@@ -3,9 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
 <title>COBRASQ – Recuperadora de Crédito</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous"></script>
 <style>
 /* ===== CSS VARIABLES ===== */
 :root {
@@ -1764,6 +1765,26 @@ img{max-width:100%}
 </div>
 
 <!-- MODAL: GERAR MINUTA -->
+<div id="modal-prompt" class="overlay">
+  <div class="modal" style="max-width:440px;">
+    <div class="modal-header">
+      <span class="modal-title" id="modal-prompt-title">Informar</span>
+      <button class="modal-close" data-close="modal-prompt">&#10005;</button>
+    </div>
+    <div class="modal-body" style="padding:20px 24px;">
+      <div class="fg">
+        <label id="modal-prompt-label" style="display:block;font-size:12px;font-weight:600;color:var(--text-2);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px;"></label>
+        <input type="text" id="modal-prompt-input" style="width:100%;padding:10px 14px;border:1.5px solid var(--border-2);border-radius:var(--radius-sm);font-size:14px;color:var(--text);background:var(--bg);outline:none;" onkeydown="if(event.key==='Enter')_promptConfirm()">
+        <textarea id="modal-prompt-textarea" rows="5" style="display:none;width:100%;padding:10px 14px;border:1.5px solid var(--border-2);border-radius:var(--radius-sm);font-size:13px;color:var(--text);background:var(--bg);outline:none;resize:vertical;"></textarea>
+        <div id="modal-prompt-hint" style="font-size:11px;color:var(--text-3);margin-top:6px;"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-prompt');if(window._promptCb)window._promptCb(null);">Cancelar</button>
+      <button class="btn btn-primary" onclick="_promptConfirm()">Confirmar</button>
+    </div>
+  </div>
+</div>
 <div id="modal-minuta" class="overlay">
   <div class="modal modal-lg">
     <div class="modal-header">
@@ -1812,7 +1833,7 @@ img{max-width:100%}
 const KEY = 'cobrasq_v6';
 let DB = {
   config: {
-    nome: 'Gustavo Santos', email: 'gustavo@cobrasq.com.br', senha: 'cobrasq2025',
+    nome: 'Gustavo Santos', email: 'gustavo@cobrasq.com.br', senha: '',
     empresa: 'COBRASQ', sub: 'RECUPERADORA DE CRÉDITO', cnpj: '34.626.848/0001-42',
     avatar: 'GS', tema: 'light', metaMensal: 40000, claudeApiKey: '',
     colaboradores: [], usuarios: [],
@@ -1877,7 +1898,7 @@ function load(){
     }
   }catch(e){console.warn('load error',e);}
 }
-const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2);
+const uid=()=>(typeof crypto!=='undefined'&&crypto.randomUUID)?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2);
 const fmt=v=>(+v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
 const fmtR=v=>'R$ '+fmt(v);
 const fmtk=v=>{const n=+v||0;return n>=1000?'R$ '+(n/1000).toFixed(1)+'k':'R$ '+fmt(n);};
@@ -1885,6 +1906,41 @@ const hoje=()=>new Date().toISOString().slice(0,10);
 const initials=n=>n?n.trim().split(' ').filter(Boolean).slice(0,2).map(w=>w[0].toUpperCase()).join(''):'?';
 const greeting=()=>{const h=new Date().getHours();return h<12?'Bom dia':h<18?'Boa tarde':'Boa noite';};
 const escHtml=s=>String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+// ── SEGURANÇA: HASH DE SENHAS ─────────────────────────────────
+async function hashSenha(s){
+  try{
+    const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode('cobrasq:v1:'+s));
+    return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  }catch(e){return s;} // fallback se SubtleCrypto indisponível
+}
+const isHashed=s=>typeof s==='string'&&s.length===64&&/^[0-9a-f]+$/.test(s);
+async function compareSenha(input,stored){
+  if(!stored)return false;
+  if(isHashed(stored))return(await hashSenha(input))===stored;
+  return input===stored; // legado plain-text: aceita e migra no login
+}
+
+// ── MODAL REUTILIZÁVEL (substitui prompt()) ───────────────────
+function promptModal(title,label,cb,{textarea=false,hint='',value=''}={}){
+  document.getElementById('modal-prompt-title').textContent=title;
+  document.getElementById('modal-prompt-label').textContent=label;
+  document.getElementById('modal-prompt-hint').textContent=hint;
+  const inp=document.getElementById('modal-prompt-input');
+  const ta=document.getElementById('modal-prompt-textarea');
+  if(textarea){inp.style.display='none';ta.style.display='block';ta.value=value;}
+  else{inp.style.display='block';ta.style.display='none';inp.value=value;}
+  window._promptCb=cb;
+  openModal('modal-prompt');
+  setTimeout(()=>(textarea?ta:inp).focus(),80);
+}
+function _promptConfirm(){
+  const inp=document.getElementById('modal-prompt-input');
+  const ta=document.getElementById('modal-prompt-textarea');
+  const v=inp.style.display!=='none'?inp.value.trim():ta.value.trim();
+  closeModal('modal-prompt');
+  if(window._promptCb)window._promptCb(v||null);
+}
 function mascaraCPF(v){return v.replace(/\D/g,'').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d{1,2})$/,'$1-$2');}
 function mascaraCNPJ(v){return v.replace(/\D/g,'').replace(/(\d{2})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1/$2').replace(/(\d{4})(\d)/,'$1-$2');}
 function mascaraDoc(el){const v=el.value.replace(/\D/g,'');el.value=v.length<=11?mascaraCPF(v):mascaraCNPJ(v);}
@@ -1968,45 +2024,51 @@ function initTabs(containerSelector){
 }
 
 // ── LOGIN MODULE ─────────────────────────────────────────────
-function doLogin(type){
+async function doLogin(type){
   if(type === 'gestor'){
     const email = (document.getElementById('gestor-email').value||'').trim().toLowerCase();
-    const senha = (document.getElementById('gestor-senha').value||'').trim();
-    if(!email || !senha){ alert('Preencha e-mail e senha.'); return; }
+    const senhaInput = (document.getElementById('gestor-senha').value||'').trim();
+    if(!email || !senhaInput){ showToast('Preencha e-mail e senha.','warning'); return; }
 
     // Check gestor (main config user)
-    if(email === (DB.config.email||'').toLowerCase() && senha === DB.config.senha){
+    if(email === (DB.config.email||'').toLowerCase() && await compareSenha(senhaInput, DB.config.senha)){
+      if(!isHashed(DB.config.senha)){ DB.config.senha=await hashSenha(senhaInput); save(); }
       currentUser = { tipo: 'gestor', nome: DB.config.nome, email: DB.config.email, avatar: DB.config.avatar || initials(DB.config.nome), role: 'Administrador' };
-      iniciarSessao();
-      return;
+      iniciarSessao(); return;
     }
-
     // Check colaboradores/usuarios
     const usuarios = (DB.config.usuarios || []).concat(DB.config.colaboradores || []);
-    const found = usuarios.find(u => (u.email||'').toLowerCase() === email && u.senha === senha);
-    if(found){
-      currentUser = { tipo: 'funcionario', nome: found.nome, email: found.email, avatar: initials(found.nome), role: found.cargo || found.role || 'Funcionário' };
-      iniciarSessao();
-      return;
+    for(const u of usuarios){
+      if((u.email||'').toLowerCase()===email && await compareSenha(senhaInput, u.senha)){
+        if(!isHashed(u.senha)){ u.senha=await hashSenha(senhaInput); save(); }
+        currentUser = { tipo: 'funcionario', nome: u.nome, email: u.email, avatar: initials(u.nome), role: u.cargo || u.role || 'Funcionário' };
+        iniciarSessao(); return;
+      }
     }
-    alert('E-mail ou senha inválidos.');
+    showToast('E-mail ou senha inválidos.','danger');
   }
   else if(type === 'cedente'){
     const email = (document.getElementById('cedente-email').value||'').trim().toLowerCase();
-    const senha = (document.getElementById('cedente-senha').value||'').trim();
-    if(!email || !senha){ alert('Preencha e-mail e senha.'); return; }
-    const cliente = (DB.clientes||[]).find(c => (c.loginEmail||'').toLowerCase() === email && c.loginSenha === senha);
-    if(cliente){
-      currentUser = { tipo: 'cedente', nome: cliente.nome, email: cliente.email, clienteId: cliente.id, avatar: initials(cliente.nome), role: 'Cedente' };
+    const senhaInput = (document.getElementById('cedente-senha').value||'').trim();
+    if(!email || !senhaInput){ showToast('Preencha e-mail e senha.','warning'); return; }
+    let found = null;
+    for(const c of (DB.clientes||[])){
+      if((c.loginEmail||'').toLowerCase()===email && await compareSenha(senhaInput, c.loginSenha)){
+        if(!isHashed(c.loginSenha)){ c.loginSenha=await hashSenha(senhaInput); save(); }
+        found=c; break;
+      }
+    }
+    if(found){
+      currentUser = { tipo: 'cedente', nome: found.nome, email: found.email, clienteId: found.id, avatar: initials(found.nome), role: 'Cedente' };
       iniciarSessao();
     } else {
-      alert('Acesso negado. Verifique suas credenciais.');
+      showToast('Acesso negado. Verifique suas credenciais.','danger');
     }
   }
   else if(type === 'devedor'){
     const cpf = (document.getElementById('devedor-cpf').value||'').replace(/\D/g,'');
     const nasc = (document.getElementById('devedor-nasc').value||'').trim();
-    if(!cpf || !nasc){ alert('Preencha CPF e data de nascimento.'); return; }
+    if(!cpf || !nasc){ showToast('Preencha CPF e data de nascimento.','warning'); return; }
     const dev = (DB.devedores||[]).find(d => {
       const docNorm = (d.doc||'').replace(/\D/g,'');
       return docNorm === cpf && d.loginNascimento === nasc;
@@ -2015,7 +2077,7 @@ function doLogin(type){
       currentUser = { tipo: 'devedor', nome: dev.nome, devedorId: dev.id, avatar: initials(dev.nome), role: 'Devedor' };
       iniciarSessao();
     } else {
-      alert('Dados não encontrados. Verifique CPF e data de nascimento.');
+      showToast('Dados não encontrados. Verifique CPF e data de nascimento.','danger');
     }
   }
 }
@@ -2054,6 +2116,11 @@ function iniciarSessao(){
   if(tName)    tName.textContent    = currentUser.nome;
 
   showPage('painel');
+  // Lembrete de backup se não feito nos últimos 7 dias
+  const lb = DB.config.lastBackupDate;
+  if(!lb || (Date.now()-new Date(lb).getTime()) > 7*24*60*60*1000){
+    setTimeout(()=>showToast('💾 Sem backup há mais de 7 dias. Acesse Configurações → Backup.','warning'), 2500);
+  }
 }
 
 function doLogout(){
@@ -3356,12 +3423,17 @@ function editCliente(id){
   openModal('modal-cliente');
 }
 
-function salvarCliente(){
+async function salvarCliente(){
   const nome = (document.getElementById('mcli-nome').value||'').trim();
-  if(!nome){ alert('Nome é obrigatório.'); return; }
+  if(!nome){ showToast('Nome é obrigatório.','warning'); return; }
 
   const id = document.getElementById('mcli-id').value;
   const existingCli = id ? (DB.clientes||[]).find(c=>c.id===id) : null;
+
+  const novaSenha = document.getElementById('mcli-senha').value;
+  let loginSenha;
+  if(novaSenha){ loginSenha = await hashSenha(novaSenha); }
+  else { loginSenha = existingCli ? existingCli.loginSenha||'' : ''; }
 
   const cliData = {
     id: id || uid(),
@@ -3372,7 +3444,7 @@ function salvarCliente(){
     endereco: document.getElementById('mcli-end').value||'',
     honorarios: document.getElementById('mcli-honor').value||'',
     loginEmail: document.getElementById('mcli-login').value||'',
-    loginSenha: document.getElementById('mcli-senha').value||( existingCli ? existingCli.loginSenha||'' : '' ),
+    loginSenha,
     obs: document.getElementById('mcli-obs').value||'',
     createdAt: existingCli ? existingCli.createdAt : hoje(),
     updatedAt: hoje()
@@ -3609,18 +3681,19 @@ function cpVerDevedor(id){
 }
 
 function cpUploadComprovante(devedorId){
-  const nome = prompt('Nome / descrição do comprovante (ex: Pagamento parcela 1):');
-  if(!nome) return;
-  const valor = prompt('Valor pago (deixe em branco se não souber):');
-  const d = (DB.devedores||[]).find(x=>x.id===devedorId);
-  if(!d) return;
-  if(!d.comprovantes) d.comprovantes = [];
-  d.comprovantes.push({ id:uid(), nome, valor:valor||'', data:hoje(), status:'pendente', cedente: currentUser.nome });
-  // add to historico
-  if(!d.historico) d.historico = [];
-  d.historico.push({ id:uid(), data:hoje(), tipo:'Comprovante', texto:`Cedente enviou comprovante: ${nome}${valor?' — '+fmtR(+valor):''}`, autor: currentUser.nome });
-  save();
-  cpVerDevedor(devedorId);
+  promptModal('Enviar comprovante','Descrição do comprovante',nome=>{
+    if(!nome) return;
+    promptModal('Valor pago','Valor (opcional)',valor=>{
+      const d = (DB.devedores||[]).find(x=>x.id===devedorId);
+      if(!d) return;
+      if(!d.comprovantes) d.comprovantes = [];
+      d.comprovantes.push({ id:uid(), nome, valor:valor||'', data:hoje(), status:'pendente', cedente: currentUser.nome });
+      if(!d.historico) d.historico = [];
+      d.historico.push({ id:uid(), data:hoje(), tipo:'Comprovante', texto:`Cedente enviou comprovante: ${nome}${valor?' — '+fmtR(+valor):''}`, autor: currentUser.nome });
+      save();
+      cpVerDevedor(devedorId);
+    },{hint:'Deixe em branco se não souber'});
+  },{hint:'Ex: Pagamento parcela 1'});
 }
 
 function cpRenderComprovantes(body){
@@ -3782,21 +3855,21 @@ function cpSalvarDados(){
   alert('Dados atualizados!');
 }
 
-function cpAlterarSenha(){
+async function cpAlterarSenha(){
   const cli = (DB.clientes||[]).find(c=>c.id===currentUser.clienteId);
   if(!cli) return;
   const atual = document.getElementById('cpconf-senha-atual').value;
   const nova  = document.getElementById('cpconf-senha-nova').value;
   const conf  = document.getElementById('cpconf-senha-conf').value;
-  if(cli.loginSenha && atual !== cli.loginSenha){ alert('Senha atual incorreta.'); return; }
-  if(!nova||nova.length<4){ alert('Nova senha deve ter pelo menos 4 caracteres.'); return; }
-  if(nova!==conf){ alert('As senhas não coincidem.'); return; }
-  cli.loginSenha = nova;
+  if(cli.loginSenha && !await compareSenha(atual, cli.loginSenha)){ showToast('Senha atual incorreta.','danger'); return; }
+  if(!nova||nova.length<4){ showToast('Nova senha deve ter pelo menos 4 caracteres.','warning'); return; }
+  if(nova!==conf){ showToast('As senhas não coincidem.','danger'); return; }
+  cli.loginSenha = await hashSenha(nova);
   save();
   document.getElementById('cpconf-senha-atual').value='';
   document.getElementById('cpconf-senha-nova').value='';
   document.getElementById('cpconf-senha-conf').value='';
-  alert('Senha alterada com sucesso!');
+  showToast('Senha alterada com sucesso!','success');
 }
 
 function cpSalvarNotif(){
@@ -4493,8 +4566,8 @@ function renderWhatsApp(){
         <div class="panel-header"><span class="panel-title">Status da integração</span></div>
         <div class="panel-body">
           <div style="display:flex;align-items:center;gap:10px;padding:14px;background:var(--bg);border-radius:var(--radius-sm);">
-            <div style="width:12px;height:12px;border-radius:50%;background:${wa.numero&&wa.apiToken?'var(--success)':'var(--danger)'}"></div>
-            <span style="font-size:13px;font-weight:600;">${wa.numero&&wa.apiToken?'Configurado — aguardando backend':'Não configurado'}</span>
+            <div style="width:12px;height:12px;border-radius:50%;background:${wa.numero&&wa.apiToken?'var(--warning)':'var(--danger)'}"></div>
+            <span style="font-size:13px;font-weight:600;">${wa.numero&&wa.apiToken?'Configuração salva — disparos requerem backend':'Não configurado'}</span>
           </div>
           <div style="margin-top:16px;font-size:13px;color:var(--text-2);">
             <div style="margin-bottom:8px;"><strong>Próximos passos:</strong></div>
@@ -4550,15 +4623,17 @@ function salvarWAConfig(){
 }
 
 function adicionarRegua(){
-  const dias = prompt('Quantos dias após o vencimento?');
-  if(!dias||isNaN(+dias)) return;
-  const mensagem = prompt('Mensagem a ser enviada:\n\nVariáveis disponíveis: {nome}, {valor}, {dias_atraso}');
-  if(!mensagem) return;
-  if(!DB.config.whatsapp) DB.config.whatsapp={};
-  if(!DB.config.whatsapp.regua) DB.config.whatsapp.regua=[];
-  DB.config.whatsapp.regua.push({dias:+dias,mensagem,canal:'WhatsApp'});
-  DB.config.whatsapp.regua.sort((a,b)=>a.dias-b.dias);
-  save(); renderWhatsApp();
+  promptModal('Nova etapa de cobrança','Dias após o vencimento',dias=>{
+    if(!dias||isNaN(+dias)) return;
+    promptModal('Mensagem da etapa','Texto da mensagem',mensagem=>{
+      if(!mensagem) return;
+      if(!DB.config.whatsapp) DB.config.whatsapp={};
+      if(!DB.config.whatsapp.regua) DB.config.whatsapp.regua=[];
+      DB.config.whatsapp.regua.push({dias:+dias,mensagem,canal:'WhatsApp'});
+      DB.config.whatsapp.regua.sort((a,b)=>a.dias-b.dias);
+      save(); renderWhatsApp();
+    },{textarea:true,hint:'Variáveis: {nome}, {valor}, {dias_atraso}'});
+  },{hint:'Ex: 7 para disparar 7 dias após o vencimento'});
 }
 
 function removerRegua(i){
@@ -4566,25 +4641,29 @@ function removerRegua(i){
 }
 
 function adicionarTemplate(){
-  const nome = prompt('Nome do template:');
-  if(!nome) return;
-  const texto = prompt('Texto da mensagem:\n\nVariáveis: {nome}, {valor}, {dias_atraso}, {empresa}');
-  if(!texto) return;
-  if(!DB.config.whatsapp) DB.config.whatsapp={};
-  if(!DB.config.whatsapp.templates) DB.config.whatsapp.templates=[];
-  DB.config.whatsapp.templates.push({id:uid(),nome,texto});
-  save(); renderWhatsApp();
+  promptModal('Novo template','Nome do template',nome=>{
+    if(!nome) return;
+    promptModal('Texto do template','Mensagem',texto=>{
+      if(!texto) return;
+      if(!DB.config.whatsapp) DB.config.whatsapp={};
+      if(!DB.config.whatsapp.templates) DB.config.whatsapp.templates=[];
+      DB.config.whatsapp.templates.push({id:uid(),nome,texto});
+      save(); renderWhatsApp();
+    },{textarea:true,hint:'Variáveis: {nome}, {valor}, {dias_atraso}, {empresa}'});
+  });
 }
 
 function editarTemplate(i){
   const t = (DB.config.whatsapp?.templates||[])[i];
   if(!t) return;
-  const nome = prompt('Nome do template:', t.nome);
-  if(nome===null) return;
-  const texto = prompt('Texto:', t.texto);
-  if(texto===null) return;
-  DB.config.whatsapp.templates[i] = {...t, nome, texto};
-  save(); renderWhatsApp();
+  promptModal('Editar template','Nome',nome=>{
+    if(nome===null) return;
+    promptModal('Texto','Mensagem',texto=>{
+      if(texto===null) return;
+      DB.config.whatsapp.templates[i]={...t,nome:nome||t.nome,texto:texto||t.texto};
+      save(); renderWhatsApp();
+    },{textarea:true,value:t.texto||''});
+  },{value:t.nome||''});
 }
 
 function removerTemplate(i){
@@ -4754,6 +4833,8 @@ function renderCfgSection(section){
 }
 
 function exportarBackup(){
+  DB.config.lastBackupDate = new Date().toISOString();
+  save();
   const json = JSON.stringify(DB, null, 2);
   const blob = new Blob([json], {type:'application/json'});
   const a = document.createElement('a');
@@ -4790,12 +4871,12 @@ function salvarPerfil(){ DB.config.nome=document.getElementById('cfg-nome')?.val
 function salvarEmpresa(){ DB.config.empresa=document.getElementById('cfg-empresa')?.value||DB.config.empresa; DB.config.cnpj=document.getElementById('cfg-cnpj')?.value||DB.config.cnpj; DB.config.sub=document.getElementById('cfg-sub')?.value||DB.config.sub; DB.config.metaMensal=+document.getElementById('cfg-meta')?.value||DB.config.metaMensal; save(); showToast('Configurações da empresa salvas!','success'); }
 function addColaborador(){ const n=(document.getElementById('cfg-col-nome')?.value||'').trim(); if(!n)return; const c=(document.getElementById('cfg-col-cargo')?.value||'').trim(); if(!DB.config.colaboradores)DB.config.colaboradores=[]; DB.config.colaboradores.push({nome:n,cargo:c}); save(); renderCfgSection('colaboradores'); }
 function delColaborador(i){ DB.config.colaboradores.splice(i,1); save(); renderCfgSection('colaboradores'); }
-function criarUsuario(){ const nome=(document.getElementById('cfg-user-nome')?.value||'').trim(); const email=(document.getElementById('cfg-user-email')?.value||'').trim(); const senha=(document.getElementById('cfg-user-senha')?.value||'').trim(); const perfil=document.getElementById('cfg-user-perfil')?.value; const msg=document.getElementById('cfg-user-msg'); if(!nome||!email||!senha){if(msg){msg.style.color='var(--danger)';msg.textContent='Preencha todos os campos.';}return;} if(!DB.config.usuarios)DB.config.usuarios=[]; DB.config.usuarios.push({nome,email,senha,perfil}); save(); if(msg){msg.style.color='var(--success)';msg.textContent='Usuário criado!';} setTimeout(()=>renderCfgSection('usuarios'),1500); }
+async function criarUsuario(){ const nome=(document.getElementById('cfg-user-nome')?.value||'').trim(); const email=(document.getElementById('cfg-user-email')?.value||'').trim(); const senha=(document.getElementById('cfg-user-senha')?.value||'').trim(); const perfil=document.getElementById('cfg-user-perfil')?.value; const msg=document.getElementById('cfg-user-msg'); if(!nome||!email||!senha){if(msg){msg.style.color='var(--danger)';msg.textContent='Preencha todos os campos.';}return;} if(!DB.config.usuarios)DB.config.usuarios=[]; const senhaHash=await hashSenha(senha); DB.config.usuarios.push({nome,email,senha:senhaHash,perfil}); save(); if(msg){msg.style.color='var(--success)';msg.textContent='Usuário criado!';} setTimeout(()=>renderCfgSection('usuarios'),1500); }
 function delUsuario(i){ DB.config.usuarios.splice(i,1); save(); renderCfgSection('usuarios'); }
 function addCategoria(tipo){ const id=tipo==='receita'?'nova-cat-rec':'nova-cat-des'; const v=(document.getElementById(id)?.value||'').trim(); if(!v)return; if(!DB.config.categorias)DB.config.categorias={receita:[],despesa:[]}; DB.config.categorias[tipo].push(v); save(); renderCfgSection('categorias'); }
 function delCategoria(tipo,i){ DB.config.categorias[tipo].splice(i,1); save(); renderCfgSection('categorias'); }
 function salvarIntegracoes(){ DB.config.claudeApiKey=document.getElementById('cfg-api-key')?.value||''; DB.config.asaasKey=document.getElementById('cfg-asaas-key')?.value||''; DB.config.asaasEnv=document.getElementById('cfg-asaas-env')?.value||'sandbox'; save(); showToast('Integrações salvas!','success'); }
-function salvarSenha(){ const atual=document.getElementById('cfg-senha-atual')?.value; const nova=document.getElementById('cfg-senha-nova')?.value; const conf=document.getElementById('cfg-senha-conf')?.value; if(!atual||atual!==DB.config.senha){showToast('Senha atual incorreta.','danger');return;} if(!nova||nova!==conf){showToast('As senhas não coincidem.','danger');return;} if(nova.length<6){showToast('Mínimo 6 caracteres.','warning');return;} DB.config.senha=nova; save(); showToast('Senha alterada com sucesso!','success'); }
+async function salvarSenha(){ const atual=document.getElementById('cfg-senha-atual')?.value||''; const nova=document.getElementById('cfg-senha-nova')?.value||''; const conf=document.getElementById('cfg-senha-conf')?.value||''; if(!await compareSenha(atual,DB.config.senha)){showToast('Senha atual incorreta.','danger');return;} if(!nova||nova!==conf){showToast('As senhas não coincidem.','danger');return;} if(nova.length<6){showToast('Mínimo 6 caracteres.','warning');return;} DB.config.senha=await hashSenha(nova); save(); showToast('Senha alterada com sucesso!','success'); }
 function salvarConfiguracoes(){ salvarEmpresa(); }
 
 // ── SIMULADOR DE ACORDO ──────────────────────────────────────
@@ -5022,7 +5103,6 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
   // ── INIT ──────────────────────────────────────────────────
   load();
-  if(!DB.config.senha) DB.config.senha = 'cobrasq2025';
   if(DB.config.tema==='dark') document.body.classList.add('dark');
 
   const themeBtn = document.getElementById('btn-theme');
