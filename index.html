@@ -1863,7 +1863,7 @@ const ETAPAS_EXTRA = ['Notificação','Em contato','Proposta enviada','Acordo','
 const ETAPAS_JUD = ['Petição inicial','Citação','Contestação','Audiência','Sentença','Recurso','Execução','Penhora','Hasta pública','Encerrado'];
 
 // ── UTILITIES ────────────────────────────────────────────────
-function save(){try{localStorage.setItem(KEY,JSON.stringify(DB));}catch(e){console.warn('save error',e);}}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(DB));}catch(e){console.warn('save error',e);if(e.name==='QuotaExceededError'||e.code===22||e.code===1014){showToast('⚠️ Armazenamento local cheio! Exporte um backup antes de continuar.','danger');}}}
 function load(){
   try{
     const d=localStorage.getItem(KEY);
@@ -2475,8 +2475,8 @@ function renderDevedores(){
                     const cliNome = d.clienteId?((DB.clientes||[]).find(c=>c.id===d.clienteId)||{}).nome||'':'';
                     const score = calcScore(d);
                     return `<tr style="cursor:pointer;" onclick="openDrawer('${d.id}')">
-                      <td><strong>${d.nome||'—'}</strong></td>
-                      <td style="font-size:12px;color:var(--text-3);">${d.doc||'—'}</td>
+                      <td><strong>${escHtml(d.nome||'—')}</strong></td>
+                      <td style="font-size:12px;color:var(--text-3);">${escHtml(d.doc||'—')}</td>
                       <td style="font-weight:700;">${fmtR(valor)}</td>
                       <td>${statusBadgeHtml(d.status)}</td>
                       <td style="font-size:12px;color:var(--text-3);">${cliNome||'—'}</td>
@@ -4604,6 +4604,7 @@ function renderConfiguracoes(){
     {id:'integracoes',icon:'🔗',label:'Integrações'},
     {id:'notificacoes',icon:'🔔',label:'Notificações'},
     {id:'senha',icon:'🔑',label:'Senha'},
+    {id:'dados',icon:'💾',label:'Backup'},
   ];
 
   el.innerHTML = `
@@ -4719,11 +4720,69 @@ function renderCfgSection(section){
   }
   else if(section==='senha'){
     el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:18px;">Alterar senha</h3>
+      <div class="fg"><label>Senha atual</label><input type="password" id="cfg-senha-atual" placeholder="••••••••"/></div>
       <div class="fg"><label>Nova senha</label><input type="password" id="cfg-senha-nova"/></div>
       <div class="fg"><label>Confirmar nova senha</label><input type="password" id="cfg-senha-conf"/></div>
       <button class="btn btn-primary" onclick="salvarSenha()">Alterar senha</button>
       <div id="cfg-senha-msg" style="margin-top:8px;font-size:12px;"></div>`;
   }
+  else if(section==='dados'){
+    const dbSize = new Blob([JSON.stringify(DB)]).size;
+    const dbKB = (dbSize/1024).toFixed(1);
+    const quota = 5*1024; // 5MB localStorage limit
+    const pct = Math.min(100,((dbSize/1024)/quota*100)).toFixed(0);
+    el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:18px;">Backup dos dados</h3>
+      <div style="background:var(--bg);border-radius:var(--r-sm);padding:14px;margin-bottom:18px;">
+        <div style="font-size:12px;color:var(--text-2);margin-bottom:8px;">Uso do armazenamento local</div>
+        <div style="background:var(--border);border-radius:4px;height:8px;overflow:hidden;margin-bottom:6px;">
+          <div style="height:100%;background:${+pct>80?'var(--danger)':+pct>50?'var(--warning)':'var(--navy)'};width:${pct}%;transition:width .3s;border-radius:4px;"></div>
+        </div>
+        <div style="font-size:12px;color:var(--text-3);">${dbKB} KB usados de ~5.120 KB disponíveis (${pct}%)</div>
+      </div>
+      <div class="panel" style="margin-bottom:14px;padding:16px;">
+        <div style="font-size:13px;font-weight:700;margin-bottom:6px;">📤 Exportar backup</div>
+        <div style="font-size:12px;color:var(--text-2);margin-bottom:12px;">Salva todos os dados do sistema em um arquivo JSON. Guarde em local seguro.</div>
+        <button class="btn btn-primary" onclick="exportarBackup()">Baixar backup (.json)</button>
+      </div>
+      <div class="panel" style="padding:16px;">
+        <div style="font-size:13px;font-weight:700;margin-bottom:6px;">📥 Restaurar backup</div>
+        <div style="font-size:12px;color:var(--text-2);margin-bottom:12px;">⚠️ Substituirá <strong>todos</strong> os dados atuais pelo conteúdo do arquivo selecionado.</div>
+        <input type="file" id="backup-file-input" accept=".json" style="display:none" onchange="importarBackup(this)">
+        <button class="btn btn-outline" onclick="document.getElementById('backup-file-input').click()">Selecionar arquivo .json</button>
+      </div>`;
+  }
+}
+
+function exportarBackup(){
+  const json = JSON.stringify(DB, null, 2);
+  const blob = new Blob([json], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'cobrasq-backup-'+hoje()+'.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  showToast('Backup exportado!','success');
+}
+
+function importarBackup(input){
+  const file = input.files[0];
+  if(!file) return;
+  if(!confirm('Isso substituirá TODOS os dados atuais pelo conteúdo do arquivo. Tem certeza?')){ input.value=''; return; }
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const parsed = JSON.parse(e.target.result);
+      if(!parsed.config || !parsed.devedores){ alert('Arquivo de backup inválido.'); return; }
+      Object.assign(DB, parsed);
+      save();
+      showToast('Backup restaurado com sucesso!','success');
+      setTimeout(()=>location.reload(), 1200);
+    } catch(err) {
+      alert('Erro ao ler o arquivo: '+err.message);
+    }
+  };
+  reader.readAsText(file);
+  input.value = '';
 }
 
 function previewAvatar(nome){ const av=initials(nome); const p=document.getElementById('cfgAvatarPreview'); if(p)p.textContent=av; }
@@ -4736,7 +4795,7 @@ function delUsuario(i){ DB.config.usuarios.splice(i,1); save(); renderCfgSection
 function addCategoria(tipo){ const id=tipo==='receita'?'nova-cat-rec':'nova-cat-des'; const v=(document.getElementById(id)?.value||'').trim(); if(!v)return; if(!DB.config.categorias)DB.config.categorias={receita:[],despesa:[]}; DB.config.categorias[tipo].push(v); save(); renderCfgSection('categorias'); }
 function delCategoria(tipo,i){ DB.config.categorias[tipo].splice(i,1); save(); renderCfgSection('categorias'); }
 function salvarIntegracoes(){ DB.config.claudeApiKey=document.getElementById('cfg-api-key')?.value||''; DB.config.asaasKey=document.getElementById('cfg-asaas-key')?.value||''; DB.config.asaasEnv=document.getElementById('cfg-asaas-env')?.value||'sandbox'; save(); showToast('Integrações salvas!','success'); }
-function salvarSenha(){ const nova=document.getElementById('cfg-senha-nova')?.value; const conf=document.getElementById('cfg-senha-conf')?.value; if(!nova||nova!==conf){showToast('As senhas não coincidem.','danger');return;} if(nova.length<6){showToast('Mínimo 6 caracteres.','warning');return;} DB.config.senha=nova; save(); showToast('Senha alterada com sucesso!','success'); }
+function salvarSenha(){ const atual=document.getElementById('cfg-senha-atual')?.value; const nova=document.getElementById('cfg-senha-nova')?.value; const conf=document.getElementById('cfg-senha-conf')?.value; if(!atual||atual!==DB.config.senha){showToast('Senha atual incorreta.','danger');return;} if(!nova||nova!==conf){showToast('As senhas não coincidem.','danger');return;} if(nova.length<6){showToast('Mínimo 6 caracteres.','warning');return;} DB.config.senha=nova; save(); showToast('Senha alterada com sucesso!','success'); }
 function salvarConfiguracoes(){ salvarEmpresa(); }
 
 // ── SIMULADOR DE ACORDO ──────────────────────────────────────
@@ -4824,10 +4883,11 @@ A carta deve incluir: identificação das partes, valor exato da dívida, prazo 
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': DB.config.claudeApiKey,
-      'anthropic-version': '2023-06-01'
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true'
     },
     body: JSON.stringify({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-haiku-4-5',
       max_tokens: 1024,
       messages: [{ role: 'user', content: prompt }]
     })
