@@ -4870,21 +4870,23 @@ async function _carregarResumoAsaasVisao(){
   if(!el) return;
   try {
     const [balData, chData] = await Promise.all([
-      AsaasAPI.req('GET','/finance/balance').catch(()=>null),
+      _asaasGetBalance(),
       AsaasAPI.req('GET','/payments?limit=50&sort=dueDate&order=asc').catch(()=>({data:[]}))
     ]);
     const charges = chData?.data||[];
     const pending = charges.filter(c=>c.status==='PENDING').reduce((s,c)=>s+c.value,0);
     const overdue = charges.filter(c=>c.status==='OVERDUE').reduce((s,c)=>s+c.value,0);
+    const balance   = balData?.balance ?? 0;
+    const inTransit = balData?.totalInTransit ?? balData?.totalTransfers ?? 0;
     el.innerHTML = `
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;text-align:left;">
         <div style="padding:8px;background:var(--surface2);border-radius:var(--radius-sm);">
           <div style="font-size:10.5px;color:var(--text-3);font-weight:700;text-transform:uppercase;letter-spacing:.5px;">Saldo Asaas</div>
-          <div style="font-size:16px;font-weight:800;color:var(--navy);margin-top:2px;">${fmtR(balData?.balance||0)}</div>
+          <div style="font-size:16px;font-weight:800;color:var(--navy);margin-top:2px;">${fmtR(balance)}</div>
         </div>
         <div style="padding:8px;background:var(--surface2);border-radius:var(--radius-sm);">
           <div style="font-size:10.5px;color:var(--text-3);font-weight:700;text-transform:uppercase;letter-spacing:.5px;">Em trânsito</div>
-          <div style="font-size:16px;font-weight:800;color:var(--navy);margin-top:2px;">${fmtR(balData?.totalInTransit||0)}</div>
+          <div style="font-size:16px;font-weight:800;color:var(--navy);margin-top:2px;">${fmtR(inTransit)}</div>
         </div>
         <div style="padding:8px;background:#fef3c7;border-radius:var(--radius-sm);">
           <div style="font-size:10.5px;color:#92400e;font-weight:700;text-transform:uppercase;letter-spacing:.5px;">A receber</div>
@@ -4898,7 +4900,25 @@ async function _carregarResumoAsaasVisao(){
       <button class="btn btn-ghost btn-sm" style="width:100%;margin-top:10px;font-size:11.5px;" onclick="setFinTab('asaas',null)">Ver cobranças completas →</button>
     `;
   } catch(e){
-    el.innerHTML = `<span style="color:var(--text-3);font-size:12px;">Não foi possível carregar: ${escHtml(e.message)}</span>`;
+    el.innerHTML = `<span style="color:var(--danger);font-size:12px;">Erro: ${escHtml(e.message)}</span>
+      <button class="btn btn-ghost btn-sm" style="margin-top:6px;width:100%;font-size:11px;" onclick="_carregarResumoAsaasVisao()">↻ Tentar novamente</button>`;
+  }
+}
+
+// Tenta /finance/balance; fallback para /finance/statistics
+async function _asaasGetBalance(){
+  try {
+    const r = await AsaasAPI.req('GET','/finance/balance');
+    return r;
+  } catch(e1){
+    // Fallback: tenta /finance/statistics que também retorna saldo em algumas versões
+    try {
+      const r2 = await AsaasAPI.req('GET','/finance/statistics');
+      return { balance: r2?.balance ?? r2?.totalBalance ?? 0, totalInTransit: r2?.totalInTransit ?? 0 };
+    } catch(e2){
+      // Último recurso: retorna 0 com flag de erro
+      return { balance: null, _error: e1.message };
+    }
   }
 }
 
@@ -5114,11 +5134,11 @@ async function renderFinAsaas(el){
   try {
     // Fetch balance + recent charges in parallel
     const [balData, chData] = await Promise.all([
-      AsaasAPI.req('GET','/finance/balance').catch(()=>null),
+      _asaasGetBalance(),
       AsaasAPI.req('GET','/payments?limit=100&sort=dueDate&order=desc').catch(()=>({data:[],totalCount:0}))
     ]);
 
-    const charges   = chData?.data || [];
+    const charges    = chData?.data || [];
     const totalCount = chData?.totalCount || charges.length;
     const mes = hoje().slice(0,7);
 
@@ -5130,8 +5150,9 @@ async function renderFinAsaas(el){
     const totalPending  = charges.filter(c=>c.status==='PENDING').reduce((s,c)=>s+c.value,0);
     const totalOverdue  = charges.filter(c=>c.status==='OVERDUE').reduce((s,c)=>s+c.value,0);
     const totalRecMes   = charges.filter(c=>['RECEIVED','CONFIRMED'].includes(c.status)&&(c.paymentDate||'').startsWith(mes)).reduce((s,c)=>s+c.value,0);
-    const balance       = balData?.balance ?? null;
-    const inTransit     = balData?.totalInTransit ?? 0;
+    const balance       = balData?._error ? null : (balData?.balance ?? 0);
+    const inTransit     = balData?.totalInTransit ?? balData?.totalTransfers ?? 0;
+    const balErrMsg     = balData?._error || null;
 
     el.innerHTML = `
       <!-- KPI cards -->
@@ -5140,8 +5161,9 @@ async function renderFinAsaas(el){
           <div class="kcard-accent" style="background:var(--navy)"></div>
           <div class="kcard-icon">🏦</div>
           <div class="kcard-label">Saldo disponível</div>
-          <div class="kcard-value" style="color:var(--navy);">${balance!==null?fmtR(balance):'—'}</div>
-          ${inTransit>0?`<div style="font-size:11px;color:var(--text-3);margin-top:3px;">+${fmtR(inTransit)} em trânsito</div>`:''}
+          <div class="kcard-value" style="color:var(--navy);">${balance!==null?fmtR(balance):`<span style="font-size:13px;color:var(--danger);">Erro</span>`}</div>
+          ${balErrMsg?`<div style="font-size:10.5px;color:var(--danger);margin-top:3px;" title="${escHtml(balErrMsg)}">⚠️ ${escHtml(balErrMsg.slice(0,40))}</div>`
+            : inTransit>0?`<div style="font-size:11px;color:var(--text-3);margin-top:3px;">+${fmtR(inTransit)} em trânsito</div>`:''}
         </div>
         <div class="kcard">
           <div class="kcard-accent" style="background:#f59e0b"></div>
@@ -6086,7 +6108,7 @@ async function testarAsaas(){
   if(!key){ res.textContent='⚠️ Chave vazia'; res.style.color='var(--warning)'; return; }
   btn.disabled=true; res.textContent='Testando…'; res.style.color='var(--text-3)';
   try {
-    const base = env==='production'?'https://api.asaas.com/v3':'https://sandbox.asaas.com/api/v3';
+    const base = env==='production'?'https://www.asaas.com/api/v3':'https://sandbox.asaas.com/api/v3';
     const r = await fetch(`${base}/customers?limit=1`,{headers:{'access_token':key}});
     if(r.ok){ res.textContent='✅ Conectado!'; res.style.color='var(--success)'; }
     else { const j=await r.json(); res.textContent='❌ '+(j?.errors?.[0]?.description||`HTTP ${r.status}`); res.style.color='var(--danger)'; }
@@ -6826,7 +6848,7 @@ function copiarMinuta(){ showToast('Use o botão Imprimir/PDF ou .docx no wizard
 // ── Asaas ─────────────────────────────────────────────────────
 const AsaasAPI = {
   get base(){ return (DB.config.asaasEnv||'sandbox')==='production'
-    ? 'https://api.asaas.com/v3' : 'https://sandbox.asaas.com/api/v3'; },
+    ? 'https://www.asaas.com/api/v3' : 'https://sandbox.asaas.com/api/v3'; },
   get h(){ return { 'access_token': DB.config.asaasKey||'', 'Content-Type':'application/json' }; },
   async req(method, path, data){
     if(!DB.config.asaasKey) throw new Error('Chave Asaas não configurada em Configurações → Integrações');
