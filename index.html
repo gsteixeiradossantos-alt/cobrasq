@@ -4757,16 +4757,26 @@ function renderFinanceiro(){
 
   const activeTab = window._finTab || 'visao';
 
+  const asaasOk = !!DB.config.asaasKey;
+
   el.innerHTML = `
     <div class="page-header">
       <div><div class="page-title">Financeiro</div></div>
-      <button class="btn btn-primary" onclick="abrirNovoLancamento()">+ Novo lançamento</button>
+      <div style="display:flex;gap:8px;">
+        ${activeTab==='asaas'
+          ? `<button class="btn btn-ghost btn-sm" onclick="renderFinAsaas(document.getElementById('fin-content'))">↻ Atualizar</button>
+             <button class="btn btn-primary btn-sm" onclick="abrirNovaCobrancaAsaasGlobal()">+ Nova cobrança</button>`
+          : `<button class="btn btn-primary" onclick="abrirNovoLancamento()">+ Novo lançamento</button>`}
+      </div>
     </div>
     <div class="tabs" style="margin-bottom:20px;">
       <div class="tab ${activeTab==='visao'?'active':''}" onclick="setFinTab('visao',this)">Visão Geral</div>
       <div class="tab ${activeTab==='lancamentos'?'active':''}" onclick="setFinTab('lancamentos',this)">Lançamentos</div>
       <div class="tab ${activeTab==='contas'?'active':''}" onclick="setFinTab('contas',this)">Contas</div>
       <div class="tab ${activeTab==='cartoes'?'active':''}" onclick="setFinTab('cartoes',this)">Cartões</div>
+      <div class="tab ${activeTab==='asaas'?'active':''}" onclick="setFinTab('asaas',this)" style="${asaasOk?'':'opacity:.5;'}" title="${asaasOk?'':'Configure a chave Asaas em Integrações'}">
+        💳 Asaas${asaasOk?'':'  🔑'}
+      </div>
     </div>
     <div id="fin-content"></div>
   `;
@@ -4789,6 +4799,7 @@ function renderFinTab(tab){
   else if(tab==='lancamentos') renderFinLancamentos(el);
   else if(tab==='contas') renderFinContas(el);
   else if(tab==='cartoes') renderFinCartoes(el);
+  else if(tab==='asaas') renderFinAsaas(el);
 }
 
 function renderFinVisao(el){
@@ -4838,9 +4849,57 @@ function renderFinVisao(el){
           <div style="font-size:24px;font-weight:800;color:var(--navy)">${fmtR(recPend)}</div>
           <div style="font-size:11px;color:var(--text3);margin-top:4px;">${(DB.lancamentos||[]).filter(l=>l.tipo==='receita'&&l.status==='pendente').length} lançamento(s) pendente(s)</div>
         </div>
+        ${DB.config.asaasKey?`
+        <div class="panel" id="visao-asaas-card">
+          <div class="panel-hdr">
+            <span class="panel-title">💳 Asaas — Resumo</span>
+            <button class="btn btn-ghost btn-sm" onclick="setFinTab('asaas',null);document.querySelectorAll('#page-fin .tab')[4]?.classList.add('active')">Ver tudo</button>
+          </div>
+          <div style="font-size:12px;color:var(--text-3);text-align:center;padding:12px;" id="visao-asaas-resumo">
+            <div class="mv2-spinner" style="margin:0 auto 8px;width:28px;height:28px;border-width:3px;"></div>Carregando…
+          </div>
+        </div>`:''}
       </div>
     </div>
   `;
+  if(DB.config.asaasKey) _carregarResumoAsaasVisao();
+}
+
+async function _carregarResumoAsaasVisao(){
+  const el = document.getElementById('visao-asaas-resumo');
+  if(!el) return;
+  try {
+    const [balData, chData] = await Promise.all([
+      AsaasAPI.req('GET','/finance/balance').catch(()=>null),
+      AsaasAPI.req('GET','/payments?limit=50&sort=dueDate&order=asc').catch(()=>({data:[]}))
+    ]);
+    const charges = chData?.data||[];
+    const pending = charges.filter(c=>c.status==='PENDING').reduce((s,c)=>s+c.value,0);
+    const overdue = charges.filter(c=>c.status==='OVERDUE').reduce((s,c)=>s+c.value,0);
+    el.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;text-align:left;">
+        <div style="padding:8px;background:var(--surface2);border-radius:var(--radius-sm);">
+          <div style="font-size:10.5px;color:var(--text-3);font-weight:700;text-transform:uppercase;letter-spacing:.5px;">Saldo Asaas</div>
+          <div style="font-size:16px;font-weight:800;color:var(--navy);margin-top:2px;">${fmtR(balData?.balance||0)}</div>
+        </div>
+        <div style="padding:8px;background:var(--surface2);border-radius:var(--radius-sm);">
+          <div style="font-size:10.5px;color:var(--text-3);font-weight:700;text-transform:uppercase;letter-spacing:.5px;">Em trânsito</div>
+          <div style="font-size:16px;font-weight:800;color:var(--navy);margin-top:2px;">${fmtR(balData?.totalInTransit||0)}</div>
+        </div>
+        <div style="padding:8px;background:#fef3c7;border-radius:var(--radius-sm);">
+          <div style="font-size:10.5px;color:#92400e;font-weight:700;text-transform:uppercase;letter-spacing:.5px;">A receber</div>
+          <div style="font-size:16px;font-weight:800;color:#b45309;margin-top:2px;">${fmtR(pending)}</div>
+        </div>
+        <div style="padding:8px;background:#fee2e2;border-radius:var(--radius-sm);">
+          <div style="font-size:10.5px;color:#991b1b;font-weight:700;text-transform:uppercase;letter-spacing:.5px;">Vencido</div>
+          <div style="font-size:16px;font-weight:800;color:#b91c1c;margin-top:2px;">${fmtR(overdue)}</div>
+        </div>
+      </div>
+      <button class="btn btn-ghost btn-sm" style="width:100%;margin-top:10px;font-size:11.5px;" onclick="setFinTab('asaas',null)">Ver cobranças completas →</button>
+    `;
+  } catch(e){
+    el.innerHTML = `<span style="color:var(--text-3);font-size:12px;">Não foi possível carregar: ${escHtml(e.message)}</span>`;
+  }
 }
 
 function renderFinLancamentos(el){
@@ -5035,6 +5094,225 @@ function salvarCartao(){
   if(id){const i=DB.cartoes.findIndex(x=>x.id===id);if(i>=0)DB.cartoes[i]=c;}else DB.cartoes.push(c);
   save();closeModal('modal-cartao');renderFinanceiro();
 }
+// ── ABA ASAAS NO FINANCEIRO ───────────────────────────────────
+async function renderFinAsaas(el){
+  if(!el) el = document.getElementById('fin-content');
+  if(!el) return;
+
+  if(!DB.config.asaasKey){
+    el.innerHTML = `<div class="empty-state" style="padding:60px 20px;">
+      <div class="empty-state-icon">🔑</div>
+      <h3>Asaas não configurado</h3>
+      <p>Configure sua chave API em <strong>Configurações → Integrações</strong>.</p>
+      <button class="btn btn-primary" onclick="setCfgSection('integracoes');showPage('config')">Configurar agora</button>
+    </div>`;
+    return;
+  }
+
+  el.innerHTML = `<div class="mv2-step-loading" style="height:200px;"><div class="mv2-spinner"></div><p>Carregando dados do Asaas…</p></div>`;
+
+  try {
+    // Fetch balance + recent charges in parallel
+    const [balData, chData] = await Promise.all([
+      AsaasAPI.req('GET','/finance/balance').catch(()=>null),
+      AsaasAPI.req('GET','/payments?limit=100&sort=dueDate&order=desc').catch(()=>({data:[],totalCount:0}))
+    ]);
+
+    const charges   = chData?.data || [];
+    const totalCount = chData?.totalCount || charges.length;
+    const mes = hoje().slice(0,7);
+
+    // Build customer → devedor map for name resolution
+    const custMap = {};
+    (DB.devedores||[]).forEach(d=>{ if(d.asaasCustomerId) custMap[d.asaasCustomerId]=d; });
+
+    // KPIs
+    const totalPending  = charges.filter(c=>c.status==='PENDING').reduce((s,c)=>s+c.value,0);
+    const totalOverdue  = charges.filter(c=>c.status==='OVERDUE').reduce((s,c)=>s+c.value,0);
+    const totalRecMes   = charges.filter(c=>['RECEIVED','CONFIRMED'].includes(c.status)&&(c.paymentDate||'').startsWith(mes)).reduce((s,c)=>s+c.value,0);
+    const balance       = balData?.balance ?? null;
+    const inTransit     = balData?.totalInTransit ?? 0;
+
+    el.innerHTML = `
+      <!-- KPI cards -->
+      <div class="kpi-grid kpi-grid-4" style="margin-bottom:20px;">
+        <div class="kcard">
+          <div class="kcard-accent" style="background:var(--navy)"></div>
+          <div class="kcard-icon">🏦</div>
+          <div class="kcard-label">Saldo disponível</div>
+          <div class="kcard-value" style="color:var(--navy);">${balance!==null?fmtR(balance):'—'}</div>
+          ${inTransit>0?`<div style="font-size:11px;color:var(--text-3);margin-top:3px;">+${fmtR(inTransit)} em trânsito</div>`:''}
+        </div>
+        <div class="kcard">
+          <div class="kcard-accent" style="background:#f59e0b"></div>
+          <div class="kcard-icon">⏳</div>
+          <div class="kcard-label">A receber</div>
+          <div class="kcard-value" style="color:#b45309;">${fmtR(totalPending)}</div>
+          <div style="font-size:11px;color:var(--text-3);margin-top:3px;">${charges.filter(c=>c.status==='PENDING').length} cobrança(s)</div>
+        </div>
+        <div class="kcard">
+          <div class="kcard-accent" style="background:var(--danger)"></div>
+          <div class="kcard-icon">⚠️</div>
+          <div class="kcard-label">Vencido</div>
+          <div class="kcard-value" style="color:var(--danger);">${fmtR(totalOverdue)}</div>
+          <div style="font-size:11px;color:var(--text-3);margin-top:3px;">${charges.filter(c=>c.status==='OVERDUE').length} cobrança(s)</div>
+        </div>
+        <div class="kcard">
+          <div class="kcard-accent" style="background:var(--success)"></div>
+          <div class="kcard-icon">✅</div>
+          <div class="kcard-label">Recebido (mês)</div>
+          <div class="kcard-value" style="color:var(--success);">${fmtR(totalRecMes)}</div>
+          <div style="font-size:11px;color:var(--text-3);margin-top:3px;">${charges.filter(c=>['RECEIVED','CONFIRMED'].includes(c.status)&&(c.paymentDate||'').startsWith(mes)).length} cobrança(s)</div>
+        </div>
+      </div>
+
+      <!-- Filtros + lista -->
+      <div class="panel" style="padding:0;overflow:visible;">
+        <div class="filter-bar" style="border-bottom:1px solid var(--border);border-radius:var(--radius) var(--radius) 0 0;">
+          <select id="fin-asaas-status" onchange="filtrarCobrancasAsaas()" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:12.5px;background:var(--bg);color:var(--text);">
+            <option value="">Todos os status</option>
+            <option value="PENDING">Pendente</option>
+            <option value="OVERDUE">Vencido</option>
+            <option value="RECEIVED">Recebido</option>
+            <option value="CONFIRMED">Confirmado</option>
+            <option value="CANCELLED">Cancelado</option>
+          </select>
+          <select id="fin-asaas-tipo" onchange="filtrarCobrancasAsaas()" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:12.5px;background:var(--bg);color:var(--text);">
+            <option value="">Tipo de cobrança</option>
+            <option value="PIX">PIX</option>
+            <option value="BOLETO">Boleto</option>
+            <option value="UNDEFINED">Livre</option>
+          </select>
+          <input type="month" id="fin-asaas-mes" value="${mes}" onchange="filtrarCobrancasAsaas()" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:12.5px;background:var(--bg);color:var(--text);">
+          <input type="search" id="fin-asaas-q" placeholder="Buscar devedor ou descrição…" oninput="filtrarCobrancasAsaas()" style="flex:1;min-width:160px;">
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('fin-asaas-status').value='';document.getElementById('fin-asaas-tipo').value='';document.getElementById('fin-asaas-mes').value='';document.getElementById('fin-asaas-q').value='';filtrarCobrancasAsaas()">Limpar</button>
+          <button class="btn btn-primary btn-sm" onclick="abrirNovaCobrancaAsaasGlobal()">+ Nova cobrança</button>
+        </div>
+
+        <div style="overflow-x:auto;">
+          <table class="tbl" id="asaas-charges-table">
+            <thead>
+              <tr>
+                <th>Devedor</th>
+                <th>Descrição</th>
+                <th>Tipo</th>
+                <th>Valor</th>
+                <th>Vencimento</th>
+                <th>Status</th>
+                <th style="text-align:right;">Ações</th>
+              </tr>
+            </thead>
+            <tbody id="asaas-charges-tbody"></tbody>
+          </table>
+        </div>
+        <div style="padding:10px 16px;font-size:11.5px;color:var(--text-3);border-top:1px solid var(--border);">
+          Mostrando as últimas ${charges.length} de ${totalCount} cobranças
+        </div>
+      </div>
+    `;
+
+    // Store charges for filtering
+    window._asaasChargesAll = charges;
+    window._asaasCustMap    = custMap;
+    filtrarCobrancasAsaas();
+
+  } catch(e){
+    el.innerHTML = `<div class="empty-state" style="padding:60px 20px;">
+      <div class="empty-state-icon">⚠️</div>
+      <h3>Erro ao carregar dados Asaas</h3>
+      <p style="color:var(--danger);">${escHtml(e.message)}</p>
+      <button class="btn btn-primary" onclick="renderFinAsaas(document.getElementById('fin-content'))">↻ Tentar novamente</button>
+    </div>`;
+  }
+}
+
+function filtrarCobrancasAsaas(){
+  const charges  = window._asaasChargesAll || [];
+  const custMap  = window._asaasCustMap || {};
+  const statusF  = document.getElementById('fin-asaas-status')?.value||'';
+  const tipoF    = document.getElementById('fin-asaas-tipo')?.value||'';
+  const mesF     = document.getElementById('fin-asaas-mes')?.value||'';
+  const qF       = (document.getElementById('fin-asaas-q')?.value||'').toLowerCase();
+  const tbody    = document.getElementById('asaas-charges-tbody');
+  if(!tbody) return;
+
+  let list = charges;
+  if(statusF) list = list.filter(c=>c.status===statusF);
+  if(tipoF)   list = list.filter(c=>c.billingType===tipoF);
+  if(mesF)    list = list.filter(c=>(c.dueDate||'').startsWith(mesF));
+  if(qF)      list = list.filter(c=>{
+    const dev = custMap[c.customer];
+    return (dev?.nome||'').toLowerCase().includes(qF) ||
+           (c.description||'').toLowerCase().includes(qF);
+  });
+
+  if(!list.length){
+    tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state" style="padding:28px;"><div class="empty-state-icon">💳</div><h3>Nenhuma cobrança encontrada</h3></div></td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = list.map(c=>{
+    const dev     = custMap[c.customer];
+    const devNome = dev ? escHtml(dev.nome) : `<span style="color:var(--text-3);font-size:11.5px;">ID: ${c.customer}</span>`;
+    const devId   = dev?.id||'';
+    const isOpen  = ['PENDING','OVERDUE'].includes(c.status);
+    const link    = c.invoiceUrl||c.bankSlipUrl||c.paymentLink||'';
+    return `<tr>
+      <td>
+        <div style="font-weight:600;">${devNome}</div>
+        ${devId?`<div style="font-size:10.5px;color:var(--text-3);">
+          <a href="#" style="color:var(--navy);" onclick="openDrawer('${devId}');return false;">Abrir ficha →</a>
+        </div>`:''}
+      </td>
+      <td style="font-size:12px;color:var(--text-2);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(c.description||'—')}</td>
+      <td><span class="badge b-gray" style="font-size:10.5px;">${billingTypeLabel(c.billingType)}</span></td>
+      <td style="font-weight:700;">${fmtR(c.value||0)}</td>
+      <td style="font-size:12px;color:${c.status==='OVERDUE'?'var(--danger)':'var(--text-2)'};">${c.dueDate||'—'}</td>
+      <td>${asaasStatusBadge(c.status)}</td>
+      <td style="text-align:right;">
+        <div style="display:flex;gap:4px;justify-content:flex-end;">
+          ${link?`<button class="btn btn-ghost btn-sm btn-icon" title="Ver cobrança" onclick="verCobrancaAsaas('${c.id}','${devId}')">🔍</button>`:''}
+          ${isOpen&&dev?.tel?`<button class="btn btn-ghost btn-sm btn-icon" title="Enviar WhatsApp" onclick="enviarCobrancaWhatsApp('${c.id}','${devId}')">💬</button>`:''}
+          ${isOpen?`<button class="btn btn-ghost btn-sm btn-icon" title="Cancelar" style="color:var(--danger);" onclick="cancelarCobrancaAsaasGlobal('${c.id}')">✕</button>`:''}
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function cancelarCobrancaAsaasGlobal(chargeId){
+  if(!confirm('Cancelar esta cobrança no Asaas?')) return;
+  try {
+    await AsaasAPI.cancelCharge(chargeId);
+    logAtividade('Cancelou cobrança Asaas (Financeiro)', `ID ${chargeId}`, '');
+    showToast('Cobrança cancelada.','success');
+    renderFinAsaas(document.getElementById('fin-content'));
+  } catch(e){ showToast('Erro: '+e.message,'error'); }
+}
+
+function abrirNovaCobrancaAsaasGlobal(){
+  // Allow choosing devedor when opening from Financeiro
+  const devedores = (DB.devedores||[]).filter(d=>!d.arquivado);
+  if(!devedores.length){ showToast('Nenhum devedor cadastrado.','warning'); return; }
+
+  // Use existing modal but allow selection of devedor first
+  const devId = devedores[0].id; // default to first; user can switch
+  abrirNovaCobrancaAsaas(devId);
+
+  // Inject devedor selector at top of modal
+  const body = document.querySelector('#modal-asaas-charge .modal-body');
+  if(body){
+    const sel = document.createElement('div');
+    sel.className = 'fg';
+    sel.style.marginBottom = '0';
+    sel.innerHTML = `<label>Devedor</label>
+      <select id="mac-dev-select" style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:13px;background:var(--bg);color:var(--text);" onchange="document.getElementById('mac-dev-id').value=this.value;document.getElementById('mac-title').textContent='💳 Nova Cobrança — '+(this.options[this.selectedIndex].text)">
+        ${devedores.map(d=>`<option value="${d.id}">${escHtml(d.nome)}</option>`).join('')}
+      </select>`;
+    body.insertBefore(sel, body.firstChild);
+  }
+}
+
 function abrirNovoLancamento(){
   document.getElementById('mlanc-id').value = '';
   document.getElementById('mlanc-tipo').value = 'receita';
