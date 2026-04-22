@@ -7,6 +7,8 @@
 <title>COBRASQ – Recuperadora de Crédito</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous"></script>
+<!-- html-docx-js: converts HTML to .docx (Word) — no SRI, audited 2026-04 -->
+<script src="https://cdn.jsdelivr.net/npm/html-docx-js@0.3.1/dist/html-docx.js" crossorigin="anonymous"></script>
 <style>
 /* ===== CSS VARIABLES ===== */
 :root {
@@ -451,6 +453,17 @@ img{max-width:100%}
 .bulk-dd-item:hover{background:var(--bg);}
 .bulk-dd-sep{height:1px;background:var(--border);margin:4px 0;}
 .page-content.bulk-pad{padding-bottom:72px!important;}
+/* ===== MINUTA WIZARD ===== */
+.minuta-tipo-card{border:2px solid var(--border);border-radius:var(--radius);padding:18px 16px;cursor:pointer;transition:all .15s;text-align:center;background:var(--surface);}
+.minuta-tipo-card:hover{border-color:var(--navy);background:rgba(0,32,96,.04);transform:translateY(-2px);box-shadow:var(--shadow);}
+.minuta-tipo-card.selected{border-color:var(--navy);background:rgba(0,32,96,.07);outline:2px solid var(--navy);outline-offset:1px;}
+.mv2-preview-frame{width:100%;border:none;flex:1;min-height:440px;}
+.mv2-body-scroll{padding:24px;overflow-y:auto;}
+#modal-minuta-v2 .modal{display:flex;flex-direction:column;height:88vh;}
+#modal-minuta-v2 .modal-body{flex:1;overflow:hidden;display:flex;flex-direction:column;padding:0;}
+.mv2-step-loading{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:12px;padding:40px;}
+.mv2-spinner{width:44px;height:44px;border:4px solid var(--border);border-top-color:var(--navy);border-radius:50%;animation:spin .8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
 @keyframes suFade{from{transform:translateY(8px);opacity:0}to{transform:translateY(0);opacity:1}}
 .sel-count{font-weight:600;flex:1;font-size:13px;}
 @media(max-width:768px){.bulk-toolbar{left:0;}}
@@ -1852,32 +1865,23 @@ img{max-width:100%}
     </div>
   </div>
 </div>
-<div id="modal-minuta" class="overlay">
-  <div class="modal modal-lg">
+<!-- legacy modal-minuta kept for compatibility; wizard uses modal-minuta-v2 -->
+<div id="modal-minuta" class="overlay" style="display:none!important;"></div>
+
+<!-- ════════════════════════════════════════════════════════════
+     MODAL: GERAR MINUTA v2 — wizard multi-step
+     ════════════════════════════════════════════════════════════ -->
+<div id="modal-minuta-v2" class="overlay">
+  <div class="modal modal-xl">
     <div class="modal-header">
-      <span class="modal-title">📄 Carta de Cobrança Extrajudicial</span>
-      <button class="modal-close" data-close="modal-minuta">&#10005;</button>
+      <span class="modal-title" id="mv2-title">📄 Gerar Minuta</span>
+      <button class="modal-close" onclick="closeModal('modal-minuta-v2')">&#10005;</button>
     </div>
-    <div class="modal-body">
-      <div id="minuta-loading" style="text-align:center;padding:40px;">
-        <div style="font-size:32px;margin-bottom:12px;">⏳</div>
-        <div style="font-size:14px;color:var(--text-2);">Gerando minuta via IA...</div>
-      </div>
-      <div id="minuta-content" style="display:none;">
-        <textarea id="minuta-texto" rows="18" style="width:100%;padding:12px;border:1.5px solid var(--border-2);border-radius:var(--radius-sm);font-size:13px;font-family:monospace;resize:vertical;background:var(--surface);color:var(--text);"></textarea>
-      </div>
-      <div id="minuta-no-key" style="display:none;">
-        <div class="empty-state">
-          <div class="empty-state-icon">🔑</div>
-          <h3>Chave API não configurada</h3>
-          <p>Configure sua chave API Claude em Configurações &rarr; Integrações para usar este recurso.</p>
-          <button class="btn btn-primary" style="margin-top:16px;" onclick="closeModal('modal-minuta');showPage('config')">Configurar agora</button>
-        </div>
-      </div>
+    <div class="modal-body" id="mv2-body">
+      <!-- populated by JS -->
     </div>
-    <div class="modal-footer" id="minuta-footer" style="display:none;">
-      <button class="btn btn-ghost" data-close="modal-minuta">Fechar</button>
-      <button class="btn btn-primary" onclick="copiarMinuta()">📋 Copiar</button>
+    <div class="modal-footer" id="mv2-footer">
+      <!-- populated by JS -->
     </div>
   </div>
 </div>
@@ -5105,77 +5109,465 @@ function usarSimulacao(devId, valorOrig){
   }, 100);
 }
 
-// ── GERAR MINUTA COM IA ──────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// MINUTA V2 — WIZARD MULTI-STEP
+// ══════════════════════════════════════════════════════════════
+
+const MINUTA_TIPOS = [
+  { id:'notificacao',        icon:'📬', nome:'Notificação Extrajudicial',    desc:'Notificação formal antes do ajuizamento' },
+  { id:'acordo',             icon:'🤝', nome:'Proposta de Acordo',           desc:'Proposta de acordo e parcelamento da dívida' },
+  { id:'peticao-cobranca',   icon:'⚖️', nome:'Petição — Ação de Cobrança',  desc:'Petição inicial no Juizado Especial Cível' },
+  { id:'peticao-danos',      icon:'⚖️', nome:'Petição — Perdas e Danos',    desc:'Petição de indenização por perdas e danos' },
+  { id:'cumprimento',        icon:'📋', nome:'Cumprimento de Sentença',      desc:'Requerimento de execução do julgado' },
+  { id:'confissao',          icon:'📝', nome:'Confissão de Dívida',          desc:'Instrumento de reconhecimento e parcelamento' },
+];
+
+const MINUTA_CAMPOS = {
+  notificacao: [
+    { id:'endereco',  label:'Endereço completo do devedor', type:'text',   ph:'Rua X, nº Y, Bairro, Cidade/UF, CEP' },
+    { id:'natureza',  label:'Natureza do crédito',          type:'text',   ph:'notas promissórias, duplicatas, contrato...' },
+    { id:'prazo',     label:'Prazo para pagamento (dias úteis)', type:'number', ph:'5', val:'5' },
+  ],
+  acordo: [
+    { id:'valor_acordo',  label:'Valor proposto do acordo',       type:'text',   ph:'R$ ...' },
+    { id:'parcelas',      label:'Número de parcelas',             type:'number', ph:'1' },
+    { id:'prazo_aceite',  label:'Prazo para aceitar a proposta',  type:'text',   ph:'7 dias' },
+    { id:'natureza',      label:'Natureza do crédito',            type:'text',   ph:'notas promissórias, duplicatas...' },
+  ],
+  'peticao-cobranca': [
+    { id:'endereco',  label:'Endereço completo do devedor', type:'text',   ph:'Rua X, nº Y, Bairro, Cidade/UF, CEP' },
+    { id:'comarca',   label:'Comarca / Juízo',              type:'text',   ph:'JEC — Comarca de Dois Vizinhos/PR' },
+    { id:'natureza',  label:'Natureza do crédito',          type:'text',   ph:'notas promissórias, duplicatas, contrato...' },
+    { id:'data_neg',  label:'Data do negócio / vencimento', type:'text',   ph:'DD/MM/AAAA' },
+  ],
+  'peticao-danos': [
+    { id:'endereco',       label:'Endereço completo do devedor', type:'text',     ph:'Rua X, nº Y, Bairro, Cidade/UF, CEP' },
+    { id:'comarca',        label:'Comarca / Juízo',              type:'text',     ph:'JEC — Comarca de Dois Vizinhos/PR' },
+    { id:'natureza',       label:'Natureza / origem do dano',    type:'text',     ph:'inadimplência, produto defeituoso...' },
+    { id:'data_fato',      label:'Data do fato gerador',         type:'text',     ph:'DD/MM/AAAA' },
+    { id:'desc_dano',      label:'Descrição resumida do dano',   type:'textarea', ph:'Descreva o fato que originou o dano...' },
+  ],
+  cumprimento: [
+    { id:'num_processo',     label:'Número do processo',          type:'text', ph:'0000000-00.0000.8.16.0131' },
+    { id:'comarca',          label:'Vara / Juízo',                type:'text', ph:'JEC — Comarca de Dois Vizinhos/PR' },
+    { id:'data_sentenca',    label:'Data da sentença / decisão',  type:'text', ph:'DD/MM/AAAA' },
+    { id:'valor_atualizado', label:'Valor atualizado (capital + correção + juros)', type:'text', ph:'R$ ...' },
+  ],
+  confissao: [
+    { id:'endereco',       label:'Endereço completo do devedor',  type:'text',   ph:'Rua X, nº Y, Bairro, Cidade/UF, CEP' },
+    { id:'valor_total',    label:'Valor total confessado',        type:'text',   ph:'R$ ...' },
+    { id:'parcelas',       label:'Número de parcelas',            type:'number', ph:'1' },
+    { id:'vencimento_1a',  label:'Vencimento da 1ª parcela',      type:'text',   ph:'DD/MM/AAAA' },
+    { id:'local_ass',      label:'Local de assinatura',           type:'text',   ph:'Francisco Beltrão/PR', val:'Francisco Beltrão/PR' },
+  ],
+};
+
+let _minuta = { devId:null, tipo:null, campos:{}, htmlDoc:null };
+
+// ── Entry point ───────────────────────────────────────────────
 function abrirGerarMinuta(devId){
-  const dev = (DB.devedores||[]).find(d=>d.id===devId);
-  if(!dev) return;
+  _minuta = { devId, tipo:null, campos:{}, htmlDoc:null };
+  mv2Step1();
+  openModal('modal-minuta-v2');
+}
 
-  const loading = document.getElementById('minuta-loading');
-  const content = document.getElementById('minuta-content');
-  const noKey = document.getElementById('minuta-no-key');
-  const footer = document.getElementById('minuta-footer');
+// ── Step 1: Choose document type ──────────────────────────────
+function mv2Step1(){
+  document.getElementById('mv2-title').textContent = '📄 Gerar Minuta — Tipo de documento';
+  document.getElementById('mv2-body').innerHTML = `
+    <div class="mv2-body-scroll">
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:18px;">Selecione o tipo de documento a gerar.</p>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;">
+        ${MINUTA_TIPOS.map(t=>`
+          <div class="minuta-tipo-card" id="mtc-${t.id}" onclick="mv2SelectTipo('${t.id}')">
+            <div style="font-size:28px;margin-bottom:10px;">${t.icon}</div>
+            <div style="font-weight:700;font-size:12.5px;margin-bottom:4px;color:var(--text);">${t.nome}</div>
+            <div style="font-size:11px;color:var(--text-3);line-height:1.4;">${t.desc}</div>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  document.getElementById('mv2-footer').innerHTML =
+    `<button class="btn btn-ghost" onclick="closeModal('modal-minuta-v2')">Cancelar</button>
+     <button class="btn btn-primary" id="mv2-btn-next" onclick="mv2Step2()" disabled>Próximo →</button>`;
+}
 
-  if(loading) loading.style.display='block';
-  if(content) content.style.display='none';
-  if(noKey) noKey.style.display='none';
-  if(footer) footer.style.display='none';
+function mv2SelectTipo(tipoId){
+  _minuta.tipo = tipoId;
+  document.querySelectorAll('.minuta-tipo-card').forEach(c=>c.classList.remove('selected'));
+  const card = document.getElementById('mtc-'+tipoId);
+  if(card) card.classList.add('selected');
+  const btn = document.getElementById('mv2-btn-next');
+  if(btn) btn.disabled = false;
+}
 
-  openModal('modal-minuta');
+// ── Step 2: Fill extra fields ─────────────────────────────────
+function mv2Step2(){
+  if(!_minuta.tipo) return;
+  const tipo = MINUTA_TIPOS.find(t=>t.id===_minuta.tipo);
+  const campos = MINUTA_CAMPOS[_minuta.tipo]||[];
+  document.getElementById('mv2-title').textContent = `📄 ${tipo.nome} — Dados complementares`;
+  document.getElementById('mv2-body').innerHTML = `
+    <div class="mv2-body-scroll">
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:18px;">
+        Todos os campos são opcionais — a IA utilizará os dados disponíveis na cobrança para preencher o restante.
+      </p>
+      ${campos.map(c=>`
+        <div class="fg" style="margin-bottom:14px;">
+          <label style="display:block;font-size:12px;font-weight:600;color:var(--text-2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px;">${c.label}</label>
+          ${c.type==='textarea'
+            ? `<textarea id="mv2f-${c.id}" rows="3" placeholder="${c.ph||''}"
+                style="width:100%;padding:9px 12px;border:1.5px solid var(--border-2);border-radius:var(--radius-sm);font-size:13px;background:var(--bg);color:var(--text);resize:vertical;">${c.val||''}</textarea>`
+            : `<input type="${c.type||'text'}" id="mv2f-${c.id}" placeholder="${c.ph||''}" value="${c.val||''}"
+                style="width:100%;padding:9px 12px;border:1.5px solid var(--border-2);border-radius:var(--radius-sm);font-size:13px;background:var(--bg);color:var(--text);">`}
+        </div>`).join('')}
+    </div>`;
+  document.getElementById('mv2-footer').innerHTML =
+    `<button class="btn btn-ghost" onclick="mv2Step1()">← Voltar</button>
+     <button class="btn btn-primary" onclick="mv2Gerar()">✨ Gerar com IA →</button>`;
+}
+
+// ── Step 3: Generate with Claude Haiku ───────────────────────
+async function mv2Gerar(){
+  // Collect field values
+  const campos = MINUTA_CAMPOS[_minuta.tipo]||[];
+  campos.forEach(c=>{
+    const el = document.getElementById(`mv2f-${c.id}`);
+    if(el) _minuta.campos[c.id] = el.value.trim();
+  });
+
+  const tipo = MINUTA_TIPOS.find(t=>t.id===_minuta.tipo);
+  document.getElementById('mv2-title').textContent = `📄 ${tipo.nome} — Gerando...`;
+  document.getElementById('mv2-body').innerHTML = `
+    <div class="mv2-step-loading">
+      <div class="mv2-spinner"></div>
+      <div style="font-size:15px;font-weight:700;">Claude Haiku está elaborando o documento…</div>
+      <div style="font-size:13px;color:var(--text-2);">Normalmente leva 5–15 segundos.</div>
+    </div>`;
+  document.getElementById('mv2-footer').innerHTML = '';
 
   if(!DB.config.claudeApiKey){
-    if(loading) loading.style.display='none';
-    if(noKey) noKey.style.display='block';
+    document.getElementById('mv2-body').innerHTML = `
+      <div class="empty-state" style="padding:40px;">
+        <div class="empty-state-icon">🔑</div>
+        <h3>Chave API não configurada</h3>
+        <p>Configure sua chave Claude em <strong>Configurações → Integrações</strong>.</p>
+        <button class="btn btn-primary" style="margin-top:16px;" onclick="closeModal('modal-minuta-v2');setCfgSection('integracoes');showPage('config')">Configurar agora</button>
+      </div>`;
+    document.getElementById('mv2-footer').innerHTML = `<button class="btn btn-ghost" onclick="mv2Step2()">← Voltar</button>`;
     return;
   }
 
+  try {
+    const prompt = _mv2BuildPrompt();
+    const resp = await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'x-api-key': DB.config.claudeApiKey,
+        'anthropic-version':'2023-06-01',
+        'anthropic-dangerous-direct-browser-access':'true'
+      },
+      body: JSON.stringify({ model:'claude-haiku-4-5', max_tokens:2048, messages:[{role:'user',content:prompt}] })
+    });
+    const data = await resp.json();
+    if(data.error) throw new Error(data.error.message||'API error');
+    const aiText = data.content?.[0]?.text || '';
+    _minuta.htmlDoc = _mv2BuildDocument(aiText);
+    mv2Step4();
+  } catch(e){
+    document.getElementById('mv2-body').innerHTML = `
+      <div class="empty-state" style="padding:40px;">
+        <div class="empty-state-icon">⚠️</div>
+        <h3>Erro na geração</h3>
+        <p style="font-size:13px;color:var(--text-2);">${escHtml(e.message)}</p>
+      </div>`;
+    document.getElementById('mv2-footer').innerHTML =
+      `<button class="btn btn-ghost" onclick="mv2Step2()">← Tentar novamente</button>
+       <button class="btn btn-ghost" onclick="closeModal('modal-minuta-v2')">Fechar</button>`;
+  }
+}
+
+// ── Prompt builder ────────────────────────────────────────────
+function _mv2BuildPrompt(){
+  const dev = (DB.devedores||[]).find(d=>d.id===_minuta.devId)||{};
+  const credor = (DB.clientes||[]).find(c=>c.id===dev.clienteId)||{};
   const valor = parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0;
-  const dias = diasEmAberto(dev.createdAt||dev.entrada);
-  const prompt = `Gere uma Carta de Cobrança Extrajudicial formal e profissional em português brasileiro para os seguintes dados:
-- Devedor: ${dev.nome}
-- CPF/CNPJ: ${dev.doc||'não informado'}
-- Valor em aberto: ${fmtR(valor)}
-- Dias em atraso: ${dias} dias
-- Endereço: ${dev.endereco||'não informado'}
-- Empresa credora: ${DB.config.empresa||'COBRASQ'}
-A carta deve incluir: identificação das partes, valor exato da dívida, prazo para regularização (5 dias úteis), consequências do não pagamento, e dados para contato. Tom formal e profissional. Máximo 400 palavras.`;
+  const c = _minuta.campos;
+  const empresa = credor.nome || DB.config.empresa || 'COBRASQ';
+  const cnpjEmp = credor.cnpj || DB.config.cnpj || '34.626.848/0001-42';
 
-  fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': DB.config.claudeApiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true'
-    },
-    body: JSON.stringify({
-      model: 'claude-haiku-4-5',
-      max_tokens: 1024,
-      messages: [{ role: 'user', content: prompt }]
-    })
-  })
-  .then(r=>r.json())
-  .then(data=>{
-    if(loading) loading.style.display='none';
-    const texto = data.content?.[0]?.text || 'Erro ao gerar minuta.';
-    const textarea = document.getElementById('minuta-texto');
-    if(textarea) textarea.value = texto;
-    if(content) content.style.display='block';
-    if(footer) footer.style.display='flex';
-  })
-  .catch(err=>{
-    if(loading) loading.style.display='none';
-    const textarea = document.getElementById('minuta-texto');
-    if(textarea) textarea.value = 'Erro ao conectar com a API: '+err.message;
-    if(content) content.style.display='block';
-    if(footer) footer.style.display='flex';
+  const base = `DEVEDOR: ${dev.nome||'—'} | CPF/CNPJ: ${dev.doc||'não informado'}
+ENDEREÇO DO DEVEDOR: ${c.endereco||'não informado'}
+CREDOR / CEDENTE: ${empresa} | CNPJ: ${cnpjEmp}
+VALOR ORIGINAL DA DÍVIDA: ${fmtR(valor)}
+NATUREZA DO CRÉDITO: ${c.natureza||dev.etapa||'não especificada'}
+DATA DE EMISSÃO: ${new Date().toLocaleDateString('pt-BR')}
+RESPONSÁVEL COBRASQ: Gustavo Teixeira — Proprietário`;
+
+  const instrucaoGeral = `\n\nINSTRUÇÕES GERAIS: Retorne APENAS o corpo do documento — sem cabeçalho institucional, sem local/data, sem linha de assinatura. Use linguagem jurídica formal em português brasileiro. O cabeçalho e rodapé serão gerados automaticamente pelo sistema.`;
+
+  const prompts = {
+    notificacao:`Você é advogado brasileiro especializado em recuperação de crédito extrajudicial.
+Redija o corpo de uma NOTIFICAÇÃO EXTRAJUDICIAL DE COBRANÇA.
+${base}
+PRAZO CONCEDIDO: ${c.prazo||'5'} dias úteis para quitação
+Inclua: identificação precisa das partes; descrição do débito e seu valor; prazo para regularização; fundamento legal (arts. 394 e 396 do CC/2002); consequências do inadimplemento (ajuizamento com acréscimo de honorários advocatícios e custas processuais); dados de contato da COBRASQ para pagamento ou negociação. Tom firme e formal.${instrucaoGeral}`,
+
+    acordo:`Você é advogado brasileiro especializado em acordos extrajudiciais.
+Redija o corpo de uma PROPOSTA DE ACORDO EXTRAJUDICIAL.
+${base}
+VALOR DO ACORDO: ${c.valor_acordo||'a negociar'}
+PARCELAMENTO: ${c.parcelas||'1'} parcela(s)
+PRAZO PARA ACEITE DA PROPOSTA: ${c.prazo_aceite||'7 dias corridos'}
+Inclua: qualificação das partes; reconhecimento do débito; condições do acordo e forma de pagamento; consequências do não aceite ou do descumprimento (vencimento antecipado e retomada da cobrança integral); cláusula extintiva (quitação total ao cumprimento integral).${instrucaoGeral}`,
+
+    'peticao-cobranca':`Você é advogado brasileiro especializado em cobrança judicial no JEC.
+Redija o corpo de uma PETIÇÃO INICIAL DE AÇÃO DE COBRANÇA (Lei 9.099/95 — Juizado Especial Cível).
+${base}
+COMARCA / JUÍZO: ${c.comarca||'JEC da Comarca competente'}
+DATA DO NEGÓCIO / VENCIMENTO: ${c.data_neg||'não informado'}
+Estruture com as seções: I — DAS PARTES, II — DOS FATOS, III — DO DIREITO, IV — DOS PEDIDOS, V — DO VALOR DA CAUSA.
+Fundamente em: arts. 420 e ss. do CC/2002; arts. 3º e 9º da Lei 9.099/95; art. 786 do CPC/2015.
+Peça: condenação ao pagamento do valor + correção monetária pelo IPCA desde o vencimento + juros de mora de 1% a.m. + honorários advocatícios.${instrucaoGeral}`,
+
+    'peticao-danos':`Você é advogado brasileiro especializado em ações de indenização.
+Redija o corpo de uma PETIÇÃO INICIAL DE AÇÃO DE INDENIZAÇÃO POR PERDAS E DANOS (Lei 9.099/95).
+${base}
+COMARCA / JUÍZO: ${c.comarca||'JEC da Comarca competente'}
+DATA DO FATO GERADOR: ${c.data_fato||'não informado'}
+DESCRIÇÃO DO DANO: ${c.desc_dano||'não especificado'}
+Estruture com: I — DAS PARTES, II — DOS FATOS, III — DO DIREITO, IV — DOS PEDIDOS, V — DO VALOR DA CAUSA.
+Fundamente em: arts. 186, 187 e 927 do CC/2002; Lei 9.099/95.
+Peça: danos materiais + eventuais danos morais (se cabível) + honorários.${instrucaoGeral}`,
+
+    cumprimento:`Você é advogado brasileiro especializado em execução civil.
+Redija o corpo de um REQUERIMENTO DE CUMPRIMENTO DE SENTENÇA.
+${base}
+NÚMERO DO PROCESSO: ${c.num_processo||'não informado'}
+VARA / JUÍZO: ${c.comarca||'não informado'}
+DATA DA SENTENÇA / DECISÃO: ${c.data_sentenca||'não informado'}
+VALOR ATUALIZADO: ${c.valor_atualizado||fmtR(valor)}
+Inclua: identificação do processo e da decisão exequenda; memória de cálculo simplificada (capital + correção + juros); requerimentos de: (a) bloqueio de ativos financeiros via Sisbajud (art. 854 CPC); (b) pesquisa de veículos no Renajud; (c) consulta de imóveis nos Cartórios de Registro de Imóveis competentes.
+Fundamente em: arts. 523, 529 e 854 do CPC/2015.${instrucaoGeral}`,
+
+    confissao:`Você é advogado brasileiro especializado em instrumentos de reconhecimento de dívida.
+Redija o corpo de um INSTRUMENTO PARTICULAR DE CONFISSÃO DE DÍVIDA E ACORDO DE PAGAMENTO.
+${base}
+VALOR TOTAL CONFESSADO: ${c.valor_total||fmtR(valor)}
+NÚMERO DE PARCELAS: ${c.parcelas||'1'}
+VENCIMENTO DA 1ª PARCELA: ${c.vencimento_1a||'a combinar'}
+LOCAL DE ASSINATURA: ${c.local_ass||'Francisco Beltrão/PR'}
+Inclua: qualificação das partes (CONFITENTE × COBRASQ/CREDOR); cláusula de reconhecimento expresso da dívida; tabela de parcelas; cláusula penal por inadimplência (multa de 2% + juros de 1% a.m. + vencimento antecipado do saldo); eleição de foro (Comarca de Dois Vizinhos/PR); espaço para 2 testemunhas.${instrucaoGeral}`
+  };
+
+  return prompts[_minuta.tipo]||prompts.notificacao;
+}
+
+// ── HTML document builder ─────────────────────────────────────
+function _mv2BuildDocument(aiText){
+  const dev  = (DB.devedores||[]).find(d=>d.id===_minuta.devId)||{};
+  const cred = (DB.clientes||[]).find(c=>c.id===dev.clienteId)||{};
+  const valor = parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0;
+  const tipo  = MINUTA_TIPOS.find(t=>t.id===_minuta.tipo);
+  const c     = _minuta.campos;
+  const dataHoje = new Date().toLocaleDateString('pt-BR',{day:'numeric',month:'long',year:'numeric'});
+  const empresa  = cred.nome||DB.config.empresa||'COBRASQ';
+  const cnpjEmp  = cred.cnpj||DB.config.cnpj||'34.626.848/0001-42';
+
+  // Convert AI plain text → HTML paragraphs + section headers
+  const bodyHtml = aiText.split('\n').filter(l=>l.trim()).map(l=>{
+    const trimmed = l.trim();
+    // All-caps lines or roman numerals = section header
+    if(/^[IVX]+\s*[—\-]\s*/i.test(trimmed)||(/^[A-ZÁÉÍÓÚÇÃ\s]{10,}$/.test(trimmed)&&trimmed.length<80)){
+      return `<h3 style="font-family:'Playfair Display',Georgia,serif;color:#0B2D5C;font-size:11.5pt;font-weight:700;margin:20px 0 8px;text-transform:uppercase;padding-bottom:4px;border-bottom:1.5px solid #E8A53C;">${escHtml(trimmed)}</h3>`;
+    }
+    return `<p style="margin-bottom:9px;text-align:justify;font-size:10.5pt;line-height:1.65;">${escHtml(trimmed)}</p>`;
+  }).join('\n');
+
+  // Optional ficha fields
+  const fichaExtra = [
+    c.comarca     ? `<div class="item"><span class="rot">Comarca / Juízo</span><span class="val">${escHtml(c.comarca)}</span></div>` : '',
+    c.num_processo? `<div class="item"><span class="rot">Processo</span><span class="val">${escHtml(c.num_processo)}</span></div>` : '',
+    c.natureza    ? `<div class="item"><span class="rot">Natureza do crédito</span><span class="val">${escHtml(c.natureza)}</span></div>` : '',
+    c.valor_atualizado?`<div class="item"><span class="rot">Valor atualizado</span><span class="val">${escHtml(c.valor_atualizado)}</span></div>`:'',
+  ].filter(Boolean).join('');
+
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>${escHtml(tipo.nome)} — ${escHtml(dev.nome||'—')}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--azul:#0B2D5C;--azul-esc:#081F3F;--dourado:#E8A53C;--dourado-cl:#F5C56B;}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Inter',sans-serif;color:#2A2A2A;background:#E8E8E8;font-size:11pt;line-height:1.6;}
+.pag{width:210mm;min-height:297mm;margin:20px auto;background:#fff;box-shadow:0 4px 20px rgba(0,0,0,.1);overflow:hidden;}
+.cab{background:var(--azul);color:#fff;padding:28px 42px 58px;position:relative;overflow:hidden;}
+.cab::before{content:'';position:absolute;bottom:-40px;left:-5%;width:110%;height:80px;background:var(--dourado);transform:rotate(-2deg);z-index:1;}
+.cab::after{content:'';position:absolute;bottom:-50px;left:-5%;width:110%;height:70px;background:#fff;transform:rotate(-1.5deg);z-index:2;}
+.cab-top{display:flex;justify-content:space-between;align-items:flex-start;position:relative;z-index:3;margin-bottom:22px;}
+.brand-name{font-family:'Playfair Display',serif;font-weight:700;font-size:30pt;letter-spacing:3px;line-height:1;}
+.brand-sub{font-size:7.5pt;letter-spacing:3.5px;text-transform:uppercase;opacity:.85;margin-top:6px;}
+.doc-info{text-align:right;font-size:8pt;line-height:1.6;opacity:.92;}
+.doc-info .lbl{opacity:.7;text-transform:uppercase;font-size:7.5pt;letter-spacing:.8px;}
+.doc-info .val{font-weight:500;}
+.tit{position:relative;z-index:3;}
+.kicker{font-size:8.5pt;letter-spacing:4px;text-transform:uppercase;opacity:.75;margin-bottom:7px;}
+.tit h1{font-family:'Playfair Display',serif;font-weight:700;font-size:19pt;line-height:1.2;color:#fff;}
+.tit .sub{font-size:9.5pt;opacity:.85;font-weight:300;margin-top:5px;}
+.corpo{padding:40px 45px 30px;}
+.ficha{background:#F5F5F5;border-left:4px solid var(--dourado);padding:16px 20px;margin-bottom:22px;display:grid;grid-template-columns:1fr 1fr;gap:8px 28px;font-size:10pt;}
+.item{display:flex;flex-direction:column;}
+.rot{font-size:7.5pt;text-transform:uppercase;letter-spacing:.8px;color:#666;font-weight:500;margin-bottom:2px;}
+.val{color:var(--azul);font-weight:600;}
+.ass{margin-top:50px;padding-top:28px;}
+.ass-linha{width:260px;border-top:1px solid #2A2A2A;margin-bottom:5px;}
+.ass-nome{font-weight:700;color:var(--azul);font-size:10.5pt;}
+.ass-cargo{font-size:9.5pt;color:#555;}
+.rod{background:var(--azul-esc);color:#fff;padding:20px 45px;font-size:8pt;position:relative;}
+.rod::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--dourado);}
+.rod-grid{display:grid;grid-template-columns:2fr 1fr;gap:24px;margin-bottom:12px;}
+.rod .rl{text-transform:uppercase;letter-spacing:1px;font-size:7pt;opacity:.6;margin-bottom:4px;font-weight:500;}
+.rod .rc{line-height:1.7;opacity:.9;}
+.rod a{color:var(--dourado-cl);}
+.conf{border-top:1px solid rgba(255,255,255,.15);padding-top:12px;font-size:7.5pt;opacity:.65;font-style:italic;text-align:center;}
+@media print{body{background:#fff;}.pag{box-shadow:none;margin:0;}}
+@page{size:A4;margin:0;}
+</style>
+</head>
+<body>
+<div class="pag">
+  <header class="cab">
+    <div class="cab-top">
+      <div><div class="brand-name">COBRASQ</div><div class="brand-sub">Recuperadora de Crédito</div></div>
+      <div class="doc-info">
+        <div class="lbl">Data de Emissão</div><div class="val">${dataHoje}</div>
+        <div class="lbl" style="margin-top:5px;">Responsável</div>
+        <div class="val">Gustavo Teixeira — Proprietário</div>
+      </div>
+    </div>
+    <div class="tit">
+      <div class="kicker">Minuta de Documento</div>
+      <h1>${escHtml(tipo.nome.toUpperCase())}</h1>
+      <div class="sub">Elaborado por COBRASQ Recuperadora de Crédito e Cobrança Ltda.</div>
+    </div>
+  </header>
+  <main class="corpo">
+    <div class="ficha">
+      <div class="item"><span class="rot">Devedor</span><span class="val">${escHtml(dev.nome||'—')}</span></div>
+      <div class="item"><span class="rot">CPF / CNPJ</span><span class="val">${escHtml(dev.doc||'—')}</span></div>
+      <div class="item"><span class="rot">Credor / Cedente</span><span class="val">${escHtml(empresa)}</span></div>
+      <div class="item"><span class="rot">CNPJ Credor</span><span class="val">${escHtml(cnpjEmp)}</span></div>
+      <div class="item"><span class="rot">Valor nominal</span><span class="val">${fmtR(valor)}</span></div>
+      ${fichaExtra}
+    </div>
+    ${bodyHtml}
+    <div class="ass">
+      <div class="ass-linha"></div>
+      <div class="ass-nome">Gustavo Teixeira</div>
+      <div class="ass-cargo">Proprietário — COBRASQ Recuperadora de Crédito e Cobrança Ltda.</div>
+    </div>
+  </main>
+  <footer class="rod">
+    <div class="rod-grid">
+      <div><div class="rl">COBRASQ — Sede</div>
+        <div class="rc">Av. Rio Grande do Sul, n.º 380, Sala 201, Edifício Mara — Centro, Dois Vizinhos/PR<br>CNPJ: 34.626.848/0001-42</div></div>
+      <div><div class="rl">Atendimento</div>
+        <div class="rc">WhatsApp: (46) 98822-6533<br>E-mail: <a href="mailto:contato@cobrasq.com.br">contato@cobrasq.com.br</a></div></div>
+    </div>
+    <div class="conf">Documento elaborado com auxílio de inteligência artificial — revise o conteúdo antes de utilizar.</div>
+  </footer>
+</div>
+</body>
+</html>`;
+}
+
+// ── Step 4: Preview + export ──────────────────────────────────
+function mv2Step4(){
+  const dev  = (DB.devedores||[]).find(d=>d.id===_minuta.devId)||{};
+  const tipo = MINUTA_TIPOS.find(t=>t.id===_minuta.tipo);
+  document.getElementById('mv2-title').textContent = `📄 ${tipo.nome} — ${escHtml(dev.nome||'')}`;
+
+  // Render in iframe via srcdoc
+  document.getElementById('mv2-body').innerHTML =
+    `<iframe id="mv2-frame" class="mv2-preview-frame" srcdoc=""></iframe>`;
+  // srcdoc must be set after element is in DOM
+  document.getElementById('mv2-frame').srcdoc = _minuta.htmlDoc;
+
+  document.getElementById('mv2-footer').innerHTML = `
+    <button class="btn btn-ghost" onclick="mv2Step2()">← Reeditar campos</button>
+    <div style="display:flex;gap:8px;margin-left:auto;">
+      <button class="btn btn-ghost btn-sm" onclick="mv2SalvarNoCaso()" title="Salvar minuta no caso">💾 Salvar no caso</button>
+      <button class="btn btn-ghost btn-sm" onclick="mv2DownloadDocx()" title="Baixar .docx">📄 .docx</button>
+      <button class="btn btn-primary" onclick="mv2ImprimirPDF()">🖨️ Imprimir / PDF</button>
+    </div>`;
+}
+
+// ── Export: PDF ───────────────────────────────────────────────
+function mv2ImprimirPDF(){
+  const win = window.open('','_blank','width=900,height=750');
+  if(!win){ showToast('Popup bloqueado — permita popups para imprimir.','warning'); return; }
+  win.document.write(_minuta.htmlDoc);
+  win.document.close();
+  win.addEventListener('load', ()=>{ setTimeout(()=>win.print(), 400); });
+  // Fallback if load already fired
+  setTimeout(()=>{ try{ win.print(); }catch(e){} }, 1200);
+}
+
+// ── Export: .docx ─────────────────────────────────────────────
+function mv2DownloadDocx(){
+  const dev  = (DB.devedores||[]).find(d=>d.id===_minuta.devId)||{};
+  const tipo = MINUTA_TIPOS.find(t=>t.id===_minuta.tipo);
+  const safe = (dev.nome||'devedor').replace(/[^a-zA-Z0-9áéíóúÁÉÍÓÚçÇ\s]/g,'').replace(/\s+/g,'_');
+  const nome = `${tipo.id}_${safe}_${new Date().toISOString().slice(0,10)}`;
+
+  // Prefer html-docx-js if loaded
+  if(typeof htmlDocx !== 'undefined'){
+    try{
+      const blob = htmlDocx.asBlob(_minuta.htmlDoc);
+      _mv2TriggerDownload(blob, nome+'.docx');
+      logAtividade('Exportou minuta (.docx)', `${tipo.nome} — ${dev.nome}`, dev.id);
+      return;
+    } catch(e){ /* fallback below */ }
+  }
+  // Fallback: Word HTML format (.doc) — opens in Word/LibreOffice
+  const wordWrap = `<html xmlns:o="urn:schemas-microsoft-com:office:office"
+    xmlns:w="urn:schemas-microsoft-com:office:word"
+    xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta charset="utf-8"><title>${escHtml(tipo.nome)}</title>
+<xml><w:WordDocument><w:View>Print</w:View></w:WordDocument></xml>
+</head><body>${_minuta.htmlDoc}</body></html>`;
+  const blob = new Blob([wordWrap],{type:'application/msword'});
+  _mv2TriggerDownload(blob, nome+'.doc');
+  logAtividade('Exportou minuta (.doc)', `${tipo.nome} — ${dev.nome}`, dev.id);
+}
+
+function _mv2TriggerDownload(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download=filename; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url), 5000);
+  showToast(`${filename} baixado.`,'success');
+}
+
+// ── Save to case ──────────────────────────────────────────────
+function mv2SalvarNoCaso(){
+  const dev  = (DB.devedores||[]).find(d=>d.id===_minuta.devId);
+  if(!dev) return;
+  const tipo = MINUTA_TIPOS.find(t=>t.id===_minuta.tipo);
+  if(!dev.documentos) dev.documentos=[];
+  dev.documentos.push({
+    id:uid(), nome:`${tipo.nome} — ${new Date().toLocaleDateString('pt-BR')}`,
+    criadoEm:new Date().toISOString(), tipo:'minuta', conteudo:_minuta.htmlDoc
   });
+  logAtividade('Gerou e salvou minuta', `${tipo.nome} — ${dev.nome}`, dev.id);
+  save();
+  showToast('Minuta salva no caso.','success');
 }
 
-function copiarMinuta(){
-  const el = document.getElementById('minuta-texto');
-  if(!el) return;
-  navigator.clipboard.writeText(el.value).then(()=>showToast('Minuta copiada!','success')).catch(()=>showToast('Erro ao copiar','danger'));
-}
+// Legacy stub (in case any old reference exists)
+function copiarMinuta(){ showToast('Use o botão Imprimir/PDF ou .docx no wizard.','info'); }
 
 // ── ALERTAS INTELIGENTES ─────────────────────────────────────
 // (overrides getAlertas to add more intelligence)
