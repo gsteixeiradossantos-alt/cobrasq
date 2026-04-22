@@ -6108,10 +6108,11 @@ async function testarAsaas(){
   if(!key){ res.textContent='⚠️ Chave vazia'; res.style.color='var(--warning)'; return; }
   btn.disabled=true; res.textContent='Testando…'; res.style.color='var(--text-3)';
   try {
-    const base = env==='production'?'https://www.asaas.com/api/v3':'https://sandbox.asaas.com/api/v3';
-    const r = await fetch(`${base}/customers?limit=1`,{headers:{'access_token':key}});
+    const r = await fetch(`/api/asaas?path=customers&limit=1`,{
+      headers:{'x-asaas-key':key,'x-asaas-env':env,'Content-Type':'application/json'}
+    });
     if(r.ok){ res.textContent='✅ Conectado!'; res.style.color='var(--success)'; }
-    else { const j=await r.json(); res.textContent='❌ '+(j?.errors?.[0]?.description||`HTTP ${r.status}`); res.style.color='var(--danger)'; }
+    else { const j=await r.json().catch(()=>{}); res.textContent='❌ '+(j?.errors?.[0]?.description||j?.error||`HTTP ${r.status}`); res.style.color='var(--danger)'; }
   } catch(e){ res.textContent='❌ '+e.message; res.style.color='var(--danger)'; }
   btn.disabled=false;
 }
@@ -6846,17 +6847,26 @@ function copiarMinuta(){ showToast('Use o botão Imprimir/PDF ou .docx no wizard
 // ══════════════════════════════════════════════════════════════
 
 // ── Asaas ─────────────────────────────────────────────────────
+// Todas as chamadas passam pelo proxy /api/asaas para evitar CORS.
+// O proxy (api/asaas.js na Vercel) faz a requisição server-to-server.
 const AsaasAPI = {
-  get base(){ return (DB.config.asaasEnv||'sandbox')==='production'
-    ? 'https://www.asaas.com/api/v3' : 'https://sandbox.asaas.com/api/v3'; },
-  get h(){ return { 'access_token': DB.config.asaasKey||'', 'Content-Type':'application/json' }; },
+  proxy: '/api/asaas',
+  get h(){ return {
+    'Content-Type':'application/json',
+    'x-asaas-key': DB.config.asaasKey||'',
+    'x-asaas-env': DB.config.asaasEnv||'sandbox',
+  }; },
   async req(method, path, data){
     if(!DB.config.asaasKey) throw new Error('Chave Asaas não configurada em Configurações → Integrações');
+    // Separa path de query string
+    const [pathPart, queryPart] = path.split('?');
+    const cleanPath = pathPart.replace(/^\/+/,'');
+    const proxyUrl = `${this.proxy}?path=${encodeURIComponent(cleanPath)}${queryPart?'&'+queryPart:''}`;
     const opts = { method, headers: this.h };
     if(data) opts.body = JSON.stringify(data);
-    const r = await fetch(this.base + path, opts);
+    const r = await fetch(proxyUrl, opts);
     const json = await r.json().catch(()=>({ message:`HTTP ${r.status}` }));
-    if(!r.ok) throw new Error(json?.errors?.[0]?.description || json?.message || `Erro ${r.status}`);
+    if(!r.ok) throw new Error(json?.errors?.[0]?.description || json?.message || json?.error || `Erro ${r.status}`);
     return json;
   },
   // Customers
