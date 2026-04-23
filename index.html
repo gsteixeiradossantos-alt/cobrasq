@@ -2505,14 +2505,34 @@ function renderPainel(){
   const el = document.getElementById('page-painel');
   if(!el) return;
 
-  const devs = DB.devedores || [];
+  // ── FIX 1: excluir arquivados de TODOS os cálculos ───────────
+  const devs = (DB.devedores || []).filter(d => !d.arquivado);
   const totalDevs = devs.length;
-  const totalCarteira = devs.reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
-  const totalRecuperado = devs.filter(d=>d.status==='Quitado'||d.status==='Recebido').reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
-  const taxaRec = totalCarteira > 0 ? ((totalRecuperado/totalCarteira)*100).toFixed(1) : '0.0';
-  const acordosAtivos = devs.filter(d=>d.status==='Acordo').length;
+  const totalCarteira = devs
+    .filter(d => d.status !== 'Quitado' && d.status !== 'Recebido')
+    .reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0), 0);
 
-  // Recent interactions
+  // ── FIX 2: Recuperado = Asaas RECEIVED (cache) OU status local ─
+  const recAsaas = devs.reduce((s,d) =>
+    s + (d.asaasCharges||[])
+      .filter(c=>['RECEIVED','CONFIRMED'].includes(c.status))
+      .reduce((ss,c)=>ss+(c.value||0), 0)
+  , 0);
+  const recLocal = devs
+    .filter(d=>d.status==='Quitado'||d.status==='Recebido')
+    .reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0), 0);
+  // Usa Asaas se houver dados, senão usa status local
+  const hasAsaasData = devs.some(d=>(d.asaasCharges||[]).length > 0);
+  const totalRecuperado = hasAsaasData ? recAsaas : recLocal;
+  const taxaRec = totalCarteira > 0 ? ((totalRecuperado/(totalCarteira+totalRecuperado))*100).toFixed(1) : '0.0';
+
+  // ── FIX 3: Acordos ativos = acordos com parcelas em aberto ────
+  const acordosAtivos = devs.filter(d =>
+    (d.acordos||[]).some(ac => (ac.parcelas||[]).some(p=>!p.pago))
+    || d.status === 'Acordo'
+  ).length;
+
+  // Recent interactions (só de não-arquivados)
   let interactions = [];
   devs.forEach(d=>{
     (d.historico||[]).forEach(h=>{
@@ -2522,46 +2542,71 @@ function renderPainel(){
   interactions.sort((a,b)=>(b.data||'').localeCompare(a.data||''));
   const recentActivity = interactions.slice(0,5);
 
-  // Vencimentos próximos (7 days)
+  // ── FIX 4: Vencimentos próximos — múltiplas fontes ────────────
   const in7days = new Date(); in7days.setDate(in7days.getDate()+7);
   const in7str = in7days.toISOString().slice(0,10);
   const todayStr = hoje();
-  const vencimentos = (DB.lancamentos||[])
+
+  const vencItems = [];
+  // Lançamentos financeiros pendentes
+  (DB.lancamentos||[])
     .filter(l=>l.status==='pendente' && l.data >= todayStr && l.data <= in7str)
-    .sort((a,b)=>a.data.localeCompare(b.data))
-    .slice(0,5);
+    .forEach(l=>vencItems.push({ desc:l.descricao||'Lançamento', data:l.data, valor:+l.valor||0, icone:'💰', tipo:'lancamento' }));
+  // Vencimentos de devedores
+  devs
+    .filter(d=>d.vencimento && d.vencimento >= todayStr && d.vencimento <= in7str)
+    .forEach(d=>vencItems.push({ desc:d.nome, data:d.vencimento, valor:parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0, icone:'📋', tipo:'devedor' }));
+  // Tarefas com prazo
+  (DB.tarefas||[])
+    .filter(t=>t.status!=='Concluída' && t.prazo && t.prazo >= todayStr && t.prazo <= in7str)
+    .forEach(t=>vencItems.push({ desc:t.titulo, data:t.prazo, valor:0, icone:'📌', tipo:'tarefa' }));
+  // Cobranças Asaas com vencimento próximo (cache)
+  devs.forEach(d=>{
+    (d.asaasCharges||[])
+      .filter(c=>['PENDING','OVERDUE'].includes(c.status) && c.dueDate && c.dueDate >= todayStr && c.dueDate <= in7str)
+      .forEach(c=>vencItems.push({ desc:d.nome, data:c.dueDate, valor:c.value||0, icone:'💳', tipo:'asaas' }));
+  });
+  const vencimentos = vencItems.sort((a,b)=>a.data.localeCompare(b.data)).slice(0,6);
+
+  // Datas com eventos para o calendário
+  const eventDates = new Set([
+    ...(DB.lancamentos||[]).filter(l=>l.status==='pendente'&&l.data).map(l=>l.data),
+    ...devs.filter(d=>d.vencimento).map(d=>d.vencimento),
+    ...(DB.tarefas||[]).filter(t=>t.status!=='Concluída'&&t.prazo).map(t=>t.prazo),
+    ...devs.flatMap(d=>(d.asaasCharges||[]).filter(c=>['PENDING','OVERDUE'].includes(c.status)&&c.dueDate).map(c=>c.dueDate)),
+  ]);
 
   const alertas = getAlertas();
 
-  // Mini calendar
+  // Mini calendar com eventos marcados
   const now = new Date();
-  const calHtml = buildMiniCalendar(now.getFullYear(), now.getMonth());
+  const calHtml = buildMiniCalendar(now.getFullYear(), now.getMonth(), eventDates);
 
   el.innerHTML = `
     <div class="grid-4">
       <div class="kcard">
         <span class="kcard-icon">👥</span>
-        <div class="kcard-label">Total Devedores</div>
+        <div class="kcard-label">Devedores Ativos</div>
         <div class="kcard-value">${totalDevs}</div>
-        <div class="kcard-sub">na carteira ativa</div>
+        <div class="kcard-sub">na carteira (excl. arquivados)</div>
       </div>
       <div class="kcard">
         <span class="kcard-icon">💰</span>
         <div class="kcard-label">Valor da Carteira</div>
         <div class="kcard-value" style="font-size:20px">${fmtk(totalCarteira)}</div>
-        <div class="kcard-sub">valor total a recuperar</div>
+        <div class="kcard-sub">em aberto · taxa ${taxaRec}%</div>
       </div>
       <div class="kcard">
         <span class="kcard-icon">✅</span>
         <div class="kcard-label">Valor Recuperado</div>
         <div class="kcard-value" style="font-size:20px;color:var(--success)">${fmtk(totalRecuperado)}</div>
-        <div class="kcard-sub">quitado + recebido</div>
+        <div class="kcard-sub">${hasAsaasData?'via Asaas (confirmado)':'por status local'}</div>
       </div>
       <div class="kcard">
         <span class="kcard-icon">🤝</span>
         <div class="kcard-label">Acordos Ativos</div>
         <div class="kcard-value">${acordosAtivos}</div>
-        <div class="kcard-sub">em negociação</div>
+        <div class="kcard-sub">com parcelas em aberto</div>
       </div>
     </div>
 
@@ -2620,13 +2665,14 @@ function renderPainel(){
           <div class="panel-body">
             ${vencimentos.length === 0
               ? '<p style="font-size:13px;color:var(--text-3);">Nenhum vencimento nos próximos 7 dias.</p>'
-              : vencimentos.map(l=>`
-                <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);">
-                  <div>
-                    <div style="font-size:13px;font-weight:600;">${l.descricao||l.desc||'—'}</div>
-                    <div style="font-size:11px;color:var(--text-3);">${l.data}</div>
+              : vencimentos.map(v=>`
+                <div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);">
+                  <span style="font-size:16px;flex-shrink:0;">${v.icone||'📅'}</span>
+                  <div style="flex:1;min-width:0;">
+                    <div style="font-size:12.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(v.desc||'—')}</div>
+                    <div style="font-size:11px;color:var(--text-3);">${v.data} ${v.data===todayStr?'<strong style="color:var(--danger);">· Hoje</strong>':''}</div>
                   </div>
-                  <div style="font-size:13px;font-weight:700;color:var(--navy);">${fmtR(l.valor)}</div>
+                  ${v.valor>0?`<div style="font-size:12.5px;font-weight:700;color:var(--navy);flex-shrink:0;">${fmtR(v.valor)}</div>`:''}
                 </div>
               `).join('')}
           </div>
@@ -2634,7 +2680,7 @@ function renderPainel(){
 
         <div class="panel">
           <div class="panel-header"><span class="panel-title">📆 Calendário</span></div>
-          <div class="panel-body" style="padding:8px 12px;">${calHtml}</div>
+          <div class="panel-body" style="padding:8px 12px;" data-cal>${calHtml}</div>
         </div>
       </div>
     </div>
@@ -2653,28 +2699,68 @@ function renderPainel(){
   `;
 }
 
-function buildMiniCalendar(year, month){
+function buildMiniCalendar(year, month, eventDates){
+  // eventDates: Set of 'YYYY-MM-DD' strings
+  const evts = eventDates || new Set();
   const monthNames = MESES_FULL;
   const firstDay = new Date(year, month, 1).getDay();
   const daysInMonth = new Date(year, month+1, 0).getDate();
   const today = new Date();
   const todayD = today.getDate(), todayM = today.getMonth(), todayY = today.getFullYear();
-  let html = `<div style="text-align:center;font-weight:700;font-size:13px;margin-bottom:8px;">${monthNames[month]} ${year}</div>`;
-  html += '<table style="width:100%;border-collapse:collapse;font-size:12px;"><tr>';
-  ['D','S','T','Q','Q','S','S'].forEach(d=>{ html += `<th style="text-align:center;padding:2px;color:var(--text-3);">${d}</th>`; });
+  const pad = n => String(n).padStart(2,'0');
+  let html = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+      <span style="font-weight:700;font-size:13px;">${monthNames[month]} ${year}</span>
+      <div style="display:flex;gap:4px;">
+        <button class="btn btn-ghost btn-sm btn-icon" onclick="_calNav(-1)" title="Mês anterior">‹</button>
+        <button class="btn btn-ghost btn-sm btn-icon" onclick="_calNav(1)" title="Próximo mês">›</button>
+      </div>
+    </div>`;
+  html += '<table style="width:100%;border-collapse:collapse;font-size:11.5px;"><tr>';
+  ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'].forEach(d=>{
+    html += `<th style="text-align:center;padding:3px 1px;color:var(--text-3);font-weight:600;font-size:10px;">${d}</th>`;
+  });
   html += '</tr><tr>';
   for(let i=0;i<firstDay;i++) html += '<td></td>';
   let col = firstDay;
   for(let d=1;d<=daysInMonth;d++){
     if(col===7){ html += '</tr><tr>'; col=0; }
     const isToday = d===todayD && month===todayM && year===todayY;
-    html += `<td style="text-align:center;padding:3px;">
-      <span style="${isToday?'background:var(--navy);color:#fff;border-radius:50%;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-weight:700;':''}">${d}</span>
+    const dateStr = `${year}-${pad(month+1)}-${pad(d)}`;
+    const hasEvt = evts.has(dateStr);
+    html += `<td style="text-align:center;padding:2px 1px;position:relative;">
+      <span style="${isToday
+        ?'background:var(--navy);color:#fff;border-radius:50%;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;'
+        :'display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;font-size:12px;'
+      }">${d}</span>
+      ${hasEvt&&!isToday?`<span style="position:absolute;bottom:1px;left:50%;transform:translateX(-50%);width:5px;height:5px;background:var(--gold);border-radius:50%;display:block;"></span>`:''}
     </td>`;
     col++;
   }
   html += '</tr></table>';
+  // Legend
+  html += `<div style="display:flex;gap:10px;margin-top:8px;font-size:10.5px;color:var(--text-3);">
+    <span style="display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;border-radius:50%;background:var(--navy);display:inline-block;"></span>Hoje</span>
+    <span style="display:flex;align-items:center;gap:3px;"><span style="width:8px;height:8px;border-radius:50%;background:var(--gold);display:inline-block;"></span>Evento</span>
+  </div>`;
   return html;
+}
+
+let _calOffset = 0;
+function _calNav(dir){
+  _calOffset += dir;
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth() + _calOffset, 1);
+  // Rebuild event set
+  const devs = (DB.devedores||[]).filter(x=>!x.arquivado);
+  const eventDates = new Set([
+    ...(DB.lancamentos||[]).filter(l=>l.status==='pendente'&&l.data).map(l=>l.data),
+    ...devs.filter(x=>x.vencimento).map(x=>x.vencimento),
+    ...(DB.tarefas||[]).filter(t=>t.status!=='Concluída'&&t.prazo).map(t=>t.prazo),
+    ...devs.flatMap(x=>(x.asaasCharges||[]).filter(c=>['PENDING','OVERDUE'].includes(c.status)&&c.dueDate).map(c=>c.dueDate)),
+  ]);
+  const calEl = document.querySelector('#page-painel .panel-body[data-cal]');
+  if(calEl) calEl.innerHTML = buildMiniCalendar(d.getFullYear(), d.getMonth(), eventDates);
 }
 
 // ── SCORE DE PRIORIDADE ──────────────────────────────────────
