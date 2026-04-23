@@ -9,6 +9,8 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous"></script>
 <!-- html-docx-js: converts HTML to .docx (Word) — no SRI, audited 2026-04 -->
 <script src="https://cdn.jsdelivr.net/npm/html-docx-js@0.3.1/dist/html-docx.js" crossorigin="anonymous"></script>
+<!-- Supabase JS SDK -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" crossorigin="anonymous"></script>
 <style>
 /* ===== CSS VARIABLES ===== */
 :root {
@@ -841,6 +843,7 @@ img{max-width:100%}
           <span id="sidebarUserRole">Administrador</span>
         </div>
       </div>
+      <div id="supa-sidebar-badge" style="font-size:10px;color:rgba(255,255,255,.35);padding:2px 10px 6px;text-align:right;display:none;">☁️ sincronizado</div>
       <button class="sidebar-logout" id="btnSidebarLogout">&#8617; Sair</button>
     </div>
   </nav>
@@ -2065,6 +2068,7 @@ let DB = {
     nome: 'Gustavo Santos', email: 'gustavo@cobrasq.com.br', senha: 'eecb89925246b6f37134c2eef90da4ab37e3985a6f8d24325ee786b8b740d94f',
     empresa: 'COBRASQ', sub: 'RECUPERADORA DE CRÉDITO', cnpj: '34.626.848/0001-42',
     avatar: 'GS', tema: 'light', metaMensal: 40000, claudeApiKey: '',
+    supabaseUrl: '', supabaseAnonKey: '',
     colaboradores: [], usuarios: [],
     categorias: {
       receita: ['Serviços','Cobrança','Honorários','Acordos','Comissões','Outros'],
@@ -2114,7 +2118,10 @@ const ETAPAS_EXTRA = ['Notificação','Em contato','Proposta enviada','Acordo','
 const ETAPAS_JUD = ['Petição inicial','Citação','Contestação','Audiência','Sentença','Recurso','Execução','Penhora','Hasta pública','Encerrado'];
 
 // ── UTILITIES ────────────────────────────────────────────────
-function save(){try{localStorage.setItem(KEY,JSON.stringify(DB));}catch(e){console.warn('save error',e);if(e.name==='QuotaExceededError'||e.code===22||e.code===1014){showToast('⚠️ Armazenamento local cheio! Exporte um backup antes de continuar.','danger');}}}
+function save(){
+  try{localStorage.setItem(KEY,JSON.stringify(DB));}catch(e){console.warn('save error',e);if(e.name==='QuotaExceededError'||e.code===22||e.code===1014){showToast('⚠️ Armazenamento local cheio! Exporte um backup antes de continuar.','danger');}}
+  syncToSupabase(); // sync in background — fire and forget
+}
 function load(){
   try{
     const d=localStorage.getItem(KEY);
@@ -2130,6 +2137,122 @@ function load(){
 }
 const uid=()=>(typeof crypto!=='undefined'&&crypto.randomUUID)?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2);
 const fmt=v=>(+v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+
+// ── SUPABASE ──────────────────────────────────────────────────
+let _supa = null;
+let _supaReady = false;
+let _syncTimer = null;
+let _lastSyncAt = null;
+
+function getSupabase(){
+  if(_supa) return _supa;
+  const url = DB.config.supabaseUrl||'';
+  const key = DB.config.supabaseAnonKey||'';
+  if(url && key && window.supabase){
+    _supa = window.supabase.createClient(url, key, {
+      auth: { persistSession: true, autoRefreshToken: true }
+    });
+    _supaReady = true;
+  }
+  return _supa;
+}
+
+function reinitSupabase(){
+  _supa = null;
+  _supaReady = false;
+  getSupabase();
+}
+
+async function syncToSupabase(force){
+  const supa = getSupabase();
+  if(!supa) return;
+  clearTimeout(_syncTimer);
+  const delay = force ? 0 : 1500;
+  _syncTimer = setTimeout(async ()=>{
+    try{
+      const { error } = await supa.from('cobrasq_data').upsert(
+        { key:'main', data: DB, updated_at: new Date().toISOString() },
+        { onConflict: 'key' }
+      );
+      if(!error){ _lastSyncAt = new Date(); _updateSyncBadge(); }
+      else console.warn('Supabase sync error:', error.message);
+    }catch(e){ console.warn('Supabase sync exception:', e.message); }
+  }, delay);
+}
+
+async function loadFromSupabase(){
+  const supa = getSupabase();
+  if(!supa){ load(); return; }
+  try{
+    const { data, error } = await supa.from('cobrasq_data').select('data').eq('key','main').maybeSingle();
+    if(data?.data){
+      const p = data.data;
+      DB = { ...DB, ...p,
+        fatHistorico: { ...DB.fatHistorico, ...(p.fatHistorico||{}) },
+        config: { ...DB.config, ...(p.config||{}) }
+      };
+      localStorage.setItem(KEY, JSON.stringify(DB));
+    } else {
+      // First time: push local data to Supabase
+      load();
+      syncToSupabase(true);
+    }
+  }catch(e){
+    console.warn('Supabase load error, using localStorage:', e.message);
+    load();
+  }
+}
+
+function _updateSyncBadge(){
+  const t = _lastSyncAt ? _lastSyncAt.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : '';
+  const el = document.getElementById('supa-sync-badge');
+  if(el && t) el.textContent = '☁️ ' + t;
+  const sb = document.getElementById('supa-sidebar-badge');
+  if(sb && t){ sb.style.display='block'; sb.textContent='☁️ ' + t; }
+}
+
+async function testarSupabase(){
+  const url = document.getElementById('cfg-supa-url')?.value?.trim();
+  const key = document.getElementById('cfg-supa-key')?.value?.trim();
+  const res = document.getElementById('supa-test-result');
+  const btn = document.getElementById('btn-test-supa');
+  if(!url||!key){ res.textContent='⚠️ Preencha URL e chave'; res.style.color='var(--warning)'; return; }
+  btn.disabled=true; res.textContent='Testando…'; res.style.color='var(--text-3)';
+  try{
+    const tmp = window.supabase.createClient(url, key);
+    const { error } = await tmp.from('cobrasq_data').select('key').limit(1);
+    if(!error){ res.textContent='✅ Conectado!'; res.style.color='var(--success)'; }
+    else { res.textContent='❌ '+error.message; res.style.color='var(--danger)'; }
+  }catch(e){ res.textContent='❌ '+e.message; res.style.color='var(--danger)'; }
+  btn.disabled=false;
+}
+
+async function criarUsuarioSupabase(nome, email, senha, papel, cargo, refId){
+  const supa = getSupabase();
+  if(!supa) throw new Error('Supabase não configurado');
+  // Create auth user via admin (only works if service key is set — otherwise instruct manual creation)
+  throw new Error('Crie o usuário direto no painel Supabase → Authentication → Users');
+}
+
+async function sincronizarAgora(){
+  const btn = document.getElementById('btn-supa-sync');
+  if(btn){ btn.disabled=true; btn.textContent='Sincronizando…'; }
+  await syncToSupabase(true);
+  if(btn){ btn.disabled=false; btn.textContent='☁️ Sincronizar agora'; }
+  showToast('Dados sincronizados com Supabase!','success');
+}
+
+function copiarSQLSupabase(){
+  const el = document.getElementById('supa-sql-block');
+  if(!el) return;
+  const txt = el.innerText;
+  navigator.clipboard.writeText(txt).then(()=>showToast('SQL copiado!','success')).catch(()=>{
+    const ta = document.createElement('textarea');
+    ta.value = txt;
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+    showToast('SQL copiado!','success');
+  });
+}
 const fmtR=v=>'R$ '+fmt(v);
 const fmtk=v=>{const n=+v||0;return n>=1000?'R$ '+(n/1000).toFixed(1)+'k':'R$ '+fmt(n);};
 const hoje=()=>new Date().toISOString().slice(0,10);
@@ -2260,7 +2383,42 @@ async function doLogin(type){
     const senhaInput = (document.getElementById('gestor-senha').value||'').trim();
     if(!email || !senhaInput){ showToast('Preencha e-mail e senha.','warning'); return; }
 
-    // Check gestor (main config user)
+    // ── Supabase Auth (quando configurado) ──
+    const supa = getSupabase();
+    if(supa){
+      const btnLogin = document.getElementById('btnLoginGestor');
+      if(btnLogin){ btnLogin.disabled=true; btnLogin.textContent='Entrando…'; }
+      try{
+        const { data, error } = await supa.auth.signInWithPassword({ email, password: senhaInput });
+        if(error){
+          showToast('E-mail ou senha inválidos.','danger');
+          if(btnLogin){ btnLogin.disabled=false; btnLogin.textContent='Entrar'; }
+          return;
+        }
+        // Load fresh data from Supabase
+        await loadFromSupabase();
+        const meta = data.user.user_metadata || {};
+        const papel = meta.papel || 'proprietario';
+        currentUser = {
+          tipo: papel === 'colaborador' ? 'funcionario' : 'gestor',
+          nome: meta.nome || data.user.email,
+          email: data.user.email,
+          avatar: initials(meta.nome || data.user.email),
+          role: papel === 'colaborador' ? (meta.cargo||'Funcionário') : 'Administrador',
+          supaId: data.user.id,
+          papel
+        };
+        if(btnLogin){ btnLogin.disabled=false; btnLogin.textContent='Entrar'; }
+        iniciarSessao();
+        return;
+      }catch(e){
+        showToast('Erro de conexão: '+e.message,'danger');
+        if(btnLogin){ btnLogin.disabled=false; btnLogin.textContent='Entrar'; }
+        return;
+      }
+    }
+
+    // ── Fallback: autenticação local ──
     if(email === (DB.config.email||'').toLowerCase() && await compareSenha(senhaInput, DB.config.senha)){
       if(!isHashed(DB.config.senha)){ DB.config.senha=await hashSenha(senhaInput); save(); }
       currentUser = { tipo: 'gestor', nome: DB.config.nome, email: DB.config.email, avatar: DB.config.avatar || initials(DB.config.nome), role: 'Administrador' };
@@ -2353,7 +2511,9 @@ function iniciarSessao(){
   }
 }
 
-function doLogout(){
+async function doLogout(){
+  const supa = getSupabase();
+  if(supa) await supa.auth.signOut().catch(()=>{});
   currentUser = null;
   currentDevId = null;
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
@@ -5900,6 +6060,98 @@ function renderCfgSection(section){
     const CANAL_OPTS = `<option value="whatsapp">💬 WhatsApp (Z-Api)</option><option value="email">📧 E-mail</option>`;
     el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:20px;">Integrações</h3>
 
+      <!-- ── Supabase ──────────────────────────────── -->
+      <div class="int-card" style="border:2px solid ${DB.config.supabaseUrl&&DB.config.supabaseAnonKey?'var(--success)':'var(--border)'};">
+        <div class="int-card-header">
+          <div class="int-card-logo">🗄️</div>
+          <div>
+            <div class="int-card-name">Supabase — Banco de Dados</div>
+            <div class="int-card-sub">Sincroniza dados na nuvem • Multi-usuário • Login colaboradores</div>
+          </div>
+          <div class="int-status">${DB.config.supabaseUrl&&DB.config.supabaseAnonKey?`<div class="int-dot int-dot-ok"></div>Configurado`:`<div class="int-dot int-dot-idle"></div>Não configurado`}</div>
+        </div>
+        <div class="fg">
+          <label>URL do projeto (Project URL)</label>
+          <input type="text" id="cfg-supa-url" value="${escHtml(DB.config.supabaseUrl||'')}" placeholder="https://xxxxxxxxxxxx.supabase.co"/>
+        </div>
+        <div class="fg">
+          <label>Chave anônima (anon / public key)</label>
+          <input type="password" id="cfg-supa-key" value="${DB.config.supabaseAnonKey||''}" placeholder="eyJhbGci..."/>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+          <button class="btn btn-ghost btn-sm" id="btn-test-supa" onclick="testarSupabase()">🔌 Testar conexão</button>
+          <button class="btn btn-ghost btn-sm" id="btn-supa-sync" onclick="sincronizarAgora()">☁️ Sincronizar agora</button>
+          <span id="supa-test-result" style="font-size:12px;"></span>
+          <span id="supa-sync-badge" style="font-size:11px;color:var(--text-3);margin-left:auto;"></span>
+        </div>
+        <div style="margin-top:12px;padding:10px 12px;background:var(--surface2);border-radius:var(--radius-sm);font-size:12px;color:var(--text-2);line-height:1.7;">
+          <strong>Como configurar:</strong><br>
+          1. Acesse <a href="https://supabase.com" target="_blank" style="color:var(--navy);">supabase.com</a> → Novo projeto (gratuito)<br>
+          2. Em <em>Project Settings → API</em> copie a <strong>Project URL</strong> e a chave <strong>anon/public</strong><br>
+          3. Cole aqui, salve e clique em "Testar conexão"<br>
+          4. Execute o <strong>SQL de setup</strong> abaixo no <em>SQL Editor</em> do Supabase<br>
+          5. Em <em>Authentication → Users</em> crie os logins dos colaboradores
+        </div>
+        <details style="margin-top:10px;">
+          <summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--navy);">📋 SQL de Setup — clique para expandir e copiar</summary>
+          <div style="position:relative;margin-top:8px;">
+            <button onclick="copiarSQLSupabase()" class="btn btn-ghost btn-xs" style="position:absolute;top:4px;right:4px;z-index:1;">📋 Copiar</button>
+            <pre id="supa-sql-block" style="background:#1e1e2e;color:#cdd6f4;padding:14px;border-radius:6px;font-size:11px;overflow-x:auto;line-height:1.6;max-height:320px;overflow-y:auto;">-- Execute no SQL Editor do Supabase
+
+-- 1. Tabela principal de dados (armazena todo o DB como JSONB)
+CREATE TABLE IF NOT EXISTS cobrasq_data (
+  key TEXT PRIMARY KEY DEFAULT 'main',
+  data JSONB NOT NULL DEFAULT '{}',
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_by UUID REFERENCES auth.users(id)
+);
+
+-- 2. Tabela de usuários do app (papéis e acessos)
+CREATE TABLE IF NOT EXISTS app_users (
+  id UUID REFERENCES auth.users(id) ON DELETE CASCADE PRIMARY KEY,
+  nome TEXT NOT NULL DEFAULT '',
+  papel TEXT NOT NULL DEFAULT 'colaborador'
+    CHECK (papel IN ('proprietario','colaborador','cedente','devedor')),
+  ref_id TEXT DEFAULT '',
+  cargo TEXT DEFAULT '',
+  ativo BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 3. Habilitar RLS (segurança por linha)
+ALTER TABLE cobrasq_data ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app_users ENABLE ROW LEVEL SECURITY;
+
+-- 4. Políticas: usuários autenticados podem ler e gravar
+CREATE POLICY "authed_read_data" ON cobrasq_data
+  FOR SELECT TO authenticated USING (true);
+CREATE POLICY "authed_insert_data" ON cobrasq_data
+  FOR INSERT TO authenticated WITH CHECK (true);
+CREATE POLICY "authed_update_data" ON cobrasq_data
+  FOR UPDATE TO authenticated USING (true);
+
+-- 5. Políticas de usuários
+CREATE POLICY "own_read_users" ON app_users
+  FOR SELECT TO authenticated USING (true);
+CREATE POLICY "own_insert_users" ON app_users
+  FOR INSERT TO authenticated WITH CHECK (true);
+CREATE POLICY "own_update_users" ON app_users
+  FOR UPDATE TO authenticated USING (auth.uid() = id);
+
+-- 6. Inserir registro inicial vazio (evita erro no primeiro acesso)
+INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
+  ON CONFLICT (key) DO NOTHING;</pre>
+          </div>
+        </details>
+        <div style="margin-top:12px;padding:10px 12px;background:#fff8e1;border-radius:var(--radius-sm);font-size:12px;color:#7c5c00;line-height:1.7;">
+          <strong>➕ Adicionar colaborador:</strong><br>
+          No Supabase: <em>Authentication → Users → Invite user</em><br>
+          Coloque o e-mail do colaborador. Depois em <em>SQL Editor</em> execute:<br>
+          <code style="display:block;margin-top:4px;background:rgba(0,0,0,.05);padding:4px 8px;border-radius:4px;font-size:11px;">INSERT INTO app_users (id, nome, papel, cargo) VALUES ('UUID_DO_USUARIO','Nome','colaborador','Cargo');</code>
+        </div>
+      </div>
+
       <!-- ── Claude ───────────────────────────────── -->
       <div class="int-card">
         <div class="int-card-header">
@@ -6173,6 +6425,8 @@ function delUsuario(i){ DB.config.usuarios.splice(i,1); save(); renderCfgSection
 function addCategoria(tipo){ const id=tipo==='receita'?'nova-cat-rec':'nova-cat-des'; const v=(document.getElementById(id)?.value||'').trim(); if(!v)return; if(!DB.config.categorias)DB.config.categorias={receita:[],despesa:[]}; DB.config.categorias[tipo].push(v); save(); renderCfgSection('categorias'); }
 function delCategoria(tipo,i){ DB.config.categorias[tipo].splice(i,1); save(); renderCfgSection('categorias'); }
 function salvarIntegracoes(){
+  DB.config.supabaseUrl       = (document.getElementById('cfg-supa-url')?.value||'').trim();
+  DB.config.supabaseAnonKey   = (document.getElementById('cfg-supa-key')?.value||'').trim();
   DB.config.claudeApiKey      = document.getElementById('cfg-api-key')?.value||'';
   DB.config.asaasKey          = document.getElementById('cfg-asaas-key')?.value||'';
   DB.config.asaasEnv          = document.getElementById('cfg-asaas-env')?.value||'sandbox';
@@ -6180,6 +6434,7 @@ function salvarIntegracoes(){
   DB.config.zapiInstanceId    = document.getElementById('cfg-zapi-instance')?.value||'';
   DB.config.zapiToken         = document.getElementById('cfg-zapi-token')?.value||'';
   DB.config.zapiClientToken   = document.getElementById('cfg-zapi-client-token')?.value||'';
+  reinitSupabase(); // re-inicializa cliente Supabase com novas credenciais
   save();
   const msg = document.getElementById('cfg-int-msg');
   if(msg){ msg.textContent='✅ Salvo!'; msg.style.color='var(--success)'; setTimeout(()=>msg.textContent='',3000); }
@@ -7155,13 +7410,39 @@ function renderRelatComissao(el){
 document.addEventListener('DOMContentLoaded', ()=>{
 
   // ── INIT ──────────────────────────────────────────────────
-  load();
+  load(); // carrega localStorage imediatamente (fast path)
   if(DB.config.tema==='dark') document.body.classList.add('dark');
-
   const themeBtn = document.getElementById('btn-theme');
   if(themeBtn) themeBtn.innerHTML = DB.config.tema==='dark' ? '☀️' : '🌙';
 
-  document.getElementById('loginScreen').classList.add('active');
+  // Tenta inicializar Supabase e verificar sessão existente
+  (async ()=>{
+    const supa = getSupabase();
+    if(supa){
+      // Sincronizar dados do Supabase antes de mostrar login
+      await loadFromSupabase();
+      // Verificar sessão ativa (auto-login)
+      const { data: { session } } = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
+      if(session){
+        const meta = session.user.user_metadata || {};
+        const papel = meta.papel || 'proprietario';
+        currentUser = {
+          tipo: papel === 'colaborador' ? 'funcionario' : 'gestor',
+          nome: meta.nome || session.user.email,
+          email: session.user.email,
+          avatar: initials(meta.nome || session.user.email),
+          role: papel === 'colaborador' ? (meta.cargo||'Funcionário') : 'Administrador',
+          supaId: session.user.id,
+          papel
+        };
+        iniciarSessao();
+        return;
+      }
+    }
+    document.getElementById('loginScreen').classList.add('active');
+  })();
+
+  // (loginScreen também é ativado pelo async acima se sem sessão)
 
   // Overlay close on outside click
   document.querySelectorAll('.overlay').forEach(el=>{
