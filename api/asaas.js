@@ -1,12 +1,13 @@
 // api/asaas.js — Proxy server-to-server para a API do Asaas
-// Resolve o bloqueio de CORS da Asaas para chamadas diretas do browser.
-// O browser chama /api/asaas?path=finance/balance e este handler
-// repassa a requisição para api.asaas.com/v3 no lado do servidor.
+// Prioriza credencial em variável de ambiente (ASAAS_API_KEY) para manter
+// a chave fora do browser. Mantém fallback por header (backward-compat)
+// mas emite warning no console server-side.
 
 module.exports = async function handler(req, res) {
-  // CORS: permite chamadas da própria origem Vercel
+  // CORS: permite chamadas da própria origem
   const origin = req.headers.origin || '*';
   res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-asaas-key, x-asaas-env');
 
@@ -15,12 +16,24 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  const asaasKey = req.headers['x-asaas-key'] || '';
-  const asaasEnv = req.headers['x-asaas-env'] || 'sandbox';
+  // 1) Prioriza env vars (server-side secret) — não expõe chave no browser
+  const envKey = process.env.ASAAS_API_KEY || '';
+  const envEnv = process.env.ASAAS_ENV || '';
+  // 2) Fallback: aceita header se env não estiver configurada (transição)
+  const asaasKey = envKey || req.headers['x-asaas-key'] || '';
+  const asaasEnv = envEnv || req.headers['x-asaas-env'] || 'sandbox';
   const pathParam = (req.query.path || '').replace(/^\/+/, '');
 
+  if (!envKey && req.headers['x-asaas-key']) {
+    // Avisa (sem expor a chave) que está em modo inseguro
+    console.warn('[asaas proxy] ASAAS_API_KEY não configurada. Usando chave do header (inseguro).');
+  }
+
   if (!asaasKey) {
-    return res.status(400).json({ error: 'x-asaas-key header ausente' });
+    return res.status(500).json({
+      error: 'ASAAS_API_KEY não configurada no servidor.',
+      hint: 'Defina a variável de ambiente ASAAS_API_KEY (e opcionalmente ASAAS_ENV=sandbox|production) no painel da Vercel.'
+    });
   }
   if (!pathParam) {
     return res.status(400).json({ error: 'query param ?path= ausente' });
@@ -30,7 +43,7 @@ module.exports = async function handler(req, res) {
     ? 'https://www.asaas.com/api/v3'
     : 'https://sandbox.asaas.com/api/v3';
 
-  // Repassa todos os query params exceto `path`
+  // Repassa query params exceto `path`
   const forwardQuery = { ...req.query };
   delete forwardQuery.path;
   const qs = new URLSearchParams(forwardQuery).toString();
@@ -47,7 +60,7 @@ module.exports = async function handler(req, res) {
     };
 
     if (!['GET', 'DELETE', 'HEAD'].includes(req.method) && req.body) {
-      fetchOpts.body = JSON.stringify(req.body);
+      fetchOpts.body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
     }
 
     const upstream = await fetch(upstreamUrl, fetchOpts);
@@ -56,7 +69,6 @@ module.exports = async function handler(req, res) {
     let data;
     try { data = JSON.parse(text); } catch { data = { raw: text }; }
 
-    // Repassa o status code do Asaas
     res.status(upstream.status).json(data);
   } catch (err) {
     res.status(502).json({ error: err.message, upstream: upstreamUrl });

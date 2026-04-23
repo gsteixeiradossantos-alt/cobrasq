@@ -355,9 +355,47 @@ img{max-width:100%}
 }
 .topbar-btn:hover{background:var(--bg);border-color:var(--border-2);}
 .notif-badge{
-  position:absolute;top:4px;right:4px;width:8px;height:8px;
-  background:var(--danger);border-radius:50%;border:2px solid var(--surface);
+  position:absolute;top:2px;right:2px;min-width:16px;height:16px;padding:0 4px;
+  background:var(--danger);color:#fff;border-radius:var(--r-full);
+  border:2px solid var(--surface);
+  font-size:10px;font-weight:var(--fw-bold);line-height:1;
+  display:none;align-items:center;justify-content:center;
 }
+/* Notification popover */
+.notif-popover{
+  width:360px;max-width:calc(100vw - 24px);max-height:70vh;overflow:hidden;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);
+  box-shadow:var(--elev-4);display:flex;flex-direction:column;
+  animation:modalIn var(--motion-base) var(--ease-out);
+}
+.notif-popover .notif-head{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:14px 16px;border-bottom:1px solid var(--border);
+  font-size:var(--fs-md);color:var(--text);
+}
+.notif-popover .notif-count{
+  background:var(--danger);color:#fff;font-size:var(--fs-xs);font-weight:var(--fw-bold);
+  min-width:20px;height:20px;padding:0 6px;border-radius:var(--r-full);
+  display:inline-flex;align-items:center;justify-content:center;
+}
+.notif-popover .notif-body{overflow-y:auto;padding:6px 0;}
+.notif-popover .notif-cat{padding:4px 0;}
+.notif-popover .notif-cat-label{
+  display:flex;align-items:center;gap:6px;
+  padding:8px 16px 4px;font-size:var(--fs-xs);font-weight:var(--fw-bold);
+  text-transform:uppercase;letter-spacing:.6px;color:var(--text-3);
+}
+.notif-popover .notif-cat-label [data-lucide]{width:13px;height:13px;}
+.notif-popover .notif-item{
+  display:flex;align-items:flex-start;gap:10px;padding:8px 16px;
+  font-size:var(--fs-sm);color:var(--text-2);line-height:1.4;
+  transition:background var(--motion-fast) var(--ease);
+}
+.notif-popover .notif-item:hover{background:var(--surface-3);}
+.notif-popover .notif-dot{
+  flex:none;width:8px;height:8px;border-radius:50%;margin-top:5px;
+}
+.notif-popover .notif-empty{padding:32px 16px;text-align:center;}
 .topbar-user-btn{
   display:flex;align-items:center;gap:8px;padding:4px 10px 4px 4px;
   border-radius:8px;border:1px solid var(--border);background:var(--surface);cursor:pointer;transition:var(--transition);
@@ -2525,6 +2563,30 @@ function _promptConfirm(){
 function mascaraCPF(v){return v.replace(/\D/g,'').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d{1,2})$/,'$1-$2');}
 function mascaraCNPJ(v){return v.replace(/\D/g,'').replace(/(\d{2})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1/$2').replace(/(\d{4})(\d)/,'$1-$2');}
 function mascaraDoc(el){const v=el.value.replace(/\D/g,'');el.value=v.length<=11?mascaraCPF(v):mascaraCNPJ(v);}
+
+// LGPD: oculta dígitos sensíveis por padrão. Chamar onde doc aparece
+// em contexto amplo (listas/tabelas/cards). Detalhes mostram completo.
+// Config DB.config.maskDocs (default true) permite desligar.
+function fmtDocMasked(doc, opts){
+  if(!doc) return '—';
+  opts = opts || {};
+  const digits = String(doc).replace(/\D/g,'');
+  if(!digits) return '—';
+  const forceFull = opts.full === true;
+  const maskEnabled = (DB && DB.config && DB.config.maskDocs !== false);
+  if(forceFull || !maskEnabled){
+    return digits.length <= 11 ? mascaraCPF(digits) : mascaraCNPJ(digits);
+  }
+  if(digits.length <= 11){
+    // CPF 123.***.***-12
+    const a = digits.slice(0,3), z = digits.slice(-2);
+    return `${a}.***.***-${z}`;
+  } else {
+    // CNPJ 12.345.***/****-**
+    const a = digits.slice(0,2), b = digits.slice(2,5);
+    return `${a}.${b}.***/****-**`;
+  }
+}
 function mascaraTel(el){const v=el.value.replace(/\D/g,'');let m='';if(v.length<=10)m=v.replace(/(\d{2})(\d{4})(\d{0,4})/,'($1) $2-$3');else m=v.replace(/(\d{2})(\d{5})(\d{0,4})/,'($1) $2-$3');el.value=m.trim().replace(/-$/,'');}
 
 function parseValorBR(s){
@@ -2896,8 +2958,65 @@ async function doLogin(type){
   }
 }
 
+const LGPD_CURRENT_VERSION = '1.0';
+function needsLgpdConsent(){
+  const accepted = DB.config.lgpdAcceptedAt;
+  const version  = DB.config.lgpdTermsVersion;
+  return !accepted || version !== LGPD_CURRENT_VERSION;
+}
+function acceptLgpd(){
+  DB.config.lgpdAcceptedAt = new Date().toISOString().slice(0,19).replace('T',' ');
+  DB.config.lgpdTermsVersion = LGPD_CURRENT_VERSION;
+  save();
+  const ov = document.getElementById('lgpd-overlay');
+  if(ov) ov.remove();
+  if(typeof _lgpdAfterAccept === 'function'){ _lgpdAfterAccept(); _lgpdAfterAccept = null; }
+}
+let _lgpdAfterAccept = null;
+function showLgpdConsent(onAccept){
+  if(document.getElementById('lgpd-overlay')) return;
+  _lgpdAfterAccept = onAccept || null;
+  const ov = document.createElement('div');
+  ov.id = 'lgpd-overlay';
+  ov.className = 'overlay open';
+  ov.style.zIndex = 'calc(var(--z-overlay,1000) + 10)';
+  ov.innerHTML = `
+    <div class="modal modal-lg" role="dialog" aria-labelledby="lgpd-title" style="padding:0;">
+      <div class="modal-header">
+        <span class="modal-title" id="lgpd-title">
+          <span class="modal-title-icon"><i data-lucide="shield-check"></i></span>
+          Proteção de dados e LGPD
+        </span>
+      </div>
+      <div class="modal-body" style="font-size:var(--fs-md);line-height:1.65;color:var(--text-2);">
+        <p style="margin-bottom:12px;"><strong>COBRASQ Recuperadora</strong> trata seus dados pessoais (nome, CPF/CNPJ, e-mail, telefone, histórico financeiro e de contato) para prestação dos serviços de cobrança e gestão de crédito, em conformidade com a <strong>Lei Geral de Proteção de Dados (LGPD, Lei 13.709/2018)</strong>.</p>
+        <p style="margin-bottom:12px;"><strong>Suas principais garantias:</strong></p>
+        <ul style="margin:0 0 12px 22px;padding:0;">
+          <li>Confirmar se tratamos seus dados e solicitar acesso</li>
+          <li>Pedir correção de informações incorretas ou desatualizadas</li>
+          <li>Solicitar portabilidade ou eliminação de dados desnecessários</li>
+          <li>Saber com quem compartilhamos suas informações (Asaas, Z-API, instituições financeiras autorizadas)</li>
+          <li>Revogar o consentimento a qualquer momento, com efeito futuro</li>
+        </ul>
+        <p style="margin-bottom:12px;"><strong>Cookies/armazenamento local:</strong> usamos <code>localStorage</code> para manter sua sessão e sincronização de dados. Não usamos cookies de publicidade.</p>
+        <p style="margin-bottom:0;color:var(--text-3);font-size:var(--fs-sm);">Ao clicar em <strong>“Aceitar e continuar”</strong>, você confirma ter lido e aceitado os termos acima (versão ${LGPD_CURRENT_VERSION}). Você pode rever esse aceite em <em>Configurações → Privacidade e LGPD</em>.</p>
+      </div>
+      <div class="modal-footer" style="justify-content:space-between;">
+        <button type="button" class="btn btn-ghost" onclick="doLogout()">Recusar e sair</button>
+        <button type="button" class="btn btn-primary" onclick="acceptLgpd()"><i data-lucide="check"></i> Aceitar e continuar</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  renderIcons(ov);
+}
+
 function iniciarSessao(){
   if(!currentUser) return;
+  // LGPD gate — valida antes de carregar as telas
+  if(needsLgpdConsent()){
+    showLgpdConsent(()=>iniciarSessao());
+    return;
+  }
   // Hide all screens
   document.querySelectorAll('.screen').forEach(s=>{ s.classList.remove('active'); });
 
@@ -3090,7 +3209,67 @@ function updateNotifBadge(){
   const alerts = getAlertas();
   const negAlerts = alerts.filter(a=>a.tipo!=='success');
   const badge = document.getElementById('notifBadge');
-  if(badge) badge.style.display = negAlerts.length > 0 ? 'block' : 'none';
+  if(!badge) return;
+  if(negAlerts.length > 0){
+    badge.style.display = 'flex';
+    badge.textContent = negAlerts.length > 9 ? '9+' : String(negAlerts.length);
+  } else {
+    badge.style.display = 'none';
+    badge.textContent = '';
+  }
+}
+
+function showNotifPopover(){
+  // Remove se já aberto (toggle)
+  const existing = document.getElementById('notif-popover');
+  if(existing){ existing.remove(); return; }
+  const alerts = getAlertas();
+  const byCat = {
+    financeiro:{label:'Financeiro', icon:'wallet', items:[]},
+    operacao:  {label:'Operação',   icon:'clipboard-list', items:[]},
+    devedores: {label:'Devedores',  icon:'users', items:[]},
+    acordos:   {label:'Acordos',    icon:'handshake', items:[]},
+    metas:     {label:'Metas',      icon:'target', items:[]},
+    outros:    {label:'Outros',     icon:'info', items:[]}
+  };
+  alerts.forEach(a=>{
+    const c = byCat[a.categoria] || byCat.outros;
+    c.items.push(a);
+  });
+  const btn = document.getElementById('btn-notif');
+  const rect = btn ? btn.getBoundingClientRect() : {right:320, bottom:56};
+  const pop = document.createElement('div');
+  pop.id = 'notif-popover';
+  pop.className = 'notif-popover';
+  pop.style.cssText = `position:fixed;top:${rect.bottom+8}px;right:${Math.max(12, window.innerWidth - rect.right)}px;z-index:var(--z-popover,500);`;
+  const tipoColor = {danger:'var(--danger)', warning:'var(--warning)', info:'var(--info)', success:'var(--success)'};
+  const catsFilled = Object.values(byCat).filter(c=>c.items.length>0);
+  if(catsFilled.length === 0){
+    pop.innerHTML = `<div class="notif-empty">
+      <i data-lucide="bell-off" style="width:28px;height:28px;opacity:.4;"></i>
+      <div style="margin-top:10px;font-weight:600;color:var(--text-2);">Tudo em dia!</div>
+      <div style="font-size:var(--fs-sm);color:var(--text-3);">Nenhuma notificação no momento.</div>
+    </div>`;
+  } else {
+    pop.innerHTML = `
+      <div class="notif-head">
+        <strong>Notificações</strong>
+        <span class="notif-count">${alerts.filter(a=>a.tipo!=='success').length}</span>
+      </div>
+      <div class="notif-body">
+        ${catsFilled.map(c=>`
+          <div class="notif-cat">
+            <div class="notif-cat-label"><i data-lucide="${c.icon}"></i>${c.label}</div>
+            ${c.items.map(a=>`
+              <div class="notif-item notif-${a.tipo}">
+                <span class="notif-dot" style="background:${tipoColor[a.tipo]||'var(--info)'};"></span>
+                <span>${escHtml(a.msg)}</span>
+              </div>`).join('')}
+          </div>`).join('')}
+      </div>`;
+  }
+  document.body.appendChild(pop);
+  renderIcons(pop);
 }
 
 // ── DASHBOARD ────────────────────────────────────────────────
@@ -3513,7 +3692,7 @@ function renderDevedores(){
           emptyText:'Nenhum devedor encontrado.',
           columns:[
             {key:'nome', label:'Nome', render:d=>`<span class="cell-primary">${escHtml(d.nome||'—')}</span>`, sortAccessor:d=>d.nome||''},
-            {key:'doc', label:'CPF/CNPJ', render:d=>`<span class="cell-secondary">${escHtml(d.doc||'—')}</span>`},
+            {key:'doc', label:'CPF/CNPJ', render:d=>`<span class="cell-secondary" title="Abrir detalhe para ver completo">${escHtml(fmtDocMasked(d.doc))}</span>`},
             {key:'valor', label:'Valor', align:'right', render:d=>fmtR(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0), sortAccessor:d=>parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0},
             {key:'status', label:'Status', render:d=>statusBadgeHtml(d.status), sortAccessor:d=>d.status||''},
             {key:'cliente', label:'Cliente', render:d=>{const n=d.clienteId?((DB.clientes||[]).find(c=>c.id===d.clienteId)||{}).nome||'':'';return `<span class="cell-secondary">${escHtml(n||'—')}</span>`;}, sortAccessor:d=>{const n=d.clienteId?((DB.clientes||[]).find(c=>c.id===d.clienteId)||{}).nome||'':'';return n;}},
@@ -3639,7 +3818,7 @@ function devCardHtml(d){
       <div style="display:flex;justify-content:space-between;align-items:flex-start;padding-right:${selectionMode?'28px':'0'};">
         <div>
           <div class="dev-card-name">${d.nome||'—'}</div>
-          <div class="dev-card-doc">${d.doc||'—'}</div>
+          <div class="dev-card-doc" title="Abrir para ver completo">${escHtml(fmtDocMasked(d.doc))}</div>
         </div>
         ${statusBadgeHtml(d.status)}
       </div>
@@ -4776,7 +4955,7 @@ function renderClientes(){
                 const taxa = carteira>0?((recuperado/carteira)*100).toFixed(1)+'%':'—';
                 return `<tr>
                   <td><strong>${c.nome||'—'}</strong></td>
-                  <td style="font-size:12px;color:var(--text-3);">${c.doc||'—'}</td>
+                  <td style="font-size:12px;color:var(--text-3);">${escHtml(fmtDocMasked(c.doc))}</td>
                   <td>${c.responsavel||currentUser.nome||'—'}</td>
                   <td>${cDevs.length}</td>
                   <td>${fmtR(carteira)}</td>
@@ -4995,7 +5174,7 @@ function cpRenderCarteira(body){
           <tbody>
             ${visible.map(d=>`<tr>
               <td><strong>${d.nome||'—'}</strong></td>
-              <td style="font-size:12px;color:var(--text-3)">${d.doc||'—'}</td>
+              <td style="font-size:12px;color:var(--text-3)">${escHtml(fmtDocMasked(d.doc))}</td>
               <td>${fmtR(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0)}</td>
               <td>${statusBadgeHtml(d.status)}</td>
               <td><span style="font-size:12px">${d.fase==='judicial'?'⚖️ Judicial':'📋 Extrajudicial'}</span></td>
@@ -5017,7 +5196,7 @@ function cpFiltrarCarteira(q){
   if(!tbody) return;
   tbody.innerHTML = devs.map(d=>`<tr>
     <td><strong>${d.nome||'—'}</strong></td>
-    <td style="font-size:12px;color:var(--text-3)">${d.doc||'—'}</td>
+    <td style="font-size:12px;color:var(--text-3)">${escHtml(fmtDocMasked(d.doc))}</td>
     <td>${fmtR(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0)}</td>
     <td>${statusBadgeHtml(d.status)}</td>
     <td><span style="font-size:12px">${d.fase==='judicial'?'⚖️ Judicial':'📋 Extrajudicial'}</span></td>
@@ -6385,6 +6564,7 @@ function renderConfiguracoes(){
     {id:'categorias',icon:'🏷️',label:'Categorias'},
     {id:'integracoes',icon:'🔗',label:'Integrações'},
     {id:'notificacoes',icon:'🔔',label:'Notificações'},
+    {id:'privacidade',icon:'🛡️',label:'Privacidade e LGPD'},
     {id:'senha',icon:'🔑',label:'Senha'},
     {id:'dados',icon:'💾',label:'Backup'},
     {id:'auditoria',icon:'🗂️',label:'Auditoria'},
@@ -6482,6 +6662,16 @@ function renderCfgSection(section){
     const regra = DB.config.regraCobranca||[];
     const CANAL_OPTS = `<option value="whatsapp">💬 WhatsApp (Z-Api)</option><option value="email">📧 E-mail</option>`;
     el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:20px;">Integrações</h3>
+
+      <!-- Aviso de segurança sobre env vars -->
+      <div class="int-env-note" style="background:var(--info-soft);color:var(--info-strong);border:1px solid #c7dcf0;border-radius:var(--r-md);padding:12px 14px;margin-bottom:20px;font-size:var(--fs-sm);display:flex;gap:10px;align-items:flex-start;">
+        <i data-lucide="shield-check" style="width:18px;height:18px;flex:none;margin-top:1px;"></i>
+        <div>
+          <strong>Credenciais server-side (recomendado)</strong>
+          <div style="margin-top:3px;">As chaves de Asaas, Z-API e ZapSign podem ser configuradas como <em>variáveis de ambiente</em> no painel da Vercel — ficam ocultas do navegador. Enquanto não estão configuradas, o sistema usa os valores preenchidos abaixo como fallback (inseguro).</div>
+          <div style="margin-top:5px;opacity:.85;">Variáveis: <code>ASAAS_API_KEY</code>, <code>ASAAS_ENV</code>, <code>ZAPI_TOKEN</code>, <code>ZAPI_INSTANCE_ID</code>, <code>ZAPI_CLIENT_TOKEN</code>, <code>ZAPSIGN_TOKEN</code>.</div>
+        </div>
+      </div>
 
       <!-- ── Supabase ──────────────────────────────── -->
       <div class="int-card" style="border:2px solid ${DB.config.supabaseUrl&&DB.config.supabaseAnonKey?'var(--success)':'var(--border)'};">
@@ -6697,6 +6887,30 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
           <input type="checkbox" ${n[k]!==false?'checked':''} onchange="DB.config.notif['${k}']=this.checked;save();" style="width:16px;height:16px;accent-color:var(--navy);cursor:pointer;"/>
         </div>`).join('')}`;
   }
+  else if(section==='privacidade'){
+    const maskOn = DB.config.maskDocs !== false;
+    const termsV = DB.config.lgpdTermsVersion || '1.0';
+    el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:18px;">Privacidade e LGPD</h3>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:var(--surface-2);border-radius:var(--r-md);margin-bottom:12px;">
+        <div>
+          <div style="font-weight:600;font-size:13px;">Mascarar CPF/CNPJ em listagens</div>
+          <div style="font-size:12px;color:var(--text-3);margin-top:3px;">Oculta dígitos do meio em tabelas e cards. Detalhes do devedor mostram o documento completo.</div>
+        </div>
+        <input type="checkbox" ${maskOn?'checked':''} onchange="DB.config.maskDocs=this.checked;save();showPage('config');setCfgSection('privacidade');" style="width:18px;height:18px;accent-color:var(--navy);cursor:pointer;"/>
+      </div>
+      <div style="padding:14px 16px;background:var(--surface-2);border-radius:var(--r-md);margin-bottom:12px;">
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px;">Aviso de privacidade</div>
+        <div style="font-size:12px;color:var(--text-2);line-height:1.6;">
+          Este sistema trata dados pessoais (CPF/CNPJ, contatos, histórico financeiro) regidos pela LGPD (Lei 13.709/2018).
+          O devedor tem direito a: acesso, correção, portabilidade e eliminação dos próprios dados, mediante solicitação ao titular do cadastro.
+          <br><br>Versão do termo aceito: <strong>${escHtml(termsV)}</strong>.
+          Aceite em: <strong>${escHtml(DB.config.lgpdAcceptedAt||'—')}</strong>.
+        </div>
+      </div>
+      <div style="padding:14px 16px;border:1px dashed var(--border);border-radius:var(--r-md);font-size:12px;color:var(--text-3);">
+        <strong>Atenção:</strong> alguns recursos adicionais de LGPD (RLS no Supabase, audit_logs no banco, apagamento de dados a pedido do titular) exigem configuração do lado do Supabase. Veja <code>docs/supabase-security.sql</code>.
+      </div>`;
+  }
   else if(section==='senha'){
     el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:18px;">Alterar senha</h3>
       <div class="fg"><label>Senha atual</label><input type="password" id="cfg-senha-atual" placeholder="••••••••"/></div>
@@ -6759,7 +6973,7 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
                   const arqDate = d.arquivadoEm?new Date(d.arquivadoEm).toLocaleDateString('pt-BR'):'—';
                   return `<tr>
                     <td><strong>${escHtml(d.nome||'—')}</strong></td>
-                    <td style="font-size:11px;color:var(--text-3);">${escHtml(d.doc||'—')}</td>
+                    <td style="font-size:11px;color:var(--text-3);">${escHtml(fmtDocMasked(d.doc))}</td>
                     <td style="font-weight:700;">${fmtR(valor)}</td>
                     <td style="font-size:12px;color:var(--text-3);">${escHtml(cliNome)}</td>
                     <td style="font-size:12px;">${escHtml(d.arquivadoPor||'—')}</td>
@@ -6888,9 +7102,9 @@ async function testarZapSign(){
   if(!token){ res.textContent='⚠️ Token vazio'; res.style.color='var(--warning)'; return; }
   btn.disabled=true; res.textContent='Testando…'; res.style.color='var(--text-3)';
   try {
-    const r = await fetch('https://api.zapsign.com.br/api/v1/docs/?limit=1',{headers:{'Authorization':`Bearer ${token}`}});
+    const r = await fetch('/api/zapsign?path=docs&limit=1',{headers:{'Content-Type':'application/json','x-zapsign-token':token}});
     if(r.ok||r.status===200){ res.textContent='✅ Conectado!'; res.style.color='var(--success)'; }
-    else { const j=await r.json().catch(()=>{}); res.textContent='❌ '+(j?.detail||`HTTP ${r.status}`); res.style.color='var(--danger)'; }
+    else { const j=await r.json().catch(()=>{}); res.textContent='❌ '+(j?.detail||j?.error||`HTTP ${r.status}`); res.style.color='var(--danger)'; }
   } catch(e){ res.textContent='❌ '+e.message; res.style.color='var(--danger)'; }
   btn.disabled=false;
 }
@@ -6904,10 +7118,15 @@ async function testarZApi(){
   if(!inst||!tok){ res.textContent='⚠️ Instance/Token vazios'; res.style.color='var(--warning)'; return; }
   btn.disabled=true; res.textContent='Testando…'; res.style.color='var(--text-3)';
   try {
-    const base = `https://api.z-api.io/instances/${inst}/token/${tok}`;
-    const r = await fetch(`${base}/status`,{headers:{'Content-Type':'application/json','Client-Token':ctok||''}});
+    const r = await fetch('/api/zapi?path=status',{headers:{
+      'Content-Type':'application/json',
+      'x-zapi-token':tok,
+      'x-zapi-instance':inst,
+      'x-zapi-client-token':ctok||''
+    }});
     const j = await r.json().catch(()=>({connected:false}));
     if(j.connected){ res.textContent='✅ WhatsApp conectado!'; res.style.color='var(--success)'; }
+    else if(j.error){ res.textContent='❌ '+j.error; res.style.color='var(--danger)'; }
     else { res.textContent='⚠️ Instância desconectada (verifique QR)'; res.style.color='var(--warning)'; }
   } catch(e){ res.textContent='❌ '+e.message; res.style.color='var(--danger)'; }
   btn.disabled=false;
@@ -7621,7 +7840,8 @@ const AsaasAPI = {
     'x-asaas-env': DB.config.asaasEnv||'sandbox',
   }; },
   async req(method, path, data){
-    if(!DB.config.asaasKey) throw new Error('Chave Asaas não configurada em Configurações → Integrações');
+    // Credencial pode vir da env var do servidor (preferência) ou do DB.config
+    // (fallback). A validação final é feita pelo proxy.
     // Separa path de query string
     const [pathPart, queryPart] = path.split('?');
     const cleanPath = pathPart.replace(/^\/+/,'');
@@ -7650,38 +7870,44 @@ const AsaasAPI = {
 };
 
 // ── ZapSign ───────────────────────────────────────────────────
+// Todas as chamadas passam pelo proxy /api/zapsign (token server-side via
+// variável de ambiente ZAPSIGN_TOKEN). Se ainda houver token em
+// DB.config.zapsignToken, é enviado como fallback (uso inseguro, só pra
+// transição). Preferir sempre ter ZAPSIGN_TOKEN configurada na Vercel.
 const ZapSignAPI = {
-  base:'https://api.zapsign.com.br/api/v1',
-  get h(){ return { 'Authorization':`Bearer ${DB.config.zapsignToken||''}`, 'Content-Type':'application/json' }; },
+  base:'/api/zapsign',
   async req(method, path, data){
-    if(!DB.config.zapsignToken) throw new Error('Token ZapSign não configurado em Configurações → Integrações');
-    const opts = { method, headers: this.h };
+    const headers = { 'Content-Type':'application/json' };
+    if(DB.config.zapsignToken) headers['x-zapsign-token'] = DB.config.zapsignToken;
+    const cleanPath = path.replace(/^\/+/, '').replace(/\/+$/, '');
+    const opts = { method, headers };
     if(data) opts.body = JSON.stringify(data);
-    const r = await fetch(this.base + path, opts);
+    const r = await fetch(`${this.base}?path=${encodeURIComponent(cleanPath)}`, opts);
     const json = await r.json().catch(()=>({ detail:`HTTP ${r.status}` }));
-    if(!r.ok) throw new Error(json?.detail || json?.message || `Erro ${r.status}`);
+    if(!r.ok) throw new Error(json?.detail || json?.message || json?.error || `Erro ${r.status}`);
     return json;
   },
-  createDoc(payload){ return this.req('POST','/docs/',payload); },
-  getDoc(token){ return this.req('GET',`/docs/${token}/`); },
+  createDoc(payload){ return this.req('POST','docs',payload); },
+  getDoc(token){ return this.req('GET',`docs/${token}`); },
 };
 
 // ── Z-Api ─────────────────────────────────────────────────────
+// Todas as chamadas passam pelo proxy /api/zapi (credenciais server-side
+// via ZAPI_TOKEN, ZAPI_INSTANCE_ID e ZAPI_CLIENT_TOKEN). Mantém fallback
+// via headers durante a transição.
 const ZApiAPI = {
-  get base(){
-    const inst = DB.config.zapiInstanceId||'';
-    const tok  = DB.config.zapiToken||'';
-    return `https://api.z-api.io/instances/${inst}/token/${tok}`;
-  },
-  get h(){ return { 'Content-Type':'application/json', 'Client-Token': DB.config.zapiClientToken||'' }; },
+  base:'/api/zapi',
   async req(method, path, data){
-    if(!DB.config.zapiInstanceId||!DB.config.zapiToken)
-      throw new Error('Z-Api não configurado em Configurações → Integrações');
-    const opts = { method, headers: this.h };
+    const headers = { 'Content-Type':'application/json' };
+    if(DB.config.zapiToken)        headers['x-zapi-token']         = DB.config.zapiToken;
+    if(DB.config.zapiInstanceId)   headers['x-zapi-instance']      = DB.config.zapiInstanceId;
+    if(DB.config.zapiClientToken)  headers['x-zapi-client-token']  = DB.config.zapiClientToken;
+    const cleanPath = path.replace(/^\/+/, '');
+    const opts = { method, headers };
     if(data) opts.body = JSON.stringify(data);
-    const r = await fetch(this.base + path, opts);
+    const r = await fetch(`${this.base}?path=${encodeURIComponent(cleanPath)}`, opts);
     const json = await r.json().catch(()=>({ message:`HTTP ${r.status}` }));
-    if(!r.ok) throw new Error(json?.message || `Erro ${r.status}`);
+    if(!r.ok) throw new Error(json?.message || json?.error || `Erro ${r.status}`);
     return json;
   },
   sendText(phone, message){ return this.req('POST','/send-text',{ phone:phone.replace(/\D/g,''), message }); },
@@ -7738,24 +7964,37 @@ function getAlertas(){
   const in15days = new Date(); in15days.setDate(in15days.getDate()-15);
   const in15str = in15days.toISOString().slice(0,10);
 
-  // Lançamentos vencidos
-  (DB.lancamentos||[]).filter(l=>l.status==='pendente' && l.data < todayStr).forEach(l=>{
-    alerts.push({ tipo:'danger', msg:`Lançamento vencido: ${l.descricao} (${fmtR(l.valor)})` });
-  });
+  // Considera apenas devedores NÃO arquivados em toda análise
+  const devAtivos = (DB.devedores||[]).filter(d=>!d.arquivado);
 
-  // Tarefas atrasadas
-  (DB.tarefas||[]).filter(t=>t.status!=='Concluída' && t.prazo && t.prazo < todayStr).forEach(t=>{
-    alerts.push({ tipo:'warning', msg:`Tarefa atrasada: ${t.titulo}` });
-  });
+  // Lançamentos vencidos — agrupa em um alerta único se >3
+  const lancVencidos = (DB.lancamentos||[]).filter(l=>l.status==='pendente' && l.data < todayStr);
+  if(lancVencidos.length > 3){
+    alerts.push({ tipo:'danger', msg:`${lancVencidos.length} lançamentos vencidos · total ${fmtR(lancVencidos.reduce((s,l)=>s+(+l.valor||0),0))}`, categoria:'financeiro' });
+  } else {
+    lancVencidos.forEach(l=>{
+      alerts.push({ tipo:'danger', msg:`Lançamento vencido: ${l.descricao} (${fmtR(l.valor)})`, categoria:'financeiro' });
+    });
+  }
+
+  // Tarefas atrasadas — agrupa se >3
+  const tarefasAtrasadas = (DB.tarefas||[]).filter(t=>t.status!=='Concluída' && t.prazo && t.prazo < todayStr);
+  if(tarefasAtrasadas.length > 3){
+    alerts.push({ tipo:'warning', msg:`${tarefasAtrasadas.length} tarefas atrasadas`, categoria:'operacao' });
+  } else {
+    tarefasAtrasadas.forEach(t=>{
+      alerts.push({ tipo:'warning', msg:`Tarefa atrasada: ${t.titulo}`, categoria:'operacao' });
+    });
+  }
 
   // Metas abaixo de 50%
   (DB.metas||[]).filter(m=>m.status!=='Concluída').forEach(m=>{
     const prog = calcMetaProgresso(m);
-    if(prog < 50) alerts.push({ tipo:'info', msg:`Meta abaixo de 50%: ${m.desc}` });
+    if(prog < 50) alerts.push({ tipo:'info', msg:`Meta abaixo de 50%: ${m.desc}`, categoria:'metas' });
   });
 
-  // Devedores sem interação há mais de 15 dias
-  const devsemInteracao = (DB.devedores||[]).filter(d=>{
+  // Devedores sem interação há mais de 15 dias (agora exclui arquivados)
+  const devsemInteracao = devAtivos.filter(d=>{
     if(['Quitado','Recebido','Devolvida','Sem êxito'].includes(d.status)) return false;
     const hist = d.historico||[];
     if(hist.length === 0) return true;
@@ -7763,17 +8002,25 @@ function getAlertas(){
     return last < in15str;
   });
   if(devsemInteracao.length > 0){
-    alerts.push({ tipo:'warning', msg:`${devsemInteracao.length} devedor(es) sem interação há mais de 15 dias` });
+    alerts.push({ tipo:'warning', msg:`${devsemInteracao.length} devedor(es) sem interação há mais de 15 dias`, categoria:'devedores' });
   }
 
-  // Parcelas de acordo vencendo nos próximos 5 dias
-  (DB.devedores||[]).forEach(d=>{
+  // Parcelas de acordo vencendo nos próximos 5 dias — agrupa se >3
+  const parcelasProx = [];
+  devAtivos.forEach(d=>{
     (d.acordos||[]).forEach(ac=>{
       (ac.parcelas||[]).filter(p=>!p.pago && p.vencimento >= todayStr && p.vencimento <= in5str).forEach(p=>{
-        alerts.push({ tipo:'warning', msg:`Parcela de ${d.nome} vence em ${p.vencimento} (${fmtR(p.valor)})` });
+        parcelasProx.push({ nome:d.nome, ven:p.vencimento, val:p.valor });
       });
     });
   });
+  if(parcelasProx.length > 3){
+    alerts.push({ tipo:'warning', msg:`${parcelasProx.length} parcelas de acordo vencem nos próximos 5 dias`, categoria:'acordos' });
+  } else {
+    parcelasProx.forEach(p=>{
+      alerts.push({ tipo:'warning', msg:`Parcela de ${p.nome} vence em ${p.ven} (${fmtR(p.val)})`, categoria:'acordos' });
+    });
+  }
 
   // Meta mensal: se atingiu 80%, mostrar alerta positivo
   const meta = DB.config.metaMensal || 40000;
@@ -7924,10 +8171,13 @@ document.addEventListener('DOMContentLoaded', ()=>{
   document.getElementById('btn-theme').addEventListener('click', toggleTheme);
 
   // ── NOTIFICATION BELL ─────────────────────────────────────
-  document.getElementById('btn-notif').addEventListener('click', ()=>{
-    const alerts = getAlertas();
-    if(alerts.length===0){ alert('Nenhuma notificação no momento.'); return; }
-    alert(alerts.map(a=>a.msg).join('\n'));
+  document.getElementById('btn-notif').addEventListener('click', (e)=>{
+    e.stopPropagation();
+    showNotifPopover();
+  });
+  document.addEventListener('click', (e)=>{
+    const pop = document.getElementById('notif-popover');
+    if(pop && !pop.contains(e.target) && e.target.id !== 'btn-notif') pop.remove();
   });
 
   // ── HAMBURGER ─────────────────────────────────────────────
@@ -8323,7 +8573,7 @@ function renderAuditoria(){
                   const arqDate = d.arquivadoEm?new Date(d.arquivadoEm).toLocaleDateString('pt-BR'):'—';
                   return `<tr>
                     <td><strong>${escHtml(d.nome||'—')}</strong></td>
-                    <td style="font-size:12px;color:var(--text-3);">${escHtml(d.doc||'—')}</td>
+                    <td style="font-size:12px;color:var(--text-3);">${escHtml(fmtDocMasked(d.doc))}</td>
                     <td style="font-weight:700;">${fmtR(valor)}</td>
                     <td style="font-size:12px;color:var(--text-3);">${escHtml(cliNome)}</td>
                     <td>${statusBadgeHtml(d.status)}</td>
