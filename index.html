@@ -2258,12 +2258,26 @@ img{max-width:100%}
   <div class="modal" style="max-width:460px;">
     <div class="modal-header">
       <span class="modal-title" id="map-title">PIX — Cobrança</span>
-      <button class="modal-close" onclick="closeModal('modal-asaas-pix')">✕</button>
+      <button class="modal-close" onclick="closeModal('modal-asaas-pix')"><i data-lucide="x"></i></button>
     </div>
     <div class="modal-body" id="map-body" style="padding:20px;">
       <div class="mv2-step-loading"><div class="mv2-spinner"></div><p>Carregando dados da cobrança…</p></div>
     </div>
     <div class="modal-footer" id="map-footer"></div>
+  </div>
+</div>
+
+<!-- Modal de pagamento do Portal Devedor -->
+<div id="modal-dev-pag" class="overlay">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <span class="modal-title">Pagamento</span>
+      <button class="modal-close" data-close="modal-dev-pag"><i data-lucide="x"></i></button>
+    </div>
+    <div class="modal-body"></div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" data-close="modal-dev-pag">Fechar</button>
+    </div>
   </div>
 </div>
 
@@ -5477,52 +5491,269 @@ function renderPortalDevedor(){
 
   const dev = (DB.devedores||[]).find(d=>d.id===currentUser.devedorId);
   if(!dev){
-    body.innerHTML = '<div class="empty-state"><div class="empty-state-icon">❌</div><h3>Dados não encontrados</h3></div>';
+    body.innerHTML = '<div class="empty-state"><div class="empty-state-icon"><i data-lucide="alert-triangle" style="width:40px;height:40px;"></i></div><h3>Dados não encontrados</h3></div>';
+    renderIcons(body);
     return;
   }
 
   const valor = parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0;
   const acordos = dev.acordos || [];
+  const quitado = dev.status==='Quitado' || dev.status==='Recebido';
+  const dias = diasEmAberto(dev.createdAt || dev.entrada);
+
+  // ─── Parcelas consolidadas (todas, de todos os acordos) ───
+  const todasParcelas = [];
+  acordos.forEach(ac=>{
+    (ac.parcelas||[]).forEach(p=>{
+      todasParcelas.push({...p, acordoId: ac.id, acordoValorTotal: ac.valorTotal });
+    });
+  });
+  todasParcelas.sort((a,b)=>(a.vencimento||'').localeCompare(b.vencimento||''));
+  const hoje = new Date().toISOString().slice(0,10);
+  const isAtrasada = (p)=>!p.pago && p.vencimento && p.vencimento < hoje;
+  const statusParcela = (p)=> p.pago ? 'paga' : (isAtrasada(p) ? 'atrasada' : 'aberta');
+
+  // ─── Documentos do devedor (comprovantes, acordos assinados etc.) ───
+  const meusDocs = (dev.documentos||[]).filter(d=>d.visivelDevedor !== false);
+
+  // ─── Desconto à vista ───
+  const DESCONTO_VISTA = 0.05;
+  const valorVista = +(valor * (1-DESCONTO_VISTA)).toFixed(2);
 
   body.innerHTML = `
-    <div class="portal-welcome">Olá, ${dev.nome}!</div>
-    <div class="grid-2">
+    <div class="portal-welcome">Olá, ${escHtml(dev.nome||'')}!</div>
+
+    <!-- Cards resumo -->
+    <div class="grid-3" style="gap:12px;margin-bottom:16px;">
       <div class="kcard">
         <div class="kcard-label">Valor em aberto</div>
-        <div class="kcard-value" style="color:var(--danger);font-size:22px;">${fmtR(valor)}</div>
+        <div class="kcard-value" style="color:${quitado?'var(--success)':'var(--danger)'};font-size:22px;">${quitado?'R$ 0,00':fmtR(valor)}</div>
       </div>
       <div class="kcard">
         <div class="kcard-label">Situação</div>
         <div style="margin-top:8px;">${statusBadgeHtml(dev.status)}</div>
       </div>
-    </div>
-    ${acordos.length>0?`
-    <div class="panel">
-      <div class="panel-header"><span class="panel-title">Acordos em andamento</span></div>
-      <div class="panel-body">
-        ${acordos.map(ac=>{
-          const parcelas = ac.parcelas||[];
-          const pagas = parcelas.filter(p=>p.pago).length;
-          return `<div style="margin-bottom:12px;">
-            <div class="pbar-wrap">
-              <div class="pbar-label"><span>Acordo — ${fmtR(ac.valorTotal||0)}</span><span>${pagas}/${parcelas.length}</span></div>
-              <div class="pbar"><div class="pbar-fill gold" style="width:${parcelas.length>0?Math.round(pagas/parcelas.length*100):0}%"></div></div>
-            </div>
-            ${parcelas.filter(p=>!p.pago).slice(0,3).map(p=>`
-              <div style="font-size:13px;color:var(--text-2);padding:4px 0;">Parcela ${p.numero} — Venc: ${p.vencimento} — ${fmtR(p.valor||0)}</div>
-            `).join('')}
-          </div>`;
-        }).join('')}
+      <div class="kcard">
+        <div class="kcard-label">${quitado?'Quitado em':'Em aberto há'}</div>
+        <div class="kcard-value" style="font-size:20px;">${quitado?'—':(dias+' dias')}</div>
       </div>
-    </div>`:''}
-    <div class="panel">
-      <div class="panel-header"><span class="panel-title">Entre em contato</span></div>
+    </div>
+
+    ${!quitado ? `
+    <!-- Pagar à vista -->
+    <div class="panel" style="border:2px solid var(--gold);">
+      <div class="panel-header"><span class="panel-title"><i data-lucide="zap" style="width:16px;height:16px;vertical-align:-2px;"></i> Pagar à vista com 5% de desconto</span></div>
       <div class="panel-body">
-        <p style="font-size:13px;color:var(--text-2);">Para regularizar sua situação, entre em contato conosco.</p>
-        ${DB.config.whatsapp&&DB.config.whatsapp.numero?`<a href="https://wa.me/55${DB.config.whatsapp.numero.replace(/\D/g,'')}" target="_blank" class="btn btn-success" style="margin-top:12px;">💬 WhatsApp</a>`:''}
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+          <div>
+            <div style="font-size:13px;color:var(--text-3);text-decoration:line-through;">${fmtR(valor)}</div>
+            <div style="font-size:28px;font-weight:var(--fw-black);color:var(--success);">${fmtR(valorVista)}</div>
+            <div style="font-size:12px;color:var(--text-2);">Você economiza ${fmtR(valor-valorVista)}</div>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-primary" onclick="devPagarVista('pix')"><i data-lucide="qr-code"></i> Pagar com PIX</button>
+            <button class="btn btn-outline" onclick="devPagarVista('boleto')"><i data-lucide="file-text"></i> Gerar boleto</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Propor acordo parcelado -->
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title"><i data-lucide="handshake" style="width:16px;height:16px;vertical-align:-2px;"></i> Não pode pagar à vista?</span></div>
+      <div class="panel-body">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+          <div style="flex:1;min-width:220px;">
+            <div style="font-weight:var(--fw-semibold);font-size:14px;">Simule um parcelamento no boleto</div>
+            <div style="font-size:12px;color:var(--text-3);margin-top:3px;">Até 12 parcelas · a combinar de acordo com sua possibilidade</div>
+          </div>
+          <button class="btn btn-primary" onclick="devAbrirSimuladorAcordo()"><i data-lucide="calculator"></i> Simular agora</button>
+        </div>
+      </div>
+    </div>
+    ` : `
+    <div class="panel" style="border:2px solid var(--success);background:var(--success-soft);">
+      <div class="panel-body" style="display:flex;align-items:center;gap:12px;">
+        <i data-lucide="check-circle-2" style="width:32px;height:32px;color:var(--success);"></i>
+        <div>
+          <div style="font-weight:var(--fw-bold);color:var(--success-strong);">Dívida quitada</div>
+          <div style="font-size:12px;color:var(--text-2);">Obrigado pela regularização. Veja abaixo seu termo de quitação.</div>
+        </div>
+      </div>
+    </div>
+    `}
+
+    <!-- Minhas parcelas (histórico completo) -->
+    ${todasParcelas.length>0 ? `
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title"><i data-lucide="list" style="width:16px;height:16px;vertical-align:-2px;"></i> Minhas parcelas</span></div>
+      <div class="panel-body" style="padding:0;">
+        <table class="data-table" style="margin:0;">
+          <thead><tr>
+            <th>#</th><th>Vencimento</th><th class="cell-num">Valor</th><th>Status</th><th class="cell-actions">Ações</th>
+          </tr></thead>
+          <tbody>
+          ${todasParcelas.map(p=>{
+            const st = statusParcela(p);
+            const badge = st==='paga' ? '<span class="badge badge-green">Paga</span>'
+                      : st==='atrasada' ? '<span class="badge badge-red">Atrasada</span>'
+                      : '<span class="badge badge-yellow">Em aberto</span>';
+            const recibo = p.pago && p.reciboId ? `<button class="btn-icon" title="Baixar recibo" onclick="devBaixarRecibo('${escHtml(p.acordoId)}','${escHtml(p.id)}')"><i data-lucide="receipt"></i></button>` : '';
+            const pagar = !p.pago ? `<button class="btn-icon" title="Pagar" onclick="devPagarParcela('${escHtml(p.acordoId)}','${escHtml(p.id)}')"><i data-lucide="credit-card"></i></button>` : '';
+            return `<tr>
+              <td>${p.numero||''}</td>
+              <td>${(p.vencimento||'').split('-').reverse().join('/')}</td>
+              <td class="cell-num">${fmtR(p.valor||0)}</td>
+              <td>${badge}</td>
+              <td class="cell-actions">${pagar}${recibo}</td>
+            </tr>`;
+          }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>` : ''}
+
+    <!-- Meus documentos -->
+    ${meusDocs.length>0 ? `
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title"><i data-lucide="folder" style="width:16px;height:16px;vertical-align:-2px;"></i> Meus documentos</span></div>
+      <div class="panel-body">
+        ${meusDocs.map(doc=>`
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);">
+            <div>
+              <div style="font-weight:var(--fw-semibold);font-size:13px;">${escHtml(doc.nome||doc.categoria||'Documento')}</div>
+              <div style="font-size:11px;color:var(--text-3);">${escHtml(doc.categoria||'—')} · ${escHtml(doc.data||'—')}</div>
+            </div>
+            ${doc.base64 ? `<a href="${doc.base64}" download="${escHtml(doc.nome||'documento')}" class="btn btn-outline btn-sm"><i data-lucide="download"></i> Baixar</a>` : ''}
+          </div>`).join('')}
+      </div>
+    </div>` : ''}
+
+    <!-- Fale conosco -->
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title"><i data-lucide="message-circle" style="width:16px;height:16px;vertical-align:-2px;"></i> Fale conosco</span></div>
+      <div class="panel-body">
+        <p style="font-size:13px;color:var(--text-2);margin-bottom:12px;">Dúvidas sobre sua negociação? Fale com nosso time.</p>
+        ${DB.config.whatsapp&&DB.config.whatsapp.numero?`<a href="https://wa.me/55${DB.config.whatsapp.numero.replace(/\D/g,'')}" target="_blank" class="btn btn-success"><i data-lucide="message-circle"></i> WhatsApp</a>`:''}
       </div>
     </div>
   `;
+  renderIcons(body);
+}
+
+// ─── DEVEDOR: Pagar à vista (5% desconto) ─────────────────────
+async function devPagarVista(metodo){
+  const dev = (DB.devedores||[]).find(d=>d.id===currentUser.devedorId);
+  if(!dev){ showToast('Sessão inválida. Recarregue a página.','danger'); return; }
+  const valor = parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0;
+  if(valor<=0){ showToast('Nada a pagar.','info'); return; }
+  const valorVista = +(valor * 0.95).toFixed(2);
+  try{
+    showToast('Gerando cobrança…','info');
+    // Garante customer Asaas do devedor
+    const customerId = await asaasEnsureCustomer(dev);
+    const billingType = metodo==='pix' ? 'PIX' : 'BOLETO';
+    const due = new Date(); due.setDate(due.getDate()+3);
+    const dueDate = due.toISOString().slice(0,10);
+    const charge = await AsaasAPI.createCharge({
+      customer: customerId,
+      billingType,
+      value: valorVista,
+      dueDate,
+      description: `Quitação à vista (5% desc) — ${dev.nome}`,
+      externalReference: `DEV:${dev.id}:VISTA`
+    });
+    // Guarda charge no devedor (cache local)
+    dev.asaasCharges = dev.asaasCharges || [];
+    dev.asaasCharges.push({
+      id: charge.id,
+      value: valorVista,
+      status: charge.status || 'PENDING',
+      billingType,
+      dueDate,
+      type: 'vista',
+      createdAt: new Date().toISOString()
+    });
+    save();
+    // Abre modal mostrando QR PIX ou linha digitável
+    devAbrirModalPagamento(charge.id, metodo);
+  }catch(e){
+    showToast('Erro ao gerar cobrança: '+e.message,'danger');
+  }
+}
+
+async function devPagarParcela(acordoId, parcelaId){
+  const dev = (DB.devedores||[]).find(d=>d.id===currentUser.devedorId);
+  if(!dev) return;
+  const ac = (dev.acordos||[]).find(a=>a.id===acordoId);
+  if(!ac) return;
+  const p = (ac.parcelas||[]).find(x=>x.id===parcelaId);
+  if(!p || p.pago) return;
+  // Se parcela já tem charge associada, só reabre o modal
+  if(p.asaasChargeId){ devAbrirModalPagamento(p.asaasChargeId, 'pix'); return; }
+  try{
+    showToast('Gerando cobrança…','info');
+    const customerId = await asaasEnsureCustomer(dev);
+    const charge = await AsaasAPI.createCharge({
+      customer: customerId,
+      billingType: 'PIX',
+      value: +(+p.valor||0).toFixed(2),
+      dueDate: p.vencimento || new Date().toISOString().slice(0,10),
+      description: `Parcela ${p.numero||''} do acordo — ${dev.nome}`,
+      externalReference: `DEV:${dev.id}:PARC:${p.id}`
+    });
+    p.asaasChargeId = charge.id;
+    save();
+    devAbrirModalPagamento(charge.id, 'pix');
+  }catch(e){
+    showToast('Erro ao gerar cobrança: '+e.message,'danger');
+  }
+}
+
+async function devAbrirModalPagamento(chargeId, metodo){
+  try{
+    const charge = await AsaasAPI.getCharge(chargeId);
+    let content = '';
+    if((metodo==='pix') || charge.billingType==='PIX'){
+      const pix = await AsaasAPI.getPixQrCode(chargeId);
+      content = `
+        <div style="text-align:center;">
+          <p style="font-size:13px;color:var(--text-2);margin-bottom:12px;">Aponte a câmera do seu aplicativo bancário para o QR code abaixo:</p>
+          <img src="data:image/png;base64,${pix.encodedImage}" style="width:240px;height:240px;border:1px solid var(--border);border-radius:var(--r-md);padding:8px;background:#fff;"/>
+          <div style="margin-top:14px;font-size:13px;color:var(--text-3);">ou use o PIX copia-cola:</div>
+          <div style="background:var(--surface-2);padding:10px 12px;margin-top:6px;border-radius:var(--r-sm);font-family:monospace;font-size:11px;word-break:break-all;text-align:left;border:1px solid var(--border);">${escHtml(pix.payload||'')}</div>
+          <button class="btn btn-outline btn-sm" style="margin-top:10px;" onclick="navigator.clipboard.writeText('${escHtml(pix.payload||'')}').then(()=>showToast('Copiado!','success'))"><i data-lucide="copy"></i> Copiar código</button>
+          <div style="margin-top:14px;font-weight:var(--fw-bold);font-size:18px;color:var(--navy);">${fmtR(charge.value)}</div>
+        </div>`;
+    } else {
+      const id = await AsaasAPI.getIdentificationField(chargeId).catch(()=>null);
+      content = `
+        <div style="text-align:center;">
+          <p style="font-size:13px;color:var(--text-2);margin-bottom:12px;">Pague o boleto no seu banco até <strong>${(charge.dueDate||'').split('-').reverse().join('/')}</strong>:</p>
+          ${id?`<div style="background:var(--surface-2);padding:12px;border-radius:var(--r-sm);font-family:monospace;font-size:13px;letter-spacing:.5px;border:1px solid var(--border);">${escHtml(id.identificationField||'')}</div>
+            <button class="btn btn-outline btn-sm" style="margin-top:10px;" onclick="navigator.clipboard.writeText('${escHtml(id.identificationField||'')}').then(()=>showToast('Copiado!','success'))"><i data-lucide="copy"></i> Copiar linha digitável</button>`:''}
+          ${charge.bankSlipUrl?`<div style="margin-top:12px;"><a href="${charge.bankSlipUrl}" target="_blank" class="btn btn-primary btn-sm"><i data-lucide="external-link"></i> Abrir boleto em PDF</a></div>`:''}
+          <div style="margin-top:14px;font-weight:var(--fw-bold);font-size:18px;color:var(--navy);">${fmtR(charge.value)}</div>
+        </div>`;
+    }
+    const modal = document.getElementById('modal-dev-pag');
+    const titleEl = modal.querySelector('.modal-title');
+    const bodyEl = modal.querySelector('.modal-body');
+    if(titleEl) titleEl.innerHTML = `<span class="modal-title-icon"><i data-lucide="${metodo==='pix'?'qr-code':'file-text'}"></i></span>Pagamento via ${metodo==='pix'?'PIX':'Boleto'}`;
+    if(bodyEl) bodyEl.innerHTML = content;
+    openModal('modal-dev-pag');
+  }catch(e){
+    showToast('Erro ao carregar cobrança: '+e.message,'danger');
+  }
+}
+
+// Placeholder — Parte B implementa simulador completo
+function devAbrirSimuladorAcordo(){
+  showToast('Simulador de acordo — em construção (Parte B do Sprint 2).','info');
+}
+// Placeholder — Parte B implementa recibo
+function devBaixarRecibo(acordoId, parcelaId){
+  showToast('Recibo — em construção (Parte B do Sprint 2).','info');
 }
 
 // ── PLACEHOLDER RENDERERS (Part 2 will fill these) ───────────
