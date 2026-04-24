@@ -29,7 +29,12 @@ function randomCode() {
 }
 
 async function sb(path, opts) {
-  if (!SB_URL || !SB_KEY) throw new Error('Supabase não configurado');
+  if (!SB_URL || !SB_KEY) {
+    const missing = [];
+    if (!SB_URL) missing.push('SUPABASE_URL');
+    if (!SB_KEY) missing.push('SUPABASE_SERVICE_KEY');
+    throw new Error('Supabase não configurado no servidor — variáveis ausentes: ' + missing.join(', '));
+  }
   const r = await fetch(`${SB_URL.replace(/\/+$/, '')}/rest/v1/${path}`, {
     ...opts,
     headers: {
