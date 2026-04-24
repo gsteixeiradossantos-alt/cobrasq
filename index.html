@@ -2258,12 +2258,67 @@ img{max-width:100%}
   <div class="modal" style="max-width:460px;">
     <div class="modal-header">
       <span class="modal-title" id="map-title">PIX — Cobrança</span>
-      <button class="modal-close" onclick="closeModal('modal-asaas-pix')">✕</button>
+      <button class="modal-close" onclick="closeModal('modal-asaas-pix')"><i data-lucide="x"></i></button>
     </div>
     <div class="modal-body" id="map-body" style="padding:20px;">
       <div class="mv2-step-loading"><div class="mv2-spinner"></div><p>Carregando dados da cobrança…</p></div>
     </div>
     <div class="modal-footer" id="map-footer"></div>
+  </div>
+</div>
+
+<!-- Modal de pagamento do Portal Devedor -->
+<div id="modal-dev-pag" class="overlay">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <span class="modal-title">Pagamento</span>
+      <button class="modal-close" data-close="modal-dev-pag"><i data-lucide="x"></i></button>
+    </div>
+    <div class="modal-body"></div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" data-close="modal-dev-pag">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Simulador de parcelamento (Portal Devedor) -->
+<div id="modal-dev-simulador" class="overlay">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <span class="modal-title"><span class="modal-title-icon"><i data-lucide="calculator"></i></span>Simular parcelamento</span>
+      <button class="modal-close" data-close="modal-dev-simulador"><i data-lucide="x"></i></button>
+    </div>
+    <div class="modal-body"></div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" data-close="modal-dev-simulador">Cancelar</button>
+      <button class="btn btn-primary" id="btn-dev-aceitar-acordo" onclick="devAceitarAcordo()"><i data-lucide="check"></i> Aceitar e assinar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Tela de assinatura pós-aceite -->
+<div id="modal-dev-assinatura" class="overlay">
+  <div class="modal modal-md">
+    <div class="modal-header">
+      <span class="modal-title"><span class="modal-title-icon"><i data-lucide="pen-tool"></i></span>Assinar acordo</span>
+      <button class="modal-close" data-close="modal-dev-assinatura"><i data-lucide="x"></i></button>
+    </div>
+    <div class="modal-body"></div>
+  </div>
+</div>
+
+<!-- MFA Devedor (opcional, se DB.config.mfaDevedor ligado) -->
+<div id="modal-mfa-devedor" class="overlay">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <span class="modal-title"><span class="modal-title-icon"><i data-lucide="shield-check"></i></span>Verificação em 2 etapas</span>
+      <button class="modal-close" data-close="modal-mfa-devedor"><i data-lucide="x"></i></button>
+    </div>
+    <div class="modal-body"></div>
+    <div class="modal-footer" style="justify-content:space-between;">
+      <button class="btn btn-ghost btn-sm" onclick="reenviarMfaDevedor()">Não chegou? Reenviar</button>
+      <button class="btn btn-primary" id="btn-mfa-ok" onclick="verificarMfaDevedor()"><i data-lucide="check"></i> Entrar</button>
+    </div>
   </div>
 </div>
 
@@ -2949,13 +3004,97 @@ async function doLogin(type){
       const docNorm = (d.doc||'').replace(/\D/g,'');
       return docNorm === cpf && d.loginNascimento === nasc;
     });
-    if(dev){
-      currentUser = { tipo: 'devedor', nome: dev.nome, devedorId: dev.id, avatar: initials(dev.nome), role: 'Devedor' };
-      iniciarSessao();
-    } else {
+    if(!dev){
       showToast('Dados não encontrados. Verifique CPF e data de nascimento.','danger');
+      return;
     }
+    // MFA opcional: se ligado, pede código via WhatsApp antes de criar a sessão
+    if(DB.config.mfaDevedor){
+      const tel = (dev.tel||dev.telefone||'').replace(/\D/g,'');
+      if(!tel){
+        showToast('MFA ativo, mas você não tem telefone cadastrado. Entre em contato com a recuperadora.','danger');
+        return;
+      }
+      try{
+        showToast('Enviando código de acesso via WhatsApp…','info');
+        const r = await fetch('/api/mfa?action=challenge', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ devId: dev.id, telefone: tel })
+        });
+        const j = await r.json();
+        if(!r.ok) throw new Error(j.error||'Falha ao enviar código');
+      }catch(e){
+        showToast('Erro ao enviar MFA: '+e.message+'. Peça para a equipe desativar MFA temporariamente.','danger');
+        return;
+      }
+      // Mostra modal pedindo código
+      window._pendingDev = dev;
+      abrirModalMfaDevedor();
+      return;
+    }
+    // Sem MFA: login direto
+    currentUser = { tipo: 'devedor', nome: dev.nome, devedorId: dev.id, avatar: initials(dev.nome), role: 'Devedor' };
+    iniciarSessao();
   }
+}
+
+function abrirModalMfaDevedor(){
+  const dev = window._pendingDev; if(!dev) return;
+  const telMasked = (dev.tel||dev.telefone||'').replace(/(\d{2})(\d{2})(\d{4,5})(\d{4})/, '($1) $2 •••• $4');
+  const modal = document.getElementById('modal-mfa-devedor');
+  const body = modal.querySelector('.modal-body');
+  body.innerHTML = `
+    <div style="text-align:center;">
+      <div style="display:inline-flex;width:56px;height:56px;border-radius:50%;background:var(--gold-50);align-items:center;justify-content:center;margin-bottom:12px;">
+        <i data-lucide="smartphone" style="width:24px;height:24px;color:var(--gold-600);"></i>
+      </div>
+      <h3 style="font-size:17px;font-weight:var(--fw-bold);color:var(--navy);margin-bottom:6px;">Digite o código de acesso</h3>
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:18px;">Enviamos um código de 6 dígitos para ${escHtml(telMasked||'seu WhatsApp')}.</p>
+      <input id="mfa-code" type="text" inputmode="numeric" maxlength="6" placeholder="000000" style="font-size:28px;letter-spacing:8px;text-align:center;width:200px;padding:10px;border:2px solid var(--border);border-radius:var(--r-md);font-weight:var(--fw-bold);" oninput="this.value=this.value.replace(/\\D/g,'').slice(0,6);if(this.value.length===6)document.getElementById('btn-mfa-ok').click()"/>
+      <div style="margin-top:10px;font-size:11px;color:var(--text-3);">Código válido por 5 minutos.</div>
+    </div>
+  `;
+  openModal('modal-mfa-devedor');
+  setTimeout(()=>{ const inp = document.getElementById('mfa-code'); if(inp) inp.focus(); }, 80);
+}
+
+async function verificarMfaDevedor(){
+  const dev = window._pendingDev; if(!dev) return;
+  const codeEl = document.getElementById('mfa-code');
+  const code = (codeEl?.value||'').replace(/\D/g,'');
+  if(code.length!==6){ showToast('Digite os 6 dígitos.','warning'); codeEl?.focus(); return; }
+  const btn = document.getElementById('btn-mfa-ok');
+  setBtnLoading(btn, true);
+  try{
+    const r = await fetch('/api/mfa?action=verify', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ devId: dev.id, code })
+    });
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.error||'Código inválido');
+    currentUser = { tipo: 'devedor', nome: dev.nome, devedorId: dev.id, avatar: initials(dev.nome), role: 'Devedor' };
+    window._pendingDev = null;
+    closeModal('modal-mfa-devedor');
+    iniciarSessao();
+  }catch(e){
+    showToast(e.message,'danger');
+    setBtnLoading(btn, false);
+  }
+}
+
+async function reenviarMfaDevedor(){
+  const dev = window._pendingDev; if(!dev) return;
+  const tel = (dev.tel||dev.telefone||'').replace(/\D/g,'');
+  try{
+    showToast('Reenviando código…','info');
+    const r = await fetch('/api/mfa?action=challenge', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ devId: dev.id, telefone: tel })
+    });
+    const j = await r.json();
+    if(!r.ok) throw new Error(j.error||'Falha');
+    showToast('Novo código enviado!','success');
+  }catch(e){ showToast('Erro: '+e.message,'danger'); }
 }
 
 const LGPD_CURRENT_VERSION = '1.0';
@@ -4754,12 +4893,50 @@ function toggleParcela(devId, acordoId, idx){
   const ac = (dev.acordos||[]).find(a=>a.id===acordoId);
   if(!ac || !ac.parcelas) return;
 
-  ac.parcelas[idx].pago = !ac.parcelas[idx].pago;
+  const p = ac.parcelas[idx];
+  const antes = !!p.pago;
+  p.pago = !p.pago;
 
-  const allPaid = ac.parcelas.every(p=>p.pago);
-  if(allPaid){
-    if(confirm('Todas as parcelas foram pagas! Deseja marcar este devedor como Quitado?')){
+  // Se acabou de ser marcada como paga → gera recibo automático
+  if(!antes && p.pago){
+    p.pagoEm = new Date().toLocaleDateString('pt-BR');
+    p.pagoVia = p.pagoVia || 'manual';
+    p.reciboId = p.reciboId || uid();
+    dev.documentos = dev.documentos || [];
+    // Evita duplicar recibo se já tem
+    if(!dev.documentos.some(d=>d.parcelaId===p.id && d.categoria==='Comprovante')){
+      dev.documentos.push({
+        id: p.reciboId,
+        nome: `Recibo — Parcela ${p.numero} — ${dev.nome}`,
+        categoria: 'Comprovante',
+        data: p.pagoEm,
+        tipo: 'text/html',
+        acordoId: ac.id, parcelaId: p.id,
+        visivelDevedor: true, auto: true
+      });
+    }
+  }
+  // Se desmarcou, remove o comprovante
+  if(antes && !p.pago){
+    dev.documentos = (dev.documentos||[]).filter(d=>d.parcelaId!==p.id || d.categoria!=='Comprovante');
+    delete p.pagoEm; delete p.pagoVia;
+  }
+
+  const allPaid = (dev.acordos||[]).every(a=>(a.parcelas||[]).every(x=>x.pago));
+  if(allPaid && !antes && p.pago){
+    if(confirm('Todas as parcelas foram pagas! Deseja marcar este devedor como Quitado e emitir o termo de quitação?')){
       dev.status = 'Quitado';
+      // Gera termo de quitação automático
+      if(!dev.documentos.some(d=>d.quitacao)){
+        dev.documentos.push({
+          id: uid(),
+          nome: `Termo de Quitação Integral — ${dev.nome}`,
+          categoria: 'Quitação',
+          data: new Date().toLocaleDateString('pt-BR'),
+          tipo: 'text/html',
+          visivelDevedor: true, auto: true, quitacao: true
+        });
+      }
     }
   }
 
@@ -5477,52 +5654,739 @@ function renderPortalDevedor(){
 
   const dev = (DB.devedores||[]).find(d=>d.id===currentUser.devedorId);
   if(!dev){
-    body.innerHTML = '<div class="empty-state"><div class="empty-state-icon">❌</div><h3>Dados não encontrados</h3></div>';
+    body.innerHTML = '<div class="empty-state"><div class="empty-state-icon"><i data-lucide="alert-triangle" style="width:40px;height:40px;"></i></div><h3>Dados não encontrados</h3></div>';
+    renderIcons(body);
     return;
   }
 
   const valor = parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0;
   const acordos = dev.acordos || [];
+  const quitado = dev.status==='Quitado' || dev.status==='Recebido';
+  const dias = diasEmAberto(dev.createdAt || dev.entrada);
+
+  // ─── Parcelas consolidadas (todas, de todos os acordos) ───
+  const todasParcelas = [];
+  acordos.forEach(ac=>{
+    (ac.parcelas||[]).forEach(p=>{
+      todasParcelas.push({...p, acordoId: ac.id, acordoValorTotal: ac.valorTotal });
+    });
+  });
+  todasParcelas.sort((a,b)=>(a.vencimento||'').localeCompare(b.vencimento||''));
+  const hoje = new Date().toISOString().slice(0,10);
+  const isAtrasada = (p)=>!p.pago && p.vencimento && p.vencimento < hoje;
+  const statusParcela = (p)=> p.pago ? 'paga' : (isAtrasada(p) ? 'atrasada' : 'aberta');
+
+  // ─── Documentos do devedor (comprovantes, acordos assinados etc.) ───
+  const meusDocs = (dev.documentos||[]).filter(d=>d.visivelDevedor !== false);
+
+  // ─── Desconto à vista ───
+  const DESCONTO_VISTA = 0.05;
+  const valorVista = +(valor * (1-DESCONTO_VISTA)).toFixed(2);
 
   body.innerHTML = `
-    <div class="portal-welcome">Olá, ${dev.nome}!</div>
-    <div class="grid-2">
+    <div class="portal-welcome">Olá, ${escHtml(dev.nome||'')}!</div>
+
+    <!-- Cards resumo -->
+    <div class="grid-3" style="gap:12px;margin-bottom:16px;">
       <div class="kcard">
         <div class="kcard-label">Valor em aberto</div>
-        <div class="kcard-value" style="color:var(--danger);font-size:22px;">${fmtR(valor)}</div>
+        <div class="kcard-value" style="color:${quitado?'var(--success)':'var(--danger)'};font-size:22px;">${quitado?'R$ 0,00':fmtR(valor)}</div>
       </div>
       <div class="kcard">
         <div class="kcard-label">Situação</div>
         <div style="margin-top:8px;">${statusBadgeHtml(dev.status)}</div>
       </div>
-    </div>
-    ${acordos.length>0?`
-    <div class="panel">
-      <div class="panel-header"><span class="panel-title">Acordos em andamento</span></div>
-      <div class="panel-body">
-        ${acordos.map(ac=>{
-          const parcelas = ac.parcelas||[];
-          const pagas = parcelas.filter(p=>p.pago).length;
-          return `<div style="margin-bottom:12px;">
-            <div class="pbar-wrap">
-              <div class="pbar-label"><span>Acordo — ${fmtR(ac.valorTotal||0)}</span><span>${pagas}/${parcelas.length}</span></div>
-              <div class="pbar"><div class="pbar-fill gold" style="width:${parcelas.length>0?Math.round(pagas/parcelas.length*100):0}%"></div></div>
-            </div>
-            ${parcelas.filter(p=>!p.pago).slice(0,3).map(p=>`
-              <div style="font-size:13px;color:var(--text-2);padding:4px 0;">Parcela ${p.numero} — Venc: ${p.vencimento} — ${fmtR(p.valor||0)}</div>
-            `).join('')}
-          </div>`;
-        }).join('')}
+      <div class="kcard">
+        <div class="kcard-label">${quitado?'Quitado em':'Em aberto há'}</div>
+        <div class="kcard-value" style="font-size:20px;">${quitado?'—':(dias+' dias')}</div>
       </div>
-    </div>`:''}
-    <div class="panel">
-      <div class="panel-header"><span class="panel-title">Entre em contato</span></div>
+    </div>
+
+    ${!quitado ? `
+    <!-- Pagar à vista -->
+    <div class="panel" style="border:2px solid var(--gold);">
+      <div class="panel-header"><span class="panel-title"><i data-lucide="zap" style="width:16px;height:16px;vertical-align:-2px;"></i> Pagar à vista com 5% de desconto</span></div>
       <div class="panel-body">
-        <p style="font-size:13px;color:var(--text-2);">Para regularizar sua situação, entre em contato conosco.</p>
-        ${DB.config.whatsapp&&DB.config.whatsapp.numero?`<a href="https://wa.me/55${DB.config.whatsapp.numero.replace(/\D/g,'')}" target="_blank" class="btn btn-success" style="margin-top:12px;">💬 WhatsApp</a>`:''}
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+          <div>
+            <div style="font-size:13px;color:var(--text-3);text-decoration:line-through;">${fmtR(valor)}</div>
+            <div style="font-size:28px;font-weight:var(--fw-black);color:var(--success);">${fmtR(valorVista)}</div>
+            <div style="font-size:12px;color:var(--text-2);">Você economiza ${fmtR(valor-valorVista)}</div>
+          </div>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-primary" onclick="devPagarVista('pix')"><i data-lucide="qr-code"></i> Pagar com PIX</button>
+            <button class="btn btn-outline" onclick="devPagarVista('boleto')"><i data-lucide="file-text"></i> Gerar boleto</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Propor acordo parcelado -->
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title"><i data-lucide="handshake" style="width:16px;height:16px;vertical-align:-2px;"></i> Não pode pagar à vista?</span></div>
+      <div class="panel-body">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+          <div style="flex:1;min-width:220px;">
+            <div style="font-weight:var(--fw-semibold);font-size:14px;">Simule um parcelamento no boleto</div>
+            <div style="font-size:12px;color:var(--text-3);margin-top:3px;">Até 12 parcelas · a combinar de acordo com sua possibilidade</div>
+          </div>
+          <button class="btn btn-primary" onclick="devAbrirSimuladorAcordo()"><i data-lucide="calculator"></i> Simular agora</button>
+        </div>
+      </div>
+    </div>
+    ` : `
+    <div class="panel" style="border:2px solid var(--success);background:var(--success-soft);">
+      <div class="panel-body" style="display:flex;align-items:center;gap:12px;">
+        <i data-lucide="check-circle-2" style="width:32px;height:32px;color:var(--success);"></i>
+        <div>
+          <div style="font-weight:var(--fw-bold);color:var(--success-strong);">Dívida quitada</div>
+          <div style="font-size:12px;color:var(--text-2);">Obrigado pela regularização. Veja abaixo seu termo de quitação.</div>
+        </div>
+      </div>
+    </div>
+    `}
+
+    <!-- Minhas parcelas (histórico completo) -->
+    ${todasParcelas.length>0 ? `
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title"><i data-lucide="list" style="width:16px;height:16px;vertical-align:-2px;"></i> Minhas parcelas</span></div>
+      <div class="panel-body" style="padding:0;">
+        <table class="data-table" style="margin:0;">
+          <thead><tr>
+            <th>#</th><th>Vencimento</th><th class="cell-num">Valor</th><th>Status</th><th class="cell-actions">Ações</th>
+          </tr></thead>
+          <tbody>
+          ${todasParcelas.map(p=>{
+            const st = statusParcela(p);
+            const badge = st==='paga' ? '<span class="badge badge-green">Paga</span>'
+                      : st==='atrasada' ? '<span class="badge badge-red">Atrasada</span>'
+                      : '<span class="badge badge-yellow">Em aberto</span>';
+            const recibo = p.pago && p.reciboId ? `<button class="btn-icon" title="Baixar recibo" onclick="devBaixarRecibo('${escHtml(p.acordoId)}','${escHtml(p.id)}')"><i data-lucide="receipt"></i></button>` : '';
+            const pagar = !p.pago ? `<button class="btn-icon" title="Pagar" onclick="devPagarParcela('${escHtml(p.acordoId)}','${escHtml(p.id)}')"><i data-lucide="credit-card"></i></button>` : '';
+            return `<tr>
+              <td>${p.numero||''}</td>
+              <td>${(p.vencimento||'').split('-').reverse().join('/')}</td>
+              <td class="cell-num">${fmtR(p.valor||0)}</td>
+              <td>${badge}</td>
+              <td class="cell-actions">${pagar}${recibo}</td>
+            </tr>`;
+          }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>` : ''}
+
+    <!-- Meus documentos -->
+    ${meusDocs.length>0 ? `
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title"><i data-lucide="folder" style="width:16px;height:16px;vertical-align:-2px;"></i> Meus documentos</span></div>
+      <div class="panel-body">
+        ${meusDocs.map(doc=>`
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);">
+            <div>
+              <div style="font-weight:var(--fw-semibold);font-size:13px;">${escHtml(doc.nome||doc.categoria||'Documento')}</div>
+              <div style="font-size:11px;color:var(--text-3);">${escHtml(doc.categoria||'—')} · ${escHtml(doc.data||'—')}</div>
+            </div>
+            ${doc.auto
+              ? `<button class="btn btn-outline btn-sm" onclick="devAbrirDocAuto('${escHtml(doc.id)}')"><i data-lucide="eye"></i> Visualizar</button>`
+              : (doc.base64 ? `<a href="${doc.base64}" download="${escHtml(doc.nome||'documento')}" class="btn btn-outline btn-sm"><i data-lucide="download"></i> Baixar</a>` : '')
+            }
+          </div>`).join('')}
+      </div>
+    </div>` : ''}
+
+    <!-- Fale conosco -->
+    <div class="panel">
+      <div class="panel-header"><span class="panel-title"><i data-lucide="message-circle" style="width:16px;height:16px;vertical-align:-2px;"></i> Fale conosco</span></div>
+      <div class="panel-body">
+        <p style="font-size:13px;color:var(--text-2);margin-bottom:12px;">Dúvidas sobre sua negociação? Fale com nosso time.</p>
+        ${DB.config.whatsapp&&DB.config.whatsapp.numero?`<a href="https://wa.me/55${DB.config.whatsapp.numero.replace(/\D/g,'')}" target="_blank" class="btn btn-success"><i data-lucide="message-circle"></i> WhatsApp</a>`:''}
       </div>
     </div>
   `;
+  renderIcons(body);
+}
+
+// ─── DEVEDOR: Pagar à vista (5% desconto) ─────────────────────
+async function devPagarVista(metodo){
+  const dev = (DB.devedores||[]).find(d=>d.id===currentUser.devedorId);
+  if(!dev){ showToast('Sessão inválida. Recarregue a página.','danger'); return; }
+  const valor = parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0;
+  if(valor<=0){ showToast('Nada a pagar.','info'); return; }
+  const valorVista = +(valor * 0.95).toFixed(2);
+  try{
+    showToast('Gerando cobrança…','info');
+    // Garante customer Asaas do devedor
+    const customerId = await asaasEnsureCustomer(dev);
+    const billingType = metodo==='pix' ? 'PIX' : 'BOLETO';
+    const due = new Date(); due.setDate(due.getDate()+3);
+    const dueDate = due.toISOString().slice(0,10);
+    const charge = await AsaasAPI.createCharge({
+      customer: customerId,
+      billingType,
+      value: valorVista,
+      dueDate,
+      description: `Quitação à vista (5% desc) — ${dev.nome}`,
+      externalReference: `DEV:${dev.id}:VISTA`
+    });
+    // Guarda charge no devedor (cache local)
+    dev.asaasCharges = dev.asaasCharges || [];
+    dev.asaasCharges.push({
+      id: charge.id,
+      value: valorVista,
+      status: charge.status || 'PENDING',
+      billingType,
+      dueDate,
+      type: 'vista',
+      createdAt: new Date().toISOString()
+    });
+    save();
+    // Abre modal mostrando QR PIX ou linha digitável
+    devAbrirModalPagamento(charge.id, metodo);
+  }catch(e){
+    showToast('Erro ao gerar cobrança: '+e.message,'danger');
+  }
+}
+
+async function devPagarParcela(acordoId, parcelaId){
+  const dev = (DB.devedores||[]).find(d=>d.id===currentUser.devedorId);
+  if(!dev) return;
+  const ac = (dev.acordos||[]).find(a=>a.id===acordoId);
+  if(!ac) return;
+  const p = (ac.parcelas||[]).find(x=>x.id===parcelaId);
+  if(!p || p.pago) return;
+  // Se parcela já tem charge associada, só reabre o modal
+  if(p.asaasChargeId){ devAbrirModalPagamento(p.asaasChargeId, 'pix'); return; }
+  try{
+    showToast('Gerando cobrança…','info');
+    const customerId = await asaasEnsureCustomer(dev);
+    const charge = await AsaasAPI.createCharge({
+      customer: customerId,
+      billingType: 'PIX',
+      value: +(+p.valor||0).toFixed(2),
+      dueDate: p.vencimento || new Date().toISOString().slice(0,10),
+      description: `Parcela ${p.numero||''} do acordo — ${dev.nome}`,
+      externalReference: `DEV:${dev.id}:PARC:${p.id}`
+    });
+    p.asaasChargeId = charge.id;
+    save();
+    devAbrirModalPagamento(charge.id, 'pix');
+  }catch(e){
+    showToast('Erro ao gerar cobrança: '+e.message,'danger');
+  }
+}
+
+async function devAbrirModalPagamento(chargeId, metodo){
+  try{
+    const charge = await AsaasAPI.getCharge(chargeId);
+    let content = '';
+    if((metodo==='pix') || charge.billingType==='PIX'){
+      const pix = await AsaasAPI.getPixQrCode(chargeId);
+      content = `
+        <div style="text-align:center;">
+          <p style="font-size:13px;color:var(--text-2);margin-bottom:12px;">Aponte a câmera do seu aplicativo bancário para o QR code abaixo:</p>
+          <img src="data:image/png;base64,${pix.encodedImage}" style="width:240px;height:240px;border:1px solid var(--border);border-radius:var(--r-md);padding:8px;background:#fff;"/>
+          <div style="margin-top:14px;font-size:13px;color:var(--text-3);">ou use o PIX copia-cola:</div>
+          <div style="background:var(--surface-2);padding:10px 12px;margin-top:6px;border-radius:var(--r-sm);font-family:monospace;font-size:11px;word-break:break-all;text-align:left;border:1px solid var(--border);">${escHtml(pix.payload||'')}</div>
+          <button class="btn btn-outline btn-sm" style="margin-top:10px;" onclick="navigator.clipboard.writeText('${escHtml(pix.payload||'')}').then(()=>showToast('Copiado!','success'))"><i data-lucide="copy"></i> Copiar código</button>
+          <div style="margin-top:14px;font-weight:var(--fw-bold);font-size:18px;color:var(--navy);">${fmtR(charge.value)}</div>
+        </div>`;
+    } else {
+      const id = await AsaasAPI.getIdentificationField(chargeId).catch(()=>null);
+      content = `
+        <div style="text-align:center;">
+          <p style="font-size:13px;color:var(--text-2);margin-bottom:12px;">Pague o boleto no seu banco até <strong>${(charge.dueDate||'').split('-').reverse().join('/')}</strong>:</p>
+          ${id?`<div style="background:var(--surface-2);padding:12px;border-radius:var(--r-sm);font-family:monospace;font-size:13px;letter-spacing:.5px;border:1px solid var(--border);">${escHtml(id.identificationField||'')}</div>
+            <button class="btn btn-outline btn-sm" style="margin-top:10px;" onclick="navigator.clipboard.writeText('${escHtml(id.identificationField||'')}').then(()=>showToast('Copiado!','success'))"><i data-lucide="copy"></i> Copiar linha digitável</button>`:''}
+          ${charge.bankSlipUrl?`<div style="margin-top:12px;"><a href="${charge.bankSlipUrl}" target="_blank" class="btn btn-primary btn-sm"><i data-lucide="external-link"></i> Abrir boleto em PDF</a></div>`:''}
+          <div style="margin-top:14px;font-weight:var(--fw-bold);font-size:18px;color:var(--navy);">${fmtR(charge.value)}</div>
+        </div>`;
+    }
+    const modal = document.getElementById('modal-dev-pag');
+    const titleEl = modal.querySelector('.modal-title');
+    const bodyEl = modal.querySelector('.modal-body');
+    if(titleEl) titleEl.innerHTML = `<span class="modal-title-icon"><i data-lucide="${metodo==='pix'?'qr-code':'file-text'}"></i></span>Pagamento via ${metodo==='pix'?'PIX':'Boleto'}`;
+    if(bodyEl) bodyEl.innerHTML = content;
+    openModal('modal-dev-pag');
+  }catch(e){
+    showToast('Erro ao carregar cobrança: '+e.message,'danger');
+  }
+}
+
+// Placeholder — Parte B implementa simulador completo
+function devAbrirSimuladorAcordo(){
+  const dev = (DB.devedores||[]).find(d=>d.id===currentUser.devedorId);
+  if(!dev) return;
+  const valor = parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0;
+  if(valor<=0){ showToast('Nada a parcelar.','info'); return; }
+  // Estado inicial: 6 parcelas e 1º venc em 15 dias
+  window._devSim = { valor, n:6, primVenc:new Date(Date.now()+15*864e5).toISOString().slice(0,10) };
+  devRenderSimulador();
+  openModal('modal-dev-simulador');
+}
+
+// Calcula tabela Price com 2,99% a.m. e tarifa R$ 6/parcela
+const DEV_JUROS_MES    = 0.0299;
+const DEV_TARIFA_PARC  = 6;
+const DEV_PARC_MIN_VAL = 200;
+const DEV_PARC_MAX_QTD = 12;
+function devCalcPrice(valor, n){
+  const i = DEV_JUROS_MES;
+  const coef = (Math.pow(1+i, n) * i) / (Math.pow(1+i, n) - 1);
+  const pmt = valor * coef + DEV_TARIFA_PARC;
+  return +pmt.toFixed(2);
+}
+function devMaxParcelasPraValor(valor){
+  // maior n <=12 em que a parcela ainda é >= DEV_PARC_MIN_VAL
+  let maxN = 1;
+  for(let n=2; n<=DEV_PARC_MAX_QTD; n++){
+    if(devCalcPrice(valor, n) >= DEV_PARC_MIN_VAL) maxN = n;
+  }
+  return maxN;
+}
+
+function devRenderSimulador(){
+  const sim = window._devSim; if(!sim) return;
+  const modal = document.getElementById('modal-dev-simulador');
+  const body = modal.querySelector('.modal-body');
+  const maxN = devMaxParcelasPraValor(sim.valor);
+  if(sim.n > maxN) sim.n = maxN;
+  const parcValor = devCalcPrice(sim.valor, sim.n);
+  const totalPago = +(parcValor * sim.n).toFixed(2);
+  const encargos  = +(totalPago - sim.valor).toFixed(2);
+  // Gera tabela de parcelas
+  const parcelas = [];
+  const d0 = new Date(sim.primVenc);
+  for(let k=0;k<sim.n;k++){
+    const dt = new Date(d0); dt.setMonth(dt.getMonth()+k);
+    parcelas.push({ numero: k+1, valor: parcValor, vencimento: dt.toISOString().slice(0,10) });
+  }
+  body.innerHTML = `
+    <p style="font-size:13px;color:var(--text-2);margin-bottom:12px;">Monte seu parcelamento. Juros de <strong>2,99% ao mês</strong> + R$ 6 por parcela (tarifa de boleto). Parcela mínima R$ ${DEV_PARC_MIN_VAL},00.</p>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+      <div>
+        <label style="font-size:11px;color:var(--text-3);font-weight:var(--fw-bold);text-transform:uppercase;letter-spacing:.5px;">Número de parcelas</label>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:6px;">
+          <input type="range" min="2" max="${maxN}" step="1" value="${sim.n}" oninput="window._devSim.n=+this.value;devRenderSimulador()" style="flex:1;accent-color:var(--navy);"/>
+          <div style="font-size:22px;font-weight:var(--fw-bold);color:var(--navy);min-width:52px;text-align:right;">${sim.n}×</div>
+        </div>
+        <div style="font-size:11px;color:var(--text-3);">Máx nesse valor: ${maxN}×</div>
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--text-3);font-weight:var(--fw-bold);text-transform:uppercase;letter-spacing:.5px;">Primeiro vencimento</label>
+        <input type="date" value="${sim.primVenc}" onchange="window._devSim.primVenc=this.value;devRenderSimulador()" min="${new Date().toISOString().slice(0,10)}" style="width:100%;margin-top:6px;padding:8px 10px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-size:13px;"/>
+      </div>
+    </div>
+
+    <div class="kcard" style="background:var(--navy);color:#fff;text-align:center;padding:18px;margin-bottom:14px;">
+      <div style="font-size:12px;opacity:.8;">Valor de cada parcela</div>
+      <div style="font-size:30px;font-weight:var(--fw-black);color:var(--gold);margin-top:4px;">${fmtR(parcValor)}</div>
+      <div style="font-size:12px;opacity:.8;margin-top:4px;">em ${sim.n}× mensais</div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px;">
+      <div class="kcard" style="padding:10px;">
+        <div style="font-size:10px;color:var(--text-3);">DÍVIDA</div>
+        <div style="font-weight:var(--fw-bold);font-size:14px;">${fmtR(sim.valor)}</div>
+      </div>
+      <div class="kcard" style="padding:10px;">
+        <div style="font-size:10px;color:var(--text-3);">TOTAL A PAGAR</div>
+        <div style="font-weight:var(--fw-bold);font-size:14px;">${fmtR(totalPago)}</div>
+      </div>
+      <div class="kcard" style="padding:10px;">
+        <div style="font-size:10px;color:var(--text-3);">JUROS + TARIFAS</div>
+        <div style="font-weight:var(--fw-bold);font-size:14px;color:var(--danger);">${fmtR(encargos)}</div>
+      </div>
+    </div>
+
+    <details style="border:1px solid var(--border);border-radius:var(--r-sm);padding:8px 12px;margin-bottom:12px;">
+      <summary style="cursor:pointer;font-size:12px;color:var(--text-2);">Ver cronograma completo de parcelas</summary>
+      <table class="data-table" style="margin-top:10px;">
+        <thead><tr><th>#</th><th>Vencimento</th><th class="cell-num">Valor</th></tr></thead>
+        <tbody>${parcelas.map(p=>`<tr><td>${p.numero}</td><td>${p.vencimento.split('-').reverse().join('/')}</td><td class="cell-num">${fmtR(p.valor)}</td></tr>`).join('')}</tbody>
+      </table>
+    </details>
+
+    <div style="background:var(--info-soft);color:var(--info-strong);padding:10px 12px;border-radius:var(--r-sm);font-size:12px;">
+      <i data-lucide="info" style="width:14px;height:14px;vertical-align:-2px;"></i>
+      Ao aceitar, você receberá um <strong>termo de acordo para assinar digitalmente</strong>. Após a assinatura, os boletos das parcelas serão enviados para seu e-mail/WhatsApp.
+    </div>
+  `;
+  renderIcons(body);
+}
+
+async function devAceitarAcordo(){
+  const sim = window._devSim;
+  const dev = (DB.devedores||[]).find(d=>d.id===currentUser.devedorId);
+  if(!sim || !dev){ return; }
+  const btnAceitar = document.getElementById('btn-dev-aceitar-acordo');
+  setBtnLoading(btnAceitar, true);
+  try{
+    // 1. Criar registro do acordo (status aguardando assinatura)
+    const parcValor = devCalcPrice(sim.valor, sim.n);
+    const d0 = new Date(sim.primVenc);
+    const parcelas = [];
+    for(let k=0;k<sim.n;k++){
+      const dt = new Date(d0); dt.setMonth(dt.getMonth()+k);
+      parcelas.push({
+        id: uid(), numero: k+1, valor: parcValor,
+        vencimento: dt.toISOString().slice(0,10), pago: false, tipo: 'normal'
+      });
+    }
+    const acordoId = uid();
+    const acordo = {
+      id: acordoId,
+      valorDivida: sim.valor,
+      valorTotal: +(parcValor * sim.n).toFixed(2),
+      numParc: sim.n,
+      jurosMes: DEV_JUROS_MES,
+      tarifaParc: DEV_TARIFA_PARC,
+      origem: 'portal-devedor',
+      fase: dev.fase || 'extrajudicial',
+      status: 'aguardando_assinatura',
+      parcelas,
+      createdAt: new Date().toISOString()
+    };
+    dev.acordos = dev.acordos || [];
+    dev.acordos.push(acordo);
+    save();
+
+    // 2. Gerar documento HTML do acordo
+    const htmlDoc = devBuildAcordoDoc(dev, acordo);
+
+    // 3. Enviar pra ZapSign
+    showToast('Gerando documento para assinatura…','info');
+    const htmlBase64 = btoa(unescape(encodeURIComponent(htmlDoc)));
+    const payload = {
+      name: `Acordo ${acordo.fase==='judicial'?'Judicial':'Extrajudicial'} — ${dev.nome} — ${new Date().toLocaleDateString('pt-BR')}`,
+      signers: [{
+        name: dev.nome,
+        email: dev.email||'',
+        phone_country: '55',
+        phone_number: (dev.tel||dev.telefone||'').replace(/\D/g,''),
+        send_automatic_email: !!dev.email,
+        send_automatic_whatsapp: !!(dev.tel||dev.telefone),
+        auth_mode: 'assinaturaTela'
+      }],
+      base64_pdf: htmlBase64,
+      lang: 'pt-br'
+    };
+    const result = await ZapSignAPI.createDoc(payload);
+    acordo.zapsignToken = result.token;
+    acordo.signLink = result.signers?.[0]?.sign_url || `https://app.zapsign.com.br/verificar/${result.signers?.[0]?.token}`;
+    save();
+
+    // 4. Fechar simulador, mostrar tela de assinatura
+    closeModal('modal-dev-simulador');
+    devMostrarTelaAssinatura(acordo);
+    showToast('Acordo gerado! Assine digitalmente.','success');
+  }catch(e){
+    showToast('Erro ao aceitar acordo: '+e.message,'danger');
+  }finally{
+    setBtnLoading(btnAceitar, false);
+  }
+}
+
+function devMostrarTelaAssinatura(acordo){
+  const modal = document.getElementById('modal-dev-assinatura');
+  const body = modal.querySelector('.modal-body');
+  body.innerHTML = `
+    <div style="text-align:center;padding:16px;">
+      <div style="display:inline-flex;width:64px;height:64px;border-radius:50%;background:var(--gold-50);align-items:center;justify-content:center;margin-bottom:12px;">
+        <i data-lucide="pen-tool" style="width:28px;height:28px;color:var(--gold-600);"></i>
+      </div>
+      <h3 style="font-size:18px;font-weight:var(--fw-bold);color:var(--navy);margin-bottom:8px;">Falta só a sua assinatura</h3>
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:20px;line-height:1.6;">Seu acordo foi gerado e está aguardando sua <strong>assinatura digital</strong> na plataforma ZapSign. Clique no botão abaixo para assinar. Depois de assinar, os boletos chegam no seu WhatsApp/e-mail.</p>
+      <a href="${acordo.signLink}" target="_blank" class="btn btn-primary" style="padding:14px 28px;font-size:14px;"><i data-lucide="pen-tool"></i> Assinar acordo agora</a>
+      <div style="margin-top:14px;font-size:11px;color:var(--text-3);">Acordo ${acordo.numParc}× de ${fmtR(acordo.parcelas[0].valor)} · total ${fmtR(acordo.valorTotal)}</div>
+      <div style="margin-top:12px;">
+        <button class="btn btn-outline btn-sm" onclick="devChecarAssinatura('${acordo.id}')"><i data-lucide="refresh-cw"></i> Já assinei — conferir agora</button>
+      </div>
+    </div>
+  `;
+  openModal('modal-dev-assinatura');
+}
+
+async function devChecarAssinatura(acordoId){
+  const dev = (DB.devedores||[]).find(d=>d.id===currentUser.devedorId);
+  if(!dev) return;
+  const ac = (dev.acordos||[]).find(a=>a.id===acordoId);
+  if(!ac || !ac.zapsignToken){ return; }
+  try{
+    showToast('Consultando assinatura…','info');
+    const doc = await ZapSignAPI.getDoc(ac.zapsignToken);
+    const signedAll = (doc.signers||[]).every(s=>s.status==='signed');
+    if(!signedAll){
+      showToast('Assinatura ainda não detectada. Tente novamente em alguns instantes.','warning');
+      return;
+    }
+    // Acordo assinado! Cria charges Asaas das parcelas e muda status
+    ac.status = 'ativo';
+    ac.assinadoEm = new Date().toISOString();
+    dev.status = 'Acordo';
+    save();
+    try{
+      const customerId = await asaasEnsureCustomer(dev);
+      for(const p of ac.parcelas){
+        const charge = await AsaasAPI.createCharge({
+          customer: customerId,
+          billingType: 'BOLETO',
+          value: p.valor,
+          dueDate: p.vencimento,
+          description: `Parcela ${p.numero}/${ac.numParc} do acordo — ${dev.nome}`,
+          externalReference: `DEV:${dev.id}:ACORDO:${ac.id}:PARC:${p.id}`
+        });
+        p.asaasChargeId = charge.id;
+      }
+      save();
+    }catch(e){
+      console.warn('Não foi possível gerar cobranças do Asaas agora:', e.message);
+    }
+    closeModal('modal-dev-assinatura');
+    showToast('Acordo assinado! Boletos foram enviados.','success');
+    renderPortalDevedor();
+  }catch(e){
+    showToast('Erro ao consultar assinatura: '+e.message,'danger');
+  }
+}
+
+function devBaixarRecibo(acordoId, parcelaId){
+  const dev = (DB.devedores||[]).find(d=>d.id===currentUser.devedorId);
+  if(!dev) return;
+  const ac = (dev.acordos||[]).find(a=>a.id===acordoId);
+  if(!ac) return;
+  const p = (ac.parcelas||[]).find(x=>x.id===parcelaId);
+  if(!p) return;
+  const html = devBuildReciboHtml(dev, ac, p);
+  const w = window.open('', '_blank');
+  if(!w){ showToast('Permita popups para abrir o recibo.','warning'); return; }
+  w.document.write(html);
+  w.document.close();
+  setTimeout(()=>w.print(), 500);
+}
+
+// ─── Geradores de documento ──────────────────────────────────
+function devBuildAcordoDoc(dev, acordo){
+  const credor = DB.config.empresa || 'COBRASQ Recuperadora';
+  const cnpjCred = DB.config.cnpj || '';
+  const ender = DB.config.endereco || '';
+  const cliente = (DB.clientes||[]).find(c=>c.id===dev.clienteId) || {};
+  const dataHoje = new Date().toLocaleDateString('pt-BR',{day:'numeric',month:'long',year:'numeric'});
+  const tipoNome = acordo.fase === 'judicial' ? 'Acordo Judicial de Pagamento' : 'Acordo Extrajudicial de Confissão e Parcelamento de Dívida';
+  const parcelas = acordo.parcelas||[];
+  const totalPagar = parcelas.reduce((s,p)=>s+(+p.valor||0),0);
+  const tabelaParcelas = `
+    <table style="width:100%;border-collapse:collapse;margin:12px 0;font-size:10.5pt;">
+      <thead><tr style="background:#0B2D5C;color:#fff;">
+        <th style="padding:6px 10px;text-align:left;">Parcela</th>
+        <th style="padding:6px 10px;text-align:left;">Vencimento</th>
+        <th style="padding:6px 10px;text-align:right;">Valor</th>
+      </tr></thead>
+      <tbody>${parcelas.map(p=>`<tr>
+        <td style="padding:5px 10px;border-bottom:1px solid #eee;">${p.numero}</td>
+        <td style="padding:5px 10px;border-bottom:1px solid #eee;">${(p.vencimento||'').split('-').reverse().join('/')}</td>
+        <td style="padding:5px 10px;border-bottom:1px solid #eee;text-align:right;">${fmtR(p.valor||0)}</td>
+      </tr>`).join('')}
+      <tr style="font-weight:bold;"><td colspan="2" style="padding:6px 10px;border-top:2px solid #0B2D5C;">Total</td><td style="padding:6px 10px;border-top:2px solid #0B2D5C;text-align:right;">${fmtR(totalPagar)}</td></tr>
+      </tbody>
+    </table>`;
+  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>${tipoNome}</title>
+<style>
+  body{font-family:Georgia,'Times New Roman',serif;max-width:780px;margin:30px auto;padding:30px;color:#222;line-height:1.6;}
+  h1{font-size:16pt;color:#0B2D5C;text-align:center;margin-bottom:6px;text-transform:uppercase;border-bottom:3px double #E8A53C;padding-bottom:8px;}
+  h2{font-size:12pt;color:#0B2D5C;margin-top:20px;text-transform:uppercase;border-bottom:1.5px solid #E8A53C;padding-bottom:4px;}
+  .ficha{display:grid;grid-template-columns:1fr 1fr;gap:10px 20px;background:#f5f7fb;padding:14px 18px;border-radius:6px;margin:14px 0;}
+  .ficha .rot{font-size:9pt;color:#666;text-transform:uppercase;}
+  .ficha .val{font-size:11pt;font-weight:bold;color:#0B2D5C;}
+  p{margin-bottom:9px;text-align:justify;font-size:10.5pt;}
+  .sig{margin-top:50px;display:grid;grid-template-columns:1fr 1fr;gap:30px;}
+  .sig div{border-top:1px solid #555;padding-top:5px;font-size:10pt;text-align:center;}
+</style></head><body>
+<h1>${tipoNome}</h1>
+<p style="text-align:center;font-size:10pt;color:#666;">${escHtml(dataHoje)}</p>
+
+<div class="ficha">
+  <div><div class="rot">Credor</div><div class="val">${escHtml(credor)}</div></div>
+  <div><div class="rot">CNPJ Credor</div><div class="val">${escHtml(cnpjCred||'—')}</div></div>
+  <div><div class="rot">Devedor</div><div class="val">${escHtml(dev.nome||'')}</div></div>
+  <div><div class="rot">CPF/CNPJ Devedor</div><div class="val">${escHtml(dev.doc||'—')}</div></div>
+  ${cliente.nome?`<div><div class="rot">Cedente / Cliente</div><div class="val">${escHtml(cliente.nome)}</div></div>`:''}
+  <div><div class="rot">Valor da dívida</div><div class="val">${fmtR(acordo.valorDivida||0)}</div></div>
+  <div><div class="rot">Total a pagar (com encargos)</div><div class="val">${fmtR(acordo.valorTotal||0)}</div></div>
+  <div><div class="rot">Parcelas</div><div class="val">${acordo.numParc}×</div></div>
+</div>
+
+<h2>1. Reconhecimento da Dívida</h2>
+<p>O(a) DEVEDOR(A) acima identificado(a) reconhece, neste ato, a existência de dívida líquida, certa e exigível em favor do CREDOR, no valor original de <strong>${fmtR(acordo.valorDivida||0)}</strong>, decorrente de obrigação pecuniária já vencida.</p>
+
+<h2>2. Forma de Pagamento</h2>
+<p>As partes acordam que o DEVEDOR efetuará o pagamento da dívida em <strong>${acordo.numParc}</strong> parcelas mensais e consecutivas, calculadas pelo sistema Price, com taxa de juros de <strong>2,99% ao mês</strong> mais tarifa de R$ 6,00 por boleto emitido, totalizando <strong>${fmtR(acordo.valorTotal||0)}</strong>, conforme cronograma abaixo:</p>
+${tabelaParcelas}
+
+<h2>3. Vencimento e Inadimplência</h2>
+<p>O atraso no pagamento de qualquer parcela implicará multa de 2% sobre o valor devido, juros de mora de 1% ao mês e correção monetária pelo IPCA/IBGE, sem prejuízo das demais sanções legais. O inadimplemento por mais de 30 dias acarreta o vencimento antecipado das demais parcelas (art. 333 do Código Civil).</p>
+
+${acordo.fase==='judicial'?`
+<h2>4. Condição Judicial</h2>
+<p>Por este acordo, as partes requerem a <strong>suspensão da execução</strong> e futura extinção do processo em curso, nos termos do art. 924, II, do CPC, uma vez integralmente cumprido o presente acordo.</p>
+<h2>5. Foro</h2>
+<p>Fica eleito o foro da comarca onde tramita a execução como competente para dirimir quaisquer controvérsias oriundas deste acordo.</p>
+`:`
+<h2>4. Caráter Extrajudicial</h2>
+<p>O presente acordo é firmado na esfera extrajudicial, constituindo título executivo extrajudicial, nos termos do art. 784, III, do CPC.</p>
+<h2>5. Foro</h2>
+<p>Fica eleito o foro da comarca do domicílio do CREDOR como competente para dirimir quaisquer controvérsias oriundas deste acordo.</p>
+`}
+
+<h2>${acordo.fase==='judicial'?'6':'6'}. Assinatura Digital</h2>
+<p>As partes reconhecem a validade desta assinatura eletrônica, nos termos da MP 2.200-2/2001 e da Lei 14.063/2020, com autenticação provida pela plataforma ZapSign.</p>
+
+<div class="sig">
+  <div>CREDOR<br/><small>${escHtml(credor)}</small></div>
+  <div>DEVEDOR<br/><small>${escHtml(dev.nome||'')}</small></div>
+</div>
+</body></html>`;
+}
+
+function devBuildReciboHtml(dev, ac, p){
+  const credor = DB.config.empresa || 'COBRASQ Recuperadora';
+  const cnpjCred = DB.config.cnpj || '';
+  const dataHoje = new Date().toLocaleDateString('pt-BR',{day:'numeric',month:'long',year:'numeric'});
+  const valorExt = _numPorExtenso(p.valor); // definida abaixo
+  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Recibo de Pagamento</title>
+<style>
+  body{font-family:Georgia,serif;max-width:720px;margin:40px auto;padding:30px;color:#222;}
+  h1{text-align:center;color:#0B2D5C;text-transform:uppercase;border-bottom:3px double #E8A53C;padding-bottom:10px;}
+  .num{font-size:26pt;font-weight:bold;color:#0B2D5C;margin:14px 0;}
+  .body{font-size:12pt;line-height:1.8;text-align:justify;}
+  .sig{margin-top:60px;text-align:center;border-top:1px solid #555;padding-top:6px;width:60%;margin-left:auto;margin-right:auto;}
+  .meta{font-size:10pt;color:#666;text-align:center;margin-bottom:20px;}
+  .box{background:#fffbe7;border-left:4px solid #E8A53C;padding:10px 14px;margin:14px 0;font-size:10.5pt;}
+</style></head><body>
+<h1>Recibo de Pagamento</h1>
+<div class="meta">Nº ${ac.id.slice(0,8)}-${p.numero} · Emitido em ${escHtml(dataHoje)}</div>
+
+<div class="num">Valor: ${fmtR(p.valor||0)}</div>
+
+<div class="body">
+  <p>Recebi(emos) de <strong>${escHtml(dev.nome||'')}</strong>${dev.doc?`, CPF/CNPJ ${escHtml(dev.doc)}`:''}, a importância de <strong>${fmtR(p.valor||0)}</strong> (${valorExt}), referente ao pagamento da parcela <strong>${p.numero}</strong> de <strong>${ac.numParc}</strong> do acordo de parcelamento nº <strong>${ac.id.slice(0,8).toUpperCase()}</strong>.</p>
+  <p>Para maior clareza, firmo o presente recibo dando plena e irrevogável quitação quanto à parcela em referência.</p>
+</div>
+
+<div class="box">
+  Vencimento original: <strong>${(p.vencimento||'').split('-').reverse().join('/')}</strong><br>
+  Data de pagamento: <strong>${escHtml(p.pagoEm||dataHoje)}</strong><br>
+  Meio: <strong>${escHtml(p.pagoVia||'—')}</strong>
+</div>
+
+<div class="sig">
+  ${escHtml(credor)}${cnpjCred?`<br/><small>CNPJ ${escHtml(cnpjCred)}</small>`:''}
+</div>
+</body></html>`;
+}
+
+function devBuildQuitacaoHtml(dev){
+  const credor = DB.config.empresa || 'COBRASQ Recuperadora';
+  const cnpjCred = DB.config.cnpj || '';
+  const dataHoje = new Date().toLocaleDateString('pt-BR',{day:'numeric',month:'long',year:'numeric'});
+  const totalPago = (dev.acordos||[]).reduce((s,a)=>s+(a.parcelas||[]).filter(p=>p.pago).reduce((ss,p)=>ss+(+p.valor||0),0),0);
+  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Termo de Quitação</title>
+<style>
+  body{font-family:Georgia,serif;max-width:720px;margin:40px auto;padding:30px;color:#222;line-height:1.7;}
+  h1{text-align:center;color:#1a6d3f;text-transform:uppercase;border-bottom:3px double #E8A53C;padding-bottom:10px;}
+  .body{font-size:12pt;text-align:justify;margin:20px 0;}
+  .sig{margin-top:60px;text-align:center;border-top:1px solid #555;padding-top:6px;width:60%;margin-left:auto;margin-right:auto;}
+  .meta{font-size:10pt;color:#666;text-align:center;margin-bottom:18px;}
+  .stamp{border:3px solid #1a6d3f;color:#1a6d3f;padding:14px 20px;font-weight:bold;text-transform:uppercase;letter-spacing:1px;text-align:center;font-size:14pt;margin:30px 0;border-radius:6px;}
+</style></head><body>
+<h1>Termo de Quitação Integral</h1>
+<div class="meta">Emitido em ${escHtml(dataHoje)}</div>
+
+<div class="stamp">Dívida integralmente quitada</div>
+
+<div class="body">
+  <p>Pelo presente instrumento, <strong>${escHtml(credor)}</strong>${cnpjCred?`, inscrita no CNPJ sob nº ${escHtml(cnpjCred)}`:''}, declara para os devidos fins que <strong>${escHtml(dev.nome||'')}</strong>${dev.doc?`, CPF/CNPJ ${escHtml(dev.doc)}`:''}, cumpriu integralmente todas as obrigações financeiras pactuadas, totalizando o valor de <strong>${fmtR(totalPago)}</strong>.</p>
+  <p>Diante disso, concede-se <strong>plena, geral, rasa e irrevogável quitação</strong>, nada mais tendo a reclamar a qualquer título, seja judicial ou extrajudicialmente, em relação ao débito ora liquidado.</p>
+  <p>Para que surta seus efeitos legais, firma-se o presente termo.</p>
+</div>
+
+<div class="sig">
+  ${escHtml(credor)}${cnpjCred?`<br/><small>CNPJ ${escHtml(cnpjCred)}</small>`:''}
+</div>
+</body></html>`;
+}
+
+// Número em extenso (simplificado — só para recibo)
+function _numPorExtenso(num){
+  const n = Math.floor(+num||0);
+  const cent = Math.round(((+num||0) - n) * 100);
+  const formatter = new Intl.NumberFormat('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}).format(num||0);
+  return `R$ ${formatter}`;
+}
+
+// Abre documento auto (recibo/quitação) — regera HTML on-the-fly
+function devAbrirDocAuto(docId){
+  const dev = (DB.devedores||[]).find(d=>d.id===currentUser?.devedorId);
+  if(!dev) return;
+  const doc = (dev.documentos||[]).find(x=>x.id===docId);
+  if(!doc) return;
+  let html;
+  if(doc.quitacao){
+    html = devBuildQuitacaoHtml(dev);
+  } else if(doc.acordoId && doc.parcelaId){
+    const ac = (dev.acordos||[]).find(a=>a.id===doc.acordoId);
+    const p  = ac && (ac.parcelas||[]).find(x=>x.id===doc.parcelaId);
+    if(!ac||!p){ showToast('Documento não pôde ser regenerado.','danger'); return; }
+    html = devBuildReciboHtml(dev, ac, p);
+  } else { showToast('Documento não reconhecido.','danger'); return; }
+  const w = window.open('', '_blank');
+  if(!w){ showToast('Permita popups para abrir o documento.','warning'); return; }
+  w.document.write(html);
+  w.document.close();
+}
+
+// Marca parcela como paga + gera recibo automático + verifica quitação total
+function devMarcarParcelaPaga(acordoId, parcelaId, via){
+  const dev = (DB.devedores||[]).find(d=>d.id===currentUser?.devedorId)
+           || (DB.devedores||[]).find(d=>(d.acordos||[]).some(a=>a.id===acordoId));
+  if(!dev) return;
+  const ac = (dev.acordos||[]).find(a=>a.id===acordoId);
+  if(!ac) return;
+  const p = (ac.parcelas||[]).find(x=>x.id===parcelaId);
+  if(!p) return;
+  p.pago = true;
+  p.pagoEm = new Date().toLocaleDateString('pt-BR');
+  p.pagoVia = via || 'boleto';
+  p.reciboId = uid();
+  // Salva recibo em dev.documentos
+  dev.documentos = dev.documentos || [];
+  dev.documentos.push({
+    id: p.reciboId,
+    nome: `Recibo — Parcela ${p.numero} — ${dev.nome}`,
+    categoria: 'Comprovante',
+    data: p.pagoEm,
+    tipo: 'text/html',
+    acordoId: ac.id, parcelaId: p.id,
+    visivelDevedor: true,
+    auto: true
+  });
+  // Verifica se TODAS as parcelas estão pagas → gera quitação
+  const todasPagas = (dev.acordos||[]).every(a=>(a.parcelas||[]).every(x=>x.pago));
+  if(todasPagas){
+    dev.status = 'Quitado';
+    dev.documentos.push({
+      id: uid(),
+      nome: `Termo de Quitação Integral — ${dev.nome}`,
+      categoria: 'Quitação',
+      data: new Date().toLocaleDateString('pt-BR'),
+      tipo: 'text/html',
+      visivelDevedor: true,
+      auto: true, quitacao: true
+    });
+    showToast('🎉 Dívida quitada! Termo de quitação gerado.','success');
+  }
+  save();
 }
 
 // ── PLACEHOLDER RENDERERS (Part 2 will fill these) ───────────
@@ -6563,6 +7427,7 @@ function renderConfiguracoes(){
     {id:'usuarios',icon:'🔐',label:'Usuários'},
     {id:'categorias',icon:'🏷️',label:'Categorias'},
     {id:'integracoes',icon:'🔗',label:'Integrações'},
+    {id:'regua',icon:'📅',label:'Régua de cobrança'},
     {id:'notificacoes',icon:'🔔',label:'Notificações'},
     {id:'privacidade',icon:'🛡️',label:'Privacidade e LGPD'},
     {id:'senha',icon:'🔑',label:'Senha'},
@@ -6878,6 +7743,79 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
       </div>
       <div id="cfg-int-msg" style="margin-top:8px;font-size:12px;text-align:right;"></div>`;
   }
+  else if(section==='regua'){
+    const regra = DB.config.regraCobranca || [];
+    const CANAIS = [
+      {v:'whatsapp', label:'WhatsApp', icon:'message-circle'},
+      {v:'email',    label:'E-mail',   icon:'mail'},
+      {v:'sms',      label:'SMS',      icon:'smartphone'}
+    ];
+    // Variáveis disponíveis nos templates
+    const VARS = ['{nome}','{valor}','{doc}','{dias}','{vencimento}','{link}','{credor}'];
+    el.innerHTML = `
+      <h3 style="font-size:15px;font-weight:700;margin-bottom:6px;">Régua de cobrança</h3>
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:16px;">Defina os passos que o sistema executa automaticamente em cada devedor após a data de vencimento. Adicione, remova e edite templates livremente.</p>
+
+      <div style="background:var(--info-soft);color:var(--info-strong);padding:10px 14px;border-radius:var(--r-md);font-size:12px;margin-bottom:16px;">
+        <strong>Variáveis disponíveis nos templates:</strong>
+        <div style="margin-top:4px;">${VARS.map(v=>`<code style="background:rgba(0,0,0,.08);padding:1px 6px;border-radius:3px;margin-right:4px;font-size:11px;">${v}</code>`).join('')}</div>
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+            <input type="checkbox" ${DB.config.reguaAtiva!==false?'checked':''} onchange="DB.config.reguaAtiva=this.checked;save();showToast(this.checked?'Régua ativada':'Régua pausada','info')" style="width:16px;height:16px;accent-color:var(--navy);"/>
+            Régua ativa
+          </label>
+          <span style="font-size:11px;color:var(--text-3);">(desligue para pausar todos os disparos automáticos)</span>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="reguaAddStep()"><i data-lucide="plus"></i> Adicionar passo</button>
+      </div>
+
+      ${regra.length===0 ? `
+        <div class="empty-state" style="padding:40px 20px;">
+          <div class="empty-state-icon"><i data-lucide="calendar-x" style="width:40px;height:40px;"></i></div>
+          <h3>Nenhum passo configurado</h3>
+          <p>Clique em "Adicionar passo" para começar a montar sua régua.</p>
+          <button class="btn btn-primary btn-sm" style="margin-top:12px;" onclick="reguaPresets()"><i data-lucide="zap"></i> Usar sugestão padrão</button>
+        </div>`
+      : `
+        <div id="regua-list" style="display:flex;flex-direction:column;gap:10px;">
+          ${regra.map((step,i)=>`
+            <div class="regua-step-card" style="background:var(--surface);border:1.5px solid var(--border);border-radius:var(--r-md);padding:14px 16px;position:relative;">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+                <div style="display:flex;align-items:center;gap:10px;">
+                  <div style="width:28px;height:28px;border-radius:50%;background:var(--navy);color:#fff;font-size:12px;font-weight:var(--fw-bold);display:flex;align-items:center;justify-content:center;">${i+1}</div>
+                  <div>
+                    <div style="font-size:13px;color:var(--text-3);">Enviar após</div>
+                    <input type="number" min="0" value="${step.dias||0}" oninput="reguaUpdate(${i},'dias',+this.value)" style="width:70px;padding:6px 8px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-weight:var(--fw-bold);font-size:14px;"/>
+                    <span style="font-size:12px;color:var(--text-2);">dias do vencimento</span>
+                  </div>
+                </div>
+                <div style="display:flex;gap:4px;">
+                  ${i>0?`<button class="btn-icon" title="Subir" onclick="reguaMove(${i},-1)"><i data-lucide="chevron-up"></i></button>`:''}
+                  ${i<regra.length-1?`<button class="btn-icon" title="Descer" onclick="reguaMove(${i},1)"><i data-lucide="chevron-down"></i></button>`:''}
+                  <button class="btn-icon btn-icon-danger" title="Remover" onclick="reguaDel(${i})"><i data-lucide="trash-2"></i></button>
+                </div>
+              </div>
+
+              <div style="display:grid;grid-template-columns:auto 1fr;gap:10px;">
+                <select onchange="reguaUpdate(${i},'canal',this.value)" style="padding:8px 10px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-size:13px;background:var(--surface);">
+                  ${CANAIS.map(c=>`<option value="${c.v}"${step.canal===c.v?' selected':''}>${c.label}</option>`).join('')}
+                </select>
+                <input type="text" value="${escHtml(step.assunto||'')}" placeholder="Assunto (opcional, para e-mail)" oninput="reguaUpdate(${i},'assunto',this.value)" style="padding:8px 10px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-size:13px;"/>
+              </div>
+
+              <textarea oninput="reguaUpdate(${i},'template',this.value)" rows="3" style="width:100%;margin-top:10px;padding:10px 12px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-size:13px;font-family:inherit;resize:vertical;">${escHtml(step.template||'')}</textarea>
+            </div>`).join('')}
+        </div>
+      `}
+
+      <div style="margin-top:18px;padding:12px 14px;background:var(--surface-2);border-radius:var(--r-md);font-size:12px;color:var(--text-2);">
+        <strong>Como funciona:</strong> um cron job diário às 09:00 (horário Brasília) varre todos os devedores ativos e dispara as mensagens conforme os passos acima. Cada devedor só recebe cada passo uma vez. Confira o log de disparos em <em>Auditoria → Régua</em>.
+      </div>`;
+    renderIcons(el);
+  }
   else if(section==='notificacoes'){
     const n = DB.config.notif||{};
     el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:18px;">Notificações</h3>
@@ -6889,6 +7827,7 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
   }
   else if(section==='privacidade'){
     const maskOn = DB.config.maskDocs !== false;
+    const mfaOn  = !!DB.config.mfaDevedor;
     const termsV = DB.config.lgpdTermsVersion || '1.0';
     el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:18px;">Privacidade e LGPD</h3>
       <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:var(--surface-2);border-radius:var(--r-md);margin-bottom:12px;">
@@ -6897,6 +7836,13 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
           <div style="font-size:12px;color:var(--text-3);margin-top:3px;">Oculta dígitos do meio em tabelas e cards. Detalhes do devedor mostram o documento completo.</div>
         </div>
         <input type="checkbox" ${maskOn?'checked':''} onchange="DB.config.maskDocs=this.checked;save();showPage('config');setCfgSection('privacidade');" style="width:18px;height:18px;accent-color:var(--navy);cursor:pointer;"/>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:var(--surface-2);border-radius:var(--r-md);margin-bottom:12px;">
+        <div style="flex:1;">
+          <div style="font-weight:600;font-size:13px;">Autenticação em 2 fatores para devedores (MFA)</div>
+          <div style="font-size:12px;color:var(--text-3);margin-top:3px;">Após CPF + data de nascimento, o devedor recebe um código de 6 dígitos no WhatsApp e precisa digitá-lo pra entrar. Mais seguro — mas exige que o devedor tenha celular cadastrado.</div>
+        </div>
+        <input type="checkbox" ${mfaOn?'checked':''} onchange="DB.config.mfaDevedor=this.checked;save();showToast(this.checked?'MFA ativado para devedores':'MFA desativado','info')" style="width:18px;height:18px;accent-color:var(--navy);cursor:pointer;"/>
       </div>
       <div style="padding:14px 16px;background:var(--surface-2);border-radius:var(--r-md);margin-bottom:12px;">
         <div style="font-weight:600;font-size:13px;margin-bottom:6px;">Aviso de privacidade</div>
@@ -7132,7 +8078,7 @@ async function testarZApi(){
   btn.disabled=false;
 }
 
-// ── Régua helpers ─────────────────────────────────────────────
+// ── Régua helpers (old — integrações) ─────────────────────────
 function addRegraStep(){
   if(!DB.config.regraCobranca) DB.config.regraCobranca=[];
   DB.config.regraCobranca.push({ id:uid(), dias:3, canal:'whatsapp', template:'Olá {nome}! Sua dívida de {valor} está em atraso. Regularize agora: {link}' });
@@ -7140,6 +8086,51 @@ function addRegraStep(){
 }
 function delRegraStep(i){
   (DB.config.regraCobranca||[]).splice(i,1); save(); renderCfgSection('integracoes');
+}
+
+// ── Régua helpers (new — seção dedicada) ──────────────────────
+function reguaAddStep(){
+  if(!DB.config.regraCobranca) DB.config.regraCobranca = [];
+  const dias = DB.config.regraCobranca.length === 0 ? 1 : (DB.config.regraCobranca[DB.config.regraCobranca.length-1].dias || 0) + 7;
+  DB.config.regraCobranca.push({
+    id: uid(),
+    dias,
+    canal: 'whatsapp',
+    assunto: '',
+    template: 'Olá {nome}! Sua dívida de {valor} venceu há {dias} dias. Regularize agora: {link}'
+  });
+  save(); renderCfgSection('regua');
+}
+function reguaDel(i){
+  if(!confirm('Remover este passo?')) return;
+  (DB.config.regraCobranca||[]).splice(i,1);
+  save(); renderCfgSection('regua');
+}
+function reguaUpdate(i, field, value){
+  const step = (DB.config.regraCobranca||[])[i];
+  if(!step) return;
+  step[field] = value;
+  save(); // sem re-render para não perder foco dos inputs
+}
+function reguaMove(i, delta){
+  const arr = DB.config.regraCobranca||[];
+  const j = i + delta;
+  if(j<0 || j>=arr.length) return;
+  [arr[i], arr[j]] = [arr[j], arr[i]];
+  save(); renderCfgSection('regua');
+}
+function reguaPresets(){
+  const presets = [
+    { dias:1,  canal:'whatsapp', assunto:'', template:'Olá {nome}! Identificamos que sua dívida venceu ontem. Podemos ajudar você a regularizar: {link}' },
+    { dias:3,  canal:'whatsapp', assunto:'', template:'{nome}, a oferta de 5% de desconto à vista ainda vale! Pague agora no portal: {link}' },
+    { dias:7,  canal:'whatsapp', assunto:'', template:'{nome}, que tal parcelar em até 12x? Simule sua proposta no portal: {link}' },
+    { dias:15, canal:'email',    assunto:'Última oportunidade antes da negativação', template:'Prezado(a) {nome}, sua dívida no valor de {valor} está há 15 dias em atraso. Caso não seja regularizada nos próximos 15 dias, poderá ser incluída nos órgãos de proteção ao crédito. Acesse {link} para negociar.' },
+    { dias:30, canal:'whatsapp', assunto:'', template:'{nome}, sua dívida de {valor} será encaminhada para ajuizamento. Ainda dá tempo de negociar: {link}' },
+    { dias:60, canal:'whatsapp', assunto:'', template:'{nome}, sua dívida foi encaminhada para a fase judicial. Procure-nos urgentemente: {link}' }
+  ];
+  DB.config.regraCobranca = presets.map(p=>({...p, id: uid()}));
+  save(); renderCfgSection('regua');
+  showToast('Régua padrão aplicada. Edite livremente.','success');
 }
 function atualizarRegraStep(i, campo, val){
   if(!DB.config.regraCobranca?.[i]) return;

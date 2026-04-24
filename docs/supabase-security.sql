@@ -181,6 +181,25 @@ CREATE POLICY "audit_read" ON public.audit_logs
 -- Sem policies de UPDATE/DELETE → append-only.
 
 -- ─────────────────────────────────────────────────────────────
+-- 5.5 MFA CODES — códigos de autenticação em 2 fatores (opcional)
+--    Usado pelo Portal Devedor quando DB.config.mfaDevedor = true.
+--    Código expira em 5 min.
+-- ─────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.mfa_codes (
+  dev_id      TEXT PRIMARY KEY,
+  code_hash   TEXT NOT NULL,
+  expires_at  TIMESTAMPTZ NOT NULL,
+  attempts    INT DEFAULT 0,
+  created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+ALTER TABLE public.mfa_codes ENABLE ROW LEVEL SECURITY;
+
+-- Todas operações são via service key (não via usuário final)
+DROP POLICY IF EXISTS "mfa_codes_service_only" ON public.mfa_codes;
+CREATE POLICY "mfa_codes_service_only" ON public.mfa_codes
+  FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+-- ─────────────────────────────────────────────────────────────
 -- 6. RATE LIMITING — tentativas de login (registro)
 -- ─────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.login_attempts (
