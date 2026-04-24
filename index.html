@@ -2455,6 +2455,15 @@ function load(){
       };
     }
   }catch(e){console.warn('load error',e);}
+  // Migração: regraCobranca (legado) → reguaCobranca
+  if(!DB.config.reguaCobranca && Array.isArray(DB.config.regraCobranca)){
+    DB.config.reguaCobranca = DB.config.regraCobranca;
+  }
+  if(!Array.isArray(DB.config.reguaCobranca)) DB.config.reguaCobranca = [];
+  if(!Array.isArray(DB.config.reguaAcordo))   DB.config.reguaAcordo   = [];
+  if(!DB.config.reguaEventos || typeof DB.config.reguaEventos !== 'object'){
+    DB.config.reguaEventos = {};
+  }
 }
 const uid=()=>(typeof crypto!=='undefined'&&crypto.randomUUID)?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2);
 const fmt=v=>(+v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -4915,6 +4924,19 @@ function toggleParcela(devId, acordoId, idx){
         visivelDevedor: true, auto: true
       });
     }
+    // ── Evento: pagamento adiantado (pagou ANTES do vencimento)
+    if(p.vencimento){
+      const venc = new Date(p.vencimento + 'T00:00:00');
+      if(!isNaN(venc) && Date.now() < venc.getTime()){
+        reguaDispararEvento('pagamento_adiantado', dev, {
+          parcela_num: String(p.numero||''),
+          parcela_total: String(ac.numParc || (ac.parcelas||[]).length || ''),
+          parcela_valor: fmtR(p.valor||0),
+          parcela_venc: (p.vencimento||'').split('-').reverse().join('/'),
+          acordo_total: fmtR(ac.valorTotal||0)
+        });
+      }
+    }
   }
   // Se desmarcou, remove o comprovante
   if(antes && !p.pago){
@@ -4937,6 +4959,10 @@ function toggleParcela(devId, acordoId, idx){
           visivelDevedor: true, auto: true, quitacao: true
         });
       }
+      // ── Evento: acordo quitado
+      reguaDispararEvento('quitacao', dev, {
+        acordo_total: fmtR(ac.valorTotal||0)
+      });
     }
   }
 
@@ -7744,75 +7770,154 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
       <div id="cfg-int-msg" style="margin-top:8px;font-size:12px;text-align:right;"></div>`;
   }
   else if(section==='regua'){
-    const regra = DB.config.regraCobranca || [];
+    const tab = window._reguaTab || 'cobranca';
     const CANAIS = [
       {v:'whatsapp', label:'WhatsApp', icon:'message-circle'},
       {v:'email',    label:'E-mail',   icon:'mail'},
       {v:'sms',      label:'SMS',      icon:'smartphone'}
     ];
-    // Variáveis disponíveis nos templates
-    const VARS = ['{nome}','{valor}','{doc}','{dias}','{vencimento}','{link}','{credor}'];
-    el.innerHTML = `
-      <h3 style="font-size:15px;font-weight:700;margin-bottom:6px;">Régua de cobrança</h3>
-      <p style="font-size:13px;color:var(--text-2);margin-bottom:16px;">Defina os passos que o sistema executa automaticamente em cada devedor após a data de vencimento. Adicione, remova e edite templates livremente.</p>
+    const VARS_PRE  = ['{nome}','{valor}','{doc}','{dias}','{vencimento}','{link}','{credor}'];
+    const VARS_POS  = [...VARS_PRE, '{parcela_num}','{parcela_total}','{parcela_valor}','{parcela_venc}','{acordo_total}'];
+    const EVENTOS = [
+      {id:'pagamento_adiantado', label:'Pagamento adiantado', icon:'zap', desc:'Disparado quando uma parcela é paga ANTES do vencimento.'},
+      {id:'quitacao',            label:'Acordo quitado',      icon:'award', desc:'Disparado quando a última parcela é paga (termo de quitação emitido).'}
+    ];
+    const tabBtn = (id, label, count) => `
+      <button onclick="window._reguaTab='${id}';renderCfgSection('regua')"
+        style="padding:10px 16px;border:none;border-bottom:3px solid ${tab===id?'var(--navy)':'transparent'};background:transparent;font-size:13px;font-weight:${tab===id?700:500};color:${tab===id?'var(--navy)':'var(--text-2)'};cursor:pointer;display:flex;align-items:center;gap:6px;">
+        ${label}
+        ${count!=null?`<span style="background:${tab===id?'var(--navy)':'var(--surface-3)'};color:${tab===id?'#fff':'var(--text-2)'};font-size:10px;font-weight:bold;padding:2px 7px;border-radius:10px;">${count}</span>`:''}
+      </button>`;
 
+    const preSteps   = DB.config.reguaCobranca || [];
+    const posSteps   = DB.config.reguaAcordo   || [];
+    const eventosMap = DB.config.reguaEventos  || {};
+
+    const renderSteps = (steps, reguaKey, VARS, presetFn, helpTxt) => {
+      const refOpts = reguaKey==='reguaAcordo' ? `
+        <select onchange="reguaUpdate('${reguaKey}',%IDX%,'referencia',this.value)" style="padding:8px 10px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-size:12px;background:var(--surface);">
+          <option value="antes">DIAS ANTES do vencimento</option>
+          <option value="no_dia">NO DIA do vencimento</option>
+          <option value="depois">DIAS DEPOIS do vencimento</option>
+        </select>` : null;
+      return `
       <div style="background:var(--info-soft);color:var(--info-strong);padding:10px 14px;border-radius:var(--r-md);font-size:12px;margin-bottom:16px;">
-        <strong>Variáveis disponíveis nos templates:</strong>
+        <strong>Variáveis disponíveis:</strong>
         <div style="margin-top:4px;">${VARS.map(v=>`<code style="background:rgba(0,0,0,.08);padding:1px 6px;border-radius:3px;margin-right:4px;font-size:11px;">${v}</code>`).join('')}</div>
       </div>
-
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
-        <div style="display:flex;align-items:center;gap:10px;">
-          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
-            <input type="checkbox" ${DB.config.reguaAtiva!==false?'checked':''} onchange="DB.config.reguaAtiva=this.checked;save();showToast(this.checked?'Régua ativada':'Régua pausada','info')" style="width:16px;height:16px;accent-color:var(--navy);"/>
-            Régua ativa
-          </label>
-          <span style="font-size:11px;color:var(--text-3);">(desligue para pausar todos os disparos automáticos)</span>
+        <span style="font-size:12px;color:var(--text-3);">${escHtml(helpTxt)}</span>
+        <div style="display:flex;gap:6px;">
+          ${steps.length===0?`<button class="btn btn-ghost btn-sm" onclick="${presetFn}()"><i data-lucide="zap"></i> Sugestão padrão</button>`:''}
+          <button class="btn btn-primary btn-sm" onclick="reguaAddStep('${reguaKey}')"><i data-lucide="plus"></i> Adicionar passo</button>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="reguaAddStep()"><i data-lucide="plus"></i> Adicionar passo</button>
       </div>
-
-      ${regra.length===0 ? `
+      ${steps.length===0 ? `
         <div class="empty-state" style="padding:40px 20px;">
           <div class="empty-state-icon"><i data-lucide="calendar-x" style="width:40px;height:40px;"></i></div>
           <h3>Nenhum passo configurado</h3>
-          <p>Clique em "Adicionar passo" para começar a montar sua régua.</p>
-          <button class="btn btn-primary btn-sm" style="margin-top:12px;" onclick="reguaPresets()"><i data-lucide="zap"></i> Usar sugestão padrão</button>
-        </div>`
-      : `
-        <div id="regua-list" style="display:flex;flex-direction:column;gap:10px;">
-          ${regra.map((step,i)=>`
-            <div class="regua-step-card" style="background:var(--surface);border:1.5px solid var(--border);border-radius:var(--r-md);padding:14px 16px;position:relative;">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
-                <div style="display:flex;align-items:center;gap:10px;">
-                  <div style="width:28px;height:28px;border-radius:50%;background:var(--navy);color:#fff;font-size:12px;font-weight:var(--fw-bold);display:flex;align-items:center;justify-content:center;">${i+1}</div>
+          <p>Clique em "Adicionar passo" para começar.</p>
+        </div>` :
+      `<div style="display:flex;flex-direction:column;gap:10px;">
+        ${steps.map((step,i)=>{
+          const refSelect = refOpts ? refOpts.replace('%IDX%', i).replace(
+            `<option value="${step.referencia||'depois'}"`, `<option value="${step.referencia||'depois'}" selected`
+          ) : '';
+          const diasLabel = reguaKey==='reguaAcordo'
+            ? (step.referencia==='no_dia' ? 'No dia do vencimento' : (step.referencia==='antes'?'dias ANTES':'dias DEPOIS'))
+            : 'dias após vencimento';
+          return `
+          <div class="regua-step-card" style="background:var(--surface);border:1.5px solid var(--border);border-radius:var(--r-md);padding:14px 16px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+              <div style="display:flex;align-items:center;gap:10px;">
+                <div style="width:28px;height:28px;border-radius:50%;background:var(--navy);color:#fff;font-size:12px;font-weight:var(--fw-bold);display:flex;align-items:center;justify-content:center;">${i+1}</div>
+                ${reguaKey==='reguaAcordo'?`
+                  <div style="display:flex;align-items:center;gap:6px;">
+                    <input type="number" min="0" value="${step.dias||0}" ${step.referencia==='no_dia'?'disabled':''} oninput="reguaUpdate('${reguaKey}',${i},'dias',+this.value)" style="width:62px;padding:6px 8px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-weight:var(--fw-bold);font-size:14px;"/>
+                    ${refSelect}
+                  </div>
+                ` : `
                   <div>
                     <div style="font-size:13px;color:var(--text-3);">Enviar após</div>
-                    <input type="number" min="0" value="${step.dias||0}" oninput="reguaUpdate(${i},'dias',+this.value)" style="width:70px;padding:6px 8px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-weight:var(--fw-bold);font-size:14px;"/>
-                    <span style="font-size:12px;color:var(--text-2);">dias do vencimento</span>
+                    <input type="number" min="0" value="${step.dias||0}" oninput="reguaUpdate('${reguaKey}',${i},'dias',+this.value)" style="width:70px;padding:6px 8px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-weight:var(--fw-bold);font-size:14px;"/>
+                    <span style="font-size:12px;color:var(--text-2);">${diasLabel}</span>
                   </div>
-                </div>
-                <div style="display:flex;gap:4px;">
-                  ${i>0?`<button class="btn-icon" title="Subir" onclick="reguaMove(${i},-1)"><i data-lucide="chevron-up"></i></button>`:''}
-                  ${i<regra.length-1?`<button class="btn-icon" title="Descer" onclick="reguaMove(${i},1)"><i data-lucide="chevron-down"></i></button>`:''}
-                  <button class="btn-icon btn-icon-danger" title="Remover" onclick="reguaDel(${i})"><i data-lucide="trash-2"></i></button>
-                </div>
+                `}
               </div>
-
-              <div style="display:grid;grid-template-columns:auto 1fr;gap:10px;">
-                <select onchange="reguaUpdate(${i},'canal',this.value)" style="padding:8px 10px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-size:13px;background:var(--surface);">
-                  ${CANAIS.map(c=>`<option value="${c.v}"${step.canal===c.v?' selected':''}>${c.label}</option>`).join('')}
-                </select>
-                <input type="text" value="${escHtml(step.assunto||'')}" placeholder="Assunto (opcional, para e-mail)" oninput="reguaUpdate(${i},'assunto',this.value)" style="padding:8px 10px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-size:13px;"/>
+              <div style="display:flex;gap:4px;">
+                ${i>0?`<button class="btn-icon" title="Subir" onclick="reguaMove('${reguaKey}',${i},-1)"><i data-lucide="chevron-up"></i></button>`:''}
+                ${i<steps.length-1?`<button class="btn-icon" title="Descer" onclick="reguaMove('${reguaKey}',${i},1)"><i data-lucide="chevron-down"></i></button>`:''}
+                <button class="btn-icon btn-icon-danger" title="Remover" onclick="reguaDel('${reguaKey}',${i})"><i data-lucide="trash-2"></i></button>
               </div>
+            </div>
+            <div style="display:grid;grid-template-columns:auto 1fr;gap:10px;">
+              <select onchange="reguaUpdate('${reguaKey}',${i},'canal',this.value)" style="padding:8px 10px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-size:13px;background:var(--surface);">
+                ${CANAIS.map(c=>`<option value="${c.v}"${step.canal===c.v?' selected':''}>${c.label}</option>`).join('')}
+              </select>
+              <input type="text" value="${escHtml(step.assunto||'')}" placeholder="Assunto (opcional, para e-mail)" oninput="reguaUpdate('${reguaKey}',${i},'assunto',this.value)" style="padding:8px 10px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-size:13px;"/>
+            </div>
+            <textarea oninput="reguaUpdate('${reguaKey}',${i},'template',this.value)" rows="3" style="width:100%;margin-top:10px;padding:10px 12px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-size:13px;font-family:inherit;resize:vertical;">${escHtml(step.template||'')}</textarea>
+          </div>`;}).join('')}
+      </div>`}
+      `;
+    };
 
-              <textarea oninput="reguaUpdate(${i},'template',this.value)" rows="3" style="width:100%;margin-top:10px;padding:10px 12px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-size:13px;font-family:inherit;resize:vertical;">${escHtml(step.template||'')}</textarea>
-            </div>`).join('')}
-        </div>
-      `}
+    const renderEventos = () => `
+      <div style="background:var(--info-soft);color:var(--info-strong);padding:10px 14px;border-radius:var(--r-md);font-size:12px;margin-bottom:16px;">
+        <strong>Variáveis disponíveis:</strong>
+        <div style="margin-top:4px;">${VARS_POS.map(v=>`<code style="background:rgba(0,0,0,.08);padding:1px 6px;border-radius:3px;margin-right:4px;font-size:11px;">${v}</code>`).join('')}</div>
+      </div>
+      <p style="font-size:12px;color:var(--text-3);margin-bottom:12px;">Estas mensagens são enviadas <strong>no momento do evento</strong> (não pelo cron diário). Deixe em branco para não enviar.</p>
+      ${EVENTOS.map(ev=>{
+        const t = eventosMap[ev.id] || {};
+        return `
+        <div class="regua-step-card" style="background:var(--surface);border:1.5px solid var(--border);border-radius:var(--r-md);padding:14px 16px;margin-bottom:10px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <div style="width:32px;height:32px;border-radius:50%;background:var(--gold-50);display:flex;align-items:center;justify-content:center;">
+                <i data-lucide="${ev.icon}" style="width:16px;height:16px;color:var(--gold-600);"></i>
+              </div>
+              <div>
+                <div style="font-weight:var(--fw-bold);font-size:14px;">${escHtml(ev.label)}</div>
+                <div style="font-size:11px;color:var(--text-3);">${escHtml(ev.desc)}</div>
+              </div>
+            </div>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
+              <input type="checkbox" ${t.ativo!==false?'checked':''} onchange="reguaEventoUpdate('${ev.id}','ativo',this.checked)" style="width:16px;height:16px;accent-color:var(--navy);"/>
+              Ativo
+            </label>
+          </div>
+          <select onchange="reguaEventoUpdate('${ev.id}','canal',this.value)" style="padding:8px 10px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-size:13px;background:var(--surface);margin-bottom:8px;">
+            ${CANAIS.map(c=>`<option value="${c.v}"${(t.canal||'whatsapp')===c.v?' selected':''}>${c.label}</option>`).join('')}
+          </select>
+          <textarea oninput="reguaEventoUpdate('${ev.id}','template',this.value)" rows="3" placeholder="Mensagem (use variáveis)..." style="width:100%;padding:10px 12px;border:1.5px solid var(--border);border-radius:var(--r-sm);font-size:13px;font-family:inherit;resize:vertical;">${escHtml(t.template||'')}</textarea>
+        </div>`;
+      }).join('')}
+    `;
+
+    el.innerHTML = `
+      <h3 style="font-size:15px;font-weight:700;margin-bottom:6px;">Régua de cobrança</h3>
+      <p style="font-size:13px;color:var(--text-2);margin-bottom:14px;">Automação de mensagens para cada momento da cobrança. Edite livremente.</p>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">
+          <input type="checkbox" ${DB.config.reguaAtiva!==false?'checked':''} onchange="DB.config.reguaAtiva=this.checked;save();showToast(this.checked?'Régua ativada':'Régua pausada','info')" style="width:16px;height:16px;accent-color:var(--navy);"/>
+          Régua ativa globalmente
+        </label>
+      </div>
+
+      <div style="display:flex;border-bottom:1.5px solid var(--border);margin-bottom:16px;">
+        ${tabBtn('cobranca','🎯 Pré-acordo (cobrança)',preSteps.length)}
+        ${tabBtn('acordo','🤝 Pós-acordo (manutenção)',posSteps.length)}
+        ${tabBtn('eventos','⚡ Eventos',null)}
+      </div>
+
+      ${tab==='cobranca' ? renderSteps(preSteps,'reguaCobranca',VARS_PRE,'reguaPresets','Dias contados a partir do vencimento original da dívida (campo "Data de vencimento" do devedor, ou data de cadastro como fallback).')
+        : tab==='acordo' ? renderSteps(posSteps,'reguaAcordo',VARS_POS,'reguaPresetsAcordo','Mensagens enviadas para cada parcela individualmente, conforme proximidade do vencimento.')
+        : renderEventos()}
 
       <div style="margin-top:18px;padding:12px 14px;background:var(--surface-2);border-radius:var(--r-md);font-size:12px;color:var(--text-2);">
-        <strong>Como funciona:</strong> um cron job diário às 09:00 (horário Brasília) varre todos os devedores ativos e dispara as mensagens conforme os passos acima. Cada devedor só recebe cada passo uma vez. Confira o log de disparos em <em>Auditoria → Régua</em>.
+        <strong>Como funciona:</strong> Pré-acordo e Pós-acordo rodam num <em>cron diário às 09:00 (BRT)</em>. Eventos são disparados instantaneamente pelo sistema quando acontecem.
       </div>`;
     renderIcons(el);
   }
@@ -8088,49 +8193,97 @@ function delRegraStep(i){
   (DB.config.regraCobranca||[]).splice(i,1); save(); renderCfgSection('integracoes');
 }
 
-// ── Régua helpers (new — seção dedicada) ──────────────────────
-function reguaAddStep(){
-  if(!DB.config.regraCobranca) DB.config.regraCobranca = [];
-  const dias = DB.config.regraCobranca.length === 0 ? 1 : (DB.config.regraCobranca[DB.config.regraCobranca.length-1].dias || 0) + 7;
-  DB.config.regraCobranca.push({
-    id: uid(),
-    dias,
-    canal: 'whatsapp',
-    assunto: '',
-    template: 'Olá {nome}! Sua dívida de {valor} venceu há {dias} dias. Regularize agora: {link}'
-  });
+// ── Régua helpers (nova estrutura: 2 réguas + eventos) ───────
+function _reguaGet(key){
+  if(!Array.isArray(DB.config[key])) DB.config[key] = [];
+  return DB.config[key];
+}
+function reguaAddStep(reguaKey){
+  const arr = _reguaGet(reguaKey);
+  const lastDias = arr.length ? (arr[arr.length-1].dias || 0) : 0;
+  const base = reguaKey==='reguaAcordo'
+    ? { id:uid(), referencia:'antes', dias: 3, canal:'whatsapp', assunto:'', template:'{nome}, sua parcela {parcela_num}/{parcela_total} ({parcela_valor}) vence em {parcela_venc}. Boleto: {link}' }
+    : { id:uid(), dias: arr.length===0 ? 1 : lastDias + 7, canal:'whatsapp', assunto:'', template:'Olá {nome}! Sua dívida de {valor} venceu há {dias} dias. Regularize: {link}' };
+  arr.push(base);
   save(); renderCfgSection('regua');
 }
-function reguaDel(i){
+function reguaDel(reguaKey, i){
   if(!confirm('Remover este passo?')) return;
-  (DB.config.regraCobranca||[]).splice(i,1);
+  _reguaGet(reguaKey).splice(i,1);
   save(); renderCfgSection('regua');
 }
-function reguaUpdate(i, field, value){
-  const step = (DB.config.regraCobranca||[])[i];
+function reguaUpdate(reguaKey, i, field, value){
+  const step = _reguaGet(reguaKey)[i];
   if(!step) return;
   step[field] = value;
-  save(); // sem re-render para não perder foco dos inputs
+  if(field === 'referencia' && value === 'no_dia') step.dias = 0;
+  save();
+  if(field === 'referencia') renderCfgSection('regua'); // re-render para aplicar disable no input
 }
-function reguaMove(i, delta){
-  const arr = DB.config.regraCobranca||[];
+function reguaMove(reguaKey, i, delta){
+  const arr = _reguaGet(reguaKey);
   const j = i + delta;
   if(j<0 || j>=arr.length) return;
   [arr[i], arr[j]] = [arr[j], arr[i]];
   save(); renderCfgSection('regua');
 }
 function reguaPresets(){
-  const presets = [
-    { dias:1,  canal:'whatsapp', assunto:'', template:'Olá {nome}! Identificamos que sua dívida venceu ontem. Podemos ajudar você a regularizar: {link}' },
-    { dias:3,  canal:'whatsapp', assunto:'', template:'{nome}, a oferta de 5% de desconto à vista ainda vale! Pague agora no portal: {link}' },
-    { dias:7,  canal:'whatsapp', assunto:'', template:'{nome}, que tal parcelar em até 12x? Simule sua proposta no portal: {link}' },
-    { dias:15, canal:'email',    assunto:'Última oportunidade antes da negativação', template:'Prezado(a) {nome}, sua dívida no valor de {valor} está há 15 dias em atraso. Caso não seja regularizada nos próximos 15 dias, poderá ser incluída nos órgãos de proteção ao crédito. Acesse {link} para negociar.' },
-    { dias:30, canal:'whatsapp', assunto:'', template:'{nome}, sua dívida de {valor} será encaminhada para ajuizamento. Ainda dá tempo de negociar: {link}' },
-    { dias:60, canal:'whatsapp', assunto:'', template:'{nome}, sua dívida foi encaminhada para a fase judicial. Procure-nos urgentemente: {link}' }
+  DB.config.reguaCobranca = [
+    { id:uid(), dias:1,  canal:'whatsapp', assunto:'', template:'Olá {nome}! Identificamos que sua dívida venceu ontem. Podemos ajudar você a regularizar: {link}' },
+    { id:uid(), dias:3,  canal:'whatsapp', assunto:'', template:'{nome}, a oferta de 5% de desconto à vista ainda vale! Pague agora no portal: {link}' },
+    { id:uid(), dias:7,  canal:'whatsapp', assunto:'', template:'{nome}, que tal parcelar em até 12x? Simule sua proposta no portal: {link}' },
+    { id:uid(), dias:15, canal:'email',    assunto:'Última oportunidade antes da negativação', template:'Prezado(a) {nome}, sua dívida no valor de {valor} está há 15 dias em atraso. Caso não seja regularizada nos próximos 15 dias, poderá ser incluída nos órgãos de proteção ao crédito. Acesse {link} para negociar.' },
+    { id:uid(), dias:30, canal:'whatsapp', assunto:'', template:'{nome}, sua dívida de {valor} será encaminhada para ajuizamento. Ainda dá tempo de negociar: {link}' },
+    { id:uid(), dias:60, canal:'whatsapp', assunto:'', template:'{nome}, sua dívida foi encaminhada para a fase judicial. Procure-nos urgentemente: {link}' }
   ];
-  DB.config.regraCobranca = presets.map(p=>({...p, id: uid()}));
   save(); renderCfgSection('regua');
-  showToast('Régua padrão aplicada. Edite livremente.','success');
+  showToast('Régua pré-acordo padrão aplicada.','success');
+}
+function reguaPresetsAcordo(){
+  DB.config.reguaAcordo = [
+    { id:uid(), referencia:'antes',  dias:3, canal:'whatsapp', assunto:'', template:'Oi {nome}! Passando pra lembrar: sua parcela {parcela_num}/{parcela_total} ({parcela_valor}) vence em {parcela_venc}. Boleto disponível no portal: {link}' },
+    { id:uid(), referencia:'no_dia', dias:0, canal:'whatsapp', assunto:'', template:'{nome}, sua parcela {parcela_num}/{parcela_total} ({parcela_valor}) vence HOJE. Pague pelo app do banco usando o boleto: {link}' },
+    { id:uid(), referencia:'depois', dias:1, canal:'whatsapp', assunto:'', template:'{nome}, notamos que sua parcela {parcela_num} atrasou ontem. Vamos regularizar? {link}' },
+    { id:uid(), referencia:'depois', dias:3, canal:'whatsapp', assunto:'', template:'{nome}, parcela {parcela_num} 3 dias em atraso. Regularize para evitar juros e multa: {link}' },
+    { id:uid(), referencia:'depois', dias:7, canal:'whatsapp', assunto:'', template:'{nome}, sua parcela {parcela_num} está 7 dias em atraso. Risco de quebra do acordo. Fale com a gente urgente.' }
+  ];
+  save(); renderCfgSection('regua');
+  showToast('Régua pós-acordo padrão aplicada.','success');
+}
+function reguaEventoUpdate(evId, field, value){
+  if(!DB.config.reguaEventos) DB.config.reguaEventos = {};
+  if(!DB.config.reguaEventos[evId]) DB.config.reguaEventos[evId] = {};
+  DB.config.reguaEventos[evId][field] = value;
+  save();
+}
+
+// ── Trigger de eventos (chamado pelo fluxo de pagamento) ────
+function _reguaRenderTpl(tpl, ctx){
+  return String(tpl||'').replace(/\{(\w+)\}/g, (_, k) => (ctx[k] != null ? String(ctx[k]) : ''));
+}
+async function reguaDispararEvento(evId, dev, ctx){
+  try{
+    const t = DB.config.reguaEventos && DB.config.reguaEventos[evId];
+    if(!t || t.ativo === false || !t.template) return;
+    const tel = (dev.tel || dev.telefone || '').replace(/\D/g,'');
+    if(!tel) return;
+    const canal = t.canal || 'whatsapp';
+    if(canal !== 'whatsapp') return; // Só WhatsApp integrado por ora
+    const msg = _reguaRenderTpl(t.template, {
+      nome: dev.nome||'', valor: fmtR(parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0),
+      doc: dev.doc||'', credor: DB.config.empresa||'COBRASQ',
+      link: DB.config.portalUrl || location.origin,
+      ...(ctx||{})
+    });
+    const headers = { 'Content-Type':'application/json' };
+    if(DB.config.zapiToken)       headers['x-zapi-token']        = DB.config.zapiToken;
+    if(DB.config.zapiInstanceId)  headers['x-zapi-instance']     = DB.config.zapiInstanceId;
+    if(DB.config.zapiClientToken) headers['x-zapi-client-token'] = DB.config.zapiClientToken;
+    await fetch('/api/zapi?path=send-text', {
+      method:'POST', headers,
+      body: JSON.stringify({ phone: tel, message: msg })
+    }).catch(e=>console.warn('[regua-evento]', e));
+  }catch(e){ console.warn('[regua-evento]', e); }
 }
 function atualizarRegraStep(i, campo, val){
   if(!DB.config.regraCobranca?.[i]) return;
