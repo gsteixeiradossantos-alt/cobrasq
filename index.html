@@ -2249,6 +2249,24 @@ img{max-width:100%}
 <!-- ════════════════════════════════════════════════════════════
      MODAL: GERAR MINUTA v2 — wizard multi-step
      ════════════════════════════════════════════════════════════ -->
+<!-- ════════════════════════════════════════════════════════════
+     MODAL: IMPORTAR COBRANÇA VIA DOCUMENTO — Feature 8.3 (Beatriz)
+     ════════════════════════════════════════════════════════════ -->
+<div id="modal-doc-import" class="overlay">
+  <div class="modal" style="max-width:580px;">
+    <div class="modal-header">
+      <span class="modal-title" id="di-title">Importar cobrança via documento</span>
+      <button class="modal-close" onclick="closeModal('modal-doc-import')">&#10005;</button>
+    </div>
+    <div class="modal-body" id="di-body" style="max-height:80vh;overflow-y:auto;">
+      <!-- populated by JS -->
+    </div>
+    <div class="modal-footer" id="di-footer">
+      <!-- populated by JS -->
+    </div>
+  </div>
+</div>
+
 <div id="modal-minuta-v2" class="overlay">
   <div class="modal modal-xl">
     <div class="modal-header">
@@ -3552,6 +3570,7 @@ function renderDevedores(){
         <button class="btn btn-ghost btn-sm" onclick="openModal('modal-importDev')">${ico('upload',13)} Importar</button>
         <button class="btn btn-ghost btn-sm" onclick="toggleDevViewMode()">${devViewMode==='cards'?'Tabela':'Cards'}</button>
         <button class="btn btn-ghost btn-sm" onclick="toggleSelectionMode()" ${selectionMode?'style="background:var(--navy);color:#fff;"':''}>${selectionMode?'✕ Cancelar':'☑ Selecionar'}</button>
+        <button class="btn btn-ghost btn-sm" onclick="abrirDocImport()" style="display:flex;align-items:center;gap:5px;" title="Importar via documento com IA Beatriz">${ico('upload',13)} <span style="color:var(--navy);font-weight:600;">✦</span> Via Documento</button>
         <button class="btn btn-primary btn-sm" onclick="abrirNovoDevedor()">${ico('plus',13)} Nova Cobrança</button>
       </div>
     </div>
@@ -4635,6 +4654,336 @@ function excluirDevedor(id){
     closeDrawer();
     renderDevedores();
   }, 'Excluir este devedor? Esta ação não pode ser desfeita.');
+}
+
+// ── FEATURE 8.3: IMPORTAR COBRANÇA VIA DOCUMENTO (BEATRIZ IA) ───
+
+let _diFile = null;
+let _diExtracted = null;
+
+function abrirDocImport(){
+  _diFile = null;
+  _diExtracted = null;
+  openModal('modal-doc-import');
+  diStep1();
+}
+
+function diStep1(){
+  document.getElementById('di-title').textContent = 'Importar cobrança via documento';
+  document.getElementById('di-body').innerHTML = `
+    <div style="padding:24px;">
+      <p style="font-size:13px;color:var(--text-2);margin:0 0 20px;">
+        Faça upload de um documento com os dados do devedor e da dívida.
+        A IA <strong style="color:var(--navy);">Beatriz</strong> vai analisar e pré-preencher o formulário de cadastro.
+      </p>
+      <div id="di-drop-zone"
+        style="border:2px dashed var(--border-2);border-radius:10px;padding:40px 24px;text-align:center;cursor:pointer;transition:background .15s;"
+        onclick="document.getElementById('di-file-input').click()"
+        ondragover="event.preventDefault();this.style.background='var(--active-bg)';this.style.borderColor='var(--navy)';"
+        ondragleave="this.style.background='';this.style.borderColor='';"
+        ondrop="event.preventDefault();this.style.background='';this.style.borderColor='';diHandleFile(event.dataTransfer.files[0])">
+        <div style="color:var(--text-3);">${ico('upload',30)}</div>
+        <div style="margin-top:12px;font-weight:600;color:var(--text);font-size:14px;">Arraste o arquivo aqui ou clique para selecionar</div>
+        <div style="font-size:12px;color:var(--text-3);margin-top:6px;">PDF, PNG, JPG ou CSV · Máx. 5 MB</div>
+        <input type="file" id="di-file-input" accept=".pdf,.png,.jpg,.jpeg,.csv,.txt" style="display:none;"
+          onchange="diHandleFile(this.files[0])">
+      </div>
+      <div id="di-file-preview" style="display:none;margin-top:14px;padding:12px 16px;background:var(--surface-2);border-radius:8px;flex-align:center;gap:10px;"></div>
+      <div id="di-err" style="color:var(--danger);font-size:12.5px;margin-top:10px;display:none;"></div>
+      <div style="margin-top:20px;padding:12px 16px;background:var(--active-bg);border-radius:8px;border-left:3px solid var(--navy);">
+        <div style="font-size:12px;font-weight:700;color:var(--navy);margin-bottom:4px;">✦ Beatriz — IA de cadastro</div>
+        <div style="font-size:12px;color:var(--text-2);">
+          Analisa contratos, promissórias, extratos, notificações e outros documentos de cobrança.
+          Requer <strong>chave Claude</strong> em Configurações → Integrações.
+        </div>
+      </div>
+    </div>`;
+  document.getElementById('di-footer').innerHTML = `
+    <button class="btn btn-ghost" onclick="closeModal('modal-doc-import')">Cancelar</button>
+    <button class="btn btn-primary" id="di-btn-analisar" onclick="diAnalisar()" disabled>Analisar com Beatriz →</button>`;
+}
+
+function diHandleFile(file){
+  if(!file) return;
+  if(file.size > 5 * 1024 * 1024){
+    const e = document.getElementById('di-err');
+    if(e){ e.textContent = 'Arquivo muito grande. Máximo 5 MB.'; e.style.display=''; }
+    return;
+  }
+  const ext = (file.name.split('.').pop()||'').toLowerCase();
+  const ok  = ['pdf','png','jpg','jpeg','csv','txt'];
+  if(!ok.includes(ext)){
+    const e = document.getElementById('di-err');
+    if(e){ e.textContent = 'Formato não suportado. Use PDF, PNG, JPG ou CSV.'; e.style.display=''; }
+    return;
+  }
+  _diFile = file;
+  const e = document.getElementById('di-err'); if(e) e.style.display='none';
+  const prev = document.getElementById('di-file-preview');
+  if(prev){
+    prev.style.display='flex';
+    prev.style.alignItems='center';
+    prev.innerHTML = `
+      <div style="width:36px;height:36px;border-radius:8px;background:var(--navy);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--gold);">${ico('file',18)}</div>
+      <div style="flex:1;min-width:0;margin-left:10px;">
+        <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(file.name)}</div>
+        <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">${(file.size/1024).toFixed(1)} KB · ${ext.toUpperCase()}</div>
+      </div>
+      <button onclick="diLimparArquivo()" style="border:none;background:none;cursor:pointer;color:var(--text-3);font-size:18px;line-height:1;padding:0 4px;margin-left:8px;">×</button>`;
+  }
+  const btn = document.getElementById('di-btn-analisar'); if(btn) btn.disabled=false;
+}
+
+function diLimparArquivo(){
+  _diFile = null;
+  const prev = document.getElementById('di-file-preview'); if(prev) prev.style.display='none';
+  const inp  = document.getElementById('di-file-input');   if(inp)  inp.value='';
+  const btn  = document.getElementById('di-btn-analisar'); if(btn)  btn.disabled=true;
+}
+
+async function diAnalisar(){
+  if(!_diFile){ showToast('Selecione um arquivo.','warning'); return; }
+  if(!DB.config.claudeApiKey){
+    document.getElementById('di-body').innerHTML = `
+      <div class="mv2-step-loading" style="padding:48px 24px;">
+        <div style="color:var(--text-3);">${ico('key',36)}</div>
+        <h3 style="margin-top:12px;">Chave API não configurada</h3>
+        <p style="font-size:13px;color:var(--text-2);text-align:center;">Configure sua chave Claude em <strong>Configurações → Integrações</strong>.</p>
+        <button class="btn btn-primary" style="margin-top:16px;" onclick="closeModal('modal-doc-import');setCfgSection('integracoes');showPage('config')">Configurar agora</button>
+      </div>`;
+    document.getElementById('di-footer').innerHTML = `<button class="btn btn-ghost" onclick="diStep1()">← Voltar</button>`;
+    return;
+  }
+
+  document.getElementById('di-title').textContent = '✦ Beatriz analisando…';
+  document.getElementById('di-body').innerHTML = `
+    <div class="mv2-step-loading" style="padding:60px 24px;">
+      <div class="mv2-spinner"></div>
+      <p style="color:var(--text-2);font-size:13px;text-align:center;margin-top:16px;">
+        Beatriz está lendo o documento e extraindo os dados da cobrança…
+      </p>
+    </div>`;
+  document.getElementById('di-footer').innerHTML = '';
+
+  try {
+    const ext = (_diFile.name.split('.').pop()||'').toLowerCase();
+    let content = [];
+
+    if(['pdf','png','jpg','jpeg'].includes(ext)){
+      const b64 = await new Promise((res,rej)=>{
+        const r = new FileReader();
+        r.onload = e => res(e.target.result.split(',')[1]);
+        r.onerror = rej;
+        r.readAsDataURL(_diFile);
+      });
+      if(ext==='pdf'){
+        content.push({ type:'document', source:{ type:'base64', media_type:'application/pdf', data:b64 }});
+      } else {
+        content.push({ type:'image',    source:{ type:'base64', media_type: ext==='png'?'image/png':'image/jpeg', data:b64 }});
+      }
+    } else {
+      const txt = await new Promise((res,rej)=>{
+        const r = new FileReader();
+        r.onload = e => res(e.target.result);
+        r.onerror = rej;
+        r.readAsText(_diFile,'utf-8');
+      });
+      content.push({ type:'text', text:`CONTEÚDO DO ARQUIVO (${_diFile.name}):\n${txt.substring(0,8000)}` });
+    }
+
+    content.push({ type:'text', text:
+`Analise este documento e extraia os dados para cadastro de cobrança no sistema COBRASQ.
+Retorne APENAS um objeto JSON válido com estes campos (use null para campos não encontrados):
+{
+  "nome": "nome completo do devedor",
+  "doc": "CPF (000.000.000-00) ou CNPJ (00.000.000/0000-00)",
+  "tel": "telefone com DDD",
+  "email": "e-mail",
+  "endereco": "endereço completo",
+  "valorOrig": "valor da dívida em formato brasileiro ex: 1.234,56",
+  "vencimento": "data de vencimento em YYYY-MM-DD ou null",
+  "credorNome": "nome do credor/cedente/empresa",
+  "fase": "judicial ou extrajudicial",
+  "processoNum": "número do processo judicial ou null",
+  "vara": "vara/comarca se judicial ou null",
+  "obs": "observações relevantes em 1-2 linhas ou null"
+}
+Retorne SOMENTE o JSON, sem texto adicional, sem markdown.`
+    });
+
+    const resp = await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'x-api-key': DB.config.claudeApiKey,
+        'anthropic-version':'2023-06-01',
+        'anthropic-dangerous-direct-browser-access':'true'
+      },
+      body: JSON.stringify({ model:'claude-opus-4-5', max_tokens:1024, messages:[{ role:'user', content }] })
+    });
+
+    const data = await resp.json();
+    if(data.error) throw new Error(data.error.message||'Erro na API Anthropic');
+    const aiText = (data.content?.[0]?.text||'').trim();
+    const m = aiText.match(/\{[\s\S]*\}/);
+    _diExtracted = JSON.parse(m ? m[0] : aiText);
+    diStep3(_diExtracted);
+
+  } catch(e){
+    document.getElementById('di-title').textContent = 'Importar cobrança via documento';
+    document.getElementById('di-body').innerHTML = `
+      <div class="mv2-step-loading" style="padding:48px 24px;">
+        <div style="color:var(--danger);">${ico('warning',36)}</div>
+        <h3 style="margin-top:12px;color:var(--danger);">Erro na análise</h3>
+        <p style="font-size:13px;color:var(--text-2);text-align:center;">${escHtml(traduzirErro(e.message))}</p>
+      </div>`;
+    document.getElementById('di-footer').innerHTML =
+      `<button class="btn btn-ghost" onclick="diStep1()">← Tentar novamente</button>
+       <button class="btn btn-ghost" onclick="closeModal('modal-doc-import')">Fechar</button>`;
+  }
+}
+
+function diStep3(d){
+  const clientes = DB.clientes||[];
+  let matchId = '';
+  if(d.credorNome){
+    const nLow = d.credorNome.toLowerCase();
+    const m = clientes.find(c=>(c.nome||'').toLowerCase().includes(nLow)||nLow.includes((c.nome||'').toLowerCase().substring(0,6)));
+    if(m) matchId = m.id;
+  }
+  const isJud = (d.fase||'').toLowerCase()==='judicial';
+
+  document.getElementById('di-title').textContent = '✦ Beatriz — Revisar dados extraídos';
+  document.getElementById('di-body').innerHTML = `
+    <div style="padding:20px 24px;">
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--active-bg);border-radius:8px;margin-bottom:18px;border:1px solid var(--border);">
+        <span style="width:28px;height:28px;border-radius:50%;background:var(--navy);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:14px;color:var(--gold);">✦</span>
+        <div>
+          <div style="font-size:12px;font-weight:700;color:var(--navy);">Beatriz IA · Dados extraídos do documento</div>
+          <div style="font-size:11.5px;color:var(--text-3);margin-top:1px;">Revise os campos abaixo e corrija o que for necessário antes de cadastrar.</div>
+        </div>
+      </div>
+
+      <div class="fg-row">
+        <div class="fg" style="flex:2;">
+          <label>Nome do devedor *</label>
+          <input type="text" id="di-nome" value="${escHtml(d.nome||'')}">
+        </div>
+        <div class="fg" style="flex:1;">
+          <label>CPF / CNPJ</label>
+          <input type="text" id="di-doc" value="${escHtml(d.doc||'')}">
+        </div>
+      </div>
+      <div class="fg-row">
+        <div class="fg">
+          <label>Telefone</label>
+          <input type="text" id="di-tel" value="${escHtml(d.tel||'')}" placeholder="(44) 99999-9999">
+        </div>
+        <div class="fg">
+          <label>E-mail</label>
+          <input type="text" id="di-email" value="${escHtml(d.email||'')}">
+        </div>
+      </div>
+      <div class="fg">
+        <label>Endereço</label>
+        <input type="text" id="di-endereco" value="${escHtml(d.endereco||'')}">
+      </div>
+      <div class="fg-row">
+        <div class="fg">
+          <label>Valor original (R$) *</label>
+          <input type="text" id="di-valor" value="${escHtml(d.valorOrig||'')}" placeholder="0,00">
+        </div>
+        <div class="fg">
+          <label>Vencimento</label>
+          <input type="date" id="di-venc" value="${escHtml(d.vencimento||'')}">
+        </div>
+      </div>
+      <div class="fg-row">
+        <div class="fg">
+          <label>Credor / Cliente</label>
+          <select id="di-cliente" style="padding:9px 12px;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:13px;background:var(--bg);color:var(--text);width:100%;">
+            <option value="">— nenhum —</option>
+            ${clientes.map(c=>`<option value="${c.id}" ${c.id===matchId?'selected':''}>${escHtml(c.nome)}</option>`).join('')}
+          </select>
+          ${matchId
+            ? `<div style="font-size:11px;color:var(--success);margin-top:3px;">✓ Correspondência automática: ${escHtml(d.credorNome)}</div>`
+            : (d.credorNome ? `<div style="font-size:11px;color:var(--text-3);margin-top:3px;">Detectado: "${escHtml(d.credorNome)}" — selecione manualmente se necessário</div>` : '')}
+        </div>
+        <div class="fg">
+          <label>Fase</label>
+          <select id="di-fase" onchange="diToggleFase()" style="padding:9px 12px;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:13px;background:var(--bg);color:var(--text);width:100%;">
+            <option value="extrajudicial" ${!isJud?'selected':''}>Extrajudicial</option>
+            <option value="judicial" ${isJud?'selected':''}>Judicial</option>
+          </select>
+        </div>
+      </div>
+      <div id="di-jud-fields" style="display:${isJud?'':'none'};">
+        <div class="fg-row">
+          <div class="fg">
+            <label>Nº do processo</label>
+            <input type="text" id="di-proc-num" value="${escHtml(d.processoNum||'')}" placeholder="0001234-56.2024.8.16.0060">
+          </div>
+          <div class="fg">
+            <label>Vara / Comarca</label>
+            <input type="text" id="di-vara" value="${escHtml(d.vara||'')}" placeholder="1ª Vara Cível">
+          </div>
+        </div>
+      </div>
+      <div class="fg">
+        <label>Observações</label>
+        <textarea id="di-obs" rows="2" style="resize:vertical;">${escHtml(d.obs||'')}</textarea>
+      </div>
+    </div>`;
+  document.getElementById('di-footer').innerHTML = `
+    <button class="btn btn-ghost" onclick="diStep1()">← Novo documento</button>
+    <button class="btn btn-primary" onclick="diConfirmar()">✓ Cadastrar cobrança</button>`;
+}
+
+function diToggleFase(){
+  const f = document.getElementById('di-fase');
+  const j = document.getElementById('di-jud-fields');
+  if(f && j) j.style.display = f.value==='judicial' ? '' : 'none';
+}
+
+function diConfirmar(){
+  const nome  = (document.getElementById('di-nome')?.value||'').trim();
+  const valor = (document.getElementById('di-valor')?.value||'').trim();
+  if(!nome)  { showToast('Nome do devedor é obrigatório.','warning'); return; }
+  if(!valor) { showToast('Valor original é obrigatório.','warning'); return; }
+
+  const fase  = document.getElementById('di-fase')?.value||'extrajudicial';
+  const isJud = fase==='judicial';
+  const id    = uid();
+
+  const devData = {
+    id, nome,
+    doc:        document.getElementById('di-doc')?.value||'',
+    tel:        document.getElementById('di-tel')?.value||'',
+    email:      document.getElementById('di-email')?.value||'',
+    endereco:   document.getElementById('di-endereco')?.value||'',
+    valorOrig:  valor,
+    valorAtual: valor,
+    vencimento: document.getElementById('di-venc')?.value||'',
+    clienteId:  document.getElementById('di-cliente')?.value||'',
+    fase, etapa: isJud ? 'Petição inicial' : 'Notificação',
+    processoNum: isJud ? (document.getElementById('di-proc-num')?.value||'') : '',
+    vara:        isJud ? (document.getElementById('di-vara')?.value||'')     : '',
+    obs:         document.getElementById('di-obs')?.value||'',
+    status: 'Cobrar', entrada: hoje(), createdAt: hoje(), updatedAt: hoje(),
+    historico:[{ id:uid(), data:hoje(), tipo:'Sistema',
+      texto:'Cadastrado via importação de documento — IA Beatriz.',
+      autor: currentUser?.nome||currentUser?.email||'sistema' }],
+    acordos:[], processoHistorico:[], documentos:[], tags:[]
+  };
+
+  if(!DB.devedores) DB.devedores=[];
+  DB.devedores.push(devData);
+  save();
+  closeModal('modal-doc-import');
+  renderDevedores();
+  setTimeout(()=>openDrawer(id), 350);
+  showToast('Cobrança cadastrada com sucesso via Beatriz!','success');
+  logAtividade('Cadastrou cobrança via documento (Beatriz)', nome, id);
 }
 
 // ── HISTÓRICO ────────────────────────────────────────────────
