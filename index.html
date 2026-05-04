@@ -9,6 +9,8 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous"></script>
 <!-- html-docx-js: converts HTML to .docx (Word) — no SRI, audited 2026-04 -->
 <script src="https://cdn.jsdelivr.net/npm/html-docx-js@0.3.1/dist/html-docx.js" crossorigin="anonymous"></script>
+<!-- html2pdf.js: converts HTML to PDF client-side (used by ZapSign send) -->
+<script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js" crossorigin="anonymous"></script>
 <!-- Supabase JS SDK -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" crossorigin="anonymous"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -3852,6 +3854,30 @@ function openDrawer(devId){
 
   document.getElementById('devDrawer').classList.add('open');
   document.getElementById('devDrawer-overlay').classList.add('open');
+
+  // Auto-verificação silenciosa: atualiza minutas PENDING sem bloquear UI
+  if(DB.config.zapsignToken){
+    const pending = (dev.minutas||[]).filter(m=>m.zapsignToken && m.zapsignStatus==='PENDING');
+    if(pending.length){
+      Promise.all(pending.map(async m=>{
+        try {
+          const doc    = await ZapSignAPI.getDoc(m.zapsignToken);
+          const signer = doc.signers?.[0];
+          const novo   = signer?.status || doc.status || m.zapsignStatus;
+          if(novo !== m.zapsignStatus){
+            m.zapsignStatus = novo;
+            if(novo==='SIGNED' && !m.assinadoEm){
+              m.assinadoEm = signer?.signed_at || new Date().toISOString();
+              if(!dev.historico) dev.historico=[];
+              dev.historico.push({ id:uid(), data:hoje(), tipo:'ZapSign',
+                texto:`Documento "${m.nome}" assinado digitalmente via ZapSign.`, autor:'Sistema' });
+              showToast(`"${m.nome}" foi assinado.`, 'success');
+            }
+          }
+        } catch(_){}
+      })).then(()=>{ save(); });
+    }
+  }
 }
 
 function closeDrawer(){
@@ -3956,12 +3982,10 @@ function renderDrawerBody(devId){
         : acordos.map((ac,ai)=>acordoHtml(ac,ai,devId)).join('')}
     </div>
 
-    <!-- DOCUMENTOS -->
+    <!-- DOCUMENTOS / ASSINATURAS ZAPSIGN -->
     <div id="dtab-docs" class="tab-panel">
-      <div class="empty-state">
-        <div class="empty-state-icon">${ico('folder',36)}</div>
-        <h3>Documentos</h3>
-        <p>Upload de documentos disponível em breve.</p>
+      <div id="dtab-docs-inner">
+        ${zsRenderDrawerDocs(dev)}
       </div>
     </div>
 
@@ -6046,13 +6070,19 @@ function renderDocs(){
   const el = document.getElementById('page-docs');
   if(!el) return;
 
-  // Collect all documents from all devedores
   const allDocs = [];
   (DB.devedores||[]).forEach(d=>{
-    (d.documentos||[]).forEach(doc=>{
-      allDocs.push({...doc, devedorNome: d.nome, devedorId: d.id});
+    (d.documentos||[]).forEach(doc=>{ allDocs.push({...doc, devedorNome:d.nome, devedorId:d.id}); });
+  });
+
+  // Count ZapSign documents
+  const allMinutas = [];
+  (DB.devedores||[]).forEach(d=>{
+    (d.minutas||[]).filter(m=>m.zapsignToken).forEach(m=>{
+      allMinutas.push({...m, devedorNome:d.nome, devedorId:d.id});
     });
   });
+  const pendentes = allMinutas.filter(m=>m.zapsignStatus==='PENDING').length;
 
   const cats = ['Todos','Contrato','Comprovante','Petição','Acordo','Procuração','Notificação','Outros'];
 
@@ -6060,36 +6090,190 @@ function renderDocs(){
     <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:14px;flex-wrap:wrap;gap:10px;">
       <div>
         <div style="font-size:22px;font-weight:700;letter-spacing:-.02em;color:var(--text);">Documentos</div>
-        <div style="font-size:12.5px;color:var(--text-2);margin-top:3px;">${allDocs.length} arquivo${allDocs.length!==1?'s':''} cadastrado${allDocs.length!==1?'s':''}</div>
+        <div style="font-size:12.5px;color:var(--text-2);margin-top:3px;">${allDocs.length} arquivo${allDocs.length!==1?'s':''} · ${allMinutas.length} minuta${allMinutas.length!==1?'s':''} ZapSign</div>
       </div>
     </div>
-    <div style="display:flex;gap:7px;margin-bottom:14px;align-items:center;flex-wrap:wrap;">
-      <div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;min-width:200px;">
-        ${ico('search',13)}
-        <input type="text" id="filtDoc" placeholder="Buscar documento ou devedor…" oninput="filtrarDocs()"
-          style="border:none;outline:none;background:transparent;font-size:12.5px;color:var(--text);flex:1;"/>
-      </div>
-      <select id="filtDocCat" onchange="filtrarDocs()"
-        style="padding:5px 10px;background:var(--surface);border:1px solid var(--border);border-radius:99px;font-size:12px;color:var(--text-2);outline:none;appearance:none;font-family:inherit;cursor:pointer;">
-        ${cats.map(c=>`<option>${c}</option>`).join('')}
-      </select>
+
+    <!-- Sub-tabs -->
+    <div class="tabs" style="margin-bottom:16px;" id="docs-tabs">
+      <button class="tab active" data-dtab="arquivos" onclick="setDocsTab('arquivos',this)">Arquivos</button>
+      <button class="tab" data-dtab="zapsign" onclick="setDocsTab('zapsign',this)">
+        Assinaturas ZapSign${pendentes>0?` <span style="background:var(--warning);color:#fff;font-size:10px;font-weight:700;padding:1px 6px;border-radius:99px;margin-left:4px;">${pendentes}</span>`:''}
+      </button>
     </div>
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;">
-      ${allDocs.length===0
-        ? `<div class="empty-state" style="padding:48px"><div class="empty-state-icon">${ico('folder',36)}</div><div class="empty-state-title">Nenhum documento</div><div class="empty-state-sub">Documentos anexados nas cobranças aparecerão aqui.</div></div>`
-        : `<table style="width:100%;border-collapse:collapse;font-size:12.5px;" id="tblDocs">
-            <thead><tr style="background:var(--surface-2);border-bottom:1px solid var(--border);">
-              <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Arquivo</th>
-              <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Categoria</th>
-              <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Devedor</th>
-              <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Data</th>
-              <th style="padding:9px 14px;width:100px;"></th>
-            </tr></thead>
-            <tbody id="docsTableBody"></tbody>
-          </table>`}
+
+    <!-- Arquivos -->
+    <div id="docs-tab-arquivos">
+      <div style="display:flex;gap:7px;margin-bottom:14px;align-items:center;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;min-width:200px;">
+          ${ico('search',13)}
+          <input type="text" id="filtDoc" placeholder="Buscar documento ou devedor…" oninput="filtrarDocs()"
+            style="border:none;outline:none;background:transparent;font-size:12.5px;color:var(--text);flex:1;"/>
+        </div>
+        <select id="filtDocCat" onchange="filtrarDocs()"
+          style="padding:5px 10px;background:var(--surface);border:1px solid var(--border);border-radius:99px;font-size:12px;color:var(--text-2);outline:none;appearance:none;font-family:inherit;cursor:pointer;">
+          ${cats.map(c=>`<option>${c}</option>`).join('')}
+        </select>
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;" id="docs-arquivos-wrap">
+        ${allDocs.length===0
+          ? `<div class="empty-state" style="padding:48px"><div class="empty-state-icon">${ico('folder',36)}</div><div class="empty-state-title">Nenhum documento</div><div class="empty-state-sub">Documentos anexados nas cobranças aparecerão aqui.</div></div>`
+          : `<table style="width:100%;border-collapse:collapse;font-size:12.5px;" id="tblDocs">
+              <thead><tr style="background:var(--surface-2);border-bottom:1px solid var(--border);">
+                <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Arquivo</th>
+                <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Categoria</th>
+                <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Devedor</th>
+                <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Data</th>
+                <th style="padding:9px 14px;width:100px;"></th>
+              </tr></thead>
+              <tbody id="docsTableBody"></tbody>
+            </table>`}
+      </div>
+    </div>
+
+    <!-- ZapSign -->
+    <div id="docs-tab-zapsign" style="display:none;">
+      <div id="zs-global-panel"></div>
     </div>
   `;
+
   renderDocsTable(allDocs);
+  renderZsGlobal();
+}
+
+function setDocsTab(tab, btn){
+  document.querySelectorAll('#docs-tabs .tab').forEach(t=>t.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+  document.getElementById('docs-tab-arquivos').style.display = tab==='arquivos' ? '' : 'none';
+  document.getElementById('docs-tab-zapsign').style.display  = tab==='zapsign'  ? '' : 'none';
+}
+
+function renderZsGlobal(){
+  const el = document.getElementById('zs-global-panel');
+  if(!el) return;
+
+  const allMinutas = [];
+  (DB.devedores||[]).forEach(d=>{
+    (d.minutas||[]).filter(m=>m.zapsignToken).forEach(m=>{
+      allMinutas.push({...m, devedorNome:d.nome, devedorId:d.id});
+    });
+  });
+
+  if(!allMinutas.length){
+    el.innerHTML = `<div class="empty-state" style="padding:48px;">
+      <div class="empty-state-icon">${ico('file',36)}</div>
+      <h3>Nenhum documento enviado ao ZapSign</h3>
+      <p>Gere uma minuta e envie para assinatura.</p>
+    </div>`;
+    return;
+  }
+
+  // Filter state
+  const filtro = window._zsFiltro || 'todos';
+
+  const counts = {
+    todos: allMinutas.length,
+    PENDING: allMinutas.filter(m=>m.zapsignStatus==='PENDING').length,
+    SIGNED:  allMinutas.filter(m=>m.zapsignStatus==='SIGNED').length,
+    REFUSED: allMinutas.filter(m=>m.zapsignStatus==='REFUSED').length,
+  };
+
+  const filtered = filtro==='todos' ? allMinutas : allMinutas.filter(m=>m.zapsignStatus===filtro);
+  filtered.sort((a,b)=>(b.criadoEm||'').localeCompare(a.criadoEm||''));
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;gap:10px;flex-wrap:wrap;">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        ${[['todos','Todos'],['PENDING','Aguardando'],['SIGNED','Assinados'],['REFUSED','Recusados']].map(([v,l])=>`
+          <button onclick="window._zsFiltro='${v}';renderZsGlobal();"
+            style="padding:5px 12px;border-radius:99px;font-size:12px;font-weight:600;cursor:pointer;border:1.5px solid ${filtro===v?'var(--navy)':'var(--border)'};background:${filtro===v?'var(--navy)':'var(--surface)'};color:${filtro===v?'#fff':'var(--text-2)'};">
+            ${l} <strong>${counts[v]||0}</strong>
+          </button>`).join('')}
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="zsVerificarTodosGlobal()">Atualizar todos</button>
+    </div>
+
+    ${!filtered.length ? `<div style="padding:32px;text-align:center;color:var(--text-3);font-size:13px;">Nenhum documento neste filtro.</div>` :
+    `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;">
+      <table style="width:100%;border-collapse:collapse;font-size:12.5px;">
+        <thead>
+          <tr style="background:var(--surface-2);border-bottom:1px solid var(--border);">
+            <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Documento</th>
+            <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Devedor</th>
+            <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Status</th>
+            <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Enviado</th>
+            <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Assinado</th>
+            <th style="padding:9px 14px;width:160px;"></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${filtered.map((m,i)=>`
+            <tr style="border-bottom:${i<filtered.length-1?'1px solid var(--border)':'none'};"
+              onmouseenter="this.style.background='var(--surface-2)'" onmouseleave="this.style.background=''">
+              <td style="padding:10px 14px;">
+                <div style="font-weight:600;color:var(--text);">${escHtml(m.nome||'Documento')}</div>
+              </td>
+              <td style="padding:10px 14px;">
+                <a href="#" onclick="openDrawer('${m.devedorId}');return false;" style="color:var(--navy);font-weight:500;text-decoration:none;">${escHtml(m.devedorNome||'—')}</a>
+              </td>
+              <td style="padding:10px 14px;">
+                <div style="display:flex;align-items:center;" id="zsg-status-${m.id}">
+                  ${zsStatusDot(m.zapsignStatus)}<span style="color:${zsStatusColor(m.zapsignStatus)};font-weight:600;">${zsStatusLabel(m.zapsignStatus)}</span>
+                </div>
+              </td>
+              <td style="padding:10px 14px;font-size:11.5px;color:var(--text-3);font-family:var(--font-mono);">
+                ${m.criadoEm ? new Date(m.criadoEm).toLocaleDateString('pt-BR') : '—'}
+              </td>
+              <td style="padding:10px 14px;font-size:11.5px;color:${m.assinadoEm?'var(--success)':'var(--text-3)'};font-family:var(--font-mono);">
+                ${m.assinadoEm ? new Date(m.assinadoEm).toLocaleDateString('pt-BR') : '—'}
+              </td>
+              <td style="padding:10px 14px;">
+                <div style="display:flex;gap:4px;justify-content:flex-end;flex-wrap:wrap;">
+                  <button class="btn btn-ghost btn-xs" onclick="zsVerificarStatusGlobal('${m.id}','${m.devedorId}')">Verificar</button>
+                  ${m.zapsignStatus==='PENDING' ? `
+                    <button class="btn btn-ghost btn-xs" onclick="zsReenviarWhatsApp('${m.id}','${m.devedorId}')">WhatsApp</button>
+                    <button class="btn btn-ghost btn-xs" onclick="zsReenviarNotificacao('${m.id}','${m.devedorId}')">ZapSign</button>` : ''}
+                </div>
+              </td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`}`;
+}
+
+// Verifica status a partir do painel global (atualiza linha sem re-render)
+async function zsVerificarStatusGlobal(minutaId, devId){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId);
+  if(!dev) return;
+  const m = (dev.minutas||[]).find(x=>x.id===minutaId);
+  if(!m||!m.zapsignToken) return;
+
+  const el = document.getElementById(`zsg-status-${minutaId}`);
+  if(el) el.innerHTML = `<span style="font-size:11px;color:var(--text-3);">Verificando…</span>`;
+
+  try {
+    const doc    = await ZapSignAPI.getDoc(m.zapsignToken);
+    const signer = doc.signers?.[0];
+    const novo   = signer?.status || doc.status || m.zapsignStatus;
+    const anterior = m.zapsignStatus;
+
+    m.zapsignStatus = novo;
+    if(novo==='SIGNED' && !m.assinadoEm){
+      m.assinadoEm = signer?.signed_at || new Date().toISOString();
+      if(!dev.historico) dev.historico=[];
+      dev.historico.push({ id:uid(), data:hoje(), tipo:'ZapSign',
+        texto:`Documento "${m.nome}" assinado digitalmente via ZapSign.`, autor:'Sistema' });
+    }
+    save();
+    if(el) el.innerHTML = `${zsStatusDot(novo)}<span style="color:${zsStatusColor(novo)};font-weight:600;">${zsStatusLabel(novo)}</span>`;
+    if(novo !== anterior){
+      showToast(`${escHtml(m.nome||'Documento')}: ${zsStatusLabel(novo)}.`, novo==='SIGNED'?'success':'info');
+      renderZsGlobal(); // re-render to update badge counts
+    }
+  } catch(e){
+    if(el) el.innerHTML = `<span style="font-size:11px;color:var(--danger);">Erro</span>`;
+    showToast(traduzirErro(e.message),'danger');
+  }
 }
 
 function renderDocsTable(docs){
@@ -8246,73 +8430,92 @@ async function mv2EnviarZapSign(){
   if(!DB.config.zapsignToken){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
   if(!dev.nome){ showToast('Devedor sem nome.','warning'); return; }
 
-  // Must save the doc first as a temp blob URL or base64
-  // ZapSign accepts base64 PDF content via the 'base64_pdf' field or an external URL
-  // We'll use the 'name' + 'url_pdf' approach with a data URI (ZapSign accepts base64)
-  const htmlBase64 = btoa(unescape(encodeURIComponent(_minuta.htmlDoc)));
-
-  // Open status modal
-  document.getElementById('mzs-body').innerHTML = `<div class="mv2-step-loading" style="height:140px;"><div class="mv2-spinner"></div><p>Enviando para ZapSign…</p></div>`;
+  document.getElementById('mzs-body').innerHTML = `<div class="mv2-step-loading" style="height:140px;"><div class="mv2-spinner"></div><p>Gerando PDF e enviando para ZapSign…</p></div>`;
   document.getElementById('mzs-footer').innerHTML = '';
   openModal('modal-zapsign-status');
 
   try {
+    // Gerar PDF real a partir do HTML via html2pdf.js
+    const pdfDataUri = await new Promise((res, rej) => {
+      if(typeof html2pdf === 'undefined') { rej(new Error('html2pdf não carregado')); return; }
+      const container = document.createElement('div');
+      container.innerHTML = _minuta.htmlDoc;
+      container.style.cssText = 'position:absolute;left:-9999px;top:0;width:210mm;';
+      document.body.appendChild(container);
+      html2pdf().set({
+        margin: 10, filename: 'minuta.pdf',
+        image: { type:'jpeg', quality:0.95 },
+        html2canvas: { scale:2, useCORS:true },
+        jsPDF: { unit:'mm', format:'a4', orientation:'portrait' }
+      }).from(container).outputPdf('datauristring').then(uri=>{
+        document.body.removeChild(container);
+        res(uri);
+      }).catch(e=>{ document.body.removeChild(container); rej(e); });
+    });
+
+    const base64Pdf = pdfDataUri.split(',')[1];
+    const nomeDoc   = `${tipo.nome} — ${dev.nome} — ${new Date().toLocaleDateString('pt-BR')}`;
+
     const payload = {
-      name: `${tipo.nome} — ${dev.nome} — ${new Date().toLocaleDateString('pt-BR')}`,
-      signers: [
-        {
-          name: dev.nome,
-          email: dev.email||'',
-          phone_country: '55',
-          phone_number: dev.tel?dev.tel.replace(/\D/g,''):'',
-          send_automatic_email: !!dev.email,
-          send_automatic_whatsapp: !!dev.tel,
-          auth_mode: 'assinaturaTela',
-        }
-      ],
-      base64_pdf: htmlBase64,
+      name: nomeDoc,
+      signers: [{
+        name: dev.nome,
+        email: dev.email||'',
+        phone_country: '55',
+        phone_number: dev.tel ? dev.tel.replace(/\D/g,'') : '',
+        send_automatic_email: !!dev.email,
+        send_automatic_whatsapp: !!dev.tel,
+        auth_mode: 'assinaturaTela',
+      }],
+      base64_pdf: base64Pdf,
       lang: 'pt-br',
     };
 
-    const result = await ZapSignAPI.createDoc(payload);
+    const result      = await ZapSignAPI.createDoc(payload);
     const signerToken = result.signers?.[0]?.token;
-    const signLink = result.signers?.[0]?.sign_url || `https://app.zapsign.com.br/verificar/${signerToken}`;
-    const docToken = result.token;
+    const signerLink  = result.signers?.[0]?.sign_url || `https://app.zapsign.com.br/verificar/${signerToken}`;
+    const docToken    = result.token;
 
-    // Save to devedor
     if(!dev.minutas) dev.minutas = [];
-    dev.minutas.push({
-      id: uid(), tipo: _minuta.tipo, nome: payload.name,
-      zapsignToken: docToken, zapsignStatus: 'PENDING',
-      signLink, criadoEm: new Date().toISOString()
-    });
+    const minuta = {
+      id: uid(), tipo: _minuta.tipo, nome: nomeDoc,
+      zapsignToken: docToken, signerToken,
+      zapsignStatus: 'PENDING', signLink: signerLink,
+      criadoEm: new Date().toISOString(), assinadoEm: null
+    };
+    dev.minutas.push(minuta);
     save();
     logAtividade('Enviou minuta para ZapSign', `${tipo.nome} — ${dev.nome}`, dev.id);
 
     document.getElementById('mzs-body').innerHTML = `
-      <div style="text-align:center;padding:10px 0 16px;">
-        <div style="font-size:36px;margin-bottom:10px;">✅</div>
-        <h3 style="color:var(--success);margin-bottom:8px;">Documento enviado!</h3>
-        <p style="font-size:13px;color:var(--text-2);margin-bottom:16px;">Link de assinatura gerado para <strong>${escHtml(dev.nome)}</strong>.</p>
-      </div>
-      <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:12px;margin-bottom:12px;">
-        <div style="font-size:11px;color:var(--text-3);margin-bottom:6px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;">Link de assinatura</div>
-        <div style="display:flex;gap:6px;align-items:center;">
-          <input type="text" value="${escHtml(signLink)}" readonly style="flex:1;font-size:11.5px;padding:6px 8px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);" onclick="this.select()">
-          <button class="btn btn-primary btn-sm" onclick="navigator.clipboard.writeText('${escHtml(signLink)}');showToast('Link copiado!','success');">Copiar</button>
+      <div style="padding:16px 0 20px;">
+        <div style="font-size:13px;font-weight:700;color:var(--success);margin-bottom:4px;">Documento enviado com sucesso.</div>
+        <div style="font-size:12.5px;color:var(--text-2);margin-bottom:18px;">Link de assinatura gerado para <strong>${escHtml(dev.nome)}</strong>.</div>
+        <div style="background:var(--surface-2);border-radius:var(--radius-sm);padding:12px;margin-bottom:12px;">
+          <div style="font-size:11px;color:var(--text-3);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;">Link de assinatura</div>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <input type="text" value="${escHtml(signerLink)}" readonly
+              style="flex:1;font-size:11.5px;padding:6px 8px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);font-family:var(--font-mono);"
+              onclick="this.select()">
+            <button class="btn btn-primary btn-sm" onclick="navigator.clipboard.writeText('${escHtml(signerLink)}');showToast('Link copiado.','success');">Copiar</button>
+          </div>
         </div>
-      </div>
-      ${dev.tel&&DB.config.zapiInstanceId?`
-        <button class="btn btn-ghost btn-sm" style="width:100%;" onclick="mv2EnviarLinkWhatsApp('${escHtml(signLink)}')">
-          💬 Enviar link via WhatsApp
-        </button>`:''}
-    `;
+        ${dev.tel && DB.config.zapiInstanceId ? `
+          <button class="btn btn-ghost btn-sm" style="width:100%;" onclick="mv2EnviarLinkWhatsApp('${escHtml(signerLink)}')">
+            Enviar link via WhatsApp
+          </button>` : ''}
+      </div>`;
     document.getElementById('mzs-footer').innerHTML = `
       <button class="btn btn-ghost" onclick="closeModal('modal-zapsign-status')">Fechar</button>
-      <button class="btn btn-ghost btn-sm" onclick="window.open('${escHtml(signLink)}','_blank')">↗ Abrir link</button>
-    `;
+      <button class="btn btn-ghost btn-sm" onclick="window.open('${escHtml(signerLink)}','_blank')">Abrir link ↗</button>`;
+
   } catch(e){
-    document.getElementById('mzs-body').innerHTML = `<div class="empty-state" style="padding:30px;"><div class="empty-state-icon">${ico('warning',36)}</div><h3>Erro ao enviar</h3><p style="color:var(--danger);">${escHtml(traduzirErro(e.message))}</p></div>`;
+    document.getElementById('mzs-body').innerHTML = `
+      <div class="empty-state" style="padding:30px;">
+        <div class="empty-state-icon">${ico('warning',36)}</div>
+        <h3>Erro ao enviar</h3>
+        <p style="color:var(--danger);">${escHtml(traduzirErro(e.message))}</p>
+      </div>`;
     document.getElementById('mzs-footer').innerHTML = `<button class="btn btn-ghost" onclick="closeModal('modal-zapsign-status')">Fechar</button>`;
   }
 }
@@ -8323,10 +8526,10 @@ async function mv2EnviarLinkWhatsApp(link){
   const tel = dev.tel?.replace(/\D/g,'');
   if(!tel){ showToast('Devedor sem telefone.','warning'); return; }
   try {
-    const msg = `Olá ${dev.nome||''}!\n\nEnviamos o documento *${tipo?.nome||''}* para assinatura digital.\n\nClique no link abaixo para assinar:\n${link}\n\nCOBRASQ — Recuperadora de Crédito`;
+    const msg = `${dev.nome||''}, segue o link para assinatura do documento *${tipo?.nome||''}*:\n${link}\n\nCOBRASQ — Recuperadora de Crédito`;
     await ZApiAPI.sendLink(tel, msg, link, `COBRASQ — ${tipo?.nome||'Documento'}`);
     logAtividade('Enviou link ZapSign via WhatsApp', `${tipo?.nome} — ${dev.nome}`, dev.id);
-    showToast('Link enviado via WhatsApp!','success');
+    showToast('Link enviado via WhatsApp.','success');
   } catch(e){ showToast(traduzirErro(e.message),'danger'); }
 }
 
@@ -8452,9 +8655,170 @@ const ZapSignAPI = {
     if(!r.ok) throw new Error(json?.detail || json?.message || `Erro ${r.status}`);
     return json;
   },
-  createDoc(payload){ return this.req('POST','/docs/',payload); },
-  getDoc(token){ return this.req('GET',`/docs/${token}/`); },
+  createDoc(payload)      { return this.req('POST','/docs/',payload); },
+  getDoc(token)           { return this.req('GET',`/docs/${token}/`); },
+  resendSigner(signerTok) { return this.req('POST',`/signers/${signerTok}/send-reminder/`,{}); },
 };
+
+// ── ZapSign helpers ───────────────────────────────────────────
+function zsStatusLabel(s){
+  return { PENDING:'Aguardando assinatura', SIGNED:'Assinado', REFUSED:'Recusado',
+           EXPIRED:'Expirado', CANCELLED:'Cancelado' }[s] || s || '—';
+}
+function zsStatusColor(s){
+  return { PENDING:'var(--warning)', SIGNED:'var(--success)', REFUSED:'var(--danger)',
+           EXPIRED:'var(--text-3)', CANCELLED:'var(--text-3)' }[s] || 'var(--text-3)';
+}
+function zsStatusDot(s){
+  return `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${zsStatusColor(s)};margin-right:6px;flex-shrink:0;"></span>`;
+}
+
+// Renderiza aba Documentos/ZapSign no drawer
+function zsRenderDrawerDocs(dev){
+  const minutas = (dev.minutas||[]).filter(m=>m.zapsignToken);
+  if(!minutas.length) return `
+    <div class="empty-state" style="padding:40px 16px;">
+      <div class="empty-state-icon">${ico('file',36)}</div>
+      <h3>Sem documentos enviados</h3>
+      <p>Gere uma minuta e envie pelo ZapSign para que ela apareça aqui.</p>
+      <button class="btn btn-ghost btn-sm" style="margin-top:12px;" onclick="abrirGerarMinuta('${dev.id}')">Gerar minuta</button>
+    </div>`;
+
+  return `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <div style="font-size:12px;color:var(--text-3);">${minutas.length} documento${minutas.length!==1?'s':''} enviado${minutas.length!==1?'s':''}</div>
+      <button class="btn btn-ghost btn-sm" onclick="zsVerificarTodosDev('${dev.id}')">Atualizar todos</button>
+    </div>
+    ${minutas.slice().reverse().map(m=>`
+      <div style="border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:10px;background:var(--surface);">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px;">
+          <div style="font-size:13px;font-weight:600;color:var(--text);line-height:1.3;">${escHtml(m.nome||'Documento')}</div>
+          <div id="zs-status-${m.id}" style="display:flex;align-items:center;white-space:nowrap;font-size:12px;font-weight:600;color:${zsStatusColor(m.zapsignStatus)};">
+            ${zsStatusDot(m.zapsignStatus)}${zsStatusLabel(m.zapsignStatus)}
+          </div>
+        </div>
+        <div style="font-size:11.5px;color:var(--text-3);margin-bottom:10px;">
+          Enviado em ${m.criadoEm ? new Date(m.criadoEm).toLocaleDateString('pt-BR') : '—'}
+          ${m.assinadoEm ? ` · Assinado em ${new Date(m.assinadoEm).toLocaleDateString('pt-BR')}` : ''}
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button class="btn btn-ghost btn-sm" onclick="zsVerificarStatus('${m.id}','${dev.id}')">Verificar status</button>
+          ${m.zapsignStatus==='PENDING' ? `
+            <button class="btn btn-ghost btn-sm" onclick="zsReenviarWhatsApp('${m.id}','${dev.id}')">Reenviar por WhatsApp</button>
+            <button class="btn btn-ghost btn-sm" onclick="zsReenviarNotificacao('${m.id}','${dev.id}')">Reenviar pelo ZapSign</button>` : ''}
+          ${m.signLink ? `<button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText('${escHtml(m.signLink)}');showToast('Link copiado.','success');">Copiar link</button>` : ''}
+        </div>
+      </div>`).join('')}`;
+}
+
+// Verifica status de um documento específico
+async function zsVerificarStatus(minutaId, devId){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId);
+  if(!dev) return;
+  const m = (dev.minutas||[]).find(x=>x.id===minutaId);
+  if(!m||!m.zapsignToken) return;
+
+  const elStatus = document.getElementById(`zs-status-${minutaId}`);
+  if(elStatus) elStatus.innerHTML = `<span style="font-size:11px;color:var(--text-3);">Verificando…</span>`;
+
+  try {
+    const doc    = await ZapSignAPI.getDoc(m.zapsignToken);
+    const signer = doc.signers?.[0];
+    const novoStatus = signer?.status || doc.status || m.zapsignStatus;
+    const statusAnterior = m.zapsignStatus;
+
+    m.zapsignStatus = novoStatus;
+    if(novoStatus === 'SIGNED' && !m.assinadoEm){
+      m.assinadoEm = signer?.signed_at || new Date().toISOString();
+      if(!dev.historico) dev.historico = [];
+      dev.historico.push({
+        id: uid(), data: hoje(), tipo: 'ZapSign',
+        texto: `Documento "${m.nome}" assinado digitalmente via ZapSign.`,
+        autor: 'Sistema'
+      });
+    }
+    save();
+
+    if(elStatus){
+      elStatus.innerHTML = `${zsStatusDot(novoStatus)}<span style="color:${zsStatusColor(novoStatus)};font-weight:600;">${zsStatusLabel(novoStatus)}</span>`;
+    }
+    if(novoStatus !== statusAnterior){
+      showToast(`Status atualizado: ${zsStatusLabel(novoStatus)}.`, novoStatus==='SIGNED'?'success':'info');
+    }
+  } catch(e){
+    if(elStatus) elStatus.innerHTML = `<span style="font-size:11px;color:var(--danger);">Erro ao verificar</span>`;
+    showToast(traduzirErro(e.message),'danger');
+  }
+}
+
+// Verifica todos os documentos PENDING de um devedor
+async function zsVerificarTodosDev(devId){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId);
+  if(!dev) return;
+  const pending = (dev.minutas||[]).filter(m=>m.zapsignToken && m.zapsignStatus==='PENDING');
+  if(!pending.length){ showToast('Nenhum documento pendente.','info'); return; }
+  for(const m of pending) await zsVerificarStatus(m.id, devId);
+}
+
+// Verifica todos os documentos PENDING de todos os devedores (painel global)
+async function zsVerificarTodosGlobal(){
+  const devedores = DB.devedores||[];
+  let total = 0, atualizados = 0;
+  for(const dev of devedores){
+    const pending = (dev.minutas||[]).filter(m=>m.zapsignToken && m.zapsignStatus==='PENDING');
+    for(const m of pending){
+      total++;
+      try {
+        const doc = await ZapSignAPI.getDoc(m.zapsignToken);
+        const signer = doc.signers?.[0];
+        const novo = signer?.status || doc.status || m.zapsignStatus;
+        if(novo !== m.zapsignStatus){
+          m.zapsignStatus = novo;
+          if(novo==='SIGNED' && !m.assinadoEm){
+            m.assinadoEm = signer?.signed_at || new Date().toISOString();
+            if(!dev.historico) dev.historico=[];
+            dev.historico.push({ id:uid(), data:hoje(), tipo:'ZapSign',
+              texto:`Documento "${m.nome}" assinado digitalmente via ZapSign.`, autor:'Sistema' });
+          }
+          atualizados++;
+        }
+      } catch(_){}
+    }
+  }
+  save();
+  showToast(`Verificados ${total} documento${total!==1?'s':''}${atualizados>0?`. ${atualizados} atualizado${atualizados!==1?'s':''}`:''}. Nenhuma mudança.`,'success');
+  renderZsGlobal();
+}
+
+// Reenviar link de assinatura via WhatsApp (Z-API)
+async function zsReenviarWhatsApp(minutaId, devId){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId);
+  if(!dev) return;
+  const m = (dev.minutas||[]).find(x=>x.id===minutaId);
+  if(!m||!m.signLink){ showToast('Link de assinatura não disponível.','warning'); return; }
+  if(!dev.tel){ showToast('Devedor sem telefone cadastrado.','warning'); return; }
+  if(!DB.config.zapiInstanceId){ showToast('Z-Api não configurado em Integrações.','warning'); return; }
+  try {
+    const tel = dev.tel.replace(/\D/g,'');
+    const msg = `${dev.nome}, segue o link para assinatura do documento:\n${m.signLink}\n\nCOBRASQ — Recuperadora de Crédito`;
+    await ZApiAPI.sendLink(tel, msg, m.signLink, 'COBRASQ — Assinatura de Documento');
+    logAtividade('Reenvio de link ZapSign via WhatsApp', m.nome, devId);
+    showToast('Link reenviado via WhatsApp.','success');
+  } catch(e){ showToast(traduzirErro(e.message),'danger'); }
+}
+
+// Reenviar notificação pelo ZapSign nativo
+async function zsReenviarNotificacao(minutaId, devId){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId);
+  if(!dev) return;
+  const m = (dev.minutas||[]).find(x=>x.id===minutaId);
+  if(!m?.signerToken){ showToast('Token do signatário não disponível.','warning'); return; }
+  try {
+    await ZapSignAPI.resendSigner(m.signerToken);
+    logAtividade('Reenvio de notificação ZapSign', m.nome, devId);
+    showToast('Notificação reenviada pelo ZapSign.','success');
+  } catch(e){ showToast(traduzirErro(e.message),'danger'); }
+}
 
 // ── Z-Api ─────────────────────────────────────────────────────
 const ZApiAPI = {
@@ -8564,6 +8928,20 @@ function getAlertas(){
       });
     });
   });
+
+  // Documentos ZapSign pendentes há mais de 7 dias
+  if(DB.config.zapsignToken){
+    const limite7d = new Date(); limite7d.setDate(limite7d.getDate()-7);
+    const velhosP = [];
+    (DB.devedores||[]).forEach(d=>{
+      (d.minutas||[]).filter(m=>m.zapsignToken && m.zapsignStatus==='PENDING' && m.criadoEm && new Date(m.criadoEm) < limite7d).forEach(m=>{
+        velhosP.push({ nome: m.nome, devNome: d.nome });
+      });
+    });
+    if(velhosP.length > 0){
+      alerts.push({ tipo:'warning', msg:`${velhosP.length} documento${velhosP.length!==1?'s':''} aguardando assinatura há mais de 7 dias — acesse Documentos → Assinaturas ZapSign.` });
+    }
+  }
 
   // Meta mensal: se atingiu 80%, mostrar alerta positivo
   const meta = DB.config.metaMensal || 40000;
