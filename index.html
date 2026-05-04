@@ -1215,6 +1215,7 @@ img{max-width:100%}
       <div class="cp-nav-item" data-cppage="carteira"><span class="cp-nav-icon"></span>Minha Carteira</div>
       <div class="cp-nav-item" data-cppage="comprovantes"><span class="cp-nav-icon"></span>Comprovantes</div>
       <div class="cp-nav-item" data-cppage="nova-cobranca"><span class="cp-nav-icon">+</span>Nova Cobrança</div>
+      <div class="cp-nav-item" data-cppage="solicitacoes"><span class="cp-nav-icon" id="cp-nav-sol-icon">📋</span>Minhas Solicitações</div>
       <div class="cp-nav-item" data-cppage="config"><span class="cp-nav-icon"></span>Configurações</div>
     </nav>
     <div class="cp-sidebar-footer">
@@ -3530,8 +3531,13 @@ function renderDevedores(){
   const clientes = DB.clientes || [];
   const colabs = (DB.config.colaboradores||[]).concat(DB.config.usuarios||[]);
 
+  // Pending approvals (cedente submissions)
+  const pendentes = devs.filter(d=>d.status==='Pendente aprovação'||d.status==='pendente_ajuste');
+
   let list = devs.filter(d=>{
     if(d.arquivado) return false;
+    // Hide pending-approval items from main list
+    if(d.status==='Pendente aprovação'||d.status==='pendente_ajuste') return false;
     const q = devFilter.q.toLowerCase();
     if(q && !(d.nome||'').toLowerCase().includes(q) && !(d.doc||'').includes(q)) return false;
     if(devFilter.statuses.length && !devFilter.statuses.includes(d.status)) return false;
@@ -3576,6 +3582,62 @@ function renderDevedores(){
         <button class="btn btn-primary btn-sm" onclick="abrirNovoDevedor()">${ico('plus',13)} Nova Cobrança</button>
       </div>
     </div>
+
+    <!-- APROVAÇÕES PENDENTES (cedentes) -->
+    ${pendentes.length ? `
+    <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:10px;padding:14px 18px;margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+        <span style="font-size:16px;">🔔</span>
+        <div style="flex:1;">
+          <div style="font-weight:700;color:#92400e;font-size:13.5px;">
+            ${pendentes.length} solicitaç${pendentes.length>1?'ões':'ão'} aguardando aprovação
+          </div>
+          <div style="font-size:12px;color:#a16207;margin-top:1px;">Enviada${pendentes.length>1?'s':''} pelos cedentes via Portal</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" style="color:#92400e;border-color:#fcd34d;font-size:12px;"
+          onclick="this.closest('div[style]').querySelector('table').closest('div').style.display=this.closest('div[style]').querySelector('table').closest('div').style.display==='none'?'':'none'">
+          ▾ Ver todas
+        </button>
+      </div>
+      <div>
+        <table class="tbl" style="font-size:12.5px;">
+          <thead><tr style="background:rgba(252,211,77,.15);">
+            <th>Devedor</th><th>Valor</th><th>Cedente</th><th>Enviado</th><th>Status</th><th style="text-align:right;">Ações</th>
+          </tr></thead>
+          <tbody>
+            ${pendentes.map(d=>{
+              const ajuste = d.status==='pendente_ajuste';
+              return `<tr style="background:${ajuste?'#fef2f2':'#fff'};">
+                <td>
+                  <div style="font-weight:600;">${escHtml(d.nome)}</div>
+                  <div style="font-size:11px;color:var(--text-3);">${escHtml(d.doc||'—')}</div>
+                </td>
+                <td style="font-family:var(--font-mono);font-weight:700;">${fmtR(parseValorBR(d.valorOrig)||0)}</td>
+                <td style="font-size:12px;color:var(--text-2);">${escHtml(d.submissaoCedenteNome||'—')}</td>
+                <td style="font-size:11.5px;color:var(--text-3);">${escHtml(d.submissaoData||'—')}</td>
+                <td><span style="padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;
+                  background:${ajuste?'#fef2f2':'#fffbeb'};color:${ajuste?'#dc2626':'#d97706'};
+                  border:1px solid ${ajuste?'#fca5a5':'#fcd34d'};">
+                  ${ajuste?'Ajuste solicitado':'Aguardando'}
+                </span></td>
+                <td style="text-align:right;">
+                  <div style="display:flex;gap:4px;justify-content:flex-end;">
+                    <button class="btn btn-ghost btn-xs" style="color:var(--navy);" title="Ver detalhes"
+                      onclick="openDrawer('${d.id}')">Ver</button>
+                    <button class="btn btn-xs" style="background:#16a34a;color:#fff;border:none;" title="Aprovar"
+                      onclick="aprovaCedenteSubmissao('${d.id}')">✓ Aprovar</button>
+                    <button class="btn btn-ghost btn-xs" style="color:#d97706;border-color:#fcd34d;" title="Editar e aprovar"
+                      onclick="editarAprovarCedente('${d.id}')">✏️ Editar</button>
+                    <button class="btn btn-ghost btn-xs" style="color:#dc2626;" title="Solicitar ajuste"
+                      onclick="solicitarAjusteCedente('${d.id}')">↩ Ajuste</button>
+                  </div>
+                </td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>` : ''}
 
     <!-- FILTER CHIPS -->
     <div style="display:flex;gap:7px;margin-bottom:14px;align-items:center;flex-wrap:wrap;position:relative;">
@@ -4615,6 +4677,41 @@ function removeMdevTag(i){
   renderMdevTags();
 }
 
+function excluirDevedor(id){
+  confirmDel(()=>{
+    DB.devedores = (DB.devedores||[]).filter(d=>d.id!==id);
+    save();
+    closeDrawer();
+    renderDevedores();
+  }, 'Excluir este devedor? Esta ação não pode ser desfeita.');
+}
+
+// ── MAKER/CHECKER: APROVAÇÃO DE SUBMISSÕES DOS CEDENTES ─────────
+
+function aprovaCedenteSubmissao(id){
+  const d = (DB.devedores||[]).find(x=>x.id===id);
+  if(!d) return;
+  d.status   = 'Cobrar';
+  d.revisaoNota = null;
+  d.updatedAt   = hoje();
+  d.historico   = d.historico||[];
+  d.historico.push({ id:uid(), data:hoje(), tipo:'Sistema',
+    texto:`Cobrança aprovada pelo gestor ${currentUser?.nome||''}. Cadastro ativado.`,
+    autor: currentUser?.nome||currentUser?.email||'sistema' });
+  save();
+  renderDevedores();
+  showToast(`Cobrança de ${d.nome} aprovada e ativada.`, 'success');
+  logAtividade('Aprovou submissão do cedente', d.nome, id);
+}
+
+function editarAprovarCedente(id){
+  // Opens the edit modal; on save, status is preserved — gestor manually approves after editing
+  editDevedor(id);
+  // Override save button to also set status=Cobrar
+  const origSalvar = window._editarAprovarPendingId;
+  window._editarAprovarPendingId = id;
+}
+
 function salvarDevedor(){
   const nome = (document.getElementById('mdev-nome').value||'').trim();
   const valorOrig = (document.getElementById('mdev-valor-orig').value||'').trim();
@@ -4627,6 +4724,7 @@ function salvarDevedor(){
 
   const id = document.getElementById('mdev-id').value;
   const existingDev = id ? (DB.devedores||[]).find(d=>d.id===id) : null;
+  const isPending = existingDev && (existingDev.status==='Pendente aprovação'||existingDev.status==='pendente_ajuste');
 
   const devData = {
     id: id || uid(),
@@ -4637,7 +4735,7 @@ function salvarDevedor(){
     endereco: document.getElementById('mdev-end').value||'',
     loginNascimento: document.getElementById('mdev-nasc').value||'',
     titulo: document.getElementById('mdev-titulo').value||'',
-    status: document.getElementById('mdev-status').value||'Cobrar',
+    status: isPending ? 'Cobrar' : (document.getElementById('mdev-status').value||'Cobrar'),
     valorOrig: document.getElementById('mdev-valor-orig').value||'',
     valorAtual: document.getElementById('mdev-valor-atual').value||document.getElementById('mdev-valor-orig').value||'',
     vencimento: document.getElementById('mdev-vencimento').value||'',
@@ -4653,9 +4751,18 @@ function salvarDevedor(){
     acordos: existingDev ? existingDev.acordos||[] : [],
     processoHistorico: existingDev ? existingDev.processoHistorico||[] : [],
     documentos: existingDev ? existingDev.documentos||[] : [],
+    submissaoCedenteNome: existingDev?.submissaoCedenteNome||null,
+    submissaoData: existingDev?.submissaoData||null,
+    revisaoNota: isPending ? null : (existingDev?.revisaoNota||null),
     createdAt: existingDev ? existingDev.createdAt : hoje(),
     updatedAt: hoje()
   };
+
+  if(isPending){
+    devData.historico.push({ id:uid(), data:hoje(), tipo:'Sistema',
+      texto:`Cadastro editado e aprovado pelo gestor ${currentUser?.nome||''}.`,
+      autor: currentUser?.nome||currentUser?.email||'sistema' });
+  }
 
   if(!DB.devedores) DB.devedores = [];
   if(id){
@@ -4669,25 +4776,46 @@ function salvarDevedor(){
   closeModal('modal-devedor');
   renderDevedores();
   if(currentDevId === id) renderDrawerBody(id);
+  if(isPending) showToast(`Cobrança de ${nome} editada e aprovada.`,'success');
 }
 
-function excluirDevedor(id){
-  confirmDel(()=>{
-    DB.devedores = (DB.devedores||[]).filter(d=>d.id!==id);
+function solicitarAjusteCedente(id){
+  const d = (DB.devedores||[]).find(x=>x.id===id);
+  if(!d) return;
+  promptModal('Solicitar ajuste ao cedente', 'Descreva o que precisa ser corrigido:', (nota)=>{
+    if(!nota) return;
+    d.status = 'pendente_ajuste';
+    d.revisaoNota = nota;
+    d.updatedAt = hoje();
+    d.historico = d.historico||[];
+    d.historico.push({ id:uid(), data:hoje(), tipo:'Sistema',
+      texto:`Gestor ${currentUser?.nome||''} solicitou ajuste: "${nota}"`,
+      autor: currentUser?.nome||currentUser?.email||'sistema' });
     save();
-    closeDrawer();
     renderDevedores();
-  }, 'Excluir este devedor? Esta ação não pode ser desfeita.');
+    showToast('Solicitação de ajuste registrada. Cedente verá a nota em "Minhas Solicitações".','warning');
+    logAtividade('Solicitou ajuste na submissão do cedente', d.nome, id);
+  }, { hint:'Ex: "CPF incorreto. O valor informado não confere com o contrato."' });
 }
 
 // ── FEATURE 8.3: IMPORTAR COBRANÇA VIA DOCUMENTO (BEATRIZ IA) ───
 
 let _diFile = null;
 let _diExtracted = null;
+let _diIsCedente = false;
 
 function abrirDocImport(){
   _diFile = null;
   _diExtracted = null;
+  _diIsCedente = false;
+  openModal('modal-doc-import');
+  diStep1();
+}
+
+function abrirDocImportCedente(){
+  _diFile = null;
+  _diExtracted = null;
+  _diIsCedente = true;
   openModal('modal-doc-import');
   diStep1();
 }
@@ -5029,7 +5157,9 @@ function diStep3(d){
     </div>`;
   document.getElementById('di-footer').innerHTML = `
     <button class="btn btn-ghost" onclick="diStep1()">← Novo documento</button>
-    <button class="btn btn-primary" onclick="diConfirmar()">✓ Cadastrar cobrança</button>`;
+    <button class="btn btn-primary" onclick="diConfirmar()">
+      ${_diIsCedente ? '📤 Enviar para aprovação' : '✓ Cadastrar cobrança'}
+    </button>`;
 }
 
 function diToggleFase(){
@@ -5047,6 +5177,12 @@ function diConfirmar(){
   const fase  = document.getElementById('di-fase')?.value||'extrajudicial';
   const isJud = fase==='judicial';
   const id    = uid();
+  const isCed = _diIsCedente;
+
+  // clienteId: cedente usa o próprio id; gestor usa o select
+  const clienteId = isCed
+    ? (currentUser?.clienteId||'')
+    : (document.getElementById('di-cliente')?.value||'');
 
   const devData = {
     id, nome,
@@ -5057,14 +5193,22 @@ function diConfirmar(){
     valorOrig:  valor,
     valorAtual: valor,
     vencimento: document.getElementById('di-venc')?.value||'',
-    clienteId:  document.getElementById('di-cliente')?.value||'',
+    clienteId,
     fase, etapa: isJud ? 'Petição inicial' : 'Notificação',
     processoNum: isJud ? (document.getElementById('di-proc-num')?.value||'') : '',
     vara:        isJud ? (document.getElementById('di-vara')?.value||'')     : '',
     obs:         document.getElementById('di-obs')?.value||'',
-    status: 'Cobrar', entrada: hoje(), createdAt: hoje(), updatedAt: hoje(),
+    // cedente → pendente aprovação; gestor → ativo direto
+    status: isCed ? 'Pendente aprovação' : 'Cobrar',
+    // campo extra para rastrear submissão do cedente
+    submissaoCedenteNome: isCed ? (currentUser?.nome||currentUser?.email||'cedente') : null,
+    submissaoData: isCed ? hoje() : null,
+    revisaoNota: null,
+    entrada: hoje(), createdAt: hoje(), updatedAt: hoje(),
     historico:[{ id:uid(), data:hoje(), tipo:'Sistema',
-      texto:'Cadastrado via importação de documento — IA Beatriz.',
+      texto: isCed
+        ? `Cobrança enviada via documento (IA Beatriz) pelo cedente ${currentUser?.nome||''} — aguardando aprovação do gestor.`
+        : 'Cadastrado via importação de documento — IA Beatriz.',
       autor: currentUser?.nome||currentUser?.email||'sistema' }],
     acordos:[], processoHistorico:[], documentos:[], tags:[]
   };
@@ -5073,10 +5217,17 @@ function diConfirmar(){
   DB.devedores.push(devData);
   save();
   closeModal('modal-doc-import');
-  renderDevedores();
-  setTimeout(()=>openDrawer(id), 350);
-  showToast('Cobrança cadastrada com sucesso via Beatriz!','success');
-  logAtividade('Cadastrou cobrança via documento (Beatriz)', nome, id);
+
+  if(isCed){
+    // Volta para a aba de solicitações do cedente
+    cpNavigate('solicitacoes');
+    showToast('Solicitação enviada! O gestor será notificado para análise.','success');
+  } else {
+    renderDevedores();
+    setTimeout(()=>openDrawer(id), 350);
+    showToast('Cobrança cadastrada com sucesso via Beatriz!','success');
+    logAtividade('Cadastrou cobrança via documento (Beatriz)', nome, id);
+  }
 }
 
 // ── HISTÓRICO ────────────────────────────────────────────────
@@ -5561,6 +5712,7 @@ function cpNavigate(page){
   else if(page==='carteira') cpRenderCarteira(body);
   else if(page==='comprovantes') cpRenderComprovantes(body);
   else if(page==='nova-cobranca') cpRenderNovaCobranca(body);
+  else if(page==='solicitacoes') cpRenderSolicitacoes(body);
   else if(page==='config') cpRenderConfig(body);
 }
 
@@ -5852,9 +6004,16 @@ function cpFiltrarComps(status, btn){
 function cpRenderNovaCobranca(body){
   body.innerHTML = `
     <div class="panel">
-      <div class="panel-hdr"><span class="panel-title">Solicitar Nova Cobrança</span></div>
+      <div class="panel-hdr" style="display:flex;align-items:center;justify-content:space-between;">
+        <span class="panel-title">Solicitar Nova Cobrança</span>
+        <button class="btn btn-ghost btn-sm" onclick="abrirDocImportCedente()"
+          style="display:flex;align-items:center;gap:6px;border-color:var(--navy);color:var(--navy);">
+          <span style="font-size:13px;color:var(--gold);font-weight:700;">✦</span> Via Documento (Beatriz IA)
+        </button>
+      </div>
       <div style="padding:4px 0 16px;font-size:13px;color:var(--text-2);">
-        Preencha os dados abaixo. A cobrança será <strong>analisada e aprovada</strong> pela equipe COBRASQ antes de ser ativada.
+        Preencha os dados abaixo ou use o botão <strong>✦ Via Documento</strong> para importar automaticamente via IA.
+        A cobrança será <strong>analisada e aprovada</strong> pela equipe COBRASQ antes de ser ativada.
       </div>
       <div class="fg-row">
         <div class="fg"><label>Nome do Devedor *</label><input type="text" id="cpnc-nome" placeholder="Nome completo ou razão social"></div>
@@ -5905,6 +6064,99 @@ function cpSubmitNovaCobranca(){
   save();
   alert('Solicitação enviada! A equipe COBRASQ irá analisar e ativar a cobrança em breve.');
   cpNavigate('carteira');
+}
+
+function cpRenderSolicitacoes(body){
+  const clienteId = currentUser?.clienteId||'';
+  const sols = (DB.devedores||[])
+    .filter(d => d.clienteId===clienteId && d.submissaoData)
+    .sort((a,b)=>(b.submissaoData||'').localeCompare(a.submissaoData||''));
+
+  const statusCfg = {
+    'Pendente aprovação': { color:'#d97706', bg:'#fffbeb', label:'Aguardando gestor' },
+    'pendente_ajuste':    { color:'#dc2626', bg:'#fef2f2', label:'Ajuste solicitado' },
+    'Cobrar':             { color:'#16a34a', bg:'#f0fdf4', label:'Aprovada ✓' },
+    'Quitado':            { color:'#16a34a', bg:'#f0fdf4', label:'Quitada ✓' },
+  };
+
+  body.innerHTML = `
+    <div class="panel">
+      <div class="panel-hdr" style="display:flex;align-items:center;justify-content:space-between;">
+        <span class="panel-title">Minhas Solicitações</span>
+        <button class="btn btn-ghost btn-sm" onclick="cpNavigate('nova-cobranca')" style="color:var(--navy);">+ Nova solicitação</button>
+      </div>
+      ${!sols.length ? `
+        <div class="empty-state" style="padding:40px 20px;">
+          <div class="empty-state-icon">📋</div>
+          <h3>Nenhuma solicitação ainda</h3>
+          <p>Clique em "Nova Cobrança" para enviar sua primeira solicitação.</p>
+          <button class="btn btn-primary" style="margin-top:16px;" onclick="cpNavigate('nova-cobranca')">+ Nova Cobrança</button>
+        </div>` : `
+      <div style="overflow-x:auto;">
+        <table class="tbl">
+          <thead><tr>
+            <th>Devedor</th><th>Valor</th><th>Enviado em</th><th>Status</th><th>Nota do gestor</th>
+          </tr></thead>
+          <tbody>
+            ${sols.map(d=>{
+              const cfg = statusCfg[d.status]||{ color:'var(--text-3)', bg:'var(--surface-2)', label:d.status };
+              return `<tr>
+                <td>
+                  <div style="font-weight:600;">${escHtml(d.nome)}</div>
+                  <div style="font-size:11px;color:var(--text-3);">${escHtml(d.doc||'—')}</div>
+                </td>
+                <td style="font-family:var(--font-mono);font-weight:700;">${fmtR(parseValorBR(d.valorOrig)||0)}</td>
+                <td style="font-size:12px;color:var(--text-2);">${escHtml(d.submissaoData||'—')}</td>
+                <td>
+                  <span style="display:inline-block;padding:3px 10px;border-radius:20px;font-size:11.5px;font-weight:600;
+                    background:${cfg.bg};color:${cfg.color};border:1px solid ${cfg.color}40;">
+                    ${cfg.label}
+                  </span>
+                </td>
+                <td style="font-size:12.5px;color:${d.revisaoNota?'#92400e':'var(--text-3)'};">
+                  ${d.revisaoNota
+                    ? `<div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:6px 10px;">
+                        💬 ${escHtml(d.revisaoNota)}
+                        ${d.status==='pendente_ajuste'
+                          ? `<br><button class="btn btn-ghost btn-xs" style="margin-top:6px;color:var(--navy);"
+                              onclick="cpEditarReenviar('${d.id}')">✏️ Editar e reenviar</button>`
+                          : ''}
+                       </div>`
+                    : '<span style="color:var(--text-4);">—</span>'}
+                </td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>`}
+    </div>`;
+}
+
+function cpEditarReenviar(devId){
+  const d = (DB.devedores||[]).find(x=>x.id===devId);
+  if(!d){ showToast('Solicitação não encontrada.','danger'); return; }
+  // Pre-fill Nova Cobrança form with existing data for correction
+  cpNavigate('nova-cobranca');
+  setTimeout(()=>{
+    const setVal = (id,v) => { const el=document.getElementById(id); if(el) el.value=v||''; };
+    setVal('cpnc-nome', d.nome);
+    setVal('cpnc-doc',  d.doc);
+    setVal('cpnc-tel',  d.tel);
+    setVal('cpnc-email',d.email);
+    setVal('cpnc-end',  d.endereco);
+    setVal('cpnc-valor',d.valorOrig);
+    setVal('cpnc-venc', d.vencimento);
+    setVal('cpnc-obs',  d.obs);
+    // Override submit to reenviar (remove old + create new)
+    const btn = document.querySelector('button[onclick="cpSubmitNovaCobranca()"]');
+    if(btn){
+      btn.textContent = '📤 Reenviar solicitação';
+      btn.onclick = () => {
+        DB.devedores = (DB.devedores||[]).filter(x=>x.id!==devId);
+        cpSubmitNovaCobranca();
+      };
+    }
+  }, 150);
 }
 
 function cpRenderConfig(body){
