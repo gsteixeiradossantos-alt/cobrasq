@@ -337,6 +337,7 @@ img{max-width:100%}
 #page-calc iframe{width:100%;flex:1;border:none;display:block;min-height:0;}
 .page-content.active{display:flex;}
 
+
 /* ===== CARDS ===== */
 .kcard{background:var(--surface);border-radius:var(--radius);padding:16px 18px;border:1px solid var(--border);}
 .kcard-label{font-size:12px;font-weight:500;color:var(--text-2);letter-spacing:.01em;margin-bottom:8px;}
@@ -982,6 +983,9 @@ img{max-width:100%}
         <div class="nav-sub-item" data-page="processos" id="nav-processos">
           <span>•</span> Processos
         </div>
+      </div>
+      <div class="nav-item" id="nav-crm" onclick="window.open('https://crm-cobrasq.vercel.app/', '_blank')" style="cursor:pointer;">
+        <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span><span>CRM</span><span style="margin-left:auto;font-size:11px;color:var(--text-3);opacity:.7;">↗</span>
       </div>
       <div class="nav-item" data-page="clientes" id="nav-clientes">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span><span>Clientes</span>
@@ -2411,7 +2415,8 @@ const ETAPAS_JUD = ['Petição inicial','Citação','Contestação','Audiência'
 // ── UTILITIES ────────────────────────────────────────────────
 function save(){
   try{localStorage.setItem(KEY,JSON.stringify(DB));}catch(e){console.warn('save error',e);if(e.name==='QuotaExceededError'||e.code===22||e.code===1014){showToast('Armazenamento local cheio! Exporte um backup antes de continuar.','danger');}}
-  syncToSupabase(); // sync in background — fire and forget
+  syncToSupabase();   // JSON blob (legacy — manter durante transição)
+  syncRelational();   // tabelas relacionais (Fase 2.6 — fonte da verdade futura)
 }
 function load(){
   try{
@@ -2555,6 +2560,263 @@ function copiarSQLSupabase(){
     document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
     showToast('SQL copiado!','success');
   });
+}
+
+// ── SUPABASE RELACIONAL (Fase 2.6 — merge CRM) ────────────────
+// Operações diretas em devedores/clientes/devedor_eventos/acordos.
+// Usadas pela aba CRM (Fase 3) e progressivamente pelas demais telas.
+// O JSON blob (cobrasq_data) ainda é mantido em paralelo durante a transição —
+// não remover syncToSupabase() até que toda a UI esteja reescrita.
+
+const _DEV_COL_FIELDS = new Set([
+  'id','clienteId','nome','doc','docHash','email','tel','status','fase',
+  'valorOrig','valorAtual','entrada','responsavel','arquivado','createdAt','updatedAt',
+  'passoAtual','assignedTo','aguardandoResposta','encerramento','acordoFinal',
+  'encaminhamentoJudicial','etapaAtualizadaEm','divida','historico','acordos'
+]);
+
+function devedorToRow(d){
+  const metadata = {};
+  for(const k of Object.keys(d||{})){
+    if(!_DEV_COL_FIELDS.has(k)) metadata[k] = d[k];
+  }
+  return {
+    id: d.id,
+    cliente_id: d.clienteId || null,
+    nome: d.nome || '',
+    doc: d.doc || null,
+    doc_hash: d.docHash || null,
+    email: d.email || null,
+    telefone: d.tel || null,
+    status: d.status || null,
+    fase: d.fase || 'extrajudicial',
+    valor_orig: d.valorOrig != null && d.valorOrig !== '' ? +d.valorOrig : null,
+    valor_atual: d.valorAtual != null && d.valorAtual !== '' ? +d.valorAtual : null,
+    data_entrada: d.entrada || null,
+    arquivado: !!d.arquivado,
+    metadata,
+    divida: d.divida || {},
+    passo_atual: d.passoAtual || null,
+    assigned_to: d.assignedTo || null,
+    aguardando_resposta: !!d.aguardandoResposta,
+    encerramento: d.encerramento || null,
+    acordo_final: d.acordoFinal || null,
+    encaminhamento_judicial: d.encaminhamentoJudicial || null
+  };
+}
+
+function rowToDevedor(r){
+  const meta = r.metadata || {};
+  return {
+    id: r.id,
+    clienteId: r.cliente_id || '',
+    nome: r.nome || '',
+    doc: r.doc || '',
+    docHash: r.doc_hash || '',
+    email: r.email || '',
+    tel: r.telefone || '',
+    status: r.status || 'Cobrar',
+    fase: r.fase || 'extrajudicial',
+    valorOrig: r.valor_orig != null ? String(r.valor_orig) : '',
+    valorAtual: r.valor_atual != null ? String(r.valor_atual) : '',
+    entrada: r.data_entrada || '',
+    arquivado: !!r.arquivado,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    passoAtual: r.passo_atual || null,
+    assignedTo: r.assigned_to || null,
+    aguardandoResposta: !!r.aguardando_resposta,
+    encerramento: r.encerramento || null,
+    acordoFinal: r.acordo_final || null,
+    encaminhamentoJudicial: r.encaminhamento_judicial || null,
+    etapaAtualizadaEm: r.etapa_atualizada_em || null,
+    divida: r.divida || {},
+    ...meta,
+    historico: meta.historico || [],
+    acordos: meta.acordos || []
+  };
+}
+
+function clienteToRow(c){
+  return {
+    id: c.id,
+    app_user_id: c.appUserId || null,
+    nome: c.nome || '',
+    doc: c.doc || null,
+    email: c.email || null,
+    telefone: c.tel || null,
+    metadata: {
+      endereco: c.endereco || '',
+      honorarios: c.honorarios || '',
+      obs: c.obs || '',
+      loginEmail: c.loginEmail || '',
+      loginSenha: c.loginSenha || ''
+    }
+  };
+}
+
+function rowToCliente(r){
+  const meta = r.metadata || {};
+  return {
+    id: r.id,
+    appUserId: r.app_user_id || null,
+    nome: r.nome || '',
+    doc: r.doc || '',
+    email: r.email || '',
+    tel: r.telefone || '',
+    endereco: meta.endereco || '',
+    honorarios: meta.honorarios || '',
+    obs: meta.obs || '',
+    loginEmail: meta.loginEmail || '',
+    loginSenha: meta.loginSenha || '',
+    createdAt: r.created_at,
+    updatedAt: r.updated_at
+  };
+}
+
+async function loadDevedoresFromSupabase(){
+  const supa = getSupabase();
+  if(!supa) return null;
+  try{
+    const { data, error } = await supa.from('devedores').select('*');
+    if(error){ console.warn('[rel] loadDevedores:', error.message); return null; }
+    return (data||[]).map(rowToDevedor);
+  }catch(e){ console.warn('[rel] loadDevedores ex:', e.message); return null; }
+}
+
+async function loadClientesFromSupabase(){
+  const supa = getSupabase();
+  if(!supa) return null;
+  try{
+    const { data, error } = await supa.from('clientes').select('*');
+    if(error){ console.warn('[rel] loadClientes:', error.message); return null; }
+    return (data||[]).map(rowToCliente);
+  }catch(e){ console.warn('[rel] loadClientes ex:', e.message); return null; }
+}
+
+async function upsertDevedorRelational(d){
+  const supa = getSupabase();
+  if(!supa) return { ok:false, error:'no supabase' };
+  try{
+    const row = devedorToRow(d);
+    const { error } = await supa.from('devedores').upsert(row, { onConflict:'id' });
+    if(error){ console.warn('[rel] upsertDevedor:', error.message); return { ok:false, error:error.message }; }
+    return { ok:true };
+  }catch(e){ return { ok:false, error:e.message }; }
+}
+
+async function upsertClienteRelational(c){
+  const supa = getSupabase();
+  if(!supa) return { ok:false, error:'no supabase' };
+  try{
+    const row = clienteToRow(c);
+    const { error } = await supa.from('clientes').upsert(row, { onConflict:'id' });
+    if(error){ console.warn('[rel] upsertCliente:', error.message); return { ok:false, error:error.message }; }
+    return { ok:true };
+  }catch(e){ return { ok:false, error:e.message }; }
+}
+
+async function addDevedorEvento(devedorId, tipo, payload){
+  const supa = getSupabase();
+  if(!supa) return { ok:false, error:'no supabase' };
+  try{
+    const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
+    const autorId = sess?.data?.session?.user?.id || null;
+    const autorNome = currentUser?.nome || sess?.data?.session?.user?.user_metadata?.nome || null;
+    const { error } = await supa.from('devedor_eventos').insert({
+      devedor_id: devedorId,
+      tipo: tipo || 'evento',
+      payload: payload || {},
+      autor_id: autorId,
+      autor_nome: autorNome
+    });
+    if(error){ console.warn('[rel] addEvento:', error.message); return { ok:false, error:error.message }; }
+    return { ok:true };
+  }catch(e){ return { ok:false, error:e.message }; }
+}
+
+async function getDevedorEventos(devedorId, limit){
+  const supa = getSupabase();
+  if(!supa) return [];
+  try{
+    const { data, error } = await supa.from('devedor_eventos')
+      .select('*').eq('devedor_id', devedorId)
+      .order('criado_em', { ascending:false }).limit(limit||100);
+    if(error){ console.warn('[rel] getEventos:', error.message); return []; }
+    return data || [];
+  }catch(e){ return []; }
+}
+
+async function upsertAcordoRelational(devedorId, acordo){
+  const supa = getSupabase();
+  if(!supa) return { ok:false, error:'no supabase' };
+  try{
+    const row = {
+      id: acordo.id || undefined,
+      devedor_id: devedorId,
+      forma: acordo.forma || 'avista',
+      status: acordo.status || 'ativo',
+      parcelas: acordo.parcelas || [],
+      valor_total: acordo.valorTotal != null ? +acordo.valorTotal : (acordo.total != null ? +acordo.total : null),
+      valor_entrada: acordo.valorEntrada != null ? +acordo.valorEntrada : null,
+      num_parcelas: acordo.numParcelas != null ? +acordo.numParcelas : (acordo.parcelas?.length || null),
+      data_primeiro_venc: acordo.dataPrimeiroVenc || null,
+      desconto: acordo.desconto != null ? +acordo.desconto : null,
+      juros: acordo.juros != null ? +acordo.juros : null,
+      cdc_aplicada: !!acordo.cdcAplicada,
+      link_zapsign: acordo.linkZapSign || null,
+      status_zapsign: acordo.statusZapSign || null,
+      data_assinatura: acordo.dataAssinatura || null,
+      linha_gsheet: acordo.linhaGSheet || null,
+      metadata: acordo.metadata || {}
+    };
+    const { error } = await supa.from('acordos').upsert(row, { onConflict:'id' });
+    if(error){ console.warn('[rel] upsertAcordo:', error.message); return { ok:false, error:error.message }; }
+    return { ok:true };
+  }catch(e){ return { ok:false, error:e.message }; }
+}
+
+async function loadRelationalData(){
+  // Sobrescreve DB.devedores e DB.clientes com dados das tabelas relacionais
+  // (fonte da verdade pós-Fase 2.5). Roda só após login — antes disso, RLS
+  // retorna [] e perderíamos os dados do JSON blob.
+  const supa = getSupabase();
+  if(!supa) return;
+  const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
+  if(!sess?.data?.session) return;
+  const [devedoresRel, clientesRel] = await Promise.all([
+    loadDevedoresFromSupabase(),
+    loadClientesFromSupabase()
+  ]);
+  // Só sobrescreve se a leitura foi não-nula (null = erro, [] = legítimo vazio mas pós-login)
+  if(Array.isArray(devedoresRel)) DB.devedores = devedoresRel;
+  if(Array.isArray(clientesRel))  DB.clientes  = clientesRel;
+}
+
+// Dual-write: durante a transição (até Fase 2.6d completa) cada save() escreve
+// nas duas pontas — JSON blob (cobrasq_data) e tabelas relacionais. Garante que
+// dados novos não somem ao recarregar.
+let _relWriteTimer = null;
+function syncRelational(){
+  const supa = getSupabase();
+  if(!supa) return;
+  clearTimeout(_relWriteTimer);
+  _relWriteTimer = setTimeout(async ()=>{
+    try{
+      const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
+      if(!sess?.data?.session) return; // sem sessão, RLS bloqueia escrita
+      if(Array.isArray(DB.clientes) && DB.clientes.length){
+        const rows = DB.clientes.map(clienteToRow);
+        const { error } = await supa.from('clientes').upsert(rows, { onConflict:'id' });
+        if(error) console.warn('[rel] syncClientes:', error.message);
+      }
+      if(Array.isArray(DB.devedores) && DB.devedores.length){
+        const rows = DB.devedores.map(devedorToRow);
+        const { error } = await supa.from('devedores').upsert(rows, { onConflict:'id' });
+        if(error) console.warn('[rel] syncDevedores:', error.message);
+      }
+    }catch(e){ console.warn('[rel] syncRelational ex:', e.message); }
+  }, 1800);
 }
 
 // ── FLUXO DE RECOVERY DE SENHA ────────────────────────────────
@@ -10150,6 +10412,8 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
       // 3. Sincronizar dados do Supabase antes de mostrar login
       await loadFromSupabase();
+      // 3b. Sobrescreve devedores/clientes com tabelas relacionais (fonte da verdade pós-Fase 2.5)
+      await loadRelationalData();
       // 4. Verificar sessão ativa (auto-login)
       const { data: { session } } = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
       if(session){
