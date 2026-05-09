@@ -8511,11 +8511,11 @@ async function renderFinLancamentos(el){
           style="padding:5px 10px;background:var(--surface);border:1px solid var(--border);border-radius:99px;font-size:12px;color:var(--text-2);cursor:pointer;outline:none;appearance:none;font-family:inherit;max-width:160px;">${optsConta}</select>
         <select id="filtLancContato" onchange="aplicarFiltrosLancs()"
           style="padding:5px 10px;background:var(--surface);border:1px solid var(--border);border-radius:99px;font-size:12px;color:var(--text-2);cursor:pointer;outline:none;appearance:none;font-family:inherit;max-width:180px;">${optsContato}</select>
-        <input type="date" id="filtLancDataIni" value="${f.dataIni||''}" onchange="aplicarFiltrosLancs()" placeholder="De"
+        <input type="date" id="filtLancDataIni" value="${f.dataIni||''}" onchange="_filtrarLancsDebounced()" oninput="_filtrarLancsDebounced()" placeholder="De"
           style="padding:5px 10px;background:var(--surface);border:1px solid var(--border);border-radius:99px;font-size:12px;color:var(--text-2);outline:none;font-family:inherit;cursor:pointer;"/>
-        <input type="date" id="filtLancDataFim" value="${f.dataFim||''}" onchange="aplicarFiltrosLancs()" placeholder="Até"
+        <input type="date" id="filtLancDataFim" value="${f.dataFim||''}" onchange="_filtrarLancsDebounced()" oninput="_filtrarLancsDebounced()" placeholder="Até"
           style="padding:5px 10px;background:var(--surface);border:1px solid var(--border);border-radius:99px;font-size:12px;color:var(--text-2);outline:none;font-family:inherit;cursor:pointer;"/>
-        <input type="search" id="filtLancBusca" value="${escHtml(f.busca||'')}" placeholder="Buscar descrição…" onchange="aplicarFiltrosLancs()"
+        <input type="search" id="filtLancBusca" value="${escHtml(f.busca||'')}" placeholder="Buscar descrição…" oninput="_filtrarLancsDebounced()"
           style="padding:5px 10px;background:var(--surface);border:1px solid var(--border);border-radius:99px;font-size:12px;color:var(--text-2);outline:none;font-family:inherit;min-width:160px;"/>
         <button style="padding:5px 10px;background:transparent;border:1px solid var(--border-2);border-radius:99px;font-size:12px;color:var(--text-2);cursor:pointer;font-family:inherit;" onclick="limparFiltrosLancs()">✕ Limpar</button>
       </div>
@@ -8546,15 +8546,29 @@ async function renderFinLancamentos(el){
   await carregarPaginaLancs();
 }
 
+let _filtLancTimer = null;
+function _filtrarLancsDebounced(){
+  clearTimeout(_filtLancTimer);
+  _filtLancTimer = setTimeout(aplicarFiltrosLancs, 350);
+}
+
 function aplicarFiltrosLancs(){
   const st = window._finLancState;
+  let dataIni = document.getElementById('filtLancDataIni')?.value||'';
+  let dataFim = document.getElementById('filtLancDataFim')?.value||'';
+  // Auto-swap se invertido (usuário trocou a ordem)
+  if(dataIni && dataFim && dataIni > dataFim){
+    const tmp = dataIni; dataIni = dataFim; dataFim = tmp;
+    const elI = document.getElementById('filtLancDataIni'); if(elI) elI.value = dataIni;
+    const elF = document.getElementById('filtLancDataFim'); if(elF) elF.value = dataFim;
+  }
   st.filtros = {
     tipo: document.getElementById('filtLancTipo')?.value||'',
     status: document.getElementById('filtLancStatus')?.value||'',
     contaId: document.getElementById('filtLancConta')?.value||'',
     contatoId: document.getElementById('filtLancContato')?.value||'',
-    dataIni: document.getElementById('filtLancDataIni')?.value||'',
-    dataFim: document.getElementById('filtLancDataFim')?.value||'',
+    dataIni,
+    dataFim,
     busca: (document.getElementById('filtLancBusca')?.value||'').trim(),
   };
   st.page = 1;
@@ -8771,26 +8785,36 @@ async function renderContasGridSrv(){
     return;
   }
 
-  // Saldo realizado por conta = saldo_inicial + sum(valor) dos lançamentos pagos
+  // Saldo realizado via RPC server-side (sem limite de 1000 + considera id_accounts_paid)
   const sb = getSupabase();
-  const saldosRealizados = {};
+  const saldosByConta = {};
   if(sb){
     try {
-      const { data } = await sb.from('fin_lancamento')
-        .select('conta_id,valor_pago,valor,status')
-        .eq('status', 1);
+      const { data, error } = await sb.rpc('fin_saldos_realizados');
+      if(error) throw error;
       for(const r of (data||[])){
-        if(!r.conta_id) continue;
-        saldosRealizados[r.conta_id] = (saldosRealizados[r.conta_id]||0) + (+r.valor_pago || +r.valor || 0);
+        saldosByConta[r.conta_id] = r;
       }
-    } catch(e){ console.warn(e); }
+    } catch(e){ console.warn('RPC fin_saldos_realizados:', e.message); }
   }
+
+  // Buscar saldo do Controlle (campo bank_balance no raw_payload — em centavos)
+  const saldoControlle = {};
+  try {
+    const { data: rawContas } = await sb.from('fin_conta').select('id,raw_payload').in('id', contas.map(c=>c.id));
+    for(const r of (rawContas||[])){
+      const bb = r.raw_payload?.bank_balance;
+      if(bb != null) saldoControlle[r.id] = (+bb)/100;
+    }
+  } catch(e){ /* opcional */ }
 
   const tipoLabels = { 0:'Conta corrente', 1:'Poupança', 2:'Investimento', 3:'Outros' };
   g.innerHTML = contas.map(c=>{
+    const s = saldosByConta[c.id] || {};
     const saldoInicial = +c.saldo_inicial || 0;
-    const saldoMov = saldosRealizados[c.id] || 0;
-    const saldoAtual = saldoInicial + saldoMov;
+    const saldoAtual = +s.saldo_atual || saldoInicial;
+    const ctlSaldo = saldoControlle[c.id];
+    const diff = ctlSaldo != null ? (saldoAtual - ctlSaldo) : null;
     return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
         <div style="display:flex;align-items:center;gap:10px;">
@@ -8806,16 +8830,21 @@ async function renderContasGridSrv(){
           <button class="btn btn-ghost btn-xs" style="color:var(--danger);" onclick="desativarConta(${c.id})" title="Desativar">${ico('trash',12)}</button>
         </div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
         <div>
           <div style="font-size:10.5px;color:var(--text-3);font-weight:600;text-transform:uppercase;letter-spacing:.5px;">Saldo inicial</div>
-          <div style="font-family:var(--font-mono);font-size:14px;font-weight:600;color:var(--text-2);">${fmtR(saldoInicial)}</div>
+          <div style="font-family:var(--font-mono);font-size:13px;font-weight:600;color:var(--text-2);">${fmtR(saldoInicial)}</div>
         </div>
         <div>
           <div style="font-size:10.5px;color:var(--text-3);font-weight:600;text-transform:uppercase;letter-spacing:.5px;">Saldo realizado</div>
           <div style="font-family:var(--font-mono);font-size:18px;font-weight:700;color:${saldoAtual>=0?'var(--success)':'var(--danger)'};">${fmtR(saldoAtual)}</div>
         </div>
       </div>
+      ${ctlSaldo != null ? `<div style="display:flex;justify-content:space-between;align-items:center;padding-top:8px;border-top:1px dashed var(--border);font-size:10.5px;">
+        <span style="color:var(--text-3);">Saldo no Controlle: <strong style="font-family:var(--font-mono);font-weight:600;">${fmtR(ctlSaldo)}</strong></span>
+        ${Math.abs(diff||0) > 0.01 ? `<span style="color:${Math.abs(diff)<10?'var(--warning)':'var(--danger)'};font-weight:600;">${diff>0?'+':''}${fmtR(diff)}</span>` : '<span style="color:var(--success);font-weight:600;">✓ bate</span>'}
+      </div>` : ''}
+      ${(s.qtd_pago||s.qtd_pendente) ? `<div style="margin-top:6px;font-size:10.5px;color:var(--text-3);font-family:var(--font-mono);">${s.qtd_pago||0} pagos · ${s.qtd_pendente||0} pendentes</div>` : ''}
     </div>`;
   }).join('');
 }
