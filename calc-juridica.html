@@ -549,6 +549,21 @@ details summary { color: #0A0908; font-size: 13px; font-family: 'Fraunces', Geor
     </div>
   </div>
 
+  <!-- C3: parcelas adicionais (vários cheques/parcelas com datas distintas) -->
+  <div style="margin-top:16px;padding:12px 14px;background:var(--gray-bg);border-radius:8px;border-left:3px solid var(--yellow-line);">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <div>
+        <strong style="font-size:13px;color:var(--navy);">Parcelas adicionais</strong>
+        <span id="parcelasExtrasCount" style="font-size:11.5px;color:var(--gray-text);margin-left:6px;">(0)</span>
+      </div>
+      <button type="button" class="small" onclick="addParcelaExtra()" style="font-size:11.5px;padding:5px 10px;">+ Adicionar parcela</button>
+    </div>
+    <div id="parcelasExtrasLista" style="display:flex;flex-direction:column;gap:6px;"></div>
+    <div style="font-size:11.5px;color:var(--gray-text);margin-top:6px;font-style:italic;">
+      Cada parcela é corrigida e tem juros calculados separadamente. Multa e honorários incidem sobre a soma final (todas as parcelas + correção + juros).
+    </div>
+  </div>
+
   <div class="checkbox-row" id="rowSelicRetro" style="display:none;">
     <input type="checkbox" id="selicRetroativo">
     <label for="selicRetroativo">Aplicar SELIC retroativamente (Lei 14.905/24 — pré-30/08/2024). Exige justificativa.</label>
@@ -1304,6 +1319,50 @@ function calcularHonorario(grupo, params, baseRef) {
 // ============================================================
 // CALCULAR — orquestrador
 // ============================================================
+// ════════════════════════════════════════════════════════════════════
+// C3 — Parcelas adicionais (vários cheques/parcelas)
+// ════════════════════════════════════════════════════════════════════
+let parcelasExtras = []; // [{id, valor, dataCorr, dataJuros}]
+
+function addParcelaExtra(){
+  const id = 'pext_' + Math.random().toString(36).slice(2,9);
+  parcelasExtras.push({ id, valor: '', dataCorr: '', dataJuros: '' });
+  renderParcelasExtras();
+}
+
+function removeParcelaExtra(id){
+  parcelasExtras = parcelasExtras.filter(p => p.id !== id);
+  renderParcelasExtras();
+}
+
+function updateParcelaExtra(id, field, value){
+  const p = parcelasExtras.find(x => x.id === id);
+  if (p) p[field] = value;
+}
+
+function renderParcelasExtras(){
+  const wrap = document.getElementById('parcelasExtrasLista');
+  if (!wrap) return;
+  wrap.innerHTML = parcelasExtras.map(p => {
+    return '<div style="display:flex;gap:6px;align-items:flex-end;background:#fff;padding:8px 10px;border:1px solid #D8D2C5;border-radius:6px;">'
+      + '<div style="flex:1.2;">'
+        + '<label style="display:block;font-size:10.5px;color:#5A554A;margin-bottom:2px;">Valor (R$)</label>'
+        + '<input type="text" inputmode="numeric" placeholder="0,00" value="'+(p.valor||'')+'" onblur="updateParcelaExtra(\''+p.id+'\',\'valor\',this.value)" style="width:100%;padding:5px 7px;font-size:12px;border:1px solid #D8D2C5;border-radius:4px;">'
+      + '</div>'
+      + '<div style="flex:1;">'
+        + '<label style="display:block;font-size:10.5px;color:#5A554A;margin-bottom:2px;">Termo correção</label>'
+        + '<input type="date" value="'+(p.dataCorr||'')+'" onchange="updateParcelaExtra(\''+p.id+'\',\'dataCorr\',this.value)" style="width:100%;padding:5px 7px;font-size:12px;border:1px solid #D8D2C5;border-radius:4px;">'
+      + '</div>'
+      + '<div style="flex:1;">'
+        + '<label style="display:block;font-size:10.5px;color:#5A554A;margin-bottom:2px;">Termo juros (vazio = correção)</label>'
+        + '<input type="date" value="'+(p.dataJuros||'')+'" onchange="updateParcelaExtra(\''+p.id+'\',\'dataJuros\',this.value)" style="width:100%;padding:5px 7px;font-size:12px;border:1px solid #D8D2C5;border-radius:4px;">'
+      + '</div>'
+      + '<button type="button" onclick="removeParcelaExtra(\''+p.id+'\')" title="Remover" style="background:#B23A3A;color:#fff;border:none;padding:5px 9px;border-radius:4px;cursor:pointer;font-size:14px;height:28px;">×</button>'
+    + '</div>';
+  }).join('');
+  document.getElementById('parcelasExtrasCount').textContent = '(' + parcelasExtras.length + ')';
+}
+
 function calcular() {
   limparErro();
 
@@ -1366,24 +1425,71 @@ function calcular() {
       overrideImputacao, justifImputacao, ordemCustom
     };
 
-    const principal = calcularPrincipal(params);
+    // C3 — calcula parcela principal SEM multa (multa será aplicada sobre a soma de todas)
+    const temExtras = parcelasExtras.length > 0;
+    const paramsPrincipalSemMulta = temExtras ? {...params, aplicarMulta: false} : params;
+    const principal = calcularPrincipal(paramsPrincipalSemMulta);
 
-    // Honorários — usa snapshot do principal no fechamento como base
+    // C3 — calcula cada parcela extra
+    let parcelasResultados = [];
+    let saldoCorrigidoExtras = 0, jurosAcumExtras = 0;
+    if (temExtras) {
+      const parseValor = (v) => parseFloat(String(v||'').replace(/[^\d,\-]/g,'').replace(',','.')) || 0;
+      for (const ex of parcelasExtras) {
+        const valorEx = parseValor(ex.valor);
+        if (!valorEx || valorEx <= 0) continue;
+        const dCorr = parseDataLocal(ex.dataCorr);
+        if (!dCorr) continue;
+        const dJur = ex.dataJuros ? parseDataLocal(ex.dataJuros) : dCorr;
+        const subParams = {
+          ...params,
+          valorOriginal: valorEx,
+          dataCorrecao: dCorr,
+          dataJuros: dJur,
+          aplicarMulta: false,
+          eventos: [] // eventos só na principal
+        };
+        const sub = calcularPrincipal(subParams);
+        parcelasResultados.push({ valor: valorEx, dataCorr: dCorr, dataJuros: dJur, resultado: sub });
+        saldoCorrigidoExtras += sub.saldoCorrigido;
+        jurosAcumExtras += sub.jurosAcumulados;
+      }
+    }
+
+    // Soma total de saldo corrigido + juros (principal + extras)
+    const saldoCorrigidoTotal = principal.saldoCorrigido + saldoCorrigidoExtras;
+    const jurosAcumuladosTotal = principal.jurosAcumulados + jurosAcumExtras;
+
+    // Multa aplicada uma vez sobre a soma (corrigido + juros) de todas parcelas
+    let multaAgregada = 0;
+    if (temExtras && aplicarMulta) {
+      if (multaTipo === 'FIXO') multaAgregada = multaPct;
+      else multaAgregada = (saldoCorrigidoTotal + jurosAcumuladosTotal) * (multaPct/100);
+    } else {
+      // sem extras, multa já foi calculada no principal
+      multaAgregada = principal.multaAcumulada;
+    }
+
+    // Honorários — incidem sobre soma final (corrigido + juros + multa)
     const baseRef = {
-      saldoCorrigido: principal.saldoCorrigido,
-      jurosAcumulados: principal.jurosAcumulados,
-      multaAcumulada: principal.multaAcumulada
+      saldoCorrigido: saldoCorrigidoTotal,
+      jurosAcumulados: jurosAcumuladosTotal,
+      multaAcumulada: multaAgregada
     };
     const honContratualResult = calcularHonorario(honC, params, baseRef);
     const honSucumbencialResult = null; // Q4 — sucumbenciais removidos
 
-    const totalPrincipal = principal.saldoCorrigido + principal.jurosAcumulados + principal.multaAcumulada;
+    const totalPrincipal = saldoCorrigidoTotal + jurosAcumuladosTotal + multaAgregada;
     const totalHonC = honContratualResult ? honContratualResult.total : 0;
     const totalHonS = 0;
     const totalGeral = totalPrincipal + totalHonC + totalHonS;
 
     estado = {
       params, principal,
+      parcelasResultados,        // C3
+      saldoCorrigidoTotal,       // C3
+      jurosAcumuladosTotal,      // C3
+      multaAgregada,             // C3
       honContratual: honContratualResult,
       honSucumbencial: null,
       totalPrincipal, totalHonC, totalHonS, totalGeral,
@@ -1408,13 +1514,26 @@ function renderResultado() {
   const pr = e.principal;
 
   let html = '';
-  html += '<div class="result-line"><span>Valor original</span><span>' + fmtBRL(p.valorOriginal) + '</span></div>';
-  html += '<div class="result-line"><span>Correção monetária (' + p.indice + ')</span><span>' + fmtBRL(pr.saldoCorrigido - p.valorOriginal) + '</span></div>';
-  html += '<div class="result-line"><span>Saldo corrigido</span><span>' + fmtBRL(pr.saldoCorrigido) + '</span></div>';
-  html += '<div class="result-line"><span>Juros simples ' + fmtNum(p.taxaJurosMensal,2) + '% a.m.</span><span>' + fmtBRL(pr.jurosAcumulados) + '</span></div>';
+  const temExtras = e.parcelasResultados && e.parcelasResultados.length > 0;
+  if (temExtras) {
+    // C3: composição por parcela
+    html += '<div class="result-line subtotal" style="font-weight:600;"><span>Composição por parcela</span><span></span></div>';
+    // Parcela principal
+    html += '<div class="result-line" style="font-size:12.5px;"><span>P1: ' + fmtBRL(p.valorOriginal) + ' (' + fmtData(p.dataCorrecao) + ')</span><span>corrigido ' + fmtBRL(pr.saldoCorrigido) + ' + juros ' + fmtBRL(pr.jurosAcumulados) + '</span></div>';
+    e.parcelasResultados.forEach((pr_ex, i) => {
+      html += '<div class="result-line" style="font-size:12.5px;"><span>P' + (i+2) + ': ' + fmtBRL(pr_ex.valor) + ' (' + fmtData(pr_ex.dataCorr) + ')</span><span>corrigido ' + fmtBRL(pr_ex.resultado.saldoCorrigido) + ' + juros ' + fmtBRL(pr_ex.resultado.jurosAcumulados) + '</span></div>';
+    });
+    html += '<div class="result-line subtotal"><span>Soma todas: corrigido ' + fmtBRL(e.saldoCorrigidoTotal) + ' + juros</span><span>' + fmtBRL(e.jurosAcumuladosTotal) + '</span></div>';
+  } else {
+    html += '<div class="result-line"><span>Valor original</span><span>' + fmtBRL(p.valorOriginal) + '</span></div>';
+    html += '<div class="result-line"><span>Correção monetária (' + p.indice + ')</span><span>' + fmtBRL(pr.saldoCorrigido - p.valorOriginal) + '</span></div>';
+    html += '<div class="result-line"><span>Saldo corrigido</span><span>' + fmtBRL(pr.saldoCorrigido) + '</span></div>';
+    html += '<div class="result-line"><span>Juros simples ' + fmtNum(p.taxaJurosMensal,2) + '% a.m.</span><span>' + fmtBRL(pr.jurosAcumulados) + '</span></div>';
+  }
   if (p.aplicarMulta) {
     const multaLbl = p.multaTipo === 'FIXO' ? '(R$ fixo)' : fmtNum(p.multaPct,2) + '%';
-    html += '<div class="result-line"><span>Multa ' + multaLbl + '</span><span>' + fmtBRL(pr.multaAcumulada) + '</span></div>';
+    const multaVal = temExtras ? e.multaAgregada : pr.multaAcumulada;
+    html += '<div class="result-line"><span>Multa ' + multaLbl + (temExtras ? ' (sobre soma)' : '') + '</span><span>' + fmtBRL(multaVal) + '</span></div>';
   }
   // C6: aviso de extrapolação se índice ausente
   if (p._extrapolacao) {
@@ -1768,21 +1887,32 @@ function exportarPDF() {
     notas += '<p><strong>Imputação de pagamento:</strong> aplicada na ordem juros vencidos → multa → principal, conforme art. 354 do Código Civil.</p>';
   }
 
-  const head = '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Memorial de Cálculo Judicial — COBRASQ</title>';
+  const head = '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Memorial de Cálculo Judicial — COBRASQ</title>'
+    + '<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,500;9..144,600&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">';
   const css = '<style>' +
-    '@page { size: A4; margin: 16mm 14mm; }' +
+    '@page { size: A4; margin: 18mm 16mm 22mm 16mm; }' +
     '* { box-sizing: border-box; margin: 0; padding: 0; }' +
-    'body { font-family: Georgia, "Times New Roman", serif; color: #1A1815; font-size: 10.5pt; line-height: 1.5; background: #F1ECE2; }' +
-    '.wordmark-bar { background: #0A0908; color: #F1ECE2; padding: 22px 28px; display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 22px; border-bottom: 3px solid #B8924B; }' +
-    '.wordmark { font-family: Georgia, serif; font-size: 30pt; font-weight: 500; letter-spacing: 6px; text-transform: lowercase; }' +
+    'body { font-family: "Inter Tight", -apple-system, "Segoe UI", sans-serif; color: #1A1815; font-size: 10.5pt; line-height: 1.55; background: #F1ECE2; }' +
+    /* C9 fase 3: capa */
+    '.cover { display: flex; flex-direction: column; justify-content: space-between; min-height: 230mm; padding: 30mm 0 20mm; page-break-after: always; }' +
+    '.cover-mark { font-family: "Fraunces", Georgia, serif; font-size: 56pt; font-weight: 500; letter-spacing: 0.16em; text-transform: lowercase; color: #0A0908; line-height: 1; }' +
+    '.cover-mark::after { content: "."; color: #B8924B; }' +
+    '.cover-rule { width: 64mm; height: 2px; background: #B8924B; margin: 14mm 0 8mm; }' +
+    '.cover-title { font-family: "Fraunces", Georgia, serif; font-size: 22pt; font-weight: 500; color: #0A0908; line-height: 1.2; max-width: 140mm; }' +
+    '.cover-quote { font-family: "Instrument Serif", Georgia, serif; font-style: italic; font-size: 14pt; color: #5A554A; margin-top: 10mm; max-width: 130mm; }' +
+    '.cover-meta { font-family: "JetBrains Mono", monospace; font-size: 9pt; letter-spacing: 0.18em; text-transform: uppercase; color: #5A554A; }' +
+    '.cover-meta strong { color: #0A0908; display: block; margin-bottom: 4mm; font-weight: 500; }' +
+    /* Páginas internas */
+    '.wordmark-bar { background: #0A0908; color: #F1ECE2; padding: 16mm 12mm 8mm; display: flex; justify-content: space-between; align-items: flex-end; margin: -18mm -16mm 14mm; border-bottom: 2px solid #B8924B; }' +
+    '.wordmark { font-family: "Fraunces", Georgia, serif; font-size: 22pt; font-weight: 500; letter-spacing: 0.16em; text-transform: lowercase; }' +
     '.wordmark::after { content: "."; color: #B8924B; }' +
-    '.meta { text-align: right; font-size: 9pt; line-height: 1.4; font-family: Arial, sans-serif; }' +
-    '.meta strong { display: block; font-size: 10pt; margin-bottom: 2px; }' +
-    '.doc-title { font-size: 15pt; font-weight: 700; color: #0A0908; margin-bottom: 4px; border-bottom: 2px solid #0A0908; padding-bottom: 6px; }' +
-    '.doc-subtitle { font-size: 10pt; color: #5A5F66; margin-bottom: 18px; font-style: italic; }' +
+    '.meta { text-align: right; font-family: "JetBrains Mono", monospace; font-size: 8pt; line-height: 1.5; letter-spacing: 0.12em; text-transform: uppercase; }' +
+    '.meta strong { display: block; font-size: 9pt; margin-bottom: 2px; color: #B8924B; font-weight: 500; }' +
+    '.doc-title { font-family: "Fraunces", Georgia, serif; font-size: 16pt; font-weight: 500; color: #0A0908; margin-bottom: 4px; padding-bottom: 6px; border-bottom: 1px solid #B8924B; letter-spacing: -0.01em; }' +
+    '.doc-subtitle { font-family: "Instrument Serif", Georgia, serif; font-style: italic; font-size: 11pt; color: #5A554A; margin-bottom: 18px; }' +
     '.section { margin-bottom: 18px; page-break-inside: avoid; }' +
-    '.section-title { font-size: 11.5pt; font-weight: 700; color: #0A0908; margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid #BFBFBF; }' +
-    '.section p { text-align: justify; margin-bottom: 6px; }' +
+    '.section-title { font-family: "Fraunces", Georgia, serif; font-size: 12pt; font-weight: 500; color: #0A0908; margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid #D8D2C5; }' +
+    '.section p { text-align: justify; margin-bottom: 6px; font-size: 10.5pt; }' +
     '.calc-table, .hon-table { width: 100%; border-collapse: collapse; margin-top: 8px; }' +
     '.calc-table tr td, .hon-table tr td { padding: 6px 4px; border-bottom: 1px solid #E1E4E8; font-size: 10pt; }' +
     '.calc-table .descr, .hon-table .descr { color: #1A1D21; }' +
@@ -1806,13 +1936,30 @@ function exportarPDF() {
     '.footer-confidencialidade { text-align: center; font-style: italic; font-size: 7.5pt; color: #5A5F66; border-top: 1px dotted #BFBFBF; padding-top: 6px; }' +
     '</style></head><body>';
 
-  const corpo =
+  // C9 fase 3: capa editorial seguindo Rebrand Book v3
+  const cover =
+    '<div class="cover">' +
+      '<div>' +
+        '<div class="cover-mark">cobrasq</div>' +
+        '<div class="cover-rule"></div>' +
+        '<div class="cover-title">Memorial de Cálculo Judicial</div>' +
+        '<div class="cover-quote">"O capital volta inteiro. Os acessórios pagam o trabalho."</div>' +
+      '</div>' +
+      '<div class="cover-meta">' +
+        '<strong>Emissão · ' + dataEmissao + '</strong>' +
+        'Cálculo até ' + fmtData(p.dataFim) + '<br>' +
+        'Documento de uso processual<br>' +
+        'COBRASQ · Recuperadora de Crédito' +
+      '</div>' +
+    '</div>';
+
+  const corpo = cover +
     '<div class="wordmark-bar">' +
       '<div class="wordmark">cobrasq</div>' +
       '<div class="meta">' +
-        '<strong>MEMORIAL DE CÁLCULO JUDICIAL</strong>' +
-        'Emissão: ' + dataEmissao + '<br>' +
-        'Documento de uso processual' +
+        '<strong>MEMORIAL DE CÁLCULO</strong>' +
+        'Emissão · ' + dataEmissao + '<br>' +
+        'Confidencial' +
       '</div>' +
     '</div>' +
 
