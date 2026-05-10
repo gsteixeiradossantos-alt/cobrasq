@@ -524,9 +524,12 @@ details summary { color: #0A0908; font-size: 13px; font-family: 'Fraunces', Geor
       <div class="hint">Vencimento, evento danoso, etc.</div>
     </div>
     <div class="field">
-      <label>Termo inicial dos juros <span class="req">*</span></label>
-      <input type="date" id="dataJuros">
-      <div class="hint">Vazio = mesmo da correção (citação, mora, ajuizamento)</div>
+      <label style="display:flex;align-items:center;gap:6px;">
+        <input type="checkbox" id="dataJurosOverride" onchange="toggleDataJurosOverride()" style="margin:0;">
+        <span>Termo inicial dos juros diferente da correção</span>
+      </label>
+      <input type="date" id="dataJuros" disabled style="opacity:0.5;cursor:not-allowed;">
+      <div class="hint" id="dataJurosHint">Inativo · usa a mesma data da correção (citação, mora, ajuizamento)</div>
     </div>
     <div class="field">
       <label>Data final do cálculo <span class="req">*</span></label>
@@ -583,29 +586,25 @@ details summary { color: #0A0908; font-size: 13px; font-family: 'Fraunces', Geor
       <input type="checkbox" id="aplicarMulta" onchange="atualizarPills()">
       <label for="aplicarMulta">Aplicar multa</label>
     </div>
-    <div class="grid-3">
+    <div class="grid-2">
       <div class="field">
         <label>Tipo</label>
-        <select id="multaTipo">
+        <select id="multaTipo" onchange="formatarMultaValor()">
           <option value="PCT" selected>Percentual (%)</option>
           <option value="FIXO">Valor fixo (R$)</option>
         </select>
       </div>
       <div class="field">
         <label>Valor / Percentual</label>
-        <input type="text" id="multaPct" inputmode="decimal" value="2,00">
-        <div class="hint">% ou R$ conforme tipo</div>
-      </div>
-      <div class="field">
-        <label>Termo de incidência</label>
-        <input type="date" id="multaData">
-        <div class="hint">Vazio = mesma do termo de juros</div>
+        <input type="text" id="multaPct" inputmode="decimal" value="2,00" oninput="formatarMultaValor(event)" onblur="formatarMultaValor(event,true)">
+        <div class="hint" id="multaHint">Ex: 2,00 (= 2%)</div>
       </div>
     </div>
     <div class="info-tag">
-      Multa entra como linha separada. Base de cálculo: corrigido + juros. Não compõe base dos juros futuros.
+      Multa entra como linha separada. Base de cálculo: corrigido + juros. Termo de incidência: data dos juros moratórios.
     </div>
     <input type="hidden" id="multaBase" value="CORRIGIDO_JUROS">
+    <input type="hidden" id="multaData" value="">
   </div>
 </div>
 
@@ -871,9 +870,15 @@ function parseValorEl(el) {
   return parseFloat(v.replace(/[^\d,\-]/g,'').replace(',','.')) || 0;
 }
 function parseDecEl(el) {
-  const v = (el.value || '').toString();
+  let v = (el.value || '').toString();
   if (!v) return 0;
-  return parseFloat(v.replace(/[^\d,.\-]/g,'').replace(',','.')) || 0;
+  // remove R$, %, espaços
+  v = v.replace(/R\$\s?/g,'').replace(/%/g,'').trim();
+  // se tem vírgula como decimal, remove pontos (milhares) e troca vírgula por ponto
+  if (v.indexOf(',') >= 0) {
+    v = v.replace(/\./g,'').replace(',','.');
+  }
+  return parseFloat(v.replace(/[^\d.\-]/g,'')) || 0;
 }
 
 function mostrarErro(msg) {
@@ -894,6 +899,62 @@ function toggleCard(id) {
   const el = document.getElementById(id);
   el.classList.toggle('collapsed');
 }
+
+// Foto 2: formata Valor/Percentual da multa conforme tipo selecionado
+function formatarMultaValor(ev, isBlur) {
+  const tipo = document.getElementById('multaTipo').value;
+  const inp = document.getElementById('multaPct');
+  const hint = document.getElementById('multaHint');
+  let raw = String(inp.value || '').replace(/[^\d.,]/g,'');
+  // normaliza pra número
+  // remove separadores de milhar (.) se houver, mantém vírgula como decimal
+  if (raw.indexOf(',') >= 0) {
+    raw = raw.replace(/\./g,'').replace(',','.');
+  }
+  const num = parseFloat(raw);
+  if (tipo === 'PCT') {
+    hint.textContent = 'Ex: 2,00 (= 2%) · máx. 100,00';
+    if (isBlur && !isNaN(num)) {
+      // formata com 2 casas e vírgula
+      const v = Math.min(num, 100);
+      inp.value = v.toFixed(2).replace('.', ',') + '%';
+    } else if (ev && ev.type === 'input') {
+      // remove % temporariamente durante digitação
+      inp.value = String(inp.value || '').replace(/%/g,'');
+    }
+  } else {
+    // FIXO — formata como R$
+    hint.textContent = 'Valor fixo em R$ · ex: R$ 1.500,00';
+    if (isBlur && !isNaN(num)) {
+      inp.value = num.toLocaleString('pt-BR', { style:'currency', currency:'BRL', minimumFractionDigits:2, maximumFractionDigits:2 });
+    } else if (ev && ev.type === 'input') {
+      // remove R$ temporariamente durante digitação
+      inp.value = String(inp.value || '').replace(/R\$\s?/g,'');
+    }
+  }
+}
+// trigger inicial pra setar hint correto no load
+setTimeout(() => { try { formatarMultaValor(null, true); } catch(e){} }, 100);
+
+// Foto 1: toggle do checkbox "Termo inicial dos juros diferente"
+function toggleDataJurosOverride() {
+  const cb = document.getElementById('dataJurosOverride');
+  const el = document.getElementById('dataJuros');
+  const hint = document.getElementById('dataJurosHint');
+  if (cb.checked) {
+    el.disabled = false;
+    el.style.opacity = '1';
+    el.style.cursor = '';
+    hint.textContent = 'Ativo · informe data específica (citação, mora, ajuizamento)';
+    if (!el.value) el.focus();
+  } else {
+    el.disabled = true;
+    el.value = '';
+    el.style.opacity = '0.5';
+    el.style.cursor = 'not-allowed';
+    hint.textContent = 'Inativo · usa a mesma data da correção (citação, mora, ajuizamento)';
+  }
+}
 function toggleJustifImputacao() {
   const on = document.getElementById('overrideImputacao').checked;
   document.getElementById('rowJustifImputacao').style.display = on ? 'block' : 'none';
@@ -905,6 +966,7 @@ function toggleJustifImputacao() {
 let estado = null;
 let eventosCounter = 0;
 let eventos = [];
+let parcelasExtras = []; // C3 — movido pra topo pra evitar TDZ
 
 (function init() {
   document.getElementById('dataFim').value = new Date().toISOString().split('T')[0];
@@ -941,17 +1003,7 @@ let eventos = [];
   document.getElementById('indice').addEventListener('change', onIndiceChange);
   document.getElementById('selicRetroativo').addEventListener('change', onSelicRetroChange);
 
-  // C5: dataJuros auto-segue dataCorrecao até user editar manualmente
-  const elCorr = document.getElementById('dataCorrecao');
-  const elJur = document.getElementById('dataJuros');
-  let dataJurosTouched = false;
-  elJur.addEventListener('input', function() { dataJurosTouched = true; });
-  elCorr.addEventListener('input', function() {
-    if (!dataJurosTouched && !elJur.value && elCorr.value) elJur.value = elCorr.value;
-  });
-  elCorr.addEventListener('change', function() {
-    if (!dataJurosTouched && elCorr.value && (!elJur.value || elJur.value === '')) elJur.value = elCorr.value;
-  });
+  // Foto 1: termo juros segue correção por default, checkbox libera edição
 
   // Carrega cache do localStorage
   carregarCacheBCB();
@@ -1322,7 +1374,7 @@ function calcularHonorario(grupo, params, baseRef) {
 // ════════════════════════════════════════════════════════════════════
 // C3 — Parcelas adicionais (vários cheques/parcelas)
 // ════════════════════════════════════════════════════════════════════
-let parcelasExtras = []; // [{id, valor, dataCorr, dataJuros}]
+// (declaração movida pra topo — bug fix Foto 3 "Cannot access before initialization")
 
 function addParcelaExtra(){
   const id = 'pext_' + Math.random().toString(36).slice(2,9);
