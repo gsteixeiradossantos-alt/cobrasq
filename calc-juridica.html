@@ -631,6 +631,11 @@ details summary { color: #0A0908; font-size: 13px; font-family: 'Fraunces', Geor
         <div class="hint">% sobre corrigido + juros + multa, ou R$ direto</div>
       </div>
     </div>
+    <!-- FIX #5: honorários com correção/juros próprios SÓ pós-sentença -->
+    <div class="checkbox-row" style="margin-top:10px;">
+      <input type="checkbox" id="honCAtualizar">
+      <label for="honCAtualizar">Atualizar honorários (correção + juros próprios) <span style="color:var(--gray-text);font-size:11.5px;">— marque APENAS se há sentença anterior fixando os honorários em data pretérita</span></label>
+    </div>
     <div class="info-tag">
       Honorários incidem sobre o total final (corrigido + juros + multa) — Lei 8.906 art. 22.
     </div>
@@ -1195,12 +1200,12 @@ function calcularPrincipal(params) {
   for (const s of segs) {
     const ch = chaveMes(s.ano, s.mes);
     const info = getIndiceParaSegmento(params.indice, s.dataFimSeg, params.selicRetro);
-    // C6: se índice do mês não publicado, usa o último disponível (extrapolação)
+    // FIX #2/#3/#6: se índice não foi publicado, NÃO extrapola (era replicar último valor).
+    // Zera a variação (correção não roda nesse mês) e registra no flag _extrapolacao
+    // pra exibir alerta visual no resultado e no PDF.
     let varPct = TABELAS[info.tabela][ch];
     if (varPct === undefined) {
-      const todasAsChaves = Object.keys(TABELAS[info.tabela]).sort();
-      const ultimaChave = todasAsChaves[todasAsChaves.length - 1];
-      varPct = ultimaChave ? TABELAS[info.tabela][ultimaChave] : 0;
+      varPct = 0; // correção 0 = não corrige saldo neste mês
     }
     const varEf = (varPct/100) * (s.diasSeg / s.diasMes);
     const fatorMes = 1 + varEf;
@@ -1328,7 +1333,20 @@ function calcularHonorario(grupo, params, baseRef) {
   }
   if (valorNominal <= 0) return null;
 
-  // Correção e juros próprios
+  // FIX #5: por padrão, honorários NÃO ganham correção/juros próprios
+  // (caso pré-sentença). Só atualiza se grupo.atualizar=true (caso há
+  // sentença anterior fixando honorários em data pretérita).
+  if (!grupo.atualizar) {
+    return {
+      grupo,
+      valorNominal,
+      correcao: 0,
+      juros: 0,
+      total: valorNominal
+    };
+  }
+
+  // Correção e juros próprios (só executado se grupo.atualizar=true)
   const dCorr = grupo.dataCorr || params.dataCorrecao;
   const dJur = grupo.dataJuros || params.dataJuros;
   const segs = segmentarPorMes(dCorr, params.dataFim);
@@ -1454,6 +1472,8 @@ function calcular() {
       tipo: document.getElementById('honCTipo').value,
       valor: parseDecEl(document.getElementById('honCValor')),
       base: document.getElementById('honCBase').value,
+      // FIX #5: atualizar honorários só se user marcar (caso pós-sentença)
+      atualizar: !!(document.getElementById('honCAtualizar') && document.getElementById('honCAtualizar').checked),
       dataCorr: null,
       dataJuros: null,
       taxa: 0
@@ -1865,16 +1885,22 @@ function exportarPDF() {
   if (!estado) { alert('Calcule antes de exportar.'); return; }
   const e = estado, p = e.params, pr = e.principal;
   const dataEmissao = new Date().toLocaleDateString('pt-BR');
+  const temExtras = !!(e.parcelasResultados && e.parcelasResultados.length > 0);
+  // FIX #2/#3: extrapolação — primeiro mês sem índice
+  const extrapolacao = p._extrapolacao;
 
   // Linhas memorial
   let memorialRows = '';
   for (const l of pr.linhas) {
     if (l.tipo === 'mes') {
       const dRef = new Date(l.ano, l.mes-1, 1);
-      const label = fmtMesAno(dRef) + (l.parcial ? ' (' + l.diasSeg + '/' + l.diasMes + 'd)' : '') + ' · ' + l.indiceTabela;
-      memorialRows += '<tr' + (l.parcial?' class="parcial"':'') + '>' +
+      // FIX #2/#3: varPct === 0 = mês sem índice publicado → marcar visualmente
+      const semIndice = l.varPct === 0 && l.indiceTabela !== 'SELIC';
+      const label = fmtMesAno(dRef) + (l.parcial ? ' (' + l.diasSeg + '/' + l.diasMes + 'd)' : '') + (semIndice ? ' ⚠ s/ índice' : '');
+      const rowClass = semIndice ? 'extrapolado' : (l.parcial ? 'parcial' : '');
+      memorialRows += '<tr' + (rowClass ? ' class="' + rowClass + '"' : '') + '>' +
         '<td>' + label + '</td>' +
-        '<td class="num">' + fmtNum(l.varPct,2) + '%</td>' +
+        '<td class="num">' + (semIndice ? '—' : fmtNum(l.varPct,2) + '%') + '</td>' +
         '<td class="num">' + fmtBRL(l.saldoCorrigido) + '</td>' +
         '<td class="num">' + (l.diasJuros>0 ? fmtBRL(l.jurosMes) : '—') + '</td>' +
         '<td class="num">' + fmtBRL(l.jurosAcumulados) + '</td>' +
@@ -1939,140 +1965,132 @@ function exportarPDF() {
     notas += '<p><strong>Imputação de pagamento:</strong> aplicada na ordem juros vencidos → multa → principal, conforme art. 354 do Código Civil.</p>';
   }
 
-  const head = '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Memorial de Cálculo Judicial — COBRASQ</title>'
-    + '<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,500;9..144,600&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">';
+  const head = '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Memorial de Cálculo — COBRASQ</title>'
+    + '<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter+Tight:wght@400;500;600&display=swap" rel="stylesheet">';
   const css = '<style>' +
-    '@page { size: A4; margin: 18mm 16mm 22mm 16mm; }' +
+    /* Memorial enxuto — 1 a 2 páginas, fundo branco, logo azul marinho */
+    '@page { size: A4; margin: 12mm 14mm 14mm 14mm; }' +
     '* { box-sizing: border-box; margin: 0; padding: 0; }' +
-    'body { font-family: "Inter Tight", -apple-system, "Segoe UI", sans-serif; color: #1A1815; font-size: 10.5pt; line-height: 1.55; background: #F1ECE2; }' +
-    /* C9 fase 3: capa */
-    '.cover { display: flex; flex-direction: column; justify-content: space-between; min-height: 230mm; padding: 30mm 0 20mm; page-break-after: always; }' +
-    '.cover-mark { font-family: "Fraunces", Georgia, serif; font-size: 56pt; font-weight: 500; letter-spacing: 0.16em; text-transform: lowercase; color: #0A0908; line-height: 1; }' +
-    '.cover-mark::after { content: "."; color: #B8924B; }' +
-    '.cover-rule { width: 64mm; height: 2px; background: #B8924B; margin: 14mm 0 8mm; }' +
-    '.cover-title { font-family: "Fraunces", Georgia, serif; font-size: 22pt; font-weight: 500; color: #0A0908; line-height: 1.2; max-width: 140mm; }' +
-    '.cover-quote { font-family: "Instrument Serif", Georgia, serif; font-style: italic; font-size: 14pt; color: #5A554A; margin-top: 10mm; max-width: 130mm; }' +
-    '.cover-meta { font-family: "JetBrains Mono", monospace; font-size: 9pt; letter-spacing: 0.18em; text-transform: uppercase; color: #5A554A; }' +
-    '.cover-meta strong { color: #0A0908; display: block; margin-bottom: 4mm; font-weight: 500; }' +
-    /* Páginas internas */
-    '.wordmark-bar { background: #0A0908; color: #F1ECE2; padding: 16mm 12mm 8mm; display: flex; justify-content: space-between; align-items: flex-end; margin: -18mm -16mm 14mm; border-bottom: 2px solid #B8924B; }' +
-    '.wordmark { font-family: "Fraunces", Georgia, serif; font-size: 22pt; font-weight: 500; letter-spacing: 0.16em; text-transform: lowercase; }' +
+    'body { font-family: "Inter Tight", -apple-system, "Segoe UI", sans-serif; color: #1A1815; font-size: 9pt; line-height: 1.4; background: #fff; }' +
+    /* Header compacto com logo azul */
+    '.wordmark-bar { display: flex; justify-content: space-between; align-items: center; padding-bottom: 6mm; border-bottom: 2px solid #0A2547; margin-bottom: 6mm; }' +
+    '.wordmark-block { display: flex; align-items: center; gap: 10pt; }' +
+    '.wordmark-dot { width: 18pt; height: 18pt; background: #0A2547; border-radius: 50%; display: inline-block; }' +
+    '.wordmark { font-family: "Fraunces", Georgia, serif; font-size: 20pt; font-weight: 500; letter-spacing: -0.01em; color: #0A2547; line-height: 1; }' +
     '.wordmark::after { content: "."; color: #B8924B; }' +
-    '.meta { text-align: right; font-family: "JetBrains Mono", monospace; font-size: 8pt; line-height: 1.5; letter-spacing: 0.12em; text-transform: uppercase; }' +
-    '.meta strong { display: block; font-size: 9pt; margin-bottom: 2px; color: #B8924B; font-weight: 500; }' +
-    '.doc-title { font-family: "Fraunces", Georgia, serif; font-size: 16pt; font-weight: 500; color: #0A0908; margin-bottom: 4px; padding-bottom: 6px; border-bottom: 1px solid #B8924B; letter-spacing: -0.01em; }' +
-    '.doc-subtitle { font-family: "Instrument Serif", Georgia, serif; font-style: italic; font-size: 11pt; color: #5A554A; margin-bottom: 18px; }' +
-    '.section { margin-bottom: 18px; page-break-inside: avoid; }' +
-    '.section-title { font-family: "Fraunces", Georgia, serif; font-size: 12pt; font-weight: 500; color: #0A0908; margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid #D8D2C5; }' +
-    '.section p { text-align: justify; margin-bottom: 6px; font-size: 10.5pt; }' +
-    '.calc-table, .hon-table { width: 100%; border-collapse: collapse; margin-top: 8px; }' +
-    '.calc-table tr td, .hon-table tr td { padding: 6px 4px; border-bottom: 1px solid #E1E4E8; font-size: 10pt; }' +
-    '.calc-table .descr, .hon-table .descr { color: #1A1D21; }' +
-    '.calc-table .valor, .calc-table .num, .hon-table .num { text-align: right; font-family: "Courier New", monospace; font-weight: 600; font-size: 9.5pt; }' +
-    '.calc-table .total-row td { background: #F5F6F8; font-weight: 700; color: #0A0908; font-size: 11pt; padding: 9px 4px; border-top: 2px solid #0A0908; border-bottom: 2px solid #0A0908; }' +
-    '.memorial-table { width: 100%; border-collapse: collapse; font-size: 8.5pt; margin-top: 8px; }' +
-    '.memorial-table thead th { background: #0A0908; color: white; padding: 5px 4px; text-align: left; font-family: Arial, sans-serif; font-size: 7.5pt; text-transform: uppercase; letter-spacing: 0.3px; }' +
+    '.wordmark-sub { font-size: 7pt; letter-spacing: 0.22em; text-transform: uppercase; color: #0A2547; opacity: 0.7; margin-top: 2pt; }' +
+    '.meta { text-align: right; font-size: 8pt; line-height: 1.5; color: #4A4A4A; }' +
+    '.meta strong { display: block; font-size: 8.5pt; color: #0A2547; font-weight: 600; }' +
+    '.doc-title { font-family: "Fraunces", Georgia, serif; font-size: 14pt; font-weight: 500; color: #0A2547; margin-bottom: 1pt; }' +
+    '.doc-subtitle { font-size: 9pt; color: #5A554A; margin-bottom: 4mm; }' +
+    /* Alerta de extrapolação */
+    '.alerta { background: #FEF3C7; border-left: 3pt solid #B45309; padding: 4pt 8pt; margin-bottom: 4mm; font-size: 8.5pt; color: #5C2E0A; }' +
+    '.alerta strong { color: #7C3A0E; }' +
+    '.section { margin-bottom: 4mm; }' +
+    '.section-title { font-family: "Fraunces", Georgia, serif; font-size: 10.5pt; font-weight: 500; color: #0A2547; margin-bottom: 3pt; padding-bottom: 2pt; border-bottom: 1px solid #B8924B; }' +
+    '.section p { text-align: justify; margin-bottom: 3pt; font-size: 9pt; }' +
+    '.calc-table, .hon-table { width: 100%; border-collapse: collapse; margin-top: 3pt; }' +
+    '.calc-table tr td, .hon-table tr td { padding: 3pt 4pt; border-bottom: 1px solid #E5E5E5; font-size: 9pt; }' +
+    '.calc-table .descr { color: #1A1815; }' +
+    '.calc-table .valor, .calc-table .num, .hon-table .num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 500; }' +
+    '.calc-table .total-row td { background: #F4F7FB; font-weight: 700; color: #0A2547; font-size: 10pt; padding: 5pt 4pt; border-top: 1.5px solid #0A2547; border-bottom: 1.5px solid #0A2547; }' +
+    '.calc-table .parcela-row td { background: #FAFAFA; font-size: 8.5pt; font-style: italic; color: #5A554A; }' +
+    '.memorial-table { width: 100%; border-collapse: collapse; font-size: 7.5pt; margin-top: 3pt; }' +
+    '.memorial-table thead th { background: #0A2547; color: #fff; padding: 3pt 4pt; text-align: left; font-size: 7pt; text-transform: uppercase; letter-spacing: 0.05em; }' +
     '.memorial-table thead th.num { text-align: right; }' +
-    '.memorial-table td { padding: 4px; border-bottom: 1px solid #E1E4E8; }' +
-    '.memorial-table td.num { text-align: right; font-family: "Courier New", monospace; }' +
+    '.memorial-table td { padding: 2pt 4pt; border-bottom: 1px solid #EAEAEA; }' +
+    '.memorial-table td.num { text-align: right; font-variant-numeric: tabular-nums; }' +
     '.memorial-table tr.parcial td { background: #FFFBE6; }' +
+    '.memorial-table tr.extrapolado td { background: #FEF3C7; color: #7C3A0E; }' +
     '.memorial-table tr.evento td { background: #E8F0FE; font-weight: 600; }' +
-    '.memorial-table tr.subtotal-row td { background: #F0F4FB; font-weight: 700; color: #0A0908; border-top: 1.5px solid #0A0908; border-bottom: 1.5px solid #0A0908; }' +
-    '.signature { margin-top: 40px; text-align: center; page-break-inside: avoid; }' +
-    '.signature-line { width: 60%; margin: 0 auto 6px; border-bottom: 1px solid #1A1D21; height: 24px; }' +
-    '.signature-name { font-weight: 700; font-size: 10.5pt; letter-spacing: 1.5px; }' +
-    '.signature-role { font-size: 9pt; color: #5A5F66; font-style: italic; margin-top: 2px; }' +
-    '.footer { margin-top: 24px; padding-top: 12px; border-top: 2px solid #0A0908; font-family: Arial, sans-serif; font-size: 8pt; color: #5A5F66; }' +
-    '.footer-cols { display: flex; justify-content: space-between; margin-bottom: 10px; }' +
-    '.footer-col strong { display: block; color: #0A0908; margin-bottom: 3px; font-size: 8.5pt; text-transform: uppercase; letter-spacing: 0.4px; }' +
-    '.footer-confidencialidade { text-align: center; font-style: italic; font-size: 7.5pt; color: #5A5F66; border-top: 1px dotted #BFBFBF; padding-top: 6px; }' +
+    '.memorial-table tr.subtotal-row td { background: #F4F7FB; font-weight: 700; color: #0A2547; border-top: 1.5px solid #0A2547; border-bottom: 1.5px solid #0A2547; font-size: 8pt; }' +
+    '.footer { margin-top: 6mm; padding-top: 3mm; border-top: 1px solid #B8924B; display: flex; justify-content: space-between; font-size: 7.5pt; color: #5A554A; }' +
+    '.footer strong { color: #0A2547; }' +
     '</style></head><body>';
 
-  // C9 fase 3: capa editorial seguindo Rebrand Book v3
-  const cover =
-    '<div class="cover">' +
-      '<div>' +
-        '<div class="cover-mark">cobrasq</div>' +
-        '<div class="cover-rule"></div>' +
-        '<div class="cover-title">Memorial de Cálculo Judicial</div>' +
-        '<div class="cover-quote">"O capital volta inteiro. Os acessórios pagam o trabalho."</div>' +
-      '</div>' +
-      '<div class="cover-meta">' +
-        '<strong>Emissão · ' + dataEmissao + '</strong>' +
-        'Cálculo até ' + fmtData(p.dataFim) + '<br>' +
-        'Documento de uso processual<br>' +
-        'COBRASQ · Recuperadora de Crédito' +
-      '</div>' +
-    '</div>';
+  // FIX #2/#3/#6: alerta visível de extrapolação no PDF
+  const alertaExtrapolacao = extrapolacao
+    ? '<div class="alerta"><strong>⚠ Atenção — índices não publicados:</strong> ' + extrapolacao.qtd + ' mês(es) sem cotação oficial do ' + extrapolacao.fonte + ' (a partir de ' + extrapolacao.primeiroMes + '). A correção monetária foi <strong>zerada nesses meses</strong> (não há projeção). Juros continuam correndo normalmente. Antes do uso processual, atualize a base BCB.</div>'
+    : '';
 
-  const corpo = cover +
+  // FIX #1: parcelas extras visíveis no PDF
+  let composicaoParcelas = '';
+  if (temExtras) {
+    composicaoParcelas = '<tr class="parcela-row"><td class="descr">Parcela 1 (principal) · ' + fmtBRL(p.valorOriginal) + ' · ' + fmtData(p.dataCorrecao) + '</td><td class="valor">corr. ' + fmtBRL(pr.saldoCorrigido - p.valorOriginal) + ' + juros ' + fmtBRL(pr.jurosAcumulados) + '</td></tr>';
+    e.parcelasResultados.forEach((pe, i) => {
+      composicaoParcelas += '<tr class="parcela-row"><td class="descr">Parcela ' + (i+2) + ' · ' + fmtBRL(pe.valor) + ' · ' + fmtData(pe.dataCorr) + '</td><td class="valor">corr. ' + fmtBRL(pe.resultado.saldoCorrigido - pe.valor) + ' + juros ' + fmtBRL(pe.resultado.jurosAcumulados) + '</td></tr>';
+    });
+  }
+
+  // FIX #4: multa visível mesmo quando vem de extras (multaAgregada)
+  const multaTotal = temExtras ? e.multaAgregada : pr.multaAcumulada;
+
+  // Honorários — só uma linha (sem dupla atualização per default — fix #5)
+  const honLabel = e.honContratual && e.honContratual.grupo.atualizar
+    ? '(+) Honorários (com correção/juros próprios)'
+    : '(+) Honorários';
+
+  const corpo =
+    // Header compacto com logo COBRASQ azul marinho
     '<div class="wordmark-bar">' +
-      '<div class="wordmark">cobrasq</div>' +
+      '<div class="wordmark-block">' +
+        '<span class="wordmark-dot"></span>' +
+        '<div>' +
+          '<div class="wordmark">cobrasq</div>' +
+          '<div class="wordmark-sub">Recuperação de Crédito</div>' +
+        '</div>' +
+      '</div>' +
       '<div class="meta">' +
-        '<strong>MEMORIAL DE CÁLCULO</strong>' +
-        'Emissão · ' + dataEmissao + '<br>' +
-        'Confidencial' +
+        '<strong>Memorial de Cálculo</strong>' +
+        'Emissão: ' + dataEmissao + '<br>' +
+        'Cálculo até ' + fmtData(p.dataFim) +
       '</div>' +
     '</div>' +
 
-    '<div class="doc-title">Demonstrativo de Atualização da Dívida — Modalidade Judicial</div>' +
-    '<div class="doc-subtitle">Composição do valor cobrado em ' + fmtDataExtenso(p.dataFim) + '</div>' +
+    '<div class="doc-title">Demonstrativo de Atualização da Dívida</div>' +
+    '<div class="doc-subtitle">Índice ' + p.indice + ' · Juros ' + fmtNum(p.taxaJurosMensal,2) + '% a.m. simples · Termo correção ' + fmtData(p.dataCorrecao) + ' · Termo juros ' + fmtData(p.dataJuros) + '</div>' +
+
+    alertaExtrapolacao +
 
     '<div class="section">' +
-      '<div class="section-title">1. Parâmetros do cálculo</div>' +
-      '<p>Apura-se o valor atualizado de obrigação cujo termo inicial da correção monetária é <strong>' + fmtData(p.dataCorrecao) +
-      '</strong> e cujo termo inicial dos juros moratórios é <strong>' + fmtData(p.dataJuros) +
-      '</strong>, com data-base de cálculo em <strong>' + fmtData(p.dataFim) + '</strong>.</p>' +
-      '<p>Índice adotado: <strong>' + p.indice + '</strong>. Juros simples à taxa de <strong>' + fmtNum(p.taxaJurosMensal,2) +
-      '% ao mês</strong>, em conformidade com a Súmula 121 do STF (vedação da capitalização). ' +
-      'Pro rata die linear no cômputo dos meses parciais. Base dos juros conforme orientação do Manual de Cálculos da Justiça Federal: aplica-se a taxa sobre o saldo já corrigido.</p>' +
-    '</div>' +
-
-    '<div class="section">' +
-      '<div class="section-title">2. Composição do valor</div>' +
+      '<div class="section-title">1. Composição do valor</div>' +
       '<table class="calc-table">' +
-        '<tr><td class="descr">Valor nominal original</td><td class="valor">' + fmtBRL(p.valorOriginal) + '</td></tr>' +
-        '<tr><td class="descr">(+) Correção monetária ' + p.indice + '</td><td class="valor">' + fmtBRL(pr.saldoCorrigido - p.valorOriginal) + '</td></tr>' +
-        '<tr><td class="descr">Saldo corrigido</td><td class="valor">' + fmtBRL(pr.saldoCorrigido) + '</td></tr>' +
-        '<tr><td class="descr">(+) Juros de mora ' + fmtNum(p.taxaJurosMensal,2) + '% a.m. (simples)</td><td class="valor">' + fmtBRL(pr.jurosAcumulados) + '</td></tr>' +
-        (p.aplicarMulta ? '<tr><td class="descr">(+) Multa contratual ' + (p.multaTipo==='FIXO'?'(R$ fixo)':fmtNum(p.multaPct,2)+'%') + '</td><td class="valor">' + fmtBRL(pr.multaAcumulada) + '</td></tr>' : '') +
+        composicaoParcelas +
+        (temExtras
+          ? '<tr><td class="descr">Saldo corrigido (soma todas parcelas)</td><td class="valor">' + fmtBRL(e.saldoCorrigidoTotal) + '</td></tr>' +
+            '<tr><td class="descr">(+) Juros de mora ' + fmtNum(p.taxaJurosMensal,2) + '% a.m. (soma)</td><td class="valor">' + fmtBRL(e.jurosAcumuladosTotal) + '</td></tr>'
+          : '<tr><td class="descr">Valor nominal original</td><td class="valor">' + fmtBRL(p.valorOriginal) + '</td></tr>' +
+            '<tr><td class="descr">(+) Correção monetária ' + p.indice + '</td><td class="valor">' + fmtBRL(pr.saldoCorrigido - p.valorOriginal) + '</td></tr>' +
+            '<tr><td class="descr">Saldo corrigido</td><td class="valor">' + fmtBRL(pr.saldoCorrigido) + '</td></tr>' +
+            '<tr><td class="descr">(+) Juros de mora ' + fmtNum(p.taxaJurosMensal,2) + '% a.m. (simples)</td><td class="valor">' + fmtBRL(pr.jurosAcumulados) + '</td></tr>'
+        ) +
+        (p.aplicarMulta ? '<tr><td class="descr">(+) Multa contratual ' + (p.multaTipo==='FIXO'?'(R$ fixo)':fmtNum(p.multaPct,2)+'%') + '</td><td class="valor">' + fmtBRL(multaTotal) + '</td></tr>' : '') +
         '<tr class="total-row"><td class="descr">Subtotal principal</td><td class="valor">' + fmtBRL(e.totalPrincipal) + '</td></tr>' +
-        (e.honContratual ? '<tr><td class="descr">(+) Honorários (atualizados)</td><td class="valor">' + fmtBRL(e.honContratual.total) + '</td></tr>' : '') +
+        (e.honContratual ? '<tr><td class="descr">' + honLabel + ' ' + fmtNum(e.honContratual.grupo.valor,2) + '%</td><td class="valor">' + fmtBRL(e.honContratual.total) + '</td></tr>' : '') +
         '<tr class="total-row"><td class="descr">Total geral atualizado</td><td class="valor">' + fmtBRL(e.totalGeral) + '</td></tr>' +
       '</table>' +
     '</div>' +
 
-    honSection +
-
-    (notas ? '<div class="section"><div class="section-title">3. Notas e observações</div>' + notas + '</div>' : '') +
+    (notas ? '<div class="section"><div class="section-title">2. Notas</div>' + notas + '</div>' : '') +
 
     '<div class="section">' +
-      '<div class="section-title">4. Memorial mês a mês</div>' +
+      '<div class="section-title">' + (notas ? '3' : '2') + '. Memorial mês a mês</div>' +
       '<table class="memorial-table">' +
         '<thead><tr>' +
-          '<th>Mês / evento</th>' +
+          '<th>Mês</th>' +
           '<th class="num">Índice %</th>' +
           '<th class="num">Saldo corrigido</th>' +
           '<th class="num">Juros mês</th>' +
           '<th class="num">Juros acum.</th>' +
           '<th class="num">Multa</th>' +
-          '<th class="num">Saldo total</th>' +
+          '<th class="num">Total</th>' +
         '</tr></thead><tbody>' + memorialRows + '</tbody>' +
       '</table>' +
     '</div>' +
 
-    '<div class="signature">' +
-      '<div class="signature-line"></div>' +
-      '<div class="signature-name">COBRASQ</div>' +
-      '<div class="signature-role">Recuperação de Crédito · CNPJ 34.626.848/0001-42</div>' +
-    '</div>' +
-
     '<div class="footer">' +
-      '<div class="footer-cols">' +
-        '<div class="footer-col"><strong>Sede</strong>COBRASQ — CNPJ 34.626.848/0001-42<br>Av. Rio Grande do Sul, n.º 380, Sala 201<br>Edifício Mara — Centro<br>Dois Vizinhos/PR</div>' +
-        '<div class="footer-col" style="text-align:right;"><strong>Atendimento</strong>contato@cobrasq.com.br<br>WhatsApp (46) 98822-6533</div>' +
-      '</div>' +
-      '<div class="footer-confidencialidade">Documento de natureza processual. Conferência humana obrigatória antes do uso peticional.</div>' +
+      '<div><strong>COBRASQ Recuperadora de Crédito e Cobrança Ltda.</strong><br>CNPJ 34.626.848/0001-42 · Av. Rio Grande do Sul, n. 380, Sala 01, Centro, Dois Vizinhos — PR</div>' +
+      '<div style="text-align:right;">contato@cobrasq.com.br<br>(46) 98822-6533</div>' +
     '</div>';
 
   const scriptPDF = '<' + 'script>window.onload=function(){setTimeout(function(){window.print();},300);};<' + '/' + 'script>';
