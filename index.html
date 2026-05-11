@@ -1709,6 +1709,15 @@ img{max-width:100%}
         <label>Observações</label>
         <textarea id="mcli-obs" placeholder="Notas sobre este cliente..."></textarea>
       </div>
+
+      <!-- Plano C1: Documentos para peças judiciais (reutilizados em todas as ações desse cliente) -->
+      <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border);">
+        <div style="font-size:11.5px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;">
+          Documentos para peças judiciais
+          <span style="font-weight:400;text-transform:none;color:var(--text-3);">— reutilizados em todas as ações desse cliente</span>
+        </div>
+        <div id="mcli-docs-area"></div>
+      </div>
       </div><!-- /mcli-form-wrap (S7) -->
     </div>
     <div class="modal-footer" id="mcli-modal-footer">
@@ -7426,7 +7435,94 @@ function abrirNovoCliente(){
   if(btnCnpj) btnCnpj.style.display = '';
   mcliSelectMode('manual');
   document.getElementById('modal-cliente-title').textContent = 'Novo Cliente (Cedente)';
+  // C1: docs do cliente — vazio em novo cadastro
+  if (typeof mcliCarregarDocumentos === 'function') mcliCarregarDocumentos(null);
   openModal('modal-cliente');
+}
+
+// Plano C1: documentos do cliente reutilizáveis em peças judiciais
+async function mcliCarregarDocumentos(clienteId){
+  const area = document.getElementById('mcli-docs-area');
+  if (!area) return;
+  if(!clienteId){
+    area.innerHTML = '<div style="font-size:12.5px;color:var(--text-3);font-style:italic;padding:8px 0;">Salve o cliente primeiro para anexar documentos.</div>';
+    return;
+  }
+  const supa = (typeof getSupabase === 'function') ? getSupabase() : null;
+  if(!supa){
+    area.innerHTML = '<div style="font-size:12px;color:var(--text-3);font-style:italic;">Supabase não configurado — não é possível listar documentos.</div>';
+    return;
+  }
+  try {
+    const { data, error } = await supa.from('cliente_documentos')
+      .select('*').eq('cliente_id', clienteId).eq('ativo', true)
+      .order('uploaded_at', { ascending: false });
+    if (error) { console.warn('docs cliente:', error.message); area.innerHTML = '<div style="font-size:12px;color:var(--danger);">Erro ao listar documentos.</div>'; return; }
+    mcliRenderDocs(data || []);
+  } catch(e) { console.warn('mcliCarregarDocumentos exception:', e); }
+}
+
+function mcliRenderDocs(docs){
+  const tipos = [
+    { key:'procuracao', label:'Procuração' },
+    { key:'contrato_social', label:'Contrato social' },
+    { key:'cartao_cnpj', label:'Cartão CNPJ' }
+  ];
+  const safe = s => String(s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const html = tipos.map(t => {
+    const itens = docs.filter(d => d.tipo === t.key);
+    return '<div style="margin-bottom:10px;padding:10px 12px;background:var(--surface-2);border-radius:6px;border-left:3px solid var(--gold);">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">'
+        + '<strong style="font-size:12.5px;color:var(--text);">'+t.label+'</strong>'
+        + '<label style="cursor:pointer;font-size:11.5px;padding:4px 10px;background:var(--surface);border:1px solid var(--border);border-radius:4px;">📤 Anexar<input type="file" accept="application/pdf,image/*" style="display:none;" onchange="mcliUploadDoc(event,\''+t.key+'\')"></label>'
+      + '</div>'
+      + (itens.length ? itens.map(d =>
+          '<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-top:1px solid var(--border);font-size:12px;">'
+          + '<span style="word-break:break-all;">'+safe(d.nome||'sem nome')+'</span>'
+          + '<span style="display:flex;gap:10px;flex-shrink:0;margin-left:10px;">'
+            + '<a href="#" onclick="mcliVerDoc(\''+safe(d.storage_path)+'\');return false;" style="font-size:11.5px;color:var(--navy);">Ver</a>'
+            + '<a href="#" onclick="mcliExcluirDoc(\''+d.id+'\');return false;" style="font-size:11.5px;color:var(--danger);">Excluir</a>'
+          + '</span>'
+          + '</div>'
+        ).join('') : '<div style="font-size:11.5px;color:var(--text-3);font-style:italic;padding:3px 0;">Nenhum '+t.label.toLowerCase()+' anexado.</div>')
+      + '</div>';
+  }).join('');
+  document.getElementById('mcli-docs-area').innerHTML = html;
+}
+
+async function mcliUploadDoc(ev, tipo){
+  const file = ev.target.files[0]; if(!file) return;
+  const clienteId = document.getElementById('mcli-id').value;
+  if(!clienteId){ alert('Salve o cliente primeiro.'); ev.target.value=''; return; }
+  const supa = getSupabase(); if(!supa){ alert('Supabase não configurado.'); return; }
+  try {
+    const u = (await supa.auth.getUser()).data?.user;
+    const path = 'clientes/'+clienteId+'/'+tipo+'_'+Date.now()+'_'+file.name.replace(/[^\w.\-]/g,'_');
+    const { error: errUp } = await supa.storage.from('peticao-assets').upload(path, file, { contentType: file.type });
+    if(errUp){ alert('Upload falhou: '+errUp.message); return; }
+    const { error: errIns } = await supa.from('cliente_documentos').insert({
+      cliente_id: clienteId, tipo, nome: file.name, storage_path: path, uploaded_by: u?.id, ativo: true
+    });
+    if(errIns){ alert('DB insert falhou: '+errIns.message); return; }
+    if(typeof showToast === 'function') showToast('Documento anexado.','success');
+    mcliCarregarDocumentos(clienteId);
+  } finally { ev.target.value=''; }
+}
+
+async function mcliVerDoc(storagePath){
+  const supa = getSupabase(); if(!supa) return;
+  const { data, error } = await supa.storage.from('peticao-assets').createSignedUrl(storagePath, 300);
+  if(error){ alert('Erro: '+error.message); return; }
+  window.open(data.signedUrl, '_blank');
+}
+
+async function mcliExcluirDoc(docId){
+  if(!confirm('Excluir este documento?')) return;
+  const supa = getSupabase(); if(!supa) return;
+  await supa.from('cliente_documentos').update({ ativo: false }).eq('id', docId);
+  const clienteId = document.getElementById('mcli-id').value;
+  mcliCarregarDocumentos(clienteId);
+  if(typeof showToast === 'function') showToast('Documento removido.','info');
 }
 
 // IMPLEMENTADO S6: troca campo "Filial de…" pra mostrar quando filial é selecionada
@@ -7859,6 +7955,8 @@ function editCliente(id){
   document.getElementById('mcli-senha').value = c.loginSenha||'';
   document.getElementById('mcli-obs').value = c.obs||'';
   document.getElementById('modal-cliente-title').textContent = 'Editar Cliente';
+  // C1: docs do cliente — carrega lista do Supabase
+  if (typeof mcliCarregarDocumentos === 'function') mcliCarregarDocumentos(c.id);
   openModal('modal-cliente');
 }
 
