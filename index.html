@@ -3034,6 +3034,25 @@ function load(){
 const uid=()=>(typeof crypto!=='undefined'&&crypto.randomUUID)?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2);
 const fmt=v=>(+v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
 
+// ── LISTENERS ESCOPADOS (B2) ─────────────────────────────────
+// Cada "escopo" (drawer, popover, modal) tem um AbortController. Quando o
+// escopo é fechado/destruído, disposeScope(name) cancela todos os listeners
+// registrados via scopedOn(name, ...). Evita o vazamento clássico de
+// `document.addEventListener` deixado pelos popovers/dropdowns quando
+// fechados por outro caminho que não o clique-fora.
+const _listenerScopes = new Map();
+function scopedOn(scopeName, target, type, handler, options){
+  if(!target || !type || typeof handler !== 'function') return;
+  let ctrl = _listenerScopes.get(scopeName);
+  if(!ctrl){ ctrl = new AbortController(); _listenerScopes.set(scopeName, ctrl); }
+  const opts = (options && typeof options === 'object') ? { ...options, signal: ctrl.signal } : { signal: ctrl.signal };
+  target.addEventListener(type, handler, opts);
+}
+function disposeScope(scopeName){
+  const ctrl = _listenerScopes.get(scopeName);
+  if(ctrl){ ctrl.abort(); _listenerScopes.delete(scopeName); }
+}
+
 // ── SUPABASE ──────────────────────────────────────────────────
 let _supa = null;
 let _supaReady = false;
@@ -5116,7 +5135,9 @@ function toggleFilterPopover(e, forceClose){
       respEl.value = devFilter.resp;
       respEl.addEventListener('change', e=>{ devFilter.resp=e.target.value; renderDevedores(); });
     }
-    // Close when clicking outside
+    // Close when clicking outside — listener no escopo 'devFilterPopover'
+    // pra ser descartado em qualquer re-render ou fechamento programático
+    disposeScope('devFilterPopover');
     setTimeout(()=>{
       function closePop(ev){
         const p = document.getElementById('filter-popover');
@@ -5124,10 +5145,10 @@ function toggleFilterPopover(e, forceClose){
         if(p && !p.contains(ev.target) && btn && !btn.contains(ev.target)){
           filterPopoverOpen = false;
           if(p) p.style.display = 'none';
-          document.removeEventListener('mousedown', closePop);
+          disposeScope('devFilterPopover');
         }
       }
-      document.addEventListener('mousedown', closePop);
+      scopedOn('devFilterPopover', document, 'mousedown', closePop);
     }, 10);
   }
 }
@@ -5188,6 +5209,8 @@ function devCardHtml(d){
 
 // ── DRAWER ───────────────────────────────────────────────────
 function openDrawer(devId){
+  // Reabertura do drawer sem fechar antes: dispose pra evitar listeners residuais
+  disposeScope('drawer');
   currentDevId = devId;
   const dev = (DB.devedores||[]).find(d=>d.id===devId);
   if(!dev) return;
@@ -5260,6 +5283,10 @@ function closeDrawer(){
   document.getElementById('devDrawer').classList.remove('open');
   document.getElementById('devDrawer-overlay').classList.remove('open');
   currentDevId = null;
+  // Drop qualquer listener escopado no drawer (B2). Futuras chamadas a
+  // scopedOn('drawer', …) podem registrar handlers em window/document/modal
+  // sem se preocupar com cleanup manual.
+  disposeScope('drawer');
 }
 
 function _drawerCtx(dev){
@@ -15114,14 +15141,16 @@ function toggleBulkDropdown(){
       function closeDd(ev){
         if(!dd.contains(ev.target) && ev.target.id !== 'bulk-btn-acoes'){
           dd.classList.remove('open');
-          document.removeEventListener('click', closeDd);
+          disposeScope('bulkDropdown');
         }
       }
-      document.addEventListener('click', closeDd);
+      scopedOn('bulkDropdown', document, 'click', closeDd);
     }, 10);
+  } else {
+    disposeScope('bulkDropdown');
   }
 }
-function closeBulkDropdown(){ const dd=document.getElementById('bulk-dropdown'); if(dd) dd.classList.remove('open'); }
+function closeBulkDropdown(){ const dd=document.getElementById('bulk-dropdown'); if(dd) dd.classList.remove('open'); disposeScope('bulkDropdown'); }
 
 function limparSelecao(){
   selectedDevIds.clear();

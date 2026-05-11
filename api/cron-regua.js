@@ -5,10 +5,18 @@
 //
 // Configurado em vercel.json como cron job (default: 12:00 UTC = 09:00 BRT).
 // Invocação manual: GET /api/cron-regua?dry=1  → dry-run sem enviar
+//
+// Mudança Fase C (B4): a idempotência (sabe se um passo já foi enviado)
+// passou de _reguaEnviados dentro do JSONB para a tabela `regua_envios`.
+// Antes: cron fazia PATCH no cobrasq_data inteiro depois de cada run, podendo
+// sobrescrever edições simultâneas do usuário.
+// Agora: leituras do JSONB são read-only; gravações vão pra `regua_envios`
+// (idempotência) e `audit_logs` (histórico). Migração de marcas legadas:
+// se a tabela `regua_envios` está vazia mas existe `_reguaEnviados` no JSONB,
+// faz back-fill no primeiro run.
 
 const SB_URL = process.env.SUPABASE_URL || '';
-// Padronizado para SUPABASE_SERVICE_ROLE_KEY (mesmo nome usado pelas edge functions).
-// SUPABASE_SERVICE_KEY mantido como fallback de retrocompat para não quebrar deploys atuais.
+// Padronizado para SUPABASE_SERVICE_ROLE_KEY; mantém fallback retrocompat.
 const SB_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || '';
 
 async function sbFetch(path, opts) {
@@ -58,7 +66,6 @@ function diasDesde(dataStr) {
   return Math.floor((Date.now() - d.getTime()) / 86400000);
 }
 
-// Dias entre hoje e uma data futura (negativo se já passou)
 function diasAte(dataStr) {
   if (!dataStr) return 0;
   const d = new Date(dataStr);
@@ -96,6 +103,116 @@ function acordoAtivo(ac) {
   return ac && (ac.status === 'ativo' || (ac.parcelas || []).some(p => !p.pago));
 }
 
+// ── Idempotência: lookup/registro em regua_envios ───────────────
+// Set<string> com chave "tipo|devedor|parcela|step" pra evitar 1 select por step.
+async function loadJaEnviados(devIds) {
+  if (!devIds.length) return new Set();
+  // PostgREST não aceita filtros muito longos; chunkar em blocos de 100.
+  const set = new Set();
+  for (let i = 0; i < devIds.length; i += 100) {
+    const chunk = devIds.slice(i, i + 100).map(encodeURIComponent).join(',');
+    const rows = await sbFetch(
+      `regua_envios?select=tipo,devedor_id,parcela_id,step_key&devedor_id=in.(${chunk})&status=eq.sent`
+    );
+    for (const r of rows) {
+      set.add(`${r.tipo}|${r.devedor_id}|${r.parcela_id || ''}|${r.step_key}`);
+    }
+  }
+  return set;
+}
+
+function jaEnviadoKey(tipo, devId, parcelaId, stepKey) {
+  return `${tipo}|${devId}|${parcelaId || ''}|${stepKey}`;
+}
+
+async function registrarEnvio({ tipo, devedorId, parcelaId, stepKey, canal, status, error }) {
+  try {
+    await sbFetch('regua_envios', {
+      method: 'POST',
+      headers: { 'Prefer': 'resolution=ignore-duplicates,return=minimal' },
+      body: JSON.stringify({
+        tipo, devedor_id: devedorId,
+        parcela_id: parcelaId || '',
+        step_key: stepKey, canal,
+        status: status || 'sent',
+        error: error || null,
+      }),
+    });
+  } catch (e) {
+    console.warn('[regua_envios] insert falhou:', e.message);
+  }
+}
+
+// Back-fill único: na primeira run, popula regua_envios a partir do
+// _reguaEnviados que ficou no JSONB. Idempotente (insert ON CONFLICT DO NOTHING
+// é simulado por `resolution=ignore-duplicates`).
+async function backfillSeNecessario(devedores) {
+  let backfilled = 0;
+  // Conta rápida (HEAD) — se já tem qualquer linha, pula
+  let rows;
+  try { rows = await sbFetch('regua_envios?select=id&limit=1'); }
+  catch { rows = []; }
+  if (Array.isArray(rows) && rows.length > 0) return 0;
+
+  for (const dev of devedores) {
+    const enviadosCob = Array.isArray(dev._reguaEnviados) ? dev._reguaEnviados : [];
+    for (const stepKey of enviadosCob) {
+      await registrarEnvio({ tipo: 'cobranca', devedorId: String(dev.id), parcelaId: '', stepKey, canal: 'whatsapp' });
+      backfilled++;
+    }
+    for (const ac of (dev.acordos || [])) {
+      for (const p of (ac.parcelas || [])) {
+        const enviadosPar = Array.isArray(p._reguaEnviados) ? p._reguaEnviados : [];
+        for (const stepKey of enviadosPar) {
+          await registrarEnvio({ tipo: 'acordo', devedorId: String(dev.id), parcelaId: String(p.id || p.numero || ''), stepKey, canal: 'whatsapp' });
+          backfilled++;
+        }
+      }
+    }
+  }
+  return backfilled;
+}
+
+// ── B7: processa cleanup de eventos do Google Calendar pendentes ─
+async function processarCalendarPendingDeletes() {
+  const out = { tentados: 0, removidos: 0, falhas: 0 };
+  let rows;
+  try { rows = await sbFetch('calendar_events_sync?select=id,user_id,google_event_id&pending_delete=eq.true&deleted_at=is.null&limit=200'); }
+  catch (e) { console.warn('[calendar] list pendentes:', e.message); return out; }
+  if (!Array.isArray(rows) || rows.length === 0) return out;
+
+  const allowedOrigin = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : (process.env.PORTAL_URL || '');
+  for (const row of rows) {
+    out.tentados++;
+    try {
+      const r = await fetch(`${SB_URL.replace(/\/+$/, '')}/functions/v1/google-calendar-sync`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${SB_KEY}`,
+          'apikey': SB_KEY,
+          ...(allowedOrigin ? { 'Origin': allowedOrigin } : {}),
+        },
+        body: JSON.stringify({ action: 'delete', eventId: row.google_event_id }),
+      });
+      if (!r.ok && r.status !== 404 && r.status !== 410) {
+        const t = await r.text().catch(() => '');
+        throw new Error(`HTTP ${r.status}: ${t.slice(0, 200)}`);
+      }
+      // 404/410: já não existe no Google — considera ok.
+      await sbFetch(`calendar_events_sync?id=eq.${encodeURIComponent(row.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ deleted_at: new Date().toISOString() }),
+      });
+      out.removidos++;
+    } catch (e) {
+      out.falhas++;
+      console.warn(`[calendar] delete event ${row.google_event_id}:`, e.message);
+    }
+  }
+  return out;
+}
+
 module.exports = async function handler(req, res) {
   const ua = req.headers['user-agent'] || '';
   const secret = req.headers['x-cron-secret'] || req.query?.secret || '';
@@ -108,6 +225,7 @@ module.exports = async function handler(req, res) {
   const dry = req.query?.dry === '1' || req.query?.dry === 'true';
 
   try {
+    // Leitura única do JSONB (read-only — não fazemos mais PATCH dele)
     const rows = await sbFetch(`cobrasq_data?key=eq.main&select=data,updated_at`);
     if (!rows || rows.length === 0) {
       return res.status(200).json({ ok: true, msg: 'cobrasq_data vazia.' });
@@ -115,7 +233,8 @@ module.exports = async function handler(req, res) {
     const DB = rows[0].data || {};
 
     if (DB.config?.reguaAtiva === false) {
-      return res.status(200).json({ ok: true, msg: 'Régua pausada globalmente.' });
+      const calendarStats = dry ? null : await processarCalendarPendingDeletes();
+      return res.status(200).json({ ok: true, msg: 'Régua pausada globalmente.', calendar: calendarStats });
     }
 
     const reguaCobranca = Array.isArray(DB.config?.reguaCobranca) ? DB.config.reguaCobranca
@@ -123,7 +242,8 @@ module.exports = async function handler(req, res) {
     const reguaAcordo   = Array.isArray(DB.config?.reguaAcordo) ? DB.config.reguaAcordo : [];
 
     if (reguaCobranca.length === 0 && reguaAcordo.length === 0) {
-      return res.status(200).json({ ok: true, msg: 'Nenhum passo configurado em nenhuma régua.' });
+      const calendarStats = dry ? null : await processarCalendarPendingDeletes();
+      return res.status(200).json({ ok: true, msg: 'Nenhum passo configurado em nenhuma régua.', calendar: calendarStats });
     }
 
     const credor = DB.config?.empresa || 'COBRASQ';
@@ -131,34 +251,40 @@ module.exports = async function handler(req, res) {
     const devedores = Array.isArray(DB.devedores) ? DB.devedores : [];
     const ativos = devedores.filter(d => !d.arquivado && !['Quitado', 'Recebido', 'Devolvida', 'Sem êxito'].includes(d.status));
 
-    DB.reguaLog = DB.reguaLog || [];
+    // Back-fill de marcas legadas, se for o caso (uma vez só)
+    const backfilled = dry ? 0 : await backfillSeNecessario(devedores);
+
+    // Pré-carrega "já enviados" de todos os devedores ativos numa única query
+    const devIds = ativos.map(d => String(d.id || ''));
+    const jaEnviados = await loadJaEnviados(devIds);
+
     const resultado = {
       processados: ativos.length,
       enviados_cobranca: 0,
       enviados_acordo:   0,
       falhas: 0,
       dry,
+      backfilled,
       itens: []
     };
 
     // ========== RÉGUA A — PRÉ-ACORDO (devedores sem acordo ativo) ==========
     for (const dev of ativos) {
       const temAcordoAtivo = (dev.acordos || []).some(acordoAtivo);
-      if (temAcordoAtivo) continue; // cobrança só pré-acordo
+      if (temAcordoAtivo) continue;
 
-      // Prioriza dev.vencimento; fallback entrada/createdAt
       const baseData = dev.vencimento || dev.entrada || (dev.createdAt ? dev.createdAt.split('T')[0] : '');
       const dias = diasDesde(baseData);
-      if (dias < 0) continue; // não venceu ainda
+      if (dias < 0) continue;
 
-      dev._reguaEnviados = Array.isArray(dev._reguaEnviados) ? dev._reguaEnviados : [];
       const tel = devTelefone(dev);
       const valor = parseValorBR(dev.valorAtual) || parseValorBR(dev.valorOrig) || 0;
+      const devId = String(dev.id || '');
 
       for (const step of reguaCobranca) {
         const stepKey = step.id || `${step.dias}_${step.canal}`;
         if (dias < (step.dias || 0)) continue;
-        if (dev._reguaEnviados.includes(stepKey)) continue;
+        if (jaEnviados.has(jaEnviadoKey('cobranca', devId, '', stepKey))) continue;
         if (step.canal !== 'whatsapp') {
           resultado.itens.push({ dev: dev.nome, tipo: 'cobranca', step: stepKey, skipped: `canal ${step.canal} não integrado` });
           continue;
@@ -171,12 +297,13 @@ module.exports = async function handler(req, res) {
         });
         try {
           if (!dry) await zapiSendText(tel, msg);
-          dev._reguaEnviados.push(stepKey);
-          DB.reguaLog.push({ ts: new Date().toISOString(), tipo:'cobranca', devId: dev.id, devNome: dev.nome, step: stepKey, canal: step.canal });
+          if (!dry) await registrarEnvio({ tipo: 'cobranca', devedorId: devId, parcelaId: '', stepKey, canal: step.canal, status: 'sent' });
+          jaEnviados.add(jaEnviadoKey('cobranca', devId, '', stepKey)); // evita reenvio na mesma run
           resultado.enviados_cobranca++;
           resultado.itens.push({ dev: dev.nome, tipo: 'cobranca', step: stepKey, status: dry ? 'dry' : 'sent' });
         } catch (e) {
           resultado.falhas++;
+          if (!dry) await registrarEnvio({ tipo: 'cobranca', devedorId: devId, parcelaId: '', stepKey, canal: step.canal, status: 'failed', error: e.message });
           resultado.itens.push({ dev: dev.nome, tipo: 'cobranca', step: stepKey, error: e.message });
         }
       }
@@ -188,17 +315,16 @@ module.exports = async function handler(req, res) {
       if (acordos.length === 0) continue;
       const tel = devTelefone(dev);
       if (!tel) continue;
+      const devId = String(dev.id || '');
 
       for (const ac of acordos) {
         const parcelas = (ac.parcelas || []).filter(p => !p.pago);
         for (const p of parcelas) {
-          p._reguaEnviados = Array.isArray(p._reguaEnviados) ? p._reguaEnviados : [];
+          const parcelaId = String(p.id || p.numero || '');
           const diasParaVencer = diasAte(p.vencimento);
-          // Disparar cada step cuja condição de dias/referencia case com hoje
           for (const step of reguaAcordo) {
             const stepKey = step.id || `${step.referencia}_${step.dias}_${step.canal}`;
-            if (p._reguaEnviados.includes(stepKey)) continue;
-            // Decide se o step deve disparar HOJE
+            if (jaEnviados.has(jaEnviadoKey('acordo', devId, parcelaId, stepKey))) continue;
             let disparaHoje = false;
             if (step.referencia === 'antes')  disparaHoje = (diasParaVencer === (step.dias || 0));
             else if (step.referencia === 'no_dia') disparaHoje = (diasParaVencer === 0);
@@ -222,12 +348,13 @@ module.exports = async function handler(req, res) {
             });
             try {
               if (!dry) await zapiSendText(tel, msg);
-              p._reguaEnviados.push(stepKey);
-              DB.reguaLog.push({ ts: new Date().toISOString(), tipo: 'acordo', devId: dev.id, devNome: dev.nome, parcelaId: p.id, step: stepKey, canal: step.canal });
+              if (!dry) await registrarEnvio({ tipo: 'acordo', devedorId: devId, parcelaId, stepKey, canal: step.canal, status: 'sent' });
+              jaEnviados.add(jaEnviadoKey('acordo', devId, parcelaId, stepKey));
               resultado.enviados_acordo++;
               resultado.itens.push({ dev: dev.nome, tipo: 'acordo', parcela: p.numero, step: stepKey, status: dry ? 'dry' : 'sent' });
             } catch (e) {
               resultado.falhas++;
+              if (!dry) await registrarEnvio({ tipo: 'acordo', devedorId: devId, parcelaId, stepKey, canal: step.canal, status: 'failed', error: e.message });
               resultado.itens.push({ dev: dev.nome, tipo: 'acordo', parcela: p.numero, step: stepKey, error: e.message });
             }
           }
@@ -235,13 +362,8 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    if (!dry && (resultado.enviados_cobranca + resultado.enviados_acordo) > 0) {
-      DB.reguaLog = DB.reguaLog.slice(-1000);
-      await sbFetch(`cobrasq_data?key=eq.main`, {
-        method: 'PATCH',
-        body: JSON.stringify({ data: DB, updated_at: new Date().toISOString() }),
-      });
-    }
+    // Cleanup de calendar (B7): só fora de dry-run
+    const calendar = dry ? null : await processarCalendarPendingDeletes();
 
     try {
       await sbFetch('audit_logs', {
@@ -253,13 +375,15 @@ module.exports = async function handler(req, res) {
             enviados_cobranca: resultado.enviados_cobranca,
             enviados_acordo: resultado.enviados_acordo,
             falhas: resultado.falhas,
-            processados: resultado.processados
+            processados: resultado.processados,
+            backfilled,
+            calendar
           }
         })
       });
     } catch {}
 
-    res.status(200).json({ ok: true, hoje: new Date().toISOString().slice(0,10), ...resultado });
+    res.status(200).json({ ok: true, hoje: new Date().toISOString().slice(0,10), ...resultado, calendar });
   } catch (err) {
     console.error('[cron-regua]', err);
     res.status(500).json({ ok: false, error: err.message });
