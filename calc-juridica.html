@@ -1021,7 +1021,65 @@ let parcelasExtras = []; // C3 — movido pra topo pra evitar TDZ
       if (e.key === 'Enter' && inp.type !== 'textarea') calcular();
     });
   });
+
+  // Auto-update silencioso da base BCB se cache vencido (>24h) — em background, sem bloquear
+  setTimeout(autoAtualizarBCBSeNecessario, 800);
 })();
+
+// Update manual disparado pelo botão do alerta — síncrono com feedback
+async function atualizarBCBManual() {
+  const btns = document.querySelectorAll('button[onclick="atualizarBCBManual()"]');
+  btns.forEach(b => { b.disabled = true; b.textContent = 'Atualizando...'; });
+  try {
+    for (const ind of Object.keys(BCB_SERIES)) {
+      try {
+        const dados = await fetchBCBSerie(BCB_SERIES[ind]);
+        Object.assign(TABELAS[ind], dados);
+        if (ind === 'INPC') Object.assign(TABELAS['TJPR'], dados);
+        salvarCacheBCB({ [ind]: dados });
+      } catch (err) {
+        console.warn('[BCB manual] falhou ' + ind + ':', err.message);
+      }
+    }
+    atualizarStatusBCB();
+    if (estado) calcular();
+  } catch (e) {
+    alert('Erro ao atualizar BCB: ' + e.message);
+  } finally {
+    btns.forEach(b => { b.disabled = false; b.textContent = 'Atualizar BCB agora'; });
+  }
+}
+
+// Auto-update silencioso do cache BCB no load (se cache >24h ou inexistente)
+async function autoAtualizarBCBSeNecessario() {
+  try {
+    const raw = localStorage.getItem(BCB_CACHE_KEY);
+    let precisa = true;
+    if (raw) {
+      const c = JSON.parse(raw);
+      const ultima = c && c.atualizadoEm ? new Date(c.atualizadoEm).getTime() : 0;
+      const horas = (Date.now() - ultima) / (1000 * 60 * 60);
+      precisa = horas > 24; // só se >24h
+    }
+    if (!precisa) { console.info('[BCB] cache ainda válido, pulando auto-update'); return; }
+    console.info('[BCB] atualizando base BCB em background...');
+    // chama silencioso (sem alerts)
+    for (const ind of Object.keys(BCB_SERIES)) {
+      try {
+        const dados = await fetchBCBSerie(BCB_SERIES[ind]);
+        Object.assign(TABELAS[ind], dados);
+        if (ind === 'INPC') Object.assign(TABELAS['TJPR'], dados);
+        salvarCacheBCB({ [ind]: dados });
+      } catch (err) {
+        console.warn('[BCB] falhou ' + ind + ':', err.message);
+      }
+    }
+    atualizarStatusBCB();
+    console.info('[BCB] base atualizada');
+    // se já há cálculo na tela, recalcula automaticamente
+    if (estado) { try { calcular(); } catch(e) {} }
+  } catch (e) { console.warn('[BCB] auto-update erro:', e); }
+}
 
 function onIndiceChange() {
   const ind = document.getElementById('indice').value;
@@ -1609,7 +1667,10 @@ function renderResultado() {
   }
   // C6: aviso de extrapolação se índice ausente
   if (p._extrapolacao) {
-    html += '<div class="result-line" style="color:#B8860B;font-size:13px;"><span>⚠ Cálculo extrapolado em ' + p._extrapolacao.qtd + ' mês(es) (a partir de ' + p._extrapolacao.primeiroMes + ', ' + p._extrapolacao.fonte + ' não publicado)</span><span></span></div>';
+    html += '<div class="result-line" style="background:#FEF3C7;border-left:3px solid #B45309;padding:8px 10px;color:#7C3A0E;font-size:13px;align-items:center;">'
+      + '<span><strong>⚠ ' + p._extrapolacao.qtd + ' mês(es) sem ' + p._extrapolacao.fonte + ' publicado</strong> (a partir de ' + p._extrapolacao.primeiroMes + '). Correção zerada nesses meses; juros continuam.</span>'
+      + '<button onclick="atualizarBCBManual()" style="background:#0A2547;color:#fff;border:0;padding:6px 12px;border-radius:4px;font-size:12px;cursor:pointer;font-weight:600;">Atualizar BCB agora</button>'
+      + '</div>';
   }
   html += '<div class="result-line subtotal"><span>Subtotal principal</span><span>' + fmtBRL(e.totalPrincipal) + '</span></div>';
 
