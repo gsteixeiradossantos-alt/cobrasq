@@ -3039,6 +3039,10 @@ let _supa = null;
 let _supaReady = false;
 let _syncTimer = null;
 let _lastSyncAt = null;
+// Lock e marca da última versão remota carregada — evita upsert paralelo (B1).
+let _syncInflight = null;
+let _syncRemoteUpdatedAt = null;
+let _syncPendingForce = false;
 
 function getSupabase(){
   if(_supa) return _supa;
@@ -3074,17 +3078,62 @@ async function fetchServerConfig(){
 async function syncToSupabase(force){
   const supa = getSupabase();
   if(!supa) return;
+  if(force) _syncPendingForce = true;
   clearTimeout(_syncTimer);
   const delay = force ? 0 : 1500;
   _syncTimer = setTimeout(async ()=>{
-    try{
-      const { error } = await supa.from('cobrasq_data').upsert(
-        { key:'main', data: DB, updated_at: new Date().toISOString() },
-        { onConflict: 'key' }
-      );
-      if(!error){ _lastSyncAt = new Date(); _updateSyncBadge(); }
-      else console.warn('Supabase sync error:', error.message);
-    }catch(e){ console.warn('Supabase sync exception:', e.message); }
+    const wasForce = _syncPendingForce; _syncPendingForce = false;
+    // Serializa: se já tem um sync rodando, espera ele terminar
+    // (evita dois upserts paralelos sobrescrevendo last-write-wins).
+    if(_syncInflight){
+      try{ await _syncInflight; }catch{}
+    }
+    _syncInflight = (async ()=>{
+      try{
+        const lastSeen = _syncRemoteUpdatedAt;
+        const nowIso = new Date().toISOString();
+        // Optimistic concurrency: se já temos baseline da versão remota, exige
+        // que ela não tenha mudado desde que carregamos (alguém pode ter salvo
+        // em outra aba). Caso tenha mudado, recarrega e avisa o usuário.
+        let q = supa.from('cobrasq_data').update(
+          { data: DB, updated_at: nowIso }
+        ).eq('key','main');
+        if(lastSeen) q = q.eq('updated_at', lastSeen);
+        const { data: updated, error } = await q.select('updated_at');
+
+        if(error){
+          console.warn('Supabase sync error:', error.message);
+          if(typeof showToast === 'function') showToast('Falha ao sincronizar: ' + error.message);
+          return;
+        }
+        if(!updated || updated.length === 0){
+          // Sem linha (1ª vez OU baseline desatualizada). Tenta UPSERT incondicional
+          // só se ainda não havia baseline; senão, recarrega para evitar sobrescrita.
+          if(!lastSeen){
+            const { data: ins, error: insErr } = await supa.from('cobrasq_data').upsert(
+              { key:'main', data: DB, updated_at: nowIso }, { onConflict: 'key' }
+            ).select('updated_at');
+            if(insErr){ console.warn('Supabase upsert error:', insErr.message); return; }
+            _syncRemoteUpdatedAt = ins?.[0]?.updated_at || nowIso;
+          } else {
+            // Conflito: outra aba/usuário salvou. Recarrega e pede o usuário pra reaplicar.
+            console.warn('Supabase sync: conflito de versão. Recarregando.');
+            if(typeof showToast === 'function') showToast('Outra aba editou o sistema — recarregando.');
+            try{ await loadFromSupabase(); }catch{}
+            // Não silencia se foi um save voluntário (force=true).
+            if(wasForce && typeof showToast === 'function'){
+              showToast('Reaplique sua última alteração e salve novamente.');
+            }
+            return;
+          }
+        } else {
+          _syncRemoteUpdatedAt = updated[0].updated_at || nowIso;
+        }
+        _lastSyncAt = new Date();
+        _updateSyncBadge();
+      }catch(e){ console.warn('Supabase sync exception:', e.message); }
+    })();
+    try{ await _syncInflight; } finally { _syncInflight = null; }
   }, delay);
 }
 
@@ -3092,13 +3141,14 @@ async function loadFromSupabase(){
   const supa = getSupabase();
   if(!supa){ load(); return; }
   try{
-    const { data, error } = await supa.from('cobrasq_data').select('data').eq('key','main').maybeSingle();
+    const { data, error } = await supa.from('cobrasq_data').select('data,updated_at').eq('key','main').maybeSingle();
     if(data?.data){
       const p = data.data;
       DB = { ...DB, ...p,
         fatHistorico: { ...DB.fatHistorico, ...(p.fatHistorico||{}) },
         config: { ...DB.config, ...(p.config||{}) }
       };
+      _syncRemoteUpdatedAt = data.updated_at || null; // baseline pra optimistic concurrency
       localStorage.setItem(KEY, JSON.stringify(DB));
     } else {
       // First time: push local data to Supabase
@@ -5198,7 +5248,10 @@ function openDrawer(devId){
             }
           }
         } catch(_){}
-      })).then(()=>{ save(); });
+      })).then(()=>{ save(); }).catch(err => {
+        console.warn('ZapSign poll falhou:', err);
+        if(typeof showToast === 'function') showToast('Falha ao consultar status ZapSign: ' + (err?.message || err), 'warning');
+      });
     }
   }
 }

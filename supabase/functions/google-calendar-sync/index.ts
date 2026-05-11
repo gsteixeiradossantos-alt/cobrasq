@@ -13,11 +13,33 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS'
-};
+// Origens permitidas para chamar essa função. Configurável via env GCAL_ALLOWED_ORIGINS
+// (lista separada por vírgula). Padrão inclui o domínio de produção da Vercel.
+// Preview/branches do Vercel são reconhecidos pelo sufixo .vercel.app.
+const DEFAULT_ORIGINS = 'https://cobrasq-faturamento.vercel.app';
+
+function pickAllowedOrigin(req: Request): string {
+  const allowed = (Deno.env.get('GCAL_ALLOWED_ORIGINS') || DEFAULT_ORIGINS)
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+  const origin = req.headers.get('origin') || '';
+  if (!origin) return allowed[0] || '';
+  // match exato, ou wildcard de subdomínios .vercel.app pra previews
+  if (allowed.includes(origin)) return origin;
+  if (allowed.some(a => a === 'https://*.vercel.app') && /^https:\/\/[a-z0-9-]+\.vercel\.app$/.test(origin)) return origin;
+  return ''; // origem não permitida → bloqueia
+}
+
+function buildCorsHeaders(req: Request): Record<string, string> {
+  const origin = pickAllowedOrigin(req);
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Vary': 'Origin'
+  };
+}
 
 // JWT pra Service Account (Google OAuth2)
 async function getAccessToken(): Promise<string> {
@@ -75,6 +97,15 @@ async function getAccessToken(): Promise<string> {
 }
 
 Deno.serve(async (req) => {
+  const corsHeaders = buildCorsHeaders(req);
+
+  // Bloqueia preflight/origin não-listada
+  if (!corsHeaders['Access-Control-Allow-Origin']) {
+    return new Response(JSON.stringify({ error: 'origin not allowed' }), {
+      status: 403, headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed' }), {
