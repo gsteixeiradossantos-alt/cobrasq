@@ -39,6 +39,11 @@ AS $$
     AND pode_ver_grupo = true
 $$;
 
+-- Não expor via RPC pública: usada apenas dentro de policies (role authenticated).
+-- (Supabase concede EXECUTE direto a anon/authenticated por default privileges.)
+REVOKE EXECUTE ON FUNCTION public.current_user_grupo() FROM anon;
+GRANT  EXECUTE ON FUNCTION public.current_user_grupo() TO authenticated;
+
 -- 3) Policy de grupo em clientes (SELECT)
 DROP POLICY IF EXISTS "clientes_cedente_grupo" ON public.clientes;
 CREATE POLICY "clientes_cedente_grupo" ON public.clientes

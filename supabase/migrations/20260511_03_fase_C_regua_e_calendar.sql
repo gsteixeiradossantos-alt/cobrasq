@@ -72,3 +72,7 @@ CREATE TRIGGER trg_calendar_orphans_devedores
   AFTER DELETE ON public.devedores
   FOR EACH ROW
   EXECUTE FUNCTION public.fn_mark_calendar_orphans_on_devedor_delete();
+
+-- Trigger function não deve ser chamável via RPC. O gatilho funciona
+-- independentemente de EXECUTE (triggers não checam esse privilégio).
+REVOKE EXECUTE ON FUNCTION public.fn_mark_calendar_orphans_on_devedor_delete() FROM anon, authenticated;
