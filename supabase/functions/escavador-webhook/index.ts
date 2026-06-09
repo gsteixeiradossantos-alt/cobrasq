@@ -3,9 +3,10 @@
 // Salva em proc_intimacoes e (se houver match com processo cadastrado) vincula ao devedor.
 //
 // Setup (depois de contratar Escavador e ter API key):
-//   supabase secrets set ESCAVADOR_TOKEN=<seu_token>
+//   supabase secrets set ESCAVADOR_WEBHOOK_TOKEN=<token-aleatorio-forte>
 //   supabase functions deploy escavador-webhook
-//   No painel Escavador: configurar callback URL = https://<project>.supabase.co/functions/v1/escavador-webhook
+//   No painel Escavador: callback URL = https://<project>.supabase.co/functions/v1/escavador-webhook
+//   No painel Escavador: header customizado Authorization: Bearer <token-aleatorio-forte>
 //
 // Spec: docs/specs/site-app.md item S13
 
@@ -17,6 +18,24 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-escavador-signature',
   'Access-Control-Allow-Methods': 'POST, OPTIONS'
 };
+
+// Aceita formatos comuns de número CNJ: 0001234-56.2024.8.16.0001
+// (NNNNNNN-DD.AAAA.J.TR.OOOO). Aceita também só dígitos (20 chars).
+const CNJ_FORMATADO = /^\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}$/;
+const CNJ_NUMERICO  = /^\d{20}$/;
+
+function isProcessoValido(num: unknown): num is string {
+  if (typeof num !== 'string') return false;
+  return CNJ_FORMATADO.test(num) || CNJ_NUMERICO.test(num);
+}
+
+// Comparação de tokens em tempo constante para mitigar timing attack.
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -30,11 +49,25 @@ Deno.serve(async (req) => {
     });
   }
 
-  try {
-    // TODO: validar assinatura do webhook quando Escavador documentar formato
-    // const signature = req.headers.get('x-escavador-signature');
-    // if (!verifySignature(signature, body)) return 401;
+  // Autorização: exige bearer token configurado em ESCAVADOR_WEBHOOK_TOKEN.
+  // (Quando Escavador publicar HMAC assinado, trocar para verifySignature.)
+  const expected = Deno.env.get('ESCAVADOR_WEBHOOK_TOKEN') || '';
+  if (!expected) {
+    return new Response(JSON.stringify({ error: 'Webhook não configurado no servidor (ESCAVADOR_WEBHOOK_TOKEN ausente).' }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+  const auth = req.headers.get('authorization') || '';
+  const provided = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : '';
+  if (!provided || !timingSafeEqual(provided, expected)) {
+    return new Response(JSON.stringify({ error: 'unauthorized' }), {
+      status: 401,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
 
+  try {
     const payload = await req.json().catch(() => ({}));
 
     // Formato esperado (genérico — ajustar conforme docs do Escavador):
@@ -51,14 +84,17 @@ Deno.serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // Tenta vincular ao devedor via número de processo
+    // Tenta vincular ao devedor via número de processo (apenas se for CNJ válido)
     let devedorId: string | null = null;
-    if (payload.processo_numero) {
-      // Busca devedor com esse processo no campo metadata.processoNum
+    if (isProcessoValido(payload.processo_numero)) {
+      // .or() interpola direto na query do PostgREST; sem validação prévia,
+      // vírgula ou parêntese no payload quebra o filtro. Por isso só rodamos
+      // a busca depois de validar contra o regex CNJ.
+      const num = payload.processo_numero;
       const { data: devs } = await supabase
         .from('devedores')
         .select('id')
-        .or(`metadata->>processoNum.eq.${payload.processo_numero},encaminhamento_judicial->>processoNum.eq.${payload.processo_numero}`)
+        .or(`metadata->>processoNum.eq.${num},encaminhamento_judicial->>processoNum.eq.${num}`)
         .limit(1);
       if (devs && devs.length > 0) devedorId = devs[0].id;
     }
@@ -67,7 +103,7 @@ Deno.serve(async (req) => {
       .from('proc_intimacoes')
       .insert({
         fonte: 'escavador',
-        processo_num: payload.processo_numero || null,
+        processo_num: isProcessoValido(payload.processo_numero) ? payload.processo_numero : null,
         oab: payload.oab || null,
         data_publicacao: payload.data_publicacao || null,
         data_intimacao: payload.data_intimacao || null,
