@@ -6778,6 +6778,7 @@ OBSERVAÇÕES IMPORTANTES:
 - "tel2" é telefone alternativo (manuscrito, segunda linha, outro contato). Se houver mais de um telefone, o principal vai em "tel" e o secundário em "tel2".
 - UF sempre em 2 letras maiúsculas (PR, SC, SP, etc.).
 - CEP no formato 00000-000.
+- Em "perguntas" sobre datas (vencimento, entrada, etc.): coloque as datas em "opcoes" no formato BRASILEIRO dd/mm/yyyy (ex: "07/03/2025"), porque será mostrado ao operador. O sistema converte de volta pra YYYY-MM-DD internamente.
 
 "perguntas" é OBRIGATÓRIO (use [] vazio se tudo certo). Use perguntas para:
 - Divergência entre documentos.
@@ -6811,31 +6812,133 @@ Retorne SOMENTE o JSON, sem texto adicional, sem markdown.`});
   }
 }
 
-// Renderiza tela de revisão com campos editáveis + perguntas da Beatriz
+// Helpers de data BR <-> ISO. Beatriz retorna ISO (YYYY-MM-DD) que o
+// <input type="date"> precisa, mas exibimos BR (dd/mm/yyyy) ao operador.
+function _diIsoToBr(s){
+  if(!s) return '';
+  const m = String(s).trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : String(s);
+}
+function _diBrToIso(s){
+  if(!s) return '';
+  const m = String(s).trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : String(s);
+}
+// Campos de data (resposta deve ser convertida BR → ISO ao mesclar).
+const _DI_CAMPOS_DATA = new Set(['vencimento','entrada']);
+
+// Respostas do step 1 (perguntas), guardadas pra reusar no step 2.
+let _diRespostas = {};
+
+// Entry point: decide se mostra step 1 (perguntas) ou pula direto pro step 2.
 function mdevDiRenderReview(extracted){
+  _diExtracted = extracted;
+  _diRespostas = {};
+  const perguntas = Array.isArray(extracted?.perguntas) ? extracted.perguntas : [];
+  if(perguntas.length){
+    mdevDiRenderPerguntas(extracted, perguntas);
+  } else {
+    mdevDiRenderCampos(extracted);
+  }
+}
+
+// Step 1 — só as perguntas. Botão "Continuar →" só habilita quando todas respondidas.
+function mdevDiRenderPerguntas(extracted, perguntas){
+  const wrap = document.getElementById('mdev-doc-wrap');
+  if(!wrap) return;
+  wrap.innerHTML = `
+    <div style="margin-bottom:14px;display:flex;justify-content:space-between;align-items:flex-end;">
+      <div>
+        <div style="font-size:14px;font-weight:700;color:var(--text);">Beatriz precisa confirmar antes de preencher</div>
+        <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">${_diFiles.length} documento${_diFiles.length>1?'s':''} analisado${_diFiles.length>1?'s':''}. Responda as dúvidas abaixo — depois o formulário aparece com tudo preenchido.</div>
+      </div>
+      <button type="button" class="btn-link-tiny" onclick="mdevRenderDocImport()">↺ Reanalisar</button>
+    </div>
+    <div style="padding:14px 16px;background:#FEF6E0;border-left:4px solid var(--gold);border-radius:6px;">
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        ${perguntas.map((p,i)=>{
+          const isData = _DI_CAMPOS_DATA.has(p.campo||'');
+          const opts = Array.isArray(p.opcoes) ? p.opcoes : [];
+          // Em campos de data: mostra opção em dd/mm/yyyy, mas guarda ISO em data-iso pro merge.
+          const optsHtml = opts.length
+            ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;">${opts.map(o=>{
+                const display = isData ? (_diIsoToBr(o)||o) : o;
+                const iso = isData ? (String(o).match(/^\d{4}-\d{2}-\d{2}$/) ? o : _diBrToIso(o)) : o;
+                return `<button type="button" class="btn btn-ghost btn-sm" style="font-size:11.5px;padding:3px 9px;" onclick="(function(b){const inp=document.getElementById('mdr-q-${i}');inp.value=b.textContent;inp.dispatchEvent(new Event('input'));})(this)" data-iso="${escHtml(iso)}">${escHtml(display)}</button>`;
+              }).join('')}</div>`
+            : '';
+          const placeholder = isData ? 'dd/mm/aaaa' : 'Sua resposta...';
+          return `<div>
+            <div style="font-size:12.5px;color:var(--text);margin-bottom:4px;"><strong>${escHtml(p.campo||'')}:</strong> ${escHtml(p.pergunta||'')}</div>
+            <input type="text" id="mdr-q-${i}" data-campo="${escHtml(p.campo||'')}" data-is-data="${isData?'1':'0'}" placeholder="${placeholder}" oninput="mdevDiAtualizarBotaoContinuar()" style="width:100%;padding:6px 10px;border:1px solid var(--border-2);border-radius:5px;font-size:12.5px;font-family:inherit;">
+            ${optsHtml}
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
+    <div style="margin-top:18px;display:flex;justify-content:space-between;gap:8px;">
+      <button class="btn btn-ghost" onclick="mdevRenderDocImport()">← Voltar</button>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost" onclick="mdevSelectMode('manual')">Preencher manualmente</button>
+        <button class="btn btn-primary" id="btn-di-continuar" disabled onclick="mdevDiAvancarParaCampos()">Continuar →</button>
+      </div>
+    </div>
+  `;
+  mdevDiAtualizarBotaoContinuar();
+}
+
+// Habilita "Continuar →" só quando todas as perguntas foram respondidas.
+function mdevDiAtualizarBotaoContinuar(){
+  const btn = document.getElementById('btn-di-continuar');
+  if(!btn) return;
+  const inputs = document.querySelectorAll('#mdev-doc-wrap [id^="mdr-q-"]');
+  let todasOk = true;
+  inputs.forEach(inp => { if(!(inp.value||'').trim()) todasOk = false; });
+  btn.disabled = !todasOk || inputs.length === 0;
+}
+
+// Step 1 → Step 2. Coleta respostas (convertendo data BR → ISO) e renderiza campos.
+function mdevDiAvancarParaCampos(){
+  document.querySelectorAll('#mdev-doc-wrap [id^="mdr-q-"]').forEach(inp => {
+    const campo = inp.getAttribute('data-campo') || '';
+    if(!campo) return;
+    let v = (inp.value||'').trim();
+    if(!v) return;
+    if(inp.getAttribute('data-is-data') === '1'){
+      // Se já é ISO, mantém. Se é BR, converte.
+      v = /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : _diBrToIso(v);
+    }
+    _diRespostas[campo] = v;
+  });
+  mdevDiRenderCampos(_diExtracted);
+}
+
+// Step 2 — campos editáveis com respostas já mescladas.
+function mdevDiRenderCampos(extracted){
   const wrap = document.getElementById('mdev-doc-wrap');
   if(!wrap) return;
   const e = extracted || {};
-  const perguntas = Array.isArray(e.perguntas) ? e.perguntas : [];
+
+  // Merge: respostas do step 1 sobrescrevem o extracted.
+  const merged = { ...e, ..._diRespostas };
 
   // Endereço pode vir como objeto (esquema novo PR #11) ou string (legado).
-  const endObj = (e.endereco && typeof e.endereco === 'object' && !Array.isArray(e.endereco)) ? e.endereco : null;
-  const endStr = (typeof e.endereco === 'string') ? e.endereco : '';
+  const endObj = (merged.endereco && typeof merged.endereco === 'object' && !Array.isArray(merged.endereco)) ? merged.endereco : null;
+  const endStr = (typeof merged.endereco === 'string') ? merged.endereco : '';
 
   const fields = [
-    { id:'nome',        label:'Nome / Razão social',         value:e.nome||e.razao_social||'' },
-    { id:'doc',         label:'CPF / CNPJ',                  value:e.doc||e.cpf||e.cnpj||'' },
-    { id:'tel',         label:'Telefone',                    value:e.tel||e.telefone||'' },
-    { id:'email',       label:'E-mail',                      value:e.email||'' },
-    { id:'valorOrig',   label:'Valor original (R$)',         value:e.valorOrig||e.valor||'' },
-    { id:'vencimento',  label:'Vencimento (AAAA-MM-DD)',     value:e.vencimento||'' },
-    { id:'credorNome',  label:'Credor (nome)',               value:e.credorNome||'' },
-    { id:'processoNum', label:'Nº do processo (se judicial)', value:e.processoNum||'' },
-    { id:'vara',        label:'Vara / Comarca',              value:e.vara||'' },
-    { id:'obs',         label:'Observações',                 value:e.obs||'' }
+    { id:'nome',        label:'Nome / Razão social',         value:merged.nome||merged.razao_social||'' },
+    { id:'doc',         label:'CPF / CNPJ',                  value:merged.doc||merged.cpf||merged.cnpj||'' },
+    { id:'tel',         label:'Telefone',                    value:merged.tel||merged.telefone||'' },
+    { id:'email',       label:'E-mail',                      value:merged.email||'' },
+    { id:'valorOrig',   label:'Valor original (R$)',         value:merged.valorOrig||merged.valor||'' },
+    { id:'vencimento',  label:'Vencimento (AAAA-MM-DD)',     value:merged.vencimento||'' },
+    { id:'credorNome',  label:'Credor (nome)',               value:merged.credorNome||'' },
+    { id:'processoNum', label:'Nº do processo (se judicial)', value:merged.processoNum||'' },
+    { id:'vara',        label:'Vara / Comarca',              value:merged.vara||'' },
+    { id:'obs',         label:'Observações',                 value:merged.obs||'' }
   ];
 
-  // Endereço: 7 inputs separados se vier objeto; 1 input se vier string (compat).
   const enderecoHtml = endObj ? `
     <div style="grid-column:1/-1;">
       <div style="font-size:11.5px;font-weight:600;color:var(--text-2);margin-bottom:6px;">Endereço</div>
@@ -6856,27 +6959,11 @@ function mdevDiRenderReview(extracted){
     </div>
   `;
 
-  const perguntasHtml = perguntas.length ? `
-    <div style="margin-bottom:18px;padding:14px 16px;background:#FEF6E0;border-left:4px solid var(--gold);border-radius:6px;">
-      <div style="font-size:12px;font-weight:700;color:#92400e;margin-bottom:8px;display:flex;align-items:center;gap:6px;">
-        <span style="font-size:14px;">?</span> Beatriz precisa confirmar antes de preencher
-      </div>
-      <div style="display:flex;flex-direction:column;gap:10px;">
-        ${perguntas.map((p,i)=>{
-          const opt = (Array.isArray(p.opcoes)&&p.opcoes.length)
-            ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;">${p.opcoes.map(o=>`<button type="button" class="btn btn-ghost btn-sm" style="font-size:11.5px;padding:3px 9px;" onclick="document.getElementById('mdr-q-${i}').value=this.textContent">${escHtml(o)}</button>`).join('')}</div>`
-            : '';
-          return `<div>
-            <div style="font-size:12.5px;color:var(--text);margin-bottom:4px;"><strong>${escHtml(p.campo||'')}:</strong> ${escHtml(p.pergunta||'')}</div>
-            <input type="text" id="mdr-q-${i}" data-campo="${escHtml(p.campo||'')}" placeholder="Sua resposta..." style="width:100%;padding:6px 10px;border:1px solid var(--border-2);border-radius:5px;font-size:12.5px;font-family:inherit;">
-            ${opt}
-          </div>`;
-        }).join('')}
-      </div>
-    </div>` : `
-    <div style="margin-bottom:14px;padding:10px 14px;background:#E8F7F0;border-left:3px solid var(--success);border-radius:6px;font-size:12.5px;color:#065f46;">
-      ✓ Beatriz não encontrou ambiguidades. Revise os campos abaixo antes de aplicar.
-    </div>`;
+  const temPerguntasRespondidas = Object.keys(_diRespostas).length > 0;
+  const voltarHandler = temPerguntasRespondidas
+    ? `mdevDiRenderPerguntas(_diExtracted, _diExtracted.perguntas||[])`
+    : `mdevRenderDocImport()`;
+  const voltarLabel = temPerguntasRespondidas ? '← Revisar dúvidas' : '← Voltar';
 
   wrap.innerHTML = `
     <div style="margin-bottom:14px;display:flex;justify-content:space-between;align-items:flex-end;">
@@ -6886,7 +6973,15 @@ function mdevDiRenderReview(extracted){
       </div>
       <button type="button" class="btn-link-tiny" onclick="mdevRenderDocImport()">↺ Reanalisar</button>
     </div>
-    ${perguntasHtml}
+    ${temPerguntasRespondidas ? `
+      <div style="margin-bottom:14px;padding:10px 14px;background:#E8F7F0;border-left:3px solid var(--success);border-radius:6px;font-size:12.5px;color:#065f46;">
+        ✓ Dúvidas respondidas e mescladas. Revise os demais campos antes de aplicar.
+      </div>
+    ` : `
+      <div style="margin-bottom:14px;padding:10px 14px;background:#E8F7F0;border-left:3px solid var(--success);border-radius:6px;font-size:12.5px;color:#065f46;">
+        ✓ Beatriz não encontrou ambiguidades. Revise os campos abaixo antes de aplicar.
+      </div>
+    `}
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
       ${fields.map(f=>`
         <div class="fg" style="margin-bottom:0;">
@@ -6897,7 +6992,7 @@ function mdevDiRenderReview(extracted){
       ${enderecoHtml}
     </div>
     <div style="margin-top:18px;display:flex;justify-content:space-between;gap:8px;">
-      <button class="btn btn-ghost" onclick="mdevRenderDocImport()">← Voltar</button>
+      <button class="btn btn-ghost" onclick="${voltarHandler}">${voltarLabel}</button>
       <div style="display:flex;gap:8px;">
         <button class="btn btn-ghost" onclick="mdevSelectMode('manual')">Preencher manualmente</button>
         <button class="btn btn-primary" onclick="mdevDiAplicarRevisao()">Aplicar ao formulário →</button>
@@ -6906,10 +7001,10 @@ function mdevDiRenderReview(extracted){
   `;
 }
 
-// Pega o que está no review (campos + respostas das perguntas) e aplica no form do devedor
+// Coleta os campos editáveis do step 2 e aplica no form do devedor.
+// (Respostas das perguntas já foram mescladas em _diRespostas no step 1.)
 function mdevDiAplicarRevisao(){
   const get = id => (document.getElementById('mdr-'+id)?.value||'').trim();
-  // Endereço: se o review renderizou 7 inputs separados, monta objeto; senão usa string única.
   let endereco;
   if(document.getElementById('mdr-end-rua') || document.getElementById('mdr-end-cep')){
     endereco = {
@@ -6924,7 +7019,6 @@ function mdevDiAplicarRevisao(){
   } else {
     endereco = get('endereco');
   }
-  // Coleta respostas das perguntas e sobrescreve campos correspondentes se preenchidas
   const merged = {
     nome:        get('nome'),
     doc:         get('doc'),
@@ -6939,15 +7033,6 @@ function mdevDiAplicarRevisao(){
     obs:         get('obs'),
     fase:        (_diExtracted && _diExtracted.fase) || ''
   };
-  // Respostas: se o usuário respondeu uma pergunta cujo "campo" corresponde a uma chave, sobrescreve
-  document.querySelectorAll('#mdev-doc-wrap [id^="mdr-q-"]').forEach(inp=>{
-    const v = (inp.value||'').trim();
-    if(!v) return;
-    const campo = inp.getAttribute('data-campo') || '';
-    if(campo && Object.prototype.hasOwnProperty.call(merged, campo)){
-      merged[campo] = v;
-    }
-  });
   mdevDiAplicarExtracted(merged);
 }
 
