@@ -3947,6 +3947,10 @@ function openModal(id){
 function closeModal(id){
   const el = document.getElementById(id);
   if(el) el.classList.remove('open');
+  // Para o auto-save de rascunho quando o modal de devedor é fechado.
+  if(id === 'modal-devedor' && typeof mdevStopAutoSave === 'function'){
+    mdevStopAutoSave();
+  }
   // IMPLEMENTADO S11: ao cancelar/fechar modal-cliente sobreposto, limpa flag e z-index
   if(id === 'modal-cliente'){
     if(window._mdevPendingCliente){
@@ -6082,13 +6086,18 @@ let mdevTags = [];
 let mdevDividas = []; // array de {id?, valor_original, valor_atualizado, vencimento, descricao, status, _local?}
 
 // IMPLEMENTADO S12: salvar devedor/cliente como rascunho (sem validação, com flag is_draft)
-function salvarDevedorRascunho(){
-  const id = document.getElementById('mdev-id').value || uid();
+function salvarDevedorRascunho(opts){
+  const silencioso = !!(opts && opts.silencioso);
+  const idCampo = document.getElementById('mdev-id');
+  let id = (idCampo && idCampo.value) || '';
+  const novoId = !id;
+  if(!id) id = uid();
   const expira = new Date(Date.now() + 30*24*60*60*1000).toISOString();
   const dev = {
     id,
     isDraft: true,
     draftExpiresAt: expira,
+    autoSavedAt: silencioso ? new Date().toISOString() : null,
     nome: (document.getElementById('mdev-nome').value||'').trim() || '(rascunho sem nome)',
     doc: document.getElementById('mdev-doc').value||'',
     tel: document.getElementById('mdev-tel').value||'',
@@ -6116,10 +6125,48 @@ function salvarDevedorRascunho(){
   if (existing>=0) DB.devedores[existing] = {...DB.devedores[existing], ...dev};
   else DB.devedores.push(dev);
   save();
+  // Em auto-save: persiste id no campo pra próximas iterações reusarem a mesma row.
+  if(silencioso && novoId && idCampo) idCampo.value = id;
+  if(silencioso) return; // sem fechar modal nem toast
   closeModal('modal-devedor');
   showToast('Rascunho salvo. Expira em 30 dias.','info');
   if (typeof renderDevedores === 'function') renderDevedores();
 }
+
+// Auto-save de rascunho enquanto o modal de devedor está aberto.
+// Dispara: timer 30s + listener beforeunload (fechar aba sem salvar).
+let _mdevAutoSaveTimer = null;
+let _mdevAutoSaveSnap = '';
+function _mdevSnapshot(){
+  // Hash leve dos campos significativos pra detectar mudança desde último save.
+  const ids = ['mdev-nome','mdev-doc','mdev-tel','mdev-email','mdev-titulo',
+               'mdev-valor-orig','mdev-vencimento','mdev-obs',
+               'mdev-cep','mdev-rua','mdev-numero','mdev-cidade'];
+  return ids.map(id => document.getElementById(id)?.value||'').join('|');
+}
+function mdevAutoSaveTick(){
+  const modal = document.getElementById('modal-devedor');
+  if(!modal || !modal.classList.contains('open')) return;
+  const nome = (document.getElementById('mdev-nome')?.value||'').trim();
+  const doc  = (document.getElementById('mdev-doc')?.value||'').trim();
+  const tel  = (document.getElementById('mdev-tel')?.value||'').trim();
+  // Só salva se há algo significativo (evita rascunhos vazios).
+  if(!nome && !doc && !tel) return;
+  const snap = _mdevSnapshot();
+  if(snap === _mdevAutoSaveSnap) return; // sem mudança desde último save
+  _mdevAutoSaveSnap = snap;
+  try { salvarDevedorRascunho({silencioso:true}); }
+  catch(e){ console.warn('mdev auto-save:', e); }
+}
+function mdevStartAutoSave(){
+  if(_mdevAutoSaveTimer) clearInterval(_mdevAutoSaveTimer);
+  _mdevAutoSaveSnap = _mdevSnapshot();
+  _mdevAutoSaveTimer = setInterval(mdevAutoSaveTick, 30000);
+}
+function mdevStopAutoSave(){
+  if(_mdevAutoSaveTimer){ clearInterval(_mdevAutoSaveTimer); _mdevAutoSaveTimer = null; }
+}
+window.addEventListener('beforeunload', ()=>{ try { mdevAutoSaveTick(); } catch(e){} });
 
 function salvarClienteRascunho(){
   const id = document.getElementById('mcli-id').value || uid();
@@ -6190,8 +6237,11 @@ function abrirRascunhos(){
       html += '<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:18px;">';
       html += r.devedores.map(d => {
         const exp = d.draftExpiresAt ? Math.max(0, Math.ceil((new Date(d.draftExpiresAt)-Date.now())/(24*60*60*1000))) : '∞';
+        const autoTag = d.autoSavedAt
+          ? '<span style="font-size:10.5px;background:var(--surface-2);color:var(--text-2);padding:2px 6px;border-radius:4px;margin-left:6px;" title="Salvo automaticamente ao fechar o cadastro">recuperado automaticamente</span>'
+          : '';
         return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border:1px solid var(--border-2);border-radius:6px;">'
-          + '<div><strong>'+escHtml(d.nome||'(sem nome)')+'</strong> <span style="color:var(--text-3);font-size:11.5px;">'+escHtml(d.doc||'')+'</span></div>'
+          + '<div><strong>'+escHtml(d.nome||'(sem nome)')+'</strong> <span style="color:var(--text-3);font-size:11.5px;">'+escHtml(d.doc||'')+'</span>'+autoTag+'</div>'
           + '<div style="display:flex;gap:6px;align-items:center;">'
             + '<span style="font-size:11.5px;color:var(--text-3);">expira em '+exp+'d</span>'
             + '<button class="btn btn-ghost" style="font-size:12px;padding:5px 9px;" onclick="(function(){closeModal(\'modal-rascunhos\');editDevedor(\''+d.id+'\');})()">Continuar</button>'
@@ -6439,6 +6489,7 @@ function abrirNovoDevedor(){
   mdevRenderDividas();
 
   openModal('modal-devedor');
+  mdevStartAutoSave();
 }
 
 // Situação contextual à fase (PR-C / C.3): substitui Status + Etapa.
@@ -6637,6 +6688,7 @@ function editDevedor(id){
 
   closeDrawer();
   openModal('modal-devedor');
+  mdevStartAutoSave();
 }
 
 // ── NOVA COBRANÇA — MODE PICKER ─────────────────────────────────────────────
