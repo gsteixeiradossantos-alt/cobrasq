@@ -3763,10 +3763,20 @@ function mascaraTel(el){const v=el.value.replace(/\D/g,'');let m='';if(v.length<
 
 function parseValorBR(s){
   if(!s && s!==0) return 0;
-  if(typeof s === 'number') return s;
-  // strip "R$ " prefix and BR formatting before parsing
-  const cleaned = String(s).replace(/R\$\s?/g,'').replace(/\./g,'').replace(',','.').trim();
-  return parseFloat(cleaned) || 0;
+  if(typeof s === 'number') return Number.isFinite(s) ? s : 0;
+  let str = String(s).replace(/R\$\s?/g,'').trim();
+  if(!str) return 0;
+  if(str.includes(',')){
+    // Formato BR: "1.954,38" ou "1954,38". Ponto = milhar; vírgula = decimal.
+    return parseFloat(str.replace(/\./g,'').replace(',','.')) || 0;
+  }
+  // Sem vírgula: pode vir do Postgres como "1954.38" (US) ou ser inteiro BR ("1954").
+  // Heurística: ponto seguido de 1-2 dígitos no FINAL = decimal US (não milhar).
+  if(/\.\d{1,2}$/.test(str)){
+    return parseFloat(str) || 0;
+  }
+  // Caso contrário: ponto é separador de milhar (raro sem vírgula) ou inexistente.
+  return parseFloat(str.replace(/\./g,'')) || 0;
 }
 
 // IMPLEMENTADO S9: máscara monetária BR
@@ -6592,6 +6602,7 @@ function mdevRenderDocImport(){
         Valor original da dívida (capital, sem juros/multa)
       </label>
       <input type="text" id="mdev-di-valor-prev" placeholder="R$ 0,00"
+        oninput="maskMoneyBR(this)"
         style="width:100%;padding:8px 10px;border:1.5px solid var(--border-2);border-radius:6px;font-size:13px;font-family:'JetBrains Mono', monospace;">
       <div style="font-size:11.5px;color:var(--text-3);margin-top:4px;">
         Beatriz vai cruzar com o que extrair dos documentos. Pode deixar vazio.
@@ -6807,12 +6818,15 @@ function mdevDiRenderReview(extracted){
   const e = extracted || {};
   const perguntas = Array.isArray(e.perguntas) ? e.perguntas : [];
 
+  // Endereço pode vir como objeto (esquema novo PR #11) ou string (legado).
+  const endObj = (e.endereco && typeof e.endereco === 'object' && !Array.isArray(e.endereco)) ? e.endereco : null;
+  const endStr = (typeof e.endereco === 'string') ? e.endereco : '';
+
   const fields = [
     { id:'nome',        label:'Nome / Razão social',         value:e.nome||e.razao_social||'' },
     { id:'doc',         label:'CPF / CNPJ',                  value:e.doc||e.cpf||e.cnpj||'' },
     { id:'tel',         label:'Telefone',                    value:e.tel||e.telefone||'' },
     { id:'email',       label:'E-mail',                      value:e.email||'' },
-    { id:'endereco',    label:'Endereço',                    value:e.endereco||'' },
     { id:'valorOrig',   label:'Valor original (R$)',         value:e.valorOrig||e.valor||'' },
     { id:'vencimento',  label:'Vencimento (AAAA-MM-DD)',     value:e.vencimento||'' },
     { id:'credorNome',  label:'Credor (nome)',               value:e.credorNome||'' },
@@ -6820,6 +6834,27 @@ function mdevDiRenderReview(extracted){
     { id:'vara',        label:'Vara / Comarca',              value:e.vara||'' },
     { id:'obs',         label:'Observações',                 value:e.obs||'' }
   ];
+
+  // Endereço: 7 inputs separados se vier objeto; 1 input se vier string (compat).
+  const enderecoHtml = endObj ? `
+    <div style="grid-column:1/-1;">
+      <div style="font-size:11.5px;font-weight:600;color:var(--text-2);margin-bottom:6px;">Endereço</div>
+      <div style="display:grid;grid-template-columns:120px 1fr 90px 1fr;gap:8px;">
+        <div class="fg" style="margin-bottom:0;"><label style="font-size:11px;">CEP</label><input type="text" id="mdr-end-cep" value="${escHtml(endObj.cep||'')}" style="font-size:12.5px;"></div>
+        <div class="fg" style="margin-bottom:0;"><label style="font-size:11px;">Rua</label><input type="text" id="mdr-end-rua" value="${escHtml(endObj.rua||'')}" style="font-size:12.5px;"></div>
+        <div class="fg" style="margin-bottom:0;"><label style="font-size:11px;">Número</label><input type="text" id="mdr-end-numero" value="${escHtml(endObj.numero||'')}" style="font-size:12.5px;"></div>
+        <div class="fg" style="margin-bottom:0;"><label style="font-size:11px;">Complemento</label><input type="text" id="mdr-end-complemento" value="${escHtml(endObj.complemento||'')}" style="font-size:12.5px;"></div>
+        <div class="fg" style="margin-bottom:0;"><label style="font-size:11px;">Bairro</label><input type="text" id="mdr-end-bairro" value="${escHtml(endObj.bairro||'')}" style="font-size:12.5px;"></div>
+        <div class="fg" style="margin-bottom:0;"><label style="font-size:11px;">Cidade</label><input type="text" id="mdr-end-cidade" value="${escHtml(endObj.cidade||'')}" style="font-size:12.5px;"></div>
+        <div class="fg" style="margin-bottom:0;"><label style="font-size:11px;">UF</label><input type="text" id="mdr-end-uf" maxlength="2" value="${escHtml(String(endObj.uf||'').toUpperCase())}" style="font-size:12.5px;text-transform:uppercase;"></div>
+      </div>
+    </div>
+  ` : `
+    <div class="fg" style="grid-column:1/-1;margin-bottom:0;">
+      <label style="font-size:11.5px;">Endereço${(!endStr)?' <span style="color:var(--text-3);font-weight:400;">— vazio</span>':''}</label>
+      <input type="text" id="mdr-endereco" value="${escHtml(endStr||'')}" style="font-size:12.5px;">
+    </div>
+  `;
 
   const perguntasHtml = perguntas.length ? `
     <div style="margin-bottom:18px;padding:14px 16px;background:#FEF6E0;border-left:4px solid var(--gold);border-radius:6px;">
@@ -6859,6 +6894,7 @@ function mdevDiRenderReview(extracted){
           <input type="text" id="mdr-${f.id}" value="${escHtml(f.value||'')}" style="font-size:12.5px;">
         </div>
       `).join('')}
+      ${enderecoHtml}
     </div>
     <div style="margin-top:18px;display:flex;justify-content:space-between;gap:8px;">
       <button class="btn btn-ghost" onclick="mdevRenderDocImport()">← Voltar</button>
@@ -6873,13 +6909,28 @@ function mdevDiRenderReview(extracted){
 // Pega o que está no review (campos + respostas das perguntas) e aplica no form do devedor
 function mdevDiAplicarRevisao(){
   const get = id => (document.getElementById('mdr-'+id)?.value||'').trim();
+  // Endereço: se o review renderizou 7 inputs separados, monta objeto; senão usa string única.
+  let endereco;
+  if(document.getElementById('mdr-end-rua') || document.getElementById('mdr-end-cep')){
+    endereco = {
+      cep:         get('end-cep'),
+      rua:         get('end-rua'),
+      numero:      get('end-numero'),
+      complemento: get('end-complemento'),
+      bairro:      get('end-bairro'),
+      cidade:      get('end-cidade'),
+      uf:          get('end-uf').toUpperCase().slice(0,2)
+    };
+  } else {
+    endereco = get('endereco');
+  }
   // Coleta respostas das perguntas e sobrescreve campos correspondentes se preenchidas
   const merged = {
     nome:        get('nome'),
     doc:         get('doc'),
     tel:         get('tel'),
     email:       get('email'),
-    endereco:    get('endereco'),
+    endereco,
     valorOrig:   get('valorOrig'),
     vencimento:  get('vencimento'),
     credorNome:  get('credorNome'),
