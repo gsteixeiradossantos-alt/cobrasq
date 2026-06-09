@@ -893,15 +893,61 @@ img{max-width:100%}
 
       <!-- Tab Devedor -->
       <div id="tab-devedor" class="login-tab-panel">
-        <div class="login-field">
-          <label>CPF</label>
-          <input type="text" id="devedor-cpf" placeholder="000.000.000-00" autocomplete="off">
+        <!-- Step 1: pedir CPF e enviar token via Z-API -->
+        <div id="devedor-step-1">
+          <div class="login-field">
+            <label>CPF</label>
+            <input type="text" id="devedor-cpf" placeholder="000.000.000-00" autocomplete="off"
+              oninput="this.value=this.value.replace(/\D/g,'').slice(0,11).replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d{1,2})$/,'$1-$2')">
+          </div>
+          <button class="btn-login" id="btnDevedorEnviarToken" onclick="portalEnviarToken()">
+            Receber código no WhatsApp <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+          </button>
+          <div id="devedor-step-1-msg" style="font-size:12px;color:var(--danger);margin-top:8px;min-height:16px;"></div>
+          <div style="margin-top:14px;text-align:center;">
+            <button type="button" class="btn-link-tiny" onclick="portalMostrarFallback()" style="font-size:11.5px;color:var(--text-3);background:none;border:none;cursor:pointer;text-decoration:underline;">
+              Não recebi · entrar com data de nascimento
+            </button>
+          </div>
         </div>
-        <div class="login-field">
-          <label>Data de Nascimento</label>
-          <input type="date" id="devedor-nasc">
+
+        <!-- Step 2: digitar o código recebido -->
+        <div id="devedor-step-2" style="display:none;">
+          <div style="margin-bottom:12px;padding:10px 12px;background:#E8F7F0;border-left:3px solid var(--success);border-radius:6px;font-size:12.5px;color:#065f46;">
+            ✓ Código enviado para <strong id="devedor-tel-mask">—</strong>. Válido por 10 minutos.
+          </div>
+          <div class="login-field">
+            <label>Código (6 dígitos)</label>
+            <input type="text" id="devedor-token" placeholder="000000" inputmode="numeric" maxlength="6" autocomplete="one-time-code"
+              oninput="this.value=this.value.replace(/\D/g,'').slice(0,6)"
+              onkeydown="if(event.key==='Enter')portalValidarToken()">
+          </div>
+          <button class="btn-login" id="btnDevedorValidarToken" onclick="portalValidarToken()">
+            Entrar <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+          </button>
+          <div id="devedor-step-2-msg" style="font-size:12px;color:var(--danger);margin-top:8px;min-height:16px;"></div>
+          <div style="margin-top:10px;text-align:center;">
+            <button type="button" class="btn-link-tiny" onclick="portalVoltarStep1()" style="font-size:11.5px;color:var(--text-3);background:none;border:none;cursor:pointer;">
+              ← Voltar · trocar CPF
+            </button>
+          </div>
         </div>
-        <button class="btn-login" id="btnLoginDevedor">Consultar minha dívida <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></button>
+
+        <!-- Step fallback: nascimento (compat com devedores sem telefone) -->
+        <div id="devedor-step-fallback" style="display:none;">
+          <div class="login-field">
+            <label>Data de Nascimento</label>
+            <input type="date" id="devedor-nasc">
+          </div>
+          <button class="btn-login" id="btnLoginDevedor">
+            Consultar minha dívida <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+          </button>
+          <div style="margin-top:10px;text-align:center;">
+            <button type="button" class="btn-link-tiny" onclick="portalVoltarStep1()" style="font-size:11.5px;color:var(--text-3);background:none;border:none;cursor:pointer;">
+              ← Voltar · usar código WhatsApp
+            </button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -4069,6 +4115,7 @@ async function doLogin(type){
     }
   }
   else if(type === 'devedor'){
+    // Fallback: login com CPF + nascimento (devedores sem telefone cadastrado).
     const cpf = (document.getElementById('devedor-cpf').value||'').replace(/\D/g,'');
     const nasc = (document.getElementById('devedor-nasc').value||'').trim();
     if(!cpf || !nasc){ showToast('Preencha CPF e data de nascimento.','warning'); return; }
@@ -4083,6 +4130,111 @@ async function doLogin(type){
       showToast('Dados não encontrados. Verifique CPF e data de nascimento.','danger');
     }
   }
+}
+
+// ── PORTAL DO DEVEDOR — login via Z-API (token 6 dígitos no WhatsApp) ──
+async function portalEnviarToken(){
+  const btn = document.getElementById('btnDevedorEnviarToken');
+  const msg = document.getElementById('devedor-step-1-msg');
+  msg.textContent = '';
+  const cpf = (document.getElementById('devedor-cpf').value||'').replace(/\D/g,'');
+  if(cpf.length !== 11){ msg.textContent = 'Informe um CPF válido (11 dígitos).'; return; }
+
+  const supa = getSupabase();
+  if(!supa){ msg.textContent = 'Sistema fora do ar. Use a opção "data de nascimento" abaixo.'; return; }
+
+  btn.disabled = true;
+  const labelOrig = btn.textContent;
+  btn.textContent = 'Enviando…';
+  try {
+    // 1) Servidor gera token + valida CPF e rate-limit
+    const { data, error } = await supa.rpc('portal_emitir_token', { p_cpf: cpf });
+    if(error) throw new Error(error.message);
+    if(!data?.ok) throw new Error(data?.erro || 'Falha ao gerar código.');
+
+    // 2) Frontend envia via Z-API (se não configurado, instrui o operador).
+    const tel = (data.telefone||'').replace(/\D/g,'');
+    const mensagem = `*COBRASQ — código de acesso*\n\nOlá, ${(data.devedor_nome||'').split(' ')[0]}!\nSeu código de acesso ao portal é:\n\n*${data.token}*\n\nVálido por 10 minutos. Não compartilhe esse código.`;
+    if(!DB.config?.zapiInstanceId || !DB.config?.zapiToken){
+      msg.style.color = 'var(--warning)';
+      msg.textContent = 'Z-API não configurado no app. Use a opção "data de nascimento" ou peça ao gestor.';
+      btn.disabled = false; btn.textContent = labelOrig;
+      return;
+    }
+    try {
+      await ZApiAPI.sendText(tel, mensagem);
+    } catch(e){
+      msg.style.color = 'var(--danger)';
+      msg.textContent = 'Falha ao enviar WhatsApp: ' + (e.message||'erro');
+      btn.disabled = false; btn.textContent = labelOrig;
+      return;
+    }
+
+    // 3) Mostra step 2 (pedir o código)
+    document.getElementById('devedor-tel-mask').textContent = data.telefone_mask || '—';
+    document.getElementById('devedor-step-1').style.display = 'none';
+    document.getElementById('devedor-step-2').style.display = '';
+    setTimeout(()=> document.getElementById('devedor-token')?.focus(), 100);
+  } catch(e){
+    msg.style.color = 'var(--danger)';
+    msg.textContent = e.message || 'Erro ao enviar código.';
+  } finally {
+    btn.disabled = false; btn.textContent = labelOrig;
+  }
+}
+
+async function portalValidarToken(){
+  const btn = document.getElementById('btnDevedorValidarToken');
+  const msg = document.getElementById('devedor-step-2-msg');
+  msg.textContent = '';
+  const cpf = (document.getElementById('devedor-cpf').value||'').replace(/\D/g,'');
+  const token = (document.getElementById('devedor-token').value||'').replace(/\D/g,'');
+  if(token.length !== 6){ msg.textContent = 'O código tem 6 dígitos.'; return; }
+
+  const supa = getSupabase();
+  if(!supa){ msg.textContent = 'Sistema fora do ar.'; return; }
+
+  btn.disabled = true;
+  const labelOrig = btn.textContent;
+  btn.textContent = 'Verificando…';
+  try {
+    const { data, error } = await supa.rpc('portal_validar_token', { p_cpf: cpf, p_token: token });
+    if(error) throw new Error(error.message);
+    if(!data?.ok) throw new Error(data?.erro || 'Código inválido.');
+
+    // Carrega devedor do DB (precisa ter sido carregado via loadRelationalData).
+    const dev = (DB.devedores||[]).find(d => d.id === data.devedor_id);
+    if(!dev){
+      // Devedor não está no DB local — pode estar sem permissão de leitura. Cria stub mínimo.
+      currentUser = { tipo:'devedor', nome:'Devedor', devedorId: data.devedor_id, avatar:'D', role:'Devedor' };
+    } else {
+      currentUser = { tipo:'devedor', nome: dev.nome, devedorId: dev.id, avatar: initials(dev.nome), role:'Devedor' };
+    }
+    iniciarSessao();
+  } catch(e){
+    msg.style.color = 'var(--danger)';
+    msg.textContent = e.message || 'Erro ao validar código.';
+  } finally {
+    btn.disabled = false; btn.textContent = labelOrig;
+  }
+}
+
+function portalMostrarFallback(){
+  document.getElementById('devedor-step-1').style.display = 'none';
+  document.getElementById('devedor-step-2').style.display = 'none';
+  document.getElementById('devedor-step-fallback').style.display = '';
+}
+
+function portalVoltarStep1(){
+  document.getElementById('devedor-step-1').style.display = '';
+  document.getElementById('devedor-step-2').style.display = 'none';
+  document.getElementById('devedor-step-fallback').style.display = 'none';
+  const tokenEl = document.getElementById('devedor-token');
+  if(tokenEl) tokenEl.value = '';
+  const msg1 = document.getElementById('devedor-step-1-msg');
+  const msg2 = document.getElementById('devedor-step-2-msg');
+  if(msg1){ msg1.textContent = ''; msg1.style.color = 'var(--danger)'; }
+  if(msg2){ msg2.textContent = ''; msg2.style.color = 'var(--danger)'; }
 }
 
 function iniciarSessao(){
