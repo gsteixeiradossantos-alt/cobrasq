@@ -3269,6 +3269,15 @@ const _DEV_COL_FIELDS = new Set([
   'encaminhamentoJudicial','etapaAtualizadaEm','divida','historico','acordos'
 ]);
 
+function _devNumOrNull(v){
+  // valores BR no app vêm como "R$ 1.954,38" — coerção direta com + dá NaN
+  // e o upsert no Postgres rejeita NaN em coluna numeric (falha silenciosa).
+  if(v == null || v === '') return null;
+  if(typeof v === 'number') return Number.isFinite(v) ? v : null;
+  const n = parseValorBR(v);
+  return Number.isFinite(n) && n !== 0 ? n : (String(v).trim() === '0' ? 0 : null);
+}
+
 function devedorToRow(d){
   const metadata = {};
   for(const k of Object.keys(d||{})){
@@ -3284,8 +3293,8 @@ function devedorToRow(d){
     telefone: d.tel || null,
     status: d.status || null,
     fase: d.fase || 'extrajudicial',
-    valor_orig: d.valorOrig != null && d.valorOrig !== '' ? +d.valorOrig : null,
-    valor_atual: d.valorAtual != null && d.valorAtual !== '' ? +d.valorAtual : null,
+    valor_orig: _devNumOrNull(d.valorOrig),
+    valor_atual: _devNumOrNull(d.valorAtual),
     data_entrada: d.entrada || null,
     arquivado: !!d.arquivado,
     metadata,
@@ -3512,14 +3521,23 @@ function syncRelational(){
       if(Array.isArray(DB.clientes) && DB.clientes.length){
         const rows = DB.clientes.map(clienteToRow);
         const { error } = await supa.from('clientes').upsert(rows, { onConflict:'id' });
-        if(error) console.warn('[rel] syncClientes:', error.message);
+        if(error){
+          console.warn('[rel] syncClientes:', error.message);
+          try { showToast('Não foi possível sincronizar Clientes: '+error.message,'danger'); } catch(_){}
+        }
       }
       if(Array.isArray(DB.devedores) && DB.devedores.length){
         const rows = DB.devedores.map(devedorToRow);
         const { error } = await supa.from('devedores').upsert(rows, { onConflict:'id' });
-        if(error) console.warn('[rel] syncDevedores:', error.message);
+        if(error){
+          console.warn('[rel] syncDevedores:', error.message);
+          try { showToast('Não foi possível sincronizar Devedores: '+error.message,'danger'); } catch(_){}
+        }
       }
-    }catch(e){ console.warn('[rel] syncRelational ex:', e.message); }
+    }catch(e){
+      console.warn('[rel] syncRelational ex:', e.message);
+      try { showToast('Falha de sincronização com o servidor: '+e.message,'danger'); } catch(_){}
+    }
   }, 1800);
 }
 
@@ -6719,8 +6737,17 @@ Retorne APENAS UM objeto JSON com este schema (campos faltantes = null):
   "nome": null,
   "doc": null,
   "tel": null,
+  "tel2": null,
   "email": null,
-  "endereco": null,
+  "endereco": {
+    "cep": null,
+    "rua": null,
+    "numero": null,
+    "complemento": null,
+    "bairro": null,
+    "cidade": null,
+    "uf": null
+  },
   "valorOrig": null,
   "vencimento": null,
   "credorNome": null,
@@ -6732,6 +6759,14 @@ Retorne APENAS UM objeto JSON com este schema (campos faltantes = null):
     {"campo": "nome do campo", "pergunta": "texto da pergunta em PT-BR", "opcoes": ["opção 1", "opção 2"]}
   ]
 }
+
+OBSERVAÇÕES IMPORTANTES:
+- "endereco" é OBJETO com 7 campos separados — NUNCA retorne como string única.
+  Exemplo: "Av. Brasil, 1234, apto 5, Centro, Curitiba — PR, CEP 80000-000" deve virar
+  {cep:"80000-000", rua:"Av. Brasil", numero:"1234", complemento:"apto 5", bairro:"Centro", cidade:"Curitiba", uf:"PR"}.
+- "tel2" é telefone alternativo (manuscrito, segunda linha, outro contato). Se houver mais de um telefone, o principal vai em "tel" e o secundário em "tel2".
+- UF sempre em 2 letras maiúsculas (PR, SC, SP, etc.).
+- CEP no formato 00000-000.
 
 "perguntas" é OBRIGATÓRIO (use [] vazio se tudo certo). Use perguntas para:
 - Divergência entre documentos.
@@ -6954,7 +6989,6 @@ function mdevDiAplicarExtracted(extracted){
   // S3: Title Case nos campos sensíveis (defesa contra IA retornando CAIXA-ALTA)
   if (extracted.nome) extracted.nome = titleCasePtBR(extracted.nome);
   if (extracted.razao_social) extracted.razao_social = titleCasePtBR(extracted.razao_social);
-  if (extracted.endereco) extracted.endereco = titleCasePtBR(extracted.endereco);
   if (extracted.vara) extracted.vara = titleCasePtBR(extracted.vara);
   if (extracted.credorNome) extracted.credorNome = titleCasePtBR(extracted.credorNome);
   const set=(id,v)=>{ const el=document.getElementById(id); if(el&&v) el.value=v; };
@@ -6962,13 +6996,35 @@ function mdevDiAplicarExtracted(extracted){
   set('mdev-doc',  extracted.cpf||extracted.cnpj||extracted.doc||'');
   set('mdev-tel',  extracted.telefone||extracted.tel||'');
   set('mdev-email',extracted.email||'');
-  // IMPLEMENTADO S8: extracted.endereco entra na rua (sem parsing)
-  set('mdev-rua',  extracted.endereco||'');
+
+  // Endereço estruturado (7 campos). Aceita objeto novo {cep,rua,numero,...} ou string legada.
+  const end = extracted.endereco;
+  if(end && typeof end === 'object' && !Array.isArray(end)){
+    const tc = (v)=> (v && typeof v === 'string') ? titleCasePtBR(v) : v;
+    set('mdev-cep',         end.cep||'');
+    set('mdev-rua',         tc(end.rua)||'');
+    set('mdev-numero',      end.numero||'');
+    set('mdev-complemento', end.complemento||'');
+    set('mdev-bairro',      tc(end.bairro)||'');
+    set('mdev-cidade',      tc(end.cidade)||'');
+    const ufEl = document.getElementById('mdev-uf');
+    if(ufEl && end.uf){ ufEl.value = String(end.uf).toUpperCase().slice(0,2); }
+  } else if(typeof end === 'string'){
+    // Fallback retrocompat: IA retornou string única → jogar na rua.
+    set('mdev-rua', titleCasePtBR(end));
+  }
+
+  // Telefone alternativo (se a IA detectou um segundo número, vai pra obs por enquanto —
+  // adicionar campo dedicado no form é follow-up).
+  let obsExtra = '';
+  if(extracted.tel2){ obsExtra = `Telefone alternativo: ${extracted.tel2}`; }
+
   set('mdev-titulo',extracted.titulo||extracted.descricao||'');
   set('mdev-valor-orig', extracted.valor||extracted.valorOriginal||'');
   set('mdev-valor-atual',extracted.valorAtualizado||'');
   set('mdev-vencimento', extracted.vencimento||'');
-  set('mdev-obs', extracted.obs||extracted.observacoes||'');
+  const obsFinal = [extracted.obs||extracted.observacoes||'', obsExtra].filter(Boolean).join('\n');
+  set('mdev-obs', obsFinal);
   // IMPLEMENTADO S9: re-aplica máscara nos campos de valor após preenchimento da IA
   ['mdev-valor-orig','mdev-valor-atual'].forEach(id=>{
     const el = document.getElementById(id);
@@ -7117,6 +7173,12 @@ function salvarDevedor(){
     clienteId: document.getElementById('mdev-cliente').value||'',
     // IMPLEMENTADO S5: leitura do campo responsavel removida; preserva valor existente se houver
     responsavel: existingDev ? (existingDev.responsavel||'') : '',
+    // Vincula a cobradora que cadastrou o caso para o CRM (view `casos` lê assigned_to).
+    // Em edição: preserva. Em criação nova: atribui ao colaborador logado.
+    // Proprietário criando deixa em branco (caso fica disponível pra ser atribuído).
+    assignedTo: existingDev
+      ? (existingDev.assignedTo || null)
+      : (currentUser?.papel === 'colaborador' ? (currentUser.supaId || null) : null),
     fase, etapa,
     processoNum: isJud ? (document.getElementById('mdev-proc-num').value||'') : (existingDev ? existingDev.processoNum||'' : ''),
     vara: isJud ? (document.getElementById('mdev-proc-vara').value||'') : (existingDev ? existingDev.vara||'' : ''),
