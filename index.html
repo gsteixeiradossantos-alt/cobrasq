@@ -5169,7 +5169,49 @@ function aplicarCalculo(total){
   if(typeof toast === 'function') toast('Valor atualizado aplicado.', 'success');
 }
 
+// Carrega solicitações de contato pendentes do portal pra mostrar no banner.
+// Chamada ao entrar na página Devedores e após cada "Atender".
+async function carregarSolicitacoesContato(){
+  const supa = getSupabase();
+  if(!supa){ window._solicitacoesContato = []; return; }
+  try {
+    const { data, error } = await supa
+      .from('solicitacoes_contato')
+      .select('id, cpf, nome, telefone_novo, preferencia, criado_em')
+      .is('atendido_em', null)
+      .order('criado_em', { ascending: false })
+      .limit(20);
+    if(error){ console.warn('carregarSolicitacoesContato:', error.message); return; }
+    window._solicitacoesContato = data || [];
+  } catch(e){ console.warn('carregarSolicitacoesContato ex:', e.message); }
+}
+
+async function atenderSolicitacaoContato(id){
+  if(!confirm('Atender essa solicitação? Vamos atualizar o telefone do devedor com o número informado e marcar como atendida.')) return;
+  const supa = getSupabase();
+  if(!supa){ showToast('Sistema fora do ar.','danger'); return; }
+  try {
+    const { data, error } = await supa.rpc('atender_solicitacao_contato', { p_id: id });
+    if(error) throw new Error(error.message);
+    if(!data?.ok) throw new Error(data?.erro || 'Falha ao atender.');
+    const upd = data.devedores_atualizados || 0;
+    showToast(upd > 0 ? `Atendida — telefone de ${upd} devedor(es) atualizado.` : 'Atendida (devedor não encontrado pelo CPF — verifique manualmente).', 'success');
+    await carregarSolicitacoesContato();
+    // Re-sincroniza devedores pra refletir o novo telefone na UI
+    if(typeof loadRelationalData === 'function') await loadRelationalData();
+    if(typeof renderDevedores === 'function') renderDevedores();
+  } catch(e){
+    showToast('Erro: '+(e.message||e),'danger');
+  }
+}
+
 function renderDevedores(){
+  // Lazy-load das solicitações pendentes (assíncrono — se ainda não carregou,
+  // renderiza sem banner e re-renderiza quando chegar).
+  if(window._solicitacoesContato === undefined){
+    window._solicitacoesContato = [];
+    carregarSolicitacoesContato().then(() => renderDevedores());
+  }
   const el = document.getElementById('page-devedores');
   if(!el) return;
 
@@ -5231,6 +5273,43 @@ function renderDevedores(){
         <button class="btn btn-primary btn-sm" onclick="abrirNovoDevedor()" style="display:flex;align-items:center;gap:6px;">${ico('plus',13)} Nova Cobrança</button>
       </div>
     </div>
+
+    <!-- SOLICITAÇÕES DE CONTATO (devedores via Portal) -->
+    ${(window._solicitacoesContato||[]).length ? `
+    <div style="background:#EFF6FF;border:1px solid #BFDBFE;border-radius:10px;padding:14px 18px;margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+        <span style="font-size:16px;">📱</span>
+        <div style="flex:1;">
+          <div style="font-weight:700;color:#1e40af;font-size:13.5px;">
+            ${(window._solicitacoesContato||[]).length} solicitaç${(window._solicitacoesContato||[]).length>1?'ões':'ão'} de atualização de contato
+          </div>
+          <div style="font-size:12px;color:#1e3a8a;margin-top:1px;">Devedores avisaram que mudaram de telefone — clique em Atender para atualizar.</div>
+        </div>
+      </div>
+      <table class="tbl" style="font-size:12.5px;">
+        <thead><tr style="background:rgba(191,219,254,.4);">
+          <th>Nome</th><th>CPF</th><th>Telefone novo</th><th>Preferência</th><th>Quando</th><th style="text-align:right;">Ações</th>
+        </tr></thead>
+        <tbody>
+          ${(window._solicitacoesContato||[]).map(s => {
+            const cpfFmt = (s.cpf||'').replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/,'$1.$2.$3-$4');
+            const telFmt = (s.telefone_novo||'').replace(/^(\d{2})(\d{4,5})(\d{4})$/,'($1) $2-$3');
+            const quando = new Date(s.criado_em).toLocaleString('pt-BR');
+            return `<tr>
+              <td>${escHtml(s.nome||'—')}</td>
+              <td style="font-family:var(--font-mono);">${escHtml(cpfFmt)}</td>
+              <td style="font-family:var(--font-mono);">${escHtml(telFmt)}</td>
+              <td>${escHtml(s.preferencia||'—')}</td>
+              <td style="font-size:11.5px;color:var(--text-3);">${escHtml(quando)}</td>
+              <td style="text-align:right;">
+                <button class="btn btn-primary btn-xs" onclick="atenderSolicitacaoContato('${s.id}')">Atender</button>
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+    ` : ''}
 
     <!-- APROVAÇÕES PENDENTES (cedentes) -->
     ${pendentes.length ? `
@@ -8838,7 +8917,12 @@ function renderClientes(){
     <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:14px;flex-wrap:wrap;gap:10px;">
       <div>
         <div style="font-size:22px;font-weight:700;letter-spacing:-.02em;color:var(--text);">Clientes</div>
-        <div style="font-size:12.5px;color:var(--text-2);margin-top:3px;">${clientes.length} cedente${clientes.length!==1?'s':''} cadastrado${clientes.length!==1?'s':''}</div>
+        <div style="font-size:12.5px;color:var(--text-2);margin-top:3px;">${clientes.length} cedente${clientes.length!==1?'s':''} cadastrado${clientes.length!==1?'s':''}${(() => {
+          const arq = (DB.clientes||[]).filter(c => c.arquivado).length;
+          return (arq && currentUser?.papel === 'proprietario')
+            ? ` · <button onclick="abrirModalArquivados()" style="background:none;border:none;color:var(--navy);font-size:12px;cursor:pointer;text-decoration:underline;padding:0;">${arq} arquivado${arq>1?'s':''}</button>`
+            : '';
+        })()}</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;">
         ${clientes.length > 0 ? `<button class="btn btn-ghost btn-sm" onclick="toggleClienteSelMode()" style="${cliSelMode?'color:var(--danger);border-color:var(--danger);':''}">${cliSelMode ? 'Cancelar seleção' : 'Selecionar'}</button>` : ''}
@@ -9821,6 +9905,78 @@ async function arquivarCliente(id){
     if(typeof renderClientes === 'function') renderClientes();
   } catch(e){
     showToast('Erro ao arquivar: '+(e.message||e),'danger');
+  }
+}
+
+// Modal de gerenciar clientes arquivados (só pro proprietário).
+function abrirModalArquivados(){
+  const arquivados = (DB.clientes||[]).filter(c => c.arquivado);
+  if(!arquivados.length){ showToast('Nenhum cliente arquivado.','info'); return; }
+
+  // Lazy: cria modal se não existir.
+  let modal = document.getElementById('modal-arquivados');
+  if(!modal){
+    modal = document.createElement('div');
+    modal.id = 'modal-arquivados';
+    modal.className = 'modal';
+    modal.innerHTML = `
+      <div class="modal-content" style="max-width:680px;">
+        <div class="modal-header">
+          <h3>Clientes arquivados</h3>
+          <button class="modal-close" onclick="closeModal('modal-arquivados')">×</button>
+        </div>
+        <div id="modal-arquivados-body" style="padding:18px 22px;max-height:520px;overflow-y:auto;"></div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+  }
+  const body = document.getElementById('modal-arquivados-body');
+  body.innerHTML = `
+    <div style="font-size:12.5px;color:var(--text-2);margin-bottom:12px;">
+      ${arquivados.length} cliente${arquivados.length>1?'s':''} arquivado${arquivados.length>1?'s':''}. Reativar volta o cliente para a lista principal.
+    </div>
+    <table class="tbl" style="font-size:12.5px;width:100%;">
+      <thead><tr>
+        <th>Nome</th><th>CPF/CNPJ</th><th>Arquivado em</th><th style="text-align:right;">Ação</th>
+      </tr></thead>
+      <tbody>
+        ${arquivados.map(c => {
+          const quando = c.arquivadoEm ? new Date(c.arquivadoEm).toLocaleDateString('pt-BR') : '—';
+          return `<tr>
+            <td>${escHtml(c.nome||'(sem nome)')}</td>
+            <td style="font-family:var(--font-mono);font-size:11.5px;">${escHtml(c.doc||'—')}</td>
+            <td style="font-size:11.5px;color:var(--text-3);">${escHtml(quando)}</td>
+            <td style="text-align:right;">
+              <button class="btn btn-ghost btn-xs" onclick="reativarCliente('${c.id}')">Reativar</button>
+            </td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+  `;
+  openModal('modal-arquivados');
+}
+
+async function reativarCliente(id){
+  const cli = (DB.clientes||[]).find(c => c.id === id);
+  if(!cli){ showToast('Cliente não encontrado.','warning'); return; }
+  if(!confirm(`Reativar "${cli.nome}"? Ele volta para a lista principal de clientes.`)) return;
+
+  const supa = getSupabase();
+  if(!supa){ showToast('Sistema fora do ar.','danger'); return; }
+  try {
+    const { data, error } = await supa.rpc('reativar_cliente', { p_id: id });
+    if(error) throw new Error(error.message);
+    if(!data?.ok) throw new Error(data?.erro || 'Falha ao reativar.');
+    cli.arquivado = false;
+    cli.arquivadoEm = null;
+    cli.arquivadoMotivo = null;
+    save();
+    showToast(`"${cli.nome}" reativado.`,'success');
+    closeModal('modal-arquivados');
+    if(typeof renderClientes === 'function') renderClientes();
+  } catch(e){
+    showToast('Erro: '+(e.message||e),'danger');
   }
 }
 
@@ -14785,6 +14941,11 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
           <label>Client-Token (Security Token)</label>
           <input type="password" id="cfg-zapi-client-token" value="${DB.config.zapiClientToken||''}" placeholder="F..."/>
         </div>
+        <div class="fg">
+          <label>Telefone admin (notificações Z-API) <span style="color:var(--text-3);font-weight:400;font-size:11.5px;">— recebe alertas de solicitações do portal</span></label>
+          <input type="text" id="cfg-zapi-admin-tel" value="${DB.config.adminTel||''}" placeholder="(00) 00000-0000"
+            oninput="this.value=this.value.replace(/\D/g,'').slice(0,11).replace(/(\d{2})(\d)/,'($1) $2').replace(/(\d{5})(\d)/,'$1-$2')"/>
+        </div>
         <button class="btn btn-ghost btn-sm" id="btn-test-zapi" onclick="testarZApi()">Testar conexão</button>
         <span id="zapi-test-result" style="font-size:12px;margin-left:8px;"></span>
       </div>
@@ -15014,6 +15175,7 @@ function salvarIntegracoes(){
   DB.config.zapiInstanceId    = document.getElementById('cfg-zapi-instance')?.value||'';
   DB.config.zapiToken         = document.getElementById('cfg-zapi-token')?.value||'';
   DB.config.zapiClientToken   = document.getElementById('cfg-zapi-client-token')?.value||'';
+  DB.config.adminTel          = (document.getElementById('cfg-zapi-admin-tel')?.value||'').replace(/\D/g,'');
   reinitSupabase(); // re-inicializa cliente Supabase com novas credenciais
   save();
   const msg = document.getElementById('cfg-int-msg');
