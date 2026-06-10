@@ -1504,6 +1504,12 @@ img{max-width:100%}
       <!-- Tab: Dados -->
       <div id="mdev-tab-dados" class="tab-panel active">
         <input type="hidden" id="mdev-id">
+        <!-- Responsável pela cobrança: definido automaticamente (quem cadastra). Read-only. -->
+        <div id="mdev-resp-info" style="display:flex;align-items:center;gap:10px;padding:9px 12px;margin-bottom:14px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px">
+          <span style="font-weight:600;color:var(--text-3);letter-spacing:.06em;text-transform:uppercase;font-size:10.5px">Responsável</span>
+          <span id="mdev-resp-nome" style="font-weight:600;color:var(--text);font-size:13px">—</span>
+          <span style="margin-left:auto;color:var(--text-3);font-size:11px">quem cadastra é o responsável</span>
+        </div>
         <div class="fg-row">
           <div class="fg">
             <label>Nome completo *</label>
@@ -2866,6 +2872,26 @@ img{max-width:100%}
     </div>
   </div>
 </div>
+<!-- Seletor de responsável (lista usuários do app_users com UUID; grava nome + assigned_to) -->
+<div id="modal-reatribuir" class="overlay">
+  <div class="modal" style="max-width:440px;">
+    <div class="modal-header">
+      <span class="modal-title" id="modal-reatribuir-title">Alterar responsável</span>
+      <button class="modal-close" data-close="modal-reatribuir">&#10005;</button>
+    </div>
+    <div class="modal-body" style="padding:20px 24px;">
+      <div class="fg">
+        <label id="modal-reatribuir-label" style="display:block;font-size:12px;font-weight:600;color:var(--text-2);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px;">Novo responsável</label>
+        <select id="modal-reatribuir-select" style="width:100%;padding:10px 14px;border:1.5px solid var(--border-2);border-radius:var(--radius-sm);font-size:14px;color:var(--text);background:var(--bg);outline:none;"></select>
+        <div id="modal-reatribuir-hint" style="font-size:11px;color:var(--text-3);margin-top:6px;"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-reatribuir');window._reatribuirCb=null;">Cancelar</button>
+      <button class="btn btn-primary" onclick="_reatribuirConfirm()">Transferir</button>
+    </div>
+  </div>
+</div>
 <!-- legacy modal-minuta kept for compatibility; wizard uses modal-minuta-v2 -->
 <div id="modal-minuta" class="overlay" style="display:none!important;"></div>
 
@@ -3849,6 +3875,46 @@ function _promptConfirm(){
   closeModal('modal-prompt');
   if(window._promptCb)window._promptCb(v||null);
 }
+
+// ── Seletor de responsável (reutiliza o roster app_users) ─────────────────────
+// Abre um modal com a LISTA de usuários (não caixa de texto). onPick recebe
+// { id, nome } do usuário escolhido. A lista vem de app_users (única fonte com UUID).
+async function reatribuirResponsavelModal(title, label, onPick){
+  window._reatribuirCb = onPick || null;
+  const sel    = document.getElementById('modal-reatribuir-select');
+  const hintEl = document.getElementById('modal-reatribuir-hint');
+  const titEl  = document.getElementById('modal-reatribuir-title');
+  const labEl  = document.getElementById('modal-reatribuir-label');
+  if(titEl) titEl.textContent = title || 'Alterar responsável';
+  if(labEl) labEl.textContent = label || 'Novo responsável';
+  if(sel){ sel.innerHTML = '<option value="">Carregando usuários…</option>'; sel.disabled = true; }
+  if(hintEl) hintEl.textContent = '';
+  openModal('modal-reatribuir');
+  const roster = await carregarRosterAppUsers();
+  if(!sel) return;
+  sel.disabled = false;
+  if(!roster || !roster.length){
+    sel.innerHTML = '<option value="">Nenhum usuário disponível</option>';
+    if(hintEl) hintEl.textContent = 'Não consegui listar os usuários (verifique conexão / permissão de leitura).';
+    return;
+  }
+  sel.innerHTML = '<option value="">Selecione um usuário…</option>' +
+    roster.map(u=>`<option value="${escHtml(u.id)}">${escHtml(u.nome)}${u.cargo?` — ${escHtml(u.cargo)}`:''}</option>`).join('');
+  // Se só o próprio gestor apareceu, provavelmente a RLS de leitura está restrita (vira F-05/Lote 2).
+  if(roster.length===1 && hintEl) hintEl.textContent = 'Só você apareceu na lista — pode ser permissão de leitura (RLS) dos usuários.';
+  setTimeout(()=>{ try{ sel.focus(); }catch(_){} }, 80);
+}
+function _reatribuirConfirm(){
+  const sel  = document.getElementById('modal-reatribuir-select');
+  const uuid = sel ? sel.value : '';
+  if(!uuid){ showToast('Escolha um usuário.','warning'); return; }
+  const u = Array.isArray(_rosterAppUsers) ? _rosterAppUsers.find(x=>x.id===uuid) : null;
+  const nome = u?.nome || '';
+  const cb = window._reatribuirCb;
+  closeModal('modal-reatribuir');
+  window._reatribuirCb = null;
+  if(cb) cb({ id: uuid, nome });
+}
 function mascaraCPF(v){return v.replace(/\D/g,'').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d{1,2})$/,'$1-$2');}
 function mascaraCNPJ(v){return v.replace(/\D/g,'').replace(/(\d{2})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1/$2').replace(/(\d{4})(\d)/,'$1-$2');}
 function mascaraDoc(el){const v=el.value.replace(/\D/g,'');el.value=v.length<=11?mascaraCPF(v):mascaraCNPJ(v);}
@@ -4441,6 +4507,10 @@ function iniciarSessao(){
   const bulkDdResp = document.getElementById('bulk-dd-resp');
   if(bulkDdResp) bulkDdResp.style.display = (tipoUser === 'gestor') ? '' : 'none';
 
+  // Need #3: o mesmo vale na aba Processos (botão "Alterar responsável" em lote).
+  const procBtnResp = document.getElementById('proc-bulk-btn-resp');
+  if(procBtnResp) procBtnResp.style.display = (tipoUser === 'gestor') ? '' : 'none';
+
   // Aprovações: gestor vê inbox; colaborador vê "Meus pedidos". Cedente/devedor não vêem.
   const navAprov = document.getElementById('nav-aprovacoes');
   const navAprovLabel = document.getElementById('nav-aprovacoes-label');
@@ -4462,6 +4532,10 @@ function iniciarSessao(){
   hidratarPodeVerGrupo().finally(()=>{
     refreshGrupoViewTopbar();
   });
+
+  // Aquece o roster de usuários (app_users) pra resolver nomes de responsável na tela.
+  // Fire-and-forget: se falhar, nomeResponsavel() cai no que já estiver salvo no caso.
+  carregarRosterAppUsers().catch(()=>{});
 
   showPage('painel');
   // Lembrete de backup se não feito nos últimos 7 dias
@@ -5778,7 +5852,7 @@ function openDrawer(devId){
       dev.tel ? `<span><span style="color:var(--text-3)">Tel</span> <strong style="font-family:var(--font-mono);color:var(--text)">${dev.tel}</strong></span>` : '',
       `<span><span style="color:var(--text-3)">Cliente</span> <strong style="color:var(--text)">${escHtml(cliNome)}</strong></span>`,
       `<span><span style="color:var(--text-3)">Desde</span> <strong style="color:var(--text)">${clienteDesde}</strong></span>`,
-      dev.responsavel ? `<span><span style="color:var(--text-3)">Resp.</span> <strong style="color:var(--text)">${escHtml(dev.responsavel)}</strong></span>` : '',
+      (()=>{ const r=nomeResponsavel(dev); return r && r!=='—' ? `<span><span style="color:var(--text-3)">Resp.</span> <strong style="color:var(--text)">${escHtml(r)}</strong></span>` : ''; })(),
     ].filter(Boolean).join('');
   }
 
@@ -5945,6 +6019,10 @@ function _drawerTabHtml(tab, dev, ctx){
     }).join('');
 
     const credorInitials = (cliNome||'?').split(' ').filter(Boolean).slice(0,2).map(w=>w[0]).join('').toUpperCase();
+    const respNome = nomeResponsavel(dev);
+    const respInitials = (respNome && respNome!=='—')
+      ? respNome.split(' ').filter(Boolean).slice(0,2).map(w=>w[0]).join('').toUpperCase()
+      : '·';
     const score = dev.score||0;
     const scoreColor = score>=80?'var(--success)':score>=40?'var(--warning)':'var(--danger)';
     const pagoCount = (activeAcordo?.parcelas||[]).filter(p=>p.pago).length;
@@ -5996,6 +6074,16 @@ function _drawerTabHtml(tab, dev, ctx){
           <button onclick="abrirAcordo('${devId}')" style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);font-weight:500;text-align:left;cursor:pointer">🤝 Novo acordo</button>
           <button onclick="abrirGerarMinuta('${devId}')" style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);font-weight:500;text-align:left;cursor:pointer">📄 Gerar minuta</button>
           <button onclick="abrirSimulador('${devId}')" style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);font-weight:500;text-align:left;cursor:pointer">🔢 Simular acordo</button>
+        </div>
+        <div style="font-size:11px;color:var(--text-3);font-weight:600;letter-spacing:.10em;text-transform:uppercase;margin-bottom:10px">Responsável</div>
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:22px">
+          <div style="display:flex;align-items:center;gap:9px">
+            <div style="width:32px;height:32px;border-radius:6px;background:var(--surface-2);color:var(--text-2);display:grid;place-items:center;font-size:11px;font-weight:800">${respInitials}</div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:12.5px;font-weight:600">${escHtml(respNome)}</div>
+              <div style="font-size:11px;color:var(--text-3)">Cobrança</div>
+            </div>
+          </div>
         </div>
         <div style="font-size:11px;color:var(--text-3);font-weight:600;letter-spacing:.10em;text-transform:uppercase;margin-bottom:10px">Credor</div>
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:22px">
@@ -6951,6 +7039,8 @@ function abrirNovoDevedor(){
   document.getElementById('mdev-proc-num').value = '';
   document.getElementById('mdev-proc-vara').value = '';
   document.getElementById('modal-devedor-title').textContent = 'Nova Cobrança';
+  // Responsável = quem cadastra (decisão 2026-06-10). Mostra read-only no form.
+  { const rn=document.getElementById('mdev-resp-nome'); if(rn) rn.textContent = (currentUser?.nome || '—'); }
   document.getElementById('mdev-wa-link').style.display = 'none';
 
   // Populate selects
@@ -7148,6 +7238,9 @@ function editDevedor(id){
   // WhatsApp link
   const waLink = document.getElementById('mdev-wa-link');
   if(waLink) waLink.style.display = dev.tel ? 'block' : 'none';
+
+  // Responsável atual da cobrança (read-only no form; reatribuição é ação do gestor em lote).
+  { const rn=document.getElementById('mdev-resp-nome'); if(rn) rn.textContent = nomeResponsavel(dev); }
 
   populateDevModalSelects(dev);
 
@@ -7968,14 +8061,14 @@ function salvarDevedor(){
     vencimento: document.getElementById('mdev-vencimento').value||'',
     entrada: document.getElementById('mdev-entrada').value||hoje(),
     clienteId: document.getElementById('mdev-cliente').value||'',
-    // IMPLEMENTADO S5: leitura do campo responsavel removida; preserva valor existente se houver
-    responsavel: existingDev ? (existingDev.responsavel||'') : '',
-    // Vincula a cobradora que cadastrou o caso para o CRM (view `casos` lê assigned_to).
-    // Em edição: preserva. Em criação nova: atribui ao colaborador logado.
-    // Proprietário criando deixa em branco (caso fica disponível pra ser atribuído).
+    // Quem cadastra é o responsável de fato (decisão 2026-06-10) — inclusive o gestor.
+    // Em edição: preserva o valor existente. Em criação nova: nome do usuário logado.
+    responsavel: existingDev ? (existingDev.responsavel||'') : (currentUser?.nome || ''),
+    // Vincula quem cadastrou o caso para o CRM: a view `casos` lê devedores.assigned_to (UUID).
+    // Em edição: preserva. Em criação nova: o usuário logado, qualquer papel (gestor incluso).
     assignedTo: existingDev
       ? (existingDev.assignedTo || null)
-      : (currentUser?.papel === 'colaborador' ? (currentUser.supaId || null) : null),
+      : (currentUser?.supaId || null),
     fase,
     tipoCobranca,
     // Etapa removida do UI (mesclada no Status). Preserva valor legado em edição.
@@ -8433,6 +8526,10 @@ function diConfirmar(){
     valorAtual: valor,
     vencimento: document.getElementById('di-venc')?.value||'',
     clienteId,
+    // Responsável = quem cadastra (decisão 2026-06-10). Exceção: submissão do CEDENTE
+    // entra pendente e só ganha responsável quando o gestor aprova/atribui.
+    responsavel: isCed ? '' : (currentUser?.nome || ''),
+    assignedTo:  isCed ? null : (currentUser?.supaId || null),
     fase, etapa: isJud ? 'Petição inicial' : 'Notificação',
     processoNum: isJud ? (document.getElementById('di-proc-num')?.value||'') : '',
     vara:        isJud ? (document.getElementById('di-vara')?.value||'')     : '',
@@ -9628,6 +9725,12 @@ async function solicitarAprovacao(tipo, recursoId, resumo, payload){
   try { logAtividade?.('Solicitou aprovação', `${tipo} — ${resumo}`, recursoId); } catch(_){}
   showToast('Solicitação enviada ao gestor.','success');
   refreshBadgeAprovacoes?.();
+  // Aviso best-effort ao gestor via WhatsApp (Z-API). Fire-and-forget: o pedido já está salvo,
+  // então uma falha de envio nunca bloqueia o fluxo nem desfaz a solicitação.
+  if(DB?.config?.zapiInstanceId && DB?.config?.zapiToken && DB?.config?.adminTel){
+    const msgAprov = `🔔 *Nova autorização pendente*\n\nTipo: ${tipo}\n${resumo || ''}\nSolicitante: ${currentUser?.nome || currentUser?.email || '—'}\n\nAbra o sistema → Aprovações para decidir.`;
+    try { ZApiAPI.sendText(DB.config.adminTel, msgAprov).catch(()=>{}); } catch(_){}
+  }
   return true;
 }
 
@@ -9835,6 +9938,40 @@ async function hidratarPodeVerGrupo(){
     currentUser.podeVerGrupo  = !!data.pode_ver_grupo;
     currentUser.clienteGrupoId = data.cliente_grupo_id || null;
   } catch(_){}
+}
+
+// ── Roster de usuários (app_users) para o seletor de responsável ──────────────
+// app_users é a ÚNICA fonte com UUID (as listas locais DB.config.* têm só nomes,
+// e o CRM lê devedores.assigned_to, que é UUID). Cache em memória: carregado sob
+// demanda na 1ª abertura do seletor e aquecido no boot pra resolver nomes na tela.
+let _rosterAppUsers = null; // null = não carregado ainda; [] = carregado (pode estar vazio)
+async function carregarRosterAppUsers(force){
+  if(_rosterAppUsers && !force) return _rosterAppUsers;
+  const supa = (typeof getSupabase==='function') ? getSupabase() : null;
+  if(!supa){ return (_rosterAppUsers = _rosterAppUsers || []); }
+  try {
+    const { data, error } = await supa.from('app_users')
+      .select('id, nome, cargo, papel, ativo')
+      .eq('ativo', true)
+      .order('nome');
+    if(error){ console.warn('carregarRosterAppUsers:', error.message); return (_rosterAppUsers = _rosterAppUsers || []); }
+    _rosterAppUsers = (data||[]).filter(u=>u && u.id && u.nome);
+    return _rosterAppUsers;
+  } catch(e){
+    console.warn('carregarRosterAppUsers exception:', e?.message||e);
+    return (_rosterAppUsers = _rosterAppUsers || []);
+  }
+}
+// Resolve o NOME do responsável: usa o nome salvo; senão tenta o roster pelo UUID; senão '—'.
+// (Casos antigos só têm o assignedTo/UUID; isto dá um nome legível na tela quando o roster carregou.)
+function nomeResponsavel(dev){
+  if(!dev) return '—';
+  if(dev.responsavel) return dev.responsavel;
+  if(dev.assignedTo && Array.isArray(_rosterAppUsers)){
+    const u = _rosterAppUsers.find(x=>x.id===dev.assignedTo);
+    if(u && u.nome) return u.nome;
+  }
+  return '—';
 }
 
 function editCliente(id){
@@ -17162,13 +17299,17 @@ function bulkAltResp(){
   if(ehColaborador()){ showToast('Apenas o gestor pode reatribuir responsável.','danger'); return; }
   if(!selectedDevIds.size) return;
   const n = selectedDevIds.size;
-  const colabs = (DB.config.colaboradores||[]).concat(DB.config.usuarios||[]).map(c=>c.nome||c.email).filter(Boolean);
-  promptModal(`Alterar responsável em lote`,`Novo responsável para ${n} cobrança${n>1?'s':''}:`,(val)=>{
-    if(!val) return;
-    _bulkApply(d=>{ d.responsavel=val; });
-    renderDevedores();
-    showToast('Responsável atualizado.','success');
-  },{ hint: colabs.join(', ') });
+  reatribuirResponsavelModal(
+    'Alterar responsável em lote',
+    `Novo responsável para ${n} cobrança${n>1?'s':''}:`,
+    (pick)=>{
+      if(!pick || !pick.id) return;
+      // Grava OS DOIS: nome (exibição na tela) + UUID (assigned_to → é isto que o CRM lê).
+      _bulkApply(d=>{ d.responsavel = pick.nome; d.assignedTo = pick.id; });
+      renderDevedores();
+      showToast('Responsável atualizado.','success');
+    }
+  );
 }
 
 function bulkMigrarCredor(){
@@ -17472,12 +17613,20 @@ function bulkProcAltEtapa(){
   },{hint});
 }
 function bulkProcAltResp(){
+  // Need #3: reatribuir responsável é ação restrita ao gestor.
+  if(ehColaborador()){ showToast('Apenas o gestor pode reatribuir responsável.','danger'); return; }
+  if(!selectedProcIds.size) return;
   const n=selectedProcIds.size;
-  promptModal('Alterar responsável','Novo responsável para '+n+' processo(s):',resp=>{
-    if(!resp) return;
-    (DB.devedores||[]).forEach(d=>{ if(selectedProcIds.has(d.id)) d.responsavel=resp; });
-    save(); showToast('Responsável atualizado em '+n+' processo(s)','success'); limparSelecaoProcs();
-  });
+  reatribuirResponsavelModal(
+    'Alterar responsável',
+    `Novo responsável para ${n} processo(s):`,
+    (pick)=>{
+      if(!pick || !pick.id) return;
+      // Grava OS DOIS: nome + UUID (assigned_to → o CRM lê isto).
+      (DB.devedores||[]).forEach(d=>{ if(selectedProcIds.has(d.id)){ d.responsavel = pick.nome; d.assignedTo = pick.id; } });
+      save(); showToast('Responsável atualizado em '+n+' processo(s)','success'); limparSelecaoProcs();
+    }
+  );
 }
 function bulkProcArquivar(){
   const n=selectedProcIds.size;
