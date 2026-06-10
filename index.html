@@ -9287,6 +9287,7 @@ function renderClientes(){
 function abrirNovoCliente(){
   // F-22: colaborador pode abrir o form de credor; ao salvar, vira pedido de aprovação (ver salvarCliente).
   if(currentUser?.tipo !== 'gestor' && currentUser?.tipo !== 'funcionario'){ showToast('Sem permissão para cadastrar credores.','danger'); return; }
+  window._editandoPedidoCredor = null; // este é um credor novo, não a edição de um pedido pendente
   document.getElementById('mcli-id').value = '';
   document.getElementById('mcli-nome').value = '';
   document.getElementById('mcli-doc').value = '';
@@ -9845,6 +9846,7 @@ function renderItemAprovacao(p, isGestor){
   const dataStr = new Date(p.solicitado_em).toLocaleString('pt-BR');
   const actions = (isGestor && p.status === 'pendente') ? `
     <div style="display:flex;gap:8px;margin-top:10px;">
+      ${p.tipo === 'novo_credor' ? `<button class="btn btn-ghost btn-sm" onclick="editarPedidoCredor('${p.id}')">Editar</button>` : ''}
       <button class="btn btn-primary btn-sm" onclick="aprovarPedido('${p.id}')">Aprovar</button>
       <button class="btn btn-danger btn-sm" onclick="rejeitarPedido('${p.id}')">Rejeitar</button>
     </div>` : '';
@@ -9915,6 +9917,58 @@ async function rejeitarPedido(id){
   showToast('Pedido rejeitado.','success');
   renderAprovacoes();
   refreshBadgeAprovacoes();
+}
+
+// F-22+: o gestor pode AJUSTAR os dados do credor antes de aprovar (a estagiária pode ter
+// digitado algo errado). Abre o modal de credor pré-preenchido com o payload do pedido; ao
+// clicar em Salvar, salvarCliente() grava as edições no próprio pedido e então aprova
+// (materializa o credor corrigido + marca executado). Sem mudança de schema/RLS.
+async function editarPedidoCredor(id){
+  if(currentUser?.papel !== 'proprietario'){ showToast('Apenas o gestor pode editar.','danger'); return; }
+  const supa = getSupabase();
+  if(!supa) return;
+  const { data: pedido, error } = await supa.from('pedidos_aprovacao').select('*').eq('id', id).maybeSingle();
+  if(error || !pedido){ showToast('Pedido não encontrado.','danger'); return; }
+  if(pedido.status !== 'pendente'){ showToast('Pedido não está mais pendente.','warning'); renderAprovacoes(); return; }
+  if(pedido.tipo !== 'novo_credor'){ showToast('Este tipo de pedido não é editável.','warning'); return; }
+  const cli = pedido.payload || {};
+
+  const setV = (elId, val)=>{ const el = document.getElementById(elId); if(el) el.value = (val == null ? '' : val); };
+  setV('mcli-id', cli.id || '');
+  setV('mcli-nome', cli.nome);
+  setV('mcli-doc', cli.doc);
+  setV('mcli-fantasia', cli.nomeFantasia || cli.nome_fantasia);
+  setV('mcli-email', cli.email);
+  setV('mcli-tel', cli.tel);
+  setV('mcli-cep', cli.cep);
+  setV('mcli-rua', cli.rua || cli.endereco);
+  setV('mcli-numero', cli.numero);
+  setV('mcli-complemento', cli.complemento);
+  setV('mcli-bairro', cli.bairro);
+  setV('mcli-cidade', cli.cidade);
+  setV('mcli-uf', cli.uf);
+  setV('mcli-honor', cli.honorarios);
+  setV('mcli-login', cli.loginEmail);
+  setV('mcli-senha', ''); // senha em branco preserva a original ao salvar (não re-hashar o hash)
+  setV('mcli-obs', cli.obs);
+
+  // vínculo de grupo (independente | matriz | filial)
+  const grupoSel = document.getElementById('mcli-grupo-vinculo');
+  const grupoMatrizWrap = document.getElementById('mcli-grupo-matriz-wrap');
+  const grupoMatrizSel = document.getElementById('mcli-grupo-matriz');
+  if(grupoSel){
+    if(cli.ehMatriz){ grupoSel.value='matriz'; if(grupoMatrizWrap) grupoMatrizWrap.style.display='none'; }
+    else if(cli.clienteGrupoId){ grupoSel.value='filial'; if(grupoMatrizWrap) grupoMatrizWrap.style.display=''; populateClienteSelectorMatriz(); if(grupoMatrizSel) grupoMatrizSel.value=cli.clienteGrupoId; }
+    else { grupoSel.value='independente'; if(grupoMatrizWrap) grupoMatrizWrap.style.display='none'; }
+  }
+  const picker = document.getElementById('mcli-mode-picker'); if(picker) picker.style.display='';
+  if(typeof mcliSelectMode === 'function') mcliSelectMode('manual');
+  if(typeof mcliCarregarDocumentos === 'function') mcliCarregarDocumentos(null);
+
+  window._editandoPedidoCredor = { id: pedido.id, payload: cli };
+  const titleEl = document.getElementById('modal-cliente-title');
+  if(titleEl) titleEl.textContent = 'Revisar e aprovar credor';
+  openModal('modal-cliente');
 }
 
 async function executarPedidoLocal(pedido){
@@ -10064,6 +10118,7 @@ function nomeResponsavel(dev){
 
 function editCliente(id){
   if(ehColaborador()){ showToast('Apenas o gestor pode editar credores.','danger'); return; }
+  window._editandoPedidoCredor = null; // edição de credor já existente, não de pedido pendente
   const c = (DB.clientes||[]).find(x=>x.id===id);
   if(!c) return;
   document.getElementById('mcli-id').value = c.id;
@@ -10184,6 +10239,36 @@ async function salvarCliente(){
     createdAt: existingCli ? existingCli.createdAt : hoje(),
     updatedAt: hoje()
   };
+
+  // F-22+: gestor revisou/ajustou um pedido de credor pendente. Grava as edições no próprio
+  // pedido e aprova (não grava direto em DB.clientes — quem materializa é executarPedidoLocal).
+  if(window._editandoPedidoCredor && window._editandoPedidoCredor.id){
+    const pedidoId = window._editandoPedidoCredor.id;
+    const origPayload = window._editandoPedidoCredor.payload || {};
+    // senha em branco preserva a original (o campo nunca exibe o hash); id/createdAt do original.
+    if(!(document.getElementById('mcli-senha').value || '')) cliData.loginSenha = origPayload.loginSenha || '';
+    if(origPayload.createdAt) cliData.createdAt = origPayload.createdAt;
+    if(origPayload.id) cliData.id = origPayload.id;
+    const supa = getSupabase();
+    if(!supa){ showToast('Supabase indisponível.','danger'); return; }
+    const novoResumo = `Novo credor: ${nome}${cliData.doc ? ' ('+cliData.doc+')' : ''}`;
+    const { data: upd, error: upErr } = await supa.from('pedidos_aprovacao')
+      .update({ payload: cliData, resumo: novoResumo })
+      .eq('id', pedidoId).eq('status','pendente')
+      .select('id');
+    if(upErr){ showToast('Erro ao salvar edição: '+(upErr.message||upErr),'danger'); return; }
+    if(!upd || upd.length === 0){
+      showToast('Pedido não está mais pendente.','warning');
+      window._editandoPedidoCredor = null;
+      closeModal('modal-cliente');
+      if(typeof renderAprovacoes === 'function') renderAprovacoes();
+      return;
+    }
+    window._editandoPedidoCredor = null;
+    closeModal('modal-cliente');
+    await aprovarPedido(pedidoId); // re-busca o pedido (já com payload editado) e materializa
+    return;
+  }
 
   // F-22: colaborador não grava direto — envia para aprovação do gestor. O cliData inteiro
   // (com id já gerado) vai no payload; ao aprovar, executarPedidoLocal('novo_credor') materializa
