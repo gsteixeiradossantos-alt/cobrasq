@@ -513,6 +513,12 @@ details summary { color: #0A0908; font-size: 13px; font-family: 'Fraunces', Geor
   <div class="erro-box" id="erroBox"></div>
   <div class="alerta-selic" id="alertaSelic"></div>
 
+  <!-- Banner de índices defasados (só modo jurídico; >2 meses sem cotação) -->
+  <div id="bannerDefasagem" style="display:none;background:#FEF3C7;border-left:3px solid #B45309;border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:13px;color:#7C3A0E;align-items:center;gap:10px;justify-content:space-between;">
+    <span id="bannerDefasagemTxt"></span>
+    <button type="button" onclick="atualizarBCBManual()" style="background:#0A2547;color:#fff;border:0;padding:6px 12px;border-radius:4px;font-size:12px;cursor:pointer;font-weight:600;white-space:nowrap;">Sincronizar BCB</button>
+  </div>
+
   <div class="grid-2">
     <div class="field">
       <label>Valor original <span class="req">*</span></label>
@@ -1152,6 +1158,7 @@ function onIndiceChange() {
     rowSelicRetro.style.display = 'none';
     rowSelicJustif.style.display = 'none';
   }
+  atualizarBannerDefasagem();
 }
 function onSelicRetroChange() {
   document.getElementById('rowSelicJustif').style.display =
@@ -1536,6 +1543,14 @@ const COB_TAXA_CORRECAO_MENSAL = 0.08 / 12; // 8% a.a. pro rata
 const COB_TAXA_JUROS_MENSAL = 0.01;         // 1% a.m. simples
 const COB_MULTA_PCT = 0.02;                 // 2%
 const COB_TAXA_SERVICO_PCT = 0.30;          // taxa COBRASQ 30%
+// Parcelamento (boleto/cartão) — portado de crm-cobrasq 4e89e9d
+const COB_BOLETO_JUROS_MENSAL = 0.0299;
+const COB_BOLETO_FIXO = 6;
+const COB_PARCELA_VALOR_MIN = 256;
+const COB_PARCELA_MAX_QTD = 12;
+const COB_CARTAO_TAXA_OPERADORA = 0.0499 * 12;
+const COB_CARTAO_MARGEM = 0.05;
+const COB_CARTAO_MULTIPLICADOR = 1 + COB_CARTAO_TAXA_OPERADORA + COB_CARTAO_MARGEM;
 
 function mesesEntre(d1, d2) {
   return Math.max(0, (d2 - d1) / (1000 * 60 * 60 * 24 * 30.4375));
@@ -1551,8 +1566,28 @@ function _calcCobrancaSimples(valorOriginal, dataVenc, dataHoje, aplicarMulta, a
   const subtotal = valorCorrigido + juros + multa;
   const taxa = aplicarTaxa ? subtotal * COB_TAXA_SERVICO_PCT : 0;
   const total = arredondaParaCima(subtotal + taxa);
+
+  // Parcelamento no boleto (juros compostos por parcela; mín. R$256/parcela)
+  const boletoOptions = [];
+  for (let n = 1; n <= COB_PARCELA_MAX_QTD; n++) {
+    let valorParc;
+    if (n === 1) valorParc = total;
+    else {
+      const i = COB_BOLETO_JUROS_MENSAL;
+      const fator = (i * Math.pow(1 + i, n)) / (Math.pow(1 + i, n) - 1);
+      valorParc = total * fator;
+    }
+    const arred = arredondaParaCima(valorParc + COB_BOLETO_FIXO);
+    if (arred >= COB_PARCELA_VALOR_MIN) boletoOptions.push({ n: n, parcela: arred, total: arred * n });
+  }
+  const boleto12 = boletoOptions.find(o => o.n === 12) || boletoOptions[boletoOptions.length - 1] || null;
+  // Cartão 12x "sem juros" (taxa da operadora + margem embutidas no total)
+  const cartao12Total = arredondaParaCima(total * COB_CARTAO_MULTIPLICADOR);
+  const cartao12Parcela = arredondaParaCima(cartao12Total / 12);
+
   return { valorOriginal, dataVenc, dataHoje, meses, correcao, valorCorrigido,
-           juros, multa, taxa, aplicarMulta, aplicarTaxa, total };
+           juros, multa, taxa, aplicarMulta, aplicarTaxa, total,
+           boletoOptions, boleto12, cartao12Total, cartao12Parcela };
 }
 
 function setModo(modo) {
@@ -1598,6 +1633,7 @@ function setModo(modo) {
   document.getElementById('memorialCard').style.display = 'none';
   estado = null;
   limparErro();
+  atualizarBannerDefasagem();
 }
 
 function calcularCobranca() {
@@ -1633,6 +1669,17 @@ function renderResultadoCobranca(r) {
   if (r.aplicarMulta) html += linha('Multa contratual (2%)', fmtBRL(r.multa));
   if (r.aplicarTaxa) html += linha('Taxa de serviço COBRASQ (30%)', fmtBRL(r.taxa));
   html += linha('Total atualizado (à vista)', fmtBRL(r.total), 'total');
+
+  // Opções de parcelamento (boleto / cartão)
+  const boletoTxt = r.boleto12 ? (r.boleto12.n + 'x de ' + fmtBRL(r.boleto12.parcela)) : 'Indisponível';
+  const boletoDesc = r.boleto12 ? ('Total ' + fmtBRL(r.boleto12.total)) : ('Mín. ' + fmtBRL(COB_PARCELA_VALOR_MIN) + '/parcela');
+  html += '<div style="margin-top:14px;font-size:12px;font-weight:600;color:var(--navy);text-transform:uppercase;letter-spacing:.04em;">Opções de pagamento</div>';
+  html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:8px;">'
+    + _cobCard('À vista (PIX)', fmtBRL(r.total), 'menor valor — sem acréscimo')
+    + _cobCard('Boleto parcelado', boletoTxt, boletoDesc)
+    + _cobCard('Cartão 12x sem juros', '12x de ' + fmtBRL(r.cartao12Parcela), 'Total ' + fmtBRL(r.cartao12Total))
+    + '</div>';
+
   document.getElementById('resultadoBlock').innerHTML = html;
 
   let bd = '';
@@ -1646,6 +1693,50 @@ function renderResultadoCobranca(r) {
 
   document.getElementById('memorialCard').style.display = 'none';
   document.getElementById('resultadoCard').style.display = 'block';
+}
+
+function _cobCard(titulo, valor, desc) {
+  return '<div style="border:1px solid #E4DCCB;border-radius:8px;padding:10px 12px;background:#fff;">'
+    + '<div style="font-size:11px;color:var(--gray-text);text-transform:uppercase;letter-spacing:.03em;">' + titulo + '</div>'
+    + '<div style="font-size:16px;font-weight:700;color:var(--navy);margin-top:2px;">' + valor + '</div>'
+    + '<div style="font-size:11px;color:var(--gray-text);margin-top:2px;">' + desc + '</div>'
+    + '</div>';
+}
+
+// ===== Banner de índices defasados (jurídica) =====
+function _ultimoMesTabela(indice) {
+  const t = TABELAS[indice] || TABELAS['INPC'] || {};
+  let max = '';
+  for (const k in t) { if (/^\d{4}-\d{2}$/.test(k) && k > max) max = k; }
+  return max; // 'YYYY-MM' ou ''
+}
+function _defasagemMeses(mesStr) {
+  if (!mesStr) return 99;
+  const partes = mesStr.split('-').map(Number);
+  const now = new Date();
+  return (now.getFullYear() - partes[0]) * 12 + ((now.getMonth() + 1) - partes[1]);
+}
+function atualizarBannerDefasagem() {
+  const banner = document.getElementById('bannerDefasagem');
+  if (!banner) return;
+  // só faz sentido no jurídico (cobrança usa 8% fixo, não índices)
+  if (modoCalc !== 'juridica') { banner.style.display = 'none'; return; }
+  const indSel = document.getElementById('indice');
+  const indice = indSel ? indSel.value : 'INPC';
+  // SELIC/intertemporal: a própria SELIC embute juros; ainda assim avisa se a série está velha
+  const baseIndice = (indice === 'TJPR') ? 'INPC' : indice;
+  const ultMes = _ultimoMesTabela(baseIndice === 'ART406-INTERTEMPORAL' ? 'IPCA' : baseIndice);
+  const def = _defasagemMeses(ultMes);
+  if (def > 2 && ultMes) {
+    const [y, m] = ultMes.split('-');
+    document.getElementById('bannerDefasagemTxt').innerHTML =
+      '⚠ <strong>Índices possivelmente defasados:</strong> a série ' + baseIndice +
+      ' vai só até <strong>' + m + '/' + y + '</strong> (' + def + ' meses atrás). ' +
+      'Meses sem cotação ficam sem correção. Sincronize com o Banco Central antes do uso processual.';
+    banner.style.display = 'flex';
+  } else {
+    banner.style.display = 'none';
+  }
 }
 
 function calcular() {
@@ -2065,6 +2156,7 @@ function atualizarStatusBCB() {
 
   const pill = document.getElementById('pillBCB');
   pill.textContent = 'BCB ' + (localStorage.getItem(BCB_CACHE_KEY) ? 'sincronizado' : 'embutido');
+  atualizarBannerDefasagem();
 }
 
 async function fetchBCBSerie(codigo) {
