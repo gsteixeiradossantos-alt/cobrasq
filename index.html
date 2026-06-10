@@ -4206,13 +4206,21 @@ async function doLogin(type){
         // Load fresh data from Supabase
         await loadFromSupabase();
         // app_users é a fonte canônica do papel — user_metadata é band-aid e não é confiável.
-        const appUser = await carregarAppUser(supa, data.user.id);
-        if(!appUser){
+        // Fix 5: distingue "não cadastrada" (absent) de "falha temporária" (error). Em erro,
+        // não acusa "conta não cadastrada" (mensagem errada) — pede tentar de novo.
+        const appUserRes = await carregarAppUserComRetry(supa, data.user.id);
+        if(appUserRes.status === 'absent'){
           await supa.auth.signOut();
           showToast('Sua conta não está cadastrada como usuário interno. Contate o gestor.','danger');
           if(btnLogin){ btnLogin.disabled=false; btnLogin.innerHTML='Entrar como gestor '+_btnArrow; }
           return;
         }
+        if(appUserRes.status === 'error'){
+          showToast('Falha temporária ao carregar seu perfil. Tente entrar novamente.','warning');
+          if(btnLogin){ btnLogin.disabled=false; btnLogin.innerHTML='Entrar como gestor '+_btnArrow; }
+          return;
+        }
+        const appUser = appUserRes.user;
         if(appUser.ativo === false){
           await supa.auth.signOut();
           showToast('Sua conta foi desativada. Contate o gestor.','danger');
@@ -9905,19 +9913,34 @@ async function executarPedidoLocal(pedido){
 }
 
 // app_users é a fonte canônica do papel/nome/cargo. user_metadata é defesa em profundidade.
+// Fix 5 (refresh-logout): distingue "conta ausente" (query OK, 0 linhas) de "erro transitório"
+// (rede/token renovando). Retorna {status:'ok'|'absent'|'error', user}. Quem chama NÃO deve
+// deslogar em 'error' — senão um soluço no refresh destrói a sessão e joga no login.
 async function carregarAppUser(supa, userId){
-  if(!supa || !userId) return null;
+  if(!supa || !userId) return { status:'error', user:null };
   try {
     const { data, error } = await supa.from('app_users')
       .select('papel, nome, cargo, ativo, pode_ver_grupo, cliente_grupo_id, avatar_url, avatar_cor')
       .eq('id', userId)
       .maybeSingle();
-    if(error){ console.warn('carregarAppUser:', error.message); return null; }
-    return data || null;
+    if(error){ console.warn('carregarAppUser:', error.message); return { status:'error', user:null }; }
+    if(!data) return { status:'absent', user:null };
+    return { status:'ok', user:data };
   } catch(e){
     console.warn('carregarAppUser exception:', e?.message||e);
-    return null;
+    return { status:'error', user:null };
   }
+}
+
+// Carrega o app_user com 1 retry após refreshSession() — usado nos caminhos onde uma falha
+// transitória NÃO deve deslogar (init/refresh e login). Só re-tenta quando o 1º resultado é 'error'.
+async function carregarAppUserComRetry(supa, userId){
+  let res = await carregarAppUser(supa, userId);
+  if(res.status === 'error'){
+    try { await supa.auth.refreshSession(); } catch(_){}
+    res = await carregarAppUser(supa, userId);
+  }
+  return res;
 }
 
 function montarCurrentUserDeAppUser(appUser, authUser){
@@ -16705,13 +16728,23 @@ document.addEventListener('DOMContentLoaded', ()=>{
           return;
         }
         // app_users é a fonte canônica do papel — user_metadata é band-aid e não é confiável.
-        const appUser = await carregarAppUser(supa, session.user.id);
-        if(!appUser){
+        // Fix 5: só desloga quando a conta está REALMENTE ausente/inativa. Falha transitória
+        // (rede/token renovando no refresh) NÃO pode deslogar — antes derrubava o app no F5.
+        const appUserRes = await carregarAppUserComRetry(supa, session.user.id);
+        if(appUserRes.status === 'absent'){
           await supa.auth.signOut();
           showToast('Sua conta não está cadastrada como usuário interno. Contate o gestor.','danger');
           document.getElementById('loginScreen').classList.add('active');
           return;
         }
+        if(appUserRes.status === 'error'){
+          // Não conseguimos ler o perfil agora (e nem após 1 retry). PRESERVA a sessão
+          // (sem signOut) e pede recarregar — um F5 normalmente resolve quando o token assenta.
+          showToast('Não consegui carregar seu perfil agora (falha temporária). Recarregue a página.','warning');
+          document.getElementById('loginScreen').classList.add('active');
+          return;
+        }
+        const appUser = appUserRes.user;
         if(appUser.ativo === false){
           await supa.auth.signOut();
           showToast('Sua conta foi desativada. Contate o gestor.','danger');
