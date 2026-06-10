@@ -18,7 +18,13 @@ const crypto = require('crypto');
 
 const SB_URL  = process.env.SUPABASE_URL || '';
 const SB_KEY  = process.env.SUPABASE_SERVICE_KEY || '';
-const MFA_SALT = process.env.MFA_SALT || 'cobrasq-default-change-me';
+// F-12: nada de salt default fraco. Sem MFA_SALT no servidor, os hashes seriam
+// previsíveis (todo mundo conhece a string default). Falha fechado: o handler
+// recusa qualquer operação até que a env esteja configurada.
+const MFA_SALT = process.env.MFA_SALT || '';
+
+const CODE_TTL_MS = 5 * 60 * 1000;   // validade do código
+const RL_WINDOW_MS = 60 * 1000;      // F-12: 1 código por minuto, por dev_id
 
 function hashCode(code) {
   return crypto.createHash('sha256').update(MFA_SALT + ':' + code).digest('hex');
@@ -79,15 +85,37 @@ module.exports = async function handler(req, res) {
 
   const action = req.query?.action;
 
+  // F-12: sem salt configurado, não operamos (hash seria fraco/previsível).
+  if (!MFA_SALT) {
+    console.error('[mfa] MFA_SALT ausente — recusando operação.');
+    return res.status(500).json({ error: 'MFA indisponível: MFA_SALT não configurado no servidor.' });
+  }
+
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
 
     if (action === 'challenge') {
       const { devId, telefone } = body;
       if (!devId || !telefone) return res.status(400).json({ error: 'devId e telefone obrigatórios' });
+
+      // F-12: rate-limit — no máximo 1 código por minuto por dev_id (evita spam
+      // de WhatsApp / brute-force de emissão). Deriva o instante de emissão do
+      // expires_at (sempre = emissão + TTL); o upsert preserva created_at antigo,
+      // então não dá pra usar created_at aqui.
+      const existing = await sb(`mfa_codes?dev_id=eq.${encodeURIComponent(devId)}&select=expires_at`);
+      if (existing && existing[0] && existing[0].expires_at) {
+        const issuedAt = new Date(existing[0].expires_at).getTime() - CODE_TTL_MS;
+        const elapsed = Date.now() - issuedAt;
+        if (elapsed >= 0 && elapsed < RL_WINDOW_MS) {
+          const retryAfter = Math.ceil((RL_WINDOW_MS - elapsed) / 1000);
+          res.setHeader('Retry-After', String(retryAfter));
+          return res.status(429).json({ error: `Aguarde ${retryAfter}s para solicitar um novo código.`, retry_after: retryAfter });
+        }
+      }
+
       const code = randomCode();
       const hash = hashCode(code);
-      const expires = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+      const expires = new Date(Date.now() + CODE_TTL_MS).toISOString();
       // Upsert (chave primária = dev_id)
       await sb('mfa_codes', {
         method: 'POST',

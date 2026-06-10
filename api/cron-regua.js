@@ -143,6 +143,73 @@ async function registrarEnvio({ tipo, devedorId, parcelaId, stepKey, canal, stat
   }
 }
 
+// ── F-10: claim idempotente ANTES do envio (anti double-send) ───────────────
+// Antes o cron ENVIAVA o WhatsApp e SÓ DEPOIS gravava a marca em regua_envios.
+// Em runs sobrepostos (cron + disparo manual, ou run que passa de 24h) os dois
+// liam regua_envios sem a marca, ambos enviavam e só então gravavam -> o devedor
+// recebia a mesma mensagem 2x. Agora invertemos: reivindicamos a vaga ANTES de
+// enviar. A unique key (tipo,devedor_id,parcela_id,step_key) garante UM vencedor.
+//
+// claimEnvio insere status='sending' com resolution=ignore-duplicates: quem
+// efetivamente inseriu recebe a linha de volta (return=representation); o
+// concorrente recebe [] e NÃO envia. Em qualquer dúvida (erro), retornamos false
+// -> preferimos NÃO enviar a arriscar duplicar.
+async function claimEnvio({ tipo, devedorId, parcelaId, stepKey, canal }) {
+  try {
+    const rows = await sbFetch('regua_envios', {
+      method: 'POST',
+      headers: { 'Prefer': 'resolution=ignore-duplicates,return=representation' },
+      body: JSON.stringify({
+        tipo, devedor_id: devedorId,
+        parcela_id: parcelaId || '',
+        step_key: stepKey, canal,
+        status: 'sending',
+      }),
+    });
+    return Array.isArray(rows) && rows.length > 0;
+  } catch (e) {
+    console.warn('[regua_envios] claim falhou:', e.message);
+    return false; // fail-safe: na dúvida NÃO envia
+  }
+}
+
+function _enviosKeyQuery({ tipo, devedorId, parcelaId, stepKey }) {
+  return 'regua_envios'
+    + `?tipo=eq.${encodeURIComponent(tipo)}`
+    + `&devedor_id=eq.${encodeURIComponent(devedorId)}`
+    + `&parcela_id=eq.${encodeURIComponent(parcelaId || '')}`
+    + `&step_key=eq.${encodeURIComponent(stepKey)}`
+    + `&status=eq.sending`;
+}
+
+// Envio confirmado: promove a marca de 'sending' -> 'sent' (vira idempotência
+// definitiva; loadJaEnviados só conta 'sent').
+async function confirmarEnvio({ tipo, devedorId, parcelaId, stepKey }) {
+  try {
+    await sbFetch(_enviosKeyQuery({ tipo, devedorId, parcelaId, stepKey }), {
+      method: 'PATCH',
+      headers: { 'Prefer': 'return=minimal' },
+      body: JSON.stringify({ status: 'sent' }),
+    });
+  } catch (e) {
+    console.warn('[regua_envios] confirmar falhou:', e.message);
+  }
+}
+
+// Envio falhou: libera o claim (remove a linha 'sending' que ESTA run criou)
+// para que o próximo run possa tentar de novo — preserva o retry-on-failure que
+// já existia, sem nunca duplicar. DELETE pontual da própria reserva, não em massa.
+async function liberarEnvio({ tipo, devedorId, parcelaId, stepKey }) {
+  try {
+    await sbFetch(_enviosKeyQuery({ tipo, devedorId, parcelaId, stepKey }), {
+      method: 'DELETE',
+      headers: { 'Prefer': 'return=minimal' },
+    });
+  } catch (e) {
+    console.warn('[regua_envios] liberar claim falhou:', e.message);
+  }
+}
+
 // Back-fill único: na primeira run, popula regua_envios a partir do
 // _reguaEnviados que ficou no JSONB. Idempotente (insert ON CONFLICT DO NOTHING
 // é simulado por `resolution=ignore-duplicates`).
@@ -214,11 +281,20 @@ async function processarCalendarPendingDeletes() {
 }
 
 module.exports = async function handler(req, res) {
-  const ua = req.headers['user-agent'] || '';
-  const secret = req.headers['x-cron-secret'] || req.query?.secret || '';
+  // F-09: autenticação forte de cron. Antes aceitava um bypass por user-agent
+  // (/vercel-cron/i), que é trivialmente forjável -> qualquer um disparava a
+  // régua (envio de WhatsApp em massa). Agora exige o segredo e falha fechado
+  // se ele não estiver configurado no servidor.
+  // Aceita o segredo via header x-cron-secret, querystring ?secret=, ou o
+  // header Authorization: Bearer <segredo> (formato padrão do cron do Vercel).
   const expect = process.env.CRON_SECRET || '';
-  const isVercelCron = /vercel-cron/i.test(ua);
-  if (expect && !isVercelCron && secret !== expect) {
+  if (!expect) {
+    return res.status(500).json({ error: 'CRON_SECRET não configurado no servidor.' });
+  }
+  const authHeader = req.headers['authorization'] || '';
+  const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+  const secret = req.headers['x-cron-secret'] || req.query?.secret || bearer || '';
+  if (secret !== expect) {
     return res.status(401).json({ error: 'unauthorized' });
   }
 
@@ -295,15 +371,24 @@ module.exports = async function handler(req, res) {
           nome: dev.nome || '', valor: fmtR(valor), doc: dev.doc || '',
           dias: String(dias), vencimento: baseData, link, credor
         });
+        // F-10: reivindica a vaga ANTES de enviar. Se outro run já reivindicou,
+        // não envia (evita WhatsApp duplicado em runs sobrepostos).
+        if (!dry) {
+          const claimed = await claimEnvio({ tipo: 'cobranca', devedorId: devId, parcelaId: '', stepKey, canal: step.canal });
+          if (!claimed) {
+            resultado.itens.push({ dev: dev.nome, tipo: 'cobranca', step: stepKey, skipped: 'já reivindicado (concorrência/duplicado)' });
+            continue;
+          }
+        }
         try {
           if (!dry) await zapiSendText(tel, msg);
-          if (!dry) await registrarEnvio({ tipo: 'cobranca', devedorId: devId, parcelaId: '', stepKey, canal: step.canal, status: 'sent' });
+          if (!dry) await confirmarEnvio({ tipo: 'cobranca', devedorId: devId, parcelaId: '', stepKey });
           jaEnviados.add(jaEnviadoKey('cobranca', devId, '', stepKey)); // evita reenvio na mesma run
           resultado.enviados_cobranca++;
           resultado.itens.push({ dev: dev.nome, tipo: 'cobranca', step: stepKey, status: dry ? 'dry' : 'sent' });
         } catch (e) {
           resultado.falhas++;
-          if (!dry) await registrarEnvio({ tipo: 'cobranca', devedorId: devId, parcelaId: '', stepKey, canal: step.canal, status: 'failed', error: e.message });
+          if (!dry) await liberarEnvio({ tipo: 'cobranca', devedorId: devId, parcelaId: '', stepKey }); // libera p/ retry no próximo run
           resultado.itens.push({ dev: dev.nome, tipo: 'cobranca', step: stepKey, error: e.message });
         }
       }
@@ -346,15 +431,23 @@ module.exports = async function handler(req, res) {
               parcela_venc: (p.vencimento || '').split('-').reverse().join('/'),
               acordo_total: fmtR(ac.valorTotal || 0),
             });
+            // F-10: claim idempotente antes do envio (anti double-send).
+            if (!dry) {
+              const claimed = await claimEnvio({ tipo: 'acordo', devedorId: devId, parcelaId, stepKey, canal: step.canal });
+              if (!claimed) {
+                resultado.itens.push({ dev: dev.nome, tipo: 'acordo', parcela: p.numero, step: stepKey, skipped: 'já reivindicado (concorrência/duplicado)' });
+                continue;
+              }
+            }
             try {
               if (!dry) await zapiSendText(tel, msg);
-              if (!dry) await registrarEnvio({ tipo: 'acordo', devedorId: devId, parcelaId, stepKey, canal: step.canal, status: 'sent' });
+              if (!dry) await confirmarEnvio({ tipo: 'acordo', devedorId: devId, parcelaId, stepKey });
               jaEnviados.add(jaEnviadoKey('acordo', devId, parcelaId, stepKey));
               resultado.enviados_acordo++;
               resultado.itens.push({ dev: dev.nome, tipo: 'acordo', parcela: p.numero, step: stepKey, status: dry ? 'dry' : 'sent' });
             } catch (e) {
               resultado.falhas++;
-              if (!dry) await registrarEnvio({ tipo: 'acordo', devedorId: devId, parcelaId, stepKey, canal: step.canal, status: 'failed', error: e.message });
+              if (!dry) await liberarEnvio({ tipo: 'acordo', devedorId: devId, parcelaId, stepKey }); // libera p/ retry
               resultado.itens.push({ dev: dev.nome, tipo: 'acordo', parcela: p.numero, step: stepKey, error: e.message });
             }
           }
