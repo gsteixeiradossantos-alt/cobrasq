@@ -1,0 +1,59 @@
+-- ============================================================================
+-- F-04 — Pinar security_invoker=true na view public.casos (anti-drift)
+-- ============================================================================
+-- ACHADO CORRIGIDO (F-04, P0): drift cross-repo na view `casos`. O CRM
+--   (2026-06-10a_views_security_invoker.sql) setou security_invoker=true; o
+--   faturamento (supabase/migrations/20260609_view_casos_status_mesclado.sql)
+--   redefiniu `casos` via CREATE OR REPLACE VIEW SEM declarar security_invoker.
+--   CREATE OR REPLACE VIEW preserva reloptions existentes; mas qualquer
+--   DROP+CREATE (ou redefinição num projeto onde a option nunca foi setada)
+--   faz a view rodar como DEFINER (dona = postgres), IGNORANDO a RLS de
+--   devedores/clientes → todo colaborador vê TODOS os casos (vazamento
+--   cross-tenant). É a porta de trás do isolamento multi-tenant do CRM.
+--
+-- ASSUNÇÃO SOBRE O PROD (estado explícito): schema aplicado via Supabase MCP;
+--   os arquivos PODEM NÃO refletir o prod. >>> VERIFICAR ANTES via
+--   supabase/verification/lote0_verify.sql, blocos F-04.a/b/c. <<<
+--     • Se F-04.a mostrar security_invoker_on = true → já está seguro; este
+--       ALTER é no-op idempotente (pode aplicar mesmo assim, custo zero).
+--     • Se security_invoker AUSENTE/false → aplique JÁ (vazamento ativo).
+--   NÃO redefinimos o corpo da view aqui (só a option), para não reintroduzir
+--   o drift de definição entre os dois repos. A definição canônica do corpo é
+--   a do faturamento (20260609_view_casos_status_mesclado.sql) — confirme com
+--   F-04.b qual corpo está no prod antes de aplicar.
+--
+-- APPS / n8n QUE LEEM/ESCREVEM (matriz do plano):
+--   • crm-cobrasq: consumidor PRIMÁRIO da view (8 usos) — funil, casos.
+--   • cobrasq-faturamento: escreve via tabela base devedores (não via a view).
+--   • Edge/Webhook: INSTEAD OF triggers na view.
+--   => Pinar security_invoker=true faz a view respeitar a RLS de quem consulta.
+--      É exatamente o que o CRM precisa para o isolamento por papel funcionar.
+--      Risco de regressão: se a RLS de devedores/clientes estiver mal
+--      configurada, o gestor pode passar a "não ver nada" (ligado ao F-05).
+--      Por isso F-04 e F-05 devem ser testados juntos por papel.
+--
+-- RISCO: BAIXO (1 ALTER VIEW, sem mudar o corpo). Reversível em 1 comando.
+--
+-- ROLLBACK: supabase/migrations/20260610_02_casos_security_invoker_rollback.sql
+--   Comando resumido: ALTER VIEW public.casos SET (security_invoker = false);
+--   (⚠️ o rollback REABRE o vazamento cross-tenant — só usar em emergência.)
+-- ----------------------------------------------------------------------------
+-- ECOSSISTEMA: Supabase jokbxzhcctcwnbhkhgru — compartilhado por
+--   cobrasq-faturamento + crm-cobrasq. Aplicar só após aprovação item-a-item.
+-- ============================================================================
+
+ALTER VIEW public.casos SET (security_invoker = true);
+
+-- ----------------------------------------------------------------------------
+-- GUARDA ANTI-DRIFT (regra da casa de duas portas):
+--   O bug F-04 nasceu de DOIS repos mexendo na mesma view `casos`. Para evitar
+--   recorrência:
+--   1. QUALQUER redefinição futura de `casos` (em QUALQUER um dos dois repos)
+--      DEVE re-declarar a option, ex.:
+--        CREATE OR REPLACE VIEW public.casos
+--          WITH (security_invoker = true) AS  ...;
+--      ou re-rodar este ALTER logo após o CREATE OR REPLACE.
+--   2. Manter as migrations de `casos` num lugar só, com data no nome, e checar
+--      o estado via F-04.a no lote0_verify.sql como teste de fumaça pós-deploy.
+--   3. Documentado também em supabase/migrations/README.md (ver F-04).
+-- ----------------------------------------------------------------------------

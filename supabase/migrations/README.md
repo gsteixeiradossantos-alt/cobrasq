@@ -19,6 +19,28 @@ Migrations geradas em 10/05/2026 a partir das specs em `docs/specs/`. **NÃO for
 - [ ] Para S6 (filiais), as RLS de visibilidade de grupo precisam ser adicionadas às políticas existentes de `clientes` e `devedores` — não foi feito automaticamente porque depende das políticas atuais.
 - [ ] Para S12 (rascunhos), filtros aplicacionais já presumem `is_draft=false` em listagens normais. Verificar.
 
+## Guarda anti-drift da view `casos` (F-04)
+
+A view `public.casos` é compartilhada pelos DOIS repos (faturamento + CRM). O
+bug F-04 nasceu de duas redefinições concorrentes da view onde uma esqueceu de
+declarar `security_invoker`, fazendo a view rodar como DEFINER e ignorar a RLS
+(vazamento cross-tenant). **Regra:** todo `CREATE OR REPLACE VIEW public.casos`
+— em qualquer um dos dois repos — DEVE re-declarar a option:
+
+```sql
+CREATE OR REPLACE VIEW public.casos
+  WITH (security_invoker = true) AS  ...;
+```
+
+Migrations de `casos` ficam num único lugar, com data no nome. Use o bloco
+F-04.a de `../verification/lote0_verify.sql` como teste de fumaça pós-deploy.
+
+## Lote 0 — fixes de RLS/schema (F-03/F-04/F-05/F-11)
+
+Drafts em `20260610_0{1..4}_*.sql` (+ `_rollback.sql` pareado). **Nenhum
+aplicado.** Verificar prod com `../verification/lote0_verify.sql` ANTES;
+detalhes e ordem em `../verification/README.md`.
+
 ## Project ID
 
 Supabase: `jokbxzhcctcwnbhkhgru` (per memória persistente).
