@@ -1302,7 +1302,7 @@ img{max-width:100%}
         <div class="bulk-dropdown" id="bulk-dropdown">
           <div class="bulk-dd-item" onclick="bulkAltEtiqueta()">Alterar etiqueta</div>
           <div class="bulk-dd-item" onclick="bulkAltStatus()">Alterar status</div>
-          <div class="bulk-dd-item" onclick="bulkAltResp()">Alterar responsável</div>
+          <div class="bulk-dd-item" id="bulk-dd-resp" onclick="bulkAltResp()">Alterar responsável</div>
           <div class="bulk-dd-item" onclick="bulkMigrarCredor()">↔️ Migrar credor</div>
           <div class="bulk-dd-item" onclick="bulkAltPrioridade()">Alterar prioridade</div>
           <div class="bulk-dd-item" onclick="bulkDefinirPrazo()">Definir prazo de follow-up</div>
@@ -2879,10 +2879,10 @@ img{max-width:100%}
     <div class="modal-body" style="padding:18px 22px;">
       <div id="calc-divida-body" style="font-size:13px;color:var(--text);"></div>
       <div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--border);font-size:11.5px;color:var(--text-3);line-height:1.5;">
-        Parâmetros: correção monetária <strong id="calc-param-correcao">0,50% a.m.</strong> ·
-        juros <strong id="calc-param-juros">1,00% a.m.</strong> ·
-        multa <strong id="calc-param-multa">2,00%</strong>.
-        <span style="display:block;margin-top:3px;">Ajuste em Configurações &rsaquo; Parâmetros de cálculo.</span>
+        Parâmetros: correção monetária <strong id="calc-param-correcao">INPC (composta)</strong> ·
+        juros <strong id="calc-param-juros">1,00% a.m. simples</strong> ·
+        multa <strong id="calc-param-multa">2,00%</strong> sobre o atualizado.
+        <span style="display:block;margin-top:3px;">Mesma metodologia da Calculadora Jurídica. Taxas de juros/multa ajustáveis em Configurações &rsaquo; Parâmetros de cálculo.</span>
       </div>
     </div>
     <div class="modal-footer">
@@ -4433,6 +4433,14 @@ function iniciarSessao(){
   const navPipeline = document.getElementById('nav-pipeline');
   if(navPipeline) navPipeline.style.display = (tipoUser === 'gestor') ? '' : 'none';
 
+  // Criar credor é ação de gestor: esconde o "+ Novo cliente" inline do form de devedor.
+  const mdevNovoCliBtn = document.getElementById('mdev-novo-cliente-btn');
+  if(mdevNovoCliBtn) mdevNovoCliBtn.style.display = (tipoUser === 'gestor') ? '' : 'none';
+
+  // Reatribuir responsável expõe nomes de outros operadores e é ação de gestão.
+  const bulkDdResp = document.getElementById('bulk-dd-resp');
+  if(bulkDdResp) bulkDdResp.style.display = (tipoUser === 'gestor') ? '' : 'none';
+
   // Aprovações: gestor vê inbox; colaborador vê "Meus pedidos". Cedente/devedor não vêem.
   const navAprov = document.getElementById('nav-aprovacoes');
   const navAprovLabel = document.getElementById('nav-aprovacoes-label');
@@ -4562,7 +4570,10 @@ function showPage(p){
   const btnAdd    = document.getElementById('btn-topbar-add');
   const btnImport = document.getElementById('btn-topbar-import');
   if(btnAdd){
-    btnAdd.style.display = ['devedores','clientes','fin'].includes(p) ? 'flex' : 'none';
+    // Colaborador só cria devedores. Criar credor (clientes) e lançamento (fin)
+    // são ações de gestor.
+    const addPages = (currentUser?.tipo === 'gestor') ? ['devedores','clientes','fin'] : ['devedores'];
+    btnAdd.style.display = addPages.includes(p) ? 'flex' : 'none';
     btnAdd.onclick = ()=>{
       if(p==='devedores') abrirNovoDevedor();
       else if(p==='clientes') abrirNovoCliente();
@@ -4701,10 +4712,13 @@ function renderPainel(){
   const todayStr = hoje();
 
   const vencItems = [];
-  // Lançamentos financeiros pendentes
-  (DB.lancamentos||[])
-    .filter(l=>l.status==='pendente' && l.data >= todayStr && l.data <= in7str)
-    .forEach(l=>vencItems.push({ desc:l.descricao||'Lançamento', data:l.data, valor:+l.valor||0, icone:'dollar', tipo:'lancamento' }));
+  // Lançamentos financeiros pendentes — dado financeiro do escritório (fin_*),
+  // visível só para gestor. Colaborador não vê vencimentos financeiros.
+  if(!ehColaborador()){
+    (DB.lancamentos||[])
+      .filter(l=>l.status==='pendente' && l.data >= todayStr && l.data <= in7str)
+      .forEach(l=>vencItems.push({ desc:l.descricao||'Lançamento', data:l.data, valor:+l.valor||0, icone:'dollar', tipo:'lancamento' }));
+  }
   // Vencimentos de devedores
   devs
     .filter(d=>d.vencimento && d.vencimento >= todayStr && d.vencimento <= in7str)
@@ -5116,6 +5130,74 @@ function getCalcParams(){
   };
 }
 
+// ── Metodologia unificada (mesma da Calculadora Jurídica / calc-juridica.html) ──
+// Correção composta mês a mês com INPC real (TJ-PR adota INPC) + garantia STJ
+// (fator de correção nunca < 1), juros 1% a.m. SIMPLES pró rata por dias e
+// multa sobre o valor ATUALIZADO (sem juros). Tabela conferida IBGE/BCB.
+const CALC_INPC_MENSAL = {
+  '2020-01': 0.19,'2020-02': 0.17,'2020-03': 0.18,'2020-04':-0.23,'2020-05':-0.25,'2020-06': 0.30,
+  '2020-07': 0.44,'2020-08': 0.36,'2020-09': 0.87,'2020-10': 0.89,'2020-11': 0.95,'2020-12': 1.46,
+  '2021-01': 0.27,'2021-02': 0.82,'2021-03': 0.86,'2021-04': 0.38,'2021-05': 0.96,'2021-06': 0.60,
+  '2021-07': 1.02,'2021-08': 0.88,'2021-09': 1.20,'2021-10': 1.16,'2021-11': 0.84,'2021-12': 0.73,
+  '2022-01': 0.73,'2022-02': 1.00,'2022-03': 1.71,'2022-04': 1.04,'2022-05': 0.45,'2022-06': 0.62,
+  '2022-07':-0.60,'2022-08':-0.31,'2022-09':-0.32,'2022-10': 0.53,'2022-11': 0.53,'2022-12': 0.69,
+  '2023-01': 0.46,'2023-02': 0.77,'2023-03': 0.64,'2023-04': 0.55,'2023-05': 0.36,'2023-06':-0.10,
+  '2023-07': 0.09,'2023-08': 0.20,'2023-09': 0.13,'2023-10': 0.12,'2023-11': 0.33,'2023-12': 0.55,
+  '2024-01': 0.57,'2024-02': 0.81,'2024-03': 0.19,'2024-04': 0.37,'2024-05': 0.46,'2024-06': 0.23,
+  '2024-07': 0.26,'2024-08':-0.14,'2024-09': 0.48,'2024-10': 0.61,'2024-11': 0.34,'2024-12': 0.48,
+  '2025-01': 0.00,'2025-02': 1.48,'2025-03': 0.51,'2025-04': 0.48,'2025-05': 0.35,'2025-06': 0.23,
+  '2025-07': 0.21,'2025-08':-0.21,'2025-09': 0.52,'2025-10': 0.03,'2025-11': 0.03,'2025-12': 0.21,
+  '2026-01': 0.39,'2026-02': 0.56,'2026-03': 0.91,'2026-04': 0.81
+};
+
+function _calcSegmentosMes(dIni, dFim){
+  const segs = [];
+  let cur = new Date(dIni.getFullYear(), dIni.getMonth(), dIni.getDate());
+  while(cur <= dFim){
+    const ano = cur.getFullYear(), mes = cur.getMonth()+1;
+    const diasMes = new Date(ano, mes, 0).getDate();
+    const fimMes = new Date(ano, mes-1, diasMes);
+    const fimSeg = fimMes < dFim ? fimMes : dFim;
+    const diasSeg = Math.round((fimSeg - cur) / 86400000) + 1;
+    segs.push({ ano, mes, diasSeg, diasMes });
+    cur = new Date(ano, mes-1, diasMes);
+    cur.setDate(cur.getDate() + 1);
+  }
+  return segs;
+}
+
+// Retorna { atualizado, correcao, juros, multa, total, diasAtraso, meses }
+function calcDividaAtualizada(valorOrig, vencStr){
+  const p = getCalcParams();
+  const hoje = new Date(); hoje.setHours(0,0,0,0);
+  if(!vencStr){
+    return { atualizado: valorOrig, correcao: 0, juros: 0, multa: 0, total: valorOrig, diasAtraso: 0, meses: 0 };
+  }
+  const venc = new Date(vencStr + 'T00:00:00');
+  const diasAtraso = Math.max(0, Math.round((hoje - venc) / 86400000));
+  if(diasAtraso <= 0){
+    return { atualizado: valorOrig, correcao: 0, juros: 0, multa: 0, total: valorOrig, diasAtraso: 0, meses: 0 };
+  }
+  const segs = _calcSegmentosMes(venc, hoje);
+  let saldo = valorOrig, juros = 0, fatorAcum = 1;
+  for(const s of segs){
+    const ch = s.ano + '-' + String(s.mes).padStart(2,'0');
+    let v = CALC_INPC_MENSAL[ch];
+    if(v === undefined) v = 0; // índice não publicado: não corrige o mês
+    const varEf = (v/100) * (s.diasSeg / s.diasMes);
+    let fmes = 1 + varEf;
+    const fnovo = fatorAcum * fmes;       // garantia STJ: fator acumulado >= 1
+    if(fnovo < 1){ fmes = fatorAcum > 0 ? (1/fatorAcum) : 1; fatorAcum = 1; }
+    else { fatorAcum = fnovo; }
+    saldo = saldo * fmes;
+    juros += saldo * p.juros * (s.diasSeg / 30); // 1% a.m. simples, pró rata
+  }
+  const correcao = saldo - valorOrig;
+  const multa = saldo * p.multa;          // multa sobre o atualizado (sem juros)
+  const total = saldo + juros + multa;
+  return { atualizado: saldo, correcao, juros, multa, total, diasAtraso, meses: diasAtraso/30 };
+}
+
 function _fmtR(n){ return 'R$ ' + (Number(n)||0).toLocaleString('pt-BR', { minimumFractionDigits:2, maximumFractionDigits:2 }); }
 function _fmtPct(p){ return (p*100).toLocaleString('pt-BR', { minimumFractionDigits:2, maximumFractionDigits:2 }) + '%'; }
 
@@ -5130,18 +5212,14 @@ function abrirVerificarCalculo(){
   }
 
   const hoje = new Date(); hoje.setHours(0,0,0,0);
-  let diasAtraso = 0;
-  if(vencStr){
-    const venc = new Date(vencStr + 'T00:00:00');
-    diasAtraso = Math.max(0, Math.floor((hoje - venc) / (1000*60*60*24)));
-  }
-  const meses = diasAtraso / 30;
   const p = getCalcParams();
-
-  const correcao = valorOrig * p.correcao * meses;
-  const juros    = valorOrig * p.juros    * meses;
-  const multa    = diasAtraso > 0 ? valorOrig * p.multa : 0;
-  const total    = valorOrig + correcao + juros + multa;
+  const r = calcDividaAtualizada(valorOrig, vencStr);
+  const diasAtraso = r.diasAtraso;
+  const meses = r.meses;
+  const correcao = r.correcao;
+  const juros = r.juros;
+  const multa = r.multa;
+  const total = r.total;
 
   const dataVencFmt = vencStr ? new Date(vencStr+'T00:00:00').toLocaleDateString('pt-BR') : '—';
   const hojeFmt = hoje.toLocaleDateString('pt-BR');
@@ -5157,11 +5235,11 @@ function abrirVerificarCalculo(){
       <tr><td style="padding:6px 0;color:var(--text-2);">Dias em atraso</td>
           <td style="padding:6px 0;text-align:right;font-family:var(--font-mono);">${diasAtraso} dia${diasAtraso===1?'':'s'} (${meses.toFixed(2)} m)</td></tr>
       <tr><td colspan="2" style="border-top:1px solid var(--border);padding-top:6px;"></td></tr>
-      <tr><td style="padding:6px 0;color:var(--text-2);">Correção monetária (${_fmtPct(p.correcao)} a.m.)</td>
+      <tr><td style="padding:6px 0;color:var(--text-2);">Correção monetária (INPC, composta mês a mês — garantia STJ)</td>
           <td style="padding:6px 0;text-align:right;font-family:var(--font-mono);color:#92400e;">+ ${_fmtR(correcao)}</td></tr>
-      <tr><td style="padding:6px 0;color:var(--text-2);">Juros (${_fmtPct(p.juros)} a.m.)</td>
+      <tr><td style="padding:6px 0;color:var(--text-2);">Juros (${_fmtPct(p.juros)} a.m. simples, pró rata)</td>
           <td style="padding:6px 0;text-align:right;font-family:var(--font-mono);color:#92400e;">+ ${_fmtR(juros)}</td></tr>
-      <tr><td style="padding:6px 0;color:var(--text-2);">Multa (${_fmtPct(p.multa)} única, se em atraso)</td>
+      <tr><td style="padding:6px 0;color:var(--text-2);">Multa (${_fmtPct(p.multa)} sobre o atualizado, se em atraso)</td>
           <td style="padding:6px 0;text-align:right;font-family:var(--font-mono);color:#92400e;">+ ${_fmtR(multa)}</td></tr>
       <tr><td colspan="2" style="border-top:2px solid var(--navy);padding-top:8px;"></td></tr>
       <tr><td style="padding:8px 0;font-weight:700;color:var(--navy);font-size:13.5px;">Total atualizado</td>
@@ -5170,8 +5248,8 @@ function abrirVerificarCalculo(){
   `;
   const el = document.getElementById('calc-divida-body');
   if(el) el.innerHTML = body;
-  document.getElementById('calc-param-correcao').textContent = _fmtPct(p.correcao) + ' a.m.';
-  document.getElementById('calc-param-juros').textContent    = _fmtPct(p.juros)    + ' a.m.';
+  document.getElementById('calc-param-correcao').textContent = 'INPC (composta)';
+  document.getElementById('calc-param-juros').textContent    = _fmtPct(p.juros)    + ' a.m. simples';
   document.getElementById('calc-param-multa').textContent    = _fmtPct(p.multa);
 
   const btn = document.getElementById('btn-aplicar-calc');
@@ -5443,11 +5521,11 @@ function renderDevedores(){
         </div>
       </div>`:''}
 
-      <select id="dev-filter-resp"
+      ${!ehColaborador() ? `<select id="dev-filter-resp"
         style="padding:5px 14px 5px 10px;background:${devFilter.resp?'#EAF0FB':'var(--surface)'};border:1px solid ${devFilter.resp?'#C8D6F0':'var(--border)'};border-radius:99px;font-size:12px;color:${devFilter.resp?'var(--navy)':'var(--text-2)'};cursor:pointer;outline:none;appearance:none;font-family:inherit;">
         <option value="">Responsável: Todos</option>
         ${respOpts}
-      </select>
+      </select>` : ''}
 
       ${activeCount>0||devFilter.q?`
       <button style="${chipBase}background:transparent;border:1px solid var(--border-2);color:var(--danger);" onclick="limparFiltrosDevedor()">
@@ -6948,15 +7026,7 @@ function mdevRecalcularValorAtualizado(){
     maskMoneyBR(out);
     return;
   }
-  const hoje = new Date(); hoje.setHours(0,0,0,0);
-  const venc = new Date(vencStr + 'T00:00:00');
-  const diasAtraso = Math.max(0, Math.floor((hoje - venc) / (1000*60*60*24)));
-  const meses = diasAtraso / 30;
-  const p = (typeof getCalcParams === 'function') ? getCalcParams() : { correcao:0.005, juros:0.01, multa:0.02 };
-  const correcao = valorOrig * p.correcao * meses;
-  const juros    = valorOrig * p.juros    * meses;
-  const multa    = diasAtraso > 0 ? valorOrig * p.multa : 0;
-  const total    = valorOrig + correcao + juros + multa;
+  const total = calcDividaAtualizada(valorOrig, vencStr).total;
   out.value = String(Math.round(total * 100));
   maskMoneyBR(out);
 }
@@ -8920,6 +8990,10 @@ function renderClientes(){
   const el = document.getElementById('page-clientes');
   if(!el) return;
 
+  // Gerir credores (criar/editar/arquivar/excluir) é ação de gestor. Colaborador
+  // visualiza e seleciona, mas não altera o cadastro mestre de credores.
+  const podeGerirCredor = currentUser?.tipo === 'gestor';
+
   // PR-H: oculta arquivados (decisão "não exibir"). Reversão via SQL pelo
   // `arquivado_motivo` se você mudar de ideia.
   let clientes = (DB.clientes || []).filter(c => !c.isDraft && !c.arquivado);
@@ -8947,8 +9021,8 @@ function renderClientes(){
         })()}</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;">
-        ${clientes.length > 0 ? `<button class="btn btn-ghost btn-sm" onclick="toggleClienteSelMode()" style="${cliSelMode?'color:var(--danger);border-color:var(--danger);':''}">${cliSelMode ? 'Cancelar seleção' : 'Selecionar'}</button>` : ''}
-        <button class="btn btn-primary btn-sm" onclick="abrirNovoCliente()">${ico('plus',13)} Novo Cliente</button>
+        ${(podeGerirCredor && clientes.length > 0) ? `<button class="btn btn-ghost btn-sm" onclick="toggleClienteSelMode()" style="${cliSelMode?'color:var(--danger);border-color:var(--danger);':''}">${cliSelMode ? 'Cancelar seleção' : 'Selecionar'}</button>` : ''}
+        ${podeGerirCredor ? `<button class="btn btn-primary btn-sm" onclick="abrirNovoCliente()">${ico('plus',13)} Novo Cliente</button>` : ''}
       </div>
     </div>
 
@@ -8981,7 +9055,7 @@ function renderClientes(){
             <div class="empty-state-icon">${ico('clients',36)}</div>
             <h3>Nenhum cliente cadastrado</h3>
             <p>Clientes (cedentes) são as empresas que contratam a recuperação.</p>
-            <button class="btn btn-primary" style="margin-top:16px;" onclick="abrirNovoCliente()">${ico('plus',13)} Novo Cliente</button>
+            ${podeGerirCredor ? `<button class="btn btn-primary" style="margin-top:16px;" onclick="abrirNovoCliente()">${ico('plus',13)} Novo Cliente</button>` : ''}
            </div>`
         : `<table style="width:100%;border-collapse:collapse;font-size:12.5px;">
             <thead><tr style="background:var(--surface-2);border-bottom:1px solid var(--border);">
@@ -9027,10 +9101,12 @@ function renderClientes(){
                   <td style="padding:10px 14px;">${c.loginEmail?'<span class="badge badge-green">Ativo</span>':'<span class="badge badge-gray">—</span>'}</td>
                   ${cliSelMode ? '' : `<td style="padding:10px 14px;">
                     <div style="display:flex;gap:4px;justify-content:flex-end;">
+                      ${podeGerirCredor ? `
                       <button class="btn btn-ghost btn-xs" onclick="gerarRelatorioCarteira('${c.id}')" title="Relatório">${ico('file',12)}</button>
                       <button class="btn btn-ghost btn-xs" onclick="editCliente('${c.id}')" title="Editar">${ico('edit',12)}</button>
                       <button class="btn btn-ghost btn-xs" onclick="arquivarCliente('${c.id}')" title="Arquivar (some da lista, reversível via SQL)">${ico('archive',12)||'📁'}</button>
-                      <button class="btn btn-ghost btn-xs" style="color:var(--danger);" onclick="excluirCliente('${c.id}')" title="Excluir">${ico('trash',12)}</button>
+                      ` : ''}
+                      <button class="btn btn-ghost btn-xs" style="color:var(--danger);" onclick="excluirCliente('${c.id}')" title="${podeGerirCredor ? 'Excluir' : 'Solicitar exclusão ao gestor'}">${ico('trash',12)}</button>
                     </div>
                   </td>`}
                 </tr>`;
@@ -9042,6 +9118,7 @@ function renderClientes(){
 }
 
 function abrirNovoCliente(){
+  if(ehColaborador()){ showToast('Apenas o gestor pode cadastrar credores.','danger'); return; }
   document.getElementById('mcli-id').value = '';
   document.getElementById('mcli-nome').value = '';
   document.getElementById('mcli-doc').value = '';
@@ -9750,6 +9827,7 @@ async function hidratarPodeVerGrupo(){
 }
 
 function editCliente(id){
+  if(ehColaborador()){ showToast('Apenas o gestor pode editar credores.','danger'); return; }
   const c = (DB.clientes||[]).find(x=>x.id===id);
   if(!c) return;
   document.getElementById('mcli-id').value = c.id;
@@ -9814,6 +9892,7 @@ function editCliente(id){
 }
 
 async function salvarCliente(){
+  if(ehColaborador()){ showToast('Apenas o gestor pode salvar credores.','danger'); return; }
   const nome = (document.getElementById('mcli-nome').value||'').trim();
   if(!nome){ showToast('Nome é obrigatório.','warning'); return; }
 
@@ -9898,6 +9977,7 @@ async function salvarCliente(){
 
 // IMPLEMENTADO S11: abre modal cliente sobreposto ao modal devedor
 function mdevNovoClienteOverlay(){
+  if(ehColaborador()){ showToast('Apenas o gestor pode cadastrar credores.','danger'); return; }
   window._mdevPendingCliente = true;
   // garante que modal-cliente apareça acima do modal-devedor
   const mc = document.getElementById('modal-cliente');
@@ -9908,6 +9988,7 @@ function mdevNovoClienteOverlay(){
 // PR-H: arquivar cliente. Some da lista (e do select de devedor),
 // preserva no banco com flag arquivado=true. Reversão via SQL.
 async function arquivarCliente(id){
+  if(ehColaborador()){ showToast('Apenas o gestor pode arquivar credores.','danger'); return; }
   const cli = (DB.clientes||[]).find(c=>c.id===id);
   if(!cli){ showToast('Cliente não encontrado.','warning'); return; }
   if(!confirm(`Arquivar "${cli.nome}"?\n\nEle some das listas e do dropdown de cadastro. Devedores já vinculados continuam funcionando. Reversível via SQL.`)) return;
@@ -17067,6 +17148,7 @@ function bulkAltStatus(){
 
 function bulkAltResp(){
   closeBulkDropdown();
+  if(ehColaborador()){ showToast('Apenas o gestor pode reatribuir responsável.','danger'); return; }
   if(!selectedDevIds.size) return;
   const n = selectedDevIds.size;
   const colabs = (DB.config.colaboradores||[]).concat(DB.config.usuarios||[]).map(c=>c.nome||c.email).filter(Boolean);
