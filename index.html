@@ -8711,7 +8711,9 @@ function renderClientes(){
   const el = document.getElementById('page-clientes');
   if(!el) return;
 
-  let clientes = (DB.clientes || []).filter(c => !c.isDraft); // IMPLEMENTADO S12: oculta rascunhos
+  // PR-H: oculta arquivados (decisão "não exibir"). Reversão via SQL pelo
+  // `arquivado_motivo` se você mudar de ideia.
+  let clientes = (DB.clientes || []).filter(c => !c.isDraft && !c.arquivado);
   // IMPLEMENTADO S6: aplica seletor "Visualizar como" do gestor (matriz/filial/todos)
   clientes = applyGrupoViewFilterClientes(clientes);
   const devs = DB.devedores || [];
@@ -8813,6 +8815,7 @@ function renderClientes(){
                     <div style="display:flex;gap:4px;justify-content:flex-end;">
                       <button class="btn btn-ghost btn-xs" onclick="gerarRelatorioCarteira('${c.id}')" title="Relatório">${ico('file',12)}</button>
                       <button class="btn btn-ghost btn-xs" onclick="editCliente('${c.id}')" title="Editar">${ico('edit',12)}</button>
+                      <button class="btn btn-ghost btn-xs" onclick="arquivarCliente('${c.id}')" title="Arquivar (some da lista, reversível via SQL)">${ico('archive',12)||'📁'}</button>
                       <button class="btn btn-ghost btn-xs" style="color:var(--danger);" onclick="excluirCliente('${c.id}')" title="Excluir">${ico('trash',12)}</button>
                     </div>
                   </td>`}
@@ -9686,6 +9689,31 @@ function mdevNovoClienteOverlay(){
   const mc = document.getElementById('modal-cliente');
   if(mc) mc.style.zIndex = '1100';
   abrirNovoCliente();
+}
+
+// PR-H: arquivar cliente. Some da lista (e do select de devedor),
+// preserva no banco com flag arquivado=true. Reversão via SQL.
+async function arquivarCliente(id){
+  const cli = (DB.clientes||[]).find(c=>c.id===id);
+  if(!cli){ showToast('Cliente não encontrado.','warning'); return; }
+  if(!confirm(`Arquivar "${cli.nome}"?\n\nEle some das listas e do dropdown de cadastro. Devedores já vinculados continuam funcionando. Reversível via SQL.`)) return;
+
+  const supa = getSupabase();
+  if(!supa){ showToast('Sistema fora do ar.','danger'); return; }
+  try {
+    const { data, error } = await supa.rpc('arquivar_cliente', { p_id: id, p_motivo: 'arquivado via app por '+(currentUser?.nome||currentUser?.email||'gestor') });
+    if(error) throw new Error(error.message);
+    if(!data?.ok) throw new Error(data?.erro || 'Falha ao arquivar.');
+
+    // Espelha no DB.clientes pra UI atualizar sem reload.
+    cli.arquivado = true;
+    cli.arquivadoEm = new Date().toISOString();
+    save();
+    showToast(`"${cli.nome}" arquivado.`,'success');
+    if(typeof renderClientes === 'function') renderClientes();
+  } catch(e){
+    showToast('Erro ao arquivar: '+(e.message||e),'danger');
+  }
 }
 
 function excluirCliente(id){
