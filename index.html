@@ -1508,7 +1508,8 @@ img{max-width:100%}
         <div id="mdev-resp-info" style="display:flex;align-items:center;gap:10px;padding:9px 12px;margin-bottom:14px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px">
           <span style="font-weight:600;color:var(--text-3);letter-spacing:.06em;text-transform:uppercase;font-size:10.5px">Responsável</span>
           <span id="mdev-resp-nome" style="font-weight:600;color:var(--text);font-size:13px">—</span>
-          <span style="margin-left:auto;color:var(--text-3);font-size:11px">quem cadastra é o responsável</span>
+          <button type="button" id="mdev-resp-alterar-btn" class="btn btn-ghost btn-sm" style="display:none;margin-left:8px" onclick="if(window._mdevRespAlterarId)reatribuirResponsavelDevedor(window._mdevRespAlterarId)">Alterar</button>
+          <span id="mdev-resp-hint" style="margin-left:auto;color:var(--text-3);font-size:11px">quem cadastra é o responsável</span>
         </div>
         <div class="fg-row">
           <div class="fg">
@@ -3637,41 +3638,55 @@ async function loadRelationalData(){
 // nas duas pontas — JSON blob (cobrasq_data) e tabelas relacionais. Garante que
 // dados novos não somem ao recarregar.
 let _relWriteTimer = null;
+
+// Fix 4: escrita relacional IMEDIATA e awaitable. O corpo antes vivia dentro do setTimeout
+// de syncRelational (debounce 1800ms) — se a página recarregava/caía antes do timer disparar,
+// a escrita (ex.: troca de responsável) nunca chegava ao banco e voltava no próximo load.
+// flushRelational() grava na hora; syncRelational() continua agendando (caminho normal de save).
+async function flushRelational(){
+  const supa = getSupabase();
+  if(!supa) return;
+  clearTimeout(_relWriteTimer); // se havia um debounce pendente, esta escrita imediata o cobre
+  _relWriteTimer = null;
+  try{
+    const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
+    if(!sess?.data?.session) return; // sem sessão, RLS bloqueia escrita
+    if(Array.isArray(DB.clientes) && DB.clientes.length){
+      const rows = DB.clientes.map(clienteToRow);
+      const { error } = await supa.from('clientes').upsert(rows, { onConflict:'id' });
+      if(error){
+        console.warn('[rel] syncClientes:', error.message);
+        try { showToast('Não foi possível sincronizar Clientes: '+error.message,'danger'); } catch(_){}
+      }
+    }
+    if(Array.isArray(DB.devedores) && DB.devedores.length){
+      const rows = DB.devedores.map(devedorToRow);
+      const { error } = await supa.from('devedores').upsert(rows, { onConflict:'id' });
+      if(error){
+        console.warn('[rel] syncDevedores:', error.message);
+        // PR-F: traduz erro de duplicação (idx_devedores_doc_digits_unique)
+        // pra mensagem amigável. Code 23505 = unique_violation.
+        const msg = (error.code === '23505' || /duplicate key|idx_devedores_doc_digits/i.test(error.message||''))
+          ? 'Já existe outra cobrança com esse CPF/CNPJ. Use "Dívidas adicionais" no cadastro existente.'
+          : 'Não foi possível sincronizar Devedores: '+error.message;
+        try { showToast(msg, 'danger'); } catch(_){}
+      }
+    }
+  }catch(e){
+    console.warn('[rel] flushRelational ex:', e.message);
+    try { showToast('Falha de sincronização com o servidor: '+e.message,'danger'); } catch(_){}
+  }
+}
+
 function syncRelational(){
   const supa = getSupabase();
   if(!supa) return;
   clearTimeout(_relWriteTimer);
-  _relWriteTimer = setTimeout(async ()=>{
-    try{
-      const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
-      if(!sess?.data?.session) return; // sem sessão, RLS bloqueia escrita
-      if(Array.isArray(DB.clientes) && DB.clientes.length){
-        const rows = DB.clientes.map(clienteToRow);
-        const { error } = await supa.from('clientes').upsert(rows, { onConflict:'id' });
-        if(error){
-          console.warn('[rel] syncClientes:', error.message);
-          try { showToast('Não foi possível sincronizar Clientes: '+error.message,'danger'); } catch(_){}
-        }
-      }
-      if(Array.isArray(DB.devedores) && DB.devedores.length){
-        const rows = DB.devedores.map(devedorToRow);
-        const { error } = await supa.from('devedores').upsert(rows, { onConflict:'id' });
-        if(error){
-          console.warn('[rel] syncDevedores:', error.message);
-          // PR-F: traduz erro de duplicação (idx_devedores_doc_digits_unique)
-          // pra mensagem amigável. Code 23505 = unique_violation.
-          const msg = (error.code === '23505' || /duplicate key|idx_devedores_doc_digits/i.test(error.message||''))
-            ? 'Já existe outra cobrança com esse CPF/CNPJ. Use "Dívidas adicionais" no cadastro existente.'
-            : 'Não foi possível sincronizar Devedores: '+error.message;
-          try { showToast(msg, 'danger'); } catch(_){}
-        }
-      }
-    }catch(e){
-      console.warn('[rel] syncRelational ex:', e.message);
-      try { showToast('Falha de sincronização com o servidor: '+e.message,'danger'); } catch(_){}
-    }
-  }, 1800);
+  _relWriteTimer = setTimeout(()=>{ flushRelational(); }, 1800);
 }
+
+// Rede de segurança: ao fechar/atualizar a aba, tenta gravar pendências relacionais (best-effort).
+window.addEventListener('beforeunload', ()=>{ try{ flushRelational(); }catch(_){} });
 
 // ── FLUXO DE RECOVERY DE SENHA ────────────────────────────────
 function mostrarRecuperacao(modo){
@@ -5407,6 +5422,13 @@ function renderDevedores(){
     window._solicitacoesContato = [];
     carregarSolicitacoesContato().then(() => renderDevedores());
   }
+  // Fix 2: a coluna Resp. resolve nomes pelo roster (assignedTo→nome). Se ainda não carregou,
+  // dispara 1x e re-renderiza ao chegar (guard anti-loop: só re-renderiza se carregou algo).
+  if(_rosterAppUsers === null && !window._rosterRerenderPending){
+    window._rosterRerenderPending = true;
+    carregarRosterAppUsers().then(()=>{ window._rosterRerenderPending = false; renderDevedores(); })
+                            .catch(()=>{ window._rosterRerenderPending = false; });
+  }
   const el = document.getElementById('page-devedores');
   if(!el) return;
 
@@ -5656,7 +5678,10 @@ function renderDevedores(){
                   const score = calcScore(d);
                   const initials = (d.nome||'?').split(' ').filter(Boolean).slice(0,2).map(s=>s[0]).join('').toUpperCase();
                   const isSel = selectedDevIds.has(d.id);
-                  const respInitials = (d.responsavel||'').split(' ').filter(Boolean).slice(0,2).map(s=>s[0]).join('').toUpperCase();
+                  // Fix 2: resolve o nome pelo assignedTo (roster) quando não há d.responsavel salvo
+                  // (legados só têm o UUID) — antes a coluna mostrava '—' mesmo com responsável.
+                  const respNome = nomeResponsavel(d);
+                  const respInitials = respNome==='—' ? '' : respNome.split(' ').filter(Boolean).slice(0,2).map(s=>s[0]).join('').toUpperCase();
                   return `<tr style="border-bottom:${i<list.length-1?'1px solid var(--border)':'none'};cursor:pointer;${isSel?'background:var(--active-bg);':''}"
                     onmouseenter="if(!${isSel})this.style.background='var(--surface-2)'"
                     onmouseleave="this.style.background='${isSel?'var(--active-bg)':''}'"
@@ -5679,10 +5704,15 @@ function renderDevedores(){
                     <td style="padding:10px 12px;">${statusBadgeHtml(d.status)}</td>
                     <td style="padding:10px 12px;font-family:var(--font-mono);font-size:11.5px;color:var(--text-3);">${dias}d</td>
                     <td style="padding:10px 12px;">${scoreBadgeHtml(score)}</td>
-                    <td style="padding:10px 12px;">
-                      ${d.responsavel
-                        ?`<div style="width:24px;height:24px;border-radius:50%;background:var(--navy);color:#fff;display:grid;place-items:center;font-size:9.5px;font-weight:700;" title="${escHtml(d.responsavel)}">${respInitials||'?'}</div>`
-                        :'<span style="color:var(--text-4);">—</span>'}
+                    <td style="padding:10px 12px;" onclick="event.stopPropagation()">
+                      <div style="display:flex;align-items:center;gap:6px;">
+                        ${respNome!=='—'
+                          ?`<div style="width:24px;height:24px;border-radius:50%;background:var(--navy);color:#fff;display:grid;place-items:center;font-size:9.5px;font-weight:700;" title="${escHtml(respNome)}">${respInitials||'?'}</div>`
+                          :'<span style="color:var(--text-4);">—</span>'}
+                        ${!ehColaborador()
+                          ?`<button class="btn btn-ghost btn-sm btn-icon" title="Alterar responsável" onclick="reatribuirResponsavelDevedor('${d.id}')">${ico('edit',13)}</button>`
+                          :''}
+                      </div>
                     </td>
                     <td style="padding:10px 12px;text-align:right;" onclick="event.stopPropagation()">
                       <button class="btn btn-ghost btn-sm btn-icon" onclick="openDrawer('${d.id}')" title="Abrir">
@@ -7062,6 +7092,8 @@ function abrirNovoDevedor(){
   document.getElementById('modal-devedor-title').textContent = 'Nova Cobrança';
   // Responsável = quem cadastra (decisão 2026-06-10). Mostra read-only no form.
   { const rn=document.getElementById('mdev-resp-nome'); if(rn) rn.textContent = (currentUser?.nome || '—'); }
+  // Cadastro novo: ainda não existe id → esconde o "Alterar" (reatribuição é só para existentes).
+  { const ab=document.getElementById('mdev-resp-alterar-btn'); if(ab) ab.style.display='none'; window._mdevRespAlterarId = null; }
   document.getElementById('mdev-wa-link').style.display = 'none';
 
   // Populate selects
@@ -7260,8 +7292,10 @@ function editDevedor(id){
   const waLink = document.getElementById('mdev-wa-link');
   if(waLink) waLink.style.display = dev.tel ? 'block' : 'none';
 
-  // Responsável atual da cobrança (read-only no form; reatribuição é ação do gestor em lote).
+  // Responsável atual da cobrança. Fix 3: gestor pode reatribuir aqui (botão "Alterar").
   { const rn=document.getElementById('mdev-resp-nome'); if(rn) rn.textContent = nomeResponsavel(dev); }
+  { const ab=document.getElementById('mdev-resp-alterar-btn');
+    if(ab){ window._mdevRespAlterarId = dev.id; ab.style.display = ehColaborador() ? 'none' : 'inline-flex'; } }
 
   populateDevModalSelects(dev);
 
@@ -17348,11 +17382,36 @@ function bulkAltResp(){
   reatribuirResponsavelModal(
     'Alterar responsável em lote',
     `Novo responsável para ${n} cobrança${n>1?'s':''}:`,
-    (pick)=>{
+    async (pick)=>{
       if(!pick || !pick.id) return;
       // Grava OS DOIS: nome (exibição na tela) + UUID (assigned_to → é isto que o CRM lê).
       _bulkApply(d=>{ d.responsavel = pick.nome; d.assignedTo = pick.id; });
       renderDevedores();
+      // Fix 4: grava JÁ no relacional (sem esperar o debounce de 1800ms) — antes a troca
+      // se perdia se a página recarregasse/caísse antes do timer disparar.
+      await flushRelational();
+      showToast('Responsável atualizado.','success');
+    }
+  );
+}
+
+// Fix 3: troca de responsável de UM devedor (ficha/drawer e linha da lista). Reusa o mesmo
+// seletor (reatribuirResponsavelModal) e persiste já no relacional (flushRelational).
+function reatribuirResponsavelDevedor(id){
+  if(ehColaborador()){ showToast('Apenas o gestor pode reatribuir responsável.','danger'); return; }
+  const dev = (DB.devedores||[]).find(d=>d.id===id);
+  if(!dev) return;
+  reatribuirResponsavelModal(
+    'Alterar responsável',
+    `Novo responsável para ${dev.nome||'esta cobrança'}:`,
+    async (pick)=>{
+      if(!pick || !pick.id) return;
+      dev.responsavel = pick.nome; dev.assignedTo = pick.id; // nome p/ tela + UUID p/ CRM
+      save();
+      await flushRelational(); // grava JÁ (Fix 4)
+      renderDevedores();
+      const cur = document.getElementById('mdev-resp-nome');
+      if(cur) cur.textContent = nomeResponsavel(dev);
       showToast('Responsável atualizado.','success');
     }
   );
@@ -17666,11 +17725,13 @@ function bulkProcAltResp(){
   reatribuirResponsavelModal(
     'Alterar responsável',
     `Novo responsável para ${n} processo(s):`,
-    (pick)=>{
+    async (pick)=>{
       if(!pick || !pick.id) return;
       // Grava OS DOIS: nome + UUID (assigned_to → o CRM lê isto).
       (DB.devedores||[]).forEach(d=>{ if(selectedProcIds.has(d.id)){ d.responsavel = pick.nome; d.assignedTo = pick.id; } });
-      save(); showToast('Responsável atualizado em '+n+' processo(s)','success'); limparSelecaoProcs();
+      save();
+      await flushRelational(); // Fix 4: persiste já no relacional, sem esperar o debounce.
+      showToast('Responsável atualizado em '+n+' processo(s)','success'); limparSelecaoProcs();
     }
   );
 }
