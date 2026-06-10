@@ -3557,7 +3557,12 @@ function syncRelational(){
         const { error } = await supa.from('devedores').upsert(rows, { onConflict:'id' });
         if(error){
           console.warn('[rel] syncDevedores:', error.message);
-          try { showToast('Não foi possível sincronizar Devedores: '+error.message,'danger'); } catch(_){}
+          // PR-F: traduz erro de duplicação (idx_devedores_doc_digits_unique)
+          // pra mensagem amigável. Code 23505 = unique_violation.
+          const msg = (error.code === '23505' || /duplicate key|idx_devedores_doc_digits/i.test(error.message||''))
+            ? 'Já existe outra cobrança com esse CPF/CNPJ. Use "Dívidas adicionais" no cadastro existente.'
+            : 'Não foi possível sincronizar Devedores: '+error.message;
+          try { showToast(msg, 'danger'); } catch(_){}
         }
       }
     }catch(e){
@@ -7596,6 +7601,28 @@ function salvarDevedor(){
   const id = document.getElementById('mdev-id').value;
   const existingDev = id ? (DB.devedores||[]).find(d=>d.id===id) : null;
   const isPending = existingDev && (existingDev.status==='Pendente aprovação'||existingDev.status==='pendente_ajuste');
+
+  // PR-F: bloqueia 1 devedor por CPF/CNPJ. Pra adicionar outra dívida ao
+  // mesmo devedor, usar "Dívidas adicionais" no cadastro existente.
+  const docDigits = doc.replace(/\D/g,'');
+  if(docDigits && (docDigits.length === 11 || docDigits.length === 14)){
+    const conflito = (DB.devedores||[]).find(d =>
+      d.id !== (id || '')
+      && !d.arquivado
+      && (d.doc||'').replace(/\D/g,'') === docDigits
+    );
+    if(conflito){
+      const tipoDoc = docDigits.length === 11 ? 'CPF' : 'CNPJ';
+      alert(
+        `Já existe cobrança cadastrada para esse ${tipoDoc}:\n\n` +
+        `• ${conflito.nome}\n` +
+        `• Situação: ${conflito.status || '—'}\n\n` +
+        `Para adicionar outra dívida ao mesmo devedor, abra o cadastro existente ` +
+        `e use "+ Adicionar dívida" em Dívidas adicionais.`
+      );
+      return;
+    }
+  }
 
   const devData = {
     id: id || uid(),
