@@ -3223,7 +3223,7 @@ async function fetchServerConfig(){
     const cfg = await r.json();
     if(cfg.supabaseUrl)     DB.config.supabaseUrl     = cfg.supabaseUrl;
     if(cfg.supabaseAnonKey) DB.config.supabaseAnonKey = cfg.supabaseAnonKey;
-  }catch(e){ /* servidor sem /api/config — ignora */ }
+  }catch(e){ /* servidor sem /api/config (ex.: estático local) — esperado */ console.debug('F-14: /api/config indisponível, seguindo com config local:', e?.message||e); }
 }
 
 async function syncToSupabase(force){
@@ -3237,7 +3237,7 @@ async function syncToSupabase(force){
     // Serializa: se já tem um sync rodando, espera ele terminar
     // (evita dois upserts paralelos sobrescrevendo last-write-wins).
     if(_syncInflight){
-      try{ await _syncInflight; }catch{}
+      try{ await _syncInflight; }catch(e){ console.debug('F-14: sync anterior falhou (já logado acima):', e?.message||e); }
     }
     _syncInflight = (async ()=>{
       try{
@@ -3270,7 +3270,7 @@ async function syncToSupabase(force){
             // Conflito: outra aba/usuário salvou. Recarrega e pede o usuário pra reaplicar.
             console.warn('Supabase sync: conflito de versão. Recarregando.');
             if(typeof showToast === 'function') showToast('Outra aba editou o sistema — recarregando.');
-            try{ await loadFromSupabase(); }catch{}
+            try{ await loadFromSupabase(); }catch(e){ console.warn('F-14: falha ao recarregar após conflito de versão:', e?.message||e); }
             // Não silencia se foi um save voluntário (force=true).
             if(wasForce && typeof showToast === 'function'){
               showToast('Reaplique sua última alteração e salve novamente.');
@@ -4459,7 +4459,7 @@ async function portalEnviarMudouContato(){
     if(DB?.config?.zapiInstanceId && DB?.config?.zapiToken && DB?.config?.adminTel){
       const adminMsg = `🔔 *Nova solicitação de atualização de contato*\n\nCPF: ${cpf.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/,'$1.$2.$3-$4')}\nNome: ${nome}\nNovo telefone: ${tel}\nPreferência: ${pref}\n\nAbra o sistema pra atender.`;
       try { await ZApiAPI.sendText(DB.config.adminTel, adminMsg); }
-      catch(_){ /* silencioso — solicitação já foi gravada */ }
+      catch(e){ console.warn('F-20: aviso Z-API (solicitação de contato) falhou:', e?.message||e); /* não bloqueia: a solicitação já foi gravada */ }
     }
 
     // Sucesso visual
@@ -4535,9 +4535,10 @@ function iniciarSessao(){
   const navPipeline = document.getElementById('nav-pipeline');
   if(navPipeline) navPipeline.style.display = (tipoUser === 'gestor') ? '' : 'none';
 
-  // Criar credor é ação de gestor: esconde o "+ Novo cliente" inline do form de devedor.
+  // F-22: criar credor é liberado ao gestor E ao colaborador. Para o colaborador, salvar
+  // vira um pedido de aprovação (ver salvarCliente). Cedente/devedor não veem este botão.
   const mdevNovoCliBtn = document.getElementById('mdev-novo-cliente-btn');
-  if(mdevNovoCliBtn) mdevNovoCliBtn.style.display = (tipoUser === 'gestor') ? '' : 'none';
+  if(mdevNovoCliBtn) mdevNovoCliBtn.style.display = (tipoUser === 'gestor' || tipoUser === 'funcionario') ? '' : 'none';
 
   // Reatribuir responsável expõe nomes de outros operadores e é ação de gestão.
   const bulkDdResp = document.getElementById('bulk-dd-resp');
@@ -9153,9 +9154,12 @@ function renderClientes(){
   const el = document.getElementById('page-clientes');
   if(!el) return;
 
-  // Gerir credores (criar/editar/arquivar/excluir) é ação de gestor. Colaborador
+  // Gerir credores (editar/arquivar/excluir/selecionar) é ação de gestor. Colaborador
   // visualiza e seleciona, mas não altera o cadastro mestre de credores.
   const podeGerirCredor = currentUser?.tipo === 'gestor';
+  // F-22: CRIAR credor é liberado também ao colaborador (funcionário) — mas o envio entra
+  // como PEDIDO DE APROVAÇÃO (não grava direto; ver salvarCliente). Gerir segue só gestor.
+  const podeCriarCredor = currentUser?.tipo === 'gestor' || currentUser?.tipo === 'funcionario';
 
   // PR-H: oculta arquivados (decisão "não exibir"). Reversão via SQL pelo
   // `arquivado_motivo` se você mudar de ideia.
@@ -9185,7 +9189,7 @@ function renderClientes(){
       </div>
       <div style="display:flex;gap:8px;align-items:center;">
         ${(podeGerirCredor && clientes.length > 0) ? `<button class="btn btn-ghost btn-sm" onclick="toggleClienteSelMode()" style="${cliSelMode?'color:var(--danger);border-color:var(--danger);':''}">${cliSelMode ? 'Cancelar seleção' : 'Selecionar'}</button>` : ''}
-        ${podeGerirCredor ? `<button class="btn btn-primary btn-sm" onclick="abrirNovoCliente()">${ico('plus',13)} Novo Cliente</button>` : ''}
+        ${podeCriarCredor ? `<button class="btn btn-primary btn-sm" onclick="abrirNovoCliente()">${ico('plus',13)} ${podeGerirCredor ? 'Novo Cliente' : 'Solicitar credor'}</button>` : ''}
       </div>
     </div>
 
@@ -9218,7 +9222,7 @@ function renderClientes(){
             <div class="empty-state-icon">${ico('clients',36)}</div>
             <h3>Nenhum cliente cadastrado</h3>
             <p>Clientes (cedentes) são as empresas que contratam a recuperação.</p>
-            ${podeGerirCredor ? `<button class="btn btn-primary" style="margin-top:16px;" onclick="abrirNovoCliente()">${ico('plus',13)} Novo Cliente</button>` : ''}
+            ${podeCriarCredor ? `<button class="btn btn-primary" style="margin-top:16px;" onclick="abrirNovoCliente()">${ico('plus',13)} ${podeGerirCredor ? 'Novo Cliente' : 'Solicitar credor'}</button>` : ''}
            </div>`
         : `<table style="width:100%;border-collapse:collapse;font-size:12.5px;">
             <thead><tr style="background:var(--surface-2);border-bottom:1px solid var(--border);">
@@ -9281,7 +9285,8 @@ function renderClientes(){
 }
 
 function abrirNovoCliente(){
-  if(ehColaborador()){ showToast('Apenas o gestor pode cadastrar credores.','danger'); return; }
+  // F-22: colaborador pode abrir o form de credor; ao salvar, vira pedido de aprovação (ver salvarCliente).
+  if(currentUser?.tipo !== 'gestor' && currentUser?.tipo !== 'funcionario'){ showToast('Sem permissão para cadastrar credores.','danger'); return; }
   document.getElementById('mcli-id').value = '';
   document.getElementById('mcli-nome').value = '';
   document.getElementById('mcli-doc').value = '';
@@ -9784,7 +9789,8 @@ async function solicitarAprovacao(tipo, recursoId, resumo, payload){
   // então uma falha de envio nunca bloqueia o fluxo nem desfaz a solicitação.
   if(DB?.config?.zapiInstanceId && DB?.config?.zapiToken && DB?.config?.adminTel){
     const msgAprov = `🔔 *Nova autorização pendente*\n\nTipo: ${tipo}\n${resumo || ''}\nSolicitante: ${currentUser?.nome || currentUser?.email || '—'}\n\nAbra o sistema → Aprovações para decidir.`;
-    try { ZApiAPI.sendText(DB.config.adminTel, msgAprov).catch(()=>{}); } catch(_){}
+    try { ZApiAPI.sendText(DB.config.adminTel, msgAprov).catch(err=>console.warn('F-20: aviso Z-API (aprovação pendente) falhou:', err?.message||err)); }
+    catch(e){ console.warn('F-20: aviso Z-API (aprovação pendente) não disparou:', e?.message||e); }
   }
   return true;
 }
@@ -9939,6 +9945,18 @@ async function executarPedidoLocal(pedido){
       const [devedorId, docId] = String(pedido.recurso_id).split('::');
       const d = (DB.devedores||[]).find(x=>x.id===devedorId);
       if(d){ d.documentos=(d.documentos||[]).filter(x=>x.id!==docId); save(); if(typeof renderDocs==='function') renderDocs(); }
+      break;
+    }
+    case 'novo_credor': {
+      // F-22: materializa o credor que o colaborador pediu. Idempotente por id (re-aprovação não duplica).
+      const cli = pedido.payload || {};
+      if(!cli.id) cli.id = uid();
+      if(!DB.clientes) DB.clientes = [];
+      if(!DB.clientes.some(c=>c.id===cli.id)){
+        DB.clientes.push(cli);
+        save();
+        if(typeof renderClientes === 'function') renderClientes();
+      }
       break;
     }
     default:
@@ -10110,7 +10128,9 @@ function editCliente(id){
 }
 
 async function salvarCliente(){
-  if(ehColaborador()){ showToast('Apenas o gestor pode salvar credores.','danger'); return; }
+  // F-22: o bloqueio duro saiu daqui. Colaborador pode preencher e enviar; em vez de gravar
+  // direto, abrimos um pedido de aprovação (ver branch logo após montar o cliData). Editar
+  // credor existente segue só gestor — editCliente() já barra o colaborador antes de chegar aqui.
   const nome = (document.getElementById('mcli-nome').value||'').trim();
   if(!nome){ showToast('Nome é obrigatório.','warning'); return; }
 
@@ -10165,6 +10185,22 @@ async function salvarCliente(){
     updatedAt: hoje()
   };
 
+  // F-22: colaborador não grava direto — envia para aprovação do gestor. O cliData inteiro
+  // (com id já gerado) vai no payload; ao aprovar, executarPedidoLocal('novo_credor') materializa
+  // o credor no DB.clientes do gestor. Reusa pedidos_aprovacao (sem mudança de schema/RLS).
+  if(ehColaborador()){
+    const resumoCredor = `Novo credor: ${nome}${cliData.doc ? ' ('+cliData.doc+')' : ''}`;
+    const okPedido = await solicitarAprovacao('novo_credor', novoId, resumoCredor, cliData);
+    if(okPedido){
+      // Não dá pra auto-vincular ao devedor em criação: o credor só existe depois de aprovado.
+      window._mdevPendingCliente = false;
+      const mcOverlay = document.getElementById('modal-cliente');
+      if(mcOverlay) mcOverlay.style.zIndex = '';
+      closeModal('modal-cliente');
+    }
+    return;
+  }
+
   if(!DB.clientes) DB.clientes = [];
   if(id){
     const idx = DB.clientes.findIndex(c=>c.id===id);
@@ -10195,7 +10231,8 @@ async function salvarCliente(){
 
 // IMPLEMENTADO S11: abre modal cliente sobreposto ao modal devedor
 function mdevNovoClienteOverlay(){
-  if(ehColaborador()){ showToast('Apenas o gestor pode cadastrar credores.','danger'); return; }
+  // F-22: colaborador pode iniciar um credor aqui também (entra como pedido de aprovação).
+  if(currentUser?.tipo !== 'gestor' && currentUser?.tipo !== 'funcionario'){ showToast('Sem permissão para cadastrar credores.','danger'); return; }
   window._mdevPendingCliente = true;
   // garante que modal-cliente apareça acima do modal-devedor
   const mc = document.getElementById('modal-cliente');
