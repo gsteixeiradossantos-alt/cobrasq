@@ -152,7 +152,12 @@ Encaixe com o resto: a folha de qualificação (itens 5+6) grava RESULTADO
 `documentos` já cobrem o checklist (`peticao`, `contrato`, `nota-promissoria`,
 `comprovante` etc. — adicionar `procuracao` e `calculo` à lista de categorias).
 
-## F-11 — RLS "só gestor + responsável" (desenho, pré-requisito do item 4)
+## F-11 — RLS "só gestor + responsável" (✅ APLICADO em 2026-06-11, aprovação do gestor)
+
+Migrações no Supabase: `f11_documentos_bucket_e_rls` + `f11_pode_ver_devedor_revoke_anon`
+(esta última revoga EXECUTE de anon/public na função — higiene apontada pelo advisor).
+Verificado pós-aplicação: 3 policies na tabela, 3 no storage, bucket privado 20 MB,
+helper executa sem erro (retorna NULL/false sem sessão).
 
 **Investigação (2026-06-11):** a infra de papéis JÁ existe e está saudável:
 - `app_users.papel` ∈ `proprietario` (1 = gestor) | `colaborador` (4);
@@ -189,8 +194,11 @@ create policy doc_update on public.documentos for update
 
 Webhook ZapSign (Feature Y) usa service_role → ignora RLS, não é afetado.
 **Rollback:** drop das policies + `drop function public.pode_ver_devedor;`.
-Dívida que continua aberta (fora deste pacote): `cliente_documentos` segue
-permissiva-autenticado.
+Dívidas que continuam abertas (fora deste pacote, apontadas pelo advisor):
+- `cliente_documentos` segue permissiva-autenticado.
+- **View `public.profiles` exposta a `anon` e SECURITY DEFINER** (pode vazar dados
+  de `auth.users`) — pré-existente, nível ERROR no advisor; tratar em PR próprio.
+- Leaked password protection do Auth desabilitada (toggle no dashboard).
 
 ## Perguntas ainda em aberto
 
