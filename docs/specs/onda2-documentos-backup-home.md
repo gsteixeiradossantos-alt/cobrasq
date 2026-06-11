@@ -28,7 +28,8 @@ fotos de celular). Path determinístico:
 
 ```
 devedores/<doc_normalizado>/<credor_id>/<categoria>/<arquivo>
-  categoria ∈ contrato | nota-promissoria | comprovante | acordo-assinado | peticao | outros
+  categoria ∈ contrato | nota-promissoria | comprovante | acordo-assinado
+            | peticao | procuracao | calculo | outros
 ```
 
 **Tabela nova `documentos`** (generaliza `cliente_documentos`, sem migrar a antiga
@@ -42,7 +43,8 @@ create table public.documentos (
   devedor_id   text,                     -- id do blob/tabela quando houver
   credor_id    text,                     -- id do cliente/credor (subpasta)
   categoria    text not null check (categoria in
-    ('contrato','nota-promissoria','comprovante','acordo-assinado','peticao','outros')),
+    ('contrato','nota-promissoria','comprovante','acordo-assinado',
+     'peticao','procuracao','calculo','outros')),
   nome         text not null,
   storage_path text not null unique,     -- unique = idempotência do webhook (Feature Y)
   mime_type    text,
@@ -111,19 +113,46 @@ Sem PII em git; arquivo cifrado se o destino for compartilhado.
 ## Decisões do gestor (2026-06-11)
 
 1. **Item 4 — volume OneDrive:** 5–50 GB → migração em lotes (1–2 dias de upload).
-   *Pendente: como as pastas estão organizadas hoje (por devedor? por credor?).*
-2. **Item 4 — quem vê documentos: SÓ gestor + responsável.** Consequência: o
+2. **Item 4 — organização atual do OneDrive:** uma pasta por CREDOR, devedores
+   dentro. Gestor decidiu INVERTER na migração: **uma pasta por devedor, subpastas
+   por credor + categorias** (boletos, acordos, recibos, provas...) — exatamente a
+   estrutura `devedores/<doc>/<credor_id>/<categoria>/` proposta acima. O script de
+   migração lê `credor/devedor/...` e grava invertido; pastas de devedor sem
+   CPF/CNPJ identificável vão para relatório de pendências (resolução manual).
+3. **Item 4 — quem vê documentos: SÓ gestor + responsável.** Consequência: o
    **F-11 (RLS por papel/responsável) vira PRÉ-REQUISITO do item 4** — a policy
    `doc_select` do rascunho acima deve checar papel/responsável, não só
    `auth.uid() is not null`. O desenho do F-11 entra antes do bucket.
-3. **Item 10 — backup diário → Google Drive do gestor** (OAuth/credencial a
+4. **Item 10 — backup diário → Google Drive do gestor** (OAuth/credencial a
    configurar pelo gestor; a rotina sobe o JSON numa pasta dedicada).
-4. **Envs confirmadas no Vercel** → fallbacks de credencial via header removidos
+5. **Envs confirmadas no Vercel** → fallbacks de credencial via header removidos
    dos proxies (asaas/zapsign/zapi) no PR #38. `x-asaas-env` (não-segredo) mantido.
+
+## Feature X — requisitos levantados (2026-06-11)
+
+**Tipos de ação:** execução de título extrajudicial · ação monitória · ação de
+cobrança comum · ação de locupletamento ilícito.
+
+**Checklist de documentos por tipo:**
+- *Execução:* inicial, procuração, documentos do exequente, título executivo, cálculo.
+- *Conhecimento (monitória/cobrança/locupletamento):* inicial, procuração,
+  documentos do autor, prova da dívida, cálculo.
+- **Campo por ação: "ajuizada em nome de"** = CobraSQ | cliente contratante. Se
+  CobraSQ, itens condicionais (toggle por caso, decisão do gestor): declaração de
+  cessão + Anexo I (comprovação da cessão de crédito).
+
+**Protocolo:** Projudi em ~99% dos casos (PJe residual).
+
+**Fluxo de revisão (estados da ação no CRM):**
+`rascunho (colaboradora elabora) → revisão (gestor corrige) → aprovada →
+protocolada (colaboradora protocola no Projudi e anexa nº do processo)`.
+
+Encaixe com o resto: a folha de qualificação (itens 5+6) grava RESULTADO
+"Ajuizar", que dispara a criação da ação em `rascunho`; as categorias do bucket
+`documentos` já cobrem o checklist (`peticao`, `contrato`, `nota-promissoria`,
+`comprovante` etc. — adicionar `procuracao` e `calculo` à lista de categorias).
 
 ## Perguntas ainda em aberto
 
-1. Item 4: como as pastas do OneDrive estão organizadas hoje (estrutura, nomes)?
-2. Feature X: tipos de ação (execução de título? monitória? cobrança?), documentos
-   obrigatórios por tipo, sistema de protocolo (Projudi/PJe) e quem revisa antes
-   de protocolar.
+Nenhuma — tudo respondido. Próximo passo de desenho: F-11 (papéis/responsável)
+como pré-requisito do item 4, apresentado junto com o SQL do bucket.
