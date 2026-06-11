@@ -6124,6 +6124,7 @@ function setDrawerTab(tab, devId, btnEl){
   if(!body) return;
   body.innerHTML = _drawerTabHtml(tab, dev, _drawerCtx(dev));
   if(tab==='cobrancas') renderDrawerAsaas(devId);
+  if(tab==='docs') renderDrawerDocumentos(devId);
 }
 
 function _drawerTabHtml(tab, dev, ctx){
@@ -6305,7 +6306,13 @@ function _drawerTabHtml(tab, dev, ctx){
   }
 
   if(tab==='docs'){
-    return `<div style="overflow-y:auto;padding:24px;flex:1"><div id="dtab-docs-inner">${zsRenderDrawerDocs(dev)}</div></div>`;
+    return `<div style="overflow-y:auto;padding:24px;flex:1">
+      <div id="dtab-docs-arquivos"><div class="mv2-step-loading" style="height:90px"><div class="mv2-spinner"></div><p style="font-size:13px;color:var(--text-3)">Carregando arquivos…</p></div></div>
+      <div style="margin-top:26px;border-top:1px solid var(--border);padding-top:18px">
+        <div style="font-size:12px;font-weight:700;letter-spacing:.06em;color:var(--text-3);margin-bottom:10px">ASSINATURAS ZAPSIGN</div>
+        <div id="dtab-docs-inner">${zsRenderDrawerDocs(dev)}</div>
+      </div>
+    </div>`;
   }
 
   if(tab==='proc'){
@@ -16652,6 +16659,137 @@ function zsStatusDot(s){
 }
 
 // Renderiza aba Documentos/ZapSign no drawer
+// ── Documentos do devedor (bucket Supabase 'documentos' + tabela 'documentos') ──
+// Acesso controlado por RLS: só gestor (proprietario) e o responsável (assigned_to)
+// enxergam/enviam. Chave da pasta: CPF/CNPJ só dígitos, ou 'id-<uuid>' se sem doc.
+const DOC_CATEGORIAS = [
+  ['contrato','Contrato'], ['nota-promissoria','Nota promissória'],
+  ['comprovante','Comprovante'], ['acordo-assinado','Acordo assinado'],
+  ['peticao','Petição'], ['procuracao','Procuração'],
+  ['calculo','Cálculo'], ['outros','Outros']
+];
+function docChaveDevedor(dev){
+  const dig = String(dev.doc||'').replace(/\D/g,'');
+  return dig || ('id-'+dev.id);
+}
+function docCatLabel(cat){
+  const f = DOC_CATEGORIAS.find(c=>c[0]===cat);
+  return f ? f[1] : (cat||'Outros');
+}
+async function renderDrawerDocumentos(devId){
+  const panel = document.getElementById('dtab-docs-arquivos');
+  if(!panel) return;
+  const dev = (DB.devedores||[]).find(d=>d.id===devId);
+  if(!dev) return;
+  const supa = getSupabase();
+  if(!supa){
+    panel.innerHTML = `<div style="font-size:12.5px;color:var(--text-3)">Arquivos do devedor exigem login via Supabase (indisponível neste modo).</div>`;
+    return;
+  }
+  const chave = docChaveDevedor(dev);
+  const { data, error } = await supa.from('documentos').select('*')
+    .eq('devedor_doc', chave).eq('ativo', true)
+    .order('uploaded_at', { ascending:false });
+  if(error){
+    panel.innerHTML = `<div style="font-size:12.5px;color:var(--danger)">Erro ao listar arquivos: ${escHtml(error.message)}</div>`;
+    return;
+  }
+  const docs = data||[];
+  const ehGestor = currentUser?.tipo === 'gestor';
+  const catOpts = DOC_CATEGORIAS.map(c=>`<option value="${c[0]}">${c[1]}</option>`).join('');
+  const lista = docs.length ? docs.map(d=>`
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;margin-bottom:8px;background:var(--surface);">
+      <div style="min-width:0;flex:1">
+        <div style="font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(d.nome)}</div>
+        <div style="font-size:11px;color:var(--text-3);margin-top:2px">
+          <span style="padding:1px 6px;background:var(--surface-2);border-radius:3px;font-weight:600">${escHtml(docCatLabel(d.categoria))}</span>
+          · ${d.uploaded_at ? new Date(d.uploaded_at).toLocaleDateString('pt-BR') : '—'}
+          ${d.size_bytes ? ` · ${(d.size_bytes/1024/1024).toFixed(d.size_bytes>1048576?1:2)} MB` : ''}
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;flex-shrink:0">
+        <button class="btn btn-ghost btn-sm" onclick="baixarDocumentoDevedor('${d.id}')">Abrir</button>
+        ${ehGestor ? `<button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="removerDocumentoDevedor('${d.id}','${devId}')">Remover</button>` : ''}
+      </div>
+    </div>`).join('')
+    : `<div class="empty-state" style="padding:26px 16px;">
+        <div class="empty-state-icon">${ico('file',32)}</div>
+        <h3 style="font-size:14px">Nenhum arquivo</h3>
+        <p style="font-size:12.5px">Envie contratos, comprovantes, procurações e provas deste devedor.</p>
+      </div>`;
+  panel.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+      <div style="font-size:12px;font-weight:700;letter-spacing:.06em;color:var(--text-3)">ARQUIVOS DO DEVEDOR${docs.length?` (${docs.length})`:''}</div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <select id="doc-up-cat" style="padding:6px 8px;border:1px solid var(--border-2);border-radius:6px;font-size:12px;font-family:inherit;background:var(--surface);color:var(--text)">${catOpts}</select>
+        <button class="btn btn-ghost btn-sm" id="doc-up-btn" onclick="document.getElementById('doc-up-file').click()">Enviar arquivo</button>
+        <input type="file" id="doc-up-file" style="display:none" accept=".pdf,.png,.jpg,.jpeg,.webp,.heic,.doc,.docx" onchange="uploadDocumentoDevedor('${devId}')"/>
+      </div>
+    </div>
+    ${lista}`;
+}
+async function uploadDocumentoDevedor(devId){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId);
+  const inp = document.getElementById('doc-up-file');
+  const file = inp && inp.files && inp.files[0];
+  if(!dev || !file) return;
+  if(file.size > 20*1024*1024){ showToast('Arquivo acima de 20 MB.','warning'); inp.value=''; return; }
+  const supa = getSupabase();
+  if(!supa) return;
+  const btn = document.getElementById('doc-up-btn');
+  if(btn){ btn.disabled = true; btn.textContent = 'Enviando…'; }
+  try{
+    const chave = docChaveDevedor(dev);
+    const cat = (document.getElementById('doc-up-cat')||{}).value || 'outros';
+    const nomeSeguro = file.name.replace(/[^a-zA-Z0-9._-]/g,'_');
+    const path = `devedores/${chave}/${dev.clienteId||'sem-credor'}/${cat}/${Date.now()}_${nomeSeguro}`;
+    const { error: upErr } = await supa.storage.from('documentos')
+      .upload(path, file, { contentType: file.type || 'application/octet-stream', upsert: false });
+    if(upErr) throw upErr;
+    const { data: udata } = await supa.auth.getUser();
+    const { error: insErr } = await supa.from('documentos').insert({
+      devedor_doc: chave, devedor_id: dev.id, credor_id: dev.clienteId||null,
+      categoria: cat, nome: file.name, storage_path: path,
+      mime_type: file.type||null, size_bytes: file.size,
+      uploaded_by: udata && udata.user ? udata.user.id : null
+    });
+    if(insErr){
+      // não deixa arquivo órfão sem metadado: move pra lixeira lógica
+      await supa.storage.from('documentos').move(path, '_lixeira/'+path).catch(()=>{});
+      throw insErr;
+    }
+    showToast('Arquivo enviado.','success');
+  }catch(e){
+    const msg = String(e && e.message || e);
+    showToast(/security|policy|denied|violates/i.test(msg)
+      ? 'Sem permissão: só o gestor e o responsável pelo devedor podem enviar arquivos.'
+      : 'Falha ao enviar: '+msg, 'danger');
+  }finally{
+    if(inp) inp.value='';
+    renderDrawerDocumentos(devId);
+  }
+}
+async function baixarDocumentoDevedor(docId){
+  const supa = getSupabase();
+  if(!supa) return;
+  const { data, error } = await supa.from('documentos').select('storage_path').eq('id', docId).single();
+  if(error || !data){ showToast('Arquivo não encontrado.','warning'); return; }
+  const { data: signed, error: sErr } = await supa.storage.from('documentos')
+    .createSignedUrl(data.storage_path, 120);
+  if(sErr || !signed || !signed.signedUrl){ showToast('Não foi possível gerar o link.','danger'); return; }
+  window.open(signed.signedUrl, '_blank');
+}
+async function removerDocumentoDevedor(docId, devId){
+  if(currentUser?.tipo !== 'gestor'){ showToast('Apenas o gestor pode remover arquivos.','warning'); return; }
+  if(!confirm('Remover este arquivo da lista? (o arquivo é desativado, não apagado)')) return;
+  const supa = getSupabase();
+  if(!supa) return;
+  const { error } = await supa.from('documentos').update({ ativo:false }).eq('id', docId);
+  if(error){ showToast('Falha ao remover: '+error.message,'danger'); return; }
+  showToast('Arquivo removido da lista.','success');
+  renderDrawerDocumentos(devId);
+}
+
 function zsRenderDrawerDocs(dev){
   const minutas = (dev.minutas||[]).filter(m=>m.zapsignToken);
   if(!minutas.length) return `
