@@ -57,8 +57,10 @@ function extractDelimited(src, startToken, endToken){
   return src.slice(s, e + endToken.length);
 }
 
-var PATH = (typeof arguments !== 'undefined' && arguments.length) ? arguments[0]
-         : (typeof process !== 'undefined' && process.argv && process.argv[2]) ? process.argv[2]
+// Node injeta um `arguments` próprio (objetos do wrapper CommonJS) — por isso
+// process.argv vem primeiro e o `arguments` do jsc só vale se for string.
+var PATH = (typeof process !== 'undefined' && process.argv && process.argv[2]) ? process.argv[2]
+         : (typeof arguments !== 'undefined' && arguments.length && typeof arguments[0] === 'string') ? arguments[0]
          : 'index.html';
 
 var SRC = readSource(PATH);
@@ -74,7 +76,8 @@ var harness =
   setSrc + '\n' + numSrc + '\n' + rowSrc + '\n' +
   'this.__devedorToRow = devedorToRow;';
 (0, eval)(harness);
-var devedorToRow = this.__devedorToRow;
+// No Node CJS, `this` é module.exports (não o global onde o eval gravou).
+var devedorToRow = (typeof globalThis !== 'undefined') ? globalThis.__devedorToRow : this.__devedorToRow;
 
 // ---------------------------- asserções ----------------------------
 var RAN = 0, FAIL = 0;

@@ -1519,6 +1519,7 @@ img{max-width:100%}
           <div class="fg">
             <label>CPF / CNPJ *</label>
             <input type="text" id="mdev-doc" placeholder="000.000.000-00">
+            <div id="mdev-doc-dup" style="display:none;font-size:11.5px;margin-top:4px;"></div>
           </div>
         </div>
         <div class="fg-row">
@@ -1781,6 +1782,7 @@ img{max-width:100%}
         <div class="fg">
           <label>CPF / CNPJ *</label>
           <input type="text" id="mcli-doc" placeholder="000.000.000-00">
+          <div id="mcli-doc-dup" style="display:none;font-size:11.5px;margin-top:4px;"></div>
         </div>
       </div>
       <!-- IMPLEMENTADO S6: vínculo de grupo (matriz / filial / independente) -->
@@ -3214,6 +3216,18 @@ function reinitSupabase(){
   getSupabase();
 }
 
+// Onda 1b: os proxies /api/* agora exigem o token de sessão do Supabase
+// (Authorization: Bearer). Este helper devolve o header para anexar no fetch.
+async function authHeaders(){
+  try{
+    const supa = getSupabase();
+    if(!supa) return {};
+    const { data } = await supa.auth.getSession();
+    const t = data?.session?.access_token;
+    return t ? { 'Authorization': 'Bearer ' + t } : {};
+  }catch(_){ return {}; }
+}
+
 async function fetchServerConfig(){
   // Busca credenciais Supabase do servidor (Vercel env vars)
   // Isso garante que qualquer navegador — inclusive aba anônima — pode conectar
@@ -3946,6 +3960,82 @@ function _reatribuirConfirm(){
 function mascaraCPF(v){return v.replace(/\D/g,'').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d{1,2})$/,'$1-$2');}
 function mascaraCNPJ(v){return v.replace(/\D/g,'').replace(/(\d{2})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1.$2').replace(/(\d{3})(\d)/,'$1/$2').replace(/(\d{4})(\d)/,'$1-$2');}
 function mascaraDoc(el){const v=el.value.replace(/\D/g,'');el.value=v.length<=11?mascaraCPF(v):mascaraCNPJ(v);}
+
+// ── Item 1 (dedup CPF/CNPJ): busca por documento ─────────────────────────
+// Só considera documento completo (11 = CPF, 14 = CNPJ); ignora arquivados e
+// o próprio registro em edição. Rascunho é tratado à parte (avisa, não bloqueia).
+function docSoDigitos(v){ return (v||'').replace(/\D/g,''); }
+function findDevedorPorDoc(docDigits, ignorarId){
+  if(docDigits.length !== 11 && docDigits.length !== 14) return null;
+  return (DB.devedores||[]).find(d => d.id !== (ignorarId||'') && !d.arquivado && !d.isDraft && docSoDigitos(d.doc) === docDigits) || null;
+}
+function findDevedorRascunhoPorDoc(docDigits, ignorarId){
+  if(docDigits.length !== 11 && docDigits.length !== 14) return null;
+  return (DB.devedores||[]).find(d => d.id !== (ignorarId||'') && !d.arquivado && d.isDraft && docSoDigitos(d.doc) === docDigits) || null;
+}
+function findClientePorDoc(docDigits, ignorarId){
+  if(docDigits.length !== 11 && docDigits.length !== 14) return null;
+  return (DB.clientes||[]).find(c => c.id !== (ignorarId||'') && !c.arquivado && !c.isDraft && docSoDigitos(c.doc) === docDigits) || null;
+}
+
+// Aviso em tempo real no campo de documento + trava do botão Salvar.
+function _setDocDupUI(avisoId, btnId, msg, bloqueia){
+  const aviso = document.getElementById(avisoId);
+  const btn = document.getElementById(btnId);
+  if(aviso){
+    if(msg){ aviso.style.display='block'; aviso.style.color = bloqueia ? 'var(--danger)' : '#D97706'; aviso.textContent = msg; }
+    else { aviso.style.display='none'; aviso.textContent=''; }
+  }
+  if(btn) btn.disabled = !!bloqueia;
+}
+function checarDupDocDevedor(){
+  const docDigits = docSoDigitos(document.getElementById('mdev-doc')?.value);
+  const ignorarId = document.getElementById('mdev-id')?.value || '';
+  const dup = findDevedorPorDoc(docDigits, ignorarId);
+  if(dup){
+    _setDocDupUI('mdev-doc-dup','btn-save-devedor', `Já existe cobrança para esse documento: ${dup.nome}. Para outra dívida do mesmo devedor, use "Dívidas adicionais" no cadastro existente.`, true);
+    return;
+  }
+  const ras = findDevedorRascunhoPorDoc(docDigits, ignorarId);
+  if(ras){
+    _setDocDupUI('mdev-doc-dup','btn-save-devedor', `Há um rascunho com esse documento (${ras.nome||'sem nome'}). Confira em Rascunhos antes de cadastrar de novo.`, false);
+    return;
+  }
+  _setDocDupUI('mdev-doc-dup','btn-save-devedor', '', false);
+}
+function checarDupDocCliente(){
+  const docDigits = docSoDigitos(document.getElementById('mcli-doc')?.value);
+  const ignorarId = document.getElementById('mcli-id')?.value || '';
+  const dup = findClientePorDoc(docDigits, ignorarId);
+  if(dup){
+    _setDocDupUI('mcli-doc-dup','btn-save-cliente', `Já existe cliente com esse documento: ${dup.nome}.`, true);
+    return;
+  }
+  _setDocDupUI('mcli-doc-dup','btn-save-cliente', '', false);
+  if(docDigits.length === 11 || docDigits.length === 14) _avisarPedidoCredorPendente(docDigits);
+}
+// Best-effort (depende de rede): avisa, sem travar, se há pedido de credor
+// pendente de aprovação com o mesmo documento.
+let _pedidosDocCache = null;
+async function _avisarPedidoCredorPendente(docDigits){
+  try{
+    const supa = getSupabase(); if(!supa) return;
+    if(!_pedidosDocCache || (Date.now() - _pedidosDocCache.ts) > 60000){
+      const { data, error } = await supa.from('pedidos_aprovacao')
+        .select('payload,resumo').eq('status','pendente').eq('tipo','novo_credor').limit(100);
+      if(error) return;
+      _pedidosDocCache = { ts: Date.now(), docs: (data||[]).map(p=>({ doc: docSoDigitos(p?.payload?.doc), resumo: p?.resumo||'' })) };
+    }
+    const hit = _pedidosDocCache.docs.find(p=>p.doc && p.doc === docDigits);
+    // A resposta pode chegar atrasada: só mostra se o campo ainda tem o mesmo doc
+    // e se nenhum bloqueio duro apareceu nesse meio-tempo.
+    if(hit
+      && docSoDigitos(document.getElementById('mcli-doc')?.value) === docDigits
+      && !findClientePorDoc(docDigits, document.getElementById('mcli-id')?.value || '')){
+      _setDocDupUI('mcli-doc-dup','btn-save-cliente', `Atenção: já existe pedido de credor pendente de aprovação com esse documento (${hit.resumo}).`, false);
+    }
+  }catch(_){}
+}
 function mascaraTel(el){const v=el.value.replace(/\D/g,'');let m='';if(v.length<=10)m=v.replace(/(\d{2})(\d{4})(\d{0,4})/,'($1) $2-$3');else m=v.replace(/(\d{2})(\d{5})(\d{0,4})/,'($1) $2-$3');el.value=m.trim().replace(/-$/,'');}
 
 function parseValorBR(s){
@@ -4155,6 +4245,10 @@ function ico(name, size){
 function openModal(id){
   const el = document.getElementById(id);
   if(el) el.classList.add('open');
+  // Item 1 (dedup): revalida o aviso de documento duplicado com os valores
+  // recém-preenchidos (setTimeout 0 = roda depois do caller terminar de setar os campos).
+  if(id === 'modal-devedor') setTimeout(()=>{ try{ checarDupDocDevedor(); }catch(_){} }, 0);
+  if(id === 'modal-cliente') setTimeout(()=>{ try{ checarDupDocCliente(); }catch(_){} }, 0);
 }
 function closeModal(id){
   const el = document.getElementById(id);
@@ -4780,8 +4874,8 @@ function renderPainel(){
   // mas não vê o gráfico agregado de performance da carteira vs. meta — visão de gestão.
   const ehGestorView = (currentUser?.tipo === 'gestor');
 
-  // ── FIX 1: excluir arquivados de TODOS os cálculos ───────────
-  const devs = (DB.devedores || []).filter(d => !d.arquivado);
+  // ── FIX 1: excluir arquivados (e rascunhos — item 8) de TODOS os cálculos ───────────
+  const devs = (DB.devedores || []).filter(d => !d.arquivado && !d.isDraft);
   const totalDevs = devs.length;
   const totalCarteira = devs
     .filter(d => d.status !== 'Quitado' && d.status !== 'Recebido')
@@ -5131,15 +5225,22 @@ function calcScore(dev){
   const now = new Date();
   const in7 = new Date(now.getTime() - 7*24*60*60*1000).toISOString().slice(0,10);
   const hasRecent = hist.some(h => h.data && h.data >= in7);
-  if(!hasRecent && hist.length >= 0) score += 15;
+  if(!hasRecent) score += 15;
   return Math.min(100, score);
 }
 
+// Item 9: legenda da fórmula (cálculo interno de prioridade — NÃO é consulta a
+// bureau tipo Serasa/SPC). Aparece como tooltip em todo lugar que o badge é usado.
+const SCORE_TOOLTIP = 'Score interno de prioridade de cobrança (não é consulta a bureau). '
+  + 'Atraso: ≥90d +50 · ≥60d +35 · ≥30d +20. Valor: >10k +20 · >5k +15 · >1k +10. '
+  + 'Status: Notificação +10 · Em contato +5. Sem contato há 7 dias: +15. '
+  + 'Faixas: ≥75 Urgente · ≥50 Alto · ≥25 Médio · abaixo Normal.';
 function scoreBadgeHtml(score){
-  if(score >= 75) return `<span class="badge score-urgente" style="font-size:11px;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#e53e3e;margin-right:4px;vertical-align:middle;"></span>Urgente</span>`;
-  if(score >= 50) return `<span class="badge score-alto" style="font-size:11px;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#dd6b20;margin-right:4px;vertical-align:middle;"></span>Alto</span>`;
-  if(score >= 25) return `<span class="badge score-medio" style="font-size:11px;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#d69e2e;margin-right:4px;vertical-align:middle;"></span>Médio</span>`;
-  return `<span class="badge score-normal" style="font-size:11px;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#a0aec0;margin-right:4px;vertical-align:middle;"></span>Normal</span>`;
+  const t = `Score ${score}/100 — ${SCORE_TOOLTIP}`;
+  if(score >= 75) return `<span class="badge score-urgente" style="font-size:11px;" title="${t}"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#e53e3e;margin-right:4px;vertical-align:middle;"></span>Urgente</span>`;
+  if(score >= 50) return `<span class="badge score-alto" style="font-size:11px;" title="${t}"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#dd6b20;margin-right:4px;vertical-align:middle;"></span>Alto</span>`;
+  if(score >= 25) return `<span class="badge score-medio" style="font-size:11px;" title="${t}"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#d69e2e;margin-right:4px;vertical-align:middle;"></span>Médio</span>`;
+  return `<span class="badge score-normal" style="font-size:11px;" title="${t}"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#a0aec0;margin-right:4px;vertical-align:middle;"></span>Normal</span>`;
 }
 
 // ── COBRANÇAS – DEVEDORES ────────────────────────────────────
@@ -5664,7 +5765,7 @@ function renderDevedores(){
                 <th class="th-sortable ${devSort.key==='valor'?'th-sorted':''}" style="padding:9px 12px;text-align:right;font-size:11px;color:var(--text-2);font-weight:600;" onclick="setDevSort('valor')">Valor ${sortArrowHtml('valor')}</th>
                 <th style="padding:9px 12px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Status</th>
                 <th class="th-sortable ${devSort.key==='dias'?'th-sorted':''}" style="padding:9px 12px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;" onclick="setDevSort('dias')">Dias ${sortArrowHtml('dias')}</th>
-                <th class="th-sortable ${devSort.key==='score'?'th-sorted':''}" style="padding:9px 12px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;" onclick="setDevSort('score')">Score ${sortArrowHtml('score')}</th>
+                <th class="th-sortable ${devSort.key==='score'?'th-sorted':''}" style="padding:9px 12px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;" onclick="setDevSort('score')" title="${SCORE_TOOLTIP}">Score ${sortArrowHtml('score')}</th>
                 <th style="padding:9px 12px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Resp.</th>
                 <th style="padding:9px 12px;width:36px;"></th>
               </tr>
@@ -5727,7 +5828,7 @@ function renderDevedores(){
           <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-top:1px solid var(--border);background:var(--surface-2);">
             <span style="font-size:11.5px;color:var(--text-2);">
               Mostrando <strong style="color:var(--text);font-family:var(--font-mono);">${list.length.toLocaleString('pt-BR')}</strong>
-              de <strong style="color:var(--text);font-family:var(--font-mono);">${devs.filter(d=>!d.arquivado).length.toLocaleString('pt-BR')}</strong> registros
+              de <strong style="color:var(--text);font-family:var(--font-mono);">${devs.filter(d=>!d.arquivado && !d.isDraft).length.toLocaleString('pt-BR')}</strong> registros
             </span>
             ${selectedDevIds.size>0?`<span style="font-size:11.5px;color:var(--navy);font-weight:600;">${selectedDevIds.size} selecionado${selectedDevIds.size>1?'s':''}</span>`:''}
           </div>
@@ -5901,7 +6002,7 @@ function openDrawer(devId){
       : '—';
     metaEl.innerHTML = [
       `<span><span style="color:var(--text-3)">CPF</span> <strong style="font-family:var(--font-mono);color:var(--text)">${dev.doc||'—'}</strong></span>`,
-      dev.tel ? `<span><span style="color:var(--text-3)">Tel</span> <strong style="font-family:var(--font-mono);color:var(--text)">${dev.tel}</strong></span>` : '',
+      dev.tel ? `<span><span style="color:var(--text-3)">Tel</span> <strong style="font-family:var(--font-mono);color:var(--text)">${escHtml(dev.tel)}</strong></span>` : '',
       `<span><span style="color:var(--text-3)">Cliente</span> <strong style="color:var(--text)">${escHtml(cliNome)}</strong></span>`,
       `<span><span style="color:var(--text-3)">Desde</span> <strong style="color:var(--text)">${clienteDesde}</strong></span>`,
       (()=>{ const r=nomeResponsavel(dev); return r && r!=='—' ? `<span><span style="color:var(--text-3)">Resp.</span> <strong style="color:var(--text)">${escHtml(r)}</strong></span>` : ''; })(),
@@ -6182,8 +6283,8 @@ function _drawerTabHtml(tab, dev, ctx){
             const usuario=h.autor||h.usuario||DB.config.nome||'Sistema';
             return `<div class="tl-item">
               <div class="tl-dot" style="background:${tipoHistColor(h.tipo)};"></div>
-              <div class="tl-date">${h.data||''} · <span style="font-size:12px">${h.tipo||''}</span> · <span style="color:var(--text-3);font-size:11px">por ${escHtml(usuario)}</span></div>
-              <div class="tl-content"><strong>${h.tipo||''}</strong> ${escHtml(h.desc||h.descricao||h.texto||'')}${h.prox?`<div style="font-size:11px;color:var(--text-3);margin-top:4px">Próximo contato: ${h.prox}</div>`:''}</div>
+              <div class="tl-date">${escHtml(h.data||'')} · <span style="font-size:12px">${escHtml(h.tipo||'')}</span> · <span style="color:var(--text-3);font-size:11px">por ${escHtml(usuario)}</span></div>
+              <div class="tl-content"><strong>${escHtml(h.tipo||'')}</strong> ${escHtml(h.desc||h.descricao||h.texto||'')}${h.prox?`<div style="font-size:11px;color:var(--text-3);margin-top:4px">Próximo contato: ${escHtml(h.prox)}</div>`:''}</div>
             </div>`;
           }).join('')}</div>`}
     </div>`;
@@ -7551,7 +7652,7 @@ Retorne SOMENTE o JSON, sem texto adicional, sem markdown.`});
 
     const resp=await fetch('/api/claude',{
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json', ...(await authHeaders())},
       body:JSON.stringify({model:'claude-opus-4-5',max_tokens:2048,messages:[{role:'user',content}]})
     });
     const data=await resp.json();
@@ -7848,7 +7949,7 @@ Retorne SOMENTE o JSON, sem texto adicional, sem markdown.`});
 
     const resp=await fetch('/api/claude',{
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json', ...(await authHeaders())},
       body:JSON.stringify({model:'claude-opus-4-5',max_tokens:512,messages:[{role:'user',content}]})
     });
     const data=await resp.json();
@@ -8062,24 +8163,19 @@ function salvarDevedor(){
 
   // PR-F: bloqueia 1 devedor por CPF/CNPJ. Pra adicionar outra dívida ao
   // mesmo devedor, usar "Dívidas adicionais" no cadastro existente.
-  const docDigits = doc.replace(/\D/g,'');
-  if(docDigits && (docDigits.length === 11 || docDigits.length === 14)){
-    const conflito = (DB.devedores||[]).find(d =>
-      d.id !== (id || '')
-      && !d.arquivado
-      && (d.doc||'').replace(/\D/g,'') === docDigits
+  // Item 1: rascunho não bloqueia mais (o aviso aparece no campo, sem travar).
+  const docDigits = docSoDigitos(doc);
+  const conflito = findDevedorPorDoc(docDigits, id || '');
+  if(conflito){
+    const tipoDoc = docDigits.length === 11 ? 'CPF' : 'CNPJ';
+    alert(
+      `Já existe cobrança cadastrada para esse ${tipoDoc}:\n\n` +
+      `• ${conflito.nome}\n` +
+      `• Situação: ${conflito.status || '—'}\n\n` +
+      `Para adicionar outra dívida ao mesmo devedor, abra o cadastro existente ` +
+      `e use "+ Adicionar dívida" em Dívidas adicionais.`
     );
-    if(conflito){
-      const tipoDoc = docDigits.length === 11 ? 'CPF' : 'CNPJ';
-      alert(
-        `Já existe cobrança cadastrada para esse ${tipoDoc}:\n\n` +
-        `• ${conflito.nome}\n` +
-        `• Situação: ${conflito.status || '—'}\n\n` +
-        `Para adicionar outra dívida ao mesmo devedor, abra o cadastro existente ` +
-        `e use "+ Adicionar dívida" em Dívidas adicionais.`
-      );
-      return;
-    }
+    return;
   }
 
   const devData = {
@@ -8331,7 +8427,8 @@ Retorne SOMENTE o JSON, sem texto adicional, sem markdown.`
     const resp = await fetch('/api/claude',{
       method:'POST',
       headers:{
-        'Content-Type':'application/json'
+        'Content-Type':'application/json',
+        ...(await authHeaders())
       },
       body: JSON.stringify({ model:'claude-opus-4-5', max_tokens:1024, messages:[{ role:'user', content }] })
     });
@@ -9124,6 +9221,20 @@ function crmWhatsApp(devId){
 }
 
 // ── CLIENTES ─────────────────────────────────────────────────
+// Item 2: busca + ordenação da lista de Clientes (replica o padrão devSort/setDevSort).
+let cliSort = { key:'nome', dir:'asc' };
+let cliFilter = { q:'' };
+let _cliVisibleIds = [];
+function setCliSort(key){
+  if(cliSort.key === key){ cliSort.dir = cliSort.dir === 'asc' ? 'desc' : 'asc'; }
+  else { cliSort.key = key; cliSort.dir = (key === 'nome') ? 'asc' : 'desc'; }
+  renderClientes();
+}
+function cliSortArrowHtml(key){
+  if(cliSort.key !== key) return '<span class="sort-arrow sort-arrow-idle">↕</span>';
+  return `<span class="sort-arrow sort-arrow-active">${cliSort.dir === 'asc' ? '↑' : '↓'}</span>`;
+}
+
 function renderClientes(){
   const el = document.getElementById('page-clientes');
   if(!el) return;
@@ -9140,15 +9251,43 @@ function renderClientes(){
   let clientes = (DB.clientes || []).filter(c => !c.isDraft && !c.arquivado);
   // IMPLEMENTADO S6: aplica seletor "Visualizar como" do gestor (matriz/filial/todos)
   clientes = applyGrupoViewFilterClientes(clientes);
-  const devs = DB.devedores || [];
+  // Item 8: contagens e somas ignoram devedores arquivados e rascunhos.
+  const devs = (DB.devedores || []).filter(d => !d.arquivado && !d.isDraft);
 
-  // KPIs
+  // Item 2: agregados por cliente calculados uma vez (içados do map) para
+  // servirem à busca, à ordenação e às células da tabela.
+  const cliRowsAll = clientes.map(c=>{
+    const cDevs = devs.filter(d=>d.clienteId===c.id);
+    const carteira = cDevs.reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
+    const recuperado = cDevs.filter(d=>d.status==='Quitado'||d.status==='Recebido').reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
+    return { c, nDevs: cDevs.length, carteira, recuperado };
+  });
+
+  // KPIs (sempre sobre a lista completa, sem o filtro de busca)
   const totalCarteira = devs.reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
   let maiorCarteiraNome = '—', maiorCarteiraVal = 0;
-  clientes.forEach(c=>{
-    const cVal = devs.filter(d=>d.clienteId===c.id).reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
-    if(cVal > maiorCarteiraVal){ maiorCarteiraVal = cVal; maiorCarteiraNome = c.nome; }
+  cliRowsAll.forEach(r=>{ if(r.carteira > maiorCarteiraVal){ maiorCarteiraVal = r.carteira; maiorCarteiraNome = r.c.nome; } });
+
+  // Busca por razão social, nome fantasia ou CPF/CNPJ
+  const q = (cliFilter.q||'').trim().toLowerCase();
+  const qDigits = docSoDigitos(q);
+  let cliRows = !q ? cliRowsAll : cliRowsAll.filter(r=>{
+    if((r.c.nome||'').toLowerCase().includes(q)) return true;
+    if((r.c.nomeFantasia||r.c.nome_fantasia||'').toLowerCase().includes(q)) return true;
+    return qDigits.length >= 3 && docSoDigitos(r.c.doc).includes(qDigits);
   });
+
+  // Ordenação (nome asc por padrão; devedores/carteira começam desc)
+  const sortDir = cliSort.dir === 'asc' ? 1 : -1;
+  cliRows = cliRows.slice().sort((a,b)=>{
+    if(cliSort.key==='devedores' && a.nDevs !== b.nDevs) return (a.nDevs - b.nDevs)*sortDir;
+    if(cliSort.key==='carteira' && a.carteira !== b.carteira) return (a.carteira - b.carteira)*sortDir;
+    const nomeDir = cliSort.key==='nome' ? sortDir : 1;
+    const byNome = (a.c.nome||'').localeCompare(b.c.nome||'','pt-BR',{sensitivity:'base'});
+    if(byNome) return byNome * nomeDir;
+    return (a.c.nomeFantasia||'').localeCompare(b.c.nomeFantasia||'','pt-BR',{sensitivity:'base'}) * nomeDir;
+  });
+  _cliVisibleIds = cliRows.map(r=>r.c.id);
 
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:14px;flex-wrap:wrap;gap:10px;">
@@ -9190,6 +9329,16 @@ function renderClientes(){
       </div>
     </div>
 
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+      <div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;min-width:240px;">
+        ${ico('search',13)}
+        <input type="search" id="cli-search" placeholder="Buscar razão social, fantasia, CPF/CNPJ…" value="${escHtml(cliFilter.q)}"
+          style="border:none;outline:none;background:transparent;font-size:12.5px;color:var(--text);flex:1;width:0;min-width:0;"/>
+      </div>
+      ${cliFilter.q ? `<button class="btn btn-ghost btn-sm" style="color:var(--danger);" onclick="cliFilter.q='';renderClientes();">✕ Limpar busca</button>` : ''}
+      ${cliFilter.q ? `<span style="font-size:11.5px;color:var(--text-2);">${cliRows.length} de ${clientes.length} cliente${clientes.length!==1?'s':''}</span>` : ''}
+    </div>
+
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;">
       ${clientes.length === 0
         ? `<div class="empty-state" style="padding:48px">
@@ -9198,30 +9347,36 @@ function renderClientes(){
             <p>Clientes (cedentes) são as empresas que contratam a recuperação.</p>
             ${podeCriarCredor ? `<button class="btn btn-primary" style="margin-top:16px;" onclick="abrirNovoCliente()">${ico('plus',13)} ${podeGerirCredor ? 'Novo Cliente' : 'Solicitar credor'}</button>` : ''}
            </div>`
+        : cliRows.length === 0
+        ? `<div class="empty-state" style="padding:36px">
+            <div class="empty-state-icon">${ico('search',36)}</div>
+            <h3>Nada encontrado</h3>
+            <p>Nenhum cliente bate com a busca "${escHtml(cliFilter.q)}".</p>
+           </div>`
         : `<table style="width:100%;border-collapse:collapse;font-size:12.5px;">
             <thead><tr style="background:var(--surface-2);border-bottom:1px solid var(--border);">
               ${cliSelMode ? `<th style="padding:9px 8px 9px 14px;width:36px;">
                 <input type="checkbox" onclick="selecionarTodosClientes()" style="cursor:pointer;"
-                  ${selectedClienteIds.size===clientes.length&&clientes.length>0?'checked':''} />
+                  ${cliRows.length>0&&cliRows.every(r=>selectedClienteIds.has(r.c.id))?'checked':''} />
               </th>` : ''}
-              <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Cliente</th>
+              <th class="th-sortable ${cliSort.key==='nome'?'th-sorted':''}" onclick="setCliSort('nome')" style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;cursor:pointer;">Cliente ${cliSortArrowHtml('nome')}</th>
               <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">CPF/CNPJ</th>
               <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Responsável</th>
-              <th style="padding:9px 14px;text-align:right;font-size:11px;color:var(--text-2);font-weight:600;">Devedores</th>
-              <th style="padding:9px 14px;text-align:right;font-size:11px;color:var(--text-2);font-weight:600;">Carteira</th>
+              <th class="th-sortable ${cliSort.key==='devedores'?'th-sorted':''}" onclick="setCliSort('devedores')" style="padding:9px 14px;text-align:right;font-size:11px;color:var(--text-2);font-weight:600;cursor:pointer;">Devedores ${cliSortArrowHtml('devedores')}</th>
+              <th class="th-sortable ${cliSort.key==='carteira'?'th-sorted':''}" onclick="setCliSort('carteira')" style="padding:9px 14px;text-align:right;font-size:11px;color:var(--text-2);font-weight:600;cursor:pointer;">Carteira ${cliSortArrowHtml('carteira')}</th>
               <th style="padding:9px 14px;text-align:right;font-size:11px;color:var(--text-2);font-weight:600;">Taxa Rec.</th>
               <th style="padding:9px 14px;text-align:left;font-size:11px;color:var(--text-2);font-weight:600;">Portal</th>
               ${cliSelMode ? '' : '<th style="padding:9px 14px;width:120px;"></th>'}
             </tr></thead>
             <tbody>
-              ${clientes.map((c,i)=>{
-                const cDevs = devs.filter(d=>d.clienteId===c.id);
-                const carteira = cDevs.reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
-                const recuperado = cDevs.filter(d=>d.status==='Quitado'||d.status==='Recebido').reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
+              ${cliRows.map((r,i)=>{
+                const c = r.c;
+                const carteira = r.carteira, recuperado = r.recuperado;
                 const taxa = carteira>0?((recuperado/carteira)*100).toFixed(1)+'%':'—';
                 const initials = (c.nome||'?').split(' ').filter(Boolean).slice(0,2).map(s=>s[0]).join('').toUpperCase();
+                const fantasia = c.nomeFantasia || c.nome_fantasia || '';
                 const isSel = selectedClienteIds.has(c.id);
-                return `<tr style="background:${isSel?'var(--active-bg)':''};border-bottom:${i<clientes.length-1?'1px solid var(--border)':'none'};cursor:${cliSelMode?'pointer':'default'};"
+                return `<tr style="background:${isSel?'var(--active-bg)':''};border-bottom:${i<cliRows.length-1?'1px solid var(--border)':'none'};cursor:${cliSelMode?'pointer':'default'};"
                   onclick="${cliSelMode?`toggleClienteSel('${c.id}',event)`:''}"
                   onmouseenter="this.style.background='${isSel?'var(--active-bg)':'var(--surface-2)'}'"
                   onmouseleave="this.style.background='${isSel?'var(--active-bg)':''}'">
@@ -9231,12 +9386,15 @@ function renderClientes(){
                   <td style="padding:10px 14px;">
                     <div style="display:flex;align-items:center;gap:9px;">
                       <div style="width:28px;height:28px;border-radius:7px;background:var(--active-bg);color:var(--navy);display:grid;place-items:center;font-weight:700;font-size:10px;flex-shrink:0;">${initials}</div>
-                      <span style="font-weight:600;color:var(--text);">${escHtml(c.nome||'—')}</span>
+                      <div style="min-width:0;">
+                        <div style="font-weight:600;color:var(--text);">${escHtml(c.nome||'—')}</div>
+                        ${fantasia ? `<div style="font-size:11px;color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(fantasia)}</div>` : ''}
+                      </div>
                     </div>
                   </td>
                   <td style="padding:10px 14px;font-family:var(--font-mono);font-size:11.5px;color:var(--text-2);">${escHtml(c.doc||'—')}</td>
-                  <td style="padding:10px 14px;color:var(--text-2);font-size:12px;">${escHtml(c.responsavel||currentUser?.nome||'—')}</td>
-                  <td style="padding:10px 14px;text-align:right;font-family:var(--font-mono);font-weight:600;color:var(--text);">${cDevs.length}</td>
+                  <td style="padding:10px 14px;color:var(--text-2);font-size:12px;">${escHtml(c.responsavel||'—')}</td>
+                  <td style="padding:10px 14px;text-align:right;font-family:var(--font-mono);font-weight:600;color:var(--text);">${r.nDevs}</td>
                   <td style="padding:10px 14px;text-align:right;font-family:var(--font-mono);font-weight:600;color:var(--text);">${fmtR(carteira)}</td>
                   <td style="padding:10px 14px;text-align:right;font-family:var(--font-mono);font-size:12px;color:${taxa!=='—'&&parseFloat(taxa)>0?'var(--success)':'var(--text-3)'};">${taxa}</td>
                   <td style="padding:10px 14px;">${c.loginEmail?'<span class="badge badge-green">Ativo</span>':'<span class="badge badge-gray">—</span>'}</td>
@@ -9256,6 +9414,16 @@ function renderClientes(){
           </table>`}
     </div>
   `;
+
+  // Item 2: o innerHTML acima recria o input de busca; religa o listener e
+  // devolve o foco (senão cada tecla digitada tira o cursor do campo).
+  const cliSearchEl = document.getElementById('cli-search');
+  if(cliSearchEl) cliSearchEl.addEventListener('input', e=>{
+    cliFilter.q = e.target.value;
+    renderClientes();
+    const s = document.getElementById('cli-search');
+    if(s){ s.focus(); const n = s.value.length; try{ s.setSelectionRange(n,n); }catch(_){} }
+  });
 }
 
 function abrirNovoCliente(){
@@ -9581,7 +9749,7 @@ Retorne APENAS JSON válido com:
 Retorne SOMENTE o JSON, sem markdown.`});
     const resp = await fetch('/api/claude',{
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json', ...(await authHeaders())},
       body: JSON.stringify({model:'claude-opus-4-5',max_tokens:1024,messages:[{role:'user',content}]})
     });
     const data = await resp.json();
@@ -10162,6 +10330,18 @@ async function salvarCliente(){
   const id = document.getElementById('mcli-id').value;
   const existingCli = id ? (DB.clientes||[]).find(c=>c.id===id) : null;
 
+  // Item 1 (dedup): bloqueia segundo cliente com o mesmo CPF/CNPJ.
+  const cliDocDigits = docSoDigitos(document.getElementById('mcli-doc')?.value);
+  const cliDup = findClientePorDoc(cliDocDigits, id || '');
+  if(cliDup){
+    alert(
+      `Já existe cliente cadastrado com esse ${cliDocDigits.length === 11 ? 'CPF' : 'CNPJ'}:\n\n` +
+      `• ${cliDup.nome}\n\n` +
+      `Confira a lista de Clientes antes de cadastrar de novo.`
+    );
+    return;
+  }
+
   const novaSenha = document.getElementById('mcli-senha').value;
   let loginSenha;
   if(novaSenha){ loginSenha = await hashSenha(novaSenha); }
@@ -10646,9 +10826,9 @@ function cpVerDevedor(id){
             <div class="timeline-item">
               <div class="timeline-dot"></div>
               <div class="timeline-content">
-                <div class="timeline-date">${h.data||''} · ${h.tipo||''}</div>
-                <div class="timeline-text">${h.texto||''}</div>
-                ${h.autor?`<div style="font-size:11px;color:var(--text-3)">${h.autor}</div>`:''}
+                <div class="timeline-date">${escHtml(h.data||'')} · ${escHtml(h.tipo||'')}</div>
+                <div class="timeline-text">${escHtml(h.texto||'')}</div>
+                ${h.autor?`<div style="font-size:11px;color:var(--text-3)">${escHtml(h.autor)}</div>`:''}
               </div>
             </div>`).join('')}</div>`}
       </div>
@@ -10664,7 +10844,7 @@ function cpVerDevedor(id){
             <div class="comp-card">
               <div class="comp-card-icon">📄</div>
               <div class="comp-card-info">
-                <div class="comp-card-name">${c.nome||'Comprovante '+(i+1)}</div>
+                <div class="comp-card-name">${escHtml(c.nome||'Comprovante '+(i+1))}</div>
                 <div class="comp-card-meta">Enviado em ${c.data||'—'} · ${c.valor?fmtR(+c.valor):''}</div>
               </div>
               <span class="comp-card-status comp-status-${c.status||'pendente'}">${c.status==='aprovado'?'Aprovado':c.status==='rejeitado'?'Rejeitado':'Pendente'}</span>
@@ -14052,7 +14232,7 @@ function renderCartoesGrid(){
   g.innerHTML = cartoes.map(c=>`<div class="kcard">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
       <div style="width:44px;height:44px;border-radius:50%;background:var(--navy);display:flex;align-items:center;justify-content:center;">${ico('card',20)}</div>
-      <div><div style="font-size:14px;font-weight:700">${c.nome}</div><div style="font-size:11px;color:var(--text3)">Vence dia ${c.vencDia||1}</div></div>
+      <div><div style="font-size:14px;font-weight:700">${escHtml(c.nome)}</div><div style="font-size:11px;color:var(--text3)">Vence dia ${c.vencDia||1}</div></div>
     </div>
     <div style="margin-bottom:8px;"><div style="font-size:11px;color:var(--text3);margin-bottom:4px;">Fatura atual</div><div style="font-size:22px;font-weight:800;color:var(--danger)">${fmtR(c.faturaAtual||0)}</div></div>
     <div style="margin-bottom:10px;"><div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text3);margin-bottom:4px;"><span>Limite usado</span><span>${fmtR(c.faturaAtual||0)} / ${fmtR(c.limite||0)}</span></div><div class="pbar"><div class="pfill" style="width:${c.limite>0?Math.min(100,((c.faturaAtual||0)/(c.limite||1)*100)).toFixed(0):0}%;background:var(--danger)"></div></div></div>
@@ -15154,7 +15334,7 @@ function renderCfgSection(section){
     const cols = DB.config.colaboradores||[];
     el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:18px;">Colaboradores</h3>
       ${cols.length ? cols.map((c,i)=>`<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">
-        <div style="flex:1"><strong style="font-size:13px;">${c.nome}</strong><span style="font-size:11px;color:var(--text3);margin-left:8px;">${c.cargo||'—'}</span></div>
+        <div style="flex:1"><strong style="font-size:13px;">${escHtml(c.nome)}</strong><span style="font-size:11px;color:var(--text3);margin-left:8px;">${escHtml(c.cargo||'—')}</span></div>
         <button class="btn btn-danger btn-xs" onclick="delColaborador(${i})">Remover</button>
       </div>`).join('') : '<div style="color:var(--text3);font-size:13px;margin-bottom:14px;">Nenhum colaborador cadastrado.</div>'}
       <div style="background:var(--surface2);border-radius:var(--r-sm);padding:14px;margin-top:14px;">
@@ -15604,7 +15784,7 @@ async function testarAsaas(){
   btn.disabled=true; res.textContent='Testando…'; res.style.color='var(--text-3)';
   try {
     const r = await fetch(`/api/asaas?path=customers&limit=1`,{
-      headers:{'x-asaas-key':key,'x-asaas-env':env,'Content-Type':'application/json'}
+      headers:{'x-asaas-key':key,'x-asaas-env':env,'Content-Type':'application/json', ...(await authHeaders())}
     });
     if(r.ok){ res.textContent='Conectado!'; res.style.color='var(--success)'; }
     else { const j=await r.json().catch(()=>{}); res.textContent='Erro: '+traduzirErro(j?.errors?.[0]?.description||j?.error||`HTTP ${r.status}`); res.style.color='var(--danger)'; }
@@ -15621,7 +15801,7 @@ async function testarZapSign(){
   try {
     // Proxy server-to-server — evita CORS do ZapSign
     const r = await fetch(`/api/zapsign?path=${encodeURIComponent('docs/')}`, {
-      headers: { 'Content-Type':'application/json', 'x-zapsign-token': token }
+      headers: { 'Content-Type':'application/json', 'x-zapsign-token': token, ...(await authHeaders()) }
     });
     if(r.ok || r.status===200){ res.textContent='Conectado!'; res.style.color='var(--success)'; }
     else {
@@ -15908,7 +16088,8 @@ async function mv2Gerar(){
     const resp = await fetch('/api/claude',{
       method:'POST',
       headers:{
-        'Content-Type':'application/json'
+        'Content-Type':'application/json',
+        ...(await authHeaders())
       },
       body: JSON.stringify({ model:'claude-haiku-4-5', max_tokens:2048, messages:[{role:'user',content:prompt}] })
     });
@@ -16409,7 +16590,7 @@ const AsaasAPI = {
     const [pathPart, queryPart] = path.split('?');
     const cleanPath = pathPart.replace(/^\/+/,'');
     const proxyUrl = `${this.proxy}?path=${encodeURIComponent(cleanPath)}${queryPart?'&'+queryPart:''}`;
-    const opts = { method, headers: this.h };
+    const opts = { method, headers: { ...this.h, ...(await authHeaders()) } };
     if(data) opts.body = JSON.stringify(data);
     const r = await fetch(proxyUrl, opts);
     const json = await r.json().catch(()=>({ message:`HTTP ${r.status}` }));
@@ -16440,7 +16621,7 @@ const ZapSignAPI = {
     const safePath = path.replace(/^\/+/, '');
     const opts = {
       method,
-      headers: { 'Content-Type':'application/json', 'x-zapsign-token': DB.config.zapsignToken }
+      headers: { 'Content-Type':'application/json', 'x-zapsign-token': DB.config.zapsignToken, ...(await authHeaders()) }
     };
     if(data && !['GET','HEAD','DELETE'].includes(method)) opts.body = JSON.stringify(data);
     const r = await fetch(`/api/zapsign?path=${encodeURIComponent(safePath)}`, opts);
@@ -17026,9 +17207,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
   // Doc mask
   const docInput = document.getElementById('mdev-doc');
-  if(docInput) docInput.addEventListener('input', ()=>mascaraDoc(docInput));
+  if(docInput) docInput.addEventListener('input', ()=>{ mascaraDoc(docInput); checarDupDocDevedor(); });
   const cliDocInput = document.getElementById('mcli-doc');
-  if(cliDocInput) cliDocInput.addEventListener('input', ()=>mascaraDoc(cliDocInput));
+  if(cliDocInput) cliDocInput.addEventListener('input', ()=>{ mascaraDoc(cliDocInput); checarDupDocCliente(); });
 
   // ── MODAL: CLIENTE ────────────────────────────────────────
   document.getElementById('btn-save-cliente').addEventListener('click', salvarCliente);
@@ -17688,9 +17869,18 @@ function updateClientesBulkToolbar(){
   if(sa){ sa.textContent=(n>0&&n===total)?'Desmarcar todos':`Selecionar todos (${total})`; sa.disabled=(total===0); }
 }
 function selecionarTodosClientes(){
-  const clientes=DB.clientes||[];
-  if(selectedClienteIds.size===clientes.length){ selectedClienteIds.clear(); cliSelMode=false; }
-  else { cliSelMode=true; clientes.forEach(c=>selectedClienteIds.add(c.id)); }
+  // Item 2: opera sobre as linhas VISÍVEIS (respeita a busca), não sobre o DB
+  // inteiro — antes selecionava até arquivados/escondidos, perigoso em ação em massa.
+  const ids = _cliVisibleIds.length ? _cliVisibleIds
+    : (DB.clientes||[]).filter(c=>!c.isDraft && !c.arquivado).map(c=>c.id);
+  const allSel = ids.length>0 && ids.every(id=>selectedClienteIds.has(id));
+  if(allSel){
+    ids.forEach(id=>selectedClienteIds.delete(id));
+    if(selectedClienteIds.size===0) cliSelMode=false;
+  } else {
+    cliSelMode=true;
+    ids.forEach(id=>selectedClienteIds.add(id));
+  }
   renderClientes(); updateClientesBulkToolbar();
 }
 function limparSelecaoClientes(){
