@@ -152,7 +152,47 @@ Encaixe com o resto: a folha de qualificação (itens 5+6) grava RESULTADO
 `documentos` já cobrem o checklist (`peticao`, `contrato`, `nota-promissoria`,
 `comprovante` etc. — adicionar `procuracao` e `calculo` à lista de categorias).
 
+## F-11 — RLS "só gestor + responsável" (desenho, pré-requisito do item 4)
+
+**Investigação (2026-06-11):** a infra de papéis JÁ existe e está saudável:
+- `app_users.papel` ∈ `proprietario` (1 = gestor) | `colaborador` (4);
+  `app_users.id` = `auth.users.id` nos 5 usuários (auth.uid() mapeia direto).
+- Helper `public.current_user_papel()` (SECURITY DEFINER, search_path fixo) já criado.
+- Responsável pelo devedor = **`devedores.assigned_to`** (uuid, preenchido nos 26).
+  ⚠️ `devedores.responsavel_id` existe mas está NULL em todos — coluna legada,
+  NÃO usar (anotar para limpeza futura).
+
+**Proposta (aplicar JUNTO com o bucket/tabela `documentos`, mesma aprovação):**
+
+```sql
+-- Helper único, evita recursão de RLS nas policies
+create or replace function public.pode_ver_devedor(p_doc text)
+returns boolean language sql stable security definer
+set search_path to 'public','pg_temp' as $$
+  select public.current_user_papel() = 'proprietario'
+      or exists (select 1 from public.devedores d
+                  where d.doc_digits = p_doc and d.assigned_to = auth.uid());
+$$;
+
+-- Tabela documentos: substitui as policies permissivas do rascunho acima
+create policy doc_select on public.documentos for select
+  using (public.pode_ver_devedor(devedor_doc));
+create policy doc_insert on public.documentos for insert
+  with check (public.pode_ver_devedor(devedor_doc));
+create policy doc_update on public.documentos for update
+  using (public.pode_ver_devedor(devedor_doc));
+
+-- Bucket documentos (storage.objects): path devedores/<doc>/... → folder[2] = doc
+-- SELECT/INSERT/UPDATE: bucket_id='documentos'
+--   and public.pode_ver_devedor((storage.foldername(name))[2])
+```
+
+Webhook ZapSign (Feature Y) usa service_role → ignora RLS, não é afetado.
+**Rollback:** drop das policies + `drop function public.pode_ver_devedor;`.
+Dívida que continua aberta (fora deste pacote): `cliente_documentos` segue
+permissiva-autenticado.
+
 ## Perguntas ainda em aberto
 
-Nenhuma — tudo respondido. Próximo passo de desenho: F-11 (papéis/responsável)
-como pré-requisito do item 4, apresentado junto com o SQL do bucket.
+Nenhuma — tudo respondido. Pacote pronto para aprovação do gestor:
+F-11 (acima) + bucket/tabela `documentos`, aplicados juntos.
