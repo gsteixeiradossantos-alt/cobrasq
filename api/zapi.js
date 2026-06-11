@@ -18,19 +18,11 @@ module.exports = async function handler(req, res) {
   const user = await requireUser(req, res);
   if (!user) return;
 
-  // Prioriza env vars
-  const envToken    = process.env.ZAPI_TOKEN || '';
-  const envInstance = process.env.ZAPI_INSTANCE_ID || '';
-  const envClientTk = process.env.ZAPI_CLIENT_TOKEN || '';
-
-  const token       = envToken    || req.headers['x-zapi-token']    || '';
-  const instanceId  = envInstance || req.headers['x-zapi-instance'] || '';
-  const clientToken = envClientTk || req.headers['x-zapi-client-token'] || '';
+  // Credenciais SÓ via env vars (gestor confirmou ZAPI_TOKEN/ZAPI_INSTANCE_ID no Vercel).
+  const token       = process.env.ZAPI_TOKEN || '';
+  const instanceId  = process.env.ZAPI_INSTANCE_ID || '';
+  const clientToken = process.env.ZAPI_CLIENT_TOKEN || '';
   const pathParam   = (req.query.path || '').replace(/^\/+/, '');
-
-  if (!envToken && req.headers['x-zapi-token']) {
-    console.warn('[zapi proxy] ZAPI_TOKEN não configurada. Usando credencial do header (inseguro).');
-  }
 
   if (!token || !instanceId) {
     return res.status(500).json({

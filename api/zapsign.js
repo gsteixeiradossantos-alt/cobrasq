@@ -18,13 +18,9 @@ module.exports = async function handler(req, res) {
   const user = await requireUser(req, res);
   if (!user) return;
 
-  const envToken = process.env.ZAPSIGN_TOKEN || '';
-  const token = envToken || req.headers['x-zapsign-token'] || '';
+  // Credencial SÓ via env var (gestor confirmou ZAPSIGN_TOKEN setada no Vercel).
+  const token = process.env.ZAPSIGN_TOKEN || '';
   const pathParam = (req.query.path || '').replace(/^\/+/, '');
-
-  if (!envToken && req.headers['x-zapsign-token']) {
-    console.warn('[zapsign proxy] ZAPSIGN_TOKEN não configurada. Usando credencial do header (inseguro).');
-  }
 
   if (!token) {
     return res.status(500).json({

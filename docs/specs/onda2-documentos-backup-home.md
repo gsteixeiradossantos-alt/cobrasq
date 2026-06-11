@@ -108,13 +108,22 @@ timingSafeEqual), agendada 1×/dia no `vercel.json`: exporta `cobrasq_data` (blo
 destino (Google Drive do gestor? bucket Storage separado com retenção? e-mail?).
 Sem PII em git; arquivo cifrado se o destino for compartilhado.
 
-## Perguntas em aberto para o gestor
+## Decisões do gestor (2026-06-11)
 
-1. Item 4: volume do OneDrive (GB) e como as pastas estão organizadas hoje?
-2. Item 4: quem pode VER documentos — qualquer autenticado (como hoje) ou só
-   gestor + responsável (exige F-11 antes)?
-3. Item 10: destino do backup diário?
-4. Envs `ASAAS_API_KEY`, `ZAPSIGN_TOKEN`, `ZAPI_TOKEN` estão setadas no Vercel?
-   (Se sim, removo os fallbacks de credencial via header no próximo PR.)
-5. Feature X: tipos de ação, documentos obrigatórios por tipo, sistema de
-   protocolo (Projudi/PJe) e quem revisa antes de protocolar.
+1. **Item 4 — volume OneDrive:** 5–50 GB → migração em lotes (1–2 dias de upload).
+   *Pendente: como as pastas estão organizadas hoje (por devedor? por credor?).*
+2. **Item 4 — quem vê documentos: SÓ gestor + responsável.** Consequência: o
+   **F-11 (RLS por papel/responsável) vira PRÉ-REQUISITO do item 4** — a policy
+   `doc_select` do rascunho acima deve checar papel/responsável, não só
+   `auth.uid() is not null`. O desenho do F-11 entra antes do bucket.
+3. **Item 10 — backup diário → Google Drive do gestor** (OAuth/credencial a
+   configurar pelo gestor; a rotina sobe o JSON numa pasta dedicada).
+4. **Envs confirmadas no Vercel** → fallbacks de credencial via header removidos
+   dos proxies (asaas/zapsign/zapi) no PR #38. `x-asaas-env` (não-segredo) mantido.
+
+## Perguntas ainda em aberto
+
+1. Item 4: como as pastas do OneDrive estão organizadas hoje (estrutura, nomes)?
+2. Feature X: tipos de ação (execução de título? monitória? cobrança?), documentos
+   obrigatórios por tipo, sistema de protocolo (Projudi/PJe) e quem revisa antes
+   de protocolar.

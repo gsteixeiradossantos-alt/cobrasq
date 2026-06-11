@@ -18,18 +18,12 @@ module.exports = async function handler(req, res) {
   const user = await requireUser(req, res);
   if (!user) return;
 
-  // 1) Prioriza env vars (server-side secret) — não expõe chave no browser
-  const envKey = process.env.ASAAS_API_KEY || '';
-  const envEnv = process.env.ASAAS_ENV || '';
-  // 2) Fallback: aceita header se env não estiver configurada (transição)
-  const asaasKey = envKey || req.headers['x-asaas-key'] || '';
-  const asaasEnv = envEnv || req.headers['x-asaas-env'] || 'sandbox';
+  // Credencial SÓ via env var (gestor confirmou ASAAS_API_KEY setada no Vercel).
+  // O fallback de chave via header x-asaas-key foi removido: chave nunca vem do cliente.
+  const asaasKey = process.env.ASAAS_API_KEY || '';
+  // x-asaas-env (sandbox|production) não é segredo; mantém fallback por header.
+  const asaasEnv = process.env.ASAAS_ENV || req.headers['x-asaas-env'] || 'sandbox';
   const pathParam = (req.query.path || '').replace(/^\/+/, '');
-
-  if (!envKey && req.headers['x-asaas-key']) {
-    // Avisa (sem expor a chave) que está em modo inseguro
-    console.warn('[asaas proxy] ASAAS_API_KEY não configurada. Usando chave do header (inseguro).');
-  }
 
   if (!asaasKey) {
     return res.status(500).json({
