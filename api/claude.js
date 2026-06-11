@@ -9,29 +9,27 @@
 // 'anthropic-dangerous-direct-browser-access'. Qualquer usuário extraía a
 // chave e bilhava a conta; além de PII saindo do front. Este proxy fecha isso.
 //
+// Onda 1b: exige login Supabase (requireUser) — antes qualquer requisição
+// anônima da internet usava a conta Anthropic do escritório como proxy grátis.
+// O fallback de chave via header x-api-key foi removido (a env já está ativa).
+//
 // A resposta upstream é repassada como está (mesma forma { content:[...], error? })
 // para que os call sites no front continuem funcionando sem mudança de parsing.
 
+const { requireUser, applyCors } = require('./_auth.js');
+
 module.exports = async function handler(req, res) {
-  // CORS: permite chamadas da própria origem
-  const origin = req.headers.origin || '*';
-  res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key, anthropic-version');
+  applyCors(req, res, { methods: 'POST, OPTIONS' });
 
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
   if (req.method !== 'POST') {
     return res.status(405).json({ error: { message: 'Use POST.' } });
   }
 
-  // 1) Prioriza env var (segredo server-side).
-  const envKey = process.env.ANTHROPIC_API_KEY || '';
-  // 2) Fallback de transição: aceita header só se a env ainda não foi setada.
-  const apiKey = envKey || req.headers['x-api-key'] || '';
-  if (!envKey && req.headers['x-api-key']) {
-    console.warn('[claude proxy] ANTHROPIC_API_KEY não configurada. Usando chave do header (inseguro).');
-  }
+  const user = await requireUser(req, res);
+  if (!user) return;
+
+  const apiKey = process.env.ANTHROPIC_API_KEY || '';
   if (!apiKey) {
     return res.status(500).json({
       error: { message: 'IA indisponível: ANTHROPIC_API_KEY não configurada no servidor.' },
@@ -63,6 +61,7 @@ module.exports = async function handler(req, res) {
     try { data = JSON.parse(text); } catch { data = { raw: text }; }
     res.status(upstream.status).json(data);
   } catch (err) {
-    res.status(502).json({ error: { message: err.message } });
+    console.error('[claude proxy] erro upstream:', err.message);
+    res.status(502).json({ error: { message: 'Serviço de IA temporariamente indisponível. Tente novamente.' } });
   }
 };

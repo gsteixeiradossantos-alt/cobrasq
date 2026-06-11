@@ -294,7 +294,12 @@ module.exports = async function handler(req, res) {
   const authHeader = req.headers['authorization'] || '';
   const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
   const secret = req.headers['x-cron-secret'] || req.query?.secret || bearer || '';
-  if (secret !== expect) {
+  // Comparação em tempo constante: o === simples vaza por timing quanto do
+  // segredo já bateu. O hash iguala os tamanhos antes do timingSafeEqual.
+  const crypto = require('crypto');
+  const got = crypto.createHash('sha256').update(String(secret)).digest();
+  const exp = crypto.createHash('sha256').update(String(expect)).digest();
+  if (!crypto.timingSafeEqual(got, exp)) {
     return res.status(401).json({ error: 'unauthorized' });
   }
 

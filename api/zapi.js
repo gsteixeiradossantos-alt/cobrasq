@@ -2,18 +2,21 @@
 // Mantém token + instanceId em variáveis de ambiente no servidor.
 // O browser chama /api/zapi?path=send-text e este handler repassa para
 // https://api.z-api.io/instances/{INSTANCE}/token/{TOKEN}/{path}
+// Onda 1b: exige login Supabase — antes qualquer requisição anônima usava o
+// WhatsApp do escritório (envio em massa, leitura de conversas).
+
+const { requireUser, applyCors } = require('./_auth.js');
 
 module.exports = async function handler(req, res) {
-  const origin = req.headers.origin || '*';
-  res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-zapi-token, x-zapi-instance, x-zapi-client-token');
+  applyCors(req, res);
 
   if (req.method === 'OPTIONS') {
     res.status(200).end();
     return;
   }
+
+  const user = await requireUser(req, res);
+  if (!user) return;
 
   // Prioriza env vars
   const envToken    = process.env.ZAPI_TOKEN || '';
@@ -62,6 +65,7 @@ module.exports = async function handler(req, res) {
 
     res.status(upstream.status).json(data);
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    console.error('[zapi proxy] erro upstream:', err.message);
+    res.status(502).json({ error: 'Falha ao conectar à Z-API. Tente novamente.' });
   }
 };

@@ -2,19 +2,21 @@
 // Prioriza credencial em variável de ambiente (ASAAS_API_KEY) para manter
 // a chave fora do browser. Mantém fallback por header (backward-compat)
 // mas emite warning no console server-side.
+// Onda 1b: exige login Supabase — antes qualquer requisição anônima criava/
+// alterava/cancelava cobranças na conta Asaas do escritório.
+
+const { requireUser, applyCors } = require('./_auth.js');
 
 module.exports = async function handler(req, res) {
-  // CORS: permite chamadas da própria origem
-  const origin = req.headers.origin || '*';
-  res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-asaas-key, x-asaas-env');
+  applyCors(req, res);
 
   if (req.method === 'OPTIONS') {
     res.status(200).end();
     return;
   }
+
+  const user = await requireUser(req, res);
+  if (!user) return;
 
   // 1) Prioriza env vars (server-side secret) — não expõe chave no browser
   const envKey = process.env.ASAAS_API_KEY || '';
@@ -71,6 +73,8 @@ module.exports = async function handler(req, res) {
 
     res.status(upstream.status).json(data);
   } catch (err) {
-    res.status(502).json({ error: err.message, upstream: upstreamUrl });
+    // Não expõe err.message/upstreamUrl cru (vazava topologia e detalhes internos).
+    console.error('[asaas proxy] erro upstream:', err.message);
+    res.status(502).json({ error: 'Falha ao conectar ao Asaas. Tente novamente.' });
   }
 };
