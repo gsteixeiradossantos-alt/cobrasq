@@ -193,6 +193,12 @@ create policy doc_update on public.documentos for update
 ```
 
 Webhook ZapSign (Feature Y) usa service_role → ignora RLS, não é afetado.
+
+**⚠️ Ajuste descoberto em 2026-06-11: 17 dos 26 devedores estão SEM CPF/CNPJ.**
+A chave de pasta `devedores/<doc>/...` não funciona para eles. Decisão de
+implementação: chave = `doc_digits` quando houver, senão `id-<uuid do devedor>`;
+`pode_ver_devedor` ganha overload/ajuste para casar também por id. A migração do
+OneDrive e a tela de documentos usam a mesma regra.
 **Rollback:** drop das policies + `drop function public.pode_ver_devedor;`.
 Dívidas que continuam abertas (fora deste pacote, apontadas pelo advisor):
 - `cliente_documentos` segue permissiva-autenticado.
