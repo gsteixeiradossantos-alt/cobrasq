@@ -1119,6 +1119,9 @@ img{max-width:100%}
       <div class="nav-item" data-page="clientes" id="nav-clientes">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span><span>Clientes</span>
       </div>
+      <div class="nav-item" data-page="tarefas" id="nav-tarefas">
+        <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><span>Tarefas <span id="nav-tarefas-count" style="display:none;background:var(--gold);color:var(--navy);padding:1px 7px;border-radius:10px;font-size:10.5px;margin-left:4px;font-weight:600;">0</span></span>
+      </div>
       <div class="nav-item" data-page="docs" id="nav-docs">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span><span>Documentos</span>
       </div>
@@ -1244,6 +1247,7 @@ img{max-width:100%}
     </div>
 
     <!-- PAGE: DOCUMENTOS -->
+    <div id="page-tarefas" class="page-content"></div>
     <div id="page-docs" class="page-content">
       <!-- JS will populate -->
     </div>
@@ -4749,7 +4753,7 @@ const PAGE_TITLES = {
   painel:'Painel', cobr:'Cobranças', devedores:'Devedores', processos:'Processos',
   pipeline:'Pipeline', clientes:'Clientes', docs:'Documentos', fin:'Financeiro',
   relat:'Relatórios', wa:'WhatsApp', config:'Configurações', calc:'Calculadora Jurídica',
-  aprovacoes:'Aprovações'
+  aprovacoes:'Aprovações', tarefas:'Tarefas'
 };
 const PAGE_BREADCRUMBS = {
   painel:    ['Painel','Visão geral'],
@@ -4765,6 +4769,7 @@ const PAGE_BREADCRUMBS = {
   config:    ['Sistema','Configurações'],
   calc:      ['Sistema','Calculadora Jurídica'],
   aprovacoes:['Sistema','Aprovações'],
+  tarefas:   ['Tarefas'],
 };
 
 const PAGE_RENDERERS = {
@@ -4779,7 +4784,8 @@ const PAGE_RENDERERS = {
   wa: ()=>renderWhatsApp(),
   config: ()=>renderConfiguracoes(),
   calc: ()=>renderCalculadora(),
-  aprovacoes: ()=>renderAprovacoes()
+  aprovacoes: ()=>renderAprovacoes(),
+  tarefas: ()=>renderTarefas()
 };
 
 // Páginas com dados agregados de toda a carteira/credores — só gestor (proprietário).
@@ -4920,6 +4926,151 @@ function updateNotifBadge(){
 }
 
 // ── DASHBOARD ────────────────────────────────────────────────
+// ── TAREFAS / ATIVIDADES ─────────────────────────────────────
+// Pedido do gestor (2026-06-12): tarefas com prazo, designação e prioridade.
+// Shape (compatível com o Painel, que já lê titulo/prazo/status):
+// { id, titulo, desc, prazo(YYYY-MM-DD), responsavel(nome), responsavelId,
+//   prioridade('alta'|'media'|'baixa'), status('Pendente'|'Concluída'),
+//   criadoPor, criadoEm, concluidaEm, concluidaPor }
+// Gestor: cria/edita/exclui e designa. Colaborador: vê as suas e conclui.
+const TAREFA_PRIO = { alta:{label:'Alta',cor:'#e53e3e',peso:0}, media:{label:'Média',cor:'#d69e2e',peso:1}, baixa:{label:'Baixa',cor:'#718096',peso:2} };
+
+function minhasTarefas(){
+  const todas = DB.tarefas || [];
+  if(currentUser?.tipo === 'gestor') return todas;
+  return todas.filter(t => t.responsavel === currentUser?.nome);
+}
+function atualizarBadgeTarefas(){
+  const el = document.getElementById('nav-tarefas-count');
+  if(!el) return;
+  const n = minhasTarefas().filter(t => t.status !== 'Concluída').length;
+  el.textContent = n;
+  el.style.display = n > 0 ? 'inline-block' : 'none';
+}
+function renderTarefas(){
+  const el = document.getElementById('page-tarefas');
+  if(!el) return;
+  const hojeStr = new Date().toISOString().slice(0,10);
+  const lista = minhasTarefas();
+  const pend = lista.filter(t=>t.status!=='Concluída').slice().sort((a,b)=>{
+    const pa = (TAREFA_PRIO[a.prioridade]||TAREFA_PRIO.media).peso, pb = (TAREFA_PRIO[b.prioridade]||TAREFA_PRIO.media).peso;
+    if(pa!==pb) return pa-pb;
+    return (a.prazo||'9999') < (b.prazo||'9999') ? -1 : 1;
+  });
+  const conc = lista.filter(t=>t.status==='Concluída').slice().sort((a,b)=>(b.concluidaEm||'')<(a.concluidaEm||'')?-1:1).slice(0,15);
+  const ehG = currentUser?.tipo === 'gestor';
+
+  const linha = t => {
+    const p = TAREFA_PRIO[t.prioridade] || TAREFA_PRIO.media;
+    const vencida = t.status!=='Concluída' && t.prazo && t.prazo < hojeStr;
+    const done = t.status==='Concluída';
+    return `<div style="display:flex;gap:12px;align-items:flex-start;padding:13px 16px;border-bottom:1px solid var(--border);${done?'opacity:.55;':''}">
+      <input type="checkbox" ${done?'checked':''} onchange="concluirTarefa('${t.id}', this.checked)" style="margin-top:3px;width:16px;height:16px;cursor:pointer;" title="${done?'Reabrir':'Concluir'}">
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13.5px;font-weight:600;color:var(--text);${done?'text-decoration:line-through;':''}">${escHtml(t.titulo||'—')}</div>
+        ${t.desc?`<div style="font-size:12px;color:var(--text-2);margin-top:3px;white-space:pre-wrap;">${escHtml(t.desc)}</div>`:''}
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;font-size:11px;color:var(--text-3);align-items:center;">
+          <span style="padding:1px 8px;border-radius:99px;font-weight:700;color:#fff;background:${p.cor};">${p.label}</span>
+          ${t.prazo?`<span style="${vencida?'color:var(--danger);font-weight:700;':''}">📅 ${new Date(t.prazo+'T00:00:00').toLocaleDateString('pt-BR')}${vencida?' · VENCIDA':''}</span>`:''}
+          ${t.responsavel?`<span>👤 ${escHtml(t.responsavel)}</span>`:'<span>👤 sem designação</span>'}
+          ${t.criadoPor?`<span style="opacity:.7;">por ${escHtml(t.criadoPor)}</span>`:''}
+          ${done&&t.concluidaEm?`<span style="opacity:.7;">✓ ${new Date(t.concluidaEm).toLocaleDateString('pt-BR')}</span>`:''}
+        </div>
+      </div>
+      ${ehG?`<button class="btn btn-ghost btn-sm btn-icon" title="Excluir tarefa" onclick="excluirTarefa('${t.id}')" style="color:var(--danger);flex-shrink:0;">✕</button>`:''}
+    </div>`;
+  };
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+      <div>
+        <div style="font-size:22px;font-weight:700;letter-spacing:-.02em;">Tarefas</div>
+        <div style="font-size:12.5px;color:var(--text-2);margin-top:3px;">${pend.length} pendente${pend.length!==1?'s':''}${ehG?' (equipe inteira)':' (suas)'}</div>
+      </div>
+      ${ehG?`<button class="btn btn-primary btn-sm" onclick="abrirNovaTarefa()">${ico('plus',13)} Nova tarefa</button>`:''}
+    </div>
+    <div id="tarefa-form-wrap" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px;">
+      <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:10px;margin-bottom:10px;">
+        <div><label style="font-size:11px;font-weight:600;color:var(--text-2);">Título *</label>
+          <input type="text" id="tf-titulo" placeholder="O que precisa ser feito" style="width:100%;padding:8px 10px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-family:inherit;background:var(--bg);color:var(--text);"></div>
+        <div><label style="font-size:11px;font-weight:600;color:var(--text-2);">Prazo</label>
+          <input type="date" id="tf-prazo" style="width:100%;padding:8px 10px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-family:inherit;background:var(--bg);color:var(--text);"></div>
+        <div><label style="font-size:11px;font-weight:600;color:var(--text-2);">Designar para</label>
+          <select id="tf-resp" style="width:100%;padding:8px 10px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-family:inherit;background:var(--bg);color:var(--text);"><option value="">Carregando…</option></select></div>
+        <div><label style="font-size:11px;font-weight:600;color:var(--text-2);">Prioridade</label>
+          <select id="tf-prio" style="width:100%;padding:8px 10px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-family:inherit;background:var(--bg);color:var(--text);">
+            <option value="alta">Alta</option><option value="media" selected>Média</option><option value="baixa">Baixa</option></select></div>
+      </div>
+      <label style="font-size:11px;font-weight:600;color:var(--text-2);">Detalhes (opcional)</label>
+      <textarea id="tf-desc" rows="2" placeholder="Passo a passo, contexto, links…" style="width:100%;padding:8px 10px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-family:inherit;background:var(--bg);color:var(--text);resize:vertical;"></textarea>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px;">
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('tarefa-form-wrap').style.display='none'">Cancelar</button>
+        <button class="btn btn-primary btn-sm" onclick="salvarTarefa()">Salvar tarefa</button>
+      </div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;">
+      ${pend.length ? pend.map(linha).join('') : `<div class="empty-state" style="padding:34px;"><div class="empty-state-icon">${ico('target',32)}</div><h3>Nenhuma tarefa pendente</h3><p>${ehG?'Crie a primeira com "Nova tarefa".':'Você está em dia. 👏'}</p></div>`}
+    </div>
+    ${conc.length?`<div style="margin-top:18px;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.06em;color:var(--text-3);margin-bottom:8px;">CONCLUÍDAS RECENTES</div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;">${conc.map(linha).join('')}</div>
+    </div>`:''}`;
+  atualizarBadgeTarefas();
+}
+async function abrirNovaTarefa(){
+  const w = document.getElementById('tarefa-form-wrap');
+  if(!w) return;
+  w.style.display = 'block';
+  document.getElementById('tf-titulo').focus();
+  const sel = document.getElementById('tf-resp');
+  try{
+    const roster = await carregarRosterAppUsers();
+    sel.innerHTML = '<option value="">— sem designação —</option>' +
+      (roster||[]).map(u=>`<option value="${escHtml(u.nome)}" data-id="${u.id}">${escHtml(u.nome)}</option>`).join('');
+  }catch(e){ sel.innerHTML = '<option value="">(falha ao listar usuários)</option>'; }
+}
+function salvarTarefa(){
+  const titulo = (document.getElementById('tf-titulo')?.value||'').trim();
+  if(!titulo){ showToast('Dê um título à tarefa.','warning'); return; }
+  const sel = document.getElementById('tf-resp');
+  const opt = sel && sel.selectedOptions && sel.selectedOptions[0];
+  DB.tarefas = DB.tarefas || [];
+  DB.tarefas.push({
+    id: uid(), titulo,
+    desc: (document.getElementById('tf-desc')?.value||'').trim(),
+    prazo: document.getElementById('tf-prazo')?.value || '',
+    responsavel: sel?.value || '',
+    responsavelId: (opt && opt.dataset.id) || '',
+    prioridade: document.getElementById('tf-prio')?.value || 'media',
+    status: 'Pendente',
+    criadoPor: currentUser?.nome || 'Sistema',
+    criadoEm: new Date().toISOString()
+  });
+  save();
+  logAtividade('Criou tarefa', `"${titulo}"${sel?.value?' → '+sel.value:''}`);
+  renderTarefas();
+  showToast('Tarefa criada.','success');
+}
+function concluirTarefa(id, done){
+  const t = (DB.tarefas||[]).find(x=>x.id===id);
+  if(!t) return;
+  t.status = done ? 'Concluída' : 'Pendente';
+  t.concluidaEm = done ? new Date().toISOString() : null;
+  t.concluidaPor = done ? (currentUser?.nome||'') : null;
+  save();
+  logAtividade(done?'Concluiu tarefa':'Reabriu tarefa', `"${t.titulo}"`);
+  renderTarefas();
+}
+function excluirTarefa(id){
+  if(currentUser?.tipo !== 'gestor'){ showToast('Apenas o gestor exclui tarefas.','danger'); return; }
+  const t = (DB.tarefas||[]).find(x=>x.id===id);
+  if(!t || !confirm(`Excluir a tarefa "${t.titulo}"?`)) return;
+  DB.tarefas = (DB.tarefas||[]).filter(x=>x.id!==id);
+  save();
+  logAtividade('Excluiu tarefa', `"${t.titulo}"`);
+  renderTarefas();
+}
+
 // ── Item 7: HOME DO COLABORADOR ──────────────────────────────
 // 4 blocos: fila por prioridade (calcScore), esquecidos 7+ dias,
 // assinaturas pendentes e mini-resumo da carteira própria no cabeçalho.
@@ -4957,6 +5108,13 @@ function renderPainelColaborador(){
       <div style="font-size:20px;font-weight:700;letter-spacing:-.02em;">${greeting()}, ${escHtml((currentUser.nome||'').split(' ')[0])}.</div>
       <div style="font-size:12.5px;color:var(--text-2);margin-top:2px;">Sua carteira: <strong>${meus.length}</strong> cobranças ativas · <strong style="font-family:var(--font-mono);">${fmtR(carteiraTotal)}</strong> · ${emAcordo} em acordo</div>
     </div>
+    ${(()=>{ // tarefas designadas a mim, pendentes
+      const ts = (DB.tarefas||[]).filter(t=>t.status!=='Concluída' && t.responsavel===currentUser.nome);
+      if(!ts.length) return '';
+      return `<div style="background:#FFF7E0;border:1px solid #F5C56B;border-radius:10px;padding:12px 16px;margin-bottom:14px;">
+        <div style="font-size:12px;font-weight:700;letter-spacing:.05em;color:#8C5A00;margin-bottom:6px;">📌 SUAS TAREFAS (${ts.length}) — <a onclick="showPage('tarefas')" style="cursor:pointer;text-decoration:underline;">ver todas</a></div>
+        ${ts.slice(0,3).map(t=>`<div style="font-size:12.5px;color:var(--text);padding:3px 0;">• ${escHtml(t.titulo)}${t.prazo?` <span style="color:var(--text-3);font-size:11px;">(até ${new Date(t.prazo+'T00:00:00').toLocaleDateString('pt-BR')})</span>`:''}</div>`).join('')}
+      </div>`; })()}
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px;">
       ${bloco('🎯 O QUE FAZER AGORA <span style="font-weight:500;color:var(--text-3);">(por prioridade)</span>',
         fila.length ? fila.map(linhaDev).join('') : '', 'Carteira em dia — nada urgente.')}
@@ -7303,6 +7461,8 @@ function updateRascunhosBadge(){
   const total = listarRascunhos().total;
   el.textContent = String(total);
   el.style.display = total > 0 ? 'inline-block' : 'none';
+  // badge de tarefas pendentes acompanha o mesmo ciclo de atualização
+  try{ atualizarBadgeTarefas(); }catch(_){}
 }
 // monkey-patch save() pra atualizar badge
 (function hookSaveBadge(){
