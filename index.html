@@ -16190,8 +16190,16 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
     const tabBtn = (id,label)=>`<button onclick="window._auditTab='${id}';renderCfgSection('auditoria')" style="padding:7px 16px;border:none;border-bottom:2px solid ${auditTab===id?'var(--navy)':'transparent'};background:transparent;font-size:13px;font-weight:${auditTab===id?700:400};color:${auditTab===id?'var(--navy)':'var(--text-2)'};cursor:pointer;">${label}</button>`;
 
     if(auditTab === 'atividades'){
-      const log = (DB.auditLog||[]);
+      // Fonte central (audit_logs) mesclada com o log local do blob — assim as
+      // atividades de TODOS os usuários aparecem (antes só as do próprio).
+      const central = (window._auditCentral||[]).map(r=>({
+        ts: r.created_at, usuario: r.actor_name||'—', acao: r.action||'',
+        detalhes: (r.metadata&&r.metadata.detalhes)||'', _c: true, id: 'c'+r.id }));
+      const vistos = new Set(central.map(e=>(e.ts||'')+(e.acao||'')+(e.detalhes||'')));
+      const locais = (DB.auditLog||[]).filter(e=>!vistos.has((e.ts||'')+(e.acao||'')+(e.detalhes||'')));
+      const log = central.concat(locais).sort((a,b)=>(b.ts||'').localeCompare(a.ts||''));
       const rows = log.slice(0, 200);
+      carregarAuditCentral();
       el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:12px;">Auditoria</h3>
         <div style="display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:18px;">
           ${tabBtn('atividades','Últimas atividades')}
@@ -18258,9 +18266,43 @@ function selecionarTodosFiltrados(){
 // ══════════════════════════════════════════════════════════════
 function logAtividade(acao, detalhes, entidadeId){
   if(!DB.auditLog) DB.auditLog = [];
-  const usuario = DB.config.nomeGestor || DB.config.nome || 'Sistema';
+  // BUG corrigido (2026-06-12): gravava sempre o nome do gestor — atividades
+  // das colaboradoras apareciam como dele (ou sumiam). Agora: usuário logado,
+  // e o evento também vai para a tabela central audit_logs (não se perde em
+  // conflito de gravação do blob e todos os usuários aparecem).
+  const usuario = currentUser?.nome || DB.config.nomeGestor || DB.config.nome || 'Sistema';
   DB.auditLog.unshift({ id:uid(), ts:new Date().toISOString(), usuario, acao, detalhes:detalhes||'', entidadeId:entidadeId||'' });
   if(DB.auditLog.length > 1000) DB.auditLog.length = 1000;
+  try{
+    const supa = getSupabase();
+    if(supa){
+      supa.from('audit_logs').insert({
+        actor_id: currentUser?.supaId || null,
+        actor_name: usuario,
+        actor_role: currentUser?.tipo || null,
+        action: acao,
+        entity: 'faturamento',
+        entity_id: entidadeId || null,
+        metadata: { detalhes: detalhes || '' }
+      }).then(({error})=>{ if(error) console.debug('audit_logs:', error.message); });
+    }
+  }catch(e){ console.debug('audit_logs ex:', e?.message||e); }
+}
+
+// Busca o log central (tabela audit_logs) — cache 20s; re-renderiza ao chegar.
+async function carregarAuditCentral(){
+  const supa = getSupabase();
+  if(!supa) return;
+  if(window._auditCentralAt && Date.now() - window._auditCentralAt < 20000) return;
+  window._auditCentralAt = Date.now();
+  const { data, error } = await supa.from('audit_logs').select('*')
+    .order('created_at', { ascending:false }).limit(300);
+  if(error){ console.debug('audit central:', error.message); return; }
+  const antes = (window._auditCentral||[]).length;
+  window._auditCentral = data || [];
+  if((data||[]).length !== antes && window._auditTab !== 'arquivados'){
+    try{ renderCfgSection('auditoria'); }catch(_){}
+  }
 }
 
 function restaurarDevedorCfg(devId){
