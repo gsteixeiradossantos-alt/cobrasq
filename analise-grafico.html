@@ -128,6 +128,7 @@
 
   <!-- ABA ANÁLISE -->
   <div id="tab-analise">
+    <div class="error" id="circuit-banner" style="margin-bottom:16px"></div>
     <div class="panel">
       <div class="dropzone" id="dropzone">
         <span id="dz-hint">📋 Cole o print aqui (Ctrl+V), arraste a imagem, ou clique para escolher o arquivo</span>
@@ -165,7 +166,8 @@
       <div class="decision">
         <span class="badge big" id="d-entrada"></span>
         <div class="dec-grid">
-          <div class="dec-item"><div class="lbl">Valor de entrada</div><div class="val" id="d-valor"></div></div>
+          <div class="dec-item"><div class="lbl">Preço de entrada</div><div class="val" id="d-valor"></div></div>
+          <div class="dec-item"><div class="lbl">Quanto apostar</div><div class="val" id="d-stake"></div></div>
           <div class="dec-item"><div class="lbl">Expiração</div><div class="val" id="d-exp"></div></div>
           <div class="dec-item"><div class="lbl">Horário da análise</div><div class="val" id="d-hora"></div></div>
           <div class="dec-item"><div class="lbl">Válido até</div><div class="val" id="d-validade"></div></div>
@@ -213,7 +215,9 @@
       </table>
       <br>
       <button class="secondary" id="btn-export">Exportar diário (JSON)</button>
+      <button class="secondary" id="btn-import">Importar diário (JSON)</button>
       <button class="secondary" id="btn-apagar-diario">Apagar histórico</button>
+      <input type="file" id="import-input" accept="application/json,.json" style="display:none">
     </div>
   </div>
 
@@ -232,6 +236,16 @@
       </select>
       <button id="btn-salvar-config">Salvar</button>
       <p class="meta">A chave é armazenada apenas no localStorage do seu navegador e enviada diretamente à API da Anthropic — nenhum outro servidor recebe seus dados ou imagens.</p>
+    </div>
+    <div class="panel">
+      <h2>Gestão de banca (estilo prop firm)</h2>
+      <div class="row">
+        <div><label>Banca demo ($)</label><input type="text" id="g-banca" placeholder="ex.: 1000"></div>
+        <div><label>Risco por entrada (%)</label><input type="text" id="g-risco" placeholder="1 (máx. 2)"></div>
+        <div><label>Payout médio da corretora (%)</label><input type="text" id="g-payout" placeholder="87"></div>
+      </div>
+      <button id="btn-salvar-gestao">Salvar gestão</button>
+      <p class="meta">Padrão profissional: arriscar 1–2% da banca por entrada. Com a banca configurada, o cartão de decisão mostra quanto apostar em $, e o app aplica o freio usado por prop firms como a FTMO: após 3 losses seguidos ou 5% de perda no dia, ele pede para você parar até o dia seguinte.</p>
     </div>
   </div>
 
@@ -364,6 +378,93 @@
     alert('Configurações salvas.');
   });
 
+  // ---------- gestão de banca e circuit breaker ----------
+  function numCampo(id) {
+    return parseFloat(($(id).value || '').replace(',', '.'));
+  }
+  function configGestao() {
+    return {
+      banca: parseFloat(localStorage.getItem('qx_banca')) || 0,
+      risco: parseFloat(localStorage.getItem('qx_risco')) || 1,
+      payout: parseFloat(localStorage.getItem('qx_payout')) || 87
+    };
+  }
+  function stakeAtual() {
+    var g = configGestao();
+    return g.banca > 0 ? g.banca * g.risco / 100 : 0;
+  }
+  function fmtUSD(v) { return '$ ' + v.toFixed(2); }
+
+  $('g-banca').value = localStorage.getItem('qx_banca') || '';
+  $('g-risco').value = localStorage.getItem('qx_risco') || '';
+  $('g-payout').value = localStorage.getItem('qx_payout') || '';
+  $('btn-salvar-gestao').addEventListener('click', function () {
+    var banca = numCampo('g-banca') || 0;
+    var risco = numCampo('g-risco') || 1;
+    var payout = numCampo('g-payout') || 87;
+    if (risco > 2) {
+      alert('Risco por entrada limitado a 2% — padrão profissional de gestão. Ajustado para 2%.');
+      risco = 2;
+    }
+    localStorage.setItem('qx_banca', banca);
+    localStorage.setItem('qx_risco', risco);
+    localStorage.setItem('qx_payout', payout);
+    $('g-banca').value = banca || '';
+    $('g-risco').value = risco;
+    $('g-payout').value = payout;
+    alert('Gestão salva.');
+    atualizarCircuit();
+  });
+
+  // regra estilo FTMO: 3 losses seguidos ou perda diária >= 5% da banca → pare por hoje
+  function estadoCircuit() {
+    var g = configGestao();
+    if (!g.banca) return { bloqueado: false };
+    var hoje = new Date().toDateString();
+    var seguidas = 0, contandoSeq = true, pnl = 0;
+    getJournal().forEach(function (e) {
+      if (e.resultado !== 'win' && e.resultado !== 'loss') return;
+      if (new Date(e.ts).toDateString() !== hoje) { contandoSeq = false; return; }
+      if (contandoSeq) {
+        if (e.resultado === 'loss') seguidas++;
+        else contandoSeq = false;
+      }
+      var st = e.stake || stakeAtual();
+      pnl += (e.resultado === 'win') ? st * g.payout / 100 : -st;
+    });
+    var limite = g.banca * 0.05;
+    if (seguidas >= 3) {
+      return { bloqueado: true, motivo: seguidas + ' losses seguidos hoje' };
+    }
+    if (pnl <= -limite) {
+      return { bloqueado: true, motivo: 'a perda do dia chegou a ' + fmtUSD(-pnl) + ' (limite de 5% da banca: ' + fmtUSD(limite) + ')' };
+    }
+    return { bloqueado: false };
+  }
+
+  function atualizarCircuit() {
+    var banner = $('circuit-banner');
+    var cb = estadoCircuit();
+    if (cb.bloqueado && localStorage.getItem('qx_override') !== new Date().toDateString()) {
+      banner.innerHTML = '';
+      var txt = document.createElement('div');
+      txt.style.marginBottom = '8px';
+      txt.textContent = '🛑 PARE POR HOJE: ' + cb.motivo + '. Sequências de perda são o momento em que se quebra a banca tentando recuperar — prop firms desligam o trader nesse ponto. Volte amanhã.';
+      banner.appendChild(txt);
+      var btn = document.createElement('button');
+      btn.className = 'secondary';
+      btn.textContent = 'Continuar mesmo assim (não recomendado)';
+      btn.addEventListener('click', function () {
+        localStorage.setItem('qx_override', new Date().toDateString());
+        atualizarCircuit();
+      });
+      banner.appendChild(btn);
+      banner.style.display = 'block';
+    } else {
+      banner.style.display = 'none';
+    }
+  }
+
   // ---------- captura da imagem ----------
   function setImagem(dataUrl, aoTerminar) {
     // redimensiona se a borda longa passar de 2000px, para controlar custo
@@ -456,7 +557,7 @@
   function capturarEAnalisar() {
     var video = $('live-video');
     if (!liveStream || !video.videoWidth) return;
-    if ($('btn-analisar').disabled && $('spinner').style.display === 'block') return; // análise em andamento
+    if (analisando) return; // análise em andamento
     var canvas = document.createElement('canvas');
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
@@ -490,7 +591,56 @@
   });
 
   // ---------- chamada da API ----------
+  var analisando = false; // guard único de concorrência (botão, modo automático)
+
+  // fetch com timeout de 90s e retry com backoff para 429/5xx (2 tentativas)
+  function chamarAPI(apiKey, body, tentativa) {
+    tentativa = tentativa || 0;
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, 90000);
+    return fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify(body),
+      signal: ctrl.signal
+    })
+    .then(function (resp) {
+      clearTimeout(timer);
+      if ((resp.status === 429 || resp.status >= 500) && tentativa < 2) {
+        var espera = parseInt(resp.headers.get('retry-after'), 10);
+        espera = (isNaN(espera) ? Math.pow(2, tentativa + 1) : espera) * 1000;
+        return new Promise(function (res) { setTimeout(res, espera); })
+          .then(function () { return chamarAPI(apiKey, body, tentativa + 1); });
+      }
+      return resp.json().then(function (json) {
+        if (!resp.ok) {
+          throw new Error((json.error && json.error.message) || ('Erro HTTP ' + resp.status));
+        }
+        return json;
+      });
+    })
+    .catch(function (err) {
+      clearTimeout(timer);
+      if (err.name === 'AbortError') {
+        if (tentativa < 2) return chamarAPI(apiKey, body, tentativa + 1);
+        throw new Error('A análise demorou demais (timeout de 90s). Tente novamente.');
+      }
+      throw err;
+    });
+  }
+
   function analisar() {
+    if (analisando) return;
+    var cb = estadoCircuit();
+    if (cb.bloqueado && localStorage.getItem('qx_override') !== new Date().toDateString()) {
+      atualizarCircuit();
+      return;
+    }
     var apiKey = (localStorage.getItem(LS_KEY) || '').trim();
     if (!apiKey) {
       alert('Configure sua chave da API na aba Configurações.');
@@ -506,7 +656,7 @@
 
     var body = {
       model: model,
-      max_tokens: 4000,
+      max_tokens: 16000,
       system: SYSTEM_PROMPT,
       output_config: { format: { type: 'json_schema', schema: SCHEMA } },
       messages: [{
@@ -522,33 +672,19 @@
       body.thinking = { type: 'adaptive' };
     }
 
+    analisando = true;
     $('btn-analisar').disabled = true;
     $('spinner').style.display = 'block';
     $('error').style.display = 'none';
     $('result').style.display = 'none';
 
-    fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
-      body: JSON.stringify(body)
-    })
-    .then(function (resp) {
-      return resp.json().then(function (json) {
-        if (!resp.ok) {
-          var msg = (json.error && json.error.message) || ('Erro HTTP ' + resp.status);
-          throw new Error(msg);
-        }
-        return json;
-      });
-    })
+    chamarAPI(apiKey, body)
     .then(function (json) {
       if (json.stop_reason === 'refusal') {
         throw new Error('O modelo recusou esta análise. Tente outro print.');
+      }
+      if (json.stop_reason === 'max_tokens') {
+        throw new Error('A análise excedeu o limite de tamanho e voltou incompleta. Tente novamente.');
       }
       var textBlock = (json.content || []).filter(function (b) { return b.type === 'text'; })[0];
       if (!textBlock) throw new Error('Resposta sem conteúdo de texto.');
@@ -561,6 +697,7 @@
       $('error').style.display = 'block';
     })
     .finally(function () {
+      analisando = false;
       $('btn-analisar').disabled = false;
       $('spinner').style.display = 'none';
     });
@@ -580,6 +717,8 @@
     $('d-entrada').textContent = rotulo;
     $('d-entrada').className = 'badge big ' + a.cenario;
     $('d-valor').textContent = a.preco_entrada || '—';
+    $('d-stake').textContent = a.cenario === 'AGUARDAR' ? '—'
+      : (stakeAtual() ? fmtUSD(stakeAtual()) : 'defina a banca');
     $('d-exp').textContent = a.cenario === 'AGUARDAR' ? '—' : a.expiracao_sugerida;
     var agora = new Date();
     $('d-hora').textContent = agora.toLocaleTimeString('pt-BR');
@@ -687,14 +826,27 @@
       confianca: a.confianca,
       padroes: a.padroes.map(function (p) { return p.nome; }),
       detalhes: a, // análise completa, para estudo e refinamento futuro do prompt
+      stake: stakeAtual(),
       resultado: 'pendente'
     });
+    // teto do diário: análise completa só nos últimos 300 registros; máx. 2000 entradas
+    if (j.length > 2000) j.length = 2000;
+    for (var i = 300; i < j.length; i++) delete j[i].detalhes;
     setJournal(j);
   }
 
   function marcar(id, resultado) {
     var j = getJournal();
     j.forEach(function (e) { if (e.id === id) e.resultado = resultado; });
+    setJournal(j);
+    renderJournal();
+    atualizarCircuit();
+  }
+
+  // para "não entrei": registra o que o sinal teria dado (mede a IA separada da execução)
+  function marcarSinal(id, valor) {
+    var j = getJournal();
+    j.forEach(function (e) { if (e.id === id) e.sinal_resultado = valor; });
     setJournal(j);
     renderJournal();
   }
@@ -727,8 +879,24 @@
           btn.addEventListener('click', function () { marcar(e.id, par[0]); });
           tdRes.appendChild(btn);
         });
+      } else if (e.resultado === 'skip' && !e.sinal_resultado) {
+        tdRes.className = 'res-btns';
+        var lbl = document.createElement('span');
+        lbl.className = 'res-skip';
+        lbl.textContent = 'não entrou · teria dado: ';
+        tdRes.appendChild(lbl);
+        [['win', '✅'], ['loss', '❌']].forEach(function (par) {
+          var btn = document.createElement('button');
+          btn.className = 'secondary';
+          btn.textContent = par[1];
+          btn.addEventListener('click', function () { marcarSinal(e.id, par[0]); });
+          tdRes.appendChild(btn);
+        });
+      } else if (e.resultado === 'skip') {
+        tdRes.innerHTML = '<span class="res-skip">não entrou (teria ' +
+          (e.sinal_resultado === 'win' ? 'WIN' : 'LOSS') + ')</span>';
       } else {
-        tdRes.innerHTML = { win: '<span class="res-win">WIN</span>', loss: '<span class="res-loss">LOSS</span>', skip: '<span class="res-skip">não entrou</span>' }[e.resultado] || e.resultado;
+        tdRes.innerHTML = { win: '<span class="res-win">WIN</span>', loss: '<span class="res-loss">LOSS</span>' }[e.resultado] || e.resultado;
       }
       tr.appendChild(tdRes);
       tbody.appendChild(tr);
@@ -741,7 +909,13 @@
     var porDir = { CALL: { w: 0, l: 0 }, PUT: { w: 0, l: 0 } };
     var porConf = { baixa: { w: 0, l: 0 }, media: { w: 0, l: 0 }, alta: { w: 0, l: 0 } };
     var porSetup = {};
+    var faixas = { 'Madrugada': { w: 0, l: 0 }, 'Manhã': { w: 0, l: 0 }, 'Tarde': { w: 0, l: 0 }, 'Noite': { w: 0, l: 0 } };
+    var sw = 0, sl = 0; // sinais avaliados em entradas não realizadas ("teria dado")
     j.forEach(function (e) {
+      if (e.resultado === 'skip' && e.sinal_resultado) {
+        e.sinal_resultado === 'win' ? sw++ : sl++;
+        return;
+      }
       if (e.resultado !== 'win' && e.resultado !== 'loss') return;
       var ok = e.resultado === 'win';
       ok ? w++ : l++;
@@ -751,31 +925,66 @@
         porSetup[e.setup] = porSetup[e.setup] || { w: 0, l: 0 };
         ok ? porSetup[e.setup].w++ : porSetup[e.setup].l++;
       }
+      var h = new Date(e.ts).getHours();
+      var f = h < 6 ? 'Madrugada' : h < 12 ? 'Manhã' : h < 18 ? 'Tarde' : 'Noite';
+      ok ? faixas[f].w++ : faixas[f].l++;
     });
+
+    // expectância: EV por entrada = win% × payout − loss% × 100 (em % do valor apostado)
+    var g = configGestao();
+    var breakEven = 100 * 100 / (100 + g.payout);
+    var evTxt = '—', evCor = '';
+    if (w + l > 0) {
+      var wr = w / (w + l);
+      var ev = wr * g.payout - (1 - wr) * 100;
+      evTxt = (ev >= 0 ? '+' : '') + ev.toFixed(1) + '%';
+      evCor = ev >= 0 ? 'var(--green)' : 'var(--red)';
+    }
+
     var cards = $('stats-cards');
     cards.innerHTML = '';
     [
-      ['Análises', String(j.length)],
-      ['Taxa de acerto', pct(w, l)],
-      ['CALL', pct(porDir.CALL.w, porDir.CALL.l)],
-      ['PUT', pct(porDir.PUT.w, porDir.PUT.l)]
+      ['Análises', String(j.length), ''],
+      ['Taxa de acerto', pct(w, l), ''],
+      ['Expectância/entrada', evTxt, evCor],
+      ['CALL', pct(porDir.CALL.w, porDir.CALL.l), ''],
+      ['PUT', pct(porDir.PUT.w, porDir.PUT.l), '']
     ].forEach(function (par) {
       var div = document.createElement('div');
       div.className = 'stat-card';
       div.innerHTML = '<div class="num"></div><div class="lbl"></div>';
       div.querySelector('.num').textContent = par[1];
+      if (par[2]) div.querySelector('.num').style.color = par[2];
       div.querySelector('.lbl').textContent = par[0];
       cards.appendChild(div);
     });
+
     var setupLinhas = Object.keys(porSetup).map(function (s) {
       return (NOME_SETUP[s] || s) + ': ' + pct(porSetup[s].w, porSetup[s].l);
     }).join(' · ') || '—';
+    var faixaLinhas = Object.keys(faixas).filter(function (f) { return faixas[f].w + faixas[f].l > 0; })
+      .map(function (f) { return f + ': ' + pct(faixas[f].w, faixas[f].l); }).join(' · ') || '—';
+
+    // checagem de calibração: a confiança "alta" precisa acertar mais que a "baixa" para valer algo
+    var calib = '';
+    var ta = porConf.alta.w + porConf.alta.l, tb = porConf.baixa.w + porConf.baixa.l;
+    if (ta >= 5 && tb >= 5) {
+      var wrAlta = 100 * porConf.alta.w / ta, wrBaixa = 100 * porConf.baixa.w / tb;
+      calib = '<br><b>Calibração da IA:</b> ' + ((wrAlta - wrBaixa >= 10)
+        ? '✔ a confiança "alta" acerta de fato mais que a "baixa" — o rótulo está calibrado.'
+        : '⚠ a confiança "alta" não está acertando mais que a "baixa" — trate o rótulo de confiança com ceticismo.');
+    }
+
     $('stats-detalhe').innerHTML =
-      '<details><summary>Acerto por setup e por nível de confiança</summary><p style="font-size:13px;padding:8px 0">'
+      '<details><summary>Detalhes: setup, confiança, horário e sinal da IA</summary><p style="font-size:13px;padding:8px 0;line-height:1.9">'
       + '<b>Por setup:</b> ' + setupLinhas + '<br>'
       + '<b>Por confiança:</b> Alta: ' + pct(porConf.alta.w, porConf.alta.l)
       + ' · Média: ' + pct(porConf.media.w, porConf.media.l)
-      + ' · Baixa: ' + pct(porConf.baixa.w, porConf.baixa.l)
+      + ' · Baixa: ' + pct(porConf.baixa.w, porConf.baixa.l) + '<br>'
+      + '<b>Por horário:</b> ' + faixaLinhas + '<br>'
+      + '<b>Acurácia do sinal da IA (incluindo entradas não realizadas):</b> ' + pct(w + sw, l + sl) + '<br>'
+      + '<b>Break-even com payout ' + g.payout + '%:</b> ' + breakEven.toFixed(1) + '% de acerto'
+      + calib
       + '</p></details>';
   }
 
@@ -788,12 +997,47 @@
     URL.revokeObjectURL(a.href);
   });
 
+  $('btn-import').addEventListener('click', function () { $('import-input').click(); });
+  $('import-input').addEventListener('change', function (e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function (ev) {
+      try {
+        var dados = JSON.parse(ev.target.result);
+        if (!Array.isArray(dados)) throw new Error('formato inválido');
+        var j = getJournal();
+        var idsExistentes = {};
+        j.forEach(function (x) { idsExistentes[x.id] = true; });
+        var novos = 0;
+        dados.forEach(function (x) {
+          if (x && x.id && x.ts && !idsExistentes[x.id]) {
+            j.push(x);
+            novos++;
+          }
+        });
+        j.sort(function (a, b) { return new Date(b.ts) - new Date(a.ts); });
+        setJournal(j);
+        renderJournal();
+        atualizarCircuit();
+        alert(novos + ' registro(s) importado(s). Duplicados foram ignorados.');
+      } catch (err) {
+        alert('Arquivo inválido: use um JSON exportado por este app.');
+      }
+      $('import-input').value = '';
+    };
+    reader.readAsText(file);
+  });
+
   $('btn-apagar-diario').addEventListener('click', function () {
     if (confirm('Apagar todo o histórico de análises? Esta ação não pode ser desfeita.')) {
       setJournal([]);
       renderJournal();
+      atualizarCircuit();
     }
   });
+
+  atualizarCircuit();
 
 })();
 </script>
