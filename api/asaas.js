@@ -2,32 +2,28 @@
 // Prioriza credencial em variável de ambiente (ASAAS_API_KEY) para manter
 // a chave fora do browser. Mantém fallback por header (backward-compat)
 // mas emite warning no console server-side.
+// Onda 1b: exige login Supabase — antes qualquer requisição anônima criava/
+// alterava/cancelava cobranças na conta Asaas do escritório.
+
+const { requireUser, applyCors } = require('./_auth.js');
 
 module.exports = async function handler(req, res) {
-  // CORS: permite chamadas da própria origem
-  const origin = req.headers.origin || '*';
-  res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-asaas-key, x-asaas-env');
+  applyCors(req, res);
 
   if (req.method === 'OPTIONS') {
     res.status(200).end();
     return;
   }
 
-  // 1) Prioriza env vars (server-side secret) — não expõe chave no browser
-  const envKey = process.env.ASAAS_API_KEY || '';
-  const envEnv = process.env.ASAAS_ENV || '';
-  // 2) Fallback: aceita header se env não estiver configurada (transição)
-  const asaasKey = envKey || req.headers['x-asaas-key'] || '';
-  const asaasEnv = envEnv || req.headers['x-asaas-env'] || 'sandbox';
-  const pathParam = (req.query.path || '').replace(/^\/+/, '');
+  const user = await requireUser(req, res);
+  if (!user) return;
 
-  if (!envKey && req.headers['x-asaas-key']) {
-    // Avisa (sem expor a chave) que está em modo inseguro
-    console.warn('[asaas proxy] ASAAS_API_KEY não configurada. Usando chave do header (inseguro).');
-  }
+  // Credencial SÓ via env var (gestor confirmou ASAAS_API_KEY setada no Vercel).
+  // O fallback de chave via header x-asaas-key foi removido: chave nunca vem do cliente.
+  const asaasKey = process.env.ASAAS_API_KEY || '';
+  // x-asaas-env (sandbox|production) não é segredo; mantém fallback por header.
+  const asaasEnv = process.env.ASAAS_ENV || req.headers['x-asaas-env'] || 'sandbox';
+  const pathParam = (req.query.path || '').replace(/^\/+/, '');
 
   if (!asaasKey) {
     return res.status(500).json({
@@ -71,6 +67,8 @@ module.exports = async function handler(req, res) {
 
     res.status(upstream.status).json(data);
   } catch (err) {
-    res.status(502).json({ error: err.message, upstream: upstreamUrl });
+    // Não expõe err.message/upstreamUrl cru (vazava topologia e detalhes internos).
+    console.error('[asaas proxy] erro upstream:', err.message);
+    res.status(502).json({ error: 'Falha ao conectar ao Asaas. Tente novamente.' });
   }
 };
