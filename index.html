@@ -3219,6 +3219,54 @@ let _syncPendingForce = false;
 // Usado pela trava anti-encolhimento do syncToSupabase.
 let _lastKnownDevCount = null;
 
+// ── GRAVAÇÃO POR REGISTRO (aprovada pelo gestor, 2026-06-12) ─────────────
+// Snapshot da última versão sincronizada. No save, comparamos registro a
+// registro e enviamos SÓ o que mudou para a RPC cobrasq_merge — o servidor
+// mescla com lock de linha. Registros não enviados ficam intocados: uma aba
+// desatualizada só consegue afetar o que ela mesma editou.
+let _syncSnapshot = null;
+const COLECOES_SYNC = ['devedores','clientes','tarefas','lancamentos','contas','cartoes','projetos','auditLog'];
+const CHAVES_REPLACE_SYNC = ['config','metas','fatHistorico'];
+function _snapColecao(arr){
+  const m = Object.create(null);
+  (arr||[]).forEach(r=>{ if(r && r.id != null) m[String(r.id)] = JSON.stringify(r); });
+  return m;
+}
+function _buildSyncSnapshot(){
+  const s = { col:{}, rep:{} };
+  COLECOES_SYNC.forEach(k=>{ s.col[k] = _snapColecao(DB[k]); });
+  CHAVES_REPLACE_SYNC.forEach(k=>{ s.rep[k] = JSON.stringify(DB[k] ?? null); });
+  return s;
+}
+function _diffParaMerge(){
+  if(!_syncSnapshot) return null;
+  const p = { colecoes:{}, replace:{} };
+  let tem = false;
+  COLECOES_SYNC.forEach(k=>{
+    const cur = Array.isArray(DB[k]) ? DB[k] : [];
+    const old = _syncSnapshot.col[k] || {};
+    const up = []; const idsAtuais = new Set();
+    cur.forEach(r=>{
+      if(!r || r.id == null) return;
+      const id = String(r.id); idsAtuais.add(id);
+      const j = JSON.stringify(r);
+      if(old[id] !== j) up.push(r);
+    });
+    const del = Object.keys(old).filter(id=>!idsAtuais.has(id));
+    if(up.length || del.length){
+      p.colecoes[k] = {};
+      if(up.length) p.colecoes[k].upsert = up;
+      if(del.length) p.colecoes[k]['delete'] = del;
+      tem = true;
+    }
+  });
+  CHAVES_REPLACE_SYNC.forEach(k=>{
+    const j = JSON.stringify(DB[k] ?? null);
+    if(_syncSnapshot.rep[k] !== j){ p.replace[k] = DB[k] ?? null; tem = true; }
+  });
+  return tem ? p : null;
+}
+
 function getSupabase(){
   if(_supa) return _supa;
   const url = DB.config.supabaseUrl||'';
@@ -3313,7 +3361,28 @@ async function syncToSupabase(force){
           return;
         }
 
-        // Optimistic concurrency: se já temos baseline da versão remota, exige
+        // ── GRAVAÇÃO POR REGISTRO: envia só o que mudou; servidor mescla ──
+        if(_syncSnapshot){
+          const diff = _diffParaMerge();
+          if(!diff){ _lastSyncAt = new Date(); _updateSyncBadge(); return; }
+          const { data: mres, error: merr } = await supa.rpc('cobrasq_merge', { p: diff });
+          if(!merr && mres && mres.ok){
+            _syncRemoteUpdatedAt = mres.updated_at || nowIso;
+            _syncSnapshot = _buildSyncSnapshot();
+            _lastKnownDevCount = localDevs;
+            _lastSyncAt = new Date();
+            _updateSyncBadge();
+            return;
+          }
+          if(merr && /F-20/.test(merr.message||'')){
+            if(typeof showToast === 'function') showToast('🛡️ ' + merr.message, 'danger');
+            try{ await loadFromSupabase(); }catch(e){ console.warn('reload pós-F20:', e?.message||e); }
+            return;
+          }
+          console.warn('cobrasq_merge indisponível — fallback para blob inteiro:', merr?.message || JSON.stringify(mres||{}));
+        }
+
+        // Optimistic concurrency (fallback/1ª gravação): se já temos baseline da versão remota, exige
         // que ela não tenha mudado desde que carregamos (alguém pode ter salvo
         // em outra aba). Caso tenha mudado, recarrega e avisa o usuário.
         let q = supa.from('cobrasq_data').update(
@@ -3336,6 +3405,7 @@ async function syncToSupabase(force){
             ).select('updated_at');
             if(insErr){ console.warn('Supabase upsert error:', insErr.message); return; }
             _syncRemoteUpdatedAt = ins?.[0]?.updated_at || nowIso;
+            _syncSnapshot = _buildSyncSnapshot(); // baseline para gravação por registro
           } else {
             // Conflito: outra aba/usuário salvou. Recarrega e pede o usuário pra reaplicar.
             console.warn('Supabase sync: conflito de versão. Recarregando.');
@@ -3351,6 +3421,7 @@ async function syncToSupabase(force){
           _syncRemoteUpdatedAt = updated[0].updated_at || nowIso;
         }
         _lastKnownDevCount = localDevs; // F-20: save aceito vira a nova referência
+        _syncSnapshot = _buildSyncSnapshot(); // baseline para gravação por registro
         _lastSyncAt = new Date();
         _updateSyncBadge();
       }catch(e){ console.warn('Supabase sync exception:', e.message); }
@@ -3372,6 +3443,7 @@ async function loadFromSupabase(){
       };
       _syncRemoteUpdatedAt = data.updated_at || null; // baseline pra optimistic concurrency
       _lastKnownDevCount = Array.isArray(p.devedores) ? p.devedores.length : null; // F-20
+      _syncSnapshot = _buildSyncSnapshot(); // baseline para gravação por registro
       localStorage.setItem(KEY, JSON.stringify(DB));
     } else {
       // First time: push local data to Supabase
