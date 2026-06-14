@@ -2687,6 +2687,65 @@ sb.auth.onAuthStateChange((event, session) => {
 });
 
 // ============================================================
+// PONTE DE MIGRAÇÃO DE localStorage (origem antiga -> nova)
+// Executa UMA vez por navegador. Importa o estado client-side que ficou na origem
+// antiga (crm-cobrasq.vercel.app) — ex.: cobrasq_checklist_tel_* (só local),
+// cobrasq_falhas_pendentes / crm_envios_falhados_local (fallbacks) — sem sobrescrever
+// nada que já exista nesta origem. Idempotente; falhas são silenciosas. Pode ser
+// removida após a janela de transição (junto com bridge.html no deploy antigo).
+// ============================================================
+(function migrarLocalStorageDaOrigemAntiga(){
+  var FLAG = 'crm_migrou_localstorage_v1';
+  var ORIGEM_ANTIGA = 'https://crm-cobrasq.vercel.app';
+  try { if (localStorage.getItem(FLAG)) return; } catch(e){ return; }
+  // Não tenta se já estamos na própria origem antiga (evita auto-iframe).
+  if (location.origin === ORIGEM_ANTIGA) return;
+
+  var iframe = null, timeout = null, finalizado = false;
+  function limpar(){
+    finalizado = true;
+    try { window.removeEventListener('message', onMsg); } catch(e){}
+    if (timeout) { clearTimeout(timeout); timeout = null; }
+    if (iframe && iframe.parentNode) { try { iframe.parentNode.removeChild(iframe); } catch(e){} }
+  }
+  function marcarFeito(){ try { localStorage.setItem(FLAG, String(Date.now())); } catch(e){} }
+  function onMsg(ev){
+    if (ev.origin !== ORIGEM_ANTIGA || !ev.data) return;
+    if (ev.data.tipo === 'cobrasq-bridge:pronto'){
+      try { iframe.contentWindow.postMessage({ tipo:'cobrasq-bridge:pedir' }, ORIGEM_ANTIGA); } catch(e){}
+      return;
+    }
+    if (ev.data.tipo === 'cobrasq-bridge:dados'){
+      if (finalizado) return;
+      var dados = ev.data.dados || {};
+      var importadas = 0;
+      try {
+        Object.keys(dados).forEach(function(k){
+          // Não sobrescreve chaves já presentes nesta origem (ex.: sessão atual).
+          if (localStorage.getItem(k) === null && dados[k] != null){
+            localStorage.setItem(k, dados[k]); importadas++;
+          }
+        });
+      } catch(e){}
+      if (importadas) console.info('[ponte] '+importadas+' chave(s) de estado migradas da origem antiga.');
+      marcarFeito();
+      limpar();
+    }
+  }
+  try {
+    window.addEventListener('message', onMsg);
+    iframe = document.createElement('iframe');
+    iframe.setAttribute('aria-hidden','true');
+    iframe.style.cssText = 'position:absolute;width:0;height:0;border:0;left:-9999px;top:-9999px;';
+    iframe.src = ORIGEM_ANTIGA + '/bridge.html';
+    iframe.onerror = function(){ marcarFeito(); limpar(); }; // origem antiga já fora do ar
+    // Se não responder em 8s, desiste e marca como feito (não repete a cada load).
+    timeout = setTimeout(function(){ marcarFeito(); limpar(); }, 8000);
+    document.documentElement.appendChild(iframe);
+  } catch(e){ marcarFeito(); limpar(); }
+})();
+
+// ============================================================
 // CONSTANTES DE NEGÓCIO
 // ============================================================
 const TAXA_CORRECAO_MENSAL = 0.08 / 12;
