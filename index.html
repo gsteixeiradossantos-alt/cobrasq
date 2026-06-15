@@ -424,6 +424,19 @@ img{max-width:100%}
 .modal{background:var(--surface);border-radius:var(--radius);box-shadow:var(--shadow-lg);width:100%;max-height:90vh;display:flex;flex-direction:column;animation:modalIn .18s ease;}
 @keyframes modalIn{from{opacity:0;transform:scale(.96) translateY(8px)}to{opacity:1;transform:none}}
 .modal-sm{max-width:420px;}.modal-md{max-width:540px;}.modal-lg{max-width:620px;}.modal-xl{max-width:780px;}
+/* ── Kanban de Tarefas ── */
+@keyframes sirenePulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.18);opacity:.5}}
+.sirene{display:inline-block;animation:sirenePulse 1s ease-in-out infinite;}
+.tar-board{display:flex;gap:14px;overflow-x:auto;padding:4px 2px 14px;align-items:flex-start;}
+.tar-col{flex:0 0 290px;max-width:290px;background:var(--surface-2);border:1px solid var(--border);border-radius:12px;display:flex;flex-direction:column;max-height:calc(100vh - 230px);}
+.tar-col-head{padding:11px 13px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:700;}
+.tar-col-body{padding:10px;display:flex;flex-direction:column;gap:9px;overflow-y:auto;flex:1;min-height:60px;}
+.tar-col.drop-hover{outline:2px dashed var(--navy);outline-offset:-3px;}
+.tar-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 11px;cursor:pointer;transition:box-shadow .12s,transform .12s;}
+.tar-card:hover{box-shadow:var(--shadow-sm,0 2px 8px rgba(0,0,0,.08));}
+.tar-card[draggable="true"]{cursor:grab;}
+.tar-card.dragging{opacity:.45;}
+.tar-chip{font-size:10.5px;font-weight:700;padding:1px 7px;border-radius:99px;display:inline-flex;align-items:center;gap:3px;}
 .modal-header{padding:18px 22px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-shrink:0;}
 .modal-title{font-size:15px;font-weight:700;color:var(--text);flex:1;}
 .modal-close{width:30px;height:30px;border-radius:6px;border:none;background:transparent;font-size:18px;color:var(--text-3);cursor:pointer;display:flex;align-items:center;justify-content:center;}
@@ -5052,12 +5065,92 @@ function updateNotifBadge(){
 //   prioridade('alta'|'media'|'baixa'), status('Pendente'|'Concluída'),
 //   criadoPor, criadoEm, concluidaEm, concluidaPor }
 // Gestor: cria/edita/exclui e designa. Colaborador: vê as suas e conclui.
-const TAREFA_PRIO = { alta:{label:'Alta',cor:'#e53e3e',peso:0}, media:{label:'Média',cor:'#d69e2e',peso:1}, baixa:{label:'Baixa',cor:'#718096',peso:2} };
+// peso = ordem de exibição (menor primeiro); pts = base de pontuação ao concluir.
+const TAREFA_PRIO = { alta:{label:'Alta',cor:'#e53e3e',peso:0,pts:30}, media:{label:'Média',cor:'#d69e2e',peso:1,pts:20}, baixa:{label:'Baixa',cor:'#718096',peso:2,pts:10} };
+
+// ── Colunas (kanban) e tipos — guardados em DB.config (sync replace), só o
+// gestor gerencia. Semeados na 1ª vez para não nascer vazio.
+const TAREFA_COLUNAS_SEED = [
+  { nome:'A Fazer',   cor:'#718096', isDone:false },
+  { nome:'Fazendo',   cor:'#2B6CB0', isDone:false },
+  { nome:'Revisão',   cor:'#9F7AEA', isDone:false },
+  { nome:'Concluído', cor:'#0F8A5F', isDone:true  },
+];
+const TAREFA_TIPOS_SEED = [
+  { nome:'Ligação',      cor:'#2B6CB0' },
+  { nome:'Petição',      cor:'#9F7AEA' },
+  { nome:'Documentação', cor:'#D69E2E' },
+  { nome:'Acordo',       cor:'#0F8A5F' },
+  { nome:'Audiência',    cor:'#E53E3E' },
+  { nome:'Outros',       cor:'#718096' },
+];
+function tarefaColunas(){
+  DB.config = DB.config || {};
+  if(!Array.isArray(DB.config.tarefaColunas) || !DB.config.tarefaColunas.length){
+    DB.config.tarefaColunas = TAREFA_COLUNAS_SEED.map((c,i)=>({ id:uid(), nome:c.nome, cor:c.cor, isDone:c.isDone, ordem:i }));
+  }
+  return DB.config.tarefaColunas.slice().sort((a,b)=>(a.ordem||0)-(b.ordem||0));
+}
+function tarefaTipos(){
+  DB.config = DB.config || {};
+  if(!Array.isArray(DB.config.tarefaTipos) || !DB.config.tarefaTipos.length){
+    DB.config.tarefaTipos = TAREFA_TIPOS_SEED.map(t=>({ id:uid(), nome:t.nome, cor:t.cor }));
+  }
+  return DB.config.tarefaTipos;
+}
+function colunaPorId(id){ return tarefaColunas().find(c=>c.id===id) || null; }
+function colunaDaTarefa(t){
+  // Retrocompat: tarefa sem colunaId vai p/ Concluído (se concluída) ou 1ª coluna.
+  const cols = tarefaColunas();
+  if(t.colunaId){ const c = cols.find(x=>x.id===t.colunaId); if(c) return c; }
+  if(t.status==='Concluída'){ const done = cols.find(c=>c.isDone); if(done) return done; }
+  return cols[0];
+}
+function tipoPorId(id){ return tarefaTipos().find(t=>t.id===id) || null; }
 
 function minhasTarefas(){
   const todas = DB.tarefas || [];
   if(currentUser?.tipo === 'gestor') return todas;
   return todas.filter(t => t.responsavel === currentUser?.nome);
+}
+
+// ── Pontuação: base por prioridade + bônus/penalidade por prazo ──────────────
+// Gravada em t.pontos na conclusão (estável mesmo se a regra mudar depois).
+function calcPontosTarefa(t){
+  const base = (TAREFA_PRIO[t.prioridade]||TAREFA_PRIO.media).pts;
+  if(!t.prazo) return base;
+  const concl = (t.concluidaEm || new Date().toISOString()).slice(0,10);
+  if(concl <= t.prazo) return base + 10;       // no prazo
+  return Math.max(0, base - 10);                // atrasada
+}
+function calcRankingTarefas(){
+  const m = {};
+  (DB.tarefas||[]).filter(t=>t.status==='Concluída' && t.responsavel).forEach(t=>{
+    const k = t.responsavel;
+    if(!m[k]) m[k] = { nome:k, pontos:0, qtd:0 };
+    m[k].pontos += (+t.pontos || 0);
+    m[k].qtd += 1;
+  });
+  return Object.values(m).sort((a,b)=>b.pontos-a.pontos);
+}
+// Contadores de alerta (escopo = lista já filtrada por papel via minhasTarefas).
+function contarAlertasTarefas(){
+  const lista = minhasTarefas().filter(t=>t.status!=='Concluída');
+  const hojeStr = hoje();
+  const d7 = new Date(Date.now()+7*86400000).toISOString().slice(0,10);
+  let atrasadas=0, hojeC=0, semana=0;
+  lista.forEach(t=>{
+    if(!t.prazo) return;
+    if(t.prazo < hojeStr) atrasadas++;
+    else if(t.prazo === hojeStr) hojeC++;
+    else if(t.prazo <= d7) semana++;
+  });
+  // prorrogações pendentes — só interessa ao gestor (decide); colaborador vê as suas.
+  let prorrPend = 0;
+  minhasTarefas().forEach(t=>{
+    (t.prorrogacoes||[]).forEach(p=>{ if(p.status==='pendente') prorrPend++; });
+  });
+  return { atrasadas, hoje:hojeC, semana, prorrPend };
 }
 function atualizarBadgeTarefas(){
   const el = document.getElementById('nav-tarefas-count');
@@ -5066,149 +5159,149 @@ function atualizarBadgeTarefas(){
   el.textContent = n;
   el.style.display = n > 0 ? 'inline-block' : 'none';
 }
+function tarCardHTML(t){
+  const p=TAREFA_PRIO[t.prioridade]||TAREFA_PRIO.media;
+  const tipo=tipoPorId(t.tipo);
+  const hojeStr=hoje();
+  const done=t.status==='Concluída';
+  const vencida=!done && t.prazo && t.prazo<hojeStr;
+  const podeMover = currentUser?.tipo==='gestor' || t.responsavel===currentUser?.nome;
+  const nCom=(t.comentarios||[]).length;
+  const prorrPend=(t.prorrogacoes||[]).some(x=>x.status==='pendente');
+  return `<div class="tar-card" ${podeMover?`draggable="true" ondragstart="tarDragStart(event,'${t.id}')" ondragend="tarDragEnd(event)"`:''} onclick="abrirTarefaModal('${t.id}')">
+    <div style="display:flex;align-items:center;gap:5px;margin-bottom:5px;flex-wrap:wrap;">
+      <span class="tar-chip" style="color:#fff;background:${p.cor};">${p.label}</span>
+      ${tipo?`<span class="tar-chip" style="color:#fff;background:${tipo.cor};">${escHtml(tipo.nome)}</span>`:''}
+      ${prorrPend?`<span class="tar-chip" style="color:#8C5A00;background:#FFF1CC;">⏳ prorrog.</span>`:''}
+    </div>
+    <div style="font-size:13px;font-weight:600;color:var(--text);${done?'text-decoration:line-through;opacity:.7;':''}">${escHtml(t.titulo||'—')}</div>
+    <div style="display:flex;gap:9px;flex-wrap:wrap;margin-top:7px;font-size:10.5px;color:var(--text-3);align-items:center;">
+      <span title="Responsável">👤 ${escHtml(t.responsavel||'sem designação')}</span>
+      ${t.prazo?`<span style="${vencida?'color:var(--danger);font-weight:700;':''}">${vencida?'🚨':'📅'} ${new Date(t.prazo+'T00:00:00').toLocaleDateString('pt-BR')}</span>`:''}
+      ${nCom?`<span title="Comentários">💬 ${nCom}</span>`:''}
+      ${done&&t.pontos?`<span style="color:#0F8A5F;font-weight:700;">+${t.pontos} pts</span>`:''}
+    </div>
+  </div>`;
+}
+
 function renderTarefas(){
   const el = document.getElementById('page-tarefas');
   if(!el) return;
-  const hojeStr = new Date().toISOString().slice(0,10);
-  const lista = minhasTarefas();
-  const pend = lista.filter(t=>t.status!=='Concluída').slice().sort((a,b)=>{
-    const pa = (TAREFA_PRIO[a.prioridade]||TAREFA_PRIO.media).peso, pb = (TAREFA_PRIO[b.prioridade]||TAREFA_PRIO.media).peso;
-    if(pa!==pb) return pa-pb;
-    return (a.prazo||'9999') < (b.prazo||'9999') ? -1 : 1;
-  });
-  const conc = lista.filter(t=>t.status==='Concluída').slice().sort((a,b)=>(b.concluidaEm||'')<(a.concluidaEm||'')?-1:1).slice(0,15);
   const ehG = currentUser?.tipo === 'gestor';
+  const f = window._tarF = window._tarF || { prio:'', q:'', resp:'', tipo:'' };
 
-  // Filtros (prioridade + texto/responsável) e agrupamento por vencimento
-  const f = window._tarF = window._tarF || { prio:'', q:'' };
-  const qf = (f.q||'').toLowerCase();
-  const pendF = pend.filter(t => (!f.prio || (t.prioridade||'media')===f.prio)
-    && (!qf || (t.titulo||'').toLowerCase().includes(qf)
-             || (t.desc||'').toLowerCase().includes(qf)
-             || (t.responsavel||'').toLowerCase().includes(qf)));
-  const d7 = new Date(Date.now()+7*86400000).toISOString().slice(0,10);
-  const seg = { vencidas:[], hoje:[], semana:[], depois:[], sem:[] };
-  pendF.forEach(t=>{
-    if(!t.prazo) seg.sem.push(t);
-    else if(t.prazo < hojeStr) seg.vencidas.push(t);
-    else if(t.prazo === hojeStr) seg.hoje.push(t);
-    else if(t.prazo <= d7) seg.semana.push(t);
-    else seg.depois.push(t);
-  });
+  // Roster p/ filtro de responsável (gestor). Carrega 1x e re-renderiza.
+  if(ehG && (!Array.isArray(_rosterAppUsers) || !_rosterAppUsers.length) && !window._tarRosterTried){
+    window._tarRosterTried = true;
+    carregarRosterAppUsers().then(r=>{ if(r&&r.length) renderTarefas(); }).catch(()=>{});
+  }
 
-  const linha = t => {
-    const p = TAREFA_PRIO[t.prioridade] || TAREFA_PRIO.media;
-    const vencida = t.status!=='Concluída' && t.prazo && t.prazo < hojeStr;
-    const done = t.status==='Concluída';
-    return `<div style="display:flex;gap:12px;align-items:flex-start;padding:13px 16px;border-bottom:1px solid var(--border);${done?'opacity:.55;':''}">
-      <input type="checkbox" ${done?'checked':''} onchange="concluirTarefa('${t.id}', this.checked)" style="margin-top:3px;width:16px;height:16px;cursor:pointer;" title="${done?'Reabrir':'Concluir'}">
-      <div style="flex:1;min-width:0;">
-        <div style="font-size:13.5px;font-weight:600;color:var(--text);${done?'text-decoration:line-through;':''}">${escHtml(t.titulo||'—')}</div>
-        ${t.desc?`<div style="font-size:12px;color:var(--text-2);margin-top:3px;white-space:pre-wrap;">${escHtml(t.desc)}</div>`:''}
-        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px;font-size:11px;color:var(--text-3);align-items:center;">
-          <span style="padding:1px 8px;border-radius:99px;font-weight:700;color:#fff;background:${p.cor};">${p.label}</span>
-          ${t.prazo?`<span style="${vencida?'color:var(--danger);font-weight:700;':''}">📅 ${new Date(t.prazo+'T00:00:00').toLocaleDateString('pt-BR')}${vencida?' · VENCIDA':''}</span>`:''}
-          ${t.responsavel?`<span>👤 ${escHtml(t.responsavel)}</span>`:'<span>👤 sem designação</span>'}
-          ${t.criadoPor?`<span style="opacity:.7;">por ${escHtml(t.criadoPor)}</span>`:''}
-          ${done&&t.concluidaEm?`<span style="opacity:.7;">✓ ${new Date(t.concluidaEm).toLocaleDateString('pt-BR')}</span>`:''}
-        </div>
-      </div>
-      ${ehG?`<button class="btn btn-ghost btn-sm btn-icon" title="Excluir tarefa" onclick="excluirTarefa('${t.id}')" style="color:var(--danger);flex-shrink:0;">✕</button>`:''}
+  const qf=(f.q||'').toLowerCase();
+  const lista = minhasTarefas().filter(t =>
+    (!f.prio || (t.prioridade||'media')===f.prio) &&
+    (!f.resp || t.responsavel===f.resp) &&
+    (!f.tipo || (t.tipo||'')===f.tipo) &&
+    (!qf || (t.titulo||'').toLowerCase().includes(qf)
+         || (t.desc||'').toLowerCase().includes(qf)
+         || (t.responsavel||'').toLowerCase().includes(qf)));
+
+  const cols=tarefaColunas();
+  const pendCount = minhasTarefas().filter(t=>t.status!=='Concluída').length;
+  const al = contarAlertasTarefas();
+
+  const board = cols.map(col=>{
+    const ts=lista.filter(t=>colunaDaTarefa(t).id===col.id).sort((a,b)=>{
+      const pa=(TAREFA_PRIO[a.prioridade]||TAREFA_PRIO.media).peso, pb=(TAREFA_PRIO[b.prioridade]||TAREFA_PRIO.media).peso;
+      if(pa!==pb) return pa-pb;
+      return (a.prazo||'9999')<(b.prazo||'9999')?-1:1;
+    });
+    return `<div class="tar-col" ondragover="event.preventDefault();this.classList.add('drop-hover')" ondragleave="this.classList.remove('drop-hover')" ondrop="tarDrop(event,'${col.id}')">
+      <div class="tar-col-head"><span style="width:10px;height:10px;border-radius:3px;background:${col.cor};flex-shrink:0;"></span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(col.nome)}${col.isDone?' ✓':''}</span><span style="color:var(--text-3);font-weight:600;">${ts.length}</span></div>
+      <div class="tar-col-body">${ts.map(tarCardHTML).join('') || `<div style="color:var(--text-4);font-size:11.5px;text-align:center;padding:14px 4px;">—</div>`}</div>
     </div>`;
-  };
+  }).join('');
+
+  const inpF='padding:6px 10px;border:1px solid var(--border-2);border-radius:6px;font-size:12.5px;font-family:inherit;background:var(--surface);color:var(--text);';
+  const respFiltro = ehG ? `<select onchange="window._tarF.resp=this.value;renderTarefas();" style="${inpF}">
+      <option value="">Todos responsáveis</option>${(_rosterAppUsers||[]).map(u=>`<option ${f.resp===u.nome?'selected':''}>${escHtml(u.nome)}</option>`).join('')}</select>` : '';
+  const tipoFiltro = `<select onchange="window._tarF.tipo=this.value;renderTarefas();" style="${inpF}">
+      <option value="">Todos os tipos</option>${tarefaTipos().map(tp=>`<option value="${tp.id}" ${f.tipo===tp.id?'selected':''}>${escHtml(tp.nome)}</option>`).join('')}</select>`;
+
+  const alertCard=(emoji,n,label,cor,sirene)=> n?`<div style="display:flex;align-items:center;gap:7px;padding:8px 13px;border-radius:9px;background:${cor}1a;border:1px solid ${cor}55;">
+      <span style="font-size:16px;${sirene?'':''}" class="${sirene?'sirene':''}">${emoji}</span>
+      <span style="font-size:18px;font-weight:800;color:${cor};">${n}</span>
+      <span style="font-size:11.5px;color:var(--text-2);">${label}</span></div>`:'';
+  const alertStrip = (al.atrasadas||al.hoje||al.semana||al.prorrPend) ? `<div style="display:flex;gap:9px;flex-wrap:wrap;margin-bottom:14px;">
+      ${alertCard('🚨',al.atrasadas,'atrasada(s)','#E53E3E',true)}
+      ${alertCard('📅',al.hoje,'vence(m) hoje','#D69E2E',false)}
+      ${alertCard('📆',al.semana,'nesta semana','#2B6CB0',false)}
+      ${ehG?alertCard('⏳',al.prorrPend,'prorrog. p/ aprovar','#9F7AEA',false):''}
+    </div>`:'';
 
   el.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:14px;flex-wrap:wrap;gap:10px;">
       <div>
         <div style="font-size:22px;font-weight:700;letter-spacing:-.02em;">Tarefas</div>
-        <div style="font-size:12.5px;color:var(--text-2);margin-top:3px;">${pend.length} pendente${pend.length!==1?'s':''}${ehG?' (equipe inteira)':' (suas)'}</div>
+        <div style="font-size:12.5px;color:var(--text-2);margin-top:3px;">${pendCount} pendente${pendCount!==1?'s':''}${ehG?' (equipe inteira)':' (suas)'}</div>
       </div>
-      ${ehG?`<button class="btn btn-primary btn-sm" onclick="abrirNovaTarefa()">${ico('plus',13)} Nova tarefa</button>`:''}
-    </div>
-    <div id="tarefa-form-wrap" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px;">
-      <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:10px;margin-bottom:10px;">
-        <div><label style="font-size:11px;font-weight:600;color:var(--text-2);">Título *</label>
-          <input type="text" id="tf-titulo" placeholder="O que precisa ser feito" style="width:100%;padding:8px 10px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-family:inherit;background:var(--bg);color:var(--text);"></div>
-        <div><label style="font-size:11px;font-weight:600;color:var(--text-2);">Prazo</label>
-          <input type="date" id="tf-prazo" style="width:100%;padding:8px 10px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-family:inherit;background:var(--bg);color:var(--text);"></div>
-        <div><label style="font-size:11px;font-weight:600;color:var(--text-2);">Designar para</label>
-          <select id="tf-resp" style="width:100%;padding:8px 10px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-family:inherit;background:var(--bg);color:var(--text);"><option value="">Carregando…</option></select></div>
-        <div><label style="font-size:11px;font-weight:600;color:var(--text-2);">Prioridade</label>
-          <select id="tf-prio" style="width:100%;padding:8px 10px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-family:inherit;background:var(--bg);color:var(--text);">
-            <option value="alta">Alta</option><option value="media" selected>Média</option><option value="baixa">Baixa</option></select></div>
-      </div>
-      <label style="font-size:11px;font-weight:600;color:var(--text-2);">Detalhes (opcional)</label>
-      <textarea id="tf-desc" rows="2" placeholder="Passo a passo, contexto, links…" style="width:100%;padding:8px 10px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-family:inherit;background:var(--bg);color:var(--text);resize:vertical;"></textarea>
-      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px;">
-        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('tarefa-form-wrap').style.display='none'">Cancelar</button>
-        <button class="btn btn-primary btn-sm" onclick="salvarTarefa()">Salvar tarefa</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-ghost btn-sm" onclick="rankingTarefasModal()">🏆 Ranking</button>
+        ${ehG?`<button class="btn btn-ghost btn-sm" onclick="gerirTiposModal()">🏷 Tipos</button>`:''}
+        ${ehG?`<button class="btn btn-ghost btn-sm" onclick="gerirColunasModal()">▦ Colunas</button>`:''}
+        ${ehG?`<button class="btn btn-primary btn-sm" onclick="abrirTarefaModal(null)">${ico('plus',13)} Nova tarefa</button>`:''}
       </div>
     </div>
-    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
+    ${alertStrip}
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;align-items:center;">
       ${[['','Todas'],['alta','🔴 Alta'],['media','🟡 Média'],['baixa','⚪ Baixa']].map(([v,l])=>`
         <button onclick="window._tarF.prio='${v}';renderTarefas();" style="padding:5px 12px;border-radius:99px;font-size:12px;font-weight:600;cursor:pointer;border:1.5px solid ${f.prio===v?'var(--navy)':'var(--border)'};background:${f.prio===v?'var(--navy)':'var(--surface)'};color:${f.prio===v?'#fff':'var(--text-2)'};">${l}</button>`).join('')}
-      <input type="text" value="${escHtml(f.q||'')}" placeholder="Filtrar por texto ou responsável…"
+      ${respFiltro}
+      ${tipoFiltro}
+      <input type="text" value="${escHtml(f.q||'')}" placeholder="Buscar por texto ou responsável…"
         oninput="window._tarF.q=this.value;clearTimeout(window._tarFT);window._tarFT=setTimeout(renderTarefas,250);"
-        style="margin-left:auto;padding:6px 10px;border:1px solid var(--border-2);border-radius:6px;font-size:12.5px;font-family:inherit;background:var(--surface);color:var(--text);min-width:220px;">
+        style="margin-left:auto;${inpF}min-width:200px;">
     </div>
-    ${(()=>{
-      const blocos = [['vencidas','🔴 VENCIDAS'],['hoje','📅 HOJE'],['semana','📆 PRÓXIMOS 7 DIAS'],['depois','🗓 MAIS TARDE'],['sem','∞ SEM PRAZO']]
-        .map(([k,l])=> seg[k].length
-          ? `<div style="font-size:11px;font-weight:800;letter-spacing:.06em;color:${k==='vencidas'?'var(--danger)':'var(--text-3)'};margin:14px 0 6px;">${l} (${seg[k].length})</div>
-             <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;">${seg[k].map(linha).join('')}</div>`
-          : '').join('');
-      return blocos || `<div class="empty-state" style="padding:34px;background:var(--surface);border:1px solid var(--border);border-radius:10px;"><div class="empty-state-icon">${ico('target',32)}</div><h3>Nenhuma tarefa ${(f.prio||f.q)?'neste filtro':'pendente'}</h3><p>${ehG?'Crie a primeira com "Nova tarefa".':'Você está em dia. 👏'}</p></div>`;
-    })()}
-    ${conc.length?`<div style="margin-top:18px;">
-      <div style="font-size:11px;font-weight:700;letter-spacing:.06em;color:var(--text-3);margin-bottom:8px;">CONCLUÍDAS RECENTES</div>
-      <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;">${conc.map(linha).join('')}</div>
-    </div>`:''}`;
+    ${lista.length || ehG ? `<div class="tar-board">${board}</div>`
+      : `<div class="empty-state" style="padding:34px;background:var(--surface);border:1px solid var(--border);border-radius:10px;"><div class="empty-state-icon">${ico('target',32)}</div><h3>Nenhuma tarefa atribuída a você</h3><p>Você está em dia. 👏</p></div>`}`;
   atualizarBadgeTarefas();
 }
-async function abrirNovaTarefa(){
-  const w = document.getElementById('tarefa-form-wrap');
-  if(!w) return;
-  w.style.display = 'block';
-  document.getElementById('tf-titulo').focus();
-  const sel = document.getElementById('tf-resp');
-  try{
-    const roster = await carregarRosterAppUsers();
-    sel.innerHTML = '<option value="">— sem designação —</option>' +
-      (roster||[]).map(u=>`<option value="${escHtml(u.nome)}" data-id="${u.id}">${escHtml(u.nome)}</option>`).join('');
-  }catch(e){ sel.innerHTML = '<option value="">(falha ao listar usuários)</option>'; }
+// ── Histórico por tarefa (timeline interna do card) ──────────────────────────
+function tarHist(t, acao){
+  t.historico = t.historico || [];
+  t.historico.push({ quando:new Date().toISOString(), autor:currentUser?.nome||'Sistema', acao });
 }
-function salvarTarefa(){
-  const titulo = (document.getElementById('tf-titulo')?.value||'').trim();
-  if(!titulo){ showToast('Dê um título à tarefa.','warning'); return; }
-  const sel = document.getElementById('tf-resp');
-  const opt = sel && sel.selectedOptions && sel.selectedOptions[0];
-  DB.tarefas = DB.tarefas || [];
-  DB.tarefas.push({
-    id: uid(), titulo,
-    desc: (document.getElementById('tf-desc')?.value||'').trim(),
-    prazo: document.getElementById('tf-prazo')?.value || '',
-    responsavel: sel?.value || '',
-    responsavelId: (opt && opt.dataset.id) || '',
-    prioridade: document.getElementById('tf-prio')?.value || 'media',
-    status: 'Pendente',
-    criadoPor: currentUser?.nome || 'Sistema',
-    criadoEm: new Date().toISOString()
-  });
-  save();
-  logAtividade('Criou tarefa', `"${titulo}"${sel?.value?' → '+sel.value:''}`);
-  renderTarefas();
-  showToast('Tarefa criada.','success');
+
+// ── Drag & drop ──────────────────────────────────────────────────────────────
+function tarDragStart(ev, id){ window._tarDragId = id; try{ ev.dataTransfer.effectAllowed='move'; }catch(_){} ev.target.classList.add('dragging'); }
+function tarDragEnd(ev){ ev.target.classList.remove('dragging'); }
+function tarDrop(ev, colunaId){ ev.preventDefault(); ev.currentTarget.classList.remove('drop-hover'); const id=window._tarDragId; window._tarDragId=null; if(id) moverTarefaColuna(id, colunaId); }
+
+function moverTarefaColuna(id, colunaId){
+  const t = (DB.tarefas||[]).find(x=>x.id===id); if(!t) return;
+  const col = colunaPorId(colunaId); if(!col) return;
+  if(!(currentUser?.tipo==='gestor' || t.responsavel===currentUser?.nome)){ showToast('Sem permissão para mover esta tarefa.','danger'); return; }
+  if(t.colunaId === colunaId) return;
+  const antiga = colunaDaTarefa(t);
+  t.colunaId = colunaId;
+  tarHist(t, `moveu de "${antiga?.nome||'—'}" para "${col.nome}"`);
+  if(col.isDone && t.status!=='Concluída'){
+    t.status='Concluída'; t.concluidaEm=new Date().toISOString(); t.concluidaPor=currentUser?.nome||''; t.pontos=calcPontosTarefa(t);
+    logAtividade('Concluiu tarefa', `"${t.titulo}" (+${t.pontos} pts)`);
+  } else if(!col.isDone && t.status==='Concluída'){
+    t.status='Pendente'; t.concluidaEm=null; t.concluidaPor=null; t.pontos=0;
+    logAtividade('Reabriu tarefa', `"${t.titulo}"`);
+  }
+  save(); renderTarefas();
 }
+
+// Atalho usado pelo painel/checkbox: move p/ coluna concluída (ou 1ª pendente).
 function concluirTarefa(id, done){
-  const t = (DB.tarefas||[]).find(x=>x.id===id);
-  if(!t) return;
-  t.status = done ? 'Concluída' : 'Pendente';
-  t.concluidaEm = done ? new Date().toISOString() : null;
-  t.concluidaPor = done ? (currentUser?.nome||'') : null;
-  save();
-  logAtividade(done?'Concluiu tarefa':'Reabriu tarefa', `"${t.titulo}"`);
-  renderTarefas();
+  const t=(DB.tarefas||[]).find(x=>x.id===id); if(!t) return;
+  const cols=tarefaColunas();
+  const alvo = done ? (cols.find(c=>c.isDone)||cols[cols.length-1]) : (cols.find(c=>!c.isDone)||cols[0]);
+  moverTarefaColuna(id, alvo.id);
 }
+
 function excluirTarefa(id){
   if(currentUser?.tipo !== 'gestor'){ showToast('Apenas o gestor exclui tarefas.','danger'); return; }
   const t = (DB.tarefas||[]).find(x=>x.id===id);
@@ -5216,7 +5309,247 @@ function excluirTarefa(id){
   DB.tarefas = (DB.tarefas||[]).filter(x=>x.id!==id);
   save();
   logAtividade('Excluiu tarefa', `"${t.titulo}"`);
+  closeModal('modal-tar');
   renderTarefas();
+}
+
+// ── Modal único: criar / editar / detalhar tarefa ────────────────────────────
+function abrirNovaTarefa(){ abrirTarefaModal(null); }   // compat com chamadas antigas
+function _injTarModal(modalId, innerHTML, maxw){
+  let m=document.getElementById(modalId);
+  if(!m){ m=document.createElement('div'); m.id=modalId; m.className='overlay'; document.body.appendChild(m); }
+  m.innerHTML=`<div class="modal" style="max-width:${maxw||580}px;overflow-y:auto;">${innerHTML}</div>`;
+  openModal(modalId);
+}
+async function abrirTarefaModal(id){
+  const t = id ? (DB.tarefas||[]).find(x=>x.id===id) : null;
+  if(id && !t) return;
+  const ehG = currentUser?.tipo==='gestor';
+  const isResp = !!(t && t.responsavel===currentUser?.nome);
+  const podeMover = ehG || isResp;
+  const podeComentar = ehG || isResp;
+  const ro = !ehG;  // colaborador não edita campos estruturais
+  let roster=[]; try{ roster=await carregarRosterAppUsers(); }catch(_){}
+  const cols=tarefaColunas(), tipos=tarefaTipos();
+  const inp='width:100%;padding:8px 10px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-family:inherit;background:var(--bg);color:var(--text);';
+  const lbl='font-size:11px;font-weight:600;color:var(--text-2);display:block;margin-bottom:3px;';
+  const dtf=s=>s?new Date(s+'T00:00:00').toLocaleDateString('pt-BR'):'';
+  const dttf=s=>s?new Date(s).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'';
+
+  const respSel=`<select id="tar-resp" ${ro?'disabled':''} style="${inp}"><option value="">— sem designação —</option>${roster.map(u=>`<option value="${escHtml(u.nome)}" data-id="${escHtml(u.id)}" ${t&&t.responsavel===u.nome?'selected':''}>${escHtml(u.nome)}</option>`).join('')}</select>`;
+  const tipoSel=`<select id="tar-tipo" ${ro?'disabled':''} style="${inp}"><option value="">— sem tipo —</option>${tipos.map(tp=>`<option value="${tp.id}" ${t&&t.tipo===tp.id?'selected':''}>${escHtml(tp.nome)}</option>`).join('')}</select>`;
+  const prioSel=`<select id="tar-prio" ${ro?'disabled':''} style="${inp}">${['alta','media','baixa'].map(pv=>`<option value="${pv}" ${(t?t.prioridade:'media')===pv?'selected':''}>${TAREFA_PRIO[pv].label}</option>`).join('')}</select>`;
+  const colSel=`<select id="tar-col" ${podeMover?'':'disabled'} ${id?`onchange="moverTarefaColuna('${id}',this.value)"`:''} style="${inp}">${cols.map(c=>`<option value="${c.id}" ${t&&colunaDaTarefa(t).id===c.id?'selected':''}>${escHtml(c.nome)}</option>`).join('')}</select>`;
+
+  const formHTML=`
+    <div style="margin-bottom:10px;"><label style="${lbl}">Título *</label>
+      <input type="text" id="tar-titulo" ${ro?'disabled':''} value="${escHtml(t?.titulo||'')}" placeholder="O que precisa ser feito" style="${inp}"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
+      <div><label style="${lbl}">Tipo</label>${tipoSel}</div>
+      <div><label style="${lbl}">Prioridade</label>${prioSel}</div>
+      <div><label style="${lbl}">Responsável</label>${respSel}</div>
+      <div><label style="${lbl}">Prazo</label><input type="date" id="tar-prazo" ${ro?'disabled':''} value="${escHtml(t?.prazo||'')}" style="${inp}"></div>
+      <div style="grid-column:1/-1;"><label style="${lbl}">Coluna</label>${colSel}</div>
+    </div>
+    <div style="margin-bottom:6px;"><label style="${lbl}">Descrição</label>
+      <textarea id="tar-desc" rows="3" ${ro?'disabled':''} placeholder="Passo a passo, contexto, links…" style="${inp}resize:vertical;">${escHtml(t?.desc||'')}</textarea></div>`;
+
+  // ── seções extras (só p/ tarefa existente) ──
+  let extra='';
+  if(t){
+    const comentarios=(t.comentarios||[]).map(c=>`<div style="padding:8px 10px;background:var(--surface-2);border-radius:8px;margin-bottom:6px;">
+      <div style="font-size:11px;color:var(--text-3);margin-bottom:2px;"><strong style="color:var(--text-2);">${escHtml(c.autor)}</strong> · ${dttf(c.criadoEm)}</div>
+      <div style="font-size:12.5px;color:var(--text);white-space:pre-wrap;">${escHtml(c.texto)}</div></div>`).join('') || `<div style="color:var(--text-4);font-size:12px;margin-bottom:6px;">Sem comentários ainda.</div>`;
+    const comentarioBox=podeComentar?`<div style="display:flex;gap:6px;align-items:flex-end;margin-top:4px;">
+      <textarea id="tar-com-input" rows="2" placeholder="Escreva um comentário ou dúvida…" style="${inp}resize:vertical;"></textarea>
+      <button class="btn btn-primary btn-sm" style="flex-shrink:0;" onclick="addComentarioTarefa('${t.id}')">Enviar</button></div>`:'';
+
+    const prorrList=(t.prorrogacoes||[]).slice().reverse().map(p=>{
+      const cor=p.status==='pendente'?'#8C5A00':p.status==='aprovada'?'#0F8A5F':'#E53E3E';
+      return `<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:6px;">
+        <div style="font-size:11px;color:var(--text-3);">${escHtml(p.solicitadoPor)} · de ${dtf(p.prazoAtual)||'—'} → <strong>${dtf(p.novaData)}</strong> <span style="color:${cor};font-weight:700;text-transform:uppercase;">[${p.status}]</span></div>
+        <div style="font-size:12.5px;color:var(--text);margin-top:2px;white-space:pre-wrap;">${escHtml(p.justificativa)}</div>
+        ${(ehG&&p.status==='pendente')?`<div style="display:flex;gap:6px;margin-top:6px;"><button class="btn btn-primary btn-sm" onclick="decidirProrrogacao('${t.id}','${p.id}',true)">Aprovar</button><button class="btn btn-ghost btn-sm" onclick="decidirProrrogacao('${t.id}','${p.id}',false)">Recusar</button></div>`:''}
+        ${p.decididoPor?`<div style="font-size:10.5px;color:var(--text-4);margin-top:4px;">decidido por ${escHtml(p.decididoPor)} · ${dttf(p.decididoEm)}</div>`:''}</div>`;
+    }).join('');
+    const prorrForm=podeMover?`<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end;margin-top:4px;">
+      <div><label style="${lbl}">Nova data</label><input type="date" id="tar-prorr-data" style="${inp}width:auto;"></div>
+      <div style="flex:1;min-width:160px;"><label style="${lbl}">Justificativa</label><input type="text" id="tar-prorr-just" placeholder="Por que precisa de mais prazo?" style="${inp}"></div>
+      <button class="btn btn-ghost btn-sm" style="flex-shrink:0;" onclick="solicitarProrrogacao('${t.id}')">Pedir prorrogação</button></div>`:'';
+
+    const hist=(t.historico||[]).slice().reverse().map(h=>`<div style="font-size:11.5px;color:var(--text-3);padding:2px 0;">• ${dttf(h.quando)} — <strong style="color:var(--text-2);">${escHtml(h.autor)}</strong> ${escHtml(h.acao)}</div>`).join('');
+
+    const sec=(titulo,corpo)=>`<div style="margin-top:16px;"><div style="font-size:11px;font-weight:800;letter-spacing:.05em;color:var(--text-3);margin-bottom:8px;">${titulo}</div>${corpo}</div>`;
+    extra = sec('💬 COMENTÁRIOS', comentarios+comentarioBox)
+          + sec('⏳ PRORROGAÇÃO DE PRAZO', (prorrList||'')+prorrForm)
+          + (hist?sec('🕓 HISTÓRICO', hist):'');
+  }
+
+  const footer=`<div class="modal-footer">
+    ${ehG?`<button class="btn btn-primary" onclick="salvarTarefaModal(${id?`'${id}'`:'null'})">💾 Salvar</button>`:''}
+    ${(ehG&&id)?`<button class="btn btn-ghost" style="color:var(--danger);" onclick="excluirTarefa('${id}')">Excluir</button>`:''}
+    <button class="btn btn-ghost" onclick="closeModal('modal-tar')">Fechar</button></div>`;
+
+  _injTarModal('modal-tar', `<div class="modal-header"><span class="modal-title">${id?'Tarefa':'Nova tarefa'}</span><button class="modal-close" onclick="closeModal('modal-tar')">✕</button></div><div class="modal-body">${formHTML}${extra}</div>${footer}`, 600);
+}
+
+function salvarTarefaModal(id){
+  if(currentUser?.tipo!=='gestor'){ showToast('Apenas o gestor cria/edita tarefas.','danger'); return; }
+  const g=x=>document.getElementById(x);
+  const titulo=(g('tar-titulo')?.value||'').trim();
+  if(!titulo){ showToast('Dê um título à tarefa.','warning'); return; }
+  const respSelEl=g('tar-resp'); const opt=respSelEl&&respSelEl.selectedOptions&&respSelEl.selectedOptions[0];
+  const dados={
+    titulo,
+    desc:(g('tar-desc')?.value||'').trim(),
+    tipo:g('tar-tipo')?.value||'',
+    prazo:g('tar-prazo')?.value||'',
+    responsavel:respSelEl?.value||'',
+    responsavelId:(opt&&opt.dataset.id)||'',
+    prioridade:g('tar-prio')?.value||'media',
+    colunaId:g('tar-col')?.value||''
+  };
+  DB.tarefas=DB.tarefas||[];
+  if(id){
+    const t=DB.tarefas.find(x=>x.id===id); if(!t) return;
+    Object.assign(t, dados);
+    const col=colunaPorId(t.colunaId);
+    if(col&&col.isDone&&t.status!=='Concluída'){ t.status='Concluída'; t.concluidaEm=new Date().toISOString(); t.concluidaPor=currentUser?.nome||''; t.pontos=calcPontosTarefa(t); }
+    else if(col&&!col.isDone&&t.status==='Concluída'){ t.status='Pendente'; t.concluidaEm=null; t.concluidaPor=null; t.pontos=0; }
+    tarHist(t,'editou a tarefa');
+    logAtividade('Editou tarefa', `"${titulo}"`);
+  } else {
+    const col=colunaPorId(dados.colunaId)||tarefaColunas()[0];
+    DB.tarefas.push({ id:uid(), ...dados, colunaId:col.id, status:col.isDone?'Concluída':'Pendente',
+      comentarios:[], prorrogacoes:[], pontos:0,
+      historico:[{quando:new Date().toISOString(), autor:currentUser?.nome||'Sistema', acao:'criou a tarefa'}],
+      criadoPor:currentUser?.nome||'Sistema', criadoEm:new Date().toISOString() });
+    logAtividade('Criou tarefa', `"${titulo}"${dados.responsavel?' → '+dados.responsavel:''}`);
+  }
+  save(); closeModal('modal-tar'); renderTarefas(); showToast(id?'Tarefa atualizada.':'Tarefa criada.','success');
+}
+
+function addComentarioTarefa(id){
+  const t=(DB.tarefas||[]).find(x=>x.id===id); if(!t) return;
+  if(!(currentUser?.tipo==='gestor'||t.responsavel===currentUser?.nome)){ showToast('Sem permissão para comentar.','danger'); return; }
+  const txt=(document.getElementById('tar-com-input')?.value||'').trim();
+  if(!txt){ showToast('Escreva um comentário.','warning'); return; }
+  t.comentarios=t.comentarios||[];
+  t.comentarios.push({ id:uid(), autorId:currentUser?.id||'', autor:currentUser?.nome||'—', texto:txt, criadoEm:new Date().toISOString() });
+  tarHist(t,'comentou');
+  save(); logAtividade('Comentou na tarefa', `"${t.titulo}"`); abrirTarefaModal(id);
+}
+
+function solicitarProrrogacao(id){
+  const t=(DB.tarefas||[]).find(x=>x.id===id); if(!t) return;
+  if(!(currentUser?.tipo==='gestor'||t.responsavel===currentUser?.nome)){ showToast('Sem permissão.','danger'); return; }
+  const nova=document.getElementById('tar-prorr-data')?.value;
+  const just=(document.getElementById('tar-prorr-just')?.value||'').trim();
+  if(!nova){ showToast('Escolha a nova data.','warning'); return; }
+  if(!just){ showToast('Justifique o pedido de prorrogação.','warning'); return; }
+  t.prorrogacoes=t.prorrogacoes||[];
+  t.prorrogacoes.push({ id:uid(), solicitadoPor:currentUser?.nome||'—', solicitanteId:currentUser?.id||'', prazoAtual:t.prazo||'', novaData:nova, justificativa:just, status:'pendente', criadoEm:new Date().toISOString() });
+  tarHist(t,`solicitou prorrogação p/ ${new Date(nova+'T00:00:00').toLocaleDateString('pt-BR')}`);
+  save(); logAtividade('Solicitou prorrogação', `"${t.titulo}"`); abrirTarefaModal(id); showToast('Pedido enviado ao gestor.','success');
+}
+
+function decidirProrrogacao(tarefaId, prorrId, aprovar){
+  if(currentUser?.tipo!=='gestor'){ showToast('Apenas o gestor decide prorrogações.','danger'); return; }
+  const t=(DB.tarefas||[]).find(x=>x.id===tarefaId); if(!t) return;
+  const p=(t.prorrogacoes||[]).find(x=>x.id===prorrId); if(!p||p.status!=='pendente') return;
+  p.status=aprovar?'aprovada':'recusada'; p.decididoPor=currentUser?.nome||''; p.decididoEm=new Date().toISOString();
+  if(aprovar){ p.prazoAtual=t.prazo||''; t.prazo=p.novaData; tarHist(t,`prazo prorrogado p/ ${new Date(p.novaData+'T00:00:00').toLocaleDateString('pt-BR')} (aprovado)`); }
+  else tarHist(t,'pedido de prorrogação recusado');
+  save(); logAtividade(aprovar?'Aprovou prorrogação':'Recusou prorrogação', `"${t.titulo}"`); abrirTarefaModal(tarefaId); renderTarefas();
+}
+
+// ── Ranking / placar ─────────────────────────────────────────────────────────
+function rankingTarefasModal(){
+  const r=calcRankingTarefas();
+  const medal=i=>i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}º`;
+  const rows=r.map((x,i)=>`<div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid var(--border);${x.nome===currentUser?.nome?'background:var(--surface-2);':''}">
+    <span style="font-size:15px;width:30px;text-align:center;">${medal(i)}</span>
+    <span style="flex:1;font-size:13px;font-weight:600;">${escHtml(x.nome)}</span>
+    <span style="font-size:11px;color:var(--text-3);">${x.qtd} tarefa(s)</span>
+    <span style="font-family:var(--font-mono);font-weight:700;color:#0F8A5F;">${x.pontos} pts</span></div>`).join('')
+    || `<div style="padding:20px;text-align:center;color:var(--text-3);">Nenhuma tarefa concluída ainda.</div>`;
+  _injTarModal('modal-tar-aux', `<div class="modal-header"><span class="modal-title">🏆 Ranking de tarefas</span><button class="modal-close" onclick="closeModal('modal-tar-aux')">✕</button></div><div class="modal-body" style="padding:6px 0;">${rows}</div><div class="modal-footer"><button class="btn btn-ghost" onclick="closeModal('modal-tar-aux')">Fechar</button></div>`, 460);
+}
+
+// ── Gerência de colunas (gestor) ─────────────────────────────────────────────
+function gerirColunasModal(){
+  if(currentUser?.tipo!=='gestor') return;
+  const cols=tarefaColunas();
+  const rows=cols.map((c,i)=>`<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);">
+    <input type="color" value="${c.cor}" onchange="setColunaCor('${c.id}',this.value)" style="width:30px;height:28px;border:none;background:none;cursor:pointer;padding:0;">
+    <input value="${escHtml(c.nome)}" onchange="setColunaNome('${c.id}',this.value)" style="flex:1;padding:6px 8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;background:var(--bg);color:var(--text);">
+    <label style="font-size:11px;color:var(--text-2);display:flex;align-items:center;gap:3px;white-space:nowrap;" title="Tarefas aqui contam como concluídas"><input type="checkbox" ${c.isDone?'checked':''} onchange="setColunaDone('${c.id}',this.checked)"> conclui</label>
+    <button class="btn btn-ghost btn-sm btn-icon" ${i===0?'disabled':''} onclick="moverColuna('${c.id}',-1)" title="Subir">▲</button>
+    <button class="btn btn-ghost btn-sm btn-icon" ${i===cols.length-1?'disabled':''} onclick="moverColuna('${c.id}',1)" title="Descer">▼</button>
+    <button class="btn btn-ghost btn-sm btn-icon" style="color:var(--danger);" onclick="excluirColuna('${c.id}')" title="Excluir">✕</button></div>`).join('');
+  _injTarModal('modal-tar-aux', `<div class="modal-header"><span class="modal-title">Colunas do quadro</span><button class="modal-close" onclick="closeModal('modal-tar-aux')">✕</button></div><div class="modal-body">${rows}<button class="btn btn-ghost btn-sm" style="margin-top:12px;" onclick="addTarefaColuna()">${ico('plus',12)} Adicionar coluna</button></div><div class="modal-footer"><button class="btn btn-primary" onclick="closeModal('modal-tar-aux')">Concluído</button></div>`, 560);
+}
+function addTarefaColuna(){ const cols=tarefaColunas(); DB.config.tarefaColunas.push({ id:uid(), nome:'Nova coluna', cor:'#718096', isDone:false, ordem:cols.length }); save(); gerirColunasModal(); renderTarefas(); }
+function setColunaCor(id,v){ const c=colunaPorId(id); if(c){ c.cor=v; save(); renderTarefas(); } }
+function setColunaNome(id,v){ const c=colunaPorId(id); if(c){ c.nome=(v||'').trim()||c.nome; save(); renderTarefas(); } }
+function setColunaDone(id,v){ const c=colunaPorId(id); if(c){ c.isDone=!!v; save(); renderTarefas(); } }
+function moverColuna(id,dir){ const cols=tarefaColunas(); const i=cols.findIndex(c=>c.id===id); const j=i+dir; if(i<0||j<0||j>=cols.length) return; cols.splice(j,0,cols.splice(i,1)[0]); cols.forEach((c,k)=>c.ordem=k); save(); gerirColunasModal(); renderTarefas(); }
+function excluirColuna(id){
+  const arr=DB.config.tarefaColunas||[];
+  if(arr.length<=1){ showToast('Mantenha ao menos uma coluna.','warning'); return; }
+  if(!confirm('Excluir esta coluna? As tarefas dela vão para a primeira coluna.')) return;
+  const destino=tarefaColunas().find(c=>c.id!==id);
+  (DB.tarefas||[]).forEach(t=>{ if(t.colunaId===id) t.colunaId=destino.id; });
+  DB.config.tarefaColunas=arr.filter(c=>c.id!==id);
+  tarefaColunas().forEach((c,k)=>c.ordem=k);
+  save(); gerirColunasModal(); renderTarefas();
+}
+
+// ── Gerência de tipos (gestor) ───────────────────────────────────────────────
+function gerirTiposModal(){
+  if(currentUser?.tipo!=='gestor') return;
+  const tipos=tarefaTipos();
+  const rows=tipos.map(tp=>`<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);">
+    <input type="color" value="${tp.cor}" onchange="setTipoCor('${tp.id}',this.value)" style="width:30px;height:28px;border:none;background:none;cursor:pointer;padding:0;">
+    <input value="${escHtml(tp.nome)}" onchange="setTipoNome('${tp.id}',this.value)" style="flex:1;padding:6px 8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;background:var(--bg);color:var(--text);">
+    <button class="btn btn-ghost btn-sm btn-icon" style="color:var(--danger);" onclick="excluirTipo('${tp.id}')" title="Excluir">✕</button></div>`).join('');
+  _injTarModal('modal-tar-aux', `<div class="modal-header"><span class="modal-title">Tipos de tarefa</span><button class="modal-close" onclick="closeModal('modal-tar-aux')">✕</button></div><div class="modal-body">${rows}<button class="btn btn-ghost btn-sm" style="margin-top:12px;" onclick="addTipo()">${ico('plus',12)} Adicionar tipo</button></div><div class="modal-footer"><button class="btn btn-primary" onclick="closeModal('modal-tar-aux')">Concluído</button></div>`, 480);
+}
+function addTipo(){ tarefaTipos(); DB.config.tarefaTipos.push({ id:uid(), nome:'Novo tipo', cor:'#718096' }); save(); gerirTiposModal(); renderTarefas(); }
+function setTipoCor(id,v){ const t=tipoPorId(id); if(t){ t.cor=v; save(); renderTarefas(); } }
+function setTipoNome(id,v){ const t=tipoPorId(id); if(t){ t.nome=(v||'').trim()||t.nome; save(); renderTarefas(); } }
+function excluirTipo(id){ if(!confirm('Excluir este tipo? As tarefas com ele ficarão sem tipo.')) return; (DB.tarefas||[]).forEach(t=>{ if(t.tipo===id) t.tipo=''; }); DB.config.tarefaTipos=(DB.config.tarefaTipos||[]).filter(t=>t.id!==id); save(); gerirTiposModal(); renderTarefas(); }
+
+// ── Bloco de tarefas para o painel (alertas + placar) ────────────────────────
+// Reusado pelo painel do gestor e do colaborador. Escopo por papel via os
+// helpers contarAlertasTarefas()/minhasTarefas().
+function tarefasPainelBloco(){
+  const al = contarAlertasTarefas();
+  const ehG = currentUser?.tipo==='gestor';
+  const card=(emoji,n,label,cor,sirene)=> n?`<div onclick="showPage('tarefas')" style="cursor:pointer;display:flex;align-items:center;gap:8px;padding:10px 14px;border-radius:10px;background:${cor}1a;border:1px solid ${cor}55;">
+      <span style="font-size:17px;" class="${sirene?'sirene':''}">${emoji}</span>
+      <span style="font-size:20px;font-weight:800;color:${cor};">${n}</span>
+      <span style="font-size:11.5px;color:var(--text-2);line-height:1.15;">${label}</span></div>`:'';
+  const cards = [card('🚨',al.atrasadas,'tarefa(s)<br>atrasada(s)','#E53E3E',true),
+                 card('📅',al.hoje,'vence(m)<br>hoje','#D69E2E',false),
+                 card('📆',al.semana,'nesta<br>semana','#2B6CB0',false),
+                 ehG?card('⏳',al.prorrPend,'prorrog.<br>p/ aprovar','#9F7AEA',false):''].filter(Boolean).join('');
+  // placar resumido (top 3) — gestor vê equipe; colaborador vê a si e vizinhos
+  const r = calcRankingTarefas();
+  let placar='';
+  if(r.length){
+    const medal=i=>i===0?'🥇':i===1?'🥈':i===2?'🥉':`${i+1}º`;
+    const top = r.slice(0,3);
+    placar = `<div style="margin-top:${cards?'12px':'0'};background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;">
+      <div style="padding:9px 13px;border-bottom:1px solid var(--border);font-size:11.5px;font-weight:700;letter-spacing:.04em;color:var(--text-2);display:flex;justify-content:space-between;align-items:center;">🏆 PLACAR DE TAREFAS <a onclick="rankingTarefasModal()" style="cursor:pointer;text-decoration:underline;font-weight:500;color:var(--text-3);">ver ranking</a></div>
+      ${top.map((x,i)=>`<div style="display:flex;align-items:center;gap:9px;padding:7px 13px;${i<top.length-1?'border-bottom:1px solid var(--border);':''}${x.nome===currentUser?.nome?'background:var(--surface-2);':''}">
+        <span style="width:26px;text-align:center;">${medal(i)}</span>
+        <span style="flex:1;font-size:12.5px;font-weight:600;">${escHtml(x.nome)}</span>
+        <span style="font-family:var(--font-mono);font-weight:700;color:#0F8A5F;font-size:12.5px;">${x.pontos} pts</span></div>`).join('')}
+    </div>`;
+  }
+  if(!cards && !placar) return '';
+  return `<div style="margin-bottom:14px;">${cards?`<div style="display:flex;gap:9px;flex-wrap:wrap;">${cards}</div>`:''}${placar}</div>`;
 }
 
 // ── Item 7: HOME DO COLABORADOR ──────────────────────────────
@@ -5256,6 +5589,7 @@ function renderPainelColaborador(){
       <div style="font-size:20px;font-weight:700;letter-spacing:-.02em;">${greeting()}, ${escHtml((currentUser.nome||'').split(' ')[0])}.</div>
       <div style="font-size:12.5px;color:var(--text-2);margin-top:2px;">Sua carteira: <strong>${meus.length}</strong> cobranças ativas · <strong style="font-family:var(--font-mono);">${fmtR(carteiraTotal)}</strong> · ${emAcordo} em acordo</div>
     </div>
+    ${tarefasPainelBloco()}
     ${(()=>{ // tarefas designadas a mim, pendentes
       const ts = (DB.tarefas||[]).filter(t=>t.status!=='Concluída' && t.responsavel===currentUser.nome);
       if(!ts.length) return '';
@@ -5439,6 +5773,8 @@ function renderPainel(){
         </button>
       </div>
     </div>
+
+    ${tarefasPainelBloco()}
 
     <!-- ── KPI GRID — Design B ── -->
     <div class="grid-4" style="margin-bottom:16px;">
@@ -18202,10 +18538,17 @@ function getAlertas(){
     alerts.push({ tipo:'danger', msg:`Lançamento vencido: ${l.descricao} (${fmtR(l.valor)})` });
   });
 
-  // Tarefas atrasadas
-  (DB.tarefas||[]).filter(t=>t.status!=='Concluída' && t.prazo && t.prazo < todayStr).forEach(t=>{
-    alerts.push({ tipo:'warning', msg:`Tarefa atrasada: ${t.titulo}` });
+  // Tarefas atrasadas / a vencer (escopadas por papel via minhasTarefas)
+  minhasTarefas().filter(t=>t.status!=='Concluída' && t.prazo).forEach(t=>{
+    if(t.prazo < todayStr) alerts.push({ tipo:'danger', msg:`🚨 Tarefa atrasada: ${t.titulo}` });
+    else if(t.prazo === todayStr) alerts.push({ tipo:'warning', msg:`Tarefa vence hoje: ${t.titulo}` });
   });
+  // Prorrogações pendentes de decisão (gestor)
+  if(currentUser?.tipo === 'gestor'){
+    let pp = 0;
+    (DB.tarefas||[]).forEach(t=>(t.prorrogacoes||[]).forEach(p=>{ if(p.status==='pendente') pp++; }));
+    if(pp>0) alerts.push({ tipo:'info', msg:`${pp} pedido(s) de prorrogação aguardando aprovação` });
+  }
 
   // Metas abaixo de 50%
   (DB.metas||[]).filter(m=>m.status!=='Concluída').forEach(m=>{
