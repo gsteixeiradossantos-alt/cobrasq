@@ -437,6 +437,10 @@ img{max-width:100%}
 .tar-card[draggable="true"]{cursor:grab;}
 .tar-card.dragging{opacity:.45;}
 .tar-chip{font-size:10.5px;font-weight:700;padding:1px 7px;border-radius:99px;display:inline-flex;align-items:center;gap:3px;}
+.tar-prog{height:5px;border-radius:99px;background:var(--border);overflow:hidden;margin-top:7px;}
+.tar-prog>i{display:block;height:100%;background:#0F8A5F;border-radius:99px;}
+.tar-mermaid{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:10px;overflow:auto;text-align:center;}
+.tar-mermaid svg{max-width:100%;height:auto;}
 .modal-header{padding:18px 22px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-shrink:0;}
 .modal-title{font-size:15px;font-weight:700;color:var(--text);flex:1;}
 .modal-close{width:30px;height:30px;border-radius:6px;border:none;background:transparent;font-size:18px;color:var(--text-3);cursor:pointer;display:flex;align-items:center;justify-content:center;}
@@ -5167,18 +5171,27 @@ function tarCardHTML(t){
   const vencida=!done && t.prazo && t.prazo<hojeStr;
   const podeMover = currentUser?.tipo==='gestor' || t.responsavel===currentUser?.nome;
   const nCom=(t.comentarios||[]).length;
+  const nAnex=(t.anexos||[]).length;
   const prorrPend=(t.prorrogacoes||[]).some(x=>x.status==='pendente');
+  const chk=t.checklist||[]; const chkFeito=chk.filter(c=>c.feito).length;
+  const pct=chk.length?Math.round(chkFeito/chk.length*100):0;
   return `<div class="tar-card" ${podeMover?`draggable="true" ondragstart="tarDragStart(event,'${t.id}')" ondragend="tarDragEnd(event)"`:''} onclick="abrirTarefaModal('${t.id}')">
     <div style="display:flex;align-items:center;gap:5px;margin-bottom:5px;flex-wrap:wrap;">
       <span class="tar-chip" style="color:#fff;background:${p.cor};">${p.label}</span>
       ${tipo?`<span class="tar-chip" style="color:#fff;background:${tipo.cor};">${escHtml(tipo.nome)}</span>`:''}
+      ${t.correcaoPendente?`<span class="tar-chip" style="color:#fff;background:#E53E3E;">↩️ correção</span>`:''}
       ${prorrPend?`<span class="tar-chip" style="color:#8C5A00;background:#FFF1CC;">⏳ prorrog.</span>`:''}
+      ${t.recorrencia&&t.recorrencia!=='nenhuma'?`<span class="tar-chip" style="color:#2B6CB0;background:#E3EEFB;">🔁</span>`:''}
     </div>
     <div style="font-size:13px;font-weight:600;color:var(--text);${done?'text-decoration:line-through;opacity:.7;':''}">${escHtml(t.titulo||'—')}</div>
+    ${t.vinculo?`<div style="font-size:10.5px;color:#2B6CB0;margin-top:4px;">🔗 ${escHtml(t.vinculo.label||'vínculo')}</div>`:''}
+    ${chk.length?`<div class="tar-prog" title="${chkFeito}/${chk.length} concluídos"><i style="width:${pct}%;"></i></div>`:''}
     <div style="display:flex;gap:9px;flex-wrap:wrap;margin-top:7px;font-size:10.5px;color:var(--text-3);align-items:center;">
       <span title="Responsável">👤 ${escHtml(t.responsavel||'sem designação')}</span>
       ${t.prazo?`<span style="${vencida?'color:var(--danger);font-weight:700;':''}">${vencida?'🚨':'📅'} ${new Date(t.prazo+'T00:00:00').toLocaleDateString('pt-BR')}</span>`:''}
+      ${chk.length?`<span title="Checklist">☑ ${chkFeito}/${chk.length}</span>`:''}
       ${nCom?`<span title="Comentários">💬 ${nCom}</span>`:''}
+      ${nAnex?`<span title="Anexos">📎 ${nAnex}</span>`:''}
       ${done&&t.pontos?`<span style="color:#0F8A5F;font-weight:700;">+${t.pontos} pts</span>`:''}
     </div>
   </div>`;
@@ -5286,7 +5299,9 @@ function moverTarefaColuna(id, colunaId){
   tarHist(t, `moveu de "${antiga?.nome||'—'}" para "${col.nome}"`);
   if(col.isDone && t.status!=='Concluída'){
     t.status='Concluída'; t.concluidaEm=new Date().toISOString(); t.concluidaPor=currentUser?.nome||''; t.pontos=calcPontosTarefa(t);
+    t.correcaoPendente=false;
     logAtividade('Concluiu tarefa', `"${t.titulo}" (+${t.pontos} pts)`);
+    spawnRecorrencia(t);
   } else if(!col.isDone && t.status==='Concluída'){
     t.status='Pendente'; t.concluidaEm=null; t.concluidaPor=null; t.pontos=0;
     logAtividade('Reabriu tarefa', `"${t.titulo}"`);
@@ -5312,6 +5327,172 @@ function excluirTarefa(id){
   closeModal('modal-tar');
   renderTarefas();
 }
+
+// ── Helpers de tarefa (checklist, anexos, recorrência, revisão, vínculo) ──────
+function _tar(id){ return (DB.tarefas||[]).find(x=>x.id===id); }
+function _podeMexerTarefa(t){ return !!t && (currentUser?.tipo==='gestor' || t.responsavel===currentUser?.nome); }
+
+function _addPeriodo(dateStr, freq){
+  if(!dateStr) return '';
+  const d=new Date(dateStr+'T00:00:00');
+  if(freq==='diaria') d.setDate(d.getDate()+1);
+  else if(freq==='semanal') d.setDate(d.getDate()+7);
+  else if(freq==='mensal') d.setMonth(d.getMonth()+1);
+  else return dateStr;
+  return d.toISOString().slice(0,10);
+}
+// Ao concluir uma tarefa recorrente, recria a próxima ocorrência (prazos deslocados).
+function spawnRecorrencia(t){
+  const freq=t.recorrencia;
+  if(!freq || freq==='nenhuma') return;
+  const cols=tarefaColunas();
+  DB.tarefas.push({
+    ...JSON.parse(JSON.stringify(t)),
+    id:uid(),
+    status:'Pendente', colunaId:(cols.find(c=>!c.isDone)||cols[0]).id,
+    concluidaEm:null, concluidaPor:null, pontos:0, correcaoPendente:false,
+    comentarios:[], prorrogacoes:[], revisoes:[],
+    checklist:(t.checklist||[]).map(c=>({ id:uid(), texto:c.texto, feito:false })),
+    dataInicio:_addPeriodo(t.dataInicio||t.prazo||hoje(), freq),
+    prazo:_addPeriodo(t.prazo||hoje(), freq),
+    criadoPor:'Sistema (recorrência)', criadoEm:new Date().toISOString(),
+    historico:[{ quando:new Date().toISOString(), autor:'Sistema', acao:`recriada automaticamente (recorrência ${freq})` }]
+  });
+}
+
+function addChecklistItem(id){
+  const t=_tar(id); if(!_podeMexerTarefa(t)) return;
+  const el=document.getElementById('tar-chk-input'); const txt=(el?.value||'').trim();
+  if(!txt) return;
+  t.checklist=t.checklist||[]; t.checklist.push({ id:uid(), texto:txt, feito:false });
+  save(); abrirTarefaModal(id);
+}
+function toggleChecklist(id,itemId,v){
+  const t=_tar(id); if(!_podeMexerTarefa(t)) return;
+  const it=(t.checklist||[]).find(x=>x.id===itemId); if(!it) return;
+  it.feito=!!v; save(); renderTarefas();
+}
+function removeChecklist(id,itemId){ const t=_tar(id); if(!_podeMexerTarefa(t)) return; t.checklist=(t.checklist||[]).filter(x=>x.id!==itemId); save(); abrirTarefaModal(id); }
+
+function addAnexo(id){
+  const t=_tar(id); if(!_podeMexerTarefa(t)) return;
+  const url=(document.getElementById('tar-anx-url')?.value||'').trim();
+  const nome=(document.getElementById('tar-anx-nome')?.value||'').trim();
+  if(!url){ showToast('Informe o link.','warning'); return; }
+  if(!/^https?:\/\//i.test(url)){ showToast('O link deve começar com http:// ou https://','warning'); return; }
+  t.anexos=t.anexos||[]; t.anexos.push({ id:uid(), nome:nome||url, url });
+  save(); abrirTarefaModal(id);
+}
+function removeAnexo(id,anexoId){ const t=_tar(id); if(!_podeMexerTarefa(t)) return; t.anexos=(t.anexos||[]).filter(a=>a.id!==anexoId); save(); abrirTarefaModal(id); }
+
+// ── Devolução para correção (loop de revisão) ────────────────────────────────
+function devolverCorrecao(id){
+  if(currentUser?.tipo!=='gestor'){ showToast('Apenas o gestor devolve tarefas.','danger'); return; }
+  const t=_tar(id); if(!t) return;
+  const nota=(document.getElementById('tar-devol-nota')?.value||'').trim();
+  if(!nota){ showToast('Descreva o que precisa ser corrigido.','warning'); return; }
+  t.revisoes=t.revisoes||[]; t.revisoes.push({ id:uid(), acao:'devolvida', por:currentUser?.nome||'', quando:new Date().toISOString(), nota });
+  t.correcaoPendente=true;
+  if(t.status==='Concluída'){ t.status='Pendente'; t.concluidaEm=null; t.concluidaPor=null; t.pontos=0; }
+  const cols=tarefaColunas(); t.colunaId=(cols.find(c=>!c.isDone)||cols[0]).id;
+  tarHist(t,`devolveu para correção: ${nota}`);
+  save(); logAtividade('Devolveu tarefa p/ correção', `"${t.titulo}"`); abrirTarefaModal(id); renderTarefas();
+}
+function reenviarRevisao(id){
+  const t=_tar(id); if(!t) return;
+  if(!_podeMexerTarefa(t)){ showToast('Sem permissão.','danger'); return; }
+  if(!t.correcaoPendente) return;
+  t.revisoes=t.revisoes||[]; t.revisoes.push({ id:uid(), acao:'reenviada', por:currentUser?.nome||'', quando:new Date().toISOString(), nota:'' });
+  t.correcaoPendente=false;
+  const cols=tarefaColunas();
+  const rev=cols.find(c=>/revis/i.test(c.nome)) || cols.filter(c=>!c.isDone).slice(-1)[0] || cols[0];
+  t.colunaId=rev.id;
+  tarHist(t,'reenviou para revisão');
+  save(); logAtividade('Reenviou tarefa p/ revisão', `"${t.titulo}"`); abrirTarefaModal(id); renderTarefas();
+}
+
+function abrirVinculoTarefa(id){
+  const t=_tar(id); if(!t||!t.vinculo) return;
+  closeModal('modal-tar');
+  if(t.vinculo.tipo==='cobranca' && typeof abrirCobrancaEdit==='function'){
+    showPage('cobr'); setTimeout(()=>{ try{ abrirCobrancaEdit(t.vinculo.id); }catch(_){} }, 350);
+  }
+}
+
+// Gatilho automático: ao cadastrar uma cobrança nova, cria a tarefa de 1º contato (30 dias).
+function criarTarefaPrimeiroContato({ cobId, credorNome, principalNome, respNome }){
+  DB.tarefas=DB.tarefas||[];
+  if(DB.tarefas.some(t=>t.origem==='auto_primeiro_contato' && t.vinculo && t.vinculo.id===cobId)) return;
+  const cols=tarefaColunas();
+  const tipoLig=tarefaTipos().find(tp=>/liga/i.test(tp.nome));
+  const prazo=new Date(Date.now()+30*86400000).toISOString().slice(0,10);
+  DB.tarefas.push({
+    id:uid(),
+    titulo:`Primeiro contato — ${credorNome||'credor'}${principalNome?(' x '+principalNome):''}`,
+    desc:'Tarefa gerada automaticamente ao cadastrar a cobrança. Fazer o primeiro contato e registrar o andamento. Prazo de 30 dias.',
+    tipo: tipoLig?tipoLig.id:'', prioridade:'alta',
+    dataInicio:hoje(), prazo,
+    responsavel: respNome||'', responsavelId:'',
+    recorrencia:'nenhuma', colunaId:cols[0].id, status:'Pendente',
+    vinculo:{ tipo:'cobranca', id:cobId, label:(credorNome||'cobrança') },
+    origem:'auto_primeiro_contato',
+    comentarios:[], prorrogacoes:[], checklist:[], anexos:[], revisoes:[], correcaoPendente:false, pontos:0,
+    historico:[{ quando:new Date().toISOString(), autor:'Sistema', acao:'tarefa criada automaticamente (cobrança cadastrada)' }],
+    criadoPor:'Sistema', criadoEm:new Date().toISOString()
+  });
+  save();
+  try{ atualizarBadgeTarefas(); }catch(_){}
+}
+
+// ── IA (Claude) + Mermaid para o "Como fazer" ────────────────────────────────
+async function chamarClaudeTar(content, maxTokens){
+  const resp=await fetch('/api/claude',{ method:'POST',
+    headers:{ 'Content-Type':'application/json', ...(await authHeaders()) },
+    body:JSON.stringify({ model:'claude-haiku-4-5', max_tokens:maxTokens||1024, messages:[{ role:'user', content }] }) });
+  const data=await resp.json();
+  if(data.error) throw new Error(data.error.message||'Erro na IA');
+  return (data.content?.[0]?.text||'').trim();
+}
+let _mermaidReady=null;
+function ensureMermaid(){
+  if(_mermaidReady) return _mermaidReady;
+  _mermaidReady=new Promise((res,rej)=>{
+    if(window.mermaid){ try{ window.mermaid.initialize({ startOnLoad:false, theme:'neutral' }); }catch(_){} return res(window.mermaid); }
+    const s=document.createElement('script');
+    s.src='https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js';
+    s.onload=()=>{ try{ window.mermaid.initialize({ startOnLoad:false, theme:'neutral' }); }catch(_){} res(window.mermaid); };
+    s.onerror=()=>rej(new Error('Falha ao carregar Mermaid'));
+    document.head.appendChild(s);
+  });
+  return _mermaidReady;
+}
+async function verFluxogramaTipo(tipoId){
+  const box=document.getElementById('tar-fluxo-box'); if(!box) return;
+  const tp=tipoPorId(tipoId); if(!tp||!tp.fluxograma){ box.innerHTML='<div style="color:var(--text-3);font-size:12px;">Sem fluxograma.</div>'; return; }
+  box.innerHTML='<div style="color:var(--text-3);font-size:12px;">Renderizando…</div>';
+  try{
+    const mer=await ensureMermaid();
+    const { svg }=await mer.render('mmd'+Date.now(), tp.fluxograma);
+    box.innerHTML=`<div class="tar-mermaid">${svg}</div>`;
+  }catch(e){ box.innerHTML=`<div style="color:var(--danger);font-size:12px;">Não foi possível renderizar (verifique a sintaxe Mermaid).</div>`; }
+}
+async function gerarFluxogramaIA(tipoId){
+  if(currentUser?.tipo!=='gestor') return;
+  const tp=tipoPorId(tipoId); if(!tp) return;
+  const base=(document.getElementById('tipo-instr-'+tipoId)?.value||tp.instrucoes||'').trim();
+  if(!base){ showToast('Escreva o passo a passo antes de gerar o fluxograma.','warning'); return; }
+  if(tp.instrucoes!==base){ tp.instrucoes=base; }
+  showToast('Gerando fluxograma com IA…');
+  try{
+    const prompt=`Você é especialista em processos de um escritório de cobrança/jurídico. Converta o passo a passo abaixo em um fluxograma na sintaxe Mermaid (flowchart TD). Responda APENAS com o código Mermaid — sem texto extra, sem cercas markdown. Rótulos curtos em português.\n\nTarefa "${tp.nome}":\n${base}`;
+    let code=await chamarClaudeTar(prompt, 1024);
+    code=code.replace(/^```(?:mermaid)?\s*/i,'').replace(/```\s*$/,'').trim();
+    if(!/^(flowchart|graph)/i.test(code)) code='flowchart TD\n'+code;
+    tp.fluxograma=code; save(); showToast('Fluxograma gerado.','success'); gerirTiposModal();
+  }catch(e){ showToast('Falha ao gerar: '+e.message,'danger'); }
+}
+function setTipoInstrucoes(id,v){ const t=tipoPorId(id); if(t){ t.instrucoes=v; save(); } }
+function setTipoFluxograma(id,v){ const t=tipoPorId(id); if(t){ t.fluxograma=v; save(); } }
 
 // ── Modal único: criar / editar / detalhar tarefa ────────────────────────────
 function abrirNovaTarefa(){ abrirTarefaModal(null); }   // compat com chamadas antigas
@@ -5340,6 +5521,13 @@ async function abrirTarefaModal(id){
   const tipoSel=`<select id="tar-tipo" ${ro?'disabled':''} style="${inp}"><option value="">— sem tipo —</option>${tipos.map(tp=>`<option value="${tp.id}" ${t&&t.tipo===tp.id?'selected':''}>${escHtml(tp.nome)}</option>`).join('')}</select>`;
   const prioSel=`<select id="tar-prio" ${ro?'disabled':''} style="${inp}">${['alta','media','baixa'].map(pv=>`<option value="${pv}" ${(t?t.prioridade:'media')===pv?'selected':''}>${TAREFA_PRIO[pv].label}</option>`).join('')}</select>`;
   const colSel=`<select id="tar-col" ${podeMover?'':'disabled'} ${id?`onchange="moverTarefaColuna('${id}',this.value)"`:''} style="${inp}">${cols.map(c=>`<option value="${c.id}" ${t&&colunaDaTarefa(t).id===c.id?'selected':''}>${escHtml(c.nome)}</option>`).join('')}</select>`;
+  const RECs=[['nenhuma','Não repete'],['diaria','Diária'],['semanal','Semanal'],['mensal','Mensal']];
+  const recSel=`<select id="tar-rec" ${ro?'disabled':''} style="${inp}">${RECs.map(([v,l])=>`<option value="${v}" ${((t&&t.recorrencia)||'nenhuma')===v?'selected':''}>${l}</option>`).join('')}</select>`;
+  // vínculo (cobrança) — gestor escolhe; colaborador vê só leitura
+  const cobrLabel=c=>{ const cr=(DB.clientes||[]).find(x=>x.id===c.cliente_id); const cn=cr?(cr.nomeFantasia||cr.nome_fantasia||cr.nome):(c.divida?.descricao||'cobrança'); const pr=(c.cobranca_partes||[]).find(p=>p.principal); return cn+(pr&&pr.devedores&&pr.devedores.nome?(' x '+pr.devedores.nome):''); };
+  const listaCobr=Array.isArray(DB_cobrancas)?DB_cobrancas:[];
+  const vincAtual=t&&t.vinculo?t.vinculo:null;
+  const vincSel=`<select id="tar-vinc" ${ro?'disabled':''} style="${inp}"><option value="">— sem vínculo —</option>${listaCobr.map(c=>`<option value="${c.id}" data-label="${escHtml(cobrLabel(c))}" ${vincAtual&&vincAtual.id===c.id?'selected':''}>${escHtml(cobrLabel(c))}</option>`).join('')}${(vincAtual&&!listaCobr.some(c=>c.id===vincAtual.id))?`<option value="${escHtml(vincAtual.id)}" data-label="${escHtml(vincAtual.label||'')}" selected>${escHtml(vincAtual.label||'vínculo atual')}</option>`:''}</select>`;
 
   const formHTML=`
     <div style="margin-bottom:10px;"><label style="${lbl}">Título *</label>
@@ -5348,15 +5536,68 @@ async function abrirTarefaModal(id){
       <div><label style="${lbl}">Tipo</label>${tipoSel}</div>
       <div><label style="${lbl}">Prioridade</label>${prioSel}</div>
       <div><label style="${lbl}">Responsável</label>${respSel}</div>
+      <div><label style="${lbl}">Início</label><input type="date" id="tar-inicio" ${ro?'disabled':''} value="${escHtml(t?.dataInicio||'')}" style="${inp}"></div>
       <div><label style="${lbl}">Prazo</label><input type="date" id="tar-prazo" ${ro?'disabled':''} value="${escHtml(t?.prazo||'')}" style="${inp}"></div>
-      <div style="grid-column:1/-1;"><label style="${lbl}">Coluna</label>${colSel}</div>
+      <div><label style="${lbl}">Recorrência</label>${recSel}</div>
+      <div><label style="${lbl}">Coluna</label>${colSel}</div>
+      <div><label style="${lbl}">Vínculo (cobrança)</label>${vincSel}</div>
     </div>
+    ${vincAtual?`<div style="margin:-4px 0 10px;"><a onclick="abrirVinculoTarefa('${id}')" style="cursor:pointer;font-size:12px;color:#2B6CB0;text-decoration:underline;">🔗 Abrir cobrança vinculada (${escHtml(vincAtual.label||'')})</a></div>`:''}
     <div style="margin-bottom:6px;"><label style="${lbl}">Descrição</label>
       <textarea id="tar-desc" rows="3" ${ro?'disabled':''} placeholder="Passo a passo, contexto, links…" style="${inp}resize:vertical;">${escHtml(t?.desc||'')}</textarea></div>`;
 
   // ── seções extras (só p/ tarefa existente) ──
   let extra='';
   if(t){
+    const sec=(titulo,corpo)=>`<div style="margin-top:16px;"><div style="font-size:11px;font-weight:800;letter-spacing:.05em;color:var(--text-3);margin-bottom:8px;">${titulo}</div>${corpo}</div>`;
+
+    // ↩️ Devolução / revisão
+    if(t.correcaoPendente){
+      const ultima=(t.revisoes||[]).slice().reverse().find(r=>r.acao==='devolvida');
+      extra += `<div style="background:#FDECEC;border:1px solid #F5B5B5;border-radius:10px;padding:11px 14px;margin-top:14px;">
+        <div style="font-size:12px;font-weight:700;color:#B42318;">↩️ Devolvida para correção</div>
+        ${ultima?`<div style="font-size:12.5px;color:#7A271A;margin-top:3px;white-space:pre-wrap;">${escHtml(ultima.nota||'')}</div><div style="font-size:10.5px;color:#9B6B6B;margin-top:3px;">por ${escHtml(ultima.por||'')} · ${dttf(ultima.quando)}</div>`:''}
+        ${isResp?`<button class="btn btn-primary btn-sm" style="margin-top:8px;" onclick="reenviarRevisao('${t.id}')">Reenviar para revisão</button>`:''}
+      </div>`;
+    } else if(ehG){
+      extra += `<div style="margin-top:14px;display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end;">
+        <div style="flex:1;min-width:180px;"><label style="${lbl}">Devolver para correção (motivo)</label><input type="text" id="tar-devol-nota" placeholder="O que precisa ser corrigido?" style="${inp}"></div>
+        <button class="btn btn-ghost btn-sm" style="flex-shrink:0;color:#B42318;" onclick="devolverCorrecao('${t.id}')">↩️ Devolver</button></div>`;
+    }
+    const revHist=(t.revisoes||[]).slice().reverse().map(r=>{
+      const ic=r.acao==='devolvida'?'↩️':r.acao==='reenviada'?'📤':'✅';
+      return `<div style="font-size:11.5px;color:var(--text-3);padding:2px 0;">${ic} ${dttf(r.quando)} — <strong style="color:var(--text-2);">${escHtml(r.por||'')}</strong> ${escHtml(r.acao)}${r.nota?': '+escHtml(r.nota):''}</div>`;
+    }).join('');
+    if(revHist) extra += sec('🔁 REVISÕES', revHist);
+
+    // 📖 Como fazer (instruções + fluxograma do tipo)
+    const tp=tipoPorId(t.tipo);
+    if(tp && (tp.instrucoes || tp.fluxograma)){
+      extra += sec(`📖 COMO FAZER${tp.nome?` — ${escHtml(tp.nome)}`:''}`,
+        `${tp.instrucoes?`<div style="font-size:12.5px;color:var(--text);white-space:pre-wrap;background:var(--surface-2);border-radius:8px;padding:10px 12px;">${escHtml(tp.instrucoes)}</div>`:''}
+         ${tp.fluxograma?`<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" onclick="verFluxogramaTipo('${tp.id}')">🗺 Ver fluxograma</button><div id="tar-fluxo-box" style="margin-top:8px;"></div></div>`:''}`);
+    }
+
+    // ☑ Checklist
+    const chk=t.checklist||[];
+    const chkRows=chk.map(it=>`<div style="display:flex;align-items:center;gap:8px;padding:3px 0;">
+      <input type="checkbox" ${it.feito?'checked':''} ${podeMover?'':'disabled'} onchange="toggleChecklist('${t.id}','${it.id}',this.checked)" style="width:15px;height:15px;cursor:pointer;">
+      <span style="flex:1;font-size:12.5px;${it.feito?'text-decoration:line-through;color:var(--text-3);':''}">${escHtml(it.texto)}</span>
+      ${podeMover?`<button class="btn btn-ghost btn-sm btn-icon" style="color:var(--danger);" onclick="removeChecklist('${t.id}','${it.id}')">✕</button>`:''}
+    </div>`).join('') || `<div style="color:var(--text-4);font-size:12px;">Sem itens.</div>`;
+    const chkAdd=podeMover?`<div style="display:flex;gap:6px;margin-top:6px;"><input type="text" id="tar-chk-input" placeholder="Novo item…" style="${inp}" onkeydown="if(event.key==='Enter')addChecklistItem('${t.id}')"><button class="btn btn-ghost btn-sm" style="flex-shrink:0;" onclick="addChecklistItem('${t.id}')">${ico('plus',12)}</button></div>`:'';
+    const chkPct=chk.length?Math.round(chk.filter(c=>c.feito).length/chk.length*100):0;
+    extra += sec(`☑ CHECKLIST${chk.length?` (${chk.filter(c=>c.feito).length}/${chk.length})`:''}`, `${chk.length?`<div class="tar-prog" style="margin:0 0 8px;"><i style="width:${chkPct}%;"></i></div>`:''}${chkRows}${chkAdd}`);
+
+    // 📎 Anexos
+    const anx=t.anexos||[];
+    const anxRows=anx.map(a=>`<div style="display:flex;align-items:center;gap:8px;padding:3px 0;">
+      <a href="${escHtml(a.url)}" target="_blank" rel="noopener noreferrer" style="flex:1;font-size:12.5px;color:#2B6CB0;text-decoration:underline;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📎 ${escHtml(a.nome||a.url)}</a>
+      ${podeMover?`<button class="btn btn-ghost btn-sm btn-icon" style="color:var(--danger);" onclick="removeAnexo('${t.id}','${a.id}')">✕</button>`:''}
+    </div>`).join('') || `<div style="color:var(--text-4);font-size:12px;">Sem anexos.</div>`;
+    const anxAdd=podeMover?`<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;"><input type="text" id="tar-anx-nome" placeholder="Nome (opcional)" style="${inp}flex:1;min-width:110px;"><input type="text" id="tar-anx-url" placeholder="https://link…" style="${inp}flex:2;min-width:150px;"><button class="btn btn-ghost btn-sm" style="flex-shrink:0;" onclick="addAnexo('${t.id}')">${ico('plus',12)}</button></div>`:'';
+    extra += sec('📎 ANEXOS / LINKS', anxRows+anxAdd);
+
     const comentarios=(t.comentarios||[]).map(c=>`<div style="padding:8px 10px;background:var(--surface-2);border-radius:8px;margin-bottom:6px;">
       <div style="font-size:11px;color:var(--text-3);margin-bottom:2px;"><strong style="color:var(--text-2);">${escHtml(c.autor)}</strong> · ${dttf(c.criadoEm)}</div>
       <div style="font-size:12.5px;color:var(--text);white-space:pre-wrap;">${escHtml(c.texto)}</div></div>`).join('') || `<div style="color:var(--text-4);font-size:12px;margin-bottom:6px;">Sem comentários ainda.</div>`;
@@ -5379,8 +5620,7 @@ async function abrirTarefaModal(id){
 
     const hist=(t.historico||[]).slice().reverse().map(h=>`<div style="font-size:11.5px;color:var(--text-3);padding:2px 0;">• ${dttf(h.quando)} — <strong style="color:var(--text-2);">${escHtml(h.autor)}</strong> ${escHtml(h.acao)}</div>`).join('');
 
-    const sec=(titulo,corpo)=>`<div style="margin-top:16px;"><div style="font-size:11px;font-weight:800;letter-spacing:.05em;color:var(--text-3);margin-bottom:8px;">${titulo}</div>${corpo}</div>`;
-    extra = sec('💬 COMENTÁRIOS', comentarios+comentarioBox)
+    extra += sec('💬 COMENTÁRIOS', comentarios+comentarioBox)
           + sec('⏳ PRORROGAÇÃO DE PRAZO', (prorrList||'')+prorrForm)
           + (hist?sec('🕓 HISTÓRICO', hist):'');
   }
@@ -5399,29 +5639,34 @@ function salvarTarefaModal(id){
   const titulo=(g('tar-titulo')?.value||'').trim();
   if(!titulo){ showToast('Dê um título à tarefa.','warning'); return; }
   const respSelEl=g('tar-resp'); const opt=respSelEl&&respSelEl.selectedOptions&&respSelEl.selectedOptions[0];
+  const vincEl=g('tar-vinc'); const vopt=vincEl&&vincEl.selectedOptions&&vincEl.selectedOptions[0];
+  const vinculo=(vincEl&&vincEl.value)?{ tipo:'cobranca', id:vincEl.value, label:(vopt&&vopt.dataset.label)||'' }:null;
   const dados={
     titulo,
     desc:(g('tar-desc')?.value||'').trim(),
     tipo:g('tar-tipo')?.value||'',
+    dataInicio:g('tar-inicio')?.value||'',
     prazo:g('tar-prazo')?.value||'',
     responsavel:respSelEl?.value||'',
     responsavelId:(opt&&opt.dataset.id)||'',
     prioridade:g('tar-prio')?.value||'media',
-    colunaId:g('tar-col')?.value||''
+    recorrencia:g('tar-rec')?.value||'nenhuma',
+    colunaId:g('tar-col')?.value||'',
+    vinculo
   };
   DB.tarefas=DB.tarefas||[];
   if(id){
     const t=DB.tarefas.find(x=>x.id===id); if(!t) return;
     Object.assign(t, dados);
     const col=colunaPorId(t.colunaId);
-    if(col&&col.isDone&&t.status!=='Concluída'){ t.status='Concluída'; t.concluidaEm=new Date().toISOString(); t.concluidaPor=currentUser?.nome||''; t.pontos=calcPontosTarefa(t); }
+    if(col&&col.isDone&&t.status!=='Concluída'){ t.status='Concluída'; t.concluidaEm=new Date().toISOString(); t.concluidaPor=currentUser?.nome||''; t.pontos=calcPontosTarefa(t); spawnRecorrencia(t); }
     else if(col&&!col.isDone&&t.status==='Concluída'){ t.status='Pendente'; t.concluidaEm=null; t.concluidaPor=null; t.pontos=0; }
     tarHist(t,'editou a tarefa');
     logAtividade('Editou tarefa', `"${titulo}"`);
   } else {
     const col=colunaPorId(dados.colunaId)||tarefaColunas()[0];
     DB.tarefas.push({ id:uid(), ...dados, colunaId:col.id, status:col.isDone?'Concluída':'Pendente',
-      comentarios:[], prorrogacoes:[], pontos:0,
+      comentarios:[], prorrogacoes:[], checklist:[], anexos:[], revisoes:[], correcaoPendente:false, pontos:0,
       historico:[{quando:new Date().toISOString(), autor:currentUser?.nome||'Sistema', acao:'criou a tarefa'}],
       criadoPor:currentUser?.nome||'Sistema', criadoEm:new Date().toISOString() });
     logAtividade('Criou tarefa', `"${titulo}"${dados.responsavel?' → '+dados.responsavel:''}`);
@@ -5509,11 +5754,34 @@ function excluirColuna(id){
 function gerirTiposModal(){
   if(currentUser?.tipo!=='gestor') return;
   const tipos=tarefaTipos();
-  const rows=tipos.map(tp=>`<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);">
-    <input type="color" value="${tp.cor}" onchange="setTipoCor('${tp.id}',this.value)" style="width:30px;height:28px;border:none;background:none;cursor:pointer;padding:0;">
-    <input value="${escHtml(tp.nome)}" onchange="setTipoNome('${tp.id}',this.value)" style="flex:1;padding:6px 8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;background:var(--bg);color:var(--text);">
-    <button class="btn btn-ghost btn-sm btn-icon" style="color:var(--danger);" onclick="excluirTipo('${tp.id}')" title="Excluir">✕</button></div>`).join('');
-  _injTarModal('modal-tar-aux', `<div class="modal-header"><span class="modal-title">Tipos de tarefa</span><button class="modal-close" onclick="closeModal('modal-tar-aux')">✕</button></div><div class="modal-body">${rows}<button class="btn btn-ghost btn-sm" style="margin-top:12px;" onclick="addTipo()">${ico('plus',12)} Adicionar tipo</button></div><div class="modal-footer"><button class="btn btn-primary" onclick="closeModal('modal-tar-aux')">Concluído</button></div>`, 480);
+  const ta='width:100%;padding:7px 9px;border:1px solid var(--border-2);border-radius:6px;font-size:12.5px;font-family:inherit;background:var(--bg);color:var(--text);resize:vertical;';
+  const rows=tipos.map(tp=>`<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:10px;">
+    <div style="display:flex;align-items:center;gap:8px;">
+      <input type="color" value="${tp.cor}" onchange="setTipoCor('${tp.id}',this.value)" style="width:30px;height:28px;border:none;background:none;cursor:pointer;padding:0;">
+      <input value="${escHtml(tp.nome)}" onchange="setTipoNome('${tp.id}',this.value)" style="flex:1;padding:6px 8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-weight:600;background:var(--bg);color:var(--text);">
+      <button class="btn btn-ghost btn-sm btn-icon" style="color:var(--danger);" onclick="excluirTipo('${tp.id}')" title="Excluir tipo">✕</button>
+    </div>
+    <div style="margin-top:8px;"><label style="font-size:10.5px;font-weight:700;color:var(--text-3);">📖 COMO FAZER (passo a passo — o colaborador vê isto na tarefa)</label>
+      <textarea id="tipo-instr-${tp.id}" rows="3" onchange="setTipoInstrucoes('${tp.id}',this.value)" placeholder="1. ...\n2. ...\n3. ..." style="${ta}margin-top:3px;">${escHtml(tp.instrucoes||'')}</textarea></div>
+    <div style="margin-top:8px;"><label style="font-size:10.5px;font-weight:700;color:var(--text-3);">🗺 FLUXOGRAMA (Mermaid) — opcional</label>
+      <textarea id="tipo-fluxo-${tp.id}" rows="3" onchange="setTipoFluxograma('${tp.id}',this.value)" placeholder="flowchart TD\n  A[Início] --> B[Ação]" style="${ta}margin-top:3px;font-family:var(--font-mono);font-size:11.5px;">${escHtml(tp.fluxograma||'')}</textarea>
+      <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">
+        <button class="btn btn-ghost btn-sm" onclick="gerarFluxogramaIA('${tp.id}')">✨ Gerar com IA</button>
+        <button class="btn btn-ghost btn-sm" onclick="previewFluxogramaTipo('${tp.id}')">🗺 Pré-visualizar</button>
+      </div>
+      <div id="tipo-fluxo-prev-${tp.id}" style="margin-top:8px;"></div>
+    </div>
+  </div>`).join('');
+  _injTarModal('modal-tar-aux', `<div class="modal-header"><span class="modal-title">Tipos de tarefa &amp; instruções</span><button class="modal-close" onclick="closeModal('modal-tar-aux')">✕</button></div><div class="modal-body">${rows}<button class="btn btn-ghost btn-sm" onclick="addTipo()">${ico('plus',12)} Adicionar tipo</button></div><div class="modal-footer"><button class="btn btn-primary" onclick="closeModal('modal-tar-aux')">Concluído</button></div>`, 620);
+}
+async function previewFluxogramaTipo(tipoId){
+  const tp=tipoPorId(tipoId); const box=document.getElementById('tipo-fluxo-prev-'+tipoId); if(!box) return;
+  const code=(document.getElementById('tipo-fluxo-'+tipoId)?.value||tp?.fluxograma||'').trim();
+  if(!code){ box.innerHTML='<div style="color:var(--text-3);font-size:12px;">Sem fluxograma.</div>'; return; }
+  if(tp) tp.fluxograma=code;
+  box.innerHTML='<div style="color:var(--text-3);font-size:12px;">Renderizando…</div>';
+  try{ const mer=await ensureMermaid(); const { svg }=await mer.render('mmdp'+Date.now(), code); box.innerHTML=`<div class="tar-mermaid">${svg}</div>`; }
+  catch(e){ box.innerHTML='<div style="color:var(--danger);font-size:12px;">Sintaxe Mermaid inválida.</div>'; }
 }
 function addTipo(){ tarefaTipos(); DB.config.tarefaTipos.push({ id:uid(), nome:'Novo tipo', cor:'#718096' }); save(); gerirTiposModal(); renderTarefas(); }
 function setTipoCor(id,v){ const t=tipoPorId(id); if(t){ t.cor=v; save(); renderTarefas(); } }
@@ -10589,6 +10857,14 @@ async function salvarCobranca(){
     const partes = resp.map(r=>({ cobranca_id: cobId, devedor_id: r.devedorId, papel: r.papel, principal: !!r.principal }));
     const { error: epar } = await supa.from('cobranca_partes').insert(partes);
     if(epar) throw new Error('responsáveis: '+epar.message);
+
+    // Gatilho: cobrança NOVA gera tarefa de "primeiro contato" com prazo de 30 dias.
+    if(!editId){
+      try{
+        const principal = resp.find(r=>r.principal) || resp[0];
+        criarTarefaPrimeiroContato({ cobId, credorNome, principalNome: principal?.nome, respNome: currentUser?.nome||'' });
+      }catch(e){ console.warn('[tarefa auto 1º contato]', e); }
+    }
 
     showToast(editId ? 'Cobrança atualizada.' : ('Cobrança criada com '+resp.length+' responsável(is).'),'success');
     document.getElementById('cobr-modal-overlay')?.remove();
