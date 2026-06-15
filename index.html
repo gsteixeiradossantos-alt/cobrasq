@@ -10099,24 +10099,35 @@ async function salvarCobranca(){
       const rdig = docSoDigitos(r.doc);
       let dev = (DB.devedores||[]).find(d=> rdig && docSoDigitos(d.doc)===rdig)
              || (DB.devedores||[]).find(d=> (d.nome||'').toLowerCase()===r.nome.toLowerCase());
-      if(dev){ r.devedorId = dev.id; }
+      if(dev){ r.devedorId = dev.id; r._novo = false; }
       else{
         const { data, error } = await supa.from('devedores')
           .insert({ nome:r.nome, doc:r.doc||null, cliente_id:clienteId, status:'Cobrar',
                     metadata:{ origem:'cobranca_form' } }).select('id').single();
         if(error) throw new Error('contato '+r.nome+': '+error.message);
-        r.devedorId = data.id;
+        r.devedorId = data.id; r._novo = true;
       }
     }
 
-    // 3) Cria a cobrança
+    // 3) Cria a cobrança.
+    // Invariante: cobranca.id = id do devedor principal (mantém compat com o CRM,
+    // que chaveia filhos por devedor_id = caso.id). Se o principal já tiver uma
+    // cobrança com esse id, deixa o banco gerar um id novo.
+    const principal = resp.find(r=>r.principal) || resp[0];
+    let cobrancaId = principal.devedorId;
+    if(!principal._novo){
+      const { data: ja } = await supa.from('cobrancas').select('id').eq('id', cobrancaId).maybeSingle();
+      if(ja) cobrancaId = null; // já existe → id gerado pelo banco
+    }
     const divida = { valorOriginal: valorOrig, totalAvista: valorAtual, vencimento: venc, descricao: desc };
-    const { data: cob, error: ecob } = await supa.from('cobrancas').insert({
+    const novaCobr = {
       cliente_id: clienteId, status:'Cobrar', fase:'extrajudicial',
       valor_orig: valorOrig, valor_atual: valorAtual, data_entrada: venc,
       divida, metadata:{ credorOriginal: credorNome, origem:'cobranca_form' },
       assigned_to: uidUser
-    }).select('id').single();
+    };
+    if(cobrancaId) novaCobr.id = cobrancaId;
+    const { data: cob, error: ecob } = await supa.from('cobrancas').insert(novaCobr).select('id').single();
     if(ecob) throw new Error('cobrança: '+ecob.message);
 
     // 4) Vincula as partes

@@ -10,6 +10,11 @@
 -- ACRESCENTA `partes` ao final → compatível com CREATE OR REPLACE VIEW (preserva
 -- grants e os triggers INSTEAD OF já existentes).
 -- ----------------------------------------------------------------------------
+-- INVARIANTE: cobranca.id = id do devedor PRINCIPAL (= caso.id). Mantém estáveis
+--   os filhos do caso (peticao_provas/conversas, acordos, devedor_eventos) que o
+--   CRM ainda chaveia por devedor_id = caso.id → nenhuma query do CRM precisa
+--   mudar. Limite herdado do modelo atual: 1 devedor é principal de 1 cobrança
+--   (débitos extras: partes adicionais ou dev_dividas).
 -- Pré-requisito: 2026-06-15a_cobrancas_e_partes.sql aplicado.
 -- Depende dos helpers public.safe_date / public.safe_numeric (2026-06-11b).
 -- NÃO aplicado automaticamente. Rollback: 2026-06-15b_..._rollback.sql
@@ -65,7 +70,7 @@ CREATE OR REPLACE VIEW public.casos WITH (security_invoker = true) AS
                                   devedor_eventos.payload ->> 'mensagem',
                                   devedor_eventos.tipo)) ORDER BY devedor_eventos.criado_em)
            FROM devedor_eventos
-          WHERE devedor_eventos.cobranca_id = co.id), '[]'::jsonb) AS historico,
+          WHERE devedor_eventos.devedor_id = co.id), '[]'::jsonb) AS historico,
     co.encerramento IS NOT NULL AS encerrado,
     co.encerramento,
     co.acordo_final,
@@ -108,7 +113,7 @@ SET search_path TO 'public', 'pg_temp'
 AS $function$
 DECLARE
   v_cliente_id  UUID;
-  v_cobranca_id UUID := COALESCE(NEW.id, gen_random_uuid());
+  v_cobranca_id UUID;        -- = id do devedor principal (invariante caso.id == principal)
   v_devedor_id  UUID;
   v_status TEXT;
   v_fase TEXT;
@@ -163,6 +168,10 @@ BEGIN
     jsonb_build_object('origem','crm_via_view','credorOriginal', NEW.credor),
     false, NOW(), NOW()
   ) RETURNING id INTO v_devedor_id;
+
+  -- Invariante: cobranca.id = id do devedor principal (mantém caso.id estável e
+  -- compatível com os filhos do caso que ainda chaveiam por devedor_id = caso.id).
+  v_cobranca_id := COALESCE(NEW.id, v_devedor_id);
 
   -- 2) COBRANÇA (débito)
   INSERT INTO public.cobrancas (
