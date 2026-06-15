@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS public.cobrancas (
   metadata            JSONB DEFAULT '{}'::jsonb,
   passo_atual         TEXT,
   aguardando_resposta BOOLEAN DEFAULT false,
-  encerramento        TIMESTAMPTZ,
+  encerramento        JSONB,
   acordo_final        JSONB,
   etapa_atualizada_em TIMESTAMPTZ,
   encaminhamento_judicial TEXT,
@@ -96,8 +96,8 @@ SELECT
   COALESCE(d.divida, '{}'::jsonb), COALESCE(d.metadata, '{}'::jsonb), d.passo_atual,
   d.aguardando_resposta, d.encerramento, d.acordo_final,
   d.etapa_atualizada_em, d.encaminhamento_judicial, d.objecao_adicionais, d.mesa_gestor,
-  d.checklist_judicial, COALESCE(d.tipo_cobranca, 'digital'), d.arquivado, d.arquivado_em,
-  d.arquivado_motivo, d.is_draft, d.draft_expires_at, d.assigned_to, d.cadastrado_por,
+  d.checklist_judicial, COALESCE(d.tipo_cobranca, 'digital'), d.arquivado, NULL::timestamptz,
+  NULL::text, d.is_draft, d.draft_expires_at, d.assigned_to, d.cadastrado_por,
   d.created_at, d.updated_at
 FROM public.devedores d
 ON CONFLICT (id) DO NOTHING;
