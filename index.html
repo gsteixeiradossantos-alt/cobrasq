@@ -6323,7 +6323,26 @@ function renderPainelColaborador(){
     </div>`;
 }
 
-function renderPainel(){
+// ── Recuperado de fato no mês (ym = "YYYY-MM") ──────────────────────────────
+// Soma as parcelas de acordo efetivamente pagas na competência — fonte real de
+// "dinheiro que entrou" (canal principal de recuperação). Usa pagoEm (data da
+// baixa) e cai para vencimento em parcelas antigas sem data. Asaas RECEIVED e
+// baixas avulsas: follow-up (sem carga em massa hoje).
+function recuperadoNoMes(ym){
+  let total = 0;
+  for(const d of (DB.devedores||[])){
+    for(const ac of (d.acordos||[])){
+      for(const p of (ac.parcelas||[])){
+        if(!p.pago) continue;
+        const ref = String(p.pagoEm || p.vencimento || '').slice(0,7);
+        if(ref === ym) total += (typeof p.valor==='number') ? p.valor : (parseValorBR(p.valor)||0);
+      }
+    }
+  }
+  return total;
+}
+
+async function renderPainel(){
   const el = document.getElementById('page-painel');
   if(!el) return;
 
@@ -6338,32 +6357,29 @@ function renderPainel(){
     return;
   }
 
-  // ── FIX 1: excluir arquivados (e rascunhos — item 8) de TODOS os cálculos ───────────
+  // ── FONTE DE VERDADE: cobranças (mesmo cache/lógica da tela Cobranças) ───────
+  // Antes o painel somava DB.devedores — que pós-migração 2026-06-15 é a tabela de
+  // CONTATOS (pessoas), não de dívidas; por isso divergia da tela Cobranças. Agora
+  // agrega `cobrancas` (reusando loadCobrancasFromSupabase) → bate por construção.
+  el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando painel…</div>`;
+  const cobrRows = await loadCobrancasFromSupabase();
+  if(Array.isArray(cobrRows)) DB_cobrancas = cobrRows;
+  const cobrAtivas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft);
+
+  const totalCarteira = cobrAtivas.reduce((s,c)=>s+(+c.valor_atual||+c.valor_orig||0), 0);
+  const totalCasos    = cobrAtivas.length;
+  const totalContatos = new Set(cobrAtivas.flatMap(c=>(c.cobranca_partes||[]).map(p=>p.devedor_id))).size;
+  const acordosAtivos = cobrAtivas.filter(c=>['Acordo','Acordo firmado','Em pagamento'].includes(c.status)).length;
+
+  // Recuperado no mês = dinheiro que de fato entrou (parcelas de acordo pagas).
+  const ymAtual    = new Date().toISOString().slice(0,7);
+  const ymAnterior = (()=>{ const d=new Date(); d.setMonth(d.getMonth()-1,1); return d.toISOString().slice(0,7); })();
+  const totalRecuperado = recuperadoNoMes(ymAtual);
+  const recMesAnterior  = recuperadoNoMes(ymAnterior);
+  const deltaRecPct = recMesAnterior>0 ? Math.round(((totalRecuperado-recMesAnterior)/recMesAnterior)*100) : null;
+
+  // Contatos (DB.devedores) seguem alimentando atividade recente, vencimentos e calendário.
   const devs = (DB.devedores || []).filter(d => !d.arquivado && !d.isDraft);
-  const totalDevs = devs.length;
-  const totalCarteira = devs
-    .filter(d => d.status !== 'Quitado' && d.status !== 'Recebido')
-    .reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0), 0);
-
-  // ── FIX 2: Recuperado = Asaas RECEIVED (cache) OU status local ─
-  const recAsaas = devs.reduce((s,d) =>
-    s + (d.asaasCharges||[])
-      .filter(c=>['RECEIVED','CONFIRMED'].includes(c.status))
-      .reduce((ss,c)=>ss+(c.value||0), 0)
-  , 0);
-  const recLocal = devs
-    .filter(d=>d.status==='Quitado'||d.status==='Recebido')
-    .reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0), 0);
-  // Usa Asaas se houver dados, senão usa status local
-  const hasAsaasData = devs.some(d=>(d.asaasCharges||[]).length > 0);
-  const totalRecuperado = hasAsaasData ? recAsaas : recLocal;
-  const taxaRec = totalCarteira > 0 ? ((totalRecuperado/(totalCarteira+totalRecuperado))*100).toFixed(1) : '0.0';
-
-  // ── FIX 3: Acordos ativos = acordos com parcelas em aberto ────
-  const acordosAtivos = devs.filter(d =>
-    (d.acordos||[]).some(ac => (ac.parcelas||[]).some(p=>!p.pago))
-    || d.status === 'Acordo'
-  ).length;
 
   // Recent interactions (só de não-arquivados)
   let interactions = [];
@@ -6420,24 +6436,13 @@ function renderPainel(){
   const nomeUsuario = (currentUser && currentUser.nome) ? currentUser.nome.split(' ')[0] : 'gestor';
   const mesAtual = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][new Date().getMonth()];
 
-  // Sparkline helper — generates a simple SVG path from data array
-  function sparkPath(data, w, h) {
-    const max = Math.max(...data), min = Math.min(...data);
-    const range = max - min || 1;
-    return data.map((v, i) =>
-      `${i===0?'M':'L'} ${(i/(data.length-1))*w} ${h - ((v-min)/range)*(h-4) - 2}`
-    ).join(' ');
-  }
-  const spark1 = [2,3,2,4,3,5,5,4,6,5,7,8,7,9,10,9,11,totalDevs||10];
-  const spark2 = [10,15,12,18,16,22,20,25,22,28,25,totalCarteira>0?30:20];
-  const spark3 = [0,2,1,3,2,4,3,5,4,6,totalRecuperado>0?8:3];
-  const spark4 = [1,1,2,2,3,2,3,4,3,4,acordosAtivos||3];
+  // (Sparklines e deltas fabricados removidos — os números agora são reais.)
 
   const kpis = [
-    { label:'Carteira ativa',      value: fmtk(totalCarteira),   delta:'+4,2%',  dir:'up',   color:'var(--success)', spark: spark2 },
-    { label:'Recuperado no mês',   value: fmtk(totalRecuperado), delta:'+18,7%', dir:'up',   color:'var(--success)', spark: spark3 },
-    { label:'Acordos em vigor',    value: String(acordosAtivos),  delta:`+${Math.max(0,acordosAtivos)}`, dir:'up', color:'var(--success)', spark: spark4 },
-    { label:'Devedores ativos',    value: String(totalDevs),      delta:`${totalDevs} total`, dir:'neutral', color:'var(--info)', spark: spark1 },
+    { label:'Carteira ativa',    value: fmtR(totalCarteira),   sub:`${totalCasos} caso${totalCasos!==1?'s':''} em aberto` },
+    { label:'Recuperado no mês', value: fmtR(totalRecuperado),  sub: totalRecuperado===0 ? 'nenhuma baixa registrada ainda' : (deltaRecPct===null ? 'parcelas de acordo pagas' : 'vs. mês anterior'), delta: totalRecuperado===0?null:deltaRecPct },
+    { label:'Acordos em vigor',  value: String(acordosAtivos),  sub: acordosAtivos===1?'cobrança com acordo':'cobranças com acordo' },
+    { label:'Casos ativos',      value: String(totalCasos),     sub:`${totalContatos} contato${totalContatos!==1?'s':''} vinculado${totalContatos!==1?'s':''}` },
   ];
 
   // Activity type label/color helper
@@ -6454,23 +6459,15 @@ function renderPainel(){
   const now = new Date();
   const calHtml = buildMiniCalendar(now.getFullYear(), now.getMonth(), eventDates);
 
-  // Gráfico de barras — Recuperação por mês (últimos 12 meses, dados reais)
+  // Gráfico de barras — Recuperação por mês (12 meses, valor REAL recuperado) + meta
   const monthsData = Array.from({length:12}, (_, i) => {
     const d = new Date(now.getFullYear(), now.getMonth() - (11 - i), 1);
     const ym = d.toISOString().slice(0,7);
     const mName = ['JAN','FEV','MAR','ABR','MAI','JUN','JUL','AGO','SET','OUT','NOV','DEZ'][d.getMonth()];
-    const rec = devs.reduce((s, dev) => {
-      const fromAsaas = (dev.asaasCharges||[])
-        .filter(c=>['RECEIVED','CONFIRMED'].includes(c.status) && (c.paymentDate||c.dueDate||'').startsWith(ym))
-        .reduce((ss,c)=>ss+(c.value||0), 0);
-      const fromLocal = (dev.historico||[])
-        .filter(h=>h.tipo==='Pagamento' && (h.data||'').startsWith(ym))
-        .reduce((ss,h)=>ss+(parseValorBR(h.valor)||0), 0);
-      return s + (fromAsaas || fromLocal);
-    }, 0);
-    return {ym, mName, rec};
+    return { ym, mName, rec: recuperadoNoMes(ym) };
   });
-  const maxBarVal = Math.max(...monthsData.map(m=>m.rec), 1);
+  const metaMensal = +(DB.config?.metaMensal) || 0;
+  const maxBarVal = Math.max(...monthsData.map(m=>m.rec), metaMensal, 1);
 
   el.innerHTML = `
     <!-- ── GREETING ── -->
@@ -6498,12 +6495,10 @@ function renderPainel(){
         <div class="kcard" style="padding:14px 16px;">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;">
             <div style="font-size:12px;color:var(--text-2);font-weight:500;">${k.label}</div>
-            <span class="kcard-delta ${k.dir==='up'?'up':k.dir==='down'?'down':''}" style="${k.dir==='neutral'?'background:var(--active-bg);color:var(--info);':''}">${k.delta}</span>
+            ${typeof k.delta==='number' ? `<span class="kcard-delta ${k.delta>=0?'up':'down'}">${k.delta>=0?'+':''}${k.delta}%</span>` : ''}
           </div>
           <div class="kcard-value" style="font-size:22px;">${k.value}</div>
-          <svg width="100%" height="28" viewBox="0 0 200 28" preserveAspectRatio="none" style="margin-top:8px;display:block;">
-            <path d="${sparkPath(k.spark, 200, 28)}" fill="none" stroke="${k.color}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
+          <div style="font-size:11px;color:var(--text-3);margin-top:6px;">${k.sub||''}</div>
         </div>
       `).join('')}
     </div>
@@ -6521,21 +6516,21 @@ function renderPainel(){
           </div>
           <div style="display:flex;gap:12px;align-items:center;font-size:11.5px;color:var(--text-2);">
             <span style="display:flex;align-items:center;gap:6px;"><span style="width:8px;height:8px;border-radius:2px;background:var(--navy);display:inline-block;"></span> Recuperado</span>
-            <span style="display:flex;align-items:center;gap:6px;"><span style="width:8px;height:8px;border-radius:2px;background:var(--gold);display:inline-block;opacity:.8;"></span> Meta</span>
+            ${metaMensal>0?`<span style="display:flex;align-items:center;gap:6px;"><span style="width:8px;height:8px;border-radius:2px;background:var(--gold);display:inline-block;opacity:.8;"></span> Meta (${fmtk(metaMensal)})</span>`:''}
           </div>
         </div>
         <div class="panel-body" style="padding:18px 18px 14px;">
-          <div style="display:flex;align-items:flex-end;gap:8px;height:160px;padding-left:28px;position:relative;">
+          <div style="display:flex;align-items:flex-end;gap:8px;height:160px;padding-left:40px;position:relative;">
             <div style="position:absolute;left:0;top:0;bottom:18px;display:flex;flex-direction:column;justify-content:space-between;font-size:10px;color:var(--text-3);font-family:var(--font-mono);">
-              <span>800k</span><span>600k</span><span>400k</span><span>200k</span><span>0</span>
+              ${[1,0.75,0.5,0.25,0].map(f=>`<span>${fmtk(maxBarVal*f).replace('R$ ','')}</span>`).join('')}
             </div>
             ${monthsData.map((m)=>{
-              const pct = Math.max(6, Math.round((m.rec/maxBarVal)*90));
-              const metaPct = Math.min(100, pct+12);
+              const recPct  = m.rec>0 ? Math.max(6, Math.round((m.rec/maxBarVal)*90)) : 0;
+              const metaPct = metaMensal>0 ? Math.round((metaMensal/maxBarVal)*90) : 0;
               return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;">
                 <div style="width:100%;height:134px;display:flex;align-items:flex-end;justify-content:center;gap:3px;">
-                  <div style="width:42%;height:${pct}%;background:var(--navy);border-radius:3px 3px 0 0;" title="${m.mName}: ${fmtR(m.rec)}"></div>
-                  <div style="width:42%;height:${metaPct}%;background:var(--gold);border-radius:3px 3px 0 0;opacity:.5;"></div>
+                  <div style="width:42%;height:${recPct}%;background:var(--navy);border-radius:3px 3px 0 0;" title="${m.mName}/${m.ym.slice(0,4)}: ${fmtR(m.rec)}"></div>
+                  ${metaMensal>0?`<div style="width:42%;height:${metaPct}%;background:var(--gold);border-radius:3px 3px 0 0;opacity:.5;" title="Meta: ${fmtR(metaMensal)}"></div>`:''}
                 </div>
                 <div style="font-size:10px;color:var(--text-3);font-family:var(--font-mono);">${m.mName}</div>
               </div>`;
@@ -10479,7 +10474,10 @@ function toggleParcela(devId, acordoId, idx){
   const ac = (dev.acordos||[]).find(a=>a.id===acordoId);
   if(!ac || !ac.parcelas) return;
 
-  ac.parcelas[idx].pago = !ac.parcelas[idx].pago;
+  const nowPaid = !ac.parcelas[idx].pago;
+  ac.parcelas[idx].pago = nowPaid;
+  // Carimba a data da baixa p/ o painel computar "Recuperado no mês" corretamente.
+  if(nowPaid) ac.parcelas[idx].pagoEm = hoje(); else delete ac.parcelas[idx].pagoEm;
 
   const allPaid = ac.parcelas.every(p=>p.pago);
   if(allPaid){
