@@ -5149,21 +5149,32 @@ function showPage(p){
 
 // ════════════════════════════════════════════════════════════════════════════
 // IMPORTACAO TEMP START — menu temporário de importação de casos do Astrea.
-// Lê a tabela de staging public.import_astrea (status='pendente'), mostra cada
-// caso como cartão de revisão; ao "Salvar no sistema" cria o devedor real no blob
-// (DB.devedores + save()). Remover este bloco + a tabela quando a migração acabar.
+// Lê a tabela de staging public.import_astrea (status='pendente') e mostra cada
+// CASO como uma COBRANÇA de revisão, com N ENVOLVIDOS (partes). Ao "Salvar no
+// sistema" cria cobrança + contatos + vínculos no relacional (igual salvarCobranca)
+// e some do staging. Remover este bloco + DROP TABLE import_astrea no fim da migração.
 // ════════════════════════════════════════════════════════════════════════════
 let _impRows = [];
 let _impSel = new Set();
 const _impEsc = (s)=> String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const _impPrompt = (t,l,cb,o)=>{ if(typeof promptModal==='function') return promptModal(t,l,cb,o); const v=prompt(l); if(v!=null) cb(v); };
 const _impStatusOpts = ['Cobrar','Em contato','Em negociação','Acordo','Recebido','Fazer ação','Ação judicial','Quitado','Devolvida','Sem êxito'];
+const _IMP_PAPEIS = { emitente:'Emitente', endossante:'Endossante', avalista:'Avalista', fiador:'Fiador', devedor_solidario:'Devedor solidário' };
 
 function _impDocOk(doc){ const d=String(doc||'').replace(/\D/g,''); return d.length===11||d.length===14; }
 function _impTelOk(tel){ return String(tel||'').replace(/\D/g,'').length>=10; }
-function _impFaltantes(p){ const f=[]; if(!_impDocOk(p&&p.doc)) f.push('CPF/CNPJ'); if(!_impTelOk(p&&p.tel)) f.push('Telefone'); return f; }
-function _impCompleto(p){ return _impFaltantes(p).length===0; }
 function _impRow(id){ return _impRows.find(r=>r.id===id); }
+// Garante o array de envolvidos (migra payload legado de devedor único).
+function _impEnvs(p){
+  if(!p) return [];
+  if(!Array.isArray(p.envolvidos)){ p.envolvidos=[{ nome:p.nome||'', doc:p.doc||'', tel:p.tel||'', papel:'emitente', principal:true }]; }
+  if(!p.envolvidos.length) p.envolvidos.push({ nome:'', doc:'', tel:'', papel:'emitente', principal:true });
+  return p.envolvidos;
+}
+function _impEnvOk(e){ return !!(e && (e.nome||'').trim() && _impDocOk(e.doc) && _impTelOk(e.tel)); }
+function _impCardFaltam(p){ return _impEnvs(p).filter(e=>!_impEnvOk(e)).length; }
+function _impCardOk(p){ const envs=_impEnvs(p); return envs.length>=1 && envs.every(_impEnvOk) && envs.some(e=>e.principal); }
+function _impPapelOpts(sel){ sel=sel||'emitente'; return Object.entries(_IMP_PAPEIS).map(([v,l])=>`<option value="${v}" ${v===sel?'selected':''}>${l}</option>`).join(''); }
 
 async function _impLoad(){
   // Hook de teste local: window._impMock = [ {payload...}, ... ]
@@ -5204,84 +5215,103 @@ function _impDraw(){
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:6px;flex-wrap:wrap;">
       <div>
         <div style="font-size:22px;font-weight:700;color:var(--text);">Importação <span style="font-size:11px;font-weight:700;background:var(--gold);color:var(--navy);padding:2px 9px;border-radius:10px;vertical-align:middle;">temporário</span></div>
-        <div style="font-size:12.5px;color:var(--text-3);margin-top:3px;">Casos trazidos do Astrea aguardando revisão. Complete <strong>CPF/CNPJ</strong> e <strong>telefone</strong> e clique <strong>Salvar no sistema</strong> para virar devedor.</div>
+        <div style="font-size:12.5px;color:var(--text-3);margin-top:3px;">Cobranças do Astrea aguardando revisão. Cadastre os <strong>envolvidos</strong> (nome, CPF/CNPJ e telefone) e clique <strong>Salvar no sistema</strong> para criar a cobrança.</div>
       </div>
       <button class="btn btn-ghost btn-sm" onclick="renderImportacao()">↻ Atualizar</button>
     </div>`;
   if(!supaOk){
-    html += `<div style="margin-top:16px;padding:16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2,#f6f7f9);color:var(--text-2);font-size:13px;">Sem conexão com o Supabase nesta sessão. Faça login no sistema para ver os casos importados.</div>`;
+    html += `<div style="margin-top:16px;padding:16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2,#f6f7f9);color:var(--text-2);font-size:13px;">Sem conexão com o Supabase nesta sessão. Faça login no sistema para ver as cobranças importadas.</div>`;
     el.innerHTML = html; return;
   }
   if(!rows.length){
     html += `<div style="margin-top:24px;text-align:center;padding:48px 20px;color:var(--text-3);border:1px dashed var(--border);border-radius:12px;">
       <div style="font-size:34px;">📥</div>
-      <div style="font-size:14px;font-weight:600;margin-top:8px;color:var(--text-2);">Nenhum caso pendente de importação.</div>
+      <div style="font-size:14px;font-weight:600;margin-top:8px;color:var(--text-2);">Nenhuma cobrança pendente de importação.</div>
       <div style="font-size:12.5px;margin-top:4px;">Envie o Excel do Astrea no chat com o Claude para carregar novos casos aqui.</div>
     </div>`;
     el.innerHTML = html; return;
   }
-  const nSel = _impSel.size, nDone = rows.filter(r=>_impCompleto(r.payload)).length;
+  const nSel = _impSel.size, nDone = rows.filter(r=>_impCardOk(r.payload)).length;
   html += `
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:14px 0;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--surface-2,#f6f7f9);">
       <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;cursor:pointer;font-weight:600;color:var(--text-2);">
-        <input type="checkbox" ${nSel===rows.length&&rows.length>0?'checked':''} onclick="_impToggleAll(this.checked)"> Selecionar todos
+        <input type="checkbox" ${nSel===rows.length&&rows.length>0?'checked':''} onclick="_impToggleAll(this.checked)"> Selecionar todas
       </label>
-      <span style="font-size:12px;color:var(--text-3);">${nSel} selecionado${nSel===1?'':'s'} • ${rows.length} pendente${rows.length===1?'':'s'} • ${nDone} pronto${nDone===1?'':'s'}</span>
+      <span style="font-size:12px;color:var(--text-3);">${nSel} selecionada${nSel===1?'':'s'} • ${rows.length} pendente${rows.length===1?'':'s'} • ${nDone} pronta${nDone===1?'':'s'}</span>
       <div style="flex:1;"></div>
       <button class="btn btn-ghost btn-sm" ${nSel?'':'disabled'} onclick="_impBulkStatus()">Status</button>
       <button class="btn btn-ghost btn-sm" ${nSel?'':'disabled'} onclick="_impBulkCredor()">Credor</button>
       <button class="btn btn-ghost btn-sm" ${nSel?'':'disabled'} onclick="_impBulkFase()">Fase</button>
-      <button class="btn btn-ghost btn-sm" ${nSel?'':'disabled'} onclick="_impBulkTag()">+ Etiqueta</button>
-      <button class="btn btn-sm" style="background:var(--gold);color:var(--navy);font-weight:700;${nSel?'':'opacity:.5;cursor:not-allowed;'}" ${nSel?'':'disabled'} onclick="_impBulkSalvar()">Salvar selecionados</button>
+      <button class="btn btn-sm" style="background:var(--gold);color:var(--navy);font-weight:700;${nSel?'':'opacity:.5;cursor:not-allowed;'}" ${nSel?'':'disabled'} onclick="_impBulkSalvar()">Salvar selecionadas</button>
       <button class="btn btn-ghost btn-sm" style="color:var(--danger);" ${nSel?'':'disabled'} onclick="_impBulkDescartar()">Descartar</button>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px;">${rows.map(_impCard).join('')}</div>`;
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(520px,1fr));gap:14px;">${rows.map(_impCard).join('')}</div>`;
   el.innerHTML = html;
 }
 
 function _impCard(r){
   const p = r.payload||{};
-  const falt = _impFaltantes(p), ok = falt.length===0, sel = _impSel.has(r.id);
+  const envs = _impEnvs(p);
+  const ok = _impCardOk(p), sel = _impSel.has(r.id);
+  const princ = envs.find(e=>e.principal) || envs[0] || {};
+  const title = (princ.nome||'').trim() || p.descDivida || p.titulo || '(cobrança)';
   const andam = Array.isArray(p.processoHistorico)? p.processoHistorico.length : 0;
   const tags = Array.isArray(p.tags)? p.tags : [];
-  const borderC = ok ? 'var(--border)' : '#fcd34d';
+  const faltam = _impCardFaltam(p), semP = !envs.some(e=>e.principal);
+  const badgeTxt = ok ? 'pronto' : (faltam ? ('faltam '+faltam) : (semP?'marque principal':'revisar'));
+  const inp = 'padding:7px 8px;border-radius:7px;font-size:12.5px;background:var(--surface,#fff);color:var(--text);box-sizing:border-box;width:100%;min-width:0;';
   return `
-  <div data-imp-id="${r.id}" style="border:1px solid ${borderC};border-radius:12px;background:var(--surface,#fff);overflow:hidden;${sel?'box-shadow:0 0 0 2px var(--navy);':''}">
+  <div data-imp-id="${r.id}" style="border:1px solid ${ok?'var(--border)':'#fcd34d'};border-radius:12px;background:var(--surface,#fff);overflow:hidden;${sel?'box-shadow:0 0 0 2px var(--navy);':''}">
     <div style="display:flex;align-items:flex-start;gap:8px;padding:12px 14px;border-bottom:1px solid var(--border);background:var(--surface-2,#f6f7f9);">
       <input type="checkbox" ${sel?'checked':''} onclick="_impToggleSel('${r.id}')" style="margin-top:3px;">
       <div style="flex:1;min-width:0;">
-        <div style="font-size:14px;font-weight:700;color:var(--text);line-height:1.25;">${_impEsc(p.nome||'(sem nome)')}</div>
+        <div style="font-size:14px;font-weight:700;color:var(--text);line-height:1.25;">${_impEsc(title)}</div>
         <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">Credor: ${_impEsc(p.credorNome||'—')}${r.lote?` • ${_impEsc(r.lote)}`:''}</div>
       </div>
-      ${ok?`<span data-imp-badge style="font-size:10px;font-weight:800;text-transform:uppercase;color:#fff;background:#10b981;padding:3px 8px;border-radius:9px;white-space:nowrap;">pronto</span>`
-          :`<span data-imp-badge style="font-size:10px;font-weight:800;text-transform:uppercase;color:#92400e;background:#fde68a;padding:3px 8px;border-radius:9px;white-space:nowrap;">faltam ${falt.length}</span>`}
+      <span data-imp-badge style="font-size:10px;font-weight:800;text-transform:uppercase;color:${ok?'#fff':'#92400e'};background:${ok?'#10b981':'#fde68a'};padding:3px 8px;border-radius:9px;white-space:nowrap;">${badgeTxt}</span>
     </div>
     <div style="padding:12px 14px;">
       <div style="display:flex;gap:10px;flex-wrap:wrap;font-size:11.5px;color:var(--text-2);margin-bottom:10px;">
-        <span>💰 ${_impEsc(p.valorOrig||'—')}</span>
         ${p.processoNum?`<span>⚖️ ${_impEsc(p.processoNum)}</span>`:`<span style="color:var(--text-4);">sem nº processo</span>`}
-        <span>📁 ${_impEsc(p.fase||'judicial')}</span>
         ${andam?`<span>🕘 ${andam} andamento${andam===1?'':'s'}</span>`:''}
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-        <label style="font-size:11px;color:var(--text-3);font-weight:600;">CPF/CNPJ *
-          <input data-imp-field="doc" value="${_impEsc(p.doc||'')}" placeholder="obrigatório" oninput="_impEdit('${r.id}','doc',this.value)" onblur="_impPersist('${r.id}')"
-            style="width:100%;margin-top:3px;padding:7px 8px;border:1px solid ${_impDocOk(p.doc)?'var(--border)':'#fcd34d'};border-radius:7px;font-size:12.5px;background:var(--surface,#fff);color:var(--text);box-sizing:border-box;">
-        </label>
-        <label style="font-size:11px;color:var(--text-3);font-weight:600;">Telefone *
-          <input data-imp-field="tel" value="${_impEsc(p.tel||'')}" placeholder="obrigatório" oninput="_impEdit('${r.id}','tel',this.value)" onblur="_impPersist('${r.id}')"
-            style="width:100%;margin-top:3px;padding:7px 8px;border:1px solid ${_impTelOk(p.tel)?'var(--border)':'#fcd34d'};border-radius:7px;font-size:12.5px;background:var(--surface,#fff);color:var(--text);box-sizing:border-box;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">
+        <label style="font-size:11px;color:var(--text-3);font-weight:600;">Valor original
+          <input value="${_impEsc(p.valorOrig||'')}" oninput="_impEdit('${r.id}','valorOrig',this.value)" onblur="_impPersist('${r.id}')" style="${inp}border:1px solid var(--border);margin-top:3px;">
         </label>
         <label style="font-size:11px;color:var(--text-3);font-weight:600;">Status
-          <select onchange="_impEdit('${r.id}','status',this.value);_impPersist('${r.id}')" style="width:100%;margin-top:3px;padding:7px 8px;border:1px solid var(--border);border-radius:7px;font-size:12.5px;background:var(--surface,#fff);color:var(--text);box-sizing:border-box;">
+          <select onchange="_impEdit('${r.id}','status',this.value);_impPersist('${r.id}')" style="${inp}border:1px solid var(--border);margin-top:3px;">
             ${_impStatusOpts.map(s=>`<option ${(p.status||'Ação judicial')===s?'selected':''}>${s}</option>`).join('')}
           </select>
         </label>
-        <label style="font-size:11px;color:var(--text-3);font-weight:600;">Título
-          <input value="${_impEsc(p.titulo||'')}" oninput="_impEdit('${r.id}','titulo',this.value)" onblur="_impPersist('${r.id}')"
-            style="width:100%;margin-top:3px;padding:7px 8px;border:1px solid var(--border);border-radius:7px;font-size:12.5px;background:var(--surface,#fff);color:var(--text);box-sizing:border-box;">
+        <label style="font-size:11px;color:var(--text-3);font-weight:600;">Fase
+          <select onchange="_impEdit('${r.id}','fase',this.value);_impPersist('${r.id}')" style="${inp}border:1px solid var(--border);margin-top:3px;">
+            <option value="judicial" ${(p.fase||'judicial')==='judicial'?'selected':''}>Judicial</option>
+            <option value="extrajudicial" ${p.fase==='extrajudicial'?'selected':''}>Extrajudicial</option>
+          </select>
+        </label>
+        <label style="font-size:11px;color:var(--text-3);font-weight:600;">Nº do processo
+          <input value="${_impEsc(p.processoNum||'')}" oninput="_impEdit('${r.id}','processoNum',this.value)" onblur="_impPersist('${r.id}')" style="${inp}border:1px solid var(--border);margin-top:3px;">
+        </label>
+        <label style="font-size:11px;color:var(--text-3);font-weight:600;grid-column:1 / -1;">Descrição da dívida
+          <input value="${_impEsc(p.descDivida||p.titulo||'')}" oninput="_impEdit('${r.id}','descDivida',this.value)" onblur="_impPersist('${r.id}')" style="${inp}border:1px solid var(--border);margin-top:3px;">
         </label>
       </div>
+      <div style="font-size:11px;font-weight:700;color:var(--text-2);margin-bottom:6px;display:flex;align-items:center;justify-content:space-between;">
+        <span>Envolvidos <span style="color:var(--text-3);font-weight:500;">(nome + CPF/CNPJ + telefone obrigatórios)</span></span>
+        <button class="btn btn-ghost btn-sm" onclick="_impAddEnv('${r.id}')" style="font-size:11px;padding:3px 8px;">+ Adicionar</button>
+      </div>
+      ${envs.map((e,idx)=>`
+        <div data-imp-env="${idx}" style="display:grid;grid-template-columns:1.6fr 1.2fr 1.2fr 1.15fr auto;gap:6px;align-items:center;margin-bottom:6px;">
+          <input data-imp-envf="nome" value="${_impEsc(e.nome||'')}" placeholder="Nome *" oninput="_impEnvEdit('${r.id}',${idx},'nome',this.value)" onblur="_impPersist('${r.id}')" style="${inp}border:1px solid ${(e.nome||'').trim()?'var(--border)':'#fcd34d'};">
+          <input data-imp-envf="doc" value="${_impEsc(e.doc||'')}" placeholder="CPF/CNPJ *" oninput="_impEnvEdit('${r.id}',${idx},'doc',this.value)" onblur="_impPersist('${r.id}')" style="${inp}border:1px solid ${_impDocOk(e.doc)?'var(--border)':'#fcd34d'};">
+          <input data-imp-envf="tel" value="${_impEsc(e.tel||'')}" placeholder="Telefone *" oninput="_impEnvEdit('${r.id}',${idx},'tel',this.value)" onblur="_impPersist('${r.id}')" style="${inp}border:1px solid ${_impTelOk(e.tel)?'var(--border)':'#fcd34d'};">
+          <select data-imp-envf="papel" onchange="_impEnvEdit('${r.id}',${idx},'papel',this.value);_impPersist('${r.id}')" style="${inp}border:1px solid var(--border);">${_impPapelOpts(e.papel)}</select>
+          <label style="display:flex;align-items:center;gap:3px;font-size:10.5px;white-space:nowrap;cursor:pointer;">
+            <input type="radio" name="imp-princ-${r.id}" ${e.principal?'checked':''} onclick="_impSetPrincipal('${r.id}',${idx})"> princ.
+            <button onclick="_impRemoveEnv('${r.id}',${idx})" title="Remover" style="border:none;background:none;color:var(--danger);cursor:pointer;font-size:14px;line-height:1;">✕</button>
+          </label>
+        </div>`).join('')}
       ${tags.length?`<div style="margin-top:9px;display:flex;gap:5px;flex-wrap:wrap;">${tags.map(t=>`<span style="font-size:10.5px;background:var(--surface-2,#f6f7f9);border:1px solid var(--border);color:var(--text-2);padding:2px 7px;border-radius:8px;">${_impEsc(t)}</span>`).join('')}</div>`:''}
       ${p.obs?`<details style="margin-top:9px;"><summary style="font-size:11.5px;color:var(--text-3);cursor:pointer;">Observações</summary><div style="font-size:11.5px;color:var(--text-2);white-space:pre-wrap;margin-top:5px;max-height:160px;overflow:auto;">${_impEsc(p.obs)}</div></details>`:''}
       <div style="display:flex;gap:8px;margin-top:12px;">
@@ -5292,79 +5322,104 @@ function _impCard(r){
   </div>`;
 }
 
-function _impEdit(id,field,val){ const r=_impRow(id); if(!r) return; r.payload[field]=val; if(field==='doc'||field==='tel') _impUpdateCardValidity(id); }
+function _impEdit(id,field,val){ const r=_impRow(id); if(!r) return; r.payload[field]=val; }
+function _impEnvEdit(id,idx,field,val){ const r=_impRow(id); if(!r) return; const envs=_impEnvs(r.payload); if(!envs[idx]) return; envs[idx][field]=val; if(field==='nome'||field==='doc'||field==='tel') _impUpdateCardValidity(id); }
+function _impSetPrincipal(id,idx){ const r=_impRow(id); if(!r) return; const envs=_impEnvs(r.payload); envs.forEach((e,i)=>{ e.principal=(i===idx); }); _impUpdateCardValidity(id); _impPersist(id); }
+function _impAddEnv(id){ const r=_impRow(id); if(!r) return; const envs=_impEnvs(r.payload); envs.push({ nome:'', doc:'', tel:'', papel:'endossante', principal:envs.length===0 }); _impPersist(id); _impDraw(); }
+function _impRemoveEnv(id,idx){ const r=_impRow(id); if(!r) return; const envs=_impEnvs(r.payload); envs.splice(idx,1); if(envs.length && !envs.some(e=>e.principal)) envs[0].principal=true; _impPersist(id); _impDraw(); }
+
 function _impUpdateCardValidity(id){
-  const r=_impRow(id); if(!r) return; const p=r.payload, ok=_impCompleto(p);
+  const r=_impRow(id); if(!r) return; const p=r.payload, ok=_impCardOk(p);
   const card=document.querySelector(`[data-imp-id="${id}"]`); if(!card) return;
   const btn=card.querySelector('[data-imp-save]');
   if(btn){ btn.disabled=!ok; btn.style.opacity=ok?'':'.5'; btn.style.cursor=ok?'':'not-allowed'; }
   card.style.borderColor = ok ? 'var(--border)' : '#fcd34d';
-  const docInp=card.querySelector('[data-imp-field="doc"]'); if(docInp) docInp.style.borderColor=_impDocOk(p.doc)?'var(--border)':'#fcd34d';
-  const telInp=card.querySelector('[data-imp-field="tel"]'); if(telInp) telInp.style.borderColor=_impTelOk(p.tel)?'var(--border)':'#fcd34d';
+  const envs=_impEnvs(p);
+  card.querySelectorAll('[data-imp-env]').forEach(row=>{
+    const i=+row.getAttribute('data-imp-env'); const e=envs[i]; if(!e) return;
+    const ni=row.querySelector('[data-imp-envf="nome"]'); if(ni) ni.style.borderColor=(e.nome||'').trim()?'var(--border)':'#fcd34d';
+    const di=row.querySelector('[data-imp-envf="doc"]'); if(di) di.style.borderColor=_impDocOk(e.doc)?'var(--border)':'#fcd34d';
+    const ti=row.querySelector('[data-imp-envf="tel"]'); if(ti) ti.style.borderColor=_impTelOk(e.tel)?'var(--border)':'#fcd34d';
+  });
   const badge=card.querySelector('[data-imp-badge]');
-  if(badge){ const falt=_impFaltantes(p);
-    if(falt.length===0){ badge.textContent='pronto'; badge.style.color='#fff'; badge.style.background='#10b981'; }
-    else { badge.textContent='faltam '+falt.length; badge.style.color='#92400e'; badge.style.background='#fde68a'; }
+  if(badge){ const faltam=_impCardFaltam(p), semP=!envs.some(e=>e.principal);
+    if(ok){ badge.textContent='pronto'; badge.style.color='#fff'; badge.style.background='#10b981'; }
+    else { badge.textContent= faltam?('faltam '+faltam):(semP?'marque principal':'revisar'); badge.style.color='#92400e'; badge.style.background='#fde68a'; }
   }
 }
 async function _impPersist(id){
   const r=_impRow(id); if(!r) return;
   if(String(id).startsWith('mock-')) return; // teste local
   const supa=(typeof getSupabase==='function')?getSupabase():null; if(!supa) return;
-  try{ await supa.from('import_astrea').update({ payload:r.payload, faltantes:_impFaltantes(r.payload) }).eq('id',id); }
+  try{ await supa.from('import_astrea').update({ payload:r.payload, faltantes:_impEnvs(r.payload).filter(e=>!_impEnvOk(e)).map(e=>e.nome||'(sem nome)') }).eq('id',id); }
   catch(e){ console.warn('[import] persist', e); }
 }
 function _impToggleSel(id){ if(_impSel.has(id)) _impSel.delete(id); else _impSel.add(id); _impDraw(); }
 function _impToggleAll(on){ _impSel.clear(); if(on) _impRows.forEach(r=>_impSel.add(r.id)); _impDraw(); }
 
-function _impResolveCliente(nomeCredor){
-  const alvo=(nomeCredor||'').trim(); if(!alvo) return '';
-  const c=(DB.clientes||[]).find(x=>(x.nome||'').trim().toLowerCase()===alvo.toLowerCase());
-  if(c) return c.id;
-  const novo={ id:uid(), nome:alvo, nomeFantasia:'', doc:'', clienteGrupoId:null, ehMatriz:false, email:'', tel:'',
-    cep:'',rua:'',numero:'',complemento:'',bairro:'',cidade:'',uf:'', endereco:'', honorarios:'', loginEmail:'', loginSenha:'',
-    obs:'Cliente criado na importação do Astrea.', createdAt:hoje(), updatedAt:hoje() };
-  if(!DB.clientes) DB.clientes=[]; DB.clientes.push(novo); return novo.id;
-}
-
-function _impBuildDevedor(r){
-  const p=r.payload||{};
-  const docDigits=(p.doc||'').replace(/\D/g,'');
-  if(docDigits.length===11||docDigits.length===14){
-    const conf=(DB.devedores||[]).find(d=>!d.arquivado && (d.doc||'').replace(/\D/g,'')===docDigits);
-    if(conf){ showToast(`Já existe devedor com esse documento: ${conf.nome}`,'danger'); return null; }
-  }
-  const clienteId=_impResolveCliente(p.credorNome);
-  return {
-    id:uid(), nome:p.nome||'', doc:p.doc||'', tel:p.tel||'', email:p.email||'',
-    cep:'',rua:'',numero:'',complemento:'',bairro:'',cidade:'',uf:'',endereco:'',loginNascimento:'',
-    titulo:p.titulo||'Cheques', status:p.status||'Ação judicial',
-    valorOrig:p.valorOrig||'', valorAtual:p.valorAtual||p.valorOrig||'',
-    vencimento:p.vencimento||'', entrada:p.entrada||hoje(), clienteId,
-    responsavel: currentUser?.nome||'', assignedTo: currentUser?.supaId||null,
-    fase:p.fase||'judicial', tipoCobranca:p.tipoCobranca||'fisica', etapa:'',
-    processoNum:p.processoNum||'', vara:p.vara||'', obs:p.obs||'',
-    tags: Array.isArray(p.tags)?p.tags.slice():[],
-    historico:[{ id:uid(), data:hoje(), tipo:'Sistema', texto:`Importado do Astrea${r.lote?` (lote ${r.lote})`:''}.`, autor: currentUser?.nome||'sistema' }],
-    acordos:[],
-    processoHistorico: Array.isArray(p.processoHistorico)?p.processoHistorico.map(h=>({ id:uid(), fase:'judicial', etapa:'', comentario:h.comentario||'', data:h.data||'' })):[],
-    documentos:[], submissaoCedenteNome:null, submissaoData:null, revisaoNota:null,
-    createdAt:hoje(), updatedAt:hoje(), _origem:'Astrea'
-  };
-}
-
+// Cria cobrança + contatos (devedores) + vínculos (cobranca_partes) no relacional,
+// espelhando salvarCobranca(). Em teste local (mock / sem Supabase) apenas simula.
 async function _impSalvar(id, silent){
-  const r=_impRow(id); if(!r) return false;
-  if(!_impCompleto(r.payload)){ if(!silent) showToast('Preencha CPF/CNPJ e telefone válidos antes de salvar.','warning'); return false; }
-  const dev=_impBuildDevedor(r); if(!dev) return false;
-  if(!DB.devedores) DB.devedores=[]; DB.devedores.push(dev);
-  save();
-  if(!String(id).startsWith('mock-')){
-    const supa=(typeof getSupabase==='function')?getSupabase():null;
-    if(supa){ try{ await supa.from('import_astrea').update({status:'importado'}).eq('id',id); }catch(e){ console.warn('[import] mark',e); } }
+  const r=_impRow(id); if(!r) return false; const p=r.payload;
+  if(!_impCardOk(p)){ if(!silent) showToast('Cada envolvido precisa de nome, CPF/CNPJ e telefone; marque um principal.','warning'); return false; }
+  const supa=(typeof getSupabase==='function')?getSupabase():null;
+  const envs=_impEnvs(p);
+
+  if(String(id).startsWith('mock-') || !supa){
+    _impRows=_impRows.filter(x=>x.id!==id); _impSel.delete(id);
+    if(!silent){ _impDraw(); atualizarBadgeImportacao(); showToast('(teste) Cobrança "'+((envs.find(e=>e.principal)||envs[0]||{}).nome||'')+'" seria criada com '+envs.length+' envolvido(s).','info'); }
+    return true;
   }
+
+  try{
+    const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
+    const uidUser = sess?.data?.session?.user?.id || null;
+
+    // 1) credor (cliente)
+    let clienteId=null;
+    const credorNome=(p.credorNome||'').trim();
+    if(credorNome){
+      const ex=(DB.clientes||[]).find(c=>(c.nome||'').toLowerCase()===credorNome.toLowerCase() || (c.nomeFantasia||c.nome_fantasia||'').toLowerCase()===credorNome.toLowerCase());
+      if(ex){ clienteId=ex.id; }
+      else{ const { data, error }=await supa.from('clientes').insert({ nome:credorNome, metadata:{ origem:'import_astrea' } }).select('id').single(); if(error) throw new Error('credor: '+error.message); clienteId=data.id; }
+    }
+
+    // 2) contatos (devedores) por envolvido
+    for(const e of envs){
+      const rdig=docSoDigitos(e.doc);
+      let dev=(DB.devedores||[]).find(d=> rdig && docSoDigitos(d.doc)===rdig) || (DB.devedores||[]).find(d=> (d.nome||'').toLowerCase()===(e.nome||'').toLowerCase());
+      if(dev){ e._devedorId=dev.id; e._novo=false; }
+      else{ const { data, error }=await supa.from('devedores').insert({ nome:e.nome, doc:e.doc||null, telefone:e.tel||null, cliente_id:clienteId, status:'Cobrar', fase:(p.fase||'extrajudicial'), metadata:{ origem:'import_astrea' } }).select('id').single(); if(error) throw new Error('contato '+e.nome+': '+error.message); e._devedorId=data.id; e._novo=true; }
+    }
+
+    // 3) cobrança
+    const valorOrig=parseValorBR(p.valorOrig)||0, valorAtual=parseValorBR(p.valorAtual||p.valorOrig)||valorOrig;
+    const venc=p.vencimento||null, entrada=p.entrada||null;
+    const divida={ valorOriginal:valorOrig, totalAvista:valorAtual, vencimento:venc, descricao:(p.descDivida||p.titulo||'') };
+    const metadata={ origem:'Astrea', lote:r.lote||'', credorOriginal:credorNome, processoNum:p.processoNum||'', vara:p.vara||'', obs:p.obs||'', tags:Array.isArray(p.tags)?p.tags:[], processoHistorico:Array.isArray(p.processoHistorico)?p.processoHistorico:[] };
+    const principal=envs.find(e=>e.principal)||envs[0];
+    let cobrancaId=principal._devedorId;
+    if(!principal._novo){ const { data:ja }=await supa.from('cobrancas').select('id').eq('id',cobrancaId).maybeSingle(); if(ja) cobrancaId=null; }
+    const nova={ cliente_id:clienteId, status:p.status||'Ação judicial', fase:p.fase||'judicial', valor_orig:valorOrig, valor_atual:valorAtual, data_entrada:entrada, tipo_cobranca:p.tipoCobranca||'fisica', divida, metadata, assigned_to:uidUser };
+    if(cobrancaId) nova.id=cobrancaId;
+    const { data:cob, error:ecob }=await supa.from('cobrancas').insert(nova).select('id').single(); if(ecob) throw new Error('cobrança: '+ecob.message);
+    const cobId=cob.id;
+
+    // 4) partes
+    const partes=envs.map(e=>({ cobranca_id:cobId, devedor_id:e._devedorId, papel:e.papel||'emitente', principal:!!e.principal }));
+    const { error:epar }=await supa.from('cobranca_partes').insert(partes); if(epar) throw new Error('partes: '+epar.message);
+
+    // 5) staging concluído
+    await supa.from('import_astrea').update({ status:'importado' }).eq('id',id);
+    if(typeof loadRelationalData==='function'){ try{ await loadRelationalData(); }catch(e){} }
+  }catch(e){
+    console.warn('[import] salvar', e);
+    if(!silent) showToast('Erro ao criar cobrança: '+(e.message||e),'danger');
+    return false;
+  }
+
   _impRows=_impRows.filter(x=>x.id!==id); _impSel.delete(id);
-  if(!silent){ _impDraw(); atualizarBadgeImportacao(); showToast(`"${dev.nome}" importado para Devedores.`,'success'); }
+  if(!silent){ _impDraw(); atualizarBadgeImportacao(); showToast('Cobrança criada com '+envs.length+' envolvido(s).','success'); }
   return true;
 }
 
@@ -5376,26 +5431,25 @@ async function _impMarcarDescartado(id){
   _impRows=_impRows.filter(x=>x.id!==id); _impSel.delete(id);
 }
 function _impDescartar(id){
-  const go=async()=>{ await _impMarcarDescartado(id); _impDraw(); atualizarBadgeImportacao(); showToast('Caso descartado da importação.','info'); };
-  if(typeof confirmDel==='function') confirmDel(go,'Descartar este caso da importação? Não cria devedor.');
-  else if(confirm('Descartar este caso da importação? Não cria devedor.')) go();
+  const go=async()=>{ await _impMarcarDescartado(id); _impDraw(); atualizarBadgeImportacao(); showToast('Cobrança descartada da importação.','info'); };
+  if(typeof confirmDel==='function') confirmDel(go,'Descartar esta cobrança da importação? Não cria nada no sistema.');
+  else if(confirm('Descartar esta cobrança da importação?')) go();
 }
 
 async function _impBulkSalvar(){
   const ids=[..._impSel]; let n=0, pend=0;
-  for(const id of ids){ const r=_impRow(id); if(!r) continue; if(_impCompleto(r.payload)){ if(await _impSalvar(id,true)) n++; } else pend++; }
+  for(const id of ids){ const r=_impRow(id); if(!r) continue; if(_impCardOk(r.payload)){ if(await _impSalvar(id,true)) n++; } else pend++; }
   _impDraw(); atualizarBadgeImportacao();
-  showToast(`${n} caso(s) importado(s).${pend?` ${pend} ainda sem CPF/telefone.`:''}`, pend?'warning':'success');
+  showToast(`${n} cobrança(s) criada(s).${pend?` ${pend} ainda com envolvido incompleto.`:''}`, pend?'warning':'success');
 }
 async function _impBulkDescartar(){
   const ids=[..._impSel]; if(!ids.length) return;
-  const go=async()=>{ for(const id of ids) await _impMarcarDescartado(id); _impDraw(); atualizarBadgeImportacao(); showToast(`${ids.length} caso(s) descartado(s).`,'info'); };
-  if(confirm(`Descartar ${ids.length} caso(s) da importação? Não cria devedor.`)) go();
+  const go=async()=>{ for(const id of ids) await _impMarcarDescartado(id); _impDraw(); atualizarBadgeImportacao(); showToast(`${ids.length} descartada(s).`,'info'); };
+  if(confirm(`Descartar ${ids.length} cobrança(s) da importação?`)) go();
 }
-function _impBulkStatus(){ _impPrompt('Status em lote',`Novo status para ${_impSel.size} caso(s):`,(v)=>{ if(!v) return; [..._impSel].forEach(id=>{const r=_impRow(id); if(r){ r.payload.status=v; _impPersist(id); }}); _impDraw(); },{hint:_impStatusOpts.join(', ')}); }
-function _impBulkCredor(){ _impPrompt('Credor em lote',`Nome do credor para ${_impSel.size} caso(s):`,(v)=>{ if(!v) return; [..._impSel].forEach(id=>{const r=_impRow(id); if(r){ r.payload.credorNome=v; _impPersist(id); }}); _impDraw(); },{hint:(DB.clientes||[]).map(c=>c.nome).slice(0,8).join(', ')}); }
-function _impBulkFase(){ _impPrompt('Fase em lote',`Fase para ${_impSel.size} caso(s):`,(v)=>{ const f=(v||'').toLowerCase().includes('extra')?'extrajudicial':'judicial'; [..._impSel].forEach(id=>{const r=_impRow(id); if(r){ r.payload.fase=f; _impPersist(id); }}); _impDraw(); },{hint:'judicial / extrajudicial'}); }
-function _impBulkTag(){ _impPrompt('Etiqueta em lote',`Etiqueta a adicionar em ${_impSel.size} caso(s):`,(v)=>{ if(!v) return; [..._impSel].forEach(id=>{const r=_impRow(id); if(r){ if(!Array.isArray(r.payload.tags)) r.payload.tags=[]; if(!r.payload.tags.includes(v)) r.payload.tags.push(v); _impPersist(id); }}); _impDraw(); }); }
+function _impBulkStatus(){ _impPrompt('Status em lote',`Novo status para ${_impSel.size} cobrança(s):`,(v)=>{ if(!v) return; [..._impSel].forEach(id=>{const r=_impRow(id); if(r){ r.payload.status=v; _impPersist(id); }}); _impDraw(); },{hint:_impStatusOpts.join(', ')}); }
+function _impBulkCredor(){ _impPrompt('Credor em lote',`Nome do credor para ${_impSel.size} cobrança(s):`,(v)=>{ if(!v) return; [..._impSel].forEach(id=>{const r=_impRow(id); if(r){ r.payload.credorNome=v; _impPersist(id); }}); _impDraw(); },{hint:(DB.clientes||[]).map(c=>c.nome).slice(0,8).join(', ')}); }
+function _impBulkFase(){ _impPrompt('Fase em lote',`Fase para ${_impSel.size} cobrança(s):`,(v)=>{ const f=(v||'').toLowerCase().includes('extra')?'extrajudicial':'judicial'; [..._impSel].forEach(id=>{const r=_impRow(id); if(r){ r.payload.fase=f; _impPersist(id); }}); _impDraw(); },{hint:'judicial / extrajudicial'}); }
 // IMPORTACAO TEMP END ════════════════════════════════════════════════════════
 
 function toggleTheme(){
