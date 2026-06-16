@@ -77,7 +77,7 @@ Deno.serve(async (req) => {
         email: null,
         auth_mode: "assinaturaTela",
         send_automatic_email: false,
-        send_automatic_whatsapp: false,
+        send_automatic_whatsapp: true,
         phone_country: "55",
         phone_number: onlyDigits(dev.telefone),
         require_cpf: true,
