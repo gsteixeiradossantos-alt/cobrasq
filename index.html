@@ -2612,7 +2612,7 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
       <div class="fg-row">
         <div class="fg">
           <label>Tipo *</label>
-          <select id="mhist-tipo">
+          <select id="mhist-tipo" onchange="_mhistToggleValor()">
             <option>Ligação</option>
             <option>WhatsApp</option>
             <option>E-mail</option>
@@ -2629,6 +2629,11 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
           <label>Data *</label>
           <input type="date" id="mhist-data">
         </div>
+      </div>
+      <div class="fg" id="mhist-valor-wrap" style="display:none;">
+        <label>Valor recebido (R$) *</label>
+        <input type="text" inputmode="decimal" id="mhist-valor" placeholder="0,00">
+        <div style="font-size:11px;color:var(--text-3);margin-top:4px;">Entra em “Recuperado no mês” no Painel.</div>
       </div>
       <div class="fg">
         <label>Descrição *</label>
@@ -6324,10 +6329,10 @@ function renderPainelColaborador(){
 }
 
 // ── Recuperado de fato no mês (ym = "YYYY-MM") ──────────────────────────────
-// Soma as parcelas de acordo efetivamente pagas na competência — fonte real de
-// "dinheiro que entrou" (canal principal de recuperação). Usa pagoEm (data da
-// baixa) e cai para vencimento em parcelas antigas sem data. Asaas RECEIVED e
-// baixas avulsas: follow-up (sem carga em massa hoje).
+// "Dinheiro que entrou" na competência, de duas fontes reais:
+//  (1) parcelas de acordo baixadas (pagoEm; cai p/ vencimento em parcelas antigas);
+//  (2) pagamentos avulsos lançados pelo botão "Registrar pagamento" (histórico
+//      tipo 'Pagamento' com valor). Asaas RECEIVED em massa: follow-up.
 function recuperadoNoMes(ym){
   let total = 0;
   for(const d of (DB.devedores||[])){
@@ -6337,6 +6342,11 @@ function recuperadoNoMes(ym){
         const ref = String(p.pagoEm || p.vencimento || '').slice(0,7);
         if(ref === ym) total += (typeof p.valor==='number') ? p.valor : (parseValorBR(p.valor)||0);
       }
+    }
+    for(const h of (d.historico||[])){
+      if(h.tipo!=='Pagamento' || h.valor==null) continue;
+      if(String(h.data||'').slice(0,7)!==ym) continue;
+      total += (typeof h.valor==='number') ? h.valor : (parseValorBR(h.valor)||0);
     }
   }
   return total;
@@ -7674,7 +7684,7 @@ function openDrawer(devId){
 
   document.getElementById('devDrawer-editBtn').onclick = ()=>editDevedor(devId);
   document.getElementById('devDrawer-deleteBtn').onclick = ()=>excluirDevedorIndividual(devId);
-  document.getElementById('devDrawer-pagarBtn').onclick = ()=>abrirHistorico(devId);
+  document.getElementById('devDrawer-pagarBtn').onclick = ()=>abrirHistorico(devId, 'Pagamento');
 
   renderDrawerBody(devId);
 
@@ -10381,13 +10391,22 @@ function diConfirmar(){
 }
 
 // ── HISTÓRICO ────────────────────────────────────────────────
-function abrirHistorico(devId){
+function abrirHistorico(devId, tipoPreset){
   document.getElementById('mhist-devId').value = devId;
-  document.getElementById('mhist-tipo').value = 'Ligação';
+  document.getElementById('mhist-tipo').value = tipoPreset || 'Ligação';
   document.getElementById('mhist-data').value = hoje();
   document.getElementById('mhist-desc').value = '';
   document.getElementById('mhist-prox').value = '';
+  const v = document.getElementById('mhist-valor'); if(v) v.value = '';
+  _mhistToggleValor();
   openModal('modal-historico');
+  if(tipoPreset==='Pagamento'){ const vv=document.getElementById('mhist-valor'); if(vv) setTimeout(()=>vv.focus(),60); }
+}
+// Mostra o campo "Valor recebido" só quando a interação é um Pagamento.
+function _mhistToggleValor(){
+  const tipo = document.getElementById('mhist-tipo')?.value;
+  const wrap = document.getElementById('mhist-valor-wrap');
+  if(wrap) wrap.style.display = (tipo==='Pagamento') ? '' : 'none';
 }
 
 function salvarHistorico(){
@@ -10403,14 +10422,28 @@ function salvarHistorico(){
   const dev = (DB.devedores||[]).find(d=>d.id===devId);
   if(!dev){ alert('Devedor não encontrado.'); return; }
 
+  // Pagamento: capta o valor recebido (alimenta "Recuperado no mês" no Painel).
+  let valor = null;
+  if(tipo==='Pagamento'){
+    valor = parseValorBR(document.getElementById('mhist-valor')?.value||'');
+    if(!valor || valor<=0){ alert('Informe o valor recebido (maior que zero).'); return; }
+  }
+
   const autor = currentUser ? currentUser.nome : (DB.config.nome||'Sistema');
   if(!dev.historico) dev.historico = [];
-  dev.historico.push({ id:uid(), tipo, data: dataFinal, desc, prox, autor });
+  const ev = { id:uid(), tipo, data: dataFinal, desc, prox, autor };
+  if(valor!=null) ev.valor = valor;
+  dev.historico.push(ev);
   dev.updatedAt = hoje();
 
   save();
+  // Trilha relacional (ledger canônico futuro). Best-effort, não bloqueia a UI.
+  if(valor!=null && typeof addDevedorEvento==='function'){
+    try{ addDevedorEvento(devId, 'pagamento', { valor, data: dataFinal, desc, autor }); }catch(e){}
+  }
   closeModal('modal-historico');
   if(currentDevId === devId) renderDrawerBody(devId);
+  if(valor!=null && typeof showToast==='function') showToast('Pagamento de '+fmtR(valor)+' registrado.','success');
 }
 
 // ── ACORDO ───────────────────────────────────────────────────
