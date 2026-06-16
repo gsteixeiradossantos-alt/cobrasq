@@ -77,7 +77,9 @@ Deno.serve(async (req) => {
         email: null,
         auth_mode: "assinaturaTela",
         send_automatic_email: false,
-        send_automatic_whatsapp: true,
+        // O CRM envia o link de assinatura por WhatsApp via Z-API (número COBRASQ),
+        // logo o ZapSign NÃO deve enviar (senão o devedor recebe duas mensagens).
+        send_automatic_whatsapp: false,
         phone_country: "55",
         phone_number: onlyDigits(dev.telefone),
         require_cpf: true,
