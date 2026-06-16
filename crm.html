@@ -9,6 +9,7 @@
 <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
+<script src="/templates/termo-engine.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@300;400;500;600&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -2107,6 +2108,7 @@
       <label>CPF / CNPJ do devedor</label>
       <input type="text" id="endCpfCnpj" placeholder="000.000.000-00 ou 00.000.000/0000-00">
     </div>
+    <button class="btn small primary" id="btnSalvarEndereco" onclick="salvarEnderecoComHistorico()" style="margin-top:6px;">💾 Salvar endereço no cadastro</button>
   </div>
 
   <div class="checklist">
@@ -2126,7 +2128,7 @@
     <button class="btn secondary" onclick="navegarPara('lista')">Voltar à lista</button>
     <button class="btn secondary" onclick="navegarPara('conversa', casoAtual)">💬 Ver conversa</button>
     <button class="btn secondary" onclick="abrirResumoAstrea(casoAtual)">📋 Resumo pro Astrea</button>
-    <button class="btn secondary" onclick="abrirModalGSheetAcordo()">📝 Gerar acordo (planilha)</button>
+    <button class="btn primary" onclick="abrirModalTermo()">Gerar termo de acordo</button>
     <button class="btn success" id="btnEncerrar" onclick="encerrarCaso()">Marcar caso como encerrado</button>
   </div>
 </div>
@@ -2148,6 +2150,50 @@
     <div class="modal-footer">
       <button class="btn success" id="btnEnviarGSheet" onclick="enviarParaGSheet()">📤 Enviar pra planilha</button>
       <button class="btn secondary" onclick="fecharModalGSheet()">Cancelar</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: GERAR TERMO (novo fluxo — extrajudicial) -->
+<div id="modalTermo" class="modal-overlay" style="display:none;" onclick="if(event.target===this) fecharModalTermo()">
+  <div class="modal-box" style="max-width:720px; max-height:92vh; display:flex; flex-direction:column;">
+    <div class="modal-header">
+      <h3>Gerar termo de acordo (extrajudicial)</h3>
+      <button class="modal-close" onclick="fecharModalTermo()">×</button>
+    </div>
+    <div class="modal-body" style="flex:1; overflow-y:auto;">
+      <p style="font-size:13px; color:var(--gray-text); margin-bottom:14px;">
+        Confira os dados; o termo é gerado e você revisa/edita antes de enviar.
+        <strong>Use só pra acordo extrajudicial</strong> — Beltrão e judicial seguem no botão antigo (planilha).
+      </p>
+      <div id="termoCampos" style="display:grid; grid-template-columns:1fr 1fr; gap:10px;"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn primary" id="btnGerarTermo" onclick="gerarPreviewTermo()">Gerar e revisar</button>
+      <button class="btn secondary" onclick="fecharModalTermo()">Cancelar</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: PREVIEW/EDIÇÃO DO TERMO -->
+<div id="modalTermoPreview" class="modal-overlay" style="display:none;">
+  <div class="modal-box" style="max-width:1000px; max-height:94vh; display:flex; flex-direction:column;">
+    <div class="modal-header">
+      <h3>Revisão do termo</h3>
+      <button class="modal-close" onclick="fecharModalTermoPreview()">×</button>
+    </div>
+    <div class="modal-body" style="flex:1; overflow:hidden; display:flex; flex-direction:column;">
+      <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
+        <button class="btn small" id="btnEditarTermo" onclick="toggleEditarTermo()">Editar texto</button>
+        <button class="btn small secondary" onclick="voltarFormTermo()">← Ajustar dados</button>
+        <span id="termoEditAviso" style="font-size:12px; color:var(--gray-text);"></span>
+      </div>
+      <iframe id="termoPreviewFrame" title="Pré-visualização do termo" style="flex:1; width:100%; min-height:55vh; border:1px solid var(--gray-line); border-radius:6px; background:#fff;"></iframe>
+    </div>
+    <div class="modal-footer">
+      <button class="btn success" id="btnEnviarTermo" onclick="enviarTermo()">Enviar pro ZapSign</button>
+      <button class="btn secondary" onclick="baixarTermoHTML()">Baixar HTML</button>
+      <button class="btn secondary" onclick="fecharModalTermoPreview()">Cancelar</button>
     </div>
   </div>
 </div>
@@ -5714,7 +5760,7 @@ async function popularDatalistCredores() {
   if (_credoresCache === null) {
     try {
       const { data, error } = await sb.from('clientes')
-        .select('id, nome, nome_fantasia, doc')
+        .select('id, nome, nome_fantasia, doc, metadata')
         .order('nome');
       if (error) throw error;
       _credoresCache = data || [];
@@ -7018,8 +7064,11 @@ async function renderFechamento() {
   });
   document.getElementById('checklistItems').innerHTML = checklistHTML;
 
-  // Carrega endereço já salvo (se houver)
-  preencherEnderecoUI(caso.endereco || {});
+  // Carrega endereço já salvo (estruturado — pra reaproveitar no próximo acordo).
+  // Antes usava caso.endereco (TEXTO da view) → os campos vinham vazios; o certo
+  // é o objeto estruturado caso.enderecoCrm.
+  preencherEnderecoUI(caso.enderecoCrm || {});
+  _enderecoCarregado = caso.enderecoCrm || {};
 
   // Renderiza histórico
   const histEl = document.getElementById('histFechamentoBody');
@@ -7445,6 +7494,67 @@ async function solicitarParcelamentoCustom() {
 // ============================================================
 // ENDEREÇO NO ACORDO (item 8)
 // ============================================================
+// Endereço carregado na tela (capturado no load) — base do "de→para" ao salvar.
+let _enderecoCarregado = {};
+
+function enderecoParaTexto(end) {
+  if (!end) return '';
+  const partes = [];
+  if (end.rua) partes.push(end.rua + (end.numero ? ', n. ' + end.numero : ''));
+  if (end.complemento) partes.push(end.complemento);
+  if (end.bairro) partes.push('bairro ' + end.bairro);
+  if (end.cidadeUf) partes.push(end.cidadeUf);
+  if (end.cep) partes.push('CEP ' + end.cep);
+  return partes.join(', ');
+}
+
+// Persiste o endereço no cadastro do devedor (pra reusar no próximo acordo) e
+// registra a alteração no histórico (de→para), MESMO sem fechar acordo.
+// - Persistência: direto na tabela `devedores` (a view `casos` compõe o texto).
+// - Histórico: caminho canônico (atualizarCaso → casos.historico, escrito pelo front).
+async function salvarEnderecoComHistorico() {
+  const caso = casosCache.find(c => c.id === casoAtual);
+  if (!caso) { toast('Caso não encontrado.', 'error'); return; }
+  const novo = lerEnderecoUI();
+  const antigo = _enderecoCarregado || {};
+  const campos = ['cep', 'rua', 'numero', 'complemento', 'bairro', 'cidadeUf', 'cpfCnpj'];
+  const mudou = campos.some(k => (novo[k] || '').trim() !== (antigo[k] || '').trim());
+  if (!mudou) { toast('Endereço sem alterações.'); return; }
+
+  const btn = document.getElementById('btnSalvarEndereco');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Salvando…'; }
+  try {
+    // 1) Histórico (rastreabilidade legal) — de→para.
+    const txtAntigo = enderecoParaTexto(antigo) || '(vazio)';
+    const txtNovo = enderecoParaTexto(novo) || '(vazio)';
+    const novoHist = (caso.historico || []).slice();
+    novoHist.push({
+      quando: new Date().toISOString(),
+      acao: 'Endereço do devedor atualizado por ' + (perfilAtual ? perfilAtual.nome : '?') + ': de [' + txtAntigo + '] para [' + txtNovo + ']'
+    });
+    const okHist = await atualizarCaso(caso.id, { historico: novoHist });
+    if (!okHist) throw new Error('não foi possível registrar o histórico');
+
+    // 2) Persistência no cadastro do devedor (estruturado + colunas) — usos futuros.
+    const [cidade, uf] = String(novo.cidadeUf || '').split('/').map(s => s.trim());
+    const { error: errDev } = await sb.from('devedores').update({
+      endereco_crm: novo,
+      cep: novo.cep || null, rua: novo.rua || null, numero: novo.numero || null,
+      complemento: novo.complemento || null, bairro: novo.bairro || null,
+      cidade: cidade || null, uf: uf || null
+    }).eq('id', caso.id);
+    if (errDev) throw errDev;
+
+    caso.enderecoCrm = novo;
+    _enderecoCarregado = Object.assign({}, novo);
+    toast('✓ Endereço salvo no cadastro e registrado no histórico.');
+  } catch (e) {
+    toast('Falha ao salvar endereço: ' + (e && e.message ? e.message : e), 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '💾 Salvar endereço no cadastro'; }
+  }
+}
+
 function lerEnderecoUI() {
   return {
     cep: (document.getElementById('endCep') || {}).value || '',
@@ -7500,6 +7610,67 @@ const GSHEET_COLUNAS = [
   { col: 'Z', campo: 'CPF ou CNPJ dev2', placeholder: 'Vazio se não houver' }
 ];
 
+// Quick wins de dados (Fase 2 — internalização do acordo): a qualificação do
+// credor e a natureza jurídica do devedor são montadas a partir do que a view
+// `casos` já expõe (credor_razao_social/_doc/_endereco, documento), em vez de
+// digitação manual. São helpers reusáveis (modal atual e futuro termo no CRM).
+function inferirNaturezaJuridica(doc) {
+  const d = String(doc || '').replace(/\D/g, '');
+  if (d.length === 14) return 'Pessoa Jurídica';
+  return 'Pessoa Física';
+}
+function montarQualificacaoCredor(caso) {
+  if (!caso) return '';
+  const razao = (caso.credor_razao_social || caso.credor || '').trim();
+  if (!razao) return '';
+  const doc = (caso.credor_doc || '').trim();
+  const end = (caso.credor_endereco || '').trim();
+  let s = razao;
+  if (doc) {
+    const ehCnpj = doc.replace(/\D/g, '').length > 11;
+    s += ehCnpj
+      ? ', pessoa jurídica de direito privado, inscrita no CNPJ sob nº ' + doc
+      : ', inscrito(a) no CPF sob nº ' + doc;
+  }
+  if (end) s += ', com endereço ' + end;
+  return s;
+}
+
+// Qualificação verbatim do credor (modelo salvo em clientes.metadata.qualificacao).
+// Fallback: monta uma básica a partir de doc + metadata.endereco.
+function _qualifDoCredor(c) {
+  if (!c) return '';
+  const meta = c.metadata || {};
+  if (meta.qualificacao && String(meta.qualificacao).trim()) return String(meta.qualificacao).trim();
+  const doc = String(c.doc || '').trim();
+  const end = String(meta.endereco || '').trim();
+  let s = '';
+  if (doc) {
+    const ehCnpj = doc.replace(/\D/g, '').length > 11;
+    s += ehCnpj ? 'pessoa jurídica de direito privado, inscrita no CNPJ sob n. ' + doc
+                : 'inscrito(a) no CPF sob n. ' + doc;
+  }
+  if (end) s += (s ? ', ' : '') + 'com endereço ' + end;
+  return s;
+}
+
+// Lista de credores (de _credoresCache) deduplicada por CNPJ (ou nome), preferindo a
+// linha que tem qualificacao salva. Usada no <select> do termo.
+function _credoresParaSelect() {
+  const arr = _credoresCache || [];
+  const map = new Map();
+  for (const c of arr) {
+    const dig = String(c.doc || '').replace(/\D/g, '');
+    const key = dig || ('nome:' + String(c.nome || '').trim().toLowerCase());
+    const prev = map.get(key);
+    const temQ = !!(c.metadata && c.metadata.qualificacao);
+    const prevTemQ = !!(prev && prev.metadata && prev.metadata.qualificacao);
+    if (!prev || (temQ && !prevTemQ)) map.set(key, c);
+  }
+  return Array.from(map.values()).sort((a, b) =>
+    String(a.nome_fantasia || a.nome || '').localeCompare(String(b.nome_fantasia || b.nome || '')));
+}
+
 function abrirModalGSheetAcordo() {
   const caso = casosCache.find(c => c.id === casoAtual);
   if (!caso) { toast('Caso não encontrado.', 'error'); return; }
@@ -7527,7 +7698,7 @@ function abrirModalGSheetAcordo() {
     'J': '2%',
     'K': '10%',
     'L': hoje,
-    'M': endereco.cpfCnpj || '',
+    'M': caso.documento || endereco.cpfCnpj || '',
     'N': endereco.numero || '',
     'O': endereco.bairro || '',
     'P': endereco.cep || '',
@@ -7538,7 +7709,7 @@ function abrirModalGSheetAcordo() {
     'U': 'Não',
     'V': 'Não',
     'W': '',
-    'X': 'Pessoa Física',
+    'X': inferirNaturezaJuridica(caso.documento || endereco.cpfCnpj),
     'Y': '',
     'Z': ''
   };
@@ -7725,6 +7896,224 @@ async function enviarParaGSheet() {
     toast('Falha no envio: ' + msg + '. Confira a planilha antes de reenviar.', 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '📤 Enviar pra planilha'; }
+  }
+}
+
+// ============================================================
+// GERAR TERMO (Fase 2 / recorte 1 — extrajudicial; usa window.TermoEngine)
+// ============================================================
+const QUALIF_COBRASQ = "sociedade empresária limitada, devidamente inscrita no CNPJ sob n. 34.626.848/0001-42, com endereço na Av. Rio Grande do Sul, n. 380, Sala 201, centro, CEP. 85660-000, município de Dois Vizinhos, Estado do Paraná, telefone n.º (46) 98822-6533.";
+let _termoHtmlAtual = '';
+let _termoEditando = false;
+
+function _tipoDocTermo(doc) { return String(doc || '').replace(/\D/g, '').length > 11 ? 'PJ' : 'PF'; }
+function _hojeISO() { return new Date().toISOString().slice(0, 10); }
+function _isoMaisDias(d) { const x = new Date(); x.setDate(x.getDate() + d); return x.toISOString().slice(0, 10); }
+function toggleEntradaTermo() {
+  const c = document.getElementById('tmTemEntrada');
+  document.getElementById('tmEntradaWrap').style.display = (c && c.checked) ? 'grid' : 'none';
+}
+
+async function abrirModalTermo() {
+  const caso = casosCache.find(c => c.id === casoAtual);
+  if (!caso) { toast('Caso não encontrado.', 'error'); return; }
+  const a = caso.acordoFinal || {};
+  const total = a.total || (caso.divida && caso.divida.totalAvista) || 0;
+  const parcelas = a.parcelas || 1;
+  const valorParc = a.valor || (parcelas ? total / parcelas : total);
+  const tipo = _tipoDocTermo(caso.documento);
+  const inp = 'style="width:100%;padding:7px;border:1px solid var(--gray-line);border-radius:5px;font-size:13px;"';
+  const lbl = 'style="display:block;font-size:11px;color:var(--navy);margin-bottom:3px;"';
+  const campo = (id, label, val, attrs, full) =>
+    '<div style="' + (full ? 'grid-column:1/3;' : '') + '"><label ' + lbl + '>' + label + '</label>' +
+    '<input id="' + id + '" value="' + escapeHTML(val == null ? '' : String(val)) + '" ' + (attrs || '') + ' ' + inp + '></div>';
+
+  // Credor vira <select> dos credores cadastrados (deduplicados), com a qualificação
+  // em data-qualif para auto-preenchimento. Garante o cache antes de montar.
+  await popularDatalistCredores();
+  const credId = caso.cliente_id || caso.credor_id || '';
+  const credNome = caso.credor || '';
+  let achou = false;
+  const optsCredor = _credoresParaSelect().map(function (c) {
+    const display = c.nome_fantasia || c.nome || '';
+    const sel = credId ? (c.id === credId) : (display.toLowerCase() === credNome.toLowerCase());
+    if (sel) achou = true;
+    return '<option value="' + escapeHTML(display) + '" data-qualif="' + escapeHTML(_qualifDoCredor(c)) + '"' +
+      (sel ? ' selected' : '') + '>' + escapeHTML(display + (c.doc ? ' (' + c.doc + ')' : '')) + '</option>';
+  });
+  if (!achou) {
+    const qCaso = montarQualificacaoCredor(caso) || (/cobrasq/i.test(credNome) ? QUALIF_COBRASQ : '');
+    optsCredor.unshift('<option value="' + escapeHTML(credNome) + '" data-qualif="' + escapeHTML(qCaso) + '" selected>' +
+      escapeHTML(credNome || '(sem credor cadastrado)') + '</option>');
+  }
+  const selCredor = '<div style="grid-column:1/3;"><label ' + lbl + '>Credor</label>' +
+    '<select id="tmCredor" onchange="aoTrocarCredorTermo()" ' + inp + '>' + optsCredor.join('') + '</select></div>';
+
+  let h = '';
+  h += '<div style="grid-column:1/3;font-size:13px;padding:4px 0;"><strong>Devedor:</strong> ' + escapeHTML(caso.devedor || '') + ' · <strong>' + tipo + '</strong></div>';
+  h += '<div id="termoGeneroWrap" style="grid-column:1/3;' + (tipo === 'PJ' ? 'display:none;' : '') + '"><label ' + lbl + '>Gênero do devedor</label>' +
+    '<label style="font-size:13px;margin-right:16px;"><input type="radio" name="termoGenero" value="F" checked> Feminino (devedora)</label>' +
+    '<label style="font-size:13px;"><input type="radio" name="termoGenero" value="M"> Masculino (devedor)</label></div>';
+  h += campo('tmDoc', 'CPF/CNPJ', caso.documento || '');
+  h += campo('tmTelefone', 'Telefone (envio do link no WhatsApp)', caso.telefone || '');
+  h += selCredor;
+  h += campo('tmTotal', 'Valor total (R$)', Number(total).toFixed(2), 'type="number" step="0.01"');
+  h += campo('tmParcelas', 'Nº de parcelas', parcelas, 'type="number" min="1"');
+  h += campo('tmValorParc', 'Valor da parcela (R$)', Number(valorParc).toFixed(2), 'type="number" step="0.01"');
+  h += campo('tmVenc', '1º vencimento', _isoMaisDias(30), 'type="date"');
+  h += campo('tmMulta', 'Multa boleto (%)', 10, 'type="number"');
+  h += campo('tmPenal', 'Cláusula penal (%)', 50, 'type="number"');
+  h += campo('tmData', 'Data do acordo', _hojeISO(), 'type="date"');
+  h += '<div style="grid-column:1/3;"><label ' + lbl + '><input type="checkbox" id="tmTemEntrada" onchange="toggleEntradaTermo()"> Tem entrada?</label>' +
+    '<div id="tmEntradaWrap" style="display:none;grid-template-columns:1fr 1fr;gap:8px;">' +
+    '<input id="tmEntradaValor" placeholder="Valor entrada (R$)" type="number" step="0.01" ' + inp + '>' +
+    '<input id="tmEntradaVenc" type="date" ' + inp + '></div></div>';
+  h += '<div style="grid-column:1/3;"><label ' + lbl + '>Qualificação do credor (confira o texto)</label><textarea id="tmCredorQualif" style="width:100%;min-height:54px;padding:7px;border:1px solid var(--gray-line);border-radius:5px;font-size:12px;"></textarea></div>';
+
+  document.getElementById('termoCampos').innerHTML = h;
+  aoTrocarCredorTermo();   // preenche a qualificação a partir do credor selecionado
+  document.getElementById('modalTermo').style.display = 'flex';
+}
+
+// Auto-preenche a qualificação do credor (textarea) a partir da opção selecionada no <select>.
+function aoTrocarCredorTermo() {
+  const sel = document.getElementById('tmCredor');
+  const ta = document.getElementById('tmCredorQualif');
+  if (!sel || !ta) return;
+  const opt = sel.selectedOptions && sel.selectedOptions[0];
+  ta.value = (opt && opt.dataset && opt.dataset.qualif) ? opt.dataset.qualif : '';
+}
+
+function fecharModalTermo() { document.getElementById('modalTermo').style.display = 'none'; }
+function fecharModalTermoPreview() { document.getElementById('modalTermoPreview').style.display = 'none'; }
+function voltarFormTermo() { fecharModalTermoPreview(); document.getElementById('modalTermo').style.display = 'flex'; }
+
+function _dadosTermoDoForm() {
+  const caso = casosCache.find(c => c.id === casoAtual);
+  const val = id => (document.getElementById(id) || {}).value || '';
+  const num = id => parseFloat(val(id)) || 0;
+  const tipo = _tipoDocTermo(val('tmDoc'));
+  const gEl = document.querySelector('input[name="termoGenero"]:checked');
+  const genero = gEl ? gEl.value : 'F';
+  const e = (caso && caso.enderecoCrm) || {};
+  const cidUf = String(e.cidadeUf || '').split('/');
+  const credor = val('tmCredor');
+  const temEntrada = document.getElementById('tmTemEntrada') && document.getElementById('tmTemEntrada').checked;
+  return {
+    credor: { nome: credor, genero: 'F', qualificacao: val('tmCredorQualif'),
+      assNome: /cobrasq/i.test(credor) ? 'COBRASQ' : credor, assDoc: '' },
+    devedor: { nome: (caso && caso.devedor) || '', tipo: tipo, genero: genero, documento: val('tmDoc'),
+      endereco: { rua: e.rua, numero: e.numero, complemento: e.complemento, bairro: e.bairro,
+        cidade: (cidUf[0] || '').trim(), uf: (cidUf[1] || '').trim(), cep: e.cep },
+      telefone: val('tmTelefone') || (caso && caso.telefone) || '',
+      assNome: ((caso && caso.devedor) || '').split(' ')[0],
+      assDoc: (tipo === 'PJ' ? 'CNPJ ' : 'CPF ') + val('tmDoc') },
+    acordo: { total: num('tmTotal'), parcelas: parseInt(val('tmParcelas'), 10) || 1, valorParcela: num('tmValorParc'),
+      vencimento: val('tmVenc'), multa: num('tmMulta'), penal: num('tmPenal'),
+      entrada: temEntrada ? { valor: num('tmEntradaValor'), vencimento: val('tmEntradaVenc') } : null },
+    dataAcordo: val('tmData')
+  };
+}
+
+async function gerarPreviewTermo() {
+  const btn = document.getElementById('btnGerarTermo');
+  if (btn) { btn.disabled = true; btn.textContent = 'Gerando…'; }
+  try {
+    if (!window.TermoEngine) throw new Error('Motor do termo não carregou — recarregue a página.');
+    const dados = _dadosTermoDoForm();
+    if (!dados.acordo.total) { toast('Informe o valor total.', 'error'); return; }
+    if (!dados.acordo.vencimento) { toast('Informe o 1º vencimento.', 'error'); return; }
+    _termoHtmlAtual = await TermoEngine.montarTermoExtrajudicial(dados);
+    document.getElementById('termoPreviewFrame').srcdoc = _termoHtmlAtual;
+    document.getElementById('termoEditAviso').textContent = '';
+    _termoEditando = false;
+    document.getElementById('btnEditarTermo').textContent = 'Editar texto';
+    fecharModalTermo();
+    document.getElementById('modalTermoPreview').style.display = 'flex';
+  } catch (e) {
+    toast('Falha ao gerar termo: ' + (e && e.message ? e.message : e), 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Gerar e revisar'; }
+  }
+}
+
+function toggleEditarTermo() {
+  const doc = document.getElementById('termoPreviewFrame').contentDocument;
+  if (!doc || !doc.body) return;
+  _termoEditando = !_termoEditando;
+  doc.body.contentEditable = _termoEditando ? 'true' : 'false';
+  doc.querySelectorAll('.sig-token').forEach(el => { el.contentEditable = 'false'; });
+  document.getElementById('btnEditarTermo').textContent = _termoEditando ? 'Concluir edição' : 'Editar texto';
+  document.getElementById('termoEditAviso').textContent = _termoEditando
+    ? 'Editando — não apague os campos «...» de assinatura.' : '';
+}
+
+function _termoHtmlFinal() {
+  const doc = document.getElementById('termoPreviewFrame').contentDocument;
+  return (doc && doc.documentElement) ? ('<!DOCTYPE html>' + doc.documentElement.outerHTML) : _termoHtmlAtual;
+}
+
+function baixarTermoHTML() {
+  const caso = casosCache.find(c => c.id === casoAtual);
+  const blob = new Blob([_termoHtmlFinal()], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'Termo - ' + ((caso && caso.devedor) || 'acordo') + '.html'; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function enviarTermo() {
+  const caso = casosCache.find(c => c.id === casoAtual);
+  if (!caso) return;
+  if (caso.acordoFinal && caso.acordoFinal._gsheetEnviadoEm) {
+    if (!confirm('Esse acordo já foi enviado em ' + new Date(caso.acordoFinal._gsheetEnviadoEm).toLocaleString('pt-BR') + '. Reenviar gera documento duplicado. Continuar?')) return;
+  }
+  const html = _termoHtmlFinal();
+  if (!/assdev1/.test(html)) {
+    if (!confirm('Não achei o campo de assinatura do devedor («assdev1») no termo. Enviar mesmo assim?')) return;
+  }
+  const btn = document.getElementById('btnEnviarTermo');
+  if (btn) { btn.disabled = true; btn.textContent = 'Enviando…'; }
+  try {
+    const dados = _dadosTermoDoForm();
+    const { data, error } = await sb.functions.invoke('gerar-acordo-termo', { body: { casoId: caso.id, html: html, dados: dados } });
+    if (error) {
+      let det = '';
+      try { det = (await error.context.json()).error || ''; } catch (_) {}
+      throw new Error(det || error.message);
+    }
+    if (data && data.error) throw new Error(data.error);
+
+    // Envia o link de assinatura pro WhatsApp do devedor via Z-API (número COBRASQ).
+    // O link é o `data.link` devolvido pelo ZapSign; mensagem em formato fixo (5 passos).
+    let notaEnvio = '';
+    if (data && data.link) {
+      const tel = (dados.devedor && dados.devedor.telefone) || caso.telefone || '';
+      const msg = data.link + '\n\n' +
+        '*Encaminhei acima o link para assinatura do seu acordo digital. O processo é simples: basta seguir os passos indicados para concluir a assinatura de forma rápida e segura.*\n\n' +
+        '1) Clique no link acima;\n' +
+        '2) Confira o documento e clique em assinar;\n' +
+        '3) Preencha os seus dados, clique em "fotografar selfie" e tire uma foto de seu rosto e, posteriormente, de seus documentos;\n' +
+        '4) Assine na tela com o seu dedo. Pode ser apenas a sua inicial;\n' +
+        '5) Confirme e seu acordo estará assinado.';
+      const r = await enviarViaZAPIComConfirmacao(tel, msg);
+      notaEnvio = (r && r.ok)
+        ? ' — link enviado por WhatsApp (' + (r.modo === 'zapi' ? 'Z-API' : r.modo) + ')'
+        : ' — link NÃO enviado por WhatsApp' + (r && r.cancelado ? ' (cancelado)' : (r && r.error ? ' (' + r.error + ')' : ''));
+    }
+
+    const novoAcordo = Object.assign({}, caso.acordoFinal || {}, { _gsheetEnviadoEm: new Date().toISOString() });
+    const novoHist = (caso.historico || []).slice();
+    novoHist.push({ quando: new Date().toISOString(), acao: 'Termo de acordo gerado no CRM e enviado pro ZapSign por ' + (perfilAtual ? perfilAtual.nome : '?') + (data && data.link ? ' — link: ' + data.link : '') + notaEnvio });
+    await atualizarCaso(caso.id, { historico: novoHist, acordoFinal: novoAcordo });
+    toast('Termo enviado pro ZapSign.');
+    fecharModalTermoPreview();
+  } catch (e) {
+    const msg = (e && e.message ? e.message : String(e));
+    const dica = /not found|Failed to send|non-2xx|404/i.test(msg) ? ' — (o proxy "gerar-acordo-termo" ainda não foi publicado; use "Baixar HTML" por enquanto)' : '';
+    toast('Falha no envio: ' + msg + dica, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Enviar pro ZapSign'; }
   }
 }
 
