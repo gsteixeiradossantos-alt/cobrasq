@@ -10,8 +10,8 @@
 //   GOTENBERG_USER / GOTENBERG_PASS  (opcional — basic auth do Gotenberg)
 //   SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY  (injetados pela plataforma)
 //
-// Body: { casoId, html, dados }  (dados = shape do TermoEngine no front)
-// Resp: { ok:true, token, link } | { error: '...' , detalhes? }
+// Body: { casoId, html, dados }  (dados = shape do TermoEngine; dados.devedores = N signatários)
+// Resp: { ok:true, token, link, signers:[{nome,phone,link}] } | { error: '...' , detalhes? }
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { encodeBase64 } from "jsr:@std/encoding@1/base64";
@@ -67,28 +67,31 @@ Deno.serve(async (req) => {
     const base64_pdf = encodeBase64(pdfBytes);
 
     // 2) Cria o documento no ZapSign (mesmos campos do nó n8n; url_pdf -> base64_pdf)
-    const dev = dados.devedor || {};
+    const devs = (Array.isArray(dados.devedores) && dados.devedores.length)
+      ? dados.devedores : (dados.devedor ? [dados.devedor] : []);
+    const dev = devs[0] || {};
     const zapBody = {
       name: (String(dev.nome || "Devedor").trim() + " - Acordo Extrajudicial"),
       base64_pdf,
       external_id: String(casoId ?? ""),
-      signers: [{
-        name: dev.nome || "",
+      // Um signer por devedor; cada um assina na sua âncora <<assdevN>> (1-based).
+      // O CRM envia o link por WhatsApp via Z-API (número COBRASQ); o ZapSign NÃO envia
+      // automaticamente (senão o devedor receberia duas mensagens).
+      signers: devs.map((d: any, i: number) => ({
+        name: d.nome || "",
         email: null,
         auth_mode: "assinaturaTela",
         send_automatic_email: false,
-        // O CRM envia o link de assinatura por WhatsApp via Z-API (número COBRASQ),
-        // logo o ZapSign NÃO deve enviar (senão o devedor recebe duas mensagens).
         send_automatic_whatsapp: false,
         phone_country: "55",
-        phone_number: onlyDigits(dev.telefone),
+        phone_number: onlyDigits(d.telefone),
         require_cpf: true,
-        cpf: onlyDigits(dev.documento),
+        cpf: onlyDigits(d.documento),
         require_selfie_photo: true,
         require_document_photo: true,
         selfie_validation_type: "none",
-        signature_placement: "<<assdev1>>",
-      }],
+        signature_placement: "<<assdev" + (i + 1) + ">>",
+      })),
       lang: "pt-br",
       disable_signer_emails: false,
       folder_path: "/",
@@ -110,7 +113,31 @@ Deno.serve(async (req) => {
       return json({ error: "ZapSign recusou: " + (zap?.detail || zap?.error || `HTTP ${zResp.status}`), detalhes: zap }, 502);
     }
     const token = zap.token || (zap.doc && zap.doc.token);
-    const link = (zap.signers && zap.signers[0] && (zap.signers[0].sign_url || zap.signers[0].signing_link)) || null;
+    const linkDe = (s: any) => (s && (s.sign_url || s.signing_link || s.signUrl || s.link)) || null;
+    // Casa cada devedor (na ordem enviada) com o signer devolvido pelo ZapSign.
+    const mapSigners = (z: any) => {
+      const arr = (z && z.signers) || [];
+      return devs.map((d: any, i: number) => ({
+        nome: d.nome || "",
+        phone: onlyDigits(d.telefone),
+        link: linkDe(arr[i]),
+      }));
+    };
+    let signersOut = mapSigners(zap);
+    // A resposta de criação nem sempre traz sign_url; nesse caso, consulta o doc criado.
+    if (signersOut.some((s) => !s.link) && token) {
+      try {
+        const dResp = await fetch(`https://api.zapsign.com.br/api/v1/docs/${token}/`, {
+          headers: { "Authorization": `Bearer ${ZAPSIGN_TOKEN}` },
+          signal: AbortSignal.timeout(15000),
+        });
+        if (dResp.ok) {
+          const remapped = mapSigners(await dResp.json().catch(() => ({})));
+          signersOut = signersOut.map((s, i) => (s.link ? s : remapped[i]));
+        }
+      } catch (_) { /* mantém links null — o front avisa e o operador envia manualmente */ }
+    }
+    const link = (signersOut[0] && signersOut[0].link) || null;
 
     // 3) Grava/vincula em `acordos` (F-08 — server-side, via RPC existente)
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
@@ -143,7 +170,7 @@ Deno.serve(async (req) => {
       }
     }
 
-    return json({ ok: true, token, link, vinculo });
+    return json({ ok: true, token, link, signers: signersOut, vinculo });
   } catch (e) {
     return json({ error: "Erro interno: " + (e instanceof Error ? e.message : String(e)) }, 500);
   }

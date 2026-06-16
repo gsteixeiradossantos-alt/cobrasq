@@ -84,18 +84,23 @@
     const endereco = [
       e.rua ? "com endereço na " + e.rua : "",
       e.numero ? "n. " + e.numero : "",
+      e.complemento ? e.complemento : "",
       e.bairro ? "no bairro " + e.bairro : "",
       e.cep ? "CEP. " + e.cep : "",
       e.cidade ? "município de " + e.cidade : "",
       e.uf ? estadoFrase(e.uf) : ""
     ].filter(Boolean).join(", ");
-    const tel = dev.telefone ? ", telefone n. " + dev.telefone : "";
+    const tel = dev.telefone ? "telefone n. " + dev.telefone : "";
+    let base;
     if (dev.tipo === "PJ") {
-      return "pessoa jurídica de direito privado, inscrita no CNPJ sob n. " + (dev.documento || "") + ", " + endereco + tel + ".";
+      base = "pessoa jurídica de direito privado, inscrita no CNPJ sob n. " + (dev.documento || "");
+    } else {
+      const nac = dev.genero === "M" ? "brasileiro" : "brasileira";
+      const insc = dev.genero === "M" ? "inscrito" : "inscrita";
+      base = nac + ", " + insc + " no CPF sob. n. " + (dev.documento || "");
     }
-    const nac = dev.genero === "M" ? "brasileiro" : "brasileira";
-    const insc = dev.genero === "M" ? "inscrito" : "inscrita";
-    return nac + ", " + insc + " no CPF sob. n. " + (dev.documento || "") + ", " + endereco + tel + ".";
+    // Junta só os trechos não-vazios — endereço ausente/parcial não gera ", ," nem vírgula órfã.
+    return [base, endereco, tel].filter(Boolean).join(", ") + ".";
   }
 
   // Credor: usa a qualificação verbatim guardada no cadastro; senão, monta uma básica.
@@ -126,17 +131,48 @@
   }
 
   function escAttr(s) { return String(s == null ? "" : s); }
+  function escHtml(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+  function generoDevedorLabel(dv) {
+    return dv.tipo === "PJ" ? "devedora" : (dv.genero === "M" ? "devedor" : "devedora");
+  }
+
+  // Preâmbulo: um bloco de parte por devedor (qualificação reusa qualifDevedor).
+  function preambuloDevedores(devs) {
+    return (devs || []).map(function (dv) {
+      const g = generoDevedorLabel(dv);
+      const label = g === "devedor" ? "Devedor" : "Devedora";
+      return '<div><div class="party-label">' + label + '</div>' +
+        '<p>Como ' + g + ', <span class="party-name">' + escHtml(dv.nome || "") + '</span>, ' + qualifDevedor(dv) + '</p></div>';
+    }).join("");
+  }
+
+  // Assinaturas: um bloco por devedor, com a âncora <<assdevN>> (1-based).
+  function assinaturasDevedores(devs) {
+    return (devs || []).map(function (dv, i) {
+      const g = generoDevedorLabel(dv);
+      const role = g === "devedor" ? "Devedor" : "Devedora";
+      const nome = dv.assNome || (dv.nome || "").split(" ")[0];
+      return '<div class="sig">' +
+        '<div class="sig-token">&lt;&lt;assdev' + (i + 1) + '&gt;&gt;</div>' +
+        '<div class="sig-line"></div>' +
+        '<div class="sig-name">' + escHtml(nome) + '</div>' +
+        '<div class="sig-doc">' + escHtml(dv.assDoc || "") + '</div>' +
+        '<div class="sig-role">' + role + '</div></div>';
+    }).join("");
+  }
 
   // Mapa placeholder → valor
   function placeholders(dados) {
-    const cr = dados.credor || {}, dv = dados.devedor || {}, ac = dados.acordo || {};
+    const cr = dados.credor || {}, ac = dados.acordo || {};
+    const devs = (dados.devedores && dados.devedores.length) ? dados.devedores : (dados.devedor ? [dados.devedor] : []);
+    const dv0 = devs[0] || {};
     return {
       generoCredor: cr.genero === "M" ? "credor" : "credora",
       credorNome: cr.nome || "",
       credorQualificacao: qualifCredor(cr),
-      generoDevedor: dv.tipo === "PJ" ? "devedora" : (dv.genero === "M" ? "devedor" : "devedora"),
-      devedorNome: dv.nome || "",
-      devedorQualificacao: qualifDevedor(dv),
+      devedoresPreambulo: preambuloDevedores(devs),
+      assinaturasDevedores: assinaturasDevedores(devs),
       valorDivida: valorCompleto(ac.total),
       frasePagamento: frasePagamento(ac),
       multaBoleto: pctExt(ac.multa != null ? ac.multa : 10),
@@ -144,8 +180,12 @@
       dataAcordo: dataExtenso(dados.dataAcordo),
       credorAssNome: cr.assNome || cr.nome || "",
       credorAssDoc: cr.assDoc || "",
-      dev1AssNome: dv.assNome || (dv.nome || "").split(" ")[0],
-      dev1AssDoc: dv.assDoc || ""
+      // compat (template single-devedor antigo)
+      generoDevedor: generoDevedorLabel(dv0),
+      devedorNome: dv0.nome || "",
+      devedorQualificacao: devs.length ? qualifDevedor(dv0) : "",
+      dev1AssNome: dv0.assNome || (dv0.nome || "").split(" ")[0],
+      dev1AssDoc: dv0.assDoc || ""
     };
   }
 
@@ -173,6 +213,7 @@
   global.TermoEngine = {
     extInt, reaisExt, valorCompleto, pctExt, dataExtenso, estadoFrase,
     qualifDevedor, qualifCredor, frasePagamento, placeholders,
+    preambuloDevedores, assinaturasDevedores, generoDevedorLabel,
     preencher, carregarTemplate, montarTermoExtrajudicial
   };
 })(typeof window !== "undefined" ? window : globalThis);

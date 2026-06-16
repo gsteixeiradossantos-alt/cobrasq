@@ -2073,43 +2073,8 @@
     </div>
   </div>
 
-  <div class="card" id="enderecoCard">
-    <div class="card-title">📮 Endereço do devedor (pra contrato/boleto)</div>
-    <div style="font-size:13px; color:var(--gray-text); margin-bottom:12px;">Confirme com o devedor antes de fechar. Esses dados vão pro contrato e pra emissão de boleto/correspondência.</div>
-    <div class="grid-2">
-      <div class="field">
-        <label>CEP</label>
-        <input type="text" id="endCep" placeholder="00000-000" onblur="buscarCepEndereco()" maxlength="9">
-      </div>
-      <div class="field">
-        <label>Cidade / UF</label>
-        <input type="text" id="endCidade" placeholder="Cidade / UF">
-      </div>
-    </div>
-    <div class="field">
-      <label>Rua / Avenida</label>
-      <input type="text" id="endRua" placeholder="Rua, av., etc.">
-    </div>
-    <div class="grid-2">
-      <div class="field">
-        <label>Número</label>
-        <input type="text" id="endNumero" placeholder="123">
-      </div>
-      <div class="field">
-        <label>Complemento (opcional)</label>
-        <input type="text" id="endComplemento" placeholder="Apto, bloco, fundos...">
-      </div>
-    </div>
-    <div class="field">
-      <label>Bairro</label>
-      <input type="text" id="endBairro">
-    </div>
-    <div class="field">
-      <label>CPF / CNPJ do devedor</label>
-      <input type="text" id="endCpfCnpj" placeholder="000.000.000-00 ou 00.000.000/0000-00">
-    </div>
-    <button class="btn small primary" id="btnSalvarEndereco" onclick="salvarEnderecoComHistorico()" style="margin-top:6px;">💾 Salvar endereço no cadastro</button>
-  </div>
+  <!-- A seção "📮 Endereço do devedor" foi unificada DENTRO do modal "Gerar termo de acordo"
+       (ver _blocoEnderecoTermo / abrirModalTermo). Mantida só lá para evitar ids duplicados. -->
 
   <div class="checklist">
     <h3>Checklist final (registrar no Astrea)</h3>
@@ -7636,12 +7601,22 @@ function montarQualificacaoCredor(caso) {
   return s;
 }
 
+// Reconhece a COBRASQ (própria credora) por CNPJ ou nome, pra garantir a
+// qualificação canônica mesmo com cadastro incompleto (metadata.qualificacao vazia).
+function _ehCredorCobrasq(nome, doc) {
+  return /cobrasq/i.test(String(nome || '')) ||
+    String(doc || '').replace(/\D/g, '').startsWith('34626848');
+}
+
 // Qualificação verbatim do credor (modelo salvo em clientes.metadata.qualificacao).
 // Fallback: monta uma básica a partir de doc + metadata.endereco.
 function _qualifDoCredor(c) {
   if (!c) return '';
   const meta = c.metadata || {};
   if (meta.qualificacao && String(meta.qualificacao).trim()) return String(meta.qualificacao).trim();
+  // COBRASQ como credora: usa o texto canônico (CNPJ + endereço completos), pois o
+  // cadastro não tem metadata.qualificacao salva. QUALIF_COBRASQ é definida adiante.
+  if (_ehCredorCobrasq(c.nome_fantasia || c.nome, c.doc)) return QUALIF_COBRASQ;
   const doc = String(c.doc || '').trim();
   const end = String(meta.endereco || '').trim();
   let s = '';
@@ -7928,39 +7903,32 @@ async function abrirModalTermo() {
     '<div style="' + (full ? 'grid-column:1/3;' : '') + '"><label ' + lbl + '>' + label + '</label>' +
     '<input id="' + id + '" value="' + escapeHTML(val == null ? '' : String(val)) + '" ' + (attrs || '') + ' ' + inp + '></div>';
 
-  // Credor vira <select> dos credores cadastrados (deduplicados), com a qualificação
-  // em data-qualif para auto-preenchimento. Garante o cache antes de montar.
+  // Credor: caixa de busca (datalist dlCredores), default sempre COBRASQ. Garante o cache.
   await popularDatalistCredores();
-  const credId = caso.cliente_id || caso.credor_id || '';
-  const credNome = caso.credor || '';
-  const credDoc = String(caso.credor_doc || '').replace(/\D/g, '');  // casa por CNPJ tb (cobre duplicatas deduplicadas, ex. COBRASQ)
-  let achou = false;
-  const optsCredor = _credoresParaSelect().map(function (c) {
-    const display = c.nome_fantasia || c.nome || '';
-    const cDoc = String(c.doc || '').replace(/\D/g, '');
-    const sel = (credId && c.id === credId)
-      || (!!credDoc && cDoc === credDoc)
-      || (!credId && !credDoc && display.toLowerCase() === credNome.toLowerCase());
-    if (sel) achou = true;
-    return '<option value="' + escapeHTML(display) + '" data-qualif="' + escapeHTML(_qualifDoCredor(c)) + '"' +
-      (sel ? ' selected' : '') + '>' + escapeHTML(display + (c.doc ? ' (' + c.doc + ')' : '')) + '</option>';
-  });
-  if (!achou) {
-    const qCaso = montarQualificacaoCredor(caso) || (/cobrasq/i.test(credNome) ? QUALIF_COBRASQ : '');
-    optsCredor.unshift('<option value="' + escapeHTML(credNome) + '" data-qualif="' + escapeHTML(qCaso) + '" selected>' +
-      escapeHTML(credNome || '(sem credor cadastrado)') + '</option>');
-  }
+  const COBRASQ_NOME = 'COBRASQ Recuperadora de Crédito e Cobrança Ltda.';
   const selCredor = '<div style="grid-column:1/3;"><label ' + lbl + '>Credor</label>' +
-    '<select id="tmCredor" onchange="aoTrocarCredorTermo()" ' + inp + '>' + optsCredor.join('') + '</select></div>';
+    '<input id="tmCredor" list="dlCredores" autocomplete="off" oninput="aoTrocarCredorTermo()" value="' + escapeHTML(COBRASQ_NOME) + '" ' + inp + '>' +
+    '<div style="font-size:11px;color:var(--gray-text);margin-top:4px;">Se o devedor residir em <strong>Francisco Beltrão</strong>, escolha o real cliente como credor (não a COBRASQ).</div></div>';
 
   let h = '';
-  h += '<div style="grid-column:1/3;font-size:13px;padding:4px 0;"><strong>Devedor:</strong> ' + escapeHTML(caso.devedor || '') + ' · <strong>' + tipo + '</strong></div>';
+  h += '<div style="grid-column:1/3;font-size:13px;padding:4px 0;"><strong>Devedor principal:</strong> ' + escapeHTML(caso.devedor || '') + ' · <strong>' + tipo + '</strong></div>';
   h += '<div id="termoGeneroWrap" style="grid-column:1/3;' + (tipo === 'PJ' ? 'display:none;' : '') + '"><label ' + lbl + '>Gênero do devedor</label>' +
     '<label style="font-size:13px;margin-right:16px;"><input type="radio" name="termoGenero" value="F" checked> Feminino (devedora)</label>' +
     '<label style="font-size:13px;"><input type="radio" name="termoGenero" value="M"> Masculino (devedor)</label></div>';
   h += campo('tmDoc', 'CPF/CNPJ', caso.documento || '');
   h += campo('tmTelefone', 'Telefone (envio do link no WhatsApp)', caso.telefone || '');
   h += selCredor;
+  h += '<div style="grid-column:1/3;"><label ' + lbl + '>Qualificação do credor (confira o texto)</label><textarea id="tmCredorQualif" style="width:100%;min-height:54px;padding:7px;border:1px solid var(--gray-line);border-radius:5px;font-size:12px;"></textarea></div>';
+  // Endereço do devedor principal — seção 📮 unificada DENTRO do modal (ids originais:
+  // reusa lerEnderecoUI / preencherEnderecoUI / buscarCepEndereco / salvarEnderecoComHistorico).
+  h += _blocoEnderecoTermo(lbl, inp);
+  // Outros devedores que assinam (co-devedor, avalista, fiador) — link no WhatsApp de cada um.
+  h += '<div style="grid-column:1/3;border-top:1px solid var(--gray-line);margin-top:8px;padding-top:8px;">' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">' +
+    '<strong style="font-size:12px;">Outros devedores que assinam</strong>' +
+    '<button type="button" class="btn small secondary" onclick="_addDevedorTermo()">+ Adicionar devedor</button></div>' +
+    '<div style="font-size:11px;color:var(--gray-text);margin-top:2px;">Cada signatário recebe o link de assinatura no próprio WhatsApp.</div>' +
+    '<div id="tmDevedoresExtras" style="margin-top:8px;display:flex;flex-direction:column;gap:10px;"></div></div>';
   h += campo('tmTotal', 'Valor total (R$)', Number(total).toFixed(2), 'type="number" step="0.01"');
   h += campo('tmParcelas', 'Nº de parcelas', parcelas, 'type="number" min="1"');
   h += campo('tmValorParc', 'Valor da parcela (R$)', Number(valorParc).toFixed(2), 'type="number" step="0.01"');
@@ -7972,25 +7940,91 @@ async function abrirModalTermo() {
     '<div id="tmEntradaWrap" style="display:none;grid-template-columns:1fr 1fr;gap:8px;">' +
     '<input id="tmEntradaValor" placeholder="Valor entrada (R$)" type="number" step="0.01" ' + inp + '>' +
     '<input id="tmEntradaVenc" type="date" ' + inp + '></div></div>';
-  h += '<div style="grid-column:1/3;"><label ' + lbl + '>Qualificação do credor (confira o texto)</label><textarea id="tmCredorQualif" style="width:100%;min-height:54px;padding:7px;border:1px solid var(--gray-line);border-radius:5px;font-size:12px;"></textarea></div>';
 
   document.getElementById('termoCampos').innerHTML = h;
-  aoTrocarCredorTermo();   // preenche a qualificação a partir do credor selecionado
+  preencherEnderecoUI(caso.enderecoCrm || {});                 // pré-preenche o endereço (ids agora no modal)
+  const _endCpf = document.getElementById('endCpfCnpj');
+  if (_endCpf && !_endCpf.value) _endCpf.value = caso.documento || '';
+  aoTrocarCredorTermo();   // qualificação do credor (default COBRASQ → QUALIF_COBRASQ)
   document.getElementById('modalTermo').style.display = 'flex';
 }
 
-// Auto-preenche a qualificação do credor (textarea) a partir da opção selecionada no <select>.
+// Preenche a qualificação do credor a partir do texto digitado na caixa de busca (tmCredor).
+// COBRASQ → texto canônico (QUALIF_COBRASQ). Outro credor cadastrado → busca em _credoresCache.
 function aoTrocarCredorTermo() {
-  const sel = document.getElementById('tmCredor');
+  const inpEl = document.getElementById('tmCredor');
   const ta = document.getElementById('tmCredorQualif');
-  if (!sel || !ta) return;
-  const opt = sel.selectedOptions && sel.selectedOptions[0];
-  ta.value = (opt && opt.dataset && opt.dataset.qualif) ? opt.dataset.qualif : '';
+  if (!inpEl || !ta) return;
+  const nome = (inpEl.value || '').trim();
+  if (_ehCredorCobrasq(nome)) { ta.value = QUALIF_COBRASQ; return; }
+  const norm = s => String(s || '').trim().toLowerCase();
+  const c = (_credoresCache || []).find(x => norm(x.nome) === norm(nome) || norm(x.nome_fantasia) === norm(nome));
+  if (c) ta.value = _qualifDoCredor(c);   // sem correspondência: mantém o texto atual (edição manual)
 }
 
 function fecharModalTermo() { document.getElementById('modalTermo').style.display = 'none'; }
 function fecharModalTermoPreview() { document.getElementById('modalTermoPreview').style.display = 'none'; }
 function voltarFormTermo() { fecharModalTermoPreview(); document.getElementById('modalTermo').style.display = 'flex'; }
+
+// Bloco de endereço do devedor principal, renderizado DENTRO do modal do termo.
+// Mantém os ids originais (endCep/endCidade/endRua/endNumero/endComplemento/endBairro/endCpfCnpj)
+// para reaproveitar lerEnderecoUI/preencherEnderecoUI/buscarCepEndereco/salvarEnderecoComHistorico.
+function _blocoEnderecoTermo(lbl, inp) {
+  return '<div style="grid-column:1/3;border-top:1px solid var(--gray-line);margin-top:8px;padding-top:8px;">' +
+    '<div style="font-size:11px;color:var(--accent-2,#9C7F40);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;">📮 Endereço do devedor (entra no termo / boleto)</div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">' +
+      '<div><label ' + lbl + '>CEP</label><input id="endCep" onblur="buscarCepEndereco()" maxlength="9" placeholder="00000-000" ' + inp + '></div>' +
+      '<div><label ' + lbl + '>Cidade / UF</label><input id="endCidade" placeholder="Cidade / UF" ' + inp + '></div>' +
+      '<div style="grid-column:1/3;"><label ' + lbl + '>Rua / Avenida</label><input id="endRua" placeholder="Rua, av., etc." ' + inp + '></div>' +
+      '<div><label ' + lbl + '>Número</label><input id="endNumero" placeholder="123" ' + inp + '></div>' +
+      '<div><label ' + lbl + '>Complemento</label><input id="endComplemento" placeholder="Apto, bloco, fundos..." ' + inp + '></div>' +
+      '<div style="grid-column:1/3;"><label ' + lbl + '>Bairro</label><input id="endBairro" ' + inp + '></div>' +
+    '</div>' +
+    '<input type="hidden" id="endCpfCnpj">' +
+    '<button type="button" class="btn small primary" id="btnSalvarEndereco" onclick="salvarEnderecoComHistorico()" style="margin-top:8px;">💾 Salvar endereço no cadastro</button>' +
+  '</div>';
+}
+
+// Devedores adicionais que assinam (co-devedor/avalista/fiador).
+let _tmExtraSeq = 0;
+function _addDevedorTermo() {
+  const wrap = document.getElementById('tmDevedoresExtras');
+  if (!wrap) return;
+  const idx = ++_tmExtraSeq;
+  const inp = 'style="width:100%;padding:6px;border:1px solid var(--gray-line);border-radius:5px;font-size:13px;"';
+  const lbl = 'style="display:block;font-size:11px;color:var(--navy);margin-bottom:3px;"';
+  const row = document.createElement('div');
+  row.className = 'tm-dev-extra';
+  row.style.cssText = 'border:1px solid var(--gray-line);border-radius:6px;padding:8px;';
+  row.innerHTML =
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">' +
+      '<strong style="font-size:12px;">Devedor adicional ' + idx + '</strong>' +
+      '<button type="button" class="btn small secondary" onclick="this.closest(\'.tm-dev-extra\').remove()">remover</button></div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">' +
+      '<div style="grid-column:1/3;"><label ' + lbl + '>Nome</label><input class="tmExtraNome" ' + inp + '></div>' +
+      '<div><label ' + lbl + '>CPF/CNPJ</label><input class="tmExtraDoc" ' + inp + '></div>' +
+      '<div><label ' + lbl + '>Telefone (WhatsApp)</label><input class="tmExtraTel" ' + inp + '></div>' +
+      '<div><label ' + lbl + '>Gênero</label><select class="tmExtraGenero" ' + inp + '><option value="F">Feminino</option><option value="M">Masculino</option></select></div>' +
+    '</div>' +
+    '<label style="font-size:12px;display:block;margin-top:6px;"><input type="checkbox" class="tmExtraMesmoEnd" checked> Mesmo endereço do devedor principal</label>';
+  wrap.appendChild(row);
+}
+
+// Lê os devedores adicionais preenchidos (ignora linhas sem nome).
+function _lerDevedoresExtras() {
+  return Array.from(document.querySelectorAll('#tmDevedoresExtras .tm-dev-extra')).map(function (r) {
+    const g = q => ((r.querySelector(q) || {}).value || '').trim();
+    const nome = g('.tmExtraNome');
+    if (!nome) return null;
+    const documento = g('.tmExtraDoc');
+    const chk = r.querySelector('.tmExtraMesmoEnd');
+    return {
+      nome: nome, documento: documento, tipo: _tipoDocTermo(documento),
+      genero: g('.tmExtraGenero') || 'F', telefone: g('.tmExtraTel'),
+      mesmoEndereco: !!(chk && chk.checked)
+    };
+  }).filter(Boolean);
+}
 
 function _dadosTermoDoForm() {
   const caso = casosCache.find(c => c.id === casoAtual);
@@ -7999,19 +8033,31 @@ function _dadosTermoDoForm() {
   const tipo = _tipoDocTermo(val('tmDoc'));
   const gEl = document.querySelector('input[name="termoGenero"]:checked');
   const genero = gEl ? gEl.value : 'F';
-  const e = (caso && caso.enderecoCrm) || {};
+  const e = lerEnderecoUI();                       // {cep,rua,numero,complemento,bairro,cidadeUf,cpfCnpj}
   const cidUf = String(e.cidadeUf || '').split('/');
+  const enderecoPrincipal = { rua: e.rua, numero: e.numero, complemento: e.complemento, bairro: e.bairro,
+    cidade: (cidUf[0] || '').trim(), uf: (cidUf[1] || '').trim(), cep: e.cep };
   const credor = val('tmCredor');
   const temEntrada = document.getElementById('tmTemEntrada') && document.getElementById('tmTemEntrada').checked;
+  const nomePrincipal = (caso && caso.devedor) || '';
+  const principal = {
+    nome: nomePrincipal, tipo: tipo, genero: genero, documento: val('tmDoc'),
+    endereco: enderecoPrincipal, telefone: val('tmTelefone') || (caso && caso.telefone) || '',
+    assNome: nomePrincipal.split(' ')[0], assDoc: (tipo === 'PJ' ? 'CNPJ ' : 'CPF ') + val('tmDoc')
+  };
+  const extras = _lerDevedoresExtras().map(function (x) {
+    return {
+      nome: x.nome, tipo: x.tipo, genero: x.genero, documento: x.documento,
+      endereco: x.mesmoEndereco ? enderecoPrincipal : {}, telefone: x.telefone,
+      assNome: x.nome.split(' ')[0], assDoc: (x.tipo === 'PJ' ? 'CNPJ ' : 'CPF ') + x.documento
+    };
+  });
+  const devedores = [principal].concat(extras);
   return {
     credor: { nome: credor, genero: 'F', qualificacao: val('tmCredorQualif'),
       assNome: /cobrasq/i.test(credor) ? 'COBRASQ' : credor, assDoc: '' },
-    devedor: { nome: (caso && caso.devedor) || '', tipo: tipo, genero: genero, documento: val('tmDoc'),
-      endereco: { rua: e.rua, numero: e.numero, complemento: e.complemento, bairro: e.bairro,
-        cidade: (cidUf[0] || '').trim(), uf: (cidUf[1] || '').trim(), cep: e.cep },
-      telefone: val('tmTelefone') || (caso && caso.telefone) || '',
-      assNome: ((caso && caso.devedor) || '').split(' ')[0],
-      assDoc: (tipo === 'PJ' ? 'CNPJ ' : 'CPF ') + val('tmDoc') },
+    devedores: devedores,
+    devedor: principal,                            // compat: 1º devedor
     acordo: { total: num('tmTotal'), parcelas: parseInt(val('tmParcelas'), 10) || 1, valorParcela: num('tmValorParc'),
       vencimento: val('tmVenc'), multa: num('tmMulta'), penal: num('tmPenal'),
       entrada: temEntrada ? { valor: num('tmEntradaValor'), vencimento: val('tmEntradaVenc') } : null },
@@ -8090,26 +8136,57 @@ async function enviarTermo() {
 
     // Envia o link de assinatura pro WhatsApp do devedor via Z-API (número COBRASQ).
     // O link é o `data.link` devolvido pelo ZapSign; mensagem em formato fixo (5 passos).
+    // Envia o link de assinatura pro WhatsApp de CADA devedor signatário (via Z-API, número COBRASQ).
+    const _msgLink = (link, nome) => link + '\n\n' +
+      '*' + (nome ? (String(nome).split(' ')[0] + ', e') : 'E') + 'ncaminhei acima o link para assinatura do seu acordo digital. O processo é simples: basta seguir os passos indicados para concluir a assinatura de forma rápida e segura.*\n\n' +
+      '1) Clique no link acima;\n' +
+      '2) Confira o documento e clique em assinar;\n' +
+      '3) Preencha os seus dados, clique em "fotografar selfie" e tire uma foto de seu rosto e, posteriormente, de seus documentos;\n' +
+      '4) Assine na tela com o seu dedo. Pode ser apenas a sua inicial;\n' +
+      '5) Confirme e seu acordo estará assinado.';
+    let signers = (data && Array.isArray(data.signers) && data.signers.length) ? data.signers : [];
+    if (!signers.length && data && data.link) {
+      const d0 = (dados.devedores && dados.devedores[0]) || dados.devedor || {};
+      signers = [{ nome: d0.nome || caso.devedor || '', phone: d0.telefone || caso.telefone || '', link: data.link }];
+    }
     let notaEnvio = '';
-    if (data && data.link) {
-      const tel = (dados.devedor && dados.devedor.telefone) || caso.telefone || '';
-      const msg = data.link + '\n\n' +
-        '*Encaminhei acima o link para assinatura do seu acordo digital. O processo é simples: basta seguir os passos indicados para concluir a assinatura de forma rápida e segura.*\n\n' +
-        '1) Clique no link acima;\n' +
-        '2) Confira o documento e clique em assinar;\n' +
-        '3) Preencha os seus dados, clique em "fotografar selfie" e tire uma foto de seu rosto e, posteriormente, de seus documentos;\n' +
-        '4) Assine na tela com o seu dedo. Pode ser apenas a sua inicial;\n' +
-        '5) Confirme e seu acordo estará assinado.';
-      const r = await enviarViaZAPIComConfirmacao(tel, msg);
-      notaEnvio = (r && r.ok)
-        ? ' — link enviado por WhatsApp (' + (r.modo === 'zapi' ? 'Z-API' : r.modo) + ')'
-        : ' — link NÃO enviado por WhatsApp' + (r && r.cancelado ? ' (cancelado)' : (r && r.error ? ' (' + r.error + ')' : ''));
+    if (signers.length) {
+      for (const s of signers) {
+        const nome = s.nome || '?';
+        if (!s.link) { notaEnvio += ' · ' + nome + ': SEM link'; continue; }
+        const tel = s.phone || s.telefone || '';
+        if (!tel) { notaEnvio += ' · ' + nome + ': sem telefone'; continue; }
+        const r = await enviarViaZAPIComConfirmacao(tel, _msgLink(s.link, s.nome));
+        notaEnvio += ' · ' + nome + ': ' + ((r && r.ok) ? 'link enviado'
+          : ('NÃO enviado' + (r && r.cancelado ? ' (cancelado)' : (r && r.error ? ' (' + r.error + ')' : ''))));
+      }
+    } else {
+      // Acordo criado, mas o ZapSign não devolveu link: não falhar em silêncio.
+      notaEnvio = ' — ATENÇÃO: ZapSign não devolveu link de assinatura (envie manualmente)';
+      toast('Acordo criado no ZapSign, mas sem link de assinatura retornado. Abra o documento no painel do ZapSign e envie o link manualmente.', 'error');
     }
 
     const novoAcordo = Object.assign({}, caso.acordoFinal || {}, { _gsheetEnviadoEm: new Date().toISOString() });
     const novoHist = (caso.historico || []).slice();
-    novoHist.push({ quando: new Date().toISOString(), acao: 'Termo de acordo gerado no CRM e enviado pro ZapSign por ' + (perfilAtual ? perfilAtual.nome : '?') + (data && data.link ? ' — link: ' + data.link : '') + notaEnvio });
+    novoHist.push({ quando: new Date().toISOString(), acao: 'Termo de acordo gerado no CRM e enviado pro ZapSign por ' + (perfilAtual ? perfilAtual.nome : '?') + ' — ' + signers.length + ' signatário(s)' + notaEnvio });
     await atualizarCaso(caso.id, { historico: novoHist, acordoFinal: novoAcordo });
+
+    // Persiste o endereço digitado/confirmado no cadastro do devedor (reuso no próximo
+    // acordo). Não bloqueia o envio: falha aqui só perde a conveniência do prefill.
+    const endNovo = lerEnderecoUI();
+    if (Object.values(endNovo).some(v => String(v || '').trim())) {
+      const [endCidade, endUf] = String(endNovo.cidadeUf || '').split('/').map(s => s.trim());
+      try {
+        await sb.from('devedores').update({
+          endereco_crm: endNovo,
+          cep: endNovo.cep || null, rua: endNovo.rua || null, numero: endNovo.numero || null,
+          complemento: endNovo.complemento || null, bairro: endNovo.bairro || null,
+          cidade: endCidade || null, uf: endUf || null
+        }).eq('id', caso.id);
+        caso.enderecoCrm = endNovo;
+      } catch (_) { /* não bloqueia o termo já enviado */ }
+    }
+
     toast('Termo enviado pro ZapSign.');
     fecharModalTermoPreview();
   } catch (e) {
