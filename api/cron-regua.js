@@ -302,6 +302,45 @@ async function processarCalendarPendingDeletes() {
   return out;
 }
 
+// PR7: notificações pessoais de CONTAS A PAGAR PRÓPRIAS. Avisa o gestor (WhatsApp +
+// e-mail) sobre despesas de fin_lancamento vencendo/atrasadas e ainda não pagas, até
+// que o pagamento seja confirmado. Destino: CONTAS_PAGAR_PHONE/CONTAS_PAGAR_EMAIL
+// (ou DB.config.contasPagarTelefone/Email). Roda no cron diário (uma msg-resumo/dia).
+async function processarContasPagarProprias(DB) {
+  const out = { vencendo: 0, notificado: false, canais: [] };
+  const hoje = new Date().toISOString().slice(0, 10);
+  let rows;
+  try {
+    rows = await sbFetch(
+      `fin_lancamento?select=id,descricao,valor,data_vencimento,status` +
+      `&tipo_movimento=eq.0&status=in.(0,2)&data_vencimento=lte.${hoje}` +
+      `&order=data_vencimento.asc&limit=100`
+    );
+  } catch (e) { return { ...out, error: e.message }; }
+  if (!Array.isArray(rows) || rows.length === 0) return out;
+  out.vencendo = rows.length;
+
+  const destTel = String(process.env.CONTAS_PAGAR_PHONE || DB.config?.contasPagarTelefone || '').replace(/\D/g, '');
+  const destEmail = process.env.CONTAS_PAGAR_EMAIL || DB.config?.contasPagarEmail || '';
+  if (!destTel && !destEmail) return { ...out, skipped: 'sem destino (CONTAS_PAGAR_PHONE/EMAIL)' };
+
+  const linhas = rows.map(r => {
+    const venc = String(r.data_vencimento || '').split('-').reverse().join('/');
+    const atras = (r.data_vencimento && r.data_vencimento < hoje) ? ' (atrasada)' : '';
+    return `• ${r.descricao || '—'} — ${fmtR(Math.abs(Number(r.valor)) || 0)} — vence ${venc}${atras}`;
+  });
+  const total = rows.reduce((s, r) => s + Math.abs(Number(r.valor) || 0), 0);
+  const corpo = `Contas a pagar (vencendo/atrasadas) — ${rows.length} item(ns), total ${fmtR(total)}:\n\n` +
+    `${linhas.join('\n')}\n\nConfirme o pagamento no sistema para parar os lembretes.`;
+
+  try { if (destTel) { await zapiSendText(destTel, '🔔 ' + corpo); out.canais.push('whatsapp'); } }
+  catch (e) { out.whatsapp_error = e.message; }
+  try { if (destEmail && emailDisponivel()) { await sendEmail({ to: destEmail, subject: 'Cobrasq — Contas a pagar', text: corpo }); out.canais.push('email'); } }
+  catch (e) { out.email_error = e.message; }
+  out.notificado = out.canais.length > 0;
+  return out;
+}
+
 module.exports = async function handler(req, res) {
   // F-09: autenticação forte de cron. Antes aceitava um bypass por user-agent
   // (/vercel-cron/i), que é trivialmente forjável -> qualquer um disparava a
@@ -335,9 +374,12 @@ module.exports = async function handler(req, res) {
     }
     const DB = rows[0].data || {};
 
+    // PR7: contas a pagar próprias — independe da régua de cobrança estar ativa.
+    const contasPagar = dry ? null : await processarContasPagarProprias(DB);
+
     if (DB.config?.reguaAtiva === false) {
       const calendarStats = dry ? null : await processarCalendarPendingDeletes();
-      return res.status(200).json({ ok: true, msg: 'Régua pausada globalmente.', calendar: calendarStats });
+      return res.status(200).json({ ok: true, msg: 'Régua pausada globalmente.', calendar: calendarStats, contasPagar });
     }
 
     const reguaCobranca = Array.isArray(DB.config?.reguaCobranca) ? DB.config.reguaCobranca
@@ -346,7 +388,7 @@ module.exports = async function handler(req, res) {
 
     if (reguaCobranca.length === 0 && reguaAcordo.length === 0) {
       const calendarStats = dry ? null : await processarCalendarPendingDeletes();
-      return res.status(200).json({ ok: true, msg: 'Nenhum passo configurado em nenhuma régua.', calendar: calendarStats });
+      return res.status(200).json({ ok: true, msg: 'Nenhum passo configurado em nenhuma régua.', calendar: calendarStats, contasPagar });
     }
 
     const credor = DB.config?.empresa || 'COBRASQ';
@@ -507,7 +549,7 @@ module.exports = async function handler(req, res) {
       });
     } catch {}
 
-    res.status(200).json({ ok: true, hoje: new Date().toISOString().slice(0,10), ...resultado, calendar });
+    res.status(200).json({ ok: true, hoje: new Date().toISOString().slice(0,10), ...resultado, calendar, contasPagar });
   } catch (err) {
     console.error('[cron-regua]', err);
     res.status(500).json({ ok: false, error: err.message });
