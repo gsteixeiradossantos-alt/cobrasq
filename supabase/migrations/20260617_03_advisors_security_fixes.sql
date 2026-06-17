@@ -2,33 +2,25 @@
 -- Correções de segurança apontadas pelos Supabase advisors (auditoria 2026-06).
 -- Ver docs/AUDITORIA-2026-06.md (seção 1.1).
 --
--- ⚠️ NÃO APLICADO AUTOMATICAMENTE. Revisar e aplicar via SQL Editor / MCP
---    (apply_migration) com confirmação. Há um par _rollback.sql.
---    Itens que dependem do modelo de tenancy (políticas USING(true)) ficam
---    COMENTADOS como template — não execute sem ajustar ao escopo real.
+-- ✅ APLICADO EM PRODUÇÃO em 2026-06-17 via MCP (migrations
+--    `advisors_security_fixes` + `advisors_security_fixes_revoke_public`).
+--    Este arquivo reflete exatamente o que foi aplicado. Par _rollback.sql incluído.
 
-begin;
+-- P0 — view profiles expunha auth.users ao anon (lint 0002_auth_users_exposed).
+-- A view roda como SECURITY DEFINER DE PROPÓSITO: faz LEFT JOIN auth.users para
+-- trazer o e-mail, e o invoker (anon/authenticated) não tem acesso a auth.users —
+-- trocar para security_invoker QUEBRARIA a view. Fix seguro: remover o acesso do
+-- papel anon (a view só é consultada por usuário logado, sempre via user.id).
+-- (O lint 0010_security_definer_view permanece e é intencional aqui.)
+revoke all on public.profiles from anon;
 
--- ─────────────────────────────────────────────────────────────────────────
--- P0 — view public.profiles expõe auth.users ao anon E roda como SECURITY DEFINER
--- (lints 0002_auth_users_exposed + 0010_security_definer_view).
--- Faz a view respeitar a RLS de quem consulta e remove o acesso anônimo.
--- ─────────────────────────────────────────────────────────────────────────
-alter view public.profiles set (security_invoker = true);
-revoke select on public.profiles from anon;
-
--- ─────────────────────────────────────────────────────────────────────────
 -- P0 — tabela de backup pública sem RLS (lint 0013_rls_disabled_in_public).
--- Sem policy, fica acessível só ao service_role (objetivo de um backup).
--- Recomendação: avaliar DROP quando o backup não for mais necessário.
--- ─────────────────────────────────────────────────────────────────────────
+-- Sem policy, fica acessível só ao service_role/owner (objetivo de um backup).
+-- Não é referenciada pelo app.
 alter table public._backup_cobrasq_data_20260611 enable row level security;
 
--- ─────────────────────────────────────────────────────────────────────────
--- P2 — funções com search_path mutável (lint 0011_function_search_path_mutable).
--- Fixa search_path (mitiga sequestro de schema). DO block resolve as assinaturas
--- reais via catálogo, então não quebra se a aridade divergir.
--- ─────────────────────────────────────────────────────────────────────────
+-- P2 — funções com search_path mutável (lint 0011). DO block resolve as assinaturas
+-- reais via catálogo (não quebra se a aridade divergir).
 do $$
 declare r record;
 begin
@@ -48,29 +40,24 @@ begin
   end loop;
 end $$;
 
--- ─────────────────────────────────────────────────────────────────────────
--- P2 — SECURITY DEFINER de ação administrativa executáveis pelo anon
--- (lint 0028). Mantém para authenticated (o app chama logado), tira do anon.
--- As funções portal_* são intencionalmente anônimas (portal do devedor) e NÃO
--- são alteradas aqui.
--- ─────────────────────────────────────────────────────────────────────────
-revoke execute on function public.arquivar_cliente(uuid, text) from anon;
-revoke execute on function public.reativar_cliente(uuid) from anon;
+-- P2 — SECURITY DEFINER administrativas executáveis pelo anon (lint 0028). O EXECUTE
+-- vinha herdado de PUBLIC, então revoga de PUBLIC e concede explicitamente a
+-- authenticated/service_role (o app chama logado). Funções portal_* são
+-- intencionalmente anônimas e NÃO são alteradas.
+revoke execute on function public.arquivar_cliente(uuid, text) from public, anon;
+grant  execute on function public.arquivar_cliente(uuid, text) to authenticated, service_role;
+revoke execute on function public.reativar_cliente(uuid) from public, anon;
+grant  execute on function public.reativar_cliente(uuid) to authenticated, service_role;
 
 -- ─────────────────────────────────────────────────────────────────────────
--- P1 — políticas RLS permissivas USING(true) (lint 0024). DEPENDEM do modelo de
--- tenancy real (grupo/papel). Template comentado — ajustar e aplicar à parte:
+-- NÃO aplicado (dependem do modelo de tenancy / são toggles de painel):
 --
+-- P1 — políticas RLS USING(true) (lint 0024). Template — ajustar ao escopo real:
 --   alter policy ag_conv_update_authenticated on public.ag_conversations
 --     using (current_user_grupo() = grupo_id) with check (current_user_grupo() = grupo_id);
 --   alter policy import_astrea_rw on public.import_astrea
 --     using (current_user_papel() = 'proprietario') with check (current_user_papel() = 'proprietario');
+--   (login_attempts_insert com WITH CHECK(true) costuma ser intencional.)
 --
--- NOTA: login_attempts_insert com WITH CHECK(true) é geralmente intencional
--- (anon precisa registrar tentativa de login) — avaliar antes de restringir.
+-- WARN — ativar "Leaked Password Protection" no painel Auth (sem SQL).
 -- ─────────────────────────────────────────────────────────────────────────
-
--- NOTA (não-SQL): ativar "Leaked Password Protection" no painel Auth
--- (lint auth_leaked_password_protection) — não há statement SQL para isso.
-
-commit;

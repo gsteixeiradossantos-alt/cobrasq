@@ -1,11 +1,9 @@
 -- 20260617_03_advisors_security_fixes_rollback.sql
 -- Reverte 20260617_03_advisors_security_fixes.sql.
--- ⚠️ Reverter restaura a postura INSEGURA — usar só em emergência.
+-- ⚠️ Reverter RESTAURA a postura INSEGURA (anon lendo auth.users via profiles,
+--    backup público, search_path solto) — usar só em emergência.
 
-begin;
-
--- Volta a view profiles ao comportamento anterior.
-alter view public.profiles set (security_invoker = false);
+-- Restaura acesso do anon à view profiles (estado anterior, inseguro).
 grant select on public.profiles to anon;
 
 -- Desliga RLS do backup (estado anterior, inseguro).
@@ -31,8 +29,6 @@ begin
   end loop;
 end $$;
 
--- Restaura execute do anon nas funções administrativas.
-grant execute on function public.arquivar_cliente(uuid, text) to anon;
-grant execute on function public.reativar_cliente(uuid) to anon;
-
-commit;
+-- Restaura execute do anon (via PUBLIC) nas funções administrativas.
+grant execute on function public.arquivar_cliente(uuid, text) to public;
+grant execute on function public.reativar_cliente(uuid) to public;
