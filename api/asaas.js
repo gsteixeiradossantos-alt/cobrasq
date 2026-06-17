@@ -34,6 +34,16 @@ module.exports = async function handler(req, res) {
     return res.status(400).json({ error: 'query param ?path= ausente' });
   }
 
+  // P2 (auditoria 2026-06) — hardening: este proxy é exposto ao browser e usa a
+  // chave da conta do escritório. Endpoints que MOVEM DINHEIRO ou alteram a conta
+  // não devem ser alcançáveis pelo cliente: o repasse PIX é server-only (api/repassar.js).
+  // Denylist por prefixo de recurso (case-insensitive).
+  const BLOCKED_PREFIXES = ['transfers', 'pix/transactions', 'anticipations', 'bill', 'mobilePhoneRecharges', 'accounts', 'myAccount', 'transferences'];
+  const resource = pathParam.toLowerCase();
+  if (BLOCKED_PREFIXES.some((p) => resource === p || resource.startsWith(p + '/') || resource.startsWith(p + '?'))) {
+    return res.status(403).json({ error: 'Operação não permitida por este endpoint.' });
+  }
+
   const base = asaasEnv === 'production'
     ? 'https://www.asaas.com/api/v3'
     : 'https://sandbox.asaas.com/api/v3';

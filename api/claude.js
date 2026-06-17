@@ -44,6 +44,16 @@ module.exports = async function handler(req, res) {
     return res.status(400).json({ error: { message: 'corpo inválido: "messages" ausente.' } });
   }
 
+  // P2 (auditoria 2026-06) — limita abuso de custo: só modelos Claude e teto de tokens.
+  // Qualquer usuário logado chama este proxy; sem teto, dava pra esgotar a conta.
+  if (typeof body.model !== 'string' || !/^claude-/.test(body.model)) {
+    return res.status(400).json({ error: { message: 'modelo inválido: use um modelo "claude-*".' } });
+  }
+  const MAX_TOKENS_CEILING = 16000;
+  if (!Number.isFinite(body.max_tokens) || body.max_tokens <= 0 || body.max_tokens > MAX_TOKENS_CEILING) {
+    body.max_tokens = Math.min(Number(body.max_tokens) > 0 ? Number(body.max_tokens) : 4096, MAX_TOKENS_CEILING);
+  }
+
   const version = req.headers['anthropic-version'] || '2023-06-01';
 
   try {
