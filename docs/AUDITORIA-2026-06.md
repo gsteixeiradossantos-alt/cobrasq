@@ -200,3 +200,76 @@ Apenas aditivas/baixo risco; o resto acima fica como recomendação para aprova�
 **Não aplicado (requer sua decisão)**: re-skin de marca (item 5), guards financeiros P1
 (itens 3.1/3.2 — alteram lógica de dinheiro), e migrations de segurança/performance do banco
 (P0/P1/P2 da seção 1.1 — exigem `db push`, vetado pelo `CLAUDE.md` sem revisão).
+
+---
+
+# Auditoria profunda (passe 2) — 2026-06-17
+
+Segundo passe, line-by-line, das áreas que ficaram rasas no passe 1: calculadora
+jurídica, endpoints `api/` restantes, edge functions e lógica JS dos SPAs. As
+severidades abaixo são as **minhas** (ajustadas sobre os achados dos agentes;
+quando rebaixei, explico). "A validar" = precisa de conferência/teste antes de virar fix.
+
+## 5.1 Calculadora jurídica (`calc-juridica.html`) — a validar (jurídico)
+⚠️ Nenhuma destas foi corrigida: várias são **decisão jurídica**, exigem seu/advogado OK + casos de teste.
+- **P1 — juros pro-rata usa `/30` fixo** (~linha 1350) em vez dos dias reais do mês
+  (`s.diasMes`): juros divergem em fev/meses de 31 dias. (Provável bug de cálculo.)
+- **P1/jurídico — cobrança 8% a.a.** (~1594) incide sobre o valor **já corrigido**
+  (semi-composto), não sobre o original. Simples vs composto é **interpretação** (Súmula 121) — confirmar.
+- **P1/jurídico — neutralização de deflação** (trava STJ, ~1336) não respeita o
+  pro-rata do segmento. Confirmar regra desejada.
+- **P2 — acúmulo de arredondamento** na cobrança (~1592-1598); base da multa não
+  cobre o 3º componente (~1361); honorários podem **duplicar correção** se `atualizar=true` sem data própria (~1479).
+- **P3 — `Math.round` em `diffDias`** (linha 911) pode causar off-by-one; floats de correção não arredondados (~1342, só estético).
+- **Caso de teste sugerido**: período 01/01/2024→28/02/2024 — juros de fev devem diferir dos de jan.
+
+## 5.2 Endpoints `api/` restantes
+- **P1 — `repasse-concluido.js` (TOCTOU)**: dois webhooks do mesmo `transferId` podem
+  ler `repasse_status≠'efetuado'` e um `FAILED` sobrescrever um `DONE` já concluído →
+  repasse refeito/duplicado. Fix: `PATCH ... WHERE repasse_status = <esperado>` (update condicional) ou claim por `transferId`.
+- **P1/P2 — idempotência sem lock** em `emitir-nf.js` e `emitir-acordo.js` (SELECT-then-act):
+  chamadas concorrentes podem emitir NF/boletos em dobro. Fix: claim idempotente antes de emitir (padrão do `cron-regua.js`).
+- **P3 — `mfa.js:145` usa `===`** para comparar hashes (idealmente `crypto.timingSafeEqual`).
+  Rebaixado de P1: compara o *hash* SHA-256 e há teto de 5 tentativas. Melhoria trivial.
+- **P2 — `mfa` rate-limit** é por `dev_id` (1 código/min), sem limite por IP nem teto de
+  códigos/hora → brute-force lento ainda possível. Recomenda limite por IP + janela.
+- **DISMISSED (era "P0" do agente) — segredo `EMIT_ACORDO_SECRET` compartilhado**: é
+  **intencional** (server-to-server interno; `processar-recebimento` chama `emitir-nf` com esse header). Não é vulnerabilidade.
+- **P2 — `diagnostico-financeiro`/`cron-regua` usam `Math.abs` em somatórios**: mascara
+  sinal invertido em dados legados. Validar `tipo_movimento` na origem.
+- **P3 — `zapi.js`/`zapsign.js`** repassam `?path=` sem allowlist (mesma classe do Asaas,
+  porém presos ao host e sem endpoint de dinheiro). Recomenda validar o path.
+
+## 5.3 Edge functions
+- **P2 — prompt injection** em `peticao-assistente` e `beatriz-msg`: `contexto`/`contexto_extra`
+  do usuário concatenado no system prompt sem limite. Impacto moderado (texto p/ staff). Fix: truncar (~1000 chars) e estruturar.
+- **P2 — `gerar-acordo-termo` casa signatários por índice**: se o ZapSign devolver os
+  signatários em ordem diferente, um devedor recebe o link de assinatura de outro. Fix: casar por CPF/nome. (A validar.)
+- **P2 — `cron-mensagens-agendadas` normaliza telefone diferente** de `enviar-whatsapp`
+  (não testa o 9º dígito) → mensagens podem não chegar. Fix: usar a mesma função.
+- **P3 — `gerar-acordo-termo`** renderiza HTML do termo sem escape (o HTML vem do app;
+  risco só com usuário logado malicioso); falta de retry/timeout consistente; parsing frágil do JSON da IA em `peticao-assistente`.
+- **DOWNGRADE — `asaas-webhook` marcar `cobranca` paga por `externalReference`**: o webhook
+  é autenticado por segredo (só o Asaas chama), então o "UUID roubado" é improvável. Ainda assim, cross-check `cobranca.devedor_id == devedor.id` é boa prática (P3).
+
+## 5.4 Lógica JS dos SPAs
+- **✅ APLICADO — P1 XSS no `showToast`** (`index.html:4477`): a função injetava a mensagem
+  via `innerHTML` sem escape e ~20 chamadas passam `error.message` do servidor. Corrigido
+  envolvendo a mensagem com `escHtml(msg)` — cobre todos os call sites de uma vez.
+- **P1 — `crm.html` `parseValor()` (~5570)**: o regex remove o ponto de milhar e quebra com
+  número em formato US (`"1,234.56"`→1). O `index.html` já tem o `parseValorBR()` correto. Fix: reusar essa função. (Dinheiro — não apliquei.)
+- **P3 — `crm.html` `arredondaParaCima()=Math.ceil(v)`** arredonda para **real inteiro**, não
+  centavo; usado em parcelas (~5598). Pode ser "real cheio" intencional — **validar intenção** antes de mexer.
+- **P2/P3 — XSS menores**: `id` interpolado em `onclick` inline (`index.html:5989`; id é UUID
+  do banco, baixo risco) e `.nome` de importação CSV em `showToast` (~5374, já mitigado pelo fix do showToast).
+- **✅ OK** — autorização é server-side (não confia em `localStorage` para papel/role);
+  dual-write devedor protegido (F-01/F-08); datas via `toISOString` ok.
+
+## Correções aplicadas neste passe
+1. **XSS do `showToast`** (`index.html`) — `escHtml(msg)`.
+
+## Pendências que exigem sua decisão
+- **Calculadora jurídica (5.1)** — confirmar regras (simples×composto, base, trava STJ) + casos de teste.
+- **Race conditions financeiras (5.2)** — repasse-concluido / emitir-nf / emitir-acordo: aplico claim idempotente?
+- **`parseValor` do CRM (5.2/5.4)** — reusar `parseValorBR`? (muda parsing de dinheiro)
+- **Prompt injection / signatários por índice (5.3)** — aplico os hardenings?
