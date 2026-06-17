@@ -1,7 +1,6 @@
 // api/asaas.js — Proxy server-to-server para a API do Asaas
-// Prioriza credencial em variável de ambiente (ASAAS_API_KEY) para manter
-// a chave fora do browser. Mantém fallback por header (backward-compat)
-// mas emite warning no console server-side.
+// Credencial SÓ via variável de ambiente (ASAAS_API_KEY): a chave nunca vem
+// do browser. O fallback por header x-asaas-key foi removido.
 // Onda 1b: exige login Supabase — antes qualquer requisição anônima criava/
 // alterava/cancelava cobranças na conta Asaas do escritório.
 
