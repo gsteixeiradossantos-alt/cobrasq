@@ -8,7 +8,7 @@
 
 const { sbFetch } = require('./_sb.js');
 const { zapiSendText } = require('./_zapi.js');
-const { msgComprovante } = require('./repassar.js');
+const { msgComprovante } = require('./_repassar.js');
 const crypto = require('crypto');
 
 function timingSafeEq(a, b) {
