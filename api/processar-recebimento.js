@@ -100,6 +100,42 @@ module.exports = async function handler(req, res) {
     const inserted = await sbFetch('fin_operacao', { method: 'POST', body: JSON.stringify(row) });
     const operacao = Array.isArray(inserted) ? inserted[0] : inserted;
 
+    // Ponte fin_lancamento: registra a RECEITA do recebimento (já paga) e a DESPESA
+    // de repasse (nasce ATIVA/pendente porque o recebimento confirmou; vira "pago"
+    // quando o PIX de repasse efetiva — /api/repassar e /api/repasse-concluido).
+    // Convenção de sinal do app: despesa com valor negativo. conta_id/contato_id ficam
+    // nulos (o módulo fin_* veio do Controlle; vínculo fino é passo futuro).
+    if (operacao && operacao.id) {
+      try {
+        const credorNome = (credor && credor.nome) || '';
+        const devNome = (devedor && devedor.nome) || 'devedor';
+        const parcTxt = row.parcela && row.total_parcelas ? ` ${row.parcela}/${row.total_parcelas}` : '';
+        const rec = await sbFetch('fin_lancamento', { method: 'POST', body: JSON.stringify({
+          descricao: `Recebimento — ${devNome}${parcTxt}`,
+          valor: valorRecebido, valor_pago: valorRecebido,
+          tipo_movimento: 1, status: 1,
+          data_competencia: row.recebido_em, data_pagamento: row.recebido_em,
+          numero_parcela: row.parcela, total_parcelas: row.total_parcelas,
+        }) }).catch(() => null);
+        const lancReceitaId = (rec && rec[0] && rec[0].id) || null;
+        let lancDespesaId = null;
+        if (valorCapital > 0) {
+          const desp = await sbFetch('fin_lancamento', { method: 'POST', body: JSON.stringify({
+            descricao: `Repasse ao credor — ${credorNome || '—'}${parcTxt}`,
+            valor: -valorCapital,
+            tipo_movimento: 0, status: 0,
+            data_competencia: row.recebido_em, data_vencimento: row.recebido_em,
+            numero_parcela: row.parcela, total_parcelas: row.total_parcelas,
+          }) }).catch(() => null);
+          lancDespesaId = (desp && desp[0] && desp[0].id) || null;
+        }
+        if (lancReceitaId || lancDespesaId) {
+          await sbFetch(`fin_operacao?id=eq.${operacao.id}`, { method: 'PATCH', body: JSON.stringify({ lancamento_receita_id: lancReceitaId, lancamento_despesa_id: lancDespesaId }) }).catch(() => {});
+          operacao.lancamento_despesa_id = lancDespesaId;
+        }
+      } catch (e) { console.warn('[processar-recebimento] ponte fin_lancamento:', e.message); }
+    }
+
     // PR5: emissão automática da NFS-e (gated por AUTO_EMIT_NF=on). Best-effort —
     // depende de configuração fiscal municipal na conta Asaas. O disparo manual fica
     // sempre disponível em /api/emitir-nf.

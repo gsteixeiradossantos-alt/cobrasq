@@ -57,6 +57,14 @@ module.exports = async function handler(req, res) {
     };
     await sbFetch(`fin_operacao?id=eq.${op.id}`, { method: 'PATCH', body: JSON.stringify(update) });
 
+    // Ponte fin_lancamento: ao concluir, marca a despesa de repasse como PAGA.
+    if (concluido && op.lancamento_despesa_id) {
+      await sbFetch(`fin_lancamento?id=eq.${op.lancamento_despesa_id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 1, data_pagamento: new Date().toISOString().slice(0, 10), valor_pago: -(Number(op.valor_capital) || 0) }),
+      }).catch(() => {});
+    }
+
     // Comprovante ao credor quando concluído (best-effort).
     let zap = null;
     if (concluido && op.credor_id) {
