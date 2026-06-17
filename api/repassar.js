@@ -90,6 +90,14 @@ module.exports = async function handler(req, res) {
     };
     await sbFetch(`fin_operacao?id=eq.${op.id}`, { method: 'PATCH', body: JSON.stringify(update) });
 
+    // Ponte fin_lancamento: ao efetivar, marca a despesa de repasse como PAGA.
+    if (concluido && op.lancamento_despesa_id) {
+      await sbFetch(`fin_lancamento?id=eq.${op.lancamento_despesa_id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 1, data_pagamento: new Date().toISOString().slice(0, 10), valor_pago: -round2(op.valor_capital) }),
+      }).catch(() => {});
+    }
+
     // Persiste a chave PIX no credor para reuso (best-effort).
     if (body.pix_key && body.pix_key !== credMeta.pix_key) {
       await sbFetch(`clientes?id=eq.${credor.id}`, {
