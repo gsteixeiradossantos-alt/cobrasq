@@ -3973,7 +3973,11 @@ async function flushRelational(){
       const { error } = await supa.from('clientes').upsert(rows, { onConflict:'id' });
       if(error){
         console.warn('[rel] syncClientes:', error.message);
-        try { showToast('Não foi possível sincronizar Clientes: '+error.message,'danger'); } catch(_){}
+        // 23505 = unique_violation (idx_clientes_doc_digits_unique): CNPJ/CPF já ativo.
+        const msg = (error.code === '23505' || /idx_clientes_doc_digits|duplicate key/i.test(error.message||''))
+          ? 'Já existe um cliente ATIVO com esse CNPJ/CPF. Verifique a lista de Clientes (reative ou arquive o existente em vez de duplicar).'
+          : 'Não foi possível sincronizar Clientes: '+error.message;
+        try { showToast(msg,'danger'); } catch(_){}
       }
     }
     if(Array.isArray(DB.devedores) && DB.devedores.length){
@@ -12690,11 +12694,23 @@ function excluirCliente(id){
     }, `Solicitar exclusão de "${cli.nome||'cliente'}"? O gestor precisa aprovar.`);
     return;
   }
-  confirmDel(()=>{
+  confirmDel(async ()=>{
     DB.clientes = (DB.clientes||[]).filter(c=>c.id!==id);
-    // Unlink devedores
+    // Unlink devedores (memória + blob)
     (DB.devedores||[]).forEach(d=>{ if(d.clienteId===id) d.clienteId=''; });
     save();
+    // Apaga TAMBÉM no relacional. O app recarrega clientes do banco em
+    // loadRelationalData() (fonte da verdade) e flushRelational() só faz UPSERT,
+    // nunca DELETE — então sem este delete o cliente "reaparecia" no próximo
+    // refresh. A FK cliente_id (devedores/cobrancas) é ON DELETE SET NULL,
+    // então os vínculos relacionais caem sozinhos.
+    try{
+      const supa = getSupabase();
+      if(supa){
+        const { error } = await supa.from('clientes').delete().eq('id', id);
+        if(error){ showToast('Removido na tela, mas o servidor recusou a exclusão ('+error.message+'). Use Arquivar.','danger'); }
+      }
+    }catch(e){ showToast('Falha ao excluir no servidor: '+e.message,'danger'); }
     renderClientes();
   }, 'Excluir este cliente? Os devedores vinculados serão desvinculados.');
 }
