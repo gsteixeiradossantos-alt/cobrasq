@@ -14314,6 +14314,7 @@ const FIN_SECTIONS = {
                      {id:'lancamentos', label:'Lançamentos'},
                      {id:'transferencias', label:'Transferências'},
                      {id:'recorrencias', label:'Recorrências'},
+                     {id:'repasses', label:'Repasses'},
                      {id:'conciliacao', label:'Conciliação'} ] },
   cadastros:     { label:'Cadastros', subtabs:[
                      {id:'contas', label:'Contas'},
@@ -14321,7 +14322,10 @@ const FIN_SECTIONS = {
                      {id:'categorias', label:'Categorias'},
                      {id:'contatos', label:'Contatos'},
                      {id:'centroscusto', label:'Centros de custo'} ] },
-  relatorios:    { label:'Relatórios', subtabs:[{id:'relatorios', label:'Relatórios'}] },
+  relatorios:    { label:'Relatórios', subtabs:[
+                     {id:'relatorios', label:'Relatórios'},
+                     {id:'diagnostico', label:'Diagnóstico'} ] },
+  importacao:    { label:'Importação', subtabs:[{id:'importacao', label:'Importação Asaas'}] },
 };
 function _finSectionOf(tab){
   for(const [key,s] of Object.entries(FIN_SECTIONS)){
@@ -14526,6 +14530,197 @@ function renderFinTab(tab){
   else if(tab==='relatorios') renderFinRelatorios(el);
   else if(tab==='cartoes') renderFinCartoes(el);
   else if(tab==='asaas') renderFinAsaas(el);
+  else if(tab==='repasses') renderFinRepasses(el);
+  else if(tab==='diagnostico') renderFinDiagnostico(el);
+  else if(tab==='importacao') renderFinImportacao(el);
+}
+
+// ══════════════════════════════════════════════════════════════
+// PR-UI: Repasses · Diagnóstico · Importação Asaas (consomem os
+// endpoints /api/repassar, /api/diagnostico-financeiro, /api/importar-asaas
+// e a tabela fin_operacao). Aditivo — segue o padrão das demais renderFin*.
+// ══════════════════════════════════════════════════════════════
+
+async function renderFinRepasses(el){
+  el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--text-3);">Carregando repasses…</div>`;
+  let pend = [], efet = [];
+  try{
+    const sb = getSupabase();
+    const r1 = await sb.from('fin_operacao').select('*').in('repasse_status',['pendente','preparado']).order('criada_em',{ascending:false}).limit(200);
+    if(r1.error) throw r1.error;
+    pend = r1.data||[];
+    const r2 = await sb.from('fin_operacao').select('*').eq('repasse_status','efetuado').order('repasse_efetuado_em',{ascending:false}).limit(20);
+    efet = (r2.data)||[];
+  }catch(e){ el.innerHTML = `<div class="panel" style="padding:20px;color:var(--danger);">Erro ao carregar repasses: ${escHtml(e.message||String(e))}</div>`; return; }
+
+  // Nomes de devedor/credor
+  const ids = [...new Set([...pend,...efet].flatMap(o=>[o.devedor_id,o.credor_id]).filter(Boolean))];
+  const devMap = {}, credMap = {};
+  try{
+    const sb = getSupabase();
+    const dIds = [...new Set([...pend,...efet].map(o=>o.devedor_id).filter(Boolean))];
+    const cIds = [...new Set([...pend,...efet].map(o=>o.credor_id).filter(Boolean))];
+    if(dIds.length){ const {data}=await sb.from('devedores').select('id,nome').in('id',dIds); (data||[]).forEach(d=>devMap[d.id]=d.nome); }
+    if(cIds.length){ const {data}=await sb.from('clientes').select('id,nome').in('id',cIds); (data||[]).forEach(c=>credMap[c.id]=c.nome); }
+  }catch(_){}
+  window._repasseOpsById = {}; [...pend,...efet].forEach(o=>{ window._repasseOpsById[o.id]={op:o, dev:devMap[o.devedor_id]||'—', cred:credMap[o.credor_id]||'—'}; });
+
+  const totalPend = pend.filter(o=>o.repasse_status==='pendente').reduce((s,o)=>s+(+o.valor_capital||0),0);
+  const parcOf = o => (o.parcela&&o.total_parcelas)?`${o.parcela}/${o.total_parcelas}`:'—';
+
+  const rowsPend = pend.map(o=>{
+    const badge = o.repasse_status==='preparado'
+      ? '<span class="badge" style="background:#fff3cd;color:#7a5b00;">aguardando Asaas</span>'
+      : '<span class="badge" style="background:#e7f1ff;color:#0a55c4;">pendente</span>';
+    const acao = o.repasse_status==='pendente'
+      ? `<button class="btn btn-sm btn-primary" onclick="confirmarRepasse('${o.id}')">Confirmar repasse</button>`
+      : `<button class="btn btn-sm" onclick="renderFinTab('repasses')">Atualizar</button>`;
+    return `<tr><td>${escHtml(devMap[o.devedor_id]||'—')}</td><td>${escHtml(credMap[o.credor_id]||'—')}</td>
+      <td>${parcOf(o)}</td><td style="text-align:right;font-weight:600;">${fmtR(o.valor_capital)}</td>
+      <td>${badge}</td><td style="text-align:right;">${acao}</td></tr>`;
+  }).join('');
+
+  const rowsEfet = efet.map(o=>{
+    const ext = o.repasse_comprovante_url?` · <a href="${escHtml(o.repasse_comprovante_url)}" target="_blank">Asaas</a>`:'';
+    return `<tr><td>${escHtml(devMap[o.devedor_id]||'—')}</td><td>${escHtml(credMap[o.credor_id]||'—')}</td>
+      <td>${parcOf(o)}</td><td style="text-align:right;">${fmtR(o.valor_capital)}</td>
+      <td style="text-align:right;"><button class="btn btn-sm" onclick="cobrasqComprovantePDF('${o.id}')">Comprovante PDF</button>${ext}</td></tr>`;
+  }).join('');
+
+  el.innerHTML = `<div class="panel" style="padding:16px;margin-bottom:14px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+      <h3 style="margin:0;">Repasses ao credor</h3>
+      <div style="font-size:13px;color:var(--text-3);">Pendente: <b>${fmtR(totalPend)}</b></div>
+    </div>
+    <p style="font-size:12.5px;color:var(--text-3);margin:0 0 12px;">Semiautomático: você confirma e o PIX é disparado no Asaas; o comprovante vai ao credor.</p>
+    ${pend.length? `<table class="data-table" style="width:100%;"><thead><tr><th>Devedor</th><th>Credor</th><th>Parc.</th><th style="text-align:right;">Capital</th><th>Status</th><th></th></tr></thead><tbody>${rowsPend}</tbody></table>`
+      : `<div style="text-align:center;padding:20px;color:var(--text-3);">Nenhum repasse pendente. 🎉</div>`}
+  </div>
+  ${efet.length? `<div class="panel" style="padding:16px;">
+    <h3 style="margin:0 0 10px;">Repasses recentes (efetuados)</h3>
+    <table class="data-table" style="width:100%;"><thead><tr><th>Devedor</th><th>Credor</th><th>Parc.</th><th style="text-align:right;">Capital</th><th></th></tr></thead><tbody>${rowsEfet}</tbody></table>
+  </div>`:''}`;
+}
+
+async function confirmarRepasse(operacaoId){
+  const info = (window._repasseOpsById||{})[operacaoId]||{};
+  promptModal('Confirmar repasse', `Chave PIX do credor ${info.cred||''} (em branco = usa a chave salva ou o CPF/CNPJ):`, async (pixKey)=>{
+    try{
+      showToast('Disparando repasse…','info');
+      const res = await fetch('/api/repassar', { method:'POST', headers:{ ...(await authHeaders()), 'Content-Type':'application/json' }, body: JSON.stringify({ operacao_id: operacaoId, pix_key:(pixKey||'').trim()||undefined }) });
+      const j = await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(j.error||('HTTP '+res.status));
+      showToast(`Repasse ${j.repasse_status==='efetuado'?'efetuado ✅':'preparado (aguardando Asaas)'}`,'success');
+      renderFinTab('repasses');
+    }catch(e){ showToast('Erro no repasse: '+(e.message||e),'danger'); }
+  }, { hint:'CPF/CNPJ, e-mail, telefone ou chave aleatória' });
+}
+
+async function cobrasqComprovantePDF(operacaoId){
+  if(typeof html2pdf==='undefined'){ showToast('Gerador de PDF não carregado','danger'); return; }
+  const info = (window._repasseOpsById||{})[operacaoId]; if(!info){ showToast('Operação não encontrada','warning'); return; }
+  const o = info.op;
+  const dataStr = String(o.repasse_efetuado_em||o.recebido_em||'').slice(0,10).split('-').reverse().join('/');
+  const html = `<div style="font-family:Inter,Arial,sans-serif;color:#0a1733;padding:34px;width:210mm;box-sizing:border-box;">
+    <div style="display:flex;align-items:center;gap:12px;border-bottom:3px solid #FABE44;padding-bottom:14px;">
+      <div style="width:44px;height:44px;background:#002060;color:#fff;border-radius:9px;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:23px;">C</div>
+      <div><div style="font-weight:800;letter-spacing:1px;color:#002060;font-size:21px;">COBRASQ</div>
+      <div style="font-size:11px;color:#5a6a85;">Comprovante de repasse ao credor</div></div>
+    </div>
+    <div style="margin-top:26px;font-size:14px;line-height:1.7;">
+      <p>Confirmamos o <b>repasse de capital</b> ao credor <b>${escHtml(info.cred||'—')}</b>, referente ao pagamento do devedor <b>${escHtml(info.dev||'—')}</b>${o.parcela?` (parcela ${o.parcela}/${o.total_parcelas})`:''}.</p>
+      <table style="width:100%;border-collapse:collapse;margin-top:18px;font-size:13.5px;">
+        <tr><td style="padding:9px 0;color:#5a6a85;border-bottom:1px solid #eef1f6;">Valor repassado</td><td style="text-align:right;font-weight:700;border-bottom:1px solid #eef1f6;">${fmtR(o.valor_capital)}</td></tr>
+        <tr><td style="padding:9px 0;color:#5a6a85;border-bottom:1px solid #eef1f6;">Data</td><td style="text-align:right;border-bottom:1px solid #eef1f6;">${dataStr||'—'}</td></tr>
+        <tr><td style="padding:9px 0;color:#5a6a85;border-bottom:1px solid #eef1f6;">Transferência (Asaas)</td><td style="text-align:right;font-family:monospace;font-size:11px;border-bottom:1px solid #eef1f6;">${escHtml(o.repasse_asaas_transfer_id||'—')}</td></tr>
+        <tr><td style="padding:9px 0;color:#5a6a85;">Operação</td><td style="text-align:right;font-family:monospace;font-size:10px;">${escHtml(o.id)}</td></tr>
+      </table>
+    </div>
+    <div style="margin-top:42px;font-size:11px;color:#8a97ad;border-top:1px solid #e3e8f0;padding-top:12px;">COBRASQ — documento gerado automaticamente em ${new Date().toLocaleDateString('pt-BR')}.</div>
+  </div>`;
+  const container = document.createElement('div');
+  container.innerHTML = html; container.style.cssText='position:absolute;left:-9999px;top:0;';
+  document.body.appendChild(container);
+  try{
+    await html2pdf().set({ margin:0, filename:`comprovante-repasse-${String(o.id).slice(0,8)}.pdf`, image:{type:'jpeg',quality:0.95}, html2canvas:{scale:2,useCORS:true}, jsPDF:{unit:'mm',format:'a4',orientation:'portrait'} }).from(container).save();
+  }catch(e){ showToast('Erro ao gerar PDF: '+(e.message||e),'danger'); }
+  finally{ document.body.removeChild(container); }
+}
+
+async function renderFinDiagnostico(el){
+  el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--text-3);">Carregando diagnóstico…</div>`;
+  let d;
+  try{
+    const res = await fetch('/api/diagnostico-financeiro', { headers: await authHeaders() });
+    d = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(d.error||('HTTP '+res.status));
+  }catch(e){ el.innerHTML = `<div class="panel" style="padding:20px;color:var(--danger);">Erro: ${escHtml(e.message||String(e))}</div>`; return; }
+  const b = d.buracos||{}, m = d.mes_corrente||{};
+  const card = (t,v,sub,cor)=>`<div class="panel" style="padding:14px;flex:1;min-width:180px;">
+    <div style="font-size:12px;color:var(--text-3);">${t}</div>
+    <div style="font-size:20px;font-weight:700;color:${cor||'var(--navy)'};">${v}</div>
+    ${sub?`<div style="font-size:11.5px;color:var(--text-3);">${sub}</div>`:''}</div>`;
+  el.innerHTML = `
+    <h3 style="margin:0 0 10px;">Mês corrente</h3>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px;">
+      ${card('Recebido', fmtR(m.recebido||0), `${m.operacoes||0} operações`)}
+      ${card('Honorário (lucro)', fmtR(m.honorario||0), null, '#0a7d3b')}
+      ${card('Capital (repasse)', fmtR(m.capital_a_repassar_ou_repassado||0))}
+    </div>
+    <h3 style="margin:0 0 10px;">Buracos a resolver</h3>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;">
+      ${card('Repasses pendentes', (b.operacoes_sem_repasse&&b.operacoes_sem_repasse.qtd)||0, fmtR((b.operacoes_sem_repasse&&b.operacoes_sem_repasse.total_capital)||0), '#b8860b')}
+      ${card('Operações sem NF', (b.operacoes_sem_nf&&b.operacoes_sem_nf.qtd)||0, null, '#b8860b')}
+      ${card('Receitas vencidas', (b.receitas_pendentes_vencidas&&b.receitas_pendentes_vencidas.qtd)||0, fmtR((b.receitas_pendentes_vencidas&&b.receitas_pendentes_vencidas.total)||0), '#c0392b')}
+      ${card('Despesas vencidas', (b.despesas_vencidas&&b.despesas_vencidas.qtd)||0, fmtR((b.despesas_vencidas&&b.despesas_vencidas.total)||0), '#c0392b')}
+      ${card('Pagos não conciliados', (b.lancamentos_pagos_nao_conciliados&&b.lancamentos_pagos_nao_conciliados.qtd)||0, null, '#b8860b')}
+    </div>`;
+}
+
+async function renderFinImportacao(el){
+  el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--text-3);">Buscando clientes do Asaas sem cadastro…</div>`;
+  const offset = window._impOffset||0;
+  let d;
+  try{
+    const res = await fetch('/api/importar-asaas?limit=100&offset='+offset, { headers: await authHeaders() });
+    d = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(d.error||('HTTP '+res.status));
+  }catch(e){ el.innerHTML = `<div class="panel" style="padding:20px;color:var(--danger);">Erro: ${escHtml(e.message||String(e))}</div>`; return; }
+  window._impList = d.novos||[];
+  const rows = window._impList.map((c,i)=>`<tr>
+    <td><input id="imp-nome-${i}" placeholder="Nome do devedor" style="width:100%;padding:5px;" value="${escHtml(c.nome||'')}"></td>
+    <td>${escHtml(c.cpf||'—')}</td><td>${escHtml(c.telefone||'—')}</td>
+    <td style="font-size:11.5px;">${escHtml(c.endereco||'—')}</td>
+    <td style="text-align:right;"><button class="btn btn-sm btn-primary" onclick="importarDevedor(${i})">Salvar</button></td>
+  </tr>`).join('');
+  el.innerHTML = `<div class="panel" style="padding:16px;">
+    <h3 style="margin:0 0 6px;">Importação Asaas → CRM</h3>
+    <p style="font-size:12.5px;color:var(--text-3);margin:0 0 12px;">Clientes do Asaas sem cadastro local (página: ${d.pagina||0} clientes; sem cadastro: ${d.sem_cadastro||0}). Complete o nome e salve — o vínculo Asaas é gravado automaticamente.</p>
+    ${window._impList.length? `<table class="data-table" style="width:100%;"><thead><tr><th>Nome</th><th>CPF/CNPJ</th><th>Telefone</th><th>Endereço</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+      : `<div style="text-align:center;padding:20px;color:var(--text-3);">Nenhum cliente Asaas sem cadastro nesta página.</div>`}
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end;">
+      <button class="btn btn-sm" ${offset>0?'':'disabled'} onclick="window._impOffset=Math.max(0,(window._impOffset||0)-100);renderFinTab('importacao')">◀ Anterior</button>
+      <button class="btn btn-sm" ${d.hasMore?'':'disabled'} onclick="window._impOffset=(window._impOffset||0)+100;renderFinTab('importacao')">Próxima ▶</button>
+    </div>
+  </div>`;
+}
+
+async function importarDevedor(i){
+  const c = (window._impList||[])[i]; if(!c){ showToast('Item não encontrado','warning'); return; }
+  const nome = (document.getElementById('imp-nome-'+i)?.value||'').trim();
+  if(!nome){ showToast('Informe o nome do devedor','warning'); return; }
+  try{
+    const dev = {
+      id: (window.crypto&&crypto.randomUUID)?crypto.randomUUID():('imp-'+Date.now()),
+      nome, doc:c.cpf||'', tel:c.telefone||'', email:c.email||'', endereco:c.endereco||'',
+      asaasCustomerId:c.asaas_customer_id||'', status:'Cobrar', fase:'extrajudicial'
+    };
+    const r = await upsertDevedorRelational(dev);
+    if(!r.ok) throw new Error(r.error||'Falha ao salvar');
+    if(Array.isArray(DB.devedores)){ DB.devedores.push(dev); save(); }
+    showToast('Devedor importado: '+nome,'success');
+    renderFinTab('importacao');
+  }catch(e){ showToast('Erro ao importar: '+(e.message||e),'danger'); }
 }
 
 async function renderFinVisao(el){
