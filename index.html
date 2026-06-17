@@ -3689,7 +3689,7 @@ const _DEV_COL_FIELDS = new Set([
   'valorOrig','valorAtual','entrada','responsavel','arquivado','createdAt','updatedAt',
   'passoAtual','assignedTo','aguardandoResposta','encerramento','acordoFinal',
   'encaminhamentoJudicial','etapaAtualizadaEm','divida','historico','acordos',
-  'tipoCobranca'
+  'tipoCobranca','asaasCustomerId'
 ]);
 
 function _devNumOrNull(v){
@@ -3712,6 +3712,7 @@ function devedorToRow(d){
     nome: d.nome || '',
     doc: d.doc || null,
     doc_hash: d.docHash || null,
+    asaas_customer_id: d.asaasCustomerId || null,
     email: d.email || null,
     telefone: d.tel || null,
     status: d.status || null,
@@ -3753,6 +3754,7 @@ function rowToDevedor(r){
     nome: r.nome || '',
     doc: r.doc || '',
     docHash: r.doc_hash || '',
+    asaasCustomerId: r.asaas_customer_id || '',
     email: r.email || '',
     tel: r.telefone || '',
     status: r.status || 'Cobrar',
@@ -19229,6 +19231,16 @@ const AsaasAPI = {
   getPixQrCode(id){ return this.req('GET',`/payments/${id}/pixQrCode`); },
   getIdentificationField(id){ return this.req('GET',`/payments/${id}/identificationField`); },
   resendPaymentLink(id){ return this.req('POST',`/payments/${id}/sendPaymentLink`,{}); },
+  // Parcelamento nativo: um único POST /payments com installmentCount + (installmentValue
+  // OU totalValue) cria a série inteira e retorna o pagamento da 1ª parcela com o id do
+  // installment. Substitui o laço de createCharge avulso. Ver getInstallment/listInstallmentPayments.
+  createInstallment(d){ return this.req('POST','/payments',d); },
+  getInstallment(id){ return this.req('GET',`/installments/${id}`); },
+  listInstallmentPayments(installmentId){ return this.req('GET',`/payments?installment=${installmentId}&limit=100`); },
+  // Transferências (repasse PIX de saída ao credor). O disparo de produção passa pelo
+  // endpoint server-side /api/repassar (confirmação manual); estes ficam p/ uso direto.
+  createTransfer(d){ return this.req('POST','/transfers',d); },
+  getTransfer(id){ return this.req('GET',`/transfers/${id}`); },
 };
 
 // ── ZapSign ───────────────────────────────────────────────────
@@ -19676,16 +19688,19 @@ async function asaasEnsureCustomer(dev){
   const result = await AsaasAPI.findByCpfCnpj(dev.doc.replace(/\D/g,''));
   if(result.data && result.data.length > 0){
     dev.asaasCustomerId = result.data[0].id;
-    save();
-    return dev.asaasCustomerId;
+  } else {
+    const created = await AsaasAPI.createCustomer({
+      name: dev.nome, cpfCnpj: dev.doc.replace(/\D/g,''),
+      email: dev.email||undefined, mobilePhone: dev.tel?dev.tel.replace(/\D/g,''):undefined,
+      address: dev.endereco||undefined, notificationDisabled: true,
+    });
+    dev.asaasCustomerId = created.id;
   }
-  const created = await AsaasAPI.createCustomer({
-    name: dev.nome, cpfCnpj: dev.doc.replace(/\D/g,''),
-    email: dev.email||undefined, mobilePhone: dev.tel?dev.tel.replace(/\D/g,''):undefined,
-    address: dev.endereco||undefined, notificationDisabled: true,
-  });
-  dev.asaasCustomerId = created.id;
   save();
+  // Persiste o vínculo no Supabase (fonte canônica para webhooks/edge functions —
+  // o asaas-webhook casa pagamentos por devedores.asaas_customer_id). Best-effort:
+  // se o devedor ainda não está no relacional, não bloqueia a emissão.
+  if(dev.id){ try{ await upsertDevedorRelational(dev); }catch(e){ console.warn('[asaas] persistir customer id:', e?.message); } }
   return dev.asaasCustomerId;
 }
 
