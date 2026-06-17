@@ -205,6 +205,32 @@ Deno.serve(async (req) => {
     }
   }
 
+  // PR2: emissão automática dos boletos pós-assinatura. Delega ao endpoint Vercel
+  // /api/emitir-acordo (lá mora a chave Asaas). Best-effort: nunca derruba o webhook
+  // — o status do acordo já foi salvo. A trava AUTO_EMIT_ACORDO=on (no servidor
+  // Vercel) evita duplicar com o n8n enquanto o fluxo legado não é desligado.
+  let emissao: unknown = null;
+  if (novoStatus === 'assinado') {
+    const base = (Deno.env.get('APP_BASE_URL') || '').replace(/\/+$/, '');
+    const emitSecret = Deno.env.get('EMIT_ACORDO_SECRET');
+    if (base && emitSecret) {
+      try {
+        const r = await fetch(base + '/api/emitir-acordo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-emit-secret': emitSecret },
+          body: JSON.stringify({ acordo_id: acordo.id }),
+          signal: AbortSignal.timeout(25000),
+        });
+        emissao = await r.json().catch(() => ({ status: r.status }));
+      } catch (e) {
+        emissao = { error: String((e as Error)?.message || e) };
+        console.warn('[zapsign-webhook] emitir-acordo falhou: ' + JSON.stringify(emissao));
+      }
+    } else {
+      emissao = { skipped: 'APP_BASE_URL/EMIT_ACORDO_SECRET ausentes' };
+    }
+  }
+
   await sb.from('devedor_eventos').insert({
     devedor_id: acordo.devedor_id,
     tipo: 'zapsign_' + novoStatus,
@@ -213,11 +239,12 @@ Deno.serve(async (req) => {
       raw_event: body.event_type || null,
       doc_id: docId,
       signed_url: signedUrl,
-      arquivo_pasta: arquivoPasta
+      arquivo_pasta: arquivoPasta,
+      emissao
     }
   });
 
-  return new Response(JSON.stringify({ ok: true, status: novoStatus, acordo_id: acordo.id, arquivo_pasta: arquivoPasta }), {
+  return new Response(JSON.stringify({ ok: true, status: novoStatus, acordo_id: acordo.id, arquivo_pasta: arquivoPasta, emissao }), {
     status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
   });
 });
