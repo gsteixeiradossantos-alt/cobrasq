@@ -143,5 +143,26 @@ Deno.serve(async (req) => {
     autor_nome: 'Asaas (webhook)'
   });
 
-  return json({ ok: true, event, payment_id: paymentId, devedor_id: devedorId, cobranca_id: cobrancaId });
+  // PR3: cria a "operação única" (recebimento + split capital/honorário) e envia o
+  // recibo ao devedor. Delega ao endpoint Vercel (lá moram a chave Asaas e a lógica
+  // financeira). Best-effort: o evento de pagamento já foi registrado acima.
+  let operacao: unknown = null;
+  const base = (Deno.env.get('APP_BASE_URL') || '').replace(/\/+$/, '');
+  const emitSecret = Deno.env.get('EMIT_ACORDO_SECRET');
+  if (base && emitSecret) {
+    try {
+      const r = await fetch(base + '/api/processar-recebimento', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-emit-secret': emitSecret },
+        body: JSON.stringify({ payment_id: paymentId, payment }),
+        signal: AbortSignal.timeout(25000),
+      });
+      operacao = await r.json().catch(() => ({ status: r.status }));
+    } catch (e) {
+      operacao = { error: String((e as Error)?.message || e) };
+      console.warn('[asaas-webhook] processar-recebimento falhou: ' + JSON.stringify(operacao));
+    }
+  }
+
+  return json({ ok: true, event, payment_id: paymentId, devedor_id: devedorId, cobranca_id: cobrancaId, operacao });
 });
