@@ -47,6 +47,35 @@ module.exports = async function handler(req, res) {
     if (op.repasse_status === 'efetuado') return res.status(200).json({ ok: true, skipped: 'repasse já efetuado', operacao_id: op.id });
     if (op.repasse_status === 'nao_aplica') return res.status(400).json({ error: 'operação não tem repasse' });
 
+    // P1 (auditoria 2026-06) — anti-duplo-repasse: se já existe um /transfers
+    // disparado (status 'preparado' aguardando o assíncrono do Asaas), NÃO cria
+    // outro. Reconcilia o status do transfer existente e retorna; só envia um novo
+    // PIX quando ainda não há transfer vinculado à operação.
+    if (op.repasse_asaas_transfer_id) {
+      const tr = await asaasReq('GET', `/transfers/${encodeURIComponent(op.repasse_asaas_transfer_id)}`).catch(() => null);
+      const stExist = String((tr && tr.status) || op.metadata?.repasse_asaas_status || '').toUpperCase();
+      const doneExist = stExist === 'DONE' || stExist === 'CONFIRMED';
+      if (doneExist && op.repasse_status !== 'efetuado') {
+        await sbFetch(`fin_operacao?id=eq.${op.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            repasse_status: 'efetuado',
+            repasse_efetuado_em: new Date().toISOString(),
+            repasse_comprovante_url: (tr && (tr.transactionReceiptUrl || tr.receiptUrl)) || op.repasse_comprovante_url || null,
+            metadata: { ...(op.metadata || {}), repasse_asaas_status: stExist },
+          }),
+        }).catch(() => {});
+      }
+      return res.status(200).json({
+        ok: true,
+        skipped: 'repasse já disparado (sem reenvio)',
+        operacao_id: op.id,
+        transfer_id: op.repasse_asaas_transfer_id,
+        asaas_status: stExist || null,
+        repasse_status: doneExist ? 'efetuado' : op.repasse_status,
+      });
+    }
+
     // Credor + chave PIX.
     let credor = null;
     if (op.credor_id) {

@@ -70,9 +70,15 @@ module.exports = async function handler(req, res) {
     const acordoTotal = Number(acordo && acordo.valor_total) || 0;
     const capitalBase = Number((acordo && acordo.metadata && acordo.metadata.capital_credor)) ||
                         Number(devedor && devedor.valor_orig) || 0;
-    const capitalRatio = acordoTotal > 0 ? Math.min(capitalBase / acordoTotal, 1) : 0;
-    const valorCapital = round2(valorRecebido * capitalRatio);
-    const valorHonorario = round2(valorRecebido - valorCapital);
+    // P1 (auditoria 2026-06): só rateia quando há base segura (acordo.valor_total > 0).
+    // Sem acordo vinculado, o código antigo forçava capitalRatio=0 → 100% honorário e
+    // NUNCA repassava capital ao credor, silenciosamente. Agora, na falta de base,
+    // marca a operação para REVISÃO MANUAL em vez de classificar errado.
+    const podeRatear = acordoTotal > 0;
+    const capitalRatio = podeRatear ? Math.min(capitalBase / acordoTotal, 1) : null;
+    const valorCapital = podeRatear ? round2(valorRecebido * capitalRatio) : 0;
+    const valorHonorario = podeRatear ? round2(valorRecebido - valorCapital) : 0;
+    const repasseStatus = !podeRatear ? 'revisar' : (valorCapital > 0 ? 'pendente' : 'nao_aplica');
 
     const row = {
       acordo_id: acordo ? acordo.id : null,
@@ -87,7 +93,7 @@ module.exports = async function handler(req, res) {
       valor_honorario: valorHonorario,
       recebido_em: payment.paymentDate || payment.clientPaymentDate || new Date().toISOString().slice(0, 10),
       recebimento_status: 'recebido',
-      repasse_status: valorCapital > 0 ? 'pendente' : 'nao_aplica',
+      repasse_status: repasseStatus,
       nf_status: 'pendente',
       metadata: {
         capital_base: capitalBase,
