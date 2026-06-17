@@ -73,6 +73,28 @@ function diasAte(dataStr) {
   return Math.floor((d.getTime() - Date.now()) / 86400000);
 }
 
+const { sendEmail, emailDisponivel } = require('./_email.js');
+const { sendSms, smsDisponivel } = require('./_sms.js');
+
+// Canal disponível? Permite à régua PULAR o passo sem reivindicar envio quando o canal
+// não tem provedor configurado (e-mail sem RESEND_API_KEY, SMS sem gateway).
+function canalDisponivel(canal) {
+  if (canal === 'email') return emailDisponivel();
+  if (canal === 'sms') return smsDisponivel();
+  if (canal === 'ligacao') return false; // sem ligação automática (decisão do usuário)
+  return true; // whatsapp (default)
+}
+
+// Dispatch por canal. mensagem é o corpo renderizado; e-mail usa assunto.
+async function enviarPorCanal(canal, { tel, email, mensagem, assunto }) {
+  if (canal === 'email') {
+    if (!email) throw new Error('sem e-mail');
+    return await sendEmail({ to: email, subject: assunto || 'Cobrasq', text: mensagem });
+  }
+  if (canal === 'sms') return await sendSms(tel, mensagem);
+  return await zapiSendText(tel, mensagem); // whatsapp
+}
+
 async function zapiSendText(phone, message) {
   const token    = process.env.ZAPI_TOKEN || '';
   const instance = process.env.ZAPI_INSTANCE_ID || '';
@@ -366,11 +388,13 @@ module.exports = async function handler(req, res) {
         const stepKey = step.id || `${step.dias}_${step.canal}`;
         if (dias < (step.dias || 0)) continue;
         if (jaEnviados.has(jaEnviadoKey('cobranca', devId, '', stepKey))) continue;
-        if (step.canal !== 'whatsapp') {
-          resultado.itens.push({ dev: dev.nome, tipo: 'cobranca', step: stepKey, skipped: `canal ${step.canal} não integrado` });
+        const canal = step.canal || 'whatsapp';
+        if (!canalDisponivel(canal)) {
+          resultado.itens.push({ dev: dev.nome, tipo: 'cobranca', step: stepKey, skipped: `canal ${canal} indisponível` });
           continue;
         }
-        if (!tel) { resultado.itens.push({ dev: dev.nome, tipo: 'cobranca', skipped: 'sem telefone' }); continue; }
+        const dest = canal === 'email' ? (dev.email || '') : tel;
+        if (!dest) { resultado.itens.push({ dev: dev.nome, tipo: 'cobranca', step: stepKey, skipped: `sem ${canal === 'email' ? 'e-mail' : 'telefone'}` }); continue; }
 
         const msg = renderTemplate(step.template, {
           nome: dev.nome || '', valor: fmtR(valor), doc: dev.doc || '',
@@ -379,14 +403,14 @@ module.exports = async function handler(req, res) {
         // F-10: reivindica a vaga ANTES de enviar. Se outro run já reivindicou,
         // não envia (evita WhatsApp duplicado em runs sobrepostos).
         if (!dry) {
-          const claimed = await claimEnvio({ tipo: 'cobranca', devedorId: devId, parcelaId: '', stepKey, canal: step.canal });
+          const claimed = await claimEnvio({ tipo: 'cobranca', devedorId: devId, parcelaId: '', stepKey, canal });
           if (!claimed) {
             resultado.itens.push({ dev: dev.nome, tipo: 'cobranca', step: stepKey, skipped: 'já reivindicado (concorrência/duplicado)' });
             continue;
           }
         }
         try {
-          if (!dry) await zapiSendText(tel, msg);
+          if (!dry) await enviarPorCanal(canal, { tel, email: dev.email, mensagem: msg, assunto: 'Cobrasq — Cobrança' });
           if (!dry) await confirmarEnvio({ tipo: 'cobranca', devedorId: devId, parcelaId: '', stepKey });
           jaEnviados.add(jaEnviadoKey('cobranca', devId, '', stepKey)); // evita reenvio na mesma run
           resultado.enviados_cobranca++;
@@ -403,8 +427,7 @@ module.exports = async function handler(req, res) {
     for (const dev of ativos) {
       const acordos = (dev.acordos || []).filter(acordoAtivo);
       if (acordos.length === 0) continue;
-      const tel = devTelefone(dev);
-      if (!tel) continue;
+      const tel = devTelefone(dev); // pode ser vazio: passos de e-mail seguem por dev.email
       const devId = String(dev.id || '');
 
       for (const ac of acordos) {
@@ -420,10 +443,13 @@ module.exports = async function handler(req, res) {
             else if (step.referencia === 'no_dia') disparaHoje = (diasParaVencer === 0);
             else if (step.referencia === 'depois') disparaHoje = (diasParaVencer === -(step.dias || 0));
             if (!disparaHoje) continue;
-            if (step.canal !== 'whatsapp') {
-              resultado.itens.push({ dev: dev.nome, tipo: 'acordo', parcela: p.numero, step: stepKey, skipped: `canal ${step.canal} não integrado` });
+            const canal = step.canal || 'whatsapp';
+            if (!canalDisponivel(canal)) {
+              resultado.itens.push({ dev: dev.nome, tipo: 'acordo', parcela: p.numero, step: stepKey, skipped: `canal ${canal} indisponível` });
               continue;
             }
+            const dest = canal === 'email' ? (dev.email || '') : tel;
+            if (!dest) { resultado.itens.push({ dev: dev.nome, tipo: 'acordo', parcela: p.numero, step: stepKey, skipped: `sem ${canal === 'email' ? 'e-mail' : 'telefone'}` }); continue; }
 
             const msg = renderTemplate(step.template, {
               nome: dev.nome || '', valor: fmtR(parseValorBR(dev.valorAtual) || parseValorBR(dev.valorOrig) || 0),
@@ -438,14 +464,14 @@ module.exports = async function handler(req, res) {
             });
             // F-10: claim idempotente antes do envio (anti double-send).
             if (!dry) {
-              const claimed = await claimEnvio({ tipo: 'acordo', devedorId: devId, parcelaId, stepKey, canal: step.canal });
+              const claimed = await claimEnvio({ tipo: 'acordo', devedorId: devId, parcelaId, stepKey, canal });
               if (!claimed) {
                 resultado.itens.push({ dev: dev.nome, tipo: 'acordo', parcela: p.numero, step: stepKey, skipped: 'já reivindicado (concorrência/duplicado)' });
                 continue;
               }
             }
             try {
-              if (!dry) await zapiSendText(tel, msg);
+              if (!dry) await enviarPorCanal(canal, { tel, email: dev.email, mensagem: msg, assunto: 'Cobrasq — Acordo' });
               if (!dry) await confirmarEnvio({ tipo: 'acordo', devedorId: devId, parcelaId, stepKey });
               jaEnviados.add(jaEnviadoKey('acordo', devId, parcelaId, stepKey));
               resultado.enviados_acordo++;
