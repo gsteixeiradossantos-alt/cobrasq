@@ -33,6 +33,10 @@ module.exports = async function handler(req, res) {
   if (!pathParam) {
     return res.status(400).json({ error: 'query param ?path= ausente' });
   }
+  // P3 (auditoria 2026-06) — só caracteres de path esperados; bloqueia traversal.
+  if (pathParam.includes('..') || !/^[A-Za-z0-9/_.-]+$/.test(pathParam)) {
+    return res.status(400).json({ error: 'path inválido' });
+  }
 
   const forwardQuery = { ...req.query };
   delete forwardQuery.path;

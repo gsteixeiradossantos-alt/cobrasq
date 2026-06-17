@@ -142,7 +142,10 @@ module.exports = async function handler(req, res) {
         await sb(`mfa_codes?dev_id=eq.${encodeURIComponent(devId)}`, { method: 'DELETE' });
         return res.status(429).json({ error: 'Muitas tentativas. Solicite um novo código.' });
       }
-      const ok = hashCode(String(code)) === row.code_hash;
+      // Comparação em tempo constante (evita timing attack na verificação do hash).
+      const _h = Buffer.from(hashCode(String(code)));
+      const _stored = Buffer.from(String(row.code_hash || ''));
+      const ok = _h.length === _stored.length && _h.length > 0 && crypto.timingSafeEqual(_h, _stored);
       if (!ok) {
         await sb(`mfa_codes?dev_id=eq.${encodeURIComponent(devId)}`, {
           method: 'PATCH', body: JSON.stringify({ attempts: (row.attempts || 0) + 1 }),
