@@ -100,6 +100,24 @@ module.exports = async function handler(req, res) {
     const inserted = await sbFetch('fin_operacao', { method: 'POST', body: JSON.stringify(row) });
     const operacao = Array.isArray(inserted) ? inserted[0] : inserted;
 
+    // PR5: emissão automática da NFS-e (gated por AUTO_EMIT_NF=on). Best-effort —
+    // depende de configuração fiscal municipal na conta Asaas. O disparo manual fica
+    // sempre disponível em /api/emitir-nf.
+    let nf = null;
+    if (operacao && operacao.id && String(process.env.AUTO_EMIT_NF || '').toLowerCase() === 'on') {
+      try {
+        const base = (process.env.APP_BASE_URL || '').replace(/\/+$/, '');
+        if (base) {
+          const r = await fetch(base + '/api/emitir-nf', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-emit-secret': process.env.EMIT_ACORDO_SECRET || '' },
+            body: JSON.stringify({ operacao_id: operacao.id }),
+          });
+          nf = await r.json().catch(() => ({ status: r.status }));
+        }
+      } catch (e) { nf = { error: e.message }; }
+    }
+
     // Recibo automático ao devedor (R4) — best-effort.
     let zap = null;
     const tel = String((devedor && devedor.telefone) || '').replace(/\D/g, '');
@@ -119,6 +137,7 @@ module.exports = async function handler(req, res) {
       valor_honorario: valorHonorario,
       repasse_status: row.repasse_status,
       recibo_enviado: !!(zap && zap.messageId),
+      nf,
     });
   } catch (e) {
     console.error('[processar-recebimento]', e.message);
