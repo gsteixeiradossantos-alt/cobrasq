@@ -67,6 +67,27 @@ Deno.serve(async (req) => {
   const payment = body?.payment || {};
   const paymentId = payment?.id || null;
 
+  // PR4: eventos de TRANSFERÊNCIA (repasse PIX de saída). Conclui a operação e manda
+  // o comprovante ao credor. Delega ao Vercel (lá moram Z-API/lógica de repasse).
+  if (event.startsWith('TRANSFER')) {
+    const transfer = body?.transfer || {};
+    const base = (Deno.env.get('APP_BASE_URL') || '').replace(/\/+$/, '');
+    const emitSecret = Deno.env.get('EMIT_ACORDO_SECRET');
+    let result: unknown = { skipped: 'sem APP_BASE_URL/EMIT_ACORDO_SECRET' };
+    if (base && emitSecret) {
+      try {
+        const r = await fetch(base + '/api/repasse-concluido', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-emit-secret': emitSecret },
+          body: JSON.stringify({ event, transfer }),
+          signal: AbortSignal.timeout(20000),
+        });
+        result = await r.json().catch(() => ({ status: r.status }));
+      } catch (e) { result = { error: String((e as Error)?.message || e) }; }
+    }
+    return json({ ok: true, event, transfer_id: transfer.id || null, repasse: result });
+  }
+
   // Só agimos sobre dinheiro que entra. Demais eventos são confirmados (200) e ignorados.
   const ENTRADA = new Set(['PAYMENT_RECEIVED', 'PAYMENT_CONFIRMED']);
   if (!ENTRADA.has(event)) return json({ ok: true, ignored: event || 'sem evento' });
