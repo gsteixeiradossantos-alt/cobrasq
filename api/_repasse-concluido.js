@@ -43,8 +43,12 @@ module.exports = async function handler(req, res) {
     const falhou = /FAIL|CANCEL|ERROR/.test(st) || event === 'TRANSFER_FAILED' || event === 'TRANSFER_CANCELLED';
     const concluido = !falhou && (/DONE|CONFIRMED/.test(st) || event === 'TRANSFER_DONE' || event === 'TRANSFER_CONFIRMED');
 
-    if (op.repasse_status === 'efetuado' && concluido) {
-      return res.status(200).json({ ok: true, duplicate: true, operacao_id: op.id });
+    // P1 (auditoria 2026-06) — uma vez 'efetuado', ignora QUALQUER evento posterior
+    // (inclusive um TRANSFER_FAILED tardio/fora de ordem ou reentrega de webhook).
+    // Antes, um FAILED após o DONE reabria para 'pendente' e podia disparar repasse
+    // em dobro. Transfer concluído não volta atrás aqui.
+    if (op.repasse_status === 'efetuado') {
+      return res.status(200).json({ ok: true, duplicate: true, operacao_id: op.id, repasse_status: 'efetuado' });
     }
 
     const comprovanteUrl = transfer.transactionReceiptUrl || transfer.receiptUrl || op.repasse_comprovante_url || '';

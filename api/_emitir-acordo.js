@@ -49,6 +49,7 @@ module.exports = async function handler(req, res) {
   const acordoId = body.acordo_id || req.query.acordo_id;
   if (!acordoId) return res.status(400).json({ error: 'acordo_id ausente' });
 
+  let claimedAcordo = false, acordoRef = null, prevMeta = null;
   try {
     const acs = await sbFetch(`acordos?id=eq.${encodeURIComponent(acordoId)}&select=*&limit=1`);
     const acordo = acs[0];
@@ -58,6 +59,7 @@ module.exports = async function handler(req, res) {
     if (acordo.cobranca_id || meta.boletos_emitidos) {
       return res.status(200).json({ ok: true, skipped: 'já emitido', acordo_id: acordoId });
     }
+    acordoRef = acordo.id; prevMeta = meta;
     // Trava anti-duplicação com o n8n: automático só emite com AUTO_EMIT_ACORDO=on.
     if (!manual && String(process.env.AUTO_EMIT_ACORDO || '').toLowerCase() !== 'on') {
       return res.status(200).json({ ok: true, skipped: 'auto-emit desligado (AUTO_EMIT_ACORDO≠on)', acordo_id: acordoId });
@@ -78,6 +80,19 @@ module.exports = async function handler(req, res) {
     const total = Number(acordo.valor_total) || parcelas.reduce((s, p) => s + (Number(p.valor) || 0), 0);
     if (!(total > 0)) return res.status(400).json({ error: 'acordo sem valor_total' });
     const firstDue = acordo.data_primeiro_venc || (parcelas[0] && (parcelas[0].venc || parcelas[0].vencimento)) || addDaysISO(3);
+
+    // P1 (auditoria 2026-06) — claim atômico anti-duplicidade antes de criar o
+    // parcelamento no Asaas. O UPDATE com WHERE em metadata->>emitindo/boletos_emitidos
+    // é serializado pelo lock de linha do Postgres: só uma chamada concorrente passa;
+    // a outra sai sem emitir uma 2ª série de boletos. O catch reverte em caso de erro.
+    const claim = await sbFetch(
+      `acordos?id=eq.${acordo.id}&cobranca_id=is.null&metadata->>boletos_emitidos=is.null&metadata->>emitindo=is.null`,
+      { method: 'PATCH', body: JSON.stringify({ metadata: { ...meta, emitindo: new Date().toISOString() } }) }
+    ).catch(() => []);
+    if (!Array.isArray(claim) || !claim[0]) {
+      return res.status(200).json({ ok: true, skipped: 'emissão já em andamento/concluída', acordo_id: acordoId });
+    }
+    claimedAcordo = true;
 
     const charge = await asaasReq('POST', '/payments', {
       customer: customerId,
@@ -146,6 +161,10 @@ module.exports = async function handler(req, res) {
       customer_criado: created,
     });
   } catch (e) {
+    if (claimedAcordo && acordoRef) {
+      // libera o claim (remove metadata.emitindo) para permitir nova tentativa.
+      await sbFetch(`acordos?id=eq.${acordoRef}`, { method: 'PATCH', body: JSON.stringify({ metadata: prevMeta || {} }) }).catch(() => {});
+    }
     console.error('[emitir-acordo]', e.message);
     return res.status(500).json({ error: e.message });
   }

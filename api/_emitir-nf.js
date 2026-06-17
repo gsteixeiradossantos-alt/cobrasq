@@ -39,11 +39,13 @@ module.exports = async function handler(req, res) {
   const operacaoId = body.operacao_id;
   if (!operacaoId) return res.status(400).json({ error: 'operacao_id ausente' });
 
+  let claimed = false, opIdRevert = null, prevNf = null;
   try {
     const ops = await sbFetch(`fin_operacao?id=eq.${encodeURIComponent(operacaoId)}&select=*&limit=1`);
     const op = ops[0];
     if (!op) return res.status(404).json({ error: 'operação não encontrada' });
     if (op.nf_status === 'emitida') return res.status(200).json({ ok: true, skipped: 'NF já emitida', nf_url: op.nf_url });
+    opIdRevert = op.id; prevNf = op.nf_status;
 
     // Base: honorário se há repasse de capital; senão o valor cheio recebido.
     const temRepasse = Number(op.valor_capital) > 0;
@@ -53,6 +55,19 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, skipped: 'base zero', nf_status: 'nao_aplica' });
     }
     if (!op.asaas_payment_id) return res.status(400).json({ error: 'operação sem asaas_payment_id (não dá para vincular a NF ao pagador)' });
+
+    // P1 (auditoria 2026-06) — claim atômico anti-duplicidade: marca 'emitindo' só se o
+    // status não mudou desde a leitura (lock otimista). Em chamadas concorrentes, só uma
+    // ganha o claim; a outra sai sem emitir uma 2ª NF. Em erro, o catch reverte o status.
+    const claimFilter = (op.nf_status == null)
+      ? `id=eq.${op.id}&nf_status=is.null`
+      : `id=eq.${op.id}&nf_status=eq.${encodeURIComponent(op.nf_status)}`;
+    const claim = await sbFetch(`fin_operacao?${claimFilter}`, { method: 'PATCH', body: JSON.stringify({ nf_status: 'emitindo' }) }).catch(() => []);
+    if (!Array.isArray(claim) || !claim[0]) {
+      const cur = await sbFetch(`fin_operacao?id=eq.${op.id}&select=nf_status,nf_url`).catch(() => []);
+      return res.status(200).json({ ok: true, skipped: 'emissão já em andamento/concluída', nf_status: (cur[0] && cur[0].nf_status) || null, nf_url: (cur[0] && cur[0].nf_url) || null });
+    }
+    claimed = true;
 
     const iss = Number(process.env.ASAAS_NF_ISS || 0);
     const invoicePayload = {
@@ -103,6 +118,10 @@ module.exports = async function handler(req, res) {
 
     return res.status(200).json({ ok: true, operacao_id: op.id, nf_status: nfStatus, nf_id: invoice.id || null, nf_url: nfUrl || null, base, base_tipo: temRepasse ? 'honorario' : 'valor_cheio', nf_enviada: !!(zap && zap.messageId) });
   } catch (e) {
+    if (claimed && opIdRevert) {
+      // libera o claim (não deixa a operação presa em 'emitindo') para permitir nova tentativa.
+      await sbFetch(`fin_operacao?id=eq.${opIdRevert}`, { method: 'PATCH', body: JSON.stringify({ nf_status: prevNf || 'pendente' }) }).catch(() => {});
+    }
     console.error('[emitir-nf]', e.message);
     return res.status(500).json({ error: e.message });
   }
