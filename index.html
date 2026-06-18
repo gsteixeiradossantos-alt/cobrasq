@@ -13877,12 +13877,16 @@ function renderDocs(){
 
     <!-- Sub-tabs -->
     <div class="cob-doctabs" id="docs-tabs">
-      <button class="cob-doctab on" data-dtab="arquivos" onclick="setDocsTab('arquivos',this)">Arquivos <span class="cob-doctab-n">${allDocs.length}</span></button>
+      <button class="cob-doctab on" data-dtab="peticoes" onclick="setDocsTab('peticoes',this)">Petições</button>
+      <button class="cob-doctab" data-dtab="arquivos" onclick="setDocsTab('arquivos',this)">Arquivos <span class="cob-doctab-n">${allDocs.length}</span></button>
       <button class="cob-doctab" data-dtab="zapsign" onclick="setDocsTab('zapsign',this)">Assinaturas ZapSign <span class="cob-doctab-n">${allMinutas.length}</span>${pendentes>0?` <span style="background:var(--warning);color:#fff;font-size:9px;font-weight:700;padding:1px 6px;border-radius:99px;">${pendentes}</span>`:''}</button>
     </div>
 
+    <!-- Petições -->
+    <div id="docs-tab-peticoes"></div>
+
     <!-- Arquivos -->
-    <div id="docs-tab-arquivos">
+    <div id="docs-tab-arquivos" style="display:none;">
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
         <div style="display:flex;align-items:center;gap:9px;background:var(--card-2);border:1px solid var(--border);border-radius:9px;padding:9px 13px;min-width:240px;color:var(--text-3);">
           ${ico('search',14)}
@@ -13913,6 +13917,7 @@ function renderDocs(){
   renderDocsTable(allDocs);
   renderZsGlobal();
   carregarDocsBucketPagina();
+  renderPeticoesTab();
 }
 
 // Carrega os arquivos do bucket (cache 15s) e re-renderiza a página Documentos.
@@ -13939,8 +13944,480 @@ async function carregarDocsBucketPagina(force){
 function setDocsTab(tab, btn){
   document.querySelectorAll('#docs-tabs .cob-doctab').forEach(t=>t.classList.remove('on'));
   if(btn) btn.classList.add('on');
+  const pt = document.getElementById('docs-tab-peticoes');
+  if(pt) pt.style.display = tab==='peticoes' ? '' : 'none';
   document.getElementById('docs-tab-arquivos').style.display = tab==='arquivos' ? '' : 'none';
   document.getElementById('docs-tab-zapsign').style.display  = tab==='zapsign'  ? '' : 'none';
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// PETIÇÕES — gerador de peças a partir de acordo (cumprimento de sentença /
+// execução por descumprimento). Reusa peticao_templates/peticao_geradas e o
+// estilo "Teixeira Advogados". Cálculo jurídico autocontido (metodologia
+// auditada contra os memoriais do Dr. Gustavo — portada do CRM).
+// ════════════════════════════════════════════════════════════════════════
+
+// Índices mensais reais (% a.m.) — atualizar mensalmente. (Portado do CRM.)
+const PET_INDICES_MENSAIS = {
+  INPC: {'2024-05':0.46,'2024-06':0.25,'2024-07':0.26,'2024-08':-0.14,'2024-09':0.48,'2024-10':0.61,'2024-11':0.33,'2024-12':0.48,'2025-01':0.00,'2025-02':1.48,'2025-03':0.51,'2025-04':0.48,'2025-05':0.35,'2025-06':0.23,'2025-07':0.21,'2025-08':-0.21,'2025-09':0.52,'2025-10':0.03,'2025-11':0.03,'2025-12':0.21,'2026-01':0.39,'2026-02':0.56,'2026-03':0.91,'2026-04':0.81},
+  IPCA: {'2024-05':0.46,'2024-06':0.21,'2024-07':0.38,'2024-08':-0.02,'2024-09':0.44,'2024-10':0.56,'2024-11':0.39,'2024-12':0.52,'2025-01':0.16,'2025-02':1.31,'2025-03':0.56,'2025-04':0.43,'2025-05':0.26,'2025-06':0.24,'2025-07':0.26,'2025-08':-0.11,'2025-09':0.48,'2025-10':0.09,'2025-11':0.18,'2025-12':0.33,'2026-01':0.33,'2026-02':0.70,'2026-03':0.88,'2026-04':0.67},
+  SELIC:{'2024-05':0.83,'2024-06':0.79,'2024-07':0.91,'2024-08':0.87,'2024-09':0.84,'2024-10':0.93,'2024-11':0.79,'2024-12':0.93,'2025-01':1.01,'2025-02':0.99,'2025-03':0.96,'2025-04':1.06,'2025-05':1.14,'2025-06':1.10,'2025-07':1.28,'2025-08':1.16,'2025-09':1.22,'2025-10':1.28,'2025-11':1.05,'2025-12':1.22,'2026-01':1.16,'2026-02':1.00,'2026-03':1.21,'2026-04':1.09,'2026-05':1.07},
+  TJPR: {'2024-05':0.67,'2024-06':0.38,'2024-07':0.55,'2024-08':-0.01,'2024-09':0.76,'2024-10':1.07,'2024-11':0.76,'2024-12':0.68,'2025-01':0.06,'2025-02':1.24,'2025-03':0.01,'2025-04':0.39,'2025-05':-0.25,'2025-06':-0.79,'2025-07':0.07,'2025-08':-0.01,'2025-09':0.44,'2025-10':0.00,'2025-11':0.02,'2025-12':0.15,'2026-01':0.29,'2026-02':-0.14,'2026-03':1.02,'2026-04':1.61}
+};
+const PET_INDICES_ATE = '2026-06';
+
+function _petCorrecaoMensal(valorInicial, dataIni, dataFim, indice){
+  const tabela = PET_INDICES_MENSAIS[indice] || PET_INDICES_MENSAIS.INPC;
+  let valor = valorInicial;
+  let cursor = new Date(dataIni.getFullYear(), dataIni.getMonth(), dataIni.getDate());
+  let mesesAplicados = 0;
+  while(true){
+    const fimDoMes = new Date(cursor.getFullYear(), cursor.getMonth()+1, 0);
+    if(fimDoMes >= dataFim) break;
+    const chave = cursor.getFullYear()+'-'+String(cursor.getMonth()+1).padStart(2,'0');
+    const pct = (chave in tabela) ? tabela[chave] : 0;
+    valor = valor * (1 + pct/100);
+    mesesAplicados++;
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth()+1, 1);
+  }
+  return { valorCorrigido: valor, mesesAplicados };
+}
+// Correção composta + juros simples pró rata + multa sobre atualizado +
+// honorários sobre (atual+juros+multa) + garantia STJ. (Portado do CRM.)
+function _petCalcJuridica(valorNominal, dataIni, dataFim, indice, multaPct, honPct, jurosMensalPct){
+  const corr = _petCorrecaoMensal(valorNominal, dataIni, dataFim, indice);
+  const valorAtualizado = Math.max(corr.valorCorrigido, valorNominal);
+  const aplicouGarantiaSTJ = corr.valorCorrigido < valorNominal;
+  const dias = (dataFim - dataIni)/(1000*60*60*24);
+  const mesesPRO = dias/30;
+  const juros = valorAtualizado * (jurosMensalPct/100) * mesesPRO;
+  const multa = valorAtualizado * (multaPct/100);
+  const honorarios = (valorAtualizado + juros + multa) * (honPct/100);
+  const total = valorAtualizado + juros + multa + honorarios;
+  return { valorNominal, indice, valorAtualizado, aplicouGarantiaSTJ,
+    mesesPRO: Math.round(mesesPRO*100)/100, mesesCorrigidos: corr.mesesAplicados,
+    juros, multa, honorarios, total, multaPct, honPct, jurosMensalPct, indice_ate: PET_INDICES_ATE };
+}
+
+function petParseDate(v){
+  const s = String(v||'').trim();
+  let m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if(m) return new Date(+m[1], +m[2]-1, +m[3], 12, 0, 0);
+  m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(s);
+  if(m) return new Date(+m[3], +m[2]-1, +m[1], 12, 0, 0);
+  const d = new Date(s); return isNaN(d) ? null : d;
+}
+
+// Credor padrão (a maioria das execuções é movida pela COBRASQ).
+const PET_CREDOR_PRESET = {
+  razao_social: 'COBRASQ Recuperadora de Crédito e Cobrança Ltda.',
+  cnpj: '34.626.848/0001-42',
+  endereco: 'Av. Rio Grande do Sul, n. 380, Sala 01, Centro, Dois Vizinhos — PR, CEP 85.660-000'
+};
+
+function petMailMerge(html, dados){
+  return String(html||'').replace(/\{\{([a-zA-Z0-9_.]+)\}\}/g, (m,k)=>escHtml((dados&&dados[k])||'_____'));
+}
+function _petCssTeixeira(){
+  return `@page { size: A4; margin: 2.5cm 2cm 2cm 3cm; }
+    @media print { body { margin: 0; } .no-print { display:none !important; } }
+    body { font-family:'Palatino Linotype',Palatino,Georgia,serif; font-size:12pt; line-height:1.4; color:#000; text-align:justify; }
+    .header-tx { text-align:center; margin-bottom:18px; }
+    .header-tx .name { font-size:11pt; font-weight:700; letter-spacing:4px; }
+    .header-tx hr { border:none; border-bottom:1.5px solid #B8860B; margin-top:6px; }
+    .enderecamento { font-size:13pt; font-style:italic; margin-bottom:6px; text-align:left; }
+    .processo-num { font-size:10pt; margin-bottom:18px; text-align:left; }
+    .qualificacao { margin-bottom:14px; }
+    h2.secao,.secao { font-variant:small-caps; font-weight:700; text-align:center; font-size:12pt; margin:24pt 0 12pt; }
+    p.subtitulo,.subtitulo { font-style:italic; font-weight:700; margin:17pt 0 2pt; text-align:left; }
+    p { margin:0 0 10pt; }
+    p.pedido { padding-left:0.5cm; }
+    p.fecho-data { text-align:center; font-style:italic; margin:36pt 0 24pt; }
+    p.fecho-nome,p.fecho-oab { text-align:center; margin:0; }
+    p.fecho-nome { font-style:italic; font-weight:700; }
+    .footer-first { text-align:center; font-style:italic; font-size:9pt; margin-top:28pt; padding-top:8pt; border-top:1px solid #B8924B; line-height:1.35; }
+    .footer-first .nome { font-weight:700; font-style:italic; }`;
+}
+function _petHeaderHtml(){ return '<div class="header-tx"><div class="name">TEIXEIRA <em>Advogados</em></div><hr></div>'; }
+function _petFooterHtml(){
+  return '<div class="footer-first"><div class="nome">Teixeira Advogados Associados</div>'
+    + '<div>R. Sicília, Nossa Senhora da Salete | Dois Vizinhos – PR | 11 93921-2125</div>'
+    + '<div>contato@teixeiraadvogadosdv.com.br | www.teixeiraadvogadosdv.com.br</div></div>';
+}
+function _petInnerDoc(merged){ return _petHeaderHtml() + merged + _petFooterHtml(); }
+function _petHtmlCompleto(inner){
+  return '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Petição</title><style>'
+    + _petCssTeixeira() + '</style></head><body>' + inner + '</body></html>';
+}
+
+window._pet = window._pet || { step:1, dev:null, acordo:null, resumo:null, tpl:null, dados:{}, templates:[], calc:null };
+
+function petDevedoresComAcordo(){
+  return (DB.devedores||[]).filter(d => (d.acordos||[]).length > 0);
+}
+function petResumoAcordo(ac){
+  const parc = (ac && ac.parcelas) || [];
+  const valOf = p => Number(p.valor) || parseValorBR(p.valor) || 0;
+  const num = parc.length;
+  const pagas = parc.filter(p=>p.pago).length;
+  const abertas = num - pagas;
+  const saldo = parc.filter(p=>!p.pago).reduce((s,p)=>s+valOf(p),0);
+  const total = Number(ac.valorTotal) || parseValorBR(ac.valorTotal) || parc.reduce((s,p)=>s+valOf(p),0);
+  const naoPagas = parc.filter(p=>!p.pago && p.vencimento)
+    .sort((a,b)=>(petParseDate(a.vencimento)||0)-(petParseDate(b.vencimento)||0));
+  const primAberta = naoPagas[0] || null;
+  return { num, pagas, abertas, saldo, total, primAberta };
+}
+function petDevEndereco(dev){
+  const partes = [
+    (dev.rua||dev.endereco||''),
+    dev.numero ? ('n. '+dev.numero) : '',
+    dev.complemento || '',
+    dev.bairro ? ('bairro '+dev.bairro) : '',
+    dev.cidade || '',
+    dev.uf || '',
+    dev.cep ? ('CEP '+dev.cep) : ''
+  ].filter(Boolean);
+  return partes.join(', ');
+}
+
+async function petCarregarTemplates(){
+  if(_pet.templates.length) return;
+  const supa = getSupabase();
+  if(!supa) return;
+  const { data, error } = await supa.from('peticao_templates').select('*')
+    .eq('ativo', true).in('tipo', ['cumprimento_sentenca','execucao_titulo']).order('nome');
+  if(error){ console.warn('peticao_templates:', error.message); return; }
+  _pet.templates = data || [];
+}
+
+function petReset(){
+  window._pet = { step:1, dev:null, acordo:null, resumo:null, tpl:null, dados:{}, templates:_pet.templates||[], calc:null };
+  petRenderStep();
+}
+
+function renderPeticoesTab(){
+  const el = document.getElementById('docs-tab-peticoes');
+  if(!el) return;
+  if(!getSupabase()){
+    el.innerHTML = `<div class="cob-panel" style="padding:22px;font-size:13px;color:var(--text-3);">As petições exigem login via Supabase (indisponível neste modo).</div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div class="cob-panel" style="padding:18px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px;">
+        <div style="font-size:13px;font-weight:700;color:var(--text-2);" id="pet-steplabel">Etapa 1 de 4</div>
+        <button class="btn btn-ghost btn-sm" onclick="petReset()">Recomeçar</button>
+      </div>
+      <div id="pet-body" style="margin-top:10px;min-height:120px;"></div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:18px;border-top:1px solid var(--border);padding-top:14px;">
+        <button id="pet-btn-voltar" onclick="petVoltar()" style="display:none;background:none;border:1px solid var(--border-2);color:var(--text-2);padding:9px 16px;border-radius:8px;font-size:13px;cursor:pointer;">← Voltar</button>
+        <div style="flex:1;"></div>
+        <button id="pet-btn-imprimir" onclick="petImprimir()" style="display:none;background:none;border:1px solid var(--border-2);color:var(--text-2);padding:9px 16px;border-radius:8px;font-size:13px;cursor:pointer;">🖨 Imprimir / PDF</button>
+        <button id="pet-btn-salvar" onclick="petSalvar()" style="display:none;background:var(--gold);color:var(--navy);border:none;padding:9px 18px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;">Salvar</button>
+        <button id="pet-btn-proximo" onclick="petProximo()" style="background:var(--navy);color:#fff;border:none;padding:9px 18px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;">Próximo →</button>
+      </div>
+    </div>`;
+  petCarregarTemplates().then(()=>petRenderStep());
+}
+
+function petRenderStep(){
+  const body = document.getElementById('pet-body');
+  if(!body) return;
+  document.getElementById('pet-steplabel').textContent = 'Etapa ' + _pet.step + ' de 4';
+  document.getElementById('pet-btn-voltar').style.display   = _pet.step>1 ? '' : 'none';
+  document.getElementById('pet-btn-proximo').style.display  = _pet.step<4 ? '' : 'none';
+  document.getElementById('pet-btn-salvar').style.display   = _pet.step===4 ? '' : 'none';
+  document.getElementById('pet-btn-imprimir').style.display = _pet.step===4 ? '' : 'none';
+  if(_pet.step===1) petRenderSelDevedor(body);
+  else if(_pet.step===2) petRenderTemplates(body);
+  else if(_pet.step===3) petRenderCampos(body);
+  else if(_pet.step===4) petRenderPreview(body);
+}
+
+function petRenderSelDevedor(body){
+  const devs = petDevedoresComAcordo();
+  if(!devs.length){
+    body.innerHTML = `<div style="font-size:13px;color:var(--text-3);padding:8px 0;">Nenhum devedor com acordo cadastrado. Crie um acordo (com parcelas) na ficha do devedor para gerar a petição.</div>`;
+    return;
+  }
+  const selDevId = _pet.dev ? _pet.dev.id : '';
+  body.innerHTML = `
+    <label style="font-size:12.5px;font-weight:600;color:var(--text-2);">Devedor (com acordo)</label>
+    <select id="pet-sel-dev" onchange="petSelDevedor(this.value)" style="width:100%;padding:9px 10px;border:1px solid var(--border-2);border-radius:8px;font-size:13px;margin-top:4px;background:var(--surface);color:var(--text);">
+      <option value="">— Selecione —</option>
+      ${devs.map(d=>`<option value="${d.id}" ${d.id===selDevId?'selected':''}>${escHtml(d.nome||'Sem nome')}${d.doc?' · '+escHtml(d.doc):''}</option>`).join('')}
+    </select>
+    <div id="pet-acordo-area" style="margin-top:14px;"></div>`;
+  if(_pet.dev) petRenderAcordoArea();
+}
+
+function petSelDevedor(devId){
+  _pet.dev = (DB.devedores||[]).find(d=>d.id===devId) || null;
+  _pet.acordo = null; _pet.resumo = null; _pet.calc = null;
+  petRenderAcordoArea();
+}
+function petRenderAcordoArea(){
+  const area = document.getElementById('pet-acordo-area');
+  if(!area || !_pet.dev) return;
+  const acordos = _pet.dev.acordos || [];
+  if(acordos.length === 1 && !_pet.acordo){ _pet.acordo = acordos[0]; }
+  const optSel = (ac,i)=>{
+    const r = petResumoAcordo(ac);
+    return `<option value="${i}" ${_pet.acordo===ac?'selected':''}>Acordo ${i+1} · ${fmtR(r.total)} · ${r.num}x (${r.abertas} em aberto)</option>`;
+  };
+  let html = '';
+  if(acordos.length > 1){
+    html += `<label style="font-size:12.5px;font-weight:600;color:var(--text-2);">Acordo</label>
+      <select id="pet-sel-acordo" onchange="petSelAcordo(this.value)" style="width:100%;padding:9px 10px;border:1px solid var(--border-2);border-radius:8px;font-size:13px;margin:4px 0 12px;background:var(--surface);color:var(--text);">
+        <option value="">— Selecione —</option>${acordos.map(optSel).join('')}</select>`;
+  }
+  if(_pet.acordo){
+    const r = petResumoAcordo(_pet.acordo);
+    _pet.resumo = r;
+    const card = (lbl,val)=>`<div style="flex:1;min-width:120px;background:var(--surface-2);border-radius:8px;padding:10px 12px;"><div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);">${lbl}</div><div style="font-size:15px;font-weight:700;color:var(--text);margin-top:2px;">${val}</div></div>`;
+    html += `<div style="display:flex;gap:10px;flex-wrap:wrap;">
+      ${card('Valor total', fmtR(r.total))}
+      ${card('Parcelas', r.num)}
+      ${card('Pagas', r.pagas)}
+      ${card('Em aberto', r.abertas)}
+      ${card('Saldo aberto', fmtR(r.saldo))}
+    </div>
+    <div style="font-size:11.5px;color:var(--text-3);margin-top:8px;">${r.primAberta ? ('1ª parcela em aberto vence em '+escHtml(r.primAberta.vencimento)) : 'Sem parcelas em aberto registradas.'}</div>`;
+  }
+  area.innerHTML = html;
+}
+function petSelAcordo(i){
+  _pet.acordo = (_pet.dev.acordos||[])[+i] || null;
+  _pet.resumo = null; _pet.calc = null;
+  petRenderAcordoArea();
+}
+
+function petRenderTemplates(body){
+  if(!_pet.templates.length){
+    body.innerHTML = `<div style="font-size:13px;color:var(--text-3);">Nenhum modelo de petição ativo encontrado.</div>`;
+    return;
+  }
+  body.innerHTML = `<div style="font-size:12.5px;font-weight:600;color:var(--text-2);margin-bottom:8px;">Tipo de petição</div>` +
+    _pet.templates.map(t=>`
+      <label style="display:flex;gap:10px;padding:12px;border:1.5px solid ${_pet.tpl&&_pet.tpl.id===t.id?'var(--navy)':'var(--border-2)'};border-radius:8px;cursor:pointer;align-items:flex-start;margin-bottom:8px;">
+        <input type="radio" name="petTpl" value="${t.id}" ${_pet.tpl&&_pet.tpl.id===t.id?'checked':''} onchange="petSelTemplate('${t.id}')" style="margin-top:3px;">
+        <div><div style="font-weight:600;color:var(--text);">${escHtml(t.nome)}</div>
+        <div style="font-size:12px;color:var(--text-3);margin-top:2px;">${escHtml(t.descricao||'')}</div></div>
+      </label>`).join('');
+}
+function petSelTemplate(id){
+  _pet.tpl = _pet.templates.find(t=>t.id===id) || null;
+  petRenderTemplates(document.getElementById('pet-body'));
+}
+
+function petResolveAuto(path){
+  const dev = _pet.dev || {}, r = _pet.resumo || {};
+  switch(path){
+    case 'cliente.razao_social': return PET_CREDOR_PRESET.razao_social;
+    case 'cliente.cnpj': return PET_CREDOR_PRESET.cnpj;
+    case 'cliente.endereco': return PET_CREDOR_PRESET.endereco;
+    case 'devedor.nome': return dev.nome || '';
+    case 'devedor.doc': return dev.doc || '';
+    case 'devedor.endereco': return petDevEndereco(dev);
+    case 'acordo.valor_total_brl': return r.total!=null ? fmtR(r.total) : '';
+    case 'acordo.num_parcelas': return r.num!=null ? String(r.num) : '';
+    case 'acordo.parcelas_pagas': return r.pagas!=null ? String(r.pagas) : '';
+    case 'acordo.parcelas_abertas': return r.abertas!=null ? String(r.abertas) : '';
+    case 'acordo.saldo_aberto_brl': return r.saldo!=null ? fmtR(r.saldo) : '';
+    case 'calculo.total_brl': return _pet.calc ? fmtR(_pet.calc.total) : '';
+    case 'advogado.nome': return 'Dr. Gustavo S. Teixeira dos Santos';
+    case 'advogado.numero_oab': return '112.743';
+    case 'advogado.uf_oab': return 'PR';
+    case 'hoje_extenso': {
+      const meses=['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+      const dt=new Date(); return dt.getDate()+' de '+meses[dt.getMonth()]+' de '+dt.getFullYear();
+    }
+    default: return '';
+  }
+}
+
+function petRenderCampos(body){
+  const vars = (_pet.tpl && _pet.tpl.variaveis) || [];
+  // pré-fill auto + defaults
+  vars.forEach(v=>{
+    if(v.auto && (_pet.dados[v.key]===undefined || _pet.dados[v.key]==='')){
+      const r = petResolveAuto(v.auto); if(r) _pet.dados[v.key] = r;
+    } else if(v.default && _pet.dados[v.key]===undefined){ _pet.dados[v.key] = v.default; }
+  });
+  _pet.dados['advogado.nome'] = 'Dr. Gustavo S. Teixeira dos Santos';
+  _pet.dados['advogado.numero_oab'] = '112.743';
+  _pet.dados['advogado.uf_oab'] = 'PR';
+
+  const r = _pet.resumo || {};
+  const termoDefault = (r.primAberta && r.primAberta.vencimento) ? String(petParseDate(r.primAberta.vencimento)?.toISOString().slice(0,10)||'') : '';
+  const calcPanel = `
+    <div style="background:var(--surface-2);border-radius:10px;padding:14px;margin-bottom:16px;">
+      <div style="font-size:12.5px;font-weight:700;color:var(--text-2);margin-bottom:10px;">Cálculo jurídico (valor atualizado)</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+        <div style="flex:1;min-width:130px;"><label style="font-size:11px;color:var(--text-3);">Saldo nominal (R$)</label>
+          <input id="pet-calc-valor" value="${r.saldo!=null?fmt(r.saldo):''}" style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;"></div>
+        <div style="flex:1;min-width:130px;"><label style="font-size:11px;color:var(--text-3);">Termo inicial</label>
+          <input type="date" id="pet-calc-termo" value="${termoDefault}" style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;"></div>
+        <div style="min-width:100px;"><label style="font-size:11px;color:var(--text-3);">Índice</label>
+          <select id="pet-calc-indice" style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;"><option>INPC</option><option>IPCA</option><option>SELIC</option><option>TJPR</option></select></div>
+        <div style="width:80px;"><label style="font-size:11px;color:var(--text-3);">Juros %a.m.</label>
+          <input id="pet-calc-juros" value="1,00" style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;"></div>
+        <div style="width:70px;"><label style="font-size:11px;color:var(--text-3);">Multa %</label>
+          <input id="pet-calc-multa" value="0" style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;"></div>
+        <div style="width:80px;"><label style="font-size:11px;color:var(--text-3);">Honor. %</label>
+          <input id="pet-calc-hon" value="0" style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;"></div>
+        <button onclick="petCalcular()" style="background:var(--navy);color:#fff;border:none;padding:9px 14px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;">Calcular</button>
+      </div>
+      <div id="pet-calc-result" style="font-size:12.5px;color:var(--text-2);margin-top:10px;">${_pet.calc?petCalcResumoHtml():'O valor atualizado preenche o campo da petição. A multa do art. 523 (10%) é condicional ao não pagamento em 15 dias — mantenha 0 aqui.'}</div>
+    </div>`;
+
+  const visiveis = vars.filter(v=>!String(v.key||'').startsWith('advogado.'));
+  const campos = visiveis.map(v=>{
+    const val = _pet.dados[v.key]||'';
+    const isAuto = !!v.auto && val;
+    const labelExtra = isAuto ? ' <em style="color:var(--success);font-size:11px;">(auto)</em>' : (v.obrigatorio?' <span style="color:var(--danger);">*</span>':'');
+    const base = `<label style="font-size:12px;font-weight:600;color:var(--text-2);">${escHtml(v.label)}${labelExtra}</label>`;
+    if(v.tipo==='textarea')
+      return `<div style="margin-bottom:10px;">${base}<textarea data-petkey="${v.key}" rows="2" oninput="_pet.dados[this.dataset.petkey]=this.value" style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-family:inherit;">${escHtml(val)}</textarea></div>`;
+    if(v.tipo==='select'){
+      const ops = v.opcoes||[];
+      return `<div style="margin-bottom:10px;">${base}<select data-petkey="${v.key}" onchange="_pet.dados[this.dataset.petkey]=this.value" style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;">
+        ${ops.map(o=>`<option ${o===val?'selected':''}>${escHtml(o)}</option>`).join('')}</select></div>`;
+    }
+    return `<div style="margin-bottom:10px;">${base}<input type="text" data-petkey="${v.key}" value="${escHtml(val)}" placeholder="${escHtml(v.placeholder||'')}" oninput="_pet.dados[this.dataset.petkey]=this.value" style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;"></div>`;
+  }).join('');
+
+  body.innerHTML = calcPanel + `<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px;">${campos}</div>`;
+}
+function petCalcResumoHtml(){
+  const c = _pet.calc; if(!c) return '';
+  let s = `<strong style="color:var(--success);">✓ Valor atualizado: ${fmtR(c.total)}</strong> · atualizado ${fmtR(c.valorAtualizado)} + juros ${fmtR(c.juros)}`;
+  if(c.multa) s += ' + multa '+fmtR(c.multa);
+  if(c.honorarios) s += ' + honor. '+fmtR(c.honorarios);
+  if(c.aplicouGarantiaSTJ) s += ' · garantia STJ aplicada';
+  return s;
+}
+function petCalcular(){
+  const parseBR = s => parseFloat(String(s||'').replace(/[^\d,.-]/g,'').replace(/\.(?=\d{3}\b)/g,'').replace(',','.'))||0;
+  const valor = parseBR(document.getElementById('pet-calc-valor').value);
+  const termo = document.getElementById('pet-calc-termo').value;
+  const indice = document.getElementById('pet-calc-indice').value;
+  const juros = parseBR(document.getElementById('pet-calc-juros').value) || 1.00;
+  const multa = parseBR(document.getElementById('pet-calc-multa').value);
+  const hon = parseBR(document.getElementById('pet-calc-hon').value);
+  if(!valor || !termo){ showToast('Informe o saldo e o termo inicial.','warning'); return; }
+  const dIni = petParseDate(termo), dFim = new Date();
+  if(!dIni || dFim <= dIni){ showToast('Termo inicial inválido (deve ser passado).','warning'); return; }
+  _pet.calc = _petCalcJuridica(valor, dIni, dFim, indice, multa, hon, juros);
+  _pet.dados['calculo.total_brl'] = fmtR(_pet.calc.total);
+  document.getElementById('pet-calc-result').innerHTML = petCalcResumoHtml();
+  showToast('Cálculo aplicado: '+fmtR(_pet.calc.total),'success');
+}
+
+function petRenderPreview(body){
+  const merged = petMailMerge(_pet.tpl.conteudo_html, _pet.dados);
+  body.innerHTML = `
+    <div style="font-size:12px;color:var(--text-3);margin-bottom:8px;">Edite o texto livremente abaixo antes de salvar.</div>
+    <div id="pet-preview" contenteditable="true" style="background:#fff;color:#000;border:1px solid var(--border-2);border-radius:8px;padding:34px 40px;max-height:60vh;overflow:auto;font-family:'Palatino Linotype',Palatino,Georgia,serif;font-size:13px;line-height:1.5;text-align:justify;outline:none;">
+      <style>${_petCssTeixeira()}</style>
+      ${_petInnerDoc(merged)}
+    </div>`;
+}
+
+function petProximo(){
+  if(_pet.step===1){
+    if(!_pet.dev){ showToast('Selecione um devedor.','warning'); return; }
+    if(!_pet.acordo){ showToast('Selecione o acordo.','warning'); return; }
+    _pet.resumo = petResumoAcordo(_pet.acordo);
+  }
+  if(_pet.step===2 && !_pet.tpl){ showToast('Escolha o tipo de petição.','warning'); return; }
+  if(_pet.step===3 && !_pet.dados['calculo.total_brl']){
+    if(!confirm('O valor atualizado (cálculo) está vazio. Continuar mesmo assim?')) return;
+  }
+  if(_pet.step<4){ _pet.step++; petRenderStep(); }
+}
+function petVoltar(){ if(_pet.step>1){ _pet.step--; petRenderStep(); } }
+
+function petImprimir(){
+  const inner = document.getElementById('pet-preview');
+  if(!inner) return;
+  const w = window.open('', '_blank', 'width=900,height=1100');
+  w.document.write(_petHtmlCompleto(inner.innerHTML.replace(/<style>[\s\S]*?<\/style>/,'')) +
+    '<div class="no-print" style="position:fixed;top:8px;right:8px;"><button onclick="window.print()" style="padding:8px 14px;background:#000;color:#fff;border:0;border-radius:4px;cursor:pointer;">🖨 Imprimir / PDF</button></div>');
+  w.document.close();
+  setTimeout(()=>{ try{ w.focus(); w.print(); }catch(e){} }, 600);
+}
+
+async function petSalvar(){
+  const supa = getSupabase();
+  if(!supa){ showToast('Supabase indisponível.','danger'); return; }
+  const dev = _pet.dev, tpl = _pet.tpl;
+  if(!dev || !tpl){ showToast('Fluxo incompleto.','warning'); return; }
+  const btn = document.getElementById('pet-btn-salvar');
+  btn.disabled = true; const txt = btn.textContent; btn.textContent = 'Salvando…';
+  try{
+    const previewEl = document.getElementById('pet-preview');
+    const inner = previewEl.innerHTML.replace(/<style>[\s\S]*?<\/style>/,'');
+    const full = _petHtmlCompleto(inner);
+    const blob = new Blob([full], { type:'text/html' });
+    const chave = docChaveDevedor(dev);
+    const nomeArq = tpl.nome.replace(/[^a-zA-Z0-9]+/g,'-').replace(/^-|-$/g,'') + '_' + hoje() + '.html';
+    const path = `devedores/${chave}/${dev.clienteId||'sem-credor'}/peticao/${Date.now()}_${nomeArq}`;
+    const { error: upErr } = await supa.storage.from('documentos')
+      .upload(path, blob, { contentType:'text/html', upsert:false });
+    if(upErr) throw upErr;
+    const { data: udata } = await supa.auth.getUser();
+    const uid2 = udata && udata.user ? udata.user.id : null;
+    const { error: insErr } = await supa.from('documentos').insert({
+      devedor_doc: chave, devedor_id: dev.id, credor_id: dev.clienteId||null,
+      categoria: 'peticao', nome: nomeArq, storage_path: path,
+      mime_type: 'text/html', size_bytes: blob.size, uploaded_by: uid2
+    });
+    if(insErr){
+      await supa.storage.from('documentos').move(path, '_lixeira/'+path).catch(()=>{});
+      throw insErr;
+    }
+    // Histórico/auditoria (best-effort — exige devedor_id uuid existente).
+    if(uid2){
+      try{
+        await supa.from('peticao_geradas').insert({
+          devedor_id: dev.id, template_id: tpl.id, template_tipo: tpl.tipo,
+          dados_preenchidos: _pet.dados, status: 'gerada', owner_id: uid2,
+          pdf_storage_path: path,
+          template_snapshot: { id:tpl.id, tipo:tpl.tipo, nome:tpl.nome },
+          dados_snapshot: _pet.dados
+        });
+      }catch(e){ console.warn('peticao_geradas (best-effort):', e); }
+    }
+    showToast('Petição salva em Documentos (categoria Petição).','success');
+    carregarDocsBucketPagina(true);
+  }catch(e){
+    const msg = String(e && e.message || e);
+    showToast(/security|policy|denied|violates/i.test(msg)
+      ? 'Sem permissão: só o gestor e o responsável pelo devedor podem salvar aqui.'
+      : 'Falha ao salvar: '+msg, 'danger');
+  }finally{
+    btn.disabled = false; btn.textContent = txt;
+  }
+}
+
+// Atalho externo (ex.: Financeiro → Inadimplência e execução): abre a aba
+// Petições já com o devedor selecionado, pulando para a escolha do modelo.
+function petAbrirParaDevedor(devId){
+  showPage('docs');
+  setTimeout(()=>{
+    const btn = document.querySelector('#docs-tabs .cob-doctab[data-dtab="peticoes"]');
+    setDocsTab('peticoes', btn);
+    const dev = (DB.devedores||[]).find(d=>d.id===devId);
+    if(dev && (dev.acordos||[]).length){
+      petReset();
+      _pet.dev = dev;
+      if((dev.acordos||[]).length===1){ _pet.acordo = dev.acordos[0]; _pet.resumo = petResumoAcordo(_pet.acordo); }
+      _pet.step = _pet.acordo ? 2 : 1;
+      petRenderStep();
+    }
+  }, 60);
 }
 
 function renderZsGlobal(){
@@ -17671,6 +18148,7 @@ function abrirExecucaoDeParcelas(devId){
   document.getElementById('mexec-footer').innerHTML = `
     <button class="btn btn-ghost" onclick="closeModal('modal-exec-parcelas')">Cancelar</button>
     <button class="btn btn-ghost btn-sm" onclick="_execAbrirMemoria()" title="Abrir a calculadora jurídica detalhada">${ico('ruler',12)} Memória de cálculo</button>
+    <button class="btn btn-ghost btn-sm" onclick="closeModal('modal-exec-parcelas'); petAbrirParaDevedor('${devId}')" title="Cumprimento de sentença ou execução por descumprimento do acordo">${ico('file',12)} Petição de acordo</button>
     <button class="btn btn-primary" id="mexec-confirm" onclick="confirmarExecucao()">${ico('scale',13)} Confirmar e gerar peça →</button>`;
 
   _execRecalc();
