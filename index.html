@@ -14052,8 +14052,26 @@ function _petHtmlCompleto(inner){
 
 window._pet = window._pet || { step:1, dev:null, acordo:null, resumo:null, tpl:null, dados:{}, templates:[], calc:null };
 
-function petDevedoresComAcordo(){
-  return (DB.devedores||[]).filter(d => (d.acordos||[]).length > 0);
+function petSaldoCadastro(d){
+  return Number(d.valorAtual) || parseValorBR(d.valorAtual) || 0;
+}
+// Alvos da petição = inadimplentes: com cobrança vencida no Asaas (já agrupada por
+// _loadInadimplentes), com saldo em aberto no cadastro, ou com acordo registrado.
+function petDevedoresAlvo(){
+  const groups = window._cobrancasGroups || {};
+  return (DB.devedores||[])
+    .filter(d => !d.arquivado && (
+      (groups[d.id] && groups[d.id].length) ||
+      petSaldoCadastro(d) > 0 ||
+      (d.acordos||[]).length > 0
+    ))
+    .sort((a,b)=> petSaldoCadastro(b) - petSaldoCadastro(a));
+}
+function petFmtDataBR(v){
+  const d = petParseDate(v);
+  if(!d) return String(v||'');
+  const p = n => String(n).padStart(2,'0');
+  return p(d.getDate())+'/'+p(d.getMonth()+1)+'/'+d.getFullYear();
 }
 function petResumoAcordo(ac){
   const parc = (ac && ac.parcelas) || [];
@@ -14067,6 +14085,27 @@ function petResumoAcordo(ac){
     .sort((a,b)=>(petParseDate(a.vencimento)||0)-(petParseDate(b.vencimento)||0));
   const primAberta = naoPagas[0] || null;
   return { num, pagas, abertas, saldo, total, primAberta };
+}
+// Resumo para inadimplente sem acordo com parcelas: usa o atraso do Asaas (cobranças
+// OVERDUE já carregadas em window._cobrancasGroups) e, na falta, o saldo do cadastro
+// (valorAtual/valorOrig). Mantém a forma de petResumoAcordo para o auto-preenchimento
+// (chaves acordo.* e divida.*) continuar funcionando.
+function petResumoInadimplencia(dev){
+  const chs = (window._cobrancasGroups||{})[dev.id] || [];
+  if(chs.length){
+    const agg = _execAgg(chs);
+    return { num: agg.count, pagas: 0, abertas: agg.count,
+      saldo: agg.nominal, total: agg.nominal, nominal: agg.nominal, atualizado: agg.atualizado,
+      primAberta: agg.oldest ? { vencimento: agg.oldest } : null,
+      vencimento: agg.oldest || '', fonte: 'asaas' };
+  }
+  const ac = (dev.acordos||[]).find(a => (a.parcelas||[]).length);
+  if(ac){ const r = petResumoAcordo(ac); r.nominal = r.saldo; r.fonte = 'acordo'; return r; }
+  const saldo = Number(dev.valorAtual) || parseValorBR(dev.valorAtual) || 0;
+  const nominal = Number(dev.valorOrig) || parseValorBR(dev.valorOrig) || saldo;
+  const venc = dev.vencimento || (dev.divida && dev.divida.vencimento) || '';
+  return { num: null, pagas: null, abertas: null, saldo, total: saldo, nominal,
+    primAberta: venc ? { vencimento: venc } : null, vencimento: venc, fonte: 'cadastro' };
 }
 function petDevEndereco(dev){
   const partes = [
@@ -14086,9 +14125,13 @@ async function petCarregarTemplates(){
   const supa = getSupabase();
   if(!supa) return;
   const { data, error } = await supa.from('peticao_templates').select('*')
-    .eq('ativo', true).in('tipo', ['cumprimento_sentenca','execucao_titulo']).order('nome');
+    .eq('ativo', true)
+    .in('tipo', ['execucao_extrajudicial','monitoria','inicial_cobranca','cumprimento_sentenca','execucao_titulo'])
+    .order('nome');
   if(error){ console.warn('peticao_templates:', error.message); return; }
-  _pet.templates = data || [];
+  // Ordem: peças extrajudiciais primeiro (caso mais comum), depois as de acordo/judicial.
+  const ordem = { execucao_extrajudicial:0, monitoria:1, inicial_cobranca:2, cumprimento_sentenca:3, execucao_titulo:4 };
+  _pet.templates = (data||[]).sort((a,b)=>(ordem[a.tipo]??9)-(ordem[b.tipo]??9));
 }
 
 function petReset(){
@@ -14118,7 +14161,9 @@ function renderPeticoesTab(){
         <button id="pet-btn-proximo" onclick="petProximo()" style="background:var(--navy);color:#fff;border:none;padding:9px 18px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;">Próximo →</button>
       </div>
     </div>`;
-  petCarregarTemplates().then(()=>petRenderStep());
+  // Carrega modelos e aquece o cache de inadimplência do Asaas (window._cobrancasGroups)
+  // antes de renderizar, para os devedores ligados ao Asaas já trazerem o saldo vencido.
+  Promise.all([ petCarregarTemplates(), _loadInadimplentes().catch(()=>{}) ]).then(()=>petRenderStep());
 }
 
 function petRenderStep(){
@@ -14136,61 +14181,64 @@ function petRenderStep(){
 }
 
 function petRenderSelDevedor(body){
-  const devs = petDevedoresComAcordo();
+  const devs = petDevedoresAlvo();
   if(!devs.length){
-    body.innerHTML = `<div style="font-size:13px;color:var(--text-3);padding:8px 0;">Nenhum devedor com acordo cadastrado. Crie um acordo (com parcelas) na ficha do devedor para gerar a petição.</div>`;
+    body.innerHTML = `<div style="font-size:13px;color:var(--text-3);padding:8px 0;">Nenhum devedor inadimplente encontrado. A lista traz quem tem saldo em aberto no cadastro ou cobrança vencida no Asaas.</div>`;
     return;
   }
   const selDevId = _pet.dev ? _pet.dev.id : '';
   body.innerHTML = `
-    <label style="font-size:12.5px;font-weight:600;color:var(--text-2);">Devedor (com acordo)</label>
+    <label style="font-size:12.5px;font-weight:600;color:var(--text-2);">Devedor (inadimplente)</label>
     <select id="pet-sel-dev" onchange="petSelDevedor(this.value)" style="width:100%;padding:9px 10px;border:1px solid var(--border-2);border-radius:8px;font-size:13px;margin-top:4px;background:var(--surface);color:var(--text);">
       <option value="">— Selecione —</option>
-      ${devs.map(d=>`<option value="${d.id}" ${d.id===selDevId?'selected':''}>${escHtml(d.nome||'Sem nome')}${d.doc?' · '+escHtml(d.doc):''}</option>`).join('')}
+      ${devs.map(d=>{ const s=petSaldoCadastro(d); return `<option value="${d.id}" ${d.id===selDevId?'selected':''}>${escHtml(d.nome||'Sem nome')}${d.doc?' · '+escHtml(d.doc):''}${s>0?' · '+fmtR(s):''}</option>`; }).join('')}
     </select>
     <div id="pet-acordo-area" style="margin-top:14px;"></div>`;
-  if(_pet.dev) petRenderAcordoArea();
+  if(_pet.dev) petRenderResumoArea();
 }
 
 function petSelDevedor(devId){
   _pet.dev = (DB.devedores||[]).find(d=>d.id===devId) || null;
   _pet.acordo = null; _pet.resumo = null; _pet.calc = null;
-  petRenderAcordoArea();
+  petRenderResumoArea();
 }
-function petRenderAcordoArea(){
+function petRenderResumoArea(){
   const area = document.getElementById('pet-acordo-area');
   if(!area || !_pet.dev) return;
-  const acordos = _pet.dev.acordos || [];
+  // Só acordos COM parcelas entram na seleção (os "cabeçalho" sem parcelas são inúteis aqui).
+  const acordos = (_pet.dev.acordos||[]).filter(a => (a.parcelas||[]).length);
+  _pet._acordos = acordos;
   if(acordos.length === 1 && !_pet.acordo){ _pet.acordo = acordos[0]; }
-  const optSel = (ac,i)=>{
-    const r = petResumoAcordo(ac);
-    return `<option value="${i}" ${_pet.acordo===ac?'selected':''}>Acordo ${i+1} · ${fmtR(r.total)} · ${r.num}x (${r.abertas} em aberto)</option>`;
-  };
   let html = '';
   if(acordos.length > 1){
+    const optSel = (ac,i)=>{
+      const r = petResumoAcordo(ac);
+      return `<option value="${i}" ${_pet.acordo===ac?'selected':''}>Acordo ${i+1} · ${fmtR(r.total)} · ${r.num}x (${r.abertas} em aberto)</option>`;
+    };
     html += `<label style="font-size:12.5px;font-weight:600;color:var(--text-2);">Acordo</label>
       <select id="pet-sel-acordo" onchange="petSelAcordo(this.value)" style="width:100%;padding:9px 10px;border:1px solid var(--border-2);border-radius:8px;font-size:13px;margin:4px 0 12px;background:var(--surface);color:var(--text);">
         <option value="">— Selecione —</option>${acordos.map(optSel).join('')}</select>`;
   }
-  if(_pet.acordo){
-    const r = petResumoAcordo(_pet.acordo);
-    _pet.resumo = r;
-    const card = (lbl,val)=>`<div style="flex:1;min-width:120px;background:var(--surface-2);border-radius:8px;padding:10px 12px;"><div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);">${lbl}</div><div style="font-size:15px;font-weight:700;color:var(--text);margin-top:2px;">${val}</div></div>`;
-    html += `<div style="display:flex;gap:10px;flex-wrap:wrap;">
-      ${card('Valor total', fmtR(r.total))}
-      ${card('Parcelas', r.num)}
-      ${card('Pagas', r.pagas)}
-      ${card('Em aberto', r.abertas)}
-      ${card('Saldo aberto', fmtR(r.saldo))}
-    </div>
-    <div style="font-size:11.5px;color:var(--text-3);margin-top:8px;">${r.primAberta ? ('1ª parcela em aberto vence em '+escHtml(r.primAberta.vencimento)) : 'Sem parcelas em aberto registradas.'}</div>`;
-  }
+  // Resumo: do acordo selecionado, ou da inadimplência (Asaas/saldo) quando não há acordo.
+  const r = _pet.acordo ? petResumoAcordo(_pet.acordo) : petResumoInadimplencia(_pet.dev);
+  _pet.resumo = r;
+  const fonteLabel = { asaas:'Asaas (cobranças vencidas)', acordo:'Acordo cadastrado', cadastro:'Saldo do cadastro' }[r.fonte] || (_pet.acordo ? 'Acordo cadastrado' : '');
+  const card = (lbl,val)=>`<div style="flex:1;min-width:110px;background:var(--surface-2);border-radius:8px;padding:10px 12px;"><div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);">${lbl}</div><div style="font-size:15px;font-weight:700;color:var(--text);margin-top:2px;">${val}</div></div>`;
+  html += `<div style="display:flex;gap:10px;flex-wrap:wrap;">
+    ${card('Saldo em aberto', fmtR(r.saldo))}
+    ${r.num!=null ? card(r.fonte==='asaas'?'Cobranças vencidas':'Parcelas', r.num) : ''}
+    ${r.abertas!=null ? card('Em aberto', r.abertas) : ''}
+    ${(r.total!=null && r.total!==r.saldo) ? card('Valor total', fmtR(r.total)) : ''}
+  </div>
+  <div style="font-size:11.5px;color:var(--text-3);margin-top:8px;">${
+    r.primAberta ? ('Vencimento mais antigo em aberto: '+escHtml(petFmtDataBR(r.primAberta.vencimento))) : 'Sem vencimento em aberto registrado — informe o termo inicial no cálculo.'
+  }${fonteLabel ? ' · Origem: '+fonteLabel : ''}</div>`;
   area.innerHTML = html;
 }
 function petSelAcordo(i){
-  _pet.acordo = (_pet.dev.acordos||[])[+i] || null;
+  _pet.acordo = (_pet._acordos||[])[+i] || null;
   _pet.resumo = null; _pet.calc = null;
-  petRenderAcordoArea();
+  petRenderResumoArea();
 }
 
 function petRenderTemplates(body){
@@ -14225,6 +14273,15 @@ function petResolveAuto(path){
     case 'acordo.parcelas_pagas': return r.pagas!=null ? String(r.pagas) : '';
     case 'acordo.parcelas_abertas': return r.abertas!=null ? String(r.abertas) : '';
     case 'acordo.saldo_aberto_brl': return r.saldo!=null ? fmtR(r.saldo) : '';
+    case 'divida.valor_original_brl': return r.nominal!=null ? fmtR(r.nominal) : (r.saldo!=null ? fmtR(r.saldo) : '');
+    case 'divida.valor_atual_brl': return _pet.calc ? fmtR(_pet.calc.total) : (r.saldo!=null ? fmtR(r.saldo) : '');
+    case 'divida.vencimento': return r.primAberta ? petFmtDataBR(r.primAberta.vencimento) : (r.vencimento ? petFmtDataBR(r.vencimento) : '');
+    case 'divida.data_calculo': return petFmtDataBR(new Date());
+    // Caracterização jurídica do título é sensível: só auto-preenche se o cadastro
+    // já tiver o tipo; senão deixa em branco para o advogado informar conscientemente.
+    case 'divida.descricao_origem': return dev.titulo || '';
+    case 'titulo.tipo': return dev.titulo || '';
+    case 'devedor.qualificacao': return dev.qualificacao || '';
     case 'calculo.total_brl': return _pet.calc ? fmtR(_pet.calc.total) : '';
     case 'advogado.nome': return 'Dr. Gustavo S. Teixeira dos Santos';
     case 'advogado.numero_oab': return '112.743';
@@ -14241,9 +14298,17 @@ function petRenderCampos(body){
   const vars = (_pet.tpl && _pet.tpl.variaveis) || [];
   // pré-fill auto + defaults
   vars.forEach(v=>{
-    if(v.auto && (_pet.dados[v.key]===undefined || _pet.dados[v.key]==='')){
+    const vazio = (_pet.dados[v.key]===undefined || _pet.dados[v.key]==='');
+    if(v.auto && vazio){
       const r = petResolveAuto(v.auto); if(r) _pet.dados[v.key] = r;
-    } else if(v.default && _pet.dados[v.key]===undefined){ _pet.dados[v.key] = v.default; }
+    } else if(v.default && _pet.dados[v.key]===undefined){
+      _pet.dados[v.key] = v.default;
+    } else if(!v.auto && vazio){
+      // Sem 'auto' explícito: tenta resolver pela própria chave (ex.: titulo.tipo,
+      // divida.descricao_origem). petResolveAuto devolve '' p/ chaves sem regra,
+      // então campos genuinamente manuais (processo.*) não são tocados.
+      const r = petResolveAuto(v.key); if(r) _pet.dados[v.key] = r;
+    }
   });
   _pet.dados['advogado.nome'] = 'Dr. Gustavo S. Teixeira dos Santos';
   _pet.dados['advogado.numero_oab'] = '112.743';
@@ -14310,9 +14375,17 @@ function petCalcular(){
   const dIni = petParseDate(termo), dFim = new Date();
   if(!dIni || dFim <= dIni){ showToast('Termo inicial inválido (deve ser passado).','warning'); return; }
   _pet.calc = _petCalcJuridica(valor, dIni, dFim, indice, multa, hon, juros);
-  _pet.dados['calculo.total_brl'] = fmtR(_pet.calc.total);
+  const totalFmt = fmtR(_pet.calc.total);
+  // Propaga o valor atualizado para as duas chaves possíveis de "valor atual" (peças de
+  // acordo usam calculo.total_brl; extrajudicial/monitória/cobrança usam divida.valor_atual_brl)
+  // e atualiza o input visível, sem re-renderizar (preserva o que o usuário digitou no cálculo).
+  ['calculo.total_brl','divida.valor_atual_brl'].forEach(k=>{
+    _pet.dados[k] = totalFmt;
+    const inp = document.querySelector('#pet-body [data-petkey="'+k+'"]');
+    if(inp) inp.value = totalFmt;
+  });
   document.getElementById('pet-calc-result').innerHTML = petCalcResumoHtml();
-  showToast('Cálculo aplicado: '+fmtR(_pet.calc.total),'success');
+  showToast('Cálculo aplicado: '+totalFmt,'success');
 }
 
 function petRenderPreview(body){
@@ -14328,12 +14401,14 @@ function petRenderPreview(body){
 function petProximo(){
   if(_pet.step===1){
     if(!_pet.dev){ showToast('Selecione um devedor.','warning'); return; }
-    if(!_pet.acordo){ showToast('Selecione o acordo.','warning'); return; }
-    _pet.resumo = petResumoAcordo(_pet.acordo);
+    _pet.resumo = _pet.acordo ? petResumoAcordo(_pet.acordo) : (_pet.resumo || petResumoInadimplencia(_pet.dev));
+    if(!_pet.resumo || !(_pet.resumo.saldo>0)){
+      if(!confirm('Não há saldo em aberto detectado para este devedor. Continuar mesmo assim?')) return;
+    }
   }
   if(_pet.step===2 && !_pet.tpl){ showToast('Escolha o tipo de petição.','warning'); return; }
-  if(_pet.step===3 && !_pet.dados['calculo.total_brl']){
-    if(!confirm('O valor atualizado (cálculo) está vazio. Continuar mesmo assim?')) return;
+  if(_pet.step===3 && !_pet.calc){
+    if(!confirm('Você não aplicou o cálculo de atualização (correção + juros). O valor usado será o nominal informado. Continuar assim?')) return;
   }
   if(_pet.step<4){ _pet.step++; petRenderStep(); }
 }
@@ -14406,17 +14481,20 @@ async function petSalvar(){
 // Petições já com o devedor selecionado, pulando para a escolha do modelo.
 function petAbrirParaDevedor(devId){
   showPage('docs');
-  setTimeout(()=>{
+  setTimeout(async ()=>{
     const btn = document.querySelector('#docs-tabs .cob-doctab[data-dtab="peticoes"]');
     setDocsTab('peticoes', btn);
     const dev = (DB.devedores||[]).find(d=>d.id===devId);
-    if(dev && (dev.acordos||[]).length){
-      petReset();
-      _pet.dev = dev;
-      if((dev.acordos||[]).length===1){ _pet.acordo = dev.acordos[0]; _pet.resumo = petResumoAcordo(_pet.acordo); }
-      _pet.step = _pet.acordo ? 2 : 1;
-      petRenderStep();
-    }
+    if(!dev) return;
+    await petCarregarTemplates();
+    await _loadInadimplentes().catch(()=>{});
+    petReset();
+    _pet.dev = dev;
+    const acs = (dev.acordos||[]).filter(a => (a.parcelas||[]).length);
+    if(acs.length===1){ _pet.acordo = acs[0]; _pet._acordos = acs; }
+    _pet.resumo = _pet.acordo ? petResumoAcordo(_pet.acordo) : petResumoInadimplencia(dev);
+    _pet.step = 2;
+    petRenderStep();
   }, 60);
 }
 
