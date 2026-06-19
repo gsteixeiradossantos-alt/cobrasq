@@ -10430,6 +10430,46 @@ function editarAprovarCedente(id){
   window._editarAprovarPendingId = id;
 }
 
+// FASE C — espelha a dívida do cadastro de devedor na tabela `cobrancas` (fonte
+// única lida pelo CRM/casos). Resolve o drift: editar a dívida no modal de devedor
+// agora chega ao casos. Invariante: cobranca.id == devedor.id (== caso.id).
+// Não-bloqueante: qualquer falha (ex.: RLS) é logada e não impede o save do devedor.
+async function syncDevedorCobranca(d){
+  const supa = (typeof getSupabase === 'function') ? getSupabase() : null;
+  if(!supa || !d || !d.id) return;
+  try{
+    const row = {
+      id: d.id,
+      cliente_id: d.clienteId || null,
+      status: d.status || null,
+      fase: d.fase || 'extrajudicial',
+      valor_orig: _devNumOrNull(d.valorOrig),
+      valor_atual: _devNumOrNull(d.valorAtual),
+      data_entrada: d.entrada || null,
+      vencimento: d.vencimento || null,
+      divida: d.divida || {},
+      tipo_cobranca: d.tipoCobranca || 'digital',
+      numero_processo: d.processoNum || null,
+      vara_tribunal: d.vara || null,
+      tipo_documento: d.titulo || null,
+      tags: Array.isArray(d.tags) ? d.tags : [],
+      observacoes: d.obs || null,
+      updated_at: new Date().toISOString()
+    };
+    if(d.assignedTo) row.assigned_to = d.assignedTo;
+    const { error:eup } = await supa.from('cobrancas').upsert(row, { onConflict:'id' });
+    if(eup){ console.warn('[sync cobranca] upsert:', eup.message); return; }
+    // Garante a parte principal (devedor_id == cobranca_id). Idempotente.
+    const { data:ja } = await supa.from('cobranca_partes')
+      .select('id').eq('cobranca_id', d.id).eq('devedor_id', d.id).maybeSingle();
+    if(!ja){
+      const { error:epar } = await supa.from('cobranca_partes')
+        .insert({ cobranca_id:d.id, devedor_id:d.id, papel:'emitente', principal:true });
+      if(epar) console.warn('[sync cobranca] parte:', epar.message);
+    }
+  }catch(e){ console.warn('[sync cobranca] ex:', e && e.message); }
+}
+
 function salvarDevedor(){
   const nome = (document.getElementById('mdev-nome').value||'').trim();
   const doc  = (document.getElementById('mdev-doc').value||'').trim();
@@ -10566,6 +10606,8 @@ function salvarDevedor(){
   save();
   // IMPLEMENTADO S2: persiste dívidas adicionais no Supabase
   mdevSalvarDividas(devData.id).catch(e=>console.warn('S2 salvarDividas erro:',e));
+  // FASE C — espelha a dívida na cobrança (fonte única do CRM/casos). Não-bloqueante.
+  syncDevedorCobranca(devData).catch(e=>console.warn('[sync cobranca] erro:',e));
   closeModal('modal-devedor');
   renderDevedores();
   if(currentDevId === id) renderDrawerBody(id);
