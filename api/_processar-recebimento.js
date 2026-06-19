@@ -52,24 +52,31 @@ module.exports = async function handler(req, res) {
       acordo = acs[0] || null;
     }
     if (acordo) {
-      const devs = await sbFetch(`devedores?id=eq.${acordo.devedor_id}&select=id,nome,telefone,valor_orig,cliente_id&limit=1`).catch(() => []);
+      const devs = await sbFetch(`devedores?id=eq.${acordo.devedor_id}&select=id,nome,telefone,cliente_id&limit=1`).catch(() => []);
       devedor = devs[0] || null;
     }
     // Fallback: casa o devedor pelo customer Asaas se não veio pelo acordo.
     if (!devedor && payment.customer) {
-      const devs = await sbFetch(`devedores?asaas_customer_id=eq.${encodeURIComponent(payment.customer)}&select=id,nome,telefone,valor_orig,cliente_id&limit=1`).catch(() => []);
+      const devs = await sbFetch(`devedores?asaas_customer_id=eq.${encodeURIComponent(payment.customer)}&select=id,nome,telefone,cliente_id&limit=1`).catch(() => []);
       devedor = devs[0] || null;
     }
     if (devedor && devedor.cliente_id) {
       const cls = await sbFetch(`clientes?id=eq.${devedor.cliente_id}&select=id,nome&limit=1`).catch(() => []);
       credor = cls[0] || null;
     }
+    // FASE C2 (tempo-2): valor original vem de `cobrancas` (fonte única; invariante
+    // cobranca.id == devedor.id), não mais de devedores.valor_orig (coluna depreciada).
+    let cobValorOrig = null;
+    if (devedor) {
+      const cobs = await sbFetch(`cobrancas?id=eq.${devedor.id}&select=valor_orig&limit=1`).catch(() => []);
+      cobValorOrig = cobs[0] ? cobs[0].valor_orig : null;
+    }
 
     // Split capital/honorário.
     const valorRecebido = round2(payment.value);
     const acordoTotal = Number(acordo && acordo.valor_total) || 0;
     const capitalBase = Number((acordo && acordo.metadata && acordo.metadata.capital_credor)) ||
-                        Number(devedor && devedor.valor_orig) || 0;
+                        Number(cobValorOrig) || 0;
     // P1 (auditoria 2026-06): só rateia quando há base segura (acordo.valor_total > 0).
     // Sem acordo vinculado, o código antigo forçava capitalRatio=0 → 100% honorário e
     // NUNCA repassava capital ao credor, silenciosamente. Agora, na falta de base,

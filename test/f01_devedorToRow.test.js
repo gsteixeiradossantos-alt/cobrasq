@@ -107,19 +107,28 @@ check('passo_atual OMITIDO quando vazio', !has(r4,'passo_atual'));
 check('encerramento OMITIDO quando vazio', !has(r4,'encerramento'));
 check('acordo_final OMITIDO quando vazio', !has(r4,'acordo_final'));
 check('encaminhamento_judicial OMITIDO quando vazio', !has(r4,'encaminhamento_judicial'));
+// FASE C2 (tempo-2): status/funil/dívida NÃO são mais gravados no devedor (vivem só
+// em `cobrancas`). devedorToRow NÃO deve emiti-los, mesmo presentes no objeto.
 var r5 = devedorToRow({ id:'d5', nome:'X', passoAtual:'negociacao', encerramento:'2026-06-10',
-                        acordoFinal:{x:1}, encaminhamentoJudicial:'sim' });
-check('passo_atual enviado quando há valor', r5.passo_atual === 'negociacao');
-check('encerramento enviado quando há valor', r5.encerramento === '2026-06-10');
-check('acordo_final enviado quando há valor', r5.acordo_final && r5.acordo_final.x === 1);
-check('encaminhamento_judicial enviado quando há valor', r5.encaminhamento_judicial === 'sim');
+                        acordoFinal:{x:1}, encaminhamentoJudicial:'sim',
+                        status:'Acordo', fase:'judicial', valorOrig:'1.000,00', tipoCobranca:'fisica' });
+check('passo_atual NÃO emitido (tempo-2)', !has(r5,'passo_atual'));
+check('encerramento NÃO emitido (tempo-2)', !has(r5,'encerramento'));
+check('acordo_final NÃO emitido (tempo-2)', !has(r5,'acordo_final'));
+check('encaminhamento_judicial NÃO emitido (tempo-2)', !has(r5,'encaminhamento_judicial'));
+check('status NÃO emitido (tempo-2)', !has(r5,'status'));
+check('fase NÃO emitida (tempo-2)', !has(r5,'fase'));
+check('valor_orig NÃO emitido (tempo-2)', !has(r5,'valor_orig'));
+check('tipo_cobranca NÃO emitido (tempo-2)', !has(r5,'tipo_cobranca'));
 
 // 4) Campos sempre presentes (não-CRM) continuam saindo no row, inclusive vazios.
 check('id sempre presente', has(r4,'id') && r4.id === 'd4');
 check('nome sempre presente', has(r4,'nome'));
-check('status sempre presente', has(r4,'status'));
-check('fase sempre presente (default extrajudicial)', r4.fase === 'extrajudicial');
-check('tipo_cobranca sempre presente (default digital)', r4.tipo_cobranca === 'digital');
+check('telefone (pessoa) sempre presente', has(r4,'telefone'));
 check('arquivado sempre presente (booleano)', has(r4,'arquivado') && r4.arquivado === false);
+// FASE C2 (tempo-2): a dívida não é mais emitida no row do devedor.
+check('status já NÃO sai no row', !has(r4,'status'));
+check('fase já NÃO sai no row', !has(r4,'fase'));
+check('divida já NÃO sai no row', !has(r4,'divida'));
 
 done(FAIL);
