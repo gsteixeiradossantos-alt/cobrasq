@@ -11862,6 +11862,50 @@ function _detTags(tags){
 }
 
 // ── 1) DETALHE DA COBRANÇA (2 layouts: Dossiê / Painel) ──────────────────────
+// FASE C2 — anexos por dívida (reusa tabela/bucket `documentos`, filtrando por
+// cobranca_id; devedor_id = principal p/ satisfazer a RLS de documentos).
+async function uploadAnexoCobranca(){
+  const ctx = window._anexoCtx; if(!ctx || !ctx.cobId) return;
+  const inp = document.getElementById('cob-anexo-file');
+  const file = inp && inp.files && inp.files[0];
+  if(!file) return;
+  if(file.size > 20*1024*1024){ showToast('Arquivo acima de 20 MB.','warning'); inp.value=''; return; }
+  const supa = getSupabase(); if(!supa) return;
+  const btn = document.getElementById('cob-anexo-btn');
+  if(btn){ btn.disabled = true; btn.textContent = 'Enviando…'; }
+  try{
+    const chave = (String(ctx.devDoc||'').replace(/\D/g,'')) || ('id-'+ctx.devId);
+    const cat = (document.getElementById('cob-anexo-cat')||{}).value || 'outros';
+    const nomeSeguro = file.name.replace(/[^a-zA-Z0-9._-]/g,'_');
+    const path = `cobrancas/${ctx.cobId}/${cat}/${Date.now()}_${nomeSeguro}`;
+    const { error: upErr } = await supa.storage.from('documentos')
+      .upload(path, file, { contentType: file.type || 'application/octet-stream', upsert: false });
+    if(upErr) throw upErr;
+    const { data: udata } = await supa.auth.getUser();
+    const { error: insErr } = await supa.from('documentos').insert({
+      devedor_doc: chave, devedor_id: ctx.devId, cobranca_id: ctx.cobId,
+      categoria: cat, nome: file.name, storage_path: path,
+      mime_type: file.type||null, size_bytes: file.size,
+      uploaded_by: udata && udata.user ? udata.user.id : null
+    });
+    if(insErr){ await supa.storage.from('documentos').move(path, '_lixeira/'+path).catch(()=>{}); throw insErr; }
+    showToast('Anexo enviado.','success');
+  }catch(e){
+    const msg = String(e && e.message || e);
+    showToast(/security|policy|denied|violates/i.test(msg)
+      ? 'Sem permissão: só o gestor e o responsável podem anexar.'
+      : 'Falha ao anexar: '+msg, 'danger');
+  }finally{ if(inp) inp.value=''; renderCobrancaDetalhe(); }
+}
+async function removerAnexoCobranca(docId){
+  if(currentUser?.tipo !== 'gestor'){ showToast('Apenas o gestor pode remover anexos.','warning'); return; }
+  if(!confirm('Remover este anexo da lista? (desativado, não apagado)')) return;
+  const supa = getSupabase(); if(!supa) return;
+  const { error } = await supa.from('documentos').update({ ativo:false }).eq('id', docId);
+  if(error){ showToast('Falha ao remover: '+error.message,'danger'); return; }
+  showToast('Anexo removido.','success'); renderCobrancaDetalhe();
+}
+
 function _detSetLayout(l){ try{ localStorage.setItem('cobrasq-detalhe-layout', l); }catch(_){ } renderCobrancaDetalhe(); }
 
 async function renderCobrancaDetalhe(){
@@ -11869,7 +11913,7 @@ async function renderCobrancaDetalhe(){
   if(!el) return;
   el.innerHTML = `<div class="det-wrap"><div style="padding:40px;text-align:center;color:var(--text-2);">Carregando…</div></div>`;
   const supa=getSupabase();
-  let cob=null, hist=[];
+  let cob=null, hist=[], anexos=[];
   if(supa && id){
     const { data } = await supa.from('cobrancas')
       .select('*, cobranca_partes(devedor_id,papel,principal,devedores(id,nome,doc,telefone,cidade,uf))')
@@ -11878,6 +11922,9 @@ async function renderCobrancaDetalhe(){
     const { data:ev } = await supa.from('devedor_eventos')
       .select('tipo,payload,criado_em').eq('cobranca_id',id).order('criado_em',{ascending:false}).limit(25);
     hist=ev||[];
+    const { data:ax } = await supa.from('documentos')
+      .select('id,nome,categoria,size_bytes,uploaded_at').eq('cobranca_id',id).eq('ativo',true).order('uploaded_at',{ascending:false});
+    anexos=ax||[];
   }
   if(!cob) cob=(DB_cobrancas||[]).find(c=>c.id===id)||null;
   if(!cob){ el.innerHTML=`<div class="det-wrap det-fade"><button class="det-back" onclick="showPage('cobr')">${ico('arrow-left',14)||'←'} Voltar</button><div class="cob-panel"><div class="cob-empty-big"><div class="cob-empty-tt">Cobrança não encontrada</div></div></div></div>`; return; }
@@ -11915,6 +11962,7 @@ async function renderCobrancaDetalhe(){
     <div class="det-panel-tt">Documento</div>
     <dl class="det-kv">
       <dt>Tipo</dt><dd>${escHtml(tipoDoc)}</dd>
+      <dt>Modalidade</dt><dd>${cob.tipo_cobranca==='fisica'?'Física':(cob.tipo_cobranca==='digital'?'Digital':'—')}</dd>
       <dt>Número</dt><dd>${escHtml(cob.numero_documento||'—')}</dd>
       <dt>Banco</dt><dd>${escHtml(cob.banco||'—')}</dd>
       <dt>Agência / Conta</dt><dd>${escHtml(cob.agencia_conta||'—')}</dd>
@@ -11959,14 +12007,34 @@ async function renderCobrancaDetalhe(){
       return `<div style="padding:9px 0;border-top:1px solid var(--border-2);font-size:12.5px;"><div style="color:var(--text-3);font-size:10px;font-family:var(--font-mono);margin-bottom:2px;">${escHtml(_detData(e.criado_em))}</div>${escHtml(t||'')}</div>`; }).join('') : _detEmpty('Sem histórico registrado.')}
   </div>`;
 
+  const principalP = partes.find(p=>p.principal) || partes[0] || null;
+  window._anexoCtx = { cobId: cob.id, devId: principalP ? principalP.devedor_id : cob.id, devDoc: principalP ? (principalP.devedores?.doc||'') : '' };
+  const ehGestorAx = currentUser?.tipo==='gestor';
+  const catOptsAx = DOC_CATEGORIAS.map(c=>`<option value="${c[0]}">${c[1]}</option>`).join('');
+  const panelAnexos=`<div class="cob-panel" style="padding:18px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+      <div class="det-panel-tt" style="margin:0;">Anexos${anexos.length?` (${anexos.length})`:''}</div>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <select id="cob-anexo-cat" style="padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:12px;font-family:inherit;background:var(--surface);color:var(--text);">${catOptsAx}</select>
+        <button class="btn btn-ghost btn-sm" id="cob-anexo-btn" onclick="document.getElementById('cob-anexo-file').click()">Anexar</button>
+        <input type="file" id="cob-anexo-file" style="display:none" accept=".pdf,.png,.jpg,.jpeg,.webp,.heic,.doc,.docx" onchange="uploadAnexoCobranca()"/>
+      </div>
+    </div>
+    ${anexos.length ? anexos.map(a=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;border:1px solid var(--border);border-radius:8px;padding:9px 12px;margin-bottom:8px;">
+      <div style="min-width:0;flex:1;"><div style="font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(a.nome)}</div>
+      <div style="font-size:10.5px;color:var(--text-3);margin-top:1px;">${escHtml(docCatLabel(a.categoria))}${a.size_bytes?` · ${(a.size_bytes/1024/1024).toFixed(a.size_bytes>1048576?1:2)} MB`:''}</div></div>
+      <div style="display:flex;gap:6px;flex-shrink:0;"><button class="btn btn-ghost btn-sm" onclick="baixarDocumentoDevedor('${a.id}')">Abrir</button>${ehGestorAx?`<button class="btn btn-ghost btn-sm" style="color:var(--danger);" onclick="removerAnexoCobranca('${a.id}')">Remover</button>`:''}</div>
+    </div>`).join('') : _detEmpty('Nenhum anexo. Envie cheque-frente, contrato, prints…')}
+  </div>`;
+
   const seg=`<div class="det-seg">
     <button class="${layout!=='painel'?'on':''}" onclick="_detSetLayout('dossie')">Dossiê</button>
     <button class="${layout==='painel'?'on':''}" onclick="_detSetLayout('painel')">Painel</button>
   </div>`;
 
   const body = layout==='painel'
-    ? `<div class="det-body single"><div class="det-col">${panelValores}${panelDevedores(true)}${panelDoc}${panelHist}</div></div>`
-    : `<div class="det-body"><div class="det-col">${panelValores}${panelDoc}</div><div class="det-col">${panelDevedores(false)}${panelHist}</div></div>`;
+    ? `<div class="det-body single"><div class="det-col">${panelValores}${panelDevedores(true)}${panelDoc}${panelAnexos}${panelHist}</div></div>`
+    : `<div class="det-body"><div class="det-col">${panelValores}${panelDoc}</div><div class="det-col">${panelDevedores(false)}${panelAnexos}${panelHist}</div></div>`;
 
   el.innerHTML=`<div class="det-wrap det-fade">
     <button class="det-back" onclick="showPage('cobr')">${ico('arrow-left',14)||'←'} Voltar para Cobranças</button>
@@ -12055,7 +12123,7 @@ async function renderDevedorDetalhe(){
     <div class="det-head">
       <span class="det-head-av">${escHtml(_detIniciais(dev.nome))}</span>
       <div><div class="det-head-tt">${escHtml(dev.nome||'—')}</div><div class="det-head-sub">${escHtml(dev.doc||'sem documento')}${dev.apelido?' · '+escHtml(dev.apelido):''}</div></div>
-      <div class="det-head-actions">${tel?_detWa(tel):''}<button class="cob-btn-primary" onclick="editDevedor('${dev.id}')">${ico('edit',14)} Editar cadastro</button></div>
+      <div class="det-head-actions">${tel?_detWa(tel):''}<button class="cob-btn-ghost" onclick="openDrawer('${dev.id}')" title="Asaas, acordos, registrar pagamento, documentos">${ico('eye',14)} Painel operacional</button><button class="cob-btn-primary" onclick="editDevedor('${dev.id}')">${ico('edit',14)} Editar cadastro</button></div>
     </div>
     ${meta}
     <div class="det-body"><div class="det-col">${panelDividas}${panelHist}</div><div class="det-col">${panelDados}</div></div>
@@ -12128,7 +12196,7 @@ async function renderClienteDetalhe(){
     <div class="det-head">
       <span class="det-head-av">${escHtml(_detIniciais(nome))}</span>
       <div><div class="det-head-tt">${escHtml(fantasia||nome)}</div><div class="det-head-sub">${escHtml(cli.doc||'cedente')}${fantasia?' · '+escHtml(nome):''}</div></div>
-      <div class="det-head-actions"><button class="cob-btn-primary" onclick="editCliente('${cli.id}')">${ico('edit',14)} Editar cadastro</button></div>
+      <div class="det-head-actions">${!ehColaborador()?`<button class="cob-btn-primary" onclick="editCliente('${cli.id}')">${ico('edit',14)} Editar cadastro</button>`:''}</div>
     </div>
     ${meta}
     <div class="det-body"><div class="det-col">${panelCarteira}${panelObs}</div><div class="det-col">${panelDados}${panelPortal}</div></div>
@@ -12160,7 +12228,7 @@ function _cobrVinculadasHTML(list){
     const credorNome = credor ? (credor.nomeFantasia||credor.nome_fantasia||credor.nome) : (cob.divida?.descricao||'—');
     const valor = fmtR(+cob.valor_atual || +cob.valor_orig || 0);
     const papelTxt = papel ? (PAPEL_LABELS[papel]||papel) : '';
-    return `<div onclick="closeModal('modal-devedor');closeModal('modal-cliente');showPage('cobr');setTimeout(()=>abrirCobrancaEdit('${cob.id}'),350)"
+    return `<div onclick="closeModal('modal-devedor');closeModal('modal-cliente');verCobranca('${cob.id}')"
         style="display:flex;justify-content:space-between;gap:10px;padding:9px 12px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;cursor:pointer;"
         onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background=''">
       <div><strong>${escHtml(credorNome)}</strong>${papelTxt?` <span style="color:var(--text-3);font-size:11px;">· ${escHtml(papelTxt)}${principal?' (principal)':''}</span>`:''}
