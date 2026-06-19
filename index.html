@@ -11775,6 +11775,26 @@ async function renderCobrancas(){
 let _cobrRespSeq = 0;
 function _cobrFmtNum(n){ return (n==null||n==='') ? '' : Number(n).toFixed(2).replace('.',','); }
 
+// FASE C — regras N:N puras (testáveis, sem DOM/DB):
+//  • garantirUmPrincipal: exatamente UM principal por dívida (espelha o índice
+//    único uq_cobranca_partes_principal). Sem marcação → 1º vira principal;
+//    múltiplos → o 1º marcado vence, os demais caem.
+//  • escolherDevedorExistente: dedup — reusa por CPF/CNPJ, depois por nome.
+function garantirUmPrincipal(resp){
+  if(!Array.isArray(resp) || !resp.length) return resp;
+  if(!resp.some(x=>x && x.principal)) resp[0].principal = true;
+  let visto = false;
+  for(const r of resp){ if(r && r.principal){ if(visto) r.principal = false; else visto = true; } }
+  return resp;
+}
+function escolherDevedorExistente(devedores, nome, doc){
+  const lista = devedores || [];
+  const rdig = docSoDigitos(doc);
+  return (rdig && lista.find(d=> docSoDigitos(d.doc)===rdig))
+      || lista.find(d=> (d.nome||'').toLowerCase() === (nome||'').toLowerCase())
+      || null;
+}
+
 // FASE C — busca rica: ao escolher/digitar um nome já cadastrado, preenche o CPF.
 function _cobrAutoDoc(input){
   const row = input.closest('.cobr-resp-row'); if(!row) return;
@@ -12319,7 +12339,7 @@ async function salvarCobranca(){
   })).filter(x=>x.nome);
 
   if(!resp.length){ showToast('Informe ao menos um responsável.','danger'); return; }
-  if(!resp.some(x=>x.principal)) resp[0].principal = true;
+  garantirUmPrincipal(resp);
 
   try{
     const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
@@ -12341,9 +12361,7 @@ async function salvarCobranca(){
 
     // 2) Resolve/cria os contatos (devedores) de cada responsável
     for(const r of resp){
-      const rdig = docSoDigitos(r.doc);
-      let dev = (DB.devedores||[]).find(d=> rdig && docSoDigitos(d.doc)===rdig)
-             || (DB.devedores||[]).find(d=> (d.nome||'').toLowerCase()===r.nome.toLowerCase());
+      let dev = escolherDevedorExistente(DB.devedores, r.nome, r.doc);
       if(dev){ r.devedorId = dev.id; r._novo = false; }
       else{
         const { data, error } = await supa.from('devedores')
