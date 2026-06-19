@@ -4531,6 +4531,36 @@ async function upsertAcordoRelational(devedorId, acordo){
   }catch(e){ return { ok:false, error:e.message }; }
 }
 
+// FASE C2 (tempo-2) — os ~150 leitores do cliente que liam a dívida do objeto
+// devedor (d.valorOrig/d.status/d.fase/…) passam a vê-la de `cobrancas` (fonte
+// única) SEM tocar cada call site: enriquecemos o objeto devedor em memória com
+// a dívida da sua cobrança. Invariante: cobranca.id == id do devedor principal.
+// Prefere cobrancas; mantém o valor do devedor como fallback (nunca zera nada).
+function _mergeDividaFromCobrancas(){
+  const byId = new Map((DB_cobrancas||[]).map(c=>[c.id, c]));
+  for(const d of (DB.devedores||[])){
+    const c = byId.get(d.id);
+    if(!c) continue;
+    if(c.valor_orig  != null) d.valorOrig  = String(c.valor_orig);
+    if(c.valor_atual != null) d.valorAtual = String(c.valor_atual);
+    if(c.status      != null) d.status     = c.status;
+    if(c.fase        != null) d.fase       = c.fase;
+    if(c.data_entrada!= null) d.entrada     = c.data_entrada;
+    if(c.vencimento  != null) d.vencimento = c.vencimento;
+    if(c.divida      != null) d.divida     = c.divida;
+    if(c.tipo_cobranca != null) d.tipoCobranca = c.tipo_cobranca;
+    // funil do CRM (vive em cobrancas desde 2026-06-15) — evita defasagem
+    if(c.passo_atual != null) d.passoAtual = c.passo_atual;
+    if(c.aguardando_resposta != null) d.aguardandoResposta = c.aguardando_resposta;
+    if(c.encerramento != null) d.encerramento = c.encerramento;
+    if(c.acordo_final != null) d.acordoFinal = c.acordo_final;
+    if(c.encaminhamento_judicial != null) d.encaminhamentoJudicial = c.encaminhamento_judicial;
+    // judicial promovido a coluna na FASE C
+    if(c.numero_processo != null) d.processoNum = c.numero_processo;
+    if(c.vara_tribunal   != null) d.vara        = c.vara_tribunal;
+  }
+}
+
 async function loadRelationalData(){
   // Sobrescreve DB.devedores e DB.clientes com dados das tabelas relacionais
   // (fonte da verdade pós-Fase 2.5). Roda só após login — antes disso, RLS
@@ -4539,13 +4569,17 @@ async function loadRelationalData(){
   if(!supa) return;
   const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
   if(!sess?.data?.session) return;
-  const [devedoresRel, clientesRel] = await Promise.all([
+  const [devedoresRel, clientesRel, cobrancasRel] = await Promise.all([
     loadDevedoresFromSupabase(),
-    loadClientesFromSupabase()
+    loadClientesFromSupabase(),
+    loadCobrancasFromSupabase()
   ]);
   // Só sobrescreve se a leitura foi não-nula (null = erro, [] = legítimo vazio mas pós-login)
   if(Array.isArray(devedoresRel)) DB.devedores = devedoresRel;
   if(Array.isArray(clientesRel))  DB.clientes  = clientesRel;
+  if(Array.isArray(cobrancasRel)) DB_cobrancas = cobrancasRel;
+  // FASE C2 (tempo-2): leitores do cliente passam a ver a dívida de cobrancas.
+  _mergeDividaFromCobrancas();
 }
 
 // Dual-write: durante a transição (até Fase 2.6d completa) cada save() escreve
