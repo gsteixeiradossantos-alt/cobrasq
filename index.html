@@ -4182,7 +4182,10 @@ const _DEV_COL_FIELDS = new Set([
   'valorOrig','valorAtual','entrada','responsavel','arquivado','createdAt','updatedAt',
   'passoAtual','assignedTo','aguardandoResposta','encerramento','acordoFinal',
   'encaminhamentoJudicial','etapaAtualizadaEm','divida','historico','acordos',
-  'tipoCobranca','asaasCustomerId'
+  'tipoCobranca','asaasCustomerId',
+  // F-20/rascunho-fantasma: isDraft/draftExpiresAt vão para COLUNAS próprias
+  // (is_draft / draft_expires_at), não mais enterrados no metadata.
+  'isDraft','draftExpiresAt'
 ]);
 
 function _devNumOrNull(v){
@@ -4214,6 +4217,9 @@ function devedorToRow(d){
     valor_atual: _devNumOrNull(d.valorAtual),
     data_entrada: d.entrada || null,
     arquivado: !!d.arquivado,
+    // rascunho na COLUNA (fonte única) — antes ia parar no metadata e "ressuscitava"
+    is_draft: !!d.isDraft,
+    draft_expires_at: d.draftExpiresAt || null,
     metadata,
     divida: d.divida || {},
     aguardando_resposta: !!d.aguardandoResposta,
@@ -4269,7 +4275,11 @@ function rowToDevedor(r){
     divida: r.divida || {},
     ...meta,
     historico: meta.historico || [],
-    acordos: meta.acordos || []
+    acordos: meta.acordos || [],
+    // is_draft mora na COLUNA (fonte única). Vem DEPOIS do ...meta de propósito,
+    // para a coluna VENCER qualquer resíduo legado de metadata.isDraft (rascunho-fantasma).
+    isDraft: !!r.is_draft,
+    draftExpiresAt: r.draft_expires_at || null
   };
 }
 
@@ -4286,6 +4296,9 @@ function clienteToRow(c){
     // IMPLEMENTADO S6: colunas de grupo (auto-FK para matriz)
     cliente_grupo_id: c.clienteGrupoId || null,
     eh_matriz: !!c.ehMatriz,
+    // rascunho de cliente na COLUNA (antes era perdido no round-trip)
+    is_draft: !!c.isDraft,
+    draft_expires_at: c.draftExpiresAt || null,
     metadata: {
       endereco: c.endereco || '',
       honorarios: c.honorarios || '',
@@ -4321,7 +4334,9 @@ function rowToCliente(r){
     loginEmail: meta.loginEmail || '',
     loginSenha: meta.loginSenha || '',
     createdAt: r.created_at,
-    updatedAt: r.updated_at
+    updatedAt: r.updated_at,
+    isDraft: !!r.is_draft,
+    draftExpiresAt: r.draft_expires_at || null
   };
 }
 
@@ -20349,8 +20364,12 @@ function _mv2BuildDocument(aiText){
   if(['peticao-cobranca','peticao-danos','cumprimento','execucao'].includes(_minuta.tipo)){
     return _mv2DocTeixeira(aiText);
   }
+  // Documentos da credora (notificação, proposta de acordo, confissão) → marca COBRASQ v3.
+  if(['notificacao','acordo','confissao'].includes(_minuta.tipo)){
+    return _mv2DocCobrasqV3(aiText);
+  }
 
-  // Convert AI plain text → HTML paragraphs + section headers
+  // (Fallback legado — os 7 tipos já roteiam acima.) Convert AI plain text → HTML paragraphs + section headers
   // BUG corrigido (2026-06-12): a IA às vezes devolve markdown (**negrito**,
   // ### títulos, listas) que aparecia cru no documento. Converte antes.
   const mdInline = s => escHtml(s)
@@ -20475,6 +20494,97 @@ body{font-family:'Inter',sans-serif;color:#2A2A2A;background:#E8E8E8;font-size:1
 </div>
 </body>
 </html>`;
+}
+
+// Documento da credora (notificação / proposta de acordo / confissão de dívida) na
+// identidade COBRASQ v3 "Marinho & Champagne" (skill identidade-visual-cobrasq):
+// timbrado branco + faixa Marinho + logo limpo (ponto dourado + cobrasq.), Fraunces /
+// Inter Tight / JetBrains Mono via Google Fonts. NÃO é peça judicial (essas usam o
+// timbre Teixeira & Azzolin em _mv2DocTeixeira).
+function _mv2DocCobrasqV3(aiText){
+  const dev  = (DB.devedores||[]).find(d=>d.id===_minuta.devId)||{};
+  const cred = (DB.clientes||[]).find(c=>c.id===dev.clienteId)||{};
+  const valor = parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0;
+  const tipo  = MINUTA_TIPOS.find(t=>t.id===_minuta.tipo)||{nome:'Documento'};
+  const c     = _minuta.campos||{};
+  const empresa = cred.nome||DB.config.empresa||'COBRASQ Recuperadora de Crédito e Cobrança Ltda.';
+  const cnpjEmp = cred.cnpj||DB.config.cnpj||'34.626.848/0001-42';
+  const meses=['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+  const dt=new Date(); const dataExt = dt.getDate()+' de '+meses[dt.getMonth()]+' de '+dt.getFullYear();
+  const mdInline = s => escHtml(s)
+    .replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>')
+    .replace(/__([^_]+)__/g,'<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g,'$1<em>$2</em>');
+  const body = (aiText||'').split('\n').filter(l=>l.trim()).map(l=>{
+    let t=l.trim(); const h=t.match(/^#{1,4}\s+(.*)$/); if(h) t=h[1].trim();
+    const li=t.match(/^[-*]\s+(.*)$/); if(li) return `<p>${mdInline(li[1])}</p>`;
+    const ehTit = h || (/^[0-9A-ZÁÉÍÓÚÇÃÂÊÔÀ\s,.ª-]{5,}$/.test(t) && t.length<70 && t===t.toUpperCase());
+    if(ehTit) return `<h2>${mdInline(t.replace(/^[IVX]+\s*[—\-.．]\s*/i,''))}</h2>`;
+    return `<p>${mdInline(t)}</p>`;
+  }).join('\n');
+  const fichaItems = [
+    ['Devedor', dev.nome||'—'], ['CPF / CNPJ', dev.doc||'—'],
+    ['Credor / cedente', empresa], ['Valor nominal', fmtR(valor)],
+    c.comarca?['Comarca / juízo', c.comarca]:null, c.num_processo?['Processo', c.num_processo]:null,
+    c.natureza?['Natureza do crédito', c.natureza]:null
+  ].filter(Boolean).map(a=>`<div class="item"><span class="rot">${escHtml(a[0])}</span><span class="val">${escHtml(a[1])}</span></div>`).join('');
+  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
+<title>${escHtml(tipo.nome)} — ${escHtml(dev.nome||'COBRASQ')}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600&family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--ink:#0A1530;--graphite:#15224A;--accent:#C9A961;--accent-2:#9C7F40;--paper:#EFEAD9;--ct:#26241F;--mute:rgba(10,21,48,.55);--line:rgba(10,21,48,.12);
+  --serif:"Fraunces","Times New Roman",serif;--serif-edit:"Instrument Serif",serif;--sans:"Inter Tight",-apple-system,system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+body{font-family:var(--sans);color:var(--ct);background:#E8E8E8;line-height:1.62;font-size:10.5pt}
+.pagina{width:210mm;min-height:297mm;margin:20px auto;background:#fff;box-shadow:0 4px 20px rgba(0,0,0,.1);overflow:hidden}
+.band{background:var(--ink);color:var(--paper);position:relative;display:flex;justify-content:space-between;align-items:center;gap:18px;padding:16px 40px 15px}
+.band::after{content:'';position:absolute;left:0;right:0;bottom:0;height:1.4px;background:var(--accent)}
+.lockup{display:flex;align-items:center;gap:13px}
+.lockup .dot{width:24px;height:24px;border-radius:50%;background:var(--accent);flex-shrink:0}
+.lockup .wm{font-family:var(--serif);font-weight:300;font-size:26px;line-height:1;text-transform:lowercase;color:var(--paper)}
+.lockup .wm .p{color:var(--accent)}
+.band-meta{text-align:right;font-family:var(--mono);font-size:6.6pt;line-height:1.6;letter-spacing:.08em;text-transform:uppercase;color:rgba(239,234,217,.72)}
+.band-meta strong{font-weight:500;color:rgba(239,234,217,.94)}
+.head{padding:30px 46px 0;text-align:center}
+.head .eyebrow{font-family:var(--mono);font-size:7.6pt;letter-spacing:.24em;text-transform:uppercase;color:var(--accent-2);margin-bottom:11px}
+.head h1{font-family:var(--serif);font-weight:400;font-size:25pt;line-height:1.08;letter-spacing:-.012em;color:var(--ink)}
+.corpo{padding:26px 46px 30px}
+.ficha{border:.8px solid var(--line);border-left:2.5px solid var(--accent);background:#FAF8F4;padding:16px 20px;margin-bottom:24px;display:grid;grid-template-columns:1fr 1fr;gap:9px 28px}
+.ficha .item{display:flex;flex-direction:column}
+.ficha .rot{font-family:var(--mono);font-size:6.8pt;text-transform:uppercase;letter-spacing:.1em;color:var(--accent-2);margin-bottom:2px}
+.ficha .val{color:var(--ink);font-weight:600;font-size:10pt}
+.corpo p{margin-bottom:11px;text-align:justify}
+.corpo p strong{color:var(--ink);font-weight:600}
+.corpo h2{font-family:var(--mono);font-size:9pt;font-weight:500;text-transform:uppercase;letter-spacing:.1em;color:var(--ink);margin:20px 0 9px;padding-bottom:5px;border-bottom:.8px solid var(--line)}
+.fecho-local{text-align:center;font-family:var(--serif-edit);font-style:italic;color:var(--graphite);font-size:12pt;margin-top:34px}
+.ass{margin-top:26px;text-align:center}
+.ass-linha{width:300px;border-top:.9px solid var(--ink);margin:0 auto 8px}
+.ass-nome{font-family:var(--serif);font-weight:500;color:var(--ink);font-size:13pt}
+.ass-cargo{font-family:var(--mono);font-size:7.4pt;letter-spacing:.06em;text-transform:uppercase;color:var(--accent-2);margin-top:3px}
+.rod{background:var(--ink);color:var(--paper);padding:18px 46px;margin-top:34px;position:relative;font-family:var(--mono);font-size:6.8pt;letter-spacing:.06em;line-height:1.8;text-transform:uppercase;color:rgba(239,234,217,.72);text-align:center}
+.rod::before{content:'';position:absolute;top:0;left:0;right:0;height:1.4px;background:var(--accent)}
+@media print{body{background:#fff}.pagina{box-shadow:none;margin:0}}
+@page{size:A4;margin:0}
+</style></head><body>
+<div class="pagina">
+  <header class="band">
+    <div class="lockup"><span class="dot"></span><span class="wm">cobrasq<span class="p">.</span></span></div>
+    <div class="band-meta"><strong>${escHtml(empresa)}</strong><br>CNPJ ${escHtml(cnpjEmp)} · Dois Vizinhos · PR</div>
+  </header>
+  <div class="head"><div class="eyebrow">Documento COBRASQ</div><h1>${escHtml(tipo.nome)}</h1></div>
+  <main class="corpo">
+    <div class="ficha">${fichaItems}</div>
+    ${body}
+    <div class="fecho-local">Dois Vizinhos, Estado do Paraná, ${dataExt}.</div>
+    <div class="ass">
+      <div class="ass-linha"></div>
+      <div class="ass-nome">Gustavo Teixeira</div>
+      <div class="ass-cargo">Proprietário · COBRASQ Recuperadora de Crédito e Cobrança Ltda.</div>
+    </div>
+  </main>
+  <footer class="rod">cobrasq.com.br · contato@cobrasq.com.br · WhatsApp (46) 98822-6533<br>Documento confidencial.</footer>
+</div></body></html>`;
 }
 
 // ── Step 4: Preview + export ──────────────────────────────────
@@ -22728,90 +22838,92 @@ function _reportTemplate(o){
 <title>Relatório de Andamento — ${escHtml(o.credorNome)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700;900&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600&family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-:root{--az:#0B2D5C;--aze:#081F3F;--dou:#E8A53C;--douc:#F5C56B;--br:#FFF;--ct:#2A2A2A;--cm:#555;--cc:#F5F5F5;--cb:#E0E0E0;--va:#2E7D4F;--ci:#6B6B6B}
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Inter',-apple-system,sans-serif;color:var(--ct);background:#E8E8E8;line-height:1.6;font-size:11pt}
+/* COBRASQ v3 · Marinho & Champagne (skill identidade-visual-cobrasq) — timbrado branco+azul */
+:root{--ink:#0A1530;--graphite:#15224A;--accent:#C9A961;--accent-2:#9C7F40;--paper:#EFEAD9;--br:#FFFFFF;--ct:#26241F;--mute:rgba(10,21,48,.55);--line:rgba(10,21,48,.12);--va:#2E7D4F;--ci:#6B6B6B;
+  --serif:"Fraunces","Times New Roman",serif;--serif-edit:"Instrument Serif",serif;--sans:"Inter Tight",-apple-system,system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+body{font-family:var(--sans);color:var(--ct);background:#E8E8E8;line-height:1.62;font-size:10.5pt}
 .pagina{width:210mm;min-height:297mm;margin:20px auto;background:var(--br);box-shadow:0 4px 20px rgba(0,0,0,.1);overflow:hidden}
-.cab{background:var(--az);color:var(--br);padding:28px 40px 60px;position:relative;overflow:hidden}
-.cab::before{content:'';position:absolute;bottom:-40px;left:-5%;width:110%;height:80px;background:var(--dou);transform:rotate(-2deg);z-index:1}
-.cab::after{content:'';position:absolute;bottom:-50px;left:-5%;width:110%;height:70px;background:var(--br);transform:rotate(-1.5deg);z-index:2}
-.cab-top{display:flex;justify-content:space-between;align-items:center;position:relative;z-index:3;margin-bottom:24px}
-.marca{color:var(--br);padding:10px 0}
-.marca-n{font-family:'Playfair Display',Georgia,serif;font-weight:700;font-size:32pt;letter-spacing:3px;line-height:1;margin-bottom:8px}
-.marca-s{font-size:8pt;letter-spacing:3.5px;text-transform:uppercase;opacity:.85}
-.info-doc{text-align:right;font-size:8.5pt;line-height:1.5;opacity:.9}
-.info-doc .r{font-weight:300;opacity:.7;text-transform:uppercase;letter-spacing:1px;font-size:7.5pt}
-.info-doc .v{font-weight:500;margin-bottom:6px}
-.tit{position:relative;z-index:3}
-.tit .kk{font-size:9pt;letter-spacing:4px;text-transform:uppercase;opacity:.75;margin-bottom:8px}
-.tit h1{font-family:'Playfair Display',serif;font-weight:700;font-size:22pt;line-height:1.15;color:var(--br);margin-bottom:10px}
-.tit .sub{font-size:10pt;opacity:.85;font-weight:300}
-.corpo{padding:40px 45px 30px}
-.sec{margin-bottom:32px}
-.sec h2{font-family:'Playfair Display',serif;color:var(--az);font-size:15pt;font-weight:700;margin-bottom:14px;padding-bottom:8px;border-bottom:2px solid var(--dou);display:inline-block;padding-right:40px}
-.sec h3{color:var(--az);font-size:11pt;font-weight:600;margin-top:18px;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px}
-.sec p{margin-bottom:12px;text-align:justify}
-.sec p strong{color:var(--az);font-weight:600}
-.ficha-caso{background:var(--cc);border-left:4px solid var(--dou);padding:18px 22px;margin-bottom:20px;display:grid;grid-template-columns:1fr 1fr;gap:10px 30px;font-size:10pt}
+.cab{padding:0}
+.cab-band{background:var(--ink);color:var(--paper);position:relative;display:flex;justify-content:space-between;align-items:center;gap:18px;padding:16px 40px 15px}
+.cab-band::after{content:'';position:absolute;left:0;right:0;bottom:0;height:1.4px;background:var(--accent)}
+.lockup{display:flex;align-items:center;gap:13px}
+.lockup .dot{width:24px;height:24px;border-radius:50%;background:var(--accent);flex-shrink:0}
+.lockup .wm{font-family:var(--serif);font-weight:300;font-size:26px;line-height:1;letter-spacing:.01em;text-transform:lowercase;color:var(--paper)}
+.lockup .wm .p{color:var(--accent)}
+.band-meta{text-align:right;font-family:var(--mono);font-size:6.6pt;line-height:1.6;letter-spacing:.08em;text-transform:uppercase;color:rgba(239,234,217,.72)}
+.band-meta strong{font-weight:500;color:rgba(239,234,217,.94)}
+.tit{padding:30px 45px 0}
+.tit .kk{font-family:var(--mono);font-size:7.6pt;letter-spacing:.24em;text-transform:uppercase;color:var(--accent-2);margin-bottom:10px}
+.tit h1{font-family:var(--serif);font-weight:400;font-size:26pt;line-height:1.1;letter-spacing:-.012em;color:var(--ink);margin-bottom:6px}
+.tit .sub{font-family:var(--serif-edit);font-style:italic;font-size:12.5pt;color:var(--graphite)}
+.tit .info-row{display:flex;gap:34px;margin-top:16px;font-family:var(--mono);font-size:7pt;letter-spacing:.06em;text-transform:uppercase;color:var(--mute)}
+.tit .info-row b{display:block;color:var(--ink);font-weight:500;font-size:8.4pt;margin-top:2px;letter-spacing:.02em}
+.corpo{padding:32px 45px 30px}
+.sec{margin-bottom:30px}
+.sec h2{font-family:var(--serif);color:var(--ink);font-size:15pt;font-weight:500;margin-bottom:14px;padding-bottom:7px;border-bottom:.8px solid var(--line);position:relative}
+.sec h2::after{content:'';position:absolute;left:0;bottom:-.8px;width:46px;height:1.6px;background:var(--accent)}
+.sec h3{color:var(--ink);font-size:9.5pt;font-weight:600;margin-top:18px;margin-bottom:8px;text-transform:uppercase;letter-spacing:.08em;font-family:var(--mono)}
+.sec p{margin-bottom:11px;text-align:justify}
+.sec p strong{color:var(--ink);font-weight:600}
+.ficha-caso{background:#FAF8F4;border-left:2.5px solid var(--accent);padding:18px 22px;margin-bottom:20px;display:grid;grid-template-columns:1fr 1fr;gap:10px 30px;font-size:10pt}
 .ficha-caso .item{display:flex;flex-direction:column}
-.ficha-caso .rotulo{font-size:7.5pt;text-transform:uppercase;letter-spacing:1px;color:var(--cm);font-weight:500;margin-bottom:2px}
-.ficha-caso .valor{color:var(--az);font-weight:600}
+.ficha-caso .rotulo{font-family:var(--mono);font-size:7pt;text-transform:uppercase;letter-spacing:.1em;color:var(--accent-2);margin-bottom:3px}
+.ficha-caso .valor{color:var(--ink);font-weight:600}
 .indicadores{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
-.indicador{background:var(--cc);border-left:4px solid var(--dou);padding:14px 16px}
-.indicador .rotulo{font-size:7.5pt;text-transform:uppercase;letter-spacing:1px;color:var(--cm);font-weight:500;margin-bottom:4px}
-.indicador .valor{color:var(--az);font-weight:700;font-family:'Playfair Display',serif;font-size:16pt;line-height:1.1}
-.indicador .detalhe{font-size:8pt;color:var(--cm);margin-top:2px}
-.linha-tempo{list-style:none;padding-left:0;margin-top:10px;border-left:2px solid var(--cb);margin-left:8px}
-.linha-tempo li{padding:10px 0 10px 24px;position:relative}
-.linha-tempo li::before{content:'';position:absolute;left:-7px;top:15px;width:12px;height:12px;background:var(--dou);border:2px solid var(--br);border-radius:50%;box-shadow:0 0 0 2px var(--dou)}
-.linha-tempo li.destacado::before{background:var(--az);box-shadow:0 0 0 2px var(--az)}
-.linha-tempo .data{font-weight:600;color:var(--az);font-size:10pt;display:block}
+.indicador{background:#FAF8F4;border-top:2px solid var(--accent);padding:14px 16px}
+.indicador .rotulo{font-family:var(--mono);font-size:7pt;text-transform:uppercase;letter-spacing:.1em;color:var(--accent-2);margin-bottom:5px}
+.indicador .valor{color:var(--ink);font-weight:500;font-family:var(--serif);font-size:18pt;line-height:1.05}
+.indicador .detalhe{font-size:8pt;color:var(--mute);margin-top:3px}
+.linha-tempo{list-style:none;padding-left:0;margin-top:10px;border-left:1.5px solid var(--line);margin-left:8px}
+.linha-tempo li{padding:9px 0 9px 24px;position:relative}
+.linha-tempo li::before{content:'';position:absolute;left:-6px;top:14px;width:10px;height:10px;background:var(--accent);border:2px solid var(--br);border-radius:50%}
+.linha-tempo li.destacado::before{background:var(--ink)}
+.linha-tempo .data{font-family:var(--mono);font-weight:500;color:var(--accent-2);font-size:8.5pt;letter-spacing:.04em;display:block}
 .linha-tempo .acao{font-size:10pt;margin-top:2px}
 .tabela-consolidada{width:100%;border-collapse:collapse;margin-top:14px;font-size:9.5pt}
-.tabela-consolidada thead{background:var(--az);color:var(--br)}
-.tabela-consolidada th{padding:11px 12px;text-align:left;font-weight:500;letter-spacing:.8px;text-transform:uppercase;font-size:8pt}
-.tabela-consolidada td{padding:11px 12px;border-bottom:1px solid var(--cb);vertical-align:top}
-.tabela-consolidada .devedor{font-weight:600;color:var(--az)}
-.tabela-consolidada .valor-num{font-weight:600;white-space:nowrap}
-.tabela-consolidada .processo{font-family:'Courier New',monospace;font-size:8.5pt;color:var(--cm)}
-.etiqueta{display:inline-block;padding:3px 8px;border-radius:3px;font-size:7.5pt;font-weight:600;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
-.etiqueta-execucao{background:rgba(46,125,79,.12);color:var(--va);border:1px solid var(--va)}
-.etiqueta-encerrada{background:rgba(107,107,107,.12);color:var(--ci);border:1px solid var(--ci)}
-.tabela-consolidada tfoot tr{background:var(--cc);font-weight:700}
-.tabela-consolidada tfoot td{padding:13px 12px;border-top:2px solid var(--az);border-bottom:2px solid var(--az);color:var(--az)}
-.assin{margin-top:50px;padding-top:30px}
-.assin-linha{width:280px;border-top:1px solid var(--ct);margin-bottom:6px}
-.assin-nome{font-weight:600;color:var(--az);font-size:10.5pt}
-.assin-cargo{font-size:9.5pt;color:var(--cm)}
-.rod{background:var(--aze);color:var(--br);padding:24px 45px;margin-top:30px;font-size:8.5pt;position:relative}
-.rod::before{content:'';position:absolute;top:0;left:0;right:0;height:4px;background:var(--dou)}
-.rod-grid{display:grid;grid-template-columns:2fr 1fr;gap:30px;margin-bottom:16px}
-.rod-bloco .rotulo{text-transform:uppercase;letter-spacing:1.5px;font-size:7pt;opacity:.6;margin-bottom:6px;font-weight:500}
-.rod-bloco .conteudo{line-height:1.7;opacity:.92}
-.rod-bloco a{color:var(--douc);text-decoration:none}
-.conf{border-top:1px solid rgba(255,255,255,.15);padding-top:14px;font-size:7.5pt;opacity:.65;font-style:italic;text-align:center;letter-spacing:.3px}
-@media print{body{background:white}.pagina{box-shadow:none;margin:0}}
+.tabela-consolidada thead{background:var(--ink);color:var(--paper)}
+.tabela-consolidada th{padding:10px 12px;text-align:left;font-family:var(--mono);font-weight:500;letter-spacing:.08em;text-transform:uppercase;font-size:7.5pt}
+.tabela-consolidada td{padding:10px 12px;border-bottom:.6px solid var(--line);vertical-align:top}
+.tabela-consolidada .devedor{font-weight:600;color:var(--ink)}
+.tabela-consolidada .valor-num{font-weight:600;white-space:nowrap;font-family:var(--mono)}
+.tabela-consolidada .processo{font-family:var(--mono);font-size:8pt;color:var(--mute)}
+.etiqueta{display:inline-block;padding:3px 8px;border-radius:2px;font-family:var(--mono);font-size:7pt;font-weight:500;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
+.etiqueta-execucao{background:rgba(46,125,79,.1);color:var(--va);border:1px solid rgba(46,125,79,.5)}
+.etiqueta-encerrada{background:rgba(107,107,107,.1);color:var(--ci);border:1px solid rgba(107,107,107,.45)}
+.tabela-consolidada tfoot tr{background:#FAF8F4;font-weight:700}
+.tabela-consolidada tfoot td{padding:12px;border-top:1.4px solid var(--ink);border-bottom:1.4px solid var(--ink);color:var(--ink)}
+.assin{margin-top:46px;padding-top:28px}
+.assin-linha{width:280px;border-top:.9px solid var(--ink);margin-bottom:6px}
+.assin-nome{font-family:var(--serif);font-weight:500;color:var(--ink);font-size:12pt}
+.assin-cargo{font-family:var(--mono);font-size:7.5pt;letter-spacing:.06em;text-transform:uppercase;color:var(--accent-2)}
+.rod{background:var(--ink);color:var(--paper);padding:22px 45px;margin-top:30px;font-size:8.5pt;position:relative}
+.rod::before{content:'';position:absolute;top:0;left:0;right:0;height:1.4px;background:var(--accent)}
+.rod-grid{display:grid;grid-template-columns:2fr 1fr;gap:30px;margin-bottom:14px}
+.rod-bloco .rotulo{font-family:var(--mono);text-transform:uppercase;letter-spacing:.12em;font-size:6.6pt;color:rgba(239,234,217,.6);margin-bottom:6px}
+.rod-bloco .conteudo{line-height:1.7;color:rgba(239,234,217,.9)}
+.rod-bloco a{color:var(--accent);text-decoration:none}
+.conf{border-top:1px solid rgba(239,234,217,.16);padding-top:13px;font-family:var(--mono);font-size:6.8pt;letter-spacing:.06em;color:rgba(239,234,217,.6);text-align:center}
+@media print{body{background:#fff}.pagina{box-shadow:none;margin:0}}
 @page{size:A4;margin:0}
 </style></head><body>
 <div class="pagina">
   <header class="cab">
-    <div class="cab-top">
-      <div class="marca">
-        <div class="marca-n">COBRASQ</div>
-        <div class="marca-s">Recuperadora de Crédito</div>
-      </div>
-      <div class="info-doc">
-        <div class="r">Data de Emissão</div><div class="v">${escHtml(o.dataEmissao)}</div>
-        <div class="r">Período de Referência</div><div class="v">${escHtml(o.periodo)}</div>
-        <div class="r">Responsável</div><div class="v">${escHtml(o.resp)} — ${escHtml(o.cargo)}</div>
-      </div>
+    <div class="cab-band">
+      <div class="lockup"><span class="dot"></span><span class="wm">cobrasq<span class="p">.</span></span></div>
+      <div class="band-meta"><strong>COBRASQ Recuperadora de Crédito e Cobrança Ltda.</strong><br>CNPJ 34.626.848/0001-42 · Dois Vizinhos · PR</div>
     </div>
     <div class="tit">
       <div class="kk">${escHtml(o.kicker)}</div>
       <h1>${escHtml(o.credorNome)}</h1>
-      <div class="sub">Emitido por COBRASQ Recuperadora de Crédito e Cobrança Ltda.</div>
+      <div class="sub">Relatório de andamento da recuperação de crédito</div>
+      <div class="info-row">
+        <div>Emitido em<b>${escHtml(o.dataEmissao)}</b></div>
+        <div>Período de referência<b>${escHtml(o.periodo)}</b></div>
+        <div>Responsável<b>${escHtml(o.resp)} · ${escHtml(o.cargo)}</b></div>
+      </div>
     </div>
   </header>
   <main class="corpo">
