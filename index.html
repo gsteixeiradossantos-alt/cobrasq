@@ -15822,14 +15822,31 @@ async function renderFinImportacao(el){
   </tr>`).join('');
   el.innerHTML = `<div class="panel" style="padding:16px;">
     <h3 style="margin:0 0 6px;">Importação Asaas → CRM</h3>
-    <p style="font-size:12.5px;color:var(--text-3);margin:0 0 12px;">Clientes do Asaas sem cadastro local (página: ${d.pagina||0} clientes; sem cadastro: ${d.sem_cadastro||0}). Complete o nome e salve — o vínculo Asaas é gravado automaticamente.</p>
+    <p style="font-size:12.5px;color:var(--text-3);margin:0 0 12px;">Clientes do Asaas sem cadastro local (página: ${d.pagina||0} clientes; sem cadastro: ${d.sem_cadastro||0}). Salve um a um, ou use <strong>Importar todos</strong> para trazê-los em lote com cadastro mínimo (nome do Asaas + CPF/CNPJ + vínculo) — a qualificação pode ser preenchida depois. O vínculo Asaas é gravado automaticamente.</p>
     ${window._impList.length? `<table class="data-table" style="width:100%;"><thead><tr><th>Nome</th><th>CPF/CNPJ</th><th>Telefone</th><th>Endereço</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
       : `<div style="text-align:center;padding:20px;color:var(--text-3);">Nenhum cliente Asaas sem cadastro nesta página.</div>`}
-    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end;">
-      <button class="btn btn-sm" ${offset>0?'':'disabled'} onclick="window._impOffset=Math.max(0,(window._impOffset||0)-100);renderFinTab('imp_asaas')">◀ Anterior</button>
-      <button class="btn btn-sm" ${d.hasMore?'':'disabled'} onclick="window._impOffset=(window._impOffset||0)+100;renderFinTab('imp_asaas')">Próxima ▶</button>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center;flex-wrap:wrap;">
+      <button class="btn btn-sm btn-primary" ${window._impList.length?'':'disabled'} onclick="importarTodosAsaas()">⬇ Importar todos desta página (mínimo)</button>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-sm" ${offset>0?'':'disabled'} onclick="window._impOffset=Math.max(0,(window._impOffset||0)-100);renderFinTab('imp_asaas')">◀ Anterior</button>
+        <button class="btn btn-sm" ${d.hasMore?'':'disabled'} onclick="window._impOffset=(window._impOffset||0)+100;renderFinTab('imp_asaas')">Próxima ▶</button>
+      </div>
     </div>
   </div>`;
+}
+
+// Monta um devedor mínimo a partir de um cliente do Asaas (sem qualificação: só
+// nome do Asaas + CPF/CNPJ + vínculo cus_). A qualificação pode ser preenchida depois.
+function _impDevedorFromAsaas(c, nomeOverride){
+  const nome = ((nomeOverride!=null ? nomeOverride : (c.nome||'')).trim())
+    || ('(sem nome) ' + (c.cpf || c.asaas_customer_id || ''));
+  const rid = (window.crypto&&crypto.randomUUID) ? crypto.randomUUID()
+    : ('imp-'+Date.now()+'-'+Math.floor(Math.random()*1e6));
+  return {
+    id: rid,
+    nome, doc:c.cpf||'', tel:c.telefone||'', email:c.email||'', endereco:c.endereco||'',
+    asaasCustomerId:c.asaas_customer_id||'', status:'Cobrar', fase:'extrajudicial'
+  };
 }
 
 async function importarDevedor(i){
@@ -15837,17 +15854,42 @@ async function importarDevedor(i){
   const nome = (document.getElementById('imp-nome-'+i)?.value||'').trim();
   if(!nome){ showToast('Informe o nome do devedor','warning'); return; }
   try{
-    const dev = {
-      id: (window.crypto&&crypto.randomUUID)?crypto.randomUUID():('imp-'+Date.now()),
-      nome, doc:c.cpf||'', tel:c.telefone||'', email:c.email||'', endereco:c.endereco||'',
-      asaasCustomerId:c.asaas_customer_id||'', status:'Cobrar', fase:'extrajudicial'
-    };
+    const dev = _impDevedorFromAsaas(c, nome);
     const r = await upsertDevedorRelational(dev);
     if(!r.ok) throw new Error(r.error||'Falha ao salvar');
     if(Array.isArray(DB.devedores)){ DB.devedores.push(dev); save(); }
+    window._inadCache = null; // re-mapeia inadimplência do Asaas com o novo vínculo
     showToast('Devedor importado: '+nome,'success');
     renderFinTab('imp_asaas');
   }catch(e){ showToast('Erro ao importar: '+(e.message||e),'danger'); }
+}
+
+// Importa em lote todos os clientes do Asaas listados (página atual), criando um
+// cadastro mínimo p/ cada um que tenha CPF/CNPJ. Reusa o caminho de _impDevedorFromAsaas
+// + upsertDevedorRelational (mesmo do botão "Salvar" individual). Respeita o nome
+// eventualmente editado na linha. Os sem CPF/CNPJ são ignorados.
+async function importarTodosAsaas(){
+  const lista = window._impList || [];
+  const temDoc = c => !!String(c.cpf||'').replace(/\D/g,'');
+  const alvo = lista.filter(temDoc);
+  if(!alvo.length){ showToast('Nenhum cliente com CPF/CNPJ para importar nesta página.','warning'); return; }
+  if(!confirm(`Importar ${alvo.length} cliente(s) do Asaas como devedores?\n\nCadastro mínimo: nome (do Asaas) + CPF/CNPJ + vínculo Asaas. Sem CPF/CNPJ são ignorados; a qualificação pode ser completada depois.`)) return;
+  let ok=0, fail=0;
+  for(let i=0;i<lista.length;i++){
+    const c = lista[i];
+    if(!temDoc(c)) continue;
+    const nomeInput = document.getElementById('imp-nome-'+i)?.value; // respeita edição na linha
+    const dev = _impDevedorFromAsaas(c, nomeInput);
+    try{
+      const r = await upsertDevedorRelational(dev);
+      if(!r.ok) throw new Error(r.error||'falha');
+      if(Array.isArray(DB.devedores)) DB.devedores.push(dev);
+      ok++;
+    }catch(e){ fail++; console.warn('[importar-asaas-lote]', c.asaas_customer_id, e.message||e); }
+  }
+  if(ok){ save(); window._inadCache = null; }
+  showToast(`Importados ${ok}${fail?` · ${fail} falharam`:''}. Já aparecem em Devedores e na aba Petições (os com cobrança vencida).`, fail?'warning':'success');
+  renderFinTab('imp_asaas');
 }
 
 async function renderFinVisao(el){
