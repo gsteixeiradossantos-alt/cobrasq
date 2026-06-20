@@ -19615,6 +19615,7 @@ function renderWhatsApp(){
     </div>
     <div class="tabs" style="margin-bottom:16px;">
       <div class="tab ${activeTab==='conversas'?'active':''}" onclick="setWATab('conversas',this)">Conversas</div>
+      <div class="tab ${activeTab==='agendados'?'active':''}" onclick="setWATab('agendados',this)">Agendados</div>
       <div class="tab ${activeTab==='config'?'active':''}" onclick="setWATab('config',this)">Configuração</div>
       <div class="tab ${activeTab==='regua'?'active':''}" onclick="setWATab('regua',this)">Régua</div>
       <div class="tab ${activeTab==='templates'?'active':''}" onclick="setWATab('templates',this)">Templates</div>
@@ -19635,9 +19636,315 @@ function renderWATab(tab){
   const el = document.getElementById('wa-content');
   if(!el) return;
   if(tab==='conversas') renderWAConversas(el);
+  else if(tab==='agendados') renderWAAgendados(el);
   else if(tab==='config') renderWAConfig(el);
   else if(tab==='regua') renderWARegua(el);
   else if(tab==='templates') renderWATemplates(el);
+}
+
+// ============================================================
+// Agendamento de mensagens WhatsApp (texto / áudio / documento)
+// Grava em crm_mensagens_agendadas; o worker cron-mensagens-agendadas
+// envia no horário marcado via Z-API. Ver migrations 2026-05-10 e 20260620_01.
+// ============================================================
+
+// Feriados nacionais (BR) do ano, como Set de 'YYYY-MM-DD'.
+// Fixos + móveis (base na Páscoa, algoritmo de Meeus/Butcher).
+function feriadosBR(ano){
+  const pad = n => String(n).padStart(2,'0');
+  const ymd = (a,m,d) => `${a}-${pad(m)}-${pad(d)}`;
+  // Páscoa (domingo) — algoritmo de Meeus/Jones/Butcher
+  const a=ano%19, b=Math.floor(ano/100), c=ano%100, d=Math.floor(b/4), e=b%4,
+        f=Math.floor((b+8)/25), g=Math.floor((b-f+1)/3), h=(19*a+b-d-g+15)%30,
+        i=Math.floor(c/4), k=c%4, l=(32+2*e+2*i-h-k)%7, mth=Math.floor((a+11*h+22*l)/451),
+        mes=Math.floor((h+l-7*mth+114)/31), dia=((h+l-7*mth+114)%31)+1;
+  const pascoa = new Date(ano, mes-1, dia);
+  const addDias = (base, n) => { const x=new Date(base); x.setDate(x.getDate()+n); return ymd(x.getFullYear(), x.getMonth()+1, x.getDate()); };
+  return new Set([
+    ymd(ano,1,1),   // Confraternização Universal
+    ymd(ano,4,21),  // Tiradentes
+    ymd(ano,5,1),   // Dia do Trabalho
+    ymd(ano,9,7),   // Independência
+    ymd(ano,10,12), // Nossa Senhora Aparecida
+    ymd(ano,11,2),  // Finados
+    ymd(ano,11,15), // Proclamação da República
+    ymd(ano,11,20), // Consciência Negra (feriado nacional desde 2024)
+    ymd(ano,12,25), // Natal
+    addDias(pascoa,-47), // Carnaval (segunda)
+    addDias(pascoa,-46), // Carnaval (terça)
+    addDias(pascoa,-2),  // Sexta-feira Santa
+    addDias(pascoa,60),  // Corpus Christi
+  ]);
+}
+
+// É dia útil (seg–sáb, excluindo domingo e feriados nacionais)?
+function ehDiaUtilWA(dt){
+  if(dt.getDay()===0) return false; // domingo
+  const pad = n => String(n).padStart(2,'0');
+  const chave = `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}`;
+  return !feriadosBR(dt.getFullYear()).has(chave);
+}
+
+// Default inteligente: hoje às 09:00; se já passou (ou não é dia útil),
+// próximo dia útil às 09:00. Retorna string p/ <input type="datetime-local">.
+function proximoEnvioUtil(){
+  const agora = new Date();
+  const dt = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate(), 9, 0, 0, 0);
+  if(dt <= agora) dt.setDate(dt.getDate()+1);
+  while(!ehDiaUtilWA(dt)) dt.setDate(dt.getDate()+1);
+  return paraDatetimeLocal(dt);
+}
+
+// Date -> 'YYYY-MM-DDTHH:mm' no horário local (formato do datetime-local).
+function paraDatetimeLocal(dt){
+  const pad = n => String(n).padStart(2,'0');
+  return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+}
+
+// Estado do compositor de agendamento (em memória).
+window._waAgend = window._waAgend || { tipo:'texto', audioBlob:null, audioUrl:'', docFile:null };
+
+function renderWAAgendados(el){
+  const A = window._waAgend;
+  const devs = (DB.devedores||[]).filter(d=>d.tel||d.telefone);
+  const selId = A.devId || (devs[0]?.id) || '';
+  A.devId = selId;
+  if(!A.quando) A.quando = proximoEnvioUtil();
+
+  const tipoBtn = (val,label,icone) => `<button type="button" onclick="setWAAgendTipo('${val}')" class="btn ${A.tipo===val?'btn-primary':'btn-ghost'} btn-sm" style="flex:1;">${icone} ${label}</button>`;
+
+  el.innerHTML = `
+    <div class="grid-2" style="align-items:start;">
+      <div class="panel">
+        <div class="panel-header"><span class="panel-title">Agendar mensagem</span></div>
+        <div class="panel-body">
+          <div class="fg">
+            <label>Cliente / devedor</label>
+            <select id="waAgendDev" onchange="window._waAgend.devId=this.value" style="width:100%;">
+              ${devs.map(d=>`<option value="${d.id}" ${d.id===selId?'selected':''}>${escHtml(d.nome||'(sem nome)')} — ${escHtml(d.tel||d.telefone||'')}</option>`).join('')}
+            </select>
+            ${devs.length===0?`<div style="font-size:12px;color:var(--text-3);margin-top:6px;">Nenhum devedor com telefone cadastrado.</div>`:''}
+          </div>
+
+          <div class="fg">
+            <label>Tipo de envio</label>
+            <div style="display:flex;gap:6px;">
+              ${tipoBtn('texto','Texto','💬')}
+              ${tipoBtn('audio','Áudio','🎙️')}
+              ${tipoBtn('documento','Documento','📎')}
+            </div>
+          </div>
+
+          <div id="waAgendCorpo">${renderWAAgendCorpo()}</div>
+
+          <div class="fg">
+            <label>Data e hora do envio</label>
+            <input type="datetime-local" id="waAgendQuando" value="${escHtml(A.quando)}" onchange="window._waAgend.quando=this.value" style="width:100%;"/>
+            <div style="font-size:11.5px;color:var(--text-3);margin-top:5px;">Padrão: 09:00. Se já passou das 9h (ou não é dia útil), vai para o próximo dia útil — seg. a sáb., pulando domingos e feriados.</div>
+          </div>
+
+          <button class="btn btn-primary" onclick="confirmarAgendamentoWA()" style="width:100%;margin-top:6px;">📅 Agendar envio</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Próximos agendamentos</span>
+          <button class="btn btn-ghost btn-sm" onclick="renderWAAgendListReload()">Atualizar</button>
+        </div>
+        <div class="panel-body" id="waAgendLista">
+          <div style="color:var(--text-3);font-size:12px;">Carregando…</div>
+        </div>
+      </div>
+    </div>
+  `;
+  carregarWAAgendados();
+}
+
+function renderWAAgendCorpo(){
+  const A = window._waAgend;
+  if(A.tipo==='texto'){
+    return `<div class="fg"><label>Mensagem</label>
+      <textarea id="waAgendMsg" placeholder="Texto que será enviado no horário marcado" style="width:100%;min-height:120px;" oninput="window._waAgend.texto=this.value">${escHtml(A.texto||'')}</textarea></div>`;
+  }
+  if(A.tipo==='audio'){
+    const temAudio = !!A.audioUrl;
+    return `<div class="fg"><label>Nota de voz</label>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <button type="button" id="waAudioBtn" class="btn btn-ghost btn-sm" onclick="toggleGravacaoWA()">🎙️ Gravar</button>
+        <span id="waAudioStatus" style="font-size:12px;color:var(--text-3);">${temAudio?'Áudio gravado ✓':'Sem áudio'}</span>
+      </div>
+      <audio id="waAudioPrev" controls src="${A.audioUrl||''}" style="display:${temAudio?'block':'none'};margin-top:10px;width:100%;"></audio>
+    </div>`;
+  }
+  // documento
+  return `<div class="fg"><label>Documento</label>
+      <input type="file" id="waDocFile" accept=".pdf,.png,.jpg,.jpeg,.webp,.doc,.docx,.xls,.xlsx" onchange="window._waAgend.docFile=this.files[0]" style="width:100%;"/>
+      <label style="margin-top:10px;">Legenda (opcional)</label>
+      <input type="text" id="waDocLegenda" placeholder="Texto que acompanha o documento" value="${escHtml(A.legenda||'')}" oninput="window._waAgend.legenda=this.value" style="width:100%;"/>
+    </div>`;
+}
+
+function setWAAgendTipo(tipo){
+  window._waAgend.tipo = tipo;
+  const corpo = document.getElementById('waAgendCorpo');
+  if(corpo) corpo.innerHTML = renderWAAgendCorpo();
+  // re-renderiza os botões de tipo (estado ativo)
+  renderWATab('agendados');
+}
+
+// ---- Gravação de áudio (MediaRecorder) ----
+window._waRec = window._waRec || { mr:null, chunks:[], stream:null };
+async function toggleGravacaoWA(){
+  const R = window._waRec;
+  const btn = document.getElementById('waAudioBtn');
+  const status = document.getElementById('waAudioStatus');
+  if(R.mr && R.mr.state==='recording'){
+    R.mr.stop();
+    return;
+  }
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+    R.stream = stream;
+    const mime = MediaRecorder.isTypeSupported('audio/ogg;codecs=opus') ? 'audio/ogg;codecs=opus'
+               : (MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : '');
+    R.mr = mime ? new MediaRecorder(stream,{mimeType:mime}) : new MediaRecorder(stream);
+    R.chunks = [];
+    R.mr.ondataavailable = e => { if(e.data.size>0) R.chunks.push(e.data); };
+    R.mr.onstop = () => {
+      const blob = new Blob(R.chunks, { type: R.mr.mimeType || 'audio/webm' });
+      window._waAgend.audioBlob = blob;
+      window._waAgend.audioUrl = URL.createObjectURL(blob);
+      (R.stream.getTracks()||[]).forEach(t=>t.stop());
+      const corpo = document.getElementById('waAgendCorpo');
+      if(corpo) corpo.innerHTML = renderWAAgendCorpo();
+    };
+    R.mr.start();
+    if(btn){ btn.textContent='⏹️ Parar'; btn.classList.add('btn-danger'); }
+    if(status){ status.textContent='Gravando…'; }
+  }catch(e){
+    showToast('Não foi possível acessar o microfone: '+(e.message||e),'danger');
+  }
+}
+
+async function confirmarAgendamentoWA(){
+  const A = window._waAgend;
+  const supa = getSupabase();
+  if(!supa){ showToast('Supabase indisponível.','danger'); return; }
+  const dev = (DB.devedores||[]).find(d=>d.id===A.devId);
+  if(!dev){ showToast('Selecione um devedor.','danger'); return; }
+  const telefone = (dev.tel||dev.telefone||'').trim();
+  if(!telefone){ showToast('Devedor sem telefone.','danger'); return; }
+  const quando = A.quando || document.getElementById('waAgendQuando')?.value;
+  if(!quando){ showToast('Informe data/hora.','danger'); return; }
+  const dt = new Date(quando);
+  if(isNaN(dt.getTime()) || dt <= new Date()){ showToast('A data deve ser no futuro.','danger'); return; }
+
+  const { data:auth } = await supa.auth.getUser();
+  const operadorId = auth?.user?.id || null;
+  if(!operadorId){ showToast('Sessão expirada. Faça login novamente.','danger'); return; }
+
+  let payload = {
+    devedor_id: dev.id,
+    operador_id: operadorId,
+    telefone,
+    tipo: A.tipo,
+    agendada_para: dt.toISOString(),
+    status: 'pendente',
+    origem: 'manual'
+  };
+
+  try{
+    if(A.tipo==='texto'){
+      const msg = (A.texto||'').trim();
+      if(!msg){ showToast('Mensagem vazia.','danger'); return; }
+      payload.mensagem = msg;
+    } else if(A.tipo==='audio'){
+      if(!A.audioBlob){ showToast('Grave um áudio primeiro.','danger'); return; }
+      const ext = (A.audioBlob.type.includes('ogg')?'ogg':'webm');
+      const up = await uploadMidiaWA(supa, operadorId, A.audioBlob, `audio_${Date.now()}.${ext}`, A.audioBlob.type);
+      if(!up.ok) throw new Error(up.error);
+      payload.media_path = up.path; payload.media_nome = up.nome; payload.media_mime = A.audioBlob.type;
+    } else if(A.tipo==='documento'){
+      const file = A.docFile || document.getElementById('waDocFile')?.files?.[0];
+      if(!file){ showToast('Selecione um documento.','danger'); return; }
+      const up = await uploadMidiaWA(supa, operadorId, file, file.name, file.type);
+      if(!up.ok) throw new Error(up.error);
+      payload.media_path = up.path; payload.media_nome = file.name; payload.media_mime = file.type;
+      payload.legenda = (A.legenda||'').trim() || null;
+    }
+
+    const { error } = await supa.from('crm_mensagens_agendadas').insert(payload);
+    if(error) throw error;
+    showToast('Mensagem agendada para '+dt.toLocaleString('pt-BR')+'.','success');
+    // reset parcial do compositor
+    window._waAgend = { tipo:'texto', devId:A.devId, quando:proximoEnvioUtil(), audioBlob:null, audioUrl:'', docFile:null };
+    renderWATab('agendados');
+  }catch(e){
+    showToast('Falha ao agendar: '+(e.message||e),'danger');
+  }
+}
+
+// Upload da mídia agendada para o bucket 'documentos'.
+async function uploadMidiaWA(supa, userId, fileOrBlob, nome, mime){
+  try{
+    const path = `wa_agendados/${userId}/${Date.now()}_${nome}`.replace(/\s+/g,'_');
+    const { error } = await supa.storage.from('documentos').upload(path, fileOrBlob, {
+      contentType: mime || 'application/octet-stream', upsert:false
+    });
+    if(error) return { ok:false, error:error.message };
+    return { ok:true, path, nome };
+  }catch(e){ return { ok:false, error:e.message||String(e) }; }
+}
+
+function renderWAAgendListReload(){ carregarWAAgendados(); }
+
+async function carregarWAAgendados(){
+  const cont = document.getElementById('waAgendLista');
+  if(!cont) return;
+  const supa = getSupabase();
+  if(!supa){ cont.innerHTML = '<div style="color:var(--text-3);font-size:12px;">Supabase indisponível.</div>'; return; }
+  const { data, error } = await supa
+    .from('crm_mensagens_agendadas')
+    .select('id, telefone, mensagem, tipo, media_nome, legenda, agendada_para, status, erro')
+    .in('status', ['pendente','enviada','falhou','cancelada'])
+    .order('agendada_para', { ascending:false })
+    .limit(50);
+  if(error){ cont.innerHTML = `<div style="color:var(--danger);font-size:12px;">Erro: ${escHtml(error.message)}</div>`; return; }
+  if(!data || !data.length){ cont.innerHTML = '<div style="color:var(--text-3);font-size:12px;">Nenhum agendamento.</div>'; return; }
+
+  const badgeStatus = s => {
+    const m = { pendente:['badge-yellow','Pendente'], enviada:['badge-green','Enviada'], falhou:['badge-red','Falhou'], cancelada:['badge-gray','Cancelada'], processando:['badge-blue','Enviando'] };
+    const [cls,txt] = m[s] || ['badge-gray', s];
+    return `<span class="badge ${cls}">${txt}</span>`;
+  };
+  const icoTipo = t => t==='audio'?'🎙️':(t==='documento'?'📎':(t==='imagem'?'🖼️':'💬'));
+  const resumo = r => r.tipo==='texto' ? escHtml((r.mensagem||'').slice(0,60)) : escHtml(r.media_nome||r.legenda||r.tipo);
+
+  cont.innerHTML = data.map(r=>`
+    <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">
+      <div style="font-size:16px;line-height:1.2;">${icoTipo(r.tipo)}</div>
+      <div style="flex:1;min-width:0;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          ${badgeStatus(r.status)}
+          <span style="font-size:11.5px;color:var(--text-3);font-family:var(--font-mono);">${new Date(r.agendada_para).toLocaleString('pt-BR')}</span>
+        </div>
+        <div style="font-size:12.5px;color:var(--text);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${resumo(r)}</div>
+        <div style="font-size:11px;color:var(--text-3);font-family:var(--font-mono);">${escHtml(r.telefone||'')}</div>
+        ${r.status==='falhou'&&r.erro?`<div style="font-size:11px;color:var(--danger);margin-top:2px;">${escHtml((r.erro||'').slice(0,120))}</div>`:''}
+      </div>
+      ${r.status==='pendente'?`<button class="btn btn-ghost btn-xs" onclick="cancelarAgendamentoWA('${r.id}')">Cancelar</button>`:''}
+    </div>
+  `).join('');
+}
+
+async function cancelarAgendamentoWA(id){
+  const supa = getSupabase();
+  if(!supa) return;
+  const { error } = await supa.from('crm_mensagens_agendadas').update({ status:'cancelada' }).eq('id', id).eq('status','pendente');
+  if(error){ showToast('Falha ao cancelar: '+error.message,'danger'); return; }
+  showToast('Agendamento cancelado.','success');
+  carregarWAAgendados();
 }
 
 function renderWAConversas(el){

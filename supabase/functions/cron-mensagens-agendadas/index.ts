@@ -2,6 +2,8 @@
 // Disparada por pg_cron a cada 1 minuto via pg_net.http_post.
 // Processa crm_mensagens_agendadas WHERE status='pendente' AND agendada_para <= now()
 // Envia via Z-API com retry+backoff. Idempotente via lock otimista.
+// Suporta tipo: texto (send-text), audio (send-audio), documento (send-document/{ext})
+// e imagem (send-image). Mídia fica no bucket 'documentos'; gera signed URL (1h) no envio.
 //
 // Autenticação: header `Authorization: Bearer <CRON_INVOKE_SECRET>`.
 // Setup: supabase secrets set CRON_INVOKE_SECRET=<random-32>
@@ -50,14 +52,55 @@ Deno.serve(async (req) => {
   const ZAPI_TOKEN = Deno.env.get('ZAPI_TOKEN');
   const ZAPI_CLIENT_TOKEN = Deno.env.get('ZAPI_CLIENT_TOKEN');
   if (!ZAPI_INSTANCE || !ZAPI_TOKEN) return new Response(JSON.stringify({ error: 'Z-API não configurado' }), { status: 500 });
-  const zapiUrl = `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`;
+  const zapiBase = `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}`;
   const zapiHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
   if (ZAPI_CLIENT_TOKEN) zapiHeaders['Client-Token'] = ZAPI_CLIENT_TOKEN;
+
+  // Bucket onde o frontend salva a mídia agendada (áudio/documento/imagem).
+  const MEDIA_BUCKET = 'documentos';
+
+  // Monta { url, body } da chamada Z-API conforme o tipo da mensagem.
+  // Para mídia, gera um signed URL temporário (1h) que o Z-API baixa no envio.
+  async function montarEnvio(m: any): Promise<{ ok: boolean; url?: string; body?: unknown; erro?: string }> {
+    const phoneDigits = String(m.telefone || '').replace(/\D/g, '');
+    const phone = phoneDigits.startsWith('55') ? phoneDigits : '55' + phoneDigits;
+    const tipo = m.tipo || 'texto';
+
+    if (tipo === 'texto') {
+      return { ok: true, url: `${zapiBase}/send-text`, body: { phone, message: m.mensagem || '' } };
+    }
+
+    if (!m.media_path) return { ok: false, erro: 'media_path ausente para tipo ' + tipo };
+    const { data: signed, error: signErr } = await sb.storage
+      .from(MEDIA_BUCKET)
+      .createSignedUrl(m.media_path, 3600);
+    if (signErr || !signed?.signedUrl) {
+      return { ok: false, erro: 'signed url: ' + (signErr?.message || 'desconhecido') };
+    }
+    const mediaUrl = signed.signedUrl;
+
+    if (tipo === 'audio') {
+      return { ok: true, url: `${zapiBase}/send-audio`, body: { phone, audio: mediaUrl } };
+    }
+    if (tipo === 'imagem') {
+      return { ok: true, url: `${zapiBase}/send-image`, body: { phone, image: mediaUrl, caption: m.legenda || '' } };
+    }
+    if (tipo === 'documento') {
+      const nome = m.media_nome || 'documento';
+      const ext = (nome.split('.').pop() || 'pdf').toLowerCase().replace(/[^a-z0-9]/g, '') || 'pdf';
+      return {
+        ok: true,
+        url: `${zapiBase}/send-document/${ext}`,
+        body: { phone, document: mediaUrl, fileName: nome, caption: m.legenda || '' }
+      };
+    }
+    return { ok: false, erro: 'tipo desconhecido: ' + tipo };
+  }
 
   const agora = new Date().toISOString();
   const { data: lote, error: errSel } = await sb
     .from('crm_mensagens_agendadas')
-    .select('id, telefone, mensagem, tentativas, caso_id, operador_id')
+    .select('id, telefone, mensagem, tentativas, caso_id, operador_id, tipo, media_path, media_nome, media_mime, legenda')
     .eq('status', 'pendente')
     .lte('agendada_para', agora)
     .order('agendada_para', { ascending: true })
@@ -79,11 +122,11 @@ Deno.serve(async (req) => {
       .select('id');
     if (!lock || lock.length === 0) continue;
 
-    const phoneDigits = String(m.telefone || '').replace(/\D/g, '');
-    const phoneFinal = phoneDigits.startsWith('55') ? phoneDigits : '55' + phoneDigits;
-
-    const result = await callZapi(zapiUrl, zapiHeaders, { phone: phoneFinal, message: m.mensagem });
+    const envio = await montarEnvio(m);
     const novasTentativas = (m.tentativas || 0) + 1;
+    const result = envio.ok
+      ? await callZapi(envio.url!, zapiHeaders, envio.body)
+      : { ok: false, status: 0, data: { error: envio.erro } };
 
     if (result.ok) {
       await sb.from('crm_mensagens_agendadas')
