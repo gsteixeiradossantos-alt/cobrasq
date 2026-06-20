@@ -40,6 +40,16 @@ async function callZapi(url: string, headers: Record<string, string>, body: unkn
   return { ok: false, status: 0, data: { error: 'esgotou tentativas' } };
 }
 
+// Z-API às vezes responde HTTP 200 mesmo sem entregar (instância desconectada):
+// o corpo vem sem identificador de mensagem ou com campo de erro. Só consideramos
+// enviado quando há messageId/zaapId/id E não há indicação de erro.
+function envioConfirmado(data: any): boolean {
+  if (!data || typeof data !== 'object') return false;
+  const temId = !!(data.messageId || data.zaapId || data.id || data.messageID);
+  const temErro = !!data.error || !!data.errorDescription || data.value === false || data.success === false;
+  return temId && !temErro;
+}
+
 Deno.serve(async (req) => {
   const expected = Deno.env.get('CRON_INVOKE_SECRET');
   if (!expected) return new Response(JSON.stringify({ error: 'CRON_INVOKE_SECRET não configurado' }), { status: 500 });
@@ -128,7 +138,10 @@ Deno.serve(async (req) => {
       ? await callZapi(envio.url!, zapiHeaders, envio.body)
       : { ok: false, status: 0, data: { error: envio.erro } };
 
-    if (result.ok) {
+    // HTTP 200 não basta: exige confirmação real do Z-API (messageId, sem erro).
+    const enviadoOk = result.ok && envioConfirmado(result.data);
+
+    if (enviadoOk) {
       await sb.from('crm_mensagens_agendadas')
         .update({ status: 'enviada', tentativas: novasTentativas, enviada_em: new Date().toISOString(), erro: null })
         .eq('id', m.id);
