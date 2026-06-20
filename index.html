@@ -19702,13 +19702,11 @@ function paraDatetimeLocal(dt){
 }
 
 // Estado do compositor de agendamento (em memória).
-window._waAgend = window._waAgend || { tipo:'texto', audioBlob:null, audioUrl:'', docFile:null };
+// sel = destinatário escolhido { telefone, nome, devId|null }; busca = texto do filtro.
+window._waAgend = window._waAgend || { tipo:'texto', sel:null, busca:'', audioBlob:null, audioUrl:'', docFile:null };
 
 function renderWAAgendados(el){
   const A = window._waAgend;
-  const devs = (DB.devedores||[]).filter(d=>d.tel||d.telefone);
-  const selId = A.devId || (devs[0]?.id) || '';
-  A.devId = selId;
   if(!A.quando) A.quando = proximoEnvioUtil();
 
   const tipoBtn = (val,label,icone) => `<button type="button" onclick="setWAAgendTipo('${val}')" class="btn ${A.tipo===val?'btn-primary':'btn-ghost'} btn-sm" style="flex:1;">${icone} ${label}</button>`;
@@ -19719,11 +19717,12 @@ function renderWAAgendados(el){
         <div class="panel-header"><span class="panel-title">Agendar mensagem</span></div>
         <div class="panel-body">
           <div class="fg">
-            <label>Cliente / devedor</label>
-            <select id="waAgendDev" onchange="window._waAgend.devId=this.value" style="width:100%;">
-              ${devs.map(d=>`<option value="${d.id}" ${d.id===selId?'selected':''}>${escHtml(d.nome||'(sem nome)')} — ${escHtml(d.tel||d.telefone||'')}</option>`).join('')}
-            </select>
-            ${devs.length===0?`<div style="font-size:12px;color:var(--text-3);margin-top:6px;">Nenhum devedor com telefone cadastrado.</div>`:''}
+            <label>Cliente / devedor / contato</label>
+            <input id="waBuscaPessoa" placeholder="Buscar por nome ou número…" value="${escHtml(A.busca||'')}" autocomplete="off"
+                   oninput="window._waAgend.busca=this.value; renderWAPessoasList();" style="width:100%;"/>
+            <div id="waPessoasList" style="border:1px solid var(--border);border-top:none;max-height:200px;overflow:auto;background:var(--surface);"></div>
+            <div id="waNovoContato" style="display:none;"></div>
+            <div id="waSelInfo" style="font-size:12px;margin-top:6px;"></div>
           </div>
 
           <div class="fg">
@@ -19758,7 +19757,144 @@ function renderWAAgendados(el){
       </div>
     </div>
   `;
+  renderWASelInfo();
+  renderWAPessoasList();
+  carregarWAContatos().then(()=>renderWAPessoasList());
   carregarWAAgendados();
+}
+
+// ---- Seleção de destinatário: busca + cadastro de contato (wa_contatos) ----
+function waDigits(s){ return String(s||'').replace(/\D/g,''); }
+function waTel55(s){ const d = waDigits(s); return d ? (d.startsWith('55') ? d : '55'+d) : ''; }
+function formatTelWA(tel){
+  const d = waDigits(tel).replace(/^55/,'');
+  if(d.length===11) return `(${d.slice(0,2)}) ${d.slice(2,7)}-${d.slice(7)}`;
+  if(d.length===10) return `(${d.slice(0,2)}) ${d.slice(2,6)}-${d.slice(6)}`;
+  return tel||'';
+}
+
+// Lista mesclada e deduplicada (por telefone): devedores com tel + contatos salvos.
+function getWAPessoas(){
+  const out=[]; const vistos=new Set();
+  (DB.devedores||[]).forEach(d=>{
+    const t = waTel55(d.tel||d.telefone||''); if(!t || vistos.has(t)) return;
+    vistos.add(t); out.push({ nome:d.nome||'(sem nome)', telefone:t, devId:d.id });
+  });
+  (window._waContatos||[]).forEach(c=>{
+    const t = waTel55(c.telefone); if(!t || vistos.has(t)) return;
+    vistos.add(t); out.push({ nome:c.nome||'(sem nome)', telefone:t, devId:null });
+  });
+  return out.sort((a,b)=>(a.nome||'').localeCompare(b.nome||''));
+}
+
+async function carregarWAContatos(force){
+  if(window._waContatos && !force) return window._waContatos;
+  const supa = getSupabase();
+  if(!supa){ window._waContatos = window._waContatos||[]; return window._waContatos; }
+  const { data, error } = await supa.from('wa_contatos').select('id,nome,telefone').order('nome',{ascending:true});
+  window._waContatos = error ? (window._waContatos||[]) : (data||[]);
+  return window._waContatos;
+}
+
+function renderWAPessoasList(){
+  const cont = document.getElementById('waPessoasList');
+  if(!cont) return;
+  const A = window._waAgend;
+  const q = (A.busca||'').trim().toLowerCase();
+  const qd = waDigits(q);
+  let pessoas = getWAPessoas();
+  if(q){
+    pessoas = pessoas.filter(p =>
+      (p.nome||'').toLowerCase().includes(q) ||
+      (qd && waDigits(p.telefone).includes(qd))
+    );
+  }
+  window._waPessoasFiltradas = pessoas.slice(0, 40);
+  let html = '';
+  if(window._waPessoasFiltradas.length){
+    html += window._waPessoasFiltradas.map((p,i)=>{
+      const sel = A.sel && A.sel.telefone===p.telefone;
+      return `<div onclick="selecionarPessoaWA(${i})" style="padding:7px 10px;cursor:pointer;border-bottom:1px solid var(--border);background:${sel?'#EAF0FB':'transparent'};">
+          <div style="font-size:13px;color:var(--text);">${escHtml(p.nome)}</div>
+          <div style="font-size:11px;color:var(--text-3);font-family:var(--font-mono);">${escHtml(formatTelWA(p.telefone))}${p.devId?'':' · contato'}</div>
+        </div>`;
+    }).join('');
+  } else {
+    html += `<div style="padding:10px;color:var(--text-3);font-size:12px;">Ninguém encontrado.</div>`;
+  }
+  html += `<div style="padding:7px 10px;border-top:1px solid var(--border);background:var(--surface-2);">
+      <button type="button" class="btn btn-ghost btn-xs" onclick="abrirNovoContatoWA()">➕ Cadastrar novo contato${q?` “${escHtml((A.busca||'').trim())}”`:''}</button>
+    </div>`;
+  cont.innerHTML = html;
+}
+
+function renderWASelInfo(){
+  const info = document.getElementById('waSelInfo');
+  if(!info) return;
+  const sel = window._waAgend.sel;
+  info.innerHTML = sel && sel.telefone
+    ? `<span style="color:var(--success);font-weight:600;">✓ Enviar para:</span> ${escHtml(sel.nome||'')} — <span style="font-family:var(--font-mono);">${escHtml(formatTelWA(sel.telefone))}</span>`
+    : `<span style="color:var(--text-3);">Nenhum destinatário selecionado.</span>`;
+}
+
+function selecionarPessoaWA(i){
+  const p = (window._waPessoasFiltradas||[])[i];
+  if(!p) return;
+  window._waAgend.sel = { telefone:p.telefone, nome:p.nome, devId:p.devId||null };
+  window._waAgend.busca = p.nome || formatTelWA(p.telefone);
+  const inp = document.getElementById('waBuscaPessoa'); if(inp) inp.value = window._waAgend.busca;
+  const nc = document.getElementById('waNovoContato'); if(nc) nc.style.display='none';
+  renderWASelInfo();
+  renderWAPessoasList();
+}
+
+function abrirNovoContatoWA(){
+  const A = window._waAgend;
+  const q = (A.busca||'').trim();
+  const ehNum = q.length>0 && waDigits(q).length >= Math.max(8, q.replace(/[\s()+-]/g,'').length);
+  const nomePre = ehNum ? '' : q;
+  const telPre = ehNum ? q : '';
+  const div = document.getElementById('waNovoContato');
+  if(!div) return;
+  div.style.display='block';
+  div.innerHTML = `
+    <div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-top:8px;background:var(--surface-2);">
+      <div style="font-size:12px;font-weight:600;margin-bottom:6px;">Novo contato</div>
+      <input id="waNCNome" placeholder="Nome" value="${escHtml(nomePre)}" style="width:100%;margin-bottom:6px;"/>
+      <input id="waNCTel" placeholder="Telefone com DDD" value="${escHtml(telPre)}" oninput="if(typeof mascaraTel==='function')mascaraTel(this)" style="width:100%;margin-bottom:8px;"/>
+      <div style="display:flex;gap:6px;">
+        <button type="button" class="btn btn-primary btn-sm" onclick="salvarContatoWA()">Salvar contato</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('waNovoContato').style.display='none'">Cancelar</button>
+      </div>
+    </div>`;
+}
+
+async function salvarContatoWA(){
+  const supa = getSupabase();
+  if(!supa){ showToast('Supabase indisponível.','danger'); return; }
+  const nome = (document.getElementById('waNCNome')?.value||'').trim();
+  const telefone = waTel55(document.getElementById('waNCTel')?.value||'');
+  if(!nome){ showToast('Informe o nome.','warning'); return; }
+  if(waDigits(telefone).replace(/^55/,'').length < 10){ showToast('Telefone inválido (use DDD).','warning'); return; }
+  const { data:auth } = await supa.auth.getUser();
+  const operadorId = auth?.user?.id || null;
+  const { error } = await supa.from('wa_contatos').insert({ nome, telefone, operador_id:operadorId });
+  if(error){
+    if(error.code==='23505' || /duplicate|unique/i.test(error.message||'')){
+      showToast('Esse número já está salvo nos contatos.','warning');
+    } else {
+      showToast('Falha ao salvar contato: '+(error.message||error),'danger');
+    }
+    return;
+  }
+  await carregarWAContatos(true);
+  window._waAgend.sel = { telefone, nome, devId:null };
+  window._waAgend.busca = nome;
+  showToast('Contato salvo.','success');
+  const inp = document.getElementById('waBuscaPessoa'); if(inp) inp.value = nome;
+  const div = document.getElementById('waNovoContato'); if(div) div.style.display='none';
+  renderWASelInfo();
+  renderWAPessoasList();
 }
 
 function renderWAAgendCorpo(){
@@ -19880,10 +20016,9 @@ async function confirmarAgendamentoWA(){
   const A = window._waAgend;
   const supa = getSupabase();
   if(!supa){ showToast('Supabase indisponível.','danger'); return; }
-  const dev = (DB.devedores||[]).find(d=>d.id===A.devId);
-  if(!dev){ showToast('Selecione um devedor.','danger'); return; }
-  const telefone = (dev.tel||dev.telefone||'').trim();
-  if(!telefone){ showToast('Devedor sem telefone.','danger'); return; }
+  const sel = A.sel;
+  if(!sel || !sel.telefone){ showToast('Busque e selecione um destinatário.','danger'); return; }
+  const telefone = sel.telefone;
   const quando = A.quando || document.getElementById('waAgendQuando')?.value;
   if(!quando){ showToast('Informe data/hora.','danger'); return; }
   const dt = new Date(quando);
@@ -19894,7 +20029,7 @@ async function confirmarAgendamentoWA(){
   if(!operadorId){ showToast('Sessão expirada. Faça login novamente.','danger'); return; }
 
   let payload = {
-    devedor_id: dev.id,
+    devedor_id: sel.devId || null,
     operador_id: operadorId,
     telefone,
     tipo: A.tipo,
@@ -19926,8 +20061,8 @@ async function confirmarAgendamentoWA(){
     const { error } = await supa.from('crm_mensagens_agendadas').insert(payload);
     if(error) throw error;
     showToast('Mensagem agendada para '+dt.toLocaleString('pt-BR')+'.','success');
-    // reset parcial do compositor
-    window._waAgend = { tipo:'texto', devId:A.devId, quando:proximoEnvioUtil(), audioBlob:null, audioUrl:'', docFile:null };
+    // reset parcial do compositor (mantém destinatário selecionado)
+    window._waAgend = { tipo:'texto', sel:A.sel, busca:A.busca, quando:proximoEnvioUtil(), audioBlob:null, audioUrl:'', docFile:null };
     renderWATab('agendados');
   }catch(e){
     showToast('Falha ao agendar: '+(e.message||e),'danger');
