@@ -27,8 +27,14 @@ function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 function addDaysISO(d) { const x = new Date(); x.setDate(x.getDate() + d); return x.toISOString().slice(0, 10); }
 function firstName(n) { return String(n || '').trim().split(/\s+/)[0] || 'tudo bem'; }
-function fmtR(v) { return 'R$ ' + (Number(v) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
-function fmtDateBR(iso) { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || '')); return m ? `${m[3]}/${m[2]}/${m[1]}` : String(iso || ''); }
+// Mensagem padrão do boleto no WhatsApp (emissão e reenvio).
+function boletoMsg(nome, link) {
+  return `*Financeiro COBRASQ:*\n`
+    + `Olá, ${firstName(nome)}! Como vai?\n`
+    + `Informamos que os boletos referentes ao nosso acordo realizado recentemente foram emitidos e estão disponíveis para pagamento. Para acessá-los basta clicar no link a seguir:\n\n`
+    + `Link do boleto:\n${link}\n\n`
+    + `_ Se precisar de alguma ajuda, é só nos chamar._`;
+}
 
 module.exports = async function handler(req, res) {
   applyCors(req, res);
@@ -66,7 +72,7 @@ module.exports = async function handler(req, res) {
       const tel = String((dev && dev.telefone) || '').replace(/\D/g, '');
       if (!tel || !url) return res.status(200).json({ ok: true, acordo_id: acordoId, reenviado: false, motivo: !tel ? 'devedor sem telefone' : 'acordo sem link' });
       let zap = null;
-      try { zap = await zapiSendText(tel, `Olá, ${firstName(dev.nome)}! Segue o link do seu boleto/PIX:\n${url}\n\nQualquer dúvida, é só responder esta mensagem. — Cobrasq`); }
+      try { zap = await zapiSendText(tel, boletoMsg(dev.nome, url)); }
       catch (e) { zap = { error: e.message }; }
       const enviado = !!(zap && zap.messageId);
       await sbFetch(`acordos?id=eq.${acordo.id}`, { method: 'PATCH', body: JSON.stringify({ metadata: { ...meta, whatsapp_ok: enviado } }) }).catch(() => {});
@@ -145,11 +151,7 @@ module.exports = async function handler(req, res) {
     let zap = null;
     const tel = String(dev.telefone || '').replace(/\D/g, '');
     if (tel && invoiceUrl) {
-      const msg = `Olá, ${firstName(dev.nome)}! Seu acordo foi confirmado. ✅\n\n` +
-        `${nParc > 1 ? `Parcelamento: ${nParc}x — total ${fmtR(total)}` : `Valor: ${fmtR(total)} (à vista)`}.\n` +
-        `1º vencimento: ${fmtDateBR(firstDue)}.\n\n` +
-        `Acesse seu boleto/PIX aqui:\n${invoiceUrl}\n\n` +
-        `Qualquer dúvida, é só responder esta mensagem. — Cobrasq`;
+      const msg = boletoMsg(dev.nome, invoiceUrl);
       try { zap = await zapiSendText(tel, msg); } catch (e) { zap = { error: e.message }; }
     }
 
