@@ -56,6 +56,24 @@ module.exports = async function handler(req, res) {
     if (!acordo) return res.status(404).json({ error: 'acordo não encontrado' });
 
     const meta = acordo.metadata || {};
+
+    // Modo REENVIO: acordo já emitido → só reenvia o link do boleto por WhatsApp (não
+    // cria boleto novo). Grava metadata.whatsapp_ok com o resultado (alimenta o Painel).
+    if ((body.resend === true || req.query.resend) && (acordo.cobranca_id || meta.boletos_emitidos)) {
+      const url = meta.asaas_invoice_url || '';
+      const dvs = await sbFetch(`devedores?id=eq.${acordo.devedor_id}&select=nome,telefone&limit=1`);
+      const dev = dvs[0];
+      const tel = String((dev && dev.telefone) || '').replace(/\D/g, '');
+      if (!tel || !url) return res.status(200).json({ ok: true, acordo_id: acordoId, reenviado: false, motivo: !tel ? 'devedor sem telefone' : 'acordo sem link' });
+      let zap = null;
+      try { zap = await zapiSendText(tel, `Olá, ${firstName(dev.nome)}! Segue o link do seu boleto/PIX:\n${url}\n\nQualquer dúvida, é só responder esta mensagem. — Cobrasq`); }
+      catch (e) { zap = { error: e.message }; }
+      const enviado = !!(zap && zap.messageId);
+      await sbFetch(`acordos?id=eq.${acordo.id}`, { method: 'PATCH', body: JSON.stringify({ metadata: { ...meta, whatsapp_ok: enviado } }) }).catch(() => {});
+      await sbFetch('devedor_eventos', { method: 'POST', body: JSON.stringify({ devedor_id: acordo.devedor_id, tipo: 'asaas_boletos_emitidos', payload: { acordo_id: acordoId, invoice_url: url, whatsapp: enviado ? 'enviado' : 'falha', via: 'reenvio' }, autor_nome: 'Faturamento (reenvio)' }) }).catch(() => {});
+      return res.status(200).json({ ok: true, acordo_id: acordoId, reenviado: enviado, erro: enviado ? undefined : (zap && zap.error) });
+    }
+
     if (acordo.cobranca_id || meta.boletos_emitidos) {
       return res.status(200).json({ ok: true, skipped: 'já emitido', acordo_id: acordoId });
     }
@@ -134,6 +152,9 @@ module.exports = async function handler(req, res) {
         `Qualquer dúvida, é só responder esta mensagem. — Cobrasq`;
       try { zap = await zapiSendText(tel, msg); } catch (e) { zap = { error: e.message }; }
     }
+
+    // Marca no acordo se o WhatsApp do boleto saiu (alimenta o alerta/reenvio do Painel).
+    await sbFetch(`acordos?id=eq.${acordo.id}`, { method: 'PATCH', body: JSON.stringify({ metadata: { ...newMeta, whatsapp_ok: !!(zap && zap.messageId) } }) }).catch(() => {});
 
     await sbFetch('devedor_eventos', {
       method: 'POST',
