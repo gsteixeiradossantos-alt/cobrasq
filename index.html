@@ -15172,6 +15172,7 @@ function petRenderCampos(body){
     const isAuto = !!v.auto && val;
     const labelExtra = isAuto ? ' <em style="color:var(--success);font-size:11px;">(auto)</em>' : (v.obrigatorio?' <span style="color:var(--danger);">*</span>':'');
     const base = `<label style="font-size:12px;font-weight:600;color:var(--text-2);">${escHtml(v.label)}${labelExtra}</label>`;
+    if(v.key==='devedor.endereco') return petCampoEndereco();
     if(v.tipo==='textarea')
       return `<div style="margin-bottom:10px;">${base}<textarea data-petkey="${v.key}" rows="2" oninput="_pet.dados[this.dataset.petkey]=this.value" style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-family:inherit;">${escHtml(val)}</textarea></div>`;
     if(v.tipo==='select'){
@@ -15183,6 +15184,54 @@ function petRenderCampos(body){
   }).join('');
 
   body.innerHTML = petTesesPanel() + calcPanel + `<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px;">${campos}</div>`;
+}
+
+// Bloco de endereço estruturado no passo de campos da Petição — mesmo padrão do CRM
+// (formalização/ZapSign): campos separados + CEP autofill (reusa viaCepLookup, prefixo
+// 'pet-end') + botão "Salvar no cadastro". Monta a string em _pet.dados['devedor.endereco'].
+function petCampoEndereco(){
+  const d = _pet.dev || {};
+  const inp = (id,val,ph,extra)=>`<input id="${id}" value="${escHtml(val||'')}" placeholder="${ph||''}" oninput="petMontaEndereco()" style="width:100%;padding:7px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;${extra||''}">`;
+  const cel = (lbl,html,span)=>`<div${span?' style="grid-column:1/-1;"':''}><label style="display:block;font-size:11px;color:var(--text-3);margin-bottom:3px;">${lbl}</label>${html}</div>`;
+  return `<div style="grid-column:1/-1;border:1px solid var(--border-2);border-radius:8px;padding:12px;margin-bottom:10px;">
+    <div style="font-size:11px;color:var(--accent-2,#9C7F40);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px;">Endereço do executado (entra na petição)</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+      ${cel('CEP', `<input id="pet-end-cep" value="${escHtml(d.cep||'')}" maxlength="9" placeholder="00000-000" oninput="onCepInput(this,'pet-end')" onblur="viaCepLookup(this.value,'pet-end').then(petMontaEndereco)" style="width:100%;padding:7px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;">`)}
+      ${cel('Cidade', inp('pet-end-cidade', d.cidade))}
+      ${cel('Rua / Avenida', inp('pet-end-rua', d.rua), true)}
+      ${cel('Número', inp('pet-end-numero', d.numero, '123'))}
+      ${cel('Complemento', inp('pet-end-complemento', d.complemento, 'Apto, bloco…'))}
+      ${cel('Bairro', inp('pet-end-bairro', d.bairro))}
+      ${cel('UF', inp('pet-end-uf', d.uf, 'PR', 'text-transform:uppercase;'))}
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:9px;flex-wrap:wrap;">
+      <button type="button" onclick="petSalvarEnderecoCadastro()" style="background:none;border:1px solid var(--border-2);color:var(--text-2);padding:6px 12px;border-radius:7px;font-size:12px;cursor:pointer;">💾 Salvar endereço no cadastro</button>
+      <span style="font-size:11px;color:var(--text-3);">Na petição: <em id="pet-end-preview">${escHtml(_pet.dados['devedor.endereco']||'—')}</em></span>
+    </div>
+  </div>`;
+}
+function petMontaEndereco(){
+  const g = id => (document.getElementById(id)?.value||'').trim();
+  const e = { cep:g('pet-end-cep'), rua:g('pet-end-rua'), numero:g('pet-end-numero'), complemento:g('pet-end-complemento'), bairro:g('pet-end-bairro'), cidade:g('pet-end-cidade'), uf:g('pet-end-uf') };
+  if(window._pet) _pet.endereco = e;
+  const partes = [ e.rua, e.numero?('n. '+e.numero):'', e.complemento, e.bairro?('bairro '+e.bairro):'', e.cidade, e.uf, e.cep?('CEP '+e.cep):'' ].filter(Boolean);
+  const s = partes.join(', ');
+  if(window._pet) _pet.dados['devedor.endereco'] = s;
+  const pv = document.getElementById('pet-end-preview'); if(pv) pv.textContent = s || '—';
+}
+async function petSalvarEnderecoCadastro(){
+  petMontaEndereco();
+  const dev = _pet.dev;
+  if(!dev){ showToast('Selecione o devedor primeiro.','warning'); return; }
+  Object.assign(dev, _pet.endereco||{});
+  dev.endereco = _pet.dados['devedor.endereco'] || petDevEndereco(dev);
+  if(dev._virtual){ showToast('Endereço guardado — o cadastro é criado ao salvar a petição.','info'); return; }
+  try{
+    const r = await upsertDevedorRelational(dev);
+    if(!r.ok) throw new Error(r.error||'falha');
+    if(typeof save==='function') save();
+    showToast('Endereço salvo no cadastro do devedor.','success');
+  }catch(e){ showToast('Falha ao salvar: '+(e.message||e),'danger'); }
 }
 function petCalcResumoHtml(){
   const c = _pet.calc; if(!c) return '';
@@ -15270,7 +15319,8 @@ async function petSalvar(){
   try{
     // Cliente só do Asaas (sem cadastro): cria um devedor mínimo p/ poder salvar e linkar.
     if(dev._virtual){
-      const novo = _impDevedorFromAsaas({ asaas_customer_id: dev.asaasCustomerId, nome: dev.nome, cpf: dev.doc, telefone:'', email:'', endereco:'' });
+      const novo = _impDevedorFromAsaas({ asaas_customer_id: dev.asaasCustomerId, nome: dev.nome, cpf: dev.doc, telefone:'', email:'', endereco: (_pet.dados['devedor.endereco']||'') });
+      if(_pet.endereco) Object.assign(novo, _pet.endereco); // endereço estruturado do passo de campos
       const rr = await upsertDevedorRelational(novo);
       if(!rr.ok) throw new Error(rr.error||'Falha ao criar o cadastro mínimo do devedor.');
       if(Array.isArray(DB.devedores)) DB.devedores.push(novo);
