@@ -94,17 +94,20 @@ module.exports = async function handler(req, res) {
     }
     claimedAcordo = true;
 
-    const charge = await asaasReq('POST', '/payments', {
+    // 1x = boleto único (campo `value`); 2x+ = parcelamento (installmentCount+totalValue).
+    // O Asaas rejeita installmentCount=1, então os casos são separados.
+    const pay = {
       customer: customerId,
       billingType: 'BOLETO',
-      installmentCount: nParc,
-      totalValue: round2(total),
       dueDate: firstDue,
-      description: `Acordo ${dev.nome} — ${nParc}x`,
+      description: `Acordo ${dev.nome}${nParc > 1 ? ` — ${nParc}x` : ' — à vista'}`,
       externalReference: acordo.id,
       fine: { value: 2 },
       interest: { value: 1 },
-    });
+    };
+    if (nParc > 1) { pay.installmentCount = nParc; pay.totalValue = round2(total); }
+    else { pay.value = round2(total); }
+    const charge = await asaasReq('POST', '/payments', pay);
     // charge = pagamento da 1ª parcela; charge.installment = id da série.
     const invoiceUrl = charge.invoiceUrl || charge.bankSlipUrl || '';
 
@@ -125,7 +128,7 @@ module.exports = async function handler(req, res) {
     const tel = String(dev.telefone || '').replace(/\D/g, '');
     if (tel && invoiceUrl) {
       const msg = `Olá, ${firstName(dev.nome)}! Seu acordo foi confirmado. ✅\n\n` +
-        `Parcelamento: ${nParc}x — total ${fmtR(total)}.\n` +
+        `${nParc > 1 ? `Parcelamento: ${nParc}x — total ${fmtR(total)}` : `Valor: ${fmtR(total)} (à vista)`}.\n` +
         `1º vencimento: ${fmtDateBR(firstDue)}.\n\n` +
         `Acesse seu boleto/PIX aqui:\n${invoiceUrl}\n\n` +
         `Qualquer dúvida, é só responder esta mensagem. — Cobrasq`;
