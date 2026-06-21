@@ -33,7 +33,7 @@ function boletoMsg(nome, link) {
     + `Olá, ${firstName(nome)}! Como vai?\n`
     + `Informamos que os boletos referentes ao nosso acordo realizado recentemente foram emitidos e estão disponíveis para pagamento. Para acessá-los basta clicar no link a seguir:\n\n`
     + `Link do boleto:\n${link}\n\n`
-    + `_ Se precisar de alguma ajuda, é só nos chamar._`;
+    + `_Se precisar de alguma ajuda, é só nos chamar._`;
 }
 
 module.exports = async function handler(req, res) {
