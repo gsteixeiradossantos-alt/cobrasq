@@ -26,19 +26,50 @@ async function asaasReq(method, path, data) {
   return json;
 }
 
-// Garante o customer Asaas para uma row de devedor (Supabase). Retorna
-// { customerId, created }. Não persiste — quem chama decide gravar asaas_customer_id.
+// Monta o endereço do Asaas a partir da row do devedor. A rua/logradouro vive no
+// jsonb `endereco_crm` (a coluna `endereco` costuma ficar vazia); o resto em colunas
+// próprias. Endereço completo é PRÉ-REQUISITO para emitir NFS-e no Asaas.
+function buildAsaasAddress(dev) {
+  const ec = (dev && dev.endereco_crm) || {};
+  const a = {};
+  const cep = String(dev.cep || ec.cep || '').replace(/\D/g, '');
+  if (cep) a.postalCode = cep;
+  const rua = String(ec.rua || ec.logradouro || dev.endereco || '').trim();
+  if (rua) a.address = rua;
+  const num = String(dev.numero || ec.numero || '').trim();
+  if (num) a.addressNumber = num;
+  const comp = String(dev.complemento || ec.complemento || '').trim();
+  if (comp) a.complement = comp;
+  const bairro = String(dev.bairro || ec.bairro || '').trim();
+  if (bairro) a.province = bairro;
+  return a;
+}
+
+// Garante o customer Asaas para uma row de devedor (Supabase), COM endereço completo
+// (necessário p/ NFS-e). Retorna { customerId, created }. Não persiste o id — quem
+// chama decide gravar asaas_customer_id; o endereço é gravado direto no Asaas.
 async function ensureAsaasCustomer(dev) {
-  if (dev.asaas_customer_id) return { customerId: dev.asaas_customer_id, created: false };
+  const addr = buildAsaasAddress(dev);
+  const hasAddr = Object.keys(addr).length > 0;
+  // Customer já vinculado: garante o endereço nele (best-effort) p/ a NF não falhar.
+  if (dev.asaas_customer_id) {
+    if (hasAddr) { try { await asaasReq('PUT', `/customers/${dev.asaas_customer_id}`, addr); } catch (e) { /* best-effort */ } }
+    return { customerId: dev.asaas_customer_id, created: false };
+  }
   const doc = String(dev.doc || '').replace(/\D/g, '');
   if (!doc) throw new Error('Devedor sem CPF/CNPJ cadastrado.');
   const found = await asaasReq('GET', `/customers?cpfCnpj=${encodeURIComponent(doc)}`);
-  if (found?.data?.length) return { customerId: found.data[0].id, created: false };
+  if (found?.data?.length) {
+    const id = found.data[0].id;
+    if (hasAddr) { try { await asaasReq('PUT', `/customers/${id}`, addr); } catch (e) { /* best-effort */ } }
+    return { customerId: id, created: false };
+  }
   const created = await asaasReq('POST', '/customers', {
     name: dev.nome || 'Devedor',
     cpfCnpj: doc,
     email: dev.email || undefined,
     mobilePhone: dev.telefone ? String(dev.telefone).replace(/\D/g, '') : undefined,
+    ...addr,
     notificationDisabled: true,
   });
   return { customerId: created.id, created: true };
