@@ -49,7 +49,7 @@ module.exports = async function handler(req, res) {
   const acordoId = body.acordo_id || req.query.acordo_id;
   if (!acordoId) return res.status(400).json({ error: 'acordo_id ausente' });
 
-  let claimedAcordo = false, acordoRef = null, prevMeta = null;
+  let claimedAcordo = false, acordoRef = null, prevMeta = null, devedorRef = null;
   try {
     const acs = await sbFetch(`acordos?id=eq.${encodeURIComponent(acordoId)}&select=*&limit=1`);
     const acordo = acs[0];
@@ -59,13 +59,13 @@ module.exports = async function handler(req, res) {
     if (acordo.cobranca_id || meta.boletos_emitidos) {
       return res.status(200).json({ ok: true, skipped: 'já emitido', acordo_id: acordoId });
     }
-    acordoRef = acordo.id; prevMeta = meta;
+    acordoRef = acordo.id; prevMeta = meta; devedorRef = acordo.devedor_id;
     // Trava anti-duplicação com o n8n: automático só emite com AUTO_EMIT_ACORDO=on.
     if (!manual && String(process.env.AUTO_EMIT_ACORDO || '').toLowerCase() !== 'on') {
       return res.status(200).json({ ok: true, skipped: 'auto-emit desligado (AUTO_EMIT_ACORDO≠on)', acordo_id: acordoId });
     }
 
-    const devs = await sbFetch(`devedores?id=eq.${acordo.devedor_id}&select=id,nome,doc,email,telefone,asaas_customer_id&limit=1`);
+    const devs = await sbFetch(`devedores?id=eq.${acordo.devedor_id}&select=id,nome,doc,email,telefone,asaas_customer_id,cep,numero,complemento,bairro,cidade,uf,endereco,endereco_crm&limit=1`);
     const dev = devs[0];
     if (!dev) return res.status(404).json({ error: 'devedor não encontrado' });
 
@@ -94,17 +94,20 @@ module.exports = async function handler(req, res) {
     }
     claimedAcordo = true;
 
-    const charge = await asaasReq('POST', '/payments', {
+    // 1x = boleto único (campo `value`); 2x+ = parcelamento (installmentCount+totalValue).
+    // O Asaas rejeita installmentCount=1, então os casos são separados.
+    const pay = {
       customer: customerId,
       billingType: 'BOLETO',
-      installmentCount: nParc,
-      totalValue: round2(total),
       dueDate: firstDue,
-      description: `Acordo ${dev.nome} — ${nParc}x`,
+      description: `Acordo ${dev.nome}${nParc > 1 ? ` — ${nParc}x` : ' — à vista'}`,
       externalReference: acordo.id,
       fine: { value: 2 },
       interest: { value: 1 },
-    });
+    };
+    if (nParc > 1) { pay.installmentCount = nParc; pay.totalValue = round2(total); }
+    else { pay.value = round2(total); }
+    const charge = await asaasReq('POST', '/payments', pay);
     // charge = pagamento da 1ª parcela; charge.installment = id da série.
     const invoiceUrl = charge.invoiceUrl || charge.bankSlipUrl || '';
 
@@ -125,7 +128,7 @@ module.exports = async function handler(req, res) {
     const tel = String(dev.telefone || '').replace(/\D/g, '');
     if (tel && invoiceUrl) {
       const msg = `Olá, ${firstName(dev.nome)}! Seu acordo foi confirmado. ✅\n\n` +
-        `Parcelamento: ${nParc}x — total ${fmtR(total)}.\n` +
+        `${nParc > 1 ? `Parcelamento: ${nParc}x — total ${fmtR(total)}` : `Valor: ${fmtR(total)} (à vista)`}.\n` +
         `1º vencimento: ${fmtDateBR(firstDue)}.\n\n` +
         `Acesse seu boleto/PIX aqui:\n${invoiceUrl}\n\n` +
         `Qualquer dúvida, é só responder esta mensagem. — Cobrasq`;
@@ -166,6 +169,30 @@ module.exports = async function handler(req, res) {
       await sbFetch(`acordos?id=eq.${acordoRef}`, { method: 'PATCH', body: JSON.stringify({ metadata: prevMeta || {} }) }).catch(() => {});
     }
     console.error('[emitir-acordo]', e.message);
+    // ALERTA DE FALHA (auditoria 2026-06): registra o evento e avisa o gestor por
+    // WhatsApp, p/ "assinou mas não emitiu por erro" nunca mais passar despercebido.
+    // O número do gestor vem de ALERT_WHATSAPP_TO (só dígitos, com DDI 55).
+    try {
+      if (devedorRef) {
+        await sbFetch('devedor_eventos', {
+          method: 'POST',
+          body: JSON.stringify({
+            devedor_id: devedorRef,
+            tipo: 'asaas_emissao_falhou',
+            payload: { acordo_id: acordoId, erro: String(e.message || e), via: manual ? 'manual' : 'auto' },
+            autor_nome: 'Sistema (falha na emissão)',
+          }),
+        }).catch(() => {});
+      }
+      const alertTo = String(process.env.ALERT_WHATSAPP_TO || '').replace(/\D/g, '');
+      if (alertTo) {
+        await zapiSendText(alertTo,
+          `⚠️ COBRASQ — falha ao emitir boleto.\n` +
+          `Acordo: ${acordoId}\nErro: ${String(e.message || e)}\n\n` +
+          `O acordo foi liberado p/ nova tentativa. Confira no painel (funil_automacao).`
+        ).catch(() => {});
+      }
+    } catch (_) { /* alerta é best-effort, não pode mascarar o erro original */ }
     return res.status(500).json({ error: e.message });
   }
 };
