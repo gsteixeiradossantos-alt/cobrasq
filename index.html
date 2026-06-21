@@ -7303,11 +7303,41 @@ async function checkAlertaBoletosPendentes(painelEl){
     const ic = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
     const html = `<div class="cob-alert" id="cob-alert-boletos" style="border-left-color:var(--danger);background:#FBEAE7;margin-bottom:16px;">
       <span class="cob-alert-ic" style="color:var(--danger);">${ic}</span>
-      <div><b>${n} acordo${n===1?'':'s'} assinado${n===1?'':'s'} sem boleto emitido</b> — a emissão automática pode ter falhado. Reemita pelo caso.</div>
-      <a class="cob-alert-link" style="color:var(--danger);" onclick="showPage('cobr')">Ver cobranças →</a>
+      <div><b>${n} acordo${n===1?'':'s'} assinado${n===1?'':'s'} sem boleto emitido</b> — clique para gerar o boleto no Asaas e enviar o link por WhatsApp.</div>
+      <button id="btn-emitir-pendentes" style="margin-left:auto;color:#fff;background:var(--danger);border:0;border-radius:8px;padding:8px 14px;font-size:12.5px;font-weight:600;cursor:pointer;white-space:nowrap;" onclick="emitirBoletosPendentes()">Emitir ${n} boleto${n===1?'':'s'} agora →</button>
     </div>`;
     el.insertAdjacentHTML('afterbegin', html);
   }catch(e){ /* best-effort: alerta não pode quebrar o painel */ }
+}
+
+// Emite (manual, pela sessão do gestor logado) os boletos dos acordos assinados que
+// ainda não têm boleto. Um clique resolve o backlog; idempotente (o endpoint pula os
+// já emitidos). Não precisa de secret — usa authHeaders() da sessão.
+async function emitirBoletosPendentes(){
+  if(currentUser?.tipo !== 'gestor') return;
+  const supa = getSupabase(); if(!supa){ showToast('Supabase indisponível.','danger'); return; }
+  const { data, error } = await supa.from('acordos')
+    .select('id,metadata,status_zapsign,devedor_id').eq('status_zapsign','assinado');
+  if(error){ showToast('Erro ao buscar acordos.','danger'); return; }
+  const travados = (data||[]).filter(a => !(a.metadata && a.metadata.boletos_emitidos));
+  if(!travados.length){ showToast('Nenhum acordo pendente de boleto.','info'); return; }
+  if(!confirm(`Gerar boleto de ${travados.length} acordo(s) assinado(s)?\n\nPara cada um: cria o parcelamento no Asaas e envia o link de pagamento por WhatsApp ao devedor.`)) return;
+  const btn = document.getElementById('btn-emitir-pendentes');
+  if(btn){ btn.disabled = true; btn.textContent = 'Emitindo… 0/'+travados.length; }
+  let ok=0, fail=0; const erros=[];
+  for(let i=0;i<travados.length;i++){
+    try{
+      const r = await fetch('/api/emitir-acordo', { method:'POST',
+        headers:{ 'Content-Type':'application/json', ...(await authHeaders()) },
+        body: JSON.stringify({ acordo_id: travados[i].id }) });
+      const j = await r.json().catch(()=>({}));
+      if(r.ok && (j.ok || j.skipped)) ok++; else { fail++; erros.push(j.error || ('HTTP '+r.status)); }
+    }catch(e){ fail++; erros.push(e.message); }
+    if(btn) btn.textContent = `Emitindo… ${i+1}/${travados.length}`;
+  }
+  if(erros.length) console.warn('[emitir-pendentes]', erros);
+  showToast(`Emissão: ${ok} ok${fail?`, ${fail} falha(s) — ver console`:''}.`, fail ? 'warning' : 'success');
+  try{ renderPainel(); }catch(e){}
 }
 
 function buildMiniCalendar(year, month, eventDates){
