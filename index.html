@@ -16575,6 +16575,7 @@ function renderFinanceiro(){
         <div class="fin-sub" id="fin-header-sub">${mesLabel} · carregando…</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-ghost btn-sm" id="fin-sync-controlle-btn" onclick="sincronizarControlle()" title="Puxar as últimas movimentações direto do Controlle">${ico('sync',13)} Sincronizar Controlle</button>
         <button class="btn btn-ghost btn-sm" onclick="renderFinTab(window._finTab)">${ico('sync',13)} Atualizar</button>
         <button class="btn btn-gold btn-sm" onclick="abrirNovaCobrancaAsaasGlobal()">${ico('plus',13)} Nova cobrança</button>
         <button class="btn btn-primary btn-sm" onclick="abrirNovoLancamento()">${ico('plus',13)} Novo lançamento</button>
@@ -16604,6 +16605,58 @@ function renderFinanceiro(){
 
   _loadFinHeader();
   setFinSection(window._finSection);
+  // "Ao abrir": dispara sync com o Controlle em segundo plano (debounce 5 min, silencioso).
+  sincronizarControlle({ silent: true });
+}
+
+// Sincronização SOB DEMANDA com o Controlle: botão "Sincronizar Controlle" e disparo
+// automático ao abrir o Financeiro. silent:true = automático (debounce de 5 min, sem alertas).
+// Chama /api/sync-controlle (autenticado; o servidor exige papel=proprietario).
+async function sincronizarControlle(opts){
+  opts = opts || {};
+  const silent = !!opts.silent;
+  const LAST_KEY = 'cobrasq_fin_controlle_last_sync';
+  if(silent){
+    const last = +(localStorage.getItem(LAST_KEY) || 0);
+    if(Date.now() - last < 5*60*1000) return;            // sincronizado há pouco
+    localStorage.setItem(LAST_KEY, String(Date.now()));  // debounce otimista
+  }
+  if(window._finSyncing) return;                          // evita concorrência
+  window._finSyncing = true;
+  const btn = document.getElementById('fin-sync-controlle-btn');
+  if(btn){ btn.disabled = true; btn.dataset.prevHtml = btn.innerHTML; btn.innerHTML = `${ico('sync',13)} Sincronizando…`; }
+  const sub = document.getElementById('fin-header-sub');
+  if(sub) sub.textContent = 'sincronizando com o Controlle…';
+  let rerendered = false;
+  try{
+    const headers = Object.assign({ 'Content-Type':'application/json' }, await authHeaders());
+    const r = await fetch('/api/sync-controlle', { method:'POST', headers });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok){
+      if(silent && r.status === 403) return;              // não-proprietário: ignora calado
+      throw new Error(j.error || ('HTTP ' + r.status));
+    }
+    localStorage.setItem(LAST_KEY, String(Date.now()));
+    try{ await finApi.loadDimensoes(true); }catch(_){}    // invalida cache de dimensões
+    if(!silent && typeof showToast === 'function'){
+      const t = j.totais || {};
+      showToast(`Controlle sincronizado — ${t.lancamentos ?? 0} lançamentos na janela.`, 'success');
+    }
+    renderFinanceiro();                                   // re-render com dados frescos (preserva a aba)
+    rerendered = true;
+  }catch(e){
+    if(!silent){
+      if(typeof showToast === 'function') showToast('Falha ao sincronizar com o Controlle: ' + e.message, 'error');
+      else alert('Falha ao sincronizar com o Controlle: ' + e.message);
+    }else{
+      console.warn('[sync-controlle auto]', e.message);
+    }
+  }finally{
+    window._finSyncing = false;
+    const b = document.getElementById('fin-sync-controlle-btn');
+    if(b && b.dataset.prevHtml){ b.disabled = false; b.innerHTML = b.dataset.prevHtml; delete b.dataset.prevHtml; }
+    if(!rerendered && document.getElementById('fin-header-sub')) _loadFinHeader(); // restaura o header
+  }
 }
 
 async function _loadFinHeader(){
