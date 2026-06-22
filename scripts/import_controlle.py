@@ -28,11 +28,17 @@ def load_env():
                 continue
             k, v = line.split("=", 1)
             env[k.strip()] = v.strip()
+    # Aceita SUPABASE_SERVICE_KEY (nome das env vars da Vercel) como alias do _ROLE_.
+    if not env.get("SUPABASE_SERVICE_ROLE_KEY") and env.get("SUPABASE_SERVICE_KEY"):
+        env["SUPABASE_SERVICE_ROLE_KEY"] = env["SUPABASE_SERVICE_KEY"]
     for k in ("CONTROLLE_TOKEN", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"):
         if not env.get(k):
             print(f"❌ Falta {k} em .env.local"); sys.exit(1)
-    env.setdefault("START_DATE", "2018-01-01")
-    env.setdefault("END_DATE", date.today().isoformat())
+    # Trata valor VAZIO (ex.: "END_DATE=" no .env) como ausente — não só chave faltando.
+    if not env.get("START_DATE"):
+        env["START_DATE"] = "2018-01-01"
+    if not env.get("END_DATE"):
+        env["END_DATE"] = date.today().isoformat()
     return env
 
 ENV = load_env()
