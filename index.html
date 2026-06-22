@@ -17072,6 +17072,25 @@ async function importarTodosAsaas(){
   renderImportacao();
 }
 
+// Mini-gráfico de linha (sparkline) em SVG — usado nos cards de 12 meses da Visão geral.
+function _finSpark(values, color){
+  const w=300, h=64, pad=6;
+  const vals=(values||[]).map(v=>+v||0);
+  if(vals.length<2) return '';
+  const min=Math.min(...vals,0), max=Math.max(...vals,0), range=(max-min)||1;
+  const stepX=(w-pad*2)/(vals.length-1);
+  const pts=vals.map((v,i)=>[pad+i*stepX, h-pad-((v-min)/range)*(h-pad*2)]);
+  const zeroY=h-pad-((0-min)/range)*(h-pad*2);
+  const line=pts.map((p,i)=>(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ');
+  const area='M'+pts[0][0].toFixed(1)+' '+zeroY.toFixed(1)+' '+pts.map(p=>'L'+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ')+' L'+pts[pts.length-1][0].toFixed(1)+' '+zeroY.toFixed(1)+' Z';
+  const last=pts[pts.length-1];
+  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="width:100%;height:60px;display:block;overflow:visible;">`
+    +`<path d="${area}" fill="${color}" opacity="0.08"/>`
+    +`<line x1="${pad}" y1="${zeroY.toFixed(1)}" x2="${w-pad}" y2="${zeroY.toFixed(1)}" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="3 3"/>`
+    +`<path d="${line}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`
+    +`<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="3" fill="${color}"/></svg>`;
+}
+
 async function renderFinVisao(el){
   el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--text-3);">
     <div class="mv2-spinner" style="margin:0 auto 8px;width:28px;height:28px;border-width:3px;"></div>
@@ -17112,9 +17131,43 @@ async function renderFinVisao(el){
     return { itens, total: itens.reduce((s,i)=>s+i.valor,0) };
   }
 
-  let kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas;
+  // Séries de 12 meses (faturamento, despesa→EBITDA, juros/multas, ticket médio por cliente).
+  async function _serie12m(){
+    if(!_sb) return null;
+    const ini12 = new Date(_y, _m-12, 1).toISOString().slice(0,10);
+    const meses=[]; for(let k=11;k>=0;k--){ const d=new Date(_y,_m-1-k,1); meses.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`); }
+    const mesesLabel = meses.map(mk=>{ const a=mk.split('-'); const d=new Date(+a[0],+a[1]-1,1); return d.toLocaleDateString('pt-BR',{month:'short'}).replace('.','')+'/'+a[0].slice(2); });
+    const idx=Object.fromEntries(meses.map((m,i)=>[m,i]));
+    const fat=Array(12).fill(0), desp=Array(12).fill(0), jm=Array(12).fill(0), cli=meses.map(()=>new Set());
+    let from=0;
+    for(;;){
+      const { data } = await _sb.from('fin_lancamento').select('data_competencia,valor,tipo_movimento,juros,multa,contato_id')
+        .gte('data_competencia',ini12).lte('data_competencia',_mesFim).order('data_competencia',{ascending:true}).range(from,from+999);
+      if(!data || !data.length) break;
+      for(const r of data){
+        const i=idx[(r.data_competencia||'').slice(0,7)]; if(i==null) continue;
+        const v=Math.abs(+r.valor||0);
+        if(r.tipo_movimento===1){ fat[i]+=v; if(r.contato_id) cli[i].add(r.contato_id); } else desp[i]+=v;
+        jm[i]+=Math.abs(+r.juros||0)+Math.abs(+r.multa||0);
+      }
+      if(data.length<1000) break; from+=1000;
+    }
+    return { meses, mesesLabel, fat, ebitda:fat.map((f,i)=>f-desp[i]), jm, ticket:fat.map((f,i)=>cli[i].size?f/cli[i].size:0) };
+  }
+  // Fluxo de caixa projetado: deltas diários dos lançamentos pendentes nos próximos 14 dias.
+  async function _fluxoDiario(){
+    if(!_sb) return null;
+    const N=14, fim=new Date(_now.getTime()+N*86400000).toISOString().slice(0,10);
+    const { data } = await _sb.from('fin_lancamento').select('data_vencimento,valor,tipo_movimento')
+      .eq('status',0).gte('data_vencimento',_hoje).lte('data_vencimento',fim).limit(2000);
+    const byDay={}; for(const r of (data||[])){ const d=(r.data_vencimento||'').slice(0,10); if(!d) continue; byDay[d]=(byDay[d]||0)+Math.abs(+r.valor||0)*(r.tipo_movimento===1?1:-1); }
+    const dias=[]; for(let k=0;k<N;k++){ const dt=new Date(_now.getTime()+k*86400000); const key=dt.toISOString().slice(0,10); dias.push({ key, label: dt.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'}), delta: byDay[key]||0 }); }
+    return { dias };
+  }
+
+  let kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas, serie, fluxo;
   try {
-    [kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas] = await Promise.all([
+    [kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas, serie, fluxo] = await Promise.all([
       finApi.getKpisMes().catch(()=>({ receitaMes:0, despesaMes:0, saldoMes:0, aReceber30d:0, qtdMes:0 })),
       finApi.getRecentes(8),
       finApi.loadDimensoes(),
@@ -17123,6 +17176,8 @@ async function renderFinVisao(el){
       _semanaAgg(0).catch(()=>({ count:0, total:0 })),
       _topAgg('clientes').catch(()=>({ itens:[], total:0 })),
       _topAgg('despesas').catch(()=>({ itens:[], total:0 })),
+      _serie12m().catch(()=>null),
+      _fluxoDiario().catch(()=>null),
     ]);
   } catch(e){
     el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--danger);">
@@ -17286,6 +17341,16 @@ async function renderFinVisao(el){
         <div class="fin-card-head"><div class="t">Últimos lançamentos</div><div class="lnk" onclick="setFinSection('movimentacoes')">ver todos →</div></div>
         ${recentesHtml}
       </div>
+
+      ${serie ? `<div class="fin-card"><div class="fin-card-head"><div class="t">Lucro/prejuízo (12m)</div></div><div style="font-family:'Fraunces',Georgia,serif;font-size:23px;font-weight:600;color:${serie.ebitda[11]>=0?'var(--success)':'var(--danger)'};margin:0 0 8px;">${fmtR(serie.ebitda[11])}</div>${_finSpark(serie.ebitda, serie.ebitda[11]>=0?'var(--success)':'var(--danger)')}<div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-3);margin-top:4px;"><span>${serie.mesesLabel[0]}</span><span>${serie.mesesLabel[11]}</span></div></div>` : ''}
+
+      ${serie ? `<div class="fin-card"><div class="fin-card-head"><div class="t">Faturamento (12m)</div></div><div style="font-family:'Fraunces',Georgia,serif;font-size:23px;font-weight:600;color:var(--navy);margin:0 0 8px;">${fmtR(serie.fat[11])}</div>${_finSpark(serie.fat,'var(--navy)')}<div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-3);margin-top:4px;"><span>${serie.mesesLabel[0]}</span><span>${serie.mesesLabel[11]}</span></div></div>` : ''}
+
+      ${serie ? `<div class="fin-card"><div class="fin-card-head"><div class="t">Ticket médio/cliente (12m)</div></div><div style="font-family:'Fraunces',Georgia,serif;font-size:23px;font-weight:600;color:var(--navy);margin:0 0 8px;">${fmtR(serie.ticket[11])}</div>${_finSpark(serie.ticket,'var(--navy)')}<div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-3);margin-top:4px;"><span>${serie.mesesLabel[0]}</span><span>${serie.mesesLabel[11]}</span></div></div>` : ''}
+
+      ${serie ? `<div class="fin-card"><div class="fin-card-head"><div class="t">Juros/Multas (12m)</div></div><div style="font-family:'Fraunces',Georgia,serif;font-size:23px;font-weight:600;color:var(--gold);margin:0 0 8px;">${fmtR(serie.jm[11])}</div>${_finSpark(serie.jm,'var(--gold)')}<div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-3);margin-top:4px;"><span>${serie.mesesLabel[0]}</span><span>${serie.mesesLabel[11]}</span></div></div>` : ''}
+
+      ${(fluxo && fluxo.dias && fluxo.dias.length) ? (()=>{ let acc=saldoContas; const s=fluxo.dias.map(d=>{acc+=d.delta;return acc;}); const fim=s[s.length-1]; const cor=fim>=0?'var(--navy)':'var(--danger)'; return `<div class="fin-card"><div class="fin-card-head"><div class="t">Fluxo de caixa (14 dias)</div></div><div style="font-family:'Fraunces',Georgia,serif;font-size:23px;font-weight:600;color:${cor};margin:0 0 8px;">${fmtR(fim)}</div>${_finSpark(s,cor)}<div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-3);margin-top:4px;"><span>${fluxo.dias[0].label}</span><span>${fluxo.dias[fluxo.dias.length-1].label}</span></div></div>`; })() : ''}
 
     </div>
   `;
