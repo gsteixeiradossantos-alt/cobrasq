@@ -17076,12 +17076,51 @@ async function renderFinVisao(el){
     Carregando dados financeiros…
   </div>`;
 
-  let recentes, dim, inad;
+  // Janelas: mês corrente + próximos 7 dias (para "na semana").
+  const _sb = getSupabase();
+  const _now = new Date();
+  const _y = _now.getFullYear(), _m = _now.getMonth()+1;
+  const _mesIni = `${_y}-${String(_m).padStart(2,'0')}-01`;
+  const _mesFim = new Date(_y, _m, 0).toISOString().slice(0,10);
+  const _hoje = _now.toISOString().slice(0,10);
+  const _sem7 = new Date(_now.getTime()+7*86400000).toISOString().slice(0,10);
+  // Contas pendentes (a receber/pagar) com vencimento nos próximos 7 dias.
+  async function _semanaAgg(tipo){
+    if(!_sb) return { count:0, total:0 };
+    const { data, count } = await _sb.from('fin_lancamento').select('valor',{count:'exact'})
+      .eq('tipo_movimento',tipo).eq('status',0)
+      .gte('data_vencimento',_hoje).lte('data_vencimento',_sem7).limit(1000);
+    return { count: count||0, total: (data||[]).reduce((s,r)=>s+Math.abs(+r.valor||0),0) };
+  }
+  // Top do mês: clientes (receitas por contato) ou despesas (rateios por categoria).
+  async function _topAgg(fonte){
+    if(!_sb) return { itens:[], total:0 };
+    const q = fonte==='clientes'
+      ? _sb.from('fin_lancamento').select('valor,fin_contato(nome)')
+          .eq('tipo_movimento',1).gte('data_competencia',_mesIni).lte('data_competencia',_mesFim).limit(1000)
+      : _sb.from('fin_lancamento_categoria').select('valor,fin_categoria(descricao),fin_lancamento!inner(data_competencia,tipo_movimento)')
+          .eq('fin_lancamento.tipo_movimento',0).gte('fin_lancamento.data_competencia',_mesIni).lte('fin_lancamento.data_competencia',_mesFim).limit(1000);
+    const { data } = await q;
+    const map = {};
+    for(const r of (data||[])){
+      const nm = fonte==='clientes' ? ((r.fin_contato&&r.fin_contato.nome)||'(sem contato)') : ((r.fin_categoria&&r.fin_categoria.descricao)||'(sem categoria)');
+      map[nm] = (map[nm]||0) + Math.abs(+r.valor||0);
+    }
+    const itens = Object.entries(map).map(([nome,valor])=>({nome,valor})).sort((a,b)=>b.valor-a.valor);
+    return { itens, total: itens.reduce((s,i)=>s+i.valor,0) };
+  }
+
+  let kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas;
   try {
-    [recentes, dim, inad] = await Promise.all([
+    [kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas] = await Promise.all([
+      finApi.getKpisMes().catch(()=>({ receitaMes:0, despesaMes:0, saldoMes:0, aReceber30d:0, qtdMes:0 })),
       finApi.getRecentes(8),
       finApi.loadDimensoes(),
       _loadInadimplentes().catch(()=>({ devList: [], charges: [], oldestAll: null })),
+      _semanaAgg(1).catch(()=>({ count:0, total:0 })),
+      _semanaAgg(0).catch(()=>({ count:0, total:0 })),
+      _topAgg('clientes').catch(()=>({ itens:[], total:0 })),
+      _topAgg('despesas').catch(()=>({ itens:[], total:0 })),
     ]);
   } catch(e){
     el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--danger);">
@@ -17177,33 +17216,75 @@ async function renderFinVisao(el){
       }).join('')
     : `<div class="note">Nenhuma conta cadastrada.</div>`;
 
+  // Lista "top N" (rank + nome + valor + %) reutilizada em Top despesas/clientes.
+  const _topList = (itens, total, cor) => (!itens || !itens.length)
+    ? `<div class="note">Sem dados no mês.</div>`
+    : itens.slice(0,5).map((it,i)=>{
+        const pct = total>0 ? Math.round(it.valor/total*100) : 0;
+        return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;${i?'border-top:1px solid var(--border);':''}">
+          <span style="width:18px;height:18px;border-radius:50%;background:var(--surface2);color:var(--text-3);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;">${i+1}</span>
+          <span style="flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escHtml(it.nome)}">${escHtml(it.nome)}</span>
+          <span style="font-size:13px;font-weight:700;color:${cor};">${fmtR(it.valor)}</span>
+          <span style="font-size:11.5px;font-weight:700;color:var(--text-3);width:36px;text-align:right;">${pct}%</span>
+        </div>`;
+      }).join('');
+  const _bigNum = (n, cor) => `<span style="font-family:'Fraunces',Georgia,serif;font-size:34px;font-weight:600;line-height:1;color:${cor};">${n}</span>`;
+  const _heroNum = (v) => `<div style="font-family:'Fraunces',Georgia,serif;font-size:30px;font-weight:600;color:var(--navy);margin:2px 0 12px;">${v}</div>`;
+
   el.innerHTML = `
-    <div class="fin-cols">
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;align-items:start;">
+
       <div class="fin-card">
-        <div class="fin-card-head">
-          <div class="t">Inadimplência — parcelas em atraso</div>
-          <div class="lnk" onclick="setFinSection('cobrancas')">ver todos →</div>
-        </div>
+        <div class="fin-card-head"><div class="t">Saldo geral</div><div class="lnk" onclick="setFinSection('cadastros')">contas →</div></div>
+        ${_heroNum(fmtR(saldoContas))}
+        ${contasHtml}
+      </div>
+
+      <div class="fin-card">
+        <div class="fin-card-head"><div class="t">Balanço do mês</div></div>
+        <div style="display:flex;justify-content:space-between;padding:6px 0;"><span style="color:var(--text-3);font-size:13px;">Entradas</span><span style="font-weight:700;color:var(--success);">${fmtR(kpis.receitaMes)}</span></div>
+        <div style="display:flex;justify-content:space-between;padding:6px 0;border-top:1px solid var(--border);"><span style="color:var(--text-3);font-size:13px;">Saídas</span><span style="font-weight:700;color:var(--danger);">${fmtR(kpis.despesaMes)}</span></div>
+        <div style="display:flex;justify-content:space-between;padding:8px 0 0;border-top:1px solid var(--border);margin-top:2px;"><span style="font-weight:700;font-size:13px;">Resultado do mês</span><span style="font-weight:800;color:${kpis.saldoMes>=0?'var(--success)':'var(--danger)'};">${fmtR(kpis.saldoMes)}</span></div>
+      </div>
+
+      <div class="fin-card">
+        <div class="fin-card-head"><div class="t">A receber na semana</div><div class="lnk" onclick="window._finTab='lancamentos';renderFinanceiro()">resolver →</div></div>
+        <div style="display:flex;align-items:baseline;gap:10px;margin-top:4px;">${_bigNum(aReceber.count,'var(--success)')}<span style="font-size:15px;font-weight:700;color:var(--navy);">${fmtR(aReceber.total)}</span></div>
+        <div class="note" style="margin-top:8px;">recebimentos pendentes nos próximos 7 dias</div>
+      </div>
+
+      <div class="fin-card">
+        <div class="fin-card-head"><div class="t">A pagar na semana</div><div class="lnk" onclick="window._finTab='lancamentos';renderFinanceiro()">resolver →</div></div>
+        <div style="display:flex;align-items:baseline;gap:10px;margin-top:4px;">${_bigNum(aPagar.count,'var(--danger)')}<span style="font-size:15px;font-weight:700;color:var(--navy);">${fmtR(aPagar.total)}</span></div>
+        <div class="note" style="margin-top:8px;">pagamentos pendentes nos próximos 7 dias</div>
+      </div>
+
+      <div class="fin-card">
+        <div class="fin-card-head"><div class="t">Faturamento do mês</div></div>
+        ${_heroNum(fmtR(kpis.receitaMes))}
+        <div class="note">total de entradas no mês corrente</div>
+      </div>
+
+      <div class="fin-card">
+        <div class="fin-card-head"><div class="t">Top despesas (mês)</div></div>
+        ${_topList(topDespesas.itens, topDespesas.total, 'var(--danger)')}
+      </div>
+
+      <div class="fin-card">
+        <div class="fin-card-head"><div class="t">Top clientes (mês)</div></div>
+        ${_topList(topClientes.itens, topClientes.total, 'var(--success)')}
+      </div>
+
+      <div class="fin-card">
+        <div class="fin-card-head"><div class="t">Inadimplência — em atraso</div><div class="lnk" onclick="setFinSection('cobrancas')">ver todos →</div></div>
         ${inadCardHtml}
       </div>
 
-      <div class="fin-stack">
-        <div class="fin-card">
-          <div class="fin-card-head">
-            <div class="t">Últimos lançamentos</div>
-            <div class="lnk" onclick="setFinSection('movimentacoes')">ver todos →</div>
-          </div>
-          ${recentesHtml}
-        </div>
-        <div class="fin-card">
-          <div class="fin-card-head">
-            <div class="t">Minhas contas</div>
-            <div class="lnk" onclick="setFinSection('cadastros')">gerenciar →</div>
-          </div>
-          ${contasHtml}
-          <div class="note">Saldo geral: <strong>${fmtR(saldoContas)}</strong></div>
-        </div>
+      <div class="fin-card">
+        <div class="fin-card-head"><div class="t">Últimos lançamentos</div><div class="lnk" onclick="setFinSection('movimentacoes')">ver todos →</div></div>
+        ${recentesHtml}
       </div>
+
     </div>
   `;
 }
