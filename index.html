@@ -14908,8 +14908,8 @@ function petResumoSistema(dev){
 // (cliente só com cus_), busca no Asaas. Aceita cliente sem cadastro completo.
 async function petLoadBoletosAsaas(){
   if(!DB.config.asaasKey) return { erro:'Configure a chave do Asaas em Configurações → Integrações.', groups:[] };
-  const data = await _loadInadimplentes({force:false}).catch(()=>null);
-  if(!data) return { erro:'Falha ao carregar os boletos vencidos do Asaas.', groups:[] };
+  const data = await _loadInadimplentes({incluirVincendas:true}).catch(()=>null);
+  if(!data) return { erro:'Falha ao carregar os boletos do Asaas.', groups:[] };
   const groups = [];
   for(const g of (data.devList||[])){
     let nome = (g.dev && g.dev.nome) || '', doc = (g.dev && g.dev.doc) || '';
@@ -15010,7 +15010,7 @@ function petRenderOrigem(body){
       <div style="font-size:12.5px;color:var(--text-3);margin-top:3px;">${desc}</div></div>
     </label>`;
   body.innerHTML = `<div style="font-size:12.5px;font-weight:600;color:var(--text-2);margin-bottom:10px;">De onde vem o caso?</div>`
-    + card('asaas','Boletos do Asaas','Puxa as cobranças vencidas (OVERDUE) direto do Asaas e gera a execução do título. Inclui clientes que existem só no Asaas (com CPF/CNPJ).','💳')
+    + card('asaas','Boletos do Asaas','Puxa as cobranças em aberto — vencidas e a vencer — direto do Asaas e gera a execução do título. Inclui clientes que existem só no Asaas (com CPF/CNPJ).','💳')
     + card('sistema','Casos do sistema','Usa os devedores / cobranças / acordos já cadastrados no sistema (saldo em aberto ou acordo).','🗂️');
 }
 function petSelOrigem(o){
@@ -15028,7 +15028,7 @@ function petRenderSelecao(body){
 // Passo 2 (origem Asaas) — clientes com boleto vencido no Asaas (inclui só-cus).
 async function petRenderSelAsaas(body){
   if(!_pet.boletosGroups){
-    body.innerHTML = `<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-3);padding:8px 0;"><div class="mv2-spinner" style="width:18px;height:18px;border-width:2px;"></div> Carregando boletos vencidos do Asaas…</div>`;
+    body.innerHTML = `<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-3);padding:8px 0;"><div class="mv2-spinner" style="width:18px;height:18px;border-width:2px;"></div> Carregando boletos do Asaas (vencidos e a vencer)…</div>`;
     const res = await petLoadBoletosAsaas();
     _pet.boletosGroups = res.groups || [];
     _pet._boletosErro = res.erro || '';
@@ -19178,19 +19178,33 @@ function _execCredorNome(dev){
 // por abrirExecucaoDeParcelas. Cache curto (60s) para não bater repetido no Asaas.
 async function _loadInadimplentes(opts){
   const force = !!(opts && opts.force);
+  // Modo do gerador de petição: além das vencidas (OVERDUE), traz também as
+  // vincendas/a vencer (PENDING). NÃO lê nem grava o cache/globais compartilhados,
+  // pra não contaminar o KPI "Vencido" e o dashboard (que devem ficar só com vencidas).
+  const comVincendas = !!(opts && opts.incluirVincendas);
   const now = Date.now();
-  if(!force && window._inadCache && (now - window._inadCache.at < 60000)){
+  if(!force && !comVincendas && window._inadCache && (now - window._inadCache.at < 60000)){
     return window._inadCache.data;
   }
   if(!DB.config.asaasKey){
     const empty = { devList: [], charges: [], oldestAll: null };
-    window._cobrancasGroups = {};
-    window._inadCache = { at: now, data: empty };
+    if(!comVincendas){ window._cobrancasGroups = {}; window._inadCache = { at: now, data: empty }; }
     return empty;
   }
-  const chData = await AsaasAPI.req('GET','/payments?limit=100&sort=dueDate&order=asc&status=OVERDUE')
-    .catch(()=>AsaasAPI.req('GET','/payments?limit=100&sort=dueDate&order=asc').catch(()=>({data:[]})));
-  const charges = (chData?.data||[]).filter(c=>c.status==='OVERDUE');
+  let chData;
+  if(comVincendas){
+    // O filtro status do Asaas é único por requisição → dois GETs (vencidas + a vencer) e junta.
+    const [overData, pendData] = await Promise.all([
+      AsaasAPI.req('GET','/payments?limit=100&sort=dueDate&order=asc&status=OVERDUE').catch(()=>({data:[]})),
+      AsaasAPI.req('GET','/payments?limit=100&sort=dueDate&order=asc&status=PENDING').catch(()=>({data:[]}))
+    ]);
+    chData = { data: [ ...(overData?.data||[]), ...(pendData?.data||[]) ] };
+  } else {
+    chData = await AsaasAPI.req('GET','/payments?limit=100&sort=dueDate&order=asc&status=OVERDUE')
+      .catch(()=>AsaasAPI.req('GET','/payments?limit=100&sort=dueDate&order=asc').catch(()=>({data:[]})));
+  }
+  const abertaOk = comVincendas ? (c=>c.status==='OVERDUE'||c.status==='PENDING') : (c=>c.status==='OVERDUE');
+  const charges = (chData?.data||[]).filter(abertaOk);
 
   const custMap = {};
   (DB.devedores||[]).forEach(d=>{ if(d.asaasCustomerId) custMap[d.asaasCustomerId]=d; });
@@ -19203,15 +19217,18 @@ async function _loadInadimplentes(opts){
     return { custId, dev, chs, agg: _execAgg(chs) };
   }).sort((a,b)=> b.agg.total - a.agg.total);
 
-  // Guarda para o modal de execução
-  window._cobrancasGroups = {};
-  devList.forEach(g=>{ if(g.dev) window._cobrancasGroups[g.dev.id] = g.chs; });
+  // Guarda para o modal de execução e cacheia — só no modo padrão (vencidas),
+  // pra não contaminar o KPI/dashboard com as vincendas do gerador de petição.
+  if(!comVincendas){
+    window._cobrancasGroups = {};
+    devList.forEach(g=>{ if(g.dev) window._cobrancasGroups[g.dev.id] = g.chs; });
+  }
 
   let oldestAll = null;
   charges.forEach(c=>{ if(c.dueDate && (!oldestAll||c.dueDate<oldestAll)) oldestAll=c.dueDate; });
 
   const data = { devList, charges, oldestAll };
-  window._inadCache = { at: now, data };
+  if(!comVincendas) window._inadCache = { at: now, data };
   return data;
 }
 
