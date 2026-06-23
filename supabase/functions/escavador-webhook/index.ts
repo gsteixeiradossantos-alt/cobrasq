@@ -84,19 +84,22 @@ Deno.serve(async (req) => {
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // Tenta vincular ao devedor via número de processo (apenas se for CNJ válido)
+    // Tenta vincular ao devedor via número de processo (apenas se for CNJ válido).
+    // Fonte única do número é cobrancas.numero_processo (Fase C, 2026-06-19a). Pela
+    // invariante 2026-06-15 (cobranca.id = id do devedor principal), o devedor_id é
+    // o próprio cobranca.id. O número pode estar gravado formatado ou só dígitos,
+    // então casamos as duas formas. Os valores derivam do CNJ já validado pelo
+    // regex acima (sem injeção no .or() do PostgREST).
     let devedorId: string | null = null;
     if (isProcessoValido(payload.processo_numero)) {
-      // .or() interpola direto na query do PostgREST; sem validação prévia,
-      // vírgula ou parêntese no payload quebra o filtro. Por isso só rodamos
-      // a busca depois de validar contra o regex CNJ.
-      const num = payload.processo_numero;
-      const { data: devs } = await supabase
-        .from('devedores')
+      const dig = payload.processo_numero.replace(/\D/g, '');
+      const formatado = `${dig.slice(0, 7)}-${dig.slice(7, 9)}.${dig.slice(9, 13)}.${dig.slice(13, 14)}.${dig.slice(14, 16)}.${dig.slice(16, 20)}`;
+      const { data: cobs } = await supabase
+        .from('cobrancas')
         .select('id')
-        .or(`metadata->>processoNum.eq.${num},encaminhamento_judicial->>processoNum.eq.${num}`)
+        .or(`numero_processo.eq.${formatado},numero_processo.eq.${dig}`)
         .limit(1);
-      if (devs && devs.length > 0) devedorId = devs[0].id;
+      if (cobs && cobs.length > 0) devedorId = cobs[0].id;
     }
 
     const { data, error } = await supabase
