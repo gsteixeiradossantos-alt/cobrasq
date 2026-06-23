@@ -11650,10 +11650,13 @@ async function renderIntimacoes(){
         <div style="font-size:12.5px;color:var(--text-2);margin-top:2px;">${all.length} registro(s) · <strong style="color:var(--text);">${totalNaoLidas}</strong> não lido(s)</div>
       </div>
       <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost btn-sm" onclick="abrirPrepararPeticionamento()">＋ Preparar peticionamento</button>
         <button class="btn btn-ghost btn-sm" onclick="_intimacoesCache=null;renderIntimacoes();">↻ Atualizar</button>
         ${totalNaoLidas>0?`<button class="btn btn-primary btn-sm" onclick="marcarTodasIntimacoesLidas()">Marcar todas lidas</button>`:''}
       </div>
     </div>
+
+    <div id="fila-peticionamento" style="margin-bottom:18px;"></div>
 
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">
       ${chip('Não lidas','nao_lidas','status')}
@@ -11673,6 +11676,135 @@ async function renderIntimacoes(){
 
   const srch = document.getElementById('intim-search');
   if(srch) srch.addEventListener('input', e=>{ _intimacoesState.q=e.target.value; renderIntimacoes(); });
+
+  renderFilaPeticionamento();
+}
+
+// ── PETICIONAMENTO eproc (Fase 2) — fila + preparar ──────────
+// A extensão Chrome consome estes jobs (status 'preparado') via
+// /api/eproc-peticionamento e protocola na sessão logada do advogado.
+const PET_STATUS = {
+  preparado:   { txt:'Preparado',   bg:'#FFF3BF', fg:'#7A5C00' },
+  enviando:    { txt:'Enviando',    bg:'#E7F0FF', fg:'#1E4DA1' },
+  protocolado: { txt:'Protocolado', bg:'#D3F9D8', fg:'#1B7A2E' },
+  erro:        { txt:'Erro',        bg:'#FFE3E3', fg:'#B42318' },
+  cancelado:   { txt:'Cancelado',   bg:'#EEE',    fg:'#666' },
+};
+
+async function carregarPeticionamentos(){
+  const supa = getSupabase();
+  if(!supa) return [];
+  const { data, error } = await supa.from('proc_peticionamentos')
+    .select('id,numero_processo,tipo,evento_eproc,status,protocolo_num,protocolado_em,erro,created_at')
+    .order('created_at', { ascending:false })
+    .limit(50);
+  if(error){ console.warn('[peticionamentos]', error.message); return []; }
+  return data || [];
+}
+
+async function renderFilaPeticionamento(){
+  const box = document.getElementById('fila-peticionamento');
+  if(!box) return;
+  const rows = await carregarPeticionamentos();
+  const ativos = rows.filter(r=>r.status!=='cancelado');
+  if(!ativos.length){
+    box.innerHTML = `<div style="border:1px dashed var(--border);border-radius:8px;padding:12px 14px;color:var(--text-2);font-size:12.5px;">
+      Nenhum peticionamento na fila. Use <strong>＋ Preparar peticionamento</strong> e protocole pela extensão do eproc.</div>`;
+    return;
+  }
+  const linha = (r)=>{
+    const st = PET_STATUS[r.status] || PET_STATUS.preparado;
+    return `<div style="display:flex;gap:12px;align-items:center;border:1px solid var(--border);border-radius:8px;padding:10px 14px;">
+      <span style="font-size:10.5px;font-weight:700;text-transform:uppercase;background:${st.bg};color:${st.fg};padding:2px 8px;border-radius:10px;">${st.txt}</span>
+      <span style="font-family:var(--font-mono);font-size:12px;font-weight:600;">${escHtml(r.numero_processo||'—')}</span>
+      <span style="font-size:12px;color:var(--text-2);">${escHtml(r.tipo||'')}${r.evento_eproc?(' · '+escHtml(r.evento_eproc)):''}</span>
+      ${r.protocolo_num?`<span style="font-size:12px;color:var(--text);margin-left:auto;">Protocolo <strong>${escHtml(r.protocolo_num)}</strong></span>`:''}
+      ${r.status==='erro'&&r.erro?`<span style="font-size:11.5px;color:var(--danger);margin-left:auto;" title="${escHtml(r.erro)}">⚠ ${escHtml(r.erro.slice(0,60))}</span>`:''}
+    </div>`;
+  };
+  box.innerHTML = `
+    <div style="font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--text-3);margin-bottom:8px;">Fila de peticionamento (eproc)</div>
+    <div style="display:flex;flex-direction:column;gap:6px;">${ativos.map(linha).join('')}</div>`;
+}
+
+function abrirPrepararPeticionamento(prefillProcesso){
+  const ov = document.createElement('div');
+  ov.id = 'pet-eproc-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  ov.innerHTML = `
+    <div style="background:var(--surface);border-radius:12px;width:min(460px,92vw);padding:20px;box-shadow:0 12px 40px rgba(0,0,0,.3);">
+      <h3 style="margin:0 0 4px;font-size:16px;">Preparar peticionamento</h3>
+      <p style="margin:0 0 14px;font-size:12.5px;color:var(--text-2);">Gera um job para a extensão protocolar no eproc TJPR (você revisa e clica Protocolar).</p>
+      <label style="font-size:12px;color:var(--text-2);">Nº do processo (CNJ)</label>
+      <input id="pet-proc" value="${escHtml(prefillProcesso||'')}" placeholder="0000000-00.0000.8.16.0000" style="width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--border);border-radius:7px;margin:4px 0 12px;background:var(--bg);color:var(--text);">
+      <div style="display:flex;gap:10px;">
+        <div style="flex:1;">
+          <label style="font-size:12px;color:var(--text-2);">Tipo</label>
+          <select id="pet-tipo" style="width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--border);border-radius:7px;margin:4px 0 12px;background:var(--bg);color:var(--text);">
+            <option value="intercorrente">Intercorrente</option>
+            <option value="inicial">Inicial</option>
+          </select>
+        </div>
+        <div style="flex:1;">
+          <label style="font-size:12px;color:var(--text-2);">Evento/tipo no eproc</label>
+          <input id="pet-evento" placeholder="ex.: Petição (intercorrente)" style="width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--border);border-radius:7px;margin:4px 0 12px;background:var(--bg);color:var(--text);">
+        </div>
+      </div>
+      <label style="font-size:12px;color:var(--text-2);">PDF da petição</label>
+      <input id="pet-file" type="file" accept="application/pdf" style="width:100%;box-sizing:border-box;padding:8px 0;margin:4px 0 14px;color:var(--text);">
+      <div id="pet-erro" style="display:none;color:var(--danger);font-size:12.5px;margin-bottom:10px;"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('pet-eproc-overlay').remove()">Cancelar</button>
+        <button class="btn btn-primary btn-sm" id="pet-submit" onclick="submeterPeticionamento()">Preparar</button>
+      </div>
+    </div>`;
+  ov.addEventListener('click', e=>{ if(e.target===ov) ov.remove(); });
+  document.body.appendChild(ov);
+}
+
+async function submeterPeticionamento(){
+  const supa = getSupabase();
+  if(!supa) return;
+  const proc = (document.getElementById('pet-proc').value||'').trim();
+  const tipo = document.getElementById('pet-tipo').value;
+  const evento = (document.getElementById('pet-evento').value||'').trim();
+  const file = document.getElementById('pet-file').files[0];
+  const errEl = document.getElementById('pet-erro');
+  const fail = (m)=>{ errEl.textContent=m; errEl.style.display='block'; };
+  if(!proc){ return fail('Informe o número do processo.'); }
+  if(!file){ return fail('Selecione o PDF da petição.'); }
+  if(file.type!=='application/pdf'){ return fail('O arquivo deve ser PDF.'); }
+
+  const btn = document.getElementById('pet-submit');
+  btn.disabled = true; const t0 = btn.textContent; btn.textContent = 'Preparando…';
+  try{
+    // Vincula a uma cobrança pelo número (formato formatado ou só dígitos).
+    const dig = proc.replace(/\D/g,'');
+    const formatado = dig.length===20 ? `${dig.slice(0,7)}-${dig.slice(7,9)}.${dig.slice(9,13)}.${dig.slice(13,14)}.${dig.slice(14,16)}.${dig.slice(16,20)}` : proc;
+    let cobrancaId=null, devedorId=null;
+    const { data: cobs } = await supa.from('cobrancas').select('id').or(`numero_processo.eq.${formatado},numero_processo.eq.${dig}`).limit(1);
+    if(cobs && cobs.length){ cobrancaId = cobs[0].id; devedorId = cobs[0].id; } // invariante cobranca.id=devedor principal
+
+    const ts = Date.now();
+    const safe = (file.name||'peticao.pdf').replace(/[^a-zA-Z0-9.]+/g,'-');
+    const path = `peticionamentos/${cobrancaId||'sem'}/${ts}_${safe}`;
+    const { error: upErr } = await supa.storage.from('documentos').upload(path, file, { contentType:'application/pdf', upsert:false });
+    if(upErr) throw upErr;
+
+    const { error: insErr } = await supa.from('proc_peticionamentos').insert({
+      cobranca_id: cobrancaId, devedor_id: devedorId, numero_processo: formatado,
+      tipo, evento_eproc: evento || null, pdf_path: path, status:'preparado'
+    });
+    if(insErr){ await supa.storage.from('documentos').move(path,'_lixeira/'+path).catch(()=>{}); throw insErr; }
+
+    document.getElementById('pet-eproc-overlay')?.remove();
+    if(typeof showToast==='function') showToast('Peticionamento preparado. Abra o eproc e use a extensão.','success');
+    renderFilaPeticionamento();
+  }catch(e){
+    const msg = String(e && e.message || e);
+    fail(/policy|denied|violates|security/i.test(msg) ? 'Sem permissão para salvar (RLS).' : ('Falha: '+msg));
+    btn.disabled=false; btn.textContent=t0;
+  }
 }
 
 // ── KANBAN DRAG AND DROP ─────────────────────────────────────
