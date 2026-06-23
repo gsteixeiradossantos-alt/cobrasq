@@ -11845,7 +11845,7 @@ function cliSortArrowHtml(key){
 // ════════════════════════════════════════════════════════════════════════════
 const PAPEL_LABELS = {
   emitente:'Emitente', endossante:'Endossante', avalista:'Avalista',
-  fiador:'Fiador', devedor_solidario:'Devedor solidário'
+  fiador:'Fiador', devedor_solidario:'Devedor solidário', sucessor:'Sucessor'
 };
 let DB_cobrancas = [];          // cache local (com cobranca_partes embutidas)
 let cobrFilter = { q:'', credor:'', responsavel:'', fase:'', status:'' };
@@ -12327,6 +12327,7 @@ async function renderCobrancaDetalhe(){
     </dl>
     <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
       ${principalP?`<button class="btn btn-ghost btn-sm" onclick="verDevedor('${principalP.devedor_id}')">Ficha do devedor principal</button>`:''}
+      <button class="btn btn-ghost btn-sm" onclick="registrarNegativacao('${cob.id}','${principalP?principalP.devedor_id:''}')">Registrar negativação</button>
       <button class="btn btn-ghost btn-sm" onclick="showPage('crm')">Abrir CRM</button>
     </div>
     <div style="font-size:11.5px;color:var(--text-3);margin-top:10px;">A aba <strong>Histórico</strong> é a base dos relatórios de andamento ao cliente.</div>
@@ -12362,6 +12363,24 @@ function cobrDetTab(name){
   document.querySelectorAll('#page-cobranca-detalhe .det-tabbar [data-cobrtab]').forEach(b=>b.classList.toggle('on', b.dataset.cobrtab===name));
   document.querySelectorAll('#page-cobranca-detalhe .det-tabpane').forEach(p=>{ p.style.display = (p.dataset.pane===name)?'':'none'; });
 }
+// Negativação manual (handoff §4.9): registra no histórico do caso. Sem API por ora;
+// o gancho p/ Serasa/SPC entra aqui depois.
+function registrarNegativacao(cobId, devId){
+  if(!cobId){ showToast('Cobrança inválida.','danger'); return; }
+  promptModal('Registrar negativação', 'Órgão e observação (ex.: "Serasa — incluído hoje"):', async (nota)=>{
+    if(!nota) return;
+    const supa=getSupabase(); if(!supa){ showToast('Supabase não configurado.','danger'); return; }
+    try{
+      const { error } = await supa.from('devedor_eventos').insert({
+        cobranca_id: cobId, devedor_id: devId||cobId, tipo:'negativacao',
+        payload:{ acao_completa:'Negativação registrada — '+nota, origem:'manual' }
+      });
+      if(error) throw error;
+      showToast('Negativação registrada no histórico.','success');
+      renderCobrancaDetalhe();
+    }catch(e){ showToast('Falha ao registrar: '+(e.message||e),'danger'); }
+  }, { hint:'Sem API por enquanto — registro manual. O gancho p/ Serasa/SPC entra aqui depois.' });
+}
 
 // ── 2) DETALHE DO DEVEDOR (ficha + todas as dívidas, com papel) ──────────────
 async function renderDevedorDetalhe(){
@@ -12369,7 +12388,7 @@ async function renderDevedorDetalhe(){
   if(!el) return;
   el.innerHTML=`<div class="det-wrap"><div style="padding:40px;text-align:center;color:var(--text-2);">Carregando…</div></div>`;
   const supa=getSupabase();
-  let dev=null, vincs=[], hist=[];
+  let dev=null, vincs=[], hist=[], docs=[];
   if(supa && id){
     const { data:dd } = await supa.from('devedores').select('*').eq('id',id).maybeSingle();
     dev=dd||null;
@@ -12380,6 +12399,14 @@ async function renderDevedorDetalhe(){
     const { data:ev } = await supa.from('devedor_eventos')
       .select('tipo,payload,criado_em').eq('devedor_id',id).order('criado_em',{ascending:false}).limit(25);
     hist=ev||[];
+    // Documentos: pessoais (devedor_id) + espelho das dívidas (cobranca_id), por referência.
+    const cobIds=vincs.map(v=>v.cobrancas.id).filter(Boolean);
+    let orF=`devedor_id.eq.${id}`;
+    if(cobIds.length) orF+=`,cobranca_id.in.(${cobIds.join(',')})`;
+    const { data:dx } = await supa.from('documentos')
+      .select('id,nome,categoria,cobranca_id,devedor_id,size_bytes,uploaded_at').eq('ativo',true)
+      .or(orF).order('uploaded_at',{ascending:false});
+    docs=dx||[];
   }
   if(!dev){ const c=(DB.devedores||[]).find(x=>x.id===id); if(c) dev={...c, telefone:c.tel, data_nascimento:c.metadata?.loginNascimento, observacoes:c.obs}; }
   if(!dev){ el.innerHTML=`<div class="det-wrap det-fade"><button class="det-back" onclick="showPage('devedores')">${ico('arrow-left',14)||'←'} Voltar</button><div class="cob-panel"><div class="cob-empty-big"><div class="cob-empty-tt">Devedor não encontrado</div></div></div></div>`; return; }
@@ -12434,6 +12461,25 @@ async function renderDevedorDetalhe(){
     ${(dev.observacoes||dev.metadata?.obs)?`<div style="margin-top:14px;"><div class="det-panel-tt">Observações internas</div><div style="font-size:12.5px;color:var(--text-2);white-space:pre-wrap;">${escHtml(dev.observacoes||dev.metadata?.obs)}</div></div>`:''}
   </div>`;
 
+  // Documentos do devedor: "Pessoais" + espelho por referência das dívidas, agrupado por credor.
+  const _docItem=(d,ref)=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;border:1px solid var(--border);border-radius:8px;padding:8px 11px;margin-bottom:7px;">
+    <div style="min-width:0;flex:1;"><div style="font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(d.nome)}</div><div style="font-size:10.5px;color:var(--text-3);">${escHtml(typeof docCatLabel==='function'?docCatLabel(d.categoria):(d.categoria||''))}${ref?` · ${escHtml(ref)}`:''}</div></div>
+    <button class="btn btn-ghost btn-sm" onclick="baixarDocumentoDevedor('${d.id}')">Abrir</button>
+  </div>`;
+  const _docsPessoais=docs.filter(d=>!d.cobranca_id);
+  const _docsPorCob={}; docs.filter(d=>d.cobranca_id).forEach(d=>{ (_docsPorCob[d.cobranca_id]=_docsPorCob[d.cobranca_id]||[]).push(d); });
+  const _grupos=Object.entries(_docsPorCob).map(([cid,arr])=>{
+    const v=vincs.find(x=>x.cobrancas.id===cid); const cr=v?((DB.clientes||[]).find(x=>x.id===v.cobrancas.cliente_id)||{}):{};
+    const crNome=cr.nomeFantasia||cr.nome_fantasia||cr.nome||'Cobrança';
+    return `<div style="margin-top:10px;"><div style="font-size:11px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">${escHtml(crNome)}</div>${arr.map(d=>_docItem(d,'espelhado da cobrança')).join('')}</div>`;
+  }).join('');
+  const panelDocs=`<div class="cob-panel" style="padding:18px;">
+    <div class="det-panel-tt">Documentos do devedor</div>
+    <div style="font-size:11px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Pessoais</div>
+    ${_docsPessoais.length? _docsPessoais.map(d=>_docItem(d)).join('') : _detEmpty('Nenhum documento pessoal.')}
+    ${_grupos? `<div style="margin-top:8px;font-size:11.5px;color:var(--text-3);">Das dívidas (por referência — o arquivo mora na cobrança):</div>${_grupos}` : ''}
+  </div>`;
+
   el.innerHTML=`<div class="det-wrap det-fade">
     <button class="det-back" onclick="showPage('devedores')">${ico('arrow-left',14)||'←'} Voltar para Devedores</button>
     <div class="det-head">
@@ -12442,7 +12488,7 @@ async function renderDevedorDetalhe(){
       <div class="det-head-actions">${tel?_detWa(tel):''}<button class="cob-btn-ghost" onclick="openDrawer('${dev.id}')" title="Asaas, acordos, registrar pagamento, documentos">${ico('eye',14)} Painel operacional</button><button class="cob-btn-primary" onclick="editDevedor('${dev.id}')">${ico('edit',14)} Editar cadastro</button></div>
     </div>
     ${meta}
-    <div class="det-body"><div class="det-col">${panelDividas}${panelHist}</div><div class="det-col">${panelDados}</div></div>
+    <div class="det-body"><div class="det-col">${panelDividas}${panelHist}</div><div class="det-col">${panelDados}${panelDocs}</div></div>
   </div>`;
 }
 
