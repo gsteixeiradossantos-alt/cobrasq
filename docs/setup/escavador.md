@@ -53,7 +53,7 @@ curl -X POST https://api.escavador.com/api/v2/monitoramento/processo \
 
 (Implementar isso como cron diário que sincroniza `devedores → escavador`. TODO no código.)
 
-## DataJud (gratuito, pull-only)
+## DataJud (gratuito, pull-only) — ✅ IMPLEMENTADO
 
 Pra andamentos processuais (não DJEN), o CNJ tem API pública:
 - Doc: https://datajud-wiki.cnj.jus.br/
@@ -61,7 +61,22 @@ Pra andamentos processuais (não DJEN), o CNJ tem API pública:
 - Latência: 24-48h
 - Útil pra confirmar metadata de processos cadastrados
 
-Implementação: cron diário que consulta DataJud pra cada `processoNum` em `devedores`, atualiza metadata. **Pendente** — fica pra próxima sessão.
+Implementação (Fase 1a eproc):
+- ✅ `api/cron-datajud.js` — cron diário (07:00 UTC, ver `vercel.json`) que consulta a API
+  pública do DataJud TJPR pra cada `cobrancas.numero_processo` (CNJ do TJPR) e grava
+  andamentos novos em `proc_intimacoes` (`fonte='datajud'`). Primeira sincronização entra
+  como lida (sem alerta retroativo); novos andamentos entram como não-lidos.
+- ✅ migration `2026-06-23a_intimacoes_datajud.sql` — adiciona `'datajud'` ao CHECK de `fonte`
+  e cria `dedup_key` (índice único) p/ insert idempotente.
+- ✅ UI: página **Intimações** (`renderIntimacoes`) + badge de não-lidas na sidebar.
+
+### Como ativar (você faz)
+1. Pegar a **chave pública do DataJud** (CNJ publica em https://datajud-wiki.cnj.jus.br/).
+2. Setar na Vercel: env var `DATAJUD_API_KEY=<chave_publica_cnj>`.
+3. Aplicar a migration `2026-06-23a_intimacoes_datajud.sql` no Supabase (SQL Editor — **não**
+   `db push` cego, ver CLAUDE.md).
+4. Teste manual: `GET /api/cron-datajud?dry=1` (com `x-cron-secret`) deve retornar a contagem
+   de processos TJPR válidos.
 
 ## UI no app
 
