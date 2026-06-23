@@ -17164,9 +17164,21 @@ async function renderFinVisao(el){
     return { dias };
   }
 
-  let kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas, serie, fluxo;
+  // Painel de automação: funil de acordos (funil_automacao) + repasses (fin_operacao).
+  async function _automacaoStats(){
+    if(!_sb) return null;
+    let funilRows=null, opRows=null;
+    try { const r = await _sb.from('funil_automacao').select('etapa_funil'); funilRows = r.data; } catch(_){ }
+    try { const r = await _sb.from('fin_operacao').select('repasse_status,valor_capital'); opRows = r.data; } catch(_){ }
+    if(!funilRows && !opRows) return null;
+    const funil={}; for(const r of (funilRows||[])){ funil[r.etapa_funil]=(funil[r.etapa_funil]||0)+1; }
+    const rep={}; for(const r of (opRows||[])){ const k=r.repasse_status||'?'; if(!rep[k]) rep[k]={n:0,valor:0}; rep[k].n++; rep[k].valor+=Math.abs(+r.valor_capital||0); }
+    return { funil, rep };
+  }
+
+  let kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas, serie, fluxo, automacao;
   try {
-    [kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas, serie, fluxo] = await Promise.all([
+    [kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas, serie, fluxo, automacao] = await Promise.all([
       finApi.getKpisMes().catch(()=>({ receitaMes:0, despesaMes:0, saldoMes:0, aReceber30d:0, qtdMes:0 })),
       finApi.getRecentes(8),
       finApi.loadDimensoes(),
@@ -17177,6 +17189,7 @@ async function renderFinVisao(el){
       _topAgg('despesas').catch(()=>({ itens:[], total:0 })),
       _serie12m().catch(()=>null),
       _fluxoDiario().catch(()=>null),
+      _automacaoStats().catch(()=>null),
     ]);
   } catch(e){
     el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--danger);">
@@ -17314,6 +17327,22 @@ async function renderFinVisao(el){
         <div style="display:flex;align-items:baseline;gap:10px;margin-top:4px;">${_bigNum(aPagar.count,'var(--danger)')}<span style="font-size:15px;font-weight:700;color:var(--navy);">${fmtR(aPagar.total)}</span></div>
         <div class="note" style="margin-top:8px;">pagamentos pendentes nos próximos 7 dias</div>
       </div>
+
+      ${automacao ? (()=>{
+        const f=automacao.funil||{}, rep=automacao.rep||{};
+        const dot=c=>`<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${c};margin-right:7px;vertical-align:middle;"></span>`;
+        const linha=(cor,label,valTxt,valCor)=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:5px 0;border-top:1px solid var(--border);"><span style="font-size:12.5px;">${dot(cor)}${label}</span><span style="font-weight:700;font-size:13px;color:${valCor||'var(--navy)'};">${valTxt}</span></div>`;
+        const repL=(label,o,cor)=>(o&&o.n)?linha(cor,`${label} <span style="color:var(--text-3);">(${o.n})</span>`,fmtR(o.valor),cor):'';
+        const temRep=rep.pendente||rep.preparado||rep.efetuado||rep.revisar;
+        return `<div class="fin-card">
+        <div class="fin-card-head"><div class="t">Automação de cobrança</div><div class="lnk" onclick="setFinSection('cobrancas')">execução →</div></div>
+        <div style="font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--text-3);margin-bottom:2px;">Esteira de acordos</div>
+        ${linha('var(--gold)','Aguardando assinatura', f.aguardando_assinatura||0)}
+        ${linha((f.assinado_sem_boleto?'var(--danger)':'var(--text-3)'),'Assinado sem boleto', f.assinado_sem_boleto||0, f.assinado_sem_boleto?'var(--danger)':'var(--navy)')}
+        ${linha('var(--success)','Boleto emitido', f.boleto_emitido||0)}
+        <div style="font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--text-3);margin:12px 0 2px;">Repasses ao credor</div>
+        ${temRep ? (repL('A repassar',rep.pendente,'var(--gold)')+repL('Em processamento',rep.preparado,'var(--navy)')+repL('Repassado',rep.efetuado,'var(--success)')+repL('Revisar',rep.revisar,'var(--danger)')) : '<div class="note" style="padding-top:6px;">Nenhum recebimento processado ainda.</div>'}
+      </div>`; })() : ''}
 
       <div class="fin-card">
         <div class="fin-card-head"><div class="t">Top despesas (mês)</div></div>
