@@ -7956,6 +7956,7 @@ function renderDevedores(){
         <button class="cob-btn-ghost" onclick="openModal('modal-importDev')">${ico('upload',14)} Importar</button>
         <button class="cob-btn-ghost" onclick="toggleDevViewMode()">${devViewMode==='cards'?'Tabela':'Cards'}</button>
         <button class="cob-btn-ghost" onclick="toggleSelectionMode()"${selectionMode?' style="background:var(--side-bg);color:var(--side-fg);border-color:var(--side-bg);"':''}>${selectionMode?'✕ Cancelar':'☑ Selecionar'}</button>
+        <button class="cob-btn-ghost" onclick="exportarTodosDevedores()">${ico('download',14)} Exportar</button>
         <button class="cob-btn-ghost" onclick="abrirNovaCobranca()">${ico('plus',14)} Nova cobrança</button>
         <button class="cob-btn-primary" onclick="abrirNovoDevedor()">${ico('plus',14)} Novo devedor</button>
       </div>
@@ -12030,6 +12031,7 @@ async function renderCobrancas(){
         <div class="cob-h1-sub">${todas.length} caso${todas.length!==1?'s':''} · cada um pode ter vários devedores (emitente, endossante…)</div>
       </div>
       <div class="cob-head-actions">
+        <button class="cob-btn-ghost" onclick="exportarTodasCobrancas()">${ico('download',14)} Exportar</button>
         <button class="cob-btn-primary" onclick="abrirNovaCobranca()">${ico('plus',14)} Nova cobrança</button>
       </div>
     </div>
@@ -13107,6 +13109,7 @@ function renderClientes(){
         })()}</div>
       </div>
       <div class="cob-head-actions">
+        <button class="cob-btn-ghost" onclick="exportarTodosClientes()">${ico('download',14)} Exportar</button>
         ${(podeGerirCredor && clientes.length > 0) ? `<button class="cob-btn-ghost" onclick="toggleClienteSelMode()"${cliSelMode?' style="color:var(--bord);border-color:var(--bord);"':''}>${cliSelMode ? 'Cancelar seleção' : 'Selecionar'}</button>` : ''}
         ${podeCriarCredor ? `<button class="cob-btn-primary" onclick="abrirNovoCliente()">${ico('plus',14)} ${podeGerirCredor ? 'Novo cliente' : 'Solicitar credor'}</button>` : ''}
       </div>
@@ -24619,6 +24622,106 @@ function bulkExportarExcel(){
   } else {
     showToast('Biblioteca XLSX não carregada.','warning');
   }
+}
+
+// ── Exportar TODAS as cobranças / clientes / devedores (base completa) ────────
+function _baixarPlanilha(rows, sheet, nomeArq){
+  if(!rows || !rows.length){ showToast('Nada para exportar.','warning'); return; }
+  if(typeof XLSX !== 'undefined'){
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, sheet);
+    XLSX.writeFile(wb, nomeArq+'.xlsx');
+  } else {
+    const cols = Object.keys(rows[0]);
+    const csv = [cols.join(',')].concat(rows.map(r=>cols.map(c=>'"'+String(r[c]==null?'':r[c]).replace(/"/g,'""')+'"').join(','))).join('\n');
+    const a=document.createElement('a');
+    a.href='data:text/csv;charset=utf-8,'+encodeURIComponent('﻿'+csv);
+    a.download=nomeArq+'.csv'; document.body.appendChild(a); a.click(); a.remove();
+  }
+  showToast('Exportado: '+rows.length+' linha(s).','success');
+}
+async function exportarTodasCobrancas(){
+  showToast('Preparando exportação…','info');
+  let lista = (typeof DB_cobrancas!=='undefined') ? DB_cobrancas : [];
+  if(typeof loadCobrancasFromSupabase==='function'){ try{ const f=await loadCobrancasFromSupabase(); if(Array.isArray(f)) lista=f; }catch(_){} }
+  lista = (lista||[]).filter(c=>!c.arquivado && !c.is_draft);
+  const rows = lista.map(c=>{
+    const partes=(c.cobranca_partes||[]).slice().sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
+    const princ=partes.find(p=>p.principal)||partes[0]||null;
+    const outros=partes.filter(p=>p!==princ).map(p=>`${p.devedores?.nome||''} (${PAPEL_LABELS[p.papel]||p.papel||''})`).join('; ');
+    const aging=_cobrAgingDias(c);
+    return {
+      'Documento':_cobrDocLabel(c),
+      'Devedor principal':princ?.devedores?.nome||'',
+      'CPF/CNPJ':princ?.devedores?.doc||'',
+      'Papel':princ?(PAPEL_LABELS[princ.papel]||princ.papel||''):'',
+      'Outros devedores':outros,
+      'Credor':_cobrCredorNome(c),
+      'Valor original':(+c.valor_orig||0).toFixed(2),
+      'Valor atual':(+c.valor_atual||+c.valor_orig||0).toFixed(2),
+      'Vencimento':String(c.vencimento||c.data_entrada||'').slice(0,10),
+      'Fase':c.fase||'',
+      'Nº processo':c.numero_processo||'',
+      'Vara/Tribunal':c.vara_tribunal||'',
+      'Status':c.status||'',
+      'Responsável':_detUserNome(c.assigned_to),
+      'Tipo':c.tipo_cobranca==='fisica'?'Física':'Digital',
+      'Dias em aberto':(aging!=null&&aging>0)?aging:'',
+      'Banco':c.banco||'',
+      'Tags':(Array.isArray(c.tags)?c.tags:[]).join(', '),
+      'Observações':c.observacoes||''
+    };
+  });
+  _baixarPlanilha(rows,'Cobranças','cobrancas_'+hoje());
+}
+function exportarTodosClientes(){
+  const lista=(DB.clientes||[]).filter(c=>!c.isDraft && !c.arquivado);
+  const devs=(DB.devedores||[]).filter(d=>!d.isDraft);
+  const rows=lista.map(c=>{
+    const cDevs=devs.filter(d=>d.clienteId===c.id);
+    const carteira=cDevs.reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
+    const end=[_gv(c,'rua'),_gv(c,'numero'),_gv(c,'bairro'),_gv(c,'cidade'),_gv(c,'uf'),_gv(c,'cep')].filter(Boolean).join(', ');
+    return {
+      'Razão social':c.nome||'',
+      'Nome fantasia':c.nomeFantasia||c.nome_fantasia||'',
+      'CNPJ/CPF':c.doc||'',
+      'Email':c.email||'',
+      'Telefone':c.tel||c.telefone||'',
+      'Endereço':end,
+      '% Honorários':c.honor||_gv(c,'honorarios')||'',
+      'Cobranças':cDevs.length,
+      'Carteira (R$)':carteira.toFixed(2),
+      'Observações':c.obs||_gv(c,'obs')||''
+    };
+  });
+  _baixarPlanilha(rows,'Clientes','clientes_'+hoje());
+}
+function exportarTodosDevedores(){
+  const lista=(DB.devedores||[]).filter(d=>!d.isDraft && !d.arquivado);
+  const rows=lista.map(d=>{
+    const end=[_gv(d,'rua'),_gv(d,'numero'),_gv(d,'bairro'),_gv(d,'cidade'),_gv(d,'uf'),_gv(d,'cep')].filter(Boolean).join(', ');
+    return {
+      'Nome':d.nome||'',
+      'CPF/CNPJ':d.doc||'',
+      'Apelido':d.apelido||'',
+      'Telefone':d.tel||d.telefone||'',
+      'Email':d.email||'',
+      'Endereço':end,
+      'Cidade':_gv(d,'cidade')||'',
+      'UF':_gv(d,'uf')||'',
+      'RG':d.rg||'',
+      'Nacionalidade':d.nacionalidade||'',
+      'Estado civil':d.estadoCivil||'',
+      'Profissão':d.profissao||'',
+      'Nascimento':String(d.loginNascimento||d.data_nascimento||'').slice(0,10),
+      'Responsável':d.responsavel||_detUserNome(d.assignedTo),
+      'Valor atual (R$)':(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0).toFixed(2),
+      'Status':d.status||'',
+      'Tags':(Array.isArray(d.tags)?d.tags:[]).join(', ')
+    };
+  });
+  _baixarPlanilha(rows,'Devedores','devedores_'+hoje());
 }
 
 function bulkCopiarLista(){
