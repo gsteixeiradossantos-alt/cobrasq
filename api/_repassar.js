@@ -95,6 +95,17 @@ module.exports = async function handler(req, res) {
       devNome = (dvs[0] && dvs[0].nome) || '';
     }
 
+    // Trava atômica anti-duplo-repasse: só prossegue quem conseguir transicionar
+    // pendente→preparado. Em duplo-clique concorrente, o 2º não obtém o claim e sai
+    // sem disparar um segundo PIX. Reverte para 'pendente' se a emissão falhar (abaixo).
+    const claim = await sbFetch(`fin_operacao?id=eq.${op.id}&repasse_status=eq.pendente`, {
+      method: 'PATCH', prefer: 'return=representation',
+      body: JSON.stringify({ repasse_status: 'preparado' }),
+    }).catch(() => null);
+    if (!Array.isArray(claim) || claim.length === 0) {
+      return res.status(200).json({ ok: true, skipped: 'repasse já em andamento (claim não obtido)', operacao_id: op.id });
+    }
+
     // Dispara o PIX no Asaas.
     const transferPayload = {
       value: round2(op.valor_capital),
@@ -104,7 +115,16 @@ module.exports = async function handler(req, res) {
       externalReference: op.id,
     };
     if (body.pix_key_type) transferPayload.pixAddressKeyType = body.pix_key_type;
-    const transfer = await asaasReq('POST', '/transfers', transferPayload);
+    let transfer;
+    try {
+      transfer = await asaasReq('POST', '/transfers', transferPayload);
+    } catch (e) {
+      // Falhou ao disparar: reverte o claim (só se nenhum transfer foi criado) p/ permitir retry.
+      await sbFetch(`fin_operacao?id=eq.${op.id}&repasse_asaas_transfer_id=is.null`, {
+        method: 'PATCH', body: JSON.stringify({ repasse_status: 'pendente' }),
+      }).catch(() => {});
+      throw e;
+    }
 
     const st = String(transfer.status || '').toUpperCase();
     const concluido = st === 'DONE' || st === 'CONFIRMED';
