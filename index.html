@@ -11848,7 +11848,8 @@ const PAPEL_LABELS = {
   fiador:'Fiador', devedor_solidario:'Devedor solidário'
 };
 let DB_cobrancas = [];          // cache local (com cobranca_partes embutidas)
-let cobrFilter = { q:'' };
+let cobrFilter = { q:'', credor:'', responsavel:'', fase:'', status:'' };
+let cobrView = 'lista';
 
 async function loadCobrancasFromSupabase(){
   const supa = getSupabase();
@@ -11871,6 +11872,19 @@ function _cobrPrincipalNome(c){
   const p = partes.find(x=>x.principal) || partes[0];
   return p?.devedores?.nome || '—';
 }
+// img/05 — rótulo do documento (tipo + número) e aging (dias em aberto).
+function _cobrDocLabel(c){
+  const tipo = c.tipo_documento || c.divida?.titulo || c.divida?.descricao || 'Cobrança';
+  const num = c.numero_documento ? ` nº ${c.numero_documento}` : '';
+  return `${tipo}${num}`;
+}
+function _cobrAgingDias(c){
+  const base = c.vencimento || c.data_entrada || c.created_at;
+  if(!base) return null;
+  const d = new Date(String(base).slice(0,10));
+  if(isNaN(d.getTime())) return null;
+  return Math.floor((Date.now() - d.getTime())/86400000);
+}
 
 // Mapeia um status de cobrança/caso para a pill .cob-pill .st-* correspondente (design system v3).
 function cobStatusPill(status){
@@ -11891,42 +11905,93 @@ async function renderCobrancas(){
   el.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text-2);">Carregando cobranças…</div>`;
   const rows = await loadCobrancasFromSupabase();
   if(Array.isArray(rows)) DB_cobrancas = rows;
+  // roster p/ resolver nome do responsável nas linhas e no filtro.
+  if(typeof carregarRosterAppUsers==='function' && !Array.isArray(_rosterAppUsers)){ try{ await carregarRosterAppUsers(); }catch(_){} }
 
-  const todas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft)
-    .sort((a,b)=> _cobrCredorNome(a).localeCompare(_cobrCredorNome(b),'pt-BR',{sensitivity:'base'})); // padrão A→Z por credor
+  const todas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft);
   const q = (cobrFilter.q||'').trim().toLowerCase();
   const qDigits = docSoDigitos(q);
-  const cobr = !q ? todas : todas.filter(c=>{
-    if(_cobrCredorNome(c).toLowerCase().includes(q)) return true;
-    const partes = c.cobranca_partes || [];
-    if(partes.some(p=>(p.devedores?.nome||'').toLowerCase().includes(q))) return true;
-    if(qDigits.length>=3 && partes.some(p=>docSoDigitos(p.devedores?.doc).includes(qDigits))) return true;
-    return false;
-  });
+  const cobr = todas.filter(c=>{
+    if(cobrFilter.credor && c.cliente_id !== cobrFilter.credor) return false;
+    if(cobrFilter.responsavel && c.assigned_to !== cobrFilter.responsavel) return false;
+    if(cobrFilter.fase && (c.fase||'extrajudicial') !== cobrFilter.fase) return false;
+    if(cobrFilter.status && c.status !== cobrFilter.status) return false;
+    if(q){
+      const partes = c.cobranca_partes || [];
+      const hit = _cobrCredorNome(c).toLowerCase().includes(q)
+        || (c.numero_documento||'').toLowerCase().includes(q)
+        || (c.tipo_documento||'').toLowerCase().includes(q)
+        || partes.some(p=>(p.devedores?.nome||'').toLowerCase().includes(q))
+        || (qDigits.length>=3 && partes.some(p=>docSoDigitos(p.devedores?.doc).includes(qDigits)));
+      if(!hit) return false;
+    }
+    return true;
+  }).sort((a,b)=> _cobrPrincipalNome(a).localeCompare(_cobrPrincipalNome(b),'pt-BR',{sensitivity:'base'}));
 
-  const totalCarteira = cobr.reduce((s,c)=>s + (+c.valor_atual || +c.valor_orig || 0), 0);
-  const comMultiplos = cobr.filter(c=>(c.cobranca_partes||[]).length > 1).length;
+  // KPIs sobre todas as cobranças ativas (independem do filtro de busca).
+  const totalCarteira = todas.reduce((s,c)=>s + (+c.valor_atual || +c.valor_orig || 0), 0);
+  const judiciaisProc = todas.filter(c=>(c.fase||'')==='judicial' && c.numero_processo).length;
+  const comMultiplos = todas.filter(c=>(c.cobranca_partes||[]).length > 1).length;
 
-  const linhas = cobr.map(c=>{
-    const partes = (c.cobranca_partes||[]).slice()
-      .sort((a,b)=> (b.principal?1:0)-(a.principal?1:0));
-    const respHtml = partes.length
-      ? `<div class="cob-resp">${partes.map(p=>`<div class="cob-resp-row"><span class="cob-resp-nm">${escHtml(p.devedores?.nome||'—')}</span><span class="cob-resp-rl">${escHtml(PAPEL_LABELS[p.papel]||p.papel||'')}</span>${p.principal?'<span class="cob-resp-tag">principal</span>':''}</div>`).join('')}</div>`
-      : '<span style="color:var(--text-3);">sem responsável</span>';
-    const valor = fmtR(+c.valor_atual || +c.valor_orig || 0);
+  // Opções dos filtros (credor, responsável, fase, status) a partir do conjunto.
+  const credorIds = [...new Set(todas.map(c=>c.cliente_id).filter(Boolean))];
+  const credorOpts = credorIds.map(cid=>({ id:cid, nome:_cobrCredorNome({cliente_id:cid}) }))
+    .sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR',{sensitivity:'base'}))
+    .map(o=>`<option value="${escHtml(o.id)}" ${cobrFilter.credor===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('');
+  const respIds = [...new Set(todas.map(c=>c.assigned_to).filter(Boolean))];
+  const respOpts = respIds.map(uid=>({ id:uid, nome:_detUserNome(uid) }))
+    .sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR',{sensitivity:'base'}))
+    .map(o=>`<option value="${escHtml(o.id)}" ${cobrFilter.responsavel===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('');
+  const statusVals = [...new Set(todas.map(c=>c.status).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
+  const statusOpts = statusVals.map(s=>`<option value="${escHtml(s)}" ${cobrFilter.status===s?'selected':''}>${escHtml(s)}</option>`).join('');
+
+  const linhaCaso = (c)=>{
+    const partes = (c.cobranca_partes||[]).slice().sort((a,b)=> (b.principal?1:0)-(a.principal?1:0));
+    const princ = partes.find(p=>p.principal) || partes[0] || null;
+    const princNome = princ?.devedores?.nome || '—';
+    const princPapel = princ ? (PAPEL_LABELS[princ.papel]||princ.papel||'') : '';
+    const extra = partes.length>1 ? `<span class="cob-resp-tag">+${partes.length-1}</span>` : '';
+    const fis = c.tipo_cobranca==='fisica';
+    const selo = `<span class="det-chip" title="${fis?'Documentação física no escritório':'Cobrança digital — WhatsApp do credor'}">${fis?'Física':'Digital'}</span>`;
+    const isJud=(c.fase||'')==='judicial';
+    const faseProc = isJud ? `Judicial${c.numero_processo?' · '+escHtml(c.numero_processo):''}` : 'Extrajudicial';
+    const aging = _cobrAgingDias(c);
+    const agingTxt = (aging!=null && aging>0) ? `${aging}d em aberto` : '';
+    const vAtual=+c.valor_atual||+c.valor_orig||0, vOrig=+c.valor_orig||0;
     return `<tr class="cob-tr-click" onclick="verCobranca('${c.id}')">
-      <td class="strong">${escHtml(_cobrCredorNome(c))}</td>
-      <td>${respHtml}</td>
-      <td class="num mono">${valor}</td>
-      <td>${cobStatusPill(c.status)}</td>
+      <td>
+        <div class="strong">${escHtml(_cobrDocLabel(c))}</div>
+        <div style="font-size:12px;color:var(--text-2);margin-top:2px;">${escHtml(princNome)}${princPapel?` <span style="color:var(--text-3);">· ${escHtml(princPapel)}</span>`:''} ${extra}</div>
+        <div style="margin-top:5px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">${selo}<span style="font-size:11px;color:var(--text-3);">${faseProc}</span></div>
+      </td>
+      <td>${escHtml(_cobrCredorNome(c))}<div style="font-size:11px;color:var(--text-3);margin-top:2px;">${escHtml(_detUserNome(c.assigned_to))}</div></td>
+      <td class="num mono">${fmtR(vAtual)}${(vOrig&&vOrig!==vAtual)?`<div style="font-size:11px;color:var(--text-3);">orig. ${fmtR(vOrig)}</div>`:''}</td>
+      <td>${cobStatusPill(c.status)}${agingTxt?`<div style="font-size:11px;color:var(--text-3);margin-top:3px;">${agingTxt}</div>`:''}</td>
     </tr>`;
-  }).join('');
+  };
+  const cardCaso = (c)=>{
+    const partes=(c.cobranca_partes||[]).slice().sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
+    const princ=partes.find(p=>p.principal)||partes[0]||null;
+    const extra=partes.length>1?` +${partes.length-1}`:'';
+    const fis=c.tipo_cobranca==='fisica';
+    const isJud=(c.fase||'')==='judicial';
+    return `<div class="cob-panel cob-tr-click" style="padding:14px;cursor:pointer;" onclick="verCobranca('${c.id}')">
+      <div style="display:flex;justify-content:space-between;gap:8px;"><div class="strong">${escHtml(_cobrDocLabel(c))}</div>${cobStatusPill(c.status)}</div>
+      <div style="font-size:12.5px;color:var(--text-2);margin-top:4px;">${escHtml(princ?.devedores?.nome||'—')}${extra}</div>
+      <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">${escHtml(_cobrCredorNome(c))}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
+        <span class="det-chip">${fis?'Física':'Digital'}${isJud?' · Judicial':''}</span>
+        <span class="mono" style="font-weight:600;">${fmtR(+c.valor_atual||+c.valor_orig||0)}</span>
+      </div>
+    </div>`;
+  };
 
+  const selStyle = 'padding:8px 10px;border:1px solid var(--border);border-radius:8px;font-size:12.5px;background:var(--surface);color:var(--text);';
   el.innerHTML = `
     <div class="cob-pg-head">
       <div>
         <h1 class="cob-h1">Cobranças</h1>
-        <div class="cob-h1-sub">${cobr.length} cobrança${cobr.length!==1?'s':''} · cada uma pode ter vários responsáveis (emitente, endossante…)</div>
+        <div class="cob-h1-sub">${todas.length} caso${todas.length!==1?'s':''} · cada um pode ter vários devedores (emitente, endossante…)</div>
       </div>
       <div class="cob-head-actions">
         <button class="cob-btn-primary" onclick="abrirNovaCobranca()">${ico('plus',14)} Nova cobrança</button>
@@ -11943,39 +12008,46 @@ async function renderCobrancas(){
     })()}
 
     <div class="cob-kpis">
-      <div class="cob-kcard"><div class="cob-kcard-top"><span class="cob-kcard-role">Cobranças</span><span class="cob-kcard-tick" style="background:var(--accent);"></span></div><div class="cob-kcard-val fr">${cobr.length}</div><div class="cob-kcard-sub">ativas</div></div>
+      <div class="cob-kcard"><div class="cob-kcard-top"><span class="cob-kcard-role">Casos ativos</span><span class="cob-kcard-tick" style="background:var(--accent);"></span></div><div class="cob-kcard-val fr">${todas.length}</div><div class="cob-kcard-sub">em recuperação</div></div>
       <div class="cob-kcard"><div class="cob-kcard-top"><span class="cob-kcard-role">Total em aberto</span><span class="cob-kcard-tick"></span></div><div class="cob-kcard-val fr">${fmtR(totalCarteira)}</div><div class="cob-kcard-sub">soma do valor atual</div></div>
-      <div class="cob-kcard"><div class="cob-kcard-top"><span class="cob-kcard-role">Vários responsáveis</span><span class="cob-kcard-tick"></span></div><div class="cob-kcard-val fr">${comMultiplos}</div><div class="cob-kcard-sub">ex.: cheque endossado</div></div>
-      <div class="cob-kcard"><div class="cob-kcard-top"><span class="cob-kcard-role">Contatos vinculados</span><span class="cob-kcard-tick"></span></div><div class="cob-kcard-val fr">${new Set(cobr.flatMap(c=>(c.cobranca_partes||[]).map(p=>p.devedor_id))).size}</div><div class="cob-kcard-sub">devedores em cobranças</div></div>
+      <div class="cob-kcard"><div class="cob-kcard-top"><span class="cob-kcard-role">Judiciais</span><span class="cob-kcard-tick"></span></div><div class="cob-kcard-val fr">${judiciaisProc}</div><div class="cob-kcard-sub">com processo</div></div>
+      <div class="cob-kcard"><div class="cob-kcard-top"><span class="cob-kcard-role">Vários devedores</span><span class="cob-kcard-tick"></span></div><div class="cob-kcard-val fr">${comMultiplos}</div><div class="cob-kcard-sub">ex.: cheque endossado</div></div>
     </div>
 
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-      <div style="display:flex;align-items:center;gap:9px;background:var(--card-2);border:1px solid var(--border);border-radius:9px;padding:9px 13px;min-width:280px;color:var(--text-3);">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px;">
+      <div style="display:flex;align-items:center;gap:9px;background:var(--card-2);border:1px solid var(--border);border-radius:9px;padding:9px 13px;min-width:240px;flex:1;color:var(--text-3);">
         ${ico('search',14)}
-        <input type="search" id="cobr-search" placeholder="Buscar credor, responsável, CPF/CNPJ…" value="${escHtml(cobrFilter.q)}"
+        <input type="search" id="cobr-search" placeholder="Buscar documento, devedor, credor, CPF/CNPJ…" value="${escHtml(cobrFilter.q)}"
           style="border:none;outline:none;background:transparent;font-size:13px;color:var(--text);flex:1;width:0;min-width:0;"/>
       </div>
-      ${cobrFilter.q ? `<button class="cob-btn-ghost" onclick="cobrFilter.q='';renderCobrancas();">Limpar busca</button>` : ''}
+      <select id="cobr-f-credor" style="${selStyle}" onchange="cobrFilter.credor=this.value;renderCobrancas();"><option value="">Credor: todos</option>${credorOpts}</select>
+      <select id="cobr-f-resp" style="${selStyle}" onchange="cobrFilter.responsavel=this.value;renderCobrancas();"><option value="">Responsável: todos</option>${respOpts}</select>
+      <select id="cobr-f-fase" style="${selStyle}" onchange="cobrFilter.fase=this.value;renderCobrancas();"><option value="">Fase: todas</option><option value="extrajudicial" ${cobrFilter.fase==='extrajudicial'?'selected':''}>Extrajudicial</option><option value="judicial" ${cobrFilter.fase==='judicial'?'selected':''}>Judicial</option></select>
+      <select id="cobr-f-status" style="${selStyle}" onchange="cobrFilter.status=this.value;renderCobrancas();"><option value="">Status: todos</option>${statusOpts}</select>
+      <div class="det-seg"><button class="${cobrView!=='cards'?'on':''}" onclick="cobrView='lista';renderCobrancas();">Lista</button><button class="${cobrView==='cards'?'on':''}" onclick="cobrView='cards';renderCobrancas();">Cards</button></div>
+      ${(cobrFilter.q||cobrFilter.credor||cobrFilter.responsavel||cobrFilter.fase||cobrFilter.status) ? `<button class="cob-btn-ghost" onclick="cobrFilter={q:'',credor:'',responsavel:'',fase:'',status:''};renderCobrancas();">Limpar filtros</button>` : ''}
     </div>
 
     <div class="cob-panel">
       ${cobr.length === 0
         ? `<div class="cob-empty-big">
             <div class="cob-empty-ic">${ico('charges',26)}</div>
-            <div class="cob-empty-tt">Nenhuma cobrança</div>
-            <div class="cob-empty-ds">Crie uma cobrança e vincule um ou mais responsáveis (emitente, endossante, avalista…).</div>
+            <div class="cob-empty-tt">Nenhum caso encontrado</div>
+            <div class="cob-empty-ds">Ajuste os filtros ou crie uma cobrança vinculando um ou mais devedores (emitente, endossante, avalista…).</div>
             <button class="cob-btn-primary" style="margin-top:14px;" onclick="abrirNovaCobranca()">${ico('plus',14)} Nova cobrança</button>
            </div>`
-        : `<table class="cob-table">
+        : (cobrView==='cards'
+          ? `<div class="det-devcards">${cobr.map(cardCaso).join('')}</div>`
+          : `<table class="cob-table">
             <thead><tr>
+              <th>Caso / devedor principal</th>
               <th>Credor</th>
-              <th>Responsáveis</th>
               <th class="num">Valor</th>
               <th>Status</th>
             </tr></thead>
-            <tbody>${linhas}</tbody>
+            <tbody>${cobr.map(linhaCaso).join('')}</tbody>
            </table>
-           <div class="cob-table-foot"><span>${cobr.length} cobrança${cobr.length!==1?'s':''}</span></div>`}
+           <div class="cob-table-foot"><span>${cobr.length} de ${todas.length} caso${todas.length!==1?'s':''}</span></div>`)}
     </div>`;
 
   const search = document.getElementById('cobr-search');
@@ -12245,24 +12317,50 @@ async function renderCobrancaDetalhe(){
     </div>`).join('') : _detEmpty('Nenhum anexo. Envie cheque-frente, contrato, prints…')}
   </div>`;
 
-  const seg=`<div class="det-seg">
-    <button class="${layout!=='painel'?'on':''}" onclick="_detSetLayout('dossie')">Dossiê</button>
-    <button class="${layout==='painel'?'on':''}" onclick="_detSetLayout('painel')">Painel</button>
+  // img/04 — aba Andamentos / CRM (funil + atalhos). Histórico ancora os relatórios.
+  const panelCrm=`<div class="cob-panel" style="padding:18px;">
+    <div class="det-panel-tt">Andamentos / CRM</div>
+    <dl class="det-kv">
+      <dt>Etapa no funil</dt><dd>${escHtml(cob.passo_atual||'—')}</dd>
+      <dt>Fase</dt><dd>${escHtml(cob.fase||'extrajudicial')}</dd>
+      ${isJud?`<dt>Nº do processo</dt><dd>${escHtml(cob.numero_processo||'—')}</dd>`:''}
+    </dl>
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+      ${principalP?`<button class="btn btn-ghost btn-sm" onclick="verDevedor('${principalP.devedor_id}')">Ficha do devedor principal</button>`:''}
+      <button class="btn btn-ghost btn-sm" onclick="showPage('crm')">Abrir CRM</button>
+    </div>
+    <div style="font-size:11.5px;color:var(--text-3);margin-top:10px;">A aba <strong>Histórico</strong> é a base dos relatórios de andamento ao cliente.</div>
   </div>`;
 
-  const body = layout==='painel'
-    ? `<div class="det-body single"><div class="det-col">${panelValores}${panelDevedores(true)}${panelDoc}${panelAnexos}${panelHist}</div></div>`
-    : `<div class="det-body"><div class="det-col">${panelValores}${panelDoc}</div><div class="det-col">${panelDevedores(false)}${panelAnexos}${panelHist}</div></div>`;
+  // Abas (img/04): Resumo · Devedores · Histórico · Documentos do caso · Andamentos/CRM.
+  const _tabs=[
+    ['resumo','Resumo', panelValores+panelDoc],
+    ['devedores',`Devedores (${partes.length})`, panelDevedores(false)],
+    ['hist','Histórico', panelHist],
+    ['docs',`Documentos do caso${anexos.length?` (${anexos.length})`:''}`, panelAnexos],
+    ['crm','Andamentos / CRM', panelCrm]
+  ];
+  const tabBar=`<div class="det-seg det-tabbar" style="flex-wrap:wrap;">${_tabs.map((t,i)=>`<button class="${i===0?'on':''}" data-cobrtab="${t[0]}" onclick="cobrDetTab('${t[0]}')">${t[1]}</button>`).join('')}</div>`;
+  const panes=_tabs.map((t,i)=>`<div class="det-tabpane" data-pane="${t[0]}" style="display:${i===0?'':'none'};margin-top:14px;">${t[2]}</div>`).join('');
+  const waBtn = principalP ? _detWa(principalP.devedores?.telefone) : '';
+  const headActions=`${waBtn}<button class="btn btn-ghost btn-sm" onclick="showPage('docs')">Gerar documento</button><button class="cob-btn-primary" onclick="abrirCobrancaEdit('${cob.id}')">${ico('edit',14)} Editar</button>`;
 
   el.innerHTML=`<div class="det-wrap det-fade">
     <button class="det-back" onclick="showPage('cobr')">${ico('arrow-left',14)||'←'} Voltar para Cobranças</button>
     <div class="det-head">
       <span class="det-head-av">${escHtml(_detIniciais(credor))}</span>
-      <div><div class="det-head-tt">${escHtml(credor)}</div><div class="det-head-sub">${cobStatusPill(cob.status)} · cobrança</div></div>
-      <div class="det-head-actions">${seg}<button class="cob-btn-primary" onclick="abrirCobrancaEdit('${cob.id}')">${ico('edit',14)} Editar dívida</button></div>
+      <div><div class="det-head-tt">${escHtml(_cobrDocLabel(cob))}</div><div class="det-head-sub">${cobStatusPill(cob.status)} · ${escHtml(credor)}</div></div>
+      <div class="det-head-actions">${headActions}</div>
     </div>
-    ${meta}${body}
+    ${meta}
+    ${tabBar}
+    ${panes}
   </div>`;
+}
+// Alterna as abas do Detalhe da cobrança sem re-fetch (panes já renderizados).
+function cobrDetTab(name){
+  document.querySelectorAll('#page-cobranca-detalhe .det-tabbar [data-cobrtab]').forEach(b=>b.classList.toggle('on', b.dataset.cobrtab===name));
+  document.querySelectorAll('#page-cobranca-detalhe .det-tabpane').forEach(p=>{ p.style.display = (p.dataset.pane===name)?'':'none'; });
 }
 
 // ── 2) DETALHE DO DEVEDOR (ficha + todas as dívidas, com papel) ──────────────
