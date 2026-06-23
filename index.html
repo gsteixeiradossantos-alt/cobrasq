@@ -1757,6 +1757,9 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
       <div class="nav-item" data-page="wa" id="nav-wa">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span><span>WhatsApp</span>
       </div>
+      <div class="nav-item" data-page="intimacoes" id="nav-intimacoes">
+        <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span><span>Intimações <span id="nav-intimacoes-count" style="display:none;background:var(--gold);color:var(--navy);padding:1px 7px;border-radius:10px;font-size:10.5px;margin-left:4px;font-weight:600;">0</span></span>
+      </div>
     </div>
 
     <div class="sidebar-section" id="nav-section-sistema">
@@ -1842,6 +1845,7 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
     </div>
 
     <!-- PAGE: PROCESSOS -->
+    <div id="page-intimacoes" class="page-content"><!-- renderIntimacoes() --></div>
     <div id="page-processos" class="page-content">
       <!-- JS will populate -->
     </div>
@@ -5658,6 +5662,19 @@ function iniciarSessao(){
     }
   }
 
+  // Intimações & andamentos: visível ao staff (gestor/funcionário). Cedente/devedor não veem.
+  const navIntim = document.getElementById('nav-intimacoes');
+  if(navIntim){
+    const staff = (tipoUser === 'gestor' || tipoUser === 'funcionario');
+    navIntim.style.display = staff ? '' : 'none';
+    if(staff && typeof refreshIntimacoesBadge === 'function'){
+      refreshIntimacoesBadge();
+      if(!window._badgeIntimacoesTimer){
+        window._badgeIntimacoesTimer = setInterval(refreshIntimacoesBadge, 120000);
+      }
+    }
+  }
+
   // IMPLEMENTADO S6: hidrata flags de grupo do app_users (se Supabase) e mostra seletor topbar
   hidratarPodeVerGrupo().finally(()=>{
     refreshGrupoViewTopbar();
@@ -5693,7 +5710,7 @@ async function doLogout(){
 const PAGE_TITLES = {
   painel:'Painel', cobr:'Cobranças', devedores:'Devedores', processos:'Processos',
   pipeline:'Pipeline', crm:'CRM', clientes:'Clientes', docs:'Documentos', fin:'Financeiro',
-  relat:'Relatórios', wa:'WhatsApp', config:'Configurações', calc:'Calculadora Jurídica',
+  relat:'Relatórios', wa:'WhatsApp', intimacoes:'Intimações', config:'Configurações', calc:'Calculadora Jurídica',
   aprovacoes:'Aprovações', tarefas:'Tarefas',
   importacao:'Importação', /* IMPORTACAO TEMP */
   'cobranca-detalhe':'Cobrança', 'devedor-detalhe':'Devedor', 'cliente-detalhe':'Cliente'
@@ -5710,6 +5727,7 @@ const PAGE_BREADCRUMBS = {
   fin:       ['Financeiro'],
   relat:     ['Relatórios'],
   wa:        ['Comunicação','WhatsApp'],
+  intimacoes:['Comunicação','Intimações & andamentos'],
   config:    ['Sistema','Configurações'],
   calc:      ['Sistema','Calculadora Jurídica'],
   aprovacoes:['Sistema','Aprovações'],
@@ -5732,6 +5750,7 @@ const PAGE_RENDERERS = {
   fin: ()=>renderFinanceiro(),
   relat: ()=>renderRelatorios(),
   wa: ()=>renderWhatsApp(),
+  intimacoes: ()=>renderIntimacoes(),
   config: ()=>renderConfiguracoes(),
   calc: ()=>renderCalculadora(),
   aprovacoes: ()=>renderAprovacoes(),
@@ -11638,6 +11657,289 @@ function renderProcessos(){
   // Bind search input
   const srch = document.getElementById('proc-search');
   if(srch) srch.addEventListener('input', e=>{ window._procSearch=e.target.value; renderProcessos(); });
+}
+
+// ── INTIMAÇÕES & ANDAMENTOS ──────────────────────────────────
+// Lê public.proc_intimacoes (fonte DataJud/Escavador). Andamentos não-lidos = alerta.
+let _intimacoesCache = null;
+const _intimacoesState = { fonte:'', status:'nao_lidas', q:'' };
+
+const INTIM_FONTE_LABEL = { datajud:'DataJud', escavador:'Escavador', jusbrasil:'JusBrasil', codilo:'Codilo', manual:'Manual' };
+
+function fmtDataBR(d){
+  if(!d) return '—';
+  try { return new Date(String(d).slice(0,10)+'T00:00:00').toLocaleDateString('pt-BR'); }
+  catch { return String(d); }
+}
+
+async function carregarIntimacoes(){
+  const supa = getSupabase();
+  if(!supa) return [];
+  const { data, error } = await supa.from('proc_intimacoes')
+    .select('id,fonte,processo_num,oab,data_publicacao,data_intimacao,conteudo,link_diario,lida,devedor_id,created_at')
+    .order('data_publicacao', { ascending:false, nullsFirst:false })
+    .order('created_at', { ascending:false })
+    .limit(300);
+  if(error){ console.error('[intimacoes] load', error.message); return []; }
+  return data || [];
+}
+
+async function refreshIntimacoesBadge(){
+  const supa = getSupabase();
+  if(!supa) return;
+  const { count, error } = await supa.from('proc_intimacoes')
+    .select('id', { count:'exact', head:true })
+    .eq('lida', false);
+  if(error) return; // RLS/sem acesso: badge fica oculto
+  const badge = document.getElementById('nav-intimacoes-count');
+  if(badge){
+    if(count>0){ badge.textContent = count>99?'99+':String(count); badge.style.display='inline-block'; }
+    else { badge.style.display='none'; }
+  }
+}
+
+async function marcarIntimacaoLida(id, lida){
+  const supa = getSupabase();
+  if(!supa) return;
+  const { error } = await supa.from('proc_intimacoes').update({ lida }).eq('id', id);
+  if(error){ alert('Não foi possível atualizar: '+error.message); return; }
+  if(_intimacoesCache){ const it=_intimacoesCache.find(x=>x.id===id); if(it) it.lida=lida; }
+  renderIntimacoes();
+  refreshIntimacoesBadge();
+}
+
+async function marcarTodasIntimacoesLidas(){
+  const naoLidas = (_intimacoesCache||[]).filter(i=>!i.lida);
+  if(!naoLidas.length) return;
+  if(!confirm(`Marcar ${naoLidas.length} intimação(ões) como lida(s)?`)) return;
+  const supa = getSupabase();
+  if(!supa) return;
+  const ids = naoLidas.map(i=>i.id);
+  const { error } = await supa.from('proc_intimacoes').update({ lida:true }).in('id', ids);
+  if(error){ alert('Erro: '+error.message); return; }
+  naoLidas.forEach(i=>i.lida=true);
+  renderIntimacoes();
+  refreshIntimacoesBadge();
+}
+
+async function renderIntimacoes(){
+  const el = document.getElementById('page-intimacoes');
+  if(!el) return;
+
+  if(_intimacoesCache === null){
+    el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando intimações…</div>`;
+    _intimacoesCache = await carregarIntimacoes();
+  }
+
+  const all = _intimacoesCache || [];
+  const totalNaoLidas = all.filter(i=>!i.lida).length;
+  const q = (_intimacoesState.q||'').toLowerCase().trim();
+
+  let lista = all.filter(i=>{
+    if(_intimacoesState.fonte && i.fonte !== _intimacoesState.fonte) return false;
+    if(_intimacoesState.status==='nao_lidas' && i.lida) return false;
+    if(_intimacoesState.status==='lidas' && !i.lida) return false;
+    if(q){
+      const hay = `${i.processo_num||''} ${i.conteudo||''} ${i.oab||''}`.toLowerCase();
+      if(!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
+  // Mapa devedor_id -> nome (do cache de devedores) p/ exibir vínculo
+  const devNome = {};
+  (DB.devedores||[]).forEach(d=>{ devNome[d.id]=d.nome; });
+
+  const fontesDisp = Array.from(new Set(all.map(i=>i.fonte))).sort();
+
+  const chip = (label, val, key) => {
+    const active = _intimacoesState[key] === val;
+    return `<button class="btn btn-sm ${active?'btn-primary':'btn-ghost'}" style="${active?'':'border-color:var(--border);'}"
+      onclick="_intimacoesState.${key}=${JSON.stringify(val)};renderIntimacoes();">${escHtml(label)}</button>`;
+  };
+
+  const linha = (i)=>{
+    const fonteLbl = INTIM_FONTE_LABEL[i.fonte] || i.fonte;
+    const nome = i.devedor_id ? (devNome[i.devedor_id]||'devedor vinculado') : null;
+    return `
+      <div style="background:var(--surface);border:1px solid var(--border);border-left:3px solid ${i.lida?'var(--border)':'var(--gold)'};border-radius:8px;padding:13px 16px;display:flex;gap:14px;align-items:flex-start;">
+        <div style="flex:1;min-width:0;">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px;">
+            ${i.lida?'':'<span style="width:7px;height:7px;border-radius:50%;background:var(--gold);display:inline-block;"></span>'}
+            <span style="font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--text-3);background:var(--active-bg);padding:1px 6px;border-radius:4px;">${escHtml(fonteLbl)}</span>
+            <span style="font-family:var(--font-mono);font-size:12px;font-weight:600;color:var(--text);">${escHtml(i.processo_num||'—')}</span>
+            <span style="font-size:11.5px;color:var(--text-2);">${fmtDataBR(i.data_publicacao||i.data_intimacao)}</span>
+            ${nome?`<span style="font-size:11.5px;color:var(--navy);cursor:pointer;text-decoration:underline;" onclick="openDrawer('${i.devedor_id}')">${escHtml(nome)}</span>`:'<span style="font-size:11px;color:var(--text-3);">não vinculada</span>'}
+          </div>
+          <div style="font-size:13px;color:var(--text);line-height:1.45;">${escHtml(i.conteudo||'')}</div>
+          ${i.link_diario?`<a href="${escHtml(i.link_diario)}" target="_blank" rel="noopener" style="font-size:11.5px;color:var(--navy);">Abrir no diário ›</a>`:''}
+        </div>
+        <button class="btn btn-ghost btn-sm" style="white-space:nowrap;" onclick="marcarIntimacaoLida('${i.id}', ${i.lida?'false':'true'})">${i.lida?'Marcar não lida':'✓ Marcar lida'}</button>
+      </div>`;
+  };
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+      <div>
+        <h1 class="cob-h1">Intimações & andamentos</h1>
+        <div style="font-size:12.5px;color:var(--text-2);margin-top:2px;">${all.length} registro(s) · <strong style="color:var(--text);">${totalNaoLidas}</strong> não lido(s)</div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost btn-sm" onclick="abrirPrepararPeticionamento()">＋ Preparar peticionamento</button>
+        <button class="btn btn-ghost btn-sm" onclick="_intimacoesCache=null;renderIntimacoes();">↻ Atualizar</button>
+        ${totalNaoLidas>0?`<button class="btn btn-primary btn-sm" onclick="marcarTodasIntimacoesLidas()">Marcar todas lidas</button>`:''}
+      </div>
+    </div>
+
+    <div id="fila-peticionamento" style="margin-bottom:18px;"></div>
+
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:14px;">
+      ${chip('Não lidas','nao_lidas','status')}
+      ${chip('Todas','','status')}
+      ${chip('Lidas','lidas','status')}
+      <span style="width:1px;height:20px;background:var(--border);margin:0 4px;"></span>
+      ${chip('Todas as fontes','','fonte')}
+      ${fontesDisp.map(f=>chip(INTIM_FONTE_LABEL[f]||f, f, 'fonte')).join('')}
+      <input id="intim-search" placeholder="Buscar processo, conteúdo, OAB…" value="${escHtml(_intimacoesState.q)}"
+        style="flex:1;min-width:180px;padding:7px 11px;border:1px solid var(--border);border-radius:7px;background:var(--surface);color:var(--text);font-size:13px;">
+    </div>
+
+    ${lista.length===0
+      ? `<div class="empty-state"><div class="empty-state-icon">${ico('bell',36)}</div><h3>Nenhuma intimação</h3><p>Andamentos do DataJud e intimações do Escavador aparecem aqui.</p></div>`
+      : `<div style="display:flex;flex-direction:column;gap:8px;">${lista.map(linha).join('')}</div>`}
+  `;
+
+  const srch = document.getElementById('intim-search');
+  if(srch) srch.addEventListener('input', e=>{ _intimacoesState.q=e.target.value; renderIntimacoes(); });
+
+  renderFilaPeticionamento();
+}
+
+// ── PETICIONAMENTO eproc (Fase 2) — fila + preparar ──────────
+// A extensão Chrome consome estes jobs (status 'preparado') via
+// /api/eproc-peticionamento e protocola na sessão logada do advogado.
+const PET_STATUS = {
+  preparado:   { txt:'Preparado',   bg:'#FFF3BF', fg:'#7A5C00' },
+  enviando:    { txt:'Enviando',    bg:'#E7F0FF', fg:'#1E4DA1' },
+  protocolado: { txt:'Protocolado', bg:'#D3F9D8', fg:'#1B7A2E' },
+  erro:        { txt:'Erro',        bg:'#FFE3E3', fg:'#B42318' },
+  cancelado:   { txt:'Cancelado',   bg:'#EEE',    fg:'#666' },
+};
+
+async function carregarPeticionamentos(){
+  const supa = getSupabase();
+  if(!supa) return [];
+  const { data, error } = await supa.from('proc_peticionamentos')
+    .select('id,numero_processo,tipo,evento_eproc,status,protocolo_num,protocolado_em,erro,created_at')
+    .order('created_at', { ascending:false })
+    .limit(50);
+  if(error){ console.warn('[peticionamentos]', error.message); return []; }
+  return data || [];
+}
+
+async function renderFilaPeticionamento(){
+  const box = document.getElementById('fila-peticionamento');
+  if(!box) return;
+  const rows = await carregarPeticionamentos();
+  const ativos = rows.filter(r=>r.status!=='cancelado');
+  if(!ativos.length){
+    box.innerHTML = `<div style="border:1px dashed var(--border);border-radius:8px;padding:12px 14px;color:var(--text-2);font-size:12.5px;">
+      Nenhum peticionamento na fila. Use <strong>＋ Preparar peticionamento</strong> e protocole pela extensão do eproc.</div>`;
+    return;
+  }
+  const linha = (r)=>{
+    const st = PET_STATUS[r.status] || PET_STATUS.preparado;
+    return `<div style="display:flex;gap:12px;align-items:center;border:1px solid var(--border);border-radius:8px;padding:10px 14px;">
+      <span style="font-size:10.5px;font-weight:700;text-transform:uppercase;background:${st.bg};color:${st.fg};padding:2px 8px;border-radius:10px;">${st.txt}</span>
+      <span style="font-family:var(--font-mono);font-size:12px;font-weight:600;">${escHtml(r.numero_processo||'—')}</span>
+      <span style="font-size:12px;color:var(--text-2);">${escHtml(r.tipo||'')}${r.evento_eproc?(' · '+escHtml(r.evento_eproc)):''}</span>
+      ${r.protocolo_num?`<span style="font-size:12px;color:var(--text);margin-left:auto;">Protocolo <strong>${escHtml(r.protocolo_num)}</strong></span>`:''}
+      ${r.status==='erro'&&r.erro?`<span style="font-size:11.5px;color:var(--danger);margin-left:auto;" title="${escHtml(r.erro)}">⚠ ${escHtml(r.erro.slice(0,60))}</span>`:''}
+    </div>`;
+  };
+  box.innerHTML = `
+    <div style="font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--text-3);margin-bottom:8px;">Fila de peticionamento (eproc)</div>
+    <div style="display:flex;flex-direction:column;gap:6px;">${ativos.map(linha).join('')}</div>`;
+}
+
+function abrirPrepararPeticionamento(prefillProcesso){
+  const ov = document.createElement('div');
+  ov.id = 'pet-eproc-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  ov.innerHTML = `
+    <div style="background:var(--surface);border-radius:12px;width:min(460px,92vw);padding:20px;box-shadow:0 12px 40px rgba(0,0,0,.3);">
+      <h3 style="margin:0 0 4px;font-size:16px;">Preparar peticionamento</h3>
+      <p style="margin:0 0 14px;font-size:12.5px;color:var(--text-2);">Gera um job para a extensão protocolar no eproc TJPR (você revisa e clica Protocolar).</p>
+      <label style="font-size:12px;color:var(--text-2);">Nº do processo (CNJ)</label>
+      <input id="pet-proc" value="${escHtml(prefillProcesso||'')}" placeholder="0000000-00.0000.8.16.0000" style="width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--border);border-radius:7px;margin:4px 0 12px;background:var(--bg);color:var(--text);">
+      <div style="display:flex;gap:10px;">
+        <div style="flex:1;">
+          <label style="font-size:12px;color:var(--text-2);">Tipo</label>
+          <select id="pet-tipo" style="width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--border);border-radius:7px;margin:4px 0 12px;background:var(--bg);color:var(--text);">
+            <option value="intercorrente">Intercorrente</option>
+            <option value="inicial">Inicial</option>
+          </select>
+        </div>
+        <div style="flex:1;">
+          <label style="font-size:12px;color:var(--text-2);">Evento/tipo no eproc</label>
+          <input id="pet-evento" placeholder="ex.: Petição (intercorrente)" style="width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--border);border-radius:7px;margin:4px 0 12px;background:var(--bg);color:var(--text);">
+        </div>
+      </div>
+      <label style="font-size:12px;color:var(--text-2);">PDF da petição</label>
+      <input id="pet-file" type="file" accept="application/pdf" style="width:100%;box-sizing:border-box;padding:8px 0;margin:4px 0 14px;color:var(--text);">
+      <div id="pet-erro" style="display:none;color:var(--danger);font-size:12.5px;margin-bottom:10px;"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('pet-eproc-overlay').remove()">Cancelar</button>
+        <button class="btn btn-primary btn-sm" id="pet-submit" onclick="submeterPeticionamento()">Preparar</button>
+      </div>
+    </div>`;
+  ov.addEventListener('click', e=>{ if(e.target===ov) ov.remove(); });
+  document.body.appendChild(ov);
+}
+
+async function submeterPeticionamento(){
+  const supa = getSupabase();
+  if(!supa) return;
+  const proc = (document.getElementById('pet-proc').value||'').trim();
+  const tipo = document.getElementById('pet-tipo').value;
+  const evento = (document.getElementById('pet-evento').value||'').trim();
+  const file = document.getElementById('pet-file').files[0];
+  const errEl = document.getElementById('pet-erro');
+  const fail = (m)=>{ errEl.textContent=m; errEl.style.display='block'; };
+  if(!proc){ return fail('Informe o número do processo.'); }
+  if(!file){ return fail('Selecione o PDF da petição.'); }
+  if(file.type!=='application/pdf'){ return fail('O arquivo deve ser PDF.'); }
+
+  const btn = document.getElementById('pet-submit');
+  btn.disabled = true; const t0 = btn.textContent; btn.textContent = 'Preparando…';
+  try{
+    // Vincula a uma cobrança pelo número (formato formatado ou só dígitos).
+    const dig = proc.replace(/\D/g,'');
+    const formatado = dig.length===20 ? `${dig.slice(0,7)}-${dig.slice(7,9)}.${dig.slice(9,13)}.${dig.slice(13,14)}.${dig.slice(14,16)}.${dig.slice(16,20)}` : proc;
+    let cobrancaId=null, devedorId=null;
+    const { data: cobs } = await supa.from('cobrancas').select('id').or(`numero_processo.eq.${formatado},numero_processo.eq.${dig}`).limit(1);
+    if(cobs && cobs.length){ cobrancaId = cobs[0].id; devedorId = cobs[0].id; } // invariante cobranca.id=devedor principal
+
+    const ts = Date.now();
+    const safe = (file.name||'peticao.pdf').replace(/[^a-zA-Z0-9.]+/g,'-');
+    const path = `peticionamentos/${cobrancaId||'sem'}/${ts}_${safe}`;
+    const { error: upErr } = await supa.storage.from('documentos').upload(path, file, { contentType:'application/pdf', upsert:false });
+    if(upErr) throw upErr;
+
+    const { error: insErr } = await supa.from('proc_peticionamentos').insert({
+      cobranca_id: cobrancaId, devedor_id: devedorId, numero_processo: formatado,
+      tipo, evento_eproc: evento || null, pdf_path: path, status:'preparado'
+    });
+    if(insErr){ await supa.storage.from('documentos').move(path,'_lixeira/'+path).catch(()=>{}); throw insErr; }
+
+    document.getElementById('pet-eproc-overlay')?.remove();
+    if(typeof showToast==='function') showToast('Peticionamento preparado. Abra o eproc e use a extensão.','success');
+    renderFilaPeticionamento();
+  }catch(e){
+    const msg = String(e && e.message || e);
+    fail(/policy|denied|violates|security/i.test(msg) ? 'Sem permissão para salvar (RLS).' : ('Falha: '+msg));
+    btn.disabled=false; btn.textContent=t0;
+  }
 }
 
 // ── KANBAN DRAG AND DROP ─────────────────────────────────────

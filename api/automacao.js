@@ -16,6 +16,7 @@ const handlers = {
   'emitir-nf': require('./_emitir-nf.js'),
   'importar-asaas': require('./_importar-asaas.js'),
   'diagnostico-financeiro': require('./_diagnostico-financeiro.js'),
+  'eproc-peticionamento': require('./_eproc-peticionamento.js'),
 };
 
 module.exports = async function handler(req, res) {
