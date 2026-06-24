@@ -27,6 +27,7 @@ async function controlleGet(path, retry = 2) {
       },
     });
     if (r.status === 429) { await sleep(5000); continue; } // rate-limit: backoff curto
+    if (r.status >= 500 && i < retry) { await sleep(2000 * (i + 1)); continue; } // 5xx transitório (ex.: 502 Cloudflare) — tenta de novo em vez de abortar o sync inteiro
     const text = await r.text();
     if (!r.ok) throw new Error(`Controlle ${r.status} em ${path}: ${text.slice(0, 200)}`);
     try { return JSON.parse(text); } catch { return {}; }
@@ -150,6 +151,7 @@ async function loadCentrosCusto() {
 async function loadContas() {
   const j = await controlleGet('/account/v1/accounts/');
   const items = j.results || [];
+  const nowIso = new Date().toISOString();
   const rows = items.map((c) => ({
     controlle_id: c.id,
     descricao: c.ds_account || '(sem descrição)',
@@ -160,7 +162,18 @@ async function loadContas() {
     tipo: c.type || 0,
     default_conta: !!c.default,
     ativa: (c.status ?? 1) === 1,
-    saldo_inicial: cents(c.bank_balance) || 0,
+    // saldo_inicial = ABERTURA da conta (initial_amount). Antes vinha de
+    // bank_balance (instantâneo de conciliação do Controlle), o que INFLAVA o
+    // saldo realizado — pois fin_saldos_realizados já soma todos os lançamentos
+    // pagos por cima do saldo_inicial. Ex.: BTG +1.737,63 / Nubank +931,47.
+    saldo_inicial: cents(c.initial_amount) || 0,
+    // bank_balance = saldo AUTORITATIVO do Controlle (campo `balance`, contábil),
+    // espelhado a cada sync para ser o número exibido no cartão. Antes esse campo
+    // era um snapshot manual/OFX que o sync NUNCA atualizava → ficava congelado
+    // (ex.: 09/05). bank_balance_at marca o espelho ("atualizado …"); a diferença
+    // p/ o saldo realizado do app vira badge de conciliação.
+    bank_balance: cents(c.balance),
+    bank_balance_at: c.balance != null ? nowIso : null,
     observacoes: c.obs_account ?? null,
     raw_payload: c,
   }));
