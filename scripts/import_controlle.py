@@ -243,6 +243,7 @@ def load_contas():
     print("→ Contas bancárias...")
     j = controlle_get("/account/v1/accounts/")
     items = j.get("results", []) or []
+    now_iso = datetime.now(timezone.utc).isoformat()
     rows = [{
         "controlle_id": c["id"],
         "descricao": c.get("ds_account") or "(sem descrição)",
@@ -253,7 +254,14 @@ def load_contas():
         "tipo": c.get("type") or 0,
         "default_conta": bool(c.get("default", False)),
         "ativa": (c.get("status", 1) == 1),
-        "saldo_inicial": cents(c.get("bank_balance")) or 0,
+        # saldo_inicial = ABERTURA (initial_amount). Antes vinha de bank_balance
+        # (instantâneo de conciliação) e inflava o saldo realizado — espelha o JS
+        # em api/_controlle-sync.js loadContas().
+        "saldo_inicial": cents(c.get("initial_amount")) or 0,
+        # bank_balance = saldo autoritativo do Controlle (campo `balance`),
+        # espelhado a cada import para ser o número exibido no cartão.
+        "bank_balance": cents(c.get("balance")),
+        "bank_balance_at": now_iso if c.get("balance") is not None else None,
         "observacoes": c.get("obs_account"),
         "raw_payload": c,
     } for c in items]
