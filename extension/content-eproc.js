@@ -9,6 +9,7 @@
 
 (function () {
   const SEL = window.EPROC_SEL || {};
+  const TXT = window.EPROC_TXT || {};
   let jobAtual = null;
 
   // ── helpers de DOM ─────────────────────────────────────────────────────────
@@ -28,6 +29,24 @@
         if (forId) { const el = document.getElementById(forId); if (el) return el; }
         const near = l.parentElement && l.parentElement.querySelector('input,select,textarea');
         if (near) return near;
+      }
+    }
+    return null;
+  }
+  // Fallback: tenta uma LISTA de termos de rótulo (vocabulário do eproc).
+  function byAnyLabel(termos) {
+    for (const t of (termos || [])) { const el = byLabel(t); if (el) return el; }
+    return null;
+  }
+  // Acha um botão/input clicável cujo value/texto contenha um dos termos.
+  function acharBotao(termos) {
+    const cands = Array.from(document.querySelectorAll(
+      'input[type="submit"],input[type="button"],button,a[href]'));
+    for (const termo of (termos || [])) {
+      const t = String(termo).toLowerCase();
+      for (const el of cands) {
+        const txt = ((el.value || '') + ' ' + (el.textContent || '') + ' ' + (el.title || '')).toLowerCase();
+        if (txt.includes(t)) return el;
       }
     }
     return null;
@@ -100,28 +119,36 @@
 
     const erros = [];
 
-    // 2) Tipo de petição / evento
-    const selTipo = qFirst(SEL.tipoPeticao) || byLabel('tipo de petição') || byLabel('evento');
-    if (selTipo && job.evento_eproc) { if (!setSelectByText(selTipo, job.evento_eproc)) erros.push('tipo de petição não encontrado na lista'); }
-    else if (!selTipo) erros.push('campo "tipo de petição" não localizado');
+    // 2) Tipo de Documento / Tipo de Petição / evento (rótulos reais do eproc TJPR).
+    const selTipo = qFirst(SEL.tipoDocumento) || byAnyLabel(TXT.tipoDocumento);
+    if (selTipo && job.evento_eproc) { if (!setSelectByText(selTipo, job.evento_eproc)) erros.push('tipo de documento "' + job.evento_eproc + '" não encontrado na lista'); }
+    else if (!selTipo) erros.push('campo "Tipo de Documento" não localizado nesta etapa');
 
-    // 3) Anexar PDF
+    // 3) Anexar PDF (etapa "Documentos" / "Anexar Documento").
     try {
-      const inputFile = qFirst(SEL.anexoPdf) || byLabel('anexar') || byLabel('arquivo');
-      if (!inputFile) { erros.push('campo de anexo (input file) não localizado'); }
+      const inputFile = qFirst(SEL.anexoPdf) || byAnyLabel(TXT.anexo);
+      if (!inputFile) { erros.push('campo de anexo (input file) não localizado nesta etapa'); }
       else if (job.pdf_url) {
         const file = await baixarPdfComoFile(job.pdf_url, 'peticao_' + (job.numero_processo || '') + '.pdf');
         anexarArquivo(inputFile, file);
       } else { erros.push('job sem PDF'); }
     } catch (e) { erros.push(String(e.message || e)); }
 
-    // 4) Destaca o botão Protocolar — NÃO clica.
-    const btn = qFirst(SEL.botaoProtocolar);
-    destacar(btn);
+    // 4) Localiza o botão FINAL (Finalizar/Peticionar/Protocolar/Confirmar) e o de
+    //    AVANÇAR etapa (Próxima). Destaca o que existir — NUNCA clica.
+    const btnFinal = qFirst(SEL.botaoFinal) || acharBotao(TXT.final);
+    const btnAvancar = qFirst(SEL.botaoAvancar) || acharBotao(TXT.avancar);
+    destacar(btnFinal || btnAvancar);
+    if (!btnFinal && btnAvancar) {
+      erros.push('esta é uma etapa intermediária do assistente (botão "Próxima") — avance até a etapa final de documentos para protocolar');
+    } else if (!btnFinal && !btnAvancar) {
+      erros.push('botão de protocolo/avanço não localizado');
+    }
 
     // 5) Painel: revisão humana + confirmação do protocolo.
+    const labelBotao = btnFinal ? ((btnFinal.value || btnFinal.textContent || 'Finalizar').trim()) : 'Próxima';
     setBody(
-      (erros.length ? msg('⚠️ Revise manualmente: <br>• ' + erros.join('<br>• '), '#fff3bf') : msg('✓ Preenchido. Revise e clique <b>Protocolar</b> no eproc.', '#d3f9d8')) +
+      (erros.length ? msg('⚠️ Revise manualmente: <br>• ' + erros.join('<br>• '), '#fff3bf') : msg('✓ Preenchido. Revise e clique <b>' + labelBotao + '</b> no eproc.', '#d3f9d8')) +
       `<div style="margin-top:6px;">Depois de protocolar, cole o <b>nº do protocolo</b>:</div>
        <input id="cb-protocolo" placeholder="nº do protocolo" style="width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid #ccc;border-radius:6px;margin:6px 0;">
        <div style="display:flex;gap:6px;">
