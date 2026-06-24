@@ -95,7 +95,8 @@ module.exports = async function handler(req, res) {
 
     const { customerId, created } = await ensureAsaasCustomer(dev);
     if (customerId && customerId !== dev.asaas_customer_id) {
-      await sbFetch(`devedores?id=eq.${dev.id}`, { method: 'PATCH', body: JSON.stringify({ asaas_customer_id: customerId }) }).catch(() => {});
+      await sbFetch(`devedores?id=eq.${dev.id}`, { method: 'PATCH', body: JSON.stringify({ asaas_customer_id: customerId }) })
+        .catch((e) => console.warn('[emitir-acordo] não persistiu asaas_customer_id no devedor:', e && e.message));
     }
 
     // Monta o parcelamento a partir dos termos do acordo.
