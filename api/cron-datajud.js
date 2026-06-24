@@ -82,9 +82,11 @@ module.exports = async function handler(req, res) {
   const limit = Math.min(500, Math.max(1, parseInt(req.query?.limit, 10) || 200));
 
   try {
-    // Processos cadastrados (fonte única = cobrancas, Fase C).
+    // Processos cadastrados (fonte única = cobrancas, Fase C). Só os com
+    // monitoramento ativo (flag monitorar_datajud, migration 2026-06-24a) — o
+    // usuário pode pausar um processo específico mesmo com o número CNJ cadastrado.
     const cobrancas = await sbFetch(
-      `cobrancas?numero_processo=not.is.null&select=id,numero_processo&limit=${limit}`
+      `cobrancas?numero_processo=not.is.null&monitorar_datajud=is.true&select=id,numero_processo&limit=${limit}`
     );
 
     // Filtra os que têm CNJ válido do TJPR.

@@ -11708,6 +11708,21 @@ async function marcarIntimacaoLida(id, lida){
   refreshIntimacoesBadge();
 }
 
+// Liga/desliga o monitoramento de andamentos (DataJud) de um processo. O cron
+// cron-datajud só consulta cobranças com monitorar_datajud=true (migration 2026-06-24a).
+async function toggleMonitorarDataJud(cobId, ativo){
+  const supa = getSupabase();
+  if(!supa){ showToast('Supabase não configurado.','danger'); return; }
+  const { error } = await supa.from('cobrancas')
+    .update({ monitorar_datajud: ativo, updated_at: new Date().toISOString() })
+    .eq('id', cobId);
+  if(error){ showToast('Não foi possível atualizar: '+error.message,'danger'); return; }
+  try{ const c=(DB_cobrancas||[]).find(x=>x.id===cobId); if(c) c.monitorar_datajud=ativo; }catch(_){}
+  const lbl=document.getElementById('mon-dj-lbl-'+cobId);
+  if(lbl){ lbl.textContent = ativo?'Monitorando':'Pausado'; lbl.style.color = ativo?'var(--success,#16a34a)':'var(--text-3)'; }
+  showToast(ativo?'Monitoramento de andamentos ativado.':'Monitoramento pausado para este processo.','success');
+}
+
 async function marcarTodasIntimacoesLidas(){
   const naoLidas = (_intimacoesCache||[]).filter(i=>!i.lida);
   if(!naoLidas.length) return;
@@ -12598,7 +12613,7 @@ async function renderCobrancaDetalhe(){
       <dt>Agência / Conta</dt><dd>${escHtml(cob.agencia_conta||'—')}</dd>
       <dt>Entrada na carteira</dt><dd>${escHtml(_detData(cob.data_entrada))}</dd>
       <dt>Fase</dt><dd>${escHtml(cob.fase||'extrajudicial')}</dd>
-      ${isJud?`<dt>Nº do processo</dt><dd>${escHtml(cob.numero_processo||'—')}</dd><dt>Vara / Tribunal</dt><dd>${escHtml(cob.vara_tribunal||'—')}</dd>`:''}
+      ${isJud?`<dt>Nº do processo</dt><dd>${escHtml(cob.numero_processo||'—')}</dd><dt>Vara / Tribunal</dt><dd>${escHtml(cob.vara_tribunal||'—')}</dd>${cob.numero_processo?`<dt>Andamentos (DataJud)</dt><dd><label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" ${cob.monitorar_datajud!==false?'checked':''} onchange="toggleMonitorarDataJud('${cob.id}', this.checked)" style="width:15px;height:15px;margin:0;cursor:pointer;"/><span id="mon-dj-lbl-${cob.id}" style="font-size:12px;font-weight:600;color:${cob.monitorar_datajud!==false?'var(--success,#16a34a)':'var(--text-3)'};">${cob.monitorar_datajud!==false?'Monitorando':'Pausado'}</span></label></dd>`:''}`:''}
       <dt>Origem</dt><dd>${escHtml(cob.origem||'—')}</dd>
     </dl>
     ${cob.observacoes?`<div style="margin-top:12px;font-size:12.5px;color:var(--text-2);white-space:pre-wrap;">${escHtml(cob.observacoes)}</div>`:''}
@@ -12999,6 +13014,8 @@ function abrirCobrancaModal(cob){
   const faseV    = cob ? (cob.fase || 'extrajudicial') : 'extrajudicial';
   const numProcV = cob ? escHtml(cob.numero_processo || '') : '';
   const varaV    = cob ? escHtml(cob.vara_tribunal || '') : '';
+  const monitorarV = cob ? (cob.monitorar_datajud !== false) : true; // default ligado
+
   const origemV  = cob ? escHtml(cob.origem || '') : '';
   const obsV     = cob ? escHtml(cob.observacoes || '') : '';
   const tagsV    = cob ? escHtml((Array.isArray(cob.tags)?cob.tags:[]).join(', ')) : '';
@@ -13081,6 +13098,10 @@ function abrirCobrancaModal(cob){
           <div><label style="font-size:12px;font-weight:600;color:var(--text-2);">Vara / Tribunal</label>
             <input id="cobr-vara" value="${varaV}" placeholder="Ex.: 1ª Vara Cível" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;margin-top:4px;"/></div>
         </div>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;font-size:12.5px;color:var(--text-2);">
+          <input type="checkbox" id="cobr-monitorar" ${monitorarV?'checked':''} style="width:16px;height:16px;margin:0;cursor:pointer;"/>
+          Monitorar andamentos automaticamente (DataJud) <span style="font-weight:400;color:var(--text-3);">— consulta diária se houver nº de processo</span>
+        </label>
         <label style="font-size:12px;font-weight:600;color:var(--text-2);display:block;margin-top:14px;">Tags <span style="font-weight:400;color:var(--text-3);">(separe por vírgula)</span></label>
         <input id="cobr-tags" value="${tagsV}" placeholder="ex.: prioridade, reincidente" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;margin-top:4px;"/>
         <label style="font-size:12px;font-weight:600;color:var(--text-2);display:block;margin-top:14px;">Observações da dívida</label>
@@ -13223,6 +13244,7 @@ async function salvarCobranca(){
   const fase    = document.getElementById('cobr-fase')?.value || 'extrajudicial';
   const numProc = (document.getElementById('cobr-num-proc')?.value||'').trim() || null;
   const vara    = (document.getElementById('cobr-vara')?.value||'').trim() || null;
+  const monitorar = document.getElementById('cobr-monitorar')?.checked !== false; // default ligado
   const origem  = (document.getElementById('cobr-origem')?.value||'').trim() || null;
   const cobObs  = (document.getElementById('cobr-obs')?.value||'').trim() || null;
   const cobTags = (document.getElementById('cobr-tags')?.value||'').split(',').map(s=>s.trim()).filter(Boolean);
@@ -13286,7 +13308,7 @@ async function salvarCobranca(){
         cliente_id: clienteId, status: situacao, tipo_cobranca: tipoCobr,
         valor_orig: valorOrig, valor_atual: valorAtual, data_entrada: venc, vencimento: venc, divida,
         fase, tipo_documento: tipoDoc, numero_documento: numDoc, banco, agencia_conta: agConta,
-        numero_processo: numProc, vara_tribunal: vara, origem, observacoes: cobObs, tags: cobTags,
+        numero_processo: numProc, vara_tribunal: vara, monitorar_datajud: monitorar, origem, observacoes: cobObs, tags: cobTags,
         updated_at: new Date().toISOString()
       };
       // Só reatribui o responsável quando explicitamente escolhido; senão preserva o atual
@@ -13311,7 +13333,7 @@ async function salvarCobranca(){
         cliente_id: clienteId, status: situacao, fase, tipo_cobranca: tipoCobr,
         valor_orig: valorOrig, valor_atual: valorAtual, data_entrada: venc, vencimento: venc,
         tipo_documento: tipoDoc, numero_documento: numDoc, banco, agencia_conta: agConta,
-        numero_processo: numProc, vara_tribunal: vara, origem, observacoes: cobObs, tags: cobTags,
+        numero_processo: numProc, vara_tribunal: vara, monitorar_datajud: monitorar, origem, observacoes: cobObs, tags: cobTags,
         divida, metadata:{ credorOriginal: credorNome, origem:'cobranca_form' },
         assigned_to: assignedTo
       };
