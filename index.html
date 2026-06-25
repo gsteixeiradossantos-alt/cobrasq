@@ -10988,7 +10988,7 @@ function editarAprovarCedente(id){
 // Não-bloqueante: qualquer falha (ex.: RLS) é logada e não impede o save do devedor.
 async function syncDevedorCobranca(d){
   const supa = (typeof getSupabase === 'function') ? getSupabase() : null;
-  if(!supa || !d || !d.id) return;
+  if(!supa || !d || !d.id) return false;
   try{
     const row = {
       id: d.id,
@@ -11010,7 +11010,7 @@ async function syncDevedorCobranca(d){
     };
     if(d.assignedTo) row.assigned_to = d.assignedTo;
     const { error:eup } = await supa.from('cobrancas').upsert(row, { onConflict:'id' });
-    if(eup){ console.warn('[sync cobranca] upsert:', eup.message); return; }
+    if(eup){ console.warn('[sync cobranca] upsert:', eup.message); return false; }
     // Garante a parte principal (devedor_id == cobranca_id). Idempotente.
     const { data:ja } = await supa.from('cobranca_partes')
       .select('id').eq('cobranca_id', d.id).eq('devedor_id', d.id).maybeSingle();
@@ -11019,7 +11019,8 @@ async function syncDevedorCobranca(d){
         .insert({ cobranca_id:d.id, devedor_id:d.id, papel:'emitente', principal:true });
       if(epar) console.warn('[sync cobranca] parte:', epar.message);
     }
-  }catch(e){ console.warn('[sync cobranca] ex:', e && e.message); }
+    return true;
+  }catch(e){ console.warn('[sync cobranca] ex:', e && e.message); return false; }
 }
 
 // img/02 + FASE C — o modal de devedor é ficha de PESSOA ('devedor'): Dívida e Fase
@@ -11039,7 +11040,7 @@ function mdevAplicarModo(modo){
   if(cobrBtn) cobrBtn.style.display = (pure && !temId) ? 'none' : '';
 }
 
-function salvarDevedor(){
+async function salvarDevedor(){
   const pure = (window._mdevModo === 'devedor'); // ficha pura: só pessoa é obrigatória
   const nome = (document.getElementById('mdev-nome').value||'').trim();
   const doc  = (document.getElementById('mdev-doc').value||'').trim();
@@ -11197,11 +11198,18 @@ function salvarDevedor(){
   }
 
   save();
+  // Fase 3 — persistência relacional IMEDIATA, fechando a janela de "salvo pela metade"
+  // (o caso do Gabriel foi um devedor gravado sem a cobrança). flushRelational() não lança.
+  await flushRelational();
   if(!pure){
     // IMPLEMENTADO S2: persiste dívidas adicionais no Supabase
     mdevSalvarDividas(devData.id).catch(e=>console.warn('S2 salvarDividas erro:',e));
-    // FASE C — espelha a dívida na cobrança (fonte única do CRM/casos). Não-bloqueante.
-    syncDevedorCobranca(devData).catch(e=>console.warn('[sync cobranca] erro:',e));
+    // FASE C — espelha a dívida na cobrança (fonte única do CRM/casos). Agora AWAITED:
+    // sem isto a cobrança podia falhar em silêncio e sobrava devedor sem caso.
+    const okCobr = await syncDevedorCobranca(devData);
+    if(!okCobr){
+      showToast('Atenção: a dívida não foi confirmada no servidor. Recarregue (F5) e edite o devedor de novo.', 'danger');
+    }
   }
   closeModal('modal-devedor');
   renderDevedores();
@@ -15128,6 +15136,8 @@ async function salvarCliente(){
   }
 
   save();
+  // Fase 3 — persistência relacional IMEDIATA (fecha a janela de "salvo pela metade").
+  await flushRelational();
   // IMPLEMENTADO S11: capturar flag antes de fechar (closeModal limpa o flag)
   const wasPendingDev = !!window._mdevPendingCliente;
   closeModal('modal-cliente');
