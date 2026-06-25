@@ -128,6 +128,23 @@ function acordoAtivo(ac) {
   return ac && (ac.status === 'ativo' || (ac.parcelas || []).some(p => !p.pago));
 }
 
+// Fase 3 — status que NÃO entram na régua de COBRANÇA (pré-acordo). Antes só os 4
+// terminais (inline). Ampliado porque a fonte relacional EXPÕE casos que no blob
+// não apareciam como "ativos": judiciais (cobrança extrajudicial automática não se
+// aplica — está com o advogado) e os que já têm acordo (vão p/ a régua de acordo,
+// não a de cobrança). É um filtro SÓ-RESTRITIVO: nunca faz enviar a mais, só a menos.
+// (Quando a régua de ACORDO for ligada, os 'Acordo*'/'Em pagamento' precisam ser
+// revistos — hoje a régua de acordo é no-op, então excluí-los aqui é seguro.)
+const STATUS_FORA_REGUA = [
+  // terminais / sem cobrança
+  'Quitado', 'Recebido', 'Devolvida', 'Sem êxito', 'Encerrado',
+  // já tem acordo -> régua de acordo (não a de cobrança pré-acordo)
+  'Acordo', 'Acordo firmado', 'Em pagamento',
+  // fase judicial -> não cobrar por WhatsApp automático
+  'Ação judicial', 'Petição inicial', 'Citação', 'Contestação',
+  'Audiência', 'Sentença', 'Recurso', 'Execução', 'Penhora', 'Hasta pública',
+];
+
 // ── Idempotência: lookup/registro em regua_envios ───────────────
 // Set<string> com chave "tipo|devedor|parcela|step" pra evitar 1 select por step.
 async function loadJaEnviados(devIds) {
@@ -400,8 +417,7 @@ async function carregarDevedoresRelacional() {
 // `somente_no_blob`  = casos que SAIRIAM da régua ao trocar p/ relacional.
 // `somente_no_relacional` = casos que ENTRARIAM na régua.
 function _ativosRegua(arr) {
-  const excl = ['Quitado', 'Recebido', 'Devolvida', 'Sem êxito'];
-  return (Array.isArray(arr) ? arr : []).filter((d) => !d.arquivado && !excl.includes(d.status));
+  return (Array.isArray(arr) ? arr : []).filter((d) => !d.arquivado && !STATUS_FORA_REGUA.includes(d.status));
 }
 function compararFontes(blobDevs, relDevs) {
   const idNome = (arr) => {
@@ -502,7 +518,7 @@ module.exports = async function handler(req, res) {
     const credor = DB.config?.empresa || 'COBRASQ';
     const link = devLinkPortal();
     const devedores = reguaSource === 'relacional' ? await carregarDevedoresRelacional() : blobDevedores;
-    const ativos = devedores.filter(d => !d.arquivado && !['Quitado', 'Recebido', 'Devolvida', 'Sem êxito'].includes(d.status));
+    const ativos = devedores.filter(d => !d.arquivado && !STATUS_FORA_REGUA.includes(d.status));
 
     // Back-fill de marcas legadas, se for o caso (uma vez só). SEMPRE a partir do
     // blob — é lá que viviam as marcas _reguaEnviados (e a tabela já está populada,
