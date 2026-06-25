@@ -114,6 +114,61 @@ async function salvarAcordoAssinadoNaPasta(
   }
 }
 
+// Item 3: documento de CLIENTE assinado cai sozinho no cadastro (bucket
+// 'peticao-assets', tabela 'cliente_documentos'). Espelha salvarAcordoAssinadoNaPasta.
+async function salvarClienteAssinadoNaPasta(
+  sb: ReturnType<typeof createClient>,
+  clienteId: string,
+  docId: string,
+  signedUrl: string
+): Promise<{ salvo: boolean; detalhe: string }> {
+  try {
+    const path = `clientes/${clienteId}/assinado_${docId}.pdf`;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 20000);
+    let resp: Response;
+    try { resp = await fetch(signedUrl, { signal: ctrl.signal }); } finally { clearTimeout(timer); }
+    if (!resp.ok) return { salvo: false, detalhe: 'download HTTP ' + resp.status };
+    const ct = resp.headers.get('content-type') || '';
+    if (!/pdf|octet-stream/i.test(ct)) return { salvo: false, detalhe: 'content-type inesperado: ' + ct };
+    const bytes = new Uint8Array(await resp.arrayBuffer());
+    if (bytes.byteLength === 0) return { salvo: false, detalhe: 'arquivo vazio' };
+    if (bytes.byteLength > 20 * 1024 * 1024) return { salvo: false, detalhe: 'acima de 20 MB' };
+    const { error: upErr } = await sb.storage.from('peticao-assets')
+      .upload(path, bytes, { contentType: 'application/pdf', upsert: true });
+    if (upErr && !/already exists|duplicate/i.test(String(upErr.message))) {
+      return { salvo: false, detalhe: 'upload: ' + upErr.message };
+    }
+    return { salvo: true, detalhe: path };
+  } catch (e) {
+    return { salvo: false, detalhe: String((e as Error)?.message || e) };
+  }
+}
+
+// Casa o doc_id na tabela cliente_documentos (documentos de cliente, não de devedor).
+// Atualiza o status e, no assinado, baixa o PDF p/ o cadastro. Retorna se encontrou.
+async function tratarDocClienteAssinado(
+  sb: ReturnType<typeof createClient>,
+  docId: string,
+  novoStatus: string,
+  signedUrl: string | null
+): Promise<{ encontrado: boolean; arquivo?: { salvo: boolean; detalhe: string } }> {
+  const { data: docs, error } = await sb.from('cliente_documentos')
+    .select('id, cliente_id, zapsign_status').eq('zapsign_doc_id', docId).limit(1);
+  if (error || !docs || docs.length === 0) return { encontrado: false };
+  const doc = docs[0] as { id: string; cliente_id: string };
+  const update: Record<string, unknown> = { zapsign_status: novoStatus };
+  if (novoStatus === 'assinado') update.zapsign_signed_at = new Date().toISOString();
+  let arquivo: { salvo: boolean; detalhe: string } | undefined;
+  if (novoStatus === 'assinado' && signedUrl) {
+    arquivo = await salvarClienteAssinadoNaPasta(sb, String(doc.cliente_id), docId, signedUrl);
+    if (arquivo.salvo) update.assinado_storage_path = arquivo.detalhe;
+    else console.warn('[zapsign-webhook] doc cliente assinado NÃO salvo: ' + arquivo.detalhe);
+  }
+  await sb.from('cliente_documentos').update(update).eq('id', doc.id);
+  return { encontrado: true, arquivo };
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST') {
@@ -174,8 +229,15 @@ Deno.serve(async (req) => {
     });
   }
   if (!acordos || acordos.length === 0) {
-    console.warn('[zapsign-webhook] acordo não encontrado pra doc_id=' + docId);
-    return new Response(JSON.stringify({ ok: true, warning: 'acordo não encontrado', doc_id: docId }), {
+    // Não é acordo de devedor — pode ser documento de CLIENTE (cessão/procuração/etc).
+    const cli = await tratarDocClienteAssinado(sb, docId, novoStatus, signedUrl);
+    if (cli.encontrado) {
+      return new Response(JSON.stringify({ ok: true, tipo: 'cliente', status: novoStatus, doc_id: docId, arquivo: cli.arquivo }), {
+        status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    console.warn('[zapsign-webhook] doc não encontrado (nem acordo nem cliente) pra doc_id=' + docId);
+    return new Response(JSON.stringify({ ok: true, warning: 'doc não encontrado', doc_id: docId }), {
       status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   }
