@@ -15,6 +15,7 @@ const handlers = {
   'repasse-concluido': require('./_repasse-concluido.js'),
   'emitir-nf': require('./_emitir-nf.js'),
   'importar-asaas': require('./_importar-asaas.js'),
+  'backfill-asaas-customers': require('./_backfill-asaas-customers.js'),
   'diagnostico-financeiro': require('./_diagnostico-financeiro.js'),
   'eproc-peticionamento': require('./_eproc-peticionamento.js'),
   // require preguiçoso: o Chromium/puppeteer (pesado) só carrega quando a ação de
