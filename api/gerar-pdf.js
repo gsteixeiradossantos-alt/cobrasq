@@ -49,9 +49,9 @@ module.exports = async function handler(req, res) {
     });
 
     const page = await browser.newPage();
-    // networkidle0 espera as fontes do Google Fonts (<link>) carregarem.
+    // networkidle0 já aguarda o download das fontes (Google Fonts via <link>),
+    // então o page.pdf renderiza com a tipografia correta (validado: a fonte sai certa).
     await page.setContent(html, { waitUntil: 'networkidle0', timeout: 25000 });
-    try { await page.evaluate(() => (document.fonts && document.fonts.ready) || true); } catch (_) {}
 
     const pdfBuffer = await page.pdf({
       format: 'A4',
@@ -69,7 +69,7 @@ module.exports = async function handler(req, res) {
     }
     return res.status(200).json({ base64 });
   } catch (e) {
-    if (browser) { try { await browser.close(); } catch (_) {} }
+    if (browser) { try { await browser.close(); } catch { /* já encerrando */ } }
     console.error('[gerar-pdf] erro:', e && e.message);
     return res.status(500).json({ error: 'Falha ao gerar PDF no servidor: ' + (e && e.message || 'desconhecido') });
   }
