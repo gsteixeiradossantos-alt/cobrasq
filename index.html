@@ -18439,8 +18439,11 @@ async function renderFinImportacao(el){
     <td style="text-align:right;"><button class="btn btn-sm btn-primary" onclick="importarDevedor(${i})">Salvar</button></td>
   </tr>`).join('');
   el.innerHTML = `<div class="panel" style="padding:16px;">
-    <h3 style="margin:0 0 6px;">Importação Asaas → CRM</h3>
-    <p style="font-size:12.5px;color:var(--text-3);margin:0 0 12px;">Clientes do Asaas sem cadastro local (página: ${d.pagina||0} clientes; sem cadastro: ${d.sem_cadastro||0}). Salve um a um, ou use <strong>Importar todos</strong> para trazê-los em lote com cadastro mínimo (nome do Asaas + CPF/CNPJ + vínculo) — a qualificação pode ser preenchida depois. O vínculo Asaas é gravado automaticamente.</p>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 6px;">
+      <h3 style="margin:0;">Importação Asaas → CRM</h3>
+      <button class="btn btn-sm btn-gold" id="imp-vincular-btn" onclick="vincularBoletosAsaas()" title="Liga os devedores JÁ cadastrados ao cliente do Asaas pelo CPF/CNPJ — assim os pagamentos casam sozinhos no financeiro.">${ico('sync',13)} Vincular boletos do Asaas</button>
+    </div>
+    <p style="font-size:12.5px;color:var(--text-3);margin:0 0 12px;">Clientes do Asaas sem cadastro local (página: ${d.pagina||0} clientes; sem cadastro: ${d.sem_cadastro||0}). Salve um a um, ou use <strong>Importar todos</strong> para trazê-los em lote com cadastro mínimo (nome do Asaas + CPF/CNPJ + vínculo) — a qualificação pode ser preenchida depois. O vínculo Asaas é gravado automaticamente.<br><strong>Vincular boletos do Asaas</strong> (botão acima) faz o contrário: liga os devedores que <em>já existem</em> ao cliente do Asaas pelo CPF, pra os pagamentos deles aparecerem no financeiro. Rode depois de importar devedores novos.</p>
     ${window._impList.length? `<table class="data-table" style="width:100%;"><thead><tr><th>Nome</th><th>CPF/CNPJ</th><th>Telefone</th><th>Endereço</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
       : `<div style="text-align:center;padding:20px;color:var(--text-3);">Nenhum cliente Asaas sem cadastro nesta página.</div>`}
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:space-between;align-items:center;flex-wrap:wrap;">
@@ -18451,6 +18454,52 @@ async function renderFinImportacao(el){
       </div>
     </div>
   </div>`;
+}
+
+// Liga TODOS os devedores já cadastrados ao cliente do Asaas correspondente (match por
+// CPF/CNPJ), pra os pagamentos casarem no financeiro (asaas-webhook → fin_operacao).
+// Faz a prévia (dry-run) primeiro, confirma, depois grava. O servidor é owner-only
+// (/api/backfill-asaas-customers) e idempotente; não desfaz vínculo nem liga ambíguo.
+async function vincularBoletosAsaas(){
+  const btn = document.getElementById('imp-vincular-btn');
+  const orig = btn ? btn.innerHTML : '';
+  const busy = (txt) => { if(btn){ btn.disabled = true; btn.innerHTML = txt; } };
+  try{
+    busy(`${ico('sync',13)} Conferindo…`);
+    const headers = await authHeaders();
+    // 1) Prévia: não grava nada, só conta o que vincularia.
+    const pr = await fetch('/api/backfill-asaas-customers?dry=1', { headers });
+    const p = await pr.json().catch(()=>({}));
+    if(!pr.ok){
+      if(pr.status === 403){ showToast('Só o proprietário pode vincular os boletos do Asaas.','warning'); return; }
+      throw new Error(p.error || ('HTTP ' + pr.status));
+    }
+    if(!p.vinculados){
+      showToast(`Nada novo a vincular. Já vinculados: ${p.ja_ok}; sem cliente no Asaas: ${p.sem_match}; sem CPF: ${p.sem_doc}.`,'success');
+      return;
+    }
+    const ok = confirm(
+      `Vincular ${p.vinculados} devedor(es) ao Asaas pelo CPF?\n\n`+
+      `• Vincular agora: ${p.vinculados}\n`+
+      `• Já vinculados: ${p.ja_ok}\n`+
+      `• Ambíguos (pulados): ${p.ambiguos}\n`+
+      `• Sem cliente no Asaas: ${p.sem_match}\n`+
+      `• Sem CPF cadastrado: ${p.sem_doc}\n\n`+
+      `Não desfaz vínculos existentes e não liga nada ambíguo.`
+    );
+    if(!ok) return;
+    // 2) Grava de verdade.
+    busy(`${ico('sync',13)} Vinculando…`);
+    const rr = await fetch('/api/backfill-asaas-customers', { headers });
+    const r = await rr.json().catch(()=>({}));
+    if(!rr.ok) throw new Error(r.error || ('HTTP ' + rr.status));
+    window._inadCache = null; // re-mapeia inadimplência do Asaas com os novos vínculos
+    showToast(`${r.vinculados} devedor(es) vinculados ao Asaas. Os pagamentos deles passam a casar no financeiro.`,'success');
+  }catch(e){
+    showToast('Falha ao vincular boletos do Asaas: ' + (e.message || e),'danger');
+  }finally{
+    if(btn){ btn.disabled = false; btn.innerHTML = orig; }
+  }
 }
 
 // Monta um devedor mínimo a partir de um cliente do Asaas (sem qualificação: só
