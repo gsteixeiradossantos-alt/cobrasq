@@ -495,8 +495,10 @@ module.exports = async function handler(req, res) {
     // ou via env REGUA_SOURCE=relacional. O id é o MESMO (=caso) nas duas fontes,
     // então a idempotência de regua_envios continua válida na troca.
     const sourceParam = String(req.query?.source || '').toLowerCase();
+    // Fase 3 — cutover: relacional vira o PADRÃO (o blob deixa de ser a fonte da régua).
+    // ?source=blob ou env REGUA_SOURCE=blob ainda forçam o blob (escape hatch reversível).
     const reguaSource = (sourceParam === 'relacional' || sourceParam === 'blob') ? sourceParam
-                      : (String(process.env.REGUA_SOURCE || '').toLowerCase() === 'relacional' ? 'relacional' : 'blob');
+                      : (String(process.env.REGUA_SOURCE || '').toLowerCase() === 'blob' ? 'blob' : 'relacional');
 
     // PR7: contas a pagar próprias — independe da régua de cobrança estar ativa.
     const contasPagar = dry ? null : await processarContasPagarProprias(DB);
@@ -553,9 +555,14 @@ module.exports = async function handler(req, res) {
       const valor = parseValorBR(dev.valorAtual) || parseValorBR(dev.valorOrig) || 0;
       const devId = String(dev.id || '');
 
-      for (const step of reguaCobranca) {
+      // Opção (a) do gestor: manda só o lembrete do ESTÁGIO ATUAL — o passo de MAIOR
+      // `dias` já vencido — 1 por devedor por run. Evita a rajada de vários lembretes de
+      // uma vez na retomada; conforme o devedor envelhece e cruza um passo novo, só esse
+      // passo novo dispara (uma vez). Os `continue` daqui pulam para o PRÓXIMO devedor.
+      const _devidos = (reguaCobranca || []).filter(s => dias >= (s.dias || 0));
+      const step = _devidos.length ? _devidos.reduce((a, b) => ((b.dias || 0) >= (a.dias || 0) ? b : a)) : null;
+      if (step) {
         const stepKey = step.id || `${step.dias}_${step.canal}`;
-        if (dias < (step.dias || 0)) continue;
         if (jaEnviados.has(jaEnviadoKey('cobranca', devId, '', stepKey))) continue;
         const canal = step.canal || 'whatsapp';
         if (!canalDisponivel(canal)) {
@@ -569,8 +576,7 @@ module.exports = async function handler(req, res) {
           nome: dev.nome || '', valor: fmtR(valor), doc: dev.doc || '',
           dias: String(dias), vencimento: baseData, link, credor
         });
-        // F-10: reivindica a vaga ANTES de enviar. Se outro run já reivindicou,
-        // não envia (evita WhatsApp duplicado em runs sobrepostos).
+        // F-10: reivindica a vaga ANTES de enviar (evita WhatsApp duplicado em runs sobrepostos).
         if (!dry) {
           const claimed = await claimEnvio({ tipo: 'cobranca', devedorId: devId, parcelaId: '', stepKey, canal });
           if (!claimed) {
