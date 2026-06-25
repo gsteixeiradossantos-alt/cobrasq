@@ -13371,7 +13371,7 @@ async function renderClienteDetalhe(){
   if(!el) return;
   el.innerHTML=`<div class="det-wrap"><div style="padding:40px;text-align:center;color:var(--text-2);">Carregando…</div></div>`;
   const supa=getSupabase();
-  let cli=null, cobr=[];
+  let cli=null, cobr=[], docsCli=[];
   if(supa && id){
     const { data:cc } = await supa.from('clientes').select('*').eq('id',id).maybeSingle();
     cli=cc||null;
@@ -13379,6 +13379,8 @@ async function renderClienteDetalhe(){
       .select('id,valor_orig,valor_atual,status,vencimento,tipo_documento,divida, cobranca_partes(devedor_id,principal,devedores(nome,doc))')
       .eq('cliente_id',id).eq('arquivado',false);
     cobr=co||[];
+    const { data:dd } = await supa.from('cliente_documentos').select('*').eq('cliente_id',id).eq('ativo',true).order('uploaded_at',{ascending:false});
+    docsCli=dd||[];
   }
   if(!cli) cli=(DB.clientes||[]).find(c=>c.id===id)||null;
   if(!cli){ el.innerHTML=`<div class="det-wrap det-fade"><button class="det-back" onclick="showPage('clientes')">${ico('arrow-left',14)||'←'} Voltar</button><div class="cob-panel"><div class="cob-empty-big"><div class="cob-empty-tt">Cliente não encontrado</div></div></div></div>`; return; }
@@ -13430,6 +13432,25 @@ async function renderClienteDetalhe(){
     <div class="det-panel-tt">Portal do cedente</div>
     <div style="display:flex;align-items:center;gap:8px;font-size:13px;"><span class="det-chip ${portalAtivo?'princ':''}">${portalAtivo?'Ativo':'Inativo'}</span><span style="color:var(--text-3);font-size:11.5px;">acesso do credor ao acompanhamento</span></div></div>`;
 
+  // Documentos do cliente: gerados, enviados p/ assinatura e ASSINADOS (volta do webhook).
+  const _docStatusChip=(s)=>{
+    const m={enviado:['Enviado','var(--warning)'],assinado:['Assinado','var(--success)'],recusado:['Recusado','var(--danger)'],expirado:['Expirado','var(--text-3)'],cancelado:['Cancelado','var(--text-3)']};
+    const it=m[s]; return it?`<span style="font-size:9.5px;font-weight:700;padding:1px 7px;border-radius:10px;background:${it[1]};color:#fff;text-transform:uppercase;letter-spacing:.03em;">${it[0]}</span>`:'';
+  };
+  const panelDocumentos=`<div class="cob-panel" style="padding:18px;">
+    <div class="det-panel-tt">Documentos${docsCli.length?` (${docsCli.length})`:''}</div>
+    ${docsCli.length? docsCli.map(dc=>{
+      const path=dc.assinado_storage_path||dc.storage_path;
+      return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;border:1px solid var(--border);border-radius:8px;padding:9px 12px;margin-bottom:7px;">
+        <div style="min-width:0;flex:1;">
+          <div style="font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(dc.nome||'Documento')}</div>
+          <div style="font-size:10.5px;color:var(--text-3);margin-top:2px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${escHtml(dc.tipo||'')}${dc.zapsign_doc_id?' · '+_docStatusChip(dc.zapsign_status):''}</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="mcliVerDoc('${escHtml(path)}')">${dc.assinado_storage_path?'Abrir assinado':'Abrir'}</button>
+      </div>`;
+    }).join('') : _detEmpty('Nenhum documento ainda. Gere/envie pelo “Editar cadastro”.')}
+  </div>`;
+
   el.innerHTML=`<div class="det-wrap det-fade">
     <button class="det-back" onclick="showPage('clientes')">${ico('arrow-left',14)||'←'} Voltar para Clientes</button>
     <div class="det-head">
@@ -13438,7 +13459,7 @@ async function renderClienteDetalhe(){
       <div class="det-head-actions">${!ehColaborador()?`<button class="cob-btn-primary" onclick="editCliente('${cli.id}')">${ico('edit',14)} Editar cadastro</button>`:''}</div>
     </div>
     ${meta}
-    <div class="det-body"><div class="det-col">${panelCarteira}${panelObs}</div><div class="det-col">${panelDados}${panelPortal}</div></div>
+    <div class="det-body"><div class="det-col">${panelCarteira}${panelDocumentos}${panelObs}</div><div class="det-col">${panelDados}${panelPortal}</div></div>
   </div>`;
 }
 
@@ -23946,6 +23967,9 @@ async function enviarDocClienteZapSign(tipo){
     const msg=`${nome}, segue acima o link para assinatura da documentação digital. Para assinar é bem tranquilo. Siga os seguintes passos:\n\n1) Clique no link acima;\n2) Confira o documento e clique em assinar;\n3) Preencha os seus dados;\n4) Assine na tela com o seu dedo. Pode ser apenas a sua inicial;\n5) Digite o código recebido por SMS;\n5) Confirme e sua documentação estará assinada.\n\n_ Em caso de dúvidas, nos informe.`;
     if(DB.config.zapiInstanceId) await ZApiAPI.sendLink(tel,msg,signerLink,`Assinar — ${tipoNome}`);
     logAtividade('Enviou doc cliente para ZapSign',`${tipoNome} — ${d.nome}`);
+    // Registra no cadastro do cliente (o webhook casa o assinado de volta pelo token).
+    await _registrarDocClienteZapSign({ clienteId:document.getElementById('mcli-id')?.value,
+      tipo:tipo==='procuracao'?'procuracao':'outros', nome:nomeDoc, base64Pdf, docToken:result.token, signerLink });
     document.getElementById('mzs-body').innerHTML=`
       <div style="padding:16px 0 20px;">
         <div style="font-size:13px;font-weight:700;color:var(--success);margin-bottom:4px;">
@@ -24013,9 +24037,12 @@ async function enviarLoteDocClienteZapSign(){
         send_automatic_email:false,send_automatic_whatsapp:false,auth_mode:'tokenSms'}],
       base64_pdf:principal.base64,lang:'pt-br',
     });
-    // Demais peças = documentos EXTRAS no mesmo envelope (um link só)
+    // Demais peças = documentos EXTRAS no mesmo envelope (um link só). Guarda o token
+    // de cada peça p/ registrar no cadastro e casar o assinado de volta.
+    const docsEnviados=[{ tipo:pdfs[0].tipo, nome:pdfs[0].nome, base64:pdfs[0].base64, token:result.token }];
     for(let i=1;i<pdfs.length;i++){
-      await ZapSignAPI.addExtraDoc(result.token, { name:`${pdfs[i].nome} — ${d.nome} — ${dataBR}`, base64_pdf:pdfs[i].base64 });
+      const ex=await ZapSignAPI.addExtraDoc(result.token, { name:`${pdfs[i].nome} — ${d.nome} — ${dataBR}`, base64_pdf:pdfs[i].base64 });
+      docsEnviados.push({ tipo:pdfs[i].tipo, nome:pdfs[i].nome, base64:pdfs[i].base64, token:(ex&&ex.token)||null });
     }
     const signerToken=result.signers?.[0]?.token;
     const signerLink=result.signers?.[0]?.sign_url||`https://app.zapsign.com.br/verificar/${signerToken}`;
@@ -24023,6 +24050,12 @@ async function enviarLoteDocClienteZapSign(){
     const msg=`${nome}, segue acima o link para assinatura da documentação digital. Para assinar é bem tranquilo. Siga os seguintes passos:\n\n1) Clique no link acima;\n2) Confira o documento e clique em assinar;\n3) Preencha os seus dados;\n4) Assine na tela com o seu dedo. Pode ser apenas a sua inicial;\n5) Digite o código recebido por SMS;\n5) Confirme e sua documentação estará assinada.\n\n_ Em caso de dúvidas, nos informe.`;
     if(DB.config.zapiInstanceId) await ZApiAPI.sendLink(tel,msg,signerLink,`Assinar — ${nomesDoc}`);
     logAtividade('Enviou docs em lote para ZapSign',`${nomesDoc} — ${d.nome}`);
+    // Registra cada peça no cadastro do cliente (cada uma com seu token ZapSign).
+    const _cidLote=document.getElementById('mcli-id')?.value;
+    for(const de of docsEnviados){
+      await _registrarDocClienteZapSign({ clienteId:_cidLote, tipo:de.tipo==='procuracao'?'procuracao':'outros',
+        nome:`${de.nome} — ${d.nome} — ${dataBR}`, base64Pdf:de.base64, docToken:de.token, signerLink });
+    }
     document.getElementById('mzs-body').innerHTML=`
       <div style="padding:16px 0 20px;">
         <div style="font-size:13px;font-weight:700;color:var(--success);margin-bottom:4px;">
@@ -24053,6 +24086,30 @@ async function enviarLoteDocClienteZapSign(){
   }
 }
 // Salva o HTML gerado em cliente_documentos (bucket peticao-assets), espelhando mcliUploadDoc.
+// Registra no cadastro do cliente (cliente_documentos) um documento ENVIADO ao
+// ZapSign, guardando o token p/ o webhook casar o PDF ASSINADO de volta — espelha
+// o fluxo do devedor (acordos.zapsign_doc_id). Guarda o PDF gerado em peticao-assets
+// (storage_path é NOT NULL). Best-effort: nunca derruba o envio; só roda se o
+// cliente já estiver salvo (tem mcli-id).
+async function _registrarDocClienteZapSign({clienteId, tipo, nome, base64Pdf, docToken, signerLink}){
+  if(!clienteId || !base64Pdf) return false;
+  const supa=getSupabase(); if(!supa) return false;
+  try{
+    const u=(await supa.auth.getUser()).data?.user;
+    const bin=atob(base64Pdf); const arr=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+    const path='clientes/'+clienteId+'/enviado_'+(tipo||'doc')+'_'+Date.now()+'.pdf';
+    const { error:eUp }=await supa.storage.from('peticao-assets')
+      .upload(path, new Blob([arr],{type:'application/pdf'}), { contentType:'application/pdf' });
+    if(eUp) throw eUp;
+    const { error:eIns }=await supa.from('cliente_documentos').insert({
+      cliente_id:clienteId, tipo:tipo||'outros', nome:nome||'Documento', storage_path:path,
+      mime_type:'application/pdf', size_bytes:arr.length, uploaded_by:u?.id, ativo:true,
+      zapsign_doc_id:docToken||null, zapsign_status:'enviado', signer_link:signerLink||null });
+    if(eIns) throw eIns;
+    return true;
+  }catch(e){ console.warn('[registrar doc cliente zapsign]', e&&e.message||e); return false; }
+}
 async function _anexarDocClienteGerado(tipoCol, html, nomeArq){
   const clienteId=document.getElementById('mcli-id')?.value;
   if(!clienteId) return false;          // cliente ainda não salvo → só abre p/ impressão
