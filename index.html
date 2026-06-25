@@ -905,7 +905,7 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
 .b-teal{background:#ECFDF5;color:#065F46;}
 
 /* ===== TOAST NOTIFICATIONS ===== */
-#toast-container{position:fixed;bottom:24px;right:24px;z-index:9999;display:flex;flex-direction:column;gap:10px;pointer-events:none;}
+#toast-container{position:fixed;bottom:24px;right:24px;z-index:10001;display:flex;flex-direction:column;gap:10px;pointer-events:none;}
 .toast{padding:12px 18px;border-radius:var(--radius-sm);font-size:13px;font-weight:600;color:#fff;box-shadow:var(--shadow-lg);animation:toastIn .25s ease;pointer-events:all;display:flex;align-items:center;gap:8px;min-width:240px;max-width:360px;}
 .toast-success{background:var(--success);}
 .toast-danger{background:var(--danger);}
@@ -2552,6 +2552,10 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
           <label>Telefone</label>
           <input type="text" id="mcli-tel" placeholder="(00) 00000-0000">
         </div>
+      </div>
+      <div class="fg">
+        <label>Chave PIX <span style="font-weight:400;color:var(--text-3);font-size:11.5px;">(CPF, CNPJ, e-mail, telefone ou chave aleatória)</span></label>
+        <input type="text" id="mcli-pix" placeholder="Ex.: 00.000.000/0001-00 ou email@pix.com">
       </div>
       <!-- IMPLEMENTADO S8: endereço separado em 7 campos -->
       <div style="display:grid;grid-template-columns:1fr 3fr 1fr;gap:12px;margin-bottom:8px;">
@@ -4473,6 +4477,7 @@ function clienteToRow(c){
     doc: c.doc || null,
     email: c.email || null,
     telefone: c.tel || null,
+    chave_pix: c.chavePix || null,
     // IMPLEMENTADO S6: colunas de grupo (auto-FK para matriz)
     cliente_grupo_id: c.clienteGrupoId || null,
     eh_matriz: !!c.ehMatriz,
@@ -4500,6 +4505,7 @@ function rowToCliente(r){
     doc: r.doc || '',
     email: r.email || '',
     tel: r.telefone || '',
+    chavePix: r.chave_pix || '',
     // IMPLEMENTADO S6
     clienteGrupoId: r.cliente_grupo_id || null,
     ehMatriz: !!r.eh_matriz,
@@ -8737,6 +8743,14 @@ function openDrawer(devId){
               dev.historico.push({ id:uid(), data:hoje(), tipo:'ZapSign',
                 texto:`Documento "${m.nome}" assinado digitalmente via ZapSign.`, autor:'Sistema' });
               showToast(`"${m.nome}" foi assinado.`, 'success');
+              // Sincronizar e-mail do signatário ZapSign → cadastro + Asaas
+              const emailZap = signer?.email;
+              if(emailZap && !dev.email){
+                dev.email = emailZap;
+                if(dev.asaasCustomerId){ try{ await AsaasAPI.updateCustomer(dev.asaasCustomerId, { email: emailZap }); }catch(_){} }
+                try{ await upsertDevedorRelational(dev); }catch(_){}
+                showToast(`E-mail ${emailZap} sincronizado do ZapSign`, 'info');
+              }
             }
           }
         } catch(_){}
@@ -12473,6 +12487,8 @@ const PAPEL_LABELS = {
 let DB_cobrancas = [];          // cache local (com cobranca_partes embutidas)
 let cobrFilter = { q:'', credor:'', responsavel:'', fase:'', status:'' };
 let cobrView = 'lista';
+let cobSelectionMode = false;
+let selectedCobrIds = new Set();
 
 async function loadCobrancasFromSupabase(){
   const supa = getSupabase();
@@ -12581,7 +12597,11 @@ async function renderCobrancas(){
     const aging = _cobrAgingDias(c);
     const agingTxt = (aging!=null && aging>0) ? `${aging}d em aberto` : '';
     const vAtual=+c.valor_atual||+c.valor_orig||0, vOrig=+c.valor_orig||0;
-    return `<tr class="cob-tr-click" onclick="verCobranca('${c.id}')">
+    const sel = cobSelectionMode ? `<td style="width:36px;text-align:center;" onclick="event.stopPropagation()"><input type="checkbox" ${selectedCobrIds.has(c.id)?'checked':''} onchange="toggleCobrSelection('${c.id}',this.checked)" style="width:16px;height:16px;cursor:pointer;"></td>` : '';
+    const trClick = cobSelectionMode ? `onclick="toggleCobrSelection('${c.id}',!selectedCobrIds.has('${c.id}'))"` : `onclick="verCobranca('${c.id}')"`;
+    const trSel = cobSelectionMode && selectedCobrIds.has(c.id) ? 'background:var(--surface-2);' : '';
+    return `<tr class="cob-tr-click" ${trClick} style="${trSel}">
+      ${sel}
       <td>
         <div class="strong">${escHtml(princNome)}${princPapel?` <span style="font-weight:400;color:var(--text-3);font-size:12px;">· ${escHtml(princPapel)}</span>`:''} ${extra}</div>
         <div style="font-size:12px;color:var(--text-2);margin-top:2px;">${escHtml(_cobrDocLabel(c))}</div>
@@ -12617,6 +12637,7 @@ async function renderCobrancas(){
         <div class="cob-h1-sub">${todas.length} caso${todas.length!==1?'s':''} · cada um pode ter vários devedores (emitente, endossante…)</div>
       </div>
       <div class="cob-head-actions">
+        <button class="cob-btn-ghost" onclick="toggleCobrSelectionMode()" id="btn-cobr-selecionar" style="${cobSelectionMode?'background:var(--gold);color:var(--navy);':''}">☐ ${cobSelectionMode?'Cancelar seleção':'Selecionar'}</button>
         <button class="cob-btn-ghost" onclick="exportarTodasCobrancas()">${ico('download',14)} Exportar</button>
         <button class="cob-btn-primary" onclick="abrirNovaCobranca()">${ico('plus',14)} Nova cobrança</button>
       </div>
@@ -12652,6 +12673,13 @@ async function renderCobrancas(){
       ${(cobrFilter.q||cobrFilter.credor||cobrFilter.responsavel||cobrFilter.fase||cobrFilter.status) ? `<button class="cob-btn-ghost" onclick="cobrFilter={q:'',credor:'',responsavel:'',fase:'',status:''};renderCobrancas();">Limpar filtros</button>` : ''}
     </div>
 
+    ${cobSelectionMode && selectedCobrIds.size > 0 ? `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 14px;background:var(--surface-2);border-radius:10px;border:1px solid var(--border);margin-bottom:8px;">
+      <span style="font-size:13px;font-weight:600;color:var(--text);">${selectedCobrIds.size} selecionado${selectedCobrIds.size!==1?'s':''}</span>
+      <button class="cob-btn-ghost" onclick="bulkAlterarStatusCobr()">Alterar status</button>
+      <button class="cob-btn-ghost" onclick="bulkExportarCobr()">Exportar CSV</button>
+      ${!ehColaborador()?`<button class="cob-btn-ghost" style="color:var(--danger);" onclick="bulkExcluirCobr()">Excluir</button>`:''}
+      <button class="cob-btn-ghost" onclick="selectedCobrIds.clear();renderCobrancas();">Limpar seleção</button>
+    </div>` : ''}
     <div class="cob-panel">
       ${cobr.length === 0
         ? `<div class="cob-empty-big">
@@ -12664,6 +12692,7 @@ async function renderCobrancas(){
           ? `<div class="det-devcards">${cobr.map(cardCaso).join('')}</div>`
           : `<table class="cob-table">
             <thead><tr>
+              ${cobSelectionMode?`<th style="width:36px;"><input type="checkbox" style="width:16px;height:16px;cursor:pointer;" onchange="cobr.forEach(c=>toggleCobrSelection(c.id,this.checked));renderCobrancas();" title="Selecionar todos"></th>`:''}
               <th>Caso / devedor principal</th>
               <th>Credor</th>
               <th class="num">Valor</th>
@@ -12680,6 +12709,77 @@ async function renderCobrancas(){
     search.addEventListener('keydown', e=>{ if(e.key==='Enter') renderCobrancas(); });
     search.addEventListener('search', ()=> renderCobrancas());
   }
+}
+
+function toggleCobrSelectionMode(){
+  cobSelectionMode = !cobSelectionMode;
+  if(!cobSelectionMode) selectedCobrIds.clear();
+  renderCobrancas();
+}
+function toggleCobrSelection(id, on){
+  if(on) selectedCobrIds.add(id); else selectedCobrIds.delete(id);
+  renderCobrancas();
+}
+async function bulkAlterarStatusCobr(){
+  if(!selectedCobrIds.size){ showToast('Nenhum caso selecionado.','warning'); return; }
+  const statusOpts = ['Cobrar','Aguardando','Acordo','Quitado','Arquivado','Judicial'];
+  const novoStatus = await new Promise(res=>{
+    const overlay = document.createElement('div');
+    overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10100;display:flex;align-items:center;justify-content:center;';
+    overlay.innerHTML=`<div style="background:var(--card);border-radius:14px;padding:24px;min-width:280px;max-width:360px;">
+      <div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:12px;">Alterar status de ${selectedCobrIds.size} caso${selectedCobrIds.size!==1?'s':''}</div>
+      <select id="_bulk-status-sel" style="width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;font-size:13px;background:var(--surface);color:var(--text);">
+        ${statusOpts.map(s=>`<option>${s}</option>`).join('')}
+      </select>
+      <div style="display:flex;gap:10px;margin-top:16px;justify-content:flex-end;">
+        <button onclick="this.closest('[style*=fixed]').remove();window._bulkStatusRes(null);" class="cob-btn-ghost">Cancelar</button>
+        <button onclick="window._bulkStatusRes(document.getElementById('_bulk-status-sel').value);this.closest('[style*=fixed]').remove();" class="cob-btn-primary">Aplicar</button>
+      </div></div>`;
+    window._bulkStatusRes = res;
+    document.body.appendChild(overlay);
+  });
+  if(!novoStatus) return;
+  const supa = getSupabase();
+  const ids = [...selectedCobrIds];
+  const { error } = await supa.from('cobrancas').update({ status: novoStatus }).in('id', ids);
+  if(error){ showToast('Erro: '+error.message,'danger'); return; }
+  (DB_cobrancas||[]).filter(c=>ids.includes(c.id)).forEach(c=>c.status=novoStatus);
+  selectedCobrIds.clear(); cobSelectionMode = false;
+  showToast(`${ids.length} caso${ids.length!==1?'s':''} → ${novoStatus}`,'success');
+  renderCobrancas();
+}
+function bulkExportarCobr(){
+  if(!selectedCobrIds.size){ showToast('Nenhum caso selecionado.','warning'); return; }
+  const cols = ['id','numero_documento','tipo_documento','status','fase','valor_orig','valor_atual','assigned_to','created_at'];
+  const rows = (DB_cobrancas||[]).filter(c=>selectedCobrIds.has(c.id));
+  const header = ['Devedor principal','Credor','Documento','Tipo','Status','Fase','Valor orig.','Valor atual','Responsável','Criado em'];
+  const lines = rows.map(c=>{
+    const princ = (c.cobranca_partes||[]).find(p=>p.principal)||(c.cobranca_partes||[])[0]||null;
+    return [
+      princ?.devedores?.nome||'—', _cobrCredorNome(c),
+      c.numero_documento||'', c.tipo_documento||'', c.status||'', c.fase||'extrajudicial',
+      c.valor_orig||'', c.valor_atual||'', _detUserNome(c.assigned_to), (c.created_at||'').slice(0,10)
+    ].map(v=>'"'+String(v||'').replace(/"/g,'""')+'"').join(',');
+  });
+  const csv = [header.map(h=>'"'+h+'"').join(','), ...lines].join('\r\n');
+  const a = Object.assign(document.createElement('a'),{ href:'data:text/csv;charset=utf-8,'+encodeURIComponent(csv), download:'cobracas_selecionadas.csv' });
+  a.click();
+  showToast(`${rows.length} casos exportados.`,'success');
+}
+async function bulkExcluirCobr(){
+  if(!selectedCobrIds.size){ showToast('Nenhum caso selecionado.','warning'); return; }
+  const n = selectedCobrIds.size;
+  if(!confirm(`Excluir ${n} cobrança${n!==1?'s':''}? Esta ação não pode ser desfeita.`)) return;
+  const supa = getSupabase();
+  const ids = [...selectedCobrIds];
+  await supa.from('cobranca_partes').delete().in('cobranca_id', ids);
+  await supa.from('devedor_eventos').delete().in('cobranca_id', ids);
+  const { error } = await supa.from('cobrancas').delete().in('id', ids);
+  if(error){ showToast('Erro: '+error.message,'danger'); return; }
+  if(window.DB_cobrancas) DB_cobrancas = DB_cobrancas.filter(c=>!ids.includes(c.id));
+  selectedCobrIds.clear(); cobSelectionMode = false;
+  showToast(`${n} cobrança${n!==1?'s':''} excluída${n!==1?'s':''}.`,'success');
+  renderCobrancas();
 }
 
 // ── Formulário de cobrança (modal dinâmico, multi-parte) — cria E edita ───────
@@ -12916,9 +13016,13 @@ async function renderCobrancaDetalhe(){
   </div>`;
 
   const panelHist=`<div class="cob-panel" style="padding:18px;">
-    <div class="det-panel-tt">Histórico</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <div class="det-panel-tt" style="margin:0;">Histórico</div>
+      <button class="btn btn-ghost btn-sm" onclick="adicionarNotaHistorico('${cob.id}')">+ Nota</button>
+    </div>
     ${hist.length? hist.map(e=>{ const t=e.payload?.acao_completa||e.payload?.acao||e.payload?.texto||e.payload?.descricao||e.payload?.mensagem||e.tipo;
-      return `<div style="padding:9px 0;border-top:1px solid var(--border-2);font-size:12.5px;"><div style="color:var(--text-3);font-size:10px;font-family:var(--font-mono);margin-bottom:2px;">${escHtml(_detData(e.criado_em))}</div>${escHtml(t||'')}</div>`; }).join('') : _detEmpty('Sem histórico registrado.')}
+      const autor = e.payload?.registrado_por ? ` <span style="color:var(--text-3);font-size:10px;">(${escHtml(e.payload.registrado_por)})</span>` : '';
+      return `<div style="padding:9px 0;border-top:1px solid var(--border-2);font-size:12.5px;"><div style="color:var(--text-3);font-size:10px;font-family:var(--font-mono);margin-bottom:2px;">${escHtml(_detData(e.criado_em))}</div>${escHtml(t||'')}${autor}</div>`; }).join('') : _detEmpty('Sem histórico registrado.')}
   </div>`;
 
   const principalP = partes.find(p=>p.principal) || partes[0] || null;
@@ -12993,7 +13097,7 @@ async function renderCobrancaDetalhe(){
   const tabBar=`<div class="det-seg det-tabbar" style="flex-wrap:wrap;">${_tabs.map((t,i)=>`<button class="${i===0?'on':''}" data-cobrtab="${t[0]}" onclick="cobrDetTab('${t[0]}')">${t[1]}</button>`).join('')}</div>`;
   const panes=_tabs.map((t,i)=>`<div class="det-tabpane" data-pane="${t[0]}" style="display:${i===0?'':'none'};margin-top:14px;">${t[2]}</div>`).join('');
   const waBtn = principalP ? _detWa(principalP.devedores?.telefone) : '';
-  const headActions=`${waBtn}<button class="btn btn-ghost btn-sm" onclick="showPage('docs')">Gerar documento</button><button class="cob-btn-primary" onclick="abrirCobrancaEdit('${cob.id}')">${ico('edit',14)} Editar</button>`;
+  const headActions=`${waBtn}<button class="btn btn-ghost btn-sm" onclick="showPage('docs')">Gerar documento</button>${currentUser?.tipo==='gestor'?`<button class="btn btn-ghost btn-sm" style="color:var(--danger);" onclick="excluirCobranca('${cob.id}')" title="Excluir cobrança permanentemente">Excluir</button>`:''}<button class="cob-btn-primary" onclick="abrirCobrancaEdit('${cob.id}')">${ico('edit',14)} Editar</button>`;
 
   el.innerHTML=`<div class="det-wrap det-fade">
     <button class="det-back" onclick="showPage('cobr')">${ico('arrow-left',14)||'←'} Voltar para Cobranças</button>
@@ -13012,6 +13116,25 @@ function cobrDetTab(name){
   document.querySelectorAll('#page-cobranca-detalhe .det-tabbar [data-cobrtab]').forEach(b=>b.classList.toggle('on', b.dataset.cobrtab===name));
   document.querySelectorAll('#page-cobranca-detalhe .det-tabpane').forEach(p=>{ p.style.display = (p.dataset.pane===name)?'':'none'; });
 }
+// Nota manual no histórico: qualquer usuário pode registrar anotações no caso.
+function adicionarNotaHistorico(cobId){
+  if(!cobId){ showToast('Cobrança inválida.','danger'); return; }
+  promptModal('Adicionar nota ao histórico', 'Descreva o que aconteceu:', async (nota)=>{
+    if(!nota) return;
+    const supa=getSupabase(); if(!supa){ showToast('Supabase não configurado.','danger'); return; }
+    try{
+      const { error } = await supa.from('devedor_eventos').insert({
+        cobranca_id: cobId,
+        tipo: 'nota_manual',
+        payload: { acao_completa: nota.trim() + ' (registrado por ' + (currentUser?.nome||'usuário') + ')', registrado_por: currentUser?.nome, origem: 'manual' }
+      });
+      if(error) throw error;
+      showToast('Nota adicionada ao histórico.','success');
+      renderCobrancaDetalhe();
+    }catch(e){ showToast('Falha ao registrar: '+(e.message||e),'danger'); }
+  }, { textarea: true, hint: 'A nota ficará visível no histórico do caso para todos os usuários.' });
+}
+
 // Negativação manual (handoff §4.9): registra no histórico do caso. Sem API por ora;
 // o gancho p/ Serasa/SPC entra aqui depois.
 function registrarNegativacao(cobId, devId){
@@ -13029,6 +13152,29 @@ function registrarNegativacao(cobId, devId){
       renderCobrancaDetalhe();
     }catch(e){ showToast('Falha ao registrar: '+(e.message||e),'danger'); }
   }, { hint:'Sem API por enquanto — registro manual. O gancho p/ Serasa/SPC entra aqui depois.' });
+}
+
+async function excluirCobranca(id){
+  if(!confirm('Excluir esta cobrança permanentemente?\n\nTodos os históricos, partes e documentos vinculados também serão excluídos.\nEsta ação não pode ser desfeita.')) return;
+  const supa = getSupabase();
+  if(!supa){ showToast('Supabase não configurado.','danger'); return; }
+  try{
+    const { error: e1 } = await supa.from('cobranca_partes').delete().eq('cobranca_id', id);
+    if(e1) throw new Error('partes: ' + e1.message);
+    const { error: e2 } = await supa.from('devedor_eventos').delete().eq('cobranca_id', id);
+    if(e2) throw new Error('histórico: ' + e2.message);
+    const { error: e3 } = await supa.from('documentos').delete().eq('cobranca_id', id);
+    if(e3) throw new Error('documentos: ' + e3.message);
+    const { error: e4 } = await supa.from('cobrancas').delete().eq('id', id);
+    if(e4) throw new Error('cobrança: ' + e4.message);
+    DB_cobrancas = (DB_cobrancas||[]).filter(c => c.id !== id);
+    showToast('Cobrança excluída.', 'success');
+    showPage('cobr');
+    renderCobrancas();
+  }catch(e){
+    console.warn('[cobr] excluir:', e);
+    showToast('Não foi possível excluir: ' + e.message, 'danger');
+  }
 }
 
 // ── 2) DETALHE DO DEVEDOR (ficha + todas as dívidas, com papel) ──────────────
@@ -13330,7 +13476,7 @@ function abrirCobrancaModal(cob){
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;max-width:900px;width:100%;box-shadow:var(--shadow);">
       <div style="padding:16px 22px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;">
         <strong style="font-family:var(--font-display);font-weight:400;font-size:22px;letter-spacing:-.01em;">${cob ? 'Editar cobrança' : 'Nova cobrança'}</strong>
-        <button onclick="document.getElementById('cobr-modal-overlay').remove()" style="border:none;background:none;font-size:20px;cursor:pointer;color:var(--text-2);">✕</button>
+        <button onclick="document.getElementById('cobr-modal-overlay').remove();window._cobrEditId=null;" style="border:none;background:none;font-size:20px;cursor:pointer;color:var(--text-2);">✕</button>
       </div>
       <div style="padding:20px;">
         <!-- Como preencher? (img/01) -->
@@ -13424,7 +13570,7 @@ function abrirCobrancaModal(cob){
         <div id="cobr-resp-list">${respHTML}</div>
       </div>
       <div style="padding:14px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px;">
-        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('cobr-modal-overlay').remove()">Cancelar</button>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('cobr-modal-overlay').remove();window._cobrEditId=null;">Cancelar</button>
         <button class="btn btn-primary btn-sm" onclick="salvarCobranca()">${cob ? 'Salvar alterações' : 'Salvar cobrança'}</button>
       </div>
     </div>`;
@@ -13432,7 +13578,7 @@ function abrirCobrancaModal(cob){
   // init pós-render: sincroniza fase↔judicial/situação, tipo de cobrança e responsável.
   cobrOnFaseChange();
   if(situacaoV){ const s=document.getElementById('cobr-situacao'); if(s && Array.from(s.options).some(o=>o.value===situacaoV)) s.value=situacaoV; }
-  if(tipoCobrV){ const tr=document.getElementById(tipoCobrV==='fisica'?'cobr-tipo-fisica':'cobr-tipo-digital'); if(tr) tr.checked=true; }
+  { const tipoFinal = tipoCobrV || (cob ? 'digital' : ''); if(tipoFinal){ const tr=document.getElementById(tipoFinal==='fisica'?'cobr-tipo-fisica':'cobr-tipo-digital'); if(tr) tr.checked=true; } }
   cobrSelectMode('manual');
   cobrInitResponsavel(assignedV);
 }
@@ -13728,6 +13874,7 @@ function renderClientes(){
       </div>
       <div class="cob-head-actions">
         <button class="cob-btn-ghost" onclick="exportarTodosClientes()">${ico('download',14)} Exportar</button>
+        ${podeGerirCredor ? `<label class="cob-btn-ghost" style="cursor:pointer;" title="Importar chaves PIX a partir de um CSV com colunas: cnpj (ou doc) e chave_pix">PIX CSV <input type="file" accept=".csv,text/csv" style="display:none;" onchange="importarPixCsv(this)"></label>` : ''}
         ${(podeGerirCredor && clientes.length > 0) ? `<button class="cob-btn-ghost" onclick="toggleClienteSelMode()"${cliSelMode?' style="color:var(--bord);border-color:var(--bord);"':''}>${cliSelMode ? 'Cancelar seleção' : 'Selecionar'}</button>` : ''}
         ${podeCriarCredor ? `<button class="cob-btn-primary" onclick="abrirNovoCliente()">${ico('plus',14)} ${podeGerirCredor ? 'Novo cliente' : 'Solicitar credor'}</button>` : ''}
       </div>
@@ -13845,6 +13992,7 @@ function abrirNovoCliente(){
   const fantEl = document.getElementById('mcli-fantasia'); if(fantEl) fantEl.value = '';
   document.getElementById('mcli-email').value = '';
   document.getElementById('mcli-tel').value = '';
+  const pixElNew = document.getElementById('mcli-pix'); if(pixElNew) pixElNew.value = '';
   // IMPLEMENTADO S8: limpar 7 campos de endereço
   ['mcli-cep','mcli-rua','mcli-numero','mcli-complemento','mcli-bairro','mcli-cidade','mcli-uf']
     .forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
@@ -14706,6 +14854,7 @@ function editCliente(id){
   mcliSelectMode && mcliSelectMode('manual');
   document.getElementById('mcli-email').value = c.email||'';
   document.getElementById('mcli-tel').value = c.tel||'';
+  const pixEl = document.getElementById('mcli-pix'); if(pixEl) pixEl.value = c.chavePix||'';
   // IMPLEMENTADO S8: load campos endereço separados (fallback string -> rua)
   if(c.cep || c.rua || c.numero || c.complemento || c.bairro || c.cidade || c.uf){
     document.getElementById('mcli-cep').value         = c.cep||'';
@@ -14787,6 +14936,7 @@ async function salvarCliente(){
     ehMatriz,
     email: document.getElementById('mcli-email').value||'',
     tel: document.getElementById('mcli-tel').value||'',
+    chavePix: (document.getElementById('mcli-pix')?.value||'').trim(),
     // IMPLEMENTADO S8: persiste 7 campos + fallback string única
     cep:         document.getElementById('mcli-cep')?.value||'',
     rua:         document.getElementById('mcli-rua')?.value||'',
@@ -16229,6 +16379,27 @@ function petResolveAuto(path){
   }
 }
 
+// Teses extras hardcoded: DPJ (Desconsideração da Personalidade Jurídica)
+// Ativadas via checkbox; injetadas no corpo da peça por petAplicarTeses().
+const _DPJ_TESES = [
+  { id:'dpj-cc', label:'Desconsideração da PJ — art. 50 CC (desvio de finalidade / confusão patrimonial)',
+    html:`<p style="text-align:justify;margin:8px 0;"><strong><em>Da Desconsideração da Personalidade Jurídica</em></strong></p>
+<p style="text-align:justify;margin:8px 0;">Requer-se a desconsideração da personalidade jurídica da executada, nos termos do art. 50 do Código Civil, ante o abuso da personalidade jurídica caracterizado pelo desvio de finalidade e/ou pela confusão patrimonial entre a pessoa jurídica e seus sócios/administradores, consoante os fatos narrados nos autos.</p>
+<p style="text-align:justify;margin:8px 0;">O Superior Tribunal de Justiça firmou que a desconsideração com lastro no art. 50 do CC exige demonstração de abuso da personalidade — desvio de finalidade ou confusão patrimonial —, não bastando o mero inadimplemento (REsp 1.315.166/RS, 3.ª T., Rel. Min. Nancy Andrighi, j. 22.05.2012).</p>` },
+  { id:'dpj-cdc', label:'Desconsideração da PJ — art. 28 CDC (relação de consumo)',
+    html:`<p style="text-align:justify;margin:8px 0;"><strong><em>Da Desconsideração da Personalidade Jurídica (CDC)</em></strong></p>
+<p style="text-align:justify;margin:8px 0;">Requer-se a desconsideração da personalidade jurídica na forma do art. 28 do Código de Defesa do Consumidor, em razão de insolvência, má administração ou abuso de direito que causou prejuízo ao consumidor.</p>
+<p style="text-align:justify;margin:8px 0;">O CDC adota a teoria menor da desconsideração, dispensando a prova de fraude específica e bastando o prejuízo ao consumidor decorrente da insolvência da pessoa jurídica (STJ, REsp 279.273/SP, 3.ª T., Rel. Min. Ari Pargendler, j. 04.12.2003).</p>` },
+  { id:'dpj-inversa', label:'Desconsideração inversa da personalidade jurídica',
+    html:`<p style="text-align:justify;margin:8px 0;"><strong><em>Da Desconsideração Inversa da Personalidade Jurídica</em></strong></p>
+<p style="text-align:justify;margin:8px 0;">Requer-se, alternativamente, a desconsideração inversa da personalidade jurídica para atingir o patrimônio da pessoa jurídica e satisfazer obrigações pessoais do sócio que utiliza a estrutura societária para ocultar bens e frustrar a execução.</p>
+<p style="text-align:justify;margin:8px 0;">A desconsideração inversa é admitida pelo Superior Tribunal de Justiça quando verificada a confusão patrimonial entre o sócio devedor e a pessoa jurídica por ele controlada (STJ, REsp 948.117/MS, 3.ª T., Rel. Min. Nancy Andrighi, j. 22.06.2010; art. 133 e ss. do CPC/2015).</p>` },
+];
+function petToggleDpj(id, on){
+  if(!_pet.dpjAtivas) _pet.dpjAtivas = new Set();
+  if(on) _pet.dpjAtivas.add(id); else _pet.dpjAtivas.delete(id);
+}
+
 // Teses opcionais — blocos <div class="tese" data-tese="ID" data-label="LABEL"> nos
 // modelos. O usuário marca/desmarca quais incluir; as desmarcadas saem da peça.
 function petTesesDisponiveis(){
@@ -16238,10 +16409,17 @@ function petTesesDisponiveis(){
 }
 function petAplicarTeses(html){
   const off = _pet.tesesOff;
-  if(!off || !off.size) return html;
-  const w = document.createElement('div'); w.innerHTML = html;
-  w.querySelectorAll('[data-tese]').forEach(el=>{ if(off.has(el.getAttribute('data-tese'))) el.remove(); });
-  return w.innerHTML;
+  if(off && off.size){
+    const w = document.createElement('div'); w.innerHTML = html;
+    w.querySelectorAll('[data-tese]').forEach(el=>{ if(off.has(el.getAttribute('data-tese'))) el.remove(); });
+    html = w.innerHTML;
+  }
+  const ativas = _pet.dpjAtivas;
+  if(ativas && ativas.size){
+    const dpj = _DPJ_TESES.filter(t=>ativas.has(t.id)).map(t=>t.html).join('\n');
+    if(dpj) html = html + '\n' + dpj;
+  }
+  return html;
 }
 function petToggleTese(id, on){
   if(!_pet.tesesOff) _pet.tesesOff = new Set();
@@ -16249,15 +16427,21 @@ function petToggleTese(id, on){
 }
 function petTesesPanel(){
   const teses = petTesesDisponiveis();
-  if(!teses.length) return '';
   if(!_pet.tesesOff) _pet.tesesOff = new Set();
-  const off = _pet.tesesOff;
-  const items = teses.map(t=>`<label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer;padding:3px 0;color:var(--text);">
-    <input type="checkbox" ${off.has(t.id)?'':'checked'} onchange="petToggleTese('${t.id}', this.checked)" style="margin:0;"> ${escHtml(t.label)}</label>`).join('');
+  if(!_pet.dpjAtivas) _pet.dpjAtivas = new Set();
+  const off = _pet.tesesOff, ativas = _pet.dpjAtivas;
+  const tplSection = teses.length ? `
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-3);margin-bottom:4px;">Teses do modelo</div>
+    ${teses.map(t=>`<label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer;padding:3px 0;color:var(--text);">
+      <input type="checkbox" ${off.has(t.id)?'':'checked'} onchange="petToggleTese('${t.id}', this.checked)" style="margin:0;"> ${escHtml(t.label)}</label>`).join('')}` : '';
+  const dpjSection = `
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-3);margin-bottom:4px;${teses.length?'margin-top:10px;':''}">Desconsideração da Personalidade Jurídica</div>
+    ${_DPJ_TESES.map(t=>`<label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer;padding:3px 0;color:var(--text);">
+      <input type="checkbox" ${ativas.has(t.id)?'checked':''} onchange="petToggleDpj('${t.id}', this.checked)" style="margin:0;"> ${escHtml(t.label)}</label>`).join('')}`;
   return `<div style="background:var(--surface-2);border-radius:10px;padding:14px;margin-bottom:16px;">
     <div style="font-size:12.5px;font-weight:700;color:var(--text-2);margin-bottom:4px;">Teses a incluir na peça</div>
-    <div style="font-size:11.5px;color:var(--text-3);margin-bottom:8px;">Desmarque as teses que não se aplicam a este caso.</div>
-    ${items}</div>`;
+    <div style="font-size:11.5px;color:var(--text-3);margin-bottom:8px;">Teses do modelo: desmarque as que não se aplicam. DPJ: marque as que cabem neste caso.</div>
+    ${tplSection}${dpjSection}</div>`;
 }
 
 function petRenderCampos(body){
@@ -16287,22 +16471,24 @@ function petRenderCampos(body){
   const calcHint = isExec
     ? 'Execução: a multa contratual (cláusula penal) já vem em 50% — ajuste se o título previr outro percentual.'
     : 'O valor atualizado preenche o campo da petição. A multa do art. 523 (10%) é condicional ao não pagamento em 15 dias — mantenha 0 aqui.';
+  // Inicializa linhas de cálculo se ainda não existirem
+  if(!_pet.calcLinhas) _pet.calcLinhas = [{ valor: r.saldo!=null ? fmt(r.saldo) : '', termo: termoDefault }];
   const calcPanel = `
     <div style="background:var(--surface-2);border-radius:10px;padding:14px;margin-bottom:16px;">
       <div style="font-size:12.5px;font-weight:700;color:var(--text-2);margin-bottom:10px;">Cálculo jurídico (valor atualizado)</div>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
-        <div style="flex:1;min-width:130px;"><label style="font-size:11px;color:var(--text-3);">Saldo nominal (R$)</label>
-          <input id="pet-calc-valor" value="${r.saldo!=null?fmt(r.saldo):''}" style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;"></div>
-        <div style="flex:1;min-width:130px;"><label style="font-size:11px;color:var(--text-3);">Termo inicial</label>
-          <input type="date" id="pet-calc-termo" value="${termoDefault}" style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;"></div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;padding-bottom:12px;border-bottom:1px solid var(--border-2);margin-bottom:10px;">
         <div style="min-width:100px;"><label style="font-size:11px;color:var(--text-3);">Índice</label>
           <select id="pet-calc-indice" style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;"><option>INPC</option><option>IPCA</option><option>SELIC</option><option selected>TJPR</option></select></div>
         <div style="width:80px;"><label style="font-size:11px;color:var(--text-3);">Juros %a.m.</label>
           <input id="pet-calc-juros" value="1,00" style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;"></div>
         <div style="width:70px;"><label style="font-size:11px;color:var(--text-3);">Multa %</label>
           <input id="pet-calc-multa" value="${multaDefault}" style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;"></div>
-        <div style="width:80px;"><label style="font-size:11px;color:var(--text-3);">Honor. %</label>
+        <div style="width:90px;"><label style="font-size:11px;color:var(--text-3);">Honor. % (total)</label>
           <input id="pet-calc-hon" value="0" style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;"></div>
+      </div>
+      <div id="pet-calc-linhas"></div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:4px;">
+        <button onclick="petAddCalcLinha()" style="background:none;border:1px dashed var(--border-2);color:var(--text-2);padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer;">+ Título</button>
         <button onclick="petCalcular()" style="background:var(--navy);color:#fff;border:none;padding:9px 14px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;">Calcular</button>
       </div>
       <div id="pet-calc-result" style="font-size:12.5px;color:var(--text-2);margin-top:10px;">${_pet.calc?petCalcResumoHtml():calcHint}</div>
@@ -16326,6 +16512,7 @@ function petRenderCampos(body){
   }).join('');
 
   body.innerHTML = petTesesPanel() + calcPanel + `<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px;">${campos}</div>`;
+  petRenderCalcLinhas();
 }
 
 // Bloco de endereço estruturado no passo de campos da Petição — mesmo padrão do CRM
@@ -16375,8 +16562,43 @@ async function petSalvarEnderecoCadastro(){
     showToast('Endereço salvo no cadastro do devedor.','success');
   }catch(e){ showToast('Falha ao salvar: '+(e.message||e),'danger'); }
 }
+function petRenderCalcLinhas(){
+  const c = document.getElementById('pet-calc-linhas'); if(!c) return;
+  if(!_pet.calcLinhas || !_pet.calcLinhas.length) _pet.calcLinhas = [{valor:'',termo:''}];
+  c.innerHTML = _pet.calcLinhas.map((l,i)=>`
+    <div class="pet-calc-row" style="display:flex;gap:8px;align-items:flex-end;margin-bottom:8px;">
+      <div style="flex:1;min-width:120px;">${i===0?'<label style="font-size:11px;color:var(--text-3);">Saldo nominal (R$)</label>':''}
+        <input class="pet-calc-row-valor" value="${escHtml(l.valor||'')}" placeholder="0,00"
+          style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;"
+          oninput="if(_pet.calcLinhas)_pet.calcLinhas[${i}].valor=this.value"></div>
+      <div style="flex:1;min-width:120px;">${i===0?'<label style="font-size:11px;color:var(--text-3);">Termo inicial</label>':''}
+        <input type="date" class="pet-calc-row-termo" value="${escHtml(l.termo||'')}"
+          style="width:100%;padding:8px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;"
+          oninput="if(_pet.calcLinhas)_pet.calcLinhas[${i}].termo=this.value"></div>
+      <div style="padding-top:${i===0?'16':'0'}px;">
+        <button onclick="petRemCalcLinha(${i})" ${_pet.calcLinhas.length<=1?'disabled':''} title="Remover título"
+          style="border:none;background:none;color:${_pet.calcLinhas.length<=1?'var(--text-3)':'var(--danger)'};cursor:${_pet.calcLinhas.length<=1?'default':'pointer'};font-size:18px;padding:6px 4px;opacity:${_pet.calcLinhas.length<=1?.4:1}">×</button>
+      </div>
+    </div>`).join('');
+}
+function petAddCalcLinha(){
+  if(!_pet.calcLinhas) _pet.calcLinhas=[{valor:'',termo:''}];
+  _pet.calcLinhas.push({valor:'',termo:''});
+  petRenderCalcLinhas();
+}
+function petRemCalcLinha(i){
+  if(!_pet.calcLinhas || _pet.calcLinhas.length<=1) return;
+  _pet.calcLinhas.splice(i,1);
+  petRenderCalcLinhas();
+}
 function petCalcResumoHtml(){
   const c = _pet.calc; if(!c) return '';
+  if(c.linhas && c.linhas.length > 1){
+    const breakdown = c.linhas.map((l,i)=>`T${i+1}: ${fmtR(l.subtotal)} (nom. ${fmtR(l.valorNominal)})`).join(' · ');
+    let s = `<strong style="color:var(--success);">✓ Total: ${fmtR(c.total)}</strong> · ${breakdown}`;
+    if(c.honorarios) s += ` · honor. ${fmtR(c.honorarios)}`;
+    return s;
+  }
   let s = `<strong style="color:var(--success);">✓ Valor atualizado: ${fmtR(c.total)}</strong> · atualizado ${fmtR(c.valorAtualizado)} + juros ${fmtR(c.juros)}`;
   if(c.multa) s += ' + multa '+fmtR(c.multa);
   if(c.honorarios) s += ' + honor. '+fmtR(c.honorarios);
@@ -16385,18 +16607,29 @@ function petCalcResumoHtml(){
 }
 function petCalcular(){
   const parseBR = s => parseFloat(String(s||'').replace(/[^\d,.-]/g,'').replace(/\.(?=\d{3}\b)/g,'').replace(',','.'))||0;
-  const valor = parseBR(document.getElementById('pet-calc-valor').value);
-  const termo = document.getElementById('pet-calc-termo').value;
   const indice = document.getElementById('pet-calc-indice').value;
   const juros = parseBR(document.getElementById('pet-calc-juros').value) || 1.00;
   const multa = parseBR(document.getElementById('pet-calc-multa').value);
   const hon = parseBR(document.getElementById('pet-calc-hon').value);
-  if(!valor || !termo){ showToast('Informe o saldo e o termo inicial.','warning'); return; }
-  const dIni = petParseDate(termo), dFim = new Date();
-  if(!dIni || dFim <= dIni){ showToast('Termo inicial inválido (deve ser passado).','warning'); return; }
-  _pet.calc = _petCalcJuridica(valor, dIni, dFim, indice, multa, hon, juros);
-  _pet.calc.termoIni = dIni; _pet.calc.dataCalc = dFim;   // datas p/ o memorial
-  const totalFmt = fmtR(_pet.calc.total);
+  const dFim = new Date();
+  const rows = [...document.querySelectorAll('#pet-calc-linhas .pet-calc-row')];
+  if(!rows.length){ showToast('Nenhum título configurado.','warning'); return; }
+  const linhas = [];
+  for(const row of rows){
+    const valor = parseBR(row.querySelector('.pet-calc-row-valor').value);
+    const termo = row.querySelector('.pet-calc-row-termo').value;
+    if(!valor || !termo){ showToast('Informe saldo e termo inicial em todos os títulos.','warning'); return; }
+    const dIni = petParseDate(termo);
+    if(!dIni || dFim <= dIni){ showToast('Termo inicial inválido — deve ser data passada.','warning'); return; }
+    const r = _petCalcJuridica(valor, dIni, dFim, indice, multa, 0, juros);
+    r.termoIni = dIni; r.subtotal = r.valorAtualizado + r.juros + r.multa;
+    linhas.push(r);
+  }
+  const subtotalGeral = linhas.reduce((s,l)=>s+l.subtotal, 0);
+  const honorarios = subtotalGeral * (hon/100);
+  const total = subtotalGeral + honorarios;
+  _pet.calc = { ...linhas[0], total, honorarios, linhas: linhas.length>1 ? linhas : null, termoIni: linhas[0].termoIni, dataCalc: dFim };
+  const totalFmt = fmtR(total);
   // Propaga o valor atualizado para as duas chaves possíveis de "valor atual" (peças de
   // acordo usam calculo.total_brl; extrajudicial/monitória/cobrança usam divida.valor_atual_brl)
   // e atualiza o input visível, sem re-renderizar (preserva o que o usuário digitou no cálculo).
@@ -25479,6 +25712,36 @@ async function exportarTodasCobrancas(){
     };
   });
   _baixarPlanilha(rows,'Cobranças','cobrancas_'+hoje());
+}
+async function importarPixCsv(input){
+  const file = input.files[0]; input.value = ''; if(!file) return;
+  const text = await file.text();
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  if(lines.length < 2){ showToast('CSV vazio ou sem dados.','warning'); return; }
+  const parseCSVLine = l => l.split(',').map(c => c.trim().replace(/^"|"$/g,'').replace(/""/g,'"'));
+  const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/[\s_-]/g,''));
+  const docIdx = ['cnpj','cpf','doc','documento'].map(k=>headers.indexOf(k)).find(i=>i>=0) ?? -1;
+  const pixIdx = ['chavepix','pix','chavepix','key'].map(k=>headers.indexOf(k)).find(i=>i>=0) ?? -1;
+  if(docIdx<0 || pixIdx<0){
+    showToast('CSV precisa ter colunas "cnpj" (ou "doc") e "chave_pix".','danger'); return;
+  }
+  const clientes = DB.clientes || [];
+  const supa = getSupabase();
+  let atualizados = 0, naoEncontrados = 0;
+  for(const line of lines.slice(1)){
+    const cols = parseCSVLine(line);
+    const docRaw = cols[docIdx]||''; const pix = (cols[pixIdx]||'').trim();
+    if(!docRaw || !pix) continue;
+    const digits = docRaw.replace(/\D/g,'');
+    const cli = clientes.find(c => (c.doc||'').replace(/\D/g,'') === digits);
+    if(!cli){ naoEncontrados++; continue; }
+    cli.chavePix = pix;
+    if(supa){ await supa.from('clientes').update({ chave_pix: pix }).eq('id', cli.id); }
+    atualizados++;
+  }
+  if(typeof save==='function') save();
+  if(typeof renderClientes==='function') renderClientes();
+  showToast(`PIX: ${atualizados} atualizado${atualizados!==1?'s':''}${naoEncontrados?'; '+naoEncontrados+' não encontrado'+(naoEncontrados!==1?'s':''):''}`, atualizados?'success':'warning');
 }
 function exportarTodosClientes(){
   const lista=(DB.clientes||[]).filter(c=>!c.isDraft && !c.arquivado);
