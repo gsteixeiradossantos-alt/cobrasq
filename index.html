@@ -23841,23 +23841,42 @@ function _canvasEmBranco(src){
 // Núcleo único de geração de PDF (usado por TODOS os caminhos: ZapSign e downloads).
 // saida:'datauristring' ⇒ retorna base64 (sem o prefixo data:) p/ enviar ao ZapSign;
 // saida:'save' ⇒ baixa o arquivo. Renderização robusta + trava anti-branco + timeout.
-async function _gerarPdf(html, opts){
+// Gera PDF VETORIAL no servidor (Chromium headless) — layout fiel, texto
+// selecionável, sem os bugs de layout do html2canvas. POST /api/gerar-pdf.
+async function _pdfBase64Servidor(html){
+  const r=await fetch('/api/gerar-pdf',{
+    method:'POST',
+    headers:{'Content-Type':'application/json', ...(await authHeaders())},
+    body:JSON.stringify({html})
+  });
+  if(!r.ok){ const j=await r.json().catch(()=>({})); throw new Error(j.error||('HTTP '+r.status)); }
+  const j=await r.json();
+  if(!j.base64) throw new Error('servidor não retornou PDF');
+  return j.base64;
+}
+function _baixarBase64Pdf(base64, filename){
+  const bin=atob(base64); const arr=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+  const url=URL.createObjectURL(new Blob([arr],{type:'application/pdf'}));
+  const a=document.createElement('a'); a.href=url; a.download=filename||'documento.pdf';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),5000);
+}
+// FALLBACK: rasterização no cliente (html2canvas). Usado SÓ se o servidor falhar.
+// Retorna sempre base64. Tem bug de layout em alguns casos (texto após <strong>
+// na quebra de linha) — por isso é rede de segurança, não o caminho principal.
+async function _gerarPdfRasterCliente(html, opts){
   opts=opts||{};
   const margin=(opts.margin!=null)?opts.margin:10;
-  const saida=opts.saida||'datauristring';
   if(typeof html2pdf==='undefined') throw new Error('html2pdf não carregado');
   const container=document.createElement('div');
   container.innerHTML=html;
-  // origem (0,0) + z-index negativo: html2canvas captura o elemento, o usuário não vê.
   container.style.cssText='position:absolute;left:0;top:0;width:210mm;z-index:-9999;background:#fff;';
   document.body.appendChild(container);
   const gerar=async()=>{
     if(document.fonts&&document.fonts.ready){ try{ await document.fonts.ready; }catch(_){} }
     const wpx=container.scrollWidth||794, hpx=container.scrollHeight||1123;
-    const scale=Math.max(1, Math.min(2, Math.sqrt(12e6/(wpx*hpx)))); // mantém a área do canvas < ~12M px²
-    // width/height/window* EXPLÍCITOS: sem isso o html2canvas mede o elemento como 0×0
-    // quando a aba está oculta/sem foco (ou o viewport é menor que a peça) e gera página
-    // em branco — fixar nas dimensões reais do elemento resolve.
+    const scale=Math.max(1, Math.min(2, Math.sqrt(12e6/(wpx*hpx))));
     const worker=html2pdf().set({
       margin, filename:opts.filename||'documento.pdf',
       image:{type:'jpeg',quality:0.95},
@@ -23869,17 +23888,30 @@ async function _gerarPdf(html, opts){
     await worker;
     if(_canvasEmBranco(worker.prop&&worker.prop.canvas))
       throw new Error('O documento foi gerado em branco — verifique os dados e tente novamente.');
-    const wPdf=worker.toPdf();
-    if(saida==='save'){ await wPdf.save(); return true; }
-    const uri=await wPdf.outputPdf('datauristring');
+    const uri=await worker.toPdf().outputPdf('datauristring');
     const base64=(uri||'').split(',')[1]||'';
     if(base64.length<1000) throw new Error('Falha ao gerar o PDF (conteúdo vazio).');
     return base64;
   };
-  // nunca deixar o modal "Gerando PDF…" travado para sempre se o html2canvas emperrar
   const limite=new Promise((_,rej)=>setTimeout(()=>rej(new Error('Tempo esgotado ao gerar o PDF.')),90000));
   try{ return await Promise.race([gerar(), limite]); }
   finally{ if(container.parentNode) container.parentNode.removeChild(container); }
+}
+// Núcleo: tenta o servidor (vetorial) primeiro e cai no raster (html2canvas) se
+// falhar — assim, se o Chromium não subir, nada quebra (volta ao comportamento antigo).
+// saida:'datauristring' ⇒ retorna base64 (p/ ZapSign); saida:'save' ⇒ baixa o arquivo.
+async function _gerarPdf(html, opts){
+  opts=opts||{};
+  const saida=opts.saida||'datauristring';
+  let base64=null;
+  try{
+    base64=await _pdfBase64Servidor(html);
+  }catch(e){
+    console.warn('[gerar-pdf] servidor indisponível, usando html2canvas:', e&&e.message);
+    base64=await _gerarPdfRasterCliente(html, opts);
+  }
+  if(saida==='save'){ _baixarBase64Pdf(base64, opts.filename||'documento.pdf'); return true; }
+  return base64;
 }
 // Wrapper p/ ZapSign: retorna base64 (sem o prefixo data:).
 async function _htmlParaPdfBase64(html, opts){
@@ -23961,31 +23993,30 @@ async function enviarLoteDocClienteZapSign(){
   document.getElementById('mzs-footer').innerHTML='';
   openModal('modal-zapsign-status');
   try{
-    // Combina os HTMLs em um único documento preservando cada estilo
-    const parser=new DOMParser();
-    const docs=tipos.map(t=>{
-      const html=_docClienteHtml(t,d);
-      const parsed=parser.parseFromString(html,'text/html');
-      const style=Array.from(parsed.querySelectorAll('style')).map(s=>s.textContent).join('\n');
-      return {tipo:t, style, body:parsed.body.innerHTML};
-    });
-    const combinedStyle=docs.map(doc=>doc.style).join('\n');
-    const combinedBody=docs.map((doc,i)=>
-      i<docs.length-1
-        ?`<div style="page-break-after:always;">${doc.body}</div>`
-        :`<div>${doc.body}</div>`
-    ).join('');
-    const htmlFull=`<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><style>${combinedStyle}</style></head><body>${combinedBody}</body></html>`;
-    const base64Pdf=await _htmlParaPdfBase64(htmlFull,{filename:'documentos.pdf'});
+    // Cada peça é um PDF SEPARADO (vetorial). Todas vão num ÚNICO envelope/link do
+    // ZapSign: a 1ª como documento principal e as demais como "documentos extras" —
+    // o cliente assina todas no mesmo link, cada uma como um documento distinto
+    // (não mais um PDF mesclado).
+    const dataBR=new Date().toLocaleDateString('pt-BR');
+    const pdfs=[];
+    for(const t of tipos){
+      const b64=await _htmlParaPdfBase64(_docClienteHtml(t,d),{filename:t+'.pdf'});
+      pdfs.push({tipo:t, nome:titulos[t], base64:b64});
+    }
     const nomesDoc=tipos.map(t=>titulos[t]).join(' + ');
-    const nomeDoc=`${nomesDoc} — ${d.nome} — ${new Date().toLocaleDateString('pt-BR')}`;
     const tel=d.tel.replace(/\D/g,'');
+    // Documento principal = 1ª peça (carrega o signatário e gera o link)
+    const principal=pdfs[0];
     const result=await ZapSignAPI.createDoc({
-      name:nomeDoc,
+      name:`${principal.nome} — ${d.nome} — ${dataBR}`,
       signers:[{name:d.nome,email:d.email||'',phone_country:'55',phone_number:tel,
         send_automatic_email:false,send_automatic_whatsapp:false,auth_mode:'tokenSms'}],
-      base64_pdf:base64Pdf,lang:'pt-br',
+      base64_pdf:principal.base64,lang:'pt-br',
     });
+    // Demais peças = documentos EXTRAS no mesmo envelope (um link só)
+    for(let i=1;i<pdfs.length;i++){
+      await ZapSignAPI.addExtraDoc(result.token, { name:`${pdfs[i].nome} — ${d.nome} — ${dataBR}`, base64_pdf:pdfs[i].base64 });
+    }
     const signerToken=result.signers?.[0]?.token;
     const signerLink=result.signers?.[0]?.sign_url||`https://app.zapsign.com.br/verificar/${signerToken}`;
     const nome=d.fantasia||d.nome;
@@ -24355,6 +24386,9 @@ const ZapSignAPI = {
     return json;
   },
   createDoc(payload)      { return this.req('POST','/docs/',payload); },
+  // Anexa um documento EXTRA ao mesmo envelope/link (até 14 extras): o signatário
+  // assina todas as peças num único link, cada uma como documento separado.
+  addExtraDoc(token,payload){ return this.req('POST',`/docs/${token}/upload-extra-doc/`,payload); },
   getDoc(token)           { return this.req('GET',`/docs/${token}/`); },
   resendSigner(signerTok) { return this.req('POST',`/signers/${signerTok}/send-reminder/`,{}); },
 };
