@@ -2618,6 +2618,11 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
           <button type="button" class="btn btn-ghost btn-sm" onclick="gerarDocCliente('procuracao')">Procuração</button>
           <button type="button" class="btn btn-ghost btn-sm" onclick="gerarDocCliente('declaracao')">Declaração de cessão</button>
         </div>
+        <div id="mcli-docs-zapsign-row" style="display:none;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:6px;">
+          <button type="button" class="btn btn-outline btn-sm" onclick="enviarDocClienteZapSign('cessao')">✍ Enviar p/ assinatura</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="enviarDocClienteZapSign('procuracao')">✍ Enviar p/ assinatura</button>
+          <button type="button" class="btn btn-outline btn-sm" onclick="enviarDocClienteZapSign('declaracao')">✍ Enviar p/ assinatura</button>
+        </div>
         <div style="font-size:11px;color:var(--text-3);margin-top:7px;">Abre o documento pronto p/ imprimir ou salvar em PDF. Modelo do escritório — revise o texto antes de enviar.</div>
       </div>
 
@@ -13573,6 +13578,7 @@ function abrirNovoCliente(){
   document.getElementById('modal-cliente-title').textContent = 'Novo Cliente (Cedente)';
   // C1: docs do cliente — vazio em novo cadastro
   if (typeof mcliCarregarDocumentos === 'function') mcliCarregarDocumentos(null);
+  { const r=document.getElementById('mcli-docs-zapsign-row'); if(r) r.style.display=DB.config?.zapsignToken?'grid':'none'; }
   openModal('modal-cliente');
 }
 
@@ -14221,6 +14227,7 @@ async function editarPedidoCredor(id){
   window._editandoPedidoCredor = { id: pedido.id, payload: cli };
   const titleEl = document.getElementById('modal-cliente-title');
   if(titleEl) titleEl.textContent = 'Revisar e aprovar credor';
+  { const r=document.getElementById('mcli-docs-zapsign-row'); if(r) r.style.display=DB.config?.zapsignToken?'grid':'none'; }
   openModal('modal-cliente');
 }
 
@@ -14434,6 +14441,7 @@ function editCliente(id){
   if (typeof mcliCarregarDocumentos === 'function') mcliCarregarDocumentos(c.id);
   // Item B: cobranças vinculadas a este credor
   if (typeof mcliCarregarCobrancas === 'function') mcliCarregarCobrancas();
+  { const r=document.getElementById('mcli-docs-zapsign-row'); if(r) r.style.display=DB.config?.zapsignToken?'grid':'none'; }
   openModal('modal-cliente');
 }
 
@@ -22965,7 +22973,8 @@ function _docClienteDados(){
   const g=id=>(document.getElementById(id)?.value||'').trim();
   return { nome:g('mcli-nome'), fantasia:g('mcli-fantasia'), doc:g('mcli-doc'),
     cep:g('mcli-cep'), rua:g('mcli-rua'), numero:g('mcli-numero'), complemento:g('mcli-complemento'),
-    bairro:g('mcli-bairro'), cidade:g('mcli-cidade'), uf:g('mcli-uf'), honor:g('mcli-honor') };
+    bairro:g('mcli-bairro'), cidade:g('mcli-cidade'), uf:g('mcli-uf'), honor:g('mcli-honor'),
+    tel:g('mcli-tel'), email:g('mcli-email') };
 }
 function _docClienteEndereco(d){
   return [d.rua, d.numero&&('nº '+d.numero), d.complemento, d.bairro,
@@ -23147,6 +23156,75 @@ async function gerarDocCliente(tipo){
   const anexou = await _anexarDocClienteGerado(tipoCol, html, (titulos[tipo]||'Documento')+' — COBRASQ.html');
   showToast(anexou ? 'Documento gerado e anexado à ficha do cliente.'
     : 'Documento gerado. Salve o cliente para anexá-lo à ficha automaticamente.', anexou?'success':'info');
+}
+async function enviarDocClienteZapSign(tipo){
+  const d=_docClienteDados();
+  if(!d.nome){ showToast('Informe a razão social do cliente.','warning'); return; }
+  if(!d.tel){ showToast('Informe o telefone do cliente.','warning'); return; }
+  if(!DB.config.zapsignToken){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
+  const titulos={cessao:'Contrato de cessão',procuracao:'Procuração',declaracao:'Declaração de cessão'};
+  const tipoNome=titulos[tipo]||'Documento';
+  document.getElementById('mzs-body').innerHTML=
+    `<div class="mv2-step-loading" style="height:140px;"><div class="mv2-spinner"></div><p>Gerando PDF e enviando para ZapSign…</p></div>`;
+  document.getElementById('mzs-footer').innerHTML='';
+  openModal('modal-zapsign-status');
+  try{
+    const html=_docClienteHtml(tipo,d);
+    const pdfDataUri=await new Promise((res,rej)=>{
+      if(typeof html2pdf==='undefined'){rej(new Error('html2pdf não carregado'));return;}
+      const container=document.createElement('div');
+      container.innerHTML=html;
+      container.style.cssText='position:absolute;left:-9999px;top:0;width:210mm;';
+      document.body.appendChild(container);
+      html2pdf().set({margin:10,filename:'doc.pdf',image:{type:'jpeg',quality:0.95},
+        html2canvas:{scale:2,useCORS:true},jsPDF:{unit:'mm',format:'a4',orientation:'portrait'}})
+        .from(container).outputPdf('datauristring').then(uri=>{
+          document.body.removeChild(container);res(uri);
+        }).catch(e=>{document.body.removeChild(container);rej(e);});
+    });
+    const base64Pdf=pdfDataUri.split(',')[1];
+    const nomeDoc=`${tipoNome} — ${d.nome} — ${new Date().toLocaleDateString('pt-BR')}`;
+    const tel=d.tel.replace(/\D/g,'');
+    const result=await ZapSignAPI.createDoc({
+      name:nomeDoc,
+      signers:[{name:d.nome,email:d.email||'',phone_country:'55',phone_number:tel,
+        send_automatic_email:false,send_automatic_whatsapp:false,auth_mode:'assinaturaTela'}],
+      base64_pdf:base64Pdf,lang:'pt-br',
+    });
+    const signerToken=result.signers?.[0]?.token;
+    const signerLink=result.signers?.[0]?.sign_url||`https://app.zapsign.com.br/verificar/${signerToken}`;
+    const nome=d.fantasia||d.nome;
+    const msg=`${nome}, segue acima o link para assinatura da documentação digital. Para assinar é bem tranquilo. Siga os seguintes passos:\n\n1) Clique no link acima;\n2) Confira o documento e clique em assinar;\n3) Preencha os seus dados;\n4) Assine na tela com o seu dedo. Pode ser apenas a sua inicial;\n5) Digite o código recebido por SMS;\n5) Confirme e sua documentação estará assinada.\n\nDuvidas, perguntas`;
+    if(DB.config.zapiInstanceId) await ZApiAPI.sendLink(tel,msg,signerLink,`Assinar — ${tipoNome}`);
+    logAtividade('Enviou doc cliente para ZapSign',`${tipoNome} — ${d.nome}`);
+    document.getElementById('mzs-body').innerHTML=`
+      <div style="padding:16px 0 20px;">
+        <div style="font-size:13px;font-weight:700;color:var(--success);margin-bottom:4px;">
+          Documento enviado${DB.config.zapiInstanceId?' e link disparado via WhatsApp.':' com sucesso.'}</div>
+        <div style="font-size:12.5px;color:var(--text-2);margin-bottom:18px;">
+          <strong>${escHtml(d.nome)}</strong> receberá o link de assinatura.</div>
+        <div style="background:var(--surface-2);border-radius:var(--radius-sm);padding:12px;">
+          <div style="font-size:11px;color:var(--text-3);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;">Link de assinatura</div>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <input type="text" value="${escHtml(signerLink)}" readonly
+              style="flex:1;font-size:11.5px;padding:6px 8px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);font-family:var(--font-mono);"
+              onclick="this.select()">
+            <button class="btn btn-primary btn-sm" onclick="navigator.clipboard.writeText('${escHtml(signerLink)}');showToast('Link copiado.','success');">Copiar</button>
+          </div>
+        </div>
+      </div>`;
+    document.getElementById('mzs-footer').innerHTML=
+      `<button class="btn btn-ghost" onclick="closeModal('modal-zapsign-status')">Fechar</button>
+       <button class="btn btn-ghost btn-sm" onclick="window.open('${escHtml(signerLink)}','_blank')">Abrir link ↗</button>`;
+  }catch(e){
+    document.getElementById('mzs-body').innerHTML=`
+      <div class="empty-state" style="padding:30px;">
+        <div class="empty-state-icon">${ico('warning',36)}</div>
+        <h3>Erro ao enviar</h3>
+        <p style="color:var(--danger);">${escHtml(traduzirErro(e.message))}</p>
+      </div>`;
+    document.getElementById('mzs-footer').innerHTML=`<button class="btn btn-ghost" onclick="closeModal('modal-zapsign-status')">Fechar</button>`;
+  }
 }
 // Salva o HTML gerado em cliente_documentos (bucket peticao-assets), espelhando mcliUploadDoc.
 async function _anexarDocClienteGerado(tipoCol, html, nomeArq){
