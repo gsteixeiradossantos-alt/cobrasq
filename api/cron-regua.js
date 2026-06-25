@@ -128,6 +128,23 @@ function acordoAtivo(ac) {
   return ac && (ac.status === 'ativo' || (ac.parcelas || []).some(p => !p.pago));
 }
 
+// Fase 3 — status que NÃO entram na régua de COBRANÇA (pré-acordo). Antes só os 4
+// terminais (inline). Ampliado porque a fonte relacional EXPÕE casos que no blob
+// não apareciam como "ativos": judiciais (cobrança extrajudicial automática não se
+// aplica — está com o advogado) e os que já têm acordo (vão p/ a régua de acordo,
+// não a de cobrança). É um filtro SÓ-RESTRITIVO: nunca faz enviar a mais, só a menos.
+// (Quando a régua de ACORDO for ligada, os 'Acordo*'/'Em pagamento' precisam ser
+// revistos — hoje a régua de acordo é no-op, então excluí-los aqui é seguro.)
+const STATUS_FORA_REGUA = [
+  // terminais / sem cobrança
+  'Quitado', 'Recebido', 'Devolvida', 'Sem êxito', 'Encerrado',
+  // já tem acordo -> régua de acordo (não a de cobrança pré-acordo)
+  'Acordo', 'Acordo firmado', 'Em pagamento',
+  // fase judicial -> não cobrar por WhatsApp automático
+  'Ação judicial', 'Petição inicial', 'Citação', 'Contestação',
+  'Audiência', 'Sentença', 'Recurso', 'Execução', 'Penhora', 'Hasta pública',
+];
+
 // ── Idempotência: lookup/registro em regua_envios ───────────────
 // Set<string> com chave "tipo|devedor|parcela|step" pra evitar 1 select por step.
 async function loadJaEnviados(devIds) {
@@ -344,6 +361,86 @@ async function processarContasPagarProprias(DB) {
   return out;
 }
 
+// ── Fase 3 (sombra) — fonte relacional da lista de devedores ────────
+// Hoje a régua lê os devedores do blob `cobrasq_data` (DB.devedores). A cura da
+// Fase 3 é ler do relacional: `cobrancas` é a fonte única pós-Fase C. Esta função
+// monta a lista no MESMO formato que a régua consome, a partir de `cobrancas` + o
+// devedor principal (via cobranca_partes), mantendo o MESMO id (= caso) — então a
+// idempotência de `regua_envios` (chave por devedor_id) segue valendo na troca.
+// Só é usada quando REGUA_SOURCE=relacional (env) ou ?source=relacional (query);
+// o default continua o blob, sem mudança de comportamento.
+// A metade PÓS-ACORDO fica DEFERIDA (acordos:[]): hoje é no-op (0 passos de acordo
+// e 0 parcelas no relacional) — espelha o blob, que também tem 0 acordos.
+async function carregarDevedoresRelacional() {
+  const sel = [
+    'id', 'status', 'arquivado', 'is_draft', 'valor_orig', 'valor_atual',
+    'vencimento', 'data_entrada', 'created_at', 'divida', 'metadata',
+    'partes:cobranca_partes(principal,devedor:devedores(nome,doc,telefone,email))',
+  ].join(',');
+  const rows = await sbFetch(`cobrancas?select=${encodeURIComponent(sel)}&arquivado=eq.false&is_draft=eq.false&limit=5000`);
+  if (!Array.isArray(rows)) return [];
+  return rows.map((co) => {
+    const partes = Array.isArray(co.partes) ? co.partes : [];
+    const parte = partes.find((p) => p && p.principal) || partes[0] || null;
+    const d = (parte && parte.devedor) ? parte.devedor : {};
+    const div = co.divida || {};
+    const meta = co.metadata || {};
+    // Mesma lógica de COALESCE da view `casos`, p/ máxima paridade com o blob.
+    const valorAtual = co.valor_atual != null ? co.valor_atual
+                     : (div.totalAvista != null ? div.totalAvista : div.valorAtual);
+    const valorOrig = co.valor_orig != null ? co.valor_orig
+                    : (div.valorOriginal != null ? div.valorOriginal
+                    : (div.valor_original != null ? div.valor_original : div.totalAvista));
+    const vencimento = co.vencimento || div.vencimento || meta.vencimento || '';
+    return {
+      id: co.id,
+      nome: d.nome || '',
+      doc: d.doc || '',
+      tel: d.telefone || '',
+      email: d.email || '',
+      status: co.status || '',
+      arquivado: !!co.arquivado,
+      vencimento,
+      entrada: co.data_entrada || '',
+      createdAt: co.created_at || '',
+      valorAtual,
+      valorOrig,
+      acordos: [],
+    };
+  });
+}
+
+// ── Fase 3 (sombra) — comparação de fontes (read-only) ──────────────
+// Diff entre a lista "ativos" do blob e do relacional, com o MESMO filtro que a
+// régua aplica (não-arquivado e status fora da lista de exclusão). Não envia e
+// não grava nada — só para conferir a paridade antes do cutover de fonte.
+// `somente_no_blob`  = casos que SAIRIAM da régua ao trocar p/ relacional.
+// `somente_no_relacional` = casos que ENTRARIAM na régua.
+function _ativosRegua(arr) {
+  return (Array.isArray(arr) ? arr : []).filter((d) => !d.arquivado && !STATUS_FORA_REGUA.includes(d.status));
+}
+function compararFontes(blobDevs, relDevs) {
+  const idNome = (arr) => {
+    const m = new Map();
+    for (const d of (Array.isArray(arr) ? arr : [])) m.set(String(d.id || ''), d.nome || '');
+    return m;
+  };
+  const nb = idNome(blobDevs);
+  const nr = idNome(relDevs);
+  const idsBlob = new Set(_ativosRegua(blobDevs).map((d) => String(d.id || '')));
+  const idsRel = new Set(_ativosRegua(relDevs).map((d) => String(d.id || '')));
+  const somenteBlob = [...idsBlob].filter((id) => !idsRel.has(id)).map((id) => ({ id, nome: nb.get(id) || '' }));
+  const somenteRel = [...idsRel].filter((id) => !idsBlob.has(id)).map((id) => ({ id, nome: nr.get(id) || '' }));
+  const emAmbos = [...idsBlob].filter((id) => idsRel.has(id)).length;
+  return {
+    blob_ativos: idsBlob.size,
+    relacional_ativos: idsRel.size,
+    em_ambos: emAmbos,
+    somente_no_blob: somenteBlob,
+    somente_no_relacional: somenteRel,
+  };
+}
+
 module.exports = async function handler(req, res) {
   // F-09: autenticação forte de cron. Antes aceitava um bypass por user-agent
   // (/vercel-cron/i), que é trivialmente forjável -> qualquer um disparava a
@@ -376,6 +473,30 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, msg: 'cobrasq_data vazia.' });
     }
     const DB = rows[0].data || {};
+    const blobDevedores = Array.isArray(DB.devedores) ? DB.devedores : [];
+
+    // Fase 3 (sombra) — modo comparação read-only: diff blob × relacional, SEM
+    // enviar e SEM gravar. Use /api/cron-regua?compare=1 (com o segredo) p/ conferir
+    // a paridade antes de virar a fonte padrão (cutover).
+    if (req.query?.compare === '1' || req.query?.compare === 'true') {
+      let relForCompare = [];
+      let erroRelacional = null;
+      try { relForCompare = await carregarDevedoresRelacional(); }
+      catch (e) { erroRelacional = e.message; }
+      return res.status(200).json({
+        ok: true, modo: 'compare',
+        erro_relacional: erroRelacional,
+        ...compararFontes(blobDevedores, relForCompare),
+      });
+    }
+
+    // Fase 3 (sombra) — fonte da lista de devedores. Default = blob (comportamento
+    // inalterado). Relacional só quando explicitamente pedido (?source=relacional)
+    // ou via env REGUA_SOURCE=relacional. O id é o MESMO (=caso) nas duas fontes,
+    // então a idempotência de regua_envios continua válida na troca.
+    const sourceParam = String(req.query?.source || '').toLowerCase();
+    const reguaSource = (sourceParam === 'relacional' || sourceParam === 'blob') ? sourceParam
+                      : (String(process.env.REGUA_SOURCE || '').toLowerCase() === 'relacional' ? 'relacional' : 'blob');
 
     // PR7: contas a pagar próprias — independe da régua de cobrança estar ativa.
     const contasPagar = dry ? null : await processarContasPagarProprias(DB);
@@ -396,11 +517,13 @@ module.exports = async function handler(req, res) {
 
     const credor = DB.config?.empresa || 'COBRASQ';
     const link = devLinkPortal();
-    const devedores = Array.isArray(DB.devedores) ? DB.devedores : [];
-    const ativos = devedores.filter(d => !d.arquivado && !['Quitado', 'Recebido', 'Devolvida', 'Sem êxito'].includes(d.status));
+    const devedores = reguaSource === 'relacional' ? await carregarDevedoresRelacional() : blobDevedores;
+    const ativos = devedores.filter(d => !d.arquivado && !STATUS_FORA_REGUA.includes(d.status));
 
-    // Back-fill de marcas legadas, se for o caso (uma vez só)
-    const backfilled = dry ? 0 : await backfillSeNecessario(devedores);
+    // Back-fill de marcas legadas, se for o caso (uma vez só). SEMPRE a partir do
+    // blob — é lá que viviam as marcas _reguaEnviados (e a tabela já está populada,
+    // então na prática isto é no-op idempotente).
+    const backfilled = dry ? 0 : await backfillSeNecessario(blobDevedores);
 
     // Pré-carrega "já enviados" de todos os devedores ativos numa única query
     const devIds = ativos.map(d => String(d.id || ''));
@@ -408,6 +531,7 @@ module.exports = async function handler(req, res) {
 
     const resultado = {
       processados: ativos.length,
+      source: reguaSource,
       enviados_cobranca: 0,
       enviados_acordo:   0,
       falhas: 0,
@@ -541,6 +665,7 @@ module.exports = async function handler(req, res) {
           action: dry ? 'regua.dry_run' : 'regua.exec',
           entity: 'sistema',
           metadata: {
+            source: reguaSource,
             enviados_cobranca: resultado.enviados_cobranca,
             enviados_acordo: resultado.enviados_acordo,
             falhas: resultado.falhas,
