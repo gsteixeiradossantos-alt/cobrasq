@@ -98,6 +98,7 @@ async function salvarAcordoAssinadoNaPasta(
     const { error: insErr } = await sb.from('documentos').upsert({
       devedor_doc: chave,
       devedor_id: String(dev.id),
+      cobranca_id: String(dev.id), // cobranca.id == devedor.id → doc aparece na cobrança no CRM
       credor_id: dev.cliente_id ? String(dev.cliente_id) : null,
       categoria: 'acordo-assinado',
       nome: 'Acordo assinado — ZapSign ' + docId + '.pdf',
@@ -167,6 +168,64 @@ async function tratarDocClienteAssinado(
   }
   await sb.from('cliente_documentos').update(update).eq('id', doc.id);
   return { encontrado: true, arquivo };
+}
+
+// === Pós-assinatura no CRM (cobrancas é a fonte do CRM, não acordos) ===========
+// O CRM lê o caso de `cobrancas` (view `casos`); o webhook tocava só `acordos`, então
+// a assinatura não refletia no caso (ficava "Acordo abandonado"). Estas duas funções
+// fecham isso. Best-effort: nunca derrubam o webhook. Invariante: cobranca.id == devedor.id.
+
+// Tira o caso de "abandonado" e marca a assinatura assim que o ZapSign confirma.
+async function refletirAssinaturaNoCRM(
+  sb: ReturnType<typeof createClient>,
+  cobrancaId: string,
+  dataAssinatura: string
+): Promise<void> {
+  try {
+    const { data: cob } = await sb.from('cobrancas')
+      .select('acordo_final, encerramento').eq('id', cobrancaId).single();
+    if (!cob || cob.encerramento) return; // sem caso, ou já encerrado → não rebaixa
+    const af = { ...((cob.acordo_final as Record<string, unknown>) || {}), assinado: true, data_assinatura: dataAssinatura };
+    await sb.from('cobrancas').update({
+      passo_atual: 'Acordo assinado', acordo_final: af, updated_at: new Date().toISOString()
+    }).eq('id', cobrancaId);
+  } catch (e) {
+    console.warn('[zapsign-webhook] refletirAssinaturaNoCRM: ' + String((e as Error)?.message || e));
+  }
+}
+
+// Conclui o caso quando os boletos saíram: encerramento {tipo:'acordo'} → o caso vai
+// p/ a aba Acordos/Formalizados. Idempotente (não reencerra) e registra no histórico.
+async function concluirCasoNoCRM(
+  sb: ReturnType<typeof createClient>,
+  cobrancaId: string,
+  emissao: { parcelas?: number; total?: number } | null,
+  dataAssinatura: string
+): Promise<{ concluido: boolean; detalhe: string }> {
+  try {
+    const { data: cob } = await sb.from('cobrancas')
+      .select('acordo_final, encerramento').eq('id', cobrancaId).single();
+    if (!cob) return { concluido: false, detalhe: 'cobrança não encontrada' };
+    if (cob.encerramento) return { concluido: false, detalhe: 'já encerrado' };
+    const af = (cob.acordo_final as Record<string, unknown>) || {};
+    const parc = Number(emissao?.parcelas) || Number(af.parcelas) || 1;
+    const total = Number(emissao?.total) || Number(af.total) || 0;
+    const formaLegivel = parc + 'x boleto' + (total ? ' · total R$ ' + total.toFixed(2).replace('.', ',') : '');
+    const quando = new Date().toISOString();
+    await sb.from('cobrancas').update({
+      encerramento: { tipo: 'acordo', motivo: 'Acordo firmado: ' + formaLegivel, quando, encerradoPor: null, auto: true },
+      acordo_final: { ...af, assinado: true, data_assinatura: dataAssinatura, boletos_emitidos: true },
+      passo_atual: 'Acordo assinado', updated_at: quando
+    }).eq('id', cobrancaId);
+    await sb.from('devedor_eventos').insert({
+      devedor_id: cobrancaId, cobranca_id: cobrancaId, tipo: 'acordo_concluido_auto',
+      autor_nome: 'Automação (ZapSign → Asaas)',
+      payload: { acao: '✅ Caso concluído automaticamente: acordo assinado e boletos emitidos (' + formaLegivel + ').' }
+    });
+    return { concluido: true, detalhe: formaLegivel };
+  } catch (e) {
+    return { concluido: false, detalhe: String((e as Error)?.message || e) };
+  }
 }
 
 Deno.serve(async (req) => {
@@ -267,6 +326,12 @@ Deno.serve(async (req) => {
     }
   }
 
+  // Reflete a assinatura no caso do CRM já (independe da emissão dos boletos): sai de
+  // "Acordo abandonado" e marca acordo_final.assinado.
+  if (novoStatus === 'assinado') {
+    await refletirAssinaturaNoCRM(sb, acordo.devedor_id, dataAssinatura || new Date().toISOString());
+  }
+
   // PR2: emissão automática dos boletos pós-assinatura. Delega ao endpoint Vercel
   // /api/emitir-acordo (lá mora a chave Asaas). Best-effort: nunca derruba o webhook
   // — o status do acordo já foi salvo. A trava AUTO_EMIT_ACORDO=on (no servidor
@@ -293,20 +358,36 @@ Deno.serve(async (req) => {
     }
   }
 
+  // Conclusão automática do caso no CRM quando os boletos saíram (pedido do escritório:
+  // após assinatura → documento → boletos, dar o caso por concluído). Só conclui com
+  // emissão OK (boletos emitidos agora OU já emitidos antes); gate/erro NÃO concluem.
+  let conclusao: { concluido: boolean; detalhe: string } | null = null;
+  if (novoStatus === 'assinado') {
+    const em = emissao as { ok?: boolean; skipped?: string; parcelas?: number; total?: number; invoice_url?: string } | null;
+    const boletosOk = !!em && em.ok === true && (!!em.invoice_url || em.skipped === 'já emitido');
+    if (boletosOk) {
+      conclusao = await concluirCasoNoCRM(sb, acordo.devedor_id, em, dataAssinatura || new Date().toISOString());
+    }
+  }
+
   await sb.from('devedor_eventos').insert({
     devedor_id: acordo.devedor_id,
+    cobranca_id: acordo.devedor_id,
     tipo: 'zapsign_' + novoStatus,
     payload: {
-      acao: 'ZapSign: ' + novoStatus + ' (doc ' + docId + ')',
+      acao: novoStatus === 'assinado'
+        ? '✍️ Acordo assinado no ZapSign — termo salvo na aba Documentos.'
+        : 'ZapSign: ' + novoStatus + ' (doc ' + docId + ')',
       raw_event: body.event_type || null,
       doc_id: docId,
       signed_url: signedUrl,
       arquivo_pasta: arquivoPasta,
-      emissao
+      emissao,
+      conclusao
     }
   });
 
-  return new Response(JSON.stringify({ ok: true, status: novoStatus, acordo_id: acordo.id, arquivo_pasta: arquivoPasta, emissao }), {
+  return new Response(JSON.stringify({ ok: true, status: novoStatus, acordo_id: acordo.id, arquivo_pasta: arquivoPasta, emissao, conclusao }), {
     status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
   });
 });
