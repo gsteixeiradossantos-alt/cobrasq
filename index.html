@@ -4341,7 +4341,13 @@ function copiarSQLSupabase(){
 
 const _DEV_COL_FIELDS = new Set([
   'id','clienteId','nome','doc','docHash','email','tel','status','fase',
-  'valorOrig','valorAtual','entrada','responsavel','arquivado','createdAt','updatedAt',
+  'valorOrig','valorAtual','entrada','arquivado','createdAt','updatedAt',
+  // F-20/responsável: 'responsavel' (NOME do dono) foi REMOVIDO desta lista de
+  // propósito. Não existe coluna p/ ele em `devedores`, então precisa cair no
+  // metadata via devedorToRow. Enquanto esteve aqui, era excluído do metadata E
+  // não tinha coluna → sumia no round-trip relacional; o load zerava o nome de
+  // todos os devedores e o trigger anti_shrink bloqueava toda gravação (46 → 0).
+  // O UUID do dono segue em `assignedTo` (coluna assigned_to).
   'passoAtual','assignedTo','aguardandoResposta','encerramento','acordoFinal',
   'encaminhamentoJudicial','etapaAtualizadaEm','divida','historico','acordos',
   'tipoCobranca','asaasCustomerId',
@@ -4660,7 +4666,17 @@ async function loadRelationalData(){
     loadCobrancasFromSupabase()
   ]);
   // Só sobrescreve se a leitura foi não-nula (null = erro, [] = legítimo vazio mas pós-login)
-  if(Array.isArray(devedoresRel)) DB.devedores = devedoresRel;
+  // F-20/responsável: o relacional pode não trazer `responsavel` (nome) — ele vive no
+  // metadata e em devedores antigos ainda está vazio. Sem isto, a sobrescrita zerava o
+  // nome de TODOS os devedores e o trigger anti_shrink barrava toda gravação (46 → 0).
+  // Preserva o nome do devedor anterior (mesmo id) quando a reconstrução não trouxer.
+  if(Array.isArray(devedoresRel)){
+    const _prevDev = new Map((DB.devedores||[]).map(d=>[d.id, d]));
+    for(const d of devedoresRel){
+      if(d && !d.responsavel){ const o=_prevDev.get(d.id); if(o && o.responsavel) d.responsavel = o.responsavel; }
+    }
+    DB.devedores = devedoresRel;
+  }
   if(Array.isArray(clientesRel))  DB.clientes  = clientesRel;
   if(Array.isArray(cobrancasRel)) DB_cobrancas = cobrancasRel;
   // FASE C2 (tempo-2): leitores do cliente passam a ver a dívida de cobrancas.
