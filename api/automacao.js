@@ -17,6 +17,9 @@ const handlers = {
   'importar-asaas': require('./_importar-asaas.js'),
   'diagnostico-financeiro': require('./_diagnostico-financeiro.js'),
   'eproc-peticionamento': require('./_eproc-peticionamento.js'),
+  // require preguiçoso: o Chromium/puppeteer (pesado) só carrega quando a ação de
+  // PDF é chamada — as demais ações não pagam esse custo no cold start.
+  'gerar-pdf': (req, res) => require('./_gerar-pdf.js')(req, res),
 };
 
 module.exports = async function handler(req, res) {
