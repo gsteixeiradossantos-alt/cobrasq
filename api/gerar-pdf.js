@@ -13,8 +13,13 @@
 // Chromium empacotado, compatível com o limite de tamanho das funções Vercel).
 
 const { requireUser, applyCors } = require('./_auth.js');
-const chromium = require('@sparticuz/chromium');
+const chromium = require('@sparticuz/chromium-min');
 const puppeteer = require('puppeteer-core');
+
+// chromium-min NÃO empacota o binário (mantém a função pequena → build confiável
+// na Vercel). O binário é baixado da release oficial (versão casada com o pacote)
+// no cold start e fica em cache no /tmp. URL precisa bater com a versão instalada.
+const CHROMIUM_PACK = 'https://github.com/Sparticuz/chromium/releases/download/v131.0.1/chromium-v131.0.1-pack.tar';
 
 module.exports = async function handler(req, res) {
   applyCors(req, res);
@@ -44,7 +49,7 @@ module.exports = async function handler(req, res) {
     browser = await puppeteer.launch({
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
+      executablePath: await chromium.executablePath(CHROMIUM_PACK),
       headless: chromium.headless,
     });
 
