@@ -4668,6 +4668,11 @@ function _mergeDividaFromCobrancas(){
   }
 }
 
+// Fase 3 — "modo seguro": vira true quando a carga relacional FALHA (retorno null).
+// Enquanto true, flushRelational() recusa gravar, pra NÃO sobrescrever o servidor
+// com o blob desatualizado. Volta a false assim que uma carga dá certo.
+let _relReadFailed = false;
+
 async function loadRelationalData(){
   // Sobrescreve DB.devedores e DB.clientes com dados das tabelas relacionais
   // (fonte da verdade pós-Fase 2.5). Roda só após login — antes disso, RLS
@@ -4681,6 +4686,15 @@ async function loadRelationalData(){
     loadClientesFromSupabase(),
     loadCobrancasFromSupabase()
   ]);
+  // Fase 3 — modo seguro: se a carga FALHOU (null = erro de RLS/rede; ≠ [] que é
+  // vazio legítimo), NÃO tratar o blob como verdade — bloqueia a escrita relacional
+  // (flushRelational) pra não sobrescrever o servidor com dado velho, e avisa.
+  if(devedoresRel === null || clientesRel === null){
+    _relReadFailed = true;
+    try{ showToast('Modo seguro: não consegui carregar seus dados do servidor. Recarregue a página (F5) antes de salvar — não vou gravar por cima do servidor.', 'danger'); }catch(_){}
+  } else {
+    _relReadFailed = false;
+  }
   // Só sobrescreve se a leitura foi não-nula (null = erro, [] = legítimo vazio mas pós-login)
   // F-20/responsável: o relacional pode não trazer `responsavel` (nome) — ele vive no
   // metadata e em devedores antigos ainda está vazio. Sem isto, a sobrescrita zerava o
@@ -4723,6 +4737,12 @@ let _relWriteTimer = null;
 async function flushRelational(){
   const supa = getSupabase();
   if(!supa) return;
+  // Fase 3 — modo seguro: se a carga relacional falhou nesta sessão, NÃO grava
+  // (evita sobrescrever o servidor com o blob velho). Avisa e sai.
+  if(_relReadFailed){
+    try{ showToast('Modo seguro ativo: recarregue a página (F5). Gravação cancelada pra não sobrescrever o servidor com dados desatualizados.', 'danger'); }catch(_){}
+    return;
+  }
   clearTimeout(_relWriteTimer); // se havia um debounce pendente, esta escrita imediata o cobre
   _relWriteTimer = null;
   try{
