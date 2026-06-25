@@ -101,8 +101,25 @@ module.exports = async function handler(req, res) {
 
     // Monta o parcelamento a partir dos termos do acordo.
     const parcelas = Array.isArray(acordo.parcelas) ? acordo.parcelas : [];
-    const nParc = acordo.num_parcelas || parcelas.length || 1;
-    const total = Number(acordo.valor_total) || parcelas.reduce((s, p) => s + (Number(p.valor) || 0), 0);
+    let nParc = acordo.num_parcelas || parcelas.length || 1;
+    let total = Number(acordo.valor_total) || parcelas.reduce((s, p) => s + (Number(p.valor) || 0), 0);
+
+    // Blindagem (caso Francieli, 25/06/2026): acordos criados pelo n8n vinham só com
+    // valor_total — num_parcelas=null e parcelas=[] — e a emissão caía p/ 1x (boleto
+    // único) mesmo num acordo parcelado. Os termos reais ficam no acordo_final da
+    // cobrança (id == devedor_id). Se o acordo não declara parcelamento, puxa de lá.
+    if (nParc <= 1) {
+      try {
+        const cob = await sbFetch(`cobrancas?id=eq.${encodeURIComponent(acordo.devedor_id)}&select=acordo_final&limit=1`);
+        const af = cob && cob[0] && cob[0].acordo_final;
+        const afParc = af && Number(af.parcelas);
+        if (afParc && afParc > 1) {
+          nParc = afParc;
+          if (!(total > 0)) total = Number(af.total) || (Number(af.valor) || 0) * afParc;
+        }
+      } catch (e) { console.warn('[emitir-acordo] fallback acordo_final:', e && e.message); }
+    }
+
     if (!(total > 0)) return res.status(400).json({ error: 'acordo sem valor_total' });
     const firstDue = acordo.data_primeiro_venc || (parcelas[0] && (parcelas[0].venc || parcelas[0].vencimento)) || addDaysISO(3);
 
