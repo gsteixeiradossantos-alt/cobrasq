@@ -13826,10 +13826,31 @@ async function salvarCobranca(){
       cobId = cob.id;
     }
 
+    // Hotfix FK: garante que todo devedor vinculado EXISTE no relacional antes da parte.
+    // escolherDevedorExistente pode casar com um registro só-em-memória (ghost) que não
+    // está na tabela; sem isto o insert da parte quebra no FK devedor_id e sobra cobrança órfã.
+    const idsVinc = [...new Set(resp.map(r=>r.devedorId).filter(Boolean))];
+    if(idsVinc.length){
+      const { data: existem } = await supa.from('devedores').select('id').in('id', idsVinc);
+      const have = new Set((existem||[]).map(x=>x.id));
+      const novosDev = resp.filter(r=>r.devedorId && !have.has(r.devedorId))
+        .map(r=>({ id:r.devedorId, nome:r.nome, doc:r.doc||null, telefone:r.tel||null,
+                  cliente_id:clienteId, status:'Cobrar', assigned_to:assignedTo,
+                  metadata:{ origem:'cobranca_form' } }));
+      if(novosDev.length){
+        const { error: efix } = await supa.from('devedores').upsert(novosDev, { onConflict:'id' });
+        if(efix) throw new Error('contato (relacional): '+efix.message);
+      }
+    }
+
     // Vincula as partes (mesmo caminho para criar/editar)
     const partes = resp.map(r=>({ cobranca_id: cobId, devedor_id: r.devedorId, papel: r.papel, principal: !!r.principal }));
     const { error: epar } = await supa.from('cobranca_partes').insert(partes);
-    if(epar) throw new Error('responsáveis: '+epar.message);
+    if(epar){
+      // Evita cobrança órfã: se acabamos de CRIAR a cobrança e a parte falhou, desfaz.
+      if(!editId && cobId){ try{ await supa.from('cobrancas').delete().eq('id', cobId); }catch(_){} }
+      throw new Error('responsáveis: '+epar.message);
+    }
 
     // Gatilho: cobrança NOVA gera tarefa de "primeiro contato" com prazo de 30 dias.
     if(!editId){
