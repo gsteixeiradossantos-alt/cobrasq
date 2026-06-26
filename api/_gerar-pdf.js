@@ -11,6 +11,13 @@
 //
 // Dependências (package.json): puppeteer-core + @sparticuz/chromium (binário do
 // Chromium empacotado, compatível com o limite de tamanho das funções Vercel).
+//
+// ⚠️ RUNTIME: o app roda em Node 20 (package.json engines). No Node 22 da Vercel
+// (base Amazon Linux 2023) o Chromium do @sparticuz/chromium-min@131 falha ao
+// carregar libnss3.so ("error while loading shared libraries: libnss3.so"). O Node
+// 20 (base anterior) traz as libs que o binário precisa. NÃO voltar engines p/ 22
+// sem revalidar o /api/gerar-pdf, ou o "Gerar PDF" do servidor quebra (o cliente
+// cai no Imprimir como rede de segurança, mas perde o 1-clique).
 
 const { requireUser, applyCors } = require('./_auth.js');
 const chromium = require('@sparticuz/chromium-min');
