@@ -4052,7 +4052,12 @@ let _lastKnownDevCount = null;
 // mescla com lock de linha. Registros não enviados ficam intocados: uma aba
 // desatualizada só consegue afetar o que ela mesma editou.
 let _syncSnapshot = null;
-const COLECOES_SYNC = ['devedores','clientes','tarefas','lancamentos','contas','cartoes','projetos','auditLog'];
+// Fase 3 (2026-06-25) — FREEZE: 'devedores' e 'clientes' saíram daqui DE PROPÓSITO.
+// Agora são fonte ÚNICA nas tabelas relacionais (gravados via flushRelational); o blob
+// cobrasq_data NÃO os recebe mais (o merge não os toca → ficam CONGELADOS como
+// fallback/arquivo). Encerra o drift "salvo pela metade". NÃO re-adicionar sem reverter
+// o resto da Fase 3. Cópia byte-fiel do blob: tabela _arquivo_blob_cobrasq_data_20260625.
+const COLECOES_SYNC = ['tarefas','lancamentos','contas','cartoes','projetos','auditLog'];
 const CHAVES_REPLACE_SYNC = ['config','metas','fatHistorico'];
 function _snapColecao(arr){
   const m = Object.create(null);
@@ -4212,8 +4217,22 @@ async function syncToSupabase(force){
         // Optimistic concurrency (fallback/1ª gravação): se já temos baseline da versão remota, exige
         // que ela não tenha mudado desde que carregamos (alguém pode ter salvo
         // em outra aba). Caso tenha mudado, recarrega e avisa o usuário.
+        // Fase 3 (freeze): devedores/clientes saíram do COLECOES_SYNC e são fonte ÚNICA
+        // no relacional. Este full-replace de fallback regravaria o blob inteiro com DB
+        // (visão relacional, possivelmente parcial do colaborador) e DESCONGELARIA o blob.
+        // Preserva os dois arrays do que JÁ está no servidor. Se a leitura falhar, cai no
+        // comportamento antigo (o trigger F-20 ainda barra encolhimento).
+        let _blobData = DB;
+        try {
+          const { data: _cur } = await supa.from('cobrasq_data').select('data').eq('key','main').maybeSingle();
+          if(_cur && _cur.data){
+            _blobData = { ...DB };
+            if(_cur.data.devedores !== undefined) _blobData.devedores = _cur.data.devedores;
+            if(_cur.data.clientes  !== undefined) _blobData.clientes  = _cur.data.clientes;
+          }
+        } catch(_){ /* sem leitura: mantém comportamento antigo */ }
         let q = supa.from('cobrasq_data').update(
-          { data: DB, updated_at: nowIso }
+          { data: _blobData, updated_at: nowIso }
         ).eq('key','main');
         if(lastSeen) q = q.eq('updated_at', lastSeen);
         const { data: updated, error } = await q.select('updated_at');
@@ -4228,7 +4247,7 @@ async function syncToSupabase(force){
           // só se ainda não havia baseline; senão, recarrega para evitar sobrescrita.
           if(!lastSeen){
             const { data: ins, error: insErr } = await supa.from('cobrasq_data').upsert(
-              { key:'main', data: DB, updated_at: nowIso }, { onConflict: 'key' }
+              { key:'main', data: _blobData, updated_at: nowIso }, { onConflict: 'key' }
             ).select('updated_at');
             if(insErr){ console.warn('Supabase upsert error:', insErr.message); return; }
             _syncRemoteUpdatedAt = ins?.[0]?.updated_at || nowIso;
@@ -5417,6 +5436,10 @@ async function doLogin(type){
         }
         // Load fresh data from Supabase
         await loadFromSupabase();
+        // Fase 3 (freeze): o blob de devedores/clientes ficou congelado; recarrega a
+        // fonte ÚNICA (relacional) já no login do gestor — senão a 1ª tela mostraria a
+        // lista velha do blob (faltando os cadastros novos) até um F5.
+        await loadRelationalData();
         // app_users é a fonte canônica do papel — user_metadata é band-aid e não é confiável.
         // Fix 5: distingue "não cadastrada" (absent) de "falha temporária" (error). Em erro,
         // não acusa "conta não cadastrada" (mensagem errada) — pede tentar de novo.
