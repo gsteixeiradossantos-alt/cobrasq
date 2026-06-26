@@ -31,13 +31,19 @@ semente do MFA** e o risco de bloqueio é o menor possível. Ver
 2. **Carregar sem compactação** → selecionar a pasta `extension/`.
 3. Fixar o ícone na barra.
 
-## ⚠️ Validar os seletores do eproc (obrigatório)
+## ⚠️ Seletores do eproc (calibrados pelos manuais; refinar no DOM real)
 
-`selectors.js` contém **palpites** dos seletores do eproc TJPR — eles **precisam ser
-validados** no eproc real (logado, F12/Inspecionar). Ajuste as listas de candidatos de:
-`tipoPeticao`, `parte`, `anexoPdf`, `botaoProtocolar`. O `content-eproc.js` tem fallback por
-rótulo, mas o ideal é seletores certos. Enquanto não validados, a extensão pode preencher
-parcialmente — o painel lista o que não achou para você completar à mão.
+`selectors.js` foi **calibrado a partir dos manuais oficiais "Eproc para Advogado"**
+(TJPR, out/2025): usa os **rótulos e textos de botão reais** e cobre os dois fluxos —
+**inicial/Distribuição** (assistente de 5 etapas, avanço por **"Próxima"**, final em
+**"Finalizar"**) e **intercorrente** (juntar documento em processo existente: **"Tipo de
+Documento"** → **"Anexar Documento"** → **"Peticionar"/"Confirmar"**). O `content-eproc.js`
+tem fallback por rótulo (`byLabel`) e por texto de botão (`acharBotao`).
+
+Os manuais dão rótulos/fluxo, **não** os ids/names exatos do DOM. Então no primeiro uso real
+(logado, F12) confira e, se necessário, refine as listas de candidatos: `tipoDocumento`,
+`parte`, `anexoPdf`, `botaoAvancar`, `botaoFinal`. Em etapa intermediária do assistente a
+extensão preenche o que dá e avisa para avançar via **"Próxima"** até a etapa de documentos.
 
 ## Arquivos
 
