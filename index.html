@@ -16520,6 +16520,7 @@ function renderPecas(){
         <h2>Peças &amp; Ações Judiciais</h2>
         <span class="spacer"></span>
         <button class="chat-new" onclick="chatNovaPeca()">＋ Nova peça</button>
+        <button class="chat-new" title="Gerar várias execuções de uma vez (rascunhos para revisar)" onclick="chatLoteAbrir()">📚 Em lote</button>
       </div>
       <div id="pecas-dados"></div>
       <div id="pecas-chat-host"></div>
@@ -16686,6 +16687,129 @@ function pecaPickAsaas(i){
   const dev = g.dev || { _virtual:true, asaasCustomerId:g.custId, nome:g.nome, doc:g.doc, clienteId:null, valorAtual:(resumo.saldo!=null?String(resumo.saldo):'') };
   const ov=document.getElementById('pecas-pick-ov'); if(ov) ov.remove();
   chatOpen({ dev, devId:dev.id||null, casoId:dev.id||null, credorId:dev.clienteId||null, resumo, tipo:(window._chat&&_chat.tipo)||'execucao' });
+}
+
+// ── PEÇAS EM LOTE — gera execuções p/ vários devedores de uma vez (rascunhos) ──
+function chatLoteAbrir(){
+  let ov=document.getElementById('pecas-lote-ov'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='pecas-lote-ov';
+  const tipoOpts=CHAT_TIPOS.map(t=>'<option value="'+t.id+'"'+(t.id==='execucao'?' selected':'')+'>'+escHtml(t.nome)+'</option>').join('');
+  ov.innerHTML=`
+    <style>
+      #pecas-lote-ov{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;}
+      #pecas-lote-ov .pp-card{width:min(620px,96vw);max-height:88vh;display:flex;flex-direction:column;background:var(--card,#15171c);border:1px solid var(--border-2,#333);border-radius:12px;overflow:hidden;}
+      #pecas-lote-ov .pp-head{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-bottom:1px solid var(--border,#2a2d35);font-size:13.5px;color:var(--text);}
+      #pecas-lote-ov .pp-head button{background:none;border:none;color:var(--text-3,#9aa);font-size:16px;cursor:pointer;}
+      #pecas-lote-ov .pp-tabs{display:flex;gap:6px;padding:10px 16px 0;}
+      #pecas-lote-ov .pp-tab{flex:1;background:var(--chip,rgba(255,255,255,.05));border:1px solid var(--border-2,#333);border-radius:8px;color:var(--text-2,#d7d7d7);font-size:12.5px;padding:8px;cursor:pointer;}
+      #pecas-lote-ov .pp-tab.on{background:var(--gold,#c8a24a);color:var(--navy,#10131a);border-color:var(--gold,#c8a24a);font-weight:600;}
+      #pecas-lote-ov #lote-search{margin:10px 16px;background:var(--chip,rgba(255,255,255,.05));border:1px solid var(--border-2,#333);border-radius:8px;color:var(--text);padding:8px 10px;font-size:12.5px;font-family:inherit;}
+      #pecas-lote-ov #lote-list{overflow:auto;padding:0 16px 6px;display:flex;flex-direction:column;gap:4px;}
+      #pecas-lote-ov .lote-row{display:flex;align-items:center;gap:9px;width:100%;background:var(--chip,rgba(255,255,255,.04));border:1px solid var(--border,#23262e);border-radius:8px;padding:8px 11px;cursor:pointer;color:var(--text,#e8e8e8);font-size:12.5px;}
+      #pecas-lote-ov .lote-row:hover{border-color:var(--gold,#c8a24a);}
+      #pecas-lote-ov .lote-nome{flex:1;}
+      #pecas-lote-ov .lote-meta{font-size:11px;color:var(--text-3,#9aa);white-space:nowrap;}
+      #pecas-lote-ov .pp-empty{padding:18px;text-align:center;font-size:12.5px;color:var(--text-3,#9aa);}
+      #pecas-lote-ov .lote-foot{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;border-top:1px solid var(--border,#2a2d35);}
+      #pecas-lote-ov #lote-tipo{background:var(--chip,rgba(255,255,255,.06));border:1px solid var(--border-2,#333);border-radius:8px;color:var(--text-2,#d7d7d7);font-size:12.5px;padding:7px 9px;font-family:inherit;}
+      #pecas-lote-ov #lote-count{font-size:12px;color:var(--text-3,#9aa);}
+      #pecas-lote-ov #lote-btn{margin-left:auto;background:var(--gold,#c8a24a);color:var(--navy,#10131a);border:none;border-radius:8px;padding:8px 16px;font-size:12.5px;font-weight:700;cursor:pointer;}
+      #pecas-lote-ov #lote-btn:disabled{opacity:.5;cursor:default;}
+      #pecas-lote-ov #lote-prog{padding:0 16px 12px;font-size:12px;color:var(--text-2,#d7d7d7);}
+    </style>
+    <div class="pp-card">
+      <div class="pp-head"><strong>Peças em lote</strong><button title="Fechar" onclick="document.getElementById('pecas-lote-ov').remove()">✕</button></div>
+      <div class="pp-tabs">
+        <button id="lote-tab-sis" class="pp-tab on" onclick="chatLoteTab('sistema')">Devedores do sistema</button>
+        <button id="lote-tab-asa" class="pp-tab" onclick="chatLoteTab('asaas')">Vencidos no Asaas</button>
+      </div>
+      <input id="lote-search" placeholder="Buscar por nome ou documento…" oninput="chatLoteRender()">
+      <div id="lote-list"></div>
+      <div class="lote-foot">
+        <select id="lote-tipo" title="Tipo de peça">${tipoOpts}</select>
+        <span id="lote-count">0 selecionado(s)</span>
+        <button id="lote-btn" onclick="chatLoteGerar()">Gerar peças</button>
+      </div>
+      <div id="lote-prog">Cada peça gera 1 chamada de IA e é salva como rascunho para você revisar.</div>
+    </div>`;
+  document.body.appendChild(ov);
+  ov.onclick=e=>{ if(e.target===ov && !window._loteBusy) ov.remove(); };
+  window._loteTab='sistema'; window._loteAsaas=null; window._loteSel=new Set(); window._loteBusy=false;
+  chatLoteRender();
+}
+function chatLoteTab(t){ window._loteTab=t; const s=document.getElementById('lote-tab-sis'),a=document.getElementById('lote-tab-asa'); if(s)s.classList.toggle('on',t==='sistema'); if(a)a.classList.toggle('on',t==='asaas'); chatLoteRender(); }
+function chatLoteToggle(key){ window._loteSel=window._loteSel||new Set(); if(window._loteSel.has(key)) window._loteSel.delete(key); else window._loteSel.add(key); const c=document.getElementById('lote-count'); if(c) c.textContent=window._loteSel.size+' selecionado(s)'; }
+async function chatLoteRender(){
+  const list=document.getElementById('lote-list'); if(!list) return;
+  const q=((document.getElementById('lote-search')||{}).value||'').toLowerCase().trim();
+  window._loteSel=window._loteSel||new Set();
+  const row=(key,nome,meta)=>'<label class="lote-row"><input type="checkbox" '+(window._loteSel.has(key)?'checked':'')+' onchange="chatLoteToggle(\''+key+'\')"><span class="lote-nome">'+escHtml(nome)+'</span><span class="lote-meta">'+escHtml(meta)+'</span></label>';
+  if(window._loteTab==='sistema'){
+    const devs=(DB.devedores||[]).filter(d=>{ const r=petResumoSistema(d)||{}; return (r.saldo>0) && (!q||(d.nome||'').toLowerCase().includes(q)||String(d.doc||'').includes(q)); }).slice(0,200);
+    list.innerHTML=devs.length?devs.map(d=>{ const r=petResumoSistema(d)||{}; return row(d.id, d.nome||'(sem nome)', (d.doc||'')+(r.saldo?(' · '+fmtR(r.saldo)):'')); }).join(''):'<div class="pp-empty">Nenhum devedor com saldo em aberto.</div>';
+  } else {
+    list.innerHTML='<div class="pp-empty">Carregando vencidos do Asaas…</div>';
+    if(!window._loteAsaas){ try{ window._loteAsaas=await petLoadBoletosAsaas(); }catch(e){ window._loteAsaas={erro:'Falha ao carregar.',groups:[]}; } }
+    const A=window._loteAsaas||{groups:[]};
+    if(A.erro){ list.innerHTML='<div class="pp-empty">'+escHtml(A.erro)+'</div>'; return; }
+    const gs=(A.groups||[]).filter(g=>!q||(g.nome||'').toLowerCase().includes(q)||String(g.doc||'').includes(q));
+    list.innerHTML=gs.length?gs.map(g=>{ const idx=A.groups.indexOf(g); const r=petResumoBoletos(g)||{}; return row('asaas:'+idx, g.nome, (g.doc||'')+(r.saldo?(' · '+fmtR(r.saldo)+' vencido'):'')); }).join(''):'<div class="pp-empty">Nenhum boleto vencido.</div>';
+  }
+  const c=document.getElementById('lote-count'); if(c) c.textContent=window._loteSel.size+' selecionado(s)';
+}
+// Resolve os devedores selecionados (sistema por id; Asaas vira devedor virtual).
+function loteResolverDevs(){
+  return [...(window._loteSel||[])].map(k=>{
+    if(String(k).startsWith('asaas:')){ const g=((window._loteAsaas&&window._loteAsaas.groups)||[])[+String(k).slice(6)]; if(!g) return null; const r=petResumoBoletos(g)||{}; return g.dev||{_virtual:true,asaasCustomerId:g.custId,nome:g.nome,doc:g.doc,clienteId:null,valorAtual:(r.saldo!=null?String(r.saldo):'')}; }
+    return (DB.devedores||[]).find(d=>d.id===k)||null;
+  }).filter(Boolean);
+}
+// Geração headless de UMA peça (troca o _chat temporariamente, 1 chamada à IA, salva rascunho).
+async function loteGerarUm(dev, tipo){
+  const prev=window._chat;
+  try{
+    const acs=(dev.acordos||[]).filter(a=>(a.parcelas||[]).length);
+    const resumo = (!dev._virtual && acs.length===1) ? petResumoAcordo(acs[0]) : (!dev._virtual?petResumoSistema(dev):null);
+    window._chat={ conversaId:null, devId:dev.id||null, casoId:dev.id||null, credorId:dev.clienteId||null,
+      tipo, titulo:chatTituloDefault(tipo,dev), messages:[], calc:null, pecaHtml:'', docs:[], busy:false,
+      dev, resumo, seed:null, intake:{} };
+    chatSeedIntake();
+    const nominal=parseValorBR(dev.valorOrig)||parseValorBR(dev.valorAtual)||((resumo&&resumo.saldo)||0);
+    const venc=dev.vencimento||(resumo&&(resumo.vencimento||(resumo.primAberta&&resumo.primAberta.vencimento)))||'';
+    if(nominal && venc){ const r=petComputeCalc({indice:'TJPR',juros:1,multa:0,hon:0,linhas:[{valor:nominal,termo:venc}]}); if(r.ok) window._chat.calc=r.calc; }
+    const userMsg='Gere AGORA a petição completa de '+chatTipoInfo(tipo).nome+' para este caso, usando os Dados da peça do CONTEXTO. Onde faltar informação (estado civil, profissão, endereço completo, número de testemunhas, origem exata da dívida), use "_____" para o operador completar. Responda com uma frase curta e o bloco ```html contendo o corpo inteiro da peça.';
+    const resp=await fetch('/api/claude',{ method:'POST', headers:{'Content-Type':'application/json', ...(await authHeaders())}, body:JSON.stringify({ model:CHAT_MODELO, max_tokens:CHAT_MAXTOK, system:chatSystemPrompt(), messages:[{role:'user',content:userMsg}] }) });
+    const data=await resp.json();
+    if(data.error) throw new Error((data.error&&data.error.message)||'Erro na IA');
+    const txt=(data.content&&data.content[0]&&data.content[0].text)||'';
+    const fence=/```html\s*([\s\S]*?)```/i.exec(txt);
+    const body=fence?chatSanitizePeca(fence[1].trim()):'';
+    if(!body) throw new Error('a IA não retornou a peça');
+    window._chat.pecaHtml=body;
+    window._chat.messages=[{role:'assistant',content:'Peça gerada em lote — revise os Dados e o texto antes de protocolar.',ts:Date.now()}];
+    await chatPersist(false);
+    return { ok:true, nome:dev.nome||'(sem nome)' };
+  }catch(e){ return { ok:false, nome:dev.nome||'(sem nome)', erro:(e&&e.message)||String(e) }; }
+  finally{ window._chat=prev; }
+}
+async function chatLoteGerar(){
+  if(window._loteBusy) return;
+  const tipo=(document.getElementById('lote-tipo')||{}).value||'execucao';
+  const devs=loteResolverDevs();
+  if(!devs.length){ showToast('Selecione ao menos um devedor.','warning'); return; }
+  if(!confirm('Gerar '+devs.length+' peça(s) de '+chatTipoInfo(tipo).nome+'?\n\nCada uma faz 1 chamada de IA e fica salva como RASCUNHO em "Conversas salvas" para você revisar antes de protocolar.')) return;
+  window._loteBusy=true;
+  const prog=document.getElementById('lote-prog'); const btn=document.getElementById('lote-btn'); if(btn) btn.disabled=true;
+  let ok=0; const fail=[];
+  for(let i=0;i<devs.length;i++){
+    if(prog) prog.textContent='Gerando '+(i+1)+' de '+devs.length+' — '+(devs[i].nome||'')+'…';
+    const r=await loteGerarUm(devs[i], tipo);
+    if(r.ok) ok++; else fail.push((r.nome||'')+' ('+r.erro+')');
+  }
+  if(prog) prog.innerHTML='<strong>✓ '+ok+' peça(s) gerada(s)</strong>'+(fail.length?(' · '+fail.length+' falha(s): '+escHtml(fail.slice(0,5).join('; '))):'')+'. Abra em <em>Conversas salvas</em> para revisar.';
+  window._loteBusy=false; if(btn) btn.disabled=false;
+  try{ chatListConversas(); }catch(e){}
+  showToast(ok+' peça(s) gerada(s) em lote'+(fail.length?(' · '+fail.length+' falha(s)'):''), fail.length?'warning':'success');
 }
 
 // Inserções jurídicas no editor (#pet-preview) — usam petInsertHtml (seleção salva).
