@@ -12654,6 +12654,22 @@ async function marcarTodasIntimacoesLidas(){
   refreshIntimacoesBadge();
 }
 
+// Abre a Bia em modo INTERCORRENTE a partir de uma intimação/andamento: semeia o nº
+// do processo, o teor (para a IA responder) e o devedor vinculado (se acessível neste login).
+function intimacaoGerarPeca(id){
+  const it=(_intimacoesCache||[]).find(x=>x.id===id);
+  if(!it){ showToast('Intimação não encontrada.','warning'); return; }
+  if(typeof chatOpen!=='function'){ showToast('Gerador de peças indisponível.','danger'); return; }
+  const dev = it.devedor_id ? (DB.devedores||[]).find(d=>d.id===it.devedor_id) : null;
+  chatOpen({
+    devId: (dev&&dev.id) || it.devedor_id || null,
+    dev: dev || null,
+    tipo: 'manifestacao',
+    seed: { processo: it.processo_num||'', intimacao_teor: it.conteudo||'', fonte: (INTIM_FONTE_LABEL[it.fonte]||it.fonte||'') }
+  });
+  if(!dev) showToast('Intimação sem devedor vinculado — confira as partes e o credor no painel da peça.','info');
+}
+
 async function renderIntimacoes(){
   const el = document.getElementById('page-intimacoes');
   if(!el) return;
@@ -12706,7 +12722,10 @@ async function renderIntimacoes(){
           <div style="font-size:13px;color:var(--text);line-height:1.45;">${escHtml(i.conteudo||'')}</div>
           ${i.link_diario?`<a href="${escHtml(i.link_diario)}" target="_blank" rel="noopener" style="font-size:11.5px;color:var(--navy);">Abrir no diário ›</a>`:''}
         </div>
-        <button class="btn btn-ghost btn-sm" style="white-space:nowrap;" onclick="marcarIntimacaoLida('${i.id}', ${i.lida?'false':'true'})">${i.lida?'Marcar não lida':'✓ Marcar lida'}</button>
+        <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0;">
+          <button class="btn btn-primary btn-sm" style="white-space:nowrap;" onclick="intimacaoGerarPeca('${i.id}')" title="Abre a Bia em modo intercorrente, com o processo e o teor já preenchidos">⚖ Gerar peça (Bia)</button>
+          <button class="btn btn-ghost btn-sm" style="white-space:nowrap;" onclick="marcarIntimacaoLida('${i.id}', ${i.lida?'false':'true'})">${i.lida?'Marcar não lida':'✓ Marcar lida'}</button>
+        </div>
       </div>`;
   };
 
@@ -16796,6 +16815,38 @@ function _petCssInicial(tipoNome, refCausa){
     /* Ementa/jurisprudência com filete lateral (skill). */
     .citacao,.ementa { margin:10px 0 11px 1.6em; padding-left:14px; border-left:2px solid #D8D4C8; font-size:10.5pt; font-style:italic; line-height:1.5; color:#45433F; text-align:justify; text-indent:0; }`;
 }
+// Variante p/ PETIÇÃO INTERCORRENTE (processo já em curso) — espelha o
+// templates/peticao-intercorrente.html da skill: endereçamento à ESQUERDA, linha do
+// número dos autos (.processo) e corpo direto. SEM a "regra da 1ª página", sem
+// qualificação das partes e sem título da ação entre fios.
+function _petCssIntercorrente(tipoNome, refCausa){
+  const esc = s => String(s||'').replace(/["\\]/g,'').replace(/\s+/g,' ').trim();
+  const rh = esc(('Teixeira & Azzolin Advogados · ' + (tipoNome||'')).slice(0,90));
+  const rf = esc((refCausa || rh).slice(0,120));
+  return _petCssTeixeira() + `
+    body { font-size:12pt; }
+    .fecho { font-size:12pt; }
+    /* Cabeçalho corrido (págs. 2+, suprimido na 1ª) + rodapé: referência à esq., página à dir. */
+    @page {
+      @top-center { content:"${rh}"; font-family:'Jost',sans-serif; font-size:8pt; letter-spacing:.04em; color:#918D89; }
+      @bottom-center { content:""; }
+      @bottom-left { content:"${rf}"; font-family:'EB Garamond',Georgia,serif; font-size:7.6pt; font-style:italic; color:#B6B2AD; }
+      @bottom-right { content:"Página " counter(page) " de " counter(pages); font-family:'EB Garamond',Georgia,serif; font-size:7.6pt; color:#B6B2AD; }
+    }
+    @page:first { @top-center { content:none; } }
+    /* Endereçamento à esquerda + linha dos autos (sem 1ª página / qualificação / título). */
+    .enderecamento { text-align:left; font-style:normal; font-weight:700; font-size:12pt; line-height:1.5; color:#26241F; margin:0 0 2px; }
+    .processo,.processo-num { text-align:left; font-style:italic; font-size:10pt; color:#5a5a57; margin:0 0 20px; }
+    /* Pedidos recuados, caso a peça liste a) b) c)… (em geral o pedido vem em prosa). */
+    .pedidos { margin:0 0 12px; }
+    p.pedido,.pedido { margin:0 0 8px 1.6em; padding-left:0; text-indent:0; }
+    /* Ementa/jurisprudência com filete lateral (skill). */
+    .citacao,.ementa { margin:10px 0 11px 1.6em; padding-left:14px; border-left:2px solid #D8D4C8; font-size:10.5pt; font-style:italic; line-height:1.5; color:#45433F; text-align:justify; text-indent:0; }`;
+}
+// Seletor de CSS por modo do tipo atual (inicial × intercorrente).
+function _petCssPorModo(tipoNome, refCausa){
+  return (chatModo()==='intercorrente' ? _petCssIntercorrente : _petCssInicial)(tipoNome, refCausa);
+}
 function _petHeaderHtml(){
   return '<div class="masthead"><div class="masthead-esq">'
     + '<div class="wm-nome">Teixeira <span class="wm-amp">&amp;</span> Azzolin</div>'
@@ -16955,14 +17006,22 @@ const CHAT_MODELO = 'claude-opus-4-5';   // mesmo modelo da Beatriz (conhecido n
 const CHAT_MAXTOK = 16000;               // teto do proxy /api/claude
 const CHAT_HIST_MAX = 20;                // turnos de texto reenviados por chamada
 
+// modo: 'inicial' = peça que abre o processo (tem 1ª página/qualificação/título da ação);
+//       'intercorrente' = peça dentro de processo já em curso (só endereçamento + nº dos
+//       autos + corpo + pedido em prosa; SEM qualificação/título/valor da causa).
 const CHAT_TIPOS = [
-  { id:'execucao',         nome:'Execução de Título Extrajudicial', acao:'AÇÃO DE EXECUÇÃO DE TÍTULO EXECUTIVO EXTRAJUDICIAL' },
-  { id:'cumprimento',      nome:'Cumprimento de Sentença',          acao:'CUMPRIMENTO DE SENTENÇA' },
-  { id:'peticao-cobranca', nome:'Ação de Cobrança',                 acao:'AÇÃO DE COBRANÇA' },
-  { id:'monitoria',        nome:'Ação Monitória',                   acao:'AÇÃO MONITÓRIA' },
-  { id:'peticao-danos',    nome:'Indenização por Perdas e Danos',   acao:'AÇÃO DE INDENIZAÇÃO POR PERDAS E DANOS' },
+  { id:'execucao',         nome:'Execução de Título Extrajudicial', acao:'AÇÃO DE EXECUÇÃO DE TÍTULO EXECUTIVO EXTRAJUDICIAL', modo:'inicial' },
+  { id:'cumprimento',      nome:'Cumprimento de Sentença',          acao:'CUMPRIMENTO DE SENTENÇA', modo:'inicial' },
+  { id:'peticao-cobranca', nome:'Ação de Cobrança',                 acao:'AÇÃO DE COBRANÇA', modo:'inicial' },
+  { id:'monitoria',        nome:'Ação Monitória',                   acao:'AÇÃO MONITÓRIA', modo:'inicial' },
+  { id:'peticao-danos',    nome:'Indenização por Perdas e Danos',   acao:'AÇÃO DE INDENIZAÇÃO POR PERDAS E DANOS', modo:'inicial' },
+  // ── Intercorrentes (processo já em curso) ──
+  { id:'manifestacao',     nome:'Manifestação / Petição (autos em curso)', acao:'PETIÇÃO', modo:'intercorrente' },
+  { id:'diligencia',       nome:'Requerimento de Diligência (Sisbajud/Renajud)', acao:'PETIÇÃO', modo:'intercorrente' },
+  { id:'cumprimento-prazo',nome:'Cumprimento de Despacho / Prazo', acao:'PETIÇÃO', modo:'intercorrente' },
 ];
 function chatTipoInfo(id){ return CHAT_TIPOS.find(t=>t.id===id) || CHAT_TIPOS[0]; }
+function chatModo(t){ return (chatTipoInfo(t||(window._chat&&_chat.tipo)).modo)||'inicial'; }
 function chatTituloDefault(tipo, dev){ return chatTipoInfo(tipo).nome + (dev&&dev.nome ? ' — '+dev.nome : ''); }
 
 let _chatSaveTimer = null;
@@ -17498,7 +17557,7 @@ function renderDadosPanel(){
   const host = document.getElementById('pecas-dados'); if(!host) return;
   chatSeedIntake();
   const it = _chat.intake; const dev = _chat.dev || {};
-  const ehProcesso = (_chat.tipo==='cumprimento' || _chat.tipo==='execucao');
+  const ehProcesso = (chatModo()==='intercorrente' || _chat.tipo==='cumprimento' || _chat.tipo==='execucao');
   const tipoChips = CHAT_TIPOS.map(t=>'<button type="button" class="dados-chip'+(t.id===_chat.tipo?' on':'')+'" onclick="dadosSetTipo(\''+t.id+'\')">'+escHtml(t.nome)+'</button>').join('');
   const valBase = parseValorBR(dev.valorOrig)||parseValorBR(dev.valorAtual)||0; // base = NOMINAL (não o atualizado)
   const ehJEC = /juizado|especial|\bjec\b/i.test((it.vara||'')+' '+(it.comarca||'')+' '+(it.titulo||''));
@@ -17568,7 +17627,7 @@ function renderDadosPanel(){
       </div>
     </details>`;
 }
-function dadosSetTipo(t){ _chat.tipo=t; if(!_chat.titulo || _chat.titulo===chatTituloDefault(_chat.tipo,_chat.dev)) _chat.titulo=chatTituloDefault(t,_chat.dev); pecaStepRender(); const ti=document.getElementById('chat-tipo'); if(ti) ti.value=t; }
+function dadosSetTipo(t){ _chat.tipo=t; if(!_chat.titulo || _chat.titulo===chatTituloDefault(_chat.tipo,_chat.dev)) _chat.titulo=chatTituloDefault(t,_chat.dev); pecaStepRender(); const ti=document.getElementById('chat-tipo'); if(ti) ti.value=t; try{ chatRenderPreview(); }catch(e){} }
 // Cálculo do painel: determinístico, SEM mandar turno à Bia (os números chegam via chatContexto no próximo turno).
 function dadosCalcular(){
   const parseBR=s=>parseFloat(String(s||'').replace(/[^\d,.-]/g,'').replace(/\.(?=\d{3}\b)/g,'').replace(',','.'))||0;
@@ -17789,7 +17848,13 @@ function chatKickoff(){
   let g = 'Oi! Sou a **Bia**. Vou te ajudar a montar a peça de **'+tipoNome+'**';
   g += (dev&&dev.nome) ? ' para **'+dev.nome+'**.\n\n' : '.\n\n';
   const ctx = chatContextoResumo(); if(ctx) g += ctx+'\n\n';
-  g += 'Os **Dados da peça** (tipo, comarca, vara, partes, valor) estão no painel acima — confira e ajuste se precisar; use **Calcular** para atualizar o valor. Aqui no chat, me conte os **fatos** (o que originou a dívida, datas, título) e, se quiser, **anexe documentos** (📎) que eu analiso. Quando tiver os fatos, eu redijo a peça aqui ao lado.';
+  if(chatModo()==='intercorrente'){
+    const teor=(_chat.seed&&_chat.seed.intimacao_teor)||'';
+    if(teor) g += 'Li a intimação: «'+String(teor).slice(0,260)+(teor.length>260?'…':'')+'».\n\n';
+    g += 'É uma **petição nos autos em curso** — confira o **nº do processo** e a **vara/comarca** no painel acima. Me diga **o que quer fazer** (cumprir o despacho, requerer diligências de busca patrimonial — *Sisbajud/Renajud*, manifestar sobre o andamento) e os fatos do incidente; se houver, **anexe documentos** (📎). Eu redijo a peça aqui ao lado.';
+  } else {
+    g += 'Os **Dados da peça** (tipo, comarca, vara, partes, valor) estão no painel acima — confira e ajuste se precisar; use **Calcular** para atualizar o valor. Aqui no chat, me conte os **fatos** (o que originou a dívida, datas, título) e, se quiser, **anexe documentos** (📎) que eu analiso. Quando tiver os fatos, eu redijo a peça aqui ao lado.';
+  }
   _chat.messages.push({ role:'assistant', content:g, ts:Date.now() });
   chatRenderMessages();
 }
@@ -17826,8 +17891,14 @@ function chatContexto(){
   if(_chat.calc){ const c=_chat.calc;
     s+='- CÁLCULO DETERMINÍSTICO (use EXATAMENTE estes números na prosa e no valor da causa): nominal '+fmtR(c.valorNominal)+', atualizado '+fmtR(c.valorAtualizado)+', juros '+fmtR(c.juros)+', multa '+fmtR(c.multa)+', honorários '+fmtR(c.honorarios)+', TOTAL '+fmtR(c.total)+'; índice '+(c.indice||'')+'.\n';
   }
-  if(_chat.seed){ try{ s+='- Observações do caso: '+JSON.stringify(_chat.seed)+'\n'; }catch(e){} }
-  s+='\nIMPORTANTE: os campos acima já foram informados no painel — NÃO repergunte comarca, vara, partes nem valor; use-os direto no endereçamento e na qualificação. Pergunte só o que falta para os FATOS, o DIREITO e os PEDIDOS.\n';
+  const seed=_chat.seed||{};
+  if(seed.intimacao_teor){ s+='- TEOR DA INTIMAÇÃO/ANDAMENTO a que esta peça responde'+(seed.fonte?(' ('+seed.fonte+')'):'')+': "'+String(seed.intimacao_teor).slice(0,1200)+'".\n'; }
+  if(_chat.seed){ try{ const rest=Object.assign({},seed); delete rest.intimacao_teor; delete rest.fonte; if(Object.keys(rest).length) s+='- Observações do caso: '+JSON.stringify(rest)+'\n'; }catch(e){} }
+  if(chatModo()==='intercorrente'){
+    s+='\nIMPORTANTE: é PEÇA INTERCORRENTE (autos já em curso). Use o nº do processo no endereçamento (linha "Autos n. …"); NÃO qualifique as partes, NÃO crie título da ação nem valor da causa. Pergunte só o objetivo da petição (cumprir despacho, requerer diligência, manifestar) e os fatos do incidente.\n';
+  } else {
+    s+='\nIMPORTANTE: os campos acima já foram informados no painel — NÃO repergunte comarca, vara, partes nem valor; use-os direto no endereçamento e na qualificação. Pergunte só o que falta para os FATOS, o DIREITO e os PEDIDOS.\n';
+  }
   return s;
 }
 
@@ -17842,6 +17913,18 @@ function chatSystemPrompt(){
   p += '- Cálculo: NÃO calcule você mesma. Se faltar o valor atualizado, escreva uma linha contendo apenas [[CALC]] (o sistema abre a calculadora determinística). Quando o cálculo existir no contexto, use EXATAMENTE o TOTAL como valor da causa e cite os números na prosa.\n';
   p += '- Documentos anexados (contrato, acordo, CNIS, comprovantes): leia e extraia o que for útil (datas, valores, cláusulas, número de testemunhas).\n\n';
   p += 'QUANDO A PEÇA ESTIVER PRONTA (ou ao revisá-la), além da sua mensagem curta de chat, anexe AO FINAL um único bloco cercado ```html com SOMENTE o corpo da peça (sem <html>/<head>/<body>/<style> e sem o timbre — o sistema adiciona timbre, cabeçalho corrido, rodapé, numeração e o memorial de cálculo).\n\n';
+  if(chatModo()==='intercorrente'){
+  // ── PEÇA INTERCORRENTE (processo já em curso) ──
+  p += 'ESTRUTURA (peça intercorrente — o processo JÁ existe: NÃO há qualificação das partes, NÃO há título da ação entre fios, NÃO há "pagina-um" e NÃO há "valor da causa"):\n';
+  p += '<p class="enderecamento">Ao Juízo da [Vara] da Comarca de [Comarca] — Estado do Paraná</p>  (use "Ao Juizado Especial Cível da Comarca de [Comarca] — Estado do Paraná" quando for JEC)\n';
+  p += '<p class="processo">Autos n. [número do processo]</p>\n';
+  p += '<p><em>Nome Da Parte</em>, já qualificada nos autos em epígrafe, por seu procurador ao final assinado, vem, respeitosamente, à presença de Vossa Excelência expor e requerer o que segue.</p>\n';
+  p += 'Em seguida, de 2 a 5 parágrafos em prosa com o fato do incidente e o fundamento; se a peça for longa, agrupe com <h2 class="secao"><span class="sn">1 |</span> TÍTULO</h2> e cite artigo/jurisprudência recuado em <p class="citacao">…</p>.\n';
+  p += 'PEDIDO em prosa: <p>Diante do exposto, requer [pedido em texto corrido].</p> — só use lista <div class="pedidos"><p class="pedido">a) …;</p></div> quando forem vários pedidos distintos. NÃO escreva "Dá-se à causa o valor de…".\n';
+  p += 'Fecho: <div class="fecho"><p class="fecho-data">Dois Vizinhos, Estado do Paraná, '+_petDataExtenso()+'.</p><p class="fecho-nome">Dr. Gustavo Souza Teixeira dos Santos</p><p class="fecho-oab">OAB/PR 112.743 | <em>Advogado</em></p></div>. Use a data informada — não invente.\n';
+  p += 'NOMES DAS PARTES sempre em <em>itálico</em> e Caixa Alta e Baixa (nome próprio), nunca em CAIXA ALTA nem em negrito.\n';
+  p += 'FUNDAMENTAÇÃO conforme o objeto (cite só os artigos pertinentes): (a) DILIGÊNCIA / busca patrimonial — poder geral de efetivação (art. 139, IV, CPC) e ordem preferencial de constrição, requerendo sucessivamente <em>Sisbajud</em> (penhora de ativos financeiros, art. 854), <em>Renajud</em> (veículos), <em>Infojud</em> (declarações fiscais), <em>Serasajud</em> e, subsidiariamente, a penhora no rosto dos autos, observada a ordem do art. 835; (b) CUMPRIMENTO de despacho/prazo — declare que cumpre a determinação de fl./mov. ___ e indique o que junta; (c) MANIFESTAÇÃO — exponha o fato novo e o requerimento dele decorrente.\n\n';
+  } else {
   p += 'ESTRUTURA EXATA (classes obrigatórias). ATENÇÃO: o endereçamento fica SOZINHO no topo; o bloco autor → título → réu fica JUNTO embaixo (o sistema deixa o espaço no meio). NÃO separe o título do réu.\n';
   p += '<div class="pagina-um">\n';
   p += '  <p class="enderecamento enderecamento-inicial">Ao Juizado Especial Cível da Comarca de [Comarca] — Estado do Paraná</p>  (use "Ao Juízo da Vara Cível da Comarca de [Comarca] — Estado do Paraná" quando não for JEC)\n';
@@ -17863,6 +17946,7 @@ function chatSystemPrompt(){
   p += 'DOS FATOS: "As partes celebraram, em 5 de fevereiro de 2026, o Contrato Particular de Compra e Venda com Reserva de Domínio n. 6.995, por meio do qual a exequente alienou à executada [bem], pelo preço total de R$ …, a ser pago em 11 parcelas mensais de R$ …. O instrumento foi firmado pela devedora e por duas testemunhas, na forma do art. 784, III, do Código de Processo Civil. A executada honrou apenas 2 parcelas, deixando de adimplir a partir do vencimento de 5 de abril de 2026. Remanescem 9 parcelas em aberto, que totalizam, em valor nominal, R$ …, conforme demonstrativo de débito atualizado que instrui esta inicial. Tratando-se de obrigação com termo certo, a mora constituiu-se de pleno direito (art. 397 do Código Civil). Conquanto o contrato contenha cláusula de reserva de domínio, a exequente opta, na forma do art. 526 do Código Civil, por cobrar as prestações vencidas e vincendas, renunciando à recuperação da posse do bem."\n';
   p += 'DO DIREITO: "O contrato particular assinado pela devedora e por duas testemunhas constitui título executivo extrajudicial, nos exatos termos do art. 784, III, do Código de Processo Civil. A obrigação é certa, líquida e exigível, requisitos do art. 783, aparelhada pelo demonstrativo discriminado e atualizado, na forma do art. 798, I, \\"b\\". (… competência do JEC pelo art. 53 da Lei n. 9.099/95, teto do art. 3º, §1º, II …)."\n';
   p += 'DOS PEDIDOS (modelo no JUIZADO, SEM honorários/custas): "a) a citação da executada para, no prazo de 3 dias, efetuar o pagamento da dívida atualizada, sob pena de penhora, na forma do art. 829 do Código de Processo Civil; b) não satisfeita a obrigação, a penhora e a avaliação de tantos bens quantos bastem à satisfação integral do crédito, observada a ordem do art. 835 e as providências do art. 829, §1º; c) frustrada a localização de bens, a realização de pesquisas e constrições por meio dos sistemas <em>Sisbajud</em>, <em>Renajud</em> e <em>Infojud</em>; d) a comprovação do alegado por todos os meios de prova admitidos." (Em VARA COMUM, acrescente o pedido de condenação em custas e honorários do art. 827.)\n\n';
+  }
   p += 'REGRAS DE REDAÇÃO (inegociáveis):\n';
   p += '- Texto corrido, denso e técnico; sem listas com marcadores no corpo (exceto os pedidos a/b/c). Cada tese ancorada em artigo específico.\n';
   p += '- Algarismos, não por extenso ("15 dias", não "quinze dias"); exceção: a data do fecho.\n';
@@ -18029,7 +18113,7 @@ function chatPecaFullFromPreview(){
   const inner = host ? host.innerHTML.replace(/<style>[\s\S]*?<\/style>/,'')
                      : (_petInnerDoc(_chat.pecaHtml)+(_chat.calc?petMemorialHtml(_chat.calc):''));
   const c=chatPecaCtx();
-  return '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Petição</title><style>'+_petCssInicial(c.tipoNome,c.refCausa)+'</style></head><body>'+inner+'</body></html>';
+  return '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Petição</title><style>'+_petCssPorModo(c.tipoNome,c.refCausa)+'</style></head><body>'+inner+'</body></html>';
 }
 function chatRenderPreview(){
   const host=document.getElementById('pet-preview'); if(!host) return;
@@ -18038,7 +18122,7 @@ function chatRenderPreview(){
     return;
   }
   const c=chatPecaCtx();
-  host.innerHTML='<style>'+_petCssInicial(c.tipoNome,c.refCausa)+'</style>'+_petInnerDoc(_chat.pecaHtml)+(_chat.calc?petMemorialHtml(_chat.calc):'');
+  host.innerHTML='<style>'+_petCssPorModo(c.tipoNome,c.refCausa)+'</style>'+_petInnerDoc(_chat.pecaHtml)+(_chat.calc?petMemorialHtml(_chat.calc):'');
 }
 
 // ── Ações: PDF / Imprimir / Salvar ──────────────────────────────────────────
