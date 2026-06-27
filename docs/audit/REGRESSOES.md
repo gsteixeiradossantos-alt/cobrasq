@@ -16,7 +16,12 @@ no código, ou ação na UI) e o **estado-correto** esperado. Atualize ao descob
 - **Teste:** `auditoria_dados_perfis.sql §1` — comparar `jsonb_array_length(data->'devedores')` (blob) com
   `count(*)` relacional; `grep -n "DB.devedores\|cobrasq_data\|data->'devedores'" index.html` p/ achar leitores.
 - **Estado-correto:** relacional é a fonte; blob congelado (Fase 3 #158). Nenhuma TELA decide por contagem do blob.
-- **Perfil exposto:** colaborador e gestor. **Última checagem (2026-06-26):** blob=60 dev / relacional=66 — DIVERGEM (esperado pós-freeze, mas blob ainda `SELECT using(true)` e presente).
+- **Perfil exposto:** colaborador e gestor. **Verificado 2026-06-27:** a divergência (blob 60 / relacional 66)
+  é **DADO MORTO** — no login `loadRelationalData` sobrescreve `DB.devedores/clientes` com o relacional e
+  rebaseia o F-20; o blob só é fallback ("modo seguro", não grava). **Mitigado.** **Landmine fechado:** o
+  `SELECT using(true)` do blob virou **staff-only** em `20260627_sec_audit_p2.sql` (antes do portal
+  cedente/devedor, que poderia ler os 60/105 congelados via API). Faxina final (tirar devedores/clientes do
+  blob de vez) = baixa prioridade.
 
 ## R-02 · F-20 falso-positivo bloqueia save do colaborador
 - **O que é:** no login o blob carrega N (todos) e seta `_lastKnownDevCount`; depois `loadRelationalData`
