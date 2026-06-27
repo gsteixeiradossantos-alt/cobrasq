@@ -3691,10 +3691,11 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
     <div class="modal-body" style="padding:18px 22px;">
       <div id="calc-divida-body" style="font-size:13px;color:var(--text);"></div>
       <div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--border);font-size:11.5px;color:var(--text-3);line-height:1.5;">
-        Parâmetros: correção monetária <strong id="calc-param-correcao">INPC (composta)</strong> ·
-        juros <strong id="calc-param-juros">1,00% a.m. simples</strong> ·
-        multa <strong id="calc-param-multa">2,00%</strong> sobre o atualizado.
-        <span style="display:block;margin-top:3px;">Mesma metodologia da Calculadora Jurídica. Taxas de juros/multa ajustáveis em Configurações &rsaquo; Parâmetros de cálculo.</span>
+        Parâmetros: correção <strong id="calc-param-correcao">8% a.a. fixa</strong> ·
+        juros <strong id="calc-param-juros">1,00% a.m.</strong> ·
+        multa <strong id="calc-param-multa">2,00%</strong> sobre o corrigido ·
+        taxa COBRASQ <strong>30,00%</strong>.
+        <span style="display:block;margin-top:3px;">Mesma conta do CRM (&ldquo;modo cobrança&rdquo;) — é o valor que vai pro devedor no 1&ordm; contato. A conta da petição (INPC composta, garantia STJ) fica na Calculadora Jurídica. Juros/multa ajustáveis em Configurações &rsaquo; Parâmetros de cálculo.</span>
       </div>
     </div>
     <div class="modal-footer">
@@ -7940,6 +7941,36 @@ function calcDividaAtualizada(valorOrig, vencStr){
   return { atualizado: saldo, correcao, juros, multa, total, diasAtraso, meses: diasAtraso/30 };
 }
 
+// ── Metodologia "modo cobrança" — IDÊNTICA ao CRM (_calcCobrancaSimples) ──────
+// #29: o valor do CADASTRO (1º contato) usa a MESMA conta que o CRM manda pro
+// devedor — correção 8% a.a. FIXA + juros 1% a.m. + multa 2% sobre o corrigido
+// + taxa de serviço COBRASQ 30% sobre o subtotal, meses em fração (dias/30,4375)
+// e total arredondado pra cima. NÃO é a conta da PETIÇÃO (INPC composta / garantia
+// STJ) — essa é a calcDividaAtualizada acima, usada pela execução (_execAgg).
+const COBRANCA_CORRECAO_MENSAL = 0.08 / 12; // 8% a.a. fixa → taxa mensal
+const COBRANCA_TAXA_SERVICO    = 0.30;      // taxa COBRASQ (perdas e lucros cessantes)
+const COBRANCA_DIAS_MES        = 30.4375;   // 365,25/12 — igual ao mesesEntre() do CRM
+
+// Retorna { atualizado(=corrigido), correcao, juros, multa, taxa, subtotal, total, diasAtraso, meses }
+function calcDividaCobranca(valorOrig, vencStr){
+  const p = getCalcParams();
+  const hoje = new Date(); hoje.setHours(0,0,0,0);
+  const zero = { atualizado: valorOrig, correcao: 0, juros: 0, multa: 0, taxa: 0, subtotal: valorOrig, total: valorOrig, diasAtraso: 0, meses: 0 };
+  if(!vencStr) return zero;
+  const venc = new Date(vencStr + 'T00:00:00');
+  const diasAtraso = Math.max(0, Math.round((hoje - venc) / 86400000));
+  if(diasAtraso <= 0) return zero;
+  const meses = diasAtraso / COBRANCA_DIAS_MES;                  // meses fracionários
+  const correcao = valorOrig * COBRANCA_CORRECAO_MENSAL * meses; // 8% a.a. fixa
+  const valorCorrigido = valorOrig + correcao;
+  const juros = valorCorrigido * p.juros * meses;               // 1% a.m. sobre o corrigido
+  const multa = valorCorrigido * p.multa;                       // 2% sobre o corrigido
+  const subtotal = valorCorrigido + juros + multa;
+  const taxa = subtotal * COBRANCA_TAXA_SERVICO;                // taxa COBRASQ 30%
+  const total = Math.ceil(subtotal + taxa);                     // arredonda pra cima (igual CRM)
+  return { atualizado: valorCorrigido, correcao, juros, multa, taxa, subtotal, total, diasAtraso, meses };
+}
+
 function _fmtR(n){ return 'R$ ' + (Number(n)||0).toLocaleString('pt-BR', { minimumFractionDigits:2, maximumFractionDigits:2 }); }
 function _fmtPct(p){ return (p*100).toLocaleString('pt-BR', { minimumFractionDigits:2, maximumFractionDigits:2 }) + '%'; }
 
@@ -7955,12 +7986,14 @@ function abrirVerificarCalculo(){
 
   const hoje = new Date(); hoje.setHours(0,0,0,0);
   const p = getCalcParams();
-  const r = calcDividaAtualizada(valorOrig, vencStr);
+  const r = calcDividaCobranca(valorOrig, vencStr);
   const diasAtraso = r.diasAtraso;
   const meses = r.meses;
   const correcao = r.correcao;
   const juros = r.juros;
   const multa = r.multa;
+  const taxa = r.taxa || 0;
+  const subtotal = r.subtotal || (valorOrig + correcao + juros + multa);
   const total = r.total;
 
   const dataVencFmt = vencStr ? new Date(vencStr+'T00:00:00').toLocaleDateString('pt-BR') : '—';
@@ -7977,21 +8010,23 @@ function abrirVerificarCalculo(){
       <tr><td style="padding:6px 0;color:var(--text-2);">Dias em atraso</td>
           <td style="padding:6px 0;text-align:right;font-family:var(--font-mono);">${diasAtraso} dia${diasAtraso===1?'':'s'} (${meses.toFixed(2)} m)</td></tr>
       <tr><td colspan="2" style="border-top:1px solid var(--border);padding-top:6px;"></td></tr>
-      <tr><td style="padding:6px 0;color:var(--text-2);">Correção monetária (INPC, composta mês a mês — garantia STJ)</td>
+      <tr><td style="padding:6px 0;color:var(--text-2);">Correção (8% a.a. fixa — modo cobrança)</td>
           <td style="padding:6px 0;text-align:right;font-family:var(--font-mono);color:#92400e;">+ ${_fmtR(correcao)}</td></tr>
-      <tr><td style="padding:6px 0;color:var(--text-2);">Juros (${_fmtPct(p.juros)} a.m. simples, pró rata)</td>
+      <tr><td style="padding:6px 0;color:var(--text-2);">Juros (${_fmtPct(p.juros)} a.m. sobre o corrigido)</td>
           <td style="padding:6px 0;text-align:right;font-family:var(--font-mono);color:#92400e;">+ ${_fmtR(juros)}</td></tr>
-      <tr><td style="padding:6px 0;color:var(--text-2);">Multa (${_fmtPct(p.multa)} sobre o atualizado, se em atraso)</td>
+      <tr><td style="padding:6px 0;color:var(--text-2);">Multa (${_fmtPct(p.multa)} sobre o corrigido)</td>
           <td style="padding:6px 0;text-align:right;font-family:var(--font-mono);color:#92400e;">+ ${_fmtR(multa)}</td></tr>
+      <tr><td style="padding:6px 0;color:var(--text-2);">Taxa COBRASQ (30% sobre o subtotal)</td>
+          <td style="padding:6px 0;text-align:right;font-family:var(--font-mono);color:#92400e;">+ ${_fmtR(taxa)}</td></tr>
       <tr><td colspan="2" style="border-top:2px solid var(--navy);padding-top:8px;"></td></tr>
-      <tr><td style="padding:8px 0;font-weight:700;color:var(--navy);font-size:13.5px;">Total atualizado</td>
+      <tr><td style="padding:8px 0;font-weight:700;color:var(--navy);font-size:13.5px;">Total (modo cobrança — vai pro devedor)</td>
           <td style="padding:8px 0;text-align:right;font-family:var(--font-mono);font-weight:800;color:var(--navy);font-size:15px;">${_fmtR(total)}</td></tr>
     </table>
   `;
   const el = document.getElementById('calc-divida-body');
   if(el) el.innerHTML = body;
-  document.getElementById('calc-param-correcao').textContent = 'INPC (composta)';
-  document.getElementById('calc-param-juros').textContent    = _fmtPct(p.juros)    + ' a.m. simples';
+  document.getElementById('calc-param-correcao').textContent = '8% a.a. fixa';
+  document.getElementById('calc-param-juros').textContent    = _fmtPct(p.juros)    + ' a.m.';
   document.getElementById('calc-param-multa').textContent    = _fmtPct(p.multa);
 
   const btn = document.getElementById('btn-aplicar-calc');
@@ -10132,7 +10167,7 @@ function mdevRecalcularValorAtualizado(){
     maskMoneyBR(out);
     return;
   }
-  const total = calcDividaAtualizada(valorOrig, vencStr).total;
+  const total = calcDividaCobranca(valorOrig, vencStr).total;
   out.value = String(Math.round(total * 100));
   maskMoneyBR(out);
 }
