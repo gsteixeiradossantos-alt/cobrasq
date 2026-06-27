@@ -7242,7 +7242,11 @@ async function renderPainel(){
   el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando painel…</div>`;
   const cobrRows = await loadCobrancasFromSupabase();
   if(Array.isArray(cobrRows)) DB_cobrancas = cobrRows;
-  const cobrAtivas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft);
+  // Filtros do painel (Cliente / Operador) — aplicados na fonte p/ consistência entre KPIs/aging/situação.
+  const _pf = window._painelFiltro || (window._painelFiltro = { cliente:'', operador:'' });
+  const cobrAtivas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft
+    && (!_pf.cliente  || String(c.cliente_id||'')===_pf.cliente)
+    && (!_pf.operador || String(c.assigned_to||'')===_pf.operador));
 
   const totalCarteira = cobrAtivas.reduce((s,c)=>s+(+c.valor_atual||+c.valor_orig||0), 0);
   const totalCasos    = cobrAtivas.length;
@@ -7316,12 +7320,7 @@ async function renderPainel(){
 
   // (Sparklines e deltas fabricados removidos — os números agora são reais.)
 
-  const kpis = [
-    { label:'Carteira ativa',    value: fmtR(totalCarteira),   sub:`${totalCasos} caso${totalCasos!==1?'s':''} em aberto` },
-    { label:'Recuperado no mês', value: fmtR(totalRecuperado),  sub: totalRecuperado===0 ? 'nenhuma baixa registrada ainda' : (deltaRecPct===null ? 'parcelas de acordo pagas' : 'vs. mês anterior'), delta: totalRecuperado===0?null:deltaRecPct },
-    { label:'Acordos em vigor',  value: String(acordosAtivos),  sub: acordosAtivos===1?'cobrança com acordo':'cobranças com acordo' },
-    { label:'Casos ativos',      value: String(totalCasos),     sub:`${totalContatos} contato${totalContatos!==1?'s':''} vinculado${totalContatos!==1?'s':''}` },
-  ];
+  // (KPIs e quadros do Painel v3 são montados abaixo, após as agregações adicionais.)
 
   // Activity type label/color helper
   function actLabel(tipo) {
@@ -7347,57 +7346,205 @@ async function renderPainel(){
   const metaMensal = +(DB.config?.metaMensal) || 0;
   const maxBarVal = Math.max(...monthsData.map(m=>m.rec), metaMensal, 1);
 
+  // ── Painel v3: agregações adicionais (aging, situação, pendências, prioridades, equipe) ──
+  // Em negociação (KPI): cobranças ativas em status de negociação.
+  const emNegRows    = cobrAtivas.filter(c=>/negocia/i.test(c.status||''));
+  const emNegociacao = emNegRows.reduce((s,c)=>s+(+c.valor_atual||+c.valor_orig||0),0);
+
+  // Pendências (KPI navy): tarefas abertas + quantas atrasadas (mesma fonte do bloco de tarefas).
+  const _alTar        = contarAlertasTarefas();
+  const pendAbertas   = minhasTarefas().filter(t=>t.status!=='Concluída').length;
+  const pendAtrasadas = _alTar.atrasadas;
+
+  // Aging da carteira por VALOR (base = cobranças ativas, igual à Carteira ativa): 0-30/30-60/60-90/90+.
+  const agingDefs = [
+    { lb:'0–30',  min:0,  max:30,       cor:'var(--green)'    },
+    { lb:'30–60', min:31, max:60,       cor:'var(--accent)'   },
+    { lb:'60–90', min:61, max:90,       cor:'var(--accent-2)' },
+    { lb:'90+',   min:91, max:Infinity, cor:'var(--danger)'   },
+  ].map(b=>{ let val=0,qtd=0; cobrAtivas.filter(c=>!/quitad|pago|liquidad/i.test(c.status||'')).forEach(c=>{ const dias=_cobrAgingDias(c); if(dias==null) return; if(dias>=b.min && dias<=b.max){ val+=(+c.valor_atual||+c.valor_orig||0); qtd++; } }); return {...b, val, qtd}; });
+  const agingTotal      = agingDefs.reduce((s,b)=>s+b.val,0) || 1;
+  const carteiraParada90 = agingDefs[3].val; // 90+ = carteira parada
+
+  // Carteira por situação (valor): em aberto / em acordo / judicial / quitado.
+  const sitDefs = { aberto:0, acordo:0, judicial:0, quitado:0 };
+  (DB_cobrancas||[]).filter(c=>!c.is_draft
+    && (!_pf.cliente  || String(c.cliente_id||'')===_pf.cliente)
+    && (!_pf.operador || String(c.assigned_to||'')===_pf.operador)).forEach(c=>{
+    const v=(+c.valor_atual||+c.valor_orig||0); const s=(c.status||'').toLowerCase();
+    if(/quitad|pago|liquidad/.test(s)) sitDefs.quitado+=v;
+    else if(c.arquivado) return;                                   // arquivado não-quitado fica fora
+    else if(c.fase==='judicial' || /judicial/.test(s)) sitDefs.judicial+=v;
+    else if(/acordo/.test(s)) sitDefs.acordo+=v;
+    else sitDefs.aberto+=v;
+  });
+  const sitMax = Math.max(sitDefs.aberto, sitDefs.acordo, sitDefs.judicial, sitDefs.quitado, 1);
+
+  // Pendências por tipo (tarefas abertas agrupadas pelo seu tipo real — top 6).
+  const pendPorTipo = (()=>{ const m={}; minhasTarefas().filter(t=>t.status!=='Concluída').forEach(t=>{ const nm=(typeof tipoPorId==='function' && tipoPorId(t.tipo)?.nome) || 'Sem tipo'; m[nm]=(m[nm]||0)+1; }); return Object.entries(m).map(([nome,qtd])=>({nome,qtd})).sort((a,b)=>b.qtd-a.qtd).slice(0,6); })();
+  const pendPorTipoMax = Math.max(1, ...pendPorTipo.map(p=>p.qtd));
+
+  // Acordos vencendo: parcelas de acordo não pagas nos próximos 7 dias.
+  const _hojeP = hoje(); const _in7P = new Date(Date.now()+7*86400000).toISOString().slice(0,10);
+  let acordosVencendo = 0;
+  (DB.devedores||[]).forEach(d=>{ (d.acordos||[]).forEach(ac=>{ (ac.parcelas||[]).forEach(p=>{ if(!p.pago && p.vencimento && p.vencimento>=_hojeP && p.vencimento<=_in7P) acordosVencendo++; }); }); });
+
+  // Equipe: ranking real (pontos) + meta do mês (recuperado vs metaMensal).
+  const rankEquipe = calcRankingTarefas().slice(0,4);
+  const metaProg   = metaMensal>0 ? Math.min(100, Math.round((totalRecuperado/metaMensal)*100)) : null;
+
+  // Projeção do mês seguinte (ILUSTRATIVA): média dos últimos 3 meses com recuperação.
+  const _ult3    = monthsData.slice(-3).map(m=>m.rec);
+  const projecao = Math.round((_ult3.reduce((s,v)=>s+v,0))/(_ult3.length||1));
+  const projMnm  = ['JAN','FEV','MAR','ABR','MAI','JUN','JUL','AGO','SET','OUT','NOV','DEZ'][(now.getMonth()+1)%12];
+
+  // Opções dos filtros (a partir de TODAS as cobranças ativas, não as já filtradas).
+  const _allCobr   = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft);
+  const _credorOpts = [...new Set(_allCobr.map(c=>c.cliente_id).filter(Boolean))]
+    .map(id=>({ id:String(id), nome:(typeof _cobrCredorNome==='function'?_cobrCredorNome({cliente_id:id}):String(id)) }))
+    .sort((a,b)=>a.nome.localeCompare(b.nome));
+  const _respOpts  = [...new Set(_allCobr.map(c=>c.assigned_to).filter(Boolean))]
+    .map(id=>({ id:String(id), nome:(typeof _detUserNome==='function'?_detUserNome(id):String(id)) }))
+    .sort((a,b)=>a.nome.localeCompare(b.nome));
+
+  // Atalhos do painel (chamam fluxos já existentes).
+  const atalhos = [
+    { ic:'＋', lb:'Nova cobrança',     fn:'abrirNovaCobranca()', primary:true },
+    { ic:'§',  lb:'Nova peça',         fn:"(typeof chatNovaPeca==='function'?chatNovaPeca():showPage('pecas'))" },
+    { ic:'⤓',  lb:'Importar carteira', fn:"showPage('importacao')" },
+    { ic:'✉',  lb:'WhatsApp em lote',  fn:"showPage('wa')" },
+    { ic:'✓',  lb:'Aprovações',        fn:"showPage('aprovacoes')" },
+    { ic:'∑',  lb:'Calculadora',       fn:"showPage('calc')" },
+  ];
+
+  // 4 KPIs do topo (design v3): carteira, recuperado, em negociação, pendências (navy).
+  const kpis = [
+    { label:'Carteira ativa',        value: fmtR(totalCarteira),    sub:`${totalCasos} caso${totalCasos!==1?'s':''} em aberto`, tick:true },
+    { label:'Recuperado · '+mesAtual, value: fmtR(totalRecuperado),  sub: totalRecuperado===0 ? 'nenhuma baixa registrada' : (metaProg!=null?`${metaProg}% da meta`:'parcelas de acordo pagas'), delta: totalRecuperado===0?null:deltaRecPct },
+    { label:'Em negociação',         value: fmtR(emNegociacao),     sub:`${emNegRows.length} cobrança${emNegRows.length!==1?'s':''}` },
+    { label:'Pendências',            value: String(pendAbertas),    sub: pendAtrasadas?`${pendAtrasadas} atrasada${pendAtrasadas!==1?'s':''}`:'em dia', navy:true },
+  ];
+
+  // Helper: embrulha cada quadro com a barra flutuante do modo Organizar.
+  function painelCard(id, inner){
+    return `<section class="painel-card" data-card="${id}">
+      <div class="painel-card-bar">
+        <button onclick="painelMove('${id}',-1)" title="Subir">↑</button>
+        <button onclick="painelMove('${id}',1)" title="Descer">↓</button>
+        <button data-hidetoggle onclick="painelHide('${id}')">ocultar</button>
+      </div>${inner}</section>`;
+  }
+
   el.innerHTML = `
-    <!-- ── SAUDAÇÃO ── -->
+    <style>
+      #painel-cards{display:flex;flex-direction:column;gap:16px;margin-top:18px;}
+      .painel-card{position:relative;}
+      .painel-card-bar{display:none;position:absolute;top:-11px;right:10px;z-index:6;gap:3px;background:var(--card);border:1px solid var(--accent);border-radius:8px;padding:3px;box-shadow:0 3px 10px rgba(10,21,48,.14);}
+      #painel-cards.editing .painel-card-bar{display:inline-flex;}
+      #painel-cards.editing .painel-card{outline:1px dashed var(--accent);outline-offset:4px;border-radius:12px;}
+      #painel-cards.editing .painel-card.is-hidden{opacity:.4;}
+      .painel-card-bar button{border:0;background:transparent;color:var(--text-2);font-family:var(--font-mono);font-size:11px;cursor:pointer;padding:3px 7px;border-radius:5px;line-height:1;}
+      .painel-card-bar button:hover{background:var(--card-2);color:var(--text);}
+      .painel-eyebrow{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--text-3);}
+      .painel-atalhos{display:flex;gap:9px;flex-wrap:wrap;}
+      .painel-atalho{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--border);background:var(--card);border-radius:20px;padding:8px 15px;font-size:12.5px;color:var(--text-2);cursor:pointer;font-family:inherit;}
+      .painel-atalho:hover{border-color:var(--accent);color:var(--text);}
+      .painel-atalho.primary{background:var(--ink-btn);color:var(--ink-btn-fg);border-color:var(--ink-btn);}
+      .painel-atalho .ic{font-family:var(--font-mono);font-size:13px;line-height:1;}
+      .painel-prio-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+      .painel-prio{background:var(--card);border:1px solid var(--border);border-top:3px solid var(--accent);border-radius:12px;padding:16px 18px;display:flex;flex-direction:column;gap:5px;}
+      .painel-prio.danger{border-top-color:var(--danger);}
+      .painel-prio.navy{border-top-color:var(--side-bg);}
+      .painel-prio-n{font-family:"Fraunces",serif;font-size:30px;line-height:1.05;color:var(--text);}
+      .painel-prio-l{font-size:12.5px;color:var(--text-2);line-height:1.35;}
+      .painel-prio-cta{margin-top:5px;align-self:flex-start;font-size:11.5px;font-weight:600;color:var(--accent-2);background:none;border:0;cursor:pointer;font-family:inherit;padding:0;}
+      .painel-band{background:var(--side-bg);border-radius:12px;padding:15px 18px;display:flex;flex-direction:column;gap:11px;}
+      .painel-band-head{display:flex;align-items:center;justify-content:space-between;}
+      .painel-band-eye{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);}
+      .painel-band-link{font-size:12px;color:var(--side-fg);opacity:.85;cursor:pointer;text-decoration:none;}
+      .painel-band-item{display:flex;align-items:flex-start;gap:10px;color:var(--side-fg);font-size:12.5px;line-height:1.45;}
+      .painel-band-item .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);margin-top:5px;flex-shrink:0;}
+      .painel-aging-bar{display:flex;height:32px;border-radius:8px;overflow:hidden;border:1px solid var(--border);}
+      .painel-aging-seg{display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:10px;color:#fff;min-width:3px;}
+      .painel-aging-legend{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:13px;}
+      .painel-aging-cell .lb{font-family:var(--font-mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-3);display:flex;align-items:center;gap:6px;}
+      .painel-aging-cell .lb i{width:9px;height:9px;border-radius:2px;flex-shrink:0;}
+      .painel-aging-cell .v{font-size:13.5px;font-weight:600;color:var(--text);margin-top:3px;}
+      .painel-aging-cell .c{font-size:10.5px;color:var(--text-3);}
+      .painel-prox-item{display:flex;align-items:center;gap:12px;padding:10px 0 10px 12px;border-bottom:1px solid var(--border-2);border-left:3px solid var(--accent);}
+      .painel-prox-item:last-child{border-bottom:0;}
+      .painel-prox-d{font-family:var(--font-mono);font-size:10px;color:var(--text-3);min-width:46px;}
+      .painel-prox-t{flex:1;font-size:12.5px;color:var(--text-2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .painel-prox-v{font-family:var(--font-mono);font-size:11.5px;color:var(--text);}
+      .painel-equipe{background:var(--side-bg);border-radius:12px;overflow:hidden;color:var(--side-fg);display:flex;flex-direction:column;height:100%;}
+      .painel-equipe-rk{display:flex;align-items:center;gap:11px;padding:10px 16px;}
+      .painel-equipe-rk + .painel-equipe-rk{border-top:1px solid rgba(239,234,217,.1);}
+      .painel-equipe-meta{margin-top:auto;padding:14px 16px;border-top:1px solid rgba(239,234,217,.14);}
+      .painel-equipe-track{height:8px;border-radius:5px;background:rgba(239,234,217,.16);overflow:hidden;margin-top:7px;}
+      .painel-equipe-fill{height:100%;background:var(--accent);border-radius:5px;}
+      .painel-select{font-family:inherit;font-size:12.5px;color:var(--text-2);background:var(--card);border:1px solid var(--border);border-radius:9px;padding:8px 11px;cursor:pointer;max-width:170px;}
+      #painel-organizar-btn.on{background:var(--accent);color:#2A1A05;border-color:var(--accent);}
+      .painel-grid-15{display:grid;grid-template-columns:1.5fr 1fr;gap:16px;align-items:start;}
+      .painel-grid-13{display:grid;grid-template-columns:1fr 1.3fr;gap:16px;align-items:start;}
+      .painel-grid-rod{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:16px;align-items:stretch;}
+      @media(max-width:980px){ .painel-grid-15,.painel-grid-13,.painel-grid-rod{grid-template-columns:1fr;} .painel-prio-grid{grid-template-columns:1fr;} .cob-kpis{grid-template-columns:repeat(2,1fr);} }
+    </style>
+
     <div class="cob-pg-head">
       <div>
-        <h1 class="cob-h1">${saudacao}, ${escHtml(nomeUsuario)}.</h1>
-        <div class="cob-h1-sub">Resumo da operação em <b>${mesAtual}</b>${alertas.length>0?`. Você tem <b>${alertas.length} ${alertas.length===1?'item':'itens'}</b> que ${alertas.length===1?'precisa':'precisam'} de atenção.`:'.'}</div>
+        <div class="painel-eyebrow">Painel do Gestor · ${mesAtual} ${now.getFullYear()}</div>
+        <h1 class="cob-h1" style="margin-top:6px;">${saudacao}, ${escHtml(nomeUsuario)}.</h1>
+        <div class="cob-h1-sub">Resumo da operação${alertas.length>0?`. <b>${alertas.length} ${alertas.length===1?'item':'itens'}</b> ${alertas.length===1?'precisa':'precisam'} de atenção.`:'.'}</div>
       </div>
       <div class="cob-head-actions">
-        <div class="cob-seg">
-          ${['Hoje','Semana','Mês','Trimestre'].map((t,i)=>`<button class="cob-seg-b ${i===2?'on':''}">${t}</button>`).join('')}
-        </div>
-        <button class="cob-btn-primary" onclick="abrirNovaCobranca()">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          Nova cobrança
-        </button>
+        ${_credorOpts.length?`<select class="painel-select" onchange="painelSetFiltro('cliente',this.value)"><option value="">Todos os clientes</option>${_credorOpts.map(o=>`<option value="${escHtml(o.id)}" ${_pf.cliente===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('')}</select>`:''}
+        ${(_respOpts.length && ehGestorView)?`<select class="painel-select" onchange="painelSetFiltro('operador',this.value)"><option value="">Todos os operadores</option>${_respOpts.map(o=>`<option value="${escHtml(o.id)}" ${_pf.operador===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('')}</select>`:''}
+        <div class="cob-seg">${['Hoje','Semana','Mês','Trim'].map((t,i)=>`<button class="cob-seg-b ${i===2?'on':''}">${t}</button>`).join('')}</div>
+        <button id="painel-organizar-btn" class="cob-btn-ghost ${window._painelEdit?'on':''}" onclick="painelToggleEdit()">${window._painelEdit?'✓ Concluir':'⚙ Organizar'}</button>
+        <button class="cob-btn-ghost" onclick="showPage('relat')">⤓ Relatório</button>
+        <button class="cob-btn-primary" onclick="(typeof chatNovaPeca==='function'?chatNovaPeca():showPage('pecas'))">＋ Nova peça</button>
       </div>
     </div>
 
-    ${tarefasPainelBloco()}
+    <div id="painel-cards">
 
-    <!-- ── KPIs ── -->
-    <div class="cob-kpis">
-      ${kpis.map((k,idx)=>`
-        <div class="cob-kcard">
+      ${painelCard('atalhos', `<div class="cob-panel"><div class="cob-panel-body"><div class="painel-atalhos">${atalhos.map(a=>`<button class="painel-atalho ${a.primary?'primary':''}" onclick="${a.fn}"><span class="ic">${a.ic}</span> ${a.lb}</button>`).join('')}</div></div></div>`)}
+
+      ${painelCard('prioridades', `<div class="cob-panel"><div class="cob-panel-head"><span class="cob-panel-title">Precisa de decisão hoje</span></div><div class="cob-panel-body"><div class="painel-prio-grid">
+        <div class="painel-prio danger"><div class="painel-prio-n">${pendAtrasadas}</div><div class="painel-prio-l">tarefa${pendAtrasadas!==1?'s':''} atrasada${pendAtrasadas!==1?'s':''}</div><button class="painel-prio-cta" onclick="showPage('tarefas')">Revisar tarefas →</button></div>
+        <div class="painel-prio"><div class="painel-prio-n">${acordosVencendo}</div><div class="painel-prio-l">acordo${acordosVencendo!==1?'s':''} vencendo em 7 dias</div><button class="painel-prio-cta" onclick="showPage('cobr')">Ver cobranças →</button></div>
+        <div class="painel-prio navy"><div class="painel-prio-n">${fmtk(carteiraParada90)}</div><div class="painel-prio-l">carteira parada há 90+ dias</div><button class="painel-prio-cta" onclick="showPage('cobr')">Priorizar →</button></div>
+      </div></div></div>`)}
+
+      ${painelCard('alertas', `<div class="painel-band">
+        <div class="painel-band-head"><span class="painel-band-eye">Alertas inteligentes</span><a class="painel-band-link" onclick="showPage('tarefas')">Ver todos →</a></div>
+        ${alertas.length? alertas.slice(0,3).map(a=>`<div class="painel-band-item"><span class="dot"></span><span>${escHtml(a.msg)}</span></div>`).join('') : `<div class="painel-band-item" style="opacity:.75"><span class="dot" style="background:var(--side-fg)"></span><span>Nenhum alerta no momento.</span></div>`}
+      </div>`)}
+
+      ${painelCard('kpis', `<div class="cob-kpis">${kpis.map(k=>`
+        <div class="cob-kcard"${k.navy?' style="background:var(--side-bg);border-color:var(--side-bg);"':''}>
           <div class="cob-kcard-top">
-            <span class="cob-kcard-role">${escHtml(k.label)}</span>
-            <span class="cob-kcard-tick"${idx===0?' style="background:var(--accent);"':''}></span>
+            <span class="cob-kcard-role"${k.navy?' style="color:var(--accent);"':''}>${escHtml(k.label)}</span>
+            <span class="cob-kcard-tick"${(k.tick||k.navy)?' style="background:var(--accent);"':''}></span>
           </div>
-          <div class="cob-kcard-val fr">${k.value}</div>
-          <div class="cob-kcard-sub">${typeof k.delta==='number'?`<span style="font-family:var(--font-mono);font-size:10px;font-weight:600;padding:1px 6px;border-radius:20px;${k.delta>=0?'color:var(--green);background:var(--green-bg);':'color:var(--bord);background:var(--bord-bg);'}">${k.delta>=0?'+':''}${k.delta}%</span> `:''}${k.sub||''}</div>
-        </div>
-      `).join('')}
-    </div>
+          <div class="cob-kcard-val fr"${k.navy?' style="color:var(--side-fg);"':''}>${k.value}</div>
+          <div class="cob-kcard-sub"${k.navy?' style="color:rgba(239,234,217,.6);"':''}>${typeof k.delta==='number'?`<span class="cob-kdelta ${k.delta>=0?'up':'down'}">${k.delta>=0?'+':''}${k.delta}%</span> `:''}${k.sub||''}</div>
+        </div>`).join('')}</div>`)}
 
-    <!-- ── GRÁFICO + ATENÇÃO ── -->
-    <div class="${ehGestorView?'cob-row-2':''}">
+      ${painelCard('aging', `<div class="cob-panel"><div class="cob-panel-head"><div style="display:flex;align-items:baseline;"><span class="cob-panel-title">Aging da carteira</span><span class="cob-panel-sub">por valor em aberto</span></div></div><div class="cob-panel-body">
+        <div class="painel-aging-bar">${agingDefs.some(b=>b.val>0)? agingDefs.map(b=>{ if(b.val<=0) return ''; const pct=(b.val/agingTotal)*100; return `<div class="painel-aging-seg" style="flex:${b.val};background:${b.cor};" title="${b.lb} dias — ${fmtR(b.val)} (${b.qtd})">${pct>=10?b.lb:''}</div>`; }).join('') : `<div class="painel-aging-seg" style="flex:1;background:var(--card-2);color:var(--text-3);">sem carteira em aberto</div>`}</div>
+        <div class="painel-aging-legend">${agingDefs.map(b=>`<div class="painel-aging-cell"><div class="lb"><i style="background:${b.cor}"></i>${b.lb} dias</div><div class="v">${fmtk(b.val)}</div><div class="c">${b.qtd} caso${b.qtd!==1?'s':''}</div></div>`).join('')}</div>
+      </div></div>`)}
 
-      ${ehGestorView ? `
-      <!-- Recuperação por mês (gestor: visão agregada da carteira) -->
-      <div class="cob-panel">
-        <div class="cob-panel-head">
-          <div style="display:flex;align-items:baseline;">
-            <span class="cob-panel-title">Recuperação por mês</span>
-            <span class="cob-panel-sub">Valor recuperado vs. meta</span>
-          </div>
-        </div>
-        <div class="cob-panel-body">
+      ${painelCard('relatorios', `<div class="${ehGestorView?'painel-grid-15':''}">
+        ${ehGestorView ? `<div class="cob-panel">
+          <div class="cob-panel-head"><div style="display:flex;align-items:baseline;"><span class="cob-panel-title">Recuperação por mês</span><span class="cob-panel-sub">recuperado vs. meta · projeção ilustrativa</span></div></div>
+          <div class="cob-panel-body">
           ${(()=>{
             const metaRatio = metaMensal>0 ? Math.min(1, metaMensal/maxBarVal) : 0;
             const metaTop = Math.round(158*(1-metaRatio));
             const allZero = monthsData.every(m=>!m.rec);
+            const projH = projecao>0 ? Math.max(2, Math.round((projecao/maxBarVal)*100)) : 0;
             return `<div class="cob-chart">
               <div class="cob-chart-grid">
                 <div class="cob-chart-y">${[1,0.75,0.5,0.25,0].map(f=>`<span>${fmtk(maxBarVal*f).replace('R$ ','')}</span>`).join('')}</div>
@@ -7405,72 +7552,99 @@ async function renderPainel(){
                   ${metaMensal>0?`<div class="cob-meta-line" style="top:${metaTop}px;"><span class="cob-meta-tag">META ${fmtk(metaMensal).replace('R$ ','')}</span></div>`:''}
                   <div class="cob-bars">
                     ${monthsData.map(m=>{ const h = m.rec>0 ? Math.max(2, Math.round((m.rec/maxBarVal)*100)) : 0; return `<div class="cob-bar-col"><div class="cob-bar" style="height:${h}%;" title="${m.mName}/${m.ym.slice(0,4)}: ${fmtR(m.rec)}"></div><span class="cob-bar-lb">${m.mName}</span></div>`; }).join('')}
+                    <div class="cob-bar-col"><div class="cob-bar" style="height:${projH}%;background:transparent;border:1.5px dashed var(--accent);opacity:1;" title="Projeção ${projMnm}: ${fmtR(projecao)}"></div><span class="cob-bar-lb">${projMnm}</span></div>
                   </div>
                 </div>
               </div>
               <div class="cob-chart-note">
                 <span class="cob-legend"><i style="background:var(--accent);"></i> Recuperado</span>
-                ${metaMensal>0?`<span class="cob-legend"><i class="dashed"></i> Meta (${fmtk(metaMensal)})</span>`:''}
+                <span class="cob-legend"><i class="dashed"></i> Projeção (${fmtk(projecao)})</span>
                 ${allZero?`<span class="cob-chart-empty">sem recuperação registrada no período</span>`:''}
               </div>
             </div>`;
           })()}
-        </div>
-      </div>
-      ` : ''}
-
-      <!-- Precisa de atenção (Alertas) -->
-      <div class="cob-panel">
-        <div class="cob-panel-head">
-          <div style="display:flex;align-items:baseline;">
-            <span class="cob-panel-title">Precisa de atenção</span>
-            <span class="cob-panel-sub">${alertas.length} ${alertas.length===1?'pendência':'pendências'}</span>
           </div>
-          <a class="cob-link" onclick="showPage('tarefas')">Ver todas →</a>
-        </div>
-        <div>
-          ${alertas.length === 0
-            ? `<div class="cob-empty"><span class="cob-empty-dot"></span> Nenhuma pendência no momento.</div>`
-            : `<ul class="cob-attn-list">${alertas.slice(0,5).map(a=>{
-                const tagLabel = a.tipo==='danger'?'URGENTE':a.tipo==='warning'?'ATENÇÃO':a.tipo==='success'?'OK':'INFO';
-                return `<li class="cob-attn-item"><span class="cob-urgent">${tagLabel}</span><span class="cob-attn-txt">${escHtml(a.msg)}</span></li>`;
-              }).join('')}</ul>`}
-        </div>
-      </div>
-    </div>
+        </div>` : ''}
+        <div class="cob-panel"><div class="cob-panel-head"><span class="cob-panel-title">Carteira por situação</span></div><div class="cob-panel-body"><div class="cob-hbars">
+          ${[['Em aberto',sitDefs.aberto,'var(--slate)'],['Em acordo',sitDefs.acordo,'var(--green)'],['Judicial',sitDefs.judicial,'var(--bord)'],['Quitado',sitDefs.quitado,'var(--accent-2)']].map(par=>`<div class="cob-hbar-row"><span class="cob-hbar-lb">${par[0]}</span><div class="cob-hbar-track"><div class="cob-hbar-fill" style="width:${Math.round((par[1]/sitMax)*100)}%;background:${par[2]};"></div></div><span class="cob-hbar-v">${fmtk(par[1])}</span></div>`).join('')}
+        </div></div></div>
+      </div>`)}
 
-    <!-- ── ATIVIDADE RECENTE ── -->
-    <div class="cob-panel">
-      <div class="cob-panel-head">
-        <span class="cob-panel-title">Atividade recente</span>
-        <div class="cob-tabs">${['Tudo','Acordos','Pagamentos','Comunicação'].map((t,i)=>`<button class="cob-tab ${i===0?'on':''}">${t}</button>`).join('')}</div>
-      </div>
-      <div>
-        ${recentActivity.length === 0
-          ? `<div class="cob-empty"><span class="cob-empty-dot"></span> Nenhuma interação registrada ainda.</div>`
-          : recentActivity.map((a,i)=>{
-              const initials = (a.devNome||'?').split(' ').slice(0,2).map(w=>w[0]).join('').toUpperCase();
-              return `<div class="cob-tr-click" style="display:grid;grid-template-columns:auto 1fr auto auto;gap:12px;align-items:center;padding:11px 18px;${i>0?'border-top:1px solid var(--border-2);':''}" onclick="openDrawer('${a.devId}')">
-                <span class="cob-av sm">${initials}</span>
-                <div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--text-2);">
-                  <span style="color:var(--text);font-weight:600;">${escHtml(a.devNome||'—')}</span><span> · ${escHtml(a.tipo||'—')}</span>${a.desc?`<span style="color:var(--text-3);"> — ${escHtml(a.desc.slice(0,60))}${a.desc.length>60?'…':''}</span>`:''}
-                </div>
-                <span style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.06em;color:${actColor(a.tipo)};border:1px solid var(--border);border-radius:4px;padding:2px 6px;white-space:nowrap;">${actLabel(a.tipo)}</span>
-                <span style="font-family:var(--font-mono);font-size:10px;color:var(--text-3);min-width:48px;text-align:right;white-space:nowrap;">${a.data||'—'}</span>
-              </div>`;
-            }).join('')}
-      </div>
-    </div>
+      ${painelCard('relatorios2', `<div class="painel-grid-13">
+        <div class="cob-panel"><div class="cob-panel-head"><div style="display:flex;align-items:baseline;"><span class="cob-panel-title">Pendências por tipo</span><span class="cob-panel-sub">tarefas abertas</span></div></div><div class="cob-panel-body">${pendPorTipo.length?`<div class="cob-hbars">${pendPorTipo.map(p=>`<div class="cob-hbar-row"><span class="cob-hbar-lb">${escHtml(p.nome)}</span><div class="cob-hbar-track"><div class="cob-hbar-fill" style="width:${Math.round((p.qtd/pendPorTipoMax)*100)}%;"></div></div><span class="cob-hbar-v">${p.qtd}</span></div>`).join('')}</div>`:`<div class="cob-empty"><span class="cob-empty-dot"></span> Nenhuma tarefa aberta.</div>`}</div></div>
+        <div class="cob-panel">
+          <div class="cob-panel-head"><span class="cob-panel-title">Atividade recente</span><div class="cob-tabs">${['Tudo','Acordos','Pagamentos','Comunicação'].map((t,i)=>`<button class="cob-tab ${i===0?'on':''}">${t}</button>`).join('')}</div></div>
+          <div>${recentActivity.length === 0 ? `<div class="cob-empty"><span class="cob-empty-dot"></span> Nenhuma interação registrada ainda.</div>` : recentActivity.map((a,i)=>{ const initials=(a.devNome||'?').split(' ').slice(0,2).map(w=>w[0]).join('').toUpperCase(); return `<div class="cob-tr-click" style="display:grid;grid-template-columns:auto 1fr auto auto;gap:12px;align-items:center;padding:11px 18px;${i>0?'border-top:1px solid var(--border-2);':''}" onclick="openDrawer('${a.devId}')"><span class="cob-av sm">${initials}</span><div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--text-2);"><span style="color:var(--text);font-weight:600;">${escHtml(a.devNome||'—')}</span><span> · ${escHtml(a.tipo||'—')}</span>${a.desc?`<span style="color:var(--text-3);"> — ${escHtml(a.desc.slice(0,60))}${a.desc.length>60?'…':''}</span>`:''}</div><span style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.06em;color:${actColor(a.tipo)};border:1px solid var(--border);border-radius:4px;padding:2px 6px;white-space:nowrap;">${actLabel(a.tipo)}</span><span style="font-family:var(--font-mono);font-size:10px;color:var(--text-3);min-width:48px;text-align:right;white-space:nowrap;">${a.data||'—'}</span></div>`; }).join('')}</div>
+        </div>
+      </div>`)}
 
-    <!-- Calendário -->
-    <div class="cob-panel">
-      <div class="cob-panel-head"><span class="cob-panel-title">Calendário</span></div>
-      <div data-cal>${calHtml}</div>
+      ${painelCard('rodape', `<div class="painel-grid-rod">
+        <div class="cob-panel"><div class="cob-panel-head"><span class="cob-panel-title">Fila de decisão</span><a class="cob-link" onclick="showPage('tarefas')">Ver todas →</a></div><div>${alertas.length? `<ul class="cob-attn-list">${alertas.slice(0,5).map(a=>{ const tag=a.tipo==='danger'?'URGENTE':a.tipo==='warning'?'ATENÇÃO':a.tipo==='success'?'OK':'INFO'; return `<li class="cob-attn-item"><span class="cob-urgent">${tag}</span><span class="cob-attn-txt">${escHtml(a.msg)}</span></li>`; }).join('')}</ul>` : `<div class="cob-empty"><span class="cob-empty-dot"></span> Sem pendências.</div>`}</div></div>
+        <div class="painel-equipe">
+          <div class="cob-panel-head" style="border-bottom:1px solid rgba(239,234,217,.14);"><span class="cob-panel-title" style="color:var(--side-fg);">Equipe</span><a class="cob-link" style="color:var(--accent);" onclick="rankingTarefasModal()">Ranking →</a></div>
+          ${rankEquipe.length? rankEquipe.map((x,i)=>`<div class="painel-equipe-rk"><span style="width:20px;font-family:var(--font-mono);font-size:12px;color:var(--accent);">${i+1}º</span><span style="flex:1;font-size:12.5px;font-weight:600;">${escHtml(x.nome)}</span><span style="font-family:var(--font-mono);font-size:12px;color:var(--accent);">${x.pontos} pts</span></div>`).join('') : `<div class="painel-equipe-rk" style="opacity:.7;font-size:12px;">Sem pontuação ainda.</div>`}
+          <div class="painel-equipe-meta"><div style="display:flex;justify-content:space-between;font-size:11.5px;"><span style="font-family:var(--font-mono);letter-spacing:.1em;text-transform:uppercase;color:var(--accent);">Meta do mês</span><span>${metaProg!=null?metaProg+'%':'—'}</span></div><div class="painel-equipe-track"><div class="painel-equipe-fill" style="width:${metaProg!=null?metaProg:0}%;"></div></div><div style="font-size:11px;opacity:.7;margin-top:6px;">${fmtR(totalRecuperado)}${metaMensal>0?` de ${fmtR(metaMensal)}`:''}</div></div>
+        </div>
+        <div class="cob-panel"><div class="cob-panel-head"><span class="cob-panel-title">Próximos compromissos</span></div><div class="cob-panel-body" style="padding-top:8px;padding-bottom:8px;">${vencimentos.length? vencimentos.map(v=>`<div class="painel-prox-item" style="border-left-color:${v.tipo==='tarefa'?'var(--accent)':v.tipo==='lancamento'?'var(--danger)':'var(--blue)'};"><span class="painel-prox-d">${(v.data||'').slice(8,10)}/${(v.data||'').slice(5,7)}</span><span class="painel-prox-t">${escHtml(v.desc||'—')}</span>${v.valor?`<span class="painel-prox-v">${fmtk(v.valor)}</span>`:''}</div>`).join('') : `<div class="cob-empty"><span class="cob-empty-dot"></span> Nada nos próximos 7 dias.</div>`}</div></div>
+      </div>`)}
+
+      ${painelCard('calendario', `<div class="cob-panel"><div class="cob-panel-head"><span class="cob-panel-title">Calendário</span></div><div data-cal>${calHtml}</div></div>`)}
+
     </div>
   `;
+  painelApplyLayout(el);
 
   // Alerta visual (gestor): acordos assinados sem boleto emitido — corrente travada/falha.
   checkAlertaBoletosPendentes(el);
+}
+
+// ── Painel v3: filtros + modo "Organizar" (ocultar/reordenar quadros, persistido em localStorage) ──
+function painelSetFiltro(kind, val){
+  window._painelFiltro = window._painelFiltro || { cliente:'', operador:'' };
+  window._painelFiltro[kind] = val || '';
+  renderPainel();
+}
+function painelLoadLayout(){
+  try{ const j=JSON.parse(localStorage.getItem('cobrasq_painel_layout')||'{}');
+    return { order: Array.isArray(j.order)?j.order:[], hidden: (j.hidden&&typeof j.hidden==='object')?j.hidden:{} };
+  }catch(e){ return { order:[], hidden:{} }; }
+}
+function painelSaveLayout(lay){ try{ localStorage.setItem('cobrasq_painel_layout', JSON.stringify(lay)); }catch(e){} }
+function painelApplyLayout(scope){
+  const host = (scope||document).querySelector('#painel-cards'); if(!host) return;
+  const lay = painelLoadLayout();
+  const editing = !!window._painelEdit;
+  host.classList.toggle('editing', editing);
+  // Reordena os quadros conforme a ordem salva (os não listados ficam no fim, na ordem natural).
+  (lay.order||[]).forEach(id=>{ const n=host.querySelector(`[data-card="${id}"]`); if(n) host.appendChild(n); });
+  // Aplica oculto/visível + rótulo do botão de cada quadro.
+  host.querySelectorAll('[data-card]').forEach(n=>{
+    const id=n.getAttribute('data-card');
+    const hidden=!!(lay.hidden && lay.hidden[id]);
+    n.classList.toggle('is-hidden', hidden);
+    n.style.display = (hidden && !editing) ? 'none' : '';
+    const btn=n.querySelector('[data-hidetoggle]'); if(btn) btn.textContent = hidden ? 'mostrar' : 'ocultar';
+  });
+}
+function painelToggleEdit(){
+  window._painelEdit = !window._painelEdit;
+  painelApplyLayout(document.getElementById('page-painel'));
+  const b = document.getElementById('painel-organizar-btn');
+  if(b){ b.classList.toggle('on', window._painelEdit); b.textContent = window._painelEdit ? '✓ Concluir' : '⚙ Organizar'; }
+}
+function painelMove(id, dir){
+  const host = document.querySelector('#painel-cards'); if(!host) return;
+  const ids = [...host.querySelectorAll('[data-card]')].map(n=>n.getAttribute('data-card'));
+  const i = ids.indexOf(id), j = i + dir;
+  if(i<0 || j<0 || j>=ids.length) return;
+  const t=ids[i]; ids[i]=ids[j]; ids[j]=t;
+  const lay = painelLoadLayout(); lay.order = ids; painelSaveLayout(lay);
+  painelApplyLayout(document.getElementById('page-painel'));
+}
+function painelHide(id){
+  const lay = painelLoadLayout(); lay.hidden = lay.hidden || {};
+  lay.hidden[id] = !lay.hidden[id]; painelSaveLayout(lay);
+  painelApplyLayout(document.getElementById('page-painel'));
 }
 
 // Banner no Painel quando há acordos ASSINADOS sem boleto emitido — mesmo sinal do
