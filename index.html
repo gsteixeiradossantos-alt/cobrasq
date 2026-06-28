@@ -5033,6 +5033,43 @@ function _promptConfirm(){
   if(window._promptCb)window._promptCb(v||null);
 }
 
+// ── Telefone de envio (assinatura) ───────────────────────────────────────────
+// No ato de enviar um documento para assinar, permite confirmar/alterar o número
+// que receberá o link. Default = telefone do cadastro. Resolve com os DÍGITOS
+// escolhidos (com DDI 55 garantido pelo Z-API/proxy) ou null se cancelar.
+function promptTelefoneEnvio(defaultTel){
+  return new Promise(resolve=>{
+    const id='modal-tel-envio';
+    let m=document.getElementById(id);
+    if(!m){ m=document.createElement('div'); m.id=id; m.className='overlay'; document.body.appendChild(m); }
+    let done=false;
+    window._telEnvioResolve=(val)=>{ if(done) return; done=true; closeModal(id); resolve(val); };
+    m.innerHTML=`<div class="modal modal-sm">
+      <div class="modal-header"><span class="modal-title">Telefone que receberá o link</span>
+        <button class="modal-close" onclick="_telEnvioResolve(null)">&#10005;</button></div>
+      <div class="modal-body">
+        <div class="fg">
+          <label>Telefone (WhatsApp)</label>
+          <input type="text" id="tel-envio-input" inputmode="numeric" placeholder="(00) 00000-0000" oninput="mascaraTel(this)">
+          <div style="font-size:11.5px;color:var(--text-3);margin-top:6px;">Padrão: telefone do cadastro. Edite para enviar a outro número.</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="_telEnvioResolve(null)">Cancelar</button>
+        <button class="btn btn-primary" onclick="_telEnvioConfirm()">Usar este número</button>
+      </div>
+    </div>`;
+    openModal(id);
+    setTimeout(()=>{ const el=document.getElementById('tel-envio-input'); if(el){ el.value=String(defaultTel||''); mascaraTel(el); el.focus(); try{el.select();}catch(_){} } },80);
+  });
+}
+function _telEnvioConfirm(){
+  const el=document.getElementById('tel-envio-input');
+  const v=(el?el.value:'').replace(/\D/g,'');
+  if(v.length<10){ showToast('Telefone inválido — informe DDD + número (mín. 10 dígitos).','warning'); return; }
+  if(window._telEnvioResolve) window._telEnvioResolve(v);
+}
+
 // ── Seletor de responsável (reutiliza o roster app_users) ─────────────────────
 // Abre um modal com a LISTA de usuários (não caixa de texto). onPick recebe
 // { id, nome } do usuário escolhido. A lista vem de app_users (única fonte com UUID).
@@ -25057,6 +25094,7 @@ async function enviarDocClienteZapSign(tipo){
   if(!d.nome){ showToast('Informe a razão social do cliente.','warning'); return; }
   if(!d.tel){ showToast('Informe o telefone do cliente.','warning'); return; }
   if(!DB.config.zapsignToken){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
+  const telSel=await promptTelefoneEnvio(d.tel); if(telSel===null) return;
   const titulos={cessao:'Contrato de cessão',procuracao:'Procuração',declaracao:'Declaração de cessão'};
   const tipoNome=titulos[tipo]||'Documento';
   document.getElementById('mzs-body').innerHTML=
@@ -25067,7 +25105,7 @@ async function enviarDocClienteZapSign(tipo){
     const html=_docClienteHtml(tipo,d);
     const base64Pdf=await _htmlParaPdfBase64(html,{filename:'doc.pdf'});
     const nomeDoc=`${tipoNome} — ${d.nome} — ${new Date().toLocaleDateString('pt-BR')}`;
-    const tel=d.tel.replace(/\D/g,'');
+    const tel=telSel;
     const result=await ZapSignAPI.createDoc({
       name:nomeDoc,
       signers:[{name:d.nome,email:d.email||'',phone_country:'55',phone_number:tel,
@@ -25123,6 +25161,7 @@ async function enviarLoteDocClienteZapSign(){
   if(!d.tel){ showToast('Informe o telefone do cliente.','warning'); return; }
   const tipos=['cessao','procuracao','declaracao'].filter(t=>document.getElementById('dlote-'+t)?.checked);
   if(!tipos.length){ showToast('Selecione ao menos um documento.','warning'); return; }
+  const telSel=await promptTelefoneEnvio(d.tel); if(telSel===null) return;
   const titulos={cessao:'Contrato de cessão',procuracao:'Procuração',declaracao:'Declaração de cessão'};
   closeModal('modal-doc-lote');
   document.getElementById('mzs-body').innerHTML=
@@ -25141,7 +25180,7 @@ async function enviarLoteDocClienteZapSign(){
       pdfs.push({tipo:t, nome:titulos[t], base64:b64});
     }
     const nomesDoc=tipos.map(t=>titulos[t]).join(' + ');
-    const tel=d.tel.replace(/\D/g,'');
+    const tel=telSel;
     // Documento principal = 1ª peça (carrega o signatário e gera o link)
     const principal=pdfs[0];
     const result=await ZapSignAPI.createDoc({
@@ -25333,6 +25372,7 @@ async function mv2EnviarZapSign(){
   const tipo = MINUTA_TIPOS.find(t=>t.id===_minuta.tipo);
   if(!DB.config.zapsignToken){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
   if(!dev.nome){ showToast('Devedor sem nome.','warning'); return; }
+  const telSel = await promptTelefoneEnvio(dev.tel); if(telSel===null) return;
 
   document.getElementById('mzs-body').innerHTML = `<div class="mv2-step-loading" style="height:140px;"><div class="mv2-spinner"></div><p>Gerando PDF e enviando para ZapSign…</p></div>`;
   document.getElementById('mzs-footer').innerHTML = '';
@@ -25349,9 +25389,9 @@ async function mv2EnviarZapSign(){
         name: dev.nome,
         email: dev.email||'',
         phone_country: '55',
-        phone_number: dev.tel ? dev.tel.replace(/\D/g,'') : '',
+        phone_number: telSel,
         send_automatic_email: !!dev.email,
-        send_automatic_whatsapp: !!dev.tel,
+        send_automatic_whatsapp: !!telSel,
         auth_mode: 'assinaturaTela',
       }],
       base64_pdf: base64Pdf,
@@ -25387,8 +25427,8 @@ async function mv2EnviarZapSign(){
             <button class="btn btn-primary btn-sm" onclick="navigator.clipboard.writeText('${escHtml(signerLink)}');showToast('Link copiado.','success');">Copiar</button>
           </div>
         </div>
-        ${dev.tel && DB.config.zapiInstanceId ? `
-          <button class="btn btn-ghost btn-sm" style="width:100%;" onclick="mv2EnviarLinkWhatsApp('${escHtml(signerLink)}')">
+        ${DB.config.zapiInstanceId ? `
+          <button class="btn btn-ghost btn-sm" style="width:100%;" onclick="mv2EnviarLinkWhatsApp('${escHtml(signerLink)}','${telSel}')">
             Enviar link via WhatsApp
           </button>` : ''}
       </div>`;
@@ -25407,10 +25447,10 @@ async function mv2EnviarZapSign(){
   }
 }
 
-async function mv2EnviarLinkWhatsApp(link){
+async function mv2EnviarLinkWhatsApp(link, telOverride){
   const dev = (DB.devedores||[]).find(d=>d.id===_minuta.devId)||{};
   const tipo = MINUTA_TIPOS.find(t=>t.id===_minuta.tipo);
-  const tel = dev.tel?.replace(/\D/g,'');
+  const tel = (telOverride || dev.tel || '').replace(/\D/g,'');
   if(!tel){ showToast('Devedor sem telefone.','warning'); return; }
   try {
     const msg = `${dev.nome||''}, segue o link para assinatura do documento *${tipo?.nome||''}*:\n${link}\n\nCOBRASQ — Recuperadora de Crédito`;
@@ -25927,10 +25967,10 @@ async function zsReenviarWhatsApp(minutaId, devId){
   if(!dev) return;
   const m = (dev.minutas||[]).find(x=>x.id===minutaId);
   if(!m||!m.signLink){ showToast('Link de assinatura não disponível.','warning'); return; }
-  if(!dev.tel){ showToast('Devedor sem telefone cadastrado.','warning'); return; }
   if(!DB.config.zapiInstanceId){ showToast('Z-Api não configurado em Integrações.','warning'); return; }
+  const telSel = await promptTelefoneEnvio(dev.tel); if(telSel===null) return;
   try {
-    const tel = dev.tel.replace(/\D/g,'');
+    const tel = telSel;
     const msg = `${dev.nome}, segue o link para assinatura do documento:\n${m.signLink}\n\nCOBRASQ — Recuperadora de Crédito`;
     await ZApiAPI.sendLink(tel, msg, m.signLink, 'COBRASQ — Assinatura de Documento');
     logAtividade('Reenvio de link ZapSign via WhatsApp', m.nome, devId);
