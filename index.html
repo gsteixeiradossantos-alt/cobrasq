@@ -11,6 +11,9 @@
 <script src="https://cdn.jsdelivr.net/npm/html-docx-js@0.3.1/dist/html-docx.js" crossorigin="anonymous"></script>
 <!-- html2pdf.js: converts HTML to PDF client-side (used by ZapSign send) -->
 <script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js" crossorigin="anonymous"></script>
+<!-- calc-engine.js: MATRIZ única de cálculo de dívida (jurídica + cobrança). Em
+     templates/ p/ não cair no rewrite catch-all do vercel.json. Ver docs/calc/MATRIZ.md -->
+<script src="/templates/calc-engine.js"></script>
 <!-- Supabase JS SDK -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" crossorigin="anonymous"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -8448,15 +8451,14 @@ function calcDividaCobranca(valorOrig, vencStr){
   const venc = new Date(vencStr + 'T00:00:00');
   const diasAtraso = Math.max(0, Math.round((hoje - venc) / 86400000));
   if(diasAtraso <= 0) return zero;
-  const meses = diasAtraso / COBRANCA_DIAS_MES;                  // meses fracionários
-  const correcao = valorOrig * COBRANCA_CORRECAO_MENSAL * meses; // 8% a.a. fixa
-  const valorCorrigido = valorOrig + correcao;
-  const juros = valorCorrigido * p.juros * meses;               // 1% a.m. sobre o corrigido
-  const multa = valorCorrigido * p.multa;                       // 2% sobre o corrigido
-  const subtotal = valorCorrigido + juros + multa;
-  const taxa = subtotal * COBRANCA_TAXA_SERVICO;                // taxa COBRASQ 30%
-  const total = Math.ceil(subtotal + taxa);                     // arredonda pra cima (igual CRM)
-  return { atualizado: valorCorrigido, correcao, juros, multa, taxa, subtotal, total, diasAtraso, meses };
+  const meses = diasAtraso / COBRANCA_DIAS_MES;                  // meses fracionários (igual antes)
+  // Mesma conta de antes, agora na MATRIZ única (templates/calc-engine.js):
+  // correção 8% a.a. + juros 1% a.m. + multa 2% sobre o corrigido + taxa COBRASQ 30%.
+  const r = CalcEngine.cobranca({ valorOriginal: valorOrig, meses,
+    correcaoMensal: COBRANCA_CORRECAO_MENSAL, jurosMensal: p.juros, multaPct: p.multa,
+    taxaServico: COBRANCA_TAXA_SERVICO, aplicarMulta: true, aplicarTaxa: true });
+  return { atualizado: r.valorCorrigido, correcao: r.correcao, juros: r.juros, multa: r.multa,
+    taxa: r.taxa, subtotal: r.subtotal, total: r.total, diasAtraso, meses: r.meses };
 }
 
 function _fmtR(n){ return 'R$ ' + (Number(n)||0).toLocaleString('pt-BR', { minimumFractionDigits:2, maximumFractionDigits:2 }); }
@@ -16684,45 +16686,12 @@ function setDocsTab(tab, btn){
 // ════════════════════════════════════════════════════════════════════════
 
 // Índices mensais reais (% a.m.) — atualizar mensalmente. (Portado do CRM.)
-const PET_INDICES_MENSAIS = {
-  INPC: {'2024-05':0.46,'2024-06':0.25,'2024-07':0.26,'2024-08':-0.14,'2024-09':0.48,'2024-10':0.61,'2024-11':0.33,'2024-12':0.48,'2025-01':0.00,'2025-02':1.48,'2025-03':0.51,'2025-04':0.48,'2025-05':0.35,'2025-06':0.23,'2025-07':0.21,'2025-08':-0.21,'2025-09':0.52,'2025-10':0.03,'2025-11':0.03,'2025-12':0.21,'2026-01':0.39,'2026-02':0.56,'2026-03':0.91,'2026-04':0.81},
-  IPCA: {'2024-05':0.46,'2024-06':0.21,'2024-07':0.38,'2024-08':-0.02,'2024-09':0.44,'2024-10':0.56,'2024-11':0.39,'2024-12':0.52,'2025-01':0.16,'2025-02':1.31,'2025-03':0.56,'2025-04':0.43,'2025-05':0.26,'2025-06':0.24,'2025-07':0.26,'2025-08':-0.11,'2025-09':0.48,'2025-10':0.09,'2025-11':0.18,'2025-12':0.33,'2026-01':0.33,'2026-02':0.70,'2026-03':0.88,'2026-04':0.67},
-  SELIC:{'2024-05':0.83,'2024-06':0.79,'2024-07':0.91,'2024-08':0.87,'2024-09':0.84,'2024-10':0.93,'2024-11':0.79,'2024-12':0.93,'2025-01':1.01,'2025-02':0.99,'2025-03':0.96,'2025-04':1.06,'2025-05':1.14,'2025-06':1.10,'2025-07':1.28,'2025-08':1.16,'2025-09':1.22,'2025-10':1.28,'2025-11':1.05,'2025-12':1.22,'2026-01':1.16,'2026-02':1.00,'2026-03':1.21,'2026-04':1.09,'2026-05':1.07},
-  TJPR: {'2024-05':0.67,'2024-06':0.38,'2024-07':0.55,'2024-08':-0.01,'2024-09':0.76,'2024-10':1.07,'2024-11':0.76,'2024-12':0.68,'2025-01':0.06,'2025-02':1.24,'2025-03':0.01,'2025-04':0.39,'2025-05':-0.25,'2025-06':-0.79,'2025-07':0.07,'2025-08':-0.01,'2025-09':0.44,'2025-10':0.00,'2025-11':0.02,'2025-12':0.15,'2026-01':0.29,'2026-02':-0.14,'2026-03':1.02,'2026-04':1.61}
-};
-const PET_INDICES_ATE = '2026-06';
-
-function _petCorrecaoMensal(valorInicial, dataIni, dataFim, indice){
-  const tabela = PET_INDICES_MENSAIS[indice] || PET_INDICES_MENSAIS.INPC;
-  let valor = valorInicial;
-  let cursor = new Date(dataIni.getFullYear(), dataIni.getMonth(), dataIni.getDate());
-  let mesesAplicados = 0;
-  while(true){
-    const fimDoMes = new Date(cursor.getFullYear(), cursor.getMonth()+1, 0);
-    if(fimDoMes >= dataFim) break;
-    const chave = cursor.getFullYear()+'-'+String(cursor.getMonth()+1).padStart(2,'0');
-    const pct = (chave in tabela) ? tabela[chave] : 0;
-    valor = valor * (1 + pct/100);
-    mesesAplicados++;
-    cursor = new Date(cursor.getFullYear(), cursor.getMonth()+1, 1);
-  }
-  return { valorCorrigido: valor, mesesAplicados };
-}
-// Correção composta + juros simples pró rata + multa sobre atualizado +
-// honorários sobre (atual+juros+multa) + garantia STJ. (Portado do CRM.)
+// ── Conta JURÍDICA (peça) — delega para a MATRIZ única templates/calc-engine.js.
+// Antes havia aqui uma cópia do motor + as tabelas PET_INDICES_MENSAIS (idênticas
+// às do CRM) + o helper _petCorrecaoMensal. Centralizado em 2026-06: muda no
+// calc-engine.js e vale aqui, no CRM e na peça. Ver docs/calc/MATRIZ.md.
 function _petCalcJuridica(valorNominal, dataIni, dataFim, indice, multaPct, honPct, jurosMensalPct){
-  const corr = _petCorrecaoMensal(valorNominal, dataIni, dataFim, indice);
-  const valorAtualizado = Math.max(corr.valorCorrigido, valorNominal);
-  const aplicouGarantiaSTJ = corr.valorCorrigido < valorNominal;
-  const dias = (dataFim - dataIni)/(1000*60*60*24);
-  const mesesPRO = dias/30;
-  const juros = valorAtualizado * (jurosMensalPct/100) * mesesPRO;
-  const multa = valorAtualizado * (multaPct/100);
-  const honorarios = (valorAtualizado + juros + multa) * (honPct/100);
-  const total = valorAtualizado + juros + multa + honorarios;
-  return { valorNominal, indice, valorAtualizado, aplicouGarantiaSTJ,
-    mesesPRO: Math.round(mesesPRO*100)/100, mesesCorrigidos: corr.mesesAplicados,
-    juros, multa, honorarios, total, multaPct, honPct, jurosMensalPct, indice_ate: PET_INDICES_ATE };
+  return CalcEngine.juridica(valorNominal, dataIni, dataFim, indice, multaPct, honPct, jurosMensalPct);
 }
 
 function petParseDate(v){

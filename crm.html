@@ -10,6 +10,8 @@
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
 <script src="/templates/termo-engine.js"></script>
+<!-- calc-engine.js: MATRIZ única de cálculo de dívida (jurídica + cobrança). Ver docs/calc/MATRIZ.md -->
+<script src="/templates/calc-engine.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@300;400;500;600&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -5591,13 +5593,14 @@ function _calcCobrancaSimples(valorOriginal, dataVenc, dataHoje, aplicarMulta, a
   const dV = new Date(dataVenc + 'T00:00:00');
   const dC = new Date(dataHoje + 'T00:00:00');
   const meses = mesesEntre(dV, dC);
-  const correcao = valorOriginal * TAXA_CORRECAO_MENSAL * meses;
-  const valorCorrigido = valorOriginal + correcao;
-  const juros = valorCorrigido * TAXA_JUROS_MENSAL * meses;
-  const multa = aplicarMulta ? valorCorrigido * MULTA_PCT : 0;
-  const subtotal = valorCorrigido + juros + multa;
-  const taxa = aplicarTaxa ? subtotal * TAXA_SERVICO_PCT : 0;
-  const total = arredondaParaCima(subtotal + taxa);
+  // Núcleo na MATRIZ única (templates/calc-engine.js): correção + juros + multa +
+  // taxa de serviço, total arredondado pra cima. O parcelamento (boleto/cartão)
+  // segue abaixo, exclusivo do CRM. Ver docs/calc/MATRIZ.md.
+  const _r = CalcEngine.cobranca({ valorOriginal: valorOriginal, meses: meses,
+    correcaoMensal: TAXA_CORRECAO_MENSAL, jurosMensal: TAXA_JUROS_MENSAL,
+    multaPct: MULTA_PCT, taxaServico: TAXA_SERVICO_PCT, aplicarMulta: aplicarMulta, aplicarTaxa: aplicarTaxa });
+  const correcao = _r.correcao, valorCorrigido = _r.valorCorrigido, juros = _r.juros,
+        multa = _r.multa, subtotal = _r.subtotal, taxa = _r.taxa, total = _r.total;
 
   const boletoOptions = [];
   for (let n = 1; n <= PARCELA_MAX_QTD; n++) {
@@ -9750,68 +9753,18 @@ async function pecaRenderAnexos() {
 // memoriais do escritório (PDFs do Dr. Gustavo, data 09/06/2026 — INPC e
 // IPCA até 04/2026, SELIC até 06/2026, TJ/PR até 04/2026).
 // Chave: 'AAAA-MM'. Valor: %.
-const PECA_INDICES_MENSAIS = {
-  INPC: {
-    '2024-05': 0.46, '2024-06': 0.25, '2024-07': 0.26, '2024-08': -0.14,
-    '2024-09': 0.48, '2024-10': 0.61, '2024-11': 0.33, '2024-12': 0.48,
-    '2025-01': 0.00, '2025-02': 1.48, '2025-03': 0.51, '2025-04': 0.48,
-    '2025-05': 0.35, '2025-06': 0.23, '2025-07': 0.21, '2025-08': -0.21,
-    '2025-09': 0.52, '2025-10': 0.03, '2025-11': 0.03, '2025-12': 0.21,
-    '2026-01': 0.39, '2026-02': 0.56, '2026-03': 0.91, '2026-04': 0.81
-  },
-  IPCA: {
-    '2024-05': 0.46, '2024-06': 0.21, '2024-07': 0.38, '2024-08': -0.02,
-    '2024-09': 0.44, '2024-10': 0.56, '2024-11': 0.39, '2024-12': 0.52,
-    '2025-01': 0.16, '2025-02': 1.31, '2025-03': 0.56, '2025-04': 0.43,
-    '2025-05': 0.26, '2025-06': 0.24, '2025-07': 0.26, '2025-08': -0.11,
-    '2025-09': 0.48, '2025-10': 0.09, '2025-11': 0.18, '2025-12': 0.33,
-    '2026-01': 0.33, '2026-02': 0.70, '2026-03': 0.88, '2026-04': 0.67
-  },
-  SELIC: {
-    '2024-05': 0.83, '2024-06': 0.79, '2024-07': 0.91, '2024-08': 0.87,
-    '2024-09': 0.84, '2024-10': 0.93, '2024-11': 0.79, '2024-12': 0.93,
-    '2025-01': 1.01, '2025-02': 0.99, '2025-03': 0.96, '2025-04': 1.06,
-    '2025-05': 1.14, '2025-06': 1.10, '2025-07': 1.28, '2025-08': 1.16,
-    '2025-09': 1.22, '2025-10': 1.28, '2025-11': 1.05, '2025-12': 1.22,
-    '2026-01': 1.16, '2026-02': 1.00, '2026-03': 1.21, '2026-04': 1.09,
-    '2026-05': 1.07, '2026-06': 0.08 /* parcial até dia 09 */
-  },
-  TJPR: {
-    '2024-05': 0.67, '2024-06': 0.38, '2024-07': 0.55, '2024-08': -0.01,
-    '2024-09': 0.76, '2024-10': 1.07, '2024-11': 0.76, '2024-12': 0.68,
-    '2025-01': 0.06, '2025-02': 1.24, '2025-03': 0.01, '2025-04': 0.39,
-    '2025-05': -0.25, '2025-06': -0.79, '2025-07': 0.07, '2025-08': -0.01,
-    '2025-09': 0.44, '2025-10': 0.00, '2025-11': 0.02, '2025-12': 0.15,
-    '2026-01': 0.29, '2026-02': -0.14, '2026-03': 1.02, '2026-04': 1.61
-  }
-};
-// Data até a qual os índices estão atualizados (AAAA-MM). Avisar admin
-// pra atualizar mensalmente.
-const PECA_INDICES_ATE = '2026-06';
+// Tabelas de índice agora vivem na MATRIZ única (templates/calc-engine.js) — uma
+// fonte só, atualizada 1x por mês (antes eram cópias aqui, no index e no
+// calc-juridica). PECA_INDICES_ATE segue exposto aqui (usado em vários avisos de
+// defasagem na UI), mas lido da matriz. Ver docs/calc/MATRIZ.md.
+const PECA_INDICES_ATE = CalcEngine.INDICES_ATE;
 
 // Aplica correção monetária COMPOSTA mês a mês entre dataIni e dataFim.
 // Retorna { valorCorrigido, meses_completos, dias_no_mes_final }.
+// Correção monetária — delega para a MATRIZ (templates/calc-engine.js). Mantida
+// como função fina porque é chamada em mais de um ponto do CRM. Ver MATRIZ.md.
 function _pecaAplicarCorrecaoMensal(valorInicial, dataIni, dataFim, indice) {
-  const tabela = PECA_INDICES_MENSAIS[indice] || PECA_INDICES_MENSAIS.INPC;
-  let valor = valorInicial;
-  let cursor = new Date(dataIni.getFullYear(), dataIni.getMonth(), dataIni.getDate());
-  let mesesAplicados = 0;
-  // Caminha mês a mês: aplica índice do MÊS em que o cursor está (mês corrente)
-  // até cursor passar dataFim. O índice do mês é publicado no fim do mês,
-  // então a aplicação é feita no último dia útil do mês — aqui simplificamos
-  // pra "aplica ao virar de mês" (último dia do mês corrente).
-  while (true) {
-    // Calcula o último dia do mês corrente
-    const fimDoMes = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0);
-    if (fimDoMes >= dataFim) break;
-    const chave = cursor.getFullYear() + '-' + String(cursor.getMonth() + 1).padStart(2, '0');
-    const pct = (chave in tabela) ? tabela[chave] : 0;
-    valor = valor * (1 + pct / 100);
-    mesesAplicados++;
-    // Avança pra o primeiro dia do próximo mês
-    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1);
-  }
-  return { valorCorrigido: valor, mesesAplicados };
+  return CalcEngine.correcaoMensal(valorInicial, dataIni, dataFim, indice);
 }
 
 function pecaCalcularRapido() {
@@ -9884,25 +9837,18 @@ function pecaCalcularRapido() {
 
 // Helper modo jurídica memorial — extrai a lógica de pecaCalcularRapido
 // pra uso compartilhado (tela standalone + wizard).
+// Conta JURÍDICA (memorial) — delega para a MATRIZ (templates/calc-engine.js) e
+// reembala no formato que o CRM já consome (chave honorariosPct, modo, etc.).
+// Antes era cópia do _petCalcJuridica do index. Ver docs/calc/MATRIZ.md.
 function _calcJuridicaMemorial(valorNominal, dataIni, dataFim, indice, multaPct, honorariosPct, jurosMensalPct) {
-  const corr = _pecaAplicarCorrecaoMensal(valorNominal, dataIni, dataFim, indice);
-  const valorAtualizado = Math.max(corr.valorCorrigido, valorNominal);
-  const aplicouGarantiaSTJ = corr.valorCorrigido < valorNominal;
-  const diasDecorridos = (dataFim - dataIni) / (1000 * 60 * 60 * 24);
-  const mesesPRO = diasDecorridos / 30;
-  const juros = valorAtualizado * (jurosMensalPct / 100) * mesesPRO;
-  const multa = valorAtualizado * (multaPct / 100);
-  const baseHon = valorAtualizado + juros + multa;
-  const honorarios = baseHon * (honorariosPct / 100);
-  const total = valorAtualizado + juros + multa + honorarios;
+  const r = CalcEngine.juridica(valorNominal, dataIni, dataFim, indice, multaPct, honorariosPct, jurosMensalPct);
   return {
-    valorNominal, indice, multaPct, honorariosPct, jurosMensalPct,
-    valorAtualizado, aplicouGarantiaSTJ,
-    mesesPRO: Math.round(mesesPRO * 100) / 100,
-    mesesCorrigidos: corr.mesesAplicados,
-    juros, multa, honorarios, total,
-    modo: 'juridica',
-    indice_ate: PECA_INDICES_ATE
+    valorNominal: r.valorNominal, indice: r.indice, multaPct: r.multaPct,
+    honorariosPct: r.honPct, jurosMensalPct: r.jurosMensalPct,
+    valorAtualizado: r.valorAtualizado, aplicouGarantiaSTJ: r.aplicouGarantiaSTJ,
+    mesesPRO: r.mesesPRO, mesesCorrigidos: r.mesesCorrigidos,
+    juros: r.juros, multa: r.multa, honorarios: r.honorarios, total: r.total,
+    modo: 'juridica', indice_ate: r.indice_ate
   };
 }
 
