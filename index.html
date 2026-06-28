@@ -16993,6 +16993,37 @@ function chatTipoInfo(id){ return CHAT_TIPOS.find(t=>t.id===id) || CHAT_TIPOS[0]
 function chatModo(t){ return (chatTipoInfo(t||(window._chat&&_chat.tipo)).modo)||'inicial'; }
 function chatTituloDefault(tipo, dev){ return chatTipoInfo(tipo).nome + (dev&&dev.nome ? ' — '+dev.nome : ''); }
 
+// ── Playbook de DILIGÊNCIAS PATRIMONIAIS (ordem-padrão do escritório) ──────────
+// Codifica a skill `pesquisa-patrimonial-execucao` (sequencias-taticas.md +
+// modelos-fundamentacao.md). `fund` é a fundamentação compacta que a Bia usa ao
+// redigir cada medida — já incorpora as PENDÊNCIAS conferidas em 2026-06-19:
+// Sisbajud SEMPRE a versão curta/teimosinha (NÃO citar Portaria SEP 2/2026 nem
+// Resolução CNJ 584/2024 — não confirmadas); Infojud "PRESCINDE" do esgotamento
+// (o modelo tinha erro lógico); penhora no rosto fecha a lista.
+const DILIG_MEDIDAS = [
+  { id:'sisbajud',     ordem:1,  nome:'Sisbajud',                  sis:'Sisbajud',  jec:true,  fund:'bloqueio de ativos financeiros, art. 854 do CPC, reiterado pela teimosinha (art. 854, §3º). Usar SEMPRE a fundamentação curta/teimosinha — NÃO citar Portaria SEP 2/2026 nem Resolução CNJ 584/2024.' },
+  { id:'renajud',      ordem:2,  nome:'Renajud (veículos)',        sis:'Renajud',   jec:true,  fund:'pesquisa e restrição de veículos via Renajud, com pedido de penhora, avaliação e remoção dos bens localizados.' },
+  { id:'mandado',      ordem:3,  nome:'Mandado de penhora/avaliação', sis:'Oficial', jec:false, fund:'penhora e avaliação por oficial de justiça no endereço (bens móveis/imóveis), art. 829, §1º (em regra acompanha o Renajud).' },
+  { id:'prevjud',      ordem:4,  nome:'Salário/INSS (PrevJud)',    sis:'PrevJud',   jec:false, fund:'consulta de vínculos e benefícios via PrevJud (sem constrição); penhora de até 30% só com cláusula de desconto em acordo homologado, Enunciado 59 do FONAJE.' },
+  { id:'negativacao',  ordem:5,  nome:'Negativação (Serasajud)',   sis:'Serasajud', jec:true,  fund:'inscrição do executado em cadastros de inadimplentes, art. 782, §3º, do CPC (pressão, sem custo).' },
+  { id:'infojud',      ordem:6,  nome:'Infojud (DIRPF/DITR)',      sis:'Infojud',   jec:true,  fund:'requisição das declarações de IR (DIRPF) e do ITR via Infojud, art. 139, IV, do CPC; STJ AREsp 1.528.536/RJ — a medida PRESCINDE do esgotamento de outras diligências.' },
+  { id:'censec',       ordem:7,  nome:'Censec (notarial)',         sis:'Censec',    jec:false, fund:'consulta à central notarial (escrituras, procurações, inventários) para apurar imóveis/heranças transferidos.' },
+  { id:'crcjud',       ordem:8,  nome:'CRCjud (estado civil)',     sis:'CRCjud',    jec:false, fund:'consulta de estado civil/casamento (regime de bens → meação/cônjuge), arts. 4º a 6º do CPC.' },
+  { id:'fgts',         ordem:9,  nome:'FGTS',                      sis:'FGTS',      jec:false, fund:'consulta e penhora do saldo de FGTS do executado.' },
+  { id:'serpjud',      ordem:10, nome:'SERP-JUD (imóveis)',        sis:'SERP-JUD',  jec:false, fund:'pesquisa de imóveis pelo registro eletrônico (Lei 14.382/2022; Provimento CNJ 149/2023), com penhora dos bens localizados.' },
+  { id:'cnib',         ordem:11, nome:'CNIB (indisponibilidade)',  sis:'CNIB',      jec:true,  fund:'averbação de indisponibilidade de bens, art. 320-A do CNN/CNJ; STJ REsp 1.816.302/RS (pressão e garantia sobre imóveis).' },
+  { id:'empresa_ei',   ordem:12, nome:'Empresa no nome / EI',      sis:'',          jec:false, fund:'verificar se o executado é sócio ou empresário individual; a inclusão do empresário individual independe de incidente de desconsideração (STJ REsp 1.355.000/SP).' },
+  { id:'penhora_rosto',ordem:13, nome:'Penhora no rosto dos autos',sis:'',          jec:true,  fund:'penhora de eventual crédito do executado em outros processos (penhora no rosto dos autos), arts. 789, 797, 835, I, e 860 do CPC.' },
+];
+function diligMedida(id){ return DILIG_MEDIDAS.find(m=>m.id===id); }
+// Presets por perfil do executado (quais medidas vêm pré-marcadas p/ "Requerer").
+const DILIG_PERFIS = {
+  pf_informal: { label:'PF informal (JEC) — padrão', sel:['sisbajud','renajud','negativacao','infojud','cnib'] },
+  pf_bens:     { label:'PF com indícios de bens',     sel:['sisbajud','renajud','mandado','serpjud','infojud','penhora_rosto'] },
+  pj_ativa:    { label:'PJ ativa',                    sel:['sisbajud','renajud','infojud','empresa_ei','penhora_rosto'] },
+  pj_inativa:  { label:'PJ inativa / baixada',        sel:['sisbajud','infojud','empresa_ei'] },
+};
+
 let _chatSaveTimer = null;
 
 function chatMd(s){
@@ -17035,7 +17066,46 @@ function chatSeedIntake(){
   if(!it.vara && (seed.vara||seed.comarca_vara)) it.vara = seed.vara||seed.comarca_vara;
   if(!it.processo && (seed.processo||seed.num_processo)) it.processo = seed.processo||seed.num_processo;
   if(!it.titulo && (seed.titulo||seed.titulo_exec)) it.titulo = seed.titulo||seed.titulo_exec;
+  if(_chat.tipo==='diligencia' && !_chat.dilig) diligInit(seed.perfil_dilig);
   return it;
+}
+// ── Checklist de diligências (_chat.dilig = { perfil, sel:{ id:{req,neg} } }) ──
+function diligInit(perfil){
+  perfil = perfil || (_chat.dilig&&_chat.dilig.perfil) || 'pf_informal';
+  const preset = (DILIG_PERFIS[perfil]||DILIG_PERFIS.pf_informal).sel;
+  const prev = (_chat.dilig&&_chat.dilig.sel)||{};
+  const sel = {};
+  DILIG_MEDIDAS.forEach(m=>{ sel[m.id] = { req: preset.indexOf(m.id)>=0, neg: !!(prev[m.id]&&prev[m.id].neg) }; });
+  _chat.dilig = { perfil, sel };
+  return _chat.dilig;
+}
+function diligEnsure(){ if(!_chat.dilig) diligInit(); return _chat.dilig; }
+function diligSetPerfil(p){ diligInit(p); pecaStepRender(); }
+function diligToggle(id, field){
+  const d=diligEnsure(); if(!d.sel[id]) d.sel[id]={req:false,neg:false};
+  d.sel[id][field]=!d.sel[id][field];
+  if(field==='neg' && d.sel[id].neg) d.sel[id].req=false;   // negativa não é pedido
+  pecaStepRender();
+}
+// Medidas a REQUERER agora e as JÁ TENTADAS (negativas), em ordem-padrão.
+function diligListas(){
+  const d=diligEnsure(); const req=[], neg=[];
+  DILIG_MEDIDAS.forEach(m=>{ const s=d.sel[m.id]||{}; if(s.neg) neg.push(m); else if(s.req) req.push(m); });
+  return { req, neg };
+}
+// Manda a Bia redigir o requerimento com as medidas marcadas (vai p/ a etapa da Bia).
+function diligGerar(){
+  const { req, neg } = diligListas();
+  if(!req.length){ showToast('Marque ao menos uma diligência para requerer.','warning'); return; }
+  let msg = 'Redija o requerimento de diligências patrimoniais pedindo, NA ORDEM, estas medidas: '
+    + req.map(m=>m.nome).join('; ') + '.';
+  if(neg.length) msg += ' Já foram tentadas e restaram NEGATIVAS — mencione o esgotamento e NÃO as repita como pedido: '
+    + neg.map(m=>m.nome).join('; ') + '.';
+  msg += ' Use a fundamentação de cada medida conforme as instruções do sistema e encerre com o pedido cabível.';
+  if(typeof pecaStepGo==='function') pecaStepGo(3);   // etapa 4 (Bia)
+  _chat.messages.push({ role:'user', content:msg, ts:Date.now() });
+  if(typeof chatRenderMessages==='function') chatRenderMessages();
+  chatDispatch([]);
 }
 function chatGotoTab(){
   // Vai para a página dedicada "Peças & Ações Judiciais"; showPage chama renderPecas()
@@ -17329,12 +17399,13 @@ async function pecaSalvarCadastro(){
 // ── Etapa 2 — Dados da ação + OCR ─────────────────────────────────────────────
 function pecaStep2(){
   const it=_chat.intake; const E=s=>escHtml(s||'');
-  const ehProcesso=(_chat.tipo==='cumprimento'||_chat.tipo==='execucao');
+  const ehProcesso=(chatModo()==='intercorrente'||_chat.tipo==='cumprimento'||_chat.tipo==='execucao');
   const tipoChips=CHAT_TIPOS.map(t=>`<button class="cob-chip ${t.id===_chat.tipo?'on':''}" onclick="dadosSetTipo('${t.id}')">${escHtml(t.nome)}</button>`).join('');
   const pre=pecaForoPresets();
   const ocr=_chat.ocr;
   return `<div class="pw-stepbody">
     <div class="pw-card"><div class="pw-card-h">Tipo de ação</div><div class="cob-chiprow">${tipoChips}</div></div>
+    ${_chat.tipo==='diligencia'?diligCardHtml():''}
     <div class="pw-card">
       <div class="pw-card-h">Anexe o título ou contrato <span class="pw-card-sub">a Bia lê o documento na redação</span></div>
       ${ocr? pecaOcrPanel(ocr) : `<div class="pw-dropzone" id="pw-dropzone" onclick="document.getElementById('pw-ocr-file').click()" ondragover="event.preventDefault();this.classList.add('drag')" ondragleave="this.classList.remove('drag')" ondrop="event.preventDefault();this.classList.remove('drag');pecaOcrFile(event.dataTransfer.files)">
@@ -17361,6 +17432,37 @@ function pecaStep2(){
         <div class="pw-part"><div class="pw-part-h">Executado / devedor <button class="pw-mini" onclick="pecaStepGo(0)">trocar</button></div><input value="${E(it.reu.nome)}" oninput="_chat.intake.reu.nome=this.value" placeholder="Nome"><div class="pw-2col"><input value="${E(it.reu.doc)}" oninput="_chat.intake.reu.doc=this.value" placeholder="CPF/CNPJ"><input value="${E(it.reu.endereco)}" oninput="_chat.intake.reu.endereco=this.value" placeholder="Endereço"></div></div>
       </div>
     </div>
+  </div>`;
+}
+// Checklist tático de diligências (Etapa 2, só p/ tipo='diligencia'). Pré-marca o
+// preset do perfil; cada medida tem "Requerer" e "já tentada (neg.)". O botão
+// "Gerar requerimento" leva à Bia (etapa 4) já com a instrução montada.
+function diligCardHtml(){
+  const d=diligEnsure();
+  const perfilChips=Object.keys(DILIG_PERFIS).map(k=>`<button class="cob-chip ${k===d.perfil?'on':''}" onclick="diligSetPerfil('${k}')">${escHtml(DILIG_PERFIS[k].label)}</button>`).join('');
+  const row=(m)=>{
+    const s=d.sel[m.id]||{};
+    const badge=m.sis?`<span style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.04em;color:var(--text-3);border:1px solid var(--border);border-radius:4px;padding:0 5px;margin-left:7px;">${escHtml(m.sis)}</span>`:'';
+    return `<div style="display:flex;align-items:center;gap:10px;padding:7px 2px;border-bottom:1px solid var(--border);${s.neg?'opacity:.6;':''}">
+      <label style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;cursor:pointer;font-size:13px;color:var(--text);">
+        <input type="checkbox" ${s.req&&!s.neg?'checked':''} ${s.neg?'disabled':''} onchange="diligToggle('${m.id}','req')" style="width:15px;height:15px;cursor:pointer;flex:0 0 auto;">
+        <span style="${s.req&&!s.neg?'font-weight:600;':''}"><span style="color:var(--text-3);font-variant-numeric:tabular-nums;">${m.ordem}.</span> ${escHtml(m.nome)}${badge}</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px;color:var(--text-3);white-space:nowrap;" title="Já tentada e negativa — entra na narrativa de esgotamento, não como pedido">
+        <input type="checkbox" ${s.neg?'checked':''} onchange="diligToggle('${m.id}','neg')" style="width:13px;height:13px;cursor:pointer;">já tentada (neg.)
+      </label>
+    </div>`;
+  };
+  const { req, neg } = diligListas();
+  return `<div class="pw-card">
+    <div class="pw-card-h">Diligências a requerer <span class="pw-card-sub">ordem-padrão do escritório · marque o que pedir agora e o que já foi negativo</span></div>
+    <div class="cob-chiprow" style="margin-bottom:10px;">${perfilChips}</div>
+    <div>${DILIG_MEDIDAS.map(row).join('')}</div>
+    <div style="display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap;">
+      <button class="cob-btn-primary" onclick="diligGerar()">⚖ Gerar requerimento (${req.length})</button>
+      <span style="font-size:11.5px;color:var(--text-3);">${req.length} a requerer${neg.length?` · ${neg.length} já negativa(s)`:''}</span>
+    </div>
+    <div style="font-size:11px;color:var(--text-3);margin-top:8px;line-height:1.5;">A ordem não é absoluta — reordene conforme o caso. <em>Sisbajud</em> usa a teimosinha; a penhora no rosto fecha a lista. A Bia redige na etapa 4.</div>
   </div>`;
 }
 function pecaForoPresets(){
@@ -17862,7 +17964,12 @@ function chatContexto(){
   }
   const seed=_chat.seed||{};
   if(seed.intimacao_teor){ s+='- TEOR DA INTIMAÇÃO/ANDAMENTO a que esta peça responde'+(seed.fonte?(' ('+seed.fonte+')'):'')+': "'+String(seed.intimacao_teor).slice(0,1200)+'".\n'; }
-  if(_chat.seed){ try{ const rest=Object.assign({},seed); delete rest.intimacao_teor; delete rest.fonte; if(Object.keys(rest).length) s+='- Observações do caso: '+JSON.stringify(rest)+'\n'; }catch(e){} }
+  if(_chat.seed){ try{ const rest=Object.assign({},seed); delete rest.intimacao_teor; delete rest.fonte; delete rest.perfil_dilig; if(Object.keys(rest).length) s+='- Observações do caso: '+JSON.stringify(rest)+'\n'; }catch(e){} }
+  if(_chat.tipo==='diligencia' && _chat.dilig && typeof diligListas==='function'){
+    const dl=diligListas();
+    if(dl.req.length) s+='- DILIGÊNCIAS A REQUERER (nesta ordem): '+dl.req.map(m=>m.nome).join('; ')+'.\n';
+    if(dl.neg.length) s+='- DILIGÊNCIAS JÁ TENTADAS E NEGATIVAS (citar o esgotamento; NÃO repetir como pedido): '+dl.neg.map(m=>m.nome).join('; ')+'.\n';
+  }
   if(chatModo()==='intercorrente'){
     s+='\nIMPORTANTE: é PEÇA INTERCORRENTE (autos já em curso). Use o nº do processo no endereçamento (linha "Autos n. …"); NÃO qualifique as partes, NÃO crie título da ação nem valor da causa. Pergunte só o objetivo da petição (cumprir despacho, requerer diligência, manifestar) e os fatos do incidente.\n';
   } else {
@@ -17893,6 +18000,17 @@ function chatSystemPrompt(){
   p += 'Fecho: <div class="fecho"><p class="fecho-data">Dois Vizinhos, Estado do Paraná, '+_petDataExtenso()+'.</p><p class="fecho-nome">Dr. Gustavo Souza Teixeira dos Santos</p><p class="fecho-oab">OAB/PR 112.743 | <em>Advogado</em></p></div>. Use a data informada — não invente.\n';
   p += 'NOMES DAS PARTES sempre em <em>itálico</em> e Caixa Alta e Baixa (nome próprio), nunca em CAIXA ALTA nem em negrito.\n';
   p += 'FUNDAMENTAÇÃO conforme o objeto (cite só os artigos pertinentes): (a) DILIGÊNCIA / busca patrimonial — poder geral de efetivação (art. 139, IV, CPC) e ordem preferencial de constrição, requerendo sucessivamente <em>Sisbajud</em> (penhora de ativos financeiros, art. 854), <em>Renajud</em> (veículos), <em>Infojud</em> (declarações fiscais), <em>Serasajud</em> e, subsidiariamente, a penhora no rosto dos autos, observada a ordem do art. 835; (b) CUMPRIMENTO de despacho/prazo — declare que cumpre a determinação de fl./mov. ___ e indique o que junta; (c) MANIFESTAÇÃO — exponha o fato novo e o requerimento dele decorrente.\n\n';
+  if(_chat.tipo==='diligencia' && _chat.dilig && typeof diligListas==='function'){
+    const dl=diligListas();
+    if(dl.req.length){
+      p += 'REQUERIMENTO DE DILIGÊNCIAS — redija UMA peça pedindo as medidas abaixo NESTA ORDEM, cada uma com a sua fundamentação (abra remetendo ao art. 139, IV, e à ordem do art. 835 do CPC). Nomes de sistemas em <em>itálico</em>:\n';
+      dl.req.forEach((m,i)=>{ p += '  '+(i+1)+'. '+m.nome+' — '+m.fund+'\n'; });
+    }
+    if(dl.neg.length){
+      p += 'JÁ ESGOTADAS (negativas) — registre na narrativa que foram tentadas sem êxito e NÃO as repita como pedido: '+dl.neg.map(m=>m.nome).join('; ')+'.\n';
+    }
+    p += 'Forma: parágrafo curto de contexto (execução em curso; frustração do que já se tentou) e, em seguida, os pedidos das medidas selecionadas em prosa OU em lista a)/b)/c) na ordem dada; se a penhora no rosto dos autos estiver entre as medidas, deixe-a por último como pedido subsidiário. NÃO inclua medida não listada.\n\n';
+  }
   } else {
   p += 'ESTRUTURA EXATA (classes obrigatórias). ATENÇÃO: o endereçamento fica SOZINHO no topo; o bloco autor → título → réu fica JUNTO embaixo (o sistema deixa o espaço no meio). NÃO separe o título do réu.\n';
   p += '<div class="pagina-um">\n';
