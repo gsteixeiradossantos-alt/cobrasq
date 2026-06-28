@@ -102,6 +102,42 @@ no código, ou ação na UI) e o **estado-correto** esperado. Atualize ao descob
 - **Teste:** `grep` por checagem de status real na resposta do Z-API; PR #91 mergeado?
 - **Estado-correto:** envio só vira "enviada" com confirmação do Z-API. **Última checagem:** #91 DRAFT — ABERTO.
 
+## R-11 · Calculadora: matriz única vs. filiais que voltam a divergir
+- **O que é:** correção/juros/multa/honorários têm **UMA matriz** — `templates/calc-engine.js`
+  (`CalcEngine.juridica / cobranca / correcaoMensal` + tabelas de índice). As telas são **filiais finas que só
+  CHAMAM**. Toda fórmula **ou tabela de índice copiada** numa tela volta a divergir (atualiza numa, esquece na
+  outra → a MESMA dívida dá total diferente conforme a aba/fluxo). Foi exatamente a origem do #180 (3 motores +
+  ~13 tabelas hardcoded, já divergentes).
+- **Onde:** matriz `templates/calc-engine.js` (carregada por `<script src="/templates/calc-engine.js">` em
+  `index.html` e `crm.html`). Filiais: `index.html` (`calcDividaCobranca`, `_petCalcJuridica`, `petComputeCalc`,
+  **`calcDividaAtualizada` + `CALC_INPC_MENSAL`**), `crm.html` (`_calcCobrancaSimples`, `_calcJuridicaMemorial`,
+  `_pecaAplicarCorrecaoMensal`), `calc-juridica.html` (standalone, iframe no CRM).
+- **Teste:**
+  - `grep -nE "CalcEngine\.(juridica|cobranca|correcaoMensal)" index.html crm.html` → toda peça/cobrança/memorial
+    deve passar por aqui; **nenhum motor reimplementado inline**.
+  - `for f in index.html crm.html calc-juridica.html templates/calc-engine.js; do echo -n "$f "; grep -oc "'2024-06'" $f; done`
+    (conta tabelas mensais por arquivo). **Esperado hoje:** `templates/calc-engine.js`=4 · `crm.html`=0 ·
+    **`index.html`=1 (PENDENTE — `CALC_INPC_MENSAL`)** · `calc-juridica.html`=4 (standalone, fase 2). **Meta:**
+    `index.html`=0; idealmente só a matriz tem tabela.
+  - **Paridade de inputs da cobrança:** `calcDividaCobranca` (index — taxas de `getCalcParams()`→`DB.config`) e
+    `_calcCobrancaSimples` (crm — constantes `TAXA_*`) precisam mandar os MESMOS números **e o mesmo `meses`**
+    (index usa `dias/30.4375`; crm usa `mesesEntre()`) para `CalcEngine.cobranca` — senão divergem assim que o
+    gestor editar os parâmetros em `DB.config`.
+- **Estado-correto:** uma matriz; **nenhuma 2ª cópia** de tabela de índice; índice e taxas vêm de uma fonte só.
+- **Pendências (faxina do #180 — "Fase B/2"):**
+  1. **`calcDividaAtualizada` + `CALC_INPC_MENSAL`** (execução/Sisbajud "valor atualizado", INPC composta +
+     garantia STJ) → migrar para `CalcEngine.correcaoMensal` e **apagar a 2ª tabela INPC do `index.html`** (a que
+     vai driftar todo mês). **Mais urgente** — é a única tabela duplicada que sobrou.
+  2. **Paridade cobrança admin × CRM** — unificar a fonte das taxas (`DB.config` × constantes) e a convenção de
+     `meses`, senão a mesma dívida diverge entre o painel e o CRM quando o gestor mexer nos parâmetros.
+  3. **`calc-juridica.html` standalone na matriz** — decidir como levar a série histórica (~566 meses; a matriz
+     só tem ~24). Versão portátil entregue **fora do repo** em `~/Desktop/Cloude/Calculadora-Juridica-COBRASQ.html`
+     (CSS embutido, Supabase removido — abre offline; histórico desativado).
+- **Última checagem 2026-06-28:** #180 (`3e32e6a`) **no ar** — jurídica + cobrança + correção de index/crm já na
+  matriz; `crm.html` zerou suas tabelas; `petComputeCalc` (Bia multi-linha) usa `_petCalcJuridica`→matriz por
+  linha (honorários sobre o subtotal agregado = decisão, não duplicação). `/templates/calc-engine.js` servido em
+  prod como `application/javascript` (200). **Faltam os itens 1–3.**
+
 ---
 
 ### Invariantes guardadas (não quebrar)
