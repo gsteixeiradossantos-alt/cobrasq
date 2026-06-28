@@ -111,3 +111,21 @@ no código, ou ação na UI) e o **estado-correto** esperado. Atualize ao descob
   `feat/aviso-aprovacao-whatsapp`, `feat/editar-credor-aprovacao`).
 - Higiene git: **fetch+rebase antes de afirmar/pushar**; editar em worktree isolado (sessões concorrentes).
 - Posicionamento público COBRASQ = **extrajudicial** (o judicial é do escritório Teixeira & Azzolin).
+
+---
+
+### Pendências de evolução (não-regressão — rever a cada vistoria)
+Itens de roadmap acordados mas ainda **não construídos**. Não são bugs; servem para a auditoria
+lembrar o Gustavo e, se já tiverem virado código, conferir a migração/RLS correspondente.
+
+- **P-01 · Rastreamento por caso da sequência de diligências (Opção C).** Hoje a Bia gera o
+  requerimento de diligências por um **checklist tático** (Opção A, #181): o operador marca o que
+  requerer e o que "já tentou (negativa)" — esse estado **não é persistido**. A Opção C guardaria,
+  por execução, em que passo da ordem-padrão cada caso está (ex.: Sisbajud feita 12/06 negativa →
+  próxima é Renajud) e **sugeriria a próxima diligência automaticamente** na lista de execuções.
+  **Por que está parado:** exige **migração** (tabela/coluna nova p/ o histórico de diligências por
+  caso) — o modelo de dados ainda será decidido com o Gustavo.
+  **O que a auditoria deve fazer:** (a) perguntar se é hora de construir; (b) se já foi construído,
+  confirmar que a **migração está aplicada em prod** (não só em PR — ver R-04) e que a tabela nova
+  tem **RLS** ligada (mesma classe do R-07, para não vazar PII de execução). Base já no ar: modo
+  intercorrente (#169) + catálogo `DILIG_MEDIDAS`/checklist de diligências (#181) em `index.html`.
