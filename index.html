@@ -24468,6 +24468,11 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
           <label>API Token</label>
           <input type="password" id="cfg-zapsign-token" value="${DB.config.zapsignToken||''}" placeholder="Token do ZapSign (obtenha em app.zapsign.com.br)"/>
         </div>
+        <div class="fg">
+          <label>Mensagem padrão do WhatsApp (link de assinatura)</label>
+          <textarea id="cfg-zapsign-msg" rows="4" style="width:100%;font-family:inherit;font-size:13px;resize:vertical;" placeholder="${escHtml(AAV_MSG_DEFAULT)}">${escHtml(DB.config.zapsignMsgPadrao||'')}</textarea>
+          <div style="font-size:11px;color:var(--text-3);margin-top:4px;">Usada no menu <b>Assinaturas</b>. Variáveis: <code>{nome}</code>, <code>{titulo}</code>, <code>{link}</code>. Em vazio, usa o texto padrão. Você ainda pode editar a mensagem na hora de enviar.</div>
+        </div>
         <button class="btn btn-ghost btn-sm" id="btn-test-zapsign" onclick="testarZapSign()">Testar conexão</button>
         <span id="zapsign-test-result" style="font-size:12px;margin-left:8px;"></span>
       </div>
@@ -24742,6 +24747,7 @@ function salvarIntegracoes(){
   DB.config.asaasKey          = document.getElementById('cfg-asaas-key')?.value||'';
   DB.config.asaasEnv          = document.getElementById('cfg-asaas-env')?.value||'sandbox';
   DB.config.zapsignToken      = document.getElementById('cfg-zapsign-token')?.value||'';
+  DB.config.zapsignMsgPadrao  = document.getElementById('cfg-zapsign-msg')?.value||'';
   DB.config.zapiInstanceId    = document.getElementById('cfg-zapi-instance')?.value||'';
   DB.config.zapiToken         = document.getElementById('cfg-zapi-token')?.value||'';
   DB.config.zapiClientToken   = document.getElementById('cfg-zapi-client-token')?.value||'';
@@ -26187,6 +26193,17 @@ function zsStatusDot(s){
 //  sob demanda via ZapSignAPI.getDoc (o webhook NÃO toca nesta tabela).
 // ════════════════════════════════════════════════════════════════
 let _aavRows = [];
+let _aavPendingWa = null;
+// Mensagem padrão do WhatsApp (link de assinatura). Editável em Config → ZapSign
+// (DB.config.zapsignMsgPadrao) e ainda ajustável na hora de enviar.
+const AAV_MSG_DEFAULT = 'Segue o link para assinatura do documento *{titulo}*:\n{link}\n\nCOBRASQ — Recuperadora de Crédito';
+function _aavMsgTemplate(){ return (DB.config.zapsignMsgPadrao && DB.config.zapsignMsgPadrao.trim()) ? DB.config.zapsignMsgPadrao : AAV_MSG_DEFAULT; }
+function _aavMontarMsg(nome, titulo, link){
+  return _aavMsgTemplate()
+    .replace(/\{nome\}/g, nome||'')
+    .replace(/\{titulo\}/g, titulo||'Documento')
+    .replace(/\{link\}/g, link||'');
+}
 
 async function renderAssinaturas(){
   const el = document.getElementById('page-assinaturas'); if(!el) return;
@@ -26360,6 +26377,7 @@ async function enviarAssinaturaAvulsa(){
     showToast('Documento enviado para assinatura.','success');
 
     // 6) link copiável + envio por WhatsApp
+    _aavPendingWa = { tel, nome, titulo, link: signerLink };
     document.getElementById('mzs-body').innerHTML = `
       <div style="padding:8px 0 12px;">
         <div style="font-size:13px;font-weight:700;color:var(--success);margin-bottom:4px;">Documento enviado com sucesso.</div>
@@ -26371,7 +26389,7 @@ async function enviarAssinaturaAvulsa(){
             <button class="btn btn-primary btn-sm" onclick="navigator.clipboard.writeText('${escHtml(signerLink)}');showToast('Link copiado.','success');">Copiar</button>
           </div>
         </div>
-        ${tel && DB.config.zapiInstanceId ? `<button class="btn btn-ghost btn-sm" style="width:100%;" onclick="_aavEnviarWhats('${escHtml(tel)}','${escHtml(signerLink)}','${escHtml(titulo).replace(/'/g,"\\'")}')">Enviar link via WhatsApp</button>` : ''}
+        ${tel && DB.config.zapiInstanceId ? `<button class="btn btn-ghost btn-sm" style="width:100%;" onclick="_aavMostrarEnvioWhats()">Enviar link via WhatsApp</button>` : ''}
       </div>`;
     document.getElementById('mzs-footer').innerHTML = `
       <button class="btn btn-ghost" onclick="closeModal('modal-zapsign-status')">Fechar</button>
@@ -26386,13 +26404,38 @@ async function enviarAssinaturaAvulsa(){
   }
 }
 
-async function _aavEnviarWhats(tel, link, titulo){
-  if(!tel){ showToast('Sem telefone.','warning'); return; }
+// Abre, no modal de status, a mensagem do WhatsApp já montada do template — editável
+// antes de enviar. Lê o contexto de _aavPendingWa (tel/nome/titulo/link).
+function _aavMostrarEnvioWhats(){
+  const w = _aavPendingWa; if(!w) return;
+  if(!w.tel){ showToast('Sem telefone para este envio.','warning'); return; }
+  if(!DB.config.zapiInstanceId){ showToast('Z-API não configurado em Integrações.','warning'); return; }
+  const msg = _aavMontarMsg(w.nome, w.titulo, w.link);
+  document.getElementById('mzs-body').innerHTML = `
+    <div style="padding:4px 0 8px;">
+      <div style="font-size:12.5px;color:var(--text-2);margin-bottom:10px;">Mensagem para <strong>${escHtml(w.nome||'')}</strong> — edite se quiser antes de enviar.</div>
+      <textarea id="aav-wa-msg" rows="6" style="width:100%;font-size:12.5px;padding:10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);font-family:inherit;resize:vertical;">${escHtml(msg)}</textarea>
+      <div style="font-size:11px;color:var(--text-3);margin-top:6px;">O link de assinatura já está incluído na mensagem.</div>
+    </div>`;
+  document.getElementById('mzs-footer').innerHTML = `
+    <button class="btn btn-ghost" onclick="closeModal('modal-zapsign-status')">Cancelar</button>
+    <button class="btn btn-primary" id="aav-wa-send" onclick="_aavEnviarWhatsEdit()">Enviar via WhatsApp</button>`;
+  openModal('modal-zapsign-status');
+}
+
+async function _aavEnviarWhatsEdit(){
+  const w = _aavPendingWa; if(!w) return;
+  const msg = (document.getElementById('aav-wa-msg')||{}).value||'';
+  if(!msg.trim()){ showToast('Mensagem vazia.','warning'); return; }
+  const btn = document.getElementById('aav-wa-send'); if(btn){ btn.disabled=true; btn.textContent='Enviando…'; }
   try{
-    const msg = `Segue o link para assinatura do documento *${titulo||'Documento'}*:\n${link}\n\nCOBRASQ — Recuperadora de Crédito`;
-    await ZApiAPI.sendLink(tel, msg, link, `COBRASQ — ${titulo||'Documento'}`);
+    await ZApiAPI.sendLink(w.tel, msg, w.link, `COBRASQ — ${w.titulo||'Documento'}`);
     showToast('Link enviado via WhatsApp.','success');
-  }catch(e){ showToast(traduzirErro(e.message||String(e)),'danger'); }
+    closeModal('modal-zapsign-status');
+  }catch(e){
+    showToast(traduzirErro(e.message||String(e)),'danger');
+    if(btn){ btn.disabled=false; btn.textContent='Enviar via WhatsApp'; }
+  }
 }
 
 function aavCopiarLink(id){
@@ -26408,7 +26451,8 @@ function aavAbrir(id){
 function aavWhatsApp(id){
   const r = _aavRows.find(x=>x.id===id);
   if(!r){ return; }
-  _aavEnviarWhats(r.signer_tel||'', r.signer_link||'', r.titulo||'Documento');
+  _aavPendingWa = { tel:r.signer_tel||'', nome:r.signer_nome||'', titulo:r.titulo||'Documento', link:r.signer_link||'' };
+  _aavMostrarEnvioWhats();
 }
 async function aavAtualizarStatus(id){
   const r = _aavRows.find(x=>x.id===id);
