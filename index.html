@@ -6142,7 +6142,34 @@ function _impEnvs(p){
 }
 function _impEnvOk(e){ return !!(e && (e.nome||'').trim() && _impDocOk(e.doc) && _impTelOk(e.tel)); }
 function _impCardFaltam(p){ return _impEnvs(p).filter(e=>!_impEnvOk(e)).length; }
-function _impCardOk(p){ const envs=_impEnvs(p); return envs.length>=1 && envs.every(_impEnvOk) && envs.some(e=>e.principal); }
+// Credor: SÓ vincula a um cliente JÁ cadastrado (localizado no sistema). Nunca cria credor novo.
+function _impCliente(p){
+  if(!p || !p.clienteId) return null;
+  return (DB.clientes||[]).find(c=>c.id===p.clienteId && !c.arquivado) || null;
+}
+function _impClienteLabel(c){ const nm=(c.nomeFantasia||c.nome_fantasia||c.nome||'—'); const doc=(c.doc||'').trim(); return nm + (doc?` · ${doc}`:' · (sem CNPJ)'); }
+// Pré-vincula pelo nome SÓ quando há um único cliente existente com nome idêntico (não cria nada).
+function _impResolveCredor(p){
+  if(!p || p.clienteId || !p.credorNome) return;
+  const q=String(p.credorNome).trim().toLowerCase();
+  const m=(DB.clientes||[]).filter(c=>!c.arquivado && !c.isDraft && ((c.nome||'').toLowerCase()===q || (c.nomeFantasia||c.nome_fantasia||'').toLowerCase()===q));
+  if(m.length===1) p.clienteId=m[0].id;
+}
+function _impCredorOpts(p){
+  const sel=p.clienteId||'';
+  const list=(DB.clientes||[]).filter(c=>!c.arquivado && !c.isDraft)
+    .slice().sort((a,b)=>(a.nomeFantasia||a.nome||'').localeCompare(b.nomeFantasia||b.nome||'','pt-BR'));
+  const opts=list.map(c=>`<option value="${c.id}" ${c.id===sel?'selected':''}>${_impEsc(_impClienteLabel(c))}</option>`).join('');
+  return `<option value="" ${sel?'':'selected'}>— localize o cliente pelo CNPJ —</option>`+opts;
+}
+function _impSetCredor(id, clienteId){
+  const r=_impRow(id); if(!r) return; const c=(DB.clientes||[]).find(x=>x.id===clienteId);
+  r.payload.clienteId = c ? c.id : '';
+  r.payload.credorNome = c ? (c.nomeFantasia||c.nome_fantasia||c.nome||'') : (r.payload.credorNome||'');
+  r.payload.credorDoc  = c ? (c.doc||'') : '';
+  _impDraw();
+}
+function _impCardOk(p){ const envs=_impEnvs(p); return !!_impCliente(p) && envs.length>=1 && envs.every(_impEnvOk) && envs.some(e=>e.principal); }
 function _impPapelOpts(sel){ sel=sel||'emitente'; return Object.entries(_IMP_PAPEIS).map(([v,l])=>`<option value="${v}" ${v===sel?'selected':''}>${l}</option>`).join(''); }
 
 async function _impLoad(){
@@ -6240,14 +6267,16 @@ function _impDraw(){
 
 function _impCard(r){
   const p = r.payload||{};
+  _impResolveCredor(p);
   const envs = _impEnvs(p);
+  const cli = _impCliente(p);
   const ok = _impCardOk(p), sel = _impSel.has(r.id);
   const princ = envs.find(e=>e.principal) || envs[0] || {};
   const title = (princ.nome||'').trim() || p.descDivida || p.titulo || '(cobrança)';
   const andam = Array.isArray(p.processoHistorico)? p.processoHistorico.length : 0;
   const tags = Array.isArray(p.tags)? p.tags : [];
   const faltam = _impCardFaltam(p), semP = !envs.some(e=>e.principal);
-  const badgeTxt = ok ? 'pronto' : (faltam ? ('faltam '+faltam) : (semP?'marque principal':'revisar'));
+  const badgeTxt = ok ? 'pronto' : (!cli ? 'vincular credor' : (faltam ? ('faltam '+faltam) : (semP?'marque principal':'revisar')));
   const inp = 'padding:7px 8px;border-radius:7px;font-size:12.5px;background:var(--surface,#fff);color:var(--text);box-sizing:border-box;width:100%;min-width:0;';
   return `
   <div data-imp-id="${r.id}" style="border:1px solid ${ok?'var(--border)':'#fcd34d'};border-radius:12px;background:var(--surface,#fff);overflow:hidden;${sel?'box-shadow:0 0 0 2px var(--navy);':''}">
@@ -6255,7 +6284,7 @@ function _impCard(r){
       <input type="checkbox" ${sel?'checked':''} onclick="_impToggleSel('${r.id}')" style="margin-top:3px;">
       <div style="flex:1;min-width:0;">
         <div style="font-size:14px;font-weight:700;color:var(--text);line-height:1.25;">${_impEsc(title)}</div>
-        <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">Credor: ${_impEsc(p.credorNome||'—')}${r.lote?` • ${_impEsc(r.lote)}`:''}</div>
+        <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">Credor da planilha: ${_impEsc(p.credorNome||'—')}${r.lote?` • ${_impEsc(r.lote)}`:''}</div>
       </div>
       <span data-imp-badge style="font-size:10px;font-weight:800;text-transform:uppercase;color:${ok?'#fff':'#92400e'};background:${ok?'#10b981':'#fde68a'};padding:3px 8px;border-radius:9px;white-space:nowrap;">${badgeTxt}</span>
     </div>
@@ -6264,6 +6293,14 @@ function _impCard(r){
         ${p.processoNum?`<span>⚖️ ${_impEsc(p.processoNum)}</span>`:`<span style="color:var(--text-4);">sem nº processo</span>`}
         ${andam?`<span>🕘 ${andam} andamento${andam===1?'':'s'}</span>`:''}
       </div>
+      <label style="font-size:11px;color:var(--text-3);font-weight:600;display:block;margin-bottom:12px;">Credor (cliente cadastrado)
+        <select data-imp-credor onchange="_impSetCredor('${r.id}',this.value);_impPersist('${r.id}')" style="${inp}border:1px solid ${cli?'var(--border)':'#fcd34d'};margin-top:3px;">
+          ${_impCredorOpts(p)}
+        </select>
+        ${cli
+          ? `<div style="font-size:11px;color:#047857;margin-top:4px;">✓ Vinculado a <b>${_impEsc(cli.nomeFantasia||cli.nome_fantasia||cli.nome||'')}</b>${(cli.doc||'').trim()?` · ${_impEsc(cli.doc)}`:' · (cliente sem CNPJ cadastrado)'}</div>`
+          : `<div style="font-size:11px;color:#92400e;margin-top:4px;">⚠ Localize o cliente pelo CNPJ. Não está na lista? <a href="#" onclick="showPage('clientes');return false;" style="color:var(--navy);font-weight:700;">Cadastre em Clientes</a> e volte — o import não cria credor.</div>`}
+      </label>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">
         <label style="font-size:11px;color:var(--text-3);font-weight:600;">Valor original
           <input value="${_impEsc(p.valorOrig||'')}" oninput="_impEdit('${r.id}','valorOrig',this.value)" onblur="_impPersist('${r.id}')" style="${inp}border:1px solid var(--border);margin-top:3px;">
@@ -6331,9 +6368,9 @@ function _impUpdateCardValidity(id){
     const ti=row.querySelector('[data-imp-envf="tel"]'); if(ti) ti.style.borderColor=_impTelOk(e.tel)?'var(--border)':'#fcd34d';
   });
   const badge=card.querySelector('[data-imp-badge]');
-  if(badge){ const faltam=_impCardFaltam(p), semP=!envs.some(e=>e.principal);
+  if(badge){ const faltam=_impCardFaltam(p), semP=!envs.some(e=>e.principal), semCli=!_impCliente(p);
     if(ok){ badge.textContent='pronto'; badge.style.color='#fff'; badge.style.background='#10b981'; }
-    else { badge.textContent= faltam?('faltam '+faltam):(semP?'marque principal':'revisar'); badge.style.color='#92400e'; badge.style.background='#fde68a'; }
+    else { badge.textContent= semCli?'vincular credor':(faltam?('faltam '+faltam):(semP?'marque principal':'revisar')); badge.style.color='#92400e'; badge.style.background='#fde68a'; }
   }
 }
 async function _impPersist(id){
@@ -6350,6 +6387,7 @@ function _impToggleAll(on){ _impSel.clear(); if(on) _impRows.forEach(r=>_impSel.
 // espelhando salvarCobranca(). Em teste local (mock / sem Supabase) apenas simula.
 async function _impSalvar(id, silent){
   const r=_impRow(id); if(!r) return false; const p=r.payload;
+  if(!_impCliente(p)){ if(!silent) showToast('Vincule o credor a um cliente já cadastrado (localize pelo CNPJ). Se não existir, cadastre em Clientes e volte — o import não cria credor.','warning'); return false; }
   if(!_impCardOk(p)){ if(!silent) showToast('Cada envolvido precisa de nome, CPF/CNPJ e telefone; marque um principal.','warning'); return false; }
   const supa=(typeof getSupabase==='function')?getSupabase():null;
   const envs=_impEnvs(p);
@@ -6364,14 +6402,11 @@ async function _impSalvar(id, silent){
     const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
     const uidUser = sess?.data?.session?.user?.id || null;
 
-    // 1) credor (cliente)
-    let clienteId=null;
-    const credorNome=(p.credorNome||'').trim();
-    if(credorNome){
-      const ex=(DB.clientes||[]).find(c=>(c.nome||'').toLowerCase()===credorNome.toLowerCase() || (c.nomeFantasia||c.nome_fantasia||'').toLowerCase()===credorNome.toLowerCase());
-      if(ex){ clienteId=ex.id; }
-      else{ const { data, error }=await supa.from('clientes').insert({ nome:credorNome, metadata:{ origem:'import_astrea' } }).select('id').single(); if(error) throw new Error('credor: '+error.message); clienteId=data.id; }
-    }
+    // 1) credor (cliente) — DEVE já existir no sistema, localizado pelo CNPJ. NUNCA cria credor novo.
+    const cli=_impCliente(p);
+    if(!cli){ throw new Error('Credor não vinculado a um cliente cadastrado. Localize-o pelo CNPJ; se não existir, cadastre em Clientes.'); }
+    const clienteId=cli.id;
+    const credorNome=(cli.nomeFantasia||cli.nome_fantasia||cli.nome||'').trim();
 
     // 2) contatos (devedores) por envolvido
     for(const e of envs){
@@ -6437,7 +6472,12 @@ async function _impBulkDescartar(){
   if(confirm(`Descartar ${ids.length} cobrança(s) da importação?`)) go();
 }
 function _impBulkStatus(){ _impPrompt('Status em lote',`Novo status para ${_impSel.size} cobrança(s):`,(v)=>{ if(!v) return; [..._impSel].forEach(id=>{const r=_impRow(id); if(r){ r.payload.status=v; _impPersist(id); }}); _impDraw(); },{hint:_impStatusOpts.join(', ')}); }
-function _impBulkCredor(){ _impPrompt('Credor em lote',`Nome do credor para ${_impSel.size} cobrança(s):`,(v)=>{ if(!v) return; [..._impSel].forEach(id=>{const r=_impRow(id); if(r){ r.payload.credorNome=v; _impPersist(id); }}); _impDraw(); },{hint:(DB.clientes||[]).map(c=>c.nome).slice(0,8).join(', ')}); }
+function _impBulkCredor(){ _impPrompt('Credor em lote',`Vincule ${_impSel.size} cobrança(s) a um cliente já cadastrado (nome ou CNPJ):`,(v)=>{
+  if(!v) return; const q=String(v).trim().toLowerCase(), qd=docSoDigitos(v);
+  const c=(DB.clientes||[]).find(x=>!x.arquivado && !x.isDraft && ( ((qd.length===11||qd.length===14) && docSoDigitos(x.doc)===qd) || (x.nome||'').toLowerCase()===q || (x.nomeFantasia||x.nome_fantasia||'').toLowerCase()===q ));
+  if(!c){ showToast('Cliente não encontrado pelo nome/CNPJ no sistema. Cadastre em Clientes e tente de novo — o import não cria credor.','warning'); return; }
+  [..._impSel].forEach(id=>{const r=_impRow(id); if(r){ r.payload.clienteId=c.id; r.payload.credorNome=c.nomeFantasia||c.nome_fantasia||c.nome||''; r.payload.credorDoc=c.doc||''; _impPersist(id); }}); _impDraw();
+},{hint:(DB.clientes||[]).map(c=>c.nomeFantasia||c.nome).slice(0,8).join(', ')}); }
 function _impBulkFase(){ _impPrompt('Fase em lote',`Fase para ${_impSel.size} cobrança(s):`,(v)=>{ const f=(v||'').toLowerCase().includes('extra')?'extrajudicial':'judicial'; [..._impSel].forEach(id=>{const r=_impRow(id); if(r){ r.payload.fase=f; _impPersist(id); }}); _impDraw(); },{hint:'judicial / extrajudicial'}); }
 // IMPORTACAO TEMP END ════════════════════════════════════════════════════════
 
@@ -10932,11 +10972,9 @@ async function mdevCnpjBuscar(){
   if(cnpj.length !== 14){ showErr('Informe um CNPJ válido (14 dígitos).'); return; }
   if(btn){ btn.disabled=true; btn.textContent='Consultando…'; }
   try{
-    const resp = await fetch(`https://brasilapi.com.br/api/cnpj/v1/${cnpj}`);
-    if(resp.status===404){ showErr('CNPJ não encontrado na Receita Federal.'); return; }
-    if(resp.status===429){ showErr('Muitas consultas — aguarde alguns segundos e tente novamente.'); return; }
-    if(!resp.ok){ showErr(`Falha na consulta (HTTP ${resp.status}).`); return; }
-    const data = await resp.json();
+    const r = await cnpjLookupReceita(cnpj);
+    if(!r.ok){ showErr(cnpjLookupErroMsg(r)); return; }
+    const data = r.data;
     const cepFmt = (data.cep && /^\d{8}$/.test(String(data.cep))) ? `${String(data.cep).slice(0,5)}-${String(data.cep).slice(5)}` : (data.cep||'');
     const cnpjFmt = `${cnpj.slice(0,2)}.${cnpj.slice(2,5)}.${cnpj.slice(5,8)}/${cnpj.slice(8,12)}-${cnpj.slice(12)}`;
     mdevCnpjAplicar({
@@ -15238,7 +15276,64 @@ function mcliDiAplicarExtracted(extracted){
   showToast('Beatriz preencheu os dados — revise antes de salvar.','success');
 }
 
-// ─── CNPJ lookup via BrasilAPI (Receita Federal) ───
+// ─── CNPJ lookup via Receita (BrasilAPI → fallback CNPJ.ws) ───
+// A BrasilAPI puxa da base "Minha Receita", que NÃO tem muitos CNPJs válidos
+// (recém-abertos, algumas filiais) e devolve 404. Quando isso acontece,
+// caímos automaticamente na CNPJ.ws pública (gratuita, libera CORS).
+// Retorna { ok:true, data:{...shape da BrasilAPI...} } ou
+// { ok:false, error:'not_found'|'rate_limit'|'http'|'network', status? }.
+async function _cnpjFetch(url, ms){
+  // fetch com timeout para não travar o botão em "Consultando…"
+  const ctrl = (typeof AbortController!=='undefined') ? new AbortController() : null;
+  const t = ctrl ? setTimeout(()=>ctrl.abort(), ms||8000) : null;
+  try { return await fetch(url, ctrl ? { signal: ctrl.signal } : undefined); }
+  finally { if(t) clearTimeout(t); }
+}
+async function cnpjLookupReceita(cnpj){
+  let baStatus = 0;
+  // 1) BrasilAPI
+  try {
+    const resp = await _cnpjFetch(`https://brasilapi.com.br/api/cnpj/v1/${cnpj}`);
+    baStatus = resp.status;
+    if(resp.ok){ return { ok:true, fonte:'BrasilAPI', data: await resp.json() }; }
+    // 404/429/5xx → tenta o fallback
+  } catch(e){ /* rede/timeout — tenta o fallback mesmo assim */ }
+  // 2) Fallback CNPJ.ws público (mapeia para o shape da BrasilAPI)
+  try {
+    const resp2 = await _cnpjFetch(`https://publica.cnpj.ws/cnpj/${cnpj}`);
+    if(resp2.status === 429){ return { ok:false, error:'rate_limit' }; }
+    if(resp2.status === 404){ return { ok:false, error:'not_found' }; }
+    if(!resp2.ok){ return baStatus===404 ? { ok:false, error:'not_found' } : { ok:false, error:'http', status: resp2.status }; }
+    const w = await resp2.json();
+    const e = w.estabelecimento || {};
+    const norm = (s)=> (s||'').replace(/\s+/g,' ').trim();
+    const tel  = [e.ddd1, e.telefone1].filter(Boolean).join('');
+    const logr = norm([e.tipo_logradouro, e.logradouro].filter(Boolean).join(' '));
+    return { ok:true, fonte:'CNPJ.ws', data: {
+      razao_social:   w.razao_social || '',
+      nome_fantasia:  e.nome_fantasia || '',
+      ddd_telefone_1: tel,
+      email:          e.email || '',
+      cep:            e.cep || '',
+      logradouro:     logr,
+      numero:         e.numero || '',
+      complemento:    norm(e.complemento),
+      bairro:         e.bairro || '',
+      municipio:      (e.cidade && e.cidade.nome) || '',
+      uf:             (e.estado && e.estado.sigla) || ''
+    }};
+  } catch(e){
+    return baStatus===404 ? { ok:false, error:'not_found' } : { ok:false, error:'network' };
+  }
+}
+function cnpjLookupErroMsg(r){
+  switch(r && r.error){
+    case 'not_found':  return 'CNPJ não encontrado na Receita Federal.';
+    case 'rate_limit': return 'Muitas consultas — aguarde alguns segundos e tente novamente.';
+    case 'http':       return `Falha na consulta (HTTP ${(r&&r.status)||'?'}). Tente novamente.`;
+    default:           return 'Erro de rede. Verifique a conexão e tente novamente.';
+  }
+}
 function mcliRenderCnpjImport(){
   const wrap = document.getElementById('mcli-cnpj-wrap');
   if(!wrap) return;
@@ -15292,11 +15387,9 @@ async function mcliCnpjBuscar(){
   if(cnpj.length !== 14){ showErr('Informe um CNPJ válido (14 dígitos).'); return; }
   if(btn){ btn.disabled = true; btn.textContent = 'Consultando…'; }
   try {
-    const resp = await fetch(`https://brasilapi.com.br/api/cnpj/v1/${cnpj}`);
-    if(resp.status === 404){ showErr('CNPJ não encontrado na Receita Federal.'); return; }
-    if(resp.status === 429){ showErr('Muitas consultas — aguarde alguns segundos e tente novamente.'); return; }
-    if(!resp.ok){ showErr(`Falha na consulta (HTTP ${resp.status}). Tente novamente.`); return; }
-    const data = await resp.json();
+    const r = await cnpjLookupReceita(cnpj);
+    if(!r.ok){ showErr(cnpjLookupErroMsg(r)); return; }
+    const data = r.data;
     // Remapeia para o shape esperado por mcliDiAplicarExtracted (mais campos)
     const ddd = data.ddd_telefone_1 || '';
     const tel = ddd ? ddd : '';
