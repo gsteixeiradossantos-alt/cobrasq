@@ -1,2 +1,2 @@
-# cobrasq-faturamento
-Faturamento Empresarial
+# cobrasq
+Painel COBRASQ — recuperação de crédito (Faturamento + CRM).
