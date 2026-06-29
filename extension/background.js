@@ -5,7 +5,7 @@
 // Não guarda senha/MFA do eproc — só o token do app (mesma sessão do usuário),
 // em chrome.storage.session (some ao fechar o navegador).
 
-const API_BASE = 'https://cobrasq-faturamento.vercel.app';
+const API_BASE = 'https://painel.cobrasq.com.br';
 
 async function getToken() {
   const { token } = await chrome.storage.session.get('token');

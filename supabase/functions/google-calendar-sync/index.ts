@@ -14,9 +14,9 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
 // Origens permitidas para chamar essa função. Configurável via env GCAL_ALLOWED_ORIGINS
-// (lista separada por vírgula). Padrão inclui o domínio de produção da Vercel.
+// (lista separada por vírgula). Padrão inclui o domínio canônico e o legado .vercel.app.
 // Preview/branches do Vercel são reconhecidos pelo sufixo .vercel.app.
-const DEFAULT_ORIGINS = 'https://cobrasq-faturamento.vercel.app';
+const DEFAULT_ORIGINS = 'https://painel.cobrasq.com.br,https://cobrasq-faturamento.vercel.app';
 
 function pickAllowedOrigin(req: Request): string {
   const allowed = (Deno.env.get('GCAL_ALLOWED_ORIGINS') || DEFAULT_ORIGINS)
