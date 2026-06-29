@@ -4037,7 +4037,25 @@ const STATUS_CFG = {
   'Devolvida':{dot:'#8A96B8',badge:'b-gray',cls:'s-devolvida'},
   'Sem êxito':{dot:'#8A96B8',badge:'b-gray',cls:'s-semexito'}
 };
-const ETAPAS_EXTRA = ['Notificação','Em contato','Proposta enviada','Acordo','Quitado','Devolvida','Sem êxito'];
+const ETAPAS_EXTRA = ['Notificação','Automatizar','Em contato','Proposta enviada','Acordo','Quitado','Devolvida','Sem êxito'];
+
+// Mapeia a Situação (status, vocabulário _SITUACOES_EXTRA) para a etapa do funil
+// extrajudicial (ETAPAS_EXTRA), usada na tela de Processos. O campo legado `etapa`
+// foi mesclado no status (PR-C / C.3) e fica vazio nos casos novos; sem este mapa a
+// tela mostraria todos os casos extrajudiciais parados em "Notificação".
+const _STATUS_TO_ETAPA_EXTRA = {
+  'Cobrar':'Notificação', 'Notificação enviada':'Notificação', 'Notificação':'Notificação',
+  'Automatizar':'Automatizar',
+  'Em contato':'Em contato', 'Em negociação':'Em contato',
+  'Proposta enviada':'Proposta enviada',
+  'Acordo firmado':'Acordo', 'Em pagamento':'Acordo', 'Acordo':'Acordo',
+  'Quitado':'Quitado', 'Devolvida':'Devolvida', 'Sem êxito':'Sem êxito'
+};
+function etapaExtraDe(d){
+  if(d && d.etapa && ETAPAS_EXTRA.includes(d.etapa)) return d.etapa;
+  const m = d && _STATUS_TO_ETAPA_EXTRA[d.status];
+  return m || ETAPAS_EXTRA[0];
+}
 const ETAPAS_JUD = ['Petição inicial','Citação','Contestação','Audiência','Sentença','Recurso','Execução','Penhora','Hasta pública','Encerrado'];
 
 // ── UTILITIES ────────────────────────────────────────────────
@@ -10632,7 +10650,7 @@ function abrirNovoDevedor(){
 
 // Situação contextual à fase (PR-C / C.3): substitui Status + Etapa.
 const _SITUACOES_EXTRA = [
-  'Cobrar', 'Notificação enviada', 'Em contato', 'Em negociação',
+  'Cobrar', 'Notificação enviada', 'Automatizar', 'Em contato', 'Em negociação',
   'Proposta enviada', 'Acordo firmado', 'Em pagamento',
   'Quitado', 'Devolvida', 'Sem êxito'
 ];
@@ -11858,6 +11876,31 @@ async function salvarDevedor(){
   if(currentDevId === id) renderDrawerBody(id);
   if(isPending) showToast(`Cobrança de ${nome} editada e aprovada.`,'success');
   else if(pure && !id) showToast(`Devedor ${nome} cadastrado.`,'success');
+  // Etapa "Automatizar" (extrajudicial): coloca o caso na corrente automatizada
+  // de cobrança. Só dispara quando a Situação MUDA para "Automatizar" (evita
+  // repetir a cada edição). Ficha pura não mexe na dívida, então fica de fora.
+  if(!pure && !isJud && devData.status === 'Automatizar' && existingDev?.status !== 'Automatizar'){
+    entrarNaCorrente(devData.id);
+  }
+}
+
+// Coloca o caso na corrente automatizada de cobrança. Por ter Situação fora dos
+// status terminais, o caso já entra na régua diária automática (api/cron-regua);
+// aqui registramos o opt-in explícito e oferecemos disparar a régua agora.
+function entrarNaCorrente(devId){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId);
+  if(!dev) return;
+  if(typeof logAtividade === 'function') logAtividade('Caso colocado na corrente automatizada de cobrança', dev.nome, devId);
+  const temRegua = Array.isArray(DB.config?.regraCobranca) && DB.config.regraCobranca.length>0;
+  if(!temRegua){
+    showToast('Caso na corrente: a régua diária automática vai cobrá-lo. Configure os passos em Configurações → Régua de Cobrança para disparo manual.','info');
+    return;
+  }
+  if(confirm(`${dev.nome} entrou na corrente automatizada — a régua diária vai cobrá-lo.\n\nDisparar a régua de cobrança agora?`)){
+    abrirReguaCobranca(devId);
+  } else {
+    showToast('Caso na corrente automatizada de cobrança.','success');
+  }
 }
 
 function solicitarAjusteCedente(id){
@@ -12490,7 +12533,7 @@ function renderProcessos(){
 
   // Para extrajudicial — fases do processo extrajudicial
   const fasesExtra = ETAPAS_EXTRA;
-  const extraFaseCounts = fasesExtra.map(f => extra.filter(d => (d.etapa||fasesExtra[0]) === f).length);
+  const extraFaseCounts = fasesExtra.map(f => extra.filter(d => etapaExtraDe(d) === f).length);
 
   // Próxima audiência
   const audiencias = jud
@@ -12509,7 +12552,7 @@ function renderProcessos(){
 
   function procCard(d, fases, isJudicial) {
     const valor = parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0;
-    const etapa = d.etapa || fases[0];
+    const etapa = isJudicial ? (d.etapa || fases[0]) : etapaExtraDe(d);
     const faseIdx = isJudicial ? etapaToFaseIdx(etapa) : fases.indexOf(etapa);
     const faseName = isJudicial ? fasesJud[faseIdx] : (etapa||fases[0]);
     const prox = d.vencimento || '—';
@@ -12617,7 +12660,7 @@ function renderProcessos(){
       </div>
       <!-- Extrajudicial chips -->
       <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
-        ${ETAPAS_EXTRA.slice(0,6).map((f,fi)=>`
+        ${ETAPAS_EXTRA.slice(0,7).map((f,fi)=>`
           <div style="padding:6px 12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:11.5px;color:var(--text-2);">
             ${f} <span style="font-family:var(--font-mono);font-weight:600;color:var(--text);margin-left:4px;">${extraFaseCounts[fi]}</span>
           </div>`).join('')}
