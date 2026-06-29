@@ -26339,6 +26339,56 @@ function _aavMontarMsg(nome, titulo, link){
     .replace(/\{link\}/g, link||'');
 }
 
+// Envia o link por WhatsApp pela edge `enviar-whatsapp` (a mesma do CRM): ela prefixa o
+// DDI 55, testa a variante com/sem o 9º dígito, confere /phone-exists, faz retry e loga
+// falha em crm_envios_falhados. Retorna { ok, messageId, error, code }. Mais robusto que
+// o ZApiAPI.sendLink direto (que não validava número nem registrava falha).
+async function _aavEnviarWhats(tel, msg){
+  const supa = getSupabase();
+  if(!supa) return { ok:false, error:'Faça login para enviar.' };
+  try{
+    const { data, error } = await supa.functions.invoke('enviar-whatsapp', { body:{ telefone: tel, mensagem: msg } });
+    if(error){
+      let detalhe = (error && error.message) || 'Falha ao enviar'; let code = null;
+      try{
+        const ctx = error.context;
+        if(ctx){
+          const corpo = await (ctx.response ? ctx.response.clone().json() : (ctx.responseBody ? Promise.resolve(JSON.parse(ctx.responseBody)) : null));
+          if(corpo && corpo.error){ detalhe = corpo.error; code = corpo.error; }
+          if(corpo && corpo.tentativas) detalhe += ' (tentou: ' + corpo.tentativas.join(', ') + ')';
+        }
+      }catch(_){}
+      return { ok:false, error: detalhe, code };
+    }
+    if(data && data.error) return { ok:false, error: data.error, code: data.error };
+    if(!data || !data.messageId) return { ok:false, error:'Z-API respondeu sem messageId — não enviou.' };
+    return { ok:true, messageId: data.messageId, phoneUsed: data.phoneUsed };
+  }catch(e){
+    return { ok:false, error: 'Falha ao chamar a Edge Function: ' + (e && e.message ? e.message : 'erro') };
+  }
+}
+
+// Grava (best-effort) o resultado do WhatsApp no registro para a lista mostrar o selo.
+async function _aavSetWaStatus(id, status, messageId){
+  if(!id) return;
+  const supa = getSupabase(); if(!supa) return;
+  const patch = { wa_status: status };
+  if(messageId) patch.wa_message_id = messageId;
+  if(status==='enviado') patch.wa_enviado_em = new Date().toISOString();
+  try{ await supa.from('assinaturas_avulsas').update(patch).eq('id', id); }catch(_){}
+}
+
+// Selo de entrega do WhatsApp na lista. Registros antigos (wa_status null) não mostram nada.
+function _aavWaBadge(st){
+  const map = {
+    enviado:      ['var(--success)','✓ WhatsApp enviado'],
+    sem_whatsapp: ['var(--warning)','📵 Sem WhatsApp'],
+    falhou:       ['var(--danger)','✗ Falha no envio'],
+  };
+  const m = map[st]; if(!m) return '';
+  return `<div style="font-size:11px;font-weight:600;color:${m[0]};margin-top:2px;">${m[1]}</div>`;
+}
+
 async function renderAssinaturas(){
   const el = document.getElementById('page-assinaturas'); if(!el) return;
   const head = `
@@ -26383,6 +26433,7 @@ function _aavDrawLista(){
         <td style="padding:11px 12px;">
           <div style="font-weight:600;font-size:13px;">${escHtml(r.signer_nome||'—')}</div>
           <div style="font-size:11.5px;color:var(--text-3);">${escHtml(r.signer_tel||r.signer_email||'')}</div>
+          ${_aavWaBadge(r.wa_status)}
         </td>
         <td style="padding:11px 12px;font-size:12.5px;">${docs}</td>
         <td style="padding:11px 12px;white-space:nowrap;">
@@ -26497,25 +26548,28 @@ async function enviarAssinaturaAvulsa(){
     }
 
     // 5) registra o envio no histórico
+    let newRowId = null;
     if(supa){
-      const { error:insErr } = await supa.from('assinaturas_avulsas').insert({
+      const { data:insRow, error:insErr } = await supa.from('assinaturas_avulsas').insert({
         titulo, signer_nome:nome, signer_tel:tel||null, signer_email:email||null,
         n_docs: files.length, zapsign_doc_token:docToken, zapsign_signer_token:signerToken||null,
         signer_link:signerLink||null, status:'PENDING', storage_paths:storagePaths
-      });
+      }).select('id').single();
       if(insErr) console.warn('insert assinaturas_avulsas:', insErr);
+      else newRowId = insRow && insRow.id;
     }
     if(typeof logAtividade==='function') try{ logAtividade('Enviou documento avulso para assinatura', `${titulo} — ${nome}`); }catch(_){}
 
     closeModal('modal-assinatura-avulsa');
-    showToast('Documento enviado para assinatura.','success');
+    showToast('Documento gerado no ZapSign.','success');
 
-    // 6) link copiável + envio por WhatsApp
-    _aavPendingWa = { tel, nome, titulo, link: signerLink };
+    // 6) link copiável + envio por WhatsApp (disparo automático, com resultado real)
+    const podeWhats = !!(tel && DB.config.zapiInstanceId);
+    _aavPendingWa = { tel, nome, titulo, link: signerLink, id: newRowId };
     document.getElementById('mzs-body').innerHTML = `
       <div style="padding:8px 0 12px;">
-        <div style="font-size:13px;font-weight:700;color:var(--success);margin-bottom:4px;">Documento enviado com sucesso.</div>
-        <div style="font-size:12.5px;color:var(--text-2);margin-bottom:18px;">Link de assinatura gerado para <strong>${escHtml(nome)}</strong>${files.length>1?` (${files.length} documentos no mesmo link)`:''}.</div>
+        <div style="font-size:13px;font-weight:700;color:var(--success);margin-bottom:4px;">Documento gerado com sucesso.</div>
+        <div style="font-size:12.5px;color:var(--text-2);margin-bottom:14px;">Link de assinatura gerado para <strong>${escHtml(nome)}</strong>${files.length>1?` (${files.length} documentos no mesmo link)`:''}.</div>
         <div style="background:var(--surface-2);border-radius:var(--radius-sm);padding:12px;margin-bottom:12px;">
           <div style="font-size:11px;color:var(--text-3);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;">Link de assinatura</div>
           <div style="display:flex;gap:6px;align-items:center;">
@@ -26523,12 +26577,27 @@ async function enviarAssinaturaAvulsa(){
             <button class="btn btn-primary btn-sm" onclick="navigator.clipboard.writeText('${escHtml(signerLink)}');showToast('Link copiado.','success');">Copiar</button>
           </div>
         </div>
-        ${tel && DB.config.zapiInstanceId ? `<button class="btn btn-ghost btn-sm" style="width:100%;" onclick="_aavMostrarEnvioWhats()">Enviar link via WhatsApp</button>` : ''}
+        <div id="aav-wa-result" style="font-size:12.5px;color:var(--text-3);">${podeWhats?'Enviando link por WhatsApp…':'Sem telefone/Z-API — copie o link e envie manualmente.'}</div>
       </div>`;
     document.getElementById('mzs-footer').innerHTML = `
       <button class="btn btn-ghost" onclick="closeModal('modal-zapsign-status')">Fechar</button>
       ${signerLink?`<button class="btn btn-ghost btn-sm" onclick="window.open('${escHtml(signerLink)}','_blank')">Abrir link ↗</button>`:''}`;
     openModal('modal-zapsign-status');
+
+    // dispara o WhatsApp e reflete o resultado real (não mais "enviado" sem checar)
+    if(podeWhats){
+      const r = await _aavEnviarWhats(tel, _aavMontarMsg(nome, titulo, signerLink));
+      const box = document.getElementById('aav-wa-result');
+      if(r.ok){
+        await _aavSetWaStatus(newRowId, 'enviado', r.messageId);
+        if(box) box.innerHTML = '<span style="color:var(--success);font-weight:600;">✓ Link enviado por WhatsApp.</span>';
+      }else{
+        const semWa = r.code==='numero_sem_whatsapp';
+        await _aavSetWaStatus(newRowId, semWa?'sem_whatsapp':'falhou');
+        if(box) box.innerHTML = `<div style="color:var(--danger);font-weight:600;">${semWa?'📵 Número sem WhatsApp ativo — copie o link e envie manualmente.':'✗ Falha ao enviar: '+escHtml(r.error||'erro')}</div>
+          <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="_aavMostrarEnvioWhats()">Tentar de novo / editar mensagem</button>`;
+      }
+    }
 
     renderAssinaturas();
   }catch(e){
@@ -26562,13 +26631,19 @@ async function _aavEnviarWhatsEdit(){
   const msg = (document.getElementById('aav-wa-msg')||{}).value||'';
   if(!msg.trim()){ showToast('Mensagem vazia.','warning'); return; }
   const btn = document.getElementById('aav-wa-send'); if(btn){ btn.disabled=true; btn.textContent='Enviando…'; }
-  try{
-    await ZApiAPI.sendLink(w.tel, msg, w.link, `COBRASQ — ${w.titulo||'Documento'}`);
+  // Vai pela edge enviar-whatsapp (prefixa 55, valida número, retry, loga falha).
+  const r = await _aavEnviarWhats(w.tel, msg);
+  if(r.ok){
+    await _aavSetWaStatus(w.id, 'enviado', r.messageId);
     showToast('Link enviado via WhatsApp.','success');
     closeModal('modal-zapsign-status');
-  }catch(e){
-    showToast(traduzirErro(e.message||String(e)),'danger');
+    renderAssinaturas();
+  }else{
+    const semWa = r.code==='numero_sem_whatsapp';
+    await _aavSetWaStatus(w.id, semWa?'sem_whatsapp':'falhou');
+    showToast(semWa?'Número sem WhatsApp ativo — copie o link e envie manualmente.':('Falha ao enviar: '+(r.error||'erro')),'danger');
     if(btn){ btn.disabled=false; btn.textContent='Enviar via WhatsApp'; }
+    renderAssinaturas();
   }
 }
 
@@ -26585,7 +26660,7 @@ function aavAbrir(id){
 function aavWhatsApp(id){
   const r = _aavRows.find(x=>x.id===id);
   if(!r){ return; }
-  _aavPendingWa = { tel:r.signer_tel||'', nome:r.signer_nome||'', titulo:r.titulo||'Documento', link:r.signer_link||'' };
+  _aavPendingWa = { tel:r.signer_tel||'', nome:r.signer_nome||'', titulo:r.titulo||'Documento', link:r.signer_link||'', id:r.id };
   _aavMostrarEnvioWhats();
 }
 async function aavAtualizarStatus(id){
@@ -26988,6 +27063,10 @@ const ZApiAPI = {
     return `https://api.z-api.io/instances/${inst}/token/${tok}`;
   },
   get h(){ return { 'Content-Type':'application/json', 'Client-Token': DB.config.zapiClientToken||'' }; },
+  // Normaliza o telefone p/ a Z-API: só dígitos e prefixa o DDI 55 quando faltar.
+  // Espelha api/_zapi.js (15-16). Sem isso, número local (DDD+9+8 díg.) vai sem DDI
+  // e a Z-API não entrega.
+  _tel(phone){ let f = String(phone||'').replace(/\D/g,''); if(f && f.length<=11 && !f.startsWith('55')) f = '55'+f; return f; },
   async req(method, path, data){
     if(!DB.config.zapiInstanceId||!DB.config.zapiToken)
       throw new Error('Z-Api não configurado em Configurações → Integrações');
@@ -26998,12 +27077,12 @@ const ZApiAPI = {
     if(!r.ok) throw new Error(json?.message || `Erro ${r.status}`);
     return json;
   },
-  sendText(phone, message){ return this.req('POST','/send-text',{ phone:phone.replace(/\D/g,''), message }); },
+  sendText(phone, message){ return this.req('POST','/send-text',{ phone:this._tel(phone), message }); },
   sendLink(phone, message, linkUrl, title){
-    return this.req('POST','/send-link',{ phone:phone.replace(/\D/g,''), message, linkUrl, title:title||'' });
+    return this.req('POST','/send-link',{ phone:this._tel(phone), message, linkUrl, title:title||'' });
   },
   sendDocumentPdf(phone, document, fileName, caption){
-    return this.req('POST','/send-document/pdf',{ phone:phone.replace(/\D/g,''), document, fileName, caption:caption||'' });
+    return this.req('POST','/send-document/pdf',{ phone:this._tel(phone), document, fileName, caption:caption||'' });
   },
   status(){ return this.req('GET','/status'); },
 };
