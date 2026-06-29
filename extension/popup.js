@@ -42,10 +42,15 @@ async function carregar() {
 
   const tab = await abaEprocAtiva();
   const aviso = tab ? '' : `<div class="warn">Abra o processo no eproc TJPR (aba ativa) para preencher.</div>`;
+  const rotuloJob = (j) => {
+    if (j.numero_processo) return j.numero_processo;
+    const r = j.dados_distribuicao && j.dados_distribuicao.requeridos && j.dados_distribuicao.requeridos[0];
+    return r && r.nome ? ('Inicial · ' + r.nome) : '— (inicial)';
+  };
   render(aviso + jobs.map((j, i) => `
     <div class="job">
-      <div><b>${esc(j.numero_processo || '—')}</b> · ${esc(j.tipo || '')}</div>
-      <div class="muted">${esc(j.evento_eproc || 'sem evento')}</div>
+      <div><b>${esc(rotuloJob(j))}</b> · ${esc(j.tipo || '')}</div>
+      <div class="muted">${esc(j.evento_eproc || (j.tipo === 'inicial' ? 'distribuição (5 etapas)' : 'sem evento'))}</div>
       <button class="btn" data-i="${i}" ${tab ? '' : 'disabled'} style="margin-top:6px;">Preencher no eproc</button>
     </div>`).join('') +
     `<button class="btn ghost" id="reload" style="margin-top:4px;">Atualizar lista</button>`);
