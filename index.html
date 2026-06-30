@@ -2925,6 +2925,12 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
         <div style="font-size:11px;color:var(--text-3);margin-top:4px;">Cria o login Supabase do cliente com o e-mail e a senha acima. Ele entra pela aba <strong>Cedente</strong> e vê só os próprios casos e repasses.</div>
       </div>
       <div class="fg">
+        <label style="display:flex;align-items:center;gap:9px;cursor:pointer;font-weight:600;">
+          <input type="checkbox" id="mcli-premium" style="width:16px;height:16px;cursor:pointer;"> ✦ Premium — gerador de documentos
+        </label>
+        <div style="font-size:11px;color:var(--text-3);margin-top:4px;">Libera no portal do cedente o menu <strong>Premium</strong> para gerar documentos (notificação, acordo, recibo, demonstrativo) com a marca dele. Ative quando o cliente assinar.</div>
+      </div>
+      <div class="fg">
         <label>Observações</label>
         <textarea id="mcli-obs" placeholder="Notas sobre este cliente..."></textarea>
       </div>
@@ -4882,7 +4888,10 @@ function clienteToRow(c){
       honorarios: c.honorarios || '',
       obs: c.obs || '',
       loginEmail: c.loginEmail || '',
-      loginSenha: c.loginSenha || ''
+      loginSenha: c.loginSenha || '',
+      // Premium (gerador de documentos) + logo white-label do cedente.
+      premium: !!c.premium,
+      logoBase64: c.logoBase64 || ''
     }
   };
 }
@@ -4913,6 +4922,9 @@ function rowToCliente(r){
     obs: meta.obs || '',
     loginEmail: meta.loginEmail || '',
     loginSenha: meta.loginSenha || '',
+    // Premium (gerador de documentos do cedente) + logo white-label — vivem no metadata.
+    premium: !!meta.premium,
+    logoBase64: meta.logoBase64 || '',
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     isDraft: !!r.is_draft,
@@ -15808,6 +15820,7 @@ function abrirNovoCliente(){
   if(cobrListNovo) cobrListNovo.innerHTML = 'Salve o cliente para ver as cobranças vinculadas.';
   document.getElementById('mcli-nome').value = '';
   document.getElementById('mcli-doc').value = '';
+  { const pEl=document.getElementById('mcli-premium'); if(pEl) pEl.checked = false; }
   // IMPLEMENTADO S7: limpar nome fantasia
   const fantEl = document.getElementById('mcli-fantasia'); if(fantEl) fantEl.value = '';
   document.getElementById('mcli-email').value = '';
@@ -16803,6 +16816,7 @@ function editCliente(id){
   document.getElementById('mcli-login').value = c.loginEmail||'';
   document.getElementById('mcli-senha').value = c.loginSenha||'';
   document.getElementById('mcli-obs').value = c.obs||'';
+  { const pEl=document.getElementById('mcli-premium'); if(pEl) pEl.checked = !!c.premium; }
   document.getElementById('modal-cliente-title').textContent = 'Editar Cliente';
   // C1: docs do cliente — carrega lista do Supabase
   if (typeof mcliCarregarDocumentos === 'function') mcliCarregarDocumentos(c.id);
@@ -16880,6 +16894,10 @@ async function salvarCliente(){
     loginEmail: document.getElementById('mcli-login').value||'',
     loginSenha,
     obs: document.getElementById('mcli-obs').value||'',
+    // Premium (gerador de documentos). logoBase64 é gravado pelo cedente (RPC) —
+    // aqui só PRESERVAMOS o que já existe pra o save do operador não apagá-lo.
+    premium: !!document.getElementById('mcli-premium')?.checked,
+    logoBase64: existingCli ? (existingCli.logoBase64||'') : '',
     createdAt: existingCli ? existingCli.createdAt : hoje(),
     updatedAt: hoje()
   };
@@ -17113,11 +17131,12 @@ function renderPortalCedente(){
   const avatEl = document.getElementById('cpAvatarSidebar');
   if(nameEl) nameEl.textContent = currentUser.nome;
   if(avatEl) avatEl.textContent = initials(currentUser.nome);
+  cpAplicarPremiumUI();
   cpNavigate(cpPage);
 }
 
-// Premium — isca de assinatura no menu do cedente (item travado abre este teaser).
-function cpPremiumTease(){ openModal('modal-premium'); }
+// Premium — sem assinatura abre o teaser; com assinatura vai pro gerador de documentos.
+function cpPremiumTease(){ if(cpEhPremium()) cpNavigate('gerador'); else openModal('modal-premium'); }
 function cpPremiumInteresse(){
   // WhatsApp de vendas do Premium (só dígitos, com DDI 55).
   const WHATS_PREMIUM='5546988226533';
@@ -17130,6 +17149,241 @@ function cpPremiumInteresse(){
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// PREMIUM — Gerador de documentos white-label (com a marca do próprio cedente)
+// ═══════════════════════════════════════════════════════════════════════════
+function _gerNum(v){ const n=parseValorBR(v); if(n) return n; const m=Number(String(v||'').replace(/\./g,'').replace(',','.')); return isFinite(m)?m:0; }
+function _gerDataExt(d){ const meses=['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro']; const dt=d?new Date(d+'T00:00:00'):new Date(); return dt.getDate()+' de '+meses[dt.getMonth()]+' de '+dt.getFullYear(); }
+function _gerValorDevedor(dev){ return parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0; }
+
+// Shell A4 white-label: cabeçalho com o LOGO/razão social do cedente (sem marca COBRASQ).
+function _cedenteDocShell(cli, o){
+  o=o||{};
+  const E=s=>escHtml(s==null?'':String(s));
+  const razao=E(cli.nome||cli.nomeFantasia||'—');
+  const metaLinha=[cli.doc?('CNPJ/CPF '+cli.doc):'', cli.endereco||''].filter(Boolean).map(E).join(' · ');
+  const marca = cli.logoBase64
+    ? `<img src="${cli.logoBase64}" alt="${razao}" style="max-height:52px;max-width:240px;object-fit:contain;display:block;">`
+    : `<div class="wm">${razao}</div>`;
+  const ficha=(o.fichaItems||[]).filter(Boolean).map(a=>`<div class="item"><span class="rot">${E(a[0])}</span><span class="val">${E(a[1])}</span></div>`).join('');
+  const ass=(o.assinaturas||[]).map(a=>`<div class="ass"><div class="ass-linha"></div><div class="ass-nome">${E(a[0])}</div><div class="ass-cargo">${E(a[1])}</div></div>`).join('');
+  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>${E(o.titulo||'Documento')}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+body{font-family:Georgia,'Times New Roman',serif;color:#1c1c1c;background:#E8E8E8;line-height:1.6;font-size:11.5pt}
+.pagina{width:210mm;min-height:297mm;margin:18px auto;background:#fff;box-shadow:0 4px 20px rgba(0,0,0,.12);padding:0}
+.band{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:26px 42px 18px;border-bottom:2px solid #1c1c1c}
+.band .wm{font-size:21pt;font-weight:700;letter-spacing:.3px;color:#111}
+.band-meta{text-align:right;font-family:Arial,Helvetica,sans-serif;font-size:8pt;line-height:1.5;color:#555;max-width:46%}
+.head{padding:26px 46px 0;text-align:center}
+.head h1{font-size:17pt;font-weight:700;letter-spacing:.3px;text-transform:uppercase;color:#111}
+.head .eyebrow{font-family:Arial,sans-serif;font-size:8pt;letter-spacing:.18em;text-transform:uppercase;color:#888;margin-bottom:8px}
+.corpo{padding:22px 46px 30px;text-align:justify}
+.corpo p{margin-bottom:12px}
+.corpo p strong{color:#111}
+.ficha{border:1px solid #ddd;border-left:3px solid #1c1c1c;background:#fafafa;padding:14px 18px;margin-bottom:20px;display:grid;grid-template-columns:1fr 1fr;gap:8px 26px}
+.ficha .item{display:flex;flex-direction:column}
+.ficha .rot{font-family:Arial,sans-serif;font-size:7pt;text-transform:uppercase;letter-spacing:.08em;color:#999;margin-bottom:1px}
+.ficha .val{color:#111;font-weight:700;font-size:10.5pt}
+.tabela{width:100%;border-collapse:collapse;margin:6px 0 16px;font-size:10.5pt}
+.tabela th,.tabela td{border:1px solid #ccc;padding:7px 10px;text-align:left}
+.tabela th{background:#f0f0f0;font-family:Arial,sans-serif;font-size:8.5pt;text-transform:uppercase;letter-spacing:.05em}
+.tabela td.num{text-align:right;font-variant-numeric:tabular-nums}
+.fecho{text-align:center;font-style:italic;color:#333;margin-top:28px}
+.ass-grid{display:flex;gap:36px;justify-content:center;margin-top:36px;flex-wrap:wrap}
+.ass{text-align:center;flex:1;min-width:210px}
+.ass-linha{width:100%;max-width:300px;border-top:1px solid #111;margin:0 auto 7px}
+.ass-nome{font-weight:700;color:#111;font-size:11pt}
+.ass-cargo{font-family:Arial,sans-serif;font-size:7.5pt;letter-spacing:.05em;text-transform:uppercase;color:#888;margin-top:2px}
+.rod{margin-top:30px;padding:14px 46px;border-top:1px solid #ddd;font-family:Arial,sans-serif;font-size:7.5pt;letter-spacing:.04em;color:#999;text-align:center}
+.noprint{margin:14px auto 30px;text-align:center}
+.noprint button{padding:11px 26px;background:#1c1c1c;color:#fff;border:none;border-radius:6px;font-size:13px;cursor:pointer;font-family:Arial,sans-serif}
+@media print{body{background:#fff}.pagina{box-shadow:none;margin:0;width:100%;min-height:0}.noprint{display:none}}
+@page{size:A4;margin:16mm 0}
+</style></head><body>
+<div class="pagina">
+  <header class="band">${marca}<div class="band-meta"><strong>${razao}</strong>${metaLinha?('<br>'+metaLinha):''}</div></header>
+  <div class="head">${o.eyebrow?`<div class="eyebrow">${E(o.eyebrow)}</div>`:''}<h1>${E(o.titulo||'')}</h1></div>
+  <main class="corpo">
+    ${ficha?`<div class="ficha">${ficha}</div>`:''}
+    ${o.corpoHtml||''}
+    <div class="fecho">${E(o.fecho||'')}</div>
+    <div class="ass-grid">${ass}</div>
+  </main>
+  <footer class="rod">Documento extrajudicial emitido por ${razao}.</footer>
+</div>
+<div class="noprint"><button onclick="window.print()">🖨 Imprimir / Salvar como PDF</button></div>
+</body></html>`;
+}
+
+// ── Construtores dos 4 documentos ────────────────────────────────────────────
+function _gerDocsCatalogo(){
+  return [
+    {k:'notificacao', label:'Notificação extrajudicial de cobrança'},
+    {k:'confissao',   label:'Confissão de dívida / acordo de parcelamento'},
+    {k:'recibo',      label:'Recibo de quitação'},
+    {k:'demonstrativo', label:'Declaração / demonstrativo de débito'}
+  ];
+}
+function _gerFichaBase(cli, dev, valor){
+  return [
+    ['Credor', cli.nome||'—'],
+    ['Devedor', dev.nome||'—'],
+    cli.doc?['CNPJ/CPF do credor', cli.doc]:null,
+    dev.doc?['CPF/CNPJ do devedor', dev.doc]:null,
+    ['Valor', fmtR(valor)],
+    dev.titulo?['Título / referência', dev.titulo]:null
+  ];
+}
+function _gerDocBuild(tipo, cli, dev, opt){
+  const valor=_gerValorDevedor(dev);
+  const fecho=(opt.cidade?opt.cidade+', ':'')+_gerDataExt(opt.data);
+  const ficha=_gerFichaBase(cli, dev, valor);
+  const credorAss=[cli.nome||'Credor', 'Credor'];
+  const devedorAss=[dev.nome||'Devedor', 'Devedor'];
+  if(tipo==='notificacao'){
+    const prazo=Math.max(1, parseInt(opt.prazo,10)||5);
+    return { titulo:'Notificação Extrajudicial de Cobrança', eyebrow:'Notificação', fichaItems:ficha, fecho, assinaturas:[credorAss],
+      corpoHtml:`<p>Prezado(a) Sr.(a) <strong>${escHtml(dev.nome||'')}</strong>,</p>
+<p>Na qualidade de credor, vimos por meio desta <strong>NOTIFICAR</strong> Vossa Senhoria de que consta em nossos registros débito em aberto no valor de <strong>${fmtR(valor)}</strong>${dev.titulo?`, referente a <strong>${escHtml(dev.titulo)}</strong>`:''}, até a presente data não quitado.</p>
+<p>Assim, fica Vossa Senhoria <strong>notificada a efetuar o pagamento no prazo de ${prazo} (${escHtml(_extensoDias(prazo))}) dias</strong> a contar do recebimento desta, evitando a adoção das medidas de cobrança cabíveis, tais como a negativação do nome junto aos órgãos de proteção ao crédito (SPC/Serasa), o protesto do título e a cobrança judicial do débito.</p>
+<p>Caso o pagamento já tenha sido realizado, favor desconsiderar esta notificação e nos encaminhar o respectivo comprovante.</p>
+<p>Colocamo-nos à disposição para negociação e eventual parcelamento do débito.</p>` };
+  }
+  if(tipo==='confissao'){
+    const n=Math.max(1, parseInt(opt.parcelas,10)||1);
+    const valParc=valor>0?(valor/n):0;
+    const primVenc=opt.venc?_gerDataExt(opt.venc):'____/____/______';
+    return { titulo:'Termo de Confissão de Dívida e Acordo de Parcelamento', eyebrow:'Acordo extrajudicial', fichaItems:ficha, fecho,
+      assinaturas:[devedorAss, credorAss, ['', 'Testemunha 1'], ['', 'Testemunha 2']],
+      corpoHtml:`<p>Pelo presente instrumento particular, <strong>${escHtml(dev.nome||'')}</strong>${dev.doc?`, inscrito(a) no CPF/CNPJ sob nº ${escHtml(dev.doc)}`:''}, doravante denominado(a) <strong>DEVEDOR(A)</strong>, declara <strong>RECONHECER E CONFESSAR</strong> dever a <strong>${escHtml(cli.nome||'')}</strong>${cli.doc?`, inscrito(a) sob nº ${escHtml(cli.doc)}`:''}, doravante denominado(a) <strong>CREDOR(A)</strong>, a quantia líquida e certa de <strong>${fmtR(valor)}</strong>${dev.titulo?`, originada de ${escHtml(dev.titulo)}`:''}.</p>
+<p>O DEVEDOR compromete-se a pagar o valor confessado em <strong>${n} (${escHtml(_extensoDias(n))}) parcela(s)</strong> de <strong>${fmtR(valParc)}</strong>, vencendo a primeira em <strong>${primVenc}</strong> e as demais no mesmo dia dos meses subsequentes.</p>
+<p>O não pagamento de qualquer parcela no respectivo vencimento acarretará o <strong>vencimento antecipado</strong> da totalidade do saldo devedor, independentemente de aviso ou notificação, autorizando o CREDOR a adotar as medidas de cobrança cabíveis.</p>
+<p>E, por estarem assim justos e acordados, firmam o presente em duas vias de igual teor.</p>` };
+  }
+  if(tipo==='recibo'){
+    const pago=_gerNum(opt.valorPago)||valor;
+    const total=(opt.quitacao!=='parcial');
+    return { titulo:'Recibo de Quitação', eyebrow: total?'Quitação':'Quitação parcial', fichaItems:_gerFichaBase(cli, dev, valor).concat([['Valor recebido', fmtR(pago)]]), fecho,
+      assinaturas:[credorAss],
+      corpoHtml:`<p>Eu, <strong>${escHtml(cli.nome||'')}</strong>${cli.doc?`, inscrito(a) sob nº ${escHtml(cli.doc)}`:''}, na qualidade de credor(a), <strong>DECLARO</strong> que recebi de <strong>${escHtml(dev.nome||'')}</strong>${dev.doc?` (CPF/CNPJ ${escHtml(dev.doc)})`:''} a importância de <strong>${fmtR(pago)}</strong>${dev.titulo?`, referente a ${escHtml(dev.titulo)}`:''}.</p>
+<p>${total
+  ? `Dou ao(à) devedor(a) a mais ampla, geral, plena e irrevogável <strong>QUITAÇÃO</strong> do débito acima, para nada mais reclamar a qualquer título.`
+  : `Trata-se de <strong>quitação parcial</strong>, permanecendo em aberto o saldo remanescente do débito, que segue passível de cobrança.`}</p>
+<p>Por ser expressão da verdade, firmo o presente recibo.</p>` };
+  }
+  // demonstrativo
+  const orig=parseValorBR(dev.valorOrig)||0, atual=parseValorBR(dev.valorAtual)||0;
+  const linhas=[
+    ['Valor original'+(dev.titulo?(' — '+dev.titulo):''), orig||valor],
+    (atual&&atual!==orig)?['Valor atualizado', atual]:null
+  ].filter(Boolean);
+  const totalDem=atual||orig||valor;
+  return { titulo:'Demonstrativo de Débito', eyebrow:'Declaração de débito', fichaItems:ficha, fecho,
+    assinaturas:[credorAss],
+    corpoHtml:`<p><strong>${escHtml(cli.nome||'')}</strong> declara, para os devidos fins, que <strong>${escHtml(dev.nome||'')}</strong>${dev.doc?` (CPF/CNPJ ${escHtml(dev.doc)})`:''} possui o débito abaixo demonstrado:</p>
+<table class="tabela"><thead><tr><th>Descrição</th><th style="text-align:right">Valor</th></tr></thead><tbody>
+${linhas.map(l=>`<tr><td>${escHtml(l[0])}</td><td class="num">${fmtR(l[1])}</td></tr>`).join('')}
+<tr><td><strong>Total devido</strong></td><td class="num"><strong>${fmtR(totalDem)}</strong></td></tr>
+</tbody></table>
+<p>O presente demonstrativo reflete a posição do débito na data de sua emissão e não constitui quitação.</p>` };
+}
+function _extensoDias(n){
+  const u=['zero','um','dois','três','quatro','cinco','seis','sete','oito','nove','dez','onze','doze','treze','quatorze','quinze','dezesseis','dezessete','dezoito','dezenove','vinte'];
+  if(n>=0&&n<=20) return u[n];
+  if(n===30) return 'trinta'; if(n===45) return 'quarenta e cinco'; if(n===60) return 'sessenta';
+  return String(n);
+}
+
+// ── Tela do gerador (portal do cedente) ─────────────────────────────────────
+function cpRenderGerador(body){
+  if(!cpEhPremium()){ openModal('modal-premium'); cpNavigate('dashboard'); return; }
+  const cli=cpCliente();
+  const devs=cpDevs();
+  const wrap=body.closest('.cp-wrap')||body; if(wrap.classList) wrap.classList.add('mid');
+  const logoCard = cli.logoBase64
+    ? `<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+         <img src="${cli.logoBase64}" alt="logo" style="max-height:54px;max-width:200px;object-fit:contain;border:1px solid var(--pline);border-radius:8px;padding:6px;background:#fff;">
+         <div><div style="font-size:12.5px;color:var(--ink);font-weight:600;">Seu logotipo está pronto.</div><div style="font-size:11.5px;color:var(--mute);">Aparece no topo de todos os documentos.</div></div>
+         <button class="cp-btn cp-btn-outline" style="margin-left:auto;" onclick="document.getElementById('cpLogoInput').click()">Trocar</button>
+       </div>`
+    : `<div style="border:1.5px dashed var(--pline);border-radius:12px;padding:22px;text-align:center;">
+         <div style="font-size:12.5px;color:var(--mute);margin-bottom:10px;">Suba o logotipo da sua empresa (PNG, JPG ou SVG) — ele entra no topo dos documentos.</div>
+         <button class="cp-btn cp-btn-primary" onclick="document.getElementById('cpLogoInput').click()">Enviar logotipo</button>
+       </div>`;
+  const docOpts=_gerDocsCatalogo().map(d=>`<option value="${d.k}">${escHtml(d.label)}</option>`).join('');
+  const devOpts = devs.length
+    ? devs.map(d=>`<option value="${escHtml(d.id)}">${escHtml(d.nome||'(sem nome)')}${d.doc?' · '+escHtml(d.doc):''}</option>`).join('')
+    : '';
+  const INP='width:100%;padding:11px 13px;border:1px solid var(--pline);background:var(--paper);border-radius:10px;font:inherit;font-size:13px;color:var(--ink);outline:none;';
+  const LB='display:block;font-size:12px;font-weight:600;color:var(--ink);margin-bottom:6px;';
+  body.innerHTML = `
+    <input type="file" id="cpLogoInput" accept="image/png,image/jpeg,image/svg+xml" style="display:none;" onchange="cpLogoSelecionado(this)">
+    <div style="margin-bottom:18px;"><div class="cp-h1">Gerador de documentos</div><div class="cp-lead">Gere notificações, acordos e recibos <em>com a sua marca</em> — pronto pra imprimir ou salvar em PDF.</div></div>
+    <div class="cp-card" style="margin-bottom:16px;"><div class="cp-label" style="margin-bottom:12px;">Sua marca</div>${logoCard}</div>
+    <div class="cp-card">
+      <div class="cp-label" style="margin-bottom:12px;">Novo documento</div>
+      ${devs.length ? `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+        <div><label style="${LB}">Devedor</label><select id="cpger-dev" style="${INP}">${devOpts}</select></div>
+        <div><label style="${LB}">Documento</label><select id="cpger-tipo" style="${INP}" onchange="cpGerCamposRender()">${docOpts}</select></div>
+      </div>
+      <div id="cpGerCampos" style="margin-top:14px;"></div>
+      <div style="display:flex;justify-content:flex-end;margin-top:18px;">
+        <button class="cp-btn cp-btn-primary" onclick="cpGerarDocumento()">Gerar documento ↗</button>
+      </div>` : `<div style="font-size:12.5px;color:var(--mute);padding:8px 0;">Você ainda não tem cobranças na carteira. Os documentos são gerados a partir de um devedor seu.</div>`}
+    </div>`;
+  if(devs.length) cpGerCamposRender();
+}
+function cpGerCamposRender(){
+  const el=document.getElementById('cpGerCampos'); if(!el) return;
+  const tipo=(document.getElementById('cpger-tipo')||{}).value||'notificacao';
+  const INP='width:100%;padding:10px 12px;border:1px solid var(--pline);background:var(--paper);border-radius:10px;font:inherit;font-size:13px;color:var(--ink);outline:none;';
+  const LB='display:block;font-size:12px;font-weight:600;color:var(--ink);margin-bottom:6px;';
+  const cidade=`<div><label style="${LB}">Cidade/UF (opcional)</label><input id="cpger-cidade" placeholder="Ex.: Dois Vizinhos/PR" style="${INP}"></div>`;
+  const data=`<div><label style="${LB}">Data do documento</label><input id="cpger-data" type="date" value="${hoje()}" style="${INP}"></div>`;
+  let campos='';
+  if(tipo==='notificacao') campos=`<div><label style="${LB}">Prazo para pagamento (dias)</label><input id="cpger-prazo" type="number" min="1" value="5" style="${INP}"></div>`;
+  else if(tipo==='confissao') campos=`<div><label style="${LB}">Nº de parcelas</label><input id="cpger-parcelas" type="number" min="1" value="1" style="${INP}"></div><div><label style="${LB}">Vencimento da 1ª parcela</label><input id="cpger-venc" type="date" style="${INP}"></div>`;
+  else if(tipo==='recibo') campos=`<div><label style="${LB}">Valor recebido (opcional)</label><input id="cpger-valorPago" placeholder="usa o valor da dívida se vazio" style="${INP}"></div><div><label style="${LB}">Quitação</label><select id="cpger-quitacao" style="${INP}"><option value="total">Total (quitação plena)</option><option value="parcial">Parcial</option></select></div>`;
+  el.innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">${campos}${cidade}${data}</div>`;
+}
+function cpGerarDocumento(){
+  const cli=cpCliente();
+  const devId=(document.getElementById('cpger-dev')||{}).value;
+  const dev=(DB.devedores||[]).find(d=>d.id===devId);
+  if(!dev){ showToast('Selecione um devedor.','warning'); return; }
+  const tipo=(document.getElementById('cpger-tipo')||{}).value||'notificacao';
+  const g=id=>(document.getElementById(id)||{}).value||'';
+  const opt={ cidade:g('cpger-cidade'), data:g('cpger-data'), prazo:g('cpger-prazo'),
+    parcelas:g('cpger-parcelas'), venc:g('cpger-venc'), valorPago:g('cpger-valorPago'), quitacao:g('cpger-quitacao') };
+  const doc=_gerDocBuild(tipo, cli, dev, opt);
+  const html=_cedenteDocShell(cli, doc);
+  const win=window.open('','_blank','width=900,height=950');
+  if(win){ win.document.write(html); win.document.close(); }
+  else showToast('Popup bloqueado — permita popups para abrir o documento.','warning');
+}
+
+// ── Upload do logo (cedente grava o PRÓPRIO logo via RPC security-definer) ────
+function cpLogoSelecionado(input){
+  const f=input.files&&input.files[0]; if(!f) return;
+  if(!/image\/(png|jpeg|svg\+xml)/.test(f.type)){ showToast('Use PNG, JPG ou SVG.','warning'); input.value=''; return; }
+  if(f.size>600*1024){ showToast('Logo muito grande (máx. 600 KB). Reduza a imagem.','warning'); input.value=''; return; }
+  const reader=new FileReader();
+  reader.onload=()=>{ cpSalvarLogo(String(reader.result||'')); };
+  reader.onerror=()=>showToast('Não consegui ler o arquivo.','danger');
+  reader.readAsDataURL(f);
+}
+async function cpSalvarLogo(dataUrl){
+  const supa=getSupabase(); if(!supa){ showToast('Sistema fora do ar.','danger'); return; }
+  showToast('Enviando logotipo…','info');
+  const { error }=await supa.rpc('cedente_set_logo', { p_logo: dataUrl });
+  if(error){ showToast('Falha ao salvar o logo: '+error.message,'danger'); return; }
+  const cli=cpCliente(); if(cli) cli.logoBase64=dataUrl;  // reflete já na sessão
+  showToast('Logotipo salvo! ✓','success');
+  const body=document.getElementById('portalCedenteBody'); if(body) cpRenderGerador(body);
+}
+
 function cpNavigate(page){
   cpPage = page;
   document.querySelectorAll('#cpNav .cp-nav-item').forEach(el=>{
@@ -17140,7 +17394,8 @@ function cpNavigate(page){
     dashboard:['Visão geral','Dashboard'], carteira:['Acompanhar','Minha Carteira'],
     detalhe:['Acompanhar','Detalhe do caso'], repasses:['Acompanhar','Repasses recebidos'],
     comprovantes:['Acompanhar','Comprovantes'], 'nova-cobranca':['Solicitar','Nova Cobrança'],
-    solicitacoes:['Solicitar','Minhas Solicitações'], config:['Conta','Configurações']
+    solicitacoes:['Solicitar','Minhas Solicitações'], config:['Conta','Configurações'],
+    gerador:['Premium','Gerador de documentos']
   };
   const m = meta[page]||['',''];
   const eb=document.getElementById('cpTopbarEyebrow'); if(eb) eb.textContent=m[0];
@@ -17159,6 +17414,30 @@ function cpNavigate(page){
   else if(page==='nova-cobranca') cpRenderNovaCobranca(body);
   else if(page==='solicitacoes') cpRenderSolicitacoes(body);
   else if(page==='config') cpRenderConfig(body);
+  else if(page==='gerador') cpRenderGerador(body);
+}
+
+// Cliente (credor) do cedente logado — fonte dos dados white-label + flag premium.
+function cpCliente(){ return (DB.clientes||[]).find(c=>c.id===currentUser?.clienteId) || {}; }
+function cpEhPremium(){ return !!cpCliente().premium; }
+
+// Liga/desliga o item "Premium" do menu conforme a assinatura do cliente.
+// Premium ⇒ item navegável (gerador). Sem premium ⇒ continua bloqueado (teaser).
+function cpAplicarPremiumUI(){
+  const item = document.querySelector('#cpNav .cp-nav-item.locked, #cpNav .cp-nav-item[data-cppage="gerador"]');
+  if(!item) return;
+  const badge = item.querySelector('.cp-nav-badge');
+  if(cpEhPremium()){
+    item.classList.remove('locked');
+    item.dataset.cppage = 'gerador';
+    item.setAttribute('onclick', "cpNavigate('gerador')");
+    if(badge) badge.textContent = 'PRO';
+  } else {
+    item.classList.add('locked');
+    delete item.dataset.cppage;
+    item.setAttribute('onclick', 'cpPremiumTease()');
+    if(badge) badge.textContent = 'PRO 🔒';
+  }
 }
 
 function cpDevs(){
