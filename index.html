@@ -28223,6 +28223,7 @@ async function renderNfAvulsa(){
       <textarea id="nfa-paste" rows="5" placeholder="Um por linha. Ex.:&#10;Eliseu Juarez Zanin de Campos; 123.456.789-00; 2.429,53; Honorários de cobrança&#10;ou cole de uma planilha (Nome | CPF | Valor | Descrição)" style="width:100%;box-sizing:border-box;font-family:var(--mono,monospace);font-size:12.5px;padding:10px;border:1px solid var(--border);border-radius:8px;resize:vertical;"></textarea>
       <div style="display:flex;gap:8px;margin-top:8px;">
         <button class="btn btn-ghost btn-sm" onclick="nfaProcessarLista()">Processar lista ↓</button>
+        <button class="btn btn-ghost btn-sm" onclick="nfaBuscarCpfAsaas()" id="nfa-buscar-btn" title="Para cada linha sem CPF, procura o cliente no Asaas pelo nome e preenche">🔎 Buscar CPF no Asaas</button>
         <button class="btn btn-ghost btn-sm" onclick="nfaAddLinha()">+ Linha em branco</button>
       </div>
     </div>
@@ -28251,6 +28252,45 @@ function nfaProcessarLista(){
   nfaDrawTabela();
 }
 function nfaAddLinha(){ _nfaRows.push({ nome:'', cpf:'', valorRaw:'', descricao:'', status:'pendente', nf_url:'', erro:'', ref:'' }); nfaDrawTabela(); }
+
+// Normaliza nome p/ comparar (sem acento, minúsculo, espaços colapsados).
+function nfaNorm(s){ return String(s||'').normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase().replace(/\s+/g,' ').trim(); }
+
+// Para cada linha SEM CPF válido mas COM nome, procura o cliente no Asaas pelo nome
+// (proxy /api/asaas na sessão do usuário) e preenche o CPF. 1 resultado → preenche;
+// match exato entre vários → preenche; 0 ou vários sem exato → marca p/ conferência.
+async function nfaBuscarCpfAsaas(){
+  const alvos = _nfaRows.map((r,i)=>({r,i})).filter(({r})=>{
+    const d = nfaDigits(r.cpf);
+    return (!([11,14].includes(d.length))) && nfaNorm(r.nome).length >= 3 && r.status!=='emitida';
+  });
+  if(!alvos.length){ showToast('Nada para buscar — preencha nomes nas linhas sem CPF.','warning'); return; }
+  const btn = document.getElementById('nfa-buscar-btn');
+  if(btn){ btn.disabled=true; }
+  let ach=0, multi=0, none=0;
+  for(let k=0;k<alvos.length;k++){
+    const { r } = alvos[k];
+    r.lookupMsg = 'buscando…'; nfaDrawTabela();
+    if(btn) btn.textContent = `🔎 Buscando ${k+1}/${alvos.length}…`;
+    try{
+      const resp = await fetch(`/api/asaas?path=customers&name=${encodeURIComponent(r.nome)}&limit=20`, { headers:{ 'Content-Type':'application/json', ...(await authHeaders()) } });
+      const j = await resp.json().catch(()=>({}));
+      if(!resp.ok) throw new Error(j?.errors?.[0]?.description || j?.error || ('HTTP '+resp.status));
+      const cand = (Array.isArray(j.data)?j.data:[]).filter(c=>c.cpfCnpj);
+      if(!cand.length){ r.lookupMsg='Asaas: não encontrado'; none++; }
+      else if(cand.length===1){ r.cpf=nfaDigits(cand[0].cpfCnpj); r.asaasCustomerId=cand[0].id; r.lookupMsg='✓ '+(cand[0].name||''); ach++; }
+      else{
+        const alvo = nfaNorm(r.nome);
+        const exatos = cand.filter(c=>nfaNorm(c.name)===alvo);
+        if(exatos.length===1){ r.cpf=nfaDigits(exatos[0].cpfCnpj); r.asaasCustomerId=exatos[0].id; r.lookupMsg='✓ '+(exatos[0].name||''); ach++; }
+        else{ r.lookupMsg=`${cand.length} no Asaas — confira`; multi++; }
+      }
+    }catch(e){ r.lookupMsg='erro: '+traduzirErro(e.message||String(e)); none++; }
+    nfaDrawTabela();
+  }
+  if(btn){ btn.disabled=false; btn.textContent='🔎 Buscar CPF no Asaas'; }
+  showToast(`Busca no Asaas: ${ach} preenchido(s)${multi?`, ${multi} ambíguo(s)`:''}${none?`, ${none} sem match`:''}.`, ach?'success':'warning');
+}
 function nfaRemoveLinha(i){ _nfaRows.splice(i,1); nfaDrawTabela(); }
 function nfaSet(i,campo,val){ if(_nfaRows[i]) _nfaRows[i][campo] = val; }
 
@@ -28275,7 +28315,7 @@ function nfaDrawTabela(){
     const travado = (r.status==='emitida'||r.status==='emitindo');
     return `<tr style="border-bottom:1px solid var(--border);${r.status==='emitida'?'opacity:.7;':''}">
       <td style="padding:7px 8px;min-width:170px;">${inp(i,'nome',r.nome||'','Nome / Razão social')}</td>
-      <td style="padding:7px 8px;width:150px;">${inp(i,'cpf',r.cpf||'','CPF/CNPJ',(nfaDigits(r.cpf).length&&![11,14].includes(nfaDigits(r.cpf).length))?'border-color:var(--danger);':'')}</td>
+      <td style="padding:7px 8px;width:160px;">${inp(i,'cpf',r.cpf||'','CPF/CNPJ',(nfaDigits(r.cpf).length&&![11,14].includes(nfaDigits(r.cpf).length))?'border-color:var(--danger);':'')}${r.lookupMsg?`<div style="font-size:10.5px;margin-top:2px;color:${/^✓/.test(r.lookupMsg)?'var(--success)':/buscando/.test(r.lookupMsg)?'var(--text-3)':'var(--danger)'};" title="${escHtml(r.lookupMsg)}">${escHtml(r.lookupMsg.length>30?r.lookupMsg.slice(0,30)+'…':r.lookupMsg)}</div>`:''}</td>
       <td style="padding:7px 8px;width:120px;">${inp(i,'valorRaw',r.valorRaw||'','0,00')}</td>
       <td style="padding:7px 8px;min-width:150px;">${inp(i,'descricao',r.descricao||'','Descrição do serviço (opcional)')}</td>
       <td style="padding:7px 8px;width:150px;font-size:12px;">${nfaStatusCel(r)}</td>
@@ -28329,7 +28369,7 @@ async function nfaEmitirLote(){
       const resp = await fetch('/api/emitir-nf-avulso', {
         method:'POST',
         headers:{ 'Content-Type':'application/json', ...(await authHeaders()) },
-        body: JSON.stringify({ nome:r.nome, doc:r._cpf, valor:r._valor, descricao:r.descricao||'', ref:r.ref }),
+        body: JSON.stringify({ nome:r.nome, doc:r._cpf, valor:r._valor, descricao:r.descricao||'', ref:r.ref, asaas_customer_id:r.asaasCustomerId||null }),
       });
       const j = await resp.json().catch(()=>({}));
       if(resp.ok && (j.nf_status==='emitida' || j.nf_status==='processando')){
