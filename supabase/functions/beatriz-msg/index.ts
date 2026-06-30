@@ -114,9 +114,17 @@ Deno.serve(async (req) => {
   if (caso_id) {
     const r = await userClient.from('casos').select('*').eq('id', caso_id).maybeSingle();
     if (r.error || !r.data) {
-      return new Response(JSON.stringify({ error: 'caso não encontrado ou sem acesso' }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      // Para sugerir uma RESPOSTA o caso é OPCIONAL: a Bia responde à mensagem do
+      // cliente mesmo sem caso vinculado (ex.: telefone que não virou caso na view).
+      // Degrada com caso=null — sem 403 e sem vazar PII (lemos com a RLS do usuário,
+      // então "sem acesso" simplesmente não traz dados). Para as outras intenções
+      // (cobrança) o caso é essencial, então mantém o 403.
+      if (intencao !== 'responder') {
+        return new Response(JSON.stringify({ error: 'caso não encontrado ou sem acesso' }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    } else {
+      caso = r.data;
     }
-    caso = r.data;
   }
 
   let aiResp: any;
