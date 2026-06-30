@@ -15,7 +15,6 @@
 // dev local e o domínio canônico. Sem reflexo de origem arbitrária.
 const ALLOWED_ORIGINS = new Set([
   'https://painel.cobrasq.com.br',          // domínio canônico (custom)
-  'https://cobrasq-faturamento.vercel.app', // legado .vercel.app (remover após cutover)
   'http://localhost:3737',
   'http://127.0.0.1:3737',
   'http://localhost:3000',
