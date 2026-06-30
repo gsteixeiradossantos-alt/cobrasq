@@ -17734,6 +17734,7 @@ function cpBeatrizSend(){ const i=document.getElementById('cpBeatrizInput'); con
 
 // Monta o extrato de repasses do cedente: capital · recebido · saldo, por caso.
 let _cpExtrato = null;
+let _cpExtUI = { q:'', filter:'todos', sort:'orig', sel:{}, open:{}, bodyEl:null, focusSearch:false };
 async function cpComputeExtrato(){
   const cid = currentUser.clienteId;
   const supa = getSupabase();
@@ -17751,46 +17752,243 @@ async function cpComputeExtrato(){
     const saldo=(cap!=null)?(cap-recebido):null;
     const principal=(c.cobranca_partes||[]).find(p=>p.principal)||(c.cobranca_partes||[])[0];
     const devNome=(principal&&principal.devedores&&principal.devedores.nome)||(c.divida&&c.divida.descricao)||'Caso';
-    return { id:c.id, cap, reps, recebido, saldo, devNome, status:c.status, quitado:(saldo!=null&&cap>0&&saldo<=0.005) };
+    return { id:c.id, cap, reps, recebido, saldo, devNome, status:c.status, quitado:(saldo!=null&&cap>0&&saldo<=0.005), ultimo:(reps[0]&&reps[0].data_pix)||null };
   }).filter(l=>l.cap!=null || l.reps.length);
   linhas.sort((a,b)=>b.recebido-a.recebido);
+  linhas.forEach((l,i)=>{ l.origIdx=i; }); // índice de origem estável (seleção/expansão sobrevivem a filtro/ordenação)
   const totCap=linhas.reduce((s,l)=>s+(l.cap||0),0);
   const totRec=linhas.reduce((s,l)=>s+l.recebido,0);
-  _cpExtrato={ linhas, totCap, totRec, totSaldo:Math.max(totCap-totRec,0), nRep:repasses.length };
+  const nQuit=linhas.filter(l=>l.quitado).length;
+  _cpExtrato={ linhas, totCap, totRec, totSaldo:Math.max(totCap-totRec,0), nRep:repasses.length, nQuit, pct: totCap>0?(totRec/totCap*100):0 };
   return _cpExtrato;
+}
+// ── Extrato: view (filtra+ordena mantendo origIdx), contagens, helpers ──
+function _cpExtNorm(s){ return (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
+function _cpExtView(){
+  const ex=_cpExtrato; if(!ex) return [];
+  const u=_cpExtUI; let v=ex.linhas.slice();
+  const q=_cpExtNorm(u.q.trim());
+  if(q) v=v.filter(l=>_cpExtNorm(l.devNome).includes(q));
+  if(u.filter==='Quitado') v=v.filter(l=>l.quitado);
+  else if(u.filter==='andamento') v=v.filter(l=>!l.quitado);
+  else if(u.filter==='sem') v=v.filter(l=>l.recebido<=0.005);
+  const sk=u.sort;
+  if(sk==='saldo') v.sort((a,b)=>Math.max(b.saldo||0,0)-Math.max(a.saldo||0,0));
+  else if(sk==='recebido') v.sort((a,b)=>b.recebido-a.recebido);
+  else if(sk==='capital') v.sort((a,b)=>(b.cap||0)-(a.cap||0));
+  else if(sk==='nome') v.sort((a,b)=>(a.devNome||'').localeCompare(b.devNome||'','pt-BR'));
+  else if(sk==='recente') v.sort((a,b)=>String(b.ultimo||'').localeCompare(String(a.ultimo||'')));
+  return v; // 'orig' = ordem do extrato (sem reordenar)
+}
+function _cpExtCounts(){ const ls=(_cpExtrato&&_cpExtrato.linhas)||[]; return { todos:ls.length, Quitado:ls.filter(l=>l.quitado).length, andamento:ls.filter(l=>!l.quitado).length, sem:ls.filter(l=>l.recebido<=0.005).length }; }
+function _cpMoneyBig(v){ const s=fmtR(v||0); const i=s.lastIndexOf(','); return i<0?escHtml(s):(escHtml(s.slice(0,i))+'<span style="font-size:.6em;">'+escHtml(s.slice(i))+'</span>'); }
+function _cpCheck(on,partial){
+  if(partial) return '<span style="width:18px;height:18px;border-radius:5px;border:1px solid var(--gold-2);background:var(--pgold);display:flex;align-items:center;justify-content:center;flex-shrink:0;"><span style="width:9px;height:2px;background:var(--ink);border-radius:1px;"></span></span>';
+  if(on) return '<span style="width:18px;height:18px;border-radius:5px;border:1px solid var(--pgold);background:var(--pgold);display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="#0A1530" stroke-width="3"><path d="m5 12 5 5 9-10"/></svg></span>';
+  return '<span style="width:18px;height:18px;border-radius:5px;border:1px solid var(--mute);background:transparent;flex-shrink:0;display:block;"></span>';
+}
+function _cpBia(scope){
+  const n=scope.length, nq=scope.filter(l=>l.quitado).length, nand=n-nq;
+  const cap=scope.reduce((s,l)=>s+(l.cap||0),0), rec=scope.reduce((s,l)=>s+l.recebido,0);
+  const saldo=Math.max(cap-rec,0), pct=cap>0?(rec/cap*100):0, nsem=scope.filter(l=>l.recebido<=0.005).length;
+  let maior=null; scope.filter(l=>!l.quitado&&(l.saldo||0)>0).forEach(l=>{ if(!maior||(l.saldo||0)>(maior.saldo||0)) maior=l; });
+  let t=`Dos ${n} caso(s) da sua carteira, ${nq} ${nq===1?'já está quitado':'já estão quitados'} e ${nand} ${nand===1?'segue':'seguem'} em andamento. `;
+  t+=`Já ${rec>0?'foram recuperados':'foi recuperado'} ${fmtR(rec)} de ${fmtR(cap)} (${pct.toFixed(1).replace('.',',')}%), restando ${fmtR(saldo)} a recuperar.`;
+  if(maior) t+=` O maior valor em aberto é de ${maior.devNome} (${fmtR(Math.max(maior.saldo||0,0))}).`;
+  if(nsem>0) t+=` ${nsem} caso(s) ainda não tiveram entrada e seguem em fase de cobrança.`;
+  return t;
+}
+function _cpNarr(l){
+  if(l.quitado) return `Cobrança quitada — recuperação integral do capital.${l.ultimo?` Último repasse em ${_detData(l.ultimo)}.`:''} Nenhuma ação pendente.`;
+  if(l.recebido>0.005){ const pct=l.cap?(l.recebido/l.cap*100):0; return `Recuperação parcial: ${fmtR(l.recebido)} de ${fmtR(l.cap||0)} (${pct.toFixed(1).replace('.',',')}%). Saldo de ${fmtR(Math.max(l.saldo||0,0))} ainda em recuperação.`; }
+  return 'Sem repasses até o momento — caso em fase de cobrança.';
 }
 async function cpRenderRepasses(body){
   if(!body) return;
-  body.innerHTML=`<div style="padding:30px;text-align:center;color:var(--text-2);">Carregando repasses…</div>`;
-  const ex=await cpComputeExtrato();
-  const repRow=(r)=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--pline);font-size:12.5px;">
-      <div style="display:flex;align-items:center;gap:8px;color:var(--mute);"><span class="cp-tl-dot" style="width:7px;height:7px;margin:0;border:0;"></span>${escHtml(r.data_pix?_detData(r.data_pix):'—')}${r.transacao_id?` · <span class="cp-mono" style="color:var(--mute);">${escHtml(String(r.transacao_id).slice(0,14))}…</span>`:''}</div>
-      <div style="display:flex;align-items:center;gap:12px;"><span class="cp-num" style="font-size:14px;color:var(--ink);">${fmtR(+r.valor||0)}</span>${r.documento_id?`<button class="cp-label" style="border:0;background:none;color:var(--gold-2);cursor:pointer;" onclick="event.stopPropagation();baixarDocumentoDevedor('${r.documento_id}')">comprovante</button>`:'<span class="cp-label" style="color:var(--mute);opacity:.5;">comprovante</span>'}</div>
+  _cpExtUI.bodyEl=body;
+  body.innerHTML=`<div style="padding:60px;text-align:center;color:var(--mute);">Carregando extrato…</div>`;
+  await cpComputeExtrato();
+  // estado de UI zera a cada entrada na tela
+  _cpExtUI.q=''; _cpExtUI.filter='todos'; _cpExtUI.sort='orig'; _cpExtUI.sel={}; _cpExtUI.open={}; _cpExtUI.focusSearch=false;
+  cpExtPaint();
+}
+// Interações (mutam _cpExtUI e repintam a folha sem refazer a query)
+function cpExtSearch(v){ _cpExtUI.q=v; _cpExtUI.focusSearch=true; cpExtPaint(); }
+function cpExtSetFilter(f){ _cpExtUI.filter=(_cpExtUI.filter===f?'todos':f); cpExtPaint(); }
+function cpExtSetSort(v){ _cpExtUI.sort=v; cpExtPaint(); }
+function cpExtClear(){ _cpExtUI.q=''; _cpExtUI.filter='todos'; _cpExtUI.sort='orig'; cpExtPaint(); }
+function cpExtToggle(idx){ idx=+idx; _cpExtUI.open[idx]=!_cpExtUI.open[idx]; cpExtPaint(); }
+function cpExtToggleAll(){ const v=_cpExtView().filter(l=>l.reps.length); const allOpen=v.length>0&&v.every(l=>_cpExtUI.open[l.origIdx]); v.forEach(l=>{ _cpExtUI.open[l.origIdx]=!allOpen; }); cpExtPaint(); }
+function cpExtSel(idx){ idx=+idx; _cpExtUI.sel[idx]=!_cpExtUI.sel[idx]; cpExtPaint(); }
+function cpExtSelAll(){ const v=_cpExtView(); const allSel=v.length>0&&v.every(l=>_cpExtUI.sel[l.origIdx]); v.forEach(l=>{ _cpExtUI.sel[l.origIdx]=!allSel; }); cpExtPaint(); }
+function cpExtPaint(){
+  const body=_cpExtUI.bodyEl, ex=_cpExtrato; if(!body||!ex) return;
+  const u=_cpExtUI, view=_cpExtView(), cnt=_cpExtCounts();
+  const active = !!u.q.trim() || u.filter!=='todos' || u.sort!=='orig';
+  const cli=(DB.clientes||[]).find(c=>c.id===currentUser.clienteId)||{};
+  const nomeCli=cli.nomeFantasia||cli.nome_fantasia||cli.nome||currentUser.nome||'Cliente';
+  const grid='grid-template-columns:22px minmax(0,1fr) 88px 88px 88px 96px;gap:8px;';
+  const filterLbl={todos:'Todos',Quitado:'Quitados',andamento:'Em andamento',sem:'Sem entrada'}[u.filter]||'Todos';
+  const sortLbl={orig:'ordem do extrato',saldo:'maior saldo',recebido:'mais recuperado',capital:'maior capital',nome:'nome',recente:'último repasse'}[u.sort]||'ordem do extrato';
+  // seleção / expansão (estado do cabeçalho)
+  const selN=view.filter(l=>u.sel[l.origIdx]).length;
+  const allSel=view.length>0&&selN===view.length, partialSel=selN>0&&selN<view.length;
+  const expandables=view.filter(l=>l.reps.length);
+  const allOpen=expandables.length>0&&expandables.every(l=>u.open[l.origIdx]);
+  const nSel=Object.keys(u.sel).filter(k=>u.sel[k]).length;
+  const btnLabel=nSel>0?`Gerar relatório (${nSel})`:'Gerar relatório (todos)';
+  // métricas do topo = extrato completo
+  const metric=(lbl,valHtml,color,extra)=>`<div style="padding:22px 18px;min-width:0;background:var(--card-warm);">
+      <div class="cp-label" style="font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${lbl}</div>
+      <div class="cp-num" style="font-size:clamp(17px,2.2vw,30px);color:${color};margin-top:8px;white-space:nowrap;">${valHtml}</div>${extra||''}</div>`;
+  const chip=(k,l,n)=>`<button onclick="cpExtSetFilter('${k}')" style="border:0;border-radius:100px;padding:6px 12px;font:inherit;font-size:12px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;gap:6px;${u.filter===k?'background:var(--ink);color:var(--cream);':'background:transparent;color:var(--mute);'}">${l}<span class="cp-mono" style="font-size:10.5px;opacity:.7;">${n}</span></button>`;
+  const sortOpt=(v,l)=>`<option value="${v}" ${u.sort===v?'selected':''}>${l}</option>`;
+  const pixRow=(r)=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 0;border-bottom:.5px solid rgba(10,21,48,.07);">
+      <div style="display:flex;align-items:center;gap:9px;min-width:0;"><span style="color:var(--gold-2);flex-shrink:0;">↳</span><span class="cp-mono" style="font-size:12px;color:var(--ink);flex-shrink:0;">${escHtml(r.data_pix?_detData(r.data_pix):'—')}</span><span class="cp-mono" style="font-size:10.5px;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(r.transacao_id||'')}</span></div>
+      <span class="cp-mono" style="font-size:12.5px;color:var(--st-quitado);white-space:nowrap;flex-shrink:0;">${fmtR(+r.valor||0)}</span>
     </div>`;
-  const caseCard=(l)=>{ const pct=l.cap?Math.min(100,(l.recebido/l.cap)*100):0; const ini=(l.devNome||'?').split(' ').filter(Boolean).slice(0,2).map(s=>s[0]).join('').toUpperCase();
-    return `<div class="cp-card" style="padding:16px 20px;margin-bottom:12px;cursor:pointer;" onclick="cpVerDevedor('${l.id}')">
-      <div style="display:grid;grid-template-columns:2fr 1.2fr 1.2fr 1.4fr;gap:16px;align-items:center;">
-        <div style="display:flex;align-items:center;gap:11px;min-width:0;"><span style="width:38px;height:38px;border-radius:50%;background:var(--ink);color:var(--cream);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;flex-shrink:0;">${ini}</span><div style="min-width:0;"><div style="font-weight:600;font-size:13.5px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(l.devNome)}</div><div class="cp-label" style="margin-top:2px;">capital ${l.cap!=null?fmtR(l.cap):'—'}</div></div></div>
-        <div style="text-align:right;"><div class="cp-label">Recebido</div><div class="cp-num" style="font-size:16px;color:var(--st-quitado);">${fmtR(l.recebido)}</div></div>
-        <div style="text-align:right;"><div class="cp-label">Saldo</div><div class="cp-num" style="font-size:16px;color:var(--gold-2);">${l.saldo!=null?fmtR(Math.max(l.saldo,0)):'—'}</div></div>
-        <div style="display:flex;align-items:center;gap:10px;"><div class="cp-prog" style="flex:1;"><span style="width:${pct.toFixed(0)}%;background:var(--st-quitado);"></span></div><span class="cp-mono" style="font-size:11px;color:var(--mute);">${pct.toFixed(0)}%</span></div>
+  const row=(l)=>{
+    const has=l.reps.length>0, open=!!u.open[l.origIdx], seld=!!u.sel[l.origIdx];
+    const sit=l.quitado?'Quitado':'Em andamento', sclass=l.quitado?'cp-st-quitado':'cp-st-acordo';
+    return `<div>
+      <div style="display:grid;${grid}padding:12px 22px;align-items:center;border-bottom:.5px solid rgba(10,21,48,.07);${seld?'background:color-mix(in srgb,var(--pgold) 9%,transparent);':(open?'background:var(--paper-2);':'')}${has?'cursor:pointer;':''}" ${has?`onclick="cpExtToggle(${l.origIdx})"`:''}>
+        <button onclick="event.stopPropagation();cpExtSel(${l.origIdx})" style="border:0;background:none;cursor:pointer;padding:0;display:flex;">${_cpCheck(seld,false)}</button>
+        <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+          ${has?`<span style="width:20px;height:20px;border-radius:6px;border:1px solid ${open?'var(--pgold)':'var(--pline)'};background:${open?'rgba(201,169,97,.15)':'transparent'};display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--gold-2);transition:transform .15s;transform:rotate(${open?'90':'0'}deg);"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg></span>`:'<span style="width:20px;flex-shrink:0;"></span>'}
+          <span style="font-size:14px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(l.devNome)}</span>
+          ${has?`<span class="cp-mono" style="font-size:9.5px;color:var(--mute);background:var(--paper);border:1px solid var(--pline);border-radius:100px;padding:2px 7px;flex-shrink:0;">${l.reps.length} PIX</span>`:''}
+        </div>
+        <div class="cp-mono" style="font-size:12px;text-align:right;white-space:nowrap;color:${l.cap!=null?'var(--ink)':'var(--mute)'};">${l.cap!=null?fmtR(l.cap):'—'}</div>
+        <div class="cp-mono" style="font-size:12px;text-align:right;white-space:nowrap;color:${l.recebido>0.005?'var(--st-quitado)':'var(--mute)'};">${fmtR(l.recebido)}</div>
+        <div class="cp-mono" style="font-size:12px;text-align:right;white-space:nowrap;color:${(l.saldo!=null&&l.saldo>0.005)?'var(--ink)':'var(--mute)'};">${l.saldo!=null?fmtR(Math.max(l.saldo,0)):'—'}</div>
+        <div style="text-align:right;"><span class="cp-pill ${sclass}" style="font-size:9px;text-transform:uppercase;letter-spacing:.04em;padding:3px 9px;">${sit}</span></div>
       </div>
-      ${l.reps.length?`<div style="margin-top:6px;">${l.reps.map(repRow).join('')}</div>`:''}
+      ${(has&&open)?`<div style="background:var(--paper);padding:6px 40px 12px 64px;">${l.reps.map(pixRow).join('')}</div>`:''}
+    </div>`;
+  };
+  // total da faixa = recorte visível
+  const vCap=view.reduce((s,l)=>s+(l.cap||0),0), vRec=view.reduce((s,l)=>s+l.recebido,0), vSaldo=Math.max(vCap-vRec,0);
+  body.innerHTML=`<div style="max-width:1080px;margin:0 auto;">
+    <div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+      <button class="cp-btn cp-btn-outline" onclick="cpExtToggleAll()">${allOpen?'Recolher tudo':'Expandir tudo'}</button>
+      <button class="cp-btn cp-btn-outline" onclick="cpExtratoPDF()"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg> Baixar PDF</button>
+      <button class="cp-btn cp-btn-primary" onclick="cpExtReport()">${btnLabel}</button>
+    </div>
+    <div style="background:var(--card-warm);border:1px solid var(--pline);border-radius:18px;box-shadow:0 24px 60px -36px rgba(10,21,48,.4);overflow:hidden;">
+      <div style="position:relative;padding:34px 40px 28px;border-bottom:.5px solid var(--pline);overflow:hidden;">
+        <div style="position:absolute;top:-44px;right:-30px;width:150px;height:150px;border-radius:50%;border:1px solid rgba(201,169,97,.18);"></div>
+        <div style="position:absolute;top:-8px;right:34px;width:90px;height:90px;border-radius:50%;border:1px solid rgba(201,169,97,.14);"></div>
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px;position:relative;">
+          <div style="min-width:0;">
+            <div class="cp-mono" style="font-size:10px;letter-spacing:.18em;color:var(--gold-2);text-transform:uppercase;">Documento financeiro</div>
+            <div style="font-family:'Fraunces',Georgia,serif;font-weight:300;font-size:38px;color:var(--ink);line-height:1.05;margin-top:8px;">Extrato de repasses</div>
+            <div style="font-family:'Instrument Serif',Georgia,serif;font-style:italic;font-size:19px;color:var(--mute);margin-top:6px;">${escHtml(nomeCli)} · <span style="color:var(--gold-2);">COBRASQ — Recuperadora de Crédito</span></div>
+          </div>
+          <div style="text-align:right;flex-shrink:0;">
+            <div style="display:inline-flex;align-items:center;gap:8px;"><span class="cp-logo-mark" style="width:26px;height:26px;"></span><span style="font-family:'Fraunces',Georgia,serif;font-size:20px;color:var(--ink);">cobrasq<span style="color:var(--pgold);">.</span></span></div>
+            <div class="cp-mono" style="font-size:10px;color:var(--mute);margin-top:8px;">Emitido em ${escHtml(_detData(new Date().toISOString()))}</div>
+          </div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--pline);border-bottom:.5px solid var(--pline);">
+        ${metric('Capital em cobrança',_cpMoneyBig(ex.totCap),'var(--ink)')}
+        ${metric('Recebido / repassado',_cpMoneyBig(ex.totRec),'var(--st-quitado)')}
+        ${metric('Saldo a recuperar',_cpMoneyBig(ex.totSaldo),'var(--gold-2)')}
+        ${metric('Recuperado',`${ex.pct.toFixed(1).replace('.',',')}% <span style="font-size:.42em;color:var(--mute);font-family:'Inter Tight',sans-serif;">${ex.nQuit} quitado${ex.nQuit!==1?'s':''}</span>`,'var(--ink)',`<div class="cp-prog" style="margin-top:12px;"><span style="width:${Math.min(100,ex.pct).toFixed(0)}%;background:var(--st-quitado);"></span></div>`)}
+      </div>
+      <div style="padding:14px 22px;border-bottom:.5px solid var(--pline);display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:8px;background:var(--paper);border:1px solid var(--pline);border-radius:100px;padding:8px 14px;min-width:200px;flex:1;max-width:300px;">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="var(--mute)" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          <input id="cpExtSearchInput" value="${escHtml(u.q)}" oninput="cpExtSearch(this.value)" placeholder="Buscar devedor…" style="border:0;background:none;outline:none;flex:1;font:inherit;font-size:13px;color:var(--ink);min-width:0;">
+          ${u.q?`<button onclick="cpExtSearch('')" style="border:0;background:none;cursor:pointer;color:var(--mute);font-size:13px;">✕</button>`:''}
+        </div>
+        <div style="display:inline-flex;align-items:center;gap:2px;background:var(--paper);border:1px solid var(--pline);border-radius:100px;padding:3px;">
+          ${chip('todos','Todos',cnt.todos)}${chip('Quitado','Quitados',cnt.Quitado)}${chip('andamento','Em andamento',cnt.andamento)}${chip('sem','Sem entrada',cnt.sem)}
+        </div>
+        <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
+          <span class="cp-label">Ordenar</span>
+          <select onchange="cpExtSetSort(this.value)" style="padding:8px 11px;border:1px solid var(--pline);background:var(--paper);border-radius:10px;font:inherit;font-size:12.5px;color:var(--ink);cursor:pointer;">
+            ${sortOpt('orig','Ordem do extrato')}${sortOpt('saldo','Maior saldo')}${sortOpt('recebido','Mais recuperado')}${sortOpt('capital','Maior capital')}${sortOpt('nome','Nome (A–Z)')}${sortOpt('recente','Último repasse')}
+          </select>
+        </div>
+      </div>
+      ${active?`<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 22px;background:var(--paper-2);border-bottom:.5px solid var(--pline);">
+        <span class="cp-mono" style="font-size:11px;color:var(--gold-2);">${view.length} de ${ex.linhas.length} caso(s) · ${filterLbl} · ord. ${sortLbl}</span>
+        <button onclick="cpExtClear()" class="cp-mono" style="border:0;background:none;color:var(--gold-2);cursor:pointer;font-size:10px;text-transform:uppercase;letter-spacing:.12em;">Limpar</button></div>`:''}
+      <div style="display:grid;${grid}padding:12px 22px;align-items:center;border-bottom:.5px solid var(--pline);">
+        <button onclick="cpExtSelAll()" style="border:0;background:none;cursor:pointer;padding:0;display:flex;">${_cpCheck(allSel,partialSel)}</button>
+        <div class="cp-label">Caso / repasse</div>
+        <div class="cp-label" style="text-align:right;">Capital</div>
+        <div class="cp-label" style="text-align:right;">Recebido</div>
+        <div class="cp-label" style="text-align:right;">Saldo</div>
+        <div class="cp-label" style="text-align:right;">Situação</div>
+      </div>
+      ${view.length?view.map(row).join(''):'<div style="padding:56px;text-align:center;color:var(--mute);font-size:13px;">Nenhum caso encontrado.</div>'}
+      <div style="display:grid;${grid}padding:20px 22px;align-items:center;background:var(--ink);color:var(--cream);">
+        <span></span>
+        <span class="cp-mono" style="font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:var(--pgold);">${active?`Total (${view.length})`:'Total'}</span>
+        <div class="cp-mono" style="font-size:12px;text-align:right;white-space:nowrap;color:var(--cream);">${fmtR(vCap)}</div>
+        <div class="cp-mono" style="font-size:12px;text-align:right;white-space:nowrap;color:#9CC18F;">${fmtR(vRec)}</div>
+        <div class="cp-mono" style="font-size:12px;text-align:right;white-space:nowrap;color:var(--pgold);">${fmtR(vSaldo)}</div>
+        <span></span>
+      </div>
+      <div style="display:flex;align-items:flex-start;gap:10px;padding:18px 22px;">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--gold-2)" stroke-width="1.8" style="flex-shrink:0;margin-top:1px;"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
+        <span style="font-size:12.5px;color:var(--mute);line-height:1.5;">Cada repasse listado é um PIX da COBRASQ ao seu favor, com data e identificador da transação. Documento informativo gerado automaticamente a partir dos seus dados.</span>
+      </div>
+    </div></div>`;
+  if(u.focusSearch){ const si=document.getElementById('cpExtSearchInput'); if(si){ si.focus(); const val=si.value; si.value=''; si.value=val; } u.focusSearch=false; }
+}
+// Modal "Gerar relatório de andamento" (escopo = selecionados, ou todos)
+function cpExtReportClose(){ const o=document.getElementById('cpExtRepOv'); if(o) o.remove(); }
+function cpExtReport(){
+  const ex=_cpExtrato; if(!ex) return;
+  const selIdxs=Object.keys(_cpExtUI.sel).filter(k=>_cpExtUI.sel[k]).map(Number);
+  const scope=selIdxs.length?ex.linhas.filter(l=>selIdxs.includes(l.origIdx)):ex.linhas.slice();
+  const n=scope.length, nq=scope.filter(l=>l.quitado).length, nand=n-nq, nsem=scope.filter(l=>l.recebido<=0.005).length;
+  const cap=scope.reduce((s,l)=>s+(l.cap||0),0), rec=scope.reduce((s,l)=>s+l.recebido,0);
+  const saldo=Math.max(cap-rec,0), pct=cap>0?(rec/cap*100):0;
+  const cli=(DB.clientes||[]).find(c=>c.id===currentUser.clienteId)||{};
+  const nomeCli=cli.nomeFantasia||cli.nome_fantasia||cli.nome||currentUser.nome||'Cliente';
+  const metric=(lbl,valHtml,color)=>`<div style="padding:18px 16px;min-width:0;background:var(--card-warm);"><div class="cp-label" style="font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${lbl}</div><div class="cp-num" style="font-size:clamp(15px,2vw,24px);color:${color};margin-top:6px;white-space:nowrap;">${valHtml}</div></div>`;
+  const dot=(c,t)=>`<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink);"><span style="width:8px;height:8px;border-radius:50%;background:${c};"></span>${t}</span>`;
+  const caseItem=(l)=>{ const p=l.cap?Math.min(100,l.recebido/l.cap*100):0; const sclass=l.quitado?'cp-st-quitado':'cp-st-acordo';
+    return `<div style="padding:14px 24px;border-bottom:.5px solid var(--pline);">
+      <div style="display:flex;align-items:center;gap:10px;justify-content:space-between;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:10px;min-width:0;"><span class="cp-pill ${sclass}" style="font-size:9px;text-transform:uppercase;padding:3px 9px;">${l.quitado?'Quitado':'Em andamento'}</span><span style="font-size:14px;font-weight:600;color:var(--ink);">${escHtml(l.devNome)}</span></div>
+        <span class="cp-mono" style="font-size:12px;color:var(--mute);">${fmtR(l.recebido)} / ${fmtR(l.cap||0)}</span>
+      </div>
+      <div class="cp-prog" style="margin:10px 0 8px;"><span style="width:${p.toFixed(0)}%;background:var(--st-quitado);"></span></div>
+      <div style="font-size:12.5px;color:var(--mute);line-height:1.5;">${escHtml(_cpNarr(l))}</div>
     </div>`; };
-  body.innerHTML=`
-    <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:20px;flex-wrap:wrap;gap:12px;">
-      <div>
-        <div class="cp-h1">Repasses recebidos</div>
-        <div class="cp-lead">Cada real que a COBRASQ recupera, <em>volta para o seu caixa</em>.</div>
+  const html=`<div id="cpExtRepOv" style="position:fixed;inset:0;z-index:9999;background:rgba(10,21,48,.55);display:flex;align-items:center;justify-content:center;padding:24px;" onclick="if(event.target===this)cpExtReportClose()">
+    <div style="background:var(--card-warm);border-radius:18px;max-width:680px;width:100%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 40px 90px -40px rgba(10,21,48,.6);overflow:hidden;font-family:'Inter Tight',sans-serif;">
+      <div style="background:var(--ink);color:var(--cream);padding:22px 26px;position:relative;">
+        <button onclick="cpExtReportClose()" style="position:absolute;top:18px;right:20px;border:0;background:none;color:rgba(239,234,217,.7);font-size:20px;cursor:pointer;line-height:1;">✕</button>
+        <div class="cp-mono" style="font-size:10px;letter-spacing:.18em;color:var(--pgold);text-transform:uppercase;">Relatório de andamento</div>
+        <div style="font-family:'Fraunces',Georgia,serif;font-weight:300;font-size:26px;margin-top:6px;">Status das cobranças</div>
+        <div style="display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap;"><span class="cp-mono" style="font-size:10px;background:rgba(201,169,97,.18);color:var(--pgold);border-radius:100px;padding:3px 10px;">${selIdxs.length?`${n} caso(s) selecionado(s)`:'Todos os casos'}</span><span style="font-size:12px;color:rgba(239,234,217,.7);">${escHtml(nomeCli)} · ${escHtml(_detData(new Date().toISOString()))}</span></div>
       </div>
-      <button class="cp-btn cp-btn-outline" onclick="cpExtratoPDF()"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg> Baixar extrato (PDF)</button>
-    </div>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-bottom:20px;">
-      <div class="cp-card"><div class="cp-label">Capital total</div><div class="cp-num" style="font-size:32px;color:var(--ink);margin-top:6px;">${fmtR(ex.totCap)}</div><div style="font-size:12px;color:var(--mute);margin-top:4px;">em ${ex.linhas.length} caso${ex.linhas.length!==1?'s':''} com valor</div></div>
-      <div class="cp-card" style="background:var(--ink);color:var(--cream);"><div class="cp-label" style="color:rgba(239,234,217,.6);">Total recebido</div><div class="cp-num" style="font-size:32px;color:var(--pgold);margin-top:6px;">${fmtR(ex.totRec)}</div><div style="font-size:12px;color:rgba(239,234,217,.7);margin-top:4px;">${ex.nRep} repasse${ex.nRep!==1?'s':''} confirmado${ex.nRep!==1?'s':''}</div></div>
-      <div class="cp-card"><div class="cp-label">Saldo a receber</div><div class="cp-num" style="font-size:32px;color:var(--gold-2);margin-top:6px;">${fmtR(ex.totSaldo)}</div><div style="font-size:12px;color:var(--mute);margin-top:4px;">capital ainda em recuperação</div></div>
-    </div>
-    ${ex.linhas.length? ex.linhas.map(caseCard).join('') : `<div class="cp-card" style="text-align:center;padding:56px;"><div class="cp-h1" style="font-size:20px;color:var(--mute);">Nenhum repasse ainda</div><div class="cp-lead" style="font-size:15px;">Assim que a COBRASQ recuperar e repassar, o dinheiro aparece aqui.</div></div>`}`;
+      <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--pline);border-bottom:.5px solid var(--pline);">
+        ${metric('Capital',_cpMoneyBig(cap),'var(--ink)')}${metric('Recuperado',_cpMoneyBig(rec),'var(--st-quitado)')}${metric('Saldo',_cpMoneyBig(saldo),'var(--gold-2)')}${metric('Recuperado %',pct.toFixed(1).replace('.',',')+'%','var(--ink)')}
+      </div>
+      <div style="display:flex;gap:18px;align-items:center;padding:12px 26px;background:var(--paper-2);flex-wrap:wrap;">
+        ${dot('var(--st-quitado)',`<strong>${nq}</strong>&nbsp;quitado(s)`)}${dot('var(--gold-2)',`<strong>${nand}</strong>&nbsp;em andamento`)}${dot('var(--mute)',`<strong>${nsem}</strong>&nbsp;sem entrada`)}
+        <span class="cp-mono" style="margin-left:auto;font-size:10px;color:var(--mute);">${n} caso(s) no relatório</span>
+      </div>
+      <div style="display:flex;gap:12px;padding:16px 26px;background:linear-gradient(120deg,rgba(201,169,97,.12),rgba(201,169,97,.02));border-bottom:.5px solid var(--pline);">
+        <span style="width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,var(--pgold),var(--gold-2));color:var(--ink);display:flex;align-items:center;justify-content:center;font-family:'Instrument Serif',serif;font-style:italic;font-size:17px;flex-shrink:0;">B</span>
+        <div><div class="cp-mono" style="font-size:9.5px;letter-spacing:.14em;color:var(--gold-2);text-transform:uppercase;margin-bottom:4px;">Resumo da Bia</div><div style="font-size:13px;color:var(--ink);line-height:1.55;">${escHtml(_cpBia(scope))}</div></div>
+      </div>
+      <div style="overflow-y:auto;max-height:46vh;">${scope.map(caseItem).join('')||'<div style="padding:40px;text-align:center;color:var(--mute);">Nenhum caso.</div>'}</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 26px;border-top:1px solid var(--pline);flex-wrap:wrap;">
+        <span style="font-size:11.5px;font-style:italic;color:var(--mute);">Relatório informativo gerado a partir dos seus dados.</span>
+        <div style="display:flex;gap:10px;"><button class="cp-btn cp-btn-outline" onclick="cpExtReportClose()">Fechar</button><button class="cp-btn cp-btn-primary" onclick="cpExtratoPDF()">Baixar PDF</button></div>
+      </div>
+    </div></div>`;
+  // anexa DENTRO de #portalCedente p/ os tokens CSS (escopados nesse seletor) resolverem
+  const host=document.getElementById('portalCedente')||document.body;
+  const wrap=document.createElement('div'); wrap.innerHTML=html; host.appendChild(wrap.firstChild);
 }
 function cpExtratoPDF(){
   const ex=_cpExtrato; if(!ex){ showToast('Carregue os repasses primeiro.','warning'); return; }
@@ -17876,7 +18074,7 @@ function cpExtratoPDF(){
     .ex-c1{display:flex;align-items:center;gap:11px;min-width:0;}
     .ex-name{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
     .ex-pixtag{font-family:var(--mono);font-size:10px;color:var(--mute);background:var(--paper);border:.5px solid var(--line);border-radius:100px;padding:2px 8px;flex-shrink:0;}
-    .ex-num{font-family:var(--mono);font-size:13px;text-align:right;font-weight:500;}
+    .ex-num{font-family:var(--mono);font-size:12px;text-align:right;white-space:nowrap;font-weight:500;}
     .ex-green{color:var(--st-quitado);} .ex-mute{color:var(--mute);}
     .ex-sit{display:flex;justify-content:flex-end;}
     .ex-badge{font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;padding:4px 10px;border-radius:100px;white-space:nowrap;}
