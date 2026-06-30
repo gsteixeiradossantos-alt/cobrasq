@@ -14015,6 +14015,69 @@ function _detData(s){
   return (m.length===3 && m[0].length===4) ? `${m[2]}/${m[1]}/${m[0]}` : String(s);
 }
 function _detIniciais(nome){ return (nome||'?').split(' ').filter(Boolean).slice(0,2).map(s=>s[0]).join('').toUpperCase()||'?'; }
+
+// ── Curadoria de andamentos DataJud (espelho de api/_datajud-tpu.js) ──────────
+// A timeline do caso mostra só atos RELEVANTES com rótulo amigável. Usado p/
+// relabelar resíduos legados de metadata.historico (fonte=datajud) no front; o
+// cron já grava o subconjunto curado direto em devedor_eventos. Manter em sincronia
+// com api/_datajud-tpu.js.
+const TPU_MOV = {
+  26:{include:true,label:'Ação distribuída (protocolada)'}, 85:{include:true,label:'Petição protocolada'},
+  12740:{include:true,label:'Audiência de conciliação'}, 106:{include:true,label:'Mandado'},
+  848:{include:true,label:'Trânsito em julgado'}, 246:{include:true,label:'Arquivamento definitivo'},
+  193:{include:true,label:'Sentença proferida'}, 219:{include:true,label:'Sentença de procedência'},
+  220:{include:true,label:'Sentença de improcedência'}, 3:{include:true,label:'Decisão proferida'},
+  11009:{include:true,label:'Despacho do juízo'}, 51:{include:true,label:'Penhora/constrição de bens'},
+  970:{include:true,label:'Processo arquivado'}, 466:{include:true,label:'Processo suspenso'},
+  123:{include:false},132:{include:false},581:{include:false},60:{include:false},14736:{include:false},
+  12266:{include:false},12283:{include:false},12293:{include:false},11383:{include:false}
+};
+function _tpuCurar(codigo, nomeCru){
+  const hit = TPU_MOV[String(codigo)];
+  if(hit) return { include:!!hit.include, label: hit.label || nomeCru || 'Movimentação' };
+  const n = String(nomeCru||'');
+  if(/tr[âa]nsito em julgado/i.test(n)) return {include:true,label:'Trânsito em julgado'};
+  if(/senten[çc]a|proced[êe]ncia/i.test(n)) return {include:true,label:'Sentença proferida'};
+  if(/penhora|constri[çc][ãa]o|arresto|sisbajud|bacenjud/i.test(n)) return {include:true,label:'Penhora/constrição de bens'};
+  if(/audi[êe]ncia/i.test(n)) return {include:true,label:'Audiência'};
+  if(/despacho/i.test(n)) return {include:true,label:'Despacho do juízo'};
+  if(/decis[ãa]o/i.test(n)) return {include:true,label:'Decisão proferida'};
+  if(/distribui[çc][ãa]o/i.test(n)) return {include:true,label:'Ação distribuída (protocolada)'};
+  if(/arquivamento/i.test(n)) return {include:true,label:'Processo arquivado'};
+  return { include:false, label:n||'Movimentação' };
+}
+
+// Builder ÚNICO da timeline do caso, usado pelo CRM (renderCobrancaDetalhe) e pelo
+// portal do cedente (cpRenderDevTimeline). Une, ordenado por data (desc):
+//   • eventos = devedor_eventos (log canônico: andamentos curados, notas, repasse-quitação, webhooks)
+//   • repasses = repasses_cliente (mesclados em render — não duplicados em eventos)
+//   • legacyHist = metadata.historico (só a cauda que NÃO é datajud nem repasse, p/ não perder notas antigas)
+// Retorna [{ iso, dataTxt, tipo, texto }].
+function buildCaseTimeline(eventos, repasses, legacyHist){
+  const out=[];
+  (eventos||[]).forEach(e=>{
+    const p=e.payload||{};
+    let texto = p.acao_completa||p.acao||p.texto||p.descricao||p.mensagem||e.tipo||'';
+    let tipoLabel = e.tipo==='andamento_judicial' ? 'Andamento judicial'
+                  : e.tipo==='repasse' ? 'Repasse'
+                  : e.tipo==='nota_manual' ? 'Nota' : (e.tipo||'Evento');
+    const iso = String(p.data || e.criado_em || '').slice(0,10);
+    out.push({ iso, dataTxt:_detData(p.data||e.criado_em), tipo:tipoLabel, texto });
+  });
+  (repasses||[]).forEach(r=>{
+    const iso=String(r.data_pix||'').slice(0,10);
+    out.push({ iso, dataTxt:_detData(r.data_pix), tipo:'Repasse', texto:`Repasse ao cliente — ${fmtR(+r.valor||0)}` });
+  });
+  (legacyHist||[]).forEach(h=>{
+    if(h && (h.fonte==='datajud' || h.tipo==='Repasse')) return; // já vem de eventos/repasses
+    const iso=String(h.data||'').slice(0,10);
+    const texto=h.texto||h.desc||h.descricao||'';
+    if(!texto && !h.tipo) return;
+    out.push({ iso, dataTxt:_detData(h.data)!=='—'?_detData(h.data):String(h.data||''), tipo:h.tipo||'Nota', texto });
+  });
+  out.sort((a,b)=>(b.iso||'').localeCompare(a.iso||''));
+  return out;
+}
 function _detUserNome(uuid){
   if(!uuid) return '—';
   if(Array.isArray(_rosterAppUsers)){ const u=_rosterAppUsers.find(x=>x.id===uuid); if(u&&u.nome) return u.nome; }
@@ -14227,9 +14290,9 @@ async function renderCobrancaDetalhe(){
       <div class="det-panel-tt" style="margin:0;">Histórico</div>
       <button class="btn btn-ghost btn-sm" onclick="adicionarNotaHistorico('${cob.id}')">+ Nota</button>
     </div>
-    ${hist.length? hist.map(e=>{ const t=e.payload?.acao_completa||e.payload?.acao||e.payload?.texto||e.payload?.descricao||e.payload?.mensagem||e.tipo;
-      const autor = e.payload?.registrado_por ? ` <span style="color:var(--text-3);font-size:10px;">(${escHtml(e.payload.registrado_por)})</span>` : '';
-      return `<div style="padding:9px 0;border-top:1px solid var(--border-2);font-size:12.5px;"><div style="color:var(--text-3);font-size:10px;font-family:var(--font-mono);margin-bottom:2px;">${escHtml(_detData(e.criado_em))}</div>${escHtml(t||'')}${autor}</div>`; }).join('') : _detEmpty('Sem histórico registrado.')}
+    ${(()=>{ const tl=buildCaseTimeline(hist, repasses, []); return tl.length? tl.map(it=>
+      `<div style="padding:9px 0;border-top:1px solid var(--border-2);font-size:12.5px;"><div style="color:var(--text-3);font-size:10px;font-family:var(--font-mono);margin-bottom:2px;">${escHtml(it.dataTxt)} · ${escHtml(it.tipo)}</div>${escHtml(it.texto||'')}</div>`).join('')
+      : _detEmpty('Sem histórico registrado.'); })()}
   </div>`;
 
   const principalP = partes.find(p=>p.principal) || partes[0] || null;
@@ -14575,7 +14638,7 @@ async function recomputarSaldoCapital(cobId){
     if((cap-enviado)<=0.005 && cob.status!=='Quitado ao cliente'){
       const novaDiv=Object.assign({}, cob.divida||{}, { valorCapital: cap });
       await supa.from('cobrancas').update({ status:'Quitado ao cliente', divida:novaDiv, updated_at:new Date().toISOString() }).eq('id',cobId);
-      try{ await supa.from('devedor_eventos').insert({ cobranca_id:cobId, tipo:'repasse', payload:{ acao_completa:'Capital integralmente repassado ao cliente — status alterado para "Quitado ao cliente".', origem:'repasse' } }); }catch(_){}
+      try{ await supa.from('devedor_eventos').insert({ cobranca_id:cobId, devedor_id:cobId, tipo:'repasse', payload:{ acao_completa:'Capital integralmente repassado ao cliente — status alterado para "Quitado ao cliente".', origem:'repasse' } }); }catch(_){}
       return 'Quitado ao cliente';
     }
     return cob.status;
@@ -14599,6 +14662,7 @@ function adicionarNotaHistorico(cobId){
     try{
       const { error } = await supa.from('devedor_eventos').insert({
         cobranca_id: cobId,
+        devedor_id: cobId, // invariante cobranca.id=devedor principal → RLS do cedente (eventos_cedente_read)
         tipo: 'nota_manual',
         payload: { acao_completa: nota.trim() + ' (registrado por ' + (currentUser?.nome||'usuário') + ')', registrado_por: currentUser?.nome, origem: 'manual' }
       });
@@ -14708,8 +14772,9 @@ async function renderDevedorDetalhe(){
 
   const panelHist=`<div class="cob-panel" style="padding:18px;">
     <div class="det-panel-tt">Histórico de contato</div>
-    ${hist.length? hist.map(e=>{ const t=e.payload?.acao_completa||e.payload?.acao||e.payload?.texto||e.payload?.descricao||e.payload?.mensagem||e.tipo;
-      return `<div style="padding:9px 0;border-top:1px solid var(--border-2);font-size:12.5px;"><div style="color:var(--text-3);font-size:10px;font-family:var(--font-mono);margin-bottom:2px;">${escHtml(_detData(e.criado_em))}</div>${escHtml(t||'')}</div>`; }).join('') : _detEmpty('Sem histórico de contato.')}
+    ${(()=>{ const tl=buildCaseTimeline(hist, [], []); return tl.length? tl.map(it=>
+      `<div style="padding:9px 0;border-top:1px solid var(--border-2);font-size:12.5px;"><div style="color:var(--text-3);font-size:10px;font-family:var(--font-mono);margin-bottom:2px;">${escHtml(it.dataTxt)} · ${escHtml(it.tipo)}</div>${escHtml(it.texto||'')}</div>`).join('')
+      : _detEmpty('Sem histórico de contato.'); })()}
   </div>`;
 
   const panelDados=`<div class="cob-panel" style="padding:18px;">
@@ -17236,7 +17301,7 @@ function cpVerDevedor(id){
     <div style="display:grid;grid-template-columns:1.1fr 1fr;gap:18px;margin-bottom:18px;">
       <div class="cp-card">
         <div class="cp-label" style="margin-bottom:14px;">Histórico do caso</div>
-        <div id="cpDevTimeline">${cpRenderDevTimeline(hist, [])}</div>
+        <div id="cpDevTimeline">${cpRenderDevTimeline([], [], hist)}</div>
       </div>
       <div style="display:flex;flex-direction:column;gap:18px;">
         <div class="cp-card">
@@ -17262,24 +17327,17 @@ function cpVerDevedor(id){
   cpFillRepassesDevedor(d.id);
 }
 
-// Monta o "Histórico do caso" do portal do cedente unindo os andamentos do caso
-// (devedor.historico) com os repasses recebidos da COBRASQ, ordenados por data
-// (mais recente primeiro). Cada repasse vira um item registrando a data do PIX.
-function cpRenderDevTimeline(hist, reps){
-  const itens=[];
-  (hist||[]).forEach(h=>{
-    const iso=String(h.data||'').slice(0,10);
-    itens.push({ iso, dataTxt:_detData(h.data)!=='—'?_detData(h.data):escHtml(h.data||''), tipo:escHtml(h.tipo||''), texto:escHtml(h.texto||'') });
-  });
-  (reps||[]).forEach(r=>{
-    const iso=String(r.data_pix||'').slice(0,10);
-    itens.push({ iso, dataTxt:_detData(r.data_pix), tipo:'Repasse', texto:`Repasse recebido da COBRASQ — ${fmtR(+r.valor||0)}` });
-  });
+// Monta o "Histórico do caso" do portal do cedente. Usa o MESMO builder do CRM
+// (buildCaseTimeline): eventos = devedor_eventos (andamentos judiciais curados,
+// notas, repasse-quitação — lidos via RLS eventos_cedente_read), repasses =
+// repasses_cliente, e a cauda legada de metadata.historico (não-datajud). Assim
+// o cedente e o gestor veem EXATAMENTE a mesma timeline.
+function cpRenderDevTimeline(eventos, reps, legacyHist){
+  const itens=buildCaseTimeline(eventos, reps, legacyHist);
   if(!itens.length){
     return `<div class="cp-tl-item"><span class="cp-tl-dot"></span><div style="font-size:13px;color:var(--ink);">Caso registrado na COBRASQ.<div style="font-size:11.5px;color:var(--mute);margin-top:2px;">Os andamentos detalhados aparecem aqui conforme o caso avança.</div></div></div>`;
   }
-  itens.sort((a,b)=> (b.iso||'').localeCompare(a.iso||''));
-  return itens.map(it=>`<div class="cp-tl-item"><span class="cp-tl-dot"></span><div style="flex:1;"><div class="cp-mono" style="font-size:10px;color:var(--mute);">${it.dataTxt} · ${it.tipo}</div><div style="font-size:13px;color:var(--ink);margin-top:1px;">${it.texto}</div></div></div>`).join('');
+  return itens.map(it=>`<div class="cp-tl-item"><span class="cp-tl-dot"></span><div style="flex:1;"><div class="cp-mono" style="font-size:10px;color:var(--mute);">${escHtml(it.dataTxt)} · ${escHtml(it.tipo)}</div><div style="font-size:13px;color:var(--ink);margin-top:1px;">${escHtml(it.texto||'')}</div></div></div>`).join('');
 }
 
 // Preenche o painel "Repasses recebidos" do detalhe do caso (cobranca_id = devedor.id).
@@ -17287,10 +17345,16 @@ async function cpFillRepassesDevedor(cobId){
   const el=document.getElementById('cpDevRepasses'); if(!el) return;
   const supa=getSupabase();
   let reps=[];
-  if(supa){ try{ const { data }=await supa.from('repasses_cliente').select('*').eq('cobranca_id',cobId).order('data_pix',{ascending:false,nullsFirst:false}); reps=data||[]; }catch(_){} }
-  // Re-renderiza o "Histórico do caso" já com os repasses (data do PIX) intercalados.
+  let eventos=[];
+  if(supa){
+    try{ const { data }=await supa.from('repasses_cliente').select('*').eq('cobranca_id',cobId).order('data_pix',{ascending:false,nullsFirst:false}); reps=data||[]; }catch(_){}
+    // Eventos do caso via RLS de cedente (eventos_cedente_read filtra por devedor_id).
+    try{ const { data:ev }=await supa.from('devedor_eventos').select('tipo,payload,criado_em').eq('devedor_id',cobId).order('criado_em',{ascending:false}).limit(50); eventos=ev||[]; }catch(_){}
+  }
+  // Re-renderiza o "Histórico do caso" unindo eventos (andamentos curados + notas)
+  // + repasses + cauda legada de metadata.historico.
   const tl=document.getElementById('cpDevTimeline');
-  if(tl){ const dDev=(DB.devedores||[]).find(x=>x.id===cobId); tl.innerHTML=cpRenderDevTimeline(dDev?(dDev.historico||[]):[], reps); }
+  if(tl){ const dDev=(DB.devedores||[]).find(x=>x.id===cobId); tl.innerHTML=cpRenderDevTimeline(eventos, reps, dDev?(dDev.historico||[]):[]); }
   const cob=(typeof DB_cobrancas!=='undefined'?DB_cobrancas:[]||[]).find(c=>c.id===cobId);
   const cap=cob?((cob.valor_capital!=null)?+cob.valor_capital:((cob.divida&&cob.divida.valorCapital!=null)?+cob.divida.valorCapital:null)):null;
   const recebido=reps.reduce((s,r)=>s+(+r.valor||0),0);
