@@ -23,6 +23,7 @@
 
 const crypto = require('crypto');
 const { sbFetch } = require('./_sb.js');
+const { curarMovimento } = require('./_datajud-tpu.js');
 
 // Endpoint público do TJPR no DataJud. A chave é a APIKey pública do CNJ
 // (documentada em https://datajud-wiki.cnj.jus.br/), exposta em DATAJUD_API_KEY.
@@ -104,7 +105,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    const totais = { processos: alvos.length, consultados: 0, novos: 0, backfill: 0, sem_dados: 0, erros: 0 };
+    const totais = { processos: alvos.length, consultados: 0, novos: 0, backfill: 0, sem_dados: 0, erros: 0, eventos: 0 };
 
     for (const alvo of alvos) {
       try {
@@ -144,6 +145,44 @@ module.exports = async function handler(req, res) {
         });
         const qtd = Array.isArray(inseridos) ? inseridos.length : 0;
         if (primeiraVez) totais.backfill += qtd; else totais.novos += qtd;
+
+        // ── Timeline do caso (devedor_eventos): subconjunto CURADO ──────────────
+        // proc_intimacoes acima é o feed cru dos alertas (menu Intimações). Aqui
+        // gravamos só os atos RELEVANTES, com rótulo amigável, no log canônico do
+        // caso (lido pelo CRM e pelo portal do cedente). devedor_id = cobranca.id
+        // (invariante) é obrigatório p/ a RLS do cedente (eventos_cedente_read).
+        for (const m of movimentos) {
+          const dataHora = m.dataHora || m.data_hora || '';
+          const dataDia = dataHora ? String(dataHora).slice(0, 10) : null;
+          const codigo = m.codigo != null ? String(m.codigo) : 's';
+          const cur = curarMovimento(codigo, m.nome, m.complementosTabelados);
+          if (!cur.include) continue;
+          const dedup = `${alvo.digitos}:${codigo}:${dataHora}`;
+          // Pré-check de idempotência (devedor_eventos não tem unique por dedup_key;
+          // há índice único parcial p/ datajud, mas o pré-check evita corrida e o erro
+          // de conflito não-tratável pelo PostgREST em índice de expressão).
+          let jaExiste = false;
+          try {
+            const ja = await sbFetch(
+              `devedor_eventos?tipo=eq.andamento_judicial&payload->>dedup=eq.${encodeURIComponent(dedup)}&select=id&limit=1`
+            );
+            jaExiste = Array.isArray(ja) && ja.length > 0;
+          } catch (_) { jaExiste = false; }
+          if (jaExiste) continue;
+          try {
+            await sbFetch('devedor_eventos', {
+              method: 'POST',
+              prefer: 'resolution=ignore-duplicates,return=minimal',
+              body: JSON.stringify({
+                devedor_id: alvo.cobrancaId,
+                cobranca_id: alvo.cobrancaId,
+                tipo: 'andamento_judicial',
+                payload: { acao_completa: cur.label, fonte: 'datajud', data: dataDia, codigo, nome: m.nome || '', dedup },
+              }),
+            });
+            totais.eventos++;
+          } catch (_) { /* índice único parcial pode rejeitar duplicata em corrida — ok */ }
+        }
       } catch (e) {
         totais.erros++;
         console.error('[cron-datajud]', alvo.formatado, String((e && e.message) || e));
