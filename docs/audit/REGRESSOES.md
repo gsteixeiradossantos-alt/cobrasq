@@ -102,6 +102,33 @@ no código, ou ação na UI) e o **estado-correto** esperado. Atualize ao descob
 - **Teste:** `grep` por checagem de status real na resposta do Z-API; PR #91 mergeado?
 - **Estado-correto:** envio só vira "enviada" com confirmação do Z-API. **Última checagem:** #91 DRAFT — ABERTO.
 
+## R-11 · Cobranças vazias (sem valor e sem credor)
+- **O que é:** cadastros incompletos/abandonados/teste que viram cobrança com `valor_orig`, `valor_atual` e
+  `divida` todos nulos e **sem `cliente_id`** (credor). Poluem listas/relatórios e ficam fora de qualquer cálculo
+  (capital, saldo, recuperado). Ex.: "Adrian Henz - Teste - Arrumar depois", "T".
+- **Onde:** `cobrancas` (criação sem validação de valor/credor no fluxo de Nova cobrança).
+- **Teste:** `select count(*) from public.cobrancas where coalesce(valor_orig,0)=0 and coalesce(valor_atual,0)=0;`
+  (listar id + devedor principal + `created_at`).
+- **Estado-correto:** zero cobranças sem valor **e** sem credor; idealmente o cadastro exige valor + credor (ou
+  marca como rascunho `is_draft`). **Última checagem 2026-06-29:** **9** vazias (criadas 10–25/06, todas sem
+  credor) — candidatas a arquivar/excluir. NÃO entraram no backfill de `valor_capital`.
+
+## R-12 · Portal do cedente quebrado pelo blob staff-only ⚠️
+- **O que é:** o login do cedente é **client-side** (casa `clientes.loginEmail/loginSenha` em `DB.clientes`, sem
+  sessão Supabase → role `anon`). No boot, `loadFromSupabase()` (index.html ~25557) lê o blob `cobrasq_data`
+  ANTES do login. Mas a RLS do blob virou **staff-only** (`data_read_staff` = `authenticated` + `papel IN
+  (proprietario,colaborador)`, migração `20260627_sec_audit_p2`). Logo o `anon` lê **vazio** → `DB.clientes`
+  vazio → o login do cedente dá **"Acesso negado"** e o portal não carrega NADA. Mesmo risco no portal do devedor
+  se depender do blob.
+- **Onde:** `index.html` `doLogin('cedente')` (~5612), boot `loadFromSupabase` (~25557); RLS `cobrasq_data`
+  (`data_read_staff`); ver memória `ref_cobrasq_portal_cedente_blob`.
+- **Teste:** `select policyname,roles,qual from pg_policies where tablename='cobrasq_data';` (confirmar sem
+  política p/ `anon`). Tentar logar como cedente num navegador SEM sessão de staff → deve falhar hoje.
+- **Estado-correto:** o cedente precisa de um caminho de dados que funcione **sem** ser staff — Supabase Auth real
+  com papel `cedente` + RLS por cliente, OU RPC/endpoint `SECURITY DEFINER` que valide a credencial e devolva os
+  dados (como o portal do devedor faz com `portal_*_token`). **Última checagem 2026-06-29:** QUEBRADO; o piloto
+  Bidão (blob + credencial via SQL) NÃO funciona no login real. Decisão de arquitetura pendente.
+
 ---
 
 ### Invariantes guardadas (não quebrar)
