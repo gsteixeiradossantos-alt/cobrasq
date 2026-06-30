@@ -14231,7 +14231,7 @@ async function _repIAConfirmar(){
   if(!incluir.length){ showToast('Selecione ao menos um comprovante.','warning'); return; }
   if(incluir.some(x=>x.valor==null)){ showToast('Há comprovante sem valor. Preencha ou desmarque.','warning'); return; }
   const btn=document.getElementById('repIA-confirmar'); if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
-  let ok=0, dup=0, fail=0;
+  let ok=0, dup=0, fail=0, semDoc=0;
   try{
     const { data: udata } = await supa.auth.getUser();
     const uid = udata && udata.user ? udata.user.id : null;
@@ -14239,7 +14239,7 @@ async function _repIAConfirmar(){
     const jaTem=new Set((existentes||[]).map(r=>r.transacao_id).filter(Boolean));
     for(const it of incluir){
       if(it.transacao_id && jaTem.has(it.transacao_id)){ dup++; continue; }
-      let documento_id=null;
+      let documento_id=null, docErro=null;
       if(it.file){
         try{
           const extf=(it.file.name.split('.').pop()||'pdf').toLowerCase();
@@ -14247,7 +14247,8 @@ async function _repIAConfirmar(){
           const nomeSeguro=(it.file.name||'repasse').replace(/[^a-zA-Z0-9._-]/g,'_');
           const path=`cobrancas/${ctx.cobId}/repasse/${Date.now()}_${nomeSeguro}`;
           const { error: upErr }=await supa.storage.from('documentos').upload(path, it.file, { contentType: it.file.type||'application/octet-stream', upsert:false });
-          if(!upErr){
+          if(upErr){ docErro='upload: '+(upErr.message||upErr); }
+          else{
             const chave=(String(ax.devDoc||'').replace(/\D/g,''))||('id-'+(ax.devId||ctx.cobId));
             const { data: docRow, error: insErr }=await supa.from('documentos').insert({
               devedor_doc: chave, devedor_id: ax.devId||null, cobranca_id: ctx.cobId,
@@ -14255,14 +14256,16 @@ async function _repIAConfirmar(){
               mime_type: it.file.type||null, size_bytes: it.file.size, uploaded_by: uid
             }).select('id').single();
             if(!insErr && docRow) documento_id=docRow.id;
-            else await supa.storage.from('documentos').move(path,'_lixeira/'+path).catch(()=>{});
+            else { docErro='doc: '+(insErr?insErr.message:'sem retorno'); await supa.storage.from('documentos').move(path,'_lixeira/'+path).catch(()=>{}); }
           }
-        }catch(_){}
+        }catch(e){ docErro='exceção: '+(e.message||e); }
+        if(docErro){ semDoc++; console.warn('[repasse] comprovante NÃO anexado:', docErro); }
       }
       const { error: rErr }=await supa.from('repasses_cliente').insert({
         cobranca_id: ctx.cobId, cliente_id: ctx.clienteId||null, valor: it.valor,
         data_pix: it.data||null, transacao_id: it.transacao_id||null,
-        destinatario_nome: it.destinatario_nome||null, destinatario_doc: it.destinatario_doc||null,
+        // nome do credor SEMPRE o do cadastro (consistente), não o que a IA leu do PDF.
+        destinatario_nome: (ctx.clienteNome || it.destinatario_nome || null), destinatario_doc: it.destinatario_doc||null,
         documento_id, status:'confirmado', origem:'ia', created_by: uid
       });
       if(rErr){ if(/duplicate|unique|uq_repasse/i.test(rErr.message||'')) dup++; else fail++; } else ok++;
@@ -14272,8 +14275,9 @@ async function _repIAConfirmar(){
     let msg=`${ok} repasse(s) registrado(s).`;
     if(dup) msg+=` ${dup} já existia(m).`;
     if(fail) msg+=` ${fail} falhou(aram).`;
+    if(semDoc) msg+=` ${semDoc} sem comprovante anexado (veja o console).`;
     if(novoStatus==='Quitado ao cliente') msg+=' Capital zerado → status "Quitado ao cliente".';
-    showToast(msg, fail?'warning':'success');
+    showToast(msg, (fail||semDoc)?'warning':'success');
     renderCobrancaDetalhe();
   }catch(e){
     showToast('Falha ao registrar repasses: '+(e.message||e),'danger');
