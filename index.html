@@ -28666,6 +28666,7 @@ async function nfaCarregarHistorico(){
   _nfaHist = rows;
   if(!rows.length){ cont.innerHTML = '<div style="color:var(--text-3);padding:8px 0;">Nenhuma nota emitida ainda.</div>'; return; }
   const nErros = rows.filter(r=>r.nf_status==='erro').length;
+  const nProc = rows.filter(r=>r.nf_status==='processando').length;
   const stCor = s => s==='emitida'?'var(--success)': s==='erro'?'var(--danger)': s==='processando'?'#9a7a18':'var(--text-3)';
   const linha = (r,idx) =>{
     const dt = r.criada_em ? new Date(r.criada_em).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
@@ -28683,6 +28684,10 @@ async function nfaCarregarHistorico(){
     </tr>`;
   };
   cont.innerHTML = `
+    ${nProc?`<div style="margin-bottom:10px;display:flex;align-items:center;gap:10px;">
+      <button class="btn btn-primary btn-sm" id="nfa-status-btn" onclick="nfaAtualizarStatus()">↻ Atualizar status das ${nProc} em processamento</button>
+      <span style="font-size:12px;color:var(--text-3);">A prefeitura autoriza a NFS-e em alguns minutos; clique para verificar e pegar o PDF.</span>
+    </div>`:''}
     ${nErros?`<div style="margin-bottom:10px;display:flex;align-items:center;gap:10px;">
       <button class="btn btn-primary btn-sm" onclick="nfaReemitirErros()">↻ Corrigir e reemitir os ${nErros} com erro</button>
       <span style="font-size:12px;color:var(--text-3);">Carrega na tabela acima p/ você ajustar e clicar em Emitir lote.</span>
@@ -28728,6 +28733,42 @@ function nfaReemitirErros(){
   nfaDrawTabela();
   const t = document.getElementById('nfa-tabela'); if(t) t.scrollIntoView({behavior:'smooth', block:'start'});
   showToast(add?`${add} linha(s) carregada(s) p/ correção. Ajuste e clique em Emitir lote.`:'Nada novo a carregar (já estão na tabela).', add?'success':'warning');
+}
+
+// Consulta no Asaas o status das notas "processando" (a prefeitura autoriza a NFS-e
+// de forma assíncrona). Para as que ficaram SCHEDULED, tenta reautorizar; depois lê o
+// status final e atualiza a linha (emitida + PDF / erro com motivo). Roda na sessão.
+async function nfaAtualizarStatus(){
+  const proc = (_nfaHist||[]).filter(r=>r.nf_status==='processando' && r.nf_asaas_id);
+  if(!proc.length){ showToast('Nenhuma nota em processamento.','warning'); return; }
+  const supa = getSupabase();
+  if(!supa){ showToast('Faça login para atualizar.','warning'); return; }
+  const btn = document.getElementById('nfa-status-btn'); if(btn){ btn.disabled=true; }
+  const hdr = { 'Content-Type':'application/json', ...(await authHeaders()) };
+  const getInv = async (id)=>{ const r=await fetch(`/api/asaas?path=invoices/${encodeURIComponent(id)}`,{headers:hdr}); const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error(j?.errors?.[0]?.description||j?.error||('HTTP '+r.status)); return j; };
+  let ok=0, ainda=0, falha=0;
+  for(let i=0;i<proc.length;i++){
+    const r = proc[i];
+    if(btn) btn.textContent = `↻ Verificando ${i+1}/${proc.length}…`;
+    try{
+      let inv = await getInv(r.nf_asaas_id);
+      let st = String(inv.status||'').toUpperCase();
+      // SCHEDULED: ainda não emitida — tenta antecipar (autorizar) e relê.
+      if(st==='SCHEDULED'){
+        try{ await fetch(`/api/asaas?path=invoices/${encodeURIComponent(r.nf_asaas_id)}/authorize`,{method:'POST',headers:hdr}); }catch(_){}
+        try{ inv = await getInv(r.nf_asaas_id); st = String(inv.status||'').toUpperCase(); }catch(_){}
+      }
+      let novo=null, url=r.nf_url||null, erro=null;
+      if(st==='AUTHORIZED'){ novo='emitida'; url=inv.pdfUrl||inv.xmlUrl||url; ok++; }
+      else if(st==='ERROR'){ novo='erro'; erro=(inv.errors&&inv.errors[0]&&inv.errors[0].description)|| inv.statusDescription || 'Recusada pela prefeitura'; falha++; }
+      else if(st==='CANCELED'||st==='CANCELLATION_DENIED'){ novo='cancelada'; falha++; }
+      else { ainda++; }
+      if(novo){ await supa.from('nf_avulsa').update({ nf_status:novo, nf_url:url, erro:erro }).eq('id', r.id); }
+    }catch(e){ falha++; }
+  }
+  if(btn){ btn.disabled=false; btn.textContent='↻ Atualizar status'; }
+  showToast(`${ok} emitida(s)${ainda?`, ${ainda} ainda processando`:''}${falha?`, ${falha} c/ problema`:''}.`, ok?'success':'warning');
+  nfaCarregarHistorico();
 }
 
 async function renderAssinaturas(){
