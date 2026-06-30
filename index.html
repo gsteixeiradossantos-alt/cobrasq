@@ -23998,6 +23998,7 @@ function renderWhatsApp(){
       </div>
     </div>
     <div class="tabs" style="margin-bottom:16px;">
+      <div class="tab ${activeTab==='pendentes'?'active':''}" onclick="setWATab('pendentes',this)">Pendentes <span id="waPendBadge" style="display:none;"></span></div>
       <div class="tab ${activeTab==='conversas'?'active':''}" onclick="setWATab('conversas',this)">Conversas</div>
       <div class="tab ${activeTab==='agendados'?'active':''}" onclick="setWATab('agendados',this)">Agendados</div>
       <div class="tab ${activeTab==='config'?'active':''}" onclick="setWATab('config',this)">Configuração</div>
@@ -24019,7 +24020,8 @@ function setWATab(tab, el){
 function renderWATab(tab){
   const el = document.getElementById('wa-content');
   if(!el) return;
-  if(tab==='conversas') renderWAConversas(el);
+  if(tab==='pendentes') renderWAPendentes(el);
+  else if(tab==='conversas') renderWAConversas(el);
   else if(tab==='agendados') renderWAAgendados(el);
   else if(tab==='config') renderWAConfig(el);
   else if(tab==='regua') renderWARegua(el);
@@ -24083,6 +24085,217 @@ function proximoEnvioUtil(){
 function paraDatetimeLocal(dt){
   const pad = n => String(n).padStart(2,'0');
   return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+}
+
+// ============================================================
+// WhatsApp — aba "Pendentes": conversas SEM RESPOSTA (inbound).
+// Lê a view vw_conversas_pendentes, sugere resposta com a Bia (beatriz-msg
+// modo "responder") e: dentro do expediente -> envia agora; fora -> agenda
+// pra próxima manhã útil (crm_mensagens_agendadas). Humano sempre aprova.
+// ============================================================
+
+// Janela comercial: dia útil (seg–sáb, sem feriado) das 09h às 18h.
+function dentroHorarioComercial(dt){
+  const d = dt || new Date();
+  return ehDiaUtilWA(d) && d.getHours() >= 9 && d.getHours() < 18;
+}
+// Próximo início de expediente (dia útil às 09:00) a partir de `now`. Retorna Date.
+function proximoSlotComercial(now){
+  const base = now || new Date();
+  const dt = new Date(base.getFullYear(), base.getMonth(), base.getDate(), 9, 0, 0, 0);
+  if(dt <= base) dt.setDate(dt.getDate()+1);
+  while(!ehDiaUtilWA(dt)) dt.setDate(dt.getDate()+1);
+  return dt;
+}
+
+// Resolve o devedor a partir do telefone (últimos 8 dígitos), igual ao backend.
+function waDevedorPorTelefone(tel){
+  const alvo = String(tel||'').replace(/\D/g,'').slice(-8);
+  if(alvo.length < 8) return null;
+  return (DB.devedores||[]).find(d => String(d.tel||'').replace(/\D/g,'').slice(-8) === alvo) || null;
+}
+function waNomeConversa(p){
+  if(p.caso_id){ const d=(DB.devedores||[]).find(x=>x.id===p.caso_id); if(d&&d.nome) return d.nome; }
+  const d = waDevedorPorTelefone(p.telefone);
+  return d && d.nome ? d.nome : ('+'+String(p.telefone||'').replace(/\D/g,''));
+}
+function waHaQuantoTempo(iso){
+  const ms = Date.now() - new Date(iso).getTime();
+  const min = Math.floor(ms/60000);
+  if(min < 60) return `há ${min} min`;
+  const h = Math.floor(min/60);
+  if(h < 24) return `há ${h}h`;
+  const dias = Math.floor(h/24);
+  return `há ${dias}d`;
+}
+
+window._waPend = window._waPend || { lista:[], sel:null, loading:false, sugestoes:[] };
+
+async function renderWAPendentes(el){
+  const P = window._waPend;
+  el.innerHTML = `<div style="padding:20px;color:var(--text-3);">Carregando conversas sem resposta…</div>`;
+  const supa = getSupabase();
+  if(!supa){ el.innerHTML = `<div style="padding:20px;color:var(--text-3);">Supabase indisponível.</div>`; return; }
+  try{
+    const { data, error } = await supa
+      .from('vw_conversas_pendentes')
+      .select('id,telefone,caso_id,texto,tipo,recebida_em')
+      .order('recebida_em', { ascending:true })
+      .limit(100);
+    if(error) throw error;
+    P.lista = data || [];
+  }catch(e){
+    el.innerHTML = `<div style="padding:20px;color:var(--text-3);">Não foi possível carregar as pendentes.<br><span style="font-size:12px;">${escHtml(e.message||String(e))}</span><br><span style="font-size:12px;">Confirme que a migração 20260701 foi aplicada e que o webhook "Ao receber" do Z-API está ligado.</span></div>`;
+    return;
+  }
+  // badge
+  const badge = document.getElementById('waPendBadge');
+  if(badge){ if(P.lista.length){ badge.style.display='inline-block'; badge.textContent=String(P.lista.length); badge.style.cssText='display:inline-block;background:var(--red,#b3261e);color:#fff;border-radius:10px;padding:0 7px;font-size:11px;margin-left:4px;'; } else badge.style.display='none'; }
+
+  if(!P.lista.length){
+    el.innerHTML = `<div style="padding:32px;text-align:center;color:var(--text-3);">
+      <div style="font-size:32px;margin-bottom:8px;">✅</div>
+      <div>Nenhuma conversa aguardando resposta.</div>
+      <div style="font-size:12px;margin-top:6px;">As mensagens que os clientes enviam aparecem aqui até alguém responder.</div>
+    </div>`;
+    return;
+  }
+
+  const sel = (P.sel!=null && P.lista[P.sel]) ? P.lista[P.sel] : null;
+  const itens = P.lista.map((p,i)=>{
+    const nome = waNomeConversa(p);
+    const prev = (p.texto || (p.tipo!=='texto'?('['+p.tipo+']'):'') || '—').slice(0,60);
+    const ativo = (P.sel===i);
+    return `<div onclick="waPendSelecionar(${i})" style="padding:10px 12px;border-bottom:1px solid var(--gray-line);cursor:pointer;${ativo?'background:var(--bg-2,#f4f1ec);':''}">
+      <div style="display:flex;justify-content:space-between;gap:8px;">
+        <strong style="font-size:14px;">${escHtml(nome)}</strong>
+        <span style="font-size:11px;color:var(--text-3);white-space:nowrap;">${waHaQuantoTempo(p.recebida_em)}</span>
+      </div>
+      <div style="font-size:12px;color:var(--text-3);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(prev)}</div>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div style="display:grid;grid-template-columns:320px 1fr;gap:16px;align-items:start;">
+      <div style="border:1px solid var(--gray-line);border-radius:8px;overflow:hidden;max-height:70vh;overflow-y:auto;">
+        <div style="padding:8px 12px;font-size:12px;color:var(--text-3);border-bottom:1px solid var(--gray-line);">${P.lista.length} aguardando · mais antigas primeiro</div>
+        ${itens}
+      </div>
+      <div id="waPendDetalhe">${sel ? '' : '<div style="padding:24px;color:var(--text-3);">Selecione uma conversa à esquerda.</div>'}</div>
+    </div>`;
+  if(sel) waPendRenderDetalhe();
+}
+
+function waPendSelecionar(i){
+  window._waPend.sel = i;
+  window._waPend.sugestoes = [];
+  renderWATab('pendentes');
+}
+
+function waPendRenderDetalhe(){
+  const P = window._waPend;
+  const wrap = document.getElementById('waPendDetalhe');
+  if(!wrap) return;
+  const p = P.lista[P.sel];
+  if(!p){ wrap.innerHTML=''; return; }
+  const nome = waNomeConversa(p);
+  const dent = dentroHorarioComercial();
+  const slot = proximoSlotComercial();
+  const cards = (P.sugestoes||[]).map((s,i)=>`
+    <div style="border:1px solid var(--gray-line);border-radius:8px;padding:10px;margin-bottom:8px;">
+      <div style="font-size:11px;color:var(--text-3);margin-bottom:4px;">Sugestão ${i+1} · tom ${escHtml(s.tom||'—')}</div>
+      <textarea id="waPendTxt${i}" rows="3" style="width:100%;padding:8px;border:1.5px solid var(--gray-line);border-radius:6px;font-family:inherit;font-size:13px;resize:vertical;">${escHtml(s.texto||'')}</textarea>
+      <button class="cob-btn-primary" style="margin-top:6px;" onclick="waPendEnviar(${i})">
+        ${dent ? '📨 Enviar agora' : '🕘 Agendar p/ '+slot.toLocaleDateString('pt-BR')+' 09:00'}
+      </button>
+    </div>`).join('');
+
+  wrap.innerHTML = `
+    <div style="border:1px solid var(--gray-line);border-radius:8px;padding:14px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+        <strong style="font-size:15px;">${escHtml(nome)}</strong>
+        <span style="font-size:11px;color:var(--text-3);">+${escHtml(String(p.telefone||'').replace(/\D/g,''))} · ${waHaQuantoTempo(p.recebida_em)}</span>
+      </div>
+      <div style="background:var(--bg-2,#f4f1ec);border-radius:8px;padding:10px;margin:10px 0;font-size:14px;">
+        <div style="font-size:11px;color:var(--text-3);margin-bottom:2px;">Última mensagem do cliente</div>
+        ${escHtml(p.texto || ('['+p.tipo+']'))}
+      </div>
+      <div style="font-size:12px;color:var(--text-3);margin-bottom:10px;">
+        ${dent ? 'Dentro do horário comercial — a resposta aprovada é enviada na hora.' : 'Fora do horário comercial — a resposta aprovada é agendada pra próxima manhã útil.'}
+      </div>
+      <button class="cob-btn-primary" id="waPendSugBtn" onclick="waPendSugerir()">✨ Sugerir resposta com a Bia</button>
+      <div id="waPendSugs" style="margin-top:12px;">${cards}</div>
+    </div>`;
+}
+
+async function waPendSugerir(){
+  const P = window._waPend;
+  const p = P.lista[P.sel];
+  if(!p) return;
+  const btn = document.getElementById('waPendSugBtn');
+  if(btn){ btn.disabled=true; btn.textContent='Pensando…'; }
+  try{
+    const supa = getSupabase();
+    const dev = p.caso_id ? (DB.devedores||[]).find(x=>x.id===p.caso_id) : waDevedorPorTelefone(p.telefone);
+    const { data, error } = await supa.functions.invoke('beatriz-msg', {
+      body: {
+        caso_id: dev?.id || p.caso_id || null,
+        intencao: 'responder',
+        ultima_mensagem_cliente: p.texto || ''
+      }
+    });
+    if(error) throw error;
+    P.sugestoes = (data && Array.isArray(data.sugestoes)) ? data.sugestoes : [];
+    if(!P.sugestoes.length) showToast('A Bia não retornou sugestões. Tente de novo.','info');
+  }catch(e){
+    showToast('Falha ao sugerir: '+(e.message||e),'danger');
+  }finally{
+    if(btn){ btn.disabled=false; btn.textContent='✨ Sugerir resposta com a Bia'; }
+    waPendRenderDetalhe();
+  }
+}
+
+async function waPendEnviar(i){
+  const P = window._waPend;
+  const p = P.lista[P.sel];
+  if(!p) return;
+  const texto = (document.getElementById('waPendTxt'+i)?.value || '').trim();
+  if(!texto){ showToast('Mensagem vazia.','danger'); return; }
+  const supa = getSupabase();
+  if(!supa){ showToast('Supabase indisponível.','danger'); return; }
+
+  try{
+    if(dentroHorarioComercial()){
+      // Dentro do expediente -> envia na hora (a função valida se o nº tem WhatsApp).
+      const { data, error } = await supa.functions.invoke('enviar-whatsapp', { body: { telefone: p.telefone, mensagem: texto } });
+      if(error) throw error;
+      if(data && data.error) throw new Error(data.message || data.error);
+      showToast('Resposta enviada.','success');
+    } else {
+      // Fora do expediente -> agenda pra próxima manhã útil.
+      const { data:auth } = await supa.auth.getUser();
+      const operadorId = auth?.user?.id || null;
+      const dev = waDevedorPorTelefone(p.telefone);
+      const { error } = await supa.from('crm_mensagens_agendadas').insert({
+        devedor_id: dev?.id || p.caso_id || null,
+        operador_id: operadorId,
+        telefone: p.telefone,
+        tipo: 'texto',
+        mensagem: texto,
+        agendada_para: proximoSlotComercial().toISOString(),
+        status: 'pendente',
+        origem: 'resposta_ia'
+      });
+      if(error) throw error;
+      showToast('Resposta agendada para a próxima manhã útil.','success');
+    }
+    // Remove da fila local (a view também já não a retornaria após o envio).
+    P.lista.splice(P.sel,1);
+    P.sel = null; P.sugestoes = [];
+    renderWATab('pendentes');
+  }catch(e){
+    showToast('Falha ao enviar/agendar: '+(e.message||e),'danger');
+  }
 }
 
 // Estado do compositor de agendamento (em memória).
