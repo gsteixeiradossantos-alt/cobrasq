@@ -1988,7 +1988,7 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></span><span>Relatórios</span>
       </div>
       <div class="nav-item" data-page="nf-avulsa" id="nav-nf-avulsa" style="display:none;">
-        <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg></span><span>Emitir NF</span>
+        <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg></span><span>Emitir NF</span><span id="nav-nf-badge" style="display:none;margin-left:auto;font-size:10px;font-weight:700;background:var(--danger);color:#fff;border-radius:100px;padding:1px 7px;min-width:16px;text-align:center;"></span>
       </div>
     </div>
 
@@ -28931,126 +28931,80 @@ function _aavWaBadge(st){
 // Emite NFS-e REAL pelo Asaas a partir do cadastro do tomador (achado/criado por
 // CPF), sem depender de cobrança/pagamento. O lote roda no front: 1 requisição por
 // linha (evita timeout), com status por linha. Backend: api/_emitir-nf-avulso.js.
-let _nfaRows = [];
-let _nfaHist = [];   // últimas notas (histórico) p/ reemitir com correção
-let _nfaServicos = [];                                   // serviços municipais da conta Asaas
-let _nfaMunSvc = (()=>{ try{ return JSON.parse(localStorage.getItem('nfa_municipal')||'null'); }catch(_){ return null; } })();
+//
+// Esta tela traz, além da emissão: modelos de serviço por município (com alíquota
+// ISS), pré-validação no Asaas, detecção de duplicidade, modal de confirmação do
+// lote, auto-atualização das "processando", gerar NF de cobranças quitadas,
+// notificar o tomador, conciliação ISS por competência, cancelamento guiado junto
+// à prefeitura, e log/auditoria por nota. Estado novo por nota vive no metadata
+// jsonb da própria linha (resolved/canal/cancel/competencia/aliquota) — owner-only.
 const NFA_SERVICO_DEFAULT = { code:'17.19', name:'Cobrança em geral' }; // LC 116 — padrão p/ cobrança
+const NFA_LS = { modelos:'nfa_modelos', ativo:'nfa_modelo_ativo', notify:'nfa_notify' };
 
-// Busca os serviços municipais cadastrados na conta Asaas (GET /fiscalInfo/services,
-// via proxy na sessão do user) e popula o seletor. O municipalServiceId escolhido vai
-// em TODA emissão — sem ele a prefeitura rejeita a NFS-e.
-function _nfaSaveMun(){ try{ if(_nfaMunSvc) localStorage.setItem('nfa_municipal', JSON.stringify(_nfaMunSvc)); else localStorage.removeItem('nfa_municipal'); }catch(_){} }
+let _nfaRows = [];     // linhas do lote em montagem
+let _nfaHist = [];     // notas do histórico (DB)
+let _nfaServicos = []; // serviços municipais da conta Asaas (p/ ajudar a preencher o código)
+let _nfaFiltro = 'todas';
+let _nfaSel = new Set();        // ids selecionados (ações em lote)
+let _nfaExpanded = new Set();   // ids com auditoria aberta
+let _nfaAutoUpdate = false, _nfaAutoTimer = null;
 
-async function nfaCarregarServicos(){
-  const box = document.getElementById('nfa-munsvc-box');
-  const msg = document.getElementById('nfa-munsvc-msg');
-  if(!box) return;
-  box.innerHTML = '<div style="color:var(--text-3);font-size:12.5px;">Carregando serviços da sua conta…</div>';
-  try{
-    const r = await fetch('/api/asaas?path=fiscalInfo/services&limit=100', { headers:{ 'Content-Type':'application/json', ...(await authHeaders()) } });
-    const j = await r.json().catch(()=>({}));
-    if(!r.ok) throw new Error(j?.errors?.[0]?.description || j?.error || ('HTTP '+r.status));
-    _nfaServicos = Array.isArray(j.data) ? j.data : [];
-    if(!_nfaServicos.length){ return nfaRenderServicoManual('Sua conta não retorna lista de serviços. Informe o código manualmente.'); }
-    const savedId = _nfaMunSvc && _nfaMunSvc.id;
-    box.innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-      <select id="nfa-munsvc" onchange="nfaSetServico(this.value)" style="flex:1;min-width:280px;box-sizing:border-box;font-size:12.5px;padding:8px;border:1px solid var(--border);border-radius:8px;background:#fff;">
-        <option value="">— selecione o serviço —</option>
-        ${_nfaServicos.map(s=>`<option value="${escHtml(s.id)}" ${String(s.id)===String(savedId)?'selected':''}>${escHtml(s.description||s.id)}</option>`).join('')}
-      </select>
-      <button class="btn btn-ghost btn-sm" onclick="nfaCarregarServicos()">↻ Recarregar</button>
-    </div>`;
-    if(msg){ msg.style.color='var(--text-3)'; msg.textContent = (_nfaMunSvc&&_nfaMunSvc.id) ? `Selecionado: ${_nfaMunSvc.description||_nfaMunSvc.id}` : 'Escolha o item de serviço da nota — fica salvo.'; }
-  }catch(e){
-    // Conta via Portal Nacional / município sem lista: cai para entrada manual do código.
-    nfaRenderServicoManual('Sua conta usa código manual (Portal Nacional): '+traduzirErro(e.message||String(e)));
-  }
+// Modelos por município (localStorage). Migra do antigo nfa_municipal (serviço único).
+function _nfaLoadModelos(){
+  try{ const a = JSON.parse(localStorage.getItem(NFA_LS.modelos)||'null'); if(Array.isArray(a)&&a.length) return a; }catch(_){}
+  let old=null; try{ old = JSON.parse(localStorage.getItem('nfa_municipal')||'null'); }catch(_){}
+  const code = (old&&old.code)||NFA_SERVICO_DEFAULT.code;
+  const name = (old&&(old.name||old.description))||NFA_SERVICO_DEFAULT.name;
+  return [{ id:'m_default', municipio:'', codigo:code, nome:name, aliquota:'2', asaasId:(old&&old.id)||'' }];
+}
+let _nfaModelos = _nfaLoadModelos();
+let _nfaModeloAtivo = (()=>{ try{ const a=localStorage.getItem(NFA_LS.ativo); return (a && _nfaModelos.some(m=>m.id===a))?a:_nfaModelos[0].id; }catch(_){ return _nfaModelos[0].id; } })();
+let _nfaNotify = (()=>{ try{ return localStorage.getItem(NFA_LS.notify)==='1'; }catch(_){ return false; } })();
+function _nfaSaveModelos(){ try{ localStorage.setItem(NFA_LS.modelos, JSON.stringify(_nfaModelos)); localStorage.setItem(NFA_LS.ativo, _nfaModeloAtivo); }catch(_){} }
+
+function nfaModeloAtivo(){ return _nfaModelos.find(m=>m.id===_nfaModeloAtivo) || _nfaModelos[0] || { codigo:NFA_SERVICO_DEFAULT.code, nome:NFA_SERVICO_DEFAULT.name, aliquota:'2' }; }
+function nfaAliquota(){ const m=nfaModeloAtivo(); const a=parseFloat(String((m&&m.aliquota)||'0').replace(',','.')); return isFinite(a)?a:0; }
+function _nfaMunReady(){ const m=nfaModeloAtivo()||{}; return !!(m.asaasId || String(m.codigo||'').trim()); }
+function _nfaMunParams(){
+  const m = nfaModeloAtivo()||{};
+  return m.asaasId ? { municipalServiceId:m.asaasId }
+                   : { municipalServiceCode:String(m.codigo||'').trim(), municipalServiceName:String(m.nome||'').trim()||undefined };
 }
 
-// Campos manuais: código + nome do serviço municipal (quando o município não tem lista).
-function nfaRenderServicoManual(motivo){
-  const box = document.getElementById('nfa-munsvc-box');
-  const msg = document.getElementById('nfa-munsvc-msg');
-  if(!box) return;
-  // Default: "Cobrança em geral" (17.19) já preenchido quando nada foi salvo ainda.
-  if(!(_nfaMunSvc && (_nfaMunSvc.code || _nfaMunSvc.id))){ _nfaMunSvc = { ...NFA_SERVICO_DEFAULT }; _nfaSaveMun(); }
-  const code = (_nfaMunSvc && _nfaMunSvc.code) || NFA_SERVICO_DEFAULT.code;
-  const name = (_nfaMunSvc && _nfaMunSvc.name) || NFA_SERVICO_DEFAULT.name;
-  box.innerHTML = `<div style="display:grid;grid-template-columns:150px 1fr;gap:8px 10px;align-items:center;max-width:680px;">
-    <label style="font-size:12px;color:var(--text-3);">Código do serviço</label>
-    <input id="nfa-mun-code" value="${escHtml(code)}" placeholder="ex.: 17.19" oninput="nfaSetServicoManual()" style="box-sizing:border-box;font-size:12.5px;padding:7px 8px;border:1px solid var(--border);border-radius:8px;">
-    <label style="font-size:12px;color:var(--text-3);">Nome do serviço</label>
-    <input id="nfa-mun-name" value="${escHtml(name)}" placeholder="ex.: Cobrança em geral" oninput="nfaSetServicoManual()" style="box-sizing:border-box;font-size:12.5px;padding:7px 8px;border:1px solid var(--border);border-radius:8px;">
-    <div></div><div><button class="btn btn-ghost btn-sm" onclick="nfaCarregarServicos()">↻ Tentar lista de novo</button></div>
-  </div>`;
-  if(msg){ msg.style.color='var(--text-3)'; msg.innerHTML = `Deixei <b>Cobrança em geral (17.19)</b> como padrão. Se o seu município usar outro código (o mesmo que você usa ao emitir NF no Asaas), é só editar — fica salvo.`; }
-}
-
-function nfaSetServico(id){
-  const s = _nfaServicos.find(x=>String(x.id)===String(id));
-  _nfaMunSvc = s ? { id:s.id, description:s.description||'' } : null;
-  _nfaSaveMun();
-  const msg = document.getElementById('nfa-munsvc-msg');
-  if(msg){ msg.style.color='var(--text-3)'; msg.textContent = _nfaMunSvc ? `Selecionado: ${_nfaMunSvc.description||_nfaMunSvc.id}` : 'Nenhum serviço selecionado.'; }
-}
-function nfaSetServicoManual(){
-  const code = (document.getElementById('nfa-mun-code')?.value||'').trim();
-  const name = (document.getElementById('nfa-mun-name')?.value||'').trim();
-  _nfaMunSvc = (code||name) ? { code, name } : null;
-  _nfaSaveMun();
-}
-
-// Converte "2.429,53" / "406,00" / "99.51" / "R$ 1.230,62" em número.
+// ── formatação / parsing (mantidos) ──────────────────────────────────────────
 function nfaParseValor(s){
   let t = String(s==null?'':s).replace(/[^\d.,]/g,'');
   if(!t) return null;
-  if(t.includes(',')){ t = t.replace(/\./g,'').replace(',', '.'); }      // BR: . milhar, , decimal
-  else if((t.match(/\./g)||[]).length > 1){ t = t.replace(/\./g,''); }    // 1.230.620 → 1230620
+  if(t.includes(',')){ t = t.replace(/\./g,'').replace(',', '.'); }
+  else if((t.match(/\./g)||[]).length > 1){ t = t.replace(/\./g,''); }
   const n = parseFloat(t);
   return isFinite(n) ? Math.round(n*100)/100 : null;
 }
 function nfaFmtBRL(n){ return (Number(n)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}); }
 const nfaDigits = s => String(s||'').replace(/\D/g,'');
-
-// Máscara de CPF (000.000.000-00) / CNPJ (00.000.000/0000-00) progressiva, ao digitar.
 function nfaMaskDoc(v){
   const d = String(v||'').replace(/\D/g,'').slice(0,14);
   if(d.length <= 11){
-    return d
-      .replace(/^(\d{3})(\d)/,'$1.$2')
-      .replace(/^(\d{3})\.(\d{3})(\d)/,'$1.$2.$3')
-      .replace(/^(\d{3})\.(\d{3})\.(\d{3})(\d)/,'$1.$2.$3-$4');
+    return d.replace(/^(\d{3})(\d)/,'$1.$2').replace(/^(\d{3})\.(\d{3})(\d)/,'$1.$2.$3').replace(/^(\d{3})\.(\d{3})\.(\d{3})(\d)/,'$1.$2.$3-$4');
   }
-  return d
-    .replace(/^(\d{2})(\d)/,'$1.$2')
-    .replace(/^(\d{2})\.(\d{3})(\d)/,'$1.$2.$3')
-    .replace(/^(\d{2})\.(\d{3})\.(\d{3})(\d)/,'$1.$2.$3/$4')
-    .replace(/^(\d{2})\.(\d{3})\.(\d{3})\/(\d{4})(\d)/,'$1.$2.$3/$4-$5');
+  return d.replace(/^(\d{2})(\d)/,'$1.$2').replace(/^(\d{2})\.(\d{3})(\d)/,'$1.$2.$3').replace(/^(\d{2})\.(\d{3})\.(\d{3})(\d)/,'$1.$2.$3/$4').replace(/^(\d{2})\.(\d{3})\.(\d{3})\/(\d{4})(\d)/,'$1.$2.$3/$4-$5');
 }
-function nfaOnDoc(i, el){ const m = nfaMaskDoc(el.value); el.value = m; nfaSet(i,'cpf',m); }
-
-// Máscara de valor em R$ (cents-based): dígitos digitados viram centavos → "R$ 1.234,56".
+function nfaOnDoc(i, el){ const m = nfaMaskDoc(el.value); el.value = m; nfaSet(i,'cpf',m); _nfaRows[i] && (_nfaRows[i].asaas=null); }
 function nfaMaskValor(v){
   const d = String(v==null?'':v).replace(/\D/g,'');
   if(!d) return '';
   return (parseInt(d,10)/100).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
 }
 function nfaOnValor(i, el){ const m = nfaMaskValor(el.value); el.value = m; nfaSet(i,'valorRaw',m); }
-
-// Parser tolerante: aceita colado de planilha (TAB/;) como [nome, cpf, valor, descrição];
-// ou texto solto tipo "R$ 2.429,53: Eliseu Juarez" — extrai CPF/CNPJ e valor, resto = nome.
+function nfaNorm(s){ return String(s||'').normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase().replace(/\s+/g,' ').trim(); }
+function nfaSet(i,campo,val){ if(_nfaRows[i]) _nfaRows[i][campo] = val; }
 function nfaParseLista(txt){
   const out = [];
   String(txt||'').split(/\r?\n/).forEach(raw=>{
     const line = raw.trim();
     if(!line) return;
-    const cols = line.split(/\t|;/).map(c=>c.trim()).filter(c=>c!=='');
-    if(cols.length >= 3){
-      out.push({ nome:cols[0]||'', cpf:nfaDigits(cols[1]), valorRaw:cols[2]||'', descricao:cols[3]||'' });
-      return;
-    }
-    // Heurística: acha CPF (11) ou CNPJ (14) e o valor; o resto vira nome.
+    const cols = line.split(/\t|;|\|/).map(c=>c.trim()).filter(c=>c!=='');
+    if(cols.length >= 3){ out.push({ nome:cols[0]||'', cpf:nfaDigits(cols[1]), valorRaw:cols[2]||'', descricao:cols[3]||'' }); return; }
     const cpfm = line.match(/\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b|\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/);
     const cpf = cpfm ? nfaDigits(cpfm[0]) : '';
     let rest = cpfm ? line.replace(cpfm[0],' ') : line;
@@ -29063,6 +29017,65 @@ function nfaParseLista(txt){
   return out;
 }
 
+// ── derivados do histórico ───────────────────────────────────────────────────
+function nfaEffStatus(h){ return (h.metadata && h.metadata.resolved) || h.nf_status || ''; }
+function nfaCompetencia(dstr){ const d = dstr?new Date(dstr):new Date(); return String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear(); }
+function nfaRowComp(h){ return (h.metadata && h.metadata.competencia) || nfaCompetencia(h.criada_em); }
+function nfaRowAliq(h){ const a=h.metadata && h.metadata.aliquota; const n=parseFloat(String(a==null?'':a).replace(',','.')); return isFinite(n)?n:nfaAliquota(); }
+function nfaRowAliqExata(h){ return !!(h.metadata && h.metadata.aliquota != null); }
+
+// ── pré-validação / duplicidade / elegibilidade ──────────────────────────────
+function nfaLocalReady(r){ const d=nfaDigits(r.cpf); return nfaNorm(r.nome).length>0 && [11,14].includes(d.length) && (nfaParseValor(r.valorRaw)>0); }
+function nfaDupOf(r){
+  const d=nfaDigits(r.cpf); const v=nfaParseValor(r.valorRaw);
+  if(![11,14].includes(d.length) || !(v>0)) return false;
+  return (_nfaHist||[]).some(h=>{
+    const hs=nfaEffStatus(h);
+    if(hs==='arquivada'||hs==='cancelada'||hs==='erro') return false;
+    return nfaDigits(h.doc_digits||h.doc||'')===d && Math.round(Number(h.valor)*100)===Math.round(v*100);
+  });
+}
+function nfaEligible(r){ return r.status!=='emitida' && r.status!=='emitindo' && nfaLocalReady(r) && !nfaDupOf(r) && r.asaas!=='sem-endereco' && r.asaas!=='sem-cpf'; }
+function nfaSituacao(r){
+  if(r.status==='emitida') return { label:'emitida', color:'var(--success)' };
+  if(r.status==='emitindo') return { label:'emitindo…', color:'var(--text-3)' };
+  if(r.status==='erro') return { label:'erro', color:'var(--danger)' };
+  if(r.asaas==='checando') return { label:'checando…', color:'var(--text-3)' };
+  if(nfaDupOf(r)) return { label:'duplicada', color:'var(--danger)' };
+  if(r.asaas==='sem-cpf') return { label:'sem CPF', color:'var(--danger)' };
+  if(r.asaas==='sem-endereco') return { label:'sem endereço', color:'var(--danger)' };
+  if(r.asaas==='ok') return { label:'Asaas ok', color:'var(--success)' };
+  if(!nfaLocalReady(r)) return { label:'incompleta', color:'var(--text-3)' };
+  return { label:'pronta', color:'var(--gold-dark,#9a7a18)' };
+}
+
+// ── helpers de UI (modal, switch, download) ──────────────────────────────────
+function _nfaModal(html, opts){
+  opts = opts || {};
+  _nfaCloseModal();
+  const ov = document.createElement('div'); ov.id='nfa-modal-ov';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:3000;background:rgba(10,21,48,.45);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;padding:24px;';
+  ov.onclick = (e)=>{ if(e.target===ov) _nfaCloseModal(); };
+  const card = document.createElement('div');
+  card.style.cssText = `background:var(--surface,#fff);border:1px solid var(--border);border-radius:16px;max-width:${opts.wide?760:520}px;width:100%;max-height:88vh;overflow:auto;box-shadow:0 30px 70px -30px rgba(10,21,48,.6);`;
+  card.innerHTML = html;
+  ov.appendChild(card); document.body.appendChild(ov);
+}
+function _nfaCloseModal(){ const e=document.getElementById('nfa-modal-ov'); if(e) e.remove(); }
+function _nfaSwitch(on, onclick){
+  return `<span onclick="${onclick}" role="switch" aria-checked="${on?'true':'false'}" style="display:inline-flex;align-items:center;width:38px;height:22px;border-radius:100px;background:${on?'var(--gold)':'var(--border)'};cursor:pointer;padding:3px;box-sizing:border-box;transition:background .15s;">
+    <span style="width:16px;height:16px;border-radius:50%;background:${on?'var(--navy,#15224A)':'#fff'};transform:translateX(${on?'16px':'0'});transition:transform .15s;box-shadow:0 1px 2px rgba(0,0,0,.2);"></span></span>`;
+}
+function _nfaDownload(name, content, mime){
+  try{
+    const blob=new Blob([content],{type:mime||'text/csv;charset=utf-8;'});
+    const url=URL.createObjectURL(blob); const a=document.createElement('a');
+    a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),1500); return true;
+  }catch(e){ showToast('Falha ao baixar: '+(e.message||e),'danger'); return false; }
+}
+
+// ── render principal ─────────────────────────────────────────────────────────
 async function renderNfAvulsa(){
   const el = document.getElementById('page-nf-avulsa'); if(!el) return;
   el.innerHTML = `
@@ -29071,122 +29084,244 @@ async function renderNfAvulsa(){
         <h1 class="cob-h1">Emitir NF</h1>
         <div class="cob-h1-sub">Emite nota fiscal de serviço (NFS-e) <b>real</b> pelo Asaas a partir do cadastro do tomador — sem precisar de cobrança. Em lote.</div>
       </div>
+      <button class="btn btn-primary" onclick="nfaAtualizarStatus()">↻ Atualizar status</button>
     </div>
+
     <div style="background:#FEF6E7;border:1px solid #F0D89B;border-left:3px solid var(--gold);border-radius:8px;padding:12px 14px;margin-bottom:16px;font-size:12.5px;color:#7a5b10;line-height:1.5;">
-      <b>Atenção:</b> emitir é irreversível (cancelar nota é processo à parte). Cada NF precisa de <b>CPF/CNPJ</b> + endereço completo do tomador. O endereço é reaproveitado do cadastro no Asaas; quem não tiver endereço lá vai falhar com aviso. <b>Emita 1 de teste antes do lote.</b>
+      <b>Atenção:</b> emitir é irreversível (cancelar nota é processo à parte). Cada NF precisa de <b>CPF/CNPJ</b> + endereço completo do tomador (reaproveitado do cadastro no Asaas). Use <b>Validar no Asaas</b> e <b>emita 1 de teste</b> antes do lote.
+    </div>
+
+    <div id="nfa-resumo"></div>
+
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:16px;">
+      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);margin-bottom:10px;">Serviço municipal · modelos por município</div>
+      <div id="nfa-modelos"></div>
     </div>
 
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:16px;">
-      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);margin-bottom:8px;">Serviço municipal (NFS-e)</div>
-      <div id="nfa-munsvc-box"><div style="color:var(--text-3);font-size:12.5px;">Carregando…</div></div>
-      <div id="nfa-munsvc-msg" style="font-size:11.5px;color:var(--text-3);margin-top:6px;"></div>
-    </div>
-
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:16px;">
-      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);margin-bottom:8px;">Colar lista</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
+        <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);">Nova emissão</div>
+        <button class="btn btn-ghost btn-sm" onclick="nfaModalCobrancas()">＋ Gerar de cobranças quitadas</button>
+      </div>
       <textarea id="nfa-paste" rows="5" placeholder="Um por linha. Ex.:&#10;Eliseu Juarez Zanin de Campos; 123.456.789-00; 2.429,53; Honorários de cobrança&#10;ou cole de uma planilha (Nome | CPF | Valor | Descrição)" style="width:100%;box-sizing:border-box;font-family:var(--mono,monospace);font-size:12.5px;padding:10px;border:1px solid var(--border);border-radius:8px;resize:vertical;"></textarea>
-      <div style="display:flex;gap:8px;margin-top:8px;">
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
         <button class="btn btn-ghost btn-sm" onclick="nfaProcessarLista()">Processar lista ↓</button>
-        <button class="btn btn-ghost btn-sm" onclick="nfaBuscarCpfAsaas()" id="nfa-buscar-btn" title="Para cada linha sem CPF, procura o cliente no Asaas pelo nome e preenche">🔎 Buscar CPF no Asaas</button>
+        <button class="btn btn-ghost btn-sm" onclick="nfaValidarAsaas()" id="nfa-validar-btn" title="Confere CPF e endereço de cada linha no Asaas. Linhas reprovadas não entram no lote.">🔎 Validar no Asaas</button>
+        <button class="btn btn-ghost btn-sm" onclick="nfaBuscarCpfAsaas()" id="nfa-buscar-btn" title="Para cada linha sem CPF, procura o cliente no Asaas pelo nome e preenche">Buscar CPF no Asaas</button>
         <button class="btn btn-ghost btn-sm" onclick="nfaAddLinha()">+ Linha em branco</button>
+      </div>
+      <div id="nfa-tabela" style="margin-top:12px;"></div>
+      <div id="nfa-acoes" style="display:none;margin-top:14px;align-items:center;gap:14px;flex-wrap:wrap;">
+        <button class="btn btn-ghost btn-sm" id="nfa-teste-btn" onclick="nfaEmitirTeste()">Emitir 1 de teste</button>
+        <button class="btn btn-primary" id="nfa-emitir-btn" onclick="nfaEmitirLote()">Emitir lote</button>
+        <span id="nfa-progresso" style="font-size:12.5px;color:var(--text-3);"></span>
+        <label style="margin-left:auto;display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--text-3);cursor:pointer;">
+          <span id="nfa-notify-sw">${_nfaSwitch(_nfaNotify,'nfaToggleNotify()')}</span> Enviar PDF ao tomador ao emitir
+        </label>
       </div>
     </div>
 
-    <div id="nfa-tabela"></div>
+    <div id="nfa-conciliacao" style="margin-bottom:16px;"></div>
 
-    <div id="nfa-acoes" style="display:none;margin:14px 0;align-items:center;gap:14px;">
-      <button class="btn btn-primary" id="nfa-emitir-btn" onclick="nfaEmitirLote()">Emitir lote</button>
-      <span id="nfa-progresso" style="font-size:12.5px;color:var(--text-3);"></span>
-    </div>
-
-    <div style="margin-top:28px;">
-      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);margin-bottom:8px;">Notas emitidas</div>
+    <div style="margin-top:8px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
+        <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);">Notas emitidas</div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <label style="display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--text-3);cursor:pointer;">
+            <span id="nfa-auto-sw">${_nfaSwitch(_nfaAutoUpdate,'nfaToggleAuto()')}</span> Auto-atualizar
+          </label>
+          <button class="btn btn-ghost btn-sm" onclick="nfaExportHistCsv()">⤓ CSV</button>
+          <button class="btn btn-ghost btn-sm" onclick="window.print()">⤓ PDF</button>
+        </div>
+      </div>
       <div id="nfa-historico" style="color:var(--text-3);font-size:13px;">Carregando…</div>
     </div>`;
+  nfaRenderModelos();
   nfaDrawTabela();
+  nfaRenderResumo();
+  nfaRenderConciliacao();
   nfaCarregarServicos();
   nfaCarregarHistorico();
 }
 
+// ── resumo (5 métricas) ──────────────────────────────────────────────────────
+function nfaRenderResumo(){
+  const box=document.getElementById('nfa-resumo'); if(!box) return;
+  const h=_nfaHist||[];
+  const nTot=h.filter(r=>nfaEffStatus(r)!=='arquivada').length;
+  const nEmit=h.filter(r=>nfaEffStatus(r)==='emitida').length;
+  const nProc=h.filter(r=>nfaEffStatus(r)==='processando').length;
+  const nErro=h.filter(r=>nfaEffStatus(r)==='erro').length;
+  const valEmit=h.filter(r=>nfaEffStatus(r)==='emitida').reduce((s,r)=>s+(Number(r.valor)||0),0);
+  const cel=(label,val,cor,dot)=>`<div style="flex:1;min-width:120px;padding:4px 18px;border-left:1px solid var(--border);">
+    <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text-3);margin-bottom:4px;">${label}</div>
+    <div style="font-size:22px;font-weight:600;color:${cor||'var(--text-1,#15224A)'};display:flex;align-items:center;gap:7px;">${dot?`<span style="width:7px;height:7px;border-radius:50%;background:${cor};display:inline-block;"></span>`:''}${val}</div></div>`;
+  box.innerHTML=`<div style="display:flex;flex-wrap:wrap;gap:0;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 4px;margin-bottom:16px;">
+    ${cel('Total', nTot)}
+    ${cel('Emitidas', nEmit, 'var(--success)')}
+    ${cel('Processando', nProc, '#9a7a18')}
+    ${cel('Com erro', nErro, 'var(--danger)', nErro>0)}
+    ${cel('Valor emitido', nfaFmtBRL(valEmit))}
+  </div>`;
+}
+
+// ── modelos por município ────────────────────────────────────────────────────
+function nfaRenderModelos(){
+  const box=document.getElementById('nfa-modelos'); if(!box) return;
+  const chips=_nfaModelos.map(m=>{
+    const on=m.id===_nfaModeloAtivo;
+    const titulo=(m.municipio||'Sem município')+' · '+(m.codigo||'—');
+    return `<button onclick="nfaSetModelo('${m.id}')" style="text-align:left;border:1px solid ${on?'var(--gold)':'var(--border)'};background:${on?'rgba(201,169,97,.12)':'var(--surface-2,#fff)'};border-radius:10px;padding:8px 12px;cursor:pointer;min-width:160px;">
+      <div style="font-size:12.5px;font-weight:600;color:var(--text-1,#15224A);">${escHtml(m.nome||'(sem nome)')}</div>
+      <div style="font-family:var(--mono,monospace);font-size:10px;color:var(--text-3);margin-top:2px;">${escHtml(titulo)} · ISS ${escHtml(String(m.aliquota||'0'))}%</div></button>`;
+  }).join('');
+  const m=nfaModeloAtivo();
+  const fld=(label,campo,val,ph,w)=>`<label style="font-size:11px;color:var(--text-3);">${label}</label>
+    <input value="${escHtml(val||'')}" placeholder="${ph}" oninput="nfaUpdModelo('${campo}',this.value)" ${campo==='codigo'?'list="nfa-svc-list"':''} style="box-sizing:border-box;width:${w||'100%'};font-size:12.5px;padding:7px 8px;border:1px solid var(--border);border-radius:8px;">`;
+  box.innerHTML=`
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+      ${chips}
+      <button onclick="nfaAddModelo()" title="Adicionar modelo" style="border:1px dashed var(--border);background:transparent;border-radius:10px;padding:8px 14px;cursor:pointer;color:var(--text-3);font-size:13px;">+ Modelo</button>
+    </div>
+    <datalist id="nfa-svc-list"></datalist>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;max-width:680px;align-items:center;">
+      <div style="display:flex;flex-direction:column;gap:3px;">${fld('Município','municipio',m.municipio,'ex.: Pato Branco — PR')}</div>
+      <div style="display:flex;flex-direction:column;gap:3px;">${fld('Nome do serviço','nome',m.nome,'ex.: Cobrança em geral')}</div>
+      <div style="display:flex;flex-direction:column;gap:3px;">${fld('Código (LC 116)','codigo',m.codigo,'ex.: 17.19')}</div>
+      <div style="display:flex;flex-direction:column;gap:3px;">${fld('Alíquota ISS (%)','aliquota',m.aliquota,'ex.: 2')}</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;margin-top:10px;">
+      <button class="btn btn-ghost btn-sm" onclick="nfaCarregarServicos(true)">↻ Carregar serviços do Asaas</button>
+      ${_nfaModelos.length>1?`<button class="btn btn-ghost btn-sm" style="color:var(--danger);" onclick="nfaRemoveModelo()">Remover este modelo</button>`:''}
+      <span id="nfa-munsvc-msg" style="font-size:11.5px;color:var(--text-3);"></span>
+    </div>`;
+}
+function nfaSetModelo(id){ _nfaModeloAtivo=id; _nfaSaveModelos(); nfaRenderModelos(); nfaDrawTabela(); nfaRenderConciliacao(); }
+function nfaUpdModelo(campo,val){ const m=nfaModeloAtivo(); if(!m) return; m[campo]=val; if(campo==='codigo'||campo==='nome') m.asaasId=''; _nfaSaveModelos(); if(campo==='aliquota') nfaRenderConciliacao(); }
+function nfaAddModelo(){ const id='m_'+Math.random().toString(36).slice(2,7); _nfaModelos.push({ id, municipio:'', codigo:'', nome:'', aliquota:'2', asaasId:'' }); _nfaModeloAtivo=id; _nfaSaveModelos(); nfaRenderModelos(); }
+function nfaRemoveModelo(){ if(_nfaModelos.length<=1) return; _nfaModelos=_nfaModelos.filter(m=>m.id!==_nfaModeloAtivo); _nfaModeloAtivo=_nfaModelos[0].id; _nfaSaveModelos(); nfaRenderModelos(); nfaDrawTabela(); nfaRenderConciliacao(); }
+function nfaToggleNotify(){ _nfaNotify=!_nfaNotify; try{ localStorage.setItem(NFA_LS.notify, _nfaNotify?'1':'0'); }catch(_){} const s=document.getElementById('nfa-notify-sw'); if(s) s.innerHTML=_nfaSwitch(_nfaNotify,'nfaToggleNotify()'); }
+
+// Carrega serviços municipais da conta Asaas → datalist (ajuda a preencher o código).
+async function nfaCarregarServicos(avisar){
+  try{
+    const r = await fetch('/api/asaas?path=fiscalInfo/services&limit=100', { headers:{ 'Content-Type':'application/json', ...(await authHeaders()) } });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j?.errors?.[0]?.description || j?.error || ('HTTP '+r.status));
+    _nfaServicos = Array.isArray(j.data) ? j.data : [];
+    const dl=document.getElementById('nfa-svc-list');
+    if(dl) dl.innerHTML=_nfaServicos.map(s=>`<option value="${escHtml(s.id)}">${escHtml(s.description||s.id)}</option>`).join('');
+    const msg=document.getElementById('nfa-munsvc-msg');
+    if(msg && avisar) msg.textContent=_nfaServicos.length?`${_nfaServicos.length} serviço(s) da sua conta no autocompletar do código.`:'Sua conta usa código manual (Portal Nacional) — preencha o código.';
+  }catch(e){
+    const msg=document.getElementById('nfa-munsvc-msg');
+    if(msg && avisar) msg.textContent='Sua conta usa código manual (Portal Nacional): '+traduzirErro(e.message||String(e));
+  }
+}
+
+// ── montagem do lote ─────────────────────────────────────────────────────────
 function nfaProcessarLista(){
   const txt = (document.getElementById('nfa-paste')||{}).value || '';
   const parsed = nfaParseLista(txt);
   if(!parsed.length){ showToast('Nada para processar — cole a lista primeiro.','warning'); return; }
   parsed.forEach(p=>{
-    const val = nfaParseValor(p.valorRaw);                 // já formata p/ exibir
-    _nfaRows.push({ ...p, cpf: p.cpf ? nfaMaskDoc(p.cpf) : '', valorRaw: (val!=null ? nfaFmtBRL(val) : (p.valorRaw||'')), status:'pendente', nf_url:'', erro:'', ref:'' });
+    const val = nfaParseValor(p.valorRaw);
+    _nfaRows.push({ ...p, cpf: p.cpf ? nfaMaskDoc(p.cpf) : '', valorRaw: (val!=null ? nfaFmtBRL(val) : (p.valorRaw||'')), status:'pendente', nf_url:'', erro:'', ref:'', asaas:null });
   });
   const pst = document.getElementById('nfa-paste'); if(pst) pst.value='';
   nfaDrawTabela();
 }
-function nfaAddLinha(){ _nfaRows.push({ nome:'', cpf:'', valorRaw:'', descricao:'', status:'pendente', nf_url:'', erro:'', ref:'' }); nfaDrawTabela(); }
+function nfaAddLinha(){ _nfaRows.push({ nome:'', cpf:'', valorRaw:'', descricao:'', status:'pendente', nf_url:'', erro:'', ref:'', asaas:null }); nfaDrawTabela(); }
+function nfaRemoveLinha(i){ _nfaRows.splice(i,1); nfaDrawTabela(); }
 
-// Normaliza nome p/ comparar (sem acento, minúsculo, espaços colapsados).
-function nfaNorm(s){ return String(s||'').normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase().replace(/\s+/g,' ').trim(); }
-
-// Para cada linha SEM CPF válido mas COM nome, procura o cliente no Asaas pelo nome
-// (proxy /api/asaas na sessão do usuário) e preenche o CPF. 1 resultado → preenche;
-// match exato entre vários → preenche; 0 ou vários sem exato → marca p/ conferência.
 async function nfaBuscarCpfAsaas(){
   const alvos = _nfaRows.map((r,i)=>({r,i})).filter(({r})=>{
     const d = nfaDigits(r.cpf);
     return (!([11,14].includes(d.length))) && nfaNorm(r.nome).length >= 3 && r.status!=='emitida';
   });
   if(!alvos.length){ showToast('Nada para buscar — preencha nomes nas linhas sem CPF.','warning'); return; }
-  const btn = document.getElementById('nfa-buscar-btn');
-  if(btn){ btn.disabled=true; }
+  const btn = document.getElementById('nfa-buscar-btn'); if(btn){ btn.disabled=true; }
   let ach=0, multi=0, none=0;
   for(let k=0;k<alvos.length;k++){
     const { r } = alvos[k];
     r.lookupMsg = 'buscando…'; nfaDrawTabela();
-    if(btn) btn.textContent = `🔎 Buscando ${k+1}/${alvos.length}…`;
+    if(btn) btn.textContent = `Buscando ${k+1}/${alvos.length}…`;
     try{
       const resp = await fetch(`/api/asaas?path=customers&name=${encodeURIComponent(r.nome)}&limit=20`, { headers:{ 'Content-Type':'application/json', ...(await authHeaders()) } });
       const j = await resp.json().catch(()=>({}));
       if(!resp.ok) throw new Error(j?.errors?.[0]?.description || j?.error || ('HTTP '+resp.status));
       const cand = (Array.isArray(j.data)?j.data:[]).filter(c=>c.cpfCnpj);
       if(!cand.length){ r.lookupMsg='Asaas: não encontrado'; none++; }
-      else if(cand.length===1){ r.cpf=nfaDigits(cand[0].cpfCnpj); r.asaasCustomerId=cand[0].id; r.lookupMsg='✓ '+(cand[0].name||''); ach++; }
+      else if(cand.length===1){ r.cpf=nfaMaskDoc(nfaDigits(cand[0].cpfCnpj)); r.asaasCustomerId=cand[0].id; r.asaas=null; r.lookupMsg='✓ '+(cand[0].name||''); ach++; }
       else{
         const alvo = nfaNorm(r.nome);
         const exatos = cand.filter(c=>nfaNorm(c.name)===alvo);
-        if(exatos.length===1){ r.cpf=nfaDigits(exatos[0].cpfCnpj); r.asaasCustomerId=exatos[0].id; r.lookupMsg='✓ '+(exatos[0].name||''); ach++; }
+        if(exatos.length===1){ r.cpf=nfaMaskDoc(nfaDigits(exatos[0].cpfCnpj)); r.asaasCustomerId=exatos[0].id; r.asaas=null; r.lookupMsg='✓ '+(exatos[0].name||''); ach++; }
         else{ r.lookupMsg=`${cand.length} no Asaas — confira`; multi++; }
       }
     }catch(e){ r.lookupMsg='erro: '+traduzirErro(e.message||String(e)); none++; }
     nfaDrawTabela();
   }
-  if(btn){ btn.disabled=false; btn.textContent='🔎 Buscar CPF no Asaas'; }
+  if(btn){ btn.disabled=false; btn.textContent='Buscar CPF no Asaas'; }
   showToast(`Busca no Asaas: ${ach} preenchido(s)${multi?`, ${multi} ambíguo(s)`:''}${none?`, ${none} sem match`:''}.`, ach?'success':'warning');
 }
-function nfaRemoveLinha(i){ _nfaRows.splice(i,1); nfaDrawTabela(); }
-function nfaSet(i,campo,val){ if(_nfaRows[i]) _nfaRows[i][campo] = val; }
 
-function nfaStatusCel(r){
-  if(r.status==='emitida') return `<span style="color:var(--success);font-weight:600;">✓ Emitida</span>${r.nf_url?` · <a href="${escHtml(r.nf_url)}" target="_blank" rel="noopener" style="color:var(--navy);">PDF ↗</a>`:''}`;
-  if(r.status==='processando') return `<span style="color:var(--gold-dark,#9a7a18);font-weight:600;">⏳ Processando</span>${r.nf_url?` · <a href="${escHtml(r.nf_url)}" target="_blank" rel="noopener">PDF ↗</a>`:''}`;
-  if(r.status==='emitindo') return `<span style="color:var(--text-3);">emitindo…</span>`;
-  if(r.status==='erro') return `<span style="color:var(--danger);font-weight:600;" title="${escHtml(r.erro||'')}">✗ ${escHtml((r.erro||'erro').slice(0,60))}</span>`;
-  return `<span style="color:var(--text-3);">—</span>`;
+// Pré-validação REAL: confere CPF + endereço de cada linha no cadastro do Asaas.
+async function nfaValidarAsaas(){
+  if(!_nfaRows.length){ showToast('Monte o lote antes de validar.','warning'); return; }
+  const hdr = { 'Content-Type':'application/json', ...(await authHeaders()) };
+  const btn=document.getElementById('nfa-validar-btn'); if(btn) btn.disabled=true;
+  let ok=0, bad=0;
+  for(let i=0;i<_nfaRows.length;i++){
+    const r=_nfaRows[i]; if(r.status==='emitida'||r.status==='emitindo') continue;
+    if(btn) btn.textContent=`🔎 Validando ${i+1}/${_nfaRows.length}…`;
+    r.asaas='checando'; nfaDrawTabela();
+    try{
+      let cust=null; let d=nfaDigits(r.cpf);
+      if(r.asaasCustomerId){
+        const rr=await fetch(`/api/asaas?path=customers/${encodeURIComponent(r.asaasCustomerId)}`,{headers:hdr});
+        const j=await rr.json().catch(()=>({})); if(rr.ok && j && j.id) cust=j;
+      }
+      if(!cust && [11,14].includes(d.length)){
+        const rr=await fetch(`/api/asaas?path=customers&cpfCnpj=${d}&limit=1`,{headers:hdr});
+        const j=await rr.json().catch(()=>({})); const c=(j&&j.data&&j.data[0]); if(c){ cust=c; r.asaasCustomerId=c.id; }
+      }
+      if(!cust && nfaNorm(r.nome).length>=3){
+        const rr=await fetch(`/api/asaas?path=customers&name=${encodeURIComponent(r.nome)}&limit=20`,{headers:hdr});
+        const j=await rr.json().catch(()=>({})); const cand=((j&&j.data)||[]).filter(c=>c.cpfCnpj);
+        const exato=cand.filter(c=>nfaNorm(c.name)===nfaNorm(r.nome));
+        const pick = cand.length===1?cand[0]:(exato.length===1?exato[0]:null);
+        if(pick){ cust=pick; r.asaasCustomerId=pick.id; if(!d){ r.cpf=nfaMaskDoc(nfaDigits(pick.cpfCnpj)); d=nfaDigits(r.cpf); } }
+      }
+      if(!cust || !nfaDigits(cust.cpfCnpj||r.cpf)){ r.asaas='sem-cpf'; bad++; }
+      else if(!(cust.address && (cust.postalCode||cust.province||cust.city))){ r.asaas='sem-endereco'; bad++; }
+      else { r.asaas='ok'; ok++; }
+    }catch(e){ r.asaas='sem-cpf'; bad++; }
+    nfaDrawTabela();
+  }
+  if(btn){ btn.disabled=false; btn.textContent='🔎 Validar no Asaas'; }
+  showToast(`Validação: ${ok} ok${bad?`, ${bad} reprovada(s) (fora do lote)`:''}.`, bad?'warning':'success');
 }
 
 function nfaDrawTabela(){
   const cont = document.getElementById('nfa-tabela'); if(!cont) return;
   const acoes = document.getElementById('nfa-acoes');
   if(!_nfaRows.length){
-    cont.innerHTML = `<div style="padding:32px 20px;text-align:center;color:var(--text-3);font-size:13px;border:1px dashed var(--border);border-radius:var(--radius);">Cole uma lista acima ou adicione linhas para começar.</div>`;
+    cont.innerHTML = `<div style="padding:32px 20px;text-align:center;color:var(--text-3);font-size:13px;border:1px dashed var(--border);border-radius:var(--radius);">Cole uma lista acima, gere de cobranças quitadas ou adicione linhas para começar.</div>`;
     if(acoes) acoes.style.display='none';
+    nfaRenderRodapeLote();
     return;
   }
   const inp = (i,campo,val,ph,extra='')=>`<input value="${escHtml(val)}" placeholder="${ph}" oninput="nfaSet(${i},'${campo}',this.value)" style="width:100%;box-sizing:border-box;font-size:12.5px;padding:6px 7px;border:1px solid var(--border);border-radius:6px;${extra}">`;
   const linha = (r,i)=>{
     const travado = (r.status==='emitida'||r.status==='emitindo');
+    const sit=nfaSituacao(r);
     return `<tr style="border-bottom:1px solid var(--border);${r.status==='emitida'?'opacity:.7;':''}">
-      <td style="padding:7px 8px;min-width:170px;">${inp(i,'nome',r.nome||'','Nome / Razão social')}</td>
+      <td style="padding:7px 8px;min-width:160px;">${inp(i,'nome',r.nome||'','Nome / Razão social')}</td>
       <td style="padding:7px 8px;width:160px;"><input value="${escHtml(r.cpf||'')}" placeholder="000.000.000-00" inputmode="numeric" oninput="nfaOnDoc(${i},this)" style="width:100%;box-sizing:border-box;font-size:12.5px;padding:6px 7px;border:1px solid var(--border);border-radius:6px;${(nfaDigits(r.cpf).length&&![11,14].includes(nfaDigits(r.cpf).length))?'border-color:var(--danger);':''}">${r.lookupMsg?`<div style="font-size:10.5px;margin-top:2px;color:${/^✓/.test(r.lookupMsg)?'var(--success)':/buscando/.test(r.lookupMsg)?'var(--text-3)':'var(--danger)'};" title="${escHtml(r.lookupMsg)}">${escHtml(r.lookupMsg.length>30?r.lookupMsg.slice(0,30)+'…':r.lookupMsg)}</div>`:''}</td>
-      <td style="padding:7px 8px;width:130px;"><input value="${escHtml(r.valorRaw||'')}" placeholder="R$ 0,00" inputmode="numeric" oninput="nfaOnValor(${i},this)" style="width:100%;box-sizing:border-box;font-size:12.5px;padding:6px 7px;border:1px solid var(--border);border-radius:6px;text-align:right;"></td>
-      <td style="padding:7px 8px;min-width:150px;">${inp(i,'descricao',r.descricao||'','Descrição do serviço (opcional)')}</td>
-      <td style="padding:7px 8px;width:150px;font-size:12px;">${nfaStatusCel(r)}</td>
+      <td style="padding:7px 8px;width:120px;"><input value="${escHtml(r.valorRaw||'')}" placeholder="R$ 0,00" inputmode="numeric" oninput="nfaOnValor(${i},this)" style="width:100%;box-sizing:border-box;font-size:12.5px;padding:6px 7px;border:1px solid var(--border);border-radius:6px;text-align:right;"></td>
+      <td style="padding:7px 8px;min-width:140px;">${inp(i,'descricao',r.descricao||'','Descrição (opcional)')}</td>
+      <td style="padding:7px 8px;width:120px;font-size:11.5px;"><span style="font-weight:600;color:${sit.color};">${escHtml(sit.label)}</span>${r.status==='erro'&&r.erro?`<div style="font-size:10px;color:var(--danger);" title="${escHtml(r.erro)}">${escHtml(r.erro.slice(0,40))}</div>`:''}</td>
       <td style="padding:7px 8px;width:28px;text-align:right;">${travado?'':`<button class="btn btn-ghost btn-sm" title="Remover" onclick="nfaRemoveLinha(${i})" style="padding:2px 8px;">✕</button>`}</td>
     </tr>`;
   };
@@ -29198,199 +29333,568 @@ function nfaDrawTabela(){
           <th style="padding:8px;font-weight:600;">CPF/CNPJ</th>
           <th style="padding:8px;font-weight:600;">Valor (R$)</th>
           <th style="padding:8px;font-weight:600;">Descrição</th>
-          <th style="padding:8px;font-weight:600;">Status</th>
+          <th style="padding:8px;font-weight:600;">Situação</th>
           <th style="padding:8px;"></th>
         </tr></thead>
         <tbody>${_nfaRows.map(linha).join('')}</tbody>
       </table>
     </div>`;
   if(acoes) acoes.style.display='flex';
+  nfaRenderRodapeLote();
+}
+function nfaRenderRodapeLote(){
+  const prog=document.getElementById('nfa-progresso'); if(!prog) return;
+  if(prog.dataset.busy==='1') return;
+  const elig=_nfaRows.filter(nfaEligible).length;
+  const dup=_nfaRows.filter(r=>r.status!=='emitida'&&nfaDupOf(r)).length;
+  const bad=_nfaRows.filter(r=>r.asaas==='sem-endereco'||r.asaas==='sem-cpf').length;
+  const parts=[]; if(_nfaRows.length) parts.push(`${elig} elegível(is)`);
+  if(dup) parts.push(`${dup} duplicada(s)`); if(bad) parts.push(`${bad} reprovada(s)`);
+  prog.textContent=parts.join(' · ');
 }
 
-async function nfaEmitirLote(){
-  if(!(_nfaMunSvc && (_nfaMunSvc.id || _nfaMunSvc.code))){
-    showToast('Informe o serviço municipal (NFS-e) antes de emitir.','warning');
-    const box = document.getElementById('nfa-munsvc-box'); if(box){ box.scrollIntoView({behavior:'smooth',block:'center'}); }
-    return;
-  }
-  // Valida e seleciona as linhas emitíveis (ainda não emitidas).
-  const pend = [];
-  for(let i=0;i<_nfaRows.length;i++){
-    const r = _nfaRows[i];
-    if(r.status==='emitida') continue;
-    const cpf = nfaDigits(r.cpf);
-    const valor = nfaParseValor(r.valorRaw);
-    if(![11,14].includes(cpf.length)){ r.status='erro'; r.erro='CPF/CNPJ inválido'; continue; }
-    if(!(valor>0)){ r.status='erro'; r.erro='Valor inválido'; continue; }
-    r._cpf=cpf; r._valor=valor; pend.push(i);
-  }
-  nfaDrawTabela();
-  if(!pend.length){ showToast('Nenhuma linha válida para emitir.','warning'); return; }
-
-  if(!confirm(`Emitir ${pend.length} nota(s) fiscal(is) agora? Esta ação é irreversível.`)) return;
-
-  const btn = document.getElementById('nfa-emitir-btn');
-  const prog = document.getElementById('nfa-progresso');
-  if(btn){ btn.disabled=true; }
+// ── confirmação + emissão ────────────────────────────────────────────────────
+function nfaEmitirTeste(){
+  const i=_nfaRows.findIndex(nfaEligible);
+  if(i<0){ showToast('Nenhuma linha elegível para teste.','warning'); return; }
+  nfaModalConfirmLote([i], true);
+}
+function nfaEmitirLote(){
+  if(!_nfaMunReady()){ showToast('Informe o serviço municipal (código) no modelo ativo antes de emitir.','warning'); const b=document.getElementById('nfa-modelos'); if(b) b.scrollIntoView({behavior:'smooth',block:'center'}); return; }
+  const idx=_nfaRows.map((r,i)=>i).filter(i=>nfaEligible(_nfaRows[i]));
+  if(!idx.length){ showToast('Nenhuma linha elegível. Valide no Asaas e confira CPF/valor.','warning'); return; }
+  nfaModalConfirmLote(idx, false);
+}
+function nfaModalConfirmLote(indices, teste){
+  const m=nfaModeloAtivo(); const aliq=nfaAliquota();
+  const total=indices.reduce((s,i)=>s+(nfaParseValor(_nfaRows[i].valorRaw)||0),0);
+  const iss=total*aliq/100;
+  const dup=_nfaRows.filter(r=>r.status!=='emitida'&&nfaDupOf(r)).length;
+  const bad=_nfaRows.filter(r=>r.asaas==='sem-endereco'||r.asaas==='sem-cpf').length;
+  const incompl=_nfaRows.filter(r=>r.status!=='emitida'&&r.status!=='emitindo'&&!nfaLocalReady(r)).length;
+  const naoValid=_nfaRows.filter(r=>r.status!=='emitida'&&nfaLocalReady(r)&&!nfaDupOf(r)&&r.asaas==null).length;
+  const avisos=[];
+  if(incompl) avisos.push(`${incompl} incompleta(s)`);
+  if(dup) avisos.push(`${dup} duplicada(s)`);
+  if(bad) avisos.push(`${bad} reprovada(s) no Asaas`);
+  if(naoValid) avisos.push(`${naoValid} ainda não validada(s) no Asaas`);
+  _nfaModal(`
+    <div style="padding:22px 24px;">
+      <div style="font-family:var(--mono,monospace);font-size:10px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--gold-dark,#9a7a18);">Confirmar ${teste?'teste':'lote'} · irreversível</div>
+      <h3 style="margin:6px 0 14px;font-size:19px;font-weight:600;color:var(--text-1,#15224A);">Emitir ${indices.length} nota(s) fiscal(is)?</h3>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 18px;font-size:13px;margin-bottom:14px;">
+        <div><div style="font-size:11px;color:var(--text-3);text-transform:uppercase;letter-spacing:.4px;">Notas</div><div style="font-weight:600;">${indices.length}</div></div>
+        <div><div style="font-size:11px;color:var(--text-3);text-transform:uppercase;letter-spacing:.4px;">Valor total</div><div style="font-weight:600;">${nfaFmtBRL(total)}</div></div>
+        <div><div style="font-size:11px;color:var(--text-3);text-transform:uppercase;letter-spacing:.4px;">ISS estimado (${aliq}%)</div><div style="font-weight:600;">${nfaFmtBRL(iss)}</div></div>
+        <div><div style="font-size:11px;color:var(--text-3);text-transform:uppercase;letter-spacing:.4px;">Serviço / município</div><div style="font-weight:600;">${escHtml(m.codigo||'—')} · ${escHtml(m.municipio||m.nome||'')}</div></div>
+      </div>
+      <div style="font-size:11px;color:var(--text-3);margin-bottom:14px;">ISS é estimativa pela alíquota do modelo; o valor oficial é o que a prefeitura apura.</div>
+      ${avisos.length?`<div style="background:#FEF6E7;border:1px solid #F0D89B;border-radius:8px;padding:10px 12px;font-size:12px;color:#7a5b10;margin-bottom:16px;">Fica de fora: ${avisos.map(escHtml).join(' · ')}.</div>`:''}
+      <div style="display:flex;gap:10px;justify-content:flex-end;">
+        <button class="btn btn-ghost btn-sm" onclick="_nfaCloseModal()">Cancelar</button>
+        <button class="btn btn-primary btn-sm" onclick="_nfaEmitirConfirmado([${indices.join(',')}])">Emitir agora</button>
+      </div>
+    </div>`);
+}
+async function _nfaEmitirConfirmado(indices){
+  _nfaCloseModal();
+  const m=nfaModeloAtivo(); const aliq=nfaAliquota(); const comp=nfaCompetencia();
+  const btn=document.getElementById('nfa-emitir-btn'); const tbtn=document.getElementById('nfa-teste-btn');
+  const prog=document.getElementById('nfa-progresso'); if(prog) prog.dataset.busy='1';
+  if(btn) btn.disabled=true; if(tbtn) tbtn.disabled=true;
   let ok=0, fail=0, done=0;
-  for(const i of pend){
-    const r = _nfaRows[i];
-    if(!r.ref){ try{ r.ref = crypto.randomUUID(); }catch(_){ r.ref = 'nfa-'+i+'-'+done; } }
+  for(const i of indices){
+    const r=_nfaRows[i]; if(!nfaEligible(r)) continue;
+    if(!r.ref){ try{ r.ref=crypto.randomUUID(); }catch(_){ r.ref='nfa-'+i+'-'+done; } }
     r.status='emitindo'; r.erro=''; nfaDrawTabela();
-    if(prog) prog.textContent = `Emitindo ${done+1} de ${pend.length}…`;
+    if(prog) prog.textContent=`Emitindo ${done+1} de ${indices.length}…`;
     try{
-      const resp = await fetch('/api/emitir-nf-avulso', {
+      const resp=await fetch('/api/emitir-nf-avulso',{
         method:'POST',
         headers:{ 'Content-Type':'application/json', ...(await authHeaders()) },
-        body: JSON.stringify({ nome:r.nome, doc:r._cpf, valor:r._valor, descricao:r.descricao||'', ref:r.ref, asaas_customer_id:r.asaasCustomerId||null,
-          ...(_nfaMunSvc.id ? { municipalServiceId:_nfaMunSvc.id } : { municipalServiceCode:_nfaMunSvc.code, municipalServiceName:_nfaMunSvc.name||undefined }) }),
+        body: JSON.stringify({ nome:r.nome, doc:nfaDigits(r.cpf), valor:nfaParseValor(r.valorRaw), descricao:r.descricao||'', ref:r.ref,
+          asaas_customer_id:r.asaasCustomerId||null, competencia:comp, aliquota:aliq, modelo_nome:m.nome||'', municipio:m.municipio||'',
+          ..._nfaMunParams() }),
       });
-      const j = await resp.json().catch(()=>({}));
-      if(resp.ok && (j.nf_status==='emitida' || j.nf_status==='processando')){
-        r.status = j.nf_status; r.nf_url = j.nf_url||''; ok++;
-      } else {
-        r.status='erro'; r.erro = traduzirErro(j.error||j.message||('HTTP '+resp.status)); fail++;
-      }
-    }catch(e){
-      r.status='erro'; r.erro = traduzirErro(e.message||String(e)); fail++;
-    }
+      const j=await resp.json().catch(()=>({}));
+      if(resp.ok && (j.nf_status==='emitida'||j.nf_status==='processando')){ r.status=j.nf_status; r.nf_url=j.nf_url||''; ok++; }
+      else{ r.status='erro'; r.erro=traduzirErro(j.error||j.message||('HTTP '+resp.status)); fail++; }
+    }catch(e){ r.status='erro'; r.erro=traduzirErro(e.message||String(e)); fail++; }
     done++; nfaDrawTabela();
   }
-  if(btn){ btn.disabled=false; }
-  if(prog) prog.textContent = `Concluído: ${ok} emitida(s)${fail?`, ${fail} com erro`:''}.`;
-  showToast(`${ok} nota(s) emitida(s)${fail?`, ${fail} com erro`:''}.`, fail? 'warning':'success');
-  nfaCarregarHistorico();
+  if(btn) btn.disabled=false; if(tbtn) tbtn.disabled=false;
+  if(prog){ prog.dataset.busy=''; prog.textContent=`Concluído: ${ok} emitida(s)${fail?`, ${fail} com erro`:''}.`; }
+  showToast(`${ok} nota(s) emitida(s)${fail?`, ${fail} com erro`:''}.`, fail?'warning':'success');
+  await nfaCarregarHistorico();
 }
 
+// ── conciliação ISS por competência ──────────────────────────────────────────
+function nfaConciliacao(){
+  const map={};
+  (_nfaHist||[]).forEach(h=>{
+    if(nfaEffStatus(h)!=='emitida') return;
+    const k=nfaRowComp(h); const aliq=nfaRowAliq(h); const base=Number(h.valor)||0;
+    if(!map[k]) map[k]={comp:k,qtd:0,base:0,iss:0,estimado:false};
+    map[k].qtd++; map[k].base+=base; map[k].iss+=base*aliq/100;
+    if(!nfaRowAliqExata(h)) map[k].estimado=true;
+  });
+  return Object.values(map).sort((a,b)=>{ const pa=a.comp.split('/'), pb=b.comp.split('/'); return (pb[1]-pa[1])||(pb[0]-pa[0]); });
+}
+function nfaRenderConciliacao(){
+  const box=document.getElementById('nfa-conciliacao'); if(!box) return;
+  const cc=nfaConciliacao();
+  if(!cc.length){ box.innerHTML=''; return; }
+  const tBase=cc.reduce((s,c)=>s+c.base,0), tIss=cc.reduce((s,c)=>s+c.iss,0);
+  const estimado=cc.some(c=>c.estimado);
+  box.innerHTML=`<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
+      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);">Conciliação fiscal · ISS por competência</div>
+      <button class="btn btn-ghost btn-sm" onclick="nfaExportConciliacao()">⤓ Exportar conciliação</button>
+    </div>
+    <div style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:12.5px;">
+        <thead><tr style="text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);border-bottom:1px solid var(--border);">
+          <th style="padding:7px 8px;font-weight:600;">Competência</th><th style="padding:7px 8px;font-weight:600;text-align:right;">Notas</th>
+          <th style="padding:7px 8px;font-weight:600;text-align:right;">Base</th><th style="padding:7px 8px;font-weight:600;text-align:right;">ISS</th>
+          <th style="padding:7px 8px;font-weight:600;text-align:right;">Líquido</th></tr></thead>
+        <tbody>${cc.map(c=>`<tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:7px 8px;font-family:var(--mono,monospace);">${escHtml(c.comp)}${c.estimado?' <span title="ISS estimado pela alíquota do modelo" style="color:var(--text-3);cursor:help;">*</span>':''}</td>
+          <td style="padding:7px 8px;text-align:right;">${c.qtd}</td>
+          <td style="padding:7px 8px;text-align:right;">${nfaFmtBRL(c.base)}</td>
+          <td style="padding:7px 8px;text-align:right;color:var(--danger);">${nfaFmtBRL(c.iss)}</td>
+          <td style="padding:7px 8px;text-align:right;">${nfaFmtBRL(c.base-c.iss)}</td></tr>`).join('')}</tbody>
+        <tfoot><tr style="font-weight:600;border-top:2px solid var(--border);">
+          <td style="padding:8px;">Total</td><td></td>
+          <td style="padding:8px;text-align:right;">${nfaFmtBRL(tBase)}</td>
+          <td style="padding:8px;text-align:right;color:var(--danger);">${nfaFmtBRL(tIss)}</td>
+          <td style="padding:8px;text-align:right;">${nfaFmtBRL(tBase-tIss)}</td></tr></tfoot>
+      </table>
+    </div>
+    ${estimado?`<div style="font-size:11px;color:var(--text-3);margin-top:8px;">* ISS estimado pela alíquota do modelo (notas antigas, sem alíquota gravada).</div>`:''}
+  </div>`;
+}
+function nfaExportConciliacao(){
+  const cc=nfaConciliacao(); if(!cc.length){ showToast('Sem dados para exportar.','warning'); return; }
+  const esc=s=>`"${String(s==null?'':s).replace(/"/g,'""')}"`;
+  const lines=[['Competencia','Notas','Base','ISS','Liquido','Estimado'].map(esc).join(';')];
+  cc.forEach(c=>lines.push([c.comp,c.qtd,c.base.toFixed(2),c.iss.toFixed(2),(c.base-c.iss).toFixed(2),c.estimado?'sim':'nao'].map(esc).join(';')));
+  _nfaDownload('conciliacao-iss-cobrasq.csv','﻿'+lines.join('\r\n'),'text/csv;charset=utf-8;');
+}
+function nfaExportHistCsv(){
+  const rows=_nfaHist||[]; if(!rows.length){ showToast('Sem notas para exportar.','warning'); return; }
+  const esc=s=>`"${String(s==null?'':s).replace(/"/g,'""')}"`;
+  const lines=[['Tomador','CPF/CNPJ','Valor','Status','NFS-e','Competencia','ISS','Quando','Canal','Erro'].map(esc).join(';')];
+  rows.forEach(r=>{
+    const nf=(r.metadata&&r.metadata.nf_number)||'';
+    const canal=(r.metadata&&r.metadata.canal)||'';
+    const iss=(Number(r.valor)||0)*nfaRowAliq(r)/100;
+    lines.push([r.nome||'', r.doc_digits||r.doc||'', (Number(r.valor)||0).toFixed(2), nfaEffStatus(r), nf, nfaRowComp(r), iss.toFixed(2),
+      r.criada_em?new Date(r.criada_em).toLocaleString('pt-BR'):'', canal, r.erro||''].map(esc).join(';'));
+  });
+  _nfaDownload('notas-emitidas-cobrasq.csv','﻿'+lines.join('\r\n'),'text/csv;charset=utf-8;');
+}
+
+// ── histórico (notas emitidas) ───────────────────────────────────────────────
 async function nfaCarregarHistorico(){
   const cont = document.getElementById('nfa-historico'); if(!cont) return;
   const supa = getSupabase();
   if(!supa){ cont.innerHTML = '<div style="color:var(--text-3);">Faça login para ver o histórico.</div>'; return; }
   let rows = [];
   try{
-    const { data, error } = await supa.from('nf_avulsa').select('*').order('criada_em',{ascending:false}).limit(200);
+    const { data, error } = await supa.from('nf_avulsa').select('*').order('criada_em',{ascending:false}).limit(300);
     if(error) throw error;
     rows = data||[];
   }catch(e){
     cont.innerHTML = `<div style="color:var(--danger);">Não consegui carregar: ${escHtml(traduzirErro(e.message||String(e)))}</div>`;
     return;
   }
-  // Deduplica por (CPF/CNPJ + valor): mostra 1 linha por item, preferindo a EMITIDA.
-  // Evita o histórico inflar (ex.: "36 com erro") quando há várias tentativas do mesmo.
+  // Deduplica por (CPF/CNPJ + valor): 1 linha por item, preferindo EMITIDA > resolvida.
   const _nfaKey = r => nfaDigits(r.doc_digits||r.doc||'') + '|' + Number(r.valor);
   const _byKey = new Map();
-  for(const r of rows){ // rows já vêm em ordem decrescente de data
-    const k = _nfaKey(r); const prev = _byKey.get(k);
-    if(!prev) _byKey.set(k, r);
-    else if(prev.nf_status!=='emitida' && r.nf_status==='emitida') _byKey.set(k, r);
+  for(const r of rows){
+    const k=_nfaKey(r); const prev=_byKey.get(k);
+    if(!prev){ _byKey.set(k,r); continue; }
+    const pe=nfaEffStatus(prev), ce=nfaEffStatus(r);
+    if(pe!=='emitida' && ce==='emitida') _byKey.set(k,r);
   }
-  rows = Array.from(_byKey.values());
-  _nfaHist = rows;
-  if(!rows.length){ cont.innerHTML = '<div style="color:var(--text-3);padding:8px 0;">Nenhuma nota emitida ainda.</div>'; return; }
-  const nErros = rows.filter(r=>r.nf_status==='erro').length;
-  const nProc = rows.filter(r=>r.nf_status==='processando').length;
-  const stCor = s => s==='emitida'?'var(--success)': s==='erro'?'var(--danger)': s==='processando'?'#9a7a18':'var(--text-3)';
-  const linha = (r,idx) =>{
-    const dt = r.criada_em ? new Date(r.criada_em).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
-    const acao = r.nf_url
-      ? `<a href="${escHtml(r.nf_url)}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">PDF ↗</a>`
-      : (r.nf_status!=='emitida'
-          ? `${r.erro?`<span title="${escHtml(r.erro)}" style="color:var(--danger);font-size:11.5px;cursor:help;margin-right:6px;">erro</span>`:''}<button class="btn btn-ghost btn-sm" title="Corrigir e reemitir esta nota" onclick="nfaReemitirHist(${idx})">↻ Reemitir</button>`
-          : '');
-    return `<tr style="border-bottom:1px solid var(--border);">
-      <td style="padding:9px 10px;font-size:12.5px;font-weight:600;">${escHtml(r.nome||'—')}<div style="font-size:11px;color:var(--text-3);font-weight:400;">${escHtml(r.doc_digits||r.doc||'')}</div></td>
-      <td style="padding:9px 10px;font-size:12.5px;white-space:nowrap;">${nfaFmtBRL(r.valor)}</td>
-      <td style="padding:9px 10px;font-size:12px;color:${stCor(r.nf_status)};font-weight:600;white-space:nowrap;">${escHtml(r.nf_status||'')}</td>
-      <td style="padding:9px 10px;font-size:11.5px;color:var(--text-3);white-space:nowrap;">${dt}</td>
-      <td style="padding:9px 10px;text-align:right;white-space:nowrap;">${acao}</td>
+  _nfaHist = Array.from(_byKey.values());
+  nfaRenderResumo();
+  nfaRenderConciliacao();
+  nfaUpdateNavBadge();
+  nfaDrawTabela(); // dup/elegibilidade dependem do histórico
+  nfaDrawHistorico();
+}
+
+function nfaDrawHistorico(){
+  const cont=document.getElementById('nfa-historico'); if(!cont) return;
+  const rows=_nfaHist||[];
+  if(!rows.length){ cont.innerHTML='<div style="color:var(--text-3);padding:8px 0;">Nenhuma nota emitida ainda.</div>'; return; }
+  const cnt=s=>rows.filter(r=>nfaEffStatus(r)===s).length;
+  const filtros=[
+    {k:'todas',  label:'Todas',       n:rows.filter(r=>nfaEffStatus(r)!=='arquivada').length},
+    {k:'emitida',label:'Emitidas',    n:cnt('emitida')},
+    {k:'processando',label:'Processando',n:cnt('processando')},
+    {k:'erro',   label:'Com erro',    n:cnt('erro')},
+    {k:'arquivada',label:'Arquivadas',n:cnt('arquivada')+cnt('cancelada')},
+  ];
+  const showSel = ['erro','processando','arquivada'].includes(_nfaFiltro);
+  let visiveis = rows.filter(r=>{
+    const s=nfaEffStatus(r);
+    if(_nfaFiltro==='todas') return s!=='arquivada';
+    if(_nfaFiltro==='arquivada') return s==='arquivada'||s==='cancelada';
+    return s===_nfaFiltro;
+  });
+  const nProc=cnt('processando');
+  const tabs=filtros.map(f=>`<button onclick="nfaSetFiltro('${f.k}')" style="border:1px solid ${_nfaFiltro===f.k?'var(--gold)':'var(--border)'};background:${_nfaFiltro===f.k?'rgba(201,169,97,.12)':'transparent'};border-radius:100px;padding:5px 13px;font-size:12px;cursor:pointer;color:var(--text-1,#15224A);">${f.label} <span style="color:var(--text-3);">${f.n}</span></button>`).join('');
+
+  const stCor=s=> s==='emitida'?'var(--success)': s==='erro'?'var(--danger)': s==='processando'?'#9a7a18': s==='cancelada'?'#6E748A': s==='arquivada'?'#6E748A':'var(--text-3)';
+  const fmtData=d=> d?new Date(d).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
+
+  const linha=(r)=>{
+    const s=nfaEffStatus(r);
+    const exp=_nfaExpanded.has(r.id);
+    const canal=(r.metadata&&r.metadata.canal)||'';
+    const acoes=nfaAcoesHist(r,s);
+    const chk=showSel?`<td style="padding:11px 6px 11px 12px;width:18px;"><input type="checkbox" ${_nfaSel.has(r.id)?'checked':''} onclick="nfaToggleSel('${r.id}')"></td>`:'';
+    const head=`<tr style="border-bottom:${exp?'none':'1px solid var(--border)'};">
+      ${chk}
+      <td style="padding:10px 10px;font-size:12.5px;">
+        <div style="display:flex;align-items:flex-start;gap:8px;">
+          <button onclick="nfaToggleExp('${r.id}')" title="Auditoria" style="background:none;border:0;cursor:pointer;color:var(--text-3);font-size:13px;transform:rotate(${exp?'90':'0'}deg);transition:transform .12s;line-height:1;padding:2px;">›</button>
+          <div><div style="font-weight:600;">${escHtml(r.nome||'—')}${canal?` <span title="PDF enviado por ${escHtml(canal)}" style="font-family:var(--mono,monospace);font-size:9px;color:var(--text-3);border:1px solid var(--border);border-radius:100px;padding:1px 6px;">⤴ ${escHtml(canal)}</span>`:''}</div>
+          <div style="font-family:var(--mono,monospace);font-size:11px;color:var(--text-3);">${escHtml(r.doc_digits||r.doc||'')}</div></div>
+        </div></td>
+      <td style="padding:10px 10px;font-family:var(--mono,monospace);font-size:12.5px;text-align:right;white-space:nowrap;">${nfaFmtBRL(r.valor)}</td>
+      <td style="padding:10px 10px;white-space:nowrap;"><span style="font-family:var(--mono,monospace);font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:${stCor(s)};border:1px solid ${stCor(s)};border-radius:100px;padding:2px 8px;display:inline-flex;align-items:center;gap:5px;">${s==='processando'?'<span style="width:5px;height:5px;border-radius:50%;background:'+stCor(s)+';display:inline-block;"></span>':''}${escHtml(s)}</span></td>
+      <td style="padding:10px 10px;font-family:var(--mono,monospace);font-size:11px;color:var(--text-3);white-space:nowrap;">${fmtData(r.criada_em)}</td>
+      <td style="padding:10px 10px;text-align:right;white-space:nowrap;">${acoes}</td>
     </tr>`;
+    const motivo = (s==='erro' && r.erro)?`<tr><td colspan="${showSel?6:5}" style="padding:0 10px 8px ${showSel?'40px':'34px'};"><div style="background:rgba(166,90,74,.08);border:1px solid rgba(166,90,74,.25);border-radius:6px;padding:6px 10px;font-size:11.5px;color:var(--danger);">${escHtml(r.erro)}</div></td></tr>`:'';
+    const audit = exp?`<tr style="border-bottom:1px solid var(--border);"><td colspan="${showSel?6:5}" style="padding:4px 10px 14px ${showSel?'40px':'34px'};">${nfaTimeline(r)}</td></tr>`:'';
+    return head+motivo+audit;
   };
-  cont.innerHTML = `
-    ${nProc?`<div style="margin-bottom:10px;display:flex;align-items:center;gap:10px;">
-      <button class="btn btn-primary btn-sm" id="nfa-status-btn" onclick="nfaAtualizarStatus()">↻ Atualizar status das ${nProc} em processamento</button>
-      <span style="font-size:12px;color:var(--text-3);">A prefeitura autoriza a NFS-e em alguns minutos; clique para verificar e pegar o PDF.</span>
-    </div>`:''}
-    ${nErros?`<div style="margin-bottom:10px;display:flex;align-items:center;gap:10px;">
-      <button class="btn btn-primary btn-sm" onclick="nfaReemitirErros()">↻ Corrigir e reemitir os ${nErros} com erro</button>
-      <span style="font-size:12px;color:var(--text-3);">Carrega na tabela acima p/ você ajustar e clicar em Emitir lote.</span>
-    </div>`:''}
-    <div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius);">
+
+  const erroPanel = (_nfaFiltro==='erro') ? nfaErroAgrupado(visiveis) : '';
+  const barra = (showSel && _nfaSel.size) ? nfaBarraLote() : '';
+
+  cont.innerHTML=`
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;">${tabs}
+      ${nProc?`<button class="btn btn-primary btn-sm" id="nfa-status-btn" onclick="nfaAtualizarStatus()" style="margin-left:auto;">↻ Atualizar ${nProc} em processamento</button>`:''}
+    </div>
+    ${erroPanel}
+    ${barra}
+    ${visiveis.length?`<div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius);">
       <table style="width:100%;border-collapse:collapse;">
         <thead><tr style="background:var(--surface-2);text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);">
+          ${showSel?`<th style="padding:8px 6px 8px 12px;width:18px;"><input type="checkbox" onclick="nfaSelAll(this.checked)" ${visiveis.length&&visiveis.every(r=>_nfaSel.has(r.id))?'checked':''}></th>`:''}
           <th style="padding:8px 10px;font-weight:600;">Tomador</th>
-          <th style="padding:8px 10px;font-weight:600;">Valor</th>
+          <th style="padding:8px 10px;font-weight:600;text-align:right;">Valor</th>
           <th style="padding:8px 10px;font-weight:600;">Status</th>
           <th style="padding:8px 10px;font-weight:600;">Quando</th>
           <th style="padding:8px 10px;"></th>
         </tr></thead>
-        <tbody>${rows.map(linha).join('')}</tbody>
-      </table>
-    </div>`;
+        <tbody>${visiveis.map(linha).join('')}</tbody>
+      </table></div>`:`<div style="padding:24px;text-align:center;color:var(--text-3);font-size:13px;border:1px dashed var(--border);border-radius:var(--radius);">Nenhuma nota neste filtro.</div>`}`;
 }
 
-// Carrega uma linha do histórico de volta na tabela de edição (p/ corrigir e reemitir).
-// Evita duplicar uma linha pendente igual (mesmo doc+valor) já na tabela.
-function nfaReemitirHist(idx){
-  const r = _nfaHist[idx]; if(!r){ showToast('Registro não encontrado.','warning'); return; }
-  const doc = nfaDigits(r.doc_digits||r.doc||'');
-  const ja = _nfaRows.some(x=> nfaDigits(x.cpf)===doc && nfaParseValor(x.valorRaw)===Number(r.valor) && x.status!=='emitida');
-  if(!ja){
-    _nfaRows.push({ nome:r.nome||'', cpf: doc?nfaMaskDoc(doc):'', valorRaw: nfaFmtBRL(r.valor), descricao: r.descricao||'', asaasCustomerId: r.asaas_customer_id||'', status:'pendente', nf_url:'', erro:'', ref:'', lookupMsg:'' });
+function nfaAcoesHist(r,s){
+  const pdf = r.nf_url?`<a href="${escHtml(r.nf_url)}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm" title="Abrir PDF da NFS-e">⤓ PDF</a>`:'';
+  if(s==='emitida'){
+    const canal=(r.metadata&&r.metadata.canal);
+    return `${pdf}
+      <button class="btn btn-ghost btn-sm" onclick="nfaEnviarPdf('${r.id}')" title="Enviar PDF ao tomador">${canal?'✓ Reenviar':'⤴ Enviar PDF'}</button>
+      <button class="btn btn-ghost btn-sm" style="color:var(--danger);" onclick="nfaModalCancelarPref('${r.id}')" title="Cancelar nota junto à prefeitura">Cancelar nota</button>`;
   }
+  if(s==='processando'){
+    return `<button class="btn btn-ghost btn-sm" onclick="nfaAtualizarStatus()" title="Verificar status na prefeitura">↻ Atualizar</button>
+      <button class="btn btn-ghost btn-sm" onclick="nfaReemitirHist('${r.id}')">Reemitir</button>`;
+  }
+  if(s==='erro'){
+    return `<button class="btn btn-ghost btn-sm" style="color:var(--gold-dark,#9a7a18);" onclick="nfaReemitirHist('${r.id}')" title="Carrega na tabela p/ corrigir e reemitir">↻ Corrigir e reemitir</button>
+      <button class="btn btn-ghost btn-sm" style="color:var(--danger);" onclick="nfaArquivar('${r.id}')" title="Tira da fila local (não cancela nota emitida)">Cancelar emissão</button>
+      <button class="btn btn-ghost btn-sm" onclick="nfaArquivar('${r.id}')" title="Arquivar">Arquivar</button>`;
+  }
+  if(s==='arquivada'||s==='cancelada'){
+    return `${pdf}<button class="btn btn-ghost btn-sm" onclick="nfaRestaurar('${r.id}')" title="Restaurar">↺ Restaurar</button>`;
+  }
+  return pdf;
+}
+
+// Timeline de auditoria (derivada dos campos disponíveis da nota).
+function nfaTimeline(r){
+  const s=nfaEffStatus(r);
+  const meta=r.metadata||{};
+  const dot=(cor)=>`<span style="width:9px;height:9px;border-radius:50%;background:${cor};display:inline-block;flex-shrink:0;margin-top:3px;"></span>`;
+  const item=(cor,label,detalhe,quando)=>`<div style="display:flex;gap:10px;">
+    ${dot(cor)}<div style="flex:1;"><div style="font-size:12px;font-weight:600;color:var(--text-1,#15224A);">${escHtml(label)}</div>${detalhe?`<div style="font-size:11px;color:var(--text-3);">${escHtml(detalhe)}</div>`:''}</div>
+    ${quando?`<div style="font-family:var(--mono,monospace);font-size:10px;color:var(--text-3);white-space:nowrap;">${escHtml(quando)}</div>`:''}</div>`;
+  const fmt=d=>d?new Date(d).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'';
+  const out=[];
+  out.push(item('var(--text-3)','Criada', (r.descricao||'')||null, fmt(r.criada_em)));
+  if(r.nf_asaas_id) out.push(item('#9a7a18','Enviada à prefeitura','via Asaas '+(r.nf_asaas_id||''),''));
+  if(s==='emitida') out.push(item('var(--success)','Autorizada', meta.nf_number?('NFS-e '+meta.nf_number):'', ''));
+  if(s==='erro') out.push(item('var(--danger)','Rejeitada', r.erro||'recusada pela prefeitura',''));
+  if(s==='processando') out.push(item('#9a7a18','Em processamento','aguardando autorização da prefeitura',''));
+  if(meta.cancel) out.push(item('#6E748A','Cancelada na prefeitura', (meta.cancel.motivo||'')+(meta.cancel.protocolo?(' · '+meta.cancel.protocolo):''), fmt(meta.cancel.quando)));
+  if(s==='arquivada' && !meta.cancel) out.push(item('#6E748A','Arquivada (fila local)','não cancela nota já emitida',''));
+  return `<div style="display:flex;flex-direction:column;gap:10px;border-left:2px solid var(--border);padding-left:14px;margin-left:3px;">${out.join('')}
+    ${r.nf_url?`<a href="${escHtml(r.nf_url)}" target="_blank" rel="noopener" style="font-size:11.5px;color:var(--navy,#15224A);">Abrir PDF da NFS-e ↗</a>`:''}</div>`;
+}
+
+// Painel de erros agrupados por categoria (só no filtro Com erro).
+function nfaErroAgrupado(rows){
+  const cats={ endereco:{label:'Sem endereço no Asaas',re:/endereç|address|postal|cep/i,ids:[]},
+    cpf:{label:'CPF/cadastro do tomador',re:/cpf|cnpj|customer|cadastr|document/i,ids:[]},
+    servico:{label:'Serviço / prefeitura rejeitou',re:/servi|prefeitura|municipal|rejeit|autoriz|iss|aliquot/i,ids:[]},
+    valor:{label:'Valor',re:/valor|value/i,ids:[]},
+    outros:{label:'Outros',re:null,ids:[]} };
+  rows.forEach(r=>{
+    const e=String(r.erro||''); let posto=false;
+    for(const k of ['endereco','cpf','servico','valor']){ if(cats[k].re.test(e)){ cats[k].ids.push(r.id); posto=true; break; } }
+    if(!posto) cats.outros.ids.push(r.id);
+  });
+  const blocos=Object.values(cats).filter(c=>c.ids.length);
+  if(!blocos.length) return '';
+  return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:12px;">
+    <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);margin-bottom:8px;">Erros agrupados</div>
+    <div style="display:flex;flex-direction:column;gap:6px;">
+      ${blocos.map(c=>`<div style="display:flex;align-items:center;gap:10px;font-size:12.5px;">
+        <span style="flex:1;">${escHtml(c.label)} <span style="color:var(--text-3);">· ${c.ids.length}</span></span>
+        <button class="btn btn-ghost btn-sm" onclick="nfaCorrigirGrupo('${c.ids.join(',')}')">Corrigir todos</button>
+        <button class="btn btn-ghost btn-sm" onclick="nfaArquivarGrupo('${c.ids.join(',')}')">Arquivar todos</button>
+      </div>`).join('')}
+    </div></div>`;
+}
+function nfaBarraLote(){
+  const arquiv = _nfaFiltro==='arquivada';
+  return `<div style="display:flex;align-items:center;gap:10px;background:var(--surface-2,#f5f2e8);border:1px solid var(--border);border-radius:var(--radius);padding:8px 12px;margin-bottom:12px;flex-wrap:wrap;">
+    <span style="font-size:12.5px;font-weight:600;">${_nfaSel.size} selecionada(s)</span>
+    ${arquiv?`<button class="btn btn-ghost btn-sm" onclick="nfaRestaurarSel()">↺ Restaurar selecionadas</button>`
+            :`<button class="btn btn-ghost btn-sm" onclick="nfaReemitirSel()">↻ Reemitir</button>
+              <button class="btn btn-ghost btn-sm" style="color:var(--danger);" onclick="nfaArquivarSel()">Cancelar emissão / Arquivar</button>`}
+    <button class="btn btn-ghost btn-sm" style="margin-left:auto;" onclick="nfaLimparSel()">Limpar seleção</button>
+  </div>`;
+}
+
+// ── filtros / seleção / expand ───────────────────────────────────────────────
+function nfaSetFiltro(k){ _nfaFiltro=k; _nfaSel.clear(); nfaDrawHistorico(); }
+function nfaToggleExp(id){ if(_nfaExpanded.has(id)) _nfaExpanded.delete(id); else _nfaExpanded.add(id); nfaDrawHistorico(); }
+function nfaToggleSel(id){ if(_nfaSel.has(id)) _nfaSel.delete(id); else _nfaSel.add(id); nfaDrawHistorico(); }
+function nfaSelAll(on){
+  const rows=(_nfaHist||[]).filter(r=>{ const s=nfaEffStatus(r); if(_nfaFiltro==='arquivada') return s==='arquivada'||s==='cancelada'; return s===_nfaFiltro; });
+  rows.forEach(r=>{ if(on) _nfaSel.add(r.id); else _nfaSel.delete(r.id); });
+  nfaDrawHistorico();
+}
+function nfaLimparSel(){ _nfaSel.clear(); nfaDrawHistorico(); }
+
+// ── reemitir (carrega no lote) ───────────────────────────────────────────────
+function _nfaHistById(id){ return (_nfaHist||[]).find(r=>r.id===id); }
+function nfaReemitirHist(id){
+  const r=_nfaHistById(id); if(!r){ showToast('Registro não encontrado.','warning'); return; }
+  const doc=nfaDigits(r.doc_digits||r.doc||'');
+  const ja=_nfaRows.some(x=>nfaDigits(x.cpf)===doc && nfaParseValor(x.valorRaw)===Number(r.valor) && x.status!=='emitida');
+  if(!ja) _nfaRows.push({ nome:r.nome||'', cpf:doc?nfaMaskDoc(doc):'', valorRaw:nfaFmtBRL(r.valor), descricao:r.descricao||'', asaasCustomerId:r.asaas_customer_id||'', status:'pendente', nf_url:'', erro:'', ref:'', asaas:null, lookupMsg:'' });
   nfaDrawTabela();
-  const t = document.getElementById('nfa-tabela'); if(t) t.scrollIntoView({behavior:'smooth', block:'center'});
+  const t=document.getElementById('nfa-tabela'); if(t) t.scrollIntoView({behavior:'smooth',block:'center'});
   showToast(ja?'Essa linha já está na tabela.':'Carregado p/ correção — ajuste e clique em Emitir lote.', ja?'warning':'success');
 }
+function nfaReemitirSel(){ const ids=[..._nfaSel]; _nfaSel.clear(); ids.forEach(nfaReemitirHist); }
+function nfaCorrigirGrupo(idsStr){ String(idsStr).split(',').filter(Boolean).forEach(nfaReemitirHist); }
 
-function nfaReemitirErros(){
-  let add=0;
-  _nfaHist.forEach((r,idx)=>{
-    if(r.nf_status!=='erro') return;
-    const doc = nfaDigits(r.doc_digits||r.doc||'');
-    const ja = _nfaRows.some(x=> nfaDigits(x.cpf)===doc && nfaParseValor(x.valorRaw)===Number(r.valor) && x.status!=='emitida');
-    if(ja) return;
-    _nfaRows.push({ nome:r.nome||'', cpf: doc?nfaMaskDoc(doc):'', valorRaw: nfaFmtBRL(r.valor), descricao: r.descricao||'', asaasCustomerId: r.asaas_customer_id||'', status:'pendente', nf_url:'', erro:'', ref:'', lookupMsg:'' });
-    add++;
-  });
-  nfaDrawTabela();
-  const t = document.getElementById('nfa-tabela'); if(t) t.scrollIntoView({behavior:'smooth', block:'start'});
-  showToast(add?`${add} linha(s) carregada(s) p/ correção. Ajuste e clique em Emitir lote.`:'Nada novo a carregar (já estão na tabela).', add?'success':'warning');
+// ── arquivar / restaurar (persistido em metadata.resolved) ───────────────────
+async function _nfaPatchMeta(id, patch){
+  const supa=getSupabase(); if(!supa) throw new Error('sem sessão');
+  const r=_nfaHistById(id); const meta={ ...(r&&r.metadata||{}), ...patch };
+  const upd={ metadata:meta };
+  if(patch.resolved==='arquivada' || patch.resolved==='cancelada') upd.nf_status=patch.resolved;
+  if(patch.resolved===null){ upd.nf_status = (r&&r.metadata&&r.metadata._prevStatus) || 'erro'; }
+  const { error }=await supa.from('nf_avulsa').update(upd).eq('id',id);
+  if(error) throw error;
+}
+async function nfaArquivar(id){
+  const r=_nfaHistById(id); if(!r) return;
+  try{ await _nfaPatchMeta(id, { resolved:'arquivada', _prevStatus:r.nf_status }); showToast('Arquivada (entrou em Arquivadas).','success'); }
+  catch(e){ showToast('Falha ao arquivar: '+traduzirErro(e.message||e),'danger'); return; }
+  await nfaCarregarHistorico();
+}
+async function nfaRestaurar(id){
+  try{ await _nfaPatchMeta(id, { resolved:null }); showToast('Restaurada.','success'); }
+  catch(e){ showToast('Falha ao restaurar: '+traduzirErro(e.message||e),'danger'); return; }
+  await nfaCarregarHistorico();
+}
+async function nfaArquivarSel(){ const ids=[..._nfaSel]; _nfaSel.clear(); for(const id of ids){ const r=_nfaHistById(id); if(r) try{ await _nfaPatchMeta(id,{resolved:'arquivada',_prevStatus:r.nf_status}); }catch(_){}} showToast(`${ids.length} arquivada(s).`,'success'); await nfaCarregarHistorico(); }
+async function nfaArquivarGrupo(idsStr){ const ids=String(idsStr).split(',').filter(Boolean); for(const id of ids){ const r=_nfaHistById(id); if(r) try{ await _nfaPatchMeta(id,{resolved:'arquivada',_prevStatus:r.nf_status}); }catch(_){}} showToast(`${ids.length} arquivada(s).`,'success'); await nfaCarregarHistorico(); }
+async function nfaRestaurarSel(){ const ids=[..._nfaSel]; _nfaSel.clear(); for(const id of ids){ try{ await _nfaPatchMeta(id,{resolved:null}); }catch(_){}} showToast(`${ids.length} restaurada(s).`,'success'); await nfaCarregarHistorico(); }
+
+// ── notificar o tomador (PDF) ────────────────────────────────────────────────
+// Registra o canal e abre o PDF p/ envio. Envio automático por e-mail/WhatsApp
+// depende de endpoint dedicado (não incluído) — aqui marca a nota e abre o PDF.
+function nfaEnviarPdf(id){
+  const r=_nfaHistById(id); if(!r) return;
+  _nfaModal(`<div style="padding:22px 24px;">
+    <h3 style="margin:0 0 6px;font-size:17px;font-weight:600;color:var(--text-1,#15224A);">Enviar PDF ao tomador</h3>
+    <div style="font-size:12.5px;color:var(--text-3);margin-bottom:16px;">${escHtml(r.nome||'')} · ${escHtml(r.doc_digits||r.doc||'')}</div>
+    <div style="display:flex;gap:10px;">
+      <button class="btn btn-ghost btn-sm" onclick="nfaConfirmEnvio('${id}','email')">✉ E-mail</button>
+      <button class="btn btn-ghost btn-sm" onclick="nfaConfirmEnvio('${id}','whatsapp')">WhatsApp</button>
+      <button class="btn btn-ghost btn-sm" style="margin-left:auto;" onclick="_nfaCloseModal()">Fechar</button>
+    </div></div>`);
+}
+async function nfaConfirmEnvio(id,canal){
+  _nfaCloseModal();
+  const r=_nfaHistById(id);
+  try{ await _nfaPatchMeta(id, { canal }); }catch(_){}
+  if(r&&r.nf_url) window.open(r.nf_url,'_blank','noopener');
+  showToast(`Marcado como enviado por ${canal}. PDF aberto p/ anexar.`,'success');
+  await nfaCarregarHistorico();
 }
 
-// Consulta no Asaas o status das notas "processando" (a prefeitura autoriza a NFS-e
-// de forma assíncrona). Para as que ficaram SCHEDULED, tenta reautorizar; depois lê o
-// status final e atualiza a linha (emitida + PDF / erro com motivo). Roda na sessão.
-async function nfaAtualizarStatus(){
-  const proc = (_nfaHist||[]).filter(r=>r.nf_status==='processando' && r.nf_asaas_id);
-  if(!proc.length){ showToast('Nenhuma nota em processamento.','warning'); return; }
-  const supa = getSupabase();
-  if(!supa){ showToast('Faça login para atualizar.','warning'); return; }
-  const btn = document.getElementById('nfa-status-btn'); if(btn){ btn.disabled=true; }
-  const hdr = { 'Content-Type':'application/json', ...(await authHeaders()) };
-  const getInv = async (id)=>{ const r=await fetch(`/api/asaas?path=invoices/${encodeURIComponent(id)}`,{headers:hdr}); const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error(j?.errors?.[0]?.description||j?.error||('HTTP '+r.status)); return j; };
+// ── cancelar nota junto à prefeitura (#9) ────────────────────────────────────
+function nfaModalCancelarPref(id){
+  const r=_nfaHistById(id); if(!r) return;
+  const motivos=['Erro no valor','Dados do tomador incorretos','Serviço não prestado','Nota em duplicidade','Outro'];
+  _nfaModal(`<div style="padding:22px 24px;">
+    <div style="font-family:var(--mono,monospace);font-size:10px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--danger);">Cancelar junto à prefeitura</div>
+    <h3 style="margin:6px 0 4px;font-size:18px;font-weight:600;color:var(--text-1,#15224A);">${escHtml(r.nome||'')}</h3>
+    <div style="font-size:12.5px;color:var(--text-3);margin-bottom:16px;">${escHtml(r.doc_digits||r.doc||'')} · ${nfaFmtBRL(r.valor)}${r.metadata&&r.metadata.nf_number?(' · NFS-e '+escHtml(r.metadata.nf_number)):''}</div>
+    <label style="font-size:11px;color:var(--text-3);text-transform:uppercase;letter-spacing:.4px;">Motivo</label>
+    <select id="nfa-cancel-motivo" style="width:100%;box-sizing:border-box;font-size:12.5px;padding:8px;border:1px solid var(--border);border-radius:8px;margin:4px 0 12px;">
+      ${motivos.map(m=>`<option>${escHtml(m)}</option>`).join('')}
+    </select>
+    <label style="font-size:11px;color:var(--text-3);text-transform:uppercase;letter-spacing:.4px;">Protocolo (opcional)</label>
+    <input id="nfa-cancel-prot" placeholder="protocolo da prefeitura, se houver" style="width:100%;box-sizing:border-box;font-size:12.5px;padding:8px;border:1px solid var(--border);border-radius:8px;margin:4px 0 16px;">
+    <div style="background:#FEF6E7;border:1px solid #F0D89B;border-radius:8px;padding:9px 11px;font-size:11.5px;color:#7a5b10;margin-bottom:16px;">O cancelamento é solicitado ao Asaas/prefeitura e é irreversível.</div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;">
+      <button class="btn btn-ghost btn-sm" onclick="_nfaCloseModal()">Voltar</button>
+      <button class="btn btn-primary btn-sm" style="background:var(--danger);border-color:var(--danger);" onclick="nfaCancelarPref('${id}')">Cancelar nota</button>
+    </div></div>`);
+}
+async function nfaCancelarPref(id){
+  const r=_nfaHistById(id); if(!r) return;
+  const motivo=(document.getElementById('nfa-cancel-motivo')||{}).value||'';
+  const protocolo=((document.getElementById('nfa-cancel-prot')||{}).value||'').trim();
+  _nfaCloseModal();
+  const supa=getSupabase();
+  if(!r.nf_asaas_id){ showToast('Nota sem ID do Asaas — não dá para cancelar pela prefeitura.','warning'); return; }
+  try{
+    const hdr={ 'Content-Type':'application/json', ...(await authHeaders()) };
+    const resp=await fetch(`/api/asaas?path=invoices/${encodeURIComponent(r.nf_asaas_id)}/cancel`,{method:'POST',headers:hdr});
+    const j=await resp.json().catch(()=>({}));
+    if(!resp.ok) throw new Error(j?.errors?.[0]?.description||j?.error||('HTTP '+resp.status));
+    const meta={ ...(r.metadata||{}), resolved:'cancelada', _prevStatus:r.nf_status, cancel:{ motivo, protocolo:protocolo||'s/ protocolo', quando:new Date().toISOString() } };
+    if(supa) await supa.from('nf_avulsa').update({ nf_status:'cancelada', metadata:meta }).eq('id',id);
+    showToast('Nota cancelada junto à prefeitura.','success');
+  }catch(e){ showToast('Falha ao cancelar: '+traduzirErro(e.message||String(e)),'danger'); }
+  await nfaCarregarHistorico();
+}
+
+// ── gerar NF de cobranças quitadas (#5) ──────────────────────────────────────
+let _nfaQuitadas=[];
+async function nfaModalCobrancas(){
+  _nfaModal(`<div style="padding:22px 24px;"><h3 style="margin:0 0 4px;font-size:18px;font-weight:600;color:var(--text-1,#15224A);">Gerar de cobranças quitadas</h3>
+    <div style="font-size:12.5px;color:var(--text-3);margin-bottom:14px;">Recebimentos confirmados no Asaas. Marque os que viram linha do lote (descrição "Honorários de cobrança").</div>
+    <div id="nfa-cob-lista" style="color:var(--text-3);font-size:13px;">Carregando recebimentos…</div></div>`, {wide:true});
+  const hdr={ 'Content-Type':'application/json', ...(await authHeaders()) };
+  try{
+    const r=await fetch('/api/asaas?path=payments&status=RECEIVED&limit=50&order=desc',{headers:hdr});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j?.errors?.[0]?.description||j?.error||('HTTP '+r.status));
+    const pays=(Array.isArray(j.data)?j.data:[]);
+    // Resolve nome/CPF do cliente (cache por id) — bounded ao tamanho da página.
+    const cache={};
+    const ids=[...new Set(pays.map(p=>p.customer).filter(Boolean))];
+    for(const cid of ids){
+      try{ const rr=await fetch(`/api/asaas?path=customers/${encodeURIComponent(cid)}`,{headers:hdr}); const cj=await rr.json().catch(()=>({})); if(cj&&cj.id) cache[cid]=cj; }catch(_){}
+    }
+    _nfaQuitadas=pays.map(p=>{ const c=cache[p.customer]||{}; return { name:c.name||p.customer||'—', cpf:c.cpfCnpj?nfaMaskDoc(nfaDigits(c.cpfCnpj)):'', customerId:p.customer||'', value:Number(p.value)||0, when:p.clientPaymentDate||p.paymentDate||'', desc:p.description||'' }; });
+    nfaDrawCobrancas();
+  }catch(e){
+    const box=document.getElementById('nfa-cob-lista'); if(box) box.innerHTML=`<div style="color:var(--danger);">Não consegui carregar: ${escHtml(traduzirErro(e.message||String(e)))}</div>`;
+  }
+}
+function nfaDrawCobrancas(){
+  const box=document.getElementById('nfa-cob-lista'); if(!box) return;
+  if(!_nfaQuitadas.length){ box.innerHTML='<div style="padding:8px 0;">Nenhum recebimento confirmado encontrado.</div>'; return; }
+  box.innerHTML=`<div style="max-height:48vh;overflow:auto;border:1px solid var(--border);border-radius:10px;">
+    <table style="width:100%;border-collapse:collapse;font-size:12.5px;">
+      <thead><tr style="background:var(--surface-2);text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);">
+        <th style="padding:7px 10px;width:18px;"><input type="checkbox" onclick="nfaCobSelAll(this.checked)"></th>
+        <th style="padding:7px 10px;font-weight:600;">Tomador</th><th style="padding:7px 10px;font-weight:600;text-align:right;">Valor</th><th style="padding:7px 10px;font-weight:600;">Pago em</th></tr></thead>
+      <tbody>${_nfaQuitadas.map((q,i)=>`<tr style="border-bottom:1px solid var(--border);">
+        <td style="padding:7px 10px;"><input type="checkbox" data-nfacob="${i}" ${q._sel?'checked':''} onclick="nfaCobSel(${i},this.checked)"></td>
+        <td style="padding:7px 10px;">${escHtml(q.name)}<div style="font-family:var(--mono,monospace);font-size:10.5px;color:var(--text-3);">${escHtml(q.cpf||'sem CPF')}</div></td>
+        <td style="padding:7px 10px;text-align:right;font-family:var(--mono,monospace);">${nfaFmtBRL(q.value)}</td>
+        <td style="padding:7px 10px;font-family:var(--mono,monospace);font-size:11px;color:var(--text-3);">${q.when?new Date(q.when).toLocaleDateString('pt-BR'):'—'}</td></tr>`).join('')}</tbody>
+    </table></div>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:14px;justify-content:flex-end;">
+      <button class="btn btn-ghost btn-sm" onclick="_nfaCloseModal()">Fechar</button>
+      <button class="btn btn-primary btn-sm" onclick="nfaCobrancasDo()">Gerar ${_nfaQuitadas.filter(q=>q._sel).length} linha(s)</button>
+    </div>`;
+}
+function nfaCobSel(i,on){ if(_nfaQuitadas[i]) _nfaQuitadas[i]._sel=on; const b=document.querySelector('#nfa-cob-lista .btn-primary'); if(b) b.textContent='Gerar '+_nfaQuitadas.filter(q=>q._sel).length+' linha(s)'; }
+function nfaCobSelAll(on){ _nfaQuitadas.forEach(q=>q._sel=on); nfaDrawCobrancas(); }
+function nfaCobrancasDo(){
+  const picks=_nfaQuitadas.filter(q=>q._sel);
+  if(!picks.length){ showToast('Selecione ao menos um recebimento.','warning'); return; }
+  picks.forEach(q=>_nfaRows.push({ nome:q.name, cpf:q.cpf, valorRaw:nfaFmtBRL(q.value), descricao:'Honorários de cobrança', asaasCustomerId:q.customerId||'', status:'pendente', nf_url:'', erro:'', ref:'', asaas:null }));
+  _nfaCloseModal();
+  nfaDrawTabela();
+  const t=document.getElementById('nfa-tabela'); if(t) t.scrollIntoView({behavior:'smooth',block:'center'});
+  showToast(`${picks.length} linha(s) gerada(s) no lote.`,'success');
+}
+
+// ── auto-atualizar (polling) ─────────────────────────────────────────────────
+function nfaToggleAuto(){
+  _nfaAutoUpdate=!_nfaAutoUpdate;
+  const s=document.getElementById('nfa-auto-sw'); if(s) s.innerHTML=_nfaSwitch(_nfaAutoUpdate,'nfaToggleAuto()');
+  if(_nfaAutoTimer){ clearInterval(_nfaAutoTimer); _nfaAutoTimer=null; }
+  if(_nfaAutoUpdate){
+    _nfaAutoTimer=setInterval(async ()=>{
+      if(!document.getElementById('page-nf-avulsa') || !document.getElementById('page-nf-avulsa').classList.contains('active')){ return; }
+      const nProc=(_nfaHist||[]).filter(r=>nfaEffStatus(r)==='processando').length;
+      if(!nProc){ return; }
+      await nfaAtualizarStatus(true);
+    }, 15000);
+    showToast('Auto-atualizar ligado — verifico as processando a cada 15s.','info');
+  }
+}
+
+// ── atualizar status das processando ─────────────────────────────────────────
+async function nfaAtualizarStatus(silent){
+  const proc=(_nfaHist||[]).filter(r=>nfaEffStatus(r)==='processando' && r.nf_asaas_id);
+  if(!proc.length){ if(!silent) showToast('Nenhuma nota em processamento.','warning'); return; }
+  const supa=getSupabase(); if(!supa){ if(!silent) showToast('Faça login para atualizar.','warning'); return; }
+  const btn=document.getElementById('nfa-status-btn'); if(btn){ btn.disabled=true; }
+  const hdr={ 'Content-Type':'application/json', ...(await authHeaders()) };
+  const getInv=async(id)=>{ const r=await fetch(`/api/asaas?path=invoices/${encodeURIComponent(id)}`,{headers:hdr}); const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error(j?.errors?.[0]?.description||j?.error||('HTTP '+r.status)); return j; };
   let ok=0, ainda=0, falha=0;
   for(let i=0;i<proc.length;i++){
-    const r = proc[i];
-    if(btn) btn.textContent = `↻ Verificando ${i+1}/${proc.length}…`;
+    const r=proc[i];
+    if(btn) btn.textContent=`↻ Verificando ${i+1}/${proc.length}…`;
     try{
-      let inv = await getInv(r.nf_asaas_id);
-      let st = String(inv.status||'').toUpperCase();
-      // SCHEDULED: ainda não emitida — tenta antecipar (autorizar) e relê.
+      let inv=await getInv(r.nf_asaas_id); let st=String(inv.status||'').toUpperCase();
       if(st==='SCHEDULED'){
         try{ await fetch(`/api/asaas?path=invoices/${encodeURIComponent(r.nf_asaas_id)}/authorize`,{method:'POST',headers:hdr}); }catch(_){}
-        try{ inv = await getInv(r.nf_asaas_id); st = String(inv.status||'').toUpperCase(); }catch(_){}
+        try{ inv=await getInv(r.nf_asaas_id); st=String(inv.status||'').toUpperCase(); }catch(_){}
       }
       let novo=null, url=r.nf_url||null, erro=null;
       if(st==='AUTHORIZED'){ novo='emitida'; url=inv.pdfUrl||inv.xmlUrl||url; ok++; }
-      else if(st==='ERROR'){ novo='erro'; erro=(inv.errors&&inv.errors[0]&&inv.errors[0].description)|| inv.statusDescription || 'Recusada pela prefeitura'; falha++; }
+      else if(st==='ERROR'){ novo='erro'; erro=(inv.errors&&inv.errors[0]&&inv.errors[0].description)||inv.statusDescription||'Recusada pela prefeitura'; falha++; }
       else if(st==='CANCELED'||st==='CANCELLATION_DENIED'){ novo='cancelada'; falha++; }
       else { ainda++; }
-      if(novo){ await supa.from('nf_avulsa').update({ nf_status:novo, nf_url:url, erro:erro }).eq('id', r.id); }
+      if(novo){ const meta={ ...(r.metadata||{}), nf_number:(inv.number||(r.metadata&&r.metadata.nf_number)||null) }; if(novo==='cancelada') meta.resolved='cancelada'; await supa.from('nf_avulsa').update({ nf_status:novo, nf_url:url, erro:erro, metadata:meta }).eq('id',r.id); }
     }catch(e){ falha++; }
   }
   if(btn){ btn.disabled=false; btn.textContent='↻ Atualizar status'; }
-  showToast(`${ok} emitida(s)${ainda?`, ${ainda} ainda processando`:''}${falha?`, ${falha} c/ problema`:''}.`, ok?'success':'warning');
-  nfaCarregarHistorico();
+  if(!silent) showToast(`${ok} emitida(s)${ainda?`, ${ainda} ainda processando`:''}${falha?`, ${falha} c/ problema`:''}.`, ok?'success':'warning');
+  await nfaCarregarHistorico();
+}
+
+// Badge da sidebar (processando + erro).
+function nfaUpdateNavBadge(){
+  const el=document.getElementById('nav-nf-badge'); if(!el) return;
+  const n=(_nfaHist||[]).filter(r=>['processando','erro'].includes(nfaEffStatus(r))).length;
+  if(n>0){ el.textContent=n; el.style.display=''; } else { el.style.display='none'; }
 }
 
 async function renderAssinaturas(){

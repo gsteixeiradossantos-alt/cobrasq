@@ -57,6 +57,17 @@ module.exports = async function handler(req, res) {
   const munId = String(body.municipalServiceId || process.env.ASAAS_NF_MUNICIPAL_SERVICE_ID || '').trim();
   const munCode = String(body.municipalServiceCode || process.env.ASAAS_NF_MUNICIPAL_SERVICE_CODE || '').trim();
   const munName = String(body.municipalServiceName || process.env.ASAAS_NF_MUNICIPAL_SERVICE_NAME || '').trim();
+  // Metadados fiscais p/ a conciliação ISS por competência (gravados no metadata,
+  // não vão no payload do Asaas). competencia "MM/AAAA"; aliquota = % ISS do modelo.
+  const competencia = String(body.competencia || '').trim() || null;
+  const aliquotaNum = (body.aliquota != null && isFinite(Number(body.aliquota))) ? Number(body.aliquota) : null;
+  const modeloNome = String(body.modelo_nome || '').trim() || null;
+  const municipio = String(body.municipio || '').trim() || null;
+  const fiscalMeta = {};
+  if (competencia) fiscalMeta.competencia = competencia;
+  if (aliquotaNum != null) fiscalMeta.aliquota = aliquotaNum;
+  if (modeloNome) fiscalMeta.modelo_nome = modeloNome;
+  if (municipio) fiscalMeta.municipio = municipio;
 
   if (!doc) return res.status(400).json({ error: 'CPF/CNPJ obrigatório para emitir NFS-e (identifica o tomador).' });
   if (!munId && !munCode) return res.status(400).json({ error: 'Serviço municipal não informado. Selecione o serviço da NFS-e (municipalServiceId) na tela antes de emitir.' });
@@ -98,7 +109,7 @@ module.exports = async function handler(req, res) {
     const linhaTentativa = {
       nome: nome || null, doc, doc_digits: doc, valor, descricao: descricao || null,
       asaas_customer_id: customerId, nf_status: 'emitindo', erro: null, criada_por: user.id,
-      metadata: ref ? { ref } : {},
+      metadata: { ...(ref ? { ref } : {}), ...fiscalMeta },
     };
     if (rowId) {
       await sbFetch(`nf_avulsa?id=eq.${rowId}`, { method: 'PATCH', body: JSON.stringify(linhaTentativa) }).catch(() => {});
@@ -146,7 +157,7 @@ module.exports = async function handler(req, res) {
         method: 'PATCH',
         body: JSON.stringify({
           nf_status: nfStatus, nf_asaas_id: invoice.id || null, nf_url: nfUrl || null,
-          metadata: { ...(ref ? { ref } : {}), nf_number: authorized.number || null },
+          metadata: { ...(ref ? { ref } : {}), ...fiscalMeta, nf_number: authorized.number || null },
         }),
       }).catch(() => {});
     }
