@@ -121,10 +121,15 @@ module.exports = async function handler(req, res) {
         iss, cofins: 0, csll: 0, inss: 0, ir: 0, pis: 0,
       },
     };
-    // Identificação do serviço municipal: prioriza municipalServiceId (recomendado
-    // pelo Asaas); senão municipalServiceCode (+ name). Sem isso a prefeitura rejeita.
-    if (munId) invoicePayload.municipalServiceId = munId;
-    else if (munCode) invoicePayload.municipalServiceCode = munCode;
+    // Identificação do serviço municipal. Conta com lista → municipalServiceId.
+    // Conta via Portal Nacional (sem lista) → municipalServiceId:null + Code (+ Name),
+    // conforme a doc do Asaas. Sem isso a prefeitura rejeita a NFS-e.
+    if (munId) {
+      invoicePayload.municipalServiceId = munId;
+    } else if (munCode) {
+      invoicePayload.municipalServiceId = null;
+      invoicePayload.municipalServiceCode = munCode;
+    }
     if (munName) invoicePayload.municipalServiceName = munName;
 
     // Cria e autoriza (emite de fato) a NFS-e.
