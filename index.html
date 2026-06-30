@@ -4334,7 +4334,25 @@ const STATUS_CFG = {
   'Quitado':{dot:'#00796B',badge:'b-teal',cls:'s-quitado'},
   'Quitado ao cliente':{dot:'#16a34a',badge:'b-green',cls:'s-recebido'},
   'Devolvida':{dot:'#8A96B8',badge:'b-gray',cls:'s-devolvida'},
-  'Sem êxito':{dot:'#8A96B8',badge:'b-gray',cls:'s-semexito'}
+  'Sem êxito':{dot:'#8A96B8',badge:'b-gray',cls:'s-semexito'},
+  // Etiquetas unificadas (2026) — reusam as cores/classes existentes.
+  '1. Ação de Cobrança':{dot:'#1A5FB4',badge:'b-blue',cls:'s-judicial'},
+  '1.1 Ação de locupletamento ilícito':{dot:'#1A5FB4',badge:'b-blue',cls:'s-judicial'},
+  '1.2. Ação Monitória':{dot:'#1A5FB4',badge:'b-blue',cls:'s-judicial'},
+  '2. Acordo Extrajudicial':{dot:'#6C3FFF',badge:'b-purple',cls:'s-acordo'},
+  '2.1. Acordo Judicial':{dot:'#6C3FFF',badge:'b-purple',cls:'s-acordo'},
+  '3. Cumprimento de Sentença':{dot:'#1A5FB4',badge:'b-blue',cls:'s-judicial'},
+  '4. Ação de Execução de Título Extrajudicial':{dot:'#1A5FB4',badge:'b-blue',cls:'s-judicial'},
+  '7. Reajuizar':{dot:'#1A5FB4',badge:'b-blue',cls:'s-judicial'},
+  'Para protocolar':{dot:'#1A5FB4',badge:'b-blue',cls:'s-judicial'},
+  '10. Automatizar Micro':{dot:'#C47A00',badge:'b-yellow',cls:'s-emcontato'},
+  '5. Quitado':{dot:'#00796B',badge:'b-teal',cls:'s-quitado'},
+  '6. Baixados':{dot:'#8A96B8',badge:'b-gray',cls:'s-devolvida'},
+  '8. Devolvida':{dot:'#8A96B8',badge:'b-gray',cls:'s-devolvida'},
+  '9. Encerrada':{dot:'#8A96B8',badge:'b-gray',cls:'s-semexito'},
+  'Análise':{dot:'#C83A1E',badge:'b-red',cls:'s-cobrar'},
+  'Baixar':{dot:'#8A96B8',badge:'b-gray',cls:'s-devolvida'},
+  'Em andamento':{dot:'#C47A00',badge:'b-yellow',cls:'s-emcontato'}
 };
 const ETAPAS_EXTRA = ['Notificação','Automatizar','Em contato','Proposta enviada','Acordo','Quitado','Devolvida','Sem êxito'];
 
@@ -6882,12 +6900,12 @@ function calcMetaProgresso(m){
   if(meta === 0) return 0;
   if(m.tipo === 'Valor recuperado'){
     const total = (DB.devedores||[])
-      .filter(d=>d.status==='Quitado' || d.status==='Recebido')
+      .filter(d=>ehRecuperado(d.status))
       .reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
     return Math.min(100, Math.round((total/meta)*100));
   }
   if(m.tipo === 'Número de acordos'){
-    const count = (DB.devedores||[]).filter(d=>d.status==='Acordo').length;
+    const count = (DB.devedores||[]).filter(d=>ehAcordo(d.status)).length;
     return Math.min(100, Math.round((count/meta)*100));
   }
   return 0;
@@ -7683,7 +7701,7 @@ function devEhDoUsuario(d){
 function renderPainelColaborador(){
   const meus = (DB.devedores||[]).filter(d =>
     !d.arquivado && !d.isDraft && devEhDoUsuario(d) &&
-    !['Quitado','Recebido','Pendente aprovação','pendente_ajuste'].includes(d.status));
+    !ehForaRegua(d.status) && !['Pendente aprovação','pendente_ajuste'].includes(d.status));
   const hoje7 = new Date(Date.now() - 7*86400000).toISOString().slice(0,10);
 
   const fila = meus.slice().sort((a,b)=>calcScore(b)-calcScore(a)).slice(0,8);
@@ -7693,7 +7711,7 @@ function renderPainelColaborador(){
   });
   const aguardandoAss = meus.filter(d=>(d.minutas||[]).some(m=>m.zapsignStatus==='PENDING'));
   const carteiraTotal = meus.reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
-  const emAcordo = meus.filter(d=>d.status==='Acordo').length;
+  const emAcordo = meus.filter(d=>ehAcordo(d.status)).length;
 
   const linhaDev = d => `
     <div onclick="showPage('devedores');setTimeout(()=>openDrawer('${d.id}'),120)" style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid var(--border);cursor:pointer;" onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background=''">
@@ -7864,7 +7882,7 @@ function delegacaoCobrancasDigest(max){
     }
   }catch(_){}
   if(!base.length) base=(DB.devedores||[]).filter(d=>!d.arquivado&&!d.isDraft).map(d=>({ id:d.id, devedor:d.nome||'', credor:d.clienteNome||'', status:d.status||'', resp:d.responsavel||'' }));
-  return base.filter(x=>x.status!=='Quitado' && x.status!=='Recebido').slice(0,max||60);
+  return base.filter(x=>!ehForaRegua(x.status)).slice(0,max||60);
 }
 // Varredura de pendências p/ a Bia sugerir delegações sem o gestor precisar escrever.
 function delegacaoPendenciasDigest(){
@@ -8832,8 +8850,8 @@ function calcScore(dev){
   else if(valor > 5000) score += 15;
   else if(valor > 1000) score += 10;
   // Status
-  if(dev.status === 'Notificação' || dev.etapa === 'Notificação') score += 10;
-  else if(dev.status === 'Em contato' || dev.etapa === 'Em contato') score += 5;
+  if(etapaCanon(dev.status) === 'Notificação' || dev.etapa === 'Notificação') score += 10;
+  else if(etapaCanon(dev.status) === 'Em contato' || dev.etapa === 'Em contato') score += 5;
   // Sem interações nos últimos 7 dias
   const hist = dev.historico || [];
   const now = new Date();
@@ -9542,7 +9560,7 @@ function renderDevedores(){
                         <span class="cob-av">${initials||'?'}</span>
                         <div>
                           <div class="cob-dev-nm">${escHtml(d.nome||'—')}</div>
-                          <div class="cob-dev-tipo${faseDaEtiqueta(d.status)==='judicial'?' jud':''}">${escHtml(d.status||'—')}${d.etapa?` · ${escHtml(d.etapa)}`:''}</div>
+                          <div class="cob-dev-tipo${faseDaEtiqueta(d.status,d.fase)==='judicial'?' jud':''}">${escHtml(d.status||'—')}${d.etapa?` · ${escHtml(d.etapa)}`:''}</div>
                         </div>
                       </div>
                     </td>
@@ -11277,7 +11295,7 @@ const _ETIQUETAS_DEFAULT = [
   '2. Acordo Extrajudicial', '2.1. Acordo Judicial', '3. Cumprimento de Sentença',
   '4. Ação de Execução de Título Extrajudicial', '10. Automatizar Micro',
   '5. Quitado', '6. Baixados', '7. Reajuizar', '8. Devolvida', '9. Encerrada',
-  'Análise', 'Cobrar', 'Baixar', 'Em andamento', 'Para protocolar'
+  'Análise', 'Cobrar', 'Baixar', 'Em andamento', 'Para protocolar', 'Fazer ação'
 ];
 // Editável em Configurações → Etiquetas (DB.config.etiquetas). Fallback: lista padrão.
 function _etiquetas(){
@@ -11288,9 +11306,35 @@ function _etiquetas(){
 const _ETIQUETAS_JUDICIAIS = new Set([
   '1. Ação de Cobrança', '1.1 Ação de locupletamento ilícito', '1.2. Ação Monitória',
   '2.1. Acordo Judicial', '3. Cumprimento de Sentença',
-  '4. Ação de Execução de Título Extrajudicial', '7. Reajuizar', 'Para protocolar'
+  '4. Ação de Execução de Título Extrajudicial', '7. Reajuizar', 'Para protocolar', 'Fazer ação'
 ]);
-function faseDaEtiqueta(et){ return _ETIQUETAS_JUDICIAIS.has((et||'').trim()) ? 'judicial' : 'extrajudicial'; }
+// Status JUDICIAIS legados (vocabulário antigo) — preservam fase judicial até a migração.
+const _STATUS_JUD_LEGADOS = new Set([
+  'Ação judicial', 'Petição inicial', 'Citação', 'Contestação', 'Audiência',
+  'Sentença', 'Recurso', 'Execução', 'Penhora', 'Hasta pública', 'Encerrado'
+]);
+// Deriva a fase da etiqueta. Para status legados/desconhecidos NÃO flipa: usa a fase
+// existente (fallbackFase) se houver; senão reconhece status judiciais legados.
+function faseDaEtiqueta(et, fallbackFase){
+  const s = (et||'').trim();
+  if(_ETIQUETAS_JUDICIAIS.has(s)) return 'judicial';
+  if(_etiquetas().includes(s))    return 'extrajudicial';
+  if(fallbackFase==='judicial' || fallbackFase==='extrajudicial') return fallbackFase;
+  return _STATUS_JUD_LEGADOS.has(s) ? 'judicial' : 'extrajudicial';
+}
+// Status terminais: pausam a régua de WhatsApp e contam como encerrados.
+const _STATUS_FORA_REGUA = new Set([
+  'Quitado','Devolvida','Sem êxito','Recebido',
+  '5. Quitado','6. Baixados','8. Devolvida','9. Encerrada'
+]);
+function ehForaRegua(status){ return _STATUS_FORA_REGUA.has((status||'').trim()); }
+// Status que contam como valor RECUPERADO (quitação efetiva).
+const _STATUS_RECUPERADO = new Set(['Quitado','Recebido','5. Quitado']);
+function ehRecuperado(status){ return _STATUS_RECUPERADO.has((status||'').trim()); }
+// Bucket canônico do funil extrajudicial (status → etapa). '' se não mapeado.
+function etapaCanon(status){ return _STATUS_TO_ETAPA_EXTRA[(status||'').trim()] || ''; }
+// Caso "em acordo" (qualquer etiqueta de acordo, nova ou legada).
+function ehAcordo(status){ return /acordo/i.test(status||''); }
 
 const _SITUACOES_EXTRA = [
   'Cobrar', 'Notificação enviada', 'Automatizar', 'Em contato', 'Em negociação',
@@ -11488,7 +11532,7 @@ function editDevedor(id){
   mdevAplicarModo('devedor'); // FASE C: ficha do devedor é só pessoa — dívida/fase moram na cobrança (editar via aba Cobranças)
 
   // Fase DERIVADA da etiqueta (Status) — sem seletor jud/extra.
-  const isJud = faseDaEtiqueta(dev.status) === 'judicial';
+  const isJud = faseDaEtiqueta(dev.status, dev.fase) === 'judicial';
   document.getElementById('mdev-fase-extra').checked = !isJud;
   document.getElementById('mdev-fase-jud').checked = isJud;
   document.getElementById('mdev-etapa-jud-wrap').style.display = isJud ? '' : 'none';
@@ -12410,14 +12454,13 @@ async function salvarDevedor(){
     return;
   }
 
-  // fase derivada da etiqueta (Status) — sem seletor jud/extra.
-  const fase = faseDaEtiqueta(status);
+  const id = document.getElementById('mdev-id').value;
+  const existingDev = id ? (DB.devedores||[]).find(d=>d.id===id) : null;
+  // fase derivada da etiqueta (Status); preserva a fase atual se status for legado.
+  const fase = faseDaEtiqueta(status, existingDev?.fase);
   const isJud = fase === 'judicial';
   // Etapa foi mesclada no Status (PR-C / C.3) — preserva valor legado se existir, senão vazio.
   const etapa = '';
-
-  const id = document.getElementById('mdev-id').value;
-  const existingDev = id ? (DB.devedores||[]).find(d=>d.id===id) : null;
   const isPending = existingDev && (existingDev.status==='Pendente aprovação'||existingDev.status==='pendente_ajuste');
 
   // PR-F: bloqueia 1 devedor por CPF/CNPJ. Pra adicionar outra dívida ao
@@ -13134,7 +13177,7 @@ function abrirAtualizarProcesso(devId){
   document.getElementById('mproc-data').value = hoje();
   document.getElementById('mproc-comentario').value = '';
 
-  const isJud = faseDaEtiqueta(dev.status) === 'judicial'; // derivado da etiqueta
+  const isJud = faseDaEtiqueta(dev.status, dev.fase) === 'judicial'; // derivado da etiqueta (preserva legado)
   document.getElementById('mproc-fase-extra').checked = !isJud;
   document.getElementById('mproc-fase-jud').checked = isJud;
   document.getElementById('mproc-etapa-extra-wrap').style.display = isJud ? 'none' : '';
@@ -13150,7 +13193,7 @@ function salvarProcesso(){
   const dev = (DB.devedores||[]).find(d=>d.id===devId);
   if(!dev) return;
 
-  const isJud = faseDaEtiqueta(dev.status) === 'judicial'; // derivado da etiqueta
+  const isJud = faseDaEtiqueta(dev.status, dev.fase) === 'judicial'; // derivado da etiqueta (preserva legado)
   const fase = isJud ? 'judicial' : 'extrajudicial';
   const etapa = isJud ? document.getElementById('mproc-etapa-jud').value : document.getElementById('mproc-etapa-extra').value;
   const comentario = document.getElementById('mproc-comentario').value||'';
@@ -14163,7 +14206,7 @@ function toggleCobrSelection(id, on){
 }
 async function bulkAlterarStatusCobr(){
   if(!selectedCobrIds.size){ showToast('Nenhum caso selecionado.','warning'); return; }
-  const statusOpts = ['Cobrar','Aguardando','Acordo','Quitado','Arquivado','Judicial'];
+  const statusOpts = _etiquetas();
   const novoStatus = await new Promise(res=>{
     const overlay = document.createElement('div');
     overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10100;display:flex;align-items:center;justify-content:center;';
@@ -15316,6 +15359,7 @@ function abrirCobrancaModal(cob){
   const bancoV   = cob ? escHtml(cob.banco || '') : '';
   const agContaV = cob ? escHtml(cob.agencia_conta || '') : '';
   const faseV    = cob ? (cob.fase || 'extrajudicial') : 'extrajudicial';
+  window._cobrEditFase = cob ? (cob.fase || '') : ''; // fallback p/ não flipar fase de status legado
   const numProcV = cob ? escHtml(cob.numero_processo || '') : '';
   const varaV    = cob ? escHtml(cob.vara_tribunal || '') : '';
   const monitorarV = cob ? (cob.monitorar_datajud !== false) : true; // default ligado
@@ -15453,8 +15497,14 @@ function abrirCobrancaModal(cob){
 // Situação reusa o MESMO vocabulário fase-aware do cadastro (preserva CRM/relatórios).
 function cobrSituacaoOptionsHTML(_fase, selected){
   const opts = _etiquetas();
-  const sel = (selected && opts.includes(selected)) ? selected : opts[0];
-  return opts.map(o=>`<option ${o===sel?'selected':''}>${escHtml(o)}</option>`).join('');
+  // Status legado (vocabulário antigo) é preservado como opção "(legado)" no topo,
+  // selecionada — para não renomear o caso ao abrir/salvar a edição.
+  let html = '';
+  if(selected && !opts.includes(selected)){
+    html += `<option value="${escHtml(selected)}" selected>${escHtml(selected)} (legado)</option>`;
+  }
+  const sel = (selected && opts.includes(selected)) ? selected : (html ? null : opts[0]);
+  return html + opts.map(o=>`<option ${o===sel?'selected':''}>${escHtml(o)}</option>`).join('');
 }
 function cobrResponsavelOptionsHTML(selectedId){
   const list = Array.isArray(_rosterAppUsers) ? _rosterAppUsers : [];
@@ -15476,7 +15526,7 @@ function cobrInitResponsavel(assignedV){
 function cobrOnSituacaoChange(){
   const et = document.getElementById('cobr-situacao')?.value || '';
   const jw = document.getElementById('cobr-judicial-wrap');
-  if(jw) jw.style.display = (faseDaEtiqueta(et)==='judicial') ? 'grid' : 'none';
+  if(jw) jw.style.display = (faseDaEtiqueta(et, window._cobrEditFase)==='judicial') ? 'grid' : 'none';
 }
 // Alterna entre preenchimento manual e via documento (Beatriz).
 function cobrSelectMode(mode){
@@ -15556,7 +15606,7 @@ async function salvarCobranca(){
   const numDoc  = (document.getElementById('cobr-num-doc')?.value||'').trim() || null;
   const banco   = (document.getElementById('cobr-banco')?.value||'').trim() || null;
   const agConta = (document.getElementById('cobr-ag-conta')?.value||'').trim() || null;
-  const fase    = faseDaEtiqueta(document.getElementById('cobr-situacao')?.value || _etiquetas()[0]);
+  const fase    = faseDaEtiqueta(document.getElementById('cobr-situacao')?.value || _etiquetas()[0], window._cobrEditFase);
   const numProc = (document.getElementById('cobr-num-proc')?.value||'').trim() || null;
   const vara    = (document.getElementById('cobr-vara')?.value||'').trim() || null;
   const monitorar = document.getElementById('cobr-monitorar')?.checked !== false; // default ligado
@@ -15727,7 +15777,7 @@ function renderClientes(){
   const cliRowsAll = clientes.map(c=>{
     const cDevs = devs.filter(d=>d.clienteId===c.id);
     const carteira = cDevs.reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
-    const recuperado = cDevs.filter(d=>d.status==='Quitado'||d.status==='Recebido').reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
+    const recuperado = cDevs.filter(d=>ehRecuperado(d.status)).reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
     return { c, nDevs: cDevs.length, carteira, recuperado };
   });
 
@@ -17525,21 +17575,32 @@ function cpDevs(){
 // ── Helpers de UI do portal (marca v3) ──
 function cpStatusKey(s){
   s=(s||'').toLowerCase();
-  if(/sem.?[êe]xito/.test(s)) return 'semexito';
+  if(/sem.?[êe]xito|baixad|encerrad/.test(s)) return 'semexito';
   if(/devolvid|quitad|recebid|pago/.test(s)) return 'quitado';
-  if(/judicial|inadimpl|protest/.test(s)) return 'judicial';
+  if(/judicial|execu|cumprimento|monit[óo]ria|locupletamento|protocolar|reajuizar|fazer a[çc][ãa]o|a[çc][ãa]o de cobran|inadimpl|protest|peti[çc]|cita[çc]|senten|audi[êe]ncia|penhora/.test(s)) return 'judicial';
   if(/acordo|negocia|proposta/.test(s)) return 'acordo';
   return 'cobrar';
 }
-function cpPill(status){ return `<span class="cp-pill cp-st-${cpStatusKey(status)}"><span class="dot"></span>${escHtml(status||'—')}</span>`; }
+// Rótulo NEUTRO/extrajudicial para o cedente — nunca expõe termos judiciais
+// (execução, sentença, monitória…). O cliente vê só a jornada de recuperação.
+function rotuloCedente(status){
+  const s=(status||'').toLowerCase();
+  if(/sem.?[êe]xito|baixad|encerrad/.test(s)) return 'Encerrada';
+  if(/devolvid/.test(s)) return 'Devolvida';
+  if(/quitad|recebid|pago/.test(s)) return 'Quitada';
+  if(/acordo/.test(s)) return 'Acordo';
+  if(/judicial|execu|cumprimento|monit[óo]ria|locupletamento|protocolar|reajuizar|fazer a[çc][ãa]o|a[çc][ãa]o de cobran|inadimpl|protest|peti[çc]|cita[çc]|senten|audi[êe]ncia|penhora/.test(s)) return 'Em recuperação';
+  return 'Em cobrança';
+}
+function cpPill(status){ return `<span class="cp-pill cp-st-${cpStatusKey(status)}"><span class="dot"></span>${escHtml(rotuloCedente(status))}</span>`; }
 // Etapa da jornada: 0 Registrada · 1 Notificação · 2 Acordo/ação · 3 Quitada · 4 Repassada. 'failed' = sem êxito.
 function cpStepIndex(status){
   const s=(status||'').toLowerCase();
-  if(/sem.?[êe]xito/.test(s)) return 'failed';
+  if(/sem.?[êe]xito|baixad|encerrad/.test(s)) return 'failed';
   if(/devolvid/.test(s)) return 4;
   if(/quitad|recebid/.test(s)) return 3;
-  if(/judicial|acordo|negocia/.test(s)) return 2;
-  if(/contato|notific|proposta/.test(s)) return 1;
+  if(/judicial|acordo|negocia|execu|cumprimento|monit[óo]ria|locupletamento|protocolar|reajuizar|fazer a[çc][ãa]o|peti[çc]|cita[çc]|senten|audi[êe]ncia|penhora/.test(s)) return 2;
+  if(/contato|notific|proposta|an[áa]lise|andamento/.test(s)) return 1;
   return 0;
 }
 // ── Beatriz IA (casca; liga no /api/claude numa 2ª etapa) ──
@@ -17790,10 +17851,10 @@ function cpExtratoPDF(){
 async function cpRenderDashboard(body){
   const cli = (DB.clientes||[]).find(c=>c.id===currentUser.clienteId);
   const devs = cpDevs();
-  const ativas    = devs.filter(d=>!['Quitado','Recebido','Devolvida','Sem êxito'].includes(d.status)).length;
+  const ativas    = devs.filter(d=>!ehForaRegua(d.status)).length;
   const judicial  = devs.filter(d=>d.fase==='judicial').length;
-  const acordo    = devs.filter(d=>d.status==='Acordo').length;
-  const quitadas  = devs.filter(d=>d.status==='Quitado'||d.status==='Recebido').length;
+  const acordo    = devs.filter(d=>ehAcordo(d.status)).length;
+  const quitadas  = devs.filter(d=>ehRecuperado(d.status)).length;
   const semDoc    = devs.filter(d=>!(d.documentos&&d.documentos.length)).length;
   const total     = devs.length;
   const pctExito  = total>0?((quitadas/total)*100).toFixed(1):'0.0';
@@ -24730,7 +24791,7 @@ function renderRelatCobr(el){
   const taxaRecup = valorTotal>0?((valorRecup/valorTotal)*100).toFixed(1):0;
 
   const aging = {0:0,30:0,60:0,90:0,180:0};
-  devs.filter(d=>!['Quitado','Devolvida','Sem êxito'].includes(d.status)).forEach(d=>{
+  devs.filter(d=>!ehForaRegua(d.status)).forEach(d=>{
     const dias = d.vencOrig?Math.floor((new Date()-new Date(d.vencOrig))/(1000*60*60*24)):0;
     if(dias<=30) aging[0]++;
     else if(dias<=60) aging[30]++;
@@ -24829,7 +24890,7 @@ function renderRelatPerf(el){
   const xlabels = mths.map((m,i)=>`<text x="${xs[i]}" y="234" font-size="10" fill="var(--text-3)" font-family="JetBrains Mono" text-anchor="middle">${m.mName}</text>`).join('');
 
   // Aging from real data
-  const activeDevs = devs.filter(d=>!['Quitado','Devolvida','Sem êxito'].includes(d.status));
+  const activeDevs = devs.filter(d=>!ehForaRegua(d.status));
   const agingBuckets = [
     {range:'0–30 dias',   min:0,   max:30,  color:'var(--success)'},
     {range:'31–60 dias',  min:31,  max:60,  color:'#1A6FB4'},
@@ -29316,7 +29377,7 @@ function getAlertas(){
 
   // Devedores sem interação há mais de 15 dias
   const devsemInteracao = (DB.devedores||[]).filter(d=>{
-    if(['Quitado','Recebido','Devolvida','Sem êxito'].includes(d.status)) return false;
+    if(ehForaRegua(d.status)) return false;
     const hist = d.historico||[];
     if(hist.length === 0) return true;
     const last = hist.map(h=>h.data||'').sort().reverse()[0];
@@ -29382,7 +29443,7 @@ function renderRelatComissao(el){
               <tbody>
                 ${cols.map((col,i)=>{
                   const nome = col.nome||col.email||'';
-                  const quitados = devs.filter(d=>(d.responsavel===nome)&&(d.status==='Quitado'||d.status==='Recebido'));
+                  const quitados = devs.filter(d=>(d.responsavel===nome)&&(ehRecuperado(d.status)));
                   const totalRecup = quitados.reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
                   const pct = window._comissaoPct[nome] !== undefined ? window._comissaoPct[nome] : 10;
                   const comissao = totalRecup * (pct/100);
