@@ -28167,6 +28167,7 @@ function _aavWaBadge(st){
 // CPF), sem depender de cobrança/pagamento. O lote roda no front: 1 requisição por
 // linha (evita timeout), com status por linha. Backend: api/_emitir-nf-avulso.js.
 let _nfaRows = [];
+let _nfaHist = [];   // últimas notas (histórico) p/ reemitir com correção
 
 // Converte "2.429,53" / "406,00" / "99.51" / "R$ 1.230,62" em número.
 function nfaParseValor(s){
@@ -28179,6 +28180,31 @@ function nfaParseValor(s){
 }
 function nfaFmtBRL(n){ return (Number(n)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}); }
 const nfaDigits = s => String(s||'').replace(/\D/g,'');
+
+// Máscara de CPF (000.000.000-00) / CNPJ (00.000.000/0000-00) progressiva, ao digitar.
+function nfaMaskDoc(v){
+  const d = String(v||'').replace(/\D/g,'').slice(0,14);
+  if(d.length <= 11){
+    return d
+      .replace(/^(\d{3})(\d)/,'$1.$2')
+      .replace(/^(\d{3})\.(\d{3})(\d)/,'$1.$2.$3')
+      .replace(/^(\d{3})\.(\d{3})\.(\d{3})(\d)/,'$1.$2.$3-$4');
+  }
+  return d
+    .replace(/^(\d{2})(\d)/,'$1.$2')
+    .replace(/^(\d{2})\.(\d{3})(\d)/,'$1.$2.$3')
+    .replace(/^(\d{2})\.(\d{3})\.(\d{3})(\d)/,'$1.$2.$3/$4')
+    .replace(/^(\d{2})\.(\d{3})\.(\d{3})\/(\d{4})(\d)/,'$1.$2.$3/$4-$5');
+}
+function nfaOnDoc(i, el){ const m = nfaMaskDoc(el.value); el.value = m; nfaSet(i,'cpf',m); }
+
+// Máscara de valor em R$ (cents-based): dígitos digitados viram centavos → "R$ 1.234,56".
+function nfaMaskValor(v){
+  const d = String(v==null?'':v).replace(/\D/g,'');
+  if(!d) return '';
+  return (parseInt(d,10)/100).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+}
+function nfaOnValor(i, el){ const m = nfaMaskValor(el.value); el.value = m; nfaSet(i,'valorRaw',m); }
 
 // Parser tolerante: aceita colado de planilha (TAB/;) como [nome, cpf, valor, descrição];
 // ou texto solto tipo "R$ 2.429,53: Eliseu Juarez" — extrai CPF/CNPJ e valor, resto = nome.
@@ -28247,7 +28273,10 @@ function nfaProcessarLista(){
   const txt = (document.getElementById('nfa-paste')||{}).value || '';
   const parsed = nfaParseLista(txt);
   if(!parsed.length){ showToast('Nada para processar — cole a lista primeiro.','warning'); return; }
-  parsed.forEach(p=>{ _nfaRows.push({ ...p, status:'pendente', nf_url:'', erro:'', ref:'' }); });
+  parsed.forEach(p=>{
+    const val = nfaParseValor(p.valorRaw);                 // já formata p/ exibir
+    _nfaRows.push({ ...p, cpf: p.cpf ? nfaMaskDoc(p.cpf) : '', valorRaw: (val!=null ? nfaFmtBRL(val) : (p.valorRaw||'')), status:'pendente', nf_url:'', erro:'', ref:'' });
+  });
   const pst = document.getElementById('nfa-paste'); if(pst) pst.value='';
   nfaDrawTabela();
 }
@@ -28315,8 +28344,8 @@ function nfaDrawTabela(){
     const travado = (r.status==='emitida'||r.status==='emitindo');
     return `<tr style="border-bottom:1px solid var(--border);${r.status==='emitida'?'opacity:.7;':''}">
       <td style="padding:7px 8px;min-width:170px;">${inp(i,'nome',r.nome||'','Nome / Razão social')}</td>
-      <td style="padding:7px 8px;width:160px;">${inp(i,'cpf',r.cpf||'','CPF/CNPJ',(nfaDigits(r.cpf).length&&![11,14].includes(nfaDigits(r.cpf).length))?'border-color:var(--danger);':'')}${r.lookupMsg?`<div style="font-size:10.5px;margin-top:2px;color:${/^✓/.test(r.lookupMsg)?'var(--success)':/buscando/.test(r.lookupMsg)?'var(--text-3)':'var(--danger)'};" title="${escHtml(r.lookupMsg)}">${escHtml(r.lookupMsg.length>30?r.lookupMsg.slice(0,30)+'…':r.lookupMsg)}</div>`:''}</td>
-      <td style="padding:7px 8px;width:120px;">${inp(i,'valorRaw',r.valorRaw||'','0,00')}</td>
+      <td style="padding:7px 8px;width:160px;"><input value="${escHtml(r.cpf||'')}" placeholder="000.000.000-00" inputmode="numeric" oninput="nfaOnDoc(${i},this)" style="width:100%;box-sizing:border-box;font-size:12.5px;padding:6px 7px;border:1px solid var(--border);border-radius:6px;${(nfaDigits(r.cpf).length&&![11,14].includes(nfaDigits(r.cpf).length))?'border-color:var(--danger);':''}">${r.lookupMsg?`<div style="font-size:10.5px;margin-top:2px;color:${/^✓/.test(r.lookupMsg)?'var(--success)':/buscando/.test(r.lookupMsg)?'var(--text-3)':'var(--danger)'};" title="${escHtml(r.lookupMsg)}">${escHtml(r.lookupMsg.length>30?r.lookupMsg.slice(0,30)+'…':r.lookupMsg)}</div>`:''}</td>
+      <td style="padding:7px 8px;width:130px;"><input value="${escHtml(r.valorRaw||'')}" placeholder="R$ 0,00" inputmode="numeric" oninput="nfaOnValor(${i},this)" style="width:100%;box-sizing:border-box;font-size:12.5px;padding:6px 7px;border:1px solid var(--border);border-radius:6px;text-align:right;"></td>
       <td style="padding:7px 8px;min-width:150px;">${inp(i,'descricao',r.descricao||'','Descrição do serviço (opcional)')}</td>
       <td style="padding:7px 8px;width:150px;font-size:12px;">${nfaStatusCel(r)}</td>
       <td style="padding:7px 8px;width:28px;text-align:right;">${travado?'':`<button class="btn btn-ghost btn-sm" title="Remover" onclick="nfaRemoveLinha(${i})" style="padding:2px 8px;">✕</button>`}</td>
@@ -28401,19 +28430,30 @@ async function nfaCarregarHistorico(){
     cont.innerHTML = `<div style="color:var(--danger);">Não consegui carregar: ${escHtml(traduzirErro(e.message||String(e)))}</div>`;
     return;
   }
+  _nfaHist = rows;
   if(!rows.length){ cont.innerHTML = '<div style="color:var(--text-3);padding:8px 0;">Nenhuma nota emitida ainda.</div>'; return; }
+  const nErros = rows.filter(r=>r.nf_status==='erro').length;
   const stCor = s => s==='emitida'?'var(--success)': s==='erro'?'var(--danger)': s==='processando'?'#9a7a18':'var(--text-3)';
-  const linha = r =>{
+  const linha = (r,idx) =>{
     const dt = r.criada_em ? new Date(r.criada_em).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
+    const acao = r.nf_url
+      ? `<a href="${escHtml(r.nf_url)}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">PDF ↗</a>`
+      : (r.nf_status!=='emitida'
+          ? `${r.erro?`<span title="${escHtml(r.erro)}" style="color:var(--danger);font-size:11.5px;cursor:help;margin-right:6px;">erro</span>`:''}<button class="btn btn-ghost btn-sm" title="Corrigir e reemitir esta nota" onclick="nfaReemitirHist(${idx})">↻ Reemitir</button>`
+          : '');
     return `<tr style="border-bottom:1px solid var(--border);">
       <td style="padding:9px 10px;font-size:12.5px;font-weight:600;">${escHtml(r.nome||'—')}<div style="font-size:11px;color:var(--text-3);font-weight:400;">${escHtml(r.doc_digits||r.doc||'')}</div></td>
       <td style="padding:9px 10px;font-size:12.5px;white-space:nowrap;">${nfaFmtBRL(r.valor)}</td>
       <td style="padding:9px 10px;font-size:12px;color:${stCor(r.nf_status)};font-weight:600;white-space:nowrap;">${escHtml(r.nf_status||'')}</td>
       <td style="padding:9px 10px;font-size:11.5px;color:var(--text-3);white-space:nowrap;">${dt}</td>
-      <td style="padding:9px 10px;text-align:right;white-space:nowrap;">${r.nf_url?`<a href="${escHtml(r.nf_url)}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">PDF ↗</a>`:(r.erro?`<span title="${escHtml(r.erro)}" style="color:var(--danger);font-size:11.5px;cursor:help;">erro</span>`:'')}</td>
+      <td style="padding:9px 10px;text-align:right;white-space:nowrap;">${acao}</td>
     </tr>`;
   };
   cont.innerHTML = `
+    ${nErros?`<div style="margin-bottom:10px;display:flex;align-items:center;gap:10px;">
+      <button class="btn btn-primary btn-sm" onclick="nfaReemitirErros()">↻ Corrigir e reemitir os ${nErros} com erro</button>
+      <span style="font-size:12px;color:var(--text-3);">Carrega na tabela acima p/ você ajustar e clicar em Emitir lote.</span>
+    </div>`:''}
     <div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius);">
       <table style="width:100%;border-collapse:collapse;">
         <thead><tr style="background:var(--surface-2);text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);">
@@ -28426,6 +28466,35 @@ async function nfaCarregarHistorico(){
         <tbody>${rows.map(linha).join('')}</tbody>
       </table>
     </div>`;
+}
+
+// Carrega uma linha do histórico de volta na tabela de edição (p/ corrigir e reemitir).
+// Evita duplicar uma linha pendente igual (mesmo doc+valor) já na tabela.
+function nfaReemitirHist(idx){
+  const r = _nfaHist[idx]; if(!r){ showToast('Registro não encontrado.','warning'); return; }
+  const doc = nfaDigits(r.doc_digits||r.doc||'');
+  const ja = _nfaRows.some(x=> nfaDigits(x.cpf)===doc && nfaParseValor(x.valorRaw)===Number(r.valor) && x.status!=='emitida');
+  if(!ja){
+    _nfaRows.push({ nome:r.nome||'', cpf: doc?nfaMaskDoc(doc):'', valorRaw: nfaFmtBRL(r.valor), descricao: r.descricao||'', asaasCustomerId: r.asaas_customer_id||'', status:'pendente', nf_url:'', erro:'', ref:'', lookupMsg:'' });
+  }
+  nfaDrawTabela();
+  const t = document.getElementById('nfa-tabela'); if(t) t.scrollIntoView({behavior:'smooth', block:'center'});
+  showToast(ja?'Essa linha já está na tabela.':'Carregado p/ correção — ajuste e clique em Emitir lote.', ja?'warning':'success');
+}
+
+function nfaReemitirErros(){
+  let add=0;
+  _nfaHist.forEach((r,idx)=>{
+    if(r.nf_status!=='erro') return;
+    const doc = nfaDigits(r.doc_digits||r.doc||'');
+    const ja = _nfaRows.some(x=> nfaDigits(x.cpf)===doc && nfaParseValor(x.valorRaw)===Number(r.valor) && x.status!=='emitida');
+    if(ja) return;
+    _nfaRows.push({ nome:r.nome||'', cpf: doc?nfaMaskDoc(doc):'', valorRaw: nfaFmtBRL(r.valor), descricao: r.descricao||'', asaasCustomerId: r.asaas_customer_id||'', status:'pendente', nf_url:'', erro:'', ref:'', lookupMsg:'' });
+    add++;
+  });
+  nfaDrawTabela();
+  const t = document.getElementById('nfa-tabela'); if(t) t.scrollIntoView({behavior:'smooth', block:'start'});
+  showToast(add?`${add} linha(s) carregada(s) p/ correção. Ajuste e clique em Emitir lote.`:'Nada novo a carregar (já estão na tabela).', add?'success':'warning');
 }
 
 async function renderAssinaturas(){
