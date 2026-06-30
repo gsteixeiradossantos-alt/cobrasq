@@ -25237,240 +25237,798 @@ function waHaQuantoTempo(iso){
   return `há ${dias}d`;
 }
 
-window._waPend = window._waPend || { lista:[], sel:null, loading:false, sugestoes:[] };
+// ── Estado da aba Pendentes (em memória) ───────────────────────────────────
+// filtro: 'pend' (aguardando humano) | 'arch' (resolvidas)
+// selMass: { [telefone]: true } seleção em massa · ordenar: antigas|prioridade|sla
+window._waPend = window._waPend || {
+  lista:[], arquivadas:[], sel:0, loading:false, sugestoes:[], historico:[],
+  filtro:'pend', selMass:{}, ordenar:'antigas', slaOnly:false,
+  insightsOpen:false, menuOpen:false, modal:null, threadCache:{}, _toastTimer:null
+};
+
+// Ícones que não existem na lib ico() do painel (chevron / paper-plane).
+function waIcoChevron(sz){ return `<svg xmlns="http://www.w3.org/2000/svg" width="${sz}" height="${sz}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`; }
+function waIcoSend(sz){ return `<svg xmlns="http://www.w3.org/2000/svg" width="${sz}" height="${sz}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>`; }
+
+// Tokens de cor por intenção (mapeados pro design system v3 do painel).
+function waIntentMeta(){
+  return {
+    pagar:       { label:'Quer pagar',        color:'var(--success)',   pri:1 },
+    comprovante: { label:'Enviou comprovante', color:'var(--info)',      pri:1 },
+    negociando:  { label:'Negociando',         color:'var(--gold-dark)', pri:2 },
+    duvida:      { label:'Contesta / dúvida',  color:'var(--danger)',    pri:3 },
+    semacao:     { label:'Sem ação',           color:'var(--text-3)',    pri:4 },
+  };
+}
+
+// Classificação de intenção. PONTO DE INTEGRAÇÃO: a Bia já grava `intencao` em
+// whatsapp_atendimentos quando tria a conversa — isso tem prioridade. Sem isso,
+// caímos numa heurística por regex sobre o conteúdo da última mensagem.
+function waClassificarIntencao(texto, p){
+  const im = waIntentMeta();
+  const fromBia = p && p.intencao ? String(p.intencao).toLowerCase().trim() : '';
+  const mapBia = { pagar:'pagar', pagamento:'pagar', comprovante:'comprovante', pago:'comprovante',
+    negociar:'negociando', negociacao:'negociando', negociação:'negociando', acordo:'negociando',
+    parcelamento:'negociando', duvida:'duvida', 'dúvida':'duvida', contestacao:'duvida',
+    contestação:'duvida', sem_acao:'semacao', semacao:'semacao', 'sem ação':'semacao' };
+  if(fromBia && (im[fromBia] ? fromBia : mapBia[fromBia])) return im[fromBia] ? fromBia : mapBia[fromBia];
+  const tipo = (p && p.tipo) ? String(p.tipo).toLowerCase() : 'texto';
+  if(tipo && tipo!=='texto' && /imag|foto|photo|document|file|sticker/.test(tipo)) return 'comprovante';
+  const t = String(texto||'').toLowerCase();
+  if(/comprovante|comprovei|segue.*(pix|pag|comprov)|\bprint\b|anexo|\[imagem\]|\[image\]|j[aá] paguei|acabei de pagar/.test(t)) return 'comprovante';
+  if(/parcel|acordo|desconto|metade|no m[aá]ximo|condi[cç]|negoci|dividir|\bentrada\b|consigo pagar/.test(t)) return 'negociando';
+  if(/n[aã]o (reconhe|dev|sei|comprei)|que d[ií]vida|qual.*d[ií]vida|por ?qu[eê]|contest|golpe|n[aã]o (é|e) min|indevid|de onde|do que se trata/.test(t)) return 'duvida';
+  if(/pagar|pago|quitar|boleto|2[ªa] ?via|segunda via|\bpix\b|link de pag|qual.*valor|quanto.*(devo|fico|é)|como fa[cç]o/.test(t)) return 'pagar';
+  if(/obrigad|valeu|bom dia|boa tarde|boa noite|de nada|[oó]timo dia|👍|🙏|tudo bem|blz|beleza/.test(t) && t.length<42) return 'semacao';
+  return 'duvida';
+}
+
+// Templates aprovados de resposta rápida, por intenção. needEdit=true abre o
+// compositor pré-preenchido (precisa de dado externo: chave, link); senão envia
+// direto. Texto sai completo e profissional (sem placeholders vazios).
+function waQuickReplies(intent){
+  const m = {
+    pagar:[
+      { label:'Enviar chave Pix',        needEdit:true,  texto:'Olá! Para regularizar com PIX, segue a chave: [COLE A CHAVE]. Assim que enviar o comprovante por aqui, damos baixa. 😊' },
+      { label:'Enviar 2ª via do boleto', needEdit:true,  texto:'Segue a 2ª via do seu boleto atualizado: [COLE O LINK]. Qualquer dúvida, é só chamar.' },
+      { label:'Enviar link de pagamento',needEdit:true,  texto:'Você pode pagar com cartão ou PIX por este link seguro: [COLE O LINK].' },
+    ],
+    comprovante:[
+      { label:'Confirmar recebimento',   needEdit:false, texto:'Recebemos o seu comprovante, muito obrigado! Vamos conferir e dar baixa no seu débito. Já retornamos confirmando. ✅' },
+    ],
+    negociando:[
+      { label:'Propor parcelamento',     needEdit:true,  texto:'Conseguimos parcelar o seu débito para caber no orçamento. Posso te enviar uma proposta agora? Me diz em quantas vezes ficaria bom pra você.' },
+      { label:'Encaminhar para acordo',  needEdit:false, texto:'Vou preparar uma proposta de acordo com condição especial e já te envio por aqui. Obrigado pela disposição em resolver! 🤝' },
+    ],
+    duvida:[
+      { label:'Explicar origem da dívida', needEdit:true, texto:'Claro, posso esclarecer. Esta cobrança refere-se a [DESCREVA A ORIGEM]. Qualquer documento que precise, é só pedir.' },
+    ],
+    semacao:[
+      { label:'Agradecer e encerrar',    needEdit:false, texto:'Obrigado pelo contato! Estamos à disposição sempre que precisar. Tenha um ótimo dia. 🙏' },
+    ],
+  };
+  return m[intent] || [{ label:'Responder', needEdit:true, texto:'' }];
+}
+
+// Motivos de arquivamento (menu "Arquivar ▾"). Spam/engano bloqueia a régua.
+function waMotivosArquivo(){
+  return [
+    { key:'Resolvido',             label:'Resolvido',              dot:'var(--success)' },
+    { key:'Sem ação necessária',   label:'Sem ação necessária',    dot:'var(--gold-dark)' },
+    { key:'Respondido por fora',   label:'Respondido por fora',    dot:'var(--gold-dark)' },
+    { key:'Spam / engano',         label:'Spam / engano',          dot:'var(--danger)', warn:true },
+  ];
+}
+
+// Telefone -> +55 (DD) 99999-9999
+function waFmtTelefone(p){
+  const d=String(p||'').replace(/\D/g,'');
+  if(d.length<11) return '+'+d;
+  const dd=d.slice(2,4); let rest=d.slice(4);
+  rest = rest.length>8 ? rest.slice(0,rest.length-4)+'-'+rest.slice(-4) : rest.slice(0,4)+'-'+rest.slice(4);
+  return '+55 ('+dd+') '+rest;
+}
+function waIniciais(p){
+  const nome = (p.caso_id ? (DB.devedores||[]).find(x=>x.id===p.caso_id) : waDevedorPorTelefone(p.telefone));
+  const nm = p.nomeVinculado || (nome && nome.nome) || '';
+  if(nm){ const parts=nm.trim().split(/\s+/); return ((parts[0]||'')[0]||'')+((parts[1]||'')[0]||''); }
+  return 'WA';
+}
+// Minutos desde a última mensagem do cliente.
+function waMinutos(iso){ return Math.max(0, Math.floor((Date.now()-new Date(iso||Date.now()).getTime())/60000)); }
+function waEhConhecido(p){
+  if(p.nomeVinculado) return true;
+  if(p.caso_id && (DB.devedores||[]).some(x=>x.id===p.caso_id)) return true;
+  return !!waDevedorPorTelefone(p.telefone);
+}
+function waDevedorDe(p){
+  if(p.caso_id){ const d=(DB.devedores||[]).find(x=>x.id===p.caso_id); if(d) return d; }
+  return waDevedorPorTelefone(p.telefone);
+}
+function waSaldoDevedor(d){ return d ? (parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0) : 0; }
 
 async function renderWAPendentes(el){
   const P = window._waPend;
-  el.innerHTML = `<div style="padding:20px;color:var(--text-3);">Carregando conversas sem resposta…</div>`;
+  el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-3);font-family:var(--font-mono);font-size:12px;letter-spacing:.04em;">Carregando conversas…</div>`;
   const supa = getSupabase();
-  if(!supa){ el.innerHTML = `<div style="padding:20px;color:var(--text-3);">Supabase indisponível.</div>`; return; }
+  if(!supa){ el.innerHTML = `<div style="padding:24px;color:var(--text-3);">Supabase indisponível.</div>`; return; }
   try{
-    // Fila = conversas sem resposta (vw_conversas_pendentes) UNIÃO atendimentos
-    // que a Bia encaminhou (estado='aguardando_humano' — estes já têm resposta
-    // dela, então sairiam da view; precisam vir da tabela de atendimentos).
-    const [pend, hand] = await Promise.all([
+    // Fila pendente = vw_conversas_pendentes ∪ atendimentos aguardando_humano.
+    // Resolvidas = atendimentos com estado='resolvido' (desfecho registrado aqui).
+    const [pend, hand, resolv] = await Promise.all([
       supa.from('vw_conversas_pendentes').select('id,telefone,caso_id,texto,tipo,recebida_em').order('recebida_em',{ ascending:true }).limit(100),
-      supa.from('whatsapp_atendimentos').select('telefone,caso_id,resumo,motivo_handoff,ultima_resposta_em,dados_coletados').eq('estado','aguardando_humano').limit(100)
+      supa.from('whatsapp_atendimentos').select('telefone,caso_id,intencao,resumo,motivo_handoff,ultima_resposta_em,dados_coletados').eq('estado','aguardando_humano').limit(100),
+      supa.from('whatsapp_atendimentos').select('telefone,caso_id,intencao,resumo,desfecho,motivo,regua_bloqueada,resolvido_em,updated_at').eq('estado','resolvido').order('updated_at',{ ascending:false }).limit(60)
     ]);
     if(pend.error) throw pend.error;
     const porTel = {};
-    (pend.data||[]).forEach(r=>{ porTel[r.telefone] = r; });
-    if(!hand.error){ // tolera tabela ausente (migração 20260702 ainda não aplicada)
+    (pend.data||[]).forEach(r=>{ porTel[r.telefone] = { ...r, intencao:null }; });
+    if(!hand.error){
       (hand.data||[]).forEach(h=>{
         const cur = porTel[h.telefone] || {};
         porTel[h.telefone] = {
           ...cur, telefone:h.telefone, caso_id: h.caso_id || cur.caso_id || null,
           texto: cur.texto || h.resumo || '(encaminhado pela Bia)', tipo: cur.tipo || 'texto',
           recebida_em: cur.recebida_em || h.ultima_resposta_em,
+          intencao: h.intencao || cur.intencao || null,
           _handoff:true, resumo:h.resumo, motivo_handoff:h.motivo_handoff, dados:h.dados_coletados
         };
       });
     }
-    P.lista = Object.values(porTel).sort((a,b)=> new Date(a.recebida_em||0) - new Date(b.recebida_em||0));
+    P.lista = Object.values(porTel).map(p=>({ ...p, intent: waClassificarIntencao(p.texto, p) }));
+    // Resolvidas (tolera colunas novas ausentes: desfecho/motivo/regua_bloqueada).
+    P.arquivadas = (resolv && !resolv.error ? (resolv.data||[]) : []).map(r=>({
+      telefone:r.telefone, caso_id:r.caso_id||null, texto:r.resumo||'', tipo:'texto',
+      recebida_em:r.resolvido_em||r.updated_at, intencao:r.intencao||null,
+      intent: waClassificarIntencao(r.resumo, r), archived:true,
+      desfecho:r.desfecho||'arquivado', motivo:r.motivo||null, regua_bloqueada:!!r.regua_bloqueada
+    }));
   }catch(e){
-    el.innerHTML = `<div style="padding:20px;color:var(--text-3);">Não foi possível carregar as pendentes.<br><span style="font-size:12px;">${escHtml(e.message||String(e))}</span><br><span style="font-size:12px;">Confirme que a migração 20260701 foi aplicada e que o webhook "Ao receber" do Z-API está ligado.</span></div>`;
+    el.innerHTML = `<div style="padding:24px;color:var(--text-3);">Não foi possível carregar as pendentes.<br><span style="font-size:12px;">${escHtml(e.message||String(e))}</span><br><span style="font-size:12px;">Confirme que a migração 20260701 foi aplicada e que o webhook "Ao receber" do Z-API está ligado.</span></div>`;
     return;
   }
-  // badge
+  waPendBadgeUpdate();
+  waPendPaint(el);
+}
+
+// Atualiza o badge vermelho na aba.
+function waPendBadgeUpdate(){
+  const P = window._waPend;
   const badge = document.getElementById('waPendBadge');
-  if(badge){ if(P.lista.length){ badge.style.display='inline-block'; badge.textContent=String(P.lista.length); badge.style.cssText='display:inline-block;background:var(--red,#b3261e);color:#fff;border-radius:10px;padding:0 7px;font-size:11px;margin-left:4px;'; } else badge.style.display='none'; }
+  if(!badge) return;
+  const n = P.lista.length;
+  if(n){ badge.style.cssText='display:inline-block;background:var(--danger);color:#fff;border-radius:100px;padding:1px 7px;font-family:var(--font-mono);font-size:10px;font-weight:600;margin-left:2px;'; badge.textContent=String(n); }
+  else badge.style.display='none';
+}
 
-  if(!P.lista.length){
-    el.innerHTML = `<div style="padding:32px;text-align:center;color:var(--text-3);">
-      <div style="font-size:32px;margin-bottom:8px;">✅</div>
-      <div>Nenhuma conversa aguardando resposta.</div>
-      <div style="font-size:12px;margin-top:6px;">As mensagens que os clientes enviam aparecem aqui até alguém responder.</div>
-    </div>`;
-    return;
-  }
+// Deriva KPIs e dados de insights a partir das listas reais.
+function waPendDerivados(){
+  const P = window._waPend;
+  const pend = P.lista, arch = P.arquivadas;
+  const avg = pend.length ? Math.round(pend.reduce((s,p)=>s+waMinutos(p.recebida_em),0)/pend.length) : 0;
+  const fmtDur = (mn)=>{ if(!mn) return '—'; const h=Math.floor(mn/60), m=mn%60; return h ? (h+'h'+(m?' '+m+'m':'')) : (m+'min'); };
+  const alta = pend.filter(p=>p.intent==='pagar'||p.intent==='comprovante').length;
+  const sla = pend.filter(p=>waMinutos(p.recebida_em)>=240).length;
+  const comResp = arch.filter(a=>a.desfecho && a.desfecho!=='arquivado').length;
+  const taxa = arch.length ? Math.round(comResp/arch.length*100)+'%' : '—';
+  return { avg, fmtDur, alta, sla, taxa, pend, arch };
+}
 
-  const sel = (P.sel!=null && P.lista[P.sel]) ? P.lista[P.sel] : null;
-  const itens = P.lista.map((p,i)=>{
+// Aplica filtro de SLA + ordenação à fila pendente.
+function waPendListaVisivel(){
+  const P = window._waPend;
+  if(P.filtro==='arch') return P.arquivadas.slice();
+  const im = waIntentMeta();
+  let l = P.lista.slice();
+  if(P.slaOnly) l = l.filter(p=>waMinutos(p.recebida_em)>=240);
+  if(P.ordenar==='prioridade') l.sort((a,b)=> (im[a.intent].pri-im[b.intent].pri) || (waMinutos(b.recebida_em)-waMinutos(a.recebida_em)));
+  else l.sort((a,b)=> waMinutos(b.recebida_em)-waMinutos(a.recebida_em)); // antigas/sla: + antigas (mais tempo de espera) 1º
+  return l;
+}
+
+function waPendPaint(el){
+  const P = window._waPend;
+  const im = waIntentMeta();
+  const D = waPendDerivados();
+  const onPend = P.filtro==='pend';
+  const lista = waPendListaVisivel();
+  const selIds = Object.keys(P.selMass);
+  const C = 'background:var(--surface);border:1px solid var(--border);border-radius:14px;';
+  const LBL = 'font-family:var(--font-mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-3);';
+  const NUM = 'font-family:var(--font-display);font-weight:300;font-size:30px;line-height:1.1;margin-top:4px;color:var(--text);';
+
+  const kpiCard = (lbl,val,color,hint)=>`<div style="${C}padding:15px 17px;">
+    <div style="${LBL}">${lbl}</div><div style="${NUM}${color?'color:'+color+';':''}">${val}</div>
+    ${hint?`<div style="font-family:var(--font-mono);font-size:8.5px;letter-spacing:.04em;color:var(--gold-dark);margin-top:3px;line-height:1.4;">${hint}</div>`:''}</div>`;
+
+  // Chip de intenção (compacto / grande).
+  const intentChip = (intent, big)=>{
+    const m=im[intent]||im.duvida; const pad=big?'4px 10px':'2px 8px'; const fs=big?'9.5px':'8.5px';
+    return `font-family:var(--font-mono);font-size:${fs};letter-spacing:.06em;text-transform:uppercase;padding:${pad};border-radius:100px;white-space:nowrap;color:${m.color};background:color-mix(in oklab,${m.color} 14%,transparent);border:1px solid color-mix(in oklab,${m.color} 30%,transparent);`;
+  };
+  const desfechoChip = (a)=>{
+    const map={ respondido:{t:'Respondido',c:'var(--success)'}, conciliado:{t:'Pago · conciliado',c:'var(--info)'},
+      encaminhado:{t:'Jurídico / tarefa',c:'var(--gold-dark)'}, arquivado:{t:(a.motivo||'Arquivado'),c:'var(--text-3)'} };
+    const r=map[a.desfecho]||map.arquivado;
+    return `<span style="font-family:var(--font-mono);font-size:8.5px;letter-spacing:.06em;text-transform:uppercase;padding:2px 8px;border-radius:100px;color:${r.c};background:color-mix(in oklab,${r.c} 13%,transparent);">${escHtml(r.t)}</span>`;
+  };
+
+  // ---- KPIs ----
+  const slaHint = P.slaOnly?'filtrando ✓':'meta 4h · tocar p/ filtrar';
+  const kpis = `<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:14px;">
+    ${kpiCard('Aguardando', D.pend.length)}
+    ${kpiCard('Tempo médio', D.fmtDur(D.avg))}
+    ${kpiCard('Alta intenção', D.alta, 'var(--success)')}
+    <button onclick="waPendToggleSla()" style="text-align:left;cursor:pointer;${C}padding:15px 17px;${P.slaOnly?'border-color:var(--gold);background:color-mix(in oklab,var(--gold) 8%,var(--surface));':''}">
+      <div style="${LBL}">Estourando SLA</div><div style="${NUM}color:var(--danger);">${D.sla}</div>
+      <div style="font-family:var(--font-mono);font-size:8.5px;letter-spacing:.04em;color:var(--gold-dark);margin-top:3px;">${slaHint}</div></button>
+    ${kpiCard('Taxa de resposta', D.taxa, 'var(--info)')}
+  </div>`;
+
+  // ---- Insights ----
+  const bar = (label,count,max,color)=>`<div>
+    <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;"><span style="color:var(--text);">${escHtml(label)}</span><span style="font-family:var(--font-mono);color:var(--text-3);">${count}</span></div>
+    <div style="height:7px;border-radius:100px;background:var(--surface-2);overflow:hidden;"><div style="height:100%;width:${Math.round(count/max*100)}%;background:${color};border-radius:100px;"></div></div></div>`;
+  const intentOrder=['pagar','comprovante','negociando','duvida','semacao'];
+  const maxI=Math.max(1,...intentOrder.map(k=>D.pend.filter(p=>p.intent===k).length));
+  const intentBars=intentOrder.map(k=>bar(im[k].label, D.pend.filter(p=>p.intent===k).length, maxI, im[k].color)).join('');
+  const resolDefs=[['respondido','Respondido','var(--success)'],['conciliado','Pago · conciliado','var(--info)'],['encaminhado','Jurídico / tarefa','var(--gold-dark)'],['arquivado','Arquivado','var(--text-3)']];
+  const maxR=Math.max(1,...resolDefs.map(d=>D.arch.filter(a=>a.desfecho===d[0]).length));
+  const resolBars=resolDefs.map(d=>{const c=D.arch.filter(a=>a.desfecho===d[0]).length; return c>0?bar(d[1],c,maxR,d[2]):'';}).join('');
+  const wb=[['menos de 1h',p=>waMinutos(p.recebida_em)<60,'var(--success)'],['1–4h',p=>{const m=waMinutos(p.recebida_em);return m>=60&&m<240;},'var(--gold-dark)'],['mais de 4h',p=>waMinutos(p.recebida_em)>=240,'var(--danger)']];
+  const maxW=Math.max(1,...wb.map(b=>D.pend.filter(b[1]).length));
+  const waitBars=wb.map(b=>bar(b[0],D.pend.filter(b[1]).length,maxW,b[2])).join('');
+  const insights = !P.insightsOpen ? '' : `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:18px;">
+    <div style="${C}padding:18px 20px;"><div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--gold-dark);margin-bottom:14px;">Por intenção · fila atual</div><div style="display:flex;flex-direction:column;gap:11px;">${intentBars}</div></div>
+    <div style="${C}padding:18px 20px;"><div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--gold-dark);margin-bottom:14px;">Como foram resolvidas</div>${resolBars.trim()?`<div style="display:flex;flex-direction:column;gap:11px;">${resolBars}</div>`:`<div style="font-family:'Instrument Serif',Georgia,serif;font-style:italic;font-size:15px;color:var(--text-3);padding:8px 0;">Resolva conversas para ver o resumo aqui.</div>`}</div>
+    <div style="${C}padding:18px 20px;"><div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--gold-dark);margin-bottom:14px;">Tempo de espera · fila</div><div style="display:flex;flex-direction:column;gap:11px;">${waitBars}</div><div style="font-family:var(--font-mono);font-size:9px;color:var(--text-3);margin-top:12px;line-height:1.5;">Horários de pico exigem o histórico de mensagens (backend) — pronto para plugar.</div></div>
+  </div>`;
+  const insightsToggle = `<div style="display:flex;justify-content:flex-end;margin-bottom:14px;">
+    <button onclick="waPendToggleInsights()" style="display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:9px;border:1px solid var(--border);background:var(--surface);color:var(--text);cursor:pointer;font-size:12px;font-weight:600;">
+      ${ico('reports',14)}${P.insightsOpen?'Ocultar insights':'Ver insights'}
+      <span style="display:inline-block;transition:transform .15s;transform:rotate(${P.insightsOpen?180:0}deg);">${waIcoChevron(12)}</span></button></div>`;
+
+  // ---- Lista (esquerda) ----
+  const seg=(ativo,label,n)=>`<button onclick="waPendSetFiltro('${ativo}')" style="flex:1;display:flex;align-items:center;justify-content:center;gap:7px;padding:9px;border-radius:9px;border:0;cursor:pointer;font-size:12.5px;font-weight:600;background:${P.filtro===ativo?'var(--navy)':'transparent'};color:${P.filtro===ativo?'var(--side-fg)':'var(--text-3)'};">
+    ${label}<span style="font-family:var(--font-mono);font-size:10px;padding:1px 7px;border-radius:100px;background:${P.filtro===ativo?'rgba(239,234,217,.2)':'var(--surface-2)'};color:${P.filtro===ativo?'var(--side-fg)':'var(--text-3)'};">${n}</span></button>`;
+
+  const pendAllOn = P.lista.length>0 && P.lista.every(p=>P.selMass[p.telefone]);
+  const massBar = selIds.length>0 ? `<div style="display:flex;align-items:center;gap:8px;padding:10px 14px;background:color-mix(in oklab,var(--gold) 12%,var(--surface));border-bottom:1px solid var(--border);">
+    <span style="font-family:var(--font-mono);font-size:11px;font-weight:600;color:var(--gold-dark);">${selIds.length} selec.</span>
+    <button onclick="waPendArquivarSelecao()" style="margin-left:auto;display:flex;align-items:center;gap:6px;padding:7px 12px;border-radius:8px;border:0;background:var(--navy);color:var(--side-fg);cursor:pointer;font-size:11.5px;font-weight:600;">${ico('archive',13)}Arquivar</button>
+    <button onclick="waPendLimparSelecao()" style="padding:7px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text-3);cursor:pointer;font-size:11.5px;font-weight:600;">Limpar</button></div>` : '';
+
+  const controls = onPend ? `<div style="display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid var(--border-2);">
+    <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:.04em;color:var(--text-3);">Ordenar</span>
+    <select onchange="waPendSetOrdem(this.value)" style="appearance:none;-webkit-appearance:none;font-size:11.5px;font-weight:600;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 24px 6px 9px;background:var(--surface);cursor:pointer;">
+      <option value="antigas" ${P.ordenar==='antigas'?'selected':''}>Mais antigas</option>
+      <option value="prioridade" ${P.ordenar==='prioridade'?'selected':''}>Prioridade</option>
+      <option value="sla" ${P.ordenar==='sla'?'selected':''}>SLA</option></select>
+    <button onclick="waPendSelTodas()" style="margin-left:auto;font-family:var(--font-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--gold-dark);background:transparent;border:0;cursor:pointer;">${pendAllOn?'limpar':'sel. todas'}</button></div>` : '';
+
+  const meta = onPend ? (lista.length + (P.slaOnly?' estourando SLA':' aguardando')) : (P.arquivadas.length+' resolvida'+(P.arquivadas.length===1?'':'s'));
+
+  const rows = lista.map((p)=>{
+    const conhecido = waEhConhecido(p);
     const nome = waNomeConversa(p);
-    const prev = (p.texto || (p.tipo!=='texto'?('['+p.tipo+']'):'') || '—').slice(0,60);
-    const ativo = (P.sel===i);
-    const tagHandoff = p._handoff ? '<span style="font-size:10px;background:var(--navy,#15212b);color:#fff;border-radius:8px;padding:1px 6px;margin-left:6px;">🤖→👤 aguardando humano</span>' : '';
-    return `<div onclick="waPendSelecionar(${i})" style="padding:10px 12px;border-bottom:1px solid var(--gray-line);cursor:pointer;${ativo?'background:var(--bg-2,#f4f1ec);':''}">
-      <div style="display:flex;justify-content:space-between;gap:8px;">
-        <strong style="font-size:14px;">${escHtml(nome)}${tagHandoff}</strong>
-        <span style="font-size:11px;color:var(--text-3);white-space:nowrap;">${waHaQuantoTempo(p.recebida_em)}</span>
+    const prev = (p.texto || (p.tipo&&p.tipo!=='texto'?('['+p.tipo+']'):'') || '—').slice(0,70);
+    const mins = waMinutos(p.recebida_em);
+    const ativo = onPend && lista.indexOf(p)===P.sel && P.lista.indexOf(p)>-1;
+    const sel = !!P.selMass[p.telefone];
+    const ago = waHaQuantoTempo(p.recebida_em).replace('há ','há ');
+    const checkbox = onPend ? `<button onclick="event.stopPropagation();waPendToggleSel('${p.telefone}')" style="width:18px;height:18px;border-radius:5px;flex-shrink:0;margin-top:1px;display:flex;align-items:center;justify-content:center;cursor:pointer;border:1.5px solid ${sel?'var(--gold)':'var(--text-3)'};background:${sel?'var(--gold)':'transparent'};">${sel?`<span style="display:flex;color:var(--navy);">${ico('check',11)}</span>`:''}</button>` : '';
+    const quickArch = onPend ? `<button onclick="event.stopPropagation();waPendArquivarRapido('${p.telefone}')" title="Arquivar sem responder" style="width:30px;height:30px;border-radius:8px;flex-shrink:0;display:flex;align-items:center;justify-content:center;cursor:pointer;border:1px solid var(--border);background:var(--surface);color:var(--text-3);">${ico('archive',14)}</button>` : '';
+    const restore = !onPend ? `<button onclick="event.stopPropagation();waPendRestaurar('${p.telefone}')" style="font-family:var(--font-mono);font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--gold-dark);background:transparent;border:0;cursor:pointer;padding:0;">Restaurar</button>` : '';
+    const blockChip = (!onPend && p.regua_bloqueada) ? `<span style="font-family:var(--font-mono);font-size:8.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--danger);background:color-mix(in oklab,var(--danger) 13%,transparent);border-radius:100px;padding:2px 8px;">Régua bloqueada</span>` : '';
+    return `<div onclick="${onPend?`waPendSelecionarTel('${p.telefone}')`:''}" style="display:flex;align-items:flex-start;gap:11px;padding:13px 14px;border-bottom:1px solid var(--border-2);${onPend?'cursor:pointer;':''}background:${ativo?'var(--surface-2)':(sel?'color-mix(in oklab,var(--gold) 8%,var(--surface))':'transparent')};">
+      ${checkbox}
+      <div style="min-width:0;flex:1;">
+        <div style="display:flex;align-items:center;gap:7px;justify-content:space-between;">
+          <div style="display:flex;align-items:center;gap:7px;min-width:0;">
+            <span style="font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(conhecido?nome:waFmtTelefone(p.telefone))}</span>
+            <span style="width:15px;height:15px;border-radius:50%;background:#1FA855;display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg viewBox="0 0 24 24" width="9" height="9" fill="#fff"><path d="M17.5 14.4c-.3-.15-1.76-.87-2.03-.97-.27-.1-.47-.15-.67.15-.2.3-.77.97-.94 1.16-.17.2-.35.22-.64.08-.3-.15-1.26-.47-2.4-1.48-.88-.79-1.48-1.76-1.65-2.06-.17-.3-.02-.46.13-.6.13-.14.3-.35.44-.52.15-.18.2-.3.3-.5.1-.2.05-.37-.02-.52-.08-.15-.67-1.6-.92-2.2-.24-.58-.49-.5-.67-.51h-.57c-.2 0-.52.07-.8.37-.27.3-1.04 1.01-1.04 2.48s1.07 2.87 1.22 3.07c.15.2 2.1 3.2 5.08 4.49.71.3 1.26.49 1.7.62.7.23 1.36.2 1.87.12.57-.08 1.76-.72 2-1.41.25-.7.25-1.29.18-1.41z"></path></svg></span>
+          </div>
+          <span style="font-family:var(--font-mono);font-size:10.5px;color:${(onPend&&mins>=240)?'var(--danger)':'var(--text-3)'};white-space:nowrap;flex-shrink:0;">${escHtml(ago)}</span>
+        </div>
+        <div style="font-size:12px;color:var(--text-2);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(prev)}</div>
+        <div style="display:flex;align-items:center;gap:6px;margin-top:6px;flex-wrap:wrap;">
+          <span style="${intentChip(p.intent,false)}">${im[p.intent].label}</span>
+          ${!onPend?desfechoChip(p):''}${blockChip}${restore}
+        </div>
       </div>
-      <div style="font-size:12px;color:var(--text-3);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(prev)}</div>
+      ${quickArch}
     </div>`;
   }).join('');
 
-  el.innerHTML = `
-    <div style="display:grid;grid-template-columns:320px 1fr;gap:16px;align-items:start;">
-      <div style="border:1px solid var(--gray-line);border-radius:8px;overflow:hidden;max-height:70vh;overflow-y:auto;">
-        <div style="padding:8px 12px;font-size:12px;color:var(--text-3);border-bottom:1px solid var(--gray-line);">${P.lista.length} aguardando · mais antigas primeiro</div>
-        ${itens}
-      </div>
-      <div id="waPendDetalhe">${sel ? '' : '<div style="padding:24px;color:var(--text-3);">Selecione uma conversa à esquerda.</div>'}</div>
-    </div>`;
-  if(sel) waPendRenderDetalhe();
+  const emptyTxt = onPend ? (P.slaOnly?'Nada estourando SLA agora.':'Tudo resolvido — nada pendente.') : 'Nenhuma conversa resolvida ainda.';
+  const empty = lista.length===0 ? `<div style="padding:48px 24px;text-align:center;">
+    <div style="width:46px;height:46px;border-radius:50%;background:color-mix(in oklab,var(--success) 14%,transparent);display:flex;align-items:center;justify-content:center;margin:0 auto 14px;color:var(--success);">${ico('check',22)}</div>
+    <div style="font-family:'Instrument Serif',Georgia,serif;font-style:italic;font-size:18px;color:var(--text-3);">${emptyTxt}</div></div>` : '';
+
+  const listCard = `<div style="${C}overflow:hidden;display:flex;flex-direction:column;max-height:78vh;">
+    <div style="display:flex;padding:10px;gap:6px;border-bottom:1px solid var(--border);">${seg('pend','Pendentes',P.lista.length)}${seg('arch','Resolvidas',P.arquivadas.length)}</div>
+    ${massBar}${controls}
+    <div style="padding:8px 14px;font-family:var(--font-mono);font-size:10.5px;letter-spacing:.03em;color:var(--text-3);border-bottom:1px solid var(--border-2);">${meta}</div>
+    <div style="overflow-y:auto;flex:1;">${rows}${empty}</div></div>`;
+
+  // ---- Detalhe (direita) ----
+  const detalhe = `<div id="waPendDetalhe" style="${C}overflow:hidden;min-height:360px;"></div>`;
+
+  el.innerHTML = `<div>
+    ${kpis}${insightsToggle}${insights}
+    <div style="display:grid;grid-template-columns:374px minmax(0,1fr);gap:18px;align-items:start;">
+      ${listCard}${detalhe}
+    </div>
+  </div>`;
+
+  // Renderiza o detalhe (só na visão Pendentes).
+  if(onPend){
+    if(P.sel>=lista.length) P.sel=0;
+    waPendRenderDetalhe(lista[P.sel]||null);
+  } else {
+    document.getElementById('waPendDetalhe').innerHTML = `<div style="padding:70px 24px;text-align:center;">
+      <div style="font-family:'Instrument Serif',Georgia,serif;font-style:italic;font-size:20px;color:var(--text-3);">Conversas já resolvidas</div>
+      <div style="font-size:13px;color:var(--text-3);margin-top:6px;">Use “Restaurar” para devolver uma conversa à fila.</div></div>`;
+  }
 }
 
-function waPendSelecionar(i){
-  window._waPend.sel = i;
-  window._waPend.sugestoes = [];
-  window._waPend.historico = [];
-  renderWATab('pendentes');
+// Seleciona conversa pelo telefone (estável a reordenações).
+function waPendSelecionarTel(tel){
+  const P=window._waPend;
+  const lista=waPendListaVisivel();
+  const i=lista.findIndex(p=>p.telefone===tel);
+  if(i<0) return;
+  P.sel=i; P.sugestoes=[]; P.historico=[]; P.menuOpen=false;
+  waPendRenderDetalhe(lista[i]);
 }
 
-function waPendRenderDetalhe(){
-  const P = window._waPend;
-  const wrap = document.getElementById('waPendDetalhe');
+function waPendRenderDetalhe(p){
+  const wrap=document.getElementById('waPendDetalhe');
   if(!wrap) return;
-  const p = P.lista[P.sel];
-  if(!p){ wrap.innerHTML=''; return; }
-  const nome = waNomeConversa(p);
-  const dent = dentroHorarioComercial();
-  const slot = proximoSlotComercial();
-  const cards = (P.sugestoes||[]).map((s,i)=>`
-    <div style="border:1px solid var(--gray-line);border-radius:8px;padding:10px;margin-bottom:8px;">
-      <div style="font-size:11px;color:var(--text-3);margin-bottom:4px;">Sugestão ${i+1} · tom ${escHtml(s.tom||'—')}</div>
-      <textarea id="waPendTxt${i}" rows="3" style="width:100%;padding:8px;border:1.5px solid var(--gray-line);border-radius:6px;font-family:inherit;font-size:13px;resize:vertical;">${escHtml(s.texto||'')}</textarea>
-      <button class="cob-btn-primary" style="margin-top:6px;" onclick="waPendEnviar(${i})">
-        ${dent ? '📨 Enviar agora' : '🕘 Agendar p/ '+slot.toLocaleDateString('pt-BR')+' 09:00'}
-      </button>
-    </div>`).join('');
+  if(!p){ wrap.innerHTML=`<div style="padding:70px 24px;text-align:center;"><div style="font-family:'Instrument Serif',Georgia,serif;font-style:italic;font-size:20px;color:var(--text-3);">Selecione uma conversa à esquerda</div><div style="font-size:13px;color:var(--text-3);margin-top:6px;">ou arquive direto pela lista, sem precisar responder.</div></div>`; return; }
+  const P=window._waPend;
+  const im=waIntentMeta();
+  const conhecido=waEhConhecido(p);
+  const dev=waDevedorDe(p);
+  const nome=conhecido?waNomeConversa(p):waFmtTelefone(p.telefone);
+  const dent=dentroHorarioComercial();
+  const slot=proximoSlotComercial();
+  const isComp=p.intent==='comprovante';
+  const intentChip=(intent)=>{const m=im[intent]||im.duvida;return `font-family:var(--font-mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;padding:4px 10px;border-radius:100px;white-space:nowrap;color:${m.color};background:color-mix(in oklab,${m.color} 14%,transparent);border:1px solid color-mix(in oklab,${m.color} 30%,transparent);`;};
 
-  wrap.innerHTML = `
-    <div style="border:1px solid var(--gray-line);border-radius:8px;padding:14px;">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-        <strong style="font-size:15px;">${escHtml(nome)}</strong>
-        <span style="font-size:11px;color:var(--text-3);">+${escHtml(String(p.telefone||'').replace(/\D/g,''))} · ${waHaQuantoTempo(p.recebida_em)}</span>
-      </div>
-      <div id="waPendThread" style="margin:10px 0;">
-        <div style="background:var(--bg-2,#f4f1ec);border-radius:8px;padding:10px;font-size:14px;">
-          <div style="font-size:11px;color:var(--text-3);margin-bottom:2px;">Última mensagem do cliente</div>
-          ${escHtml(p.texto || ('['+p.tipo+']'))}
+  // Cabeçalho do detalhe: caso conhecido (status+saldo) ou botão vincular.
+  const headerRight = conhecido
+    ? `<div style="text-align:right;flex-shrink:0;">
+        <div style="font-family:var(--font-mono);font-size:8.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--danger);background:color-mix(in oklab,var(--danger) 13%,transparent);border:1px solid color-mix(in oklab,var(--danger) 30%,transparent);border-radius:100px;padding:3px 9px;display:inline-block;">${escHtml(dev?(dev.status||'Em andamento'):'Em andamento')}</div>
+        <div style="font-family:var(--font-mono);font-size:13px;font-weight:600;margin-top:6px;">${fmtR(waSaldoDevedor(dev))}</div>
+        ${dev?`<div style="font-family:var(--font-mono);font-size:9px;color:var(--gold-dark);margin-top:3px;">${escHtml(dev.nome||'')}</div>`:''}</div>`
+    : `<button onclick="waPendModalVincular()" style="flex-shrink:0;display:flex;align-items:center;gap:7px;padding:9px 13px;border-radius:9px;border:1px solid var(--gold);background:color-mix(in oklab,var(--gold) 10%,var(--surface));color:var(--gold-dark);cursor:pointer;font-size:12px;font-weight:600;">${ico('link',14)}Vincular a um caso</button>`;
+
+  // Última mensagem (fallback). waPendCarregarThread substitui por thread ao vivo.
+  const ultima = `<div id="waPendThread" style="margin-top:8px;">
+    <div style="display:flex;gap:10px;align-items:flex-start;">
+      <span style="width:30px;height:30px;border-radius:50%;background:#1FA855;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px;"><svg viewBox="0 0 24 24" width="16" height="16" fill="#fff"><path d="M17.5 14.4c-.3-.15-1.76-.87-2.03-.97-.27-.1-.47-.15-.67.15-.2.3-.77.97-.94 1.16-.17.2-.35.22-.64.08-.3-.15-1.26-.47-2.4-1.48-.88-.79-1.48-1.76-1.65-2.06-.17-.3-.02-.46.13-.6.13-.14.3-.35.44-.52.15-.18.2-.3.3-.5.1-.2.05-.37-.02-.52-.08-.15-.67-1.6-.92-2.2-.24-.58-.49-.5-.67-.51h-.57c-.2 0-.52.07-.8.37-.27.3-1.04 1.01-1.04 2.48s1.07 2.87 1.22 3.07c.15.2 2.1 3.2 5.08 4.49.71.3 1.26.49 1.7.62.7.23 1.36.2 1.87.12.57-.08 1.76-.72 2-1.41.25-.7.25-1.29.18-1.41z"></path></svg></span>
+      <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:4px 14px 14px 14px;padding:13px 16px;font-size:14.5px;line-height:1.45;color:var(--text);max-width:560px;">${escHtml(p.texto||('['+(p.tipo||'mensagem')+']'))}</div></div></div>`;
+
+  // Compositor de sugestões (aparece após "Sugerir com a Bia").
+  const sugs=(P.sugestoes||[]).map((s,i)=>`<div style="border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px;">
+    <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.04em;color:var(--text-3);margin-bottom:4px;">Sugestão ${i+1}${s.tom?' · tom '+escHtml(s.tom):''}</div>
+    <textarea id="waPendTxt${i}" rows="3" style="width:100%;padding:8px;border:1.5px solid var(--border);border-radius:6px;font-family:inherit;font-size:13px;resize:vertical;background:var(--surface);color:var(--text);">${escHtml(s.texto||'')}</textarea>
+    <button class="btn btn-primary btn-sm" style="margin-top:6px;" onclick="waPendEnviarSugestao(${i})">${dent?'📨 Enviar agora':'🕘 Agendar p/ '+slot.toLocaleDateString('pt-BR')+' 09:00'}</button></div>`).join('');
+
+  // Responder em 1 toque.
+  const quicks=waQuickReplies(p.intent).map((q,i)=>`<button onclick="waPendQuick(${i})" style="display:flex;align-items:center;gap:7px;padding:10px 14px;border-radius:10px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);cursor:pointer;font-size:12.5px;font-weight:600;"><span style="color:#0E5C30;display:flex;">${waIcoSend(13)}</span>${escHtml(q.label)}</button>`).join('');
+
+  // Ação primária contextual.
+  const primary = isComp
+    ? `<button onclick="waPendModalConciliar()" style="display:flex;align-items:center;gap:8px;padding:13px 20px;border-radius:11px;border:0;background:var(--info);color:#fff;cursor:pointer;font-size:13.5px;font-weight:600;">${ico('check',16)}Conciliar pagamento</button>`
+    : `<button id="waPendSugBtn" onclick="waPendSugerir()" style="display:flex;align-items:center;gap:8px;padding:13px 20px;border-radius:11px;border:0;background:var(--gold);color:var(--navy);cursor:pointer;font-size:13.5px;font-weight:600;">✨ Sugerir resposta com a Bia</button>`;
+
+  // Menu Arquivar ▾.
+  const menu = P.menuOpen ? `<div style="position:absolute;right:0;top:calc(100% + 8px);width:282px;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow-lg);overflow:hidden;z-index:10;">
+    <div style="padding:10px 14px 6px;font-family:var(--font-mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-3);">Motivo do arquivamento</div>
+    ${waMotivosArquivo().map((r,i)=>`<button onclick="waPendArquivarMotivo(${i})" style="display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:11px 14px;border:0;background:transparent;cursor:pointer;font-size:13px;color:var(--text);"><span style="width:7px;height:7px;border-radius:50%;background:${r.dot};flex-shrink:0;"></span><span style="flex:1;">${r.label}</span>${r.warn?'<span style="font-family:var(--font-mono);font-size:8px;letter-spacing:.06em;text-transform:uppercase;color:var(--danger);">bloqueia régua</span>':''}</button>`).join('')}</div>` : '';
+
+  wrap.innerHTML = `<div>
+    <div style="padding:20px 24px;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;">
+      <div style="min-width:0;flex:1 1 240px;">
+        <div style="display:flex;align-items:center;gap:11px;">
+          <span style="width:42px;height:42px;border-radius:50%;background:var(--navy);color:var(--side-fg);display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-size:15px;flex-shrink:0;">${escHtml(waIniciais(p))}</span>
+          <div style="min-width:0;">
+            <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;"><span style="font-size:16px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(nome)}</span><span style="${intentChip(p.intent)}">${im[p.intent].label}</span></div>
+            <div style="font-family:var(--font-mono);font-size:11px;color:var(--text-3);margin-top:2px;">${escHtml(waFmtTelefone(p.telefone))} · ${escHtml(waHaQuantoTempo(p.recebida_em))}</div>
+          </div>
         </div>
       </div>
-      <div style="font-size:12px;color:var(--text-3);margin-bottom:10px;">
-        ${dent ? 'Dentro do horário comercial — a resposta aprovada é enviada na hora.' : 'Fora do horário comercial — a resposta aprovada é agendada pra próxima manhã útil.'}
+      ${headerRight}
+    </div>
+    <div style="padding:22px 24px;">
+      <div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-3);margin-bottom:8px;">Última mensagem do cliente</div>
+      ${ultima}
+      <div style="display:flex;align-items:center;gap:8px;margin-top:14px;padding:10px 14px;border-radius:10px;background:color-mix(in oklab,#1FA855 9%,var(--surface));border:1px solid color-mix(in oklab,#1FA855 22%,transparent);">
+        <span style="color:#0E5C30;flex-shrink:0;display:flex;">${ico('clock',15)}</span>
+        <span style="font-size:12.5px;color:#0E5C30;line-height:1.4;">${dent?'Dentro do horário comercial — uma resposta aprovada é enviada na hora.':'Fora do horário comercial — a resposta aprovada é agendada pra próxima manhã útil.'}</span>
       </div>
-      <button class="cob-btn-primary" id="waPendSugBtn" onclick="waPendSugerir()">✨ Sugerir resposta com a Bia</button>
-      <div id="waPendSugs" style="margin-top:12px;">${cards}</div>
-    </div>`;
-  // Híbrido: tenta puxar a conversa ao vivo do Z-API (mais contexto pra Bia).
-  // Se falhar (plano sem leitura, offline), mantém o fallback acima.
+      <div style="margin-top:20px;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;"><span style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--gold-dark);">Responder em 1 toque</span><span style="font-family:var(--font-mono);font-size:9px;color:var(--text-3);">· envia template aprovado e resolve</span></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">${quicks}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:18px;flex-wrap:wrap;">
+        ${primary}
+        <button onclick="waPendModalTarefa()" style="display:flex;align-items:center;gap:8px;padding:13px 16px;border-radius:11px;border:1px solid var(--border);background:var(--surface);color:var(--text);cursor:pointer;font-size:13px;font-weight:600;">${ico('reports',15)}Criar tarefa</button>
+        <button onclick="waPendAbrirWa()" style="display:flex;align-items:center;gap:8px;padding:13px 16px;border-radius:11px;border:1px solid var(--border);background:var(--surface);color:var(--text);cursor:pointer;font-size:13px;font-weight:600;">${ico('whatsapp',15)}Abrir</button>
+        <div style="margin-left:auto;position:relative;" id="waPendMenuWrap">
+          <button onclick="event.stopPropagation();waPendToggleMenu()" style="display:flex;align-items:center;gap:8px;padding:13px 16px;border-radius:11px;border:1px solid var(--navy);background:var(--navy);color:var(--side-fg);cursor:pointer;font-size:13px;font-weight:600;">${ico('archive',15)}Arquivar<span style="display:inline-flex;transition:transform .15s;transform:rotate(${P.menuOpen?180:0}deg);">${waIcoChevron(13)}</span></button>
+          ${menu}
+        </div>
+      </div>
+      <div id="waPendSugs" style="margin-top:14px;">${sugs}</div>
+      <div style="font-family:var(--font-mono);font-size:10px;color:var(--text-3);margin-top:12px;line-height:1.5;">Arquivar remove de Pendentes <b>sem enviar mensagem</b>. Responder em 1 toque envia e resolve. Tudo fica em <b>Resolvidas</b>.</div>
+    </div>
+  </div>`;
   waPendCarregarThread();
 }
 
-// Carrega o histórico ao vivo da conversa via Z-API e renderiza em bolhas.
-// Guarda o histórico normalizado em _waPend.historico p/ a Bia. Best-effort.
-async function waPendCarregarThread(){
-  const P = window._waPend;
-  const p = P.lista[P.sel];
-  if(!p) return;
-  const box = document.getElementById('waPendThread');
-  if(!box) return;
-  // cache por telefone (evita refetch ao re-renderizar com sugestões)
-  P.threadCache = P.threadCache || {};
-  if(P.threadCache[p.telefone]){ P.historico = P.threadCache[p.telefone]; waPendRenderThread(box, P.historico); return; }
+// ── Controles de estado (re-render leve) ───────────────────────────────────
+function waPendRepaint(){ const el=document.getElementById('wa-content'); if(el) waPendPaint(el); }
+function waPendToggleSla(){ const P=window._waPend; P.slaOnly=!P.slaOnly; P.sel=0; waPendRepaint(); }
+function waPendToggleInsights(){ window._waPend.insightsOpen=!window._waPend.insightsOpen; waPendRepaint(); }
+function waPendSetFiltro(f){ const P=window._waPend; P.filtro=f; P.sel=0; P.menuOpen=false; waPendRepaint(); }
+function waPendSetOrdem(v){ window._waPend.ordenar=v; waPendRepaint(); }
+function waPendToggleSel(tel){ const P=window._waPend; if(P.selMass[tel]) delete P.selMass[tel]; else P.selMass[tel]=true; waPendRepaint(); }
+function waPendLimparSelecao(){ window._waPend.selMass={}; waPendRepaint(); }
+function waPendSelTodas(){ const P=window._waPend; const allOn=P.lista.length>0&&P.lista.every(p=>P.selMass[p.telefone]); if(allOn){ P.selMass={}; } else { P.selMass={}; P.lista.forEach(p=>P.selMass[p.telefone]=true); } waPendRepaint(); }
+function waPendToggleMenu(){ const P=window._waPend; P.menuOpen=!P.menuOpen; waPendRenderDetalhe(waPendListaVisivel()[P.sel]||null); }
+function waPendAbrirWa(){ const p=waPendListaVisivel()[window._waPend.sel]; if(p) window.open('https://wa.me/'+String(p.telefone).replace(/\D/g,''),'_blank'); }
+
+// Fecha o menu de arquivar ao clicar fora.
+if(!window._waPendDocBound){ window._waPendDocBound=true; document.addEventListener('mousedown',(e)=>{ const P=window._waPend; if(!P||!P.menuOpen) return; const wrap=document.getElementById('waPendMenuWrap'); if(wrap && !wrap.contains(e.target)){ P.menuOpen=false; const l=waPendListaVisivel(); waPendRenderDetalhe(l[P.sel]||null); } }); }
+
+// ── Toast com Desfazer ─────────────────────────────────────────────────────
+function waPendToast(texto, onUndo){
+  const P=window._waPend;
+  const cont=document.getElementById('toast-container');
+  if(!cont){ showToast(texto,'success'); return; }
+  if(P._toastTimer) clearTimeout(P._toastTimer);
+  const t=document.createElement('div');
+  t.className='toast toast-success';
+  t.innerHTML=`<span class="toast-icon">${ico('checkcircle',15)}</span><span>${escHtml(texto)}</span>`;
+  if(onUndo){
+    const b=document.createElement('button');
+    b.textContent='Desfazer';
+    b.style.cssText='margin-left:10px;background:transparent;border:1px solid var(--gold);color:var(--gold);border-radius:8px;padding:4px 10px;font-weight:700;font-size:12px;cursor:pointer;';
+    b.onclick=()=>{ try{ onUndo(); }catch(_){} t.remove(); };
+    t.appendChild(b);
+  }
+  cont.appendChild(t);
+  P._toastTimer=setTimeout(()=>{ t.style.animation='toastOut .3s ease forwards'; setTimeout(()=>t.remove(),320); }, 5200);
+}
+
+// ── Persistência da resolução (upsert em whatsapp_atendimentos) ─────────────
+// Tolera colunas novas ausentes (desfecho/motivo/regua_bloqueada/resolvido_em):
+// se a migração 20260703 ainda não rodou, faz upsert mínimo (estado=resolvido).
+async function waPendPersistirResolucao(p, { desfecho, motivo, reguaBloqueada }){
+  const supa=getSupabase(); if(!supa) return;
+  const dev=waDevedorDe(p);
+  const full={ telefone:p.telefone, caso_id:dev?dev.id:(p.caso_id||null), estado:'resolvido',
+    desfecho, motivo:motivo||null, regua_bloqueada:!!reguaBloqueada, intencao:p.intent||null,
+    resolvido_em:new Date().toISOString(), updated_at:new Date().toISOString() };
   try{
-    const raw = await ZApiAPI.chatMessages(p.telefone, 20);
-    const arr = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.messages) ? raw.messages : []);
-    const hist = arr.map(m => ({
-      dir: m.fromMe ? 'nos' : 'cliente',
-      texto: (m.text && (m.text.message ?? m.text)) || m.message || m.caption || (m.type?('['+m.type+']'):''),
-      ts: Number(m.momment || m.moment || 0)
-    })).filter(h => h.texto);
-    if(hist.length){
-      P.threadCache[p.telefone] = hist;
-      P.historico = hist;
-      waPendRenderThread(box, hist);
-    }
+    const { error }=await supa.from('whatsapp_atendimentos').upsert(full,{ onConflict:'telefone' });
+    if(error) throw error;
   }catch(e){
-    // silencioso: degrada pro fallback (última mensagem armazenada).
-    console.warn('Z-API leitura de conversa indisponível:', e?.message||e);
+    try{ await supa.from('whatsapp_atendimentos').upsert({ telefone:p.telefone, caso_id:full.caso_id, estado:'resolvido', updated_at:full.updated_at },{ onConflict:'telefone' }); }catch(_){}
+  }
+  // Régua bloqueada: marca o devedor (a régua/disparo deve checar metadata.reguaBloqueada).
+  if(reguaBloqueada && dev){
+    try{
+      dev.metadata=dev.metadata||{}; dev.metadata.reguaBloqueada=true; dev.metadata.reguaBloqueadaMotivo='spam_engano_whatsapp';
+      if(typeof save==='function') save();
+    }catch(_){}
   }
 }
 
-function waPendRenderThread(box, hist){
-  const bolhas = hist.slice(-12).map(h => {
-    const meu = h.dir==='nos';
-    return `<div style="display:flex;justify-content:${meu?'flex-end':'flex-start'};margin:3px 0;">
-      <div style="max-width:78%;padding:7px 10px;border-radius:10px;font-size:13px;${meu?'background:var(--green-soft,#e3efe5);':'background:var(--bg-2,#f4f1ec);'}">${escHtml(h.texto)}</div>
-    </div>`;
-  }).join('');
-  box.innerHTML = `<div style="border:1px solid var(--gray-line);border-radius:8px;padding:8px;max-height:260px;overflow-y:auto;">
-    <div style="font-size:11px;color:var(--text-3);margin-bottom:4px;">Conversa (ao vivo)</div>${bolhas}</div>`;
+// Reabre uma conversa resolvida (Restaurar). Best-effort.
+async function waPendReabrir(tel){
+  const supa=getSupabase(); if(!supa) return;
+  try{ await supa.from('whatsapp_atendimentos').upsert({ telefone:tel, estado:'aguardando_humano', updated_at:new Date().toISOString() },{ onConflict:'telefone' }); }catch(_){}
 }
 
+// Move uma conversa da fila pendente -> resolvidas (local + persistência).
+function waPendResolverLocal(tel, { desfecho, motivo, reguaBloqueada }){
+  const P=window._waPend;
+  const idx=P.lista.findIndex(x=>x.telefone===tel);
+  if(idx<0) return null;
+  const p=P.lista[idx];
+  P.lista.splice(idx,1);
+  delete P.selMass[tel];
+  const arch={ ...p, archived:true, desfecho, motivo:motivo||null, regua_bloqueada:!!reguaBloqueada, recebida_em:new Date().toISOString() };
+  P.arquivadas.unshift(arch);
+  waPendPersistirResolucao(p,{ desfecho, motivo, reguaBloqueada });
+  return p;
+}
+// Desfaz (Desfazer no toast): devolve à fila.
+function waPendDesfazer(snapshotLista, snapshotArq, tel){
+  const P=window._waPend;
+  P.lista=snapshotLista; P.arquivadas=snapshotArq;
+  waPendReabrir(tel);
+  waPendBadgeUpdate(); waPendRepaint();
+}
+
+// ── Arquivar / resolver ────────────────────────────────────────────────────
+function waPendArquivarRapido(tel){ waPendArquivarComMotivo([tel],'Resolvido'); }
+function waPendArquivarMotivo(i){
+  const P=window._waPend; const p=waPendListaVisivel()[P.sel]; if(!p) return;
+  const m=waMotivosArquivo()[i]; P.menuOpen=false;
+  waPendArquivarComMotivo([p.telefone], m.key);
+}
+function waPendArquivarSelecao(){
+  const tels=Object.keys(window._waPend.selMass);
+  if(!tels.length) return;
+  waPendArquivarComMotivo(tels,'Resolvido');
+}
+function waPendArquivarComMotivo(tels, motivo){
+  const P=window._waPend;
+  const block = motivo==='Spam / engano';
+  const snapLista=P.lista.slice(); const snapArq=P.arquivadas.slice();
+  tels.forEach(tel=> waPendResolverLocal(tel,{ desfecho:'arquivado', motivo, reguaBloqueada:block }));
+  P.sel=0; waPendBadgeUpdate(); waPendRepaint();
+  const txt=(tels.length>1?tels.length+' conversas arquivadas':'Conversa arquivada')+(block?' · régua bloqueada':'');
+  waPendToast(txt, ()=>waPendDesfazer(snapLista,snapArq,tels[0]));
+}
+function waPendRestaurar(tel){
+  const P=window._waPend;
+  const idx=P.arquivadas.findIndex(x=>x.telefone===tel);
+  if(idx<0) return;
+  const a=P.arquivadas.splice(idx,1)[0];
+  P.lista.push({ telefone:a.telefone, caso_id:a.caso_id, texto:a.texto, tipo:a.tipo||'texto', recebida_em:a.recebida_em, intencao:a.intencao, intent:a.intent });
+  waPendReabrir(tel); waPendBadgeUpdate(); waPendRepaint();
+}
+
+// ── Enviar texto (na hora ou agendado) — usado por sugestões e 1-toque ──────
+async function waPendEnviarTexto(p, texto){
+  const supa=getSupabase(); if(!supa) throw new Error('Supabase indisponível.');
+  const dev=waDevedorDe(p);
+  if(dentroHorarioComercial()){
+    const { data, error }=await supa.functions.invoke('enviar-whatsapp',{ body:{ telefone:p.telefone, mensagem:texto } });
+    if(error) throw error;
+    if(data && data.error) throw new Error(data.message||data.error);
+    return 'enviada';
+  } else {
+    const { data:auth }=await supa.auth.getUser();
+    const { error }=await supa.from('crm_mensagens_agendadas').insert({
+      devedor_id:dev?dev.id:(p.caso_id||null), operador_id:auth?.user?.id||null,
+      telefone:p.telefone, tipo:'texto', mensagem:texto,
+      agendada_para:proximoSlotComercial().toISOString(), status:'pendente', origem:'resposta_humana' });
+    if(error) throw error;
+    return 'agendada';
+  }
+}
+
+// Responder em 1 toque: templates completos enviam+resolvem; os que precisam de
+// dado (chave/link) pré-preenchem uma sugestão editável (1 toque + revisar).
+async function waPendQuick(i){
+  const P=window._waPend; const p=waPendListaVisivel()[P.sel]; if(!p) return;
+  const q=waQuickReplies(p.intent)[i]; if(!q) return;
+  if(q.needEdit){
+    P.sugestoes=[{ texto:q.texto, tom:'template' }];
+    waPendRenderDetalhe(p);
+    showToast('Template carregado — revise (chave/link) e envie.','info');
+    return;
+  }
+  try{
+    const r=await waPendEnviarTexto(p, q.texto);
+    const snapLista=P.lista.slice(), snapArq=P.arquivadas.slice();
+    waPendResolverLocal(p.telefone,{ desfecho:'respondido', motivo:q.label });
+    P.sel=0; waPendBadgeUpdate(); waPendRepaint();
+    waPendToast((r==='agendada'?'Resposta agendada · ':'Resposta enviada · ')+q.label, ()=>waPendDesfazer(snapLista,snapArq,p.telefone));
+  }catch(e){ showToast('Falha ao responder: '+(e.message||e),'danger'); }
+}
+// Enviar uma sugestão editada (compositor da Bia ou template carregado).
+async function waPendEnviarSugestao(i){
+  const P=window._waPend; const p=waPendListaVisivel()[P.sel]; if(!p) return;
+  const texto=(document.getElementById('waPendTxt'+i)?.value||'').trim();
+  if(!texto){ showToast('Mensagem vazia.','danger'); return; }
+  if(/\[(cole|descreva|link|chave)/i.test(texto)){ showToast('Preencha o trecho entre colchetes antes de enviar.','warning'); return; }
+  try{
+    const r=await waPendEnviarTexto(p, texto);
+    const snapLista=P.lista.slice(), snapArq=P.arquivadas.slice();
+    waPendResolverLocal(p.telefone,{ desfecho:'respondido', motivo:'Resposta enviada' });
+    P.sel=0; P.sugestoes=[]; waPendBadgeUpdate(); waPendRepaint();
+    waPendToast(r==='agendada'?'Resposta agendada para a próxima manhã útil.':'Resposta enviada.', ()=>waPendDesfazer(snapLista,snapArq,p.telefone));
+  }catch(e){ showToast('Falha ao enviar/agendar: '+(e.message||e),'danger'); }
+}
+
+// Sugerir com a Bia (mantém a integração beatriz-msg modo "responder").
 async function waPendSugerir(){
-  const P = window._waPend;
-  const p = P.lista[P.sel];
-  if(!p) return;
-  const btn = document.getElementById('waPendSugBtn');
+  const P=window._waPend; const p=waPendListaVisivel()[P.sel]; if(!p) return;
+  const btn=document.getElementById('waPendSugBtn');
   if(btn){ btn.disabled=true; btn.textContent='Pensando…'; }
   try{
-    const supa = getSupabase();
-    const dev = p.caso_id ? (DB.devedores||[]).find(x=>x.id===p.caso_id) : waDevedorPorTelefone(p.telefone);
-    const { data, error } = await supa.functions.invoke('beatriz-msg', {
-      body: {
-        caso_id: dev?.id || p.caso_id || null,
-        intencao: 'responder',
-        ultima_mensagem_cliente: p.texto || '',
-        historico: (Array.isArray(P.historico) && P.historico.length) ? P.historico.map(h=>({dir:h.dir,texto:h.texto})) : undefined
-      }
-    });
+    const supa=getSupabase();
+    const dev=waDevedorDe(p);
+    const { data, error }=await supa.functions.invoke('beatriz-msg',{ body:{
+      caso_id:dev?dev.id:(p.caso_id||null), intencao:'responder', ultima_mensagem_cliente:p.texto||'',
+      historico:(Array.isArray(P.historico)&&P.historico.length)?P.historico.map(h=>({dir:h.dir,texto:h.texto})):undefined } });
     if(error) throw error;
-    P.sugestoes = (data && Array.isArray(data.sugestoes)) ? data.sugestoes : [];
+    P.sugestoes=(data && Array.isArray(data.sugestoes))?data.sugestoes:[];
     if(!P.sugestoes.length) showToast('A Bia não retornou sugestões. Tente de novo.','info');
-  }catch(e){
-    showToast('Falha ao sugerir: '+(e.message||e),'danger');
-  }finally{
-    if(btn){ btn.disabled=false; btn.textContent='✨ Sugerir resposta com a Bia'; }
-    waPendRenderDetalhe();
-  }
+  }catch(e){ showToast('Falha ao sugerir: '+(e.message||e),'danger'); }
+  finally{ if(btn){ btn.disabled=false; btn.textContent='✨ Sugerir resposta com a Bia'; } waPendRenderDetalhe(waPendListaVisivel()[P.sel]||null); }
 }
 
-async function waPendEnviar(i){
-  const P = window._waPend;
-  const p = P.lista[P.sel];
-  if(!p) return;
-  const texto = (document.getElementById('waPendTxt'+i)?.value || '').trim();
-  if(!texto){ showToast('Mensagem vazia.','danger'); return; }
-  const supa = getSupabase();
-  if(!supa){ showToast('Supabase indisponível.','danger'); return; }
-
+// ── Thread ao vivo via Z-API (best-effort, igual à versão anterior) ─────────
+async function waPendCarregarThread(){
+  const P=window._waPend; const p=waPendListaVisivel()[P.sel]; if(!p) return;
+  const box=document.getElementById('waPendThread'); if(!box) return;
+  P.threadCache=P.threadCache||{};
+  if(P.threadCache[p.telefone]){ P.historico=P.threadCache[p.telefone]; waPendRenderThread(box,P.historico); return; }
   try{
-    if(dentroHorarioComercial()){
-      // Dentro do expediente -> envia na hora (a função valida se o nº tem WhatsApp).
-      const { data, error } = await supa.functions.invoke('enviar-whatsapp', { body: { telefone: p.telefone, mensagem: texto } });
-      if(error) throw error;
-      if(data && data.error) throw new Error(data.message || data.error);
-      showToast('Resposta enviada.','success');
-    } else {
-      // Fora do expediente -> agenda pra próxima manhã útil.
-      const { data:auth } = await supa.auth.getUser();
-      const operadorId = auth?.user?.id || null;
-      const dev = waDevedorPorTelefone(p.telefone);
-      const { error } = await supa.from('crm_mensagens_agendadas').insert({
-        devedor_id: dev?.id || p.caso_id || null,
-        operador_id: operadorId,
-        telefone: p.telefone,
-        tipo: 'texto',
-        mensagem: texto,
-        agendada_para: proximoSlotComercial().toISOString(),
-        status: 'pendente',
-        origem: 'resposta_ia'
-      });
-      if(error) throw error;
-      showToast('Resposta agendada para a próxima manhã útil.','success');
-    }
-    // Humano assumiu: encerra o atendimento automático desta conversa (tira do
-    // estado aguardando_humano; a Bia só volta a agir se o cliente escrever de novo).
-    try { await supa.from('whatsapp_atendimentos').upsert({ telefone:p.telefone, estado:'resolvido', updated_at:new Date().toISOString() }, { onConflict:'telefone' }); } catch(_e){/* tabela pode não existir ainda */}
-    // Remove da fila local (a view também já não a retornaria após o envio).
-    P.lista.splice(P.sel,1);
-    P.sel = null; P.sugestoes = [];
-    renderWATab('pendentes');
-  }catch(e){
-    showToast('Falha ao enviar/agendar: '+(e.message||e),'danger');
-  }
+    const raw=await ZApiAPI.chatMessages(p.telefone,20);
+    const arr=Array.isArray(raw)?raw:(raw&&Array.isArray(raw.messages)?raw.messages:[]);
+    const hist=arr.map(m=>({ dir:m.fromMe?'nos':'cliente', texto:(m.text&&(m.text.message??m.text))||m.message||m.caption||(m.type?('['+m.type+']'):''), ts:Number(m.momment||m.moment||0) })).filter(h=>h.texto);
+    if(hist.length){ P.threadCache[p.telefone]=hist; P.historico=hist; waPendRenderThread(box,hist); }
+  }catch(e){ console.warn('Z-API leitura de conversa indisponível:', e?.message||e); }
+}
+function waPendRenderThread(box, hist){
+  const bolhas=hist.slice(-12).map(h=>{ const meu=h.dir==='nos'; return `<div style="display:flex;justify-content:${meu?'flex-end':'flex-start'};margin:3px 0;"><div style="max-width:78%;padding:7px 10px;border-radius:10px;font-size:13px;${meu?'background:color-mix(in oklab,#1FA855 14%,var(--surface));':'background:var(--surface-2);'}">${escHtml(h.texto)}</div></div>`; }).join('');
+  box.innerHTML=`<div style="border:1px solid var(--border);border-radius:8px;padding:8px;max-height:260px;overflow-y:auto;"><div style="font-family:var(--font-mono);font-size:11px;color:var(--text-3);margin-bottom:4px;">Conversa (ao vivo)</div>${bolhas}</div>`;
+}
+
+// ── Modais (vincular / conciliar / tarefa) ─────────────────────────────────
+function waPendModalClose(){ const ov=document.getElementById('waPendModal'); if(ov) ov.remove(); }
+function waPendModalShell(opts){
+  waPendModalClose();
+  const ov=document.createElement('div');
+  ov.id='waPendModal';
+  ov.style.cssText='position:fixed;inset:0;z-index:1200;background:rgba(10,21,48,.42);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;padding:24px;';
+  ov.innerHTML=`<div style="width:480px;max-width:100%;background:var(--surface);border-radius:18px;overflow:hidden;box-shadow:var(--shadow-lg);">
+    <div style="padding:20px 24px;background:var(--navy);color:var(--side-fg);display:flex;align-items:center;justify-content:space-between;">
+      <div style="display:flex;align-items:center;gap:11px;"><span style="width:34px;height:34px;border-radius:50%;background:${opts.iconBg||'var(--gold)'};color:${opts.iconFg||'var(--navy)'};display:flex;align-items:center;justify-content:center;flex-shrink:0;">${opts.icon}</span><div><div style="font-size:15px;font-weight:600;">${escHtml(opts.title)}</div><div style="font-family:var(--font-mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--gold);margin-top:2px;">${escHtml(opts.kicker||'')}</div></div></div>
+      <button onclick="waPendModalClose()" style="width:30px;height:30px;border-radius:50%;border:1px solid rgba(239,234,217,.3);background:transparent;color:var(--side-fg);cursor:pointer;font-size:15px;">✕</button>
+    </div>
+    <div style="padding:22px 24px;">${opts.intro?`<div style="font-size:13px;color:var(--text-2);margin-bottom:16px;line-height:1.5;">${escHtml(opts.intro)}</div>`:''}<div id="waPendModalBody">${opts.body||''}</div>
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:22px;">
+        <button onclick="waPendModalClose()" style="padding:11px 16px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text-2);cursor:pointer;font-size:12.5px;font-weight:600;">Cancelar</button>
+        ${opts.confirmLabel?`<button id="waPendModalConfirm" style="display:flex;align-items:center;gap:8px;padding:11px 18px;border-radius:10px;border:0;background:var(--navy);color:var(--side-fg);cursor:pointer;font-size:12.5px;font-weight:600;">${ico('check',14)}${escHtml(opts.confirmLabel)}</button>`:''}
+      </div></div></div>`;
+  ov.addEventListener('mousedown',(e)=>{ if(e.target===ov) waPendModalClose(); });
+  document.body.appendChild(ov);
+  if(opts.onConfirm){ const b=document.getElementById('waPendModalConfirm'); if(b) b.onclick=opts.onConfirm; }
+  return ov;
+}
+
+// VINCULAR número a um caso/devedor.
+function waPendModalVincular(){
+  const P=window._waPend; const p=waPendListaVisivel()[P.sel]; if(!p) return;
+  const cands=()=> (DB.devedores||[]).filter(d=>!d.arquivado).slice(0,200);
+  const linha=(d)=>{ const ini=(d.nome||'').trim().split(/\s+/).slice(0,2).map(w=>w[0]||'').join('')||'?';
+    return `<button onclick="waPendVincularEscolher('${d.id}')" style="display:flex;align-items:center;gap:12px;text-align:left;padding:12px 14px;border-radius:11px;border:1px solid var(--border);background:var(--surface);cursor:pointer;width:100%;">
+      <span style="width:34px;height:34px;border-radius:50%;background:var(--navy);color:var(--side-fg);display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-size:13px;flex-shrink:0;">${escHtml(ini.toUpperCase())}</span>
+      <span style="flex:1;min-width:0;"><span style="display:block;font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(d.nome||'(sem nome)')}</span><span style="display:block;font-family:var(--font-mono);font-size:10.5px;color:var(--text-3);margin-top:1px;">${escHtml(d.status||'Em andamento')} · ${fmtR(waSaldoDevedor(d))}</span></span>
+      <span style="flex-shrink:0;color:var(--gold-dark);display:flex;">${ico('moveright',16)}</span></button>`; };
+  waPendModalShell({
+    icon:ico('link',16), iconBg:'var(--gold)', iconFg:'var(--navy)',
+    title:'Vincular número a um caso', kicker:'Identificar contato',
+    intro:'Escolha o caso/devedor para trazer status e saldo para esta conversa.',
+    body:`<input id="waPendVincQ" placeholder="Buscar caso por nome…" oninput="waPendVincularFiltrar(this.value)" style="width:100%;font-size:13.5px;border:1px solid var(--border);border-radius:9px;padding:10px 12px;background:var(--surface);color:var(--text);margin-bottom:12px;">
+      <div id="waPendVincList" style="display:flex;flex-direction:column;gap:8px;max-height:280px;overflow-y:auto;">${cands().map(linha).join('')}</div>`
+  });
+  window._waPendVincLinha=linha;
+}
+function waPendVincularFiltrar(q){
+  const box=document.getElementById('waPendVincList'); if(!box) return;
+  const ql=(q||'').toLowerCase();
+  const linha=window._waPendVincLinha;
+  box.innerHTML=(DB.devedores||[]).filter(d=>!d.arquivado && (d.nome||'').toLowerCase().includes(ql)).slice(0,200).map(linha).join('') || `<div style="padding:16px;text-align:center;color:var(--text-3);font-size:12px;">Nenhum caso encontrado.</div>`;
+}
+async function waPendVincularEscolher(devId){
+  const P=window._waPend; const p=waPendListaVisivel()[P.sel]; if(!p) return;
+  const dev=(DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  p.caso_id=dev.id; p.nomeVinculado=dev.nome;
+  const orig=P.lista.find(x=>x.telefone===p.telefone); if(orig){ orig.caso_id=dev.id; orig.nomeVinculado=dev.nome; }
+  try{ const supa=getSupabase(); if(supa) await supa.from('whatsapp_atendimentos').upsert({ telefone:p.telefone, caso_id:dev.id, updated_at:new Date().toISOString() },{ onConflict:'telefone' }); }catch(_){}
+  waPendModalClose(); waPendRepaint();
+  showToast('Número vinculado a '+(dev.nome||'caso'),'success');
+}
+
+// CONCILIAR comprovante: registra um comprovante 'conciliado' no devedor
+// (auditável e reversível) + andamento, e resolve a conversa. NÃO altera o
+// saldo automaticamente — a baixa final é confirmada na ficha da cobrança.
+function waPendModalConciliar(){
+  const P=window._waPend; const p=waPendListaVisivel()[P.sel]; if(!p) return;
+  const dev=waDevedorDe(p);
+  const casoLabel=dev?(dev.nome||'caso'):'— vincular um caso primeiro —';
+  waPendModalShell({
+    icon:ico('check',16), iconBg:'var(--info)', iconFg:'#fff',
+    title:'Conciliar pagamento', kicker:'Comprovante recebido',
+    intro:'O cliente enviou um comprovante. Confirme os dados para registrar a conciliação no caso.',
+    body:`<div style="display:flex;flex-direction:column;gap:14px;">
+      <label style="display:flex;flex-direction:column;gap:6px;"><span style="font-family:var(--font-mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-3);">Caso vinculado</span><input id="waPendConcCaso" value="${escHtml(casoLabel)}" ${dev?'readonly':''} style="font-size:13.5px;border:1px solid var(--border);border-radius:9px;padding:10px 12px;background:${dev?'var(--surface-2)':'var(--surface)'};color:var(--text);"></label>
+      <div style="display:flex;gap:12px;">
+        <label style="display:flex;flex-direction:column;gap:6px;flex:1;"><span style="font-family:var(--font-mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-3);">Valor recebido</span><input id="waPendConcValor" value="R$ 0,00" oninput="waPendMoedaMask(this)" style="font-size:13.5px;border:1px solid var(--border);border-radius:9px;padding:10px 12px;background:var(--surface);color:var(--text);"></label>
+        <label style="display:flex;flex-direction:column;gap:6px;"><span style="font-family:var(--font-mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-3);">Data</span><input id="waPendConcData" type="date" value="${hoje()}" style="font-family:var(--font-mono);font-size:12.5px;border:1px solid var(--border);border-radius:9px;padding:9px 11px;background:var(--surface);color:var(--text);"></label>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;padding:10px 13px;border-radius:9px;background:color-mix(in oklab,var(--success) 10%,var(--surface));border:1px solid color-mix(in oklab,var(--success) 26%,transparent);font-size:12px;color:#0E5C30;line-height:1.4;"><span style="flex-shrink:0;display:flex;">${ico('check',14)}</span>Registra o comprovante conciliado no caso. A baixa do saldo é confirmada na ficha da cobrança.</div>
+    </div>`,
+    confirmLabel:'Conciliar e resolver', onConfirm:waPendConciliarConfirmar
+  });
+}
+function waPendMoedaMask(inp){
+  let v=inp.value.replace(/\D/g,''); v=(parseInt(v||'0',10)/100);
+  inp.value='R$ '+v.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+async function waPendConciliarConfirmar(){
+  const P=window._waPend; const p=waPendListaVisivel()[P.sel]; if(!p) return;
+  const dev=waDevedorDe(p);
+  if(!dev){ showToast('Vincule a conversa a um caso antes de conciliar.','warning'); return; }
+  const valor=parseValorBR((document.getElementById('waPendConcValor')||{}).value||'')||0;
+  const data=(document.getElementById('waPendConcData')||{}).value||hoje();
+  if(valor<=0){ showToast('Informe o valor recebido.','warning'); return; }
+  try{
+    dev.comprovantes=dev.comprovantes||[];
+    dev.comprovantes.push({ id:uid(), valor, data, status:'conciliado', origem:'whatsapp', criadoEm:new Date().toISOString() });
+    dev.andamentos=dev.andamentos||[];
+    dev.andamentos.push({ id:uid(), data:new Date().toISOString(), tipo:'pagamento', texto:`Pagamento conciliado via WhatsApp: ${fmtR(valor)} em ${data.split('-').reverse().join('/')}.` });
+    if(typeof save==='function') save();
+  }catch(e){ console.warn('falha ao registrar comprovante:', e); }
+  waPendModalClose();
+  waPendResolverLocal(p.telefone,{ desfecho:'conciliado', motivo:'Pagamento conciliado' });
+  P.sel=0; waPendBadgeUpdate(); waPendRepaint();
+  showToast('Pagamento conciliado · '+fmtR(valor)+' registrado no caso.','success');
+}
+
+// CRIAR TAREFA / Delegação: grava em DB.tarefas (lido pela página Tarefas/Delegação).
+function waPendModalTarefa(){
+  const P=window._waPend; const p=waPendListaVisivel()[P.sel]; if(!p) return;
+  const nome=waNomeConversa(p);
+  const respSug = p.intent==='duvida' ? 'Jurídico' : 'Cobrança';
+  const prazo=new Date(Date.now()+3*86400000).toISOString().slice(0,10);
+  waPendModalShell({
+    icon:ico('reports',16), iconBg:'var(--gold)', iconFg:'var(--navy)',
+    title:'Criar tarefa', kicker:'Encaminhar trabalho',
+    intro:'Gera uma tarefa a partir desta conversa e (opcionalmente) envia para a fila de Delegação.',
+    body:`<div style="display:flex;flex-direction:column;gap:14px;">
+      <label style="display:flex;flex-direction:column;gap:6px;"><span style="font-family:var(--font-mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-3);">Tarefa</span><input id="waPendTarTitulo" value="Tratar contato WhatsApp — ${escHtml(nome)}" style="font-size:13.5px;border:1px solid var(--border);border-radius:9px;padding:10px 12px;background:var(--surface);color:var(--text);"></label>
+      <div style="display:flex;gap:12px;">
+        <label style="display:flex;flex-direction:column;gap:6px;flex:1;"><span style="font-family:var(--font-mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-3);">Responsável (setor)</span>
+          <select id="waPendTarResp" style="font-size:13px;border:1px solid var(--border);border-radius:9px;padding:10px 12px;background:var(--surface);color:var(--text);"><option ${respSug==='Cobrança'?'selected':''}>Cobrança</option><option ${respSug==='Jurídico'?'selected':''}>Jurídico</option></select></label>
+        <label style="display:flex;flex-direction:column;gap:6px;"><span style="font-family:var(--font-mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-3);">Prazo</span><input id="waPendTarPrazo" type="date" value="${prazo}" style="font-family:var(--font-mono);font-size:12.5px;border:1px solid var(--border);border-radius:9px;padding:9px 11px;background:var(--surface);color:var(--text);"></label>
+      </div>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:4px 0;font-size:13px;color:var(--text);"><input type="checkbox" id="waPendTarDeleg" checked style="width:16px;height:16px;accent-color:var(--gold);">Enviar para a fila de Delegação</label>
+    </div>`,
+    confirmLabel:'Criar tarefa', onConfirm:waPendTarefaConfirmar
+  });
+}
+function waPendTarefaConfirmar(){
+  const P=window._waPend; const p=waPendListaVisivel()[P.sel]; if(!p) return;
+  const titulo=(document.getElementById('waPendTarTitulo')||{}).value||('Contato WhatsApp — '+waNomeConversa(p));
+  const setor=(document.getElementById('waPendTarResp')||{}).value||'Cobrança';
+  const prazo=(document.getElementById('waPendTarPrazo')||{}).value||new Date(Date.now()+3*86400000).toISOString().slice(0,10);
+  const deleg=!!(document.getElementById('waPendTarDeleg')||{}).checked;
+  const dev=waDevedorDe(p);
+  try{
+    DB.tarefas=DB.tarefas||[];
+    const cols=(typeof tarefaColunas==='function')?tarefaColunas():[{id:'todo'}];
+    DB.tarefas.push({
+      id:uid(), titulo,
+      desc:`Tarefa criada a partir de uma conversa de WhatsApp (${waFmtTelefone(p.telefone)}).\nÚltima mensagem do cliente: "${(p.texto||'').slice(0,200)}".`,
+      tipo:'', prioridade:p.intent==='duvida'?'alta':'media',
+      dataInicio:hoje(), prazo, responsavel:setor, responsavelId:'',
+      recorrencia:'nenhuma', colunaId:(cols[0]&&cols[0].id)||'todo', status:'Pendente',
+      vinculo:dev?{ tipo:'cobranca', id:dev.id, label:dev.nome||'cobrança' }:null,
+      origem:'whatsapp_pendentes', delegacao:deleg, setor,
+      comentarios:[], prorrogacoes:[], checklist:[], anexos:[], revisoes:[], correcaoPendente:false, pontos:0,
+      historico:[{ quando:new Date().toISOString(), autor:'WhatsApp', acao:'tarefa criada a partir da fila de Pendentes'+(deleg?' · enviada à Delegação':'') }],
+      criadoPor:'WhatsApp', criadoEm:new Date().toISOString()
+    });
+    if(typeof save==='function') save();
+    if(typeof atualizarBadgeTarefas==='function') atualizarBadgeTarefas();
+  }catch(e){ console.warn('falha ao criar tarefa:', e); showToast('Não foi possível criar a tarefa.','danger'); return; }
+  waPendModalClose();
+  waPendResolverLocal(p.telefone,{ desfecho:'encaminhado', motivo: deleg?'Enviado à Delegação':'Tarefa criada' });
+  P.sel=0; waPendBadgeUpdate(); waPendRepaint();
+  showToast('Tarefa criada · '+setor+(deleg?' · enviada à Delegação':''),'success');
 }
 
 // Estado do compositor de agendamento (em memória).
