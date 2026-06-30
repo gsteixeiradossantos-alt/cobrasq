@@ -132,9 +132,11 @@ Deno.serve(async (req) => {
     const msgId = c.message_id as string;
     if (!telefone || !msgId) { puladas++; continue; }
 
-    // Estado do atendimento.
+    // Estado do atendimento. Só pula 'aguardando_humano' (humano assumindo). Um
+    // 'resolvido' que reaparece na fila significa que o cliente escreveu DE NOVO
+    // (msg mais nova que a última resposta) -> reabre e a Bia volta a atender.
     const { data: at } = await sb.from('whatsapp_atendimentos').select('*').eq('telefone', telefone).maybeSingle();
-    if (at && (at.estado === 'aguardando_humano' || at.estado === 'resolvido')) { puladas++; continue; }
+    if (at && at.estado === 'aguardando_humano') { puladas++; continue; }
     if (at?.ultima_resposta_em && (Date.now() - new Date(at.ultima_resposta_em).getTime()) < cooldownMs) { puladas++; continue; }
 
     // CLAIM idempotente: tenta inserir o log p/ este message_id. Se já existe
