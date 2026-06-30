@@ -107,7 +107,9 @@ Deno.serve(async (req) => {
     const { data: blob } = await sb.from('cobrasq_data').select('data').eq('key', 'main').maybeSingle();
     adminTel = String(blob?.data?.config?.adminTel || '').replace(/\D/g, '');
   } catch {/* ignore */}
-  const grupoTel = String(cfg.grupo_empresa_tel || '').replace(/\D/g, '');
+  // Grupo: NÃO limpar não-dígitos — o id do grupo no Z-API tem sufixo/formato
+  // próprio (ex.: "120363427277707516-group" ou "554699739101-1520964979").
+  const grupoTel = String(cfg.grupo_empresa_tel || '').trim();
 
   async function notificar(texto: string) {
     for (const dest of [adminTel, grupoTel]) {
