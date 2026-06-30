@@ -18,6 +18,7 @@ const handlers = {
   'backfill-asaas-customers': require('./_backfill-asaas-customers.js'),
   'diagnostico-financeiro': require('./_diagnostico-financeiro.js'),
   'eproc-peticionamento': require('./_eproc-peticionamento.js'),
+  'criar-cedente': require('./_criar-cedente.js'),
   // require preguiçoso: o Chromium/puppeteer (pesado) só carrega quando a ação de
   // PDF é chamada — as demais ações não pagam esse custo no cold start.
   'gerar-pdf': (req, res) => require('./_gerar-pdf.js')(req, res),
