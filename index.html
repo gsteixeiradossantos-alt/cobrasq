@@ -1987,6 +1987,9 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
       <div class="nav-item" data-page="relat" id="nav-relat">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></span><span>Relatórios</span>
       </div>
+      <div class="nav-item" data-page="nf-avulsa" id="nav-nf-avulsa" style="display:none;">
+        <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg></span><span>Emitir NF</span>
+      </div>
     </div>
 
     <!-- Seção Comunicação/WhatsApp reabilitada para o recurso de agendamento (2026-06-20). -->
@@ -2132,6 +2135,11 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
     <!-- PAGE: RELATÓRIOS -->
     <div id="page-relat" class="page-content">
       <!-- JS will populate -->
+    </div>
+
+    <!-- PAGE: EMITIR NF (avulsa/lote via Asaas) -->
+    <div id="page-nf-avulsa" class="page-content">
+      <!-- renderNfAvulsa() -->
     </div>
 
     <!-- PAGE: WHATSAPP -->
@@ -6194,6 +6202,13 @@ function iniciarSessao(){
     navFin.style.display = (tipo === 'gestor') ? '' : 'none';
   }
 
+  // Emitir NF (avulsa/lote): só gestor (proprietário). Reforçado em showPage/backend.
+  const navNfAvulsa = document.getElementById('nav-nf-avulsa');
+  if(navNfAvulsa){
+    const tipo = currentUser.tipo || '';
+    navNfAvulsa.style.display = (tipo === 'gestor') ? '' : 'none';
+  }
+
   // Relatórios e Pipeline: dados agregados de toda a carteira/credores → só gestor.
   // Colaborador (operador) não vê esses menus. Guarda em showPage reforça via URL/chamada direta.
   const tipoUser = currentUser.tipo || '';
@@ -6329,6 +6344,7 @@ const PAGE_RENDERERS = {
   pecas: ()=>renderPecas(),
   fin: ()=>renderFinanceiro(),
   relat: ()=>renderRelatorios(),
+  'nf-avulsa': ()=>renderNfAvulsa(),
   wa: ()=>renderWhatsApp(),
   intimacoes: ()=>renderIntimacoes(),
   config: ()=>renderConfiguracoes(),
@@ -6343,7 +6359,7 @@ const PAGE_RENDERERS = {
 };
 
 // Páginas com dados agregados de toda a carteira/credores — só gestor (proprietário).
-const ADMIN_ONLY_PAGES = new Set(['fin','relat','pipeline','importacao','delegacao' /* IMPORTACAO TEMP */]);
+const ADMIN_ONLY_PAGES = new Set(['fin','relat','pipeline','importacao','delegacao','nf-avulsa' /* IMPORTACAO TEMP */]);
 
 function showPage(p){
   // Guarda de papel: colaborador não acessa páginas admin-only nem por chamada direta/URL.
@@ -28130,6 +28146,232 @@ function _aavWaBadge(st){
   };
   const m = map[st]; if(!m) return '';
   return `<div style="font-size:11px;font-weight:600;color:${m[0]};margin-top:2px;">${m[1]}</div>`;
+}
+
+// ── Emitir NF (avulsa / em lote via Asaas) ───────────────────────────────────
+// Emite NFS-e REAL pelo Asaas a partir do cadastro do tomador (achado/criado por
+// CPF), sem depender de cobrança/pagamento. O lote roda no front: 1 requisição por
+// linha (evita timeout), com status por linha. Backend: api/_emitir-nf-avulso.js.
+let _nfaRows = [];
+
+// Converte "2.429,53" / "406,00" / "99.51" / "R$ 1.230,62" em número.
+function nfaParseValor(s){
+  let t = String(s==null?'':s).replace(/[^\d.,]/g,'');
+  if(!t) return null;
+  if(t.includes(',')){ t = t.replace(/\./g,'').replace(',', '.'); }      // BR: . milhar, , decimal
+  else if((t.match(/\./g)||[]).length > 1){ t = t.replace(/\./g,''); }    // 1.230.620 → 1230620
+  const n = parseFloat(t);
+  return isFinite(n) ? Math.round(n*100)/100 : null;
+}
+function nfaFmtBRL(n){ return (Number(n)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}); }
+const nfaDigits = s => String(s||'').replace(/\D/g,'');
+
+// Parser tolerante: aceita colado de planilha (TAB/;) como [nome, cpf, valor, descrição];
+// ou texto solto tipo "R$ 2.429,53: Eliseu Juarez" — extrai CPF/CNPJ e valor, resto = nome.
+function nfaParseLista(txt){
+  const out = [];
+  String(txt||'').split(/\r?\n/).forEach(raw=>{
+    const line = raw.trim();
+    if(!line) return;
+    const cols = line.split(/\t|;/).map(c=>c.trim()).filter(c=>c!=='');
+    if(cols.length >= 3){
+      out.push({ nome:cols[0]||'', cpf:nfaDigits(cols[1]), valorRaw:cols[2]||'', descricao:cols[3]||'' });
+      return;
+    }
+    // Heurística: acha CPF (11) ou CNPJ (14) e o valor; o resto vira nome.
+    const cpfm = line.match(/\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b|\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/);
+    const cpf = cpfm ? nfaDigits(cpfm[0]) : '';
+    let rest = cpfm ? line.replace(cpfm[0],' ') : line;
+    const valm = rest.match(/\d{1,3}(?:\.\d{3})*,\d{2}|\d+[.,]\d{2}|\d+/);
+    const valorRaw = valm ? valm[0] : '';
+    if(valm) rest = rest.replace(valm[0],' ');
+    const nome = rest.replace(/r\$/ig,'').replace(/[:\-–]/g,' ').replace(/\s+/g,' ').trim();
+    out.push({ nome, cpf, valorRaw, descricao:'' });
+  });
+  return out;
+}
+
+async function renderNfAvulsa(){
+  const el = document.getElementById('page-nf-avulsa'); if(!el) return;
+  el.innerHTML = `
+    <div class="cob-pg-head">
+      <div>
+        <h1 class="cob-h1">Emitir NF</h1>
+        <div class="cob-h1-sub">Emite nota fiscal de serviço (NFS-e) <b>real</b> pelo Asaas a partir do cadastro do tomador — sem precisar de cobrança. Em lote.</div>
+      </div>
+    </div>
+    <div style="background:#FEF6E7;border:1px solid #F0D89B;border-left:3px solid var(--gold);border-radius:8px;padding:12px 14px;margin-bottom:16px;font-size:12.5px;color:#7a5b10;line-height:1.5;">
+      <b>Atenção:</b> emitir é irreversível (cancelar nota é processo à parte). Cada NF precisa de <b>CPF/CNPJ</b> + endereço completo do tomador. O endereço é reaproveitado do cadastro no Asaas; quem não tiver endereço lá vai falhar com aviso. <b>Emita 1 de teste antes do lote.</b>
+    </div>
+
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:16px;">
+      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);margin-bottom:8px;">Colar lista</div>
+      <textarea id="nfa-paste" rows="5" placeholder="Um por linha. Ex.:&#10;Eliseu Juarez Zanin de Campos; 123.456.789-00; 2.429,53; Honorários de cobrança&#10;ou cole de uma planilha (Nome | CPF | Valor | Descrição)" style="width:100%;box-sizing:border-box;font-family:var(--mono,monospace);font-size:12.5px;padding:10px;border:1px solid var(--border);border-radius:8px;resize:vertical;"></textarea>
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <button class="btn btn-ghost btn-sm" onclick="nfaProcessarLista()">Processar lista ↓</button>
+        <button class="btn btn-ghost btn-sm" onclick="nfaAddLinha()">+ Linha em branco</button>
+      </div>
+    </div>
+
+    <div id="nfa-tabela"></div>
+
+    <div id="nfa-acoes" style="display:none;margin:14px 0;align-items:center;gap:14px;">
+      <button class="btn btn-primary" id="nfa-emitir-btn" onclick="nfaEmitirLote()">Emitir lote</button>
+      <span id="nfa-progresso" style="font-size:12.5px;color:var(--text-3);"></span>
+    </div>
+
+    <div style="margin-top:28px;">
+      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);margin-bottom:8px;">Notas emitidas</div>
+      <div id="nfa-historico" style="color:var(--text-3);font-size:13px;">Carregando…</div>
+    </div>`;
+  nfaDrawTabela();
+  nfaCarregarHistorico();
+}
+
+function nfaProcessarLista(){
+  const txt = (document.getElementById('nfa-paste')||{}).value || '';
+  const parsed = nfaParseLista(txt);
+  if(!parsed.length){ showToast('Nada para processar — cole a lista primeiro.','warning'); return; }
+  parsed.forEach(p=>{ _nfaRows.push({ ...p, status:'pendente', nf_url:'', erro:'', ref:'' }); });
+  const pst = document.getElementById('nfa-paste'); if(pst) pst.value='';
+  nfaDrawTabela();
+}
+function nfaAddLinha(){ _nfaRows.push({ nome:'', cpf:'', valorRaw:'', descricao:'', status:'pendente', nf_url:'', erro:'', ref:'' }); nfaDrawTabela(); }
+function nfaRemoveLinha(i){ _nfaRows.splice(i,1); nfaDrawTabela(); }
+function nfaSet(i,campo,val){ if(_nfaRows[i]) _nfaRows[i][campo] = val; }
+
+function nfaStatusCel(r){
+  if(r.status==='emitida') return `<span style="color:var(--success);font-weight:600;">✓ Emitida</span>${r.nf_url?` · <a href="${escHtml(r.nf_url)}" target="_blank" rel="noopener" style="color:var(--navy);">PDF ↗</a>`:''}`;
+  if(r.status==='processando') return `<span style="color:var(--gold-dark,#9a7a18);font-weight:600;">⏳ Processando</span>${r.nf_url?` · <a href="${escHtml(r.nf_url)}" target="_blank" rel="noopener">PDF ↗</a>`:''}`;
+  if(r.status==='emitindo') return `<span style="color:var(--text-3);">emitindo…</span>`;
+  if(r.status==='erro') return `<span style="color:var(--danger);font-weight:600;" title="${escHtml(r.erro||'')}">✗ ${escHtml((r.erro||'erro').slice(0,60))}</span>`;
+  return `<span style="color:var(--text-3);">—</span>`;
+}
+
+function nfaDrawTabela(){
+  const cont = document.getElementById('nfa-tabela'); if(!cont) return;
+  const acoes = document.getElementById('nfa-acoes');
+  if(!_nfaRows.length){
+    cont.innerHTML = `<div style="padding:32px 20px;text-align:center;color:var(--text-3);font-size:13px;border:1px dashed var(--border);border-radius:var(--radius);">Cole uma lista acima ou adicione linhas para começar.</div>`;
+    if(acoes) acoes.style.display='none';
+    return;
+  }
+  const inp = (i,campo,val,ph,extra='')=>`<input value="${escHtml(val)}" placeholder="${ph}" oninput="nfaSet(${i},'${campo}',this.value)" style="width:100%;box-sizing:border-box;font-size:12.5px;padding:6px 7px;border:1px solid var(--border);border-radius:6px;${extra}">`;
+  const linha = (r,i)=>{
+    const travado = (r.status==='emitida'||r.status==='emitindo');
+    return `<tr style="border-bottom:1px solid var(--border);${r.status==='emitida'?'opacity:.7;':''}">
+      <td style="padding:7px 8px;min-width:170px;">${inp(i,'nome',r.nome||'','Nome / Razão social')}</td>
+      <td style="padding:7px 8px;width:150px;">${inp(i,'cpf',r.cpf||'','CPF/CNPJ',(nfaDigits(r.cpf).length&&![11,14].includes(nfaDigits(r.cpf).length))?'border-color:var(--danger);':'')}</td>
+      <td style="padding:7px 8px;width:120px;">${inp(i,'valorRaw',r.valorRaw||'','0,00')}</td>
+      <td style="padding:7px 8px;min-width:150px;">${inp(i,'descricao',r.descricao||'','Descrição do serviço (opcional)')}</td>
+      <td style="padding:7px 8px;width:150px;font-size:12px;">${nfaStatusCel(r)}</td>
+      <td style="padding:7px 8px;width:28px;text-align:right;">${travado?'':`<button class="btn btn-ghost btn-sm" title="Remover" onclick="nfaRemoveLinha(${i})" style="padding:2px 8px;">✕</button>`}</td>
+    </tr>`;
+  };
+  cont.innerHTML = `
+    <div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius);">
+      <table style="width:100%;border-collapse:collapse;">
+        <thead><tr style="background:var(--surface-2);text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);">
+          <th style="padding:8px;font-weight:600;">Tomador</th>
+          <th style="padding:8px;font-weight:600;">CPF/CNPJ</th>
+          <th style="padding:8px;font-weight:600;">Valor (R$)</th>
+          <th style="padding:8px;font-weight:600;">Descrição</th>
+          <th style="padding:8px;font-weight:600;">Status</th>
+          <th style="padding:8px;"></th>
+        </tr></thead>
+        <tbody>${_nfaRows.map(linha).join('')}</tbody>
+      </table>
+    </div>`;
+  if(acoes) acoes.style.display='flex';
+}
+
+async function nfaEmitirLote(){
+  // Valida e seleciona as linhas emitíveis (ainda não emitidas).
+  const pend = [];
+  for(let i=0;i<_nfaRows.length;i++){
+    const r = _nfaRows[i];
+    if(r.status==='emitida') continue;
+    const cpf = nfaDigits(r.cpf);
+    const valor = nfaParseValor(r.valorRaw);
+    if(![11,14].includes(cpf.length)){ r.status='erro'; r.erro='CPF/CNPJ inválido'; continue; }
+    if(!(valor>0)){ r.status='erro'; r.erro='Valor inválido'; continue; }
+    r._cpf=cpf; r._valor=valor; pend.push(i);
+  }
+  nfaDrawTabela();
+  if(!pend.length){ showToast('Nenhuma linha válida para emitir.','warning'); return; }
+
+  if(!confirm(`Emitir ${pend.length} nota(s) fiscal(is) agora? Esta ação é irreversível.`)) return;
+
+  const btn = document.getElementById('nfa-emitir-btn');
+  const prog = document.getElementById('nfa-progresso');
+  if(btn){ btn.disabled=true; }
+  let ok=0, fail=0, done=0;
+  for(const i of pend){
+    const r = _nfaRows[i];
+    if(!r.ref){ try{ r.ref = crypto.randomUUID(); }catch(_){ r.ref = 'nfa-'+i+'-'+done; } }
+    r.status='emitindo'; r.erro=''; nfaDrawTabela();
+    if(prog) prog.textContent = `Emitindo ${done+1} de ${pend.length}…`;
+    try{
+      const resp = await fetch('/api/emitir-nf-avulso', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json', ...(await authHeaders()) },
+        body: JSON.stringify({ nome:r.nome, doc:r._cpf, valor:r._valor, descricao:r.descricao||'', ref:r.ref }),
+      });
+      const j = await resp.json().catch(()=>({}));
+      if(resp.ok && (j.nf_status==='emitida' || j.nf_status==='processando')){
+        r.status = j.nf_status; r.nf_url = j.nf_url||''; ok++;
+      } else {
+        r.status='erro'; r.erro = traduzirErro(j.error||j.message||('HTTP '+resp.status)); fail++;
+      }
+    }catch(e){
+      r.status='erro'; r.erro = traduzirErro(e.message||String(e)); fail++;
+    }
+    done++; nfaDrawTabela();
+  }
+  if(btn){ btn.disabled=false; }
+  if(prog) prog.textContent = `Concluído: ${ok} emitida(s)${fail?`, ${fail} com erro`:''}.`;
+  showToast(`${ok} nota(s) emitida(s)${fail?`, ${fail} com erro`:''}.`, fail? 'warning':'success');
+  nfaCarregarHistorico();
+}
+
+async function nfaCarregarHistorico(){
+  const cont = document.getElementById('nfa-historico'); if(!cont) return;
+  const supa = getSupabase();
+  if(!supa){ cont.innerHTML = '<div style="color:var(--text-3);">Faça login para ver o histórico.</div>'; return; }
+  let rows = [];
+  try{
+    const { data, error } = await supa.from('nf_avulsa').select('*').order('criada_em',{ascending:false}).limit(200);
+    if(error) throw error;
+    rows = data||[];
+  }catch(e){
+    cont.innerHTML = `<div style="color:var(--danger);">Não consegui carregar: ${escHtml(traduzirErro(e.message||String(e)))}</div>`;
+    return;
+  }
+  if(!rows.length){ cont.innerHTML = '<div style="color:var(--text-3);padding:8px 0;">Nenhuma nota emitida ainda.</div>'; return; }
+  const stCor = s => s==='emitida'?'var(--success)': s==='erro'?'var(--danger)': s==='processando'?'#9a7a18':'var(--text-3)';
+  const linha = r =>{
+    const dt = r.criada_em ? new Date(r.criada_em).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
+    return `<tr style="border-bottom:1px solid var(--border);">
+      <td style="padding:9px 10px;font-size:12.5px;font-weight:600;">${escHtml(r.nome||'—')}<div style="font-size:11px;color:var(--text-3);font-weight:400;">${escHtml(r.doc_digits||r.doc||'')}</div></td>
+      <td style="padding:9px 10px;font-size:12.5px;white-space:nowrap;">${nfaFmtBRL(r.valor)}</td>
+      <td style="padding:9px 10px;font-size:12px;color:${stCor(r.nf_status)};font-weight:600;white-space:nowrap;">${escHtml(r.nf_status||'')}</td>
+      <td style="padding:9px 10px;font-size:11.5px;color:var(--text-3);white-space:nowrap;">${dt}</td>
+      <td style="padding:9px 10px;text-align:right;white-space:nowrap;">${r.nf_url?`<a href="${escHtml(r.nf_url)}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">PDF ↗</a>`:(r.erro?`<span title="${escHtml(r.erro)}" style="color:var(--danger);font-size:11.5px;cursor:help;">erro</span>`:'')}</td>
+    </tr>`;
+  };
+  cont.innerHTML = `
+    <div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius);">
+      <table style="width:100%;border-collapse:collapse;">
+        <thead><tr style="background:var(--surface-2);text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);">
+          <th style="padding:8px 10px;font-weight:600;">Tomador</th>
+          <th style="padding:8px 10px;font-weight:600;">Valor</th>
+          <th style="padding:8px 10px;font-weight:600;">Status</th>
+          <th style="padding:8px 10px;font-weight:600;">Quando</th>
+          <th style="padding:8px 10px;"></th>
+        </tr></thead>
+        <tbody>${rows.map(linha).join('')}</tbody>
+      </table>
+    </div>`;
 }
 
 async function renderAssinaturas(){
