@@ -7696,37 +7696,86 @@ function delegacaoPendenciasDigest(){
   const cobrancas=delegacaoCobrancasDigest(120).filter(c=>!c.resp).slice(0,40);
   return { tarefas, judiciais, cobrancas, hoje };
 }
-async function delegacaoBiaScan(){
-  const box=document.getElementById('deleg-result');
-  if(box) box.innerHTML='<div style="padding:18px;color:var(--text-3);">A Bia está varrendo as pendências e montando a proposta de delegação…</div>';
+// Seleção manual: o gestor marca o que delegar; a Bia analisa só o selecionado.
+window._delegSel = window._delegSel || new Set();
+function delegacaoSelData(){
+  try{ return delegacaoPendenciasDigest(); }
+  catch(_){ return { tarefas:[], judiciais:[], cobrancas:[], hoje:_metaYmd(new Date()) }; }
+}
+function delegacaoToggleSel(key, checked){
+  if(checked) window._delegSel.add(key); else window._delegSel.delete(key);
+  const btn=document.getElementById('deleg-go'); const n=window._delegSel.size;
+  if(btn){ btn.disabled=!n; btn.textContent='✨ Analisar selecionados'+(n?(' ('+n+')'):'')+' com a Bia'; }
+}
+function delegacaoToggleGrupo(kind, checked){
+  document.querySelectorAll('input[data-deleg-kind="'+kind+'"]').forEach(cb=>{ cb.checked=checked; delegacaoToggleSel(cb.value, checked); });
+}
+function delegacaoListaSelecionavel(){
+  const dig=delegacaoSelData(); const sel=window._delegSel;
+  const grupo=(kind,cor,titulo,itens,rowFn)=>{
+    const head=`<div style="display:flex;align-items:center;gap:8px;margin:14px 0 4px;">
+        <span style="width:9px;height:9px;border-radius:3px;background:${cor};flex-shrink:0;"></span>
+        <span style="font-size:12.5px;font-weight:700;color:var(--text);">${titulo}</span>
+        <span style="font-size:11px;color:var(--text-3);">(${itens.length})</span>
+        ${itens.length?`<label style="margin-left:auto;font-size:11px;color:var(--text-3);display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" onchange="delegacaoToggleGrupo('${kind}',this.checked)"> selecionar todos</label>`:''}
+      </div>`;
+    const body=itens.length
+      ? itens.map(it=>{ const key=kind+':'+it.id; return `<label style="display:flex;align-items:center;gap:9px;padding:7px 4px;border-top:1px solid var(--border-2);font-size:12.5px;cursor:pointer;">
+          <input type="checkbox" data-deleg-kind="${kind}" value="${escHtml(key)}" ${sel.has(key)?'checked':''} onchange="delegacaoToggleSel('${escHtml(key)}',this.checked)" style="flex-shrink:0;">
+          ${rowFn(it)}</label>`; }).join('')
+      : `<div style="padding:7px 4px;color:var(--text-4);font-size:12px;">—</div>`;
+    return head+body;
+  };
+  const tarRow=t=>`<span style="flex:1;min-width:0;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(t.titulo)}${t.resp?`<span style="color:var(--text-3);"> · ${escHtml(t.resp)}</span>`:''}</span>
+      ${t.prazo?`<span style="font-family:var(--font-mono);font-size:11px;color:${t.atrasada?'var(--danger)':'var(--text-3)'};flex-shrink:0;">${t.prazo.slice(8,10)}/${t.prazo.slice(5,7)}</span>`:''}
+      ${t.atrasada?`<span style="font-size:10px;color:#fff;background:#e53e3e;border-radius:8px;padding:1px 6px;flex-shrink:0;">atrasada</span>`:''}`;
+  const judRow=j=>`<span style="flex:1;min-width:0;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(j.devedor||'—')}${j.credor?`<span style="color:var(--text-3);"> · ${escHtml(j.credor)}</span>`:''}</span>
+      ${j.valor?`<span style="font-family:var(--font-mono);font-size:11px;color:var(--text-3);flex-shrink:0;">R$ ${Number(j.valor).toLocaleString('pt-BR',{minimumFractionDigits:2})}</span>`:''}`;
+  const cobRow=c=>`<span style="flex:1;min-width:0;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(c.devedor||'—')}${c.credor?`<span style="color:var(--text-3);"> · ${escHtml(c.credor)}</span>`:''}</span>
+      ${c.status?`<span style="font-size:10.5px;color:var(--text-3);flex-shrink:0;">${escHtml(c.status)}</span>`:''}`;
+  return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:4px 14px 14px;">
+    ${grupo('tar','#e53e3e','Tarefas pendentes (reatribuir)',dig.tarefas,tarRow)}
+    ${grupo('jud','#9F7AEA','Casos no judicial sem tarefa',dig.judiciais,judRow)}
+    ${grupo('cob','#2B6CB0','Cobranças sem responsável',dig.cobrancas,cobRow)}
+  </div>`;
+}
+async function delegacaoAnalisarSelecionados(){
+  const sel=window._delegSel; if(!sel||!sel.size){ showToast('Selecione ao menos um item.','warning'); return; }
+  const box=document.getElementById('deleg-result'); if(box) box.innerHTML='<div style="padding:18px;color:var(--text-3);">A Bia está analisando os itens selecionados…</div>';
   try{
     try{ await carregarRosterAppUsers(); }catch(_){}
     const colabs=(Array.isArray(_rosterAppUsers)?_rosterAppUsers:[]).map(u=>u.nome);
     const tipos=tarefaTipos().map(t=>t.nome);
-    const dig=delegacaoPendenciasDigest();
-    if(!dig.tarefas.length && !dig.judiciais.length && !dig.cobrancas.length){
-      if(box) box.innerHTML='<div style="padding:18px;color:var(--text-3);">Nenhuma pendência para delegar no momento. 👏</div>'; return;
-    }
+    const dig=delegacaoSelData();
+    const byId=(arr)=>{ const m={}; (arr||[]).forEach(x=>m[x.id]=x); return m; };
+    const tMap=byId(dig.tarefas), jMap=byId(dig.judiciais), cMap=byId(dig.cobrancas);
+    const itens=[];
+    sel.forEach(key=>{
+      const p=key.indexOf(':'); const kind=key.slice(0,p), id=key.slice(p+1);
+      if(kind==='tar' && tMap[id]) itens.push({ kind:'tarefa', id, titulo:tMap[id].titulo, respAtual:tMap[id].resp||'', prazoAtual:tMap[id].prazo||'', tipo:tMap[id].tipo||'' });
+      else if(kind==='jud' && jMap[id]) itens.push({ kind:'judicial', id, devedor:jMap[id].devedor, credor:jMap[id].credor, valor:jMap[id].valor||0, titulo:'Providência judicial — '+(jMap[id].devedor||'')+(jMap[id].credor?(' ('+jMap[id].credor+')'):'') });
+      else if(kind==='cob' && cMap[id]) itens.push({ kind:'cobranca', id, devedor:cMap[id].devedor, credor:cMap[id].credor, status:cMap[id].status||'', titulo:'Primeiro contato — '+(cMap[id].devedor||'')+(cMap[id].credor?(' ('+cMap[id].credor+')'):'') });
+    });
+    if(!itens.length){ if(box) box.innerHTML='<div style="padding:18px;color:var(--text-3);">Os itens selecionados não estão mais em aberto.</div>'; return; }
     const extra=(document.getElementById('deleg-input')?.value||'').trim();
     const prompt=[
-      'Você é a Bia, assistente do escritório de cobrança/jurídico COBRASQ. Ajude o GESTOR (Dr. Gustavo, advogado) a DELEGAR trabalho à equipe, varrendo as pendências abaixo.',
-      'Objetivo: aliviar o gestor distribuindo o que for OPERACIONAL/ADMINISTRATIVO aos colaboradores, e criando tarefas para o que está parado. NUNCA delegue atos PRIVATIVOS DE ADVOGADO (redigir/protocolar petição, cumprir prazo processual, reajuizar, recurso, audiência, manifestação, impugnação) — esses ficam com o gestor; não os inclua na proposta.',
-      'Pode delegar a colaborador: ligar/cobrar, primeiro contato, verificar/separar documentos, organizar, avisar cliente, conferir cadastro, agendar, pesquisar dados simples, restituição de custas administrativa.',
+      'Você é a Bia, assistente do escritório de cobrança/jurídico COBRASQ. O GESTOR (Dr. Gustavo, advogado) já ESCOLHEU os itens abaixo para delegar. Para CADA item, monte UMA delegação — NÃO pule nenhum item.',
       'Responda APENAS com JSON válido (sem texto fora, sem cercas markdown), no formato:',
       '{"delegacoes":[{"tarefaId":null,"titulo":"","descricao":"","responsavelNome":"","prazo":"YYYY-MM-DD","tipoNome":"","vinculoCobrancaId":null,"checklist":["passo"],"ehTarefaNova":false,"instrucoes":null}]}',
-      'REATRIBUIÇÃO: para mover uma TAREFA EXISTENTE (lista TAREFAS) a um colaborador, preencha "tarefaId" com o id dela, "responsavelNome" com o colaborador e repita o "titulo" original. Só reatribua tarefas operacionais; deixe as privativas de advogado de fora.',
-      'TAREFA NOVA: para casos no judicial e cobranças sem responsável, deixe tarefaId=null, ehTarefaNova=true e descreva o passo-a-passo em "instrucoes" e os itens em "checklist". Use "vinculoCobrancaId" com o id do devedor/cobrança quando a tarefa vier dessas listas.',
-      'Regras: responsavelNome deve ser EXATAMENTE um dos COLABORADORES. prazo: data absoluta (hoje é '+dig.hoje+'); proponha prazos realistas. Se nenhum colaborador couber numa pendência, não invente — pule.',
+      'Mapeamento por item da lista SELECIONADOS:',
+      '- kind="tarefa": é REATRIBUIÇÃO. Preencha "tarefaId" com o id e repita o "titulo".',
+      '- kind="judicial" ou "cobranca": é TAREFA NOVA. Deixe tarefaId=null, ehTarefaNova=true, use o "titulo" dado, preencha "vinculoCobrancaId" com o id, e escreva passo-a-passo em "instrucoes" e itens em "checklist".',
+      'Responsável: escolha o COLABORADOR mais provável. Se não houver colaborador adequado (ou a lista estiver vazia), deixe "responsavelNome" vazio — o gestor escolhe na revisão. NUNCA descarte o item por falta de responsável.',
+      'Atos PRIVATIVOS DE ADVOGADO (redigir/protocolar petição, cumprir prazo, reajuizar, recurso, audiência, manifestação): ainda devolva o item, mas deixe "responsavelNome" vazio e registre na "descricao" que é ato do advogado.',
+      'prazo: data absoluta (hoje é '+dig.hoje+'); proponha algo realista. responsavelNome, quando preenchido, deve ser EXATAMENTE um dos COLABORADORES.',
       'COLABORADORES: '+JSON.stringify(colabs),
       'TIPOS DE TAREFA: '+JSON.stringify(tipos),
-      'TAREFAS PENDENTES (id, titulo, resp atual, prazo, prioridade, atrasada, tipo): '+JSON.stringify(dig.tarefas),
-      'CASOS NO JUDICIAL SEM TAREFA (id, devedor, credor, valor): '+JSON.stringify(dig.judiciais),
-      'COBRANÇAS ABERTAS SEM RESPONSÁVEL (id, devedor, credor, status): '+JSON.stringify(dig.cobrancas),
-      extra?('OBSERVAÇÃO DO GESTOR (priorize isto): '+extra):''
+      'SELECIONADOS: '+JSON.stringify(itens),
+      extra?('OBSERVAÇÃO DO GESTOR (priorize): '+extra):''
     ].filter(Boolean).join('\n');
     const raw=await chamarClaudeTar(prompt, 4096);
     const sug=delegacaoParse(raw);
-    if(!sug.length){ if(box) box.innerHTML='<div style="padding:18px;color:var(--danger);">A Bia não encontrou delegações claras. Escreva uma observação no campo acima e rode de novo.</div>'; return; }
+    if(!sug.length){ if(box) box.innerHTML='<div style="padding:18px;color:var(--danger);">A Bia não retornou a proposta. Tente de novo.</div>'; return; }
     window._deleg={ sugestoes:sug };
     if(box) box.innerHTML=delegacaoRenderReview(sug);
   }catch(e){ if(box) box.innerHTML='<div style="padding:18px;color:var(--danger);">Falha na Bia: '+escHtml(e.message||'erro')+'</div>'; }
@@ -7873,7 +7922,7 @@ function delegacaoConfirmar(){
   save(); try{ atualizarBadgeTarefas(); }catch(_){}
   const criadas=n-reatN;
   const msg=[criadas?criadas+' criada(s)':'', reatN?reatN+' reatribuída(s)':''].filter(Boolean).join(' · ')||'0 tarefas';
-  window._deleg=null; showToast('Delegação aplicada: '+msg+'.','success'); renderDelegacao();
+  window._deleg=null; window._delegSel=new Set(); showToast('Delegação aplicada: '+msg+'.','success'); renderDelegacao();
 }
 function delegacaoRenderAcompanhamento(){
   const ts=(DB.tarefas||[]).filter(t=>t && (t.origem==='delegacao' || t.delegada));
@@ -7916,17 +7965,19 @@ function renderDelegacao(){
     <div style="max-width:1000px;margin:0 auto;padding:24px 20px 60px;">
       <div style="margin-bottom:14px;">
         <div style="font-size:20px;font-weight:700;letter-spacing:-.02em;">Delegação</div>
-        <div style="font-size:12.5px;color:var(--text-2);margin-top:2px;">A Bia varre suas pendências — tarefas, casos no judicial e cobranças — e sugere a quem delegar, com prazo. Reatribuir move o card; tarefa nova ganha um “como fazer” reutilizável.</div>
+        <div style="font-size:12.5px;color:var(--text-2);margin-top:2px;">Marque nas listas o que quer delegar — tarefas pendentes, casos no judicial e cobranças — e a Bia propõe responsável, prazo e o “como fazer”. Reatribuir move o card; tarefa nova é criada.</div>
       </div>
       ${delegacaoPendenciasPanel()}
-      <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px;">
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between;">
-          <div style="font-size:13px;font-weight:700;color:var(--text);">Sugestão automática</div>
-          <button class="btn btn-primary" onclick="delegacaoBiaScan()">✨ Varrer pendências e sugerir</button>
+      ${(!Array.isArray(_rosterAppUsers)||!_rosterAppUsers.length)?`<div class="cob-autobar" style="margin-bottom:12px;"><span class="cob-auto-ic">ℹ️</span><div>Nenhum colaborador cadastrado — você pode preparar as tarefas, mas precisa cadastrar a equipe para atribuir.</div></div>`:''}
+      <div style="font-size:12.5px;color:var(--text-2);margin-bottom:6px;">Marque o que quer delegar e deixe a Bia propor responsável, prazo e o “como fazer”.</div>
+      ${delegacaoListaSelecionavel()}
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px;margin-top:12px;">
+        <label style="font-size:12px;font-weight:600;color:var(--text-2);display:block;">Observação (opcional) — foca a análise</label>
+        <textarea id="deleg-input" rows="2" placeholder="Ex.: passa o que der pra Natália até sexta; estes são urgentes." style="width:100%;margin-top:6px;font-size:13px;padding:10px;border:1px solid var(--border);border-radius:8px;font-family:inherit;"></textarea>
+        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between;">
+          <button class="btn btn-ghost btn-sm" onclick="delegacaoBiaSugerir()">Interpretar só a observação</button>
+          <button class="btn btn-primary" id="deleg-go" onclick="delegacaoAnalisarSelecionados()" ${window._delegSel&&window._delegSel.size?'':'disabled'}>✨ Analisar selecionados${window._delegSel&&window._delegSel.size?(' ('+window._delegSel.size+')'):''} com a Bia</button>
         </div>
-        <label style="font-size:12px;font-weight:600;color:var(--text-2);display:block;margin-top:12px;">Observação (opcional) — foque a Bia ou escreva um pedido específico</label>
-        <textarea id="deleg-input" rows="2" placeholder="Ex.: priorize as cobranças do cliente Acme; passa o que der pra Natália até sexta." style="width:100%;margin-top:6px;font-size:13px;padding:10px;border:1px solid var(--border);border-radius:8px;font-family:inherit;"></textarea>
-        <div style="margin-top:8px;text-align:right;"><button class="btn btn-ghost btn-sm" onclick="delegacaoBiaSugerir()">Interpretar só a observação</button></div>
       </div>
       <div id="deleg-result">${sug.length?delegacaoRenderReview(sug):''}</div>
       <div id="deleg-acomp">${delegacaoRenderAcompanhamento()}</div>
