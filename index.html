@@ -24313,13 +24313,28 @@ async function renderWAPendentes(el){
   const supa = getSupabase();
   if(!supa){ el.innerHTML = `<div style="padding:20px;color:var(--text-3);">Supabase indisponível.</div>`; return; }
   try{
-    const { data, error } = await supa
-      .from('vw_conversas_pendentes')
-      .select('id,telefone,caso_id,texto,tipo,recebida_em')
-      .order('recebida_em', { ascending:true })
-      .limit(100);
-    if(error) throw error;
-    P.lista = data || [];
+    // Fila = conversas sem resposta (vw_conversas_pendentes) UNIÃO atendimentos
+    // que a Bia encaminhou (estado='aguardando_humano' — estes já têm resposta
+    // dela, então sairiam da view; precisam vir da tabela de atendimentos).
+    const [pend, hand] = await Promise.all([
+      supa.from('vw_conversas_pendentes').select('id,telefone,caso_id,texto,tipo,recebida_em').order('recebida_em',{ ascending:true }).limit(100),
+      supa.from('whatsapp_atendimentos').select('telefone,caso_id,resumo,motivo_handoff,ultima_resposta_em,dados_coletados').eq('estado','aguardando_humano').limit(100)
+    ]);
+    if(pend.error) throw pend.error;
+    const porTel = {};
+    (pend.data||[]).forEach(r=>{ porTel[r.telefone] = r; });
+    if(!hand.error){ // tolera tabela ausente (migração 20260702 ainda não aplicada)
+      (hand.data||[]).forEach(h=>{
+        const cur = porTel[h.telefone] || {};
+        porTel[h.telefone] = {
+          ...cur, telefone:h.telefone, caso_id: h.caso_id || cur.caso_id || null,
+          texto: cur.texto || h.resumo || '(encaminhado pela Bia)', tipo: cur.tipo || 'texto',
+          recebida_em: cur.recebida_em || h.ultima_resposta_em,
+          _handoff:true, resumo:h.resumo, motivo_handoff:h.motivo_handoff, dados:h.dados_coletados
+        };
+      });
+    }
+    P.lista = Object.values(porTel).sort((a,b)=> new Date(a.recebida_em||0) - new Date(b.recebida_em||0));
   }catch(e){
     el.innerHTML = `<div style="padding:20px;color:var(--text-3);">Não foi possível carregar as pendentes.<br><span style="font-size:12px;">${escHtml(e.message||String(e))}</span><br><span style="font-size:12px;">Confirme que a migração 20260701 foi aplicada e que o webhook "Ao receber" do Z-API está ligado.</span></div>`;
     return;
@@ -24342,9 +24357,10 @@ async function renderWAPendentes(el){
     const nome = waNomeConversa(p);
     const prev = (p.texto || (p.tipo!=='texto'?('['+p.tipo+']'):'') || '—').slice(0,60);
     const ativo = (P.sel===i);
+    const tagHandoff = p._handoff ? '<span style="font-size:10px;background:var(--navy,#15212b);color:#fff;border-radius:8px;padding:1px 6px;margin-left:6px;">🤖→👤 aguardando humano</span>' : '';
     return `<div onclick="waPendSelecionar(${i})" style="padding:10px 12px;border-bottom:1px solid var(--gray-line);cursor:pointer;${ativo?'background:var(--bg-2,#f4f1ec);':''}">
       <div style="display:flex;justify-content:space-between;gap:8px;">
-        <strong style="font-size:14px;">${escHtml(nome)}</strong>
+        <strong style="font-size:14px;">${escHtml(nome)}${tagHandoff}</strong>
         <span style="font-size:11px;color:var(--text-3);white-space:nowrap;">${waHaQuantoTempo(p.recebida_em)}</span>
       </div>
       <div style="font-size:12px;color:var(--text-3);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(prev)}</div>
@@ -24513,6 +24529,9 @@ async function waPendEnviar(i){
       if(error) throw error;
       showToast('Resposta agendada para a próxima manhã útil.','success');
     }
+    // Humano assumiu: encerra o atendimento automático desta conversa (tira do
+    // estado aguardando_humano; a Bia só volta a agir se o cliente escrever de novo).
+    try { await supa.from('whatsapp_atendimentos').upsert({ telefone:p.telefone, estado:'resolvido', updated_at:new Date().toISOString() }, { onConflict:'telefone' }); } catch(_e){/* tabela pode não existir ainda */}
     // Remove da fila local (a view também já não a retornaria após o envio).
     P.lista.splice(P.sel,1);
     P.sel = null; P.sugestoes = [];
@@ -25110,7 +25129,54 @@ function renderWAConfig(el){
         </div>
       </div>
     </div>
+    <div class="panel" style="margin-top:16px;">
+      <div class="panel-header"><span class="panel-title">Atendimento automático (Bia)</span></div>
+      <div class="panel-body" id="bia-auto-body"><div style="font-size:13px;color:var(--text-3);">Carregando…</div></div>
+    </div>
   `;
+  carregarBiaConfig();
+}
+
+// Config do agente Bia vive na tabela whatsapp_bia_config (não no blob), pra o
+// worker server-side ler direto. Só o dono edita (RLS reforça no servidor).
+async function carregarBiaConfig(){
+  const body = document.getElementById('bia-auto-body'); if(!body) return;
+  const ehDono = (currentUser?.papel === 'proprietario') || (currentUser?.tipo === 'gestor');
+  if(!ehDono){ body.innerHTML = '<div style="font-size:13px;color:var(--text-3);">Só o gestor pode configurar o atendimento automático.</div>'; return; }
+  const supa = getSupabase();
+  if(!supa){ body.innerHTML = '<div style="font-size:13px;color:var(--text-3);">Supabase indisponível.</div>'; return; }
+  let cfg = { auto_ativo:false, grupo_empresa_tel:'' };
+  try {
+    const { data, error } = await supa.from('whatsapp_bia_config').select('*').eq('id',1).maybeSingle();
+    if(error) throw error;
+    if(data) cfg = data;
+  } catch(e){
+    body.innerHTML = '<div style="font-size:13px;color:var(--text-3);">Config indisponível (aplique a migração 20260702).<br><span style="font-size:11px;">'+escHtml(e.message||String(e))+'</span></div>';
+    return;
+  }
+  window._biaCfg = cfg;
+  body.innerHTML = `
+    <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin-bottom:14px;">
+      <input type="checkbox" id="bia-auto-ativo" ${cfg.auto_ativo?'checked':''} onchange="salvarBiaConfig()" style="width:18px;height:18px;accent-color:var(--navy);cursor:pointer;margin-top:2px;"/>
+      <span><b>Bia responde automaticamente (24/7)</b><br><span style="font-size:12px;color:var(--text-3);">Ligado: a Bia responde sozinha as conversas sem resposta, com o contexto do caso. Casos sensíveis e números não cadastrados ela faz a triagem e encaminha para um humano.</span></span>
+    </label>
+    <div class="fg"><label>Grupo da empresa (telefone ou ID — avisos de handoff)</label><input type="text" id="bia-grupo" value="${escHtml(cfg.grupo_empresa_tel||'')}" placeholder="55 46 99999-0000 ou ID do grupo" onblur="salvarBiaConfig()"/></div>
+    <div id="bia-auto-msg" style="font-size:12px;margin-top:6px;"></div>
+    <div style="background:var(--bg);border-radius:var(--radius-sm);padding:12px;font-size:12px;color:var(--text-2);margin-top:10px;">⚠️ A Bia envia mensagens reais na linha oficial. Acompanhe a aba <b>Pendentes</b> — os encaminhamentos dela aparecem lá marcados.</div>
+  `;
+}
+function salvarBiaConfig(){
+  const supa = getSupabase(); if(!supa) return;
+  const ativo = document.getElementById('bia-auto-ativo')?.checked || false;
+  const grupo = (document.getElementById('bia-grupo')?.value || '').trim();
+  const msg = document.getElementById('bia-auto-msg');
+  supa.auth.getUser().then(({data})=>
+    supa.from('whatsapp_bia_config').upsert({ id:1, auto_ativo:ativo, grupo_empresa_tel:grupo, updated_by:data?.user?.id||null, updated_at:new Date().toISOString() }, { onConflict:'id' })
+  ).then(({error})=>{
+    if(!msg) return;
+    msg.textContent = error ? ('Falha ao salvar: '+error.message) : ('Salvo'+(ativo?' — Bia ATIVA ✅':' — Bia desligada'));
+    msg.style.color = error ? 'var(--danger)' : 'var(--success)';
+  }).catch(e=>{ if(msg){ msg.textContent='Falha: '+(e.message||e); msg.style.color='var(--danger)'; } });
 }
 
 function renderWARegua(el){
