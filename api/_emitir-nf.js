@@ -73,7 +73,8 @@ module.exports = async function handler(req, res) {
     const invoicePayload = {
       // Vincular ao pagamento faz o tomador ser o pagador (devedor) automaticamente.
       payment: op.asaas_payment_id,
-      serviceDescription: process.env.ASAAS_NF_SERVICE_DESCRIPTION || 'Serviços de cobrança e recuperação de crédito.',
+      serviceDescription: process.env.ASAAS_NF_SERVICE_DESCRIPTION || 'Serviços de cobrança e recuperação de crédito prestados ao tomador, referentes ao acompanhamento e à intermediação do recebimento de valores inadimplidos.',
+      municipalServiceDescription: process.env.ASAAS_NF_MUNICIPAL_SERVICE_DESCRIPTION || 'Serviços de cobrança e recuperação de crédito prestados ao tomador, referentes ao acompanhamento e à intermediação do recebimento de valores inadimplidos.',
       observations: `Operação ${op.id}${op.parcela ? ' — parcela ' + op.parcela + '/' + op.total_parcelas : ''}.`,
       value: base,
       deductions: 0,

@@ -18,6 +18,10 @@ const { requireUser, applyCors } = require('./_auth.js');
 const { sbFetch } = require('./_sb.js');
 const { asaasReq, ensureAsaasCustomer } = require('./_asaas.js');
 
+// Descrição padrão do serviço (também usada como municipalServiceDescription, que
+// algumas prefeituras exigem). Sobrescrevível por env.
+const DEFAULT_NF_DESC = 'Serviços de cobrança e recuperação de crédito prestados ao tomador, referentes ao acompanhamento e à intermediação do recebimento de valores inadimplidos.';
+
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 const digits = (s) => String(s || '').replace(/\D/g, '');
@@ -95,7 +99,8 @@ module.exports = async function handler(req, res) {
     const iss = Number(process.env.ASAAS_NF_ISS || 0);
     const invoicePayload = {
       customer: customerId,
-      serviceDescription: descricao || process.env.ASAAS_NF_SERVICE_DESCRIPTION || 'Serviços de cobrança e recuperação de crédito.',
+      serviceDescription: descricao || process.env.ASAAS_NF_SERVICE_DESCRIPTION || DEFAULT_NF_DESC,
+      municipalServiceDescription: process.env.ASAAS_NF_MUNICIPAL_SERVICE_DESCRIPTION || DEFAULT_NF_DESC,
       observations: ref ? `Ref ${ref}.` : 'Emissão avulsa.',
       value: valor,
       deductions: 0,
