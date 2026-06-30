@@ -64,13 +64,19 @@ module.exports = async function handler(req, res) {
 
   let rowId = null;
   try {
-    // Idempotência: se já existe uma nota EMITIDA com a mesma ref, não emite outra.
-    if (ref) {
-      const ja = await sbFetch(`nf_avulsa?metadata->>ref=eq.${encodeURIComponent(ref)}&nf_status=eq.emitida&select=id,nf_url,nf_asaas_id&limit=1`).catch(() => []);
-      if (Array.isArray(ja) && ja[0]) {
-        return res.status(200).json({ ok: true, skipped: 'já emitida (ref)', nf_status: 'emitida', nf_id: ja[0].nf_asaas_id, nf_url: ja[0].nf_url });
-      }
+    // DEDUP FORTE por (CPF/CNPJ + valor): se já há nota EMITIDA pro mesmo tomador e
+    // valor, NÃO emite outra — evita duplicidade na prefeitura. E para não empilhar
+    // tentativas falhas: reaproveita UMA linha não-emitida do mesmo item e apaga as
+    // demais (resolve o "18 → 36 com erro").
+    const mesmas = await sbFetch(`nf_avulsa?doc_digits=eq.${encodeURIComponent(doc)}&valor=eq.${valor}&select=id,nf_status,nf_url,nf_asaas_id&order=criada_em.desc`).catch(() => []);
+    const emitida = Array.isArray(mesmas) ? mesmas.find((x) => x.nf_status === 'emitida') : null;
+    if (emitida) {
+      return res.status(200).json({ ok: true, skipped: 'já emitida (mesmo CPF+valor)', nf_status: 'emitida', nf_id: emitida.nf_asaas_id, nf_url: emitida.nf_url });
     }
+    const reuso = Array.isArray(mesmas) ? mesmas.filter((x) => x.nf_status !== 'emitida') : [];
+    rowId = reuso[0] ? reuso[0].id : null;
+    const apagar = reuso.slice(1).map((x) => x.id);
+    if (apagar.length) { await sbFetch(`nf_avulsa?id=in.(${apagar.join(',')})`, { method: 'DELETE' }).catch(() => {}); }
 
     // Garante o customer no Asaas (acha por CPF, sincroniza endereço; cria se não houver).
     // Monta um objeto "dev-like" que buildAsaasAddress/ensureAsaasCustomer entende.
@@ -87,17 +93,19 @@ module.exports = async function handler(req, res) {
     };
     const { customerId } = await ensureAsaasCustomer(devLike);
 
-    // Registra a tentativa ANTES de chamar o Asaas (status 'emitindo'), para haver
-    // rastro mesmo se a emissão falhar no meio.
-    const ins = await sbFetch('nf_avulsa', {
-      method: 'POST',
-      body: JSON.stringify({
-        nome: nome || null, doc, doc_digits: doc, valor, descricao: descricao || null,
-        asaas_customer_id: customerId, nf_status: 'emitindo', criada_por: user.id,
-        metadata: ref ? { ref } : {},
-      }),
-    });
-    rowId = Array.isArray(ins) && ins[0] ? ins[0].id : null;
+    // Registra/atualiza a tentativa ANTES de chamar o Asaas (status 'emitindo'), para
+    // haver rastro mesmo se falhar no meio. Reusa a linha de erro do item se existir.
+    const linhaTentativa = {
+      nome: nome || null, doc, doc_digits: doc, valor, descricao: descricao || null,
+      asaas_customer_id: customerId, nf_status: 'emitindo', erro: null, criada_por: user.id,
+      metadata: ref ? { ref } : {},
+    };
+    if (rowId) {
+      await sbFetch(`nf_avulsa?id=eq.${rowId}`, { method: 'PATCH', body: JSON.stringify(linhaTentativa) }).catch(() => {});
+    } else {
+      const ins = await sbFetch('nf_avulsa', { method: 'POST', body: JSON.stringify(linhaTentativa) });
+      rowId = Array.isArray(ins) && ins[0] ? ins[0].id : null;
+    }
 
     // Monta o payload da NFS-e — IGUAL ao emissor nativo, trocando `payment` por `customer`.
     const iss = Number(process.env.ASAAS_NF_ISS || 0);
