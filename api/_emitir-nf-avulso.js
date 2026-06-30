@@ -18,8 +18,7 @@ const { requireUser, applyCors } = require('./_auth.js');
 const { sbFetch } = require('./_sb.js');
 const { asaasReq, ensureAsaasCustomer } = require('./_asaas.js');
 
-// Descrição padrão do serviço (também usada como municipalServiceDescription, que
-// algumas prefeituras exigem). Sobrescrevível por env.
+// Descrição livre do serviço (campo serviceDescription do Asaas). Sobrescrevível por env.
 const DEFAULT_NF_DESC = 'Serviços de cobrança e recuperação de crédito prestados ao tomador, referentes ao acompanhamento e à intermediação do recebimento de valores inadimplidos.';
 
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
@@ -54,8 +53,13 @@ module.exports = async function handler(req, res) {
   const descricao = String(body.descricao || '').trim();
   const ref = String(body.ref || '').trim(); // chave de idempotência opcional (uma por linha do lote)
   const endereco = (body.endereco && typeof body.endereco === 'object') ? body.endereco : {};
+  // Serviço municipal (NFS-e): obrigatório. Vem do corpo (seletor da UI) ou de env.
+  const munId = String(body.municipalServiceId || process.env.ASAAS_NF_MUNICIPAL_SERVICE_ID || '').trim();
+  const munCode = String(body.municipalServiceCode || process.env.ASAAS_NF_MUNICIPAL_SERVICE_CODE || '').trim();
+  const munName = String(body.municipalServiceName || process.env.ASAAS_NF_MUNICIPAL_SERVICE_NAME || '').trim();
 
   if (!doc) return res.status(400).json({ error: 'CPF/CNPJ obrigatório para emitir NFS-e (identifica o tomador).' });
+  if (!munId && !munCode) return res.status(400).json({ error: 'Serviço municipal não informado. Selecione o serviço da NFS-e (municipalServiceId) na tela antes de emitir.' });
   if (!(valor > 0)) return res.status(400).json({ error: 'Valor inválido.' });
 
   let rowId = null;
@@ -100,7 +104,6 @@ module.exports = async function handler(req, res) {
     const invoicePayload = {
       customer: customerId,
       serviceDescription: descricao || process.env.ASAAS_NF_SERVICE_DESCRIPTION || DEFAULT_NF_DESC,
-      municipalServiceDescription: process.env.ASAAS_NF_MUNICIPAL_SERVICE_DESCRIPTION || DEFAULT_NF_DESC,
       observations: ref ? `Ref ${ref}.` : 'Emissão avulsa.',
       value: valor,
       deductions: 0,
@@ -110,8 +113,11 @@ module.exports = async function handler(req, res) {
         iss, cofins: 0, csll: 0, inss: 0, ir: 0, pis: 0,
       },
     };
-    if (process.env.ASAAS_NF_MUNICIPAL_SERVICE_CODE) invoicePayload.municipalServiceCode = process.env.ASAAS_NF_MUNICIPAL_SERVICE_CODE;
-    if (process.env.ASAAS_NF_MUNICIPAL_SERVICE_NAME) invoicePayload.municipalServiceName = process.env.ASAAS_NF_MUNICIPAL_SERVICE_NAME;
+    // Identificação do serviço municipal: prioriza municipalServiceId (recomendado
+    // pelo Asaas); senão municipalServiceCode (+ name). Sem isso a prefeitura rejeita.
+    if (munId) invoicePayload.municipalServiceId = munId;
+    else if (munCode) invoicePayload.municipalServiceCode = munCode;
+    if (munName) invoicePayload.municipalServiceName = munName;
 
     // Cria e autoriza (emite de fato) a NFS-e.
     const invoice = await asaasReq('POST', '/invoices', invoicePayload);
