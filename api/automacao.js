@@ -14,6 +14,7 @@ const handlers = {
   'repassar': require('./_repassar.js'),
   'repasse-concluido': require('./_repasse-concluido.js'),
   'emitir-nf': require('./_emitir-nf.js'),
+  'emitir-nf-avulso': require('./_emitir-nf-avulso.js'),
   'importar-asaas': require('./_importar-asaas.js'),
   'backfill-asaas-customers': require('./_backfill-asaas-customers.js'),
   'diagnostico-financeiro': require('./_diagnostico-financeiro.js'),
