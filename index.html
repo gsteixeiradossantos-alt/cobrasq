@@ -24189,6 +24189,7 @@ async function renderWAPendentes(el){
 function waPendSelecionar(i){
   window._waPend.sel = i;
   window._waPend.sugestoes = [];
+  window._waPend.historico = [];
   renderWATab('pendentes');
 }
 
@@ -24216,9 +24217,11 @@ function waPendRenderDetalhe(){
         <strong style="font-size:15px;">${escHtml(nome)}</strong>
         <span style="font-size:11px;color:var(--text-3);">+${escHtml(String(p.telefone||'').replace(/\D/g,''))} · ${waHaQuantoTempo(p.recebida_em)}</span>
       </div>
-      <div style="background:var(--bg-2,#f4f1ec);border-radius:8px;padding:10px;margin:10px 0;font-size:14px;">
-        <div style="font-size:11px;color:var(--text-3);margin-bottom:2px;">Última mensagem do cliente</div>
-        ${escHtml(p.texto || ('['+p.tipo+']'))}
+      <div id="waPendThread" style="margin:10px 0;">
+        <div style="background:var(--bg-2,#f4f1ec);border-radius:8px;padding:10px;font-size:14px;">
+          <div style="font-size:11px;color:var(--text-3);margin-bottom:2px;">Última mensagem do cliente</div>
+          ${escHtml(p.texto || ('['+p.tipo+']'))}
+        </div>
       </div>
       <div style="font-size:12px;color:var(--text-3);margin-bottom:10px;">
         ${dent ? 'Dentro do horário comercial — a resposta aprovada é enviada na hora.' : 'Fora do horário comercial — a resposta aprovada é agendada pra próxima manhã útil.'}
@@ -24226,6 +24229,50 @@ function waPendRenderDetalhe(){
       <button class="cob-btn-primary" id="waPendSugBtn" onclick="waPendSugerir()">✨ Sugerir resposta com a Bia</button>
       <div id="waPendSugs" style="margin-top:12px;">${cards}</div>
     </div>`;
+  // Híbrido: tenta puxar a conversa ao vivo do Z-API (mais contexto pra Bia).
+  // Se falhar (plano sem leitura, offline), mantém o fallback acima.
+  waPendCarregarThread();
+}
+
+// Carrega o histórico ao vivo da conversa via Z-API e renderiza em bolhas.
+// Guarda o histórico normalizado em _waPend.historico p/ a Bia. Best-effort.
+async function waPendCarregarThread(){
+  const P = window._waPend;
+  const p = P.lista[P.sel];
+  if(!p) return;
+  const box = document.getElementById('waPendThread');
+  if(!box) return;
+  // cache por telefone (evita refetch ao re-renderizar com sugestões)
+  P.threadCache = P.threadCache || {};
+  if(P.threadCache[p.telefone]){ P.historico = P.threadCache[p.telefone]; waPendRenderThread(box, P.historico); return; }
+  try{
+    const raw = await ZApiAPI.chatMessages(p.telefone, 20);
+    const arr = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.messages) ? raw.messages : []);
+    const hist = arr.map(m => ({
+      dir: m.fromMe ? 'nos' : 'cliente',
+      texto: (m.text && (m.text.message ?? m.text)) || m.message || m.caption || (m.type?('['+m.type+']'):''),
+      ts: Number(m.momment || m.moment || 0)
+    })).filter(h => h.texto);
+    if(hist.length){
+      P.threadCache[p.telefone] = hist;
+      P.historico = hist;
+      waPendRenderThread(box, hist);
+    }
+  }catch(e){
+    // silencioso: degrada pro fallback (última mensagem armazenada).
+    console.warn('Z-API leitura de conversa indisponível:', e?.message||e);
+  }
+}
+
+function waPendRenderThread(box, hist){
+  const bolhas = hist.slice(-12).map(h => {
+    const meu = h.dir==='nos';
+    return `<div style="display:flex;justify-content:${meu?'flex-end':'flex-start'};margin:3px 0;">
+      <div style="max-width:78%;padding:7px 10px;border-radius:10px;font-size:13px;${meu?'background:var(--green-soft,#e3efe5);':'background:var(--bg-2,#f4f1ec);'}">${escHtml(h.texto)}</div>
+    </div>`;
+  }).join('');
+  box.innerHTML = `<div style="border:1px solid var(--gray-line);border-radius:8px;padding:8px;max-height:260px;overflow-y:auto;">
+    <div style="font-size:11px;color:var(--text-3);margin-bottom:4px;">Conversa (ao vivo)</div>${bolhas}</div>`;
 }
 
 async function waPendSugerir(){
@@ -24241,7 +24288,8 @@ async function waPendSugerir(){
       body: {
         caso_id: dev?.id || p.caso_id || null,
         intencao: 'responder',
-        ultima_mensagem_cliente: p.texto || ''
+        ultima_mensagem_cliente: p.texto || '',
+        historico: (Array.isArray(P.historico) && P.historico.length) ? P.historico.map(h=>({dir:h.dir,texto:h.texto})) : undefined
       }
     });
     if(error) throw error;
@@ -27843,6 +27891,9 @@ const ZApiAPI = {
     return this.req('POST','/send-document/pdf',{ phone:this._tel(phone), document, fileName, caption:caption||'' });
   },
   status(){ return this.req('GET','/status'); },
+  // Leitura ao vivo do histórico de uma conversa (últimas `amount` mensagens).
+  // Pode não estar disponível dependendo do plano Z-API — quem chama trata o erro.
+  chatMessages(phone, amount){ return this.req('GET', `/chat-messages/${this._tel(phone)}?amount=${amount||20}`, null); },
 };
 
 // ── Helpers ───────────────────────────────────────────────────
