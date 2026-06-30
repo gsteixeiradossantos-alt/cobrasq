@@ -2124,6 +2124,7 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
     <nav class="cp-nav" id="cpNav">
       <div class="cp-nav-item active" data-cppage="dashboard"><span class="cp-nav-icon"></span>Dashboard</div>
       <div class="cp-nav-item" data-cppage="carteira"><span class="cp-nav-icon"></span>Minha Carteira</div>
+      <div class="cp-nav-item" data-cppage="repasses" onclick="cpNavigate('repasses')"><span class="cp-nav-icon">💸</span>Repasses recebidos</div>
       <div class="cp-nav-item" data-cppage="comprovantes"><span class="cp-nav-icon"></span>Comprovantes</div>
       <div class="cp-nav-item" data-cppage="nova-cobranca"><span class="cp-nav-icon">+</span>Nova Cobrança</div>
       <div class="cp-nav-item" data-cppage="solicitacoes"><span class="cp-nav-icon" id="cp-nav-sol-icon">📋</span>Minhas Solicitações</div>
@@ -2641,6 +2642,10 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
       <div class="fg">
         <label>Senha do portal</label>
         <input type="text" id="mcli-senha" placeholder="Defina uma senha para o cedente">
+      </div>
+      <div class="fg">
+        <button type="button" class="btn btn-ghost btn-sm" onclick="ativarAcessoCedente()" style="font-size:12px;">🔓 Ativar acesso do cedente (login real)</button>
+        <div style="font-size:11px;color:var(--text-3);margin-top:4px;">Cria o login Supabase do cliente com o e-mail e a senha acima. Ele entra pela aba <strong>Cedente</strong> e vê só os próprios casos e repasses.</div>
       </div>
       <div class="fg">
         <label>Observações</label>
@@ -5619,22 +5624,33 @@ async function doLogin(type){
     showToast('E-mail ou senha inválidos.','danger');
   }
   else if(type === 'cedente'){
+    // Login REAL via Supabase Auth (papel 'cedente' no app_users; dados via RLS por cliente).
     const email = (document.getElementById('cedente-email').value||'').trim().toLowerCase();
     const senhaInput = (document.getElementById('cedente-senha').value||'').trim();
     if(!email || !senhaInput){ showToast('Preencha e-mail e senha.','warning'); return; }
-    let found = null;
-    for(const c of (DB.clientes||[])){
-      if((c.loginEmail||'').toLowerCase()===email && await compareSenha(senhaInput, c.loginSenha)){
-        if(!isHashed(c.loginSenha)){ c.loginSenha=await hashSenha(senhaInput); save(); }
-        found=c; break;
+    const supa = getSupabase();
+    if(!supa){ showToast('Sistema fora do ar. Tente novamente em instantes.','danger'); return; }
+    const btn = document.getElementById('btnLoginCedente');
+    const _orig = btn ? btn.innerHTML : '';
+    if(btn){ btn.disabled=true; btn.textContent='Entrando…'; }
+    const _reset=()=>{ if(btn){ btn.disabled=false; btn.innerHTML=_orig; } };
+    try{
+      const { data, error } = await supa.auth.signInWithPassword({ email, password: senhaInput });
+      if(error){ showToast('E-mail ou senha inválidos.','danger'); _reset(); return; }
+      const appRes = await carregarAppUserComRetry(supa, data.user.id);
+      if(appRes.status!=='ok' || !appRes.user || appRes.user.papel!=='cedente'){
+        await supa.auth.signOut();
+        showToast('Esta conta não tem acesso de cedente. Contate o escritório.','danger'); _reset(); return;
       }
-    }
-    if(found){
-      currentUser = { tipo: 'cedente', nome: found.nome, email: found.email, clienteId: found.id, avatar: initials(found.nome), role: 'Cedente' };
+      if(appRes.user.ativo===false){
+        await supa.auth.signOut();
+        showToast('Acesso desativado. Contate o escritório.','danger'); _reset(); return;
+      }
+      await loadRelationalData(); // sessão do cedente → RLS entrega só os dados do cliente
+      currentUser = montarCurrentUserDeAppUser(appRes.user, data.user);
+      _reset();
       iniciarSessao();
-    } else {
-      showToast('Acesso negado. Verifique suas credenciais.','danger');
-    }
+    }catch(e){ showToast(traduzirErro(e.message),'danger'); _reset(); }
   }
   else if(type === 'devedor'){
     // Fallback: login com CPF + nascimento (devedores sem telefone cadastrado).
@@ -13706,6 +13722,22 @@ let _detCobrId=null, _detDevId=null, _detCliId=null;
 
 function verCobranca(id){ _detCobrId=id; showPage('cobranca-detalhe'); }
 function verDevedor(id){ _detDevId=id; showPage('devedor-detalhe'); }
+// Cria/ativa o login REAL do cedente (Supabase Auth) a partir do e-mail/senha do modal do cliente.
+async function ativarAcessoCedente(){
+  const clienteId=(document.getElementById('mcli-id')?.value||'').trim();
+  const email=(document.getElementById('mcli-login')?.value||'').trim().toLowerCase();
+  const senha=(document.getElementById('mcli-senha')?.value||'');
+  const nome=(document.getElementById('mcli-nome')?.value||'').trim();
+  if(!clienteId){ showToast('Salve o cliente primeiro; depois ative o acesso.','warning'); return; }
+  if(!email || senha.length<6){ showToast('Preencha o e-mail e uma senha (mín. 6 caracteres) acima.','warning'); return; }
+  if(!confirm(`Ativar o acesso do cedente para "${email}"? Ele poderá entrar pela aba Cedente e ver só os casos e repasses deste cliente.`)) return;
+  try{
+    const resp=await fetch('/api/criar-cedente',{ method:'POST', headers:{'Content-Type':'application/json', ...(await authHeaders())}, body:JSON.stringify({clienteId, email, senha, nome}) });
+    const data=await resp.json().catch(()=>({}));
+    if(!resp.ok || data.error){ throw new Error(data.error||('HTTP '+resp.status)); }
+    showToast('Acesso do cedente ativado. O cliente já entra com esse e-mail e senha.','success');
+  }catch(e){ showToast('Falha ao ativar acesso: '+(e.message||e),'danger'); }
+}
 function verCliente(id){ _detCliId=id; showPage('cliente-detalhe'); }
 
 function _detData(s){
@@ -16060,7 +16092,7 @@ async function carregarAppUser(supa, userId){
   if(!supa || !userId) return { status:'error', user:null };
   try {
     const { data, error } = await supa.from('app_users')
-      .select('papel, nome, cargo, ativo, pode_ver_grupo, cliente_grupo_id, avatar_url, avatar_cor')
+      .select('papel, nome, cargo, ativo, ref_id, pode_ver_grupo, cliente_grupo_id, avatar_url, avatar_cor')
       .eq('id', userId)
       .maybeSingle();
     if(error){ console.warn('carregarAppUser:', error.message); return { status:'error', user:null }; }
@@ -16085,6 +16117,17 @@ async function carregarAppUserComRetry(supa, userId){
 
 function montarCurrentUserDeAppUser(appUser, authUser){
   const papel = appUser.papel;
+  if(papel === 'cedente'){
+    return {
+      tipo: 'cedente', papel,
+      nome: appUser.nome || authUser.email,
+      email: authUser.email,
+      avatar: initials(appUser.nome || authUser.email),
+      role: 'Cedente',
+      supaId: authUser.id,
+      clienteId: appUser.ref_id || ''
+    };
+  }
   const tipo  = papel === 'proprietario' ? 'gestor' : 'funcionario';
   const role  = papel === 'proprietario' ? 'Administrador' : (appUser.cargo || 'Funcionário');
   return {
@@ -16517,7 +16560,7 @@ function cpNavigate(page){
     el.classList.toggle('active', el.dataset.cppage===page);
   });
   // update topbar title
-  const titles = {dashboard:'Dashboard',carteira:'Minha Carteira',comprovantes:'Comprovantes de Pagamento','nova-cobranca':'Nova Cobrança',config:'Configurações'};
+  const titles = {dashboard:'Dashboard',carteira:'Minha Carteira',repasses:'Repasses recebidos',comprovantes:'Comprovantes de Pagamento','nova-cobranca':'Nova Cobrança',config:'Configurações'};
   const titleEl = document.getElementById('cpTopbarTitle');
   if(titleEl) titleEl.textContent = titles[page]||'';
   // render page
@@ -16525,6 +16568,7 @@ function cpNavigate(page){
   if(!body) return;
   if(page==='dashboard') cpRenderDashboard(body);
   else if(page==='carteira') cpRenderCarteira(body);
+  else if(page==='repasses') cpRenderRepasses(body);
   else if(page==='comprovantes') cpRenderComprovantes(body);
   else if(page==='nova-cobranca') cpRenderNovaCobranca(body);
   else if(page==='solicitacoes') cpRenderSolicitacoes(body);
@@ -16534,6 +16578,103 @@ function cpNavigate(page){
 function cpDevs(){
   // Item 8: rascunho nunca aparece no portal do cedente (não é cobrança ainda).
   return (DB.devedores||[]).filter(d=>d.clienteId===currentUser.clienteId && !d.isDraft);
+}
+
+// Monta o extrato de repasses do cedente: capital · recebido · saldo, por caso.
+let _cpExtrato = null;
+async function cpComputeExtrato(){
+  const cid = currentUser.clienteId;
+  const supa = getSupabase();
+  let repasses=[];
+  if(supa){
+    try{ const { data } = await supa.from('repasses_cliente').select('*').order('data_pix',{ascending:false,nullsFirst:false}); repasses=data||[]; }catch(_){}
+  }
+  const repByCob={};
+  repasses.forEach(r=>{ (repByCob[r.cobranca_id]=repByCob[r.cobranca_id]||[]).push(r); });
+  const cobr=(typeof DB_cobrancas!=='undefined'?DB_cobrancas:[]||[]).filter(c=>c.cliente_id===cid);
+  const linhas=cobr.map(c=>{
+    const cap=(c.valor_capital!=null)?+c.valor_capital:((c.divida&&c.divida.valorCapital!=null)?+c.divida.valorCapital:null);
+    const reps=(repByCob[c.id]||[]).slice().sort((a,b)=>String(b.data_pix||'').localeCompare(String(a.data_pix||'')));
+    const recebido=reps.reduce((s,r)=>s+(+r.valor||0),0);
+    const saldo=(cap!=null)?(cap-recebido):null;
+    const principal=(c.cobranca_partes||[]).find(p=>p.principal)||(c.cobranca_partes||[])[0];
+    const devNome=(principal&&principal.devedores&&principal.devedores.nome)||(c.divida&&c.divida.descricao)||'Caso';
+    return { id:c.id, cap, reps, recebido, saldo, devNome, status:c.status, quitado:(saldo!=null&&cap>0&&saldo<=0.005) };
+  }).filter(l=>l.cap!=null || l.reps.length);
+  linhas.sort((a,b)=>b.recebido-a.recebido);
+  const totCap=linhas.reduce((s,l)=>s+(l.cap||0),0);
+  const totRec=linhas.reduce((s,l)=>s+l.recebido,0);
+  _cpExtrato={ linhas, totCap, totRec, totSaldo:Math.max(totCap-totRec,0), nRep:repasses.length };
+  return _cpExtrato;
+}
+async function cpRenderRepasses(body){
+  if(!body) return;
+  body.innerHTML=`<div style="padding:30px;text-align:center;color:var(--text-2);">Carregando repasses…</div>`;
+  const ex=await cpComputeExtrato();
+  const repRow=(r)=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 0;border-top:1px solid var(--border-2);font-size:12px;">
+      <div style="color:var(--text-2);">${escHtml(r.data_pix?_detData(r.data_pix):'—')}${r.transacao_id?` · <span style="color:var(--text-3);font-family:var(--font-mono);">${escHtml(String(r.transacao_id).slice(0,16))}…</span>`:''}</div>
+      <div style="display:flex;align-items:center;gap:8px;"><span style="font-family:var(--font-mono);font-weight:600;">${fmtR(+r.valor||0)}</span>${r.documento_id?`<button class="btn btn-xs btn-ghost" onclick="baixarDocumentoDevedor('${r.documento_id}')">comprovante</button>`:''}</div>
+    </div>`;
+  const caseCard=(l)=>`<div style="border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:10px;background:var(--surface);">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;">
+        <div><div style="font-weight:700;font-size:13.5px;color:var(--text);">${escHtml(l.devNome)}</div>
+          <div style="font-size:11px;color:var(--text-3);margin-top:2px;">${l.reps.length} repasse${l.reps.length!==1?'s':''}</div></div>
+        ${l.quitado?'<span class="cob-pill st-quitado">✓ Quitado ao cliente</span>':''}
+      </div>
+      <div style="display:flex;gap:22px;flex-wrap:wrap;margin-top:10px;">
+        <div><div style="font-size:10.5px;color:var(--text-3);text-transform:uppercase;letter-spacing:.04em;">Capital</div><div style="font-family:var(--font-mono);font-weight:600;">${l.cap!=null?fmtR(l.cap):'—'}</div></div>
+        <div><div style="font-size:10.5px;color:var(--text-3);text-transform:uppercase;letter-spacing:.04em;">Recebido</div><div style="font-family:var(--font-mono);font-weight:600;color:var(--success,#16a34a);">${fmtR(l.recebido)}</div></div>
+        <div><div style="font-size:10.5px;color:var(--text-3);text-transform:uppercase;letter-spacing:.04em;">Saldo a receber</div><div style="font-family:var(--font-mono);font-weight:600;color:${l.saldo!=null&&l.saldo<=0.005?'var(--success,#16a34a)':'var(--navy)'};">${l.saldo!=null?fmtR(Math.max(l.saldo,0)):'—'}</div></div>
+      </div>
+      ${l.reps.length?`<div style="margin-top:8px;">${l.reps.map(repRow).join('')}</div>`:''}
+    </div>`;
+  body.innerHTML=`
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:14px;flex-wrap:wrap;gap:10px;">
+      <div>
+        <div style="font-size:22px;font-weight:700;letter-spacing:-.02em;color:var(--text);">Repasses recebidos</div>
+        <div style="font-size:12.5px;color:var(--text-2);margin-top:3px;">Valores que a COBRASQ repassou a você, abatidos do capital de cada caso.</div>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="cpExtratoPDF()">${ico('file',13)} Baixar extrato (PDF)</button>
+    </div>
+    <div class="grid-3" style="margin-bottom:16px;">
+      <div class="kcard"><div class="kcard-label">Capital total</div><div class="kcard-value" style="font-size:16px;">${fmtR(ex.totCap)}</div><div class="kcard-sub">${ex.linhas.length} caso${ex.linhas.length!==1?'s':''}</div></div>
+      <div class="kcard"><div class="kcard-label">Total recebido</div><div class="kcard-value" style="font-size:16px;color:var(--success);">${fmtR(ex.totRec)}</div><div class="kcard-sub">${ex.nRep} repasse${ex.nRep!==1?'s':''}</div></div>
+      <div class="kcard"><div class="kcard-label">Saldo a receber</div><div class="kcard-value" style="font-size:16px;">${fmtR(ex.totSaldo)}</div><div class="kcard-sub">capital ainda não repassado</div></div>
+    </div>
+    ${ex.linhas.length? ex.linhas.map(caseCard).join('') : `<div class="empty-state" style="padding:48px"><div class="empty-state-icon">${ico('inbox',36)}</div><div class="empty-state-title">Nenhum repasse registrado ainda</div><div style="font-size:12.5px;color:var(--text-3);margin-top:4px;">Assim que a COBRASQ repassar valores recuperados, eles aparecem aqui.</div></div>`}`;
+}
+function cpExtratoPDF(){
+  const ex=_cpExtrato; if(!ex){ showToast('Carregue os repasses primeiro.','warning'); return; }
+  const cli=(DB.clientes||[]).find(c=>c.id===currentUser.clienteId)||{};
+  const nomeCli=cli.nomeFantasia||cli.nome_fantasia||cli.nome||currentUser.nome||'Cliente';
+  const linhasHtml=ex.linhas.map(l=>`<tr>
+      <td>${escHtml(l.devNome)}</td>
+      <td class="num">${l.cap!=null?fmtR(l.cap):'—'}</td>
+      <td class="num">${fmtR(l.recebido)}</td>
+      <td class="num">${l.saldo!=null?fmtR(Math.max(l.saldo,0)):'—'}</td>
+      <td>${l.quitado?'Quitado':'Em andamento'}</td>
+    </tr>${l.reps.map(r=>`<tr class="sub"><td>↳ ${escHtml(r.data_pix?_detData(r.data_pix):'—')}${r.transacao_id?` · ${escHtml(String(r.transacao_id).slice(0,20))}`:''}</td><td></td><td class="num">${fmtR(+r.valor||0)}</td><td></td><td></td></tr>`).join('')}`).join('');
+  const html=`<!doctype html><html><head><meta charset="utf-8"><title>Extrato de repasses — ${escHtml(nomeCli)}</title>
+    <style>body{font-family:Arial,Helvetica,sans-serif;color:#15212B;margin:32px;font-size:12px;}
+    h1{font-size:18px;margin:0 0 2px;} .sub-t{color:#667;font-size:12px;margin-bottom:18px;}
+    table{width:100%;border-collapse:collapse;margin-top:8px;} th,td{padding:6px 8px;border-bottom:1px solid #e3e6ea;text-align:left;}
+    th{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:#667;} td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;}
+    tr.sub td{color:#889;font-size:11px;border-bottom:1px dashed #eef0f2;} .tot{font-weight:700;background:#f6f7f9;}
+    .head{display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #15212B;padding-bottom:10px;margin-bottom:6px;}</style></head>
+    <body>
+    <div class="head"><div><h1>Extrato de repasses</h1><div class="sub-t">${escHtml(nomeCli)}</div></div>
+      <div style="text-align:right;font-size:11px;color:#667;">COBRASQ — Recuperadora de Crédito<br>Emitido em ${escHtml(_detData(new Date().toISOString()))}</div></div>
+    <table>
+      <thead><tr><th>Caso / repasse</th><th class="num">Capital</th><th class="num">Recebido</th><th class="num">Saldo</th><th>Situação</th></tr></thead>
+      <tbody>${linhasHtml}
+        <tr class="tot"><td>TOTAL</td><td class="num">${fmtR(ex.totCap)}</td><td class="num">${fmtR(ex.totRec)}</td><td class="num">${fmtR(ex.totSaldo)}</td><td></td></tr>
+      </tbody>
+    </table>
+    <p style="margin-top:18px;font-size:10.5px;color:#889;">Os comprovantes PIX de cada repasse estão disponíveis no portal. Documento informativo gerado automaticamente.</p>
+    <script>window.onload=function(){setTimeout(function(){window.print();},250);}<\/script>
+    </body></html>`;
+  const w=window.open('','_blank'); if(!w){ showToast('Permita pop-ups para baixar o extrato.','warning'); return; }
+  w.document.write(html); w.document.close();
 }
 
 function cpRenderDashboard(body){
