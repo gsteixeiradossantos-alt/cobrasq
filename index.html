@@ -7677,12 +7677,67 @@ function delegacaoCobrancasDigest(max){
   if(!base.length) base=(DB.devedores||[]).filter(d=>!d.arquivado&&!d.isDraft).map(d=>({ id:d.id, devedor:d.nome||'', credor:d.clienteNome||'', status:d.status||'', resp:d.responsavel||'' }));
   return base.filter(x=>x.status!=='Quitado' && x.status!=='Recebido').slice(0,max||60);
 }
+// Varredura de pendências p/ a Bia sugerir delegações sem o gestor precisar escrever.
+function delegacaoPendenciasDigest(){
+  const hoje=_metaYmd(new Date());
+  // 1) Tarefas pendentes → candidatas a REATRIBUIÇÃO (mover o card a um colaborador).
+  const tarefas=(DB.tarefas||[]).filter(t=>t && t.status!=='Concluída').map(t=>({
+    id:t.id, titulo:String(t.titulo||'').slice(0,120),
+    resp:t.responsavel||'', prazo:t.prazo||'', prioridade:t.prioridade||'media',
+    atrasada:!!(t.prazo && t.prazo<hoje), tipo:(tipoPorId(t.tipo)||{}).nome||''
+  })).sort((a,b)=>((b.atrasada?1:0)-(a.atrasada?1:0))||((a.prazo||'9999').localeCompare(b.prazo||'9999'))).slice(0,90);
+  // 2) Devedores no judicial SEM tarefa vinculada → candidatos a TAREFA NOVA.
+  const comTarefa=new Set((DB.tarefas||[]).filter(t=>t && t.vinculo && t.vinculo.id).map(t=>String(t.vinculo.id)));
+  const judiciais=(DB.devedores||[]).filter(d=>_pecaEhJudicial(d)).map(d=>({
+    id:d.id, devedor:d.nome||'', credor:d.clienteNome||'',
+    valor:Number(d.saldo||d.valor||0)||0, jaTemTarefa:comTarefa.has(String(d.id))
+  })).filter(d=>!d.jaTemTarefa).slice(0,40);
+  // 3) Cobranças abertas SEM responsável → candidatas a 1º contato.
+  const cobrancas=delegacaoCobrancasDigest(120).filter(c=>!c.resp).slice(0,40);
+  return { tarefas, judiciais, cobrancas, hoje };
+}
+async function delegacaoBiaScan(){
+  const box=document.getElementById('deleg-result');
+  if(box) box.innerHTML='<div style="padding:18px;color:var(--text-3);">A Bia está varrendo as pendências e montando a proposta de delegação…</div>';
+  try{
+    try{ await carregarRosterAppUsers(); }catch(_){}
+    const colabs=(Array.isArray(_rosterAppUsers)?_rosterAppUsers:[]).map(u=>u.nome);
+    const tipos=tarefaTipos().map(t=>t.nome);
+    const dig=delegacaoPendenciasDigest();
+    if(!dig.tarefas.length && !dig.judiciais.length && !dig.cobrancas.length){
+      if(box) box.innerHTML='<div style="padding:18px;color:var(--text-3);">Nenhuma pendência para delegar no momento. 👏</div>'; return;
+    }
+    const extra=(document.getElementById('deleg-input')?.value||'').trim();
+    const prompt=[
+      'Você é a Bia, assistente do escritório de cobrança/jurídico COBRASQ. Ajude o GESTOR (Dr. Gustavo, advogado) a DELEGAR trabalho à equipe, varrendo as pendências abaixo.',
+      'Objetivo: aliviar o gestor distribuindo o que for OPERACIONAL/ADMINISTRATIVO aos colaboradores, e criando tarefas para o que está parado. NUNCA delegue atos PRIVATIVOS DE ADVOGADO (redigir/protocolar petição, cumprir prazo processual, reajuizar, recurso, audiência, manifestação, impugnação) — esses ficam com o gestor; não os inclua na proposta.',
+      'Pode delegar a colaborador: ligar/cobrar, primeiro contato, verificar/separar documentos, organizar, avisar cliente, conferir cadastro, agendar, pesquisar dados simples, restituição de custas administrativa.',
+      'Responda APENAS com JSON válido (sem texto fora, sem cercas markdown), no formato:',
+      '{"delegacoes":[{"tarefaId":null,"titulo":"","descricao":"","responsavelNome":"","prazo":"YYYY-MM-DD","tipoNome":"","vinculoCobrancaId":null,"checklist":["passo"],"ehTarefaNova":false,"instrucoes":null}]}',
+      'REATRIBUIÇÃO: para mover uma TAREFA EXISTENTE (lista TAREFAS) a um colaborador, preencha "tarefaId" com o id dela, "responsavelNome" com o colaborador e repita o "titulo" original. Só reatribua tarefas operacionais; deixe as privativas de advogado de fora.',
+      'TAREFA NOVA: para casos no judicial e cobranças sem responsável, deixe tarefaId=null, ehTarefaNova=true e descreva o passo-a-passo em "instrucoes" e os itens em "checklist". Use "vinculoCobrancaId" com o id do devedor/cobrança quando a tarefa vier dessas listas.',
+      'Regras: responsavelNome deve ser EXATAMENTE um dos COLABORADORES. prazo: data absoluta (hoje é '+dig.hoje+'); proponha prazos realistas. Se nenhum colaborador couber numa pendência, não invente — pule.',
+      'COLABORADORES: '+JSON.stringify(colabs),
+      'TIPOS DE TAREFA: '+JSON.stringify(tipos),
+      'TAREFAS PENDENTES (id, titulo, resp atual, prazo, prioridade, atrasada, tipo): '+JSON.stringify(dig.tarefas),
+      'CASOS NO JUDICIAL SEM TAREFA (id, devedor, credor, valor): '+JSON.stringify(dig.judiciais),
+      'COBRANÇAS ABERTAS SEM RESPONSÁVEL (id, devedor, credor, status): '+JSON.stringify(dig.cobrancas),
+      extra?('OBSERVAÇÃO DO GESTOR (priorize isto): '+extra):''
+    ].filter(Boolean).join('\n');
+    const raw=await chamarClaudeTar(prompt, 4096);
+    const sug=delegacaoParse(raw);
+    if(!sug.length){ if(box) box.innerHTML='<div style="padding:18px;color:var(--danger);">A Bia não encontrou delegações claras. Escreva uma observação no campo acima e rode de novo.</div>'; return; }
+    window._deleg={ sugestoes:sug };
+    if(box) box.innerHTML=delegacaoRenderReview(sug);
+  }catch(e){ if(box) box.innerHTML='<div style="padding:18px;color:var(--danger);">Falha na Bia: '+escHtml(e.message||'erro')+'</div>'; }
+}
 function delegacaoParse(raw){
   let s=String(raw||'').trim().replace(/^```(?:json)?\s*/i,'').replace(/```\s*$/,'').trim();
   const i=s.indexOf('{'), j=s.lastIndexOf('}'); if(i>=0 && j>i) s=s.slice(i, j+1);
   try{
     const o=JSON.parse(s); const arr=Array.isArray(o)?o:(o.delegacoes||o.tarefas||[]);
     return (arr||[]).filter(x=>x&&(x.titulo||x.descricao)).map(x=>({
+      tarefaId:x.tarefaId||null,
       titulo:String(x.titulo||x.descricao||'Tarefa').slice(0,140),
       descricao:String(x.descricao||''),
       responsavelNome:String(x.responsavelNome||x.responsavel||''),
@@ -7725,19 +7780,31 @@ async function delegacaoBiaSugerir(){
 function delegacaoRenderReview(sug){
   const roster=Array.isArray(_rosterAppUsers)?_rosterAppUsers:[];
   const optResp=(nome)=>['<option value="">— escolher —</option>'].concat(roster.map(u=>`<option ${u.nome===nome?'selected':''} value="${escHtml(u.nome)}">${escHtml(u.nome)}</option>`)).join('');
-  const rows=sug.map((d,i)=>`
+  const lblS='font-size:11px;color:var(--text-3);display:flex;flex-direction:column;gap:2px;';
+  const rows=sug.map((d,i)=>{
+    const reat=!!d.tarefaId;
+    const badge=reat
+      ? `<span style="font-size:10.5px;color:#fff;background:#2B6CB0;border-radius:10px;padding:3px 8px;flex-shrink:0;">reatribuir</span>`
+      : (d.ehTarefaNova
+          ? `<span style="font-size:10.5px;color:var(--accent-2);background:var(--surface-2,#f3f3f3);border-radius:10px;padding:3px 8px;flex-shrink:0;">tarefa nova</span>`
+          : `<span style="font-size:10.5px;color:#fff;background:#0F8A5F;border-radius:10px;padding:3px 8px;flex-shrink:0;">criar</span>`);
+    return `
     <div style="border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:10px;background:var(--surface);">
-      <input id="dlg-tit-${i}" value="${escHtml(d.titulo)}" style="width:100%;font-weight:600;font-size:13px;border:0;border-bottom:1px solid var(--border);padding:4px 0;margin-bottom:8px;background:transparent;color:var(--text);">
-      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px;">
-        <label style="font-size:11px;color:var(--text-3);display:flex;flex-direction:column;gap:2px;">Responsável<select id="dlg-resp-${i}">${optResp(d.responsavelNome)}</select></label>
-        <label style="font-size:11px;color:var(--text-3);display:flex;flex-direction:column;gap:2px;">Prazo<input type="date" id="dlg-prazo-${i}" value="${escHtml(d.prazo)}"></label>
-        <label style="font-size:11px;color:var(--text-3);display:flex;flex-direction:column;gap:2px;">Tipo<input id="dlg-tipo-${i}" value="${escHtml(d.tipoNome)}" placeholder="ex.: Ligação" style="width:140px;"></label>
-        ${d.ehTarefaNova?`<span style="font-size:10.5px;color:var(--accent-2);background:var(--surface-2,#f3f3f3);border-radius:10px;padding:3px 8px;">tarefa nova</span>`:''}
-        <button class="btn btn-ghost btn-sm" onclick="delegacaoEnsinar(${i})" title="Gerar passo-a-passo com a Bia">📘 Ensinar</button>
+      <input type="hidden" id="dlg-tarid-${i}" value="${escHtml(d.tarefaId||'')}">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        ${badge}
+        <input id="dlg-tit-${i}" value="${escHtml(d.titulo)}" ${reat?'readonly':''} style="flex:1;font-weight:600;font-size:13px;border:0;border-bottom:1px solid var(--border);padding:4px 0;background:transparent;color:var(--text);">
       </div>
-      <textarea id="dlg-chk-${i}" rows="3" placeholder="Checklist (um item por linha)" style="width:100%;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-family:inherit;">${escHtml((d.checklist||[]).join('\n'))}</textarea>
-      <div id="dlg-instr-box-${i}">${d.instrucoes?('<div style="margin-top:8px;font-size:12px;color:var(--text-2);white-space:pre-wrap;background:var(--surface-2,#f6f6f6);border-radius:8px;padding:8px 10px;"><b>Como fazer:</b>\n'+escHtml(d.instrucoes)+'</div>'):''}</div>
-    </div>`).join('');
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:${reat?'0':'8px'};">
+        <label style="${lblS}">Responsável<select id="dlg-resp-${i}">${optResp(d.responsavelNome)}</select></label>
+        <label style="${lblS}">Prazo<input type="date" id="dlg-prazo-${i}" value="${escHtml(d.prazo)}"></label>
+        ${reat?'':`<label style="${lblS}">Tipo<input id="dlg-tipo-${i}" value="${escHtml(d.tipoNome)}" placeholder="ex.: Ligação" style="width:140px;"></label>
+        <button class="btn btn-ghost btn-sm" onclick="delegacaoEnsinar(${i})" title="Gerar passo-a-passo com a Bia">📘 Ensinar</button>`}
+      </div>
+      ${reat?'':`<textarea id="dlg-chk-${i}" rows="3" placeholder="Checklist (um item por linha)" style="width:100%;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-family:inherit;">${escHtml((d.checklist||[]).join('\n'))}</textarea>
+      <div id="dlg-instr-box-${i}">${d.instrucoes?('<div style="margin-top:8px;font-size:12px;color:var(--text-2);white-space:pre-wrap;background:var(--surface-2,#f6f6f6);border-radius:8px;padding:8px 10px;"><b>Como fazer:</b>\n'+escHtml(d.instrucoes)+'</div>'):''}</div>`}
+    </div>`;
+  }).join('');
   return `<div style="margin-top:16px;">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:8px;flex-wrap:wrap;">
       <div style="font-size:13px;font-weight:700;color:var(--text);">Proposta da Bia (${sug.length}) — revise e confirme</div>
@@ -7763,14 +7830,28 @@ async function delegacaoEnsinar(i){
 function delegacaoConfirmar(){
   const sug=(window._deleg&&window._deleg.sugestoes)||[]; if(!sug.length) return;
   DB.tarefas=DB.tarefas||[]; const cols=tarefaColunas(); const roster=Array.isArray(_rosterAppUsers)?_rosterAppUsers:[];
-  let n=0;
+  let n=0, reatN=0;
   sug.forEach((d,i)=>{
-    const titulo=(document.getElementById('dlg-tit-'+i)?.value||d.titulo||'').trim(); if(!titulo) return;
+    const tarId=(document.getElementById('dlg-tarid-'+i)?.value||d.tarefaId||'').trim();
     const respNome=(document.getElementById('dlg-resp-'+i)?.value||d.responsavelNome||'').trim();
     const prazo=document.getElementById('dlg-prazo-'+i)?.value||d.prazo||'';
+    const respId=(roster.find(u=>u.nome===respNome)||{}).id||'';
+    // Reatribuição de tarefa existente: move o card, não duplica.
+    if(tarId){
+      const t=(DB.tarefas||[]).find(x=>x.id===tarId);
+      if(t && respNome){
+        const antes=t.responsavel||'—';
+        t.responsavel=respNome; t.responsavelId=respId;
+        if(prazo) t.prazo=prazo;
+        t.historico=t.historico||[];
+        t.historico.push({ quando:new Date().toISOString(), autor:currentUser?.nome||'Gestor', acao:'reatribuída pelo gestor ('+antes+' → '+respNome+')' });
+        n++; reatN++;
+      }
+      return;
+    }
+    const titulo=(document.getElementById('dlg-tit-'+i)?.value||d.titulo||'').trim(); if(!titulo) return;
     const tipoNome=(document.getElementById('dlg-tipo-'+i)?.value||d.tipoNome||'').trim();
     const checklist=(document.getElementById('dlg-chk-'+i)?.value||'').split(/\n+/).map(s=>s.trim()).filter(Boolean);
-    const respId=(roster.find(u=>u.nome===respNome)||{}).id||'';
     let tipo=tipoNome?tarefaTipos().find(t=>t.nome.toLowerCase()===tipoNome.toLowerCase()):null;
     if(!tipo && tipoNome){ tipo={ id:uid(), nome:tipoNome, cor:'#64748b', instrucoes:d.instrucoes||'' }; tarefaTipos().push(tipo); }
     else if(tipo && d.instrucoes && !tipo.instrucoes){ tipo.instrucoes=d.instrucoes; }
@@ -7789,7 +7870,9 @@ function delegacaoConfirmar(){
     n++;
   });
   save(); try{ atualizarBadgeTarefas(); }catch(_){}
-  window._deleg=null; showToast(n+' tarefa(s) delegada(s).','success'); renderDelegacao();
+  const criadas=n-reatN;
+  const msg=[criadas?criadas+' criada(s)':'', reatN?reatN+' reatribuída(s)':''].filter(Boolean).join(' · ')||'0 tarefas';
+  window._deleg=null; showToast('Delegação aplicada: '+msg+'.','success'); renderDelegacao();
 }
 function delegacaoRenderAcompanhamento(){
   const ts=(DB.tarefas||[]).filter(t=>t && t.origem==='delegacao');
@@ -7809,6 +7892,19 @@ function delegacaoRenderAcompanhamento(){
   }).join('');
   return `<div style="margin-top:24px;"><div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:6px;">Acompanhamento das delegações</div>${blocos}</div>`;
 }
+function delegacaoPendenciasPanel(){
+  let dig; try{ dig=delegacaoPendenciasDigest(); }catch(_){ dig={tarefas:[],judiciais:[],cobrancas:[]}; }
+  const atrasadas=dig.tarefas.filter(t=>t.atrasada).length;
+  const card=(cor,n,titulo,sub)=>`<div style="flex:1;min-width:160px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;">
+    <div style="font-size:24px;font-weight:800;color:${cor};line-height:1;">${n}</div>
+    <div style="font-size:12.5px;font-weight:600;color:var(--text);margin-top:5px;">${titulo}</div>
+    <div style="font-size:11px;color:var(--text-3);margin-top:2px;">${sub}</div></div>`;
+  return `<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+    ${card('#e53e3e', dig.tarefas.length, 'Tarefas pendentes', atrasadas?(atrasadas+' atrasada'+(atrasadas===1?'':'s')):'em dia')}
+    ${card('#9F7AEA', dig.judiciais.length, 'Casos no judicial sem tarefa', 'em Peças & Ações Judiciais')}
+    ${card('#2B6CB0', dig.cobrancas.length, 'Cobranças sem responsável', 'sem dono atribuído')}
+  </div>`;
+}
 function renderDelegacao(){
   const el=document.getElementById('page-delegacao'); if(!el) return;
   if(currentUser?.tipo!=='gestor'){ el.innerHTML='<div style="padding:40px;text-align:center;color:var(--text-3);">Acesso restrito ao gestor.</div>'; return; }
@@ -7818,12 +7914,17 @@ function renderDelegacao(){
     <div style="max-width:1000px;margin:0 auto;padding:24px 20px 60px;">
       <div style="margin-bottom:14px;">
         <div style="font-size:20px;font-weight:700;letter-spacing:-.02em;">Delegação</div>
-        <div style="font-size:12.5px;color:var(--text-2);margin-top:2px;">Descreva o que precisa ser feito; a Bia transforma em tarefas com responsável e prazo. Tarefas novas ganham um “como fazer” reutilizável.</div>
+        <div style="font-size:12.5px;color:var(--text-2);margin-top:2px;">A Bia varre suas pendências — tarefas, casos no judicial e cobranças — e sugere a quem delegar, com prazo. Reatribuir move o card; tarefa nova ganha um “como fazer” reutilizável.</div>
       </div>
+      ${delegacaoPendenciasPanel()}
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px;">
-        <label style="font-size:12px;font-weight:600;color:var(--text-2);">O que você quer delegar?</label>
-        <textarea id="deleg-input" rows="4" placeholder="Ex.: Passa pra Natália as cobranças vencidas do cliente Acme e pede o primeiro contato até sexta. Cria também uma tarefa nova de 'protocolar no eproc' pra Mikaelly até dia 5." style="width:100%;margin-top:6px;font-size:13px;padding:10px;border:1px solid var(--border);border-radius:8px;font-family:inherit;"></textarea>
-        <div style="margin-top:8px;text-align:right;"><button class="btn btn-primary" onclick="delegacaoBiaSugerir()">✨ Sugerir com a Bia</button></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between;">
+          <div style="font-size:13px;font-weight:700;color:var(--text);">Sugestão automática</div>
+          <button class="btn btn-primary" onclick="delegacaoBiaScan()">✨ Varrer pendências e sugerir</button>
+        </div>
+        <label style="font-size:12px;font-weight:600;color:var(--text-2);display:block;margin-top:12px;">Observação (opcional) — foque a Bia ou escreva um pedido específico</label>
+        <textarea id="deleg-input" rows="2" placeholder="Ex.: priorize as cobranças do cliente Acme; passa o que der pra Natália até sexta." style="width:100%;margin-top:6px;font-size:13px;padding:10px;border:1px solid var(--border);border-radius:8px;font-family:inherit;"></textarea>
+        <div style="margin-top:8px;text-align:right;"><button class="btn btn-ghost btn-sm" onclick="delegacaoBiaSugerir()">Interpretar só a observação</button></div>
       </div>
       <div id="deleg-result">${sug.length?delegacaoRenderReview(sug):''}</div>
       <div id="deleg-acomp">${delegacaoRenderAcompanhamento()}</div>
