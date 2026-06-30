@@ -28168,6 +28168,43 @@ function _aavWaBadge(st){
 // linha (evita timeout), com status por linha. Backend: api/_emitir-nf-avulso.js.
 let _nfaRows = [];
 let _nfaHist = [];   // últimas notas (histórico) p/ reemitir com correção
+let _nfaServicos = [];                                   // serviços municipais da conta Asaas
+let _nfaMunSvc = (()=>{ try{ return JSON.parse(localStorage.getItem('nfa_municipal')||'null'); }catch(_){ return null; } })();
+
+// Busca os serviços municipais cadastrados na conta Asaas (GET /fiscalInfo/services,
+// via proxy na sessão do user) e popula o seletor. O municipalServiceId escolhido vai
+// em TODA emissão — sem ele a prefeitura rejeita a NFS-e.
+async function nfaCarregarServicos(){
+  const sel = document.getElementById('nfa-munsvc');
+  const msg = document.getElementById('nfa-munsvc-msg');
+  if(!sel) return;
+  sel.innerHTML = '<option value="">Carregando serviços da sua conta…</option>';
+  try{
+    const r = await fetch('/api/asaas?path=fiscalInfo/services&limit=100', { headers:{ 'Content-Type':'application/json', ...(await authHeaders()) } });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j?.errors?.[0]?.description || j?.error || ('HTTP '+r.status));
+    _nfaServicos = Array.isArray(j.data) ? j.data : [];
+    if(!_nfaServicos.length){
+      sel.innerHTML = '<option value="">Nenhum serviço configurado na conta Asaas</option>';
+      if(msg){ msg.innerHTML = '⚠️ Sua conta Asaas não tem serviço municipal cadastrado. Configure em <b>Asaas → Configurações → Informações fiscais</b> e recarregue.'; msg.style.color='var(--danger)'; }
+      return;
+    }
+    const savedId = _nfaMunSvc && _nfaMunSvc.id;
+    sel.innerHTML = '<option value="">— selecione o serviço —</option>' +
+      _nfaServicos.map(s=>`<option value="${escHtml(s.id)}" ${String(s.id)===String(savedId)?'selected':''}>${escHtml(s.description||s.id)}</option>`).join('');
+    if(msg){ msg.style.color='var(--text-3)'; msg.textContent = _nfaMunSvc ? `Selecionado: ${_nfaMunSvc.description||_nfaMunSvc.id}` : 'Escolha o item de serviço da nota — fica salvo p/ os próximos lotes.'; }
+  }catch(e){
+    sel.innerHTML = '<option value="">Erro ao carregar serviços</option>';
+    if(msg){ msg.innerHTML = 'Não consegui carregar os serviços: '+escHtml(traduzirErro(e.message||String(e))); msg.style.color='var(--danger)'; }
+  }
+}
+function nfaSetServico(id){
+  const s = _nfaServicos.find(x=>String(x.id)===String(id));
+  _nfaMunSvc = s ? { id:s.id, description:s.description||'' } : null;
+  try{ if(_nfaMunSvc) localStorage.setItem('nfa_municipal', JSON.stringify(_nfaMunSvc)); else localStorage.removeItem('nfa_municipal'); }catch(_){}
+  const msg = document.getElementById('nfa-munsvc-msg');
+  if(msg){ msg.style.color='var(--text-3)'; msg.textContent = _nfaMunSvc ? `Selecionado: ${_nfaMunSvc.description||_nfaMunSvc.id}` : 'Nenhum serviço selecionado.'; }
+}
 
 // Converte "2.429,53" / "406,00" / "99.51" / "R$ 1.230,62" em número.
 function nfaParseValor(s){
@@ -28245,6 +28282,17 @@ async function renderNfAvulsa(){
     </div>
 
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:16px;">
+      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);margin-bottom:8px;">Serviço municipal (NFS-e)</div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <select id="nfa-munsvc" onchange="nfaSetServico(this.value)" style="flex:1;min-width:280px;box-sizing:border-box;font-size:12.5px;padding:8px;border:1px solid var(--border);border-radius:8px;background:#fff;">
+          <option value="">Carregando serviços da sua conta…</option>
+        </select>
+        <button class="btn btn-ghost btn-sm" onclick="nfaCarregarServicos()">↻ Recarregar</button>
+      </div>
+      <div id="nfa-munsvc-msg" style="font-size:11.5px;color:var(--text-3);margin-top:6px;">Item de serviço que vai em todas as notas (cadastrado na sua conta Asaas). Escolha uma vez — fica salvo.</div>
+    </div>
+
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:16px;">
       <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);margin-bottom:8px;">Colar lista</div>
       <textarea id="nfa-paste" rows="5" placeholder="Um por linha. Ex.:&#10;Eliseu Juarez Zanin de Campos; 123.456.789-00; 2.429,53; Honorários de cobrança&#10;ou cole de uma planilha (Nome | CPF | Valor | Descrição)" style="width:100%;box-sizing:border-box;font-family:var(--mono,monospace);font-size:12.5px;padding:10px;border:1px solid var(--border);border-radius:8px;resize:vertical;"></textarea>
       <div style="display:flex;gap:8px;margin-top:8px;">
@@ -28266,6 +28314,7 @@ async function renderNfAvulsa(){
       <div id="nfa-historico" style="color:var(--text-3);font-size:13px;">Carregando…</div>
     </div>`;
   nfaDrawTabela();
+  nfaCarregarServicos();
   nfaCarregarHistorico();
 }
 
@@ -28369,6 +28418,11 @@ function nfaDrawTabela(){
 }
 
 async function nfaEmitirLote(){
+  if(!(_nfaMunSvc && _nfaMunSvc.id)){
+    showToast('Selecione o serviço municipal (NFS-e) antes de emitir.','warning');
+    const sel = document.getElementById('nfa-munsvc'); if(sel){ sel.style.borderColor='var(--danger)'; sel.scrollIntoView({behavior:'smooth',block:'center'}); }
+    return;
+  }
   // Valida e seleciona as linhas emitíveis (ainda não emitidas).
   const pend = [];
   for(let i=0;i<_nfaRows.length;i++){
@@ -28398,7 +28452,7 @@ async function nfaEmitirLote(){
       const resp = await fetch('/api/emitir-nf-avulso', {
         method:'POST',
         headers:{ 'Content-Type':'application/json', ...(await authHeaders()) },
-        body: JSON.stringify({ nome:r.nome, doc:r._cpf, valor:r._valor, descricao:r.descricao||'', ref:r.ref, asaas_customer_id:r.asaasCustomerId||null }),
+        body: JSON.stringify({ nome:r.nome, doc:r._cpf, valor:r._valor, descricao:r.descricao||'', ref:r.ref, asaas_customer_id:r.asaasCustomerId||null, municipalServiceId:_nfaMunSvc.id }),
       });
       const j = await resp.json().catch(()=>({}));
       if(resp.ok && (j.nf_status==='emitida' || j.nf_status==='processando')){

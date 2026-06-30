@@ -74,7 +74,6 @@ module.exports = async function handler(req, res) {
       // Vincular ao pagamento faz o tomador ser o pagador (devedor) automaticamente.
       payment: op.asaas_payment_id,
       serviceDescription: process.env.ASAAS_NF_SERVICE_DESCRIPTION || 'Serviços de cobrança e recuperação de crédito prestados ao tomador, referentes ao acompanhamento e à intermediação do recebimento de valores inadimplidos.',
-      municipalServiceDescription: process.env.ASAAS_NF_MUNICIPAL_SERVICE_DESCRIPTION || 'Serviços de cobrança e recuperação de crédito prestados ao tomador, referentes ao acompanhamento e à intermediação do recebimento de valores inadimplidos.',
       observations: `Operação ${op.id}${op.parcela ? ' — parcela ' + op.parcela + '/' + op.total_parcelas : ''}.`,
       value: base,
       deductions: 0,
@@ -84,7 +83,8 @@ module.exports = async function handler(req, res) {
         iss, cofins: 0, csll: 0, inss: 0, ir: 0, pis: 0,
       },
     };
-    if (process.env.ASAAS_NF_MUNICIPAL_SERVICE_CODE) invoicePayload.municipalServiceCode = process.env.ASAAS_NF_MUNICIPAL_SERVICE_CODE;
+    if (process.env.ASAAS_NF_MUNICIPAL_SERVICE_ID) invoicePayload.municipalServiceId = process.env.ASAAS_NF_MUNICIPAL_SERVICE_ID;
+    else if (process.env.ASAAS_NF_MUNICIPAL_SERVICE_CODE) invoicePayload.municipalServiceCode = process.env.ASAAS_NF_MUNICIPAL_SERVICE_CODE;
     if (process.env.ASAAS_NF_MUNICIPAL_SERVICE_NAME) invoicePayload.municipalServiceName = process.env.ASAAS_NF_MUNICIPAL_SERVICE_NAME;
 
     // Cria e autoriza (emite de fato) a NFS-e.
