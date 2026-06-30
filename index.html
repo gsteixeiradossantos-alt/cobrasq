@@ -4034,6 +4034,7 @@ const STATUS_CFG = {
   'Fazer ação':{dot:'#C47A00',badge:'b-yellow',cls:'s-facao'},
   'Ação judicial':{dot:'#1A5FB4',badge:'b-blue',cls:'s-judicial'},
   'Quitado':{dot:'#00796B',badge:'b-teal',cls:'s-quitado'},
+  'Quitado ao cliente':{dot:'#16a34a',badge:'b-green',cls:'s-recebido'},
   'Devolvida':{dot:'#8A96B8',badge:'b-gray',cls:'s-devolvida'},
   'Sem êxito':{dot:'#8A96B8',badge:'b-gray',cls:'s-semexito'}
 };
@@ -5086,6 +5087,14 @@ async function compareSenha(input,stored){
 }
 
 // ── MODAL REUTILIZÁVEL (substitui prompt()) ───────────────────
+// Confirmação por palavra (campos críticos). Só chama cb() se o texto digitado === palavra.
+function confirmarPalavra(palavra, msg, cb){
+  promptModal('Confirmação necessária', msg, (v)=>{
+    if(v==null) return;
+    if(String(v).trim().toUpperCase() === String(palavra).toUpperCase()) cb();
+    else showToast(`Digite exatamente "${palavra}" para confirmar.`,'warning');
+  }, { hint:`Digite: ${palavra}` });
+}
 function promptModal(title,label,cb,{textarea=false,hint='',value=''}={}){
   document.getElementById('modal-prompt-title').textContent=title;
   document.getElementById('modal-prompt-label').textContent=label;
@@ -6127,7 +6136,7 @@ let _impRows = [];
 let _impSel = new Set();
 const _impEsc = (s)=> String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const _impPrompt = (t,l,cb,o)=>{ if(typeof promptModal==='function') return promptModal(t,l,cb,o); const v=prompt(l); if(v!=null) cb(v); };
-const _impStatusOpts = ['Cobrar','Automatizar','Em contato','Em negociação','Acordo','Recebido','Fazer ação','Ação judicial','Quitado','Devolvida','Sem êxito'];
+const _impStatusOpts = ['Cobrar','Automatizar','Em contato','Em negociação','Acordo','Recebido','Fazer ação','Ação judicial','Quitado','Quitado ao cliente','Devolvida','Sem êxito'];
 const _IMP_PAPEIS = { emitente:'Emitente', endossante:'Endossante', avalista:'Avalista', fiador:'Fiador', devedor_solidario:'Devedor solidário' };
 
 function _impDocOk(doc){ const d=String(doc||'').replace(/\D/g,''); return d.length===11||d.length===14; }
@@ -13787,7 +13796,7 @@ async function renderCobrancaDetalhe(){
   if(!el) return;
   el.innerHTML = `<div class="det-wrap"><div style="padding:40px;text-align:center;color:var(--text-2);">Carregando…</div></div>`;
   const supa=getSupabase();
-  let cob=null, hist=[], anexos=[];
+  let cob=null, hist=[], anexos=[], repasses=[];
   if(supa && id){
     const { data } = await supa.from('cobrancas')
       .select('*, cobranca_partes(devedor_id,papel,principal,devedores(id,nome,doc,telefone,cidade,uf))')
@@ -13799,6 +13808,9 @@ async function renderCobrancaDetalhe(){
     const { data:ax } = await supa.from('documentos')
       .select('id,nome,categoria,size_bytes,uploaded_at').eq('cobranca_id',id).eq('ativo',true).order('uploaded_at',{ascending:false});
     anexos=ax||[];
+    const { data:rp } = await supa.from('repasses_cliente')
+      .select('*').eq('cobranca_id',id).order('data_pix',{ascending:false,nullsFirst:false});
+    repasses=rp||[];
   }
   if(!cob) cob=(DB_cobrancas||[]).find(c=>c.id===id)||null;
   if(!cob){ el.innerHTML=`<div class="det-wrap det-fade"><button class="det-back" onclick="showPage('cobr')">${ico('arrow-left',14)||'←'} Voltar</button><div class="cob-panel"><div class="cob-empty-big"><div class="cob-empty-tt">Cobrança não encontrada</div></div></div></div>`; return; }
@@ -13808,6 +13820,18 @@ async function renderCobrancaDetalhe(){
   const d=cob.divida||{};
   const vAtual=+cob.valor_atual||+cob.valor_orig||0, vOrig=+cob.valor_orig||+d.valorOriginal||0;
   const juros=+d.juros||0, multa=+d.multa||0, correcao=+(d.correcao||d.valorCorrigido)||0;
+  // Capital e repasses ao cliente
+  const vCapital = (cob.valor_capital!=null) ? +cob.valor_capital : (d.valorCapital!=null ? +d.valorCapital : null);
+  const enviado = (repasses||[]).reduce((s,r)=>s+(+r.valor||0),0);
+  const saldoCap = (vCapital!=null) ? (vCapital - enviado) : null;
+  const quitadoCliente = (saldoCap!=null && vCapital>0 && saldoCap<=0.005);
+  const _cliCob = (DB.clientes||[]).find(x=>x.id===cob.cliente_id) || null;
+  window._repasseCtx = {
+    cobId: cob.id, clienteId: cob.cliente_id||'',
+    clienteNome: (_cliCob && (_cliCob.nomeFantasia||_cliCob.nome_fantasia||_cliCob.nome)) || _cobrCredorNome(cob) || '',
+    clienteDoc: (_cliCob && (_cliCob.doc||'')) || '',
+    devDoc: '', devId: ''
+  };
   const tipoDoc=cob.tipo_documento||d.titulo||d.descricao||'—';
   const isJud=(cob.fase||'')==='judicial';
   const layout=(()=>{ try{ return localStorage.getItem('cobrasq-detalhe-layout')||'dossie'; }catch(_){ return 'dossie'; } })();
@@ -13831,6 +13855,19 @@ async function renderCobrancaDetalhe(){
       <div><div class="k">Multa</div><div class="v">${fmtR(multa)}</div></div>
       <div><div class="k">Correção</div><div class="v">${fmtR(correcao)}</div></div>
     </div></div>`;
+
+  const panelCapital=`<div class="cob-panel" style="padding:18px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+      <div class="det-panel-tt" style="margin:0;">Capital e repasses ao cliente</div>
+      ${quitadoCliente?'<span class="cob-pill st-quitado">✓ Quitado ao cliente</span>':''}
+    </div>
+    <div class="det-vbreak" style="grid-template-columns:repeat(3,1fr);margin-top:12px;">
+      <div><div class="k">Valor capital da dívida</div><div class="v">${vCapital!=null?fmtR(vCapital):'<span style="color:var(--text-3);font-weight:400;">não definido</span>'}</div></div>
+      <div><div class="k">Valores enviados ao cliente</div><div class="v">${fmtR(enviado)}</div></div>
+      <div><div class="k">Saldo capital remanescente</div><div class="v" style="color:${saldoCap==null?'inherit':(saldoCap<=0.005?'var(--success,#16a34a)':'var(--navy)')};">${saldoCap!=null?fmtR(Math.max(saldoCap,0)):'—'}</div></div>
+    </div>
+    ${vCapital==null?`<div style="font-size:11.5px;color:var(--text-3);margin-top:10px;">Defina o <strong>valor capital</strong> no botão <strong>Editar</strong> para acompanhar o saldo de repasses. Registre os comprovantes na aba <strong>Repasses ao cliente</strong>.</div>`:''}
+  </div>`;
 
   const panelDoc=`<div class="cob-panel" style="padding:18px;">
     <div class="det-panel-tt">Documento</div>
@@ -13946,12 +13983,43 @@ async function renderCobrancaDetalhe(){
     </div>
   </div>`;
 
-  // Abas (img/04): Resumo · Devedores · Histórico · Documentos do caso · Andamentos/CRM.
+  // Aba "Repasses ao cliente": comprovantes PIX (COBRASQ -> credor) que abatem o capital.
+  const _repDoc = _repasseCtx.clienteDoc ? String(_repasseCtx.clienteDoc).replace(/\D/g,'') : '';
+  const repRow=(r)=>{
+    const dataTxt = r.data_pix ? _detData(r.data_pix) : '—';
+    const divergente = (r.destinatario_doc && _repDoc && String(r.destinatario_doc).replace(/\D/g,'')!==_repDoc);
+    return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;border:1px solid var(--border);border-radius:8px;padding:9px 12px;margin-bottom:8px;">
+      <div style="min-width:0;flex:1;">
+        <div style="font-size:13px;font-weight:700;font-family:var(--font-mono);">${fmtR(+r.valor||0)}${divergente?' <span title="Destinatário diverge do cliente do caso" style="color:var(--danger);font-weight:400;">⚠ destinatário</span>':''}</div>
+        <div style="font-size:10.5px;color:var(--text-3);margin-top:1px;">${dataTxt}${r.destinatario_nome?` · ${escHtml(r.destinatario_nome)}`:''}${r.transacao_id?` · ID ${escHtml(String(r.transacao_id).slice(0,18))}…`:''}</div>
+      </div>
+      <div style="display:flex;gap:6px;flex-shrink:0;">
+        ${r.documento_id?`<button class="btn btn-ghost btn-sm" onclick="baixarDocumentoDevedor('${r.documento_id}')">Abrir</button>`:''}
+        ${currentUser?.tipo==='gestor'?`<button class="btn btn-ghost btn-sm" style="color:var(--danger);" onclick="removerRepasse('${r.id}')">Remover</button>`:''}
+      </div>
+    </div>`;
+  };
+  const panelRepasses=`<div class="cob-panel" style="padding:18px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+      <div class="det-panel-tt" style="margin:0;">Repasses ao cliente${repasses.length?` (${repasses.length})`:''}</div>
+      <button class="cob-btn-primary" onclick="abrirRepasseIA()">${ico('file',14)} Enviar comprovantes (IA)</button>
+    </div>
+    <div class="det-vbreak" style="grid-template-columns:repeat(3,1fr);margin-bottom:14px;">
+      <div><div class="k">Capital</div><div class="v">${vCapital!=null?fmtR(vCapital):'—'}</div></div>
+      <div><div class="k">Enviado</div><div class="v">${fmtR(enviado)}</div></div>
+      <div><div class="k">Saldo</div><div class="v" style="color:${saldoCap==null?'inherit':(saldoCap<=0.005?'var(--success,#16a34a)':'var(--navy)')};">${saldoCap!=null?fmtR(Math.max(saldoCap,0)):'—'}</div></div>
+    </div>
+    ${vCapital==null?`<div style="font-size:11.5px;color:#92400e;background:#FEF6E0;border-left:3px solid var(--gold,#d4a017);padding:8px 10px;border-radius:6px;margin-bottom:10px;">⚠ Defina o <strong>valor capital</strong> da dívida (botão Editar) para o abatimento funcionar.</div>`:''}
+    ${repasses.length? repasses.map(repRow).join('') : _detEmpty('Nenhum repasse registrado. Use "Enviar comprovantes (IA)" para subir os comprovantes PIX enviados ao cliente.')}
+  </div>`;
+
+  // Abas (img/04): Resumo · Devedores · Histórico · Documentos do caso · Repasses · Andamentos/CRM.
   const _tabs=[
-    ['resumo','Resumo', panelValores+panelDoc],
+    ['resumo','Resumo', panelValores+panelCapital+panelDoc],
     ['devedores',`Devedores (${partes.length})`, panelDevedores(false)],
     ['hist','Histórico', panelHist],
     ['docs',`Documentos do caso${anexos.length?` (${anexos.length})`:''}`, panelDocGerar+panelAnexos],
+    ['repasses',`Repasses ao cliente${repasses.length?` (${repasses.length})`:''}`, panelRepasses],
     ['crm','Andamentos / CRM', panelCrm]
   ];
   const tabBar=`<div class="det-seg det-tabbar" style="flex-wrap:wrap;">${_tabs.map((t,i)=>`<button class="${i===0?'on':''}" data-cobrtab="${t[0]}" onclick="cobrDetTab('${t[0]}')">${t[1]}</button>`).join('')}</div>`;
@@ -13975,6 +14043,238 @@ async function renderCobrancaDetalhe(){
 function cobrDetTab(name){
   document.querySelectorAll('#page-cobranca-detalhe .det-tabbar [data-cobrtab]').forEach(b=>b.classList.toggle('on', b.dataset.cobrtab===name));
   document.querySelectorAll('#page-cobranca-detalhe .det-tabpane').forEach(p=>{ p.style.display = (p.dataset.pane===name)?'':'none'; });
+}
+
+// ===== Repasses ao cliente — comprovantes PIX lidos por IA, abatem o capital =====
+let _repIAFiles = [];
+let _repIAItems = [];
+
+function abrirRepasseIA(){
+  const ctx = window._repasseCtx;
+  if(!ctx || !ctx.cobId){ showToast('Abra um caso para registrar repasses.','warning'); return; }
+  _repIAFiles = []; _repIAItems = [];
+  _repIAEnsureModal();
+  _repIARenderStep('upload');
+  openModal('modal-repasse-ia');
+}
+function _repIAEnsureModal(){
+  if(document.getElementById('modal-repasse-ia')) return;
+  const d=document.createElement('div'); d.id='modal-repasse-ia'; d.className='overlay';
+  d.innerHTML=`<div class="modal" style="max-width:700px;width:100%;">
+    <div class="modal-header">
+      <span class="modal-title">Repasses ao cliente — enviar comprovantes</span>
+      <button class="modal-close" onclick="closeModal('modal-repasse-ia')">&#10005;</button>
+    </div>
+    <div class="modal-body" id="repIA-body" style="padding:18px 22px;max-height:72vh;overflow:auto;"></div>
+  </div>`;
+  document.body.appendChild(d);
+}
+function _repIARenderStep(step){
+  const body=document.getElementById('repIA-body'); if(!body) return;
+  const ctx=window._repasseCtx||{};
+  if(step==='upload'){
+    body.innerHTML=`
+      <div style="font-size:12.5px;color:var(--text-2);margin-bottom:12px;line-height:1.5;">
+        Suba os comprovantes PIX (PDF ou imagem) que a COBRASQ enviou ao cliente <strong>${escHtml(ctx.clienteNome||'—')}</strong>${ctx.clienteDoc?` (${escHtml(ctx.clienteDoc)})`:''}.
+        A IA lê cada um, extrai valor e data, valida o destinatário e abate do capital <strong>após sua conferência</strong>.
+      </div>
+      <div style="border:1.5px dashed var(--border);border-radius:10px;padding:22px;text-align:center;cursor:pointer;" onclick="document.getElementById('repIA-file').click()">
+        <input type="file" id="repIA-file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp" style="display:none" onchange="_repIAHandleFiles(this.files)">
+        <div style="font-size:13px;color:var(--text-2);">Clique para escolher os comprovantes (até 10)</div>
+      </div>
+      <div id="repIA-list" style="margin-top:12px;"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
+        <button class="btn btn-ghost" onclick="closeModal('modal-repasse-ia')">Cancelar</button>
+        <button class="btn btn-primary" id="repIA-analisar" onclick="_repIAAnalisar()" disabled>Analisar com IA →</button>
+      </div>`;
+    _repIARenderList();
+  }
+}
+function _repIAHandleFiles(fileList){
+  for(const f of Array.from(fileList||[])){
+    if(_repIAFiles.length>=10){ showToast('Limite de 10 arquivos.','warning'); break; }
+    if(_repIAFiles.some(x=>x.name===f.name && x.size===f.size)) continue;
+    if(f.size>20*1024*1024){ showToast(`${f.name} acima de 20 MB.`,'warning'); continue; }
+    _repIAFiles.push(f);
+  }
+  _repIARenderList();
+}
+function _repIARemoveFile(i){ _repIAFiles.splice(i,1); _repIARenderList(); }
+function _repIARenderList(){
+  const list=document.getElementById('repIA-list'); if(!list) return;
+  list.innerHTML=_repIAFiles.map((f,i)=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;border:1px solid var(--border);border-radius:7px;padding:7px 10px;margin-bottom:6px;font-size:12px;">
+    <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(f.name)}</span>
+    <button onclick="_repIARemoveFile(${i})" style="border:none;background:none;cursor:pointer;color:var(--text-3);font-size:16px;">×</button>
+  </div>`).join('');
+  const btn=document.getElementById('repIA-analisar'); if(btn) btn.disabled=_repIAFiles.length===0;
+}
+async function _repIAAnalisar(){
+  if(!_repIAFiles.length) return;
+  const body=document.getElementById('repIA-body');
+  body.innerHTML=`<div style="text-align:center;padding:40px 0;"><div class="mv2-spinner"></div><p style="margin-top:14px;font-size:13px;color:var(--text-2);">IA lendo ${_repIAFiles.length} comprovante(s)…</p></div>`;
+  try{
+    const content=[];
+    for(let i=0;i<_repIAFiles.length;i++){
+      const file=_repIAFiles[i];
+      const ext=(file.name.split('.').pop()||'').toLowerCase();
+      content.push({type:'text',text:`--- COMPROVANTE ${i+1} de ${_repIAFiles.length}: ${file.name} ---`});
+      const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=e=>res(e.target.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file);});
+      if(ext==='pdf') content.push({type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}});
+      else content.push({type:'image',source:{type:'base64',media_type:ext==='png'?'image/png':(ext==='webp'?'image/webp':'image/jpeg'),data:b64}});
+    }
+    const ctx=window._repasseCtx||{};
+    content.push({type:'text',text:`Você analisa COMPROVANTES DE TRANSFERÊNCIA PIX que a COBRASQ (pagadora) enviou ao credor (destinatário). Há ${_repIAFiles.length} comprovante(s), um por bloco, na ordem acima. O cliente/credor esperado é "${ctx.clienteNome||''}"${ctx.clienteDoc?`, CNPJ/CPF ${ctx.clienteDoc}`:''}.
+
+Para CADA comprovante extraia um objeto, na MESMA ordem. Responda APENAS com JSON: {"itens":[ {...} ]}.
+Schema de cada item (campo faltante = null):
+{
+ "valor": número em reais (ponto decimal, ex.: 206.00) — o valor transferido,
+ "data": "AAAA-MM-DD",
+ "transacao_id": string (endToEndId / ID da Transação),
+ "pagador_nome": string,
+ "destinatario_nome": string,
+ "destinatario_doc": somente dígitos do CPF/CNPJ do destinatário,
+ "alerta": null OU um texto curto se algo estiver estranho (destinatário diferente do credor esperado, pagador não é COBRASQ, status não confirmado, valor ilegível)
+}
+NUNCA invente valor. Se não conseguir ler o valor, deixe null e explique em "alerta". Retorne só o JSON, sem markdown.`});
+    const resp=await fetch('/api/claude',{ method:'POST', headers:{'Content-Type':'application/json', ...(await authHeaders())},
+      body:JSON.stringify({model:'claude-opus-4-5',max_tokens:2048,messages:[{role:'user',content}]}) });
+    const data=await resp.json();
+    if(data.error) throw new Error(data.error.message||'Erro na IA');
+    const aiText=(data.content?.[0]?.text||'').trim();
+    const m=aiText.match(/\{[\s\S]*\}/);
+    const parsed=JSON.parse(m?m[0]:aiText);
+    const itens=Array.isArray(parsed.itens)?parsed.itens:(Array.isArray(parsed)?parsed:[]);
+    _repIAItems=itens.map((it,i)=>({
+      file:_repIAFiles[i]||null,
+      valor:(it.valor!=null && !isNaN(+it.valor))?+it.valor:null,
+      data:it.data||'', transacao_id:it.transacao_id||'',
+      destinatario_nome:it.destinatario_nome||'', destinatario_doc:String(it.destinatario_doc||'').replace(/\D/g,''),
+      pagador_nome:it.pagador_nome||'', alerta:it.alerta||'', incluir:true
+    }));
+    if(!_repIAItems.length){ throw new Error('A IA não retornou nenhum comprovante.'); }
+    _repIARenderReview();
+  }catch(e){
+    body.innerHTML=`<div style="text-align:center;padding:30px;"><div style="font-size:26px;color:var(--danger);">⚠</div><p style="margin-top:8px;font-size:13px;color:var(--text-2);">${escHtml((typeof traduzirErro==='function'?traduzirErro(e.message):e.message)||'Falha na análise.')}</p><button class="btn btn-ghost" style="margin-top:14px;" onclick="_repIARenderStep('upload')">← Voltar</button></div>`;
+  }
+}
+function _repIARenderReview(){
+  const body=document.getElementById('repIA-body'); const ctx=window._repasseCtx||{};
+  const cliDoc=String(ctx.clienteDoc||'').replace(/\D/g,'');
+  const rows=_repIAItems.map((it,i)=>{
+    const divergente=it.destinatario_doc && cliDoc && it.destinatario_doc!==cliDoc;
+    const semValor=it.valor==null;
+    return `<tr style="border-top:1px solid var(--border);">
+      <td style="padding:6px;"><input type="checkbox" ${it.incluir?'checked':''} onchange="_repIAItems[${i}].incluir=this.checked;_repIAUpdTotal()"></td>
+      <td style="padding:6px;font-size:11px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escHtml(it.file?it.file.name:'')}">${escHtml(it.file?it.file.name:'—')}</td>
+      <td style="padding:6px;"><input value="${it.valor!=null?_cobrFmtNum(it.valor):''}" placeholder="0,00" oninput="_repIAItems[${i}].valor=parseValorBR(this.value);_repIAUpdTotal()" style="width:88px;padding:4px 6px;border:1px solid ${semValor?'var(--danger)':'var(--border)'};border-radius:5px;font-size:12px;"></td>
+      <td style="padding:6px;"><input type="date" value="${escHtml(it.data||'')}" onchange="_repIAItems[${i}].data=this.value" style="padding:4px 6px;border:1px solid var(--border);border-radius:5px;font-size:12px;"></td>
+      <td style="padding:6px;font-size:11px;color:${divergente?'var(--danger)':'var(--text-3)'};max-width:160px;">${escHtml(it.destinatario_nome||'—')}${divergente?' ⚠ diverge':''}${it.alerta?`<div style="color:var(--danger);margin-top:2px;">${escHtml(it.alerta)}</div>`:''}</td>
+    </tr>`;
+  }).join('');
+  body.innerHTML=`
+    <div style="font-size:12.5px;color:var(--text-2);margin-bottom:10px;">Confira os valores extraídos pela IA. Desmarque o que não quer registrar. <strong>⚠ diverge</strong> = destinatário diferente do cliente do caso.</div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+      <thead><tr style="text-align:left;color:var(--text-3);font-size:10px;text-transform:uppercase;"><th style="padding:6px;"></th><th style="padding:6px;">Arquivo</th><th style="padding:6px;">Valor</th><th style="padding:6px;">Data</th><th style="padding:6px;">Destinatário / alerta</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:16px;gap:10px;flex-wrap:wrap;">
+      <div style="font-size:13px;"><strong>Total a abater:</strong> <span id="repIA-total" style="font-family:var(--font-mono);"></span></div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost" onclick="_repIARenderStep('upload')">← Voltar</button>
+        <button class="btn btn-primary" id="repIA-confirmar" onclick="_repIAConfirmar()">Confirmar e abater</button>
+      </div>
+    </div>`;
+  _repIAUpdTotal();
+}
+function _repIAUpdTotal(){
+  const el=document.getElementById('repIA-total'); if(!el) return;
+  const total=_repIAItems.filter(x=>x.incluir && x.valor!=null).reduce((s,x)=>s+(+x.valor||0),0);
+  el.textContent=fmtR(total);
+}
+async function _repIAConfirmar(){
+  const ctx=window._repasseCtx||{}; const ax=window._anexoCtx||{};
+  const supa=getSupabase(); if(!supa){ showToast('Supabase não configurado.','danger'); return; }
+  const incluir=_repIAItems.filter(x=>x.incluir);
+  if(!incluir.length){ showToast('Selecione ao menos um comprovante.','warning'); return; }
+  if(incluir.some(x=>x.valor==null)){ showToast('Há comprovante sem valor. Preencha ou desmarque.','warning'); return; }
+  const btn=document.getElementById('repIA-confirmar'); if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
+  let ok=0, dup=0, fail=0;
+  try{
+    const { data: udata } = await supa.auth.getUser();
+    const uid = udata && udata.user ? udata.user.id : null;
+    const { data: existentes } = await supa.from('repasses_cliente').select('transacao_id').eq('cobranca_id', ctx.cobId);
+    const jaTem=new Set((existentes||[]).map(r=>r.transacao_id).filter(Boolean));
+    for(const it of incluir){
+      if(it.transacao_id && jaTem.has(it.transacao_id)){ dup++; continue; }
+      let documento_id=null;
+      if(it.file){
+        try{
+          const extf=(it.file.name.split('.').pop()||'pdf').toLowerCase();
+          const nomePadrao=`Repasse — ${(ctx.clienteNome||'cliente')} — ${it.data||'sem-data'} — R$ ${_cobrFmtNum(it.valor)}.${extf}`.replace(/\s+/g,' ').trim();
+          const nomeSeguro=(it.file.name||'repasse').replace(/[^a-zA-Z0-9._-]/g,'_');
+          const path=`cobrancas/${ctx.cobId}/repasse/${Date.now()}_${nomeSeguro}`;
+          const { error: upErr }=await supa.storage.from('documentos').upload(path, it.file, { contentType: it.file.type||'application/octet-stream', upsert:false });
+          if(!upErr){
+            const chave=(String(ax.devDoc||'').replace(/\D/g,''))||('id-'+(ax.devId||ctx.cobId));
+            const { data: docRow, error: insErr }=await supa.from('documentos').insert({
+              devedor_doc: chave, devedor_id: ax.devId||null, cobranca_id: ctx.cobId,
+              categoria:'repasse', nome: nomePadrao, storage_path: path,
+              mime_type: it.file.type||null, size_bytes: it.file.size, uploaded_by: uid
+            }).select('id').single();
+            if(!insErr && docRow) documento_id=docRow.id;
+            else await supa.storage.from('documentos').move(path,'_lixeira/'+path).catch(()=>{});
+          }
+        }catch(_){}
+      }
+      const { error: rErr }=await supa.from('repasses_cliente').insert({
+        cobranca_id: ctx.cobId, cliente_id: ctx.clienteId||null, valor: it.valor,
+        data_pix: it.data||null, transacao_id: it.transacao_id||null,
+        destinatario_nome: it.destinatario_nome||null, destinatario_doc: it.destinatario_doc||null,
+        documento_id, status:'confirmado', origem:'ia', created_by: uid
+      });
+      if(rErr){ if(/duplicate|unique|uq_repasse/i.test(rErr.message||'')) dup++; else fail++; } else ok++;
+    }
+    closeModal('modal-repasse-ia');
+    const novoStatus=await recomputarSaldoCapital(ctx.cobId);
+    let msg=`${ok} repasse(s) registrado(s).`;
+    if(dup) msg+=` ${dup} já existia(m).`;
+    if(fail) msg+=` ${fail} falhou(aram).`;
+    if(novoStatus==='Quitado ao cliente') msg+=' Capital zerado → status "Quitado ao cliente".';
+    showToast(msg, fail?'warning':'success');
+    renderCobrancaDetalhe();
+  }catch(e){
+    showToast('Falha ao registrar repasses: '+(e.message||e),'danger');
+    if(btn){ btn.disabled=false; btn.textContent='Confirmar e abater'; }
+  }
+}
+// Soma os repasses, calcula o saldo do capital; zerou -> status "Quitado ao cliente".
+async function recomputarSaldoCapital(cobId){
+  const supa=getSupabase(); if(!supa||!cobId) return null;
+  try{
+    const { data: cob }=await supa.from('cobrancas').select('valor_capital,status,divida').eq('id',cobId).maybeSingle();
+    if(!cob) return null;
+    const cap=(cob.valor_capital!=null)?+cob.valor_capital:((cob.divida&&cob.divida.valorCapital!=null)?+cob.divida.valorCapital:null);
+    if(cap==null||cap<=0) return cob.status;
+    const { data: rps }=await supa.from('repasses_cliente').select('valor').eq('cobranca_id',cobId);
+    const enviado=(rps||[]).reduce((s,r)=>s+(+r.valor||0),0);
+    if((cap-enviado)<=0.005 && cob.status!=='Quitado ao cliente'){
+      const novaDiv=Object.assign({}, cob.divida||{}, { valorCapital: cap });
+      await supa.from('cobrancas').update({ status:'Quitado ao cliente', divida:novaDiv, updated_at:new Date().toISOString() }).eq('id',cobId);
+      try{ await supa.from('devedor_eventos').insert({ cobranca_id:cobId, tipo:'repasse', payload:{ acao_completa:'Capital integralmente repassado ao cliente — status alterado para "Quitado ao cliente".', origem:'repasse' } }); }catch(_){}
+      return 'Quitado ao cliente';
+    }
+    return cob.status;
+  }catch(e){ return null; }
+}
+async function removerRepasse(id){
+  if(currentUser?.tipo!=='gestor'){ showToast('Apenas o gestor pode remover repasses.','warning'); return; }
+  const supa=getSupabase(); if(!supa) return;
+  if(!confirm('Remover este repasse? O valor volta para o saldo do capital.')) return;
+  const { error }=await supa.from('repasses_cliente').delete().eq('id',id);
+  if(error){ showToast('Falha ao remover: '+error.message,'danger'); return; }
+  showToast('Repasse removido. Confira o status se o capital deixou de estar quitado.','success');
+  renderCobrancaDetalhe();
 }
 // Nota manual no histórico: qualquer usuário pode registrar anotações no caso.
 function adicionarNotaHistorico(cobId){
@@ -14318,6 +14618,8 @@ async function mcliCarregarCobrancas(){
 
 function abrirCobrancaModal(cob){
   window._cobrEditId = cob?.id || null;
+  // Valor capital: trava após o 1º cadastro (só dono + digitar CONFIRMAR). _cobrEditCapitalPrev = valor já salvo (null = ainda não definido).
+  window._cobrEditCapitalPrev = (cob && cob.valor_capital!=null) ? +cob.valor_capital : null;
   const _ordNome = (a,b)=>(a.nome||'').localeCompare(b.nome||'','pt-BR',{sensitivity:'base'});
   const credoresOpts = (DB.clientes||[]).filter(c=>!c.arquivado && !c.isDraft).slice().sort(_ordNome)
     .map(c=>`<option value="${escHtml(c.nome)}"></option>`).join('');
@@ -14329,6 +14631,9 @@ function abrirCobrancaModal(cob){
   const credorVal = cob ? escHtml((DB.clientes||[]).find(x=>x.id===cob.cliente_id)?.nome || _cobrCredorNome(cob) || '') : '';
   const vOrig = cob ? _cobrFmtNum(cob.valor_orig ?? d.valorOriginal) : '';
   const vAtual = cob ? _cobrFmtNum(cob.valor_atual ?? d.totalAvista) : '';
+  const vCapital = cob ? _cobrFmtNum(cob.valor_capital ?? cob.valor_orig ?? d.valorOriginal) : '';
+  const capJaSet = !!(cob && cob.valor_capital!=null);
+  const capDisabled = !!(capJaSet && ehColaborador());
   const venc = cob ? (cob.data_entrada || d.vencimento || '') : '';
   const desc = cob ? escHtml(d.descricao || d.titulo || '') : '';
   // FASE C — campos de documento/fase promovidos a colunas próprias de cobrancas.
@@ -14434,6 +14739,11 @@ function abrirCobrancaModal(cob){
 
         <!-- Valores e vencimento -->
         <div style="font-size:11.5px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.06em;margin:18px 0 8px;">Valores e vencimento</div>
+        <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;background:var(--surface-2);">
+          <label style="font-size:12px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:6px;">Valor capital da dívida ${capJaSet?'<span title="Campo crítico — travado após o cadastro">🔒</span>':''}<span style="font-weight:400;color:var(--text-3);">(sem juros/multa/correção)</span></label>
+          <input id="cobr-valor-capital" value="${vCapital}" placeholder="0,00" ${capDisabled?'disabled':''} style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;margin-top:4px;${capDisabled?'background:var(--surface);color:var(--text-3);cursor:not-allowed;':''}"/>
+          <div style="font-size:11px;color:var(--text-3);margin-top:5px;">${capDisabled?'Só o proprietário pode alterar este valor após o cadastro.':(capJaSet?'Alterar este valor exige digitar <strong>CONFIRMAR</strong> (campo crítico).':'Base para o saldo de repasses ao cliente. Após salvo, só o proprietário edita (com confirmação).')}</div>
+        </div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
           <div><label style="font-size:12px;font-weight:600;color:var(--text-2);">Valor original</label>
             <input id="cobr-valor-orig" value="${vOrig}" placeholder="0,00" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;margin-top:4px;"/></div>
@@ -14559,6 +14869,15 @@ async function salvarCobranca(){
   const credorNome = document.getElementById('cobr-credor').value.trim();
   const valorOrig  = parseValorBR(document.getElementById('cobr-valor-orig').value) || 0;
   const valorAtual = parseValorBR(document.getElementById('cobr-valor-atual').value) || valorOrig;
+  const valorCapital = (()=>{ const el=document.getElementById('cobr-valor-capital'); return el ? (parseValorBR(el.value)||0) : 0; })();
+  // Trava do valor capital: depois de definido (≠ null), alterar exige proprietário + digitar CONFIRMAR.
+  const _capPrev = window._cobrEditCapitalPrev;
+  if(_capPrev!=null && Math.abs((valorCapital||0)-(+_capPrev||0))>0.005 && !window._capitalConfirmOK){
+    if(ehColaborador()){ showToast('Só o proprietário pode alterar o valor capital após o cadastro.','danger'); return; }
+    confirmarPalavra('CONFIRMAR','Você está alterando o VALOR CAPITAL da dívida (de '+fmtR(+_capPrev||0)+' para '+fmtR(valorCapital||0)+') — campo crítico. Digite CONFIRMAR para prosseguir:', ()=>{ window._capitalConfirmOK=true; salvarCobranca(); });
+    return;
+  }
+  window._capitalConfirmOK=false;
   const venc       = document.getElementById('cobr-venc').value || null;
   const desc       = document.getElementById('cobr-desc').value.trim();
   // FASE C — campos de documento/fase (colunas próprias de cobrancas)
@@ -14622,7 +14941,7 @@ async function salvarCobranca(){
       }
     }
 
-    const divida = { valorOriginal: valorOrig, totalAvista: valorAtual, vencimento: venc, descricao: desc };
+    const divida = { valorOriginal: valorOrig, totalAvista: valorAtual, vencimento: venc, descricao: desc, valorCapital: (valorCapital||null) };
     const assignedTo = responsavelId || uidUser;
     let cobId;
 
@@ -14631,7 +14950,7 @@ async function salvarCobranca(){
       cobId = editId;
       const updCob = {
         cliente_id: clienteId, status: situacao, tipo_cobranca: tipoCobr,
-        valor_orig: valorOrig, valor_atual: valorAtual, data_entrada: venc, vencimento: venc, divida,
+        valor_orig: valorOrig, valor_atual: valorAtual, valor_capital: (valorCapital||null), data_entrada: venc, vencimento: venc, divida,
         fase, tipo_documento: tipoDoc, numero_documento: numDoc, banco, agencia_conta: agConta,
         numero_processo: numProc, vara_tribunal: vara, monitorar_datajud: monitorar, origem, observacoes: cobObs, tags: cobTags,
         updated_at: new Date().toISOString()
@@ -14656,7 +14975,7 @@ async function salvarCobranca(){
       }
       const novaCobr = {
         cliente_id: clienteId, status: situacao, fase, tipo_cobranca: tipoCobr,
-        valor_orig: valorOrig, valor_atual: valorAtual, data_entrada: venc, vencimento: venc,
+        valor_orig: valorOrig, valor_atual: valorAtual, valor_capital: (valorCapital||null), data_entrada: venc, vencimento: venc,
         tipo_documento: tipoDoc, numero_documento: numDoc, banco, agencia_conta: agConta,
         numero_processo: numProc, vara_tribunal: vara, monitorar_datajud: monitorar, origem, observacoes: cobObs, tags: cobTags,
         divida, metadata:{ credorOriginal: credorNome, origem:'cobranca_form' },
@@ -26686,7 +27005,7 @@ async function aavAtualizarStatus(id){
 // enxergam/enviam. Chave da pasta: CPF/CNPJ só dígitos, ou 'id-<uuid>' se sem doc.
 const DOC_CATEGORIAS = [
   ['contrato','Contrato'], ['nota-promissoria','Nota promissória'],
-  ['comprovante','Comprovante'], ['acordo-assinado','Acordo assinado'],
+  ['comprovante','Comprovante'], ['repasse','Repasse ao cliente'], ['acordo-assinado','Acordo assinado'],
   ['peticao','Petição'], ['procuracao','Procuração'],
   ['calculo','Cálculo'], ['outros','Outros']
 ];
