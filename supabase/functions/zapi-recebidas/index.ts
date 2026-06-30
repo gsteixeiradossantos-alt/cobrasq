@@ -3,8 +3,10 @@
 // mensagem que o DEVEDOR enviou em crm_mensagens_recebidas. É o lado INBOUND
 // que faltava: o zapi-webhook só trata STATUS de entrega (outbound).
 //
-// Idempotente por message_id. Ignora mensagens nossas (fromMe), grupos e
-// callbacks de status. Resolve o caso (devedor) pelo telefone via RPC.
+// Idempotente por message_id. Ignora grupos e callbacks de status. Mensagens
+// nossas (fromMe) — inclusive resposta MANUAL no celular — são gravadas como
+// outbound em crm_mensagens_status pra tirar a conversa da fila de pendentes.
+// Resolve o caso (devedor) pelo telefone via RPC.
 //
 // verify_jwt: false (Z-API não tem JWT do Supabase).
 // Auth via query ?token=ZAPI_WEBHOOK_SECRET ou header Authorization: Bearer <secret>.
@@ -72,19 +74,17 @@ Deno.serve(async (req) => {
   try { body = await req.json(); }
   catch { return new Response(JSON.stringify({ error: 'JSON inválido' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }); }
 
-  // Só nos interessa mensagem RECEBIDA de pessoa: ignora as nossas (fromMe),
-  // grupos e callbacks de status que por ventura cheguem nesta URL.
-  if (body?.fromMe === true || body?.isGroup === true || body?.isStatusReply === true) {
-    return new Response(JSON.stringify({ ok: true, ignored: 'fromMe/group/status' }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+  // Grupos e callbacks de status não interessam aqui.
+  if (body?.isGroup === true || body?.isStatusReply === true) {
+    return new Response(JSON.stringify({ ok: true, ignored: 'group/status' }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   }
 
   const messageId = body?.messageId || body?.id || body?.zaapId || null;
-  const telefone = normalizarTelefone(body?.phone || body?.from || '');
+  // Em mensagem nossa (fromMe) o `phone` é o DESTINATÁRIO; em recebida é o remetente.
+  const telefone = normalizarTelefone(body?.phone || body?.to || body?.from || '');
   if (!messageId || !telefone) {
     return new Response(JSON.stringify({ ok: true, ignored: 'sem messageId/telefone' }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   }
-
-  const { tipo, texto, midia_url } = extrairConteudo(body);
 
   const sb = createClient(
     Deno.env.get('SUPABASE_URL')!,
@@ -97,6 +97,27 @@ Deno.serve(async (req) => {
     const { data: rid } = await sb.rpc('resolver_caso_por_telefone', { p_tel: telefone });
     if (rid) casoId = rid as string;
   } catch {/* sem match -> caso_id null; o front resolve o nome por telefone */}
+
+  // fromMe = mensagem que SAIU da nossa conta (inclui resposta MANUAL feita no
+  // celular). Registra como outbound em crm_mensagens_status: a view
+  // vw_conversas_pendentes tira a conversa da fila quando há envio nosso após a
+  // recebida. Idempotente por message_id. (Antes isto era ignorado e a conversa
+  // ficava presa em "Pendentes" mesmo após resposta manual.)
+  if (body?.fromMe === true) {
+    await sb.from('crm_mensagens_status').upsert({
+      caso_id: casoId,
+      message_id: String(messageId),
+      telefone_enviado: telefone,
+      status: 'sent',
+      evento_em: new Date().toISOString(),
+      raw_payload: body
+    }, { onConflict: 'message_id' });
+    return new Response(JSON.stringify({ ok: true, recorded_as_outbound: String(messageId), telefone, caso_id: casoId }), {
+      status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
+  }
+
+  const { tipo, texto, midia_url } = extrairConteudo(body);
 
   const momentMs = Number(body?.momment || body?.moment || 0);
   const recebidaEm = momentMs > 0 ? new Date(momentMs).toISOString() : new Date().toISOString();
