@@ -80,11 +80,13 @@ module.exports = async function handler(req, res) {
     // tentativas falhas: reaproveita UMA linha não-emitida do mesmo item e apaga as
     // demais (resolve o "18 → 36 com erro").
     const mesmas = await sbFetch(`nf_avulsa?doc_digits=eq.${encodeURIComponent(doc)}&valor=eq.${valor}&select=id,nf_status,nf_url,nf_asaas_id&order=criada_em.desc`).catch(() => []);
-    const emitida = Array.isArray(mesmas) ? mesmas.find((x) => x.nf_status === 'emitida') : null;
+    // Só bloqueia se há nota REALMENTE emitida (com PDF). 'emitida' sem nf_url é
+    // falso-positivo do fluxo assíncrono e NÃO deve travar a reemissão.
+    const emitida = Array.isArray(mesmas) ? mesmas.find((x) => x.nf_status === 'emitida' && x.nf_url) : null;
     if (emitida) {
       return res.status(200).json({ ok: true, skipped: 'já emitida (mesmo CPF+valor)', nf_status: 'emitida', nf_id: emitida.nf_asaas_id, nf_url: emitida.nf_url });
     }
-    const reuso = Array.isArray(mesmas) ? mesmas.filter((x) => x.nf_status !== 'emitida') : [];
+    const reuso = Array.isArray(mesmas) ? mesmas.filter((x) => !(x.nf_status === 'emitida' && x.nf_url)) : [];
     rowId = reuso[0] ? reuso[0].id : null;
     const apagar = reuso.slice(1).map((x) => x.id);
     if (apagar.length) { await sbFetch(`nf_avulsa?id=in.(${apagar.join(',')})`, { method: 'DELETE' }).catch(() => {}); }
@@ -149,20 +151,28 @@ module.exports = async function handler(req, res) {
     try { authorized = await asaasReq('POST', `/invoices/${invoice.id}/authorize`, {}); }
     catch (e) { authorized = { ...invoice, _authorizeError: e.message }; }
 
+    // A NFS-e é autorizada pela prefeitura de forma ASSÍNCRONA: o /authorize NÃO-erro
+    // só agenda; não significa autorizada. Só marca 'emitida' quando status=AUTHORIZED
+    // (ou já veio pdfUrl). Senão fica 'processando' (e a UI reconcilia depois). ERROR
+    // já traz o motivo. Evita o falso-positivo "emitida sem PDF".
+    const st = String(authorized.status || invoice.status || '').toUpperCase();
     const nfUrl = authorized.pdfUrl || authorized.xmlUrl || invoice.pdfUrl || '';
-    const nfStatus = authorized._authorizeError ? 'processando' : 'emitida';
+    let nfStatus, nfErro = null;
+    if (st === 'AUTHORIZED' || nfUrl) nfStatus = 'emitida';
+    else if (st === 'ERROR') { nfStatus = 'erro'; nfErro = (authorized.errors && authorized.errors[0] && authorized.errors[0].description) || authorized.statusDescription || 'Recusada pela prefeitura'; }
+    else nfStatus = 'processando';
 
     if (rowId) {
       await sbFetch(`nf_avulsa?id=eq.${rowId}`, {
         method: 'PATCH',
         body: JSON.stringify({
-          nf_status: nfStatus, nf_asaas_id: invoice.id || null, nf_url: nfUrl || null,
+          nf_status: nfStatus, erro: nfErro, nf_asaas_id: invoice.id || null, nf_url: nfUrl || null,
           metadata: { ...(ref ? { ref } : {}), ...fiscalMeta, nf_number: authorized.number || null },
         }),
       }).catch(() => {});
     }
 
-    return res.status(200).json({ ok: true, nf_status: nfStatus, nf_id: invoice.id || null, nf_url: nfUrl || null, customer_id: customerId });
+    return res.status(200).json({ ok: true, nf_status: nfStatus, nf_id: invoice.id || null, nf_url: nfUrl || null, erro: nfErro, customer_id: customerId });
   } catch (e) {
     if (rowId) {
       await sbFetch(`nf_avulsa?id=eq.${rowId}`, { method: 'PATCH', body: JSON.stringify({ nf_status: 'erro', erro: String(e.message || e).slice(0, 500) }) }).catch(() => {});

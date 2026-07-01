@@ -29271,6 +29271,10 @@ function nfaParseLista(txt){
 
 // ── derivados do histórico ───────────────────────────────────────────────────
 function nfaEffStatus(h){ return (h.metadata && h.metadata.resolved) || h.nf_status || ''; }
+// Pendente de conciliação: precisa reconsultar o Asaas. Inclui "processando" E
+// "emitida SEM PDF" (falso-positivo do backend antigo, que marcava emitida só pq o
+// /authorize não deu erro — a prefeitura autoriza depois). Sem isto, essas travam.
+function nfaPendentePdf(h){ const s=nfaEffStatus(h); return !!h.nf_asaas_id && (s==='processando' || (s==='emitida' && !h.nf_url)); }
 function nfaCompetencia(dstr){ const d = dstr?new Date(dstr):new Date(); return String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear(); }
 function nfaRowComp(h){ return (h.metadata && h.metadata.competencia) || nfaCompetencia(h.criada_em); }
 function nfaRowAliq(h){ const a=h.metadata && h.metadata.aliquota; const n=parseFloat(String(a==null?'':a).replace(',','.')); return isFinite(n)?n:nfaAliquota(); }
@@ -29797,6 +29801,7 @@ function nfaDrawHistorico(){
     return s===_nfaFiltro;
   });
   const nProc=cnt('processando');
+  const nPend=(_nfaHist||[]).filter(nfaPendentePdf).length; // processando + emitida-sem-PDF
   const tabs=filtros.map(f=>`<button onclick="nfaSetFiltro('${f.k}')" style="border:1px solid ${_nfaFiltro===f.k?'var(--gold)':'var(--border)'};background:${_nfaFiltro===f.k?'rgba(201,169,97,.12)':'transparent'};border-radius:100px;padding:5px 13px;font-size:12px;cursor:pointer;color:var(--text-1,#15224A);">${f.label} <span style="color:var(--text-3);">${f.n}</span></button>`).join('');
 
   const stCor=s=> s==='emitida'?'var(--success)': s==='erro'?'var(--danger)': s==='processando'?'#9a7a18': s==='cancelada'?'#6E748A': s==='arquivada'?'#6E748A':'var(--text-3)';
@@ -29831,7 +29836,7 @@ function nfaDrawHistorico(){
 
   cont.innerHTML=`
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;">${tabs}
-      ${nProc?`<button class="btn btn-primary btn-sm" id="nfa-status-btn" onclick="nfaAtualizarStatus()" style="margin-left:auto;">↻ Atualizar ${nProc} em processamento</button>`:''}
+      ${nPend?`<button class="btn btn-primary btn-sm" id="nfa-status-btn" onclick="nfaAtualizarStatus()" style="margin-left:auto;">↻ Atualizar ${nPend} pendente(s)</button>`:''}
     </div>
     ${erroPanel}
     ${barra}
@@ -30103,7 +30108,7 @@ function nfaToggleAuto(){
   if(_nfaAutoUpdate){
     _nfaAutoTimer=setInterval(async ()=>{
       if(!document.getElementById('page-nf-avulsa') || !document.getElementById('page-nf-avulsa').classList.contains('active')){ return; }
-      const nProc=(_nfaHist||[]).filter(r=>nfaEffStatus(r)==='processando').length;
+      const nProc=(_nfaHist||[]).filter(nfaPendentePdf).length;
       if(!nProc){ return; }
       await nfaAtualizarStatus(true);
     }, 15000);
@@ -30113,8 +30118,8 @@ function nfaToggleAuto(){
 
 // ── atualizar status das processando ─────────────────────────────────────────
 async function nfaAtualizarStatus(silent){
-  const proc=(_nfaHist||[]).filter(r=>nfaEffStatus(r)==='processando' && r.nf_asaas_id);
-  if(!proc.length){ if(!silent) showToast('Nenhuma nota em processamento.','warning'); return; }
+  const proc=(_nfaHist||[]).filter(nfaPendentePdf);
+  if(!proc.length){ if(!silent) showToast('Nenhuma nota pendente de confirmação.','warning'); return; }
   const supa=getSupabase(); if(!supa){ if(!silent) showToast('Faça login para atualizar.','warning'); return; }
   const btn=document.getElementById('nfa-status-btn'); if(btn){ btn.disabled=true; }
   const hdr={ 'Content-Type':'application/json', ...(await authHeaders()) };
@@ -30133,7 +30138,7 @@ async function nfaAtualizarStatus(silent){
       if(st==='AUTHORIZED'){ novo='emitida'; url=inv.pdfUrl||inv.xmlUrl||url; ok++; }
       else if(st==='ERROR'){ novo='erro'; erro=(inv.errors&&inv.errors[0]&&inv.errors[0].description)||inv.statusDescription||'Recusada pela prefeitura'; falha++; }
       else if(st==='CANCELED'||st==='CANCELLATION_DENIED'){ novo='cancelada'; falha++; }
-      else { ainda++; }
+      else { if(nfaEffStatus(r)==='emitida' && !r.nf_url){ novo='processando'; } ainda++; } // corrige falso-"emitida" sem PDF
       if(novo){ const meta={ ...(r.metadata||{}), nf_number:(inv.number||(r.metadata&&r.metadata.nf_number)||null) }; if(novo==='cancelada') meta.resolved='cancelada'; await supa.from('nf_avulsa').update({ nf_status:novo, nf_url:url, erro:erro, metadata:meta }).eq('id',r.id); }
     }catch(e){ falha++; }
   }
