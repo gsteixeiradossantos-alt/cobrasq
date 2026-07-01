@@ -25581,12 +25581,45 @@ async function renderWAPendentes(el){
       intent: waClassificarIntencao(r.resumo, r), archived:true,
       desfecho:r.desfecho||'arquivado', motivo:r.motivo||null, regua_bloqueada:!!r.regua_bloqueada
     }));
+    // Burst: mensagens do cliente da conversa ATUAL (desde o nosso último envio),
+    // lidas direto de crm_mensagens_recebidas (fonte confiável — não depende da
+    // leitura ao vivo do Z-API). Chave por 8 dígitos, igual ao resto do módulo.
+    // Assim o operador vê a rajada inteira ("oi / tudo bem / quero alterar o
+    // vencimento / consegue ver?"), não só a última linha.
+    P.burst = {};
+    const telsBurst = P.lista.map(p=>p.telefone).filter(Boolean);
+    if(telsBurst.length){
+      try{
+        const [msgs, outs] = await Promise.all([
+          supa.from('crm_mensagens_recebidas').select('telefone,texto,tipo,recebida_em').in('telefone', telsBurst).order('recebida_em',{ ascending:true }).limit(500),
+          supa.from('crm_mensagens_status').select('telefone_enviado,evento_em').order('evento_em',{ ascending:false }).limit(500)
+        ]);
+        const dk = t => String(t||'').replace(/\D/g,'').slice(-8);
+        const lastOut = {};
+        (outs&&outs.data||[]).forEach(o=>{ const k=dk(o.telefone_enviado); if(k && (!lastOut[k]||new Date(o.evento_em)>new Date(lastOut[k]))) lastOut[k]=o.evento_em; });
+        (msgs&&msgs.data||[]).forEach(m=>{ const k=dk(m.telefone); if(!k) return; const lo=lastOut[k]; if(!lo || new Date(m.recebida_em)>new Date(lo)){ (P.burst[k]=P.burst[k]||[]).push({ texto:m.texto, tipo:m.tipo, recebida_em:m.recebida_em }); } });
+      }catch(_e){ /* best-effort: sem burst, o painel cai no texto único */ }
+    }
   }catch(e){
     el.innerHTML = `<div style="padding:24px;color:var(--text-3);">Não foi possível carregar as pendentes.<br><span style="font-size:12px;">${escHtml(e.message||String(e))}</span><br><span style="font-size:12px;">Confirme que a migração 20260701 foi aplicada e que o webhook "Ao receber" do Z-API está ligado.</span></div>`;
     return;
   }
   waPendBadgeUpdate();
   waPendPaint(el);
+}
+
+// Mensagens do cliente da conversa atual (rajada). Fallback: a única mensagem
+// que a fila trouxe. Sempre devolve pelo menos 1 item.
+function waPendBurstDe(p){
+  const k = String(p.telefone||'').replace(/\D/g,'').slice(-8);
+  const arr = (window._waPend.burst && window._waPend.burst[k]) || [];
+  if(arr.length) return arr;
+  return [{ texto:p.texto, tipo:p.tipo, recebida_em:p.recebida_em }];
+}
+function waPendBurstCount(p){
+  const k = String(p.telefone||'').replace(/\D/g,'').slice(-8);
+  const arr = (window._waPend.burst && window._waPend.burst[k]) || [];
+  return arr.length;
 }
 
 // Atualiza o badge vermelho na aba.
@@ -25709,7 +25742,9 @@ function waPendPaint(el){
   const rows = lista.map((p)=>{
     const conhecido = waEhConhecido(p);
     const nome = waNomeConversa(p);
+    const nBurst = onPend ? waPendBurstCount(p) : 0;
     const prev = (p.texto || (p.tipo&&p.tipo!=='texto'?('['+p.tipo+']'):'') || '—').slice(0,70);
+    const burstChip = (nBurst>1) ? `<span style="font-family:var(--font-mono);font-size:8.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--info);background:color-mix(in oklab,var(--info) 13%,transparent);border-radius:100px;padding:2px 8px;">${nBurst} mensagens</span>` : '';
     const mins = waMinutos(p.recebida_em);
     const ativo = onPend && lista.indexOf(p)===P.sel && P.lista.indexOf(p)>-1;
     const sel = !!P.selMass[p.telefone];
@@ -25731,7 +25766,7 @@ function waPendPaint(el){
         <div style="font-size:12px;color:var(--text-2);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(prev)}</div>
         <div style="display:flex;align-items:center;gap:6px;margin-top:6px;flex-wrap:wrap;">
           <span style="${intentChip(p.intent,false)}">${im[p.intent].label}</span>
-          ${!onPend?desfechoChip(p):''}${blockChip}${restore}
+          ${burstChip}${!onPend?desfechoChip(p):''}${blockChip}${restore}
         </div>
       </div>
       ${quickArch}
@@ -25802,11 +25837,20 @@ function waPendRenderDetalhe(p){
         ${dev?`<div style="font-family:var(--font-mono);font-size:9px;color:var(--gold-dark);margin-top:3px;">${escHtml(dev.nome||'')}</div>`:''}</div>`
     : `<button onclick="waPendModalVincular()" style="flex-shrink:0;display:flex;align-items:center;gap:7px;padding:9px 13px;border-radius:9px;border:1px solid var(--gold);background:color-mix(in oklab,var(--gold) 10%,var(--surface));color:var(--gold-dark);cursor:pointer;font-size:12px;font-weight:600;">${ico('link',14)}Vincular a um caso</button>`;
 
-  // Última mensagem (fallback). waPendCarregarThread substitui por thread ao vivo.
+  // Rajada de mensagens do cliente (do banco). waPendCarregarThread pode
+  // enriquecer com a conversa ao vivo (2 lados) do Z-API por cima disto.
+  const burst = waPendBurstDe(p);
+  const msgsLabel = burst.length>1 ? (burst.length+' mensagens do cliente') : 'Última mensagem do cliente';
+  const bolhasBurst = burst.map((m,idx)=>{
+    const hora = m.recebida_em ? new Date(m.recebida_em).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}) : '';
+    return `<div style="margin-bottom:${idx<burst.length-1?'6px':'0'};">
+      <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:${idx===0?'4px 14px 14px 14px':'14px'};padding:11px 15px;font-size:14px;line-height:1.4;color:var(--text);max-width:560px;">${escHtml(m.texto||('['+(m.tipo||'mensagem')+']'))}</div>
+      ${hora?`<div style="font-family:var(--font-mono);font-size:9px;color:var(--text-3);margin-top:2px;">${hora}</div>`:''}</div>`;
+  }).join('');
   const ultima = `<div id="waPendThread" style="margin-top:8px;">
     <div style="display:flex;gap:10px;align-items:flex-start;">
       <span style="width:30px;height:30px;border-radius:50%;background:#1FA855;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px;"><svg viewBox="0 0 24 24" width="16" height="16" fill="#fff"><path d="M17.5 14.4c-.3-.15-1.76-.87-2.03-.97-.27-.1-.47-.15-.67.15-.2.3-.77.97-.94 1.16-.17.2-.35.22-.64.08-.3-.15-1.26-.47-2.4-1.48-.88-.79-1.48-1.76-1.65-2.06-.17-.3-.02-.46.13-.6.13-.14.3-.35.44-.52.15-.18.2-.3.3-.5.1-.2.05-.37-.02-.52-.08-.15-.67-1.6-.92-2.2-.24-.58-.49-.5-.67-.51h-.57c-.2 0-.52.07-.8.37-.27.3-1.04 1.01-1.04 2.48s1.07 2.87 1.22 3.07c.15.2 2.1 3.2 5.08 4.49.71.3 1.26.49 1.7.62.7.23 1.36.2 1.87.12.57-.08 1.76-.72 2-1.41.25-.7.25-1.29.18-1.41z"></path></svg></span>
-      <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:4px 14px 14px 14px;padding:13px 16px;font-size:14.5px;line-height:1.45;color:var(--text);max-width:560px;">${escHtml(p.texto||('['+(p.tipo||'mensagem')+']'))}</div></div></div>`;
+      <div style="min-width:0;flex:1;">${bolhasBurst}</div></div></div>`;
 
   // Compositor de sugestões (aparece após "Sugerir com a Bia").
   const sugs=(P.sugestoes||[]).map((s,i)=>`<div style="border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px;">
@@ -25841,7 +25885,7 @@ function waPendRenderDetalhe(p){
       ${headerRight}
     </div>
     <div style="padding:22px 24px;">
-      <div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-3);margin-bottom:8px;">Última mensagem do cliente</div>
+      <div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-3);margin-bottom:8px;">${msgsLabel}</div>
       ${ultima}
       <div style="display:flex;align-items:center;gap:8px;margin-top:14px;padding:10px 14px;border-radius:10px;background:color-mix(in oklab,#1FA855 9%,var(--surface));border:1px solid color-mix(in oklab,#1FA855 22%,transparent);">
         <span style="color:#0E5C30;flex-shrink:0;display:flex;">${ico('clock',15)}</span>
