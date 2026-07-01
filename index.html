@@ -29301,7 +29301,7 @@ function nfaDupOf(r){
     return nfaDigits(h.doc_digits||h.doc||'')===d && Math.round(Number(h.valor)*100)===Math.round(v*100);
   });
 }
-function nfaEligible(r){ return r.status!=='emitida' && r.status!=='emitindo' && nfaLocalReady(r) && !nfaDupOf(r) && r.asaas!=='sem-endereco' && r.asaas!=='sem-cpf'; }
+function nfaEligible(r){ return r.status!=='emitida' && r.status!=='emitindo' && nfaLocalReady(r) && !nfaDupOf(r) && (r.asaas!=='sem-endereco' || nfaEndOk(r)) && r.asaas!=='sem-cpf'; }
 function nfaSituacao(r){
   if(r.status==='emitida') return { label:'emitida', color:'var(--success)' };
   if(r.status==='emitindo') return { label:'emitindo…', color:'var(--text-3)' };
@@ -29309,10 +29309,42 @@ function nfaSituacao(r){
   if(r.asaas==='checando') return { label:'checando…', color:'var(--text-3)' };
   if(nfaDupOf(r)) return { label:'duplicada', color:'var(--danger)' };
   if(r.asaas==='sem-cpf') return { label:'sem CPF', color:'var(--danger)' };
-  if(r.asaas==='sem-endereco') return { label:'sem endereço', color:'var(--danger)' };
+  if(r.asaas==='sem-endereco') return nfaEndOk(r) ? { label:'endereço preenchido', color:'var(--success)' } : { label:'sem endereço', color:'var(--danger)' };
   if(r.asaas==='ok') return { label:'Asaas ok', color:'var(--success)' };
   if(!nfaLocalReady(r)) return { label:'incompleta', color:'var(--text-3)' };
   return { label:'pronta', color:'var(--gold-dark,#9a7a18)' };
+}
+
+// ── endereço do tomador (completar no cobrasq → sincroniza no Asaas ao emitir) ──
+function nfaEndOk(r){ const e=r.endereco||{}; return nfaDigits(e.cep).length===8 && String(e.rua||'').trim().length>0 && String(e.numero||'').trim().length>0; }
+function nfaSetEnd(i,campo,val){ const r=_nfaRows[i]; if(!r) return; if(!r.endereco) r.endereco={}; r.endereco[campo]=val; }
+function nfaToggleEnd(i){ const r=_nfaRows[i]; if(!r) return; r.endAberto=!r.endAberto; nfaDrawTabela(); }
+async function nfaViaCep(i){
+  const r=_nfaRows[i]; if(!r||!r.endereco) return; const cep=nfaDigits(r.endereco.cep);
+  if(cep.length!==8) return;
+  try{ const rr=await fetch(`https://viacep.com.br/ws/${cep}/json/`); const j=await rr.json().catch(()=>({}));
+    if(j && !j.erro){ r.endereco.rua=r.endereco.rua||j.logradouro||''; r.endereco.bairro=r.endereco.bairro||j.bairro||''; r.endereco.cidade=r.endereco.cidade||j.localidade||''; r.endereco.uf=r.endereco.uf||j.uf||''; nfaDrawTabela(); }
+  }catch(_){}
+}
+// Pré-preenche o endereço a partir do cadastro de devedores (por CPF), quando a pessoa existir lá.
+async function nfaPrefillEnderecos(){
+  const supa=getSupabase(); if(!supa) return 0;
+  const docs=[...new Set(_nfaRows.filter(r=>!nfaEndOk(r)).map(r=>nfaDigits(r.cpf)).filter(d=>[11,14].includes(d.length)))];
+  if(!docs.length) return 0;
+  let n=0;
+  try{
+    const { data } = await supa.from('devedores').select('doc_digits,cep,rua,numero,complemento,bairro,cidade,uf,endereco,endereco_crm').in('doc_digits',docs);
+    const byDoc={}; (data||[]).forEach(d=>{ if(!byDoc[d.doc_digits]) byDoc[d.doc_digits]=d; });
+    _nfaRows.forEach(r=>{
+      const dv=byDoc[nfaDigits(r.cpf)]; if(!dv) return; const ec=dv.endereco_crm||{};
+      const e=r.endereco||(r.endereco={});
+      e.cep=e.cep||nfaDigits(dv.cep||ec.cep||''); e.rua=e.rua||dv.rua||ec.rua||ec.logradouro||dv.endereco||'';
+      e.numero=e.numero||dv.numero||ec.numero||''; e.complemento=e.complemento||dv.complemento||ec.complemento||'';
+      e.bairro=e.bairro||dv.bairro||ec.bairro||''; e.cidade=e.cidade||dv.cidade||ec.cidade||''; e.uf=(e.uf||dv.uf||ec.uf||'').toUpperCase();
+      if(nfaEndOk(r)) n++;
+    });
+  }catch(_){}
+  return n;
 }
 
 // ── helpers de UI (modal, switch, download) ──────────────────────────────────
@@ -29496,6 +29528,7 @@ function nfaProcessarLista(){
   });
   const pst = document.getElementById('nfa-paste'); if(pst) pst.value='';
   nfaDrawTabela();
+  nfaPrefillEnderecos().then(n=>{ if(n){ nfaDrawTabela(); showToast(`${n} endereço(s) pré-preenchido(s) do cadastro de devedores.`,'success'); } });
 }
 function nfaAddLinha(){ _nfaRows.push({ nome:'', cpf:'', valorRaw:'', descricao:'', status:'pendente', nf_url:'', erro:'', ref:'', asaas:null }); nfaDrawTabela(); }
 function nfaRemoveLinha(i){ _nfaRows.splice(i,1); nfaDrawTabela(); }
@@ -29535,6 +29568,7 @@ async function nfaBuscarCpfAsaas(){
 // Pré-validação REAL: confere CPF + endereço de cada linha no cadastro do Asaas.
 async function nfaValidarAsaas(){
   if(!_nfaRows.length){ showToast('Monte o lote antes de validar.','warning'); return; }
+  await nfaPrefillEnderecos().catch(()=>{}); // puxa endereço do cadastro de devedores antes de checar
   const hdr = { 'Content-Type':'application/json', ...(await authHeaders()) };
   const btn=document.getElementById('nfa-validar-btn'); if(btn) btn.disabled=true;
   let ok=0, bad=0;
@@ -29579,17 +29613,40 @@ function nfaDrawTabela(){
     return;
   }
   const inp = (i,campo,val,ph,extra='')=>`<input value="${escHtml(val)}" placeholder="${ph}" oninput="nfaSet(${i},'${campo}',this.value)" style="width:100%;box-sizing:border-box;font-size:12.5px;padding:6px 7px;border:1px solid var(--border);border-radius:6px;${extra}">`;
+  const eInp = (i,campo,val,ph,extra='')=>`<input value="${escHtml(val||'')}" placeholder="${ph}" oninput="nfaSetEnd(${i},'${campo}',this.value)" style="box-sizing:border-box;font-size:12px;padding:6px 7px;border:1px solid var(--border);border-radius:6px;${extra}">`;
   const linha = (r,i)=>{
     const travado = (r.status==='emitida'||r.status==='emitindo');
     const sit=nfaSituacao(r);
-    return `<tr style="border-bottom:1px solid var(--border);${r.status==='emitida'?'opacity:.7;':''}">
+    const precisaEnd = (r.asaas==='sem-endereco' && !nfaEndOk(r));
+    const eAberto = !!r.endAberto || precisaEnd;
+    const e=r.endereco||{};
+    const head=`<tr style="border-bottom:${eAberto?'none':'1px solid var(--border)'};${r.status==='emitida'?'opacity:.7;':''}">
       <td style="padding:7px 8px;min-width:160px;">${inp(i,'nome',r.nome||'','Nome / Razão social')}</td>
       <td style="padding:7px 8px;width:160px;"><input value="${escHtml(r.cpf||'')}" placeholder="000.000.000-00" inputmode="numeric" oninput="nfaOnDoc(${i},this)" style="width:100%;box-sizing:border-box;font-size:12.5px;padding:6px 7px;border:1px solid var(--border);border-radius:6px;${(nfaDigits(r.cpf).length&&![11,14].includes(nfaDigits(r.cpf).length))?'border-color:var(--danger);':''}">${r.lookupMsg?`<div style="font-size:10.5px;margin-top:2px;color:${/^✓/.test(r.lookupMsg)?'var(--success)':/buscando/.test(r.lookupMsg)?'var(--text-3)':'var(--danger)'};" title="${escHtml(r.lookupMsg)}">${escHtml(r.lookupMsg.length>30?r.lookupMsg.slice(0,30)+'…':r.lookupMsg)}</div>`:''}</td>
       <td style="padding:7px 8px;width:120px;"><input value="${escHtml(r.valorRaw||'')}" placeholder="R$ 0,00" inputmode="numeric" oninput="nfaOnValor(${i},this)" style="width:100%;box-sizing:border-box;font-size:12.5px;padding:6px 7px;border:1px solid var(--border);border-radius:6px;text-align:right;"></td>
       <td style="padding:7px 8px;min-width:140px;">${inp(i,'descricao',r.descricao||'','Descrição (opcional)')}</td>
       <td style="padding:7px 8px;width:120px;font-size:11.5px;"><span style="font-weight:600;color:${sit.color};">${escHtml(sit.label)}</span>${r.status==='erro'&&r.erro?`<div style="font-size:10px;color:var(--danger);" title="${escHtml(r.erro)}">${escHtml(r.erro.slice(0,40))}</div>`:''}</td>
-      <td style="padding:7px 8px;width:28px;text-align:right;">${travado?'':`<button class="btn btn-ghost btn-sm" title="Remover" onclick="nfaRemoveLinha(${i})" style="padding:2px 8px;">✕</button>`}</td>
+      <td style="padding:7px 8px;width:52px;text-align:right;white-space:nowrap;">
+        <button class="btn btn-ghost btn-sm" title="Endereço do tomador" onclick="nfaToggleEnd(${i})" style="padding:2px 6px;${nfaEndOk(r)?'color:var(--success);':precisaEnd?'color:var(--danger);':''}">🏠</button>
+        ${travado?'':`<button class="btn btn-ghost btn-sm" title="Remover" onclick="nfaRemoveLinha(${i})" style="padding:2px 6px;">✕</button>`}
+      </td>
     </tr>`;
+    const endRow = eAberto ? `<tr style="border-bottom:1px solid var(--border);background:var(--surface-2);">
+      <td colspan="6" style="padding:4px 10px 12px 10px;">
+        <div style="font-size:11px;color:${precisaEnd?'var(--danger)':'var(--text-3)'};margin-bottom:6px;">Endereço do tomador ${precisaEnd?'— <b>faltando no Asaas</b>, preencha aqui':''} (grava no cadastro do Asaas ao emitir):</div>
+        <div style="display:grid;grid-template-columns:120px 1fr 80px;gap:6px;">
+          <input value="${escHtml(e.cep||'')}" placeholder="CEP" inputmode="numeric" oninput="nfaSetEnd(${i},'cep',this.value)" onblur="nfaViaCep(${i})" style="box-sizing:border-box;font-size:12px;padding:6px 7px;border:1px solid var(--border);border-radius:6px;">
+          ${eInp(i,'rua',e.rua,'Logradouro')}
+          ${eInp(i,'numero',e.numero,'Nº')}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr 60px;gap:6px;margin-top:6px;">
+          ${eInp(i,'complemento',e.complemento,'Complemento')}
+          ${eInp(i,'bairro',e.bairro,'Bairro')}
+          ${eInp(i,'cidade',e.cidade,'Cidade')}
+          ${eInp(i,'uf',e.uf,'UF','text-transform:uppercase;')}
+        </div>
+      </td></tr>` : '';
+    return head+endRow;
   };
   cont.innerHTML = `
     <div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius);">
@@ -29680,6 +29737,7 @@ async function _nfaEmitirConfirmado(indices){
         headers:{ 'Content-Type':'application/json', ...(await authHeaders()) },
         body: JSON.stringify({ nome:r.nome, doc:nfaDigits(r.cpf), valor:nfaParseValor(r.valorRaw), descricao:r.descricao||'', ref:r.ref,
           asaas_customer_id:r.asaasCustomerId||null, competencia:comp, aliquota:aliq, modelo_nome:m.nome||'', municipio:m.municipio||'',
+          endereco:(r.endereco && (r.endereco.cep||r.endereco.rua))?r.endereco:undefined,
           ..._nfaMunParams() }),
       });
       const j=await resp.json().catch(()=>({}));
