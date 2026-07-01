@@ -121,7 +121,17 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({ ok: true, processadas: 0 }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }
 
-  let enviadas = 0, falhadas = 0;
+  // Enforcement da régua bloqueada: números marcados como Spam/engano na aba
+  // WhatsApp > Pendentes (whatsapp_atendimentos.regua_bloqueada) NÃO recebem
+  // disparos agendados. Chave por 8 dígitos (mesma convenção do painel).
+  const dk = (t: string) => String(t || '').replace(/\D/g, '').slice(-8);
+  const bloqueados = new Set<string>();
+  try {
+    const { data: blk } = await sb.from('whatsapp_atendimentos').select('telefone').eq('regua_bloqueada', true);
+    (blk || []).forEach((b: any) => { const k = dk(b.telefone); if (k) bloqueados.add(k); });
+  } catch { /* coluna ausente (migração 20260703 não aplicada) -> sem enforcement */ }
+
+  let enviadas = 0, falhadas = 0, bloqueadas = 0;
   for (const m of lote) {
     // Lock otimista
     const { data: lock } = await sb
@@ -131,6 +141,15 @@ Deno.serve(async (req) => {
       .eq('status', 'pendente')
       .select('id');
     if (!lock || lock.length === 0) continue;
+
+    // Régua bloqueada: cancela sem enviar.
+    if (bloqueados.has(dk(m.telefone))) {
+      await sb.from('crm_mensagens_agendadas')
+        .update({ status: 'cancelada', erro: 'regua_bloqueada (spam/engano)' })
+        .eq('id', m.id);
+      bloqueadas++;
+      continue;
+    }
 
     const envio = await montarEnvio(m);
     const novasTentativas = (m.tentativas || 0) + 1;
@@ -167,7 +186,7 @@ Deno.serve(async (req) => {
     }
   }
 
-  return new Response(JSON.stringify({ ok: true, lote: lote.length, enviadas, falhadas }), {
+  return new Response(JSON.stringify({ ok: true, lote: lote.length, enviadas, falhadas, bloqueadas }), {
     status: 200, headers: { 'Content-Type': 'application/json' }
   });
 });
