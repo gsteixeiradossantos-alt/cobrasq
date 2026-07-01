@@ -112,7 +112,24 @@ Deno.serve(async (req) => {
       evento_em: new Date().toISOString(),
       raw_payload: body
     }, { onConflict: 'message_id' });
-    return new Response(JSON.stringify({ ok: true, recorded_as_outbound: String(messageId), telefone, caso_id: casoId }), {
+
+    // Trava "humano atendendo": se este envio NÃO é da Bia (não está em
+    // whatsapp_bia_enviadas), então foi um HUMANO — pelo painel ou digitando no
+    // celular. Pausa a Bia por humano_pausa_min minutos (expira sozinha), pra ela
+    // não responder por cima do humano. Best-effort; tolera tabelas ausentes.
+    let humano = false;
+    try {
+      const { data: botMsg } = await sb.from('whatsapp_bia_enviadas').select('message_id').eq('message_id', String(messageId)).maybeSingle();
+      if (!botMsg) {
+        let pausaMin = 30;
+        try { const { data: cfg } = await sb.from('whatsapp_bia_config').select('humano_pausa_min').eq('id', 1).maybeSingle(); if (cfg?.humano_pausa_min != null) pausaMin = cfg.humano_pausa_min; } catch { /* usa default */ }
+        const humanoAte = new Date(Date.now() + pausaMin * 60000).toISOString();
+        await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, humano_ate: humanoAte, updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
+        humano = true;
+      }
+    } catch { /* colunas/tabela ainda não migradas -> comportamento antigo */ }
+
+    return new Response(JSON.stringify({ ok: true, recorded_as_outbound: String(messageId), telefone, caso_id: casoId, humano }), {
       status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
   }

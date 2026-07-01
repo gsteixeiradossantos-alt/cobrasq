@@ -89,6 +89,10 @@ Deno.serve(async (req) => {
   }
   const cooldownMs = (cfg.cooldown_seg ?? 30) * 1000;
   const turnoMax = cfg.turno_max_seguranca ?? 12;
+  // Debounce: espera a RAJADA do cliente assentar. Se a última mensagem recebida
+  // é mais nova que debounce_seg, a pessoa provavelmente ainda está mandando
+  // mensagens -> não responde ainda (responde no próximo run, à rajada inteira).
+  const debounceMs = (cfg.debounce_seg ?? 120) * 1000;
 
   const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY');
   const ZAPI_INSTANCE = Deno.env.get('ZAPI_INSTANCE');
@@ -134,11 +138,17 @@ Deno.serve(async (req) => {
     const msgId = c.message_id as string;
     if (!telefone || !msgId) { puladas++; continue; }
 
+    // Debounce da rajada: se a última mensagem do cliente é muito recente, espera.
+    if (c.recebida_em && (Date.now() - new Date(c.recebida_em).getTime()) < debounceMs) { puladas++; continue; }
+
     // Estado do atendimento. Só pula 'aguardando_humano' (humano assumindo). Um
     // 'resolvido' que reaparece na fila significa que o cliente escreveu DE NOVO
     // (msg mais nova que a última resposta) -> reabre e a Bia volta a atender.
     const { data: at } = await sb.from('whatsapp_atendimentos').select('*').eq('telefone', telefone).maybeSingle();
     if (at && at.estado === 'aguardando_humano') { puladas++; continue; }
+    // Trava "humano atendendo": um humano respondeu (pelo painel ou pelo celular)
+    // há pouco -> a Bia não fala por cima. Expira sozinha (humano_ate no futuro).
+    if (at?.humano_ate && Date.now() < new Date(at.humano_ate).getTime()) { puladas++; continue; }
     if (at?.ultima_resposta_em && (Date.now() - new Date(at.ultima_resposta_em).getTime()) < cooldownMs) { puladas++; continue; }
 
     // CLAIM idempotente: tenta inserir o log p/ este message_id. Se já existe
@@ -215,6 +225,9 @@ Deno.serve(async (req) => {
           caso_id: casoId, message_id: String(outId), telefone_enviado: telefone,
           status: 'sent', evento_em: new Date().toISOString(), raw_payload: { via: 'bia-atendimento' }
         }, { onConflict: 'message_id' });
+        // Marca este envio como sendo DO ROBÔ, p/ o webhook zapi-recebidas não
+        // confundir o fromMe da Bia com resposta humana (não seta humano_ate).
+        try { await sb.from('whatsapp_bia_enviadas').upsert({ message_id: String(outId), telefone }, { onConflict: 'message_id' }); } catch { /* best-effort */ }
       }
 
       // Confirma o log (resposta + ação).
