@@ -104,5 +104,21 @@ LOG('7) Judicial: parcelas extras, multa/honorarios sobre a soma');
   near(j.totalGeral, j.totalPrincipal + j.totalHonC, 'total geral = principal + honC');
 })();
 
+// 8) Multa unica: um pagamento que quita a multa nao pode fazer a multa reaparecer
+LOG('8) Multa unica: pagamento que zera a multa nao a reaplica em mes posterior');
+(function () {
+  var r = E.calcularPrincipal({
+    valorOriginal: 10000, dataCorrecao: D(2024, 0, 10), dataFim: D(2024, 11, 10),
+    dataJuros: D(2024, 0, 10), indice: 'INPC', taxaJurosMensal: 1,
+    aplicarMulta: true, multaTipo: 'PCT', multaPct: 10, multaBase: 'ORIGINAL',
+    multaData: D(2024, 1, 1), // multa incide cedo (fev), antes do pagamento
+    eventos: [{ data: '2024-03-05', valor: 3000 }] // pagamento quita juros+multa
+  });
+  var mesesComMulta = r.linhas.filter(function (l) { return l.tipo === 'mes' && l.multaAplicada > 0; });
+  ok(mesesComMulta.length === 1, 'multa aplicada em exatamente 1 mes (=' + mesesComMulta.length + ')');
+  var totalMulta = r.linhas.reduce(function (s, l) { return s + (l.tipo === 'mes' ? (l.multaAplicada || 0) : 0); }, 0);
+  near(totalMulta, 1000, 'multa total = 10% de 10000, aplicada uma unica vez');
+})();
+
 LOG(FAIL === 0 ? '\nOK -- ' + RAN + ' assercoes passaram (motor canonico v3).' : '\nFALHOU -- ' + FAIL + '/' + RAN + ' assercao(oes).');
 if (FAIL > 0) { if (typeof process !== 'undefined' && process.exit) process.exit(1); else throw new Error('calc-engine: ' + FAIL + ' falhas'); }
