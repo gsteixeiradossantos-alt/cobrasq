@@ -29904,11 +29904,20 @@ function nfaDrawHistorico(){
 
   const erroPanel = (_nfaFiltro==='erro') ? nfaErroAgrupado(visiveis) : '';
   const barra = (showSel && _nfaSel.size) ? nfaBarraLote() : '';
+  // Faixa de ação em LOTE sobre TODAS as com erro — 1 clique, sem marcar checkbox.
+  const nErro=cnt('erro');
+  const bannerErros = nErro?`<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:rgba(166,90,74,.07);border:1px solid rgba(166,90,74,.3);border-radius:var(--radius);padding:10px 14px;margin-bottom:12px;">
+      <span style="font-size:12.5px;font-weight:600;color:var(--danger);">⚠ ${nErro} nota(s) com erro</span>
+      <button class="btn btn-primary btn-sm" onclick="nfaReemitirTodasErros()" title="Carrega todas as com erro na tabela de emissão p/ ajustar e emitir de novo">↻ Corrigir e reemitir todas</button>
+      <button class="btn btn-ghost btn-sm" style="color:var(--danger);" onclick="nfaArquivarTodasErros()" title="Cancela a emissão de todas (só tira da fila; não cancela nota já emitida). Vão p/ Arquivadas, de onde dá p/ restaurar.">Cancelar emissão de todas</button>
+      ${_nfaFiltro!=='erro'?`<button class="btn btn-ghost btn-sm" style="margin-left:auto;" onclick="nfaSetFiltro('erro')">Ver motivos ›</button>`:''}
+    </div>`:'';
 
   cont.innerHTML=`
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;">${tabs}
       ${nPend?`<button class="btn btn-primary btn-sm" id="nfa-status-btn" onclick="nfaAtualizarStatus()" style="margin-left:auto;">↻ Atualizar ${nPend} pendente(s)</button>`:''}
     </div>
+    ${bannerErros}
     ${erroPanel}
     ${barra}
     ${visiveis.length?`<div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius);">
@@ -30028,6 +30037,49 @@ function nfaReemitirHist(id){
 }
 function nfaReemitirSel(){ const ids=[..._nfaSel]; _nfaSel.clear(); ids.forEach(nfaReemitirHist); }
 function nfaCorrigirGrupo(idsStr){ String(idsStr).split(',').filter(Boolean).forEach(nfaReemitirHist); }
+
+// ── ações em LOTE sobre TODAS as com erro (sem checkbox) ─────────────────────
+function _nfaIdsErro(){ return (_nfaHist||[]).filter(r=>nfaEffStatus(r)==='erro').map(r=>r.id); }
+// Carrega todas as com erro na tabela de emissão, de uma vez (1 toast, 1 scroll).
+// A emissão em si continua passando pelo modal de confirmação do lote.
+function nfaReemitirTodasErros(){
+  const ids=_nfaIdsErro(); if(!ids.length){ showToast('Nenhuma nota com erro.','warning'); return; }
+  let add=0;
+  ids.forEach(id=>{
+    const r=_nfaHistById(id); if(!r) return;
+    const doc=nfaDigits(r.doc_digits||r.doc||'');
+    const ja=_nfaRows.some(x=>nfaDigits(x.cpf)===doc && nfaParseValor(x.valorRaw)===Number(r.valor) && x.status!=='emitida');
+    if(ja) return;
+    _nfaRows.push({ nome:r.nome||'', cpf:doc?nfaMaskDoc(doc):'', valorRaw:nfaFmtBRL(r.valor), descricao:r.descricao||'', asaasCustomerId:r.asaas_customer_id||'', status:'pendente', nf_url:'', erro:'', ref:'', asaas:null, lookupMsg:'' });
+    add++;
+  });
+  nfaDrawTabela();
+  const t=document.getElementById('nfa-tabela'); if(t) t.scrollIntoView({behavior:'smooth',block:'start'});
+  showToast(add?`${add} linha(s) carregada(s) p/ correção — ajuste e clique em Emitir lote.`:'Todas já estão na tabela de emissão.', add?'success':'warning');
+}
+// Cancela a emissão de todas as com erro (arquiva em lote), com confirmação.
+// NÃO cancela nota já emitida na prefeitura — só tira da fila local (restaurável).
+function nfaArquivarTodasErros(){
+  const ids=_nfaIdsErro(); if(!ids.length){ showToast('Nenhuma nota com erro.','warning'); return; }
+  _nfaModal(`<div style="padding:22px 24px;">
+    <div style="font-family:var(--mono,monospace);font-size:10px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--danger);">Cancelar emissão · em lote</div>
+    <h3 style="margin:6px 0 10px;font-size:18px;font-weight:600;color:var(--text-1,#15224A);">Cancelar a emissão de ${ids.length} nota(s) com erro?</h3>
+    <div style="font-size:12.5px;color:var(--text-3);line-height:1.5;margin-bottom:16px;">Elas saem da fila e vão para <b>Arquivadas</b>, de onde dá para restaurar. Isso <b>não</b> cancela nota já emitida na prefeitura (para isso, use "Cancelar nota" numa emitida).</div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;">
+      <button class="btn btn-ghost btn-sm" onclick="_nfaCloseModal()">Voltar</button>
+      <button class="btn btn-primary btn-sm" style="background:var(--danger);border-color:var(--danger);" onclick="_nfaArquivarTodasErrosConfirm()">Cancelar todas</button>
+    </div></div>`);
+}
+async function _nfaArquivarTodasErrosConfirm(){
+  _nfaCloseModal();
+  const ids=_nfaIdsErro(); let ok=0;
+  for(const id of ids){
+    const r=_nfaHistById(id); if(!r) continue;
+    try{ await _nfaPatchMeta(id,{resolved:'arquivada',_prevStatus:r.nf_status}); ok++; }catch(_){}
+  }
+  showToast(`${ok} de ${ids.length} com erro arquivada(s) — veja em Arquivadas.`, ok?'success':'warning');
+  await nfaCarregarHistorico();
+}
 
 // ── arquivar / restaurar (persistido em metadata.resolved) ───────────────────
 async function _nfaPatchMeta(id, patch){
