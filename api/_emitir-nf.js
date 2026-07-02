@@ -93,15 +93,23 @@ module.exports = async function handler(req, res) {
     try { authorized = await asaasReq('POST', `/invoices/${invoice.id}/authorize`, {}); }
     catch (e) { /* fica como agendada; o status real vem no GET/retorno */ authorized = { ...invoice, _authorizeError: e.message }; }
 
+    // A NFS-e é autorizada pela prefeitura de forma ASSÍNCRONA: o /authorize NÃO-erro só
+    // agenda; não significa autorizada. Só marca 'emitida' quando status=AUTHORIZED (ou já
+    // veio pdfUrl). Senão fica 'processando' (reconcilia depois). ERROR já traz o motivo.
+    // Evita o falso-positivo "emitida sem PDF" — mesma regra do avulso (_emitir-nf-avulso).
+    const st = String(authorized.status || invoice.status || '').toUpperCase();
     const nfUrl = authorized.pdfUrl || authorized.xmlUrl || invoice.pdfUrl || '';
-    const nfStatus = authorized._authorizeError ? 'processando' : 'emitida';
+    let nfStatus, nfErro = null;
+    if (st === 'AUTHORIZED' || nfUrl) nfStatus = 'emitida';
+    else if (st === 'ERROR') { nfStatus = 'erro'; nfErro = (authorized.errors && authorized.errors[0] && authorized.errors[0].description) || authorized.statusDescription || authorized._authorizeError || 'Recusada pela prefeitura'; }
+    else nfStatus = 'processando';
     await sbFetch(`fin_operacao?id=eq.${op.id}`, {
       method: 'PATCH',
       body: JSON.stringify({
         nf_status: nfStatus,
         nf_asaas_id: invoice.id || null,
         nf_url: nfUrl || null,
-        metadata: { ...(op.metadata || {}), nf_base: base, nf_base_tipo: temRepasse ? 'honorario' : 'valor_cheio', nf_number: authorized.number || null },
+        metadata: { ...(op.metadata || {}), nf_base: base, nf_base_tipo: temRepasse ? 'honorario' : 'valor_cheio', nf_number: authorized.number || null, ...(nfErro ? { nf_erro: nfErro } : {}) },
       }),
     });
 

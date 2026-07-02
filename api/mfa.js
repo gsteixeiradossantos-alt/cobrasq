@@ -23,15 +23,8 @@ const SB_KEY  = process.env.SUPABASE_SERVICE_KEY || '';
 // recusa qualquer operação até que a env esteja configurada.
 const MFA_SALT = process.env.MFA_SALT || '';
 
-const CODE_TTL_MS = 5 * 60 * 1000;   // validade do código
-const RL_WINDOW_MS = 60 * 1000;      // F-12: 1 código por minuto, por dev_id
-
 function hashCode(code) {
   return crypto.createHash('sha256').update(MFA_SALT + ':' + code).digest('hex');
-}
-
-function randomCode() {
-  return String(crypto.randomInt(100000, 999999));
 }
 
 async function sb(path, opts) {
@@ -135,35 +128,14 @@ module.exports = async function handler(req, res) {
     }
 
     if (action === 'challenge') {
-      const { devId, telefone } = body;
-      if (!devId || !telefone) return res.status(400).json({ error: 'devId e telefone obrigatórios' });
-
-      // F-12: rate-limit — no máximo 1 código por minuto por dev_id (evita spam
-      // de WhatsApp / brute-force de emissão). Deriva o instante de emissão do
-      // expires_at (sempre = emissão + TTL); o upsert preserva created_at antigo,
-      // então não dá pra usar created_at aqui.
-      const existing = await sb(`mfa_codes?dev_id=eq.${encodeURIComponent(devId)}&select=expires_at`);
-      if (existing && existing[0] && existing[0].expires_at) {
-        const issuedAt = new Date(existing[0].expires_at).getTime() - CODE_TTL_MS;
-        const elapsed = Date.now() - issuedAt;
-        if (elapsed >= 0 && elapsed < RL_WINDOW_MS) {
-          const retryAfter = Math.ceil((RL_WINDOW_MS - elapsed) / 1000);
-          res.setHeader('Retry-After', String(retryAfter));
-          return res.status(429).json({ error: `Aguarde ${retryAfter}s para solicitar um novo código.`, retry_after: retryAfter });
-        }
-      }
-
-      const code = randomCode();
-      const hash = hashCode(code);
-      const expires = new Date(Date.now() + CODE_TTL_MS).toISOString();
-      // Upsert (chave primária = dev_id)
-      await sb('mfa_codes', {
-        method: 'POST',
-        headers: { 'Prefer': 'resolution=merge-duplicates,return=representation' },
-        body: JSON.stringify({ dev_id: devId, code_hash: hash, expires_at: expires, attempts: 0 }),
-      });
-      await zapiSend(telefone, `Seu código de acesso COBRASQ: ${code}\nVálido por 5 minutos. Não compartilhe.`);
-      return res.status(200).json({ ok: true, expires_at: expires });
+      // SEGURANÇA (AUDITORIA-2026-07) — a ação legada 'challenge' era um relay de WhatsApp
+      // SEM autenticação, com `telefone` e `devId` controlados pelo cliente: qualquer
+      // anônimo podia disparar o OTP da conta Z-API do escritório para NÚMEROS ARBITRÁRIOS
+      // (spam/phishing em nome da COBRASQ, risco de banimento da instância) e ainda driblar
+      // o rate-limit por dev_id variando o devId a cada chamada. O fluxo canônico do portal
+      // já é o 'portal-challenge' acima, que recebe o CPF, deriva o telefone no servidor via
+      // RPC portal_emitir_token e nunca aceita o telefone do corpo. Caminho legado desativado.
+      return res.status(410).json({ error: 'Fluxo descontinuado. Use action=portal-challenge.' });
     }
 
     if (action === 'verify') {
