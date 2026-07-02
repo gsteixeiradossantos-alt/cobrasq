@@ -52,12 +52,23 @@ module.exports = async function handler(req, res) {
     }
 
     const comprovanteUrl = transfer.transactionReceiptUrl || transfer.receiptUrl || op.repasse_comprovante_url || '';
+    // P1 (auditoria 2026-06) — ao FALHAR, zera o transfer_id para liberar novo disparo
+    // em /api/repassar. Sem isso, o guard anti-duplo-repasse (_repassar.js:54) trava em
+    // QUALQUER transfer_id existente e devolve "repasse já disparado (sem reenvio)",
+    // deixando o capital do credor preso em 'pendente' sem saída pelo app. Guarda o id
+    // que falhou no metadata (auditoria).
+    const transferIdFalho = falhou ? (transferId || op.repasse_asaas_transfer_id || null) : null;
     const update = {
       repasse_status: falhou ? 'pendente' : (concluido ? 'efetuado' : 'preparado'),
-      repasse_asaas_transfer_id: transferId || op.repasse_asaas_transfer_id,
+      repasse_asaas_transfer_id: falhou ? null : (transferId || op.repasse_asaas_transfer_id),
       repasse_comprovante_url: comprovanteUrl || null,
       repasse_efetuado_em: concluido ? new Date().toISOString() : op.repasse_efetuado_em,
-      metadata: { ...(op.metadata || {}), repasse_asaas_status: st, repasse_falhou: falhou || undefined },
+      metadata: {
+        ...(op.metadata || {}),
+        repasse_asaas_status: st,
+        repasse_falhou: falhou || undefined,
+        ...(transferIdFalho ? { repasse_asaas_transfer_id_falho: transferIdFalho } : {}),
+      },
     };
     await sbFetch(`fin_operacao?id=eq.${op.id}`, { method: 'PATCH', body: JSON.stringify(update) });
 
