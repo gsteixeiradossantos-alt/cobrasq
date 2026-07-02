@@ -15,6 +15,26 @@ async function abaEprocAtiva() {
 
 function render(html) { body.innerHTML = html; }
 
+// Envia o job ao content script do eproc. Se a aba foi aberta antes de a extensão
+// (re)carregar, o content script não está lá e o sendMessage estoura
+// "Receiving end does not exist" — nesse caso injetamos os scripts na hora
+// (permissão "scripting" + host tjpr no manifest) e tentamos de novo.
+async function enviarParaEproc(tabId, job) {
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: 'FILL_JOB', job });
+    return true;
+  } catch (_) {
+    try {
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['selectors.js', 'content-eproc.js'] });
+      await chrome.tabs.sendMessage(tabId, { type: 'FILL_JOB', job });
+      return true;
+    } catch (e) {
+      alert('Não consegui falar com a página do eproc (' + ((e && e.message) || e) + ').\nDê F5 na aba do eproc e tente novamente.');
+      return false;
+    }
+  }
+}
+
 async function carregar() {
   const has = await send({ type: 'HAS_TOKEN' });
   if (!has || !has.hasToken) {
@@ -61,8 +81,7 @@ async function carregar() {
       const job = jobs[+btn.dataset.i];
       const t = await abaEprocAtiva();
       if (!t) { alert('Abra o processo no eproc TJPR primeiro.'); return; }
-      await chrome.tabs.sendMessage(t.id, { type: 'FILL_JOB', job });
-      window.close();
+      if (await enviarParaEproc(t.id, job)) window.close();
     };
   });
 }
