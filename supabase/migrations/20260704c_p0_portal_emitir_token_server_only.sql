@@ -1,3 +1,6 @@
+-- ✅ APLICADA EM PRODUÇÃO 2026-07-02 (via MCP, projeto jokbxzhcctcwnbhkhgru), APÓS o merge
+--    do frontend novo (api/mfa.js?action=portal-challenge). Verificado: anon/authenticated
+--    NÃO executam mais; service_role mantém. Não reaplicar.
 -- P0 (AUDITORIA-2026-07) — Portal do devedor: token de acesso deixa de ser
 -- exposto ao cliente. A RPC portal_emitir_token é SECURITY DEFINER e devolve no
 -- JSON, ao próprio chamador, o código de 6 dígitos (`token`) e o telefone completo
@@ -19,7 +22,12 @@
 -- só o servidor a chama). Fecha também o P1 index.html:6022 (entrega dependia do
 -- Z-API guardado no blob staff-only, ilegível para o anônimo).
 
+-- IMPORTANTE: a função tinha EXECUTE para PUBLIC (default do Postgres na criação),
+-- então revogar só de anon/authenticated NÃO fecha o acesso anônimo (anon herda do
+-- PUBLIC). É obrigatório revogar do PUBLIC também — só postgres e service_role
+-- (grants explícitos) mantêm o EXECUTE.
 REVOKE EXECUTE ON FUNCTION public.portal_emitir_token(text) FROM anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.portal_emitir_token(text) FROM PUBLIC;
 
 -- portal_validar_token continua com EXECUTE para anon: ela não devolve segredo
 -- (apenas devedor_id após conferir CPF+token), então o fluxo de validação segue

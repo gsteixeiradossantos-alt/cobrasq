@@ -40,9 +40,12 @@ Cada onda passou por `npm test` + `npm run lint` verdes e `node --check` do scri
 - `20260706_infra_uniq_auto_cobranca.sql` — índice único parcial anti-duplicidade.
 - `20260706_infra_bucket_avatars.sql` — bucket `avatars` + policies.
 
-**⏸️ AINDA NÃO aplicadas (por dependência ou risco — de propósito):**
-- `20260704c_p0_portal_emitir_token_server_only.sql` — **espera o merge** (revoga o acesso anon da RPC antiga;
-  aplicar antes do frontend novo estar no ar quebra o "enviar código" do portal).
+**✅ P0 APLICADO EM PRODUÇÃO (2026-07-02, após o merge):** `20260704c` — revogado o EXECUTE de
+`anon`/`authenticated` **e do PUBLIC** (a migração original esquecia o PUBLIC, então o `anon` herdava o acesso;
+corrigido). Verificado: `anon`/`authenticated` não executam mais `portal_emitir_token`; `service_role` mantém
+(o `/api/mfa` server-side funciona). Vazamento do token fechado de fato.
+
+**⏸️ AINDA NÃO aplicadas (por risco — de propósito):**
 - `20260705_valor_capital_lock_PREPARADA.sql` — **segurada**: o gatilho barra `valor_capital` de quem não é
   proprietário, e jobs de backend rodam como `service_role` (≠ proprietário) — pode barrar backfill legítimo.
   Testar em staging antes.
