@@ -57,6 +57,23 @@ async function sb(path, opts) {
   return data;
 }
 
+async function sbRpc(fn, args) {
+  if (!SB_URL || !SB_KEY) throw new Error('Supabase não configurado no servidor.');
+  const r = await fetch(`${SB_URL.replace(/\/+$/, '')}/rest/v1/rpc/${fn}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'apikey': SB_KEY,
+      'Authorization': `Bearer ${SB_KEY}`,
+    },
+    body: JSON.stringify(args || {}),
+  });
+  const text = await r.text();
+  let data; try { data = JSON.parse(text); } catch { data = text; }
+  if (!r.ok) throw new Error(`Supabase rpc/${fn}: ${r.status} — ${typeof data === 'string' ? data : JSON.stringify(data)}`);
+  return data;
+}
+
 async function zapiSend(phone, message) {
   const token = process.env.ZAPI_TOKEN || '';
   const instance = process.env.ZAPI_INSTANCE_ID || '';
@@ -85,14 +102,37 @@ module.exports = async function handler(req, res) {
 
   const action = req.query?.action;
 
-  // F-12: sem salt configurado, não operamos (hash seria fraco/previsível).
-  if (!MFA_SALT) {
+  // F-12: sem salt configurado, não operamos os fluxos que dependem de hash de
+  // código (challenge/verify). portal-challenge usa portal_tokens (não usa o
+  // salt), então não é bloqueado por essa guarda.
+  if ((action === 'challenge' || action === 'verify') && !MFA_SALT) {
     console.error('[mfa] MFA_SALT ausente — recusando operação.');
     return res.status(500).json({ error: 'MFA indisponível: MFA_SALT não configurado no servidor.' });
   }
 
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
+
+    // P0 (AUDITORIA-2026-07) — emissão server-only do token do Portal do Devedor.
+    // O navegador (anônimo) NÃO chama mais portal_emitir_token direto (a RPC devolve
+    // o código e o telefone em claro). Aqui o servidor chama a RPC com a service key,
+    // dispara o WhatsApp via Z-API e devolve ao cliente só telefone_mask.
+    if (action === 'portal-challenge') {
+      const cpf = String((body.cpf || '')).replace(/\D/g, '');
+      if (cpf.length !== 11) return res.status(400).json({ ok: false, erro: 'Informe um CPF válido (11 dígitos).' });
+      const r = await sbRpc('portal_emitir_token', { p_cpf: cpf });
+      if (!r || !r.ok) return res.status(400).json({ ok: false, erro: (r && r.erro) || 'Falha ao gerar código.' });
+      const nome1 = String(r.devedor_nome || '').split(' ')[0];
+      const mensagem = `*COBRASQ — código de acesso*\n\nOlá, ${nome1}!\nSeu código de acesso ao portal é:\n\n*${r.token}*\n\nVálido por 10 minutos. Não compartilhe esse código.`;
+      try {
+        await zapiSend(r.telefone, mensagem);
+      } catch (e) {
+        console.error('[mfa] portal-challenge zapi', e);
+        return res.status(502).json({ ok: false, erro: 'Não foi possível enviar o WhatsApp agora. Use a opção "data de nascimento".' });
+      }
+      // Nunca devolve token nem telefone em claro.
+      return res.status(200).json({ ok: true, telefone_mask: r.telefone_mask || '—' });
+    }
 
     if (action === 'challenge') {
       const { devId, telefone } = body;

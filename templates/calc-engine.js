@@ -111,6 +111,7 @@
     params._extrapolacao = faltantes.length ? { primeiroMes: primeiroFalt, qtd: faltantes.length, fonte: faltantes[0].split(':')[0] } : null;
 
     let saldoCorrigido = params.valorOriginal, jurosAcumulados = 0, multaAcumulada = 0, fatorAcum = 1, aplicouGarantia = false;
+    let multaJaAplicada = false;                        // multa é única: não pode voltar após um pagamento zerar multaAcumulada
     const linhas = []; let evIdx = 0;
     const dataMulta = params.aplicarMulta ? (params.multaData || params.dataFim) : null;
 
@@ -142,7 +143,7 @@
       }
 
       let multaSeg = 0;
-      if (params.aplicarMulta && multaAcumulada === 0 && dataMulta <= s.dataFimSeg) {
+      if (params.aplicarMulta && !multaJaAplicada && dataMulta <= s.dataFimSeg) {
         if (params.multaTipo === 'FIXO') { multaSeg = params.multaPct; }
         else {
           let baseM = saldoCorrigido;
@@ -151,6 +152,7 @@
           multaSeg = baseM * (params.multaPct / 100);
         }
         multaAcumulada = multaSeg;
+        multaJaAplicada = true;
       }
 
       linhas.push({ tipo: 'mes', ano: s.ano, mes: s.mes, parcial: s.parcial, diasSeg: s.diasSeg, diasMes: s.diasMes,
