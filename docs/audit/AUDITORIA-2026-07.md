@@ -36,19 +36,36 @@ Cada onda passou por `npm test` + `npm run lint` verdes e `node --check` do scri
 - `20260704c_p0_portal_emitir_token_server_only.sql` — fecha o P0 (deploy junto com `api/mfa.js` + `index.html`).
 - `20260705_valor_capital_lock_PREPARADA.sql` — trava server-side de `valor_capital`.
 - `20260705_fin_transferencia_saldo_PREPARADA.sql` — espelho de transferências no saldo realizado.
+- `20260706_portal_meu_caso.sql` — RPCs do portal do devedor (`portal_meu_caso`, `portal_login_nascimento`,
+  redefinição de `portal_validar_token`) + tabelas de sessão. Aplicar junto do deploy do `index.html`.
+- `20260706_infra_reaper_lock_agendadas.sql` — coluna `processando_desde` + reaper de lock.
+- `20260706_infra_uniq_auto_cobranca.sql` — índice único parcial anti-duplicidade da auto-cobrança.
+- `20260706_infra_bucket_avatars.sql` — cria o bucket `avatars` (o CRM já o usa).
 
-**Edge functions:** o fonte foi corrigido (`zapsign-webhook`, `beatriz-msg`, `enviar-whatsapp`,
-`cron-mensagens-agendadas`, `escavador-webhook`) mas o **deploy é manual/coordenado** — não foi feito.
+**Edge functions (fonte corrigido — DEPLOY MANUAL/COORDENADO, não feito):** `zapsign-webhook`, `beatriz-msg`,
+`enviar-whatsapp`, `cron-mensagens-agendadas`, `escavador-webhook`, e a **nova `criar-usuario`**. Os webhooks
+(`asaas`/`zapi`/`zapsign`) têm a flag `ACEITAR_TOKEN_QUERYSTRING` — só virar `false` **após** migrar o segredo
+para header no painel de cada provedor.
 
 **Persistência de acordos — ✅ RESOLVIDO (2026-07-02):** `salvarAcordo`/`toggleParcela` agora gravam na tabela
 dedicada `acordos` e `loadRelationalData` reidrata `dev.acordos` no login — o "Recuperado no mês" e o drawer
 não zeram mais no reload. RLS (staff ALL) e CHECKs (`forma`, `status`) respeitados.
 
-**Principais pendências que dependem de você (decisão/backend):**
-portal do devedor abrir vazio + login CPF/nascimento (nova RPC `SECURITY DEFINER`); botão "Criar usuário" (Edge
-Function nova); UI de reenvio de mensagens falhadas; trava anti-duplicidade da auto-cobrança ZapSign (índice único);
-bucket `avatars` no Storage; paridade de juros/multa admin×CRM (fonte única); remover `?token=` dos webhooks
-(rotacionar no painel do provedor primeiro).
+**Pendências de backend — ✅ TODAS IMPLEMENTADAS (2026-07-06)** como código + migrações preparadas (falta só
+aplicar/deploiar): portal do devedor (RPC própria + login por nascimento); botão "Criar usuário" (edge function
+`criar-usuario`); UI de reenvio de mensagens falhadas; trava anti-duplicidade da auto-cobrança (índice único);
+bucket `avatars`; paridade de juros/multa admin×CRM; reaper de lock do cron; remoção do `?token=` dos webhooks
+(flag pronta, ativar após rotacionar no painel).
+
+**O que ainda depende exclusivamente de você (ação em produção, não código):**
+1. Revisar e **aplicar as 7 migrações preparadas** (SQL Editor do Supabase — nunca `db push` cego).
+2. **Deployar as edge functions** corrigidas + a nova `criar-usuario`.
+3. Nos painéis Asaas/Z-API/ZapSign, **migrar o segredo do webhook** de `?token=` para header e então virar a flag.
+4. Ativar a **proteção de senha vazada** no painel Auth (toggle).
+
+**Achados P3 deixados como estão (latentes / código morto / ambíguos):** totais que incluiriam status cancelado
+(sem casos vivos), `despesaMes` (soma ambígua), dedup fiscal do histórico, e alguns blocos de código morto —
+documentados nas seções P3 abaixo; mexer traria mais risco que benefício sem casos reais.
 
 ## 1. Recheck do catálogo de regressões (R-01..R-12 + invariantes)
 
