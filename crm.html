@@ -5696,7 +5696,7 @@ async function enviarPropostaPagamento(opcao) {
   } else if (opcao === 'boleto' && boleto12) {
     proposta = 'Oi ' + primeiroNome + '! Opção parcelada no boleto: *' + boleto12.n + 'x de ' + fmtBRL(boleto12.parcela) + '* (total ' + fmtBRL(boleto12.total) + '). Topa?';
   } else if (opcao === 'cartao') {
-    proposta = 'Oi ' + primeiroNome + '! No cartão posso parcelar em *12x de ' + fmtBRL(cartao12) + '* sem juros (total ' + fmtBRL(total) + '). Topa?';
+    proposta = 'Oi ' + primeiroNome + '! No cartão posso parcelar em *12x de ' + fmtBRL(cartao12) + '* sem juros (total ' + fmtBRL(calc.cartao12Total || cartao12 * 12) + '). Topa?';
   } else {
     toast('Opção inválida.', 'error'); return;
   }
@@ -7181,6 +7181,19 @@ async function processarMensagensAgendadasPendentes() {
     console.log('[#11] Mensagens agendadas vencidas:', data.length);
     for (const m of data) {
       try {
+        // Só texto é enviado aqui. Mídia (áudio/documento/imagem) fica para o cron,
+        // que sabe gerar signed URL e chamar o endpoint Z-API certo — este worker
+        // só faz send-text e destruiria a mídia como texto vazio.
+        const tipo = m.tipo || 'texto';
+        if (tipo !== 'texto') continue;
+        // Claim atômico antes de enviar: só envia se esta aba reivindicar a linha
+        // (evita duplicar com o cron de 1 min e com outras abas do CRM).
+        const { data: claim } = await sb.from('crm_mensagens_agendadas')
+          .update({ status: 'processando' })
+          .eq('id', m.id)
+          .eq('status', 'pendente')
+          .select('id');
+        if (!claim || !claim.length) continue;
         const r = await enviarViaZAPI(m.telefone, m.mensagem);
         const novoStatus = r.ok ? 'enviada' : 'falhou';
         await sb.from('crm_mensagens_agendadas')
