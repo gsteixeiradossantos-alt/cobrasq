@@ -76,6 +76,40 @@ window.EPROC_SEL = {
   ],
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// IDs REAIS do eproc TJPR, capturados do DOM em produção (jul/2026) durante uma
+// distribuição completa (5 etapas + tela de sucesso). São a 1ª tentativa do motor;
+// os vocabulários abaixo continuam como fallback se o eproc mudar.
+window.EPROC_IDS = {
+  // Etapa 1 — Informações do processo (form #frmProcessoCadastro)
+  comarca: ['#selLocalidadeJudicial'],
+  rito: ['#selRitoProcesso'],
+  area: ['#selIdGrupoCompetencia'],
+  classe: ['#selIdClasseJudicial'],
+  sigilo: ['#selIdSigilo'],
+  valorCausa: ['#txtValorCausa'],
+  // Etapa 2 — Assuntos (árvore jstree #divArvore)
+  assuntoBusca: ['#txtFiltroPesquisa'],
+  filtrar: ['#btnFiltrar'],
+  incluirAssunto: ['#btnIncluirAssunto'],
+  competencia: ['#selNumCodCompetencia'],
+  // Etapas 3/4 — Partes (form #frmPartes)
+  tipoPessoa: ['#selTipoPessoa'],
+  docParte: ['#txtCpfCnpj'],
+  nomeParte: ['#txtNome'],
+  consultar: ['#btnConsultarNome', '#btnConsultar'],
+  // Etapa 5 — Documentos (uploader qq/plupload)
+  anexo: ['.qq-upload-input', 'input[type="file"][name="file"]'],
+  tipoDoc: ['#txtTipo_1'],
+  sigiloDoc: ['#selIdSigilo_1'],
+  confirmarDocs: ['#btnEnviarArquivos'],
+  // Navegação
+  avancar: ['input[name="sbmProcessoEtapa1"]', 'button[name="sbmProcessoEtapa2"]', '#btnProxima'],
+  finalizar: ['button[name="sbmProcessoEtapa4"]', '#btnSalvar[data-value="Finalizar"]'],
+  // Tela de sucesso ("Processo distribuído.")
+  numeroSucesso: ['#lblDesNumProcesso'],
+};
+
 // Vocabulário de RÓTULOS/TEXTOS reais (minúsculas, sem exigir acento perfeito) usado
 // pelo fallback por rótulo em content-eproc.js quando os seletores CSS falham.
 window.EPROC_TXT = {
@@ -87,10 +121,12 @@ window.EPROC_TXT = {
 };
 
 // Vocabulário por CAMPO do assistente de distribuição (inicial, 5 etapas). Usado
-// pelo motor multi-etapas (content-eproc.js) via byAnyLabel — calibrar com o DOM real.
+// pelo motor multi-etapas (content-eproc.js) via byAnyLabel — calibrado com a tela
+// real do eproc TJPR ("Peticionamento Eletrônico (1 de 5) - Informações do processo").
 window.EPROC_DIST = {
-  // Etapa 1 — Informações do processo
-  comarca: ['comarca', 'foro', 'seção judiciária', 'secao judiciaria'],
+  // Etapa 1 — Informações do processo. No eproc TJPR o campo da comarca é o select
+  // "Desejo entrar com a ação em:" (não diz "Comarca").
+  comarca: ['desejo entrar com a ação em', 'desejo entrar com a acao em', 'entrar com a ação', 'entrar com a acao', 'comarca', 'foro', 'seção judiciária', 'secao judiciaria'],
   valorCausa: ['valor da causa', 'valor da ação', 'valor da acao', 'valor da demanda', 'valor'],
   rito: ['rito', 'procedimento'],
   area: ['área', 'area'],

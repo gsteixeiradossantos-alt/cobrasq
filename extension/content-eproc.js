@@ -17,6 +17,7 @@
   const SEL = window.EPROC_SEL || {};
   const TXT = window.EPROC_TXT || {};
   const DIST = window.EPROC_DIST || {};
+  const IDS = window.EPROC_IDS || {};
   const JOB_KEY = 'cobrasq_job_ativo';
   let jobAtual = null;
 
@@ -27,16 +28,41 @@
     }
     return null;
   }
-  // Fallback: acha <input>/<select> cujo rótulo/vizinhança contém `texto`.
+  // Normaliza p/ comparação: minúsculas e sem acentos ("Cível" ≈ "CIVEL").
+  function norm(s) {
+    return String(s == null ? '' : s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  }
+  function visivel(el) { return !!(el && el.offsetParent !== null); }
+  // Dado um rótulo, acha o campo correspondente: atributo for=, senão o primeiro
+  // input/select VISÍVEL que vem DEPOIS do rótulo (subindo até 3 níveis de container).
+  function campoDoLabel(l) {
+    const forId = l.getAttribute && l.getAttribute('for');
+    if (forId) { const el = document.getElementById(forId); if (visivel(el)) return el; }
+    let scope = l.parentElement;
+    for (let depth = 0; scope && depth < 3; depth++) {
+      const cands = Array.from(scope.querySelectorAll('input:not([type="hidden"]),select,textarea')).filter(visivel);
+      for (const c of cands) {
+        if (l.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING) return c;
+      }
+      if (cands.length) return cands[0];
+      scope = scope.parentElement;
+    }
+    return null;
+  }
+  // Fallback: acha <input>/<select> cujo rótulo VISÍVEL contém `texto`.
+  // Prioriza <label> reais; ignora containers gigantes (texto > 120 chars) para não
+  // casar com divs de layout que contêm a página inteira.
   function byLabel(texto) {
-    const t = String(texto).toLowerCase();
-    const labels = Array.from(document.querySelectorAll('label, th, td, span, div'));
-    for (const l of labels) {
-      if ((l.textContent || '').toLowerCase().includes(t)) {
-        const forId = l.getAttribute && l.getAttribute('for');
-        if (forId) { const el = document.getElementById(forId); if (el) return el; }
-        const near = l.parentElement && l.parentElement.querySelector('input,select,textarea');
-        if (near) return near;
+    const t = norm(texto);
+    const grupos = ['label', 'th, td, b, strong, span, div'];
+    for (const selGrupo of grupos) {
+      for (const l of Array.from(document.querySelectorAll(selGrupo))) {
+        const full = (l.textContent || '').trim();
+        if (!full || full.length > 120) continue;
+        if (!norm(full).includes(t)) continue;
+        if (!visivel(l)) continue;
+        const el = campoDoLabel(l);
+        if (el) return el;
       }
     }
     return null;
@@ -64,13 +90,27 @@
     el.dispatchEvent(new Event('change', { bubbles: true }));
     return true;
   }
+  // Seleciona a opção com melhor casamento (sem acentos; aceita casamento parcial
+  // por palavras: "Cível" acha "CÍVEL", "Juizado Especial Cível" acha
+  // "RITO SUMARÍSSIMO (JUIZADO ESPECIAL)" só se a maioria das palavras bater).
   function setSelectByText(sel, texto) {
     if (!sel || !texto) return false;
-    const alvo = String(texto).toLowerCase();
+    const alvo = norm(texto);
+    let best = null, bestScore = 0;
     for (const opt of Array.from(sel.options || [])) {
-      if ((opt.textContent || '').toLowerCase().includes(alvo)) {
-        sel.value = opt.value; sel.dispatchEvent(new Event('change', { bubbles: true })); return true;
+      const o = norm(opt.textContent);
+      if (!o.trim()) continue;
+      let score = 0;
+      if (o.includes(alvo) || alvo.includes(o)) score = 100;
+      else {
+        const palavras = alvo.split(/\W+/).filter(w => w.length >= 4);
+        const hits = palavras.filter(w => o.includes(w)).length;
+        if (palavras.length && hits) score = Math.round((100 * hits) / palavras.length);
       }
+      if (score > bestScore) { best = opt; bestScore = score; }
+    }
+    if (best && bestScore >= 60) {
+      sel.value = best.value; sel.dispatchEvent(new Event('change', { bubbles: true })); return true;
     }
     return false;
   }
@@ -133,11 +173,12 @@
     input.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
-  // ── preenchimento de UM campo simples (label → input/select) ────────────────
-  function preencherCampo(termos, valor, rotulo, erros, autocomplete) {
+  // ── preenchimento de UM campo simples (id real → fallback por rótulo) ───────
+  function preencherCampo(termos, valor, rotulo, erros, autocomplete, ids) {
     if (valor == null || valor === '') return;
-    const el = byAnyLabel(termos);
+    const el = (ids && qFirst(ids)) || byAnyLabel(termos);
     if (!el) { erros.push(rotulo + ' (campo não localizado)'); return; }
+    if (ids && qFirst(ids)) autocomplete = false; // id exato: selects nativos, sem confirmação
     if (el.tagName === 'SELECT') {
       if (!setSelectByText(el, valor)) { erros.push(rotulo + ' (opção "' + valor + '" não está na lista — confira)'); destacar(el, '#fab005'); }
     } else {
@@ -148,54 +189,85 @@
 
   // ── DISTRIBUIÇÃO (inicial) — motor multi-etapas ─────────────────────────────
   function detectarEtapa() {
-    const t = document.body ? (document.body.innerText || '') : '';
-    const m = t.match(/Etapa\s*([1-5])\s*de\s*5/i);
+    // Título real do eproc TJPR: "Peticionamento Eletrônico (1 de 5) - Informações do processo"
+    const h = Array.from(document.querySelectorAll('h1,h2,h3,.infraCaption'))
+      .map(e => e.textContent || '').join(' ');
+    const t = h + ' ' + (document.body ? (document.body.innerText || '').slice(0, 4000) : '');
+    if (/Processo distribu[íi]do/i.test(t)) return 6; // tela de sucesso
+    let m = t.match(/\(\s*([1-5])\s*de\s*5\s*\)/i) || t.match(/Etapa\s*([1-5])\s*de\s*5/i);
     if (m) return +m[1];
     if (/Informa[çc][õo]es do processo/i.test(t)) return 1;
     if (/Assuntos/i.test(t)) return 2;
-    if (/Partes/i.test(t) && /(Requerido|Executado)/i.test(t)) return 4;
-    if (/Partes/i.test(t) && /Requerente/i.test(t)) return 3;
+    if (/Partes\s*(Autoras|Requerentes)/i.test(t)) return 3;
+    if (/Partes\s*(R[ée]s|Requerid|Executad)/i.test(t)) return 4;
     if (/Documentos/i.test(t) || /Anexar Documento/i.test(t)) return 5;
     return 0;
   }
 
   function etapa1(d, erros) {
-    preencherCampo(DIST.comarca, d.comarca, 'Comarca', erros, true);
-    preencherCampo(DIST.valorCausa, d.valor_causa != null ? fmtNum(d.valor_causa) : null, 'Valor da causa', erros, false);
-    preencherCampo(DIST.rito, d.rito, 'Rito', erros, false);
-    preencherCampo(DIST.area, d.area, 'Área', erros, false);
-    preencherCampo(DIST.classe, d.classe, 'Classe processual', erros, true);
-    if (d.nivel_sigilo != null) preencherCampo(DIST.sigilo, String(d.nivel_sigilo), 'Nível de sigilo', erros, false);
+    preencherCampo(DIST.comarca, d.comarca, 'Comarca', erros, true, IDS.comarca);
+    // Campo real: "Valor da Causa: (R$) (Somente números)" → sem separador de milhar.
+    preencherCampo(DIST.valorCausa, d.valor_causa != null ? fmtNum(d.valor_causa).replace(/\./g, '') : null, 'Valor da causa', erros, false, IDS.valorCausa);
+    preencherCampo(DIST.rito, d.rito, 'Rito', erros, false, IDS.rito);
+    preencherCampo(DIST.area, d.area, 'Área', erros, false, IDS.area);
+    preencherCampo(DIST.classe, d.classe, 'Classe processual', erros, true, IDS.classe);
+    if (d.nivel_sigilo != null) preencherCampo(DIST.sigilo, 'Nível ' + d.nivel_sigilo, 'Nível de sigilo', erros, false, IDS.sigilo);
   }
   function etapa2(d, erros) {
+    // Árvore de assuntos (jstree): a extensão pré-preenche a busca; a seleção na
+    // árvore e o "Incluir" são cliques do humano. Competência é select ao lado.
     const assuntos = d.assuntos || [];
-    if (!assuntos.length) { erros.push('Sem assuntos no snapshot — selecione manualmente'); return; }
-    const busca = byAnyLabel(DIST.assuntoBusca);
-    if (busca) { setInput(busca, assuntos[0]); destacar(byAnyLabel(DIST.filtrar) || busca, '#fab005'); }
-    erros.push('Assuntos: ' + assuntos.join(', ') + ' — pesquise/inclua cada um (Filtrar → Incluir)');
+    const busca = qFirst(IDS.assuntoBusca) || byAnyLabel(DIST.assuntoBusca);
+    if (assuntos.length && busca) {
+      setInput(busca, assuntos[0]);
+      destacar(qFirst(IDS.filtrar) || byAnyLabel(DIST.filtrar) || busca, '#fab005');
+      erros.push('Assuntos: ' + assuntos.join(', ') + ' — clique <b>Filtrar</b>, selecione na árvore e <b>Incluir</b>');
+    } else if (!assuntos.length) {
+      erros.push('Sem assuntos no snapshot — selecione na árvore e clique Incluir');
+    }
+    const comp = qFirst(IDS.competencia);
+    if (comp && comp.value === '-1') { destacar(comp, '#fab005'); erros.push('Selecione a <b>Competência</b> (ex.: Matéria Residual)'); }
   }
   function etapaPartes(lista, rotulo, erros) {
     const partes = lista || [];
     if (!partes.length) { erros.push('Sem ' + rotulo + ' no snapshot'); return; }
-    const docEl = byAnyLabel(DIST.docParte);
-    if (docEl && partes[0].doc) { setInput(docEl, partes[0].doc); }
-    const consultar = acharBotao(DIST.consultar);
+    // Pré-preenche o CPF/CNPJ da 1ª parte; Consultar→(Receita)→Incluir é do humano.
+    const docEl = qFirst(IDS.docParte) || byAnyLabel(DIST.docParte);
+    if (docEl && partes[0].doc) { setInput(docEl, partes[0].doc.replace(/[^\d./-]/g, '')); }
+    const consultar = qFirst(IDS.consultar) || acharBotao(DIST.consultar);
     if (consultar) destacar(consultar, '#fab005');
     const linhas = partes.map(p => '— ' + (p.nome || '?') + (p.doc ? ' (' + p.doc + ')' : '')).join('<br>');
-    erros.push(rotulo + ' a incluir (Consultar → Salvar → Incluir, um a um):<br>' + linhas);
+    erros.push(rotulo + ' a incluir (Consultar → conferir → Incluir, um a um):<br>' + linhas);
   }
   function etapa3(d, erros) { etapaPartes(d.requerentes, 'Requerente(s)', erros); }
   function etapa4(d, erros) { etapaPartes(d.requeridos, 'Requerido(s)', erros); }
   async function etapa5(d, job, erros) {
-    // Tipo de Documento (se houver evento) + anexo do PDF.
-    const selTipo = qFirst(SEL.tipoDocumento) || byAnyLabel(TXT.tipoDocumento);
-    if (selTipo && job.evento_eproc) { if (!setSelectByText(selTipo, job.evento_eproc)) erros.push('Tipo de Documento "' + job.evento_eproc + '" não encontrado'); }
+    // Anexo do PDF no uploader (qq/plupload) + tipo do documento (autocomplete).
     try {
-      const inputFile = qFirst(SEL.anexoPdf) || byAnyLabel(TXT.anexo);
+      const inputFile = qFirst(IDS.anexo) || qFirst(SEL.anexoPdf) || byAnyLabel(TXT.anexo);
       if (!inputFile) erros.push('Campo de anexo não localizado');
-      else if (job.pdf_url) anexarArquivo(inputFile, await baixarPdfComoFile(job.pdf_url, 'peticao.pdf'));
-      else erros.push('Job sem PDF');
+      else if (job.pdf_url) {
+        anexarArquivo(inputFile, await baixarPdfComoFile(job.pdf_url, 'peticao.pdf'));
+        erros.push('PDF anexado — informe o <b>Tipo</b> (ex.: PETIÇÃO INICIAL) e clique <b>Confirmar seleção de documentos</b>');
+        const tipoTxt = qFirst(IDS.tipoDoc);
+        if (tipoTxt) { setInput(tipoTxt, job.evento_eproc || 'PETIÇÃO INICIAL'); destacar(tipoTxt, '#fab005'); }
+        const conf = qFirst(IDS.confirmarDocs);
+        if (conf) destacar(conf, '#fab005');
+      } else erros.push('Job sem PDF');
     } catch (e) { erros.push(String(e.message || e)); }
+  }
+
+  // Tela final "Processo distribuído.": captura o nº e reporta ao app sozinho.
+  async function telaSucesso(job) {
+    const el = qFirst(IDS.numeroSucesso) || qFirst(SEL.resultadoProtocolo);
+    const num = el ? (el.textContent || '').trim() : '';
+    await chrome.runtime.sendMessage({ type: 'CLAIM', id: job.id }).catch(() => {});
+    const r = await chrome.runtime.sendMessage({ type: 'DONE', id: job.id, protocolo_num: num });
+    await limparJobAtivo();
+    setBody(
+      msg('🎉 <b>Processo distribuído!</b>' + (num ? '<br>Nº ' + num : ''), '#d3f9d8') +
+      (r && r.ok ? msg('✓ Registrado no app automaticamente.', '#d3f9d8')
+                 : msg('Não consegui registrar no app (' + ((r && r.error) || '?') + ') — anote o número.', '#fff3bf')));
   }
 
   async function preencherDistribuicao(job) {
@@ -210,7 +282,8 @@
       ligarBotaoParar();
       return;
     }
-    const nomes = { 1: 'Informações do processo', 2: 'Assuntos', 3: 'Partes — Requerentes', 4: 'Partes — Requeridos', 5: 'Documentos' };
+    if (etapa === 6) { await telaSucesso(job); return; }
+    const nomes = { 1: 'Informações do processo', 2: 'Assuntos', 3: 'Partes Autoras', 4: 'Partes Rés', 5: 'Documentos' };
     const erros = [];
     if (etapa === 1) etapa1(d, erros);
     else if (etapa === 2) etapa2(d, erros);
@@ -219,7 +292,8 @@
     else if (etapa === 5) await etapa5(d, job, erros);
 
     const ultima = etapa === 5;
-    const btn = ultima ? (qFirst(SEL.botaoFinal) || acharBotao(TXT.final)) : (qFirst(SEL.botaoAvancar) || acharBotao(TXT.avancar));
+    const btn = ultima ? (qFirst(IDS.finalizar) || qFirst(SEL.botaoFinal) || acharBotao(TXT.final))
+                       : (qFirst(IDS.avancar) || qFirst(SEL.botaoAvancar) || acharBotao(TXT.avancar));
     destacar(btn);
     const rotuloBtn = ultima ? 'Finalizar' : 'Próxima';
 
