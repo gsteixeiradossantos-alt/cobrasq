@@ -16,13 +16,26 @@ semente do MFA** e o risco de bloqueio é o menor possível. Ver
 
 ## Como funciona (fluxo)
 
-1. No app, **Intimações → ＋ Preparar peticionamento**: você anexa o PDF, informa o processo,
-   o tipo e o evento. Isso cria um job `proc_peticionamentos` com status `preparado`.
-2. Abra o **app logado** numa aba (a extensão lê o token de sessão do Supabase do
-   `localStorage` — nunca a senha) e o **processo no eproc** noutra aba.
-3. Clique no ícone da extensão → **Buscar petições preparadas** → **Preencher no eproc**.
-4. A extensão preenche tipo/evento e **anexa o PDF**, depois **destaca o "Protocolar"**.
-   Você revisa e clica Protocolar. Cole o nº do protocolo no painel → **Confirmar**.
+1. No app, **Intimações → ＋ Preparar peticionamento**: anexe o PDF, informe tipo/evento e,
+   no **inicial**, escolha o **caso** + Comarca/Classe/Assuntos. Cria um job
+   `proc_peticionamentos` (status `preparado`; no inicial vai junto o `dados_distribuicao`).
+2. Abra o **app logado** numa aba (a extensão lê o token de sessão — nunca a senha) e o
+   **eproc** noutra aba.
+3. Ícone da extensão → **Buscar petições preparadas** → **Preencher no eproc**.
+
+### Intercorrente (tela única)
+A extensão seleciona o **Tipo de Documento**, **anexa o PDF** e **destaca o botão**
+(Peticionar/Confirmar). Você revisa e clica; cola o nº no painel → **Confirmar**.
+
+### Inicial / Distribuição (assistente de 5 etapas) — motor multi-etapas
+A extensão **detecta a etapa visível** (1 Informações → 2 Assuntos → 3 Requerentes →
+4 Requeridos → 5 Documentos) e **preenche os campos daquela etapa** a partir do
+`dados_distribuicao`. Ela **destaca "Próxima"** (ou "Finalizar" na etapa 5) mas **nunca
+clica** — você revisa e avança; ao carregar a próxima etapa, ela preenche sozinha (o job
+ativo fica em `chrome.storage.local` até Finalizar ou "Parar assistente"). Na etapa 5,
+cola o nº gerado → **Confirmar**. Autocompletes (Comarca/Classe/Assunto) e o ciclo de
+Partes (Consultar→Salvar→Incluir) são destacados para conferência/entrada manual.
+
 5. O resultado volta para o app (`status='protocolado'`, `protocolo_num`).
 
 ## Instalar (modo desenvolvedor)

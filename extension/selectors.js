@@ -85,3 +85,25 @@ window.EPROC_TXT = {
   avancar: ['próxima', 'proxima', 'próximo', 'proximo', 'avançar', 'avancar', 'continuar'],
   final: ['finalizar', 'peticionar', 'protocolar', 'confirmar', 'assinar', 'distribuir'],
 };
+
+// Vocabulário por CAMPO do assistente de distribuição (inicial, 5 etapas). Usado
+// pelo motor multi-etapas (content-eproc.js) via byAnyLabel — calibrar com o DOM real.
+window.EPROC_DIST = {
+  // Etapa 1 — Informações do processo
+  comarca: ['comarca', 'foro', 'seção judiciária', 'secao judiciaria'],
+  valorCausa: ['valor da causa', 'valor da ação', 'valor da acao', 'valor da demanda', 'valor'],
+  rito: ['rito', 'procedimento'],
+  area: ['área', 'area'],
+  classe: ['classe processual', 'classe'],
+  sigilo: ['nível de sigilo', 'nivel de sigilo', 'sigilo'],
+  // Etapa 2 — Assuntos
+  assuntoBusca: ['pesquisar assunto', 'filtrar assunto', 'assunto'],
+  filtrar: ['filtrar', 'pesquisar', 'buscar'],
+  // Etapas 3/4 — Partes
+  tipoPessoa: ['tipo pessoa', 'tipo de pessoa'],
+  docParte: ['cpf/cnpj', 'cpf / cnpj', 'cnpj', 'cpf', 'documento'],
+  nomeParte: ['nome', 'razão social', 'razao social'],
+  consultar: ['consultar', 'pesquisar'],
+  salvar: ['salvar'],
+  incluir: ['incluir', 'adicionar'],
+};

@@ -74,7 +74,7 @@ module.exports = async function handler(req, res) {
       const status = String(req.query?.status || 'preparado');
       // RLS restringe aos jobs do próprio usuário.
       const rows = await pgrest(token,
-        `proc_peticionamentos?status=eq.${encodeURIComponent(status)}&select=id,cobranca_id,devedor_id,numero_processo,tipo,evento_eproc,pdf_path,protocolo_num,created_at&order=created_at.asc`);
+        `proc_peticionamentos?status=eq.${encodeURIComponent(status)}&select=id,cobranca_id,devedor_id,numero_processo,tipo,evento_eproc,pdf_path,dados_distribuicao,protocolo_num,created_at&order=created_at.asc`);
       const jobs = [];
       for (const j of (Array.isArray(rows) ? rows : [])) {
         const pdf_url = j.pdf_path ? await signUrl(token, j.pdf_path) : null;
@@ -85,6 +85,7 @@ module.exports = async function handler(req, res) {
           evento_eproc: j.evento_eproc,
           cobranca_id: j.cobranca_id,
           devedor_id: j.devedor_id,
+          dados_distribuicao: j.dados_distribuicao || null,
           pdf_url,
         });
       }
