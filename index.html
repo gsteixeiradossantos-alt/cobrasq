@@ -6733,7 +6733,9 @@ function _impToggleAll(on){ _impSel.clear(); if(on) _impRows.forEach(r=>_impSel.
 
 // Cria cobrança + contatos (devedores) + vínculos (cobranca_partes) no relacional,
 // espelhando salvarCobranca(). Em teste local (mock / sem Supabase) apenas simula.
+const _impSaving = new Set(); // trava anti duplo-clique por linha do import
 async function _impSalvar(id, silent){
+  if(_impSaving.has(id)) return false;
   const r=_impRow(id); if(!r) return false; const p=r.payload;
   if(!_impCliente(p)){ if(!silent) showToast('Vincule o credor a um cliente já cadastrado (localize pelo CNPJ). Se não existir, cadastre em Clientes e volte — o import não cria credor.','warning'); return false; }
   if(!_impCardOk(p)){ if(!silent) showToast('Cada envolvido precisa de nome, CPF/CNPJ e telefone; marque um principal.','warning'); return false; }
@@ -6746,6 +6748,7 @@ async function _impSalvar(id, silent){
     return true;
   }
 
+  _impSaving.add(id);
   try{
     const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
     const uidUser = sess?.data?.session?.user?.id || null;
@@ -6788,7 +6791,7 @@ async function _impSalvar(id, silent){
     console.warn('[import] salvar', e);
     if(!silent) showToast('Erro ao criar cobrança: '+(e.message||e),'danger');
     return false;
-  }
+  }finally{ _impSaving.delete(id); }
 
   _impRows=_impRows.filter(x=>x.id!==id); _impSel.delete(id);
   if(!silent){ _impDraw(); atualizarBadgeImportacao(); showToast('Cobrança criada com '+envs.length+' envolvido(s).','success'); }
@@ -8283,8 +8286,8 @@ async function renderPainel(){
   const acordosAtivos = cobrAtivas.filter(c=>['Acordo','Acordo firmado','Em pagamento'].includes(c.status)).length;
 
   // Recuperado no mês = dinheiro que de fato entrou (parcelas de acordo pagas).
-  const ymAtual    = new Date().toISOString().slice(0,7);
-  const ymAnterior = (()=>{ const d=new Date(); d.setMonth(d.getMonth()-1,1); return d.toISOString().slice(0,7); })();
+  const ymAtual    = _metaYmd(new Date()).slice(0,7); // mês LOCAL (evita virar o mês 3h cedo em UTC-3)
+  const ymAnterior = (()=>{ const d=new Date(); d.setMonth(d.getMonth()-1,1); return _metaYmd(d).slice(0,7); })();
   const totalRecuperado = recuperadoNoMes(ymAtual);
   const recMesAnterior  = recuperadoNoMes(ymAnterior);
   const deltaRecPct = recMesAnterior>0 ? Math.round(((totalRecuperado-recMesAnterior)/recMesAnterior)*100) : null;
@@ -8416,7 +8419,7 @@ async function renderPainel(){
   // Acordos vencendo: parcelas de acordo não pagas nos próximos 7 dias.
   const _hojeP = hoje(); const _in7P = new Date(Date.now()+7*86400000).toISOString().slice(0,10);
   let acordosVencendo = 0;
-  (DB.devedores||[]).forEach(d=>{ (d.acordos||[]).forEach(ac=>{ (ac.parcelas||[]).forEach(p=>{ if(!p.pago && p.vencimento && p.vencimento>=_hojeP && p.vencimento<=_in7P) acordosVencendo++; }); }); });
+  (DB.devedores||[]).filter(d=>!d.arquivado && !d.isDraft).forEach(d=>{ (d.acordos||[]).forEach(ac=>{ (ac.parcelas||[]).forEach(p=>{ if(!p.pago && p.vencimento && p.vencimento>=_hojeP && p.vencimento<=_in7P) acordosVencendo++; }); }); });
 
   // Equipe: ranking real (pontos) + meta do mês (recuperado vs metaMensal).
   const rankEquipe = calcRankingTarefas().slice(0,4);
@@ -10293,7 +10296,7 @@ function _drawerTabHtml(tab, dev, ctx){
         <div style="font-size:11px;color:var(--text-3);font-weight:600;letter-spacing:.10em;text-transform:uppercase;margin-bottom:10px">Etiquetas</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:22px">
           ${tags.map(t=>`<span style="padding:3px 9px;background:var(--surface);border:1px solid var(--border);border-radius:99px;font-size:11.5px;color:var(--text-2);font-weight:500">${escHtml(t)}</span>`).join('')}
-          <button onclick="abrirHistorico('${devId}')" style="padding:3px 9px;background:transparent;border:1px dashed var(--border-2);border-radius:99px;font-size:11.5px;color:var(--text-3);font-weight:500;cursor:pointer">+ Add</button>
+          <button onclick="editDevedor('${devId}')" style="padding:3px 9px;background:transparent;border:1px dashed var(--border-2);border-radius:99px;font-size:11.5px;color:var(--text-3);font-weight:500;cursor:pointer">+ Add</button>
         </div>
         ${score>0?`<div style="font-size:11px;color:var(--text-3);font-weight:600;letter-spacing:.10em;text-transform:uppercase;margin-bottom:10px">Score interno</div>
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:14px;margin-bottom:22px">
@@ -13224,7 +13227,7 @@ function renderProcessos(){
   if(!el) return;
 
   const devs = DB.devedores || [];
-  const allProcs = devs.filter(d => !d.arquivado);
+  const allProcs = devs.filter(d => !d.arquivado && !d.isDraft);
   const jud = allProcs.filter(d => d.fase === 'judicial');
   const extra = allProcs.filter(d => d.fase !== 'judicial');
 
@@ -13346,7 +13349,7 @@ function renderProcessos(){
     <!-- Filter row -->
     <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
       <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-3);font-size:12.5px;flex:1;max-width:320px;">
-        ${ico('search',13)} <input id="proc-search" placeholder="Buscar devedor, vara, nº processo…" oninput="renderProcessos()"
+        ${ico('search',13)} <input id="proc-search" placeholder="Buscar devedor, vara, nº processo…"
           value="${escHtml(window._procSearch||'')}"
           style="border:none;outline:none;background:transparent;font-size:12.5px;flex:1;font-family:inherit;color:var(--text);"/>
       </div>
@@ -13392,7 +13395,10 @@ function renderProcessos(){
 
   // Bind search input
   const srch = document.getElementById('proc-search');
-  if(srch) srch.addEventListener('input', e=>{ window._procSearch=e.target.value; renderProcessos(); });
+  if(srch) srch.addEventListener('input', e=>{
+    const pos=e.target.selectionStart; window._procSearch=e.target.value; renderProcessos();
+    const el2=document.getElementById('proc-search'); if(el2){ el2.focus(); try{ el2.setSelectionRange(pos,pos); }catch(_){} }
+  });
 }
 
 // ── INTIMAÇÕES & ANDAMENTOS ──────────────────────────────────
@@ -13580,7 +13586,10 @@ async function renderIntimacoes(){
   `;
 
   const srch = document.getElementById('intim-search');
-  if(srch) srch.addEventListener('input', e=>{ _intimacoesState.q=e.target.value; renderIntimacoes(); });
+  if(srch) srch.addEventListener('input', e=>{
+    const pos=e.target.selectionStart; _intimacoesState.q=e.target.value; renderIntimacoes();
+    const el2=document.getElementById('intim-search'); if(el2){ el2.focus(); try{ el2.setSelectionRange(pos,pos); }catch(_){} }
+  });
 
   renderFilaPeticionamento();
 }
@@ -15614,6 +15623,7 @@ Retorne SOMENTE o JSON, sem markdown.`});
 }
 
 async function salvarCobranca(){
+  if(window._salvandoCobr) return; // trava anti duplo-clique (evita cobrança/devedor/tarefa em duplicidade)
   const supa = getSupabase();
   if(!supa){ showToast('Supabase não configurado.','danger'); return; }
   const editId = window._cobrEditId || null;
@@ -15666,6 +15676,7 @@ async function salvarCobranca(){
   }
   garantirUmPrincipal(resp);
 
+  window._salvandoCobr = true;
   try{
     const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
     const uidUser = sess?.data?.session?.user?.id || null;
@@ -15792,7 +15803,7 @@ async function salvarCobranca(){
   }catch(e){
     console.warn('[cobr] salvar:', e);
     showToast('Não foi possível salvar: '+e.message,'danger');
-  }
+  }finally{ window._salvandoCobr = false; }
 }
 
 function renderClientes(){
@@ -17412,12 +17423,15 @@ function _gerDocBuild(tipo, cli, dev, opt){
   }
   if(tipo==='confissao'){
     const n=Math.max(1, parseInt(opt.parcelas,10)||1);
-    const valParc=valor>0?(valor/n):0;
+    const _totCent=Math.round((valor>0?valor:0)*100);
+    const _baseCent=Math.floor(_totCent/n);
+    const valParc=_baseCent/100;
+    const valParcUlt=(_totCent-_baseCent*(n-1))/100; // última carrega o resto p/ somar o total exato
     const primVenc=opt.venc?_gerDataExt(opt.venc):'____/____/______';
     return { titulo:'Termo de Confissão de Dívida e Acordo de Parcelamento', eyebrow:'Acordo extrajudicial', fichaItems:ficha, fecho,
       assinaturas:[devedorAss, credorAss, ['', 'Testemunha 1'], ['', 'Testemunha 2']],
       corpoHtml:`<p>Pelo presente instrumento particular, <strong>${escHtml(dev.nome||'')}</strong>${dev.doc?`, inscrito(a) no CPF/CNPJ sob nº ${escHtml(dev.doc)}`:''}, doravante denominado(a) <strong>DEVEDOR(A)</strong>, declara <strong>RECONHECER E CONFESSAR</strong> dever a <strong>${escHtml(cli.nome||'')}</strong>${cli.doc?`, inscrito(a) sob nº ${escHtml(cli.doc)}`:''}, doravante denominado(a) <strong>CREDOR(A)</strong>, a quantia líquida e certa de <strong>${fmtR(valor)}</strong>${compStr}${dev.titulo?`, originada de ${escHtml(dev.titulo)}`:''}.</p>
-<p>O DEVEDOR compromete-se a pagar o valor confessado em <strong>${n} (${escHtml(_extensoDias(n))}) parcela(s)</strong> de <strong>${fmtR(valParc)}</strong>, vencendo a primeira em <strong>${primVenc}</strong> e as demais no mesmo dia dos meses subsequentes.</p>
+<p>O DEVEDOR compromete-se a pagar o valor confessado em <strong>${n} (${escHtml(_extensoDias(n))}) parcela(s)</strong> de <strong>${fmtR(valParc)}</strong>${valParcUlt!==valParc?` (a última parcela no valor de <strong>${fmtR(valParcUlt)}</strong> para ajuste de arredondamento)`:''}, vencendo a primeira em <strong>${primVenc}</strong> e as demais no mesmo dia dos meses subsequentes.</p>
 <p>O não pagamento de qualquer parcela no respectivo vencimento acarretará o <strong>vencimento antecipado</strong> da totalidade do saldo devedor, independentemente de aviso ou notificação, autorizando o CREDOR a adotar as medidas de cobrança cabíveis.</p>
 <p>E, por estarem assim justos e acordados, firmam o presente em duas vias de igual teor.</p>` };
   }
@@ -20423,6 +20437,15 @@ async function chatSalvarNoBucket(){
 // ── Persistência da conversa (peticao_conversas) ────────────────────────────
 async function chatPersist(showOk){
   const supa=getSupabase(); if(!supa) return;
+  clearTimeout(_chatSaveTimer); // cancela autosave pendente p/ não concorrer com este save
+  // Serializa persistências concorrentes (autosave + botão Salvar): evita 2 INSERT com conversaId=null.
+  const prev = _chat._persisting || Promise.resolve();
+  const run = ()=>_chatPersistOnce(showOk);
+  _chat._persisting = prev.then(run, run);
+  return _chat._persisting;
+}
+async function _chatPersistOnce(showOk){
+  const supa=getSupabase(); if(!supa) return;
   try{
     await chatEnsureDevedor();
     const payload={ devedor_id:_chat.devId||null, caso_id:_chat.casoId||null, credor_id:_chat.credorId||null,
@@ -22939,7 +22962,7 @@ async function renderContasGridSrv(){
   g.innerHTML = contas.map(c=>{
     const s = saldosByConta[c.id] || {};
     const saldoInicial = +c.saldo_inicial || 0;
-    const saldoRealizado = +s.saldo_atual || saldoInicial;
+    const saldoRealizado = (s.saldo_atual != null) ? +s.saldo_atual : saldoInicial;
     const bankBal = c.bank_balance != null ? +c.bank_balance : null;
     const dispBal = bankBal != null ? bankBal : saldoRealizado;  // banco se tiver, senão realizado
     const diff = bankBal != null ? (saldoRealizado - bankBal) : null;
@@ -25663,13 +25686,16 @@ async function renderWAPendentes(el){
     if(telsBurst.length){
       try{
         const [msgs, outs] = await Promise.all([
-          supa.from('crm_mensagens_recebidas').select('telefone,texto,tipo,recebida_em').in('telefone', telsBurst).order('recebida_em',{ ascending:true }).limit(500),
+          // desc + limit pega as mais RECENTES (a rajada atual); revertemos p/ exibição cronológica.
+          // Com asc, ao passar de 500 linhas acumuladas o painel perdia justamente as novas.
+          supa.from('crm_mensagens_recebidas').select('telefone,texto,tipo,recebida_em').in('telefone', telsBurst).order('recebida_em',{ ascending:false }).limit(500),
           supa.from('crm_mensagens_status').select('telefone_enviado,evento_em').order('evento_em',{ ascending:false }).limit(500)
         ]);
         const dk = t => String(t||'').replace(/\D/g,'').slice(-8);
         const lastOut = {};
         (outs&&outs.data||[]).forEach(o=>{ const k=dk(o.telefone_enviado); if(k && (!lastOut[k]||new Date(o.evento_em)>new Date(lastOut[k]))) lastOut[k]=o.evento_em; });
-        (msgs&&msgs.data||[]).forEach(m=>{ const k=dk(m.telefone); if(!k) return; const lo=lastOut[k]; if(!lo || new Date(m.recebida_em)>new Date(lo)){ (P.burst[k]=P.burst[k]||[]).push({ texto:m.texto, tipo:m.tipo, recebida_em:m.recebida_em }); } });
+        const msgData = (msgs&&msgs.data||[]).slice().reverse(); // desc no fetch → asc (cronológico) na exibição
+        msgData.forEach(m=>{ const k=dk(m.telefone); if(!k) return; const lo=lastOut[k]; if(!lo || new Date(m.recebida_em)>new Date(lo)){ (P.burst[k]=P.burst[k]||[]).push({ texto:m.texto, tipo:m.tipo, recebida_em:m.recebida_em }); } });
       }catch(_e){ /* best-effort: sem burst, o painel cai no texto único */ }
     }
   }catch(e){
@@ -26072,7 +26098,7 @@ function waPendResolverLocal(tel, { desfecho, motivo, reguaBloqueada }){
   const p=P.lista[idx];
   P.lista.splice(idx,1);
   delete P.selMass[tel];
-  const arch={ ...p, archived:true, desfecho, motivo:motivo||null, regua_bloqueada:!!reguaBloqueada, recebida_em:new Date().toISOString() };
+  const arch={ ...p, archived:true, desfecho, motivo:motivo||null, regua_bloqueada:!!reguaBloqueada, recebida_em_orig:p.recebida_em, recebida_em:new Date().toISOString() };
   P.arquivadas.unshift(arch);
   // Guarda a Promise da persistência por telefone p/ waPendReabrir poder sequenciar (anti-corrida).
   (P._resolPromises=P._resolPromises||{})[tel]=waPendPersistirResolucao(p,{ desfecho, motivo, reguaBloqueada });
@@ -26115,7 +26141,7 @@ function waPendRestaurar(tel){
   const idx=P.arquivadas.findIndex(x=>x.telefone===tel);
   if(idx<0) return;
   const a=P.arquivadas.splice(idx,1)[0];
-  P.lista.push({ telefone:a.telefone, caso_id:a.caso_id, texto:a.texto, tipo:a.tipo||'texto', recebida_em:a.recebida_em, intencao:a.intencao, intent:a.intent });
+  P.lista.push({ telefone:a.telefone, caso_id:a.caso_id, texto:a.texto, tipo:a.tipo||'texto', recebida_em:a.recebida_em_orig||a.recebida_em, intencao:a.intencao, intent:a.intent });
   waPendReabrir(tel, a.caso_id); waPendBadgeUpdate(); waPendRepaint();
 }
 
@@ -28130,7 +28156,7 @@ async function mv2Gerar(){
 function _mv2BuildPrompt(){
   const dev = (DB.devedores||[]).find(d=>d.id===_minuta.devId)||{};
   const credor = (DB.clientes||[]).find(c=>c.id===dev.clienteId)||{};
-  const valor = parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0;
+  const valor = parseValorBR(dev.valorOrig)||parseValorBR(dev.valorAtual)||0;
   const c = _minuta.campos;
   const empresa = credor.nome || DB.config.empresa || 'COBRASQ';
   const cnpjEmp = credor.cnpj || DB.config.cnpj || '34.626.848/0001-42';
@@ -29340,6 +29366,7 @@ function nfaParseValor(s){
   if(!t) return null;
   if(t.includes(',')){ t = t.replace(/\./g,'').replace(',', '.'); }
   else if((t.match(/\./g)||[]).length > 1){ t = t.replace(/\./g,''); }
+  else if(/^\d+\.\d{3}$/.test(t)){ t = t.replace(/\./g,''); } // ponto único + 3 dígitos = milhar pt-BR ('1.500'→1500)
   const n = parseFloat(t);
   return isFinite(n) ? Math.round(n*100)/100 : null;
 }
@@ -29402,7 +29429,7 @@ function nfaDupOf(r){
     return nfaDigits(h.doc_digits||h.doc||'')===d && Math.round(Number(h.valor)*100)===Math.round(v*100);
   });
 }
-function nfaEligible(r){ return r.status!=='emitida' && r.status!=='emitindo' && nfaLocalReady(r) && !nfaDupOf(r) && (r.asaas!=='sem-endereco' || nfaEndOk(r)) && r.asaas!=='sem-cpf'; }
+function nfaEligible(r){ return !!r && r.status!=='emitida' && r.status!=='emitindo' && nfaLocalReady(r) && !nfaDupOf(r) && (r.asaas!=='sem-endereco' || nfaEndOk(r)) && r.asaas!=='sem-cpf'; }
 function nfaSituacao(r){
   if(r.status==='emitida') return { label:'emitida', color:'var(--success)' };
   if(r.status==='emitindo') return { label:'emitindo…', color:'var(--text-3)' };
@@ -29828,11 +29855,14 @@ async function _nfaEmitirConfirmado(indices){
   const prog=document.getElementById('nfa-progresso'); if(prog) prog.dataset.busy='1';
   if(btn) btn.disabled=true; if(tbtn) tbtn.disabled=true;
   let ok=0, fail=0, done=0;
-  for(const i of indices){
-    const r=_nfaRows[i]; if(!nfaEligible(r)) continue;
-    if(!r.ref){ try{ r.ref=crypto.randomUUID(); }catch(_){ r.ref='nfa-'+i+'-'+done; } }
+  // Snapshot das referências no momento da confirmação: imuniza contra splice (remoção de
+  // linha via ✕) durante a emissão, que deslocaria os índices e puxaria _nfaRows[i]===undefined.
+  const rows = indices.map(i=>_nfaRows[i]).filter(Boolean);
+  for(const r of rows){
+    if(!nfaEligible(r)) continue;
+    if(!r.ref){ try{ r.ref=crypto.randomUUID(); }catch(_){ r.ref='nfa-'+done; } }
     r.status='emitindo'; r.erro=''; nfaDrawTabela();
-    if(prog) prog.textContent=`Emitindo ${done+1} de ${indices.length}…`;
+    if(prog) prog.textContent=`Emitindo ${done+1} de ${rows.length}…`;
     try{
       const resp=await fetch('/api/emitir-nf-avulso',{
         method:'POST',
@@ -29844,7 +29874,7 @@ async function _nfaEmitirConfirmado(indices){
       });
       const j=await resp.json().catch(()=>({}));
       if(resp.ok && (j.nf_status==='emitida'||j.nf_status==='processando')){ r.status=j.nf_status; r.nf_url=j.nf_url||''; ok++; }
-      else{ r.status='erro'; r.erro=traduzirErro(j.error||j.message||('HTTP '+resp.status)); fail++; }
+      else{ r.status='erro'; r.erro=traduzirErro(j.erro||j.error||j.message||('HTTP '+resp.status)); fail++; }
     }catch(e){ r.status='erro'; r.erro=traduzirErro(e.message||String(e)); fail++; }
     done++; nfaDrawTabela();
   }
@@ -30033,8 +30063,7 @@ function nfaAcoesHist(r,s){
       <button class="btn btn-ghost btn-sm" style="color:var(--danger);" onclick="nfaModalCancelarPref('${r.id}')" title="Cancelar nota junto à prefeitura">Cancelar nota</button>`;
   }
   if(s==='processando'){
-    return `<button class="btn btn-ghost btn-sm" onclick="nfaAtualizarStatus()" title="Verificar status na prefeitura">↻ Atualizar</button>
-      <button class="btn btn-ghost btn-sm" onclick="nfaReemitirHist('${r.id}')">Reemitir</button>`;
+    return `<button class="btn btn-ghost btn-sm" onclick="nfaAtualizarStatus()" title="Verificar status na prefeitura">↻ Atualizar</button>`;
   }
   if(s==='erro'){
     return `<button class="btn btn-ghost btn-sm" style="color:var(--gold-dark,#9a7a18);" onclick="nfaReemitirHist('${r.id}')" title="Carrega na tabela p/ corrigir e reemitir">↻ Corrigir e reemitir</button>
@@ -31114,7 +31143,7 @@ function getAlertas(){
   }
 
   // Parcelas de acordo vencendo nos próximos 5 dias
-  (DB.devedores||[]).forEach(d=>{
+  (DB.devedores||[]).filter(d=>!d.arquivado && !d.isDraft).forEach(d=>{
     (d.acordos||[]).forEach(ac=>{
       (ac.parcelas||[]).filter(p=>!p.pago && p.vencimento >= todayStr && p.vencimento <= in5str).forEach(p=>{
         alerts.push({ tipo:'warning', msg:`Parcela de ${d.nome} vence em ${p.vencimento} (${fmtR(p.valor)})` });
