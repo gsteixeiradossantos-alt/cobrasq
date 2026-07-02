@@ -85,7 +85,13 @@ module.exports = async function handler(req, res) {
     const capitalRatio = podeRatear ? Math.min(capitalBase / acordoTotal, 1) : null;
     const valorCapital = podeRatear ? round2(valorRecebido * capitalRatio) : 0;
     const valorHonorario = podeRatear ? round2(valorRecebido - valorCapital) : 0;
-    const repasseStatus = !podeRatear ? 'revisar' : (valorCapital > 0 ? 'pendente' : 'nao_aplica');
+    // Acordo vinculado mas SEM base de capital (capital_credor/valor_orig ausentes ou 0,
+    // ex.: dado legado não migrado) NÃO é o mesmo que capital genuinamente zero: também
+    // vai para REVISÃO MANUAL, senão o valor cai 100% em honorário e o credor nunca é
+    // repassado, sem alerta.
+    const repasseStatus = (!podeRatear || capitalBase <= 0)
+      ? 'revisar'
+      : (valorCapital > 0 ? 'pendente' : 'nao_aplica');
 
     const row = {
       acordo_id: acordo ? acordo.id : null,

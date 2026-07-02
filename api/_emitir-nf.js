@@ -47,6 +47,13 @@ module.exports = async function handler(req, res) {
     if (op.nf_status === 'emitida') return res.status(200).json({ ok: true, skipped: 'NF já emitida', nf_url: op.nf_url });
     opIdRevert = op.id; prevNf = op.nf_status;
 
+    // Operação em revisão manual (rateio não apurado, ex.: recebimento sem acordo
+    // vinculado): base fiscal indefinida — NÃO emitir NF sobre o valor cheio, senão
+    // pode declarar como honorário um valor que em parte é capital do credor.
+    if (op.repasse_status === 'revisar') {
+      return res.status(200).json({ ok: true, skipped: 'repasse em revisão manual (base indefinida)', repasse_status: 'revisar' });
+    }
+
     // Base: honorário se há repasse de capital; senão o valor cheio recebido.
     const temRepasse = Number(op.valor_capital) > 0;
     const base = round2(temRepasse ? op.valor_honorario : op.valor_recebido);

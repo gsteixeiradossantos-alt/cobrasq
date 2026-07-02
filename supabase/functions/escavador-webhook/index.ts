@@ -29,11 +29,15 @@ function isProcessoValido(num: unknown): num is string {
   return CNJ_FORMATADO.test(num) || CNJ_NUMERICO.test(num);
 }
 
-// Comparação de tokens em tempo constante para mitigar timing attack.
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
+// Comparação em tempo constante (mesmo padrão do asaas/zapsign/zapi-webhook, F-18):
+// compara o SHA-256 dos dois lados, o que normaliza o comprimento e não faz
+// short-circuit — não vaza o tamanho do segredo por timing.
+async function safeEqual(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder();
+  const ha = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(a)));
+  const hb = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(b)));
   let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  for (let i = 0; i < ha.length; i++) diff |= ha[i] ^ hb[i];
   return diff === 0;
 }
 
@@ -60,7 +64,7 @@ Deno.serve(async (req) => {
   }
   const auth = req.headers.get('authorization') || '';
   const provided = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : '';
-  if (!provided || !timingSafeEqual(provided, expected)) {
+  if (!provided || !(await safeEqual(provided, expected))) {
     return new Response(JSON.stringify({ error: 'unauthorized' }), {
       status: 401,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' }
