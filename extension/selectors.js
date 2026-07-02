@@ -87,10 +87,12 @@ window.EPROC_TXT = {
 };
 
 // Vocabulário por CAMPO do assistente de distribuição (inicial, 5 etapas). Usado
-// pelo motor multi-etapas (content-eproc.js) via byAnyLabel — calibrar com o DOM real.
+// pelo motor multi-etapas (content-eproc.js) via byAnyLabel — calibrado com a tela
+// real do eproc TJPR ("Peticionamento Eletrônico (1 de 5) - Informações do processo").
 window.EPROC_DIST = {
-  // Etapa 1 — Informações do processo
-  comarca: ['comarca', 'foro', 'seção judiciária', 'secao judiciaria'],
+  // Etapa 1 — Informações do processo. No eproc TJPR o campo da comarca é o select
+  // "Desejo entrar com a ação em:" (não diz "Comarca").
+  comarca: ['desejo entrar com a ação em', 'desejo entrar com a acao em', 'entrar com a ação', 'entrar com a acao', 'comarca', 'foro', 'seção judiciária', 'secao judiciaria'],
   valorCausa: ['valor da causa', 'valor da ação', 'valor da acao', 'valor da demanda', 'valor'],
   rito: ['rito', 'procedimento'],
   area: ['área', 'area'],

@@ -27,16 +27,41 @@
     }
     return null;
   }
-  // Fallback: acha <input>/<select> cujo rótulo/vizinhança contém `texto`.
+  // Normaliza p/ comparação: minúsculas e sem acentos ("Cível" ≈ "CIVEL").
+  function norm(s) {
+    return String(s == null ? '' : s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  }
+  function visivel(el) { return !!(el && el.offsetParent !== null); }
+  // Dado um rótulo, acha o campo correspondente: atributo for=, senão o primeiro
+  // input/select VISÍVEL que vem DEPOIS do rótulo (subindo até 3 níveis de container).
+  function campoDoLabel(l) {
+    const forId = l.getAttribute && l.getAttribute('for');
+    if (forId) { const el = document.getElementById(forId); if (visivel(el)) return el; }
+    let scope = l.parentElement;
+    for (let depth = 0; scope && depth < 3; depth++) {
+      const cands = Array.from(scope.querySelectorAll('input:not([type="hidden"]),select,textarea')).filter(visivel);
+      for (const c of cands) {
+        if (l.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING) return c;
+      }
+      if (cands.length) return cands[0];
+      scope = scope.parentElement;
+    }
+    return null;
+  }
+  // Fallback: acha <input>/<select> cujo rótulo VISÍVEL contém `texto`.
+  // Prioriza <label> reais; ignora containers gigantes (texto > 120 chars) para não
+  // casar com divs de layout que contêm a página inteira.
   function byLabel(texto) {
-    const t = String(texto).toLowerCase();
-    const labels = Array.from(document.querySelectorAll('label, th, td, span, div'));
-    for (const l of labels) {
-      if ((l.textContent || '').toLowerCase().includes(t)) {
-        const forId = l.getAttribute && l.getAttribute('for');
-        if (forId) { const el = document.getElementById(forId); if (el) return el; }
-        const near = l.parentElement && l.parentElement.querySelector('input,select,textarea');
-        if (near) return near;
+    const t = norm(texto);
+    const grupos = ['label', 'th, td, b, strong, span, div'];
+    for (const selGrupo of grupos) {
+      for (const l of Array.from(document.querySelectorAll(selGrupo))) {
+        const full = (l.textContent || '').trim();
+        if (!full || full.length > 120) continue;
+        if (!norm(full).includes(t)) continue;
+        if (!visivel(l)) continue;
+        const el = campoDoLabel(l);
+        if (el) return el;
       }
     }
     return null;
@@ -64,13 +89,27 @@
     el.dispatchEvent(new Event('change', { bubbles: true }));
     return true;
   }
+  // Seleciona a opção com melhor casamento (sem acentos; aceita casamento parcial
+  // por palavras: "Cível" acha "CÍVEL", "Juizado Especial Cível" acha
+  // "RITO SUMARÍSSIMO (JUIZADO ESPECIAL)" só se a maioria das palavras bater).
   function setSelectByText(sel, texto) {
     if (!sel || !texto) return false;
-    const alvo = String(texto).toLowerCase();
+    const alvo = norm(texto);
+    let best = null, bestScore = 0;
     for (const opt of Array.from(sel.options || [])) {
-      if ((opt.textContent || '').toLowerCase().includes(alvo)) {
-        sel.value = opt.value; sel.dispatchEvent(new Event('change', { bubbles: true })); return true;
+      const o = norm(opt.textContent);
+      if (!o.trim()) continue;
+      let score = 0;
+      if (o.includes(alvo) || alvo.includes(o)) score = 100;
+      else {
+        const palavras = alvo.split(/\W+/).filter(w => w.length >= 4);
+        const hits = palavras.filter(w => o.includes(w)).length;
+        if (palavras.length && hits) score = Math.round((100 * hits) / palavras.length);
       }
+      if (score > bestScore) { best = opt; bestScore = score; }
+    }
+    if (best && bestScore >= 60) {
+      sel.value = best.value; sel.dispatchEvent(new Event('change', { bubbles: true })); return true;
     }
     return false;
   }
@@ -148,20 +187,24 @@
 
   // ── DISTRIBUIÇÃO (inicial) — motor multi-etapas ─────────────────────────────
   function detectarEtapa() {
-    const t = document.body ? (document.body.innerText || '') : '';
-    const m = t.match(/Etapa\s*([1-5])\s*de\s*5/i);
+    // Título real do eproc TJPR: "Peticionamento Eletrônico (1 de 5) - Informações do processo"
+    const h = Array.from(document.querySelectorAll('h1,h2,h3,.infraCaption'))
+      .map(e => e.textContent || '').join(' ');
+    const t = h + ' ' + (document.body ? (document.body.innerText || '').slice(0, 4000) : '');
+    let m = t.match(/\(\s*([1-5])\s*de\s*5\s*\)/i) || t.match(/Etapa\s*([1-5])\s*de\s*5/i);
     if (m) return +m[1];
     if (/Informa[çc][õo]es do processo/i.test(t)) return 1;
     if (/Assuntos/i.test(t)) return 2;
-    if (/Partes/i.test(t) && /(Requerido|Executado)/i.test(t)) return 4;
-    if (/Partes/i.test(t) && /Requerente/i.test(t)) return 3;
+    if (/Partes\s*(Autoras|Requerentes)/i.test(t)) return 3;
+    if (/Partes\s*(R[ée]s|Requerid|Executad)/i.test(t)) return 4;
     if (/Documentos/i.test(t) || /Anexar Documento/i.test(t)) return 5;
     return 0;
   }
 
   function etapa1(d, erros) {
     preencherCampo(DIST.comarca, d.comarca, 'Comarca', erros, true);
-    preencherCampo(DIST.valorCausa, d.valor_causa != null ? fmtNum(d.valor_causa) : null, 'Valor da causa', erros, false);
+    // Campo real: "Valor da Causa: (R$) (Somente números)" → sem separador de milhar.
+    preencherCampo(DIST.valorCausa, d.valor_causa != null ? fmtNum(d.valor_causa).replace(/\./g, '') : null, 'Valor da causa', erros, false);
     preencherCampo(DIST.rito, d.rito, 'Rito', erros, false);
     preencherCampo(DIST.area, d.area, 'Área', erros, false);
     preencherCampo(DIST.classe, d.classe, 'Classe processual', erros, true);
@@ -210,7 +253,7 @@
       ligarBotaoParar();
       return;
     }
-    const nomes = { 1: 'Informações do processo', 2: 'Assuntos', 3: 'Partes — Requerentes', 4: 'Partes — Requeridos', 5: 'Documentos' };
+    const nomes = { 1: 'Informações do processo', 2: 'Assuntos', 3: 'Partes Autoras', 4: 'Partes Rés', 5: 'Documentos' };
     const erros = [];
     if (etapa === 1) etapa1(d, erros);
     else if (etapa === 2) etapa2(d, erros);
