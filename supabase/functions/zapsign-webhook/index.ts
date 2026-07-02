@@ -26,6 +26,17 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS'
 };
 
+// ⚠️ ATIVAR SÓ APÓS TROCAR PARA HEADER NO PAINEL DO ZAPSIGN.
+// O segredo via `?token=` na URL vaza em logs/histórico/referrer; o correto é mandá-lo só
+// no HEADER `Authorization: Bearer <secret>`. Enquanto a URL cadastrada no painel ainda usa
+// `?token=`, manter TRUE evita quebrar o webhook em produção. PASSO MANUAL para desligar:
+//   1. Painel ZapSign → Configurações/Webhooks → editar a URL do webhook.
+//   2. Remover `?token=<secret>` da URL e configurar o segredo no header
+//      `Authorization: Bearer <secret>` (headers customizados do webhook).
+//   3. Enviar evento de teste e confirmar 200.
+//   4. Trocar esta flag para `false` e re-deployar. A partir daí, `?token=` é IGNORADO.
+const ACEITAR_TOKEN_QUERYSTRING = true;
+
 // F-18: comparação do secret em tempo constante (não vaza, por timing, quantos
 // caracteres do segredo bateram). Hashamos os dois lados com SHA-256 (normaliza
 // o tamanho e não expõe o comprimento do segredo) e comparamos byte a byte sem
@@ -249,7 +260,7 @@ Deno.serve(async (req) => {
   }
   const auth = req.headers.get('authorization') || '';
   const url = new URL(req.url);
-  const tokenQs = url.searchParams.get('token') || '';
+  const tokenQs = ACEITAR_TOKEN_QUERYSTRING ? (url.searchParams.get('token') || '') : '';
   const provided = auth.replace(/^Bearer\s+/i, '') || tokenQs;
   if (!(await safeEqual(provided, expected))) {
     return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

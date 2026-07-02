@@ -16,6 +16,12 @@ import { createClient } from 'jsr:@supabase/supabase-js@2';
 
 const MAX_LOTE = 50;
 const MAX_TENTATIVAS = 5;
+// Reaper: linha presa em 'processando' há mais que isto é considerada lock MORTO
+// (processo que caiu no meio) e volta pra 'pendente'. 10 min >> tempo de um run vivo
+// (o cron roda a cada 1 min e processa o lote em segundos), então não recicla item de
+// execução concorrente legítima. Requer a coluna processando_desde (migração
+// 20260706_infra_reaper_lock_agendadas.sql).
+const LOCK_TIMEOUT_MIN = 10;
 
 async function callZapi(url: string, headers: Record<string, string>, body: unknown): Promise<{ ok: boolean; status: number; data: any }> {
   const delays = [1000, 2000, 4000];
@@ -111,6 +117,28 @@ Deno.serve(async (req) => {
     return { ok: false, erro: 'tipo desconhecido: ' + tipo };
   }
 
+  // === Reaper de lock preso ===
+  // Antes de claimar novos itens, recicla p/ 'pendente' as linhas que ficaram presas em
+  // 'processando' porque o processo morreu no meio (não viraram enviada/falhou/pendente).
+  // Alvo: processando há > LOCK_TIMEOUT_MIN, OU sem carimbo (processando_desde IS NULL —
+  // presas de antes da migração do reaper). O filtro por tempo garante não tocar em item
+  // de um run concorrente vivo. Best-effort: se a coluna ainda não existir (migração não
+  // aplicada), o erro é ignorado e o cron segue como antes.
+  const limiteLock = new Date(Date.now() - LOCK_TIMEOUT_MIN * 60_000).toISOString();
+  try {
+    const { data: reciclados } = await sb
+      .from('crm_mensagens_agendadas')
+      .update({ status: 'pendente', processando_desde: null })
+      .eq('status', 'processando')
+      .or(`processando_desde.is.null,processando_desde.lt.${limiteLock}`)
+      .select('id');
+    if (reciclados && reciclados.length) {
+      console.warn(`[cron] reaper reciclou ${reciclados.length} lock(s) preso(s) > ${LOCK_TIMEOUT_MIN}min`);
+    }
+  } catch (e) {
+    console.warn('[cron] reaper pulado (coluna processando_desde ausente?): ' + (e instanceof Error ? e.message : String(e)));
+  }
+
   const agora = new Date().toISOString();
   const { data: lote, error: errSel } = await sb
     .from('crm_mensagens_agendadas')
@@ -137,10 +165,10 @@ Deno.serve(async (req) => {
 
   let enviadas = 0, falhadas = 0, bloqueadas = 0;
   for (const m of lote) {
-    // Lock otimista
+    // Lock otimista — carimba processando_desde=now() p/ o reaper saber a idade do lock.
     const { data: lock } = await sb
       .from('crm_mensagens_agendadas')
-      .update({ status: 'processando' })
+      .update({ status: 'processando', processando_desde: new Date().toISOString() })
       .eq('id', m.id)
       .eq('status', 'pendente')
       .select('id');
@@ -149,7 +177,7 @@ Deno.serve(async (req) => {
     // Régua bloqueada: cancela sem enviar.
     if (bloqueados.has(dk(m.telefone))) {
       await sb.from('crm_mensagens_agendadas')
-        .update({ status: 'cancelada', erro: 'regua_bloqueada (spam/engano)' })
+        .update({ status: 'cancelada', erro: 'regua_bloqueada (spam/engano)', processando_desde: null })
         .eq('id', m.id);
       bloqueadas++;
       continue;
@@ -166,12 +194,12 @@ Deno.serve(async (req) => {
 
     if (enviadoOk) {
       await sb.from('crm_mensagens_agendadas')
-        .update({ status: 'enviada', tentativas: novasTentativas, enviada_em: new Date().toISOString(), erro: null })
+        .update({ status: 'enviada', tentativas: novasTentativas, enviada_em: new Date().toISOString(), erro: null, processando_desde: null })
         .eq('id', m.id);
       enviadas++;
     } else if (novasTentativas >= MAX_TENTATIVAS) {
       await sb.from('crm_mensagens_agendadas')
-        .update({ status: 'falhou', tentativas: novasTentativas, erro: JSON.stringify(result.data).slice(0, 500) })
+        .update({ status: 'falhou', tentativas: novasTentativas, erro: JSON.stringify(result.data).slice(0, 500), processando_desde: null })
         .eq('id', m.id);
       await sb.from('crm_envios_falhados').insert({
         caso_id: m.caso_id,
@@ -185,7 +213,7 @@ Deno.serve(async (req) => {
       falhadas++;
     } else {
       await sb.from('crm_mensagens_agendadas')
-        .update({ status: 'pendente', tentativas: novasTentativas, erro: JSON.stringify(result.data).slice(0, 500) })
+        .update({ status: 'pendente', tentativas: novasTentativas, erro: JSON.stringify(result.data).slice(0, 500), processando_desde: null })
         .eq('id', m.id);
     }
   }
