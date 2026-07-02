@@ -226,7 +226,11 @@
       erros.push('Sem assuntos no snapshot — selecione na árvore e clique Incluir');
     }
     const comp = qFirst(IDS.competencia);
-    if (comp && comp.value === '-1') { destacar(comp, '#fab005'); erros.push('Selecione a <b>Competência</b> (ex.: Matéria Residual)'); }
+    if (comp) {
+      // Ex.: "Matéria Residual" casa com "Juizado Especial Cível - Matéria Residual".
+      if (d.competencia && setSelectByText(comp, d.competencia)) { /* selecionada */ }
+      else if (comp.value === '-1') { destacar(comp, '#fab005'); erros.push('Selecione a <b>Competência</b> (ex.: Matéria Residual)'); }
+    }
   }
   function etapaPartes(lista, rotulo, erros) {
     const partes = lista || [];
