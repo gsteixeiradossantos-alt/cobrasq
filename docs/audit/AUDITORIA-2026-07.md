@@ -32,20 +32,30 @@ Cada onda passou por `npm test` + `npm run lint` verdes e `node --check` do scri
 | 3 | P3 | 25 | ~16 (código morto/latente, decisão, DDL) |
 | **Total** | | **~87 em código** | **~27 dependem de decisão/backend** |
 
-**Migrações preparadas (NÃO aplicadas — revisar e aplicar com deploy coordenado):**
-- `20260704c_p0_portal_emitir_token_server_only.sql` — fecha o P0 (deploy junto com `api/mfa.js` + `index.html`).
-- `20260705_valor_capital_lock_PREPARADA.sql` — trava server-side de `valor_capital`.
-- `20260705_fin_transferencia_saldo_PREPARADA.sql` — espelho de transferências no saldo realizado.
-- `20260706_portal_meu_caso.sql` — RPCs do portal do devedor (`portal_meu_caso`, `portal_login_nascimento`,
-  redefinição de `portal_validar_token`) + tabelas de sessão. Aplicar junto do deploy do `index.html`.
-- `20260706_infra_reaper_lock_agendadas.sql` — coluna `processando_desde` + reaper de lock.
-- `20260706_infra_uniq_auto_cobranca.sql` — índice único parcial anti-duplicidade da auto-cobrança.
-- `20260706_infra_bucket_avatars.sql` — cria o bucket `avatars` (o CRM já o usa).
+**✅ JÁ APLICADAS EM PRODUÇÃO (2026-07-06, via MCP — smoke-tested):**
+- `20260706_portal_meu_caso.sql` — RPCs do portal (`portal_meu_caso`, `portal_login_nascimento`, redefinição
+  retrocompatível de `portal_validar_token`) + tabelas de sessão. Aditivo; o frontend novo (index.html) as usa
+  só depois do merge — compatível com o frontend atual.
+- `20260706_infra_reaper_lock_agendadas.sql` — coluna `processando_desde` + índice.
+- `20260706_infra_uniq_auto_cobranca.sql` — índice único parcial anti-duplicidade.
+- `20260706_infra_bucket_avatars.sql` — bucket `avatars` + policies.
 
-**Edge functions (fonte corrigido — DEPLOY MANUAL/COORDENADO, não feito):** `zapsign-webhook`, `beatriz-msg`,
-`enviar-whatsapp`, `cron-mensagens-agendadas`, `escavador-webhook`, e a **nova `criar-usuario`**. Os webhooks
-(`asaas`/`zapi`/`zapsign`) têm a flag `ACEITAR_TOKEN_QUERYSTRING` — só virar `false` **após** migrar o segredo
-para header no painel de cada provedor.
+**⏸️ AINDA NÃO aplicadas (por dependência ou risco — de propósito):**
+- `20260704c_p0_portal_emitir_token_server_only.sql` — **espera o merge** (revoga o acesso anon da RPC antiga;
+  aplicar antes do frontend novo estar no ar quebra o "enviar código" do portal).
+- `20260705_valor_capital_lock_PREPARADA.sql` — **segurada**: o gatilho barra `valor_capital` de quem não é
+  proprietário, e jobs de backend rodam como `service_role` (≠ proprietário) — pode barrar backfill legítimo.
+  Testar em staging antes.
+- `20260705_fin_transferencia_saldo_PREPARADA.sql` — **esqueleto** (precisa mesclar a def vigente de
+  `fin_saldos_realizados` de prod, que não está versionada). Não aplicar cega.
+
+**Edge functions:**
+- ✅ **`criar-usuario` DEPLOYADA** (2026-07-06, v1, ACTIVE, `verify_jwt=true`) — o botão Admin volta a funcionar.
+- ⏸️ **`enviar-whatsapp`, `zapsign-webhook`, `cron-mensagens-agendadas`** (fonte corrigido no PR) — **não
+  redeployadas**: são funções que já rodam e o redeploy exige o fonte exato (via `supabase functions deploy`,
+  fora do alcance seguro daqui). Comando por função: `supabase functions deploy <nome>`.
+- `escavador-webhook` não está ativa em prod (fonte corrigido fica pronto se for ativada).
+- Webhooks têm a flag `ACEITAR_TOKEN_QUERYSTRING` — virar `false` só após migrar o segredo para header no painel.
 
 **Persistência de acordos — ✅ RESOLVIDO (2026-07-02):** `salvarAcordo`/`toggleParcela` agora gravam na tabela
 dedicada `acordos` e `loadRelationalData` reidrata `dev.acordos` no login — o "Recuperado no mês" e o drawer
@@ -58,8 +68,10 @@ bucket `avatars`; paridade de juros/multa admin×CRM; reaper de lock do cron; re
 (flag pronta, ativar após rotacionar no painel).
 
 **O que ainda depende exclusivamente de você (ação em produção, não código):**
-1. Revisar e **aplicar as 7 migrações preparadas** (SQL Editor do Supabase — nunca `db push` cego).
-2. **Deployar as edge functions** corrigidas + a nova `criar-usuario`.
+1. **Mergear o PR** (frontend → Vercel) e, no mesmo momento, aplicar a migração do **P0**
+   (`20260704c`) — coordenados, testando o login do portal logo em seguida.
+2. **Redeployar** as 3 edge functions corrigidas: `supabase functions deploy enviar-whatsapp` ·
+   `... zapsign-webhook` · `... cron-mensagens-agendadas`.
 3. Nos painéis Asaas/Z-API/ZapSign, **migrar o segredo do webhook** de `?token=` para header e então virar a flag.
 4. Ativar a **proteção de senha vazada** no painel Auth (toggle).
 

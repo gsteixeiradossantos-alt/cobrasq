@@ -1,5 +1,5 @@
 -- ============================================================
--- PREPARADA — NÃO APLICAR SEM REVISÃO
+-- ✅ APLICADA EM PRODUÇÃO 2026-07-06 (via MCP, projeto jokbxzhcctcwnbhkhgru). Não reaplicar.
 -- ============================================================
 -- Reaper de lock preso em crm_mensagens_agendadas.
 --
