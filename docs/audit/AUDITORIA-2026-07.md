@@ -40,7 +40,11 @@ Cada onda passou por `npm test` + `npm run lint` verdes e `node --check` do scri
 **Edge functions:** o fonte foi corrigido (`zapsign-webhook`, `beatriz-msg`, `enviar-whatsapp`,
 `cron-mensagens-agendadas`, `escavador-webhook`) mas o **deploy é manual/coordenado** — não foi feito.
 
-**Principais pendências que dependem de você (decisão/backend):** persistência de acordos (rehidratar do banco);
+**Persistência de acordos — ✅ RESOLVIDO (2026-07-02):** `salvarAcordo`/`toggleParcela` agora gravam na tabela
+dedicada `acordos` e `loadRelationalData` reidrata `dev.acordos` no login — o "Recuperado no mês" e o drawer
+não zeram mais no reload. RLS (staff ALL) e CHECKs (`forma`, `status`) respeitados.
+
+**Principais pendências que dependem de você (decisão/backend):**
 portal do devedor abrir vazio + login CPF/nascimento (nova RPC `SECURITY DEFINER`); botão "Criar usuário" (Edge
 Function nova); UI de reenvio de mensagens falhadas; trava anti-duplicidade da auto-cobrança ZapSign (índice único);
 bucket `avatars` no Storage; paridade de juros/multa admin×CRM (fonte única); remover `?token=` dos webhooks

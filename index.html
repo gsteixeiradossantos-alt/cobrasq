@@ -5071,6 +5071,46 @@ async function upsertAcordoRelational(devedorId, acordo){
   }catch(e){ return { ok:false, error:e.message }; }
 }
 
+// Mapeia uma linha da tabela `acordos` para a forma em memória que o drawer/KPIs leem
+// (dev.acordos[]). `parcelas` é jsonb e faz round-trip idêntico; `obs` vive no metadata.
+function _rowToAcordo(row){
+  const parc = Array.isArray(row.parcelas) ? row.parcelas : [];
+  return {
+    id: row.id,
+    valorTotal: row.valor_total != null ? +row.valor_total : 0,
+    numParc: row.num_parcelas != null ? +row.num_parcelas : parc.filter(p=>p.tipo!=='entrada').length,
+    entrada: row.valor_entrada != null ? +row.valor_entrada : 0,
+    venc1: row.data_primeiro_venc || '',
+    obs: (row.metadata && row.metadata.obs) || '',
+    parcelas: parc,
+    forma: row.forma || 'outro',
+    status: row.status || 'ativo',
+    createdAt: row.created_at || null,
+    linkZapSign: row.link_zapsign || null,
+    statusZapSign: row.status_zapsign || null
+  };
+}
+
+// Reidrata dev.acordos a partir da tabela dedicada `acordos` para os devedores dados.
+// devedorToRow REMOVE 'acordos' do metadata (fonte é a tabela), então sem esta carga
+// o dev.acordos volta VAZIO no load e o "Recuperado no mês"/drawer perdem os acordos.
+async function _reidratarAcordos(devs){
+  const supa = getSupabase();
+  if(!supa || !Array.isArray(devs) || !devs.length) return;
+  const ids = devs.map(d=>d.id).filter(Boolean);
+  try{
+    const byDev = {};
+    // Chunk defensivo p/ não estourar o comprimento da URL do PostgREST.
+    for(let i=0;i<ids.length;i+=200){
+      const slice = ids.slice(i, i+200);
+      const { data, error } = await supa.from('acordos').select('*').in('devedor_id', slice);
+      if(error){ console.warn('[rel] reidratarAcordos:', error.message); return; }
+      for(const row of (data||[])){ (byDev[row.devedor_id] = byDev[row.devedor_id] || []).push(_rowToAcordo(row)); }
+    }
+    for(const d of devs){ if(byDev[d.id]) d.acordos = byDev[d.id]; }
+  }catch(e){ console.warn('[rel] reidratarAcordos:', e.message); }
+}
+
 // FASE C2 (tempo-2) — os ~150 leitores do cliente que liam a dívida do objeto
 // devedor (d.valorOrig/d.status/d.fase/…) passam a vê-la de `cobrancas` (fonte
 // única) SEM tocar cada call site: enriquecemos o objeto devedor em memória com
@@ -5145,6 +5185,8 @@ async function loadRelationalData(){
   // FASE C2 (tempo-2): leitores do cliente passam a ver a dívida de cobrancas.
   _mergeDividaFromCobrancas();
   await loadGruposEconomicos();
+  // Reidrata os acordos da tabela dedicada (salvarAcordo/toggleParcela persistem lá).
+  await _reidratarAcordos(DB.devedores);
   // F-20 (Fase 2): rebaseia a referência anti-encolhimento ao que ESTE usuário REALMENTE
   // carregou. O blob (cobrasq_data) tem TODOS os devedores (RLS SELECT=true), mas o
   // relacional traz só os do colaborador (RLS por linha). Sem isto, _lastKnownDevCount e
@@ -13148,6 +13190,22 @@ function salvarAcordo(){
   dev.updatedAt = hoje();
 
   save();
+  // Persiste na tabela dedicada `acordos` (fonte da verdade — o metadata não guarda
+  // acordos). Sem isto, o acordo some no próximo load. forma/status respeitam os CHECKs
+  // (forma ∈ avista/boleto/cartao/outro; status ∈ ativo/encerrado/cancelado).
+  upsertAcordoRelational(devId, {
+    id: acordo.id,
+    forma: (numParc > 1 || entrada > 0) ? 'outro' : 'avista',
+    status: 'ativo',
+    parcelas,
+    valorTotal,
+    valorEntrada: entrada,
+    numParcelas: numParc,
+    dataPrimeiroVenc: venc1,
+    metadata: { obs }
+  }).then(res=>{
+    if(!res || !res.ok) showToast('Acordo salvo na tela, mas falhou ao gravar no servidor'+(res&&res.error?': '+res.error:'')+'. Recarregue e tente de novo.','warning');
+  });
   closeModal('modal-acordo');
   if(currentDevId === devId) renderDrawerBody(devId);
   renderDevedores();
@@ -13174,6 +13232,16 @@ function toggleParcela(devId, acordoId, idx){
 
   dev.updatedAt = hoje();
   save();
+  // Persiste a baixa na tabela `acordos` (update pontual do jsonb parcelas — não toca as
+  // demais colunas). status='encerrado' quando tudo pago (CHECK: ativo/encerrado/cancelado).
+  const supa = getSupabase();
+  if(supa && ac.id){
+    const patch = { parcelas: ac.parcelas, updated_at: new Date().toISOString() };
+    if(allPaid) patch.status = 'encerrado';
+    supa.from('acordos').update(patch).eq('id', ac.id).then(({ error })=>{
+      if(error) showToast('Baixa registrada na tela, mas falhou no servidor: '+error.message+'. Recarregue e confira.','warning');
+    });
+  }
   if(currentDevId === devId) renderDrawerBody(devId);
   renderDevedores();
 }
