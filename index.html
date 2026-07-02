@@ -5921,6 +5921,15 @@ async function doLogin(type){
           if(btnLogin){ btnLogin.disabled=false; btnLogin.innerHTML='Entrar como gestor '+_btnArrow; }
           return;
         }
+        // Guarda de papel: só papéis internos (proprietario/colaborador) ou cedente
+        // (roteado ao portal por montarCurrentUserDeAppUser) podem seguir. Papéis não-staff
+        // como 'devedor' não devem virar 'funcionario' e abrir o app interno.
+        if(appUser.papel!=='proprietario' && appUser.papel!=='colaborador' && appUser.papel!=='cedente'){
+          await supa.auth.signOut();
+          showToast('Esta conta não tem acesso interno.','danger');
+          if(btnLogin){ btnLogin.disabled=false; btnLogin.innerHTML='Entrar como gestor '+_btnArrow; }
+          return;
+        }
         currentUser = montarCurrentUserDeAppUser(appUser, data.user);
         if(btnLogin){ btnLogin.disabled=false; btnLogin.innerHTML='Entrar como gestor '+_btnArrow; }
         iniciarSessao();
@@ -8261,7 +8270,10 @@ async function renderPainel(){
   if(Array.isArray(cobrRows)) DB_cobrancas = cobrRows;
   // Filtros do painel (Cliente / Operador) — aplicados na fonte p/ consistência entre KPIs/aging/situação.
   const _pf = window._painelFiltro || (window._painelFiltro = { cliente:'', operador:'' });
+  // "Carteira ativa" = casos EM ABERTO — exclui quitado/pago/liquidado (mesma base do Aging,
+  // que já filtra esses status). Quitadas seguem contabilizadas só no quadro "Carteira por situação".
   const cobrAtivas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft
+    && !/quitad|pago|liquidad/i.test(c.status||'')
     && (!_pf.cliente  || String(c.cliente_id||'')===_pf.cliente)
     && (!_pf.operador || String(c.assigned_to||'')===_pf.operador));
 
@@ -8409,6 +8421,9 @@ async function renderPainel(){
   // Equipe: ranking real (pontos) + meta do mês (recuperado vs metaMensal).
   const rankEquipe = calcRankingTarefas().slice(0,4);
   const metaProg   = metaMensal>0 ? Math.min(100, Math.round((totalRecuperado/metaMensal)*100)) : null;
+  // Recuperado/Meta/gráfico vêm de recuperadoNoMes (DB.devedores/acordos), modelo distinto de
+  // DB_cobrancas — não respondem aos filtros Cliente/Operador. Sinaliza isso quando há filtro ativo.
+  const _pfAtivo   = !!(_pf.cliente || _pf.operador);
 
   // Projeção do mês seguinte (ILUSTRATIVA): média dos últimos 3 meses com recuperação.
   const _ult3    = monthsData.slice(-3).map(m=>m.rec);
@@ -8437,7 +8452,7 @@ async function renderPainel(){
   // 4 KPIs do topo (design v3): carteira, recuperado, em negociação, pendências (navy).
   const kpis = [
     { label:'Carteira ativa',        value: fmtR(totalCarteira),    sub:`${totalCasos} caso${totalCasos!==1?'s':''} em aberto`, tick:true },
-    { label:'Recuperado · '+mesAtual, value: fmtR(totalRecuperado),  sub: totalRecuperado===0 ? 'nenhuma baixa registrada' : (metaProg!=null?`${metaProg}% da meta`:'parcelas de acordo pagas'), delta: totalRecuperado===0?null:deltaRecPct },
+    { label:'Recuperado · '+mesAtual, value: fmtR(totalRecuperado),  sub: (totalRecuperado===0 ? 'nenhuma baixa registrada' : (metaProg!=null?`${metaProg}% da meta`:'parcelas de acordo pagas')) + (_pfAtivo?' · total global (ignora filtros)':''), delta: totalRecuperado===0?null:deltaRecPct },
     { label:'Em negociação',         value: fmtR(emNegociacao),     sub:`${emNegRows.length} cobrança${emNegRows.length!==1?'s':''}` },
     { label:'Pendências',            value: String(pendAbertas),    sub: pendAtrasadas?`${pendAtrasadas} atrasada${pendAtrasadas!==1?'s':''}`:'em dia', navy:true },
   ];
@@ -9311,7 +9326,7 @@ function renderDevedores(){
     if(q && !(d.nome||'').toLowerCase().includes(q) && !(d.doc||'').includes(q)) return false;
     if(devFilter.statuses.length && !devFilter.statuses.includes(d.status)) return false;
     if(devFilter.clienteIds.length && !devFilter.clienteIds.includes(d.clienteId)) return false;
-    if(devFilter.resp && d.responsavel !== devFilter.resp) return false;
+    if(devFilter.resp && nomeResponsavel(d) !== devFilter.resp) return false;
     return true;
   });
   // IMPLEMENTADO S6: aplica seletor "Visualizar como" do gestor
@@ -9584,7 +9599,13 @@ function renderDevedores(){
   `;
 
   const searchEl = document.getElementById('dev-search');
-  if(searchEl) searchEl.addEventListener('input', e=>{ devFilter.q=e.target.value; renderDevedores(); });
+  if(searchEl) searchEl.addEventListener('input', e=>{
+    const pos = e.target.selectionStart;
+    devFilter.q=e.target.value; renderDevedores();
+    // renderDevedores recria a página inteira (novo input) — re-foca e restaura o cursor
+    const nv = document.getElementById('dev-search');
+    if(nv){ nv.focus(); try{ nv.setSelectionRange(pos,pos); }catch(_){} }
+  });
 
   const respSel = document.getElementById('dev-filter-resp');
   if(respSel){ respSel.value=devFilter.resp; respSel.addEventListener('change', e=>{ devFilter.resp=e.target.value; renderDevedores(); }); }
@@ -10006,7 +10027,7 @@ function openDrawer(devId){
       ? createdDate.toLocaleString('pt-BR',{month:'short',year:'numeric'})
       : '—';
     metaEl.innerHTML = [
-      `<span><span style="color:var(--text-3)">CPF</span> <strong style="font-family:var(--font-mono);color:var(--text)">${dev.doc||'—'}</strong></span>`,
+      `<span><span style="color:var(--text-3)">CPF</span> <strong style="font-family:var(--font-mono);color:var(--text)">${escHtml(dev.doc)||'—'}</strong></span>`,
       dev.tel ? `<span><span style="color:var(--text-3)">Tel</span> <strong style="font-family:var(--font-mono);color:var(--text)">${escHtml(dev.tel)}</strong></span>` : '',
       `<span><span style="color:var(--text-3)">Cliente</span> <strong style="color:var(--text)">${escHtml(cliNome)}</strong></span>`,
       `<span><span style="color:var(--text-3)">Desde</span> <strong style="color:var(--text)">${clienteDesde}</strong></span>`,
@@ -10016,7 +10037,7 @@ function openDrawer(devId){
 
   document.getElementById('devDrawer-editBtn').onclick = ()=>editDevedor(devId);
   document.getElementById('devDrawer-deleteBtn').onclick = ()=>excluirDevedorIndividual(devId);
-  document.getElementById('devDrawer-pagarBtn').onclick = ()=>abrirHistorico(devId);
+  document.getElementById('devDrawer-pagarBtn').onclick = ()=>abrirHistorico(devId, 'Pagamento');
 
   renderDrawerBody(devId);
 
@@ -10031,7 +10052,7 @@ function openDrawer(devId){
         try {
           const doc    = await ZapSignAPI.getDoc(m.zapsignToken);
           const signer = doc.signers?.[0];
-          const novo   = signer?.status || doc.status || m.zapsignStatus;
+          const novo   = zsNormStatus(signer?.status || doc.status || m.zapsignStatus);
           if(novo !== m.zapsignStatus){
             m.zapsignStatus = novo;
             if(novo==='SIGNED' && !m.assinadoEm){
@@ -10186,7 +10207,7 @@ function _drawerTabHtml(tab, dev, ctx){
             <div style="font-size:13px;color:var(--text);font-weight:500">${escHtml(h.desc||h.descricao||h.texto||'')}</div>
             <div style="font-size:11.5px;color:var(--text-3);margin-top:2px">${escHtml(usuario)} · <span style="font-family:var(--font-mono)">${h.data||''}</span></div>
           </div>
-          ${h.valor?`<span style="font-family:var(--font-mono);font-size:12.5px;font-weight:600;color:var(--text)">${h.valor}</span>`:''}
+          ${h.valor?`<span style="font-family:var(--font-mono);font-size:12.5px;font-weight:600;color:var(--text)">${escHtml(h.valor)}</span>`:''}
         </div>
       </div>`;
     }).join('');
@@ -13043,9 +13064,9 @@ function diConfirmar(){
 }
 
 // ── HISTÓRICO ────────────────────────────────────────────────
-function abrirHistorico(devId){
+function abrirHistorico(devId, tipoInicial){
   document.getElementById('mhist-devId').value = devId;
-  document.getElementById('mhist-tipo').value = 'Ligação';
+  document.getElementById('mhist-tipo').value = tipoInicial || 'Ligação';
   document.getElementById('mhist-data').value = hoje();
   document.getElementById('mhist-desc').value = '';
   document.getElementById('mhist-prox').value = '';
@@ -13263,7 +13284,7 @@ function renderProcessos(){
         ${isJudicial ? `
         <div style="border-right:1px solid var(--border);padding-right:18px;min-width:160px;">
           <div style="font-size:10.5px;color:var(--text-3);font-weight:500;letter-spacing:.04em;text-transform:uppercase;margin-bottom:3px;">Nº processo</div>
-          <div style="font-family:var(--font-mono);font-size:11.5px;font-weight:600;color:var(--text);">${escHtml(d.numProcesso||d.doc||'—')}</div>
+          <div style="font-family:var(--font-mono);font-size:11.5px;font-weight:600;color:var(--text);">${escHtml(d.processoNum||d.doc||'—')}</div>
           <div style="font-size:11.5px;color:var(--text-2);margin-top:2px;">${escHtml(d.vara||d.comarca||'—')}</div>
         </div>` : `
         <div style="border-right:1px solid var(--border);padding-right:18px;min-width:120px;">
@@ -13341,7 +13362,7 @@ function renderProcessos(){
       ${jud
         .filter(d => {
           const q = (window._procSearch||'').toLowerCase();
-          if(q && !(d.nome||'').toLowerCase().includes(q) && !(d.numProcesso||'').includes(q) && !(d.doc||'').includes(q)) return false;
+          if(q && !(d.nome||'').toLowerCase().includes(q) && !(d.processoNum||'').includes(q) && !(d.doc||'').includes(q)) return false;
           if(window._procFaseFilter && fasesJud[etapaToFaseIdx(d.etapa)] !== window._procFaseFilter) return false;
           return true;
         })
@@ -13501,7 +13522,7 @@ async function renderIntimacoes(){
   const chip = (label, val, key) => {
     const active = _intimacoesState[key] === val;
     return `<button class="btn btn-sm ${active?'btn-primary':'btn-ghost'}" style="${active?'':'border-color:var(--border);'}"
-      onclick="_intimacoesState.${key}=${JSON.stringify(val)};renderIntimacoes();">${escHtml(label)}</button>`;
+      onclick="_intimacoesState.${key}=${escHtml(JSON.stringify(val))};renderIntimacoes();">${escHtml(label)}</button>`;
   };
 
   const linha = (i)=>{
@@ -13684,8 +13705,15 @@ async function submeterPeticionamento(){
     if(proc){
       const dig = proc.replace(/\D/g,'');
       formatado = dig.length===20 ? `${dig.slice(0,7)}-${dig.slice(7,9)}.${dig.slice(9,13)}.${dig.slice(13,14)}.${dig.slice(14,16)}.${dig.slice(16,20)}` : proc;
-      const { data: cobs } = await supa.from('cobrancas').select('id').or(`numero_processo.eq.${formatado},numero_processo.eq.${dig}`).limit(1);
-      if(cobs && cobs.length){ cobrancaId = cobs[0].id; devedorId = cobs[0].id; } // invariante cobranca.id=devedor principal
+      const { data: cobs } = await supa.from('cobrancas').select('id, cobranca_partes(devedor_id, principal)').or(`numero_processo.eq.${formatado},numero_processo.eq.${dig}`).limit(1);
+      if(cobs && cobs.length){
+        cobrancaId = cobs[0].id;
+        // devedor_id tem FK p/ devedores(id): NÃO usar o id da cobrança (o invariante cobranca.id=devedor
+        // não vale a partir da 2ª cobrança do mesmo devedor). Pega o devedor principal em cobranca_partes.
+        const _partes = cobs[0].cobranca_partes || [];
+        const _pr = _partes.find(p=>p.principal) || _partes[0];
+        devedorId = _pr ? _pr.devedor_id : null;
+      }
     }
 
     const ts = Date.now();
@@ -15631,6 +15659,11 @@ async function salvarCobranca(){
 
   if(!resp.length){ showToast('Informe ao menos um devedor.','danger'); return; }
   if(!tipoCobr){ showToast('Selecione o tipo de cobrança (física ou digital).','danger'); return; }
+  // R-11: na CRIAÇÃO exige credor vinculado e valor > 0 (evita cobrança vazia fora de capital/saldo).
+  if(!editId){
+    if(!credorNome){ showToast('Informe o credor (cliente) da cobrança.','danger'); return; }
+    if(!(valorOrig>0)){ showToast('Informe o valor da cobrança (maior que zero).','danger'); return; }
+  }
   garantirUmPrincipal(resp);
 
   try{
@@ -15640,10 +15673,13 @@ async function salvarCobranca(){
     // 1) Resolve/cria o credor (cliente)
     let clienteId = null;
     if(credorNome){
-      const existente = (DB.clientes||[]).find(c=>(c.nome||'').toLowerCase()===credorNome.toLowerCase()
-        || (c.nomeFantasia||c.nome_fantasia||'').toLowerCase()===credorNome.toLowerCase());
+      // Não casa credores arquivados/rascunho (mesma regra dos demais seletores de credor).
+      const existente = (DB.clientes||[]).find(c=>!c.arquivado && !c.isDraft && ((c.nome||'').toLowerCase()===credorNome.toLowerCase()
+        || (c.nomeFantasia||c.nome_fantasia||'').toLowerCase()===credorNome.toLowerCase()));
       if(existente){ clienteId = existente.id; }
       else{
+        // F-22: colaborador não cria credor direto — deve passar pelo fluxo de aprovação (Clientes).
+        if(ehColaborador()){ showToast('Credor não cadastrado. Cadastre-o em Clientes (vai para aprovação do gestor) antes de vincular à cobrança.','danger'); return; }
         const { data, error } = await supa.from('clientes')
           .insert({ nome: credorNome, metadata:{ origem:'cobranca_form' } }).select('id').single();
         if(error) throw new Error('credor: '+error.message);
@@ -15727,8 +15763,12 @@ async function salvarCobranca(){
       }
     }
 
-    // Vincula as partes (mesmo caminho para criar/editar)
-    const partes = resp.map(r=>({ cobranca_id: cobId, devedor_id: r.devedorId, papel: r.papel, principal: !!r.principal }));
+    // Vincula as partes (mesmo caminho para criar/editar). Dedup por (devedor_id, papel):
+    // o índice único uq_cobranca_partes_papel rejeita duplicatas e, na edição (partes já
+    // apagadas acima), esse insert falho deixaria a cobrança órfã sem nenhum responsável.
+    const _seenParte = new Set();
+    const partes = resp.map(r=>({ cobranca_id: cobId, devedor_id: r.devedorId, papel: r.papel, principal: !!r.principal }))
+      .filter(p=>{ const k=p.devedor_id+'|'+p.papel; if(_seenParte.has(k)) return false; _seenParte.add(k); return true; });
     const { error: epar } = await supa.from('cobranca_partes').insert(partes);
     if(epar){
       // Evita cobrança órfã: se acabamos de CRIAR a cobrança e a parte falhou, desfaz.
@@ -20809,7 +20849,7 @@ async function zsVerificarStatusGlobal(minutaId, devId){
   try {
     const doc    = await ZapSignAPI.getDoc(m.zapsignToken);
     const signer = doc.signers?.[0];
-    const novo   = signer?.status || doc.status || m.zapsignStatus;
+    const novo   = zsNormStatus(signer?.status || doc.status || m.zapsignStatus);
     const anterior = m.zapsignStatus;
 
     m.zapsignStatus = novo;
@@ -21023,6 +21063,7 @@ window.finApi = (function(){
     const ini = y+'-'+String(m).padStart(2,'0')+'-01';
     const fim = new Date(y, m, 0).toISOString().slice(0,10);
     const futureLimit = new Date(Date.now()+30*86400000).toISOString().slice(0,10);
+    const hojeLimit   = new Date().toISOString().slice(0,10); // piso: só vencimentos a partir de hoje
 
     // Server-side aggregate via RPC seria ideal, mas pra evitar criar função usamos
     // queries leves (somente coluna valor) — ainda assim PostgREST limita 1000 por padrão.
@@ -21031,7 +21072,8 @@ window.finApi = (function(){
       let from = 0, total = 0, qty = 0;
       while(true){
         let q = sb.from('fin_lancamento').select('valor', { count:'exact' });
-        q = filterFn(q).range(from, from+999);
+        // ORDER BY estável: sem ele, LIMIT/OFFSET pode duplicar/perder linhas entre páginas.
+        q = filterFn(q).order('id',{ascending:true}).range(from, from+999);
         const { data, count, error } = await q;
         if(error) throw error;
         for(const r of (data||[])) total += (+r.valor||0);
@@ -21045,7 +21087,7 @@ window.finApi = (function(){
     const [rec, des, pend] = await Promise.all([
       sumValor(q=>q.eq('tipo_movimento',1).gte('data_competencia',ini).lte('data_competencia',fim)),
       sumValor(q=>q.eq('tipo_movimento',0).gte('data_competencia',ini).lte('data_competencia',fim)),
-      sumValor(q=>q.eq('tipo_movimento',1).eq('status',0).lte('data_vencimento', futureLimit)),
+      sumValor(q=>q.eq('tipo_movimento',1).eq('status',0).gte('data_vencimento', hojeLimit).lte('data_vencimento', futureLimit)),
     ]);
     return {
       receitaMes: rec.total,
@@ -21297,7 +21339,12 @@ window.finApi = (function(){
     const rows = [];
     for(let i=0; i<totalParcelas; i++){
       const dataParc = new Date(dataIni);
+      // Clampa o dia ao último do mês alvo: sem isso, dias 29–31 estouram o setMonth
+      // (ex.: 31/jan +1 mês vira 03/mar), pulando/duplicando meses nas competências.
+      const _diaBase = dataIni.getDate();
+      dataParc.setDate(1);
       dataParc.setMonth(dataParc.getMonth() + i);
+      dataParc.setDate(Math.min(_diaBase, new Date(dataParc.getFullYear(), dataParc.getMonth()+1, 0).getDate()));
       const venc = new Date(dataParc);
       const vlr = i === totalParcelas - 1 ? (valorParcela + ajuste) : valorParcela;
       rows.push({
@@ -24138,6 +24185,7 @@ async function _carregarDadosRelat(ano){
     const { data, error } = await sb.from('fin_lancamento')
       .select('valor,data_competencia,tipo_movimento')
       .gte('data_competencia', ini).lte('data_competencia', fim)
+      .order('id',{ascending:true}) // ORDER BY estável evita duplicar/perder linhas entre páginas
       .range(from, from+999);
     if(error) throw error;
     if(!data || !data.length) break;
@@ -24325,6 +24373,8 @@ async function renderFinAsaas(el){
     const balance       = balData?._error ? null : (balData?.balance ?? 0);
     const inTransit     = balData?.totalInTransit ?? balData?.totalTransfers ?? 0;
     const balErrMsg     = balData?._error || null;
+    // KPIs somam só a 1ª página (limit 100 do Asaas). Sinaliza que são parciais quando há mais.
+    const _parcialAviso = totalCount > charges.length ? ` · parcial (${charges.length} de ${totalCount})` : '';
 
     el.innerHTML = `
       <!-- KPI cards -->
@@ -24338,17 +24388,17 @@ async function renderFinAsaas(el){
         <div class="kcard">
           <div class="kcard-label">A receber</div>
           <div class="kcard-value" style="color:#b45309;">${fmtR(totalPending)}</div>
-          <div class="kcard-sub">${charges.filter(c=>c.status==='PENDING').length} cobrança(s)</div>
+          <div class="kcard-sub">${charges.filter(c=>c.status==='PENDING').length} cobrança(s)${_parcialAviso}</div>
         </div>
         <div class="kcard">
           <div class="kcard-label">Vencido</div>
           <div class="kcard-value" style="color:var(--danger);">${fmtR(totalOverdue)}</div>
-          <div class="kcard-sub">${charges.filter(c=>c.status==='OVERDUE').length} cobrança(s)</div>
+          <div class="kcard-sub">${charges.filter(c=>c.status==='OVERDUE').length} cobrança(s)${_parcialAviso}</div>
         </div>
         <div class="kcard">
           <div class="kcard-label">Recebido (mês)</div>
           <div class="kcard-value" style="color:var(--success);">${fmtR(totalRecMes)}</div>
-          <div class="kcard-sub">${charges.filter(c=>['RECEIVED','CONFIRMED'].includes(c.status)&&(c.paymentDate||'').startsWith(mes)).length} cobrança(s)</div>
+          <div class="kcard-sub">${charges.filter(c=>['RECEIVED','CONFIRMED'].includes(c.status)&&(c.paymentDate||'').startsWith(mes)).length} cobrança(s)${_parcialAviso}</div>
         </div>
       </div>
 
@@ -26002,6 +26052,9 @@ async function waPendPersistirResolucao(p, { desfecho, motivo, reguaBloqueada })
 // manual travada, sem caminho de reversão na UI.
 async function waPendReabrir(tel, casoId){
   const supa=getSupabase(); if(!supa) return;
+  // Corrida: aguarda o upsert 'resolvido' (persistência) terminar antes de reabrir, senão ele
+  // pode aterrissar por último e deixar o banco 'resolvido' com a UI mostrando pendente.
+  try{ const pend=(window._waPend&&window._waPend._resolPromises)||{}; await pend[tel]; }catch(_){}
   try{ await supa.from('whatsapp_atendimentos').upsert({ telefone:tel, estado:'aguardando_humano', regua_bloqueada:false, updated_at:new Date().toISOString() },{ onConflict:'telefone' }); }
   catch(_){ try{ await supa.from('whatsapp_atendimentos').upsert({ telefone:tel, estado:'aguardando_humano', updated_at:new Date().toISOString() },{ onConflict:'telefone' }); }catch(__){} }
   const dev=waDevedorDe({ telefone:tel, caso_id:casoId });
@@ -26021,15 +26074,18 @@ function waPendResolverLocal(tel, { desfecho, motivo, reguaBloqueada }){
   delete P.selMass[tel];
   const arch={ ...p, archived:true, desfecho, motivo:motivo||null, regua_bloqueada:!!reguaBloqueada, recebida_em:new Date().toISOString() };
   P.arquivadas.unshift(arch);
-  waPendPersistirResolucao(p,{ desfecho, motivo, reguaBloqueada });
+  // Guarda a Promise da persistência por telefone p/ waPendReabrir poder sequenciar (anti-corrida).
+  (P._resolPromises=P._resolPromises||{})[tel]=waPendPersistirResolucao(p,{ desfecho, motivo, reguaBloqueada });
   return p;
 }
-// Desfaz (Desfazer no toast): devolve à fila.
+// Desfaz (Desfazer no toast): devolve à fila. `tel` pode ser um telefone ou um array (ação em massa).
 function waPendDesfazer(snapshotLista, snapshotArq, tel){
   const P=window._waPend;
   P.lista=snapshotLista; P.arquivadas=snapshotArq;
-  const arch=(snapshotArq||[]).find(x=>x.telefone===tel);
-  waPendReabrir(tel, arch?arch.caso_id:null);
+  (Array.isArray(tel)?tel:[tel]).forEach(t=>{
+    const arch=(snapshotArq||[]).find(x=>x.telefone===t);
+    waPendReabrir(t, arch?arch.caso_id:null);
+  });
   waPendBadgeUpdate(); waPendRepaint();
 }
 
@@ -26052,7 +26108,7 @@ function waPendArquivarComMotivo(tels, motivo){
   tels.forEach(tel=> waPendResolverLocal(tel,{ desfecho:'arquivado', motivo, reguaBloqueada:block }));
   P.sel=0; waPendBadgeUpdate(); waPendRepaint();
   const txt=(tels.length>1?tels.length+' conversas arquivadas':'Conversa arquivada')+(block?' · régua bloqueada':'');
-  waPendToast(txt, ()=>waPendDesfazer(snapLista,snapArq,tels[0]));
+  waPendToast(txt, ()=>waPendDesfazer(snapLista,snapArq,tels));
 }
 function waPendRestaurar(tel){
   const P=window._waPend;
@@ -26094,6 +26150,7 @@ async function waPendQuick(i){
     showToast('Template carregado — revise (chave/link) e envie.','info');
     return;
   }
+  if(P._enviando) return; P._enviando=true; // trava in-flight: evita envio duplicado no duplo-clique
   try{
     const r=await waPendEnviarTexto(p, q.texto);
     const snapLista=P.lista.slice(), snapArq=P.arquivadas.slice();
@@ -26101,6 +26158,7 @@ async function waPendQuick(i){
     P.sel=0; waPendBadgeUpdate(); waPendRepaint();
     waPendToast((r==='agendada'?'Resposta agendada · ':'Resposta enviada · ')+q.label, ()=>waPendDesfazer(snapLista,snapArq,p.telefone));
   }catch(e){ showToast('Falha ao responder: '+(e.message||e),'danger'); }
+  finally{ P._enviando=false; }
 }
 // Enviar uma sugestão editada (compositor da Bia ou template carregado).
 async function waPendEnviarSugestao(i){
@@ -26108,6 +26166,7 @@ async function waPendEnviarSugestao(i){
   const texto=(document.getElementById('waPendTxt'+i)?.value||'').trim();
   if(!texto){ showToast('Mensagem vazia.','danger'); return; }
   if(/\[(cole|descreva|link|chave)/i.test(texto)){ showToast('Preencha o trecho entre colchetes antes de enviar.','warning'); return; }
+  if(P._enviando) return; P._enviando=true; // trava in-flight: evita envio duplicado no duplo-clique
   try{
     const r=await waPendEnviarTexto(p, texto);
     const snapLista=P.lista.slice(), snapArq=P.arquivadas.slice();
@@ -26115,6 +26174,7 @@ async function waPendEnviarSugestao(i){
     P.sel=0; P.sugestoes=[]; waPendBadgeUpdate(); waPendRepaint();
     waPendToast(r==='agendada'?'Resposta agendada para a próxima manhã útil.':'Resposta enviada.', ()=>waPendDesfazer(snapLista,snapArq,p.telefone));
   }catch(e){ showToast('Falha ao enviar/agendar: '+(e.message||e),'danger'); }
+  finally{ P._enviando=false; }
 }
 
 // Sugerir com a Bia (mantém a integração beatriz-msg modo "responder").
@@ -29131,6 +29191,13 @@ const ZapSignAPI = {
 };
 
 // ── ZapSign helpers ───────────────────────────────────────────
+// ZapSign devolve status em minúsculo (signed/new/link-opened/…). Normaliza para o padrão
+// interno em CAIXA ALTA e mapeia os estados iniciais (new/link-opened) de volta para PENDING.
+function zsNormStatus(s){
+  const v = String(s||'').toUpperCase().replace(/-/g,'_');
+  if(v==='NEW' || v==='LINK_OPENED' || v==='CREATED') return 'PENDING';
+  return v;
+}
 function zsStatusLabel(s){
   return { PENDING:'Aguardando assinatura', SIGNED:'Assinado', REFUSED:'Recusado',
            EXPIRED:'Expirado', CANCELLED:'Cancelado' }[s] || s || '—';
@@ -29529,7 +29596,8 @@ function nfaRenderModelos(){
     </div>`;
 }
 function nfaSetModelo(id){ _nfaModeloAtivo=id; _nfaSaveModelos(); nfaRenderModelos(); nfaDrawTabela(); nfaRenderConciliacao(); }
-function nfaUpdModelo(campo,val){ const m=nfaModeloAtivo(); if(!m) return; m[campo]=val; if(campo==='codigo'||campo==='nome') m.asaasId=''; _nfaSaveModelos(); if(campo==='aliquota') nfaRenderConciliacao(); }
+function nfaUpdModelo(campo,val){ const m=nfaModeloAtivo(); if(!m) return; m[campo]=val; if(campo==='codigo'||campo==='nome'){ // Se o valor casar um serviço municipal da conta Asaas (datalist), guarda o id interno como municipalServiceId; senão é código LC 116 manual (Portal Nacional).
+    const svc = (campo==='codigo' && Array.isArray(_nfaServicos)) ? _nfaServicos.find(s=>String(s.id)===String(val)) : null; m.asaasId = svc ? svc.id : ''; } _nfaSaveModelos(); if(campo==='aliquota') nfaRenderConciliacao(); }
 function nfaAddModelo(){ const id='m_'+Math.random().toString(36).slice(2,7); _nfaModelos.push({ id, municipio:'', codigo:'', nome:'', aliquota:'2', asaasId:'' }); _nfaModeloAtivo=id; _nfaSaveModelos(); nfaRenderModelos(); }
 function nfaRemoveModelo(){ if(_nfaModelos.length<=1) return; _nfaModelos=_nfaModelos.filter(m=>m.id!==_nfaModeloAtivo); _nfaModeloAtivo=_nfaModelos[0].id; _nfaSaveModelos(); nfaRenderModelos(); nfaDrawTabela(); nfaRenderConciliacao(); }
 function nfaToggleNotify(){ _nfaNotify=!_nfaNotify; try{ localStorage.setItem(NFA_LS.notify, _nfaNotify?'1':'0'); }catch(_){} const s=document.getElementById('nfa-notify-sw'); if(s) s.innerHTML=_nfaSwitch(_nfaNotify,'nfaToggleNotify()'); }
@@ -30066,7 +30134,12 @@ async function _nfaPatchMeta(id, patch){
   const r=_nfaHistById(id); const meta={ ...(r&&r.metadata||{}), ...patch };
   const upd={ metadata:meta };
   if(patch.resolved==='arquivada' || patch.resolved==='cancelada') upd.nf_status=patch.resolved;
-  if(patch.resolved===null){ upd.nf_status = (r&&r.metadata&&r.metadata._prevStatus) || 'erro'; }
+  if(patch.resolved===null){
+    // Cancelamento na prefeitura é IRREVERSÍVEL: restaurar não pode reviver a nota como 'emitida'
+    // (voltaria a somar ISS na conciliação e a travar reemissão). Nota só-arquivada volta normal.
+    if(r&&r.metadata&&r.metadata.cancel){ meta.resolved='cancelada'; upd.nf_status='cancelada'; }
+    else { upd.nf_status = (r&&r.metadata&&r.metadata._prevStatus) || 'erro'; }
+  }
   const { error }=await supa.from('nf_avulsa').update(upd).eq('id',id);
   if(error) throw error;
 }
@@ -30239,7 +30312,8 @@ async function nfaAtualizarStatus(silent){
       let novo=null, url=r.nf_url||null, erro=null;
       if(st==='AUTHORIZED'){ novo='emitida'; url=inv.pdfUrl||inv.xmlUrl||url; ok++; }
       else if(st==='ERROR'){ novo='erro'; erro=(inv.errors&&inv.errors[0]&&inv.errors[0].description)||inv.statusDescription||'Recusada pela prefeitura'; falha++; }
-      else if(st==='CANCELED'||st==='CANCELLATION_DENIED'){ novo='cancelada'; falha++; }
+      else if(st==='CANCELED'){ novo='cancelada'; falha++; }
+      else if(st==='CANCELLATION_DENIED'){ novo='emitida'; url=inv.pdfUrl||inv.xmlUrl||url; falha++; } // cancelamento NEGADO: a NFS-e permanece válida na prefeitura
       else { if(nfaEffStatus(r)==='emitida' && !r.nf_url){ novo='processando'; } ainda++; } // corrige falso-"emitida" sem PDF
       if(novo){ const meta={ ...(r.metadata||{}), nf_number:(inv.number||(r.metadata&&r.metadata.nf_number)||null) }; if(novo==='cancelada') meta.resolved='cancelada'; await supa.from('nf_avulsa').update({ nf_status:novo, nf_url:url, erro:erro, metadata:meta }).eq('id',r.id); }
     }catch(e){ falha++; }
@@ -30826,7 +30900,7 @@ async function zsVerificarStatus(minutaId, devId){
   try {
     const doc    = await ZapSignAPI.getDoc(m.zapsignToken);
     const signer = doc.signers?.[0];
-    const novoStatus = signer?.status || doc.status || m.zapsignStatus;
+    const novoStatus = zsNormStatus(signer?.status || doc.status || m.zapsignStatus);
     const statusAnterior = m.zapsignStatus;
 
     m.zapsignStatus = novoStatus;
@@ -30873,7 +30947,7 @@ async function zsVerificarTodosGlobal(){
       try {
         const doc = await ZapSignAPI.getDoc(m.zapsignToken);
         const signer = doc.signers?.[0];
-        const novo = signer?.status || doc.status || m.zapsignStatus;
+        const novo = zsNormStatus(signer?.status || doc.status || m.zapsignStatus);
         if(novo !== m.zapsignStatus){
           m.zapsignStatus = novo;
           if(novo==='SIGNED' && !m.assinadoEm){
@@ -31558,7 +31632,7 @@ function selecionarTodosFiltrados(){
     if(q && !(d.nome||'').toLowerCase().includes(q) && !(d.doc||'').includes(q)) return false;
     if(devFilter.statuses.length && !devFilter.statuses.includes(d.status)) return false;
     if(devFilter.clienteIds.length && !devFilter.clienteIds.includes(d.clienteId)) return false;
-    if(devFilter.resp && d.responsavel !== devFilter.resp) return false;
+    if(devFilter.resp && nomeResponsavel(d) !== devFilter.resp) return false;
     return true;
   });
   filtered = applyGrupoViewFilterDevedores(filtered);

@@ -1,0 +1,62 @@
+-- PREPARADA — NÃO APLICAR SEM REVISÃO
+-- ============================================================================
+-- P2 (idx-financeiro): transferências entre contas não afetam o saldo realizado
+-- por conta. A RPC public.fin_saldos_realizados agrega SOMENTE fin_lancamento;
+-- saveTransferencia (index.html) grava apenas em fin_transferencia, sem lançamentos
+-- espelho. Logo, transferir entre contas sem bank_balance não desloca o saldo
+-- realizado de nenhuma das duas contas.
+--
+-- CORREÇÃO PRETENDIDA: incluir fin_transferencia no cálculo do saldo por conta —
+-- débito na conta de origem e crédito na conta de destino, considerando apenas
+-- transferências efetivadas (status = 1).
+--
+-- ATENÇÃO / POR QUE ESTÁ PREPARADA E NÃO PRONTA:
+--   A definição atual de fin_saldos_realizados NÃO está versionada neste repo.
+--   Antes de aplicar, obtenha o corpo vigente em produção:
+--       select pg_get_functiondef('public.fin_saldos_realizados'::regproc);
+--   e mescle o bloco de transferências abaixo à CTE de movimentos, preservando
+--   assinatura, colunas de retorno, security/search_path e demais agregados.
+--   NÃO aplicar o esqueleto abaixo cegamente — ele é ilustrativo e pode divergir
+--   da função real (colunas, filtros por usuário/RLS, tratamento de saldo_inicial).
+--
+-- Esqueleto ilustrativo (AJUSTAR ao corpo real antes de aplicar):
+--
+--   create or replace function public.fin_saldos_realizados(/* ...args atuais... */)
+--   returns table (/* ...colunas atuais... */)
+--   language sql
+--   security invoker            -- manter o modo atual da função
+--   set search_path = public
+--   as $$
+--     with mov as (
+--       -- (1) lançamentos pagos (lógica ATUAL — copiar do corpo vigente)
+--       select l.conta_id, l.valor as delta
+--       from public.fin_lancamento l
+--       where /* ...filtros atuais de status/pago... */
+--       union all
+--       -- (2) NOVO: transferências efetivadas — débito na origem, crédito no destino
+--       select t.conta_origem_id  as conta_id, -abs(t.valor) as delta
+--       from public.fin_transferencia t
+--       where t.status = 1 and t.conta_origem_id is not null
+--       union all
+--       select t.conta_destino_id as conta_id,  abs(t.valor) as delta
+--       from public.fin_transferencia t
+--       where t.status = 1 and t.conta_destino_id is not null
+--     )
+--     select c.id as conta_id,
+--            coalesce(c.saldo_inicial,0) + coalesce(sum(m.delta),0) as saldo_atual
+--            /* + demais colunas/agregados atuais */
+--     from public.fin_conta c
+--     left join mov m on m.conta_id = c.id
+--     group by c.id, c.saldo_inicial;
+--   $$;
+--
+-- ALTERNATIVA (menos invasiva, se preferir não mexer na RPC): gerar um par de
+-- lançamentos neutros em fin_lancamento ao salvar/efetivar a transferência
+-- (débito origem + crédito destino, categoria "transferência", excluídos de
+-- receita/despesa), mantendo a RPC intacta. Requer também ajuste no app
+-- (saveTransferencia) e cuidado para não duplicar em edição/estorno.
+--
+-- REVISAR: reconciliação de saldo_geral em cenários mistos (contas com
+-- incluir_no_saldo_geral=false ou com bank_balance), idempotência em edição de
+-- transferência e efeito em relatórios antes de aplicar em produção.
+-- ============================================================================
