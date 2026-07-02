@@ -2545,6 +2545,12 @@
   </div>
 
   <div class="card">
+    <div class="card-title">📤 Reenvio de mensagens falhadas (Z-API)</div>
+    <div style="font-size:13px; color:var(--gray-text); line-height:1.6; margin-bottom:14px;">Mensagens que falharam ao enviar pela Z-API ficam registradas aqui. Confira o motivo, e reenvie com um clique. Ao dar certo, a falha é marcada como resolvida e some da lista.</div>
+    <div id="reenviosContainer"></div>
+  </div>
+
+  <div class="card">
     <div class="card-title">🐛 Falhas reportadas pelos operadores</div>
     <div style="font-size:13px; color:var(--gray-text); line-height:1.6; margin-bottom:14px;">Problemas e bugs reportados via botão "Reportar problema". Marque como resolvida ao corrigir.</div>
     <div id="falhasContainer"></div>
@@ -2783,6 +2789,38 @@ const DIAS_AVISO_AMARELO = 1;
 const DIAS_AVISO_VERMELHO = 2;
 
 // ============================================================
+// PARIDADE DE JUROS/MULTA — fonte única com o app admin (index.html)
+// ============================================================
+// O gestor define "juros (% a.m.)" e "multa (%)" em Configurações → Parâmetros de
+// cálculo do faturamento (index.html), que grava em DB.config.calcParams e persiste
+// no localStorage. Como CRM e faturamento rodam na MESMA ORIGEM, compartilham o
+// localStorage — o CRM LÊ os mesmos valores (chave 'cobrasq_v6') e passa a calcular
+// com os parâmetros que o gestor configurou, sem divergência.
+//
+// Só jurosMensal e multa são configuráveis no admin; por isso apenas estes dois
+// passam a vir do config. A correção (8% a.a. → TAXA_CORRECAO_MENSAL) e a taxa de
+// serviço COBRASQ (30% → TAXA_SERVICO_PCT) NÃO são configuráveis e seguem fixas
+// aqui — idênticas às constantes COBRANCA_CORRECAO_MENSAL / COBRANCA_TAXA_SERVICO
+// do index.html (mesma metodologia "modo cobrança").
+//
+// Fallback: se o config não existir (ou o campo não for número), mantém o valor
+// hardcoded atual (TAXA_JUROS_MENSAL / MULTA_PCT) — resultado idêntico ao de antes.
+function crmCalcParams() {
+  let cp = {};
+  try {
+    const raw = localStorage.getItem('cobrasq_v6'); // KEY do DB do index.html
+    if (raw) {
+      const db = JSON.parse(raw);
+      cp = (db && db.config && db.config.calcParams) || {};
+    }
+  } catch (e) { cp = {}; }
+  return {
+    jurosMensal: typeof cp.jurosMensal === 'number' ? cp.jurosMensal : TAXA_JUROS_MENSAL,
+    multaPct:    typeof cp.multa       === 'number' ? cp.multa       : MULTA_PCT
+  };
+}
+
+// ============================================================
 // ESTADO GLOBAL
 // ============================================================
 let usuarioAtual = null;
@@ -2883,7 +2921,10 @@ function definirModoEnvioWhatsApp(modo) {
   try { localStorage.setItem(WHATSAPP_MODO_KEY, modo); } catch (e) {}
 }
 
-async function enviarViaZAPI(telefone, mensagem) {
+async function enviarViaZAPI(telefone, mensagem, ctx) {
+  // ctx opcional: { casoId, operadorId } — repassado a registrarFalhaEnvio para
+  // atribuir a falha ao caso/operador certo (o worker envia msgs de qualquer caso).
+  const _ctx = ctx || {};
   console.log('[Z-API] enviarViaZAPI entrada:', { telefone, msgLen: (mensagem || '').length });
   try {
     const { data, error } = await sb.functions.invoke('enviar-whatsapp', {
@@ -2903,17 +2944,17 @@ async function enviarViaZAPI(telefone, mensagem) {
         }
       } catch {/* ignore */}
       console.error('[Z-API] erro fetch:', error, 'detalhe:', detalhe);
-      await registrarFalhaEnvio({ telefone, mensagem, erro: detalhe });
+      await registrarFalhaEnvio({ telefone, mensagem, erro: detalhe, casoId: _ctx.casoId, operadorId: _ctx.operadorId });
       return { ok: false, error: detalhe, code: errCode };
     }
     if (data && data.error) {
       console.error('[Z-API] erro retornado:', data.error);
-      await registrarFalhaEnvio({ telefone, mensagem, erro: data.error });
+      await registrarFalhaEnvio({ telefone, mensagem, erro: data.error, casoId: _ctx.casoId, operadorId: _ctx.operadorId });
       return { ok: false, error: data.error, code: data.error };
     }
     if (!data || !data.messageId) {
       const msg = 'Z-API respondeu OK mas sem messageId — não enviou.';
-      await registrarFalhaEnvio({ telefone, mensagem, erro: msg });
+      await registrarFalhaEnvio({ telefone, mensagem, erro: msg, casoId: _ctx.casoId, operadorId: _ctx.operadorId });
       return { ok: false, error: msg };
     }
     console.log('[Z-API] sucesso, messageId:', data.messageId, 'phoneUsed:', data.phoneUsed);
@@ -2921,7 +2962,7 @@ async function enviarViaZAPI(telefone, mensagem) {
   } catch (e) {
     const errMsg = 'Falha ao chamar a Edge Function: ' + (e && e.message ? e.message : 'erro desconhecido');
     console.error('[Z-API] exceção:', e);
-    await registrarFalhaEnvio({ telefone, mensagem, erro: errMsg });
+    await registrarFalhaEnvio({ telefone, mensagem, erro: errMsg, casoId: _ctx.casoId, operadorId: _ctx.operadorId });
     return { ok: false, error: errMsg };
   }
 }
@@ -2949,12 +2990,14 @@ function _abrirModalSemWhatsApp(telefone, onConfirmar) {
 
 // Item #2: registra falhas de envio Z-API em tabela pra retry manual.
 // Fallback: localStorage caso a tabela ainda não exista.
-async function registrarFalhaEnvio({ telefone, mensagem, erro }) {
-  const casoId = casoAtual || null;
-  const operadorId = perfilAtual ? perfilAtual.id : null;
+async function registrarFalhaEnvio({ telefone, mensagem, erro, casoId, operadorId }) {
+  // Quando o chamador informa caso/operador (ex.: worker de mensagens agendadas),
+  // usa-os; senão cai nos globais de UI (envio manual a partir do caso aberto).
+  const casoIdFinal = casoId !== undefined ? casoId : (casoAtual || null);
+  const operadorIdFinal = operadorId !== undefined ? operadorId : (perfilAtual ? perfilAtual.id : null);
   const payload = {
-    caso_id: casoId,
-    operador_id: operadorId,
+    caso_id: casoIdFinal,
+    operador_id: operadorIdFinal,
     telefone,
     mensagem,
     erro: String(erro || '').slice(0, 500),
@@ -3098,9 +3141,9 @@ function gerarResumoAstrea(caso) {
       const acordo = caso.acordoFinal;
       let descAcordo = '';
       if (acordo) {
-        if (acordo.tipo === 'avista') descAcordo = 'pagamento à vista no valor de ' + fmtMoedaBRL(acordo.valor) + ' via PIX';
-        else if (acordo.tipo === 'boleto') descAcordo = 'parcelamento em ' + (acordo.parcelas || '?') + 'x de ' + fmtMoedaBRL(acordo.parcela) + ' via boleto, totalizando ' + fmtMoedaBRL(acordo.total);
-        else if (acordo.tipo === 'cartao') descAcordo = 'parcelamento em 12x via cartão de crédito, totalizando ' + fmtMoedaBRL(acordo.total);
+        if (acordo.forma === 'avista') descAcordo = 'pagamento à vista no valor de ' + fmtMoedaBRL(acordo.valor) + ' via PIX';
+        else if (acordo.forma === 'boleto') descAcordo = 'parcelamento em ' + (acordo.parcelas || '?') + 'x de ' + fmtMoedaBRL(acordo.valor) + ' via boleto, totalizando ' + fmtMoedaBRL(acordo.total);
+        else if (acordo.forma === 'cartao') descAcordo = 'parcelamento em 12x via cartão de crédito, totalizando ' + fmtMoedaBRL(acordo.total);
         else descAcordo = 'condições registradas no sistema';
       } else {
         descAcordo = 'condições registradas no sistema';
@@ -3370,6 +3413,7 @@ async function safeRun(key, fn) {
 }
 function iniciarWorkersFrontend() {
   pararWorkersFrontend();
+  setTimeout(() => flushRelatosFalhaLocais().catch(() => {}), 8000);
   setTimeout(() => safeRun('msgs', processarMensagensAgendadasPendentes), 5000);
   setTimeout(() => safeRun('auto', processarAutoCobrancaZapSign), 10000);
   _workerHandles.msgs         = setInterval(() => safeRun('msgs', processarMensagensAgendadasPendentes), 5 * 60 * 1000);
@@ -3733,7 +3777,11 @@ function renderAvatarHTML(perfil, tamanho) {
   const foto = perfil.avatar_url || perfil.avatarUrl;
   const cor = perfil.avatar_cor || perfil.avatarCor || corDoNome(perfil.nome);
   if (foto) {
-    return '<div class="' + cls + '" style="background-image:url(' + foto + ');"></div>';
+    let fotoOk = false;
+    try { const u = new URL(foto, location.href); fotoOk = u.protocol === 'http:' || u.protocol === 'https:' || (u.protocol === 'data:' && /^data:image\//i.test(foto)); } catch (e) {}
+    if (fotoOk) {
+      return '<div class="' + cls + '" style="background-image:url(&quot;' + escapeHTML(foto) + '&quot;);"></div>';
+    }
   }
   return '<div class="' + cls + '" style="background:' + cor + ';">' + inicialDoNome(perfil.nome) + '</div>';
 }
@@ -5133,7 +5181,7 @@ async function renderTemplatesList() {
     + '<div style="display:flex; gap:6px;">'
       + '<button class="btn small secondary" onclick="navegarPara(\'editor-template\', \'' + t.id + '\')">Editar</button>'
       + '<button class="btn small secondary" onclick="duplicarTemplate(\'' + t.id + '\')">Duplicar</button>'
-      + '<button class="btn small" onclick="excluirTemplateDireto(\'' + t.id + '\', \'' + escapeHTML(t.nome).replace(/\'/g,"\\'") + '\')" style="background:#C0392B; color:white;">🗑</button>'
+      + '<button class="btn small" onclick="excluirTemplateDireto(\'' + t.id + '\')" style="background:#C0392B; color:white;">🗑</button>'
     + '</div>'
     + '</div>'
   ).join('');
@@ -5334,6 +5382,7 @@ async function excluirTemplate() {
 }
 
 async function excluirTemplateDireto(id, nome) {
+  if (nome == null) { const _t = _templatesCache.find(t => t.id === id); nome = _t ? _t.nome : ''; }
   const conf = prompt('Pra EXCLUIR DEFINITIVAMENTE o template "' + nome + '", digite o nome:');
   if (conf === null) return;
   if (conf.trim() !== String(nome).trim()) { toast('Nome não confere.', 'error'); return; }
@@ -5426,11 +5475,15 @@ async function salvarTemplate() {
     _editandoTplId = ins.data.id;
     toast('Template salvo (v' + novaVersao + ').', 'success');
   } else {
+    // Deriva `variaveis` dos {{tokens}} do corpo — sem isso a etapa 2 do gerador de
+    // peças fica sem campos e a peça sai toda com "_____".
+    const variaveis = usadas.map(k => ({ key: k, label: k, tipo: 'text' }));
     const ins = await sb.from('peticao_templates').insert({
       nome, tipo, descricao, conteudo_html,
       cabecalho_html: cabVazio ? null : cabecalho_html,
       rodape_html: rodVazio ? null : rodape_html,
       logo_storage_path: _tplLogoPath,
+      variaveis,
       ativo: true, versao: 1
     }).select().single();
     if (ins.error) { toast('Erro: ' + ins.error.message, 'error'); return; }
@@ -5460,6 +5513,10 @@ async function duplicarTemplate(id) {
     descricao: data.descricao,
     conteudo_html: data.conteudo_html,
     variaveis: data.variaveis,
+    cabecalho_html: data.cabecalho_html,
+    rodape_html: data.rodape_html,
+    logo_storage_path: data.logo_storage_path,
+    requisitos: data.requisitos,
     ativo: true
   };
   const ins = await sb.from('peticao_templates').insert(novo);
@@ -5596,9 +5653,12 @@ function _calcCobrancaSimples(valorOriginal, dataVenc, dataHoje, aplicarMulta, a
   // Núcleo na MATRIZ única (templates/calc-engine.js): correção + juros + multa +
   // taxa de serviço, total arredondado pra cima. O parcelamento (boleto/cartão)
   // segue abaixo, exclusivo do CRM. Ver docs/calc/MATRIZ.md.
+  // Juros e multa vêm de DB.config.calcParams (fonte única com o faturamento);
+  // correção e taxa de serviço seguem fixas. Ver crmCalcParams().
+  const _cp = crmCalcParams();
   const _r = CalcEngine.cobranca({ valorOriginal: valorOriginal, meses: meses,
-    correcaoMensal: TAXA_CORRECAO_MENSAL, jurosMensal: TAXA_JUROS_MENSAL,
-    multaPct: MULTA_PCT, taxaServico: TAXA_SERVICO_PCT, aplicarMulta: aplicarMulta, aplicarTaxa: aplicarTaxa });
+    correcaoMensal: TAXA_CORRECAO_MENSAL, jurosMensal: _cp.jurosMensal,
+    multaPct: _cp.multaPct, taxaServico: TAXA_SERVICO_PCT, aplicarMulta: aplicarMulta, aplicarTaxa: aplicarTaxa });
   const correcao = _r.correcao, valorCorrigido = _r.valorCorrigido, juros = _r.juros,
         multa = _r.multa, subtotal = _r.subtotal, taxa = _r.taxa, total = _r.total;
 
@@ -5696,7 +5756,7 @@ async function enviarPropostaPagamento(opcao) {
   } else if (opcao === 'boleto' && boleto12) {
     proposta = 'Oi ' + primeiroNome + '! Opção parcelada no boleto: *' + boleto12.n + 'x de ' + fmtBRL(boleto12.parcela) + '* (total ' + fmtBRL(boleto12.total) + '). Topa?';
   } else if (opcao === 'cartao') {
-    proposta = 'Oi ' + primeiroNome + '! No cartão posso parcelar em *12x de ' + fmtBRL(cartao12) + '* sem juros (total ' + fmtBRL(total) + '). Topa?';
+    proposta = 'Oi ' + primeiroNome + '! No cartão posso parcelar em *12x de ' + fmtBRL(cartao12) + '* sem juros (total ' + fmtBRL(calc.cartao12Total || cartao12 * 12) + '). Topa?';
   } else {
     toast('Opção inválida.', 'error'); return;
   }
@@ -6112,7 +6172,7 @@ function obterMensagens(opcaoId, caso) {
   const nomeDevedor = caso.devedor.split(' ')[0];
   const valorAvista = fmtBRL(d.totalAvista);
   const boleto12 = d.boleto12 ? d.boleto12.n + 'x de ' + fmtBRL(d.boleto12.parcela) : 'parcelamento indisponível';
-  const cartao12 = '12x sem juros de ' + fmtBRL(d.cartao12Parcela);
+  const cartao12 = d.cartao12Parcela != null ? '12x sem juros de ' + fmtBRL(d.cartao12Parcela) : 'parcelamento indisponível';
 
   const SCRIPTS = {
     'enviar-1': {
@@ -6367,7 +6427,7 @@ async function renderConversa() {
   if (temDivida) {
     metaHTML += '<span><strong>À vista:</strong> ' + fmtBRL(d.totalAvista) + '</span>'
              +  '<span><strong>Boleto:</strong> ' + (d.boleto12 ? d.boleto12.n + 'x ' + fmtBRL(d.boleto12.parcela) : '-') + '</span>'
-             +  '<span><strong>Cartão:</strong> 12x ' + fmtBRL(d.cartao12Parcela) + '</span>';
+             +  '<span><strong>Cartão:</strong> ' + (d.cartao12Parcela != null ? '12x ' + fmtBRL(d.cartao12Parcela) : '-') + '</span>';
   } else {
     metaHTML += '<span style="color:var(--gray-text);font-style:italic;">⚠ Dívida não calculada — clique em "Editar dados do caso" para informar valor e calcular</span>';
   }
@@ -6923,6 +6983,14 @@ async function confirmarEnvio() {
     }
 
     if (script.irParaFechamento) {
+      // Bloqueia fechar acordo sem valores calculados (ex.: caso do faturamento só
+      // com valor_atual, sem régua de boleto/cartão) — evita acordo R$ 0,00/undefined.
+      const _af = script.irParaFechamento;
+      const _valorOk = Number(_af.valor) > 0 && (_af.forma === 'avista' || Number(_af.total) > 0);
+      if (!_valorOk) {
+        toast('Dívida ainda não calculada — informe o valor e recalcule as formas de pagamento antes de fechar o acordo.', 'error');
+        return;
+      }
       mudancas.passoAtual = 'Acordo aceito - aguardando assinatura';
       mudancas.aguardandoResposta = false;
       mudancas.acordoFinal = script.irParaFechamento;
@@ -7128,7 +7196,8 @@ function abrirModalAgendar() {
   m.style.display = 'flex';
   // Default: amanhã 09:00
   const amanha = new Date(); amanha.setDate(amanha.getDate() + 1); amanha.setHours(9, 0, 0, 0);
-  document.getElementById('agendaQuando').value = amanha.toISOString().slice(0, 16);
+  const _p = n => String(n).padStart(2, '0');
+  document.getElementById('agendaQuando').value = amanha.getFullYear() + '-' + _p(amanha.getMonth() + 1) + '-' + _p(amanha.getDate()) + 'T' + _p(amanha.getHours()) + ':' + _p(amanha.getMinutes());
   document.getElementById('agendaMensagem').value = '';
 }
 function fecharModalAgendar() {
@@ -7169,6 +7238,7 @@ async function confirmarAgendamento() {
 // e envia. (Em produção real isso deve ser uma Edge Function com cron — TODO.)
 async function processarMensagensAgendadasPendentes() {
   if (!perfilAtual) return;
+  const MAX_TENTATIVAS = 5; // espelha cron-mensagens-agendadas
   try {
     const agora = new Date().toISOString();
     const { data, error } = await sb.from('crm_mensagens_agendadas')
@@ -7179,14 +7249,45 @@ async function processarMensagensAgendadasPendentes() {
     if (error) return;
     if (!data || !data.length) return;
     console.log('[#11] Mensagens agendadas vencidas:', data.length);
+    // Enforcement da régua bloqueada (espelha o cron): números marcados como
+    // Spam/engano em whatsapp_atendimentos.regua_bloqueada não recebem disparos.
+    const _dk = (t) => String(t || '').replace(/\D/g, '').slice(-8);
+    const bloqueados = new Set();
+    try {
+      const { data: blk } = await sb.from('whatsapp_atendimentos').select('telefone').eq('regua_bloqueada', true);
+      (blk || []).forEach(b => { const k = _dk(b.telefone); if (k) bloqueados.add(k); });
+    } catch { /* coluna ausente -> sem enforcement */ }
     for (const m of data) {
       try {
-        const r = await enviarViaZAPI(m.telefone, m.mensagem);
-        const novoStatus = r.ok ? 'enviada' : 'falhou';
+        // Só texto é enviado aqui. Mídia (áudio/documento/imagem) fica para o cron,
+        // que sabe gerar signed URL e chamar o endpoint Z-API certo — este worker
+        // só faz send-text e destruiria a mídia como texto vazio.
+        const tipo = m.tipo || 'texto';
+        if (tipo !== 'texto') continue;
+        // Régua bloqueada: cancela sem enviar (espelha o cron).
+        if (bloqueados.has(_dk(m.telefone))) {
+          await sb.from('crm_mensagens_agendadas')
+            .update({ status: 'cancelada', erro: 'regua_bloqueada (spam/engano)' })
+            .eq('id', m.id);
+          continue;
+        }
+        // Claim atômico antes de enviar: só envia se esta aba reivindicar a linha
+        // (evita duplicar com o cron de 1 min e com outras abas do CRM).
+        const { data: claim } = await sb.from('crm_mensagens_agendadas')
+          .update({ status: 'processando' })
+          .eq('id', m.id)
+          .eq('status', 'pendente')
+          .select('id');
+        if (!claim || !claim.length) continue;
+        const r = await enviarViaZAPI(m.telefone, m.mensagem, { casoId: m.caso_id, operadorId: m.operador_id });
+        const novasTentativas = (m.tentativas || 0) + 1;
+        // Falha transitória volta a 'pendente' pra ser reprocessada; só sela
+        // 'falhou' após esgotar MAX_TENTATIVAS (espelha a política do cron).
+        const novoStatus = r.ok ? 'enviada' : (novasTentativas >= MAX_TENTATIVAS ? 'falhou' : 'pendente');
         await sb.from('crm_mensagens_agendadas')
           .update({
             status: novoStatus,
-            tentativas: (m.tentativas || 0) + 1,
+            tentativas: novasTentativas,
             erro: r.ok ? null : r.error,
             enviada_em: r.ok ? new Date().toISOString() : null
           })
@@ -7451,7 +7552,10 @@ async function devolverParaCobrancas() {
 // ============================================================
 function parsearMoedaInput(s) {
   if (!s) return 0;
-  const limpo = String(s).replace(/[R$\s.]/g, '').replace(',', '.');
+  // Só remove ponto (separador de milhar) quando há vírgula decimal; senão preserva
+  // o ponto como decimal (ex.: "1500.00" copiado de planilha) — espelha CalcEngine.parseValor.
+  const semSimbolo = String(s).replace(/[R$\s]/g, '');
+  const limpo = semSimbolo.includes(',') ? semSimbolo.replace(/\./g, '').replace(',', '.') : semSimbolo;
   const v = parseFloat(limpo);
   return isNaN(v) ? 0 : v;
 }
@@ -8417,6 +8521,7 @@ async function enviarRelatoFalha() {
 
   // Tenta inserir na tabela
   let salvo = false;
+  let apenasLocal = false;
   try {
     const { error } = await sb.from('falhas_reportadas').insert(payload);
     if (!error) salvo = true;
@@ -8425,7 +8530,7 @@ async function enviarRelatoFalha() {
       const arq = JSON.parse(localStorage.getItem('cobrasq_falhas_pendentes') || '[]');
       arq.push({ ...payload, _ts: Date.now() });
       localStorage.setItem('cobrasq_falhas_pendentes', JSON.stringify(arq));
-      salvo = true;
+      salvo = true; apenasLocal = true;
     } else {
       throw error;
     }
@@ -8434,17 +8539,42 @@ async function enviarRelatoFalha() {
       const arq = JSON.parse(localStorage.getItem('cobrasq_falhas_pendentes') || '[]');
       arq.push({ ...payload, _ts: Date.now() });
       localStorage.setItem('cobrasq_falhas_pendentes', JSON.stringify(arq));
-      salvo = true;
+      salvo = true; apenasLocal = true;
     } catch(e2) {}
   }
 
   if (btn) { btn.disabled = false; btn.textContent = 'Enviar relato'; }
   if (salvo) {
-    toast('✓ Relato enviado. Obrigado!');
+    // Não anuncia "enviado" quando o insert falhou e ficou só no localStorage —
+    // será reenviado no próximo login (flushRelatosFalhaLocais).
+    toast(apenasLocal
+      ? '⚠ Sem conexão — relato salvo localmente e será reenviado ao reconectar.'
+      : '✓ Relato enviado. Obrigado!');
     fecharModalFalha();
   } else {
     toast('Erro ao enviar relato.', 'error');
   }
+}
+
+// Reenvia relatos de falha que ficaram presos no localStorage (sessão expirada,
+// RLS negada, rede) — o toast de sucesso antigo mascarava o insert falho.
+async function flushRelatosFalhaLocais() {
+  let arq;
+  try { arq = JSON.parse(localStorage.getItem('cobrasq_falhas_pendentes') || '[]'); }
+  catch { return; }
+  if (!Array.isArray(arq) || !arq.length) return;
+  const restantes = [];
+  for (const item of arq) {
+    const { _ts, ...payload } = item;
+    try {
+      const { error } = await sb.from('falhas_reportadas').insert(payload);
+      if (error) restantes.push(item);
+    } catch { restantes.push(item); }
+  }
+  try {
+    if (restantes.length) localStorage.setItem('cobrasq_falhas_pendentes', JSON.stringify(restantes));
+    else localStorage.removeItem('cobrasq_falhas_pendentes');
+  } catch {}
 }
 
 async function buscarCepEndereco() {
@@ -8479,27 +8609,28 @@ function ajustarSliderParcelas(qtd) {
   if (a.forma === 'boleto') {
     // Usa boletoOptions se houver, senão calcula
     const boletoOpts = d.boletoOptions || [];
-    let opt = boletoOpts.find(o => o.n === parcelas);
-    if (!opt) {
-      // Fallback: calcula
-      const totalBase = d.totalAvista || 0;
+    // Fallback de cálculo por nº de parcelas (usado quando não há entrada na régua).
+    const totalBase = d.totalAvista || 0;
+    const calcFallback = (n) => {
       let valorParc;
-      if (parcelas === 1) valorParc = totalBase;
+      if (n === 1) valorParc = totalBase;
       else {
         const i = 0.0299;
-        const fator = (i * Math.pow(1 + i, parcelas)) / (Math.pow(1 + i, parcelas) - 1);
+        const fator = (i * Math.pow(1 + i, n)) / (Math.pow(1 + i, n) - 1);
         valorParc = totalBase * fator;
       }
       const arredondado = Math.ceil(valorParc + 6);
-      opt = { n: parcelas, parcela: arredondado, total: arredondado * parcelas };
-    }
+      return { n, parcela: arredondado, total: arredondado * n };
+    };
+    let opt = boletoOpts.find(o => o.n === parcelas) || calcFallback(parcelas);
     // Aplica mínimo de R$ 256
     if (opt.parcela < 256) {
       avisoMin = true;
-      // Reduz qtd de parcelas até parcela >= 256
+      // Reduz qtd de parcelas até parcela >= 256, recalculando o fallback a cada
+      // novo nº (sem isso, opt ficava congelado no valor do n original).
       while (parcelas > 1 && opt && opt.parcela < 256) {
         parcelas--;
-        opt = boletoOpts.find(o => o.n === parcelas) || opt;
+        opt = boletoOpts.find(o => o.n === parcelas) || calcFallback(parcelas);
       }
       // Atualiza slider visualmente
       const slider = document.getElementById('sliderParcelas');
@@ -8629,8 +8760,112 @@ async function renderAdmin() {
   // Item #9: MP config
   renderConfigMP();
 
+  // Reenvio de mensagens Z-API falhadas (best-effort — não pode quebrar o Admin)
+  try { await renderReenviosFalhados(); } catch (e) { console.warn('renderReenviosFalhados falhou:', e); }
   // Carrega falhas reportadas
   await renderFalhasReportadas();
+}
+
+// ============================================================
+// REENVIO DE MENSAGENS FALHADAS (Z-API) — área Admin (só staff)
+// ============================================================
+// Lista as falhas pendentes de crm_envios_falhados (fallback: crm_envios_falhados_local),
+// permite reenviar reusando enviarViaZAPI() e marca como resolvida ao ter sucesso.
+let _reenviosFalhadosCache = [];
+async function renderReenviosFalhados() {
+  const cont = document.getElementById('reenviosContainer');
+  if (!cont) return;
+  // Guarda de acesso: só admin (o RLS permite qualquer autenticado ler/atualizar,
+  // então a restrição a staff é reforçada aqui na UI).
+  if (!perfilAtual || perfilAtual.role !== 'admin') { cont.innerHTML = ''; return; }
+  cont.innerHTML = '<div style="padding:14px; color:var(--gray-text); font-size:13px;">Carregando mensagens falhadas...</div>';
+
+  let falhas = [];
+  try {
+    const { data, error } = await sb.from('crm_envios_falhados')
+      .select('*')
+      .eq('status', 'pendente')
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (error) throw error;
+    falhas = data || [];
+  } catch (e) {
+    // Fallback: mensagens guardadas localmente quando o insert no banco falhou
+    try {
+      falhas = JSON.parse(localStorage.getItem('crm_envios_falhados_local') || '[]')
+        .map((f, i) => ({ ...f, id: 'local-' + i, created_at: new Date(f._ts || Date.now()).toISOString(), _local: true }));
+    } catch (e2) { falhas = []; }
+  }
+
+  _reenviosFalhadosCache = falhas;
+
+  if (!falhas.length) {
+    cont.innerHTML = '<div style="padding:20px; text-align:center; color:var(--gray-text); font-size:13px;">Nenhuma mensagem falhada pendente. ✨</div>';
+    return;
+  }
+
+  cont.innerHTML = falhas.map(f => {
+    const dt = f.created_at ? new Date(f.created_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+    const msg = f.mensagem || '';
+    const preview = msg.length > 240 ? msg.slice(0, 240) + '…' : msg;
+    const idAttr = escapeHTML(String(f.id));
+    return '<div style="padding:14px; border:1px solid var(--gray-line); border-radius:8px; margin-bottom:10px; background:white;">' +
+      '<div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px; gap:10px;">' +
+        '<div><strong style="color:var(--navy);">📱 ' + escapeHTML(f.telefone || '—') + '</strong> <span style="font-size:11px; color:var(--gray-text);">· ' + dt + (f.tentativas ? ' · ' + f.tentativas + ' tentativa(s)' : '') + '</span></div>' +
+        '<span style="font-size:11px; padding:2px 8px; border-radius:10px; background:#FBEAEA; color:var(--red); border:1px solid var(--red); text-transform:uppercase; font-weight:600;">pendente</span>' +
+      '</div>' +
+      (f.erro ? '<div style="font-size:12px; color:var(--red); margin-bottom:6px;"><strong>Motivo:</strong> ' + escapeHTML(f.erro) + '</div>' : '') +
+      '<div style="font-size:13px; color:var(--ink); white-space:pre-wrap; background:var(--gray-light); padding:8px 10px; border-radius:6px; margin-bottom:8px;">' + escapeHTML(preview) + '</div>' +
+      (f._local
+        ? '<div style="font-size:11px; color:var(--yellow); margin-bottom:8px;">⚠ Salva localmente (não chegou ao banco). Reenvie para tentar de novo.</div>' +
+          '<div><button class="btn small success" onclick="reenviarMensagemFalhada(\'' + idAttr + '\', this)">↻ Reenviar</button></div>'
+        : '<div style="display:flex; gap:8px;">' +
+            '<button class="btn small success" onclick="reenviarMensagemFalhada(\'' + idAttr + '\', this)">↻ Reenviar</button>' +
+            '<button class="btn small secondary" onclick="marcarReenvioResolvido(\'' + idAttr + '\')">✓ Marcar resolvida</button>' +
+          '</div>') +
+    '</div>';
+  }).join('');
+}
+
+async function reenviarMensagemFalhada(id, btn) {
+  const f = _reenviosFalhadosCache.find(x => String(x.id) === String(id));
+  if (!f) { toast('Mensagem não encontrada. Recarregue o painel.', 'error'); return; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Enviando…'; }
+  try {
+    // Reusa a função de envio existente (registra nova falha automaticamente se der erro)
+    const r = await enviarViaZAPI(f.telefone, f.mensagem);
+    if (r && r.ok) {
+      if (f._local) {
+        // Remove a entrada do fallback local
+        try {
+          const arr = JSON.parse(localStorage.getItem('crm_envios_falhados_local') || '[]');
+          const idx = parseInt(String(id).replace('local-', ''), 10);
+          if (!isNaN(idx) && idx >= 0 && idx < arr.length) {
+            arr.splice(idx, 1);
+            localStorage.setItem('crm_envios_falhados_local', JSON.stringify(arr));
+          }
+        } catch (e) {}
+      } else {
+        // Marca como resolvida no banco
+        try { await sb.from('crm_envios_falhados').update({ status: 'resolvida' }).eq('id', id); }
+        catch (e) { console.warn('Falha ao marcar resolvida:', e); }
+      }
+      toast('✓ Mensagem reenviada com sucesso.');
+    } else {
+      toast('Não deu certo: ' + ((r && r.error) || 'erro desconhecido'), 'error');
+    }
+  } catch (e) {
+    toast('Erro ao reenviar: ' + (e && e.message ? e.message : 'erro desconhecido'), 'error');
+  }
+  await renderReenviosFalhados();
+}
+
+async function marcarReenvioResolvido(id) {
+  if (!confirm('Marcar essa mensagem como resolvida (sem reenviar)?')) return;
+  const { error } = await sb.from('crm_envios_falhados').update({ status: 'resolvida' }).eq('id', id);
+  if (error) { toast(msgErroAmigavel(error), 'error'); return; }
+  toast('Marcada como resolvida.');
+  await renderReenviosFalhados();
 }
 
 async function renderFalhasReportadas() {
@@ -10248,6 +10483,7 @@ async function pecaImprimir() {
   const tpl = await _pecaResolverLogo(Object.assign({}, peca.selecionado));
   const merged = pecaMailMerge(tpl.conteudo_html, peca.dados);
   const w = window.open('', '_blank', 'width=900,height=1100');
+  if (!w) { toast('Bloqueado pelo navegador — libere popups.', 'error'); return; }
   w.document.write(_pecaHtmlCompleto(merged, tpl) +
     '<div class="no-print" style="position:fixed;top:8px;right:8px;"><button onclick="window.print()" style="padding:8px 14px;background:#000;color:#fff;border:0;border-radius:4px;cursor:pointer;">🖨 Imprimir / PDF</button></div>');
   w.document.close();

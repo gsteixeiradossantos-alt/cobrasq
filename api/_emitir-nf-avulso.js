@@ -91,6 +91,37 @@ module.exports = async function handler(req, res) {
     const apagar = reuso.slice(1).map((x) => x.id);
     if (apagar.length) { await sbFetch(`nf_avulsa?id=in.(${apagar.join(',')})`, { method: 'DELETE' }).catch(() => {}); }
 
+    // P1 (auditoria 2026-06) — guarda anti-2ª-NFS-e: a linha reaproveitada pode ter uma
+    // invoice AINDA em curso no Asaas (o 'processando'/'emitindo' do fluxo assíncrono
+    // leva minutos até a prefeitura autorizar). Se essa invoice já está viva lá
+    // (agendada/autorizada/em processamento), NÃO emitir outra — senão a prefeitura
+    // autoriza DUAS NFS-e reais (ISS em dobro) e a 1ª vira órfã (o nf_asaas_id abaixo
+    // seria sobrescrito). Só segue se a anterior sumiu (404) ou já é terminal de
+    // falha/cancelamento (ERROR/CANCELED). Estado desconhecido bloqueia (fail-safe).
+    const prevNfId = reuso[0] ? reuso[0].nf_asaas_id : null;
+    if (prevNfId) {
+      const prev = await asaasReq('GET', `/invoices/${encodeURIComponent(prevNfId)}`).catch(() => null);
+      const prevSt = String((prev && prev.status) || '').toUpperCase();
+      const terminalFalha = prevSt === 'ERROR' || prevSt === 'CANCELED' || prevSt === 'CANCELLED';
+      if (prev && !terminalFalha) {
+        const prevUrl = prev.pdfUrl || prev.xmlUrl || reuso[0].nf_url || null;
+        const autorizada = prevSt === 'AUTHORIZED' || !!prevUrl;
+        if (rowId) {
+          await sbFetch(`nf_avulsa?id=eq.${rowId}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ nf_status: autorizada ? 'emitida' : 'processando', nf_asaas_id: prevNfId, nf_url: prevUrl, erro: null }),
+          }).catch(() => {});
+        }
+        return res.status(200).json({
+          ok: true,
+          skipped: 'NFS-e anterior ainda ativa no Asaas (' + (prevSt || 'sem status') + ') — não reemite',
+          nf_status: autorizada ? 'emitida' : 'processando',
+          nf_id: prevNfId,
+          nf_url: prevUrl,
+        });
+      }
+    }
+
     // Garante o customer no Asaas (acha por CPF, sincroniza endereço; cria se não houver).
     // Monta um objeto "dev-like" que buildAsaasAddress/ensureAsaasCustomer entende.
     const devLike = {

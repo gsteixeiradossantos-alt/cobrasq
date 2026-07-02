@@ -43,6 +43,17 @@ async function phoneExistsOnWhatsApp(instance: string, token: string, clientToke
   }
 }
 
+// Z-API às vezes responde HTTP 200 mesmo sem entregar (instância desconectada):
+// o corpo vem sem identificador de mensagem ou com campo de erro. Só consideramos
+// enviado quando há messageId/zaapId/id E não há indicação de erro. (Mesma lógica
+// das funções irmãs cron-mensagens-agendadas e bia-atendimento.)
+function envioConfirmado(data: any): boolean {
+  if (!data || typeof data !== 'object') return false;
+  const temId = !!(data.messageId || data.zaapId || data.id || data.messageID);
+  const temErro = !!data.error || !!data.errorDescription || data.value === false || data.success === false;
+  return temId && !temErro;
+}
+
 async function callZapiSendText(url: string, headers: Record<string, string>, body: unknown): Promise<{ ok: boolean; status: number; data: any }> {
   const delays = [1000, 2000, 4000];
   for (let i = 0; i <= delays.length; i++) {
@@ -126,9 +137,12 @@ Deno.serve(async (req) => {
     if (ZAPI_CLIENT_TOKEN) zapiHeaders['Client-Token'] = ZAPI_CLIENT_TOKEN;
     const result = await callZapiSendText(url, zapiHeaders, { phone: phoneFinal, message: mensagem });
 
-    if (!result.ok) {
+    // HTTP 200 não basta: exige confirmação real do Z-API (messageId, sem erro).
+    // Sem isso, uma instância desconectada que responde 200-sem-id seria tratada
+    // como enviada (ok:true, messageId:undefined) — a cobrança nunca sairia.
+    if (!result.ok || !envioConfirmado(result.data)) {
       return new Response(JSON.stringify({
-        error: 'Z-API retornou erro: ' + (result.data?.error || result.data?.message || `HTTP ${result.status}`),
+        error: 'Z-API retornou erro: ' + (result.data?.error || result.data?.message || `HTTP ${result.status} sem confirmação (messageId ausente)`),
         detalhes: result.data,
         phoneUsed: phoneFinal
       }), { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

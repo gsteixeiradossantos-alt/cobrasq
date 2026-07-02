@@ -8,7 +8,7 @@ vale em todo lugar.** As telas viraram "filiais" finas que só chamam o motor.
 ## O que a matriz expõe (`CalcEngine`)
 | API | O que faz |
 |---|---|
-| `CalcEngine.TABELAS` | `{INPC, IPCA, SELIC, TJPR}` — variação % mês a mês. **Atualizar aqui 1×/mês.** |
+| `CalcEngine.TABELAS` | `{INPC, IPCA, IGP-M, IGP-DI, SELIC, TJPR, TAXA-LEGAL}` — variação % mês a mês. **Atualizar aqui 1×/mês.** |
 | `CalcEngine.INDICES_ATE` | `'AAAA-MM'` até onde os índices estão preenchidos (avisos de defasagem). |
 | `CalcEngine.correcaoMensal(valorIni, dataIni, dataFim, indice)` | Correção monetária composta, mês fechado → `{valorCorrigido, mesesAplicados}`. |
 | `CalcEngine.juridica(valor, dataIni, dataFim, indice, multaPct, honPct, jurosMensalPct)` | Conta da **peça/memorial**: correção + juros pró-rata + multa + honorários + garantia STJ. |
@@ -23,11 +23,14 @@ servido de `templates/` para **não** cair no rewrite catch-all do `vercel.json`
 - **`crm.html`** — `_calcJuridicaMemorial` → `juridica`; `_pecaAplicarCorrecaoMensal` →
   `correcaoMensal`; `_calcCobrancaSimples` → `cobranca` (núcleo; parcelamento
   boleto/cartão segue inline, é exclusivo do CRM); `PECA_INDICES_ATE = CalcEngine.INDICES_ATE`.
+- **`calc-juridica.html`** — carrega `<script src="/templates/calc-engine.js">` e usa
+  `CalcEngine.calcularJudicial` / `CalcEngine.TABELAS` (calculadora standalone, já migrada).
 
 ## Atualização mensal dos índices (o ganho)
 Editar **só** `CalcEngine.TABELAS` em `templates/calc-engine.js` (acrescentar o mês novo
-em INPC/IPCA/SELIC/TJPR) e avançar `INDICES_ATE`. Peça, memorial e cobrança do painel e
-do CRM passam a usar o valor novo automaticamente.
+nas 7 séries — INPC/IPCA/IGP-M/IGP-DI/SELIC/TJPR/TAXA-LEGAL; TJPR e TAXA-LEGAL são
+derivadas/auto-fetch, mas confira) e avançar `INDICES_ATE`. Peça, memorial, cobrança do
+painel/CRM e a calc-jurídica passam a usar o valor novo automaticamente.
 
 ## Testes
 `npm test` (inclui `test/calc_engine.test.js`) ou, sem Node:
@@ -45,12 +48,12 @@ porque **altera valores**. Ficaram intactas:
    **desde 2020**, garantia STJ por fator acumulado e juros pró-rata **por dias** — não é
    a conta `dias/30` da peça. Migrar = mesclar o histórico 2020+ na matriz e reconciliar
    o algoritmo.
-2. **`calc-juridica.html` `calcularPrincipal` / `segmentarPorMes`** (calculadora standalone).
-   Faz correção **pró-rata-die por segmento de mês** (mais precisa que `dias/30`), com
-   tabelas próprias `TABELA_*_EMBUTIDA`. Migrar exige decidir qual é a fórmula **canônica**
-   da peça: `dias/30` (atual da peça/memorial) ou pró-rata-die (calc-juridica).
-3. **`index.html` `petComputeCalc`** (chat da Bia). Honorários com base possivelmente
+2. **`index.html` `petComputeCalc`** (chat da Bia). Honorários com base possivelmente
    diferente (`subtotalGeral * hon%`) do motor (`(atualizado+juros+multa) * hon%`).
+
+> **Nota (PR #183, item 3 — resolvido):** a `calc-juridica.html` **já foi migrada** e hoje
+> consome `CalcEngine.calcularJudicial` / `CalcEngine.TABELAS`. As antigas
+> `calcularPrincipal` / `segmentarPorMes` com `TABELA_*_EMBUTIDA` não existem mais.
 
 ## Divergências reais que a matriz NÃO escondeu (para decidir — "fase B")
 A centralização preservou o comportamento atual de propósito; estas duas divergências
@@ -61,7 +64,7 @@ A centralização preservou o comportamento atual de propósito; estas duas dive
   usa **constantes chumbadas** (`TAXA_JUROS_MENSAL=0.01`, `MULTA_PCT=0.02`). Hoje coincidem
   (mesmo default), mas **se você mudar no admin, o CRM não obedece.** Unificar = o CRM
   passar `getCalcParams()` no lugar das constantes.
-- **Honorários da Bia** (item 3 acima): alinhar a base antes de migrar `petComputeCalc`.
+- **Honorários da Bia** (item 2 acima): alinhar a base antes de migrar `petComputeCalc`.
 
 Quando quiser fechar esses pontos, é a "Opção B" da auditoria (mexe em valores; mostro o
 antes/depois de cada caso afetado antes de aplicar).

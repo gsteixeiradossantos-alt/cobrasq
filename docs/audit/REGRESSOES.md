@@ -61,9 +61,12 @@ no código, ou ação na UI) e o **estado-correto** esperado. Atualize ao descob
 - **O que é:** objeto em produção (trigger, índice, policy) que não está nas migrations versionadas → o que
   está no código diverge do que roda.
 - **Teste:** `auditoria_deploy.sql` (lista triggers/policies de prod) cruzado com `supabase/migrations/`.
-- **Estado-correto:** todo objeto de prod tem migration correspondente. **Última checagem:** triggers de prod
-  (`trg_cobrasq_data_anti_shrink`, `devedores_preserve_asaas`, `*_set_cadastrado_por`, `trg_calendar_orphans_devedores`)
-  têm migration; view `casos` `security_invoker=true` ✓.
+- **Estado-correto:** todo objeto de prod tem migration correspondente. **Última checagem 2026-07-01 — 🔴 ABERTO:**
+  dos 7 triggers em prod, 5 têm migration versionada, mas **`trg_cobrasq_data_anti_shrink`** (e a função
+  `fn_cobrasq_data_anti_shrink`) segue **sem arquivo** em `supabase/migrations/` — drift documental do próprio
+  guard F-20. Ação: capturar `pg_get_functiondef` + `CREATE TRIGGER` em prod e versionar como
+  `20260612_f20_trigger_anti_encolhimento_cobrasq_data.sql` com cabeçalho "JÁ APLICADO EM PROD" (não rodar push).
+  View `casos` `security_invoker=true` ✓.
 
 ## R-07 · Tabelas de backup/arquivo expostas (vazamento de PII) ⚠️ P0
 - **O que é:** tabelas `_backup_*`/`_arquivo_*` (cópias de devedores/cobranças/blob com nome, CPF, dívida)
@@ -86,7 +89,11 @@ no código, ou ação na UI) e o **estado-correto** esperado. Atualize ao descob
 - **Onde:** `api/_processar-recebimento.js`, `api/_backfill-asaas-customers.js`, trigger `devedores_preserve_asaas`.
 - **Teste:** `auditoria_dados_perfis.sql §4` (devedores sem `asaas_customer_id`); `fin_operacao` recente.
 - **Estado-correto:** devedores com boleto têm `asaas_customer_id`; pagamento gera `fin_operacao`.
-- **Perfil exposto:** gestor (painel). **Última checagem:** PR #59 ABERTO (fluxo de registro incompleto no ar).
+- **Perfil exposto:** gestor (painel). **Última checagem 2026-07-01 — 🔴 ABERTO:** PR #59 foi **fechado sem merge**
+  (27/06) como "já existe na main", mas o fluxo "Registrar pagamento com valor" **não existe** na main — o botão
+  (index.html:2474) não grava `{tipo:'Pagamento', valor}` nem alimenta `fin_operacao`. Em prod, `fin_operacao`
+  tem **1 única linha** na história (R$ 156,00, 26/06) e **61 de 77 devedores (79%) sem `asaas_customer_id`** —
+  corrente essencialmente parada. Ação: reimplementar o fluxo do #59 sobre a main atual (ver AUDITORIA-2026-07 P1).
 
 ## R-09 · Corrente acordo → boleto (num_parcelas nulo / reflexo no CRM)
 - **O que é:** acordo assinado (ZapSign) deve emitir N boletos (Asaas) e refletir no CRM; bugs conhecidos:
@@ -100,7 +107,11 @@ no código, ou ação na UI) e o **estado-correto** esperado. Atualize ao descob
   recebeu aparecem como enviados. Fix no PR #91 (DRAFT, fora do ar).
 - **Onde:** `api/_zapi.js`, `api/cron-regua.js`.
 - **Teste:** `grep` por checagem de status real na resposta do Z-API; PR #91 mergeado?
-- **Estado-correto:** envio só vira "enviada" com confirmação do Z-API. **Última checagem:** #91 DRAFT — ABERTO.
+- **Estado-correto:** envio só vira "enviada" com confirmação do Z-API. **Última checagem 2026-07-02 — 🟢 RESOLVIDO
+  (deploy pendente da edge):** PR #91 já cobria a edge `cron-mensagens-agendadas` (v28). Na auditoria 2026-07 a
+  validação foi portada para o **runtime Vercel** (`api/cron-regua.js` agora exige `messageId/zaapId` e cai no
+  retry sem marcar `sent`) e a edge `enviar-whatsapp` ganhou `envioConfirmado()`. Restam sem a checagem apenas
+  caminhos já corrigidos no fonte aguardando **deploy manual** das edge functions. Reconferir após o deploy.
 
 ## R-11 · Cobranças vazias (sem valor e sem credor)
 - **O que é:** cadastros incompletos/abandonados/teste que viram cobrança com `valor_orig`, `valor_atual` e
@@ -128,6 +139,21 @@ no código, ou ação na UI) e o **estado-correto** esperado. Atualize ao descob
   com papel `cedente` + RLS por cliente, OU RPC/endpoint `SECURITY DEFINER` que valide a credencial e devolva os
   dados (como o portal do devedor faz com `portal_*_token`). **Última checagem 2026-06-29:** QUEBRADO; o piloto
   Bidão (blob + credencial via SQL) NÃO funciona no login real. Decisão de arquitetura pendente.
+
+## R-13 · Portal do devedor: token de acesso vazado ao cliente ⚠️ P0
+- **O que é:** a RPC `portal_emitir_token(p_cpf)` é `SECURITY DEFINER`, tinha `EXECUTE` para `anon`, e devolve no
+  JSON — ao próprio chamador — o **código de 6 dígitos** (`token`) **e o telefone completo** (`telefone`). Qualquer
+  pessoa que digitasse o CPF de uma vítima lia o OTP no DevTools/Network e chamava `portal_validar_token` para logar
+  como o devedor: **2FA por WhatsApp totalmente contornável + vazamento de PII + enumeração de CPF**.
+- **Onde:** RPC `portal_emitir_token` (Supabase); `index.html` `portalEnviarToken` (~6000); envio server-side em
+  `api/mfa.js`.
+- **Teste:** `select proname, proacl from pg_proc where proname='portal_emitir_token';` (não pode ter `anon=X`);
+  no fluxo, a resposta de `/api/mfa?action=portal-challenge` **não** pode conter `token` nem `telefone` em claro.
+- **Estado-correto:** emissão **server-only** — só `service_role` executa a RPC; o servidor gera, envia via Z-API e
+  devolve ao cliente **apenas `telefone_mask`**. **Última checagem 2026-07-02 — 🟡 FIX NA BRANCH (deploy coordenado):**
+  migração `20260704c_p0_portal_emitir_token_server_only.sql` (REVOKE anon/authenticated — **não aplicada em prod**),
+  nova action `portal-challenge` em `api/mfa.js`, e `portalEnviarToken` migrado para o endpoint. Os 3 precisam subir
+  **juntos** (migração isolada quebra o portal). Fecha também o antigo P1 de entrega via Z-API no blob staff-only.
 
 ---
 

@@ -47,6 +47,13 @@ module.exports = async function handler(req, res) {
     if (op.nf_status === 'emitida') return res.status(200).json({ ok: true, skipped: 'NF já emitida', nf_url: op.nf_url });
     opIdRevert = op.id; prevNf = op.nf_status;
 
+    // Operação em revisão manual (rateio não apurado, ex.: recebimento sem acordo
+    // vinculado): base fiscal indefinida — NÃO emitir NF sobre o valor cheio, senão
+    // pode declarar como honorário um valor que em parte é capital do credor.
+    if (op.repasse_status === 'revisar') {
+      return res.status(200).json({ ok: true, skipped: 'repasse em revisão manual (base indefinida)', repasse_status: 'revisar' });
+    }
+
     // Base: honorário se há repasse de capital; senão o valor cheio recebido.
     const temRepasse = Number(op.valor_capital) > 0;
     const base = round2(temRepasse ? op.valor_honorario : op.valor_recebido);
@@ -93,15 +100,23 @@ module.exports = async function handler(req, res) {
     try { authorized = await asaasReq('POST', `/invoices/${invoice.id}/authorize`, {}); }
     catch (e) { /* fica como agendada; o status real vem no GET/retorno */ authorized = { ...invoice, _authorizeError: e.message }; }
 
+    // A NFS-e é autorizada pela prefeitura de forma ASSÍNCRONA: o /authorize NÃO-erro só
+    // agenda; não significa autorizada. Só marca 'emitida' quando status=AUTHORIZED (ou já
+    // veio pdfUrl). Senão fica 'processando' (reconcilia depois). ERROR já traz o motivo.
+    // Evita o falso-positivo "emitida sem PDF" — mesma regra do avulso (_emitir-nf-avulso).
+    const st = String(authorized.status || invoice.status || '').toUpperCase();
     const nfUrl = authorized.pdfUrl || authorized.xmlUrl || invoice.pdfUrl || '';
-    const nfStatus = authorized._authorizeError ? 'processando' : 'emitida';
+    let nfStatus, nfErro = null;
+    if (st === 'AUTHORIZED' || nfUrl) nfStatus = 'emitida';
+    else if (st === 'ERROR') { nfStatus = 'erro'; nfErro = (authorized.errors && authorized.errors[0] && authorized.errors[0].description) || authorized.statusDescription || authorized._authorizeError || 'Recusada pela prefeitura'; }
+    else nfStatus = 'processando';
     await sbFetch(`fin_operacao?id=eq.${op.id}`, {
       method: 'PATCH',
       body: JSON.stringify({
         nf_status: nfStatus,
         nf_asaas_id: invoice.id || null,
         nf_url: nfUrl || null,
-        metadata: { ...(op.metadata || {}), nf_base: base, nf_base_tipo: temRepasse ? 'honorario' : 'valor_cheio', nf_number: authorized.number || null },
+        metadata: { ...(op.metadata || {}), nf_base: base, nf_base_tipo: temRepasse ? 'honorario' : 'valor_cheio', nf_number: authorized.number || null, ...(nfErro ? { nf_erro: nfErro } : {}) },
       }),
     });
 

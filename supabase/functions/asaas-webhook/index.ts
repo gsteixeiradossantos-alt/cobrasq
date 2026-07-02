@@ -27,6 +27,18 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS'
 };
 
+// ⚠️ ATIVAR SÓ APÓS TROCAR PARA HEADER NO PAINEL DO ASAAS.
+// O segredo via `?token=` na URL vaza em logs/histórico/referrer; o correto é mandá-lo só
+// no HEADER `asaas-access-token` (campo "Token de autenticação" do webhook, no painel).
+// Enquanto a URL cadastrada ainda usa `?token=`, manter TRUE evita quebrar o webhook em
+// produção. PASSO MANUAL para desligar a querystring:
+//   1. Painel Asaas → Integrações → Webhooks → editar o webhook.
+//   2. Remover o `?token=<secret>` da URL e preencher "Token de autenticação" = <secret>
+//      (ele chega no header `asaas-access-token`).
+//   3. Enviar evento de teste e confirmar 200.
+//   4. Trocar esta flag para `false` e re-deployar. A partir daí, `?token=` é IGNORADO.
+const ACEITAR_TOKEN_QUERYSTRING = true;
+
 // Comparação em tempo constante (mesmo padrão do zapi-webhook/zapsign-webhook).
 async function safeEqual(a: string, b: string): Promise<boolean> {
   const enc = new TextEncoder();
@@ -53,10 +65,11 @@ Deno.serve(async (req) => {
   if (!expected) return json({ error: 'ASAAS_WEBHOOK_SECRET não configurado.' }, 500);
 
   const url = new URL(req.url);
+  const tokenQs = ACEITAR_TOKEN_QUERYSTRING ? (url.searchParams.get('token') || '').trim() : '';
   const provided =
     (req.headers.get('asaas-access-token') || '').trim() ||
     (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '').trim() ||
-    (url.searchParams.get('token') || '').trim();
+    tokenQs;
   if (!(await safeEqual(provided, expected))) return json({ error: 'unauthorized' }, 401);
 
   let body: any;

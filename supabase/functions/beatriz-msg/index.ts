@@ -110,13 +110,19 @@ Deno.serve(async (req) => {
   // bastava passar o caso_id de outro tenant para receber uma sugestão montada
   // com a PII alheia (devedor, credor, valor). Agora a RLS do próprio usuário
   // decide o que ele pode ler; sem acesso -> 403.
+  // Exceção: em intencao='responder' o telefone pode ainda não ter virado caso
+  // na view (número não cadastrado). Nesse caso degrada com caso=null em vez de
+  // 403, permitindo sugerir resposta à última mensagem do cliente.
   let caso: any = null;
   if (caso_id) {
     const r = await userClient.from('casos').select('*').eq('id', caso_id).maybeSingle();
     if (r.error || !r.data) {
-      return new Response(JSON.stringify({ error: 'caso não encontrado ou sem acesso' }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      if (intencao !== 'responder') {
+        return new Response(JSON.stringify({ error: 'caso não encontrado ou sem acesso' }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    } else {
+      caso = r.data;
     }
-    caso = r.data;
   }
 
   let aiResp: any;

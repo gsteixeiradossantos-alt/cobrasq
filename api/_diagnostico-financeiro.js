@@ -26,7 +26,7 @@ module.exports = async function handler(req, res) {
 
   try {
     const [opsRepasse, opsNf, recVenc, despVenc, naoConc, opsMes] = await Promise.all([
-      sbFetch(`fin_operacao?select=valor_capital&repasse_status=eq.pendente&limit=5000`).catch(() => []),
+      sbFetch(`fin_operacao?select=valor_capital&repasse_status=in.(pendente,revisar,preparado)&limit=5000`).catch(() => []),
       sbFetch(`fin_operacao?select=id&nf_status=eq.pendente&limit=5000`).catch(() => []),
       sbFetch(`fin_lancamento?select=valor&tipo_movimento=eq.1&status=eq.0&data_vencimento=lt.${today}&limit=5000`).catch(() => []),
       sbFetch(`fin_lancamento?select=valor&tipo_movimento=eq.0&status=eq.0&data_vencimento=lt.${today}&limit=5000`).catch(() => []),

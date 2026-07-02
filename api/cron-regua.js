@@ -113,6 +113,14 @@ async function zapiSendText(phone, message) {
   const text = await r.text();
   let data; try { data = JSON.parse(text); } catch { data = text; }
   if (!r.ok) throw new Error(`Z-API HTTP ${r.status}: ${typeof data === 'string' ? data : JSON.stringify(data)}`);
+  // R-10: HTTP 200 NÃO garante envio — a Z-API responde 200 com corpo de erro quando a
+  // instância está desconectada / número inválido (sem messageId/zaapId). Exige a prova de
+  // envio, igual à convenção `zap.messageId` dos demais endpoints; sem ela, lança para cair
+  // no catch do chamador → liberarEnvio (retry no próximo run) em vez de marcar 'sent' e
+  // nunca mais reenviar a cobrança.
+  if (!data || typeof data !== 'object' || !(data.messageId || data.zaapId)) {
+    throw new Error(`Z-API sem messageId: ${typeof data === 'string' ? data : JSON.stringify(data)}`);
+  }
   return data;
 }
 

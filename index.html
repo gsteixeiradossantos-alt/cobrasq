@@ -5071,6 +5071,46 @@ async function upsertAcordoRelational(devedorId, acordo){
   }catch(e){ return { ok:false, error:e.message }; }
 }
 
+// Mapeia uma linha da tabela `acordos` para a forma em memória que o drawer/KPIs leem
+// (dev.acordos[]). `parcelas` é jsonb e faz round-trip idêntico; `obs` vive no metadata.
+function _rowToAcordo(row){
+  const parc = Array.isArray(row.parcelas) ? row.parcelas : [];
+  return {
+    id: row.id,
+    valorTotal: row.valor_total != null ? +row.valor_total : 0,
+    numParc: row.num_parcelas != null ? +row.num_parcelas : parc.filter(p=>p.tipo!=='entrada').length,
+    entrada: row.valor_entrada != null ? +row.valor_entrada : 0,
+    venc1: row.data_primeiro_venc || '',
+    obs: (row.metadata && row.metadata.obs) || '',
+    parcelas: parc,
+    forma: row.forma || 'outro',
+    status: row.status || 'ativo',
+    createdAt: row.created_at || null,
+    linkZapSign: row.link_zapsign || null,
+    statusZapSign: row.status_zapsign || null
+  };
+}
+
+// Reidrata dev.acordos a partir da tabela dedicada `acordos` para os devedores dados.
+// devedorToRow REMOVE 'acordos' do metadata (fonte é a tabela), então sem esta carga
+// o dev.acordos volta VAZIO no load e o "Recuperado no mês"/drawer perdem os acordos.
+async function _reidratarAcordos(devs){
+  const supa = getSupabase();
+  if(!supa || !Array.isArray(devs) || !devs.length) return;
+  const ids = devs.map(d=>d.id).filter(Boolean);
+  try{
+    const byDev = {};
+    // Chunk defensivo p/ não estourar o comprimento da URL do PostgREST.
+    for(let i=0;i<ids.length;i+=200){
+      const slice = ids.slice(i, i+200);
+      const { data, error } = await supa.from('acordos').select('*').in('devedor_id', slice);
+      if(error){ console.warn('[rel] reidratarAcordos:', error.message); return; }
+      for(const row of (data||[])){ (byDev[row.devedor_id] = byDev[row.devedor_id] || []).push(_rowToAcordo(row)); }
+    }
+    for(const d of devs){ if(byDev[d.id]) d.acordos = byDev[d.id]; }
+  }catch(e){ console.warn('[rel] reidratarAcordos:', e.message); }
+}
+
 // FASE C2 (tempo-2) — os ~150 leitores do cliente que liam a dívida do objeto
 // devedor (d.valorOrig/d.status/d.fase/…) passam a vê-la de `cobrancas` (fonte
 // única) SEM tocar cada call site: enriquecemos o objeto devedor em memória com
@@ -5145,6 +5185,8 @@ async function loadRelationalData(){
   // FASE C2 (tempo-2): leitores do cliente passam a ver a dívida de cobrancas.
   _mergeDividaFromCobrancas();
   await loadGruposEconomicos();
+  // Reidrata os acordos da tabela dedicada (salvarAcordo/toggleParcela persistem lá).
+  await _reidratarAcordos(DB.devedores);
   // F-20 (Fase 2): rebaseia a referência anti-encolhimento ao que ESTE usuário REALMENTE
   // carregou. O blob (cobrasq_data) tem TODOS os devedores (RLS SELECT=true), mas o
   // relacional traz só os do colaborador (RLS por linha). Sem isto, _lastKnownDevCount e
@@ -5921,6 +5963,15 @@ async function doLogin(type){
           if(btnLogin){ btnLogin.disabled=false; btnLogin.innerHTML='Entrar como gestor '+_btnArrow; }
           return;
         }
+        // Guarda de papel: só papéis internos (proprietario/colaborador) ou cedente
+        // (roteado ao portal por montarCurrentUserDeAppUser) podem seguir. Papéis não-staff
+        // como 'devedor' não devem virar 'funcionario' e abrir o app interno.
+        if(appUser.papel!=='proprietario' && appUser.papel!=='colaborador' && appUser.papel!=='cedente'){
+          await supa.auth.signOut();
+          showToast('Esta conta não tem acesso interno.','danger');
+          if(btnLogin){ btnLogin.disabled=false; btnLogin.innerHTML='Entrar como gestor '+_btnArrow; }
+          return;
+        }
         currentUser = montarCurrentUserDeAppUser(appUser, data.user);
         if(btnLogin){ btnLogin.disabled=false; btnLogin.innerHTML='Entrar como gestor '+_btnArrow; }
         iniciarSessao();
@@ -5980,18 +6031,24 @@ async function doLogin(type){
   }
   else if(type === 'devedor'){
     // Fallback: login com CPF + nascimento (devedores sem telefone cadastrado).
+    // O devedor é anon (sem RLS de staff), então DB.devedores vem vazio — a
+    // conferência CPF+nascimento roda no servidor via RPC SECURITY DEFINER
+    // portal_login_nascimento, que também emite o token de sessão do portal
+    // (prova de posse para o portal_meu_caso). Ver 20260706_portal_meu_caso.sql.
     const cpf = (document.getElementById('devedor-cpf').value||'').replace(/\D/g,'');
     const nasc = (document.getElementById('devedor-nasc').value||'').trim();
-    if(!cpf || !nasc){ showToast('Preencha CPF e data de nascimento.','warning'); return; }
-    const dev = (DB.devedores||[]).find(d => {
-      const docNorm = (d.doc||'').replace(/\D/g,'');
-      return docNorm === cpf && d.loginNascimento === nasc;
-    });
-    if(dev){
-      currentUser = { tipo: 'devedor', nome: dev.nome, devedorId: dev.id, avatar: initials(dev.nome), role: 'Devedor' };
+    if(cpf.length !== 11 || !nasc){ showToast('Preencha CPF (11 dígitos) e data de nascimento.','warning'); return; }
+    const supa = getSupabase();
+    if(!supa){ showToast('Sistema fora do ar. Tente novamente em instantes.','danger'); return; }
+    try{
+      const { data, error } = await supa.rpc('portal_login_nascimento', { p_cpf: cpf, p_nascimento: nasc });
+      if(error) throw new Error(error.message);
+      if(!data?.ok){ showToast(data?.erro || 'Dados não encontrados. Verifique CPF e data de nascimento.','danger'); return; }
+      const nomeDev = data.nome || 'Devedor';
+      currentUser = { tipo: 'devedor', nome: nomeDev, devedorId: data.devedor_id, portalSessao: data.sessao_token, avatar: initials(nomeDev), role: 'Devedor' };
       iniciarSessao();
-    } else {
-      showToast('Dados não encontrados. Verifique CPF e data de nascimento.','danger');
+    }catch(e){
+      showToast('Não foi possível entrar. Verifique os dados e tente novamente.','danger');
     }
   }
 }
@@ -6011,30 +6068,17 @@ async function portalEnviarToken(){
   const labelOrig = btn.textContent;
   btn.textContent = 'Enviando…';
   try {
-    // 1) Servidor gera token + valida CPF e rate-limit
-    const { data, error } = await supa.rpc('portal_emitir_token', { p_cpf: cpf });
-    if(error) throw new Error(error.message);
-    if(!data?.ok) throw new Error(data?.erro || 'Falha ao gerar código.');
+    // P0 (AUDITORIA-2026-07): a emissão e o envio do código são SERVER-ONLY.
+    // O servidor gera o token, envia via Z-API e devolve só o telefone mascarado
+    // — nunca o código nem o telefone em claro. (Antes o frontend chamava
+    // portal_emitir_token direto e recebia token+telefone, permitindo bypass do 2FA.)
+    const resp = await fetch('/api/mfa?action=portal-challenge', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ cpf })
+    });
+    let data = {}; try { data = await resp.json(); } catch {}
+    if(!resp.ok || !data?.ok) throw new Error(data?.erro || 'Falha ao enviar código.');
 
-    // 2) Frontend envia via Z-API (se não configurado, instrui o operador).
-    const tel = (data.telefone||'').replace(/\D/g,'');
-    const mensagem = `*COBRASQ — código de acesso*\n\nOlá, ${(data.devedor_nome||'').split(' ')[0]}!\nSeu código de acesso ao portal é:\n\n*${data.token}*\n\nVálido por 10 minutos. Não compartilhe esse código.`;
-    if(!DB.config?.zapiInstanceId || !DB.config?.zapiToken){
-      msg.style.color = 'var(--warning)';
-      msg.textContent = 'Z-API não configurado no app. Use a opção "data de nascimento" ou peça ao gestor.';
-      btn.disabled = false; btn.textContent = labelOrig;
-      return;
-    }
-    try {
-      await ZApiAPI.sendText(tel, mensagem);
-    } catch(e){
-      msg.style.color = 'var(--danger)';
-      msg.textContent = 'Falha ao enviar WhatsApp: ' + (e.message||'erro');
-      btn.disabled = false; btn.textContent = labelOrig;
-      return;
-    }
-
-    // 3) Mostra step 2 (pedir o código)
+    // Mostra step 2 (pedir o código)
     document.getElementById('devedor-tel-mask').textContent = data.telefone_mask || '—';
     document.getElementById('devedor-step-1').style.display = 'none';
     document.getElementById('devedor-step-2').style.display = '';
@@ -6067,12 +6111,14 @@ async function portalValidarToken(){
     if(!data?.ok) throw new Error(data?.erro || 'Código inválido.');
 
     // Carrega devedor do DB (precisa ter sido carregado via loadRelationalData).
+    // portalSessao = token de sessão do portal emitido pela RPC (prova de posse
+    // para o portal_meu_caso, que é a fonte real dos dados do devedor anon).
     const dev = (DB.devedores||[]).find(d => d.id === data.devedor_id);
     if(!dev){
       // Devedor não está no DB local — pode estar sem permissão de leitura. Cria stub mínimo.
-      currentUser = { tipo:'devedor', nome:'Devedor', devedorId: data.devedor_id, avatar:'D', role:'Devedor' };
+      currentUser = { tipo:'devedor', nome:'Devedor', devedorId: data.devedor_id, portalSessao: data.sessao_token, avatar:'D', role:'Devedor' };
     } else {
-      currentUser = { tipo:'devedor', nome: dev.nome, devedorId: dev.id, avatar: initials(dev.nome), role:'Devedor' };
+      currentUser = { tipo:'devedor', nome: dev.nome, devedorId: dev.id, portalSessao: data.sessao_token, avatar: initials(dev.nome), role:'Devedor' };
     }
     iniciarSessao();
   } catch(e){
@@ -6737,7 +6783,9 @@ function _impToggleAll(on){ _impSel.clear(); if(on) _impRows.forEach(r=>_impSel.
 
 // Cria cobrança + contatos (devedores) + vínculos (cobranca_partes) no relacional,
 // espelhando salvarCobranca(). Em teste local (mock / sem Supabase) apenas simula.
+const _impSaving = new Set(); // trava anti duplo-clique por linha do import
 async function _impSalvar(id, silent){
+  if(_impSaving.has(id)) return false;
   const r=_impRow(id); if(!r) return false; const p=r.payload;
   if(!_impCliente(p)){ if(!silent) showToast('Vincule o credor a um cliente já cadastrado (localize pelo CNPJ). Se não existir, cadastre em Clientes e volte — o import não cria credor.','warning'); return false; }
   if(!_impCardOk(p)){ if(!silent) showToast('Cada envolvido precisa de nome, CPF/CNPJ e telefone; marque um principal.','warning'); return false; }
@@ -6750,6 +6798,7 @@ async function _impSalvar(id, silent){
     return true;
   }
 
+  _impSaving.add(id);
   try{
     const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
     const uidUser = sess?.data?.session?.user?.id || null;
@@ -6792,7 +6841,7 @@ async function _impSalvar(id, silent){
     console.warn('[import] salvar', e);
     if(!silent) showToast('Erro ao criar cobrança: '+(e.message||e),'danger');
     return false;
-  }
+  }finally{ _impSaving.delete(id); }
 
   _impRows=_impRows.filter(x=>x.id!==id); _impSel.delete(id);
   if(!silent){ _impDraw(); atualizarBadgeImportacao(); showToast('Cobrança criada com '+envs.length+' envolvido(s).','success'); }
@@ -8274,7 +8323,10 @@ async function renderPainel(){
   if(Array.isArray(cobrRows)) DB_cobrancas = cobrRows;
   // Filtros do painel (Cliente / Operador) — aplicados na fonte p/ consistência entre KPIs/aging/situação.
   const _pf = window._painelFiltro || (window._painelFiltro = { cliente:'', operador:'' });
+  // "Carteira ativa" = casos EM ABERTO — exclui quitado/pago/liquidado (mesma base do Aging,
+  // que já filtra esses status). Quitadas seguem contabilizadas só no quadro "Carteira por situação".
   const cobrAtivas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft
+    && !/quitad|pago|liquidad/i.test(c.status||'')
     && (!_pf.cliente  || String(c.cliente_id||'')===_pf.cliente)
     && (!_pf.operador || String(c.assigned_to||'')===_pf.operador));
 
@@ -8284,8 +8336,8 @@ async function renderPainel(){
   const acordosAtivos = cobrAtivas.filter(c=>['Acordo','Acordo firmado','Em pagamento'].includes(c.status)).length;
 
   // Recuperado no mês = dinheiro que de fato entrou (parcelas de acordo pagas).
-  const ymAtual    = new Date().toISOString().slice(0,7);
-  const ymAnterior = (()=>{ const d=new Date(); d.setMonth(d.getMonth()-1,1); return d.toISOString().slice(0,7); })();
+  const ymAtual    = _metaYmd(new Date()).slice(0,7); // mês LOCAL (evita virar o mês 3h cedo em UTC-3)
+  const ymAnterior = (()=>{ const d=new Date(); d.setMonth(d.getMonth()-1,1); return _metaYmd(d).slice(0,7); })();
   const totalRecuperado = recuperadoNoMes(ymAtual);
   const recMesAnterior  = recuperadoNoMes(ymAnterior);
   const deltaRecPct = recMesAnterior>0 ? Math.round(((totalRecuperado-recMesAnterior)/recMesAnterior)*100) : null;
@@ -8417,11 +8469,14 @@ async function renderPainel(){
   // Acordos vencendo: parcelas de acordo não pagas nos próximos 7 dias.
   const _hojeP = hoje(); const _in7P = new Date(Date.now()+7*86400000).toISOString().slice(0,10);
   let acordosVencendo = 0;
-  (DB.devedores||[]).forEach(d=>{ (d.acordos||[]).forEach(ac=>{ (ac.parcelas||[]).forEach(p=>{ if(!p.pago && p.vencimento && p.vencimento>=_hojeP && p.vencimento<=_in7P) acordosVencendo++; }); }); });
+  (DB.devedores||[]).filter(d=>!d.arquivado && !d.isDraft).forEach(d=>{ (d.acordos||[]).forEach(ac=>{ (ac.parcelas||[]).forEach(p=>{ if(!p.pago && p.vencimento && p.vencimento>=_hojeP && p.vencimento<=_in7P) acordosVencendo++; }); }); });
 
   // Equipe: ranking real (pontos) + meta do mês (recuperado vs metaMensal).
   const rankEquipe = calcRankingTarefas().slice(0,4);
   const metaProg   = metaMensal>0 ? Math.min(100, Math.round((totalRecuperado/metaMensal)*100)) : null;
+  // Recuperado/Meta/gráfico vêm de recuperadoNoMes (DB.devedores/acordos), modelo distinto de
+  // DB_cobrancas — não respondem aos filtros Cliente/Operador. Sinaliza isso quando há filtro ativo.
+  const _pfAtivo   = !!(_pf.cliente || _pf.operador);
 
   // Projeção do mês seguinte (ILUSTRATIVA): média dos últimos 3 meses com recuperação.
   const _ult3    = monthsData.slice(-3).map(m=>m.rec);
@@ -8450,7 +8505,7 @@ async function renderPainel(){
   // 4 KPIs do topo (design v3): carteira, recuperado, em negociação, pendências (navy).
   const kpis = [
     { label:'Carteira ativa',        value: fmtR(totalCarteira),    sub:`${totalCasos} caso${totalCasos!==1?'s':''} em aberto`, tick:true },
-    { label:'Recuperado · '+mesAtual, value: fmtR(totalRecuperado),  sub: totalRecuperado===0 ? 'nenhuma baixa registrada' : (metaProg!=null?`${metaProg}% da meta`:'parcelas de acordo pagas'), delta: totalRecuperado===0?null:deltaRecPct },
+    { label:'Recuperado · '+mesAtual, value: fmtR(totalRecuperado),  sub: (totalRecuperado===0 ? 'nenhuma baixa registrada' : (metaProg!=null?`${metaProg}% da meta`:'parcelas de acordo pagas')) + (_pfAtivo?' · total global (ignora filtros)':''), delta: totalRecuperado===0?null:deltaRecPct },
     { label:'Em negociação',         value: fmtR(emNegociacao),     sub:`${emNegRows.length} cobrança${emNegRows.length!==1?'s':''}` },
     { label:'Pendências',            value: String(pendAbertas),    sub: pendAtrasadas?`${pendAtrasadas} atrasada${pendAtrasadas!==1?'s':''}`:'em dia', navy:true },
   ];
@@ -9082,21 +9137,22 @@ function getCalcParams(){
 // ── Metodologia unificada (mesma da Calculadora Jurídica / calc-juridica.html) ──
 // Correção composta mês a mês com INPC real (TJ-PR adota INPC) + garantia STJ
 // (fator de correção nunca < 1), juros 1% a.m. SIMPLES pró rata por dias e
-// multa sobre o valor ATUALIZADO (sem juros). Tabela conferida IBGE/BCB.
+// multa sobre o valor ATUALIZADO (sem juros). Série INPC espelha a matriz
+// canônica CalcEngine.TABELAS.INPC (BCB/SGS 188) — manter em sincronia.
 const CALC_INPC_MENSAL = {
   '2020-01': 0.19,'2020-02': 0.17,'2020-03': 0.18,'2020-04':-0.23,'2020-05':-0.25,'2020-06': 0.30,
   '2020-07': 0.44,'2020-08': 0.36,'2020-09': 0.87,'2020-10': 0.89,'2020-11': 0.95,'2020-12': 1.46,
   '2021-01': 0.27,'2021-02': 0.82,'2021-03': 0.86,'2021-04': 0.38,'2021-05': 0.96,'2021-06': 0.60,
   '2021-07': 1.02,'2021-08': 0.88,'2021-09': 1.20,'2021-10': 1.16,'2021-11': 0.84,'2021-12': 0.73,
-  '2022-01': 0.73,'2022-02': 1.00,'2022-03': 1.71,'2022-04': 1.04,'2022-05': 0.45,'2022-06': 0.62,
-  '2022-07':-0.60,'2022-08':-0.31,'2022-09':-0.32,'2022-10': 0.53,'2022-11': 0.53,'2022-12': 0.69,
-  '2023-01': 0.46,'2023-02': 0.77,'2023-03': 0.64,'2023-04': 0.55,'2023-05': 0.36,'2023-06':-0.10,
-  '2023-07': 0.09,'2023-08': 0.20,'2023-09': 0.13,'2023-10': 0.12,'2023-11': 0.33,'2023-12': 0.55,
-  '2024-01': 0.57,'2024-02': 0.81,'2024-03': 0.19,'2024-04': 0.37,'2024-05': 0.46,'2024-06': 0.23,
-  '2024-07': 0.26,'2024-08':-0.14,'2024-09': 0.48,'2024-10': 0.61,'2024-11': 0.34,'2024-12': 0.48,
+  '2022-01': 0.67,'2022-02': 1.00,'2022-03': 1.71,'2022-04': 1.04,'2022-05': 0.45,'2022-06': 0.62,
+  '2022-07':-0.60,'2022-08':-0.31,'2022-09':-0.32,'2022-10': 0.47,'2022-11': 0.38,'2022-12': 0.69,
+  '2023-01': 0.46,'2023-02': 0.77,'2023-03': 0.64,'2023-04': 0.53,'2023-05': 0.36,'2023-06':-0.10,
+  '2023-07':-0.09,'2023-08': 0.20,'2023-09': 0.11,'2023-10': 0.12,'2023-11': 0.10,'2023-12': 0.55,
+  '2024-01': 0.57,'2024-02': 0.81,'2024-03': 0.19,'2024-04': 0.37,'2024-05': 0.46,'2024-06': 0.25,
+  '2024-07': 0.26,'2024-08':-0.14,'2024-09': 0.48,'2024-10': 0.61,'2024-11': 0.33,'2024-12': 0.48,
   '2025-01': 0.00,'2025-02': 1.48,'2025-03': 0.51,'2025-04': 0.48,'2025-05': 0.35,'2025-06': 0.23,
   '2025-07': 0.21,'2025-08':-0.21,'2025-09': 0.52,'2025-10': 0.03,'2025-11': 0.03,'2025-12': 0.21,
-  '2026-01': 0.39,'2026-02': 0.56,'2026-03': 0.91,'2026-04': 0.81
+  '2026-01': 0.39,'2026-02': 0.56,'2026-03': 0.91,'2026-04': 0.81,'2026-05': 0.65
 };
 
 function _calcSegmentosMes(dIni, dFim){
@@ -9323,7 +9379,7 @@ function renderDevedores(){
     if(q && !(d.nome||'').toLowerCase().includes(q) && !(d.doc||'').includes(q)) return false;
     if(devFilter.statuses.length && !devFilter.statuses.includes(d.status)) return false;
     if(devFilter.clienteIds.length && !devFilter.clienteIds.includes(d.clienteId)) return false;
-    if(devFilter.resp && d.responsavel !== devFilter.resp) return false;
+    if(devFilter.resp && nomeResponsavel(d) !== devFilter.resp) return false;
     return true;
   });
   // IMPLEMENTADO S6: aplica seletor "Visualizar como" do gestor
@@ -9596,7 +9652,13 @@ function renderDevedores(){
   `;
 
   const searchEl = document.getElementById('dev-search');
-  if(searchEl) searchEl.addEventListener('input', e=>{ devFilter.q=e.target.value; renderDevedores(); });
+  if(searchEl) searchEl.addEventListener('input', e=>{
+    const pos = e.target.selectionStart;
+    devFilter.q=e.target.value; renderDevedores();
+    // renderDevedores recria a página inteira (novo input) — re-foca e restaura o cursor
+    const nv = document.getElementById('dev-search');
+    if(nv){ nv.focus(); try{ nv.setSelectionRange(pos,pos); }catch(_){} }
+  });
 
   const respSel = document.getElementById('dev-filter-resp');
   if(respSel){ respSel.value=devFilter.resp; respSel.addEventListener('change', e=>{ devFilter.resp=e.target.value; renderDevedores(); }); }
@@ -10018,7 +10080,7 @@ function openDrawer(devId){
       ? createdDate.toLocaleString('pt-BR',{month:'short',year:'numeric'})
       : '—';
     metaEl.innerHTML = [
-      `<span><span style="color:var(--text-3)">CPF</span> <strong style="font-family:var(--font-mono);color:var(--text)">${dev.doc||'—'}</strong></span>`,
+      `<span><span style="color:var(--text-3)">CPF</span> <strong style="font-family:var(--font-mono);color:var(--text)">${escHtml(dev.doc)||'—'}</strong></span>`,
       dev.tel ? `<span><span style="color:var(--text-3)">Tel</span> <strong style="font-family:var(--font-mono);color:var(--text)">${escHtml(dev.tel)}</strong></span>` : '',
       `<span><span style="color:var(--text-3)">Cliente</span> <strong style="color:var(--text)">${escHtml(cliNome)}</strong></span>`,
       `<span><span style="color:var(--text-3)">Desde</span> <strong style="color:var(--text)">${clienteDesde}</strong></span>`,
@@ -10028,7 +10090,7 @@ function openDrawer(devId){
 
   document.getElementById('devDrawer-editBtn').onclick = ()=>editDevedor(devId);
   document.getElementById('devDrawer-deleteBtn').onclick = ()=>excluirDevedorIndividual(devId);
-  document.getElementById('devDrawer-pagarBtn').onclick = ()=>abrirHistorico(devId);
+  document.getElementById('devDrawer-pagarBtn').onclick = ()=>abrirHistorico(devId, 'Pagamento');
 
   renderDrawerBody(devId);
 
@@ -10043,7 +10105,7 @@ function openDrawer(devId){
         try {
           const doc    = await ZapSignAPI.getDoc(m.zapsignToken);
           const signer = doc.signers?.[0];
-          const novo   = signer?.status || doc.status || m.zapsignStatus;
+          const novo   = zsNormStatus(signer?.status || doc.status || m.zapsignStatus);
           if(novo !== m.zapsignStatus){
             m.zapsignStatus = novo;
             if(novo==='SIGNED' && !m.assinadoEm){
@@ -10198,7 +10260,7 @@ function _drawerTabHtml(tab, dev, ctx){
             <div style="font-size:13px;color:var(--text);font-weight:500">${escHtml(h.desc||h.descricao||h.texto||'')}</div>
             <div style="font-size:11.5px;color:var(--text-3);margin-top:2px">${escHtml(usuario)} · <span style="font-family:var(--font-mono)">${h.data||''}</span></div>
           </div>
-          ${h.valor?`<span style="font-family:var(--font-mono);font-size:12.5px;font-weight:600;color:var(--text)">${h.valor}</span>`:''}
+          ${h.valor?`<span style="font-family:var(--font-mono);font-size:12.5px;font-weight:600;color:var(--text)">${escHtml(h.valor)}</span>`:''}
         </div>
       </div>`;
     }).join('');
@@ -10284,7 +10346,7 @@ function _drawerTabHtml(tab, dev, ctx){
         <div style="font-size:11px;color:var(--text-3);font-weight:600;letter-spacing:.10em;text-transform:uppercase;margin-bottom:10px">Etiquetas</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:22px">
           ${tags.map(t=>`<span style="padding:3px 9px;background:var(--surface);border:1px solid var(--border);border-radius:99px;font-size:11.5px;color:var(--text-2);font-weight:500">${escHtml(t)}</span>`).join('')}
-          <button onclick="abrirHistorico('${devId}')" style="padding:3px 9px;background:transparent;border:1px dashed var(--border-2);border-radius:99px;font-size:11.5px;color:var(--text-3);font-weight:500;cursor:pointer">+ Add</button>
+          <button onclick="editDevedor('${devId}')" style="padding:3px 9px;background:transparent;border:1px dashed var(--border-2);border-radius:99px;font-size:11.5px;color:var(--text-3);font-weight:500;cursor:pointer">+ Add</button>
         </div>
         ${score>0?`<div style="font-size:11px;color:var(--text-3);font-weight:600;letter-spacing:.10em;text-transform:uppercase;margin-bottom:10px">Score interno</div>
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:14px;margin-bottom:22px">
@@ -13055,9 +13117,9 @@ function diConfirmar(){
 }
 
 // ── HISTÓRICO ────────────────────────────────────────────────
-function abrirHistorico(devId){
+function abrirHistorico(devId, tipoInicial){
   document.getElementById('mhist-devId').value = devId;
-  document.getElementById('mhist-tipo').value = 'Ligação';
+  document.getElementById('mhist-tipo').value = tipoInicial || 'Ligação';
   document.getElementById('mhist-data').value = hoje();
   document.getElementById('mhist-desc').value = '';
   document.getElementById('mhist-prox').value = '';
@@ -13136,6 +13198,22 @@ function salvarAcordo(){
   dev.updatedAt = hoje();
 
   save();
+  // Persiste na tabela dedicada `acordos` (fonte da verdade — o metadata não guarda
+  // acordos). Sem isto, o acordo some no próximo load. forma/status respeitam os CHECKs
+  // (forma ∈ avista/boleto/cartao/outro; status ∈ ativo/encerrado/cancelado).
+  upsertAcordoRelational(devId, {
+    id: acordo.id,
+    forma: (numParc > 1 || entrada > 0) ? 'outro' : 'avista',
+    status: 'ativo',
+    parcelas,
+    valorTotal,
+    valorEntrada: entrada,
+    numParcelas: numParc,
+    dataPrimeiroVenc: venc1,
+    metadata: { obs }
+  }).then(res=>{
+    if(!res || !res.ok) showToast('Acordo salvo na tela, mas falhou ao gravar no servidor'+(res&&res.error?': '+res.error:'')+'. Recarregue e tente de novo.','warning');
+  });
   closeModal('modal-acordo');
   if(currentDevId === devId) renderDrawerBody(devId);
   renderDevedores();
@@ -13162,6 +13240,16 @@ function toggleParcela(devId, acordoId, idx){
 
   dev.updatedAt = hoje();
   save();
+  // Persiste a baixa na tabela `acordos` (update pontual do jsonb parcelas — não toca as
+  // demais colunas). status='encerrado' quando tudo pago (CHECK: ativo/encerrado/cancelado).
+  const supa = getSupabase();
+  if(supa && ac.id){
+    const patch = { parcelas: ac.parcelas, updated_at: new Date().toISOString() };
+    if(allPaid) patch.status = 'encerrado';
+    supa.from('acordos').update(patch).eq('id', ac.id).then(({ error })=>{
+      if(error) showToast('Baixa registrada na tela, mas falhou no servidor: '+error.message+'. Recarregue e confira.','warning');
+    });
+  }
   if(currentDevId === devId) renderDrawerBody(devId);
   renderDevedores();
 }
@@ -13215,7 +13303,7 @@ function renderProcessos(){
   if(!el) return;
 
   const devs = DB.devedores || [];
-  const allProcs = devs.filter(d => !d.arquivado);
+  const allProcs = devs.filter(d => !d.arquivado && !d.isDraft);
   const jud = allProcs.filter(d => d.fase === 'judicial');
   const extra = allProcs.filter(d => d.fase !== 'judicial');
 
@@ -13275,7 +13363,7 @@ function renderProcessos(){
         ${isJudicial ? `
         <div style="border-right:1px solid var(--border);padding-right:18px;min-width:160px;">
           <div style="font-size:10.5px;color:var(--text-3);font-weight:500;letter-spacing:.04em;text-transform:uppercase;margin-bottom:3px;">Nº processo</div>
-          <div style="font-family:var(--font-mono);font-size:11.5px;font-weight:600;color:var(--text);">${escHtml(d.numProcesso||d.doc||'—')}</div>
+          <div style="font-family:var(--font-mono);font-size:11.5px;font-weight:600;color:var(--text);">${escHtml(d.processoNum||d.doc||'—')}</div>
           <div style="font-size:11.5px;color:var(--text-2);margin-top:2px;">${escHtml(d.vara||d.comarca||'—')}</div>
         </div>` : `
         <div style="border-right:1px solid var(--border);padding-right:18px;min-width:120px;">
@@ -13337,7 +13425,7 @@ function renderProcessos(){
     <!-- Filter row -->
     <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
       <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-3);font-size:12.5px;flex:1;max-width:320px;">
-        ${ico('search',13)} <input id="proc-search" placeholder="Buscar devedor, vara, nº processo…" oninput="renderProcessos()"
+        ${ico('search',13)} <input id="proc-search" placeholder="Buscar devedor, vara, nº processo…"
           value="${escHtml(window._procSearch||'')}"
           style="border:none;outline:none;background:transparent;font-size:12.5px;flex:1;font-family:inherit;color:var(--text);"/>
       </div>
@@ -13353,7 +13441,7 @@ function renderProcessos(){
       ${jud
         .filter(d => {
           const q = (window._procSearch||'').toLowerCase();
-          if(q && !(d.nome||'').toLowerCase().includes(q) && !(d.numProcesso||'').includes(q) && !(d.doc||'').includes(q)) return false;
+          if(q && !(d.nome||'').toLowerCase().includes(q) && !(d.processoNum||'').includes(q) && !(d.doc||'').includes(q)) return false;
           if(window._procFaseFilter && fasesJud[etapaToFaseIdx(d.etapa)] !== window._procFaseFilter) return false;
           return true;
         })
@@ -13383,7 +13471,10 @@ function renderProcessos(){
 
   // Bind search input
   const srch = document.getElementById('proc-search');
-  if(srch) srch.addEventListener('input', e=>{ window._procSearch=e.target.value; renderProcessos(); });
+  if(srch) srch.addEventListener('input', e=>{
+    const pos=e.target.selectionStart; window._procSearch=e.target.value; renderProcessos();
+    const el2=document.getElementById('proc-search'); if(el2){ el2.focus(); try{ el2.setSelectionRange(pos,pos); }catch(_){} }
+  });
 }
 
 // ── INTIMAÇÕES & ANDAMENTOS ──────────────────────────────────
@@ -13513,7 +13604,7 @@ async function renderIntimacoes(){
   const chip = (label, val, key) => {
     const active = _intimacoesState[key] === val;
     return `<button class="btn btn-sm ${active?'btn-primary':'btn-ghost'}" style="${active?'':'border-color:var(--border);'}"
-      onclick="_intimacoesState.${key}=${JSON.stringify(val)};renderIntimacoes();">${escHtml(label)}</button>`;
+      onclick="_intimacoesState.${key}=${escHtml(JSON.stringify(val))};renderIntimacoes();">${escHtml(label)}</button>`;
   };
 
   const linha = (i)=>{
@@ -13571,7 +13662,10 @@ async function renderIntimacoes(){
   `;
 
   const srch = document.getElementById('intim-search');
-  if(srch) srch.addEventListener('input', e=>{ _intimacoesState.q=e.target.value; renderIntimacoes(); });
+  if(srch) srch.addEventListener('input', e=>{
+    const pos=e.target.selectionStart; _intimacoesState.q=e.target.value; renderIntimacoes();
+    const el2=document.getElementById('intim-search'); if(el2){ el2.focus(); try{ el2.setSelectionRange(pos,pos); }catch(_){} }
+  });
 
   renderFilaPeticionamento();
 }
@@ -13775,8 +13869,15 @@ async function submeterPeticionamento(){
     if(proc){
       const dig = proc.replace(/\D/g,'');
       formatado = dig.length===20 ? `${dig.slice(0,7)}-${dig.slice(7,9)}.${dig.slice(9,13)}.${dig.slice(13,14)}.${dig.slice(14,16)}.${dig.slice(16,20)}` : proc;
-      const { data: cobs } = await supa.from('cobrancas').select('id').or(`numero_processo.eq.${formatado},numero_processo.eq.${dig}`).limit(1);
-      if(cobs && cobs.length){ cobrancaId = cobs[0].id; devedorId = cobs[0].id; } // invariante cobranca.id=devedor principal
+      const { data: cobs } = await supa.from('cobrancas').select('id, cobranca_partes(devedor_id, principal)').or(`numero_processo.eq.${formatado},numero_processo.eq.${dig}`).limit(1);
+      if(cobs && cobs.length){
+        cobrancaId = cobs[0].id;
+        // devedor_id tem FK p/ devedores(id): NÃO usar o id da cobrança (o invariante cobranca.id=devedor
+        // não vale a partir da 2ª cobrança do mesmo devedor). Pega o devedor principal em cobranca_partes.
+        const _partes = cobs[0].cobranca_partes || [];
+        const _pr = _partes.find(p=>p.principal) || _partes[0];
+        devedorId = _pr ? _pr.devedor_id : null;
+      }
     }
 
     // Snapshot da distribuição (inicial): partes do caso + classificação informada.
@@ -15466,7 +15567,7 @@ function abrirCobrancaModal(cob){
   const vCapital = cob ? _cobrFmtNum(cob.valor_capital ?? cob.valor_orig ?? d.valorOriginal) : '';
   const capJaSet = !!(cob && cob.valor_capital!=null);
   const capDisabled = !!(capJaSet && ehColaborador());
-  const venc = cob ? (cob.data_entrada || d.vencimento || '') : '';
+  const venc = cob ? (cob.vencimento || d.vencimento || '') : '';
   const desc = cob ? escHtml(d.descricao || d.titulo || '') : '';
   // FASE C — campos de documento/fase promovidos a colunas próprias de cobrancas.
   const tipoDocRaw = cob ? (cob.tipo_documento || d.titulo || '') : '';
@@ -15699,6 +15800,7 @@ Retorne SOMENTE o JSON, sem markdown.`});
 }
 
 async function salvarCobranca(){
+  if(window._salvandoCobr) return; // trava anti duplo-clique (evita cobrança/devedor/tarefa em duplicidade)
   const supa = getSupabase();
   if(!supa){ showToast('Supabase não configurado.','danger'); return; }
   const editId = window._cobrEditId || null;
@@ -15744,8 +15846,14 @@ async function salvarCobranca(){
 
   if(!resp.length){ showToast('Informe ao menos um devedor.','danger'); return; }
   if(!tipoCobr){ showToast('Selecione o tipo de cobrança (física ou digital).','danger'); return; }
+  // R-11: na CRIAÇÃO exige credor vinculado e valor > 0 (evita cobrança vazia fora de capital/saldo).
+  if(!editId){
+    if(!credorNome){ showToast('Informe o credor (cliente) da cobrança.','danger'); return; }
+    if(!(valorOrig>0)){ showToast('Informe o valor da cobrança (maior que zero).','danger'); return; }
+  }
   garantirUmPrincipal(resp);
 
+  window._salvandoCobr = true;
   try{
     const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
     const uidUser = sess?.data?.session?.user?.id || null;
@@ -15753,10 +15861,13 @@ async function salvarCobranca(){
     // 1) Resolve/cria o credor (cliente)
     let clienteId = null;
     if(credorNome){
-      const existente = (DB.clientes||[]).find(c=>(c.nome||'').toLowerCase()===credorNome.toLowerCase()
-        || (c.nomeFantasia||c.nome_fantasia||'').toLowerCase()===credorNome.toLowerCase());
+      // Não casa credores arquivados/rascunho (mesma regra dos demais seletores de credor).
+      const existente = (DB.clientes||[]).find(c=>!c.arquivado && !c.isDraft && ((c.nome||'').toLowerCase()===credorNome.toLowerCase()
+        || (c.nomeFantasia||c.nome_fantasia||'').toLowerCase()===credorNome.toLowerCase()));
       if(existente){ clienteId = existente.id; }
       else{
+        // F-22: colaborador não cria credor direto — deve passar pelo fluxo de aprovação (Clientes).
+        if(ehColaborador()){ showToast('Credor não cadastrado. Cadastre-o em Clientes (vai para aprovação do gestor) antes de vincular à cobrança.','danger'); return; }
         const { data, error } = await supa.from('clientes')
           .insert({ nome: credorNome, metadata:{ origem:'cobranca_form' } }).select('id').single();
         if(error) throw new Error('credor: '+error.message);
@@ -15770,7 +15881,7 @@ async function salvarCobranca(){
       if(dev){ r.devedorId = dev.id; r._novo = false; }
       else{
         const { data, error } = await supa.from('devedores')
-          .insert({ nome:r.nome, doc:r.doc||null, telefone:r.tel||null, cliente_id:clienteId, status:'Cobrar',
+          .insert({ nome:r.nome, doc:r.doc||null, telefone:r.tel||null, cliente_id:clienteId,
                     metadata:{ origem:'cobranca_form' } }).select('id').single();
         if(error) throw new Error('contato '+r.nome+': '+error.message);
         r.devedorId = data.id; r._novo = true;
@@ -15786,7 +15897,7 @@ async function salvarCobranca(){
       cobId = editId;
       const updCob = {
         cliente_id: clienteId, status: situacao, tipo_cobranca: tipoCobr,
-        valor_orig: valorOrig, valor_atual: valorAtual, valor_capital: (valorCapital||null), data_entrada: venc, vencimento: venc, divida,
+        valor_orig: valorOrig, valor_atual: valorAtual, valor_capital: (valorCapital||null), vencimento: venc, divida,
         fase, tipo_documento: tipoDoc, numero_documento: numDoc, banco, agencia_conta: agConta,
         numero_processo: numProc, vara_tribunal: vara, monitorar_datajud: monitorar, origem, observacoes: cobObs, tags: cobTags,
         updated_at: new Date().toISOString()
@@ -15811,7 +15922,7 @@ async function salvarCobranca(){
       }
       const novaCobr = {
         cliente_id: clienteId, status: situacao, fase, tipo_cobranca: tipoCobr,
-        valor_orig: valorOrig, valor_atual: valorAtual, valor_capital: (valorCapital||null), data_entrada: venc, vencimento: venc,
+        valor_orig: valorOrig, valor_atual: valorAtual, valor_capital: (valorCapital||null), data_entrada: hoje(), vencimento: venc,
         tipo_documento: tipoDoc, numero_documento: numDoc, banco, agencia_conta: agConta,
         numero_processo: numProc, vara_tribunal: vara, monitorar_datajud: monitorar, origem, observacoes: cobObs, tags: cobTags,
         divida, metadata:{ credorOriginal: credorNome, origem:'cobranca_form' },
@@ -15832,7 +15943,7 @@ async function salvarCobranca(){
       const have = new Set((existem||[]).map(x=>x.id));
       const novosDev = resp.filter(r=>r.devedorId && !have.has(r.devedorId))
         .map(r=>({ id:r.devedorId, nome:r.nome, doc:r.doc||null, telefone:r.tel||null,
-                  cliente_id:clienteId, status:'Cobrar', assigned_to:assignedTo,
+                  cliente_id:clienteId, assigned_to:assignedTo,
                   metadata:{ origem:'cobranca_form' } }));
       if(novosDev.length){
         const { error: efix } = await supa.from('devedores').upsert(novosDev, { onConflict:'id' });
@@ -15840,8 +15951,12 @@ async function salvarCobranca(){
       }
     }
 
-    // Vincula as partes (mesmo caminho para criar/editar)
-    const partes = resp.map(r=>({ cobranca_id: cobId, devedor_id: r.devedorId, papel: r.papel, principal: !!r.principal }));
+    // Vincula as partes (mesmo caminho para criar/editar). Dedup por (devedor_id, papel):
+    // o índice único uq_cobranca_partes_papel rejeita duplicatas e, na edição (partes já
+    // apagadas acima), esse insert falho deixaria a cobrança órfã sem nenhum responsável.
+    const _seenParte = new Set();
+    const partes = resp.map(r=>({ cobranca_id: cobId, devedor_id: r.devedorId, papel: r.papel, principal: !!r.principal }))
+      .filter(p=>{ const k=p.devedor_id+'|'+p.papel; if(_seenParte.has(k)) return false; _seenParte.add(k); return true; });
     const { error: epar } = await supa.from('cobranca_partes').insert(partes);
     if(epar){
       // Evita cobrança órfã: se acabamos de CRIAR a cobrança e a parte falhou, desfaz.
@@ -15865,7 +15980,7 @@ async function salvarCobranca(){
   }catch(e){
     console.warn('[cobr] salvar:', e);
     showToast('Não foi possível salvar: '+e.message,'danger');
-  }
+  }finally{ window._salvandoCobr = false; }
 }
 
 function renderClientes(){
@@ -17485,12 +17600,15 @@ function _gerDocBuild(tipo, cli, dev, opt){
   }
   if(tipo==='confissao'){
     const n=Math.max(1, parseInt(opt.parcelas,10)||1);
-    const valParc=valor>0?(valor/n):0;
+    const _totCent=Math.round((valor>0?valor:0)*100);
+    const _baseCent=Math.floor(_totCent/n);
+    const valParc=_baseCent/100;
+    const valParcUlt=(_totCent-_baseCent*(n-1))/100; // última carrega o resto p/ somar o total exato
     const primVenc=opt.venc?_gerDataExt(opt.venc):'____/____/______';
     return { titulo:'Termo de Confissão de Dívida e Acordo de Parcelamento', eyebrow:'Acordo extrajudicial', fichaItems:ficha, fecho,
       assinaturas:[devedorAss, credorAss, ['', 'Testemunha 1'], ['', 'Testemunha 2']],
       corpoHtml:`<p>Pelo presente instrumento particular, <strong>${escHtml(dev.nome||'')}</strong>${dev.doc?`, inscrito(a) no CPF/CNPJ sob nº ${escHtml(dev.doc)}`:''}, doravante denominado(a) <strong>DEVEDOR(A)</strong>, declara <strong>RECONHECER E CONFESSAR</strong> dever a <strong>${escHtml(cli.nome||'')}</strong>${cli.doc?`, inscrito(a) sob nº ${escHtml(cli.doc)}`:''}, doravante denominado(a) <strong>CREDOR(A)</strong>, a quantia líquida e certa de <strong>${fmtR(valor)}</strong>${compStr}${dev.titulo?`, originada de ${escHtml(dev.titulo)}`:''}.</p>
-<p>O DEVEDOR compromete-se a pagar o valor confessado em <strong>${n} (${escHtml(_extensoDias(n))}) parcela(s)</strong> de <strong>${fmtR(valParc)}</strong>, vencendo a primeira em <strong>${primVenc}</strong> e as demais no mesmo dia dos meses subsequentes.</p>
+<p>O DEVEDOR compromete-se a pagar o valor confessado em <strong>${n} (${escHtml(_extensoDias(n))}) parcela(s)</strong> de <strong>${fmtR(valParc)}</strong>${valParcUlt!==valParc?` (a última parcela no valor de <strong>${fmtR(valParcUlt)}</strong> para ajuste de arredondamento)`:''}, vencendo a primeira em <strong>${primVenc}</strong> e as demais no mesmo dia dos meses subsequentes.</p>
 <p>O não pagamento de qualquer parcela no respectivo vencimento acarretará o <strong>vencimento antecipado</strong> da totalidade do saldo devedor, independentemente de aviso ou notificação, autorizando o CREDOR a adotar as medidas de cobrança cabíveis.</p>
 <p>E, por estarem assim justos e acordados, firmam o presente em duas vias de igual teor.</p>` };
   }
@@ -18711,20 +18829,50 @@ function cpSalvarNotif(){
 }
 
 // ── PORTAL DEVEDOR ───────────────────────────────────────────
-function renderPortalDevedor(){
+async function renderPortalDevedor(){
   if(!currentUser || currentUser.tipo!=='devedor') return;
   const body = document.getElementById('portalDevedorBody');
   if(!body) return;
 
-  const dev = (DB.devedores||[]).find(d=>d.id===currentUser.devedorId);
-  if(!dev){
-    body.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${ico('danger',36)}</div><h3>Dados não encontrados</h3></div>`;
-    return;
+  body.innerHTML = `<div class="empty-state"><h3>Carregando seus dados…</h3></div>`;
+
+  // Fonte autoritativa: RPC SECURITY DEFINER amarrada ao token de sessão do
+  // portal. O devedor é anon (sem RLS de staff), então DB.devedores vem vazio —
+  // por isso o portal abria em branco. A RPC devolve SÓ o caso do próprio
+  // devedor, resolvendo o devedor_id a partir da sessão (nunca do cliente).
+  // Ver 20260706_portal_meu_caso.sql.
+  let caso = null;
+  const supa = getSupabase();
+  const sess = currentUser.portalSessao;
+  if(supa && sess){
+    try{
+      const { data, error } = await supa.rpc('portal_meu_caso', { p_sessao_token: sess });
+      if(!error && data?.ok) caso = data;
+    }catch(_){ /* cai no fallback abaixo */ }
   }
 
-  const valor = parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0;
-  const acordos = dev.acordos || [];
-  const primeiroNome = (dev.nome||'').split(' ')[0];
+  // Monta o objeto de exibição a partir da RPC (devedor) ou de DB.devedores
+  // (preview de staff logado, que enxerga tudo via RLS).
+  let nome, valor, statusTxt, vencimento, acordos;
+  if(caso){
+    nome = caso.devedor?.nome || 'Devedor';
+    valor = Number(caso.divida?.valor_atual) || Number(caso.divida?.valor_orig) || 0;
+    statusTxt = caso.divida?.status || '';
+    vencimento = caso.divida?.vencimento || '';
+    acordos = Array.isArray(caso.acordos) ? caso.acordos : [];
+  } else {
+    const dev = (DB.devedores||[]).find(d=>d.id===currentUser.devedorId);
+    if(!dev){
+      body.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${ico('danger',36)}</div><h3>Não foi possível carregar seus dados</h3><p style="color:#8C7E72;">Sua sessão pode ter expirado. Entre novamente para continuar.</p></div>`;
+      return;
+    }
+    nome = dev.nome||'';
+    valor = parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0;
+    statusTxt = dev.status;
+    vencimento = dev.vencimento||'';
+    acordos = dev.acordos || [];
+  }
+  const primeiroNome = (nome||'').split(' ')[0];
   const waNr = DB.config?.whatsapp?.numero?.replace(/\D/g,'');
 
   body.innerHTML = `
@@ -18736,8 +18884,8 @@ function renderPortalDevedor(){
     <div style="background:#fff;border:1px solid #E8E4DF;border-radius:12px;padding:24px 28px;margin-bottom:16px;">
       <div style="font-family:'Inter',sans-serif;font-size:11px;color:#8C7E72;letter-spacing:.1em;text-transform:uppercase;margin-bottom:10px;">Valor a regularizar</div>
       <div style="font-family:'Playfair Display',Georgia,serif;font-size:38px;font-weight:700;color:#B45309;line-height:1;">${fmtR(valor)}</div>
-      <div style="margin-top:14px;">${statusBadgeHtml(dev.status)}</div>
-      ${dev.vencimento?`<div style="font-family:'Newsreader',Georgia,serif;font-size:13px;color:#8C7E72;margin-top:8px;">Vencimento original: ${escHtml(dev.vencimento)}</div>`:''}
+      <div style="margin-top:14px;">${statusBadgeHtml(statusTxt)}</div>
+      ${vencimento?`<div style="font-family:'Newsreader',Georgia,serif;font-size:13px;color:#8C7E72;margin-top:8px;">Vencimento original: ${escHtml(vencimento)}</div>`:''}
     </div>
 
     ${acordos.length>0?`
@@ -20496,6 +20644,15 @@ async function chatSalvarNoBucket(){
 // ── Persistência da conversa (peticao_conversas) ────────────────────────────
 async function chatPersist(showOk){
   const supa=getSupabase(); if(!supa) return;
+  clearTimeout(_chatSaveTimer); // cancela autosave pendente p/ não concorrer com este save
+  // Serializa persistências concorrentes (autosave + botão Salvar): evita 2 INSERT com conversaId=null.
+  const prev = _chat._persisting || Promise.resolve();
+  const run = ()=>_chatPersistOnce(showOk);
+  _chat._persisting = prev.then(run, run);
+  return _chat._persisting;
+}
+async function _chatPersistOnce(showOk){
+  const supa=getSupabase(); if(!supa) return;
   try{
     await chatEnsureDevedor();
     const payload={ devedor_id:_chat.devId||null, caso_id:_chat.casoId||null, credor_id:_chat.credorId||null,
@@ -20922,7 +21079,7 @@ async function zsVerificarStatusGlobal(minutaId, devId){
   try {
     const doc    = await ZapSignAPI.getDoc(m.zapsignToken);
     const signer = doc.signers?.[0];
-    const novo   = signer?.status || doc.status || m.zapsignStatus;
+    const novo   = zsNormStatus(signer?.status || doc.status || m.zapsignStatus);
     const anterior = m.zapsignStatus;
 
     m.zapsignStatus = novo;
@@ -21136,6 +21293,7 @@ window.finApi = (function(){
     const ini = y+'-'+String(m).padStart(2,'0')+'-01';
     const fim = new Date(y, m, 0).toISOString().slice(0,10);
     const futureLimit = new Date(Date.now()+30*86400000).toISOString().slice(0,10);
+    const hojeLimit   = new Date().toISOString().slice(0,10); // piso: só vencimentos a partir de hoje
 
     // Server-side aggregate via RPC seria ideal, mas pra evitar criar função usamos
     // queries leves (somente coluna valor) — ainda assim PostgREST limita 1000 por padrão.
@@ -21144,7 +21302,8 @@ window.finApi = (function(){
       let from = 0, total = 0, qty = 0;
       while(true){
         let q = sb.from('fin_lancamento').select('valor', { count:'exact' });
-        q = filterFn(q).range(from, from+999);
+        // ORDER BY estável: sem ele, LIMIT/OFFSET pode duplicar/perder linhas entre páginas.
+        q = filterFn(q).order('id',{ascending:true}).range(from, from+999);
         const { data, count, error } = await q;
         if(error) throw error;
         for(const r of (data||[])) total += (+r.valor||0);
@@ -21158,7 +21317,7 @@ window.finApi = (function(){
     const [rec, des, pend] = await Promise.all([
       sumValor(q=>q.eq('tipo_movimento',1).gte('data_competencia',ini).lte('data_competencia',fim)),
       sumValor(q=>q.eq('tipo_movimento',0).gte('data_competencia',ini).lte('data_competencia',fim)),
-      sumValor(q=>q.eq('tipo_movimento',1).eq('status',0).lte('data_vencimento', futureLimit)),
+      sumValor(q=>q.eq('tipo_movimento',1).eq('status',0).gte('data_vencimento', hojeLimit).lte('data_vencimento', futureLimit)),
     ]);
     return {
       receitaMes: rec.total,
@@ -21206,7 +21365,9 @@ window.finApi = (function(){
       data_vencimento: lanc.data_vencimento || null,
       data_pagamento: lanc.data_pagamento || null,
       valor: valorAssinado,
-      valor_pago: (lanc.valor_pago!=null && lanc.valor_pago!=='') ? sign * Math.abs(+lanc.valor_pago) : null,
+      // undefined ⇒ chave omitida no JSON ⇒ UPDATE não toca valor_pago (preserva
+      // a baixa parcial). null explícito continua zerando quando intencional.
+      valor_pago: (lanc.valor_pago===undefined) ? undefined : ((lanc.valor_pago!=null && lanc.valor_pago!=='') ? sign * Math.abs(+lanc.valor_pago) : null),
       juros: (lanc.juros!=null && lanc.juros!=='') ? +lanc.juros : null,
       multa: (lanc.multa!=null && lanc.multa!=='') ? +lanc.multa : null,
       desconto: (lanc.desconto!=null && lanc.desconto!=='') ? +lanc.desconto : null,
@@ -21408,7 +21569,12 @@ window.finApi = (function(){
     const rows = [];
     for(let i=0; i<totalParcelas; i++){
       const dataParc = new Date(dataIni);
+      // Clampa o dia ao último do mês alvo: sem isso, dias 29–31 estouram o setMonth
+      // (ex.: 31/jan +1 mês vira 03/mar), pulando/duplicando meses nas competências.
+      const _diaBase = dataIni.getDate();
+      dataParc.setDate(1);
       dataParc.setMonth(dataParc.getMonth() + i);
+      dataParc.setDate(Math.min(_diaBase, new Date(dataParc.getFullYear(), dataParc.getMonth()+1, 0).getDate()));
       const venc = new Date(dataParc);
       const vlr = i === totalParcelas - 1 ? (valorParcela + ajuste) : valorParcela;
       rows.push({
@@ -22889,6 +23055,10 @@ async function editarLancamento(id){
     if(document.getElementById('mlanc-pagamento')) document.getElementById('mlanc-pagamento').value = l.data_pagamento || '';
     document.getElementById('mlanc-desc').value = l.descricao || '';
     document.getElementById('mlanc-valor').value = Math.abs(+l.valor||0).toFixed(2).replace('.',',');
+    // Repopula juros/multa/desconto — senão o save relê inputs vazios e zera esses campos.
+    if(document.getElementById('mlanc-juros')) document.getElementById('mlanc-juros').value = l.juros!=null ? Math.abs(+l.juros).toFixed(2).replace('.',',') : '';
+    if(document.getElementById('mlanc-multa')) document.getElementById('mlanc-multa').value = l.multa!=null ? Math.abs(+l.multa).toFixed(2).replace('.',',') : '';
+    if(document.getElementById('mlanc-desconto')) document.getElementById('mlanc-desconto').value = l.desconto!=null ? Math.abs(+l.desconto).toFixed(2).replace('.',',') : '';
     const catId = (l._categorias && l._categorias[0]) ? l._categorias[0].categoria_id : '';
     if(document.getElementById('mlanc-cat')) document.getElementById('mlanc-cat').value = catId || '';
     document.getElementById('mlanc-conta').value = l.conta_id || '';
@@ -22999,7 +23169,7 @@ async function renderContasGridSrv(){
   g.innerHTML = contas.map(c=>{
     const s = saldosByConta[c.id] || {};
     const saldoInicial = +c.saldo_inicial || 0;
-    const saldoRealizado = +s.saldo_atual || saldoInicial;
+    const saldoRealizado = (s.saldo_atual != null) ? +s.saldo_atual : saldoInicial;
     const bankBal = c.bank_balance != null ? +c.bank_balance : null;
     const dispBal = bankBal != null ? bankBal : saldoRealizado;  // banco se tiver, senão realizado
     const diff = bankBal != null ? (saldoRealizado - bankBal) : null;
@@ -24245,6 +24415,7 @@ async function _carregarDadosRelat(ano){
     const { data, error } = await sb.from('fin_lancamento')
       .select('valor,data_competencia,tipo_movimento')
       .gte('data_competencia', ini).lte('data_competencia', fim)
+      .order('id',{ascending:true}) // ORDER BY estável evita duplicar/perder linhas entre páginas
       .range(from, from+999);
     if(error) throw error;
     if(!data || !data.length) break;
@@ -24432,6 +24603,8 @@ async function renderFinAsaas(el){
     const balance       = balData?._error ? null : (balData?.balance ?? 0);
     const inTransit     = balData?.totalInTransit ?? balData?.totalTransfers ?? 0;
     const balErrMsg     = balData?._error || null;
+    // KPIs somam só a 1ª página (limit 100 do Asaas). Sinaliza que são parciais quando há mais.
+    const _parcialAviso = totalCount > charges.length ? ` · parcial (${charges.length} de ${totalCount})` : '';
 
     el.innerHTML = `
       <!-- KPI cards -->
@@ -24445,17 +24618,17 @@ async function renderFinAsaas(el){
         <div class="kcard">
           <div class="kcard-label">A receber</div>
           <div class="kcard-value" style="color:#b45309;">${fmtR(totalPending)}</div>
-          <div class="kcard-sub">${charges.filter(c=>c.status==='PENDING').length} cobrança(s)</div>
+          <div class="kcard-sub">${charges.filter(c=>c.status==='PENDING').length} cobrança(s)${_parcialAviso}</div>
         </div>
         <div class="kcard">
           <div class="kcard-label">Vencido</div>
           <div class="kcard-value" style="color:var(--danger);">${fmtR(totalOverdue)}</div>
-          <div class="kcard-sub">${charges.filter(c=>c.status==='OVERDUE').length} cobrança(s)</div>
+          <div class="kcard-sub">${charges.filter(c=>c.status==='OVERDUE').length} cobrança(s)${_parcialAviso}</div>
         </div>
         <div class="kcard">
           <div class="kcard-label">Recebido (mês)</div>
           <div class="kcard-value" style="color:var(--success);">${fmtR(totalRecMes)}</div>
-          <div class="kcard-sub">${charges.filter(c=>['RECEIVED','CONFIRMED'].includes(c.status)&&(c.paymentDate||'').startsWith(mes)).length} cobrança(s)</div>
+          <div class="kcard-sub">${charges.filter(c=>['RECEIVED','CONFIRMED'].includes(c.status)&&(c.paymentDate||'').startsWith(mes)).length} cobrança(s)${_parcialAviso}</div>
         </div>
       </div>
 
@@ -25064,7 +25237,9 @@ async function salvarLancamento(){
     data_vencimento: document.getElementById('mlanc-vencimento')?.value || null,
     data_pagamento: document.getElementById('mlanc-pagamento')?.value || null,
     valor: valor,
-    valor_pago: null,
+    // undefined = "não mexer": o modal não edita valor_pago (baixa é em "Baixar
+    // lançamento"). Enviar null aqui apagava o valor pago de lançamentos parciais.
+    valor_pago: undefined,
     juros: parseValorBR(document.getElementById('mlanc-juros')?.value) || null,
     multa: parseValorBR(document.getElementById('mlanc-multa')?.value) || null,
     desconto: parseValorBR(document.getElementById('mlanc-desconto')?.value) || null,
@@ -25684,6 +25859,23 @@ async function renderWAPendentes(el){
       });
     }
     P.lista = Object.values(porTel).map(p=>({ ...p, intent: waClassificarIntencao(p.texto, p) }));
+    // F-07: vw_conversas_pendentes não exclui telefones já resolvidos em
+    // whatsapp_atendimentos (só considera outbound/agendada). Sem isto, uma
+    // conversa arquivada SEM resposta reaparece na fila e duplica em Resolvidas
+    // no próximo reload. Remove da fila os telefones resolvidos DEPOIS da última
+    // mensagem recebida (se o cliente escrever de novo, recebida_em > resolvido_em
+    // e a conversa volta à fila naturalmente). Handoff (aguardando_humano) é
+    // pendência real e nunca é escondido.
+    const _resolvMap = {};
+    (resolv && !resolv.error ? (resolv.data||[]) : []).forEach(r=>{
+      const t = r.resolvido_em || r.updated_at;
+      if(r.telefone && t){ const prev=_resolvMap[r.telefone]; if(!prev || new Date(t)>new Date(prev)) _resolvMap[r.telefone]=t; }
+    });
+    P.lista = P.lista.filter(p=>{
+      const rt = _resolvMap[p.telefone];
+      if(!rt || p._handoff) return true;
+      return p.recebida_em ? (new Date(p.recebida_em) > new Date(rt)) : false;
+    });
     // Resolvidas (tolera colunas novas ausentes: desfecho/motivo/regua_bloqueada).
     P.arquivadas = (resolv && !resolv.error ? (resolv.data||[]) : []).map(r=>({
       telefone:r.telefone, caso_id:r.caso_id||null, texto:r.resumo||'', tipo:'texto',
@@ -25701,13 +25893,16 @@ async function renderWAPendentes(el){
     if(telsBurst.length){
       try{
         const [msgs, outs] = await Promise.all([
-          supa.from('crm_mensagens_recebidas').select('telefone,texto,tipo,recebida_em').in('telefone', telsBurst).order('recebida_em',{ ascending:true }).limit(500),
+          // desc + limit pega as mais RECENTES (a rajada atual); revertemos p/ exibição cronológica.
+          // Com asc, ao passar de 500 linhas acumuladas o painel perdia justamente as novas.
+          supa.from('crm_mensagens_recebidas').select('telefone,texto,tipo,recebida_em').in('telefone', telsBurst).order('recebida_em',{ ascending:false }).limit(500),
           supa.from('crm_mensagens_status').select('telefone_enviado,evento_em').order('evento_em',{ ascending:false }).limit(500)
         ]);
         const dk = t => String(t||'').replace(/\D/g,'').slice(-8);
         const lastOut = {};
         (outs&&outs.data||[]).forEach(o=>{ const k=dk(o.telefone_enviado); if(k && (!lastOut[k]||new Date(o.evento_em)>new Date(lastOut[k]))) lastOut[k]=o.evento_em; });
-        (msgs&&msgs.data||[]).forEach(m=>{ const k=dk(m.telefone); if(!k) return; const lo=lastOut[k]; if(!lo || new Date(m.recebida_em)>new Date(lo)){ (P.burst[k]=P.burst[k]||[]).push({ texto:m.texto, tipo:m.tipo, recebida_em:m.recebida_em }); } });
+        const msgData = (msgs&&msgs.data||[]).slice().reverse(); // desc no fetch → asc (cronológico) na exibição
+        msgData.forEach(m=>{ const k=dk(m.telefone); if(!k) return; const lo=lastOut[k]; if(!lo || new Date(m.recebida_em)>new Date(lo)){ (P.burst[k]=P.burst[k]||[]).push({ texto:m.texto, tipo:m.tipo, recebida_em:m.recebida_em }); } });
       }catch(_e){ /* best-effort: sem burst, o painel cai no texto único */ }
     }
   }catch(e){
@@ -26084,10 +26279,22 @@ async function waPendPersistirResolucao(p, { desfecho, motivo, reguaBloqueada })
   }
 }
 
-// Reabre uma conversa resolvida (Restaurar). Best-effort.
-async function waPendReabrir(tel){
+// Reabre uma conversa resolvida (Restaurar/Desfazer). Best-effort.
+// Também DESBLOQUEIA a régua: senão um arquivamento "Spam / engano" desfeito
+// deixava regua_bloqueada=true (cron cancela agendadas em silêncio) e a régua
+// manual travada, sem caminho de reversão na UI.
+async function waPendReabrir(tel, casoId){
   const supa=getSupabase(); if(!supa) return;
-  try{ await supa.from('whatsapp_atendimentos').upsert({ telefone:tel, estado:'aguardando_humano', updated_at:new Date().toISOString() },{ onConflict:'telefone' }); }catch(_){}
+  // Corrida: aguarda o upsert 'resolvido' (persistência) terminar antes de reabrir, senão ele
+  // pode aterrissar por último e deixar o banco 'resolvido' com a UI mostrando pendente.
+  try{ const pend=(window._waPend&&window._waPend._resolPromises)||{}; await pend[tel]; }catch(_){}
+  try{ await supa.from('whatsapp_atendimentos').upsert({ telefone:tel, estado:'aguardando_humano', regua_bloqueada:false, updated_at:new Date().toISOString() },{ onConflict:'telefone' }); }
+  catch(_){ try{ await supa.from('whatsapp_atendimentos').upsert({ telefone:tel, estado:'aguardando_humano', updated_at:new Date().toISOString() },{ onConflict:'telefone' }); }catch(__){} }
+  const dev=waDevedorDe({ telefone:tel, caso_id:casoId });
+  if(dev && dev.metadata && dev.metadata.reguaBloqueada){
+    delete dev.metadata.reguaBloqueada; delete dev.metadata.reguaBloqueadaMotivo;
+    if(typeof save==='function') save();
+  }
 }
 
 // Move uma conversa da fila pendente -> resolvidas (local + persistência).
@@ -26098,16 +26305,20 @@ function waPendResolverLocal(tel, { desfecho, motivo, reguaBloqueada }){
   const p=P.lista[idx];
   P.lista.splice(idx,1);
   delete P.selMass[tel];
-  const arch={ ...p, archived:true, desfecho, motivo:motivo||null, regua_bloqueada:!!reguaBloqueada, recebida_em:new Date().toISOString() };
+  const arch={ ...p, archived:true, desfecho, motivo:motivo||null, regua_bloqueada:!!reguaBloqueada, recebida_em_orig:p.recebida_em, recebida_em:new Date().toISOString() };
   P.arquivadas.unshift(arch);
-  waPendPersistirResolucao(p,{ desfecho, motivo, reguaBloqueada });
+  // Guarda a Promise da persistência por telefone p/ waPendReabrir poder sequenciar (anti-corrida).
+  (P._resolPromises=P._resolPromises||{})[tel]=waPendPersistirResolucao(p,{ desfecho, motivo, reguaBloqueada });
   return p;
 }
-// Desfaz (Desfazer no toast): devolve à fila.
+// Desfaz (Desfazer no toast): devolve à fila. `tel` pode ser um telefone ou um array (ação em massa).
 function waPendDesfazer(snapshotLista, snapshotArq, tel){
   const P=window._waPend;
   P.lista=snapshotLista; P.arquivadas=snapshotArq;
-  waPendReabrir(tel);
+  (Array.isArray(tel)?tel:[tel]).forEach(t=>{
+    const arch=(snapshotArq||[]).find(x=>x.telefone===t);
+    waPendReabrir(t, arch?arch.caso_id:null);
+  });
   waPendBadgeUpdate(); waPendRepaint();
 }
 
@@ -26130,15 +26341,15 @@ function waPendArquivarComMotivo(tels, motivo){
   tels.forEach(tel=> waPendResolverLocal(tel,{ desfecho:'arquivado', motivo, reguaBloqueada:block }));
   P.sel=0; waPendBadgeUpdate(); waPendRepaint();
   const txt=(tels.length>1?tels.length+' conversas arquivadas':'Conversa arquivada')+(block?' · régua bloqueada':'');
-  waPendToast(txt, ()=>waPendDesfazer(snapLista,snapArq,tels[0]));
+  waPendToast(txt, ()=>waPendDesfazer(snapLista,snapArq,tels));
 }
 function waPendRestaurar(tel){
   const P=window._waPend;
   const idx=P.arquivadas.findIndex(x=>x.telefone===tel);
   if(idx<0) return;
   const a=P.arquivadas.splice(idx,1)[0];
-  P.lista.push({ telefone:a.telefone, caso_id:a.caso_id, texto:a.texto, tipo:a.tipo||'texto', recebida_em:a.recebida_em, intencao:a.intencao, intent:a.intent });
-  waPendReabrir(tel); waPendBadgeUpdate(); waPendRepaint();
+  P.lista.push({ telefone:a.telefone, caso_id:a.caso_id, texto:a.texto, tipo:a.tipo||'texto', recebida_em:a.recebida_em_orig||a.recebida_em, intencao:a.intencao, intent:a.intent });
+  waPendReabrir(tel, a.caso_id); waPendBadgeUpdate(); waPendRepaint();
 }
 
 // ── Enviar texto (na hora ou agendado) — usado por sugestões e 1-toque ──────
@@ -26172,6 +26383,7 @@ async function waPendQuick(i){
     showToast('Template carregado — revise (chave/link) e envie.','info');
     return;
   }
+  if(P._enviando) return; P._enviando=true; // trava in-flight: evita envio duplicado no duplo-clique
   try{
     const r=await waPendEnviarTexto(p, q.texto);
     const snapLista=P.lista.slice(), snapArq=P.arquivadas.slice();
@@ -26179,6 +26391,7 @@ async function waPendQuick(i){
     P.sel=0; waPendBadgeUpdate(); waPendRepaint();
     waPendToast((r==='agendada'?'Resposta agendada · ':'Resposta enviada · ')+q.label, ()=>waPendDesfazer(snapLista,snapArq,p.telefone));
   }catch(e){ showToast('Falha ao responder: '+(e.message||e),'danger'); }
+  finally{ P._enviando=false; }
 }
 // Enviar uma sugestão editada (compositor da Bia ou template carregado).
 async function waPendEnviarSugestao(i){
@@ -26186,6 +26399,7 @@ async function waPendEnviarSugestao(i){
   const texto=(document.getElementById('waPendTxt'+i)?.value||'').trim();
   if(!texto){ showToast('Mensagem vazia.','danger'); return; }
   if(/\[(cole|descreva|link|chave)/i.test(texto)){ showToast('Preencha o trecho entre colchetes antes de enviar.','warning'); return; }
+  if(P._enviando) return; P._enviando=true; // trava in-flight: evita envio duplicado no duplo-clique
   try{
     const r=await waPendEnviarTexto(p, texto);
     const snapLista=P.lista.slice(), snapArq=P.arquivadas.slice();
@@ -26193,6 +26407,7 @@ async function waPendEnviarSugestao(i){
     P.sel=0; P.sugestoes=[]; waPendBadgeUpdate(); waPendRepaint();
     waPendToast(r==='agendada'?'Resposta agendada para a próxima manhã útil.':'Resposta enviada.', ()=>waPendDesfazer(snapLista,snapArq,p.telefone));
   }catch(e){ showToast('Falha ao enviar/agendar: '+(e.message||e),'danger'); }
+  finally{ P._enviando=false; }
 }
 
 // Sugerir com a Bia (mantém a integração beatriz-msg modo "responder").
@@ -28148,7 +28363,7 @@ async function mv2Gerar(){
 function _mv2BuildPrompt(){
   const dev = (DB.devedores||[]).find(d=>d.id===_minuta.devId)||{};
   const credor = (DB.clientes||[]).find(c=>c.id===dev.clienteId)||{};
-  const valor = parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0;
+  const valor = parseValorBR(dev.valorOrig)||parseValorBR(dev.valorAtual)||0;
   const c = _minuta.campos;
   const empresa = credor.nome || DB.config.empresa || 'COBRASQ';
   const cnpjEmp = credor.cnpj || DB.config.cnpj || '34.626.848/0001-42';
@@ -29079,12 +29294,20 @@ async function mv2EmitirCobrancasAcordo(){
 
   // Try to parse installments from the acordo fields
   let nParcelas = parseInt(campos.num_parcelas)||parseInt(campos.parcelas)||1;
-  let valorTotal = parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0;
-  let valorParcela = valorTotal / nParcelas;
+  // Base é o valor NEGOCIADO no wizard (acordo/confissão), não a dívida cheia.
+  // Fallback para o valor da dívida só se o campo não foi preenchido.
+  const valorNegociado = parseValorBR(campos.valor_acordo) || parseValorBR(campos.valor_total) || 0;
+  let valorTotal = valorNegociado || parseValorBR(dev.valorAtual) || parseValorBR(dev.valorOrig) || 0;
+  // Arredonda por parcela e joga a sobra de centavos na última (soma = valorTotal).
+  const valorParcela = Math.floor((valorTotal / nParcelas) * 100) / 100;
+  const valorUltima = parseFloat((valorTotal - valorParcela * (nParcelas - 1)).toFixed(2));
 
   // Prompt for confirmation
+  const origem = valorNegociado ? 'valor do acordo' : 'valor da dívida (acordo sem valor preenchido)';
   const confirmed = confirm(
-    `Emitir ${nParcelas} cobrança(s) de ${fmtR(valorParcela)} no Asaas para ${dev.nome}?\n\n`+
+    `Emitir ${nParcelas} cobrança(s) no Asaas para ${dev.nome}?\n\n`+
+    `Total: ${fmtR(valorTotal)} (${origem})\nParcela: ${fmtR(valorParcela)}`+
+    (nParcelas>1?` (última: ${fmtR(valorUltima)})`:'')+`\n`+
     `Tipo: PIX\nPrimeiro vencimento: 3 dias a partir de hoje\nIntervalo: mensal\n\nConfirmar?`
   );
   if(!confirmed) return;
@@ -29101,7 +29324,7 @@ async function mv2EmitirCobrancasAcordo(){
       const charge = await AsaasAPI.createCharge({
         customer: customerId,
         billingType: 'PIX',
-        value: parseFloat(valorParcela.toFixed(2)),
+        value: (i === nParcelas - 1) ? valorUltima : valorParcela,
         dueDate: dueDate.toISOString().slice(0,10),
         description: `${tipo?.nome||'Acordo'} — Parcela ${i+1}/${nParcelas} — ${dev.nome}`,
         fine: { value: 2 },
@@ -29201,6 +29424,13 @@ const ZapSignAPI = {
 };
 
 // ── ZapSign helpers ───────────────────────────────────────────
+// ZapSign devolve status em minúsculo (signed/new/link-opened/…). Normaliza para o padrão
+// interno em CAIXA ALTA e mapeia os estados iniciais (new/link-opened) de volta para PENDING.
+function zsNormStatus(s){
+  const v = String(s||'').toUpperCase().replace(/-/g,'_');
+  if(v==='NEW' || v==='LINK_OPENED' || v==='CREATED') return 'PENDING';
+  return v;
+}
 function zsStatusLabel(s){
   return { PENDING:'Aguardando assinatura', SIGNED:'Assinado', REFUSED:'Recusado',
            EXPIRED:'Expirado', CANCELLED:'Cancelado' }[s] || s || '—';
@@ -29343,6 +29573,7 @@ function nfaParseValor(s){
   if(!t) return null;
   if(t.includes(',')){ t = t.replace(/\./g,'').replace(',', '.'); }
   else if((t.match(/\./g)||[]).length > 1){ t = t.replace(/\./g,''); }
+  else if(/^\d+\.\d{3}$/.test(t)){ t = t.replace(/\./g,''); } // ponto único + 3 dígitos = milhar pt-BR ('1.500'→1500)
   const n = parseFloat(t);
   return isFinite(n) ? Math.round(n*100)/100 : null;
 }
@@ -29355,7 +29586,7 @@ function nfaMaskDoc(v){
   }
   return d.replace(/^(\d{2})(\d)/,'$1.$2').replace(/^(\d{2})\.(\d{3})(\d)/,'$1.$2.$3').replace(/^(\d{2})\.(\d{3})\.(\d{3})(\d)/,'$1.$2.$3/$4').replace(/^(\d{2})\.(\d{3})\.(\d{3})\/(\d{4})(\d)/,'$1.$2.$3/$4-$5');
 }
-function nfaOnDoc(i, el){ const m = nfaMaskDoc(el.value); el.value = m; nfaSet(i,'cpf',m); _nfaRows[i] && (_nfaRows[i].asaas=null); }
+function nfaOnDoc(i, el){ const m = nfaMaskDoc(el.value); el.value = m; nfaSet(i,'cpf',m); if(_nfaRows[i]){ _nfaRows[i].asaas=null; _nfaRows[i].asaasCustomerId=''; _nfaRows[i].lookupMsg=''; } }
 function nfaMaskValor(v){
   const d = String(v==null?'':v).replace(/\D/g,'');
   if(!d) return '';
@@ -29405,7 +29636,7 @@ function nfaDupOf(r){
     return nfaDigits(h.doc_digits||h.doc||'')===d && Math.round(Number(h.valor)*100)===Math.round(v*100);
   });
 }
-function nfaEligible(r){ return r.status!=='emitida' && r.status!=='emitindo' && nfaLocalReady(r) && !nfaDupOf(r) && (r.asaas!=='sem-endereco' || nfaEndOk(r)) && r.asaas!=='sem-cpf'; }
+function nfaEligible(r){ return !!r && r.status!=='emitida' && r.status!=='emitindo' && nfaLocalReady(r) && !nfaDupOf(r) && (r.asaas!=='sem-endereco' || nfaEndOk(r)) && r.asaas!=='sem-cpf'; }
 function nfaSituacao(r){
   if(r.status==='emitida') return { label:'emitida', color:'var(--success)' };
   if(r.status==='emitindo') return { label:'emitindo…', color:'var(--text-3)' };
@@ -29599,7 +29830,8 @@ function nfaRenderModelos(){
     </div>`;
 }
 function nfaSetModelo(id){ _nfaModeloAtivo=id; _nfaSaveModelos(); nfaRenderModelos(); nfaDrawTabela(); nfaRenderConciliacao(); }
-function nfaUpdModelo(campo,val){ const m=nfaModeloAtivo(); if(!m) return; m[campo]=val; if(campo==='codigo'||campo==='nome') m.asaasId=''; _nfaSaveModelos(); if(campo==='aliquota') nfaRenderConciliacao(); }
+function nfaUpdModelo(campo,val){ const m=nfaModeloAtivo(); if(!m) return; m[campo]=val; if(campo==='codigo'||campo==='nome'){ // Se o valor casar um serviço municipal da conta Asaas (datalist), guarda o id interno como municipalServiceId; senão é código LC 116 manual (Portal Nacional).
+    const svc = (campo==='codigo' && Array.isArray(_nfaServicos)) ? _nfaServicos.find(s=>String(s.id)===String(val)) : null; m.asaasId = svc ? svc.id : ''; } _nfaSaveModelos(); if(campo==='aliquota') nfaRenderConciliacao(); }
 function nfaAddModelo(){ const id='m_'+Math.random().toString(36).slice(2,7); _nfaModelos.push({ id, municipio:'', codigo:'', nome:'', aliquota:'2', asaasId:'' }); _nfaModeloAtivo=id; _nfaSaveModelos(); nfaRenderModelos(); }
 function nfaRemoveModelo(){ if(_nfaModelos.length<=1) return; _nfaModelos=_nfaModelos.filter(m=>m.id!==_nfaModeloAtivo); _nfaModeloAtivo=_nfaModelos[0].id; _nfaSaveModelos(); nfaRenderModelos(); nfaDrawTabela(); nfaRenderConciliacao(); }
 function nfaToggleNotify(){ _nfaNotify=!_nfaNotify; try{ localStorage.setItem(NFA_LS.notify, _nfaNotify?'1':'0'); }catch(_){} const s=document.getElementById('nfa-notify-sw'); if(s) s.innerHTML=_nfaSwitch(_nfaNotify,'nfaToggleNotify()'); }
@@ -29830,11 +30062,14 @@ async function _nfaEmitirConfirmado(indices){
   const prog=document.getElementById('nfa-progresso'); if(prog) prog.dataset.busy='1';
   if(btn) btn.disabled=true; if(tbtn) tbtn.disabled=true;
   let ok=0, fail=0, done=0;
-  for(const i of indices){
-    const r=_nfaRows[i]; if(!nfaEligible(r)) continue;
-    if(!r.ref){ try{ r.ref=crypto.randomUUID(); }catch(_){ r.ref='nfa-'+i+'-'+done; } }
+  // Snapshot das referências no momento da confirmação: imuniza contra splice (remoção de
+  // linha via ✕) durante a emissão, que deslocaria os índices e puxaria _nfaRows[i]===undefined.
+  const rows = indices.map(i=>_nfaRows[i]).filter(Boolean);
+  for(const r of rows){
+    if(!nfaEligible(r)) continue;
+    if(!r.ref){ try{ r.ref=crypto.randomUUID(); }catch(_){ r.ref='nfa-'+done; } }
     r.status='emitindo'; r.erro=''; nfaDrawTabela();
-    if(prog) prog.textContent=`Emitindo ${done+1} de ${indices.length}…`;
+    if(prog) prog.textContent=`Emitindo ${done+1} de ${rows.length}…`;
     try{
       const resp=await fetch('/api/emitir-nf-avulso',{
         method:'POST',
@@ -29846,7 +30081,7 @@ async function _nfaEmitirConfirmado(indices){
       });
       const j=await resp.json().catch(()=>({}));
       if(resp.ok && (j.nf_status==='emitida'||j.nf_status==='processando')){ r.status=j.nf_status; r.nf_url=j.nf_url||''; ok++; }
-      else{ r.status='erro'; r.erro=traduzirErro(j.error||j.message||('HTTP '+resp.status)); fail++; }
+      else{ r.status='erro'; r.erro=traduzirErro(j.erro||j.error||j.message||('HTTP '+resp.status)); fail++; }
     }catch(e){ r.status='erro'; r.erro=traduzirErro(e.message||String(e)); fail++; }
     done++; nfaDrawTabela();
   }
@@ -30044,8 +30279,7 @@ function nfaAcoesHist(r,s){
       <button class="btn btn-ghost btn-sm" style="color:var(--danger);" onclick="nfaModalCancelarPref('${r.id}')" title="Cancelar nota junto à prefeitura">Cancelar nota</button>`;
   }
   if(s==='processando'){
-    return `<button class="btn btn-ghost btn-sm" onclick="nfaAtualizarStatus()" title="Verificar status na prefeitura">↻ Atualizar</button>
-      <button class="btn btn-ghost btn-sm" onclick="nfaReemitirHist('${r.id}')">Reemitir</button>`;
+    return `<button class="btn btn-ghost btn-sm" onclick="nfaAtualizarStatus()" title="Verificar status na prefeitura">↻ Atualizar</button>`;
   }
   if(s==='erro'){
     return `<button class="btn btn-ghost btn-sm" style="color:var(--gold-dark,#9a7a18);" onclick="nfaReemitirHist('${r.id}')" title="Carrega na tabela p/ corrigir e reemitir">↻ Corrigir e reemitir</button>
@@ -30188,7 +30422,12 @@ async function _nfaPatchMeta(id, patch){
   const r=_nfaHistById(id); const meta={ ...(r&&r.metadata||{}), ...patch };
   const upd={ metadata:meta };
   if(patch.resolved==='arquivada' || patch.resolved==='cancelada') upd.nf_status=patch.resolved;
-  if(patch.resolved===null){ upd.nf_status = (r&&r.metadata&&r.metadata._prevStatus) || 'erro'; }
+  if(patch.resolved===null){
+    // Cancelamento na prefeitura é IRREVERSÍVEL: restaurar não pode reviver a nota como 'emitida'
+    // (voltaria a somar ISS na conciliação e a travar reemissão). Nota só-arquivada volta normal.
+    if(r&&r.metadata&&r.metadata.cancel){ meta.resolved='cancelada'; upd.nf_status='cancelada'; }
+    else { upd.nf_status = (r&&r.metadata&&r.metadata._prevStatus) || 'erro'; }
+  }
   const { error }=await supa.from('nf_avulsa').update(upd).eq('id',id);
   if(error) throw error;
 }
@@ -30361,7 +30600,8 @@ async function nfaAtualizarStatus(silent){
       let novo=null, url=r.nf_url||null, erro=null;
       if(st==='AUTHORIZED'){ novo='emitida'; url=inv.pdfUrl||inv.xmlUrl||url; ok++; }
       else if(st==='ERROR'){ novo='erro'; erro=(inv.errors&&inv.errors[0]&&inv.errors[0].description)||inv.statusDescription||'Recusada pela prefeitura'; falha++; }
-      else if(st==='CANCELED'||st==='CANCELLATION_DENIED'){ novo='cancelada'; falha++; }
+      else if(st==='CANCELED'){ novo='cancelada'; falha++; }
+      else if(st==='CANCELLATION_DENIED'){ novo='emitida'; url=inv.pdfUrl||inv.xmlUrl||url; falha++; } // cancelamento NEGADO: a NFS-e permanece válida na prefeitura
       else { if(nfaEffStatus(r)==='emitida' && !r.nf_url){ novo='processando'; } ainda++; } // corrige falso-"emitida" sem PDF
       if(novo){ const meta={ ...(r.metadata||{}), nf_number:(inv.number||(r.metadata&&r.metadata.nf_number)||null) }; if(novo==='cancelada') meta.resolved='cancelada'; await supa.from('nf_avulsa').update({ nf_status:novo, nf_url:url, erro:erro, metadata:meta }).eq('id',r.id); }
     }catch(e){ falha++; }
@@ -30948,7 +31188,7 @@ async function zsVerificarStatus(minutaId, devId){
   try {
     const doc    = await ZapSignAPI.getDoc(m.zapsignToken);
     const signer = doc.signers?.[0];
-    const novoStatus = signer?.status || doc.status || m.zapsignStatus;
+    const novoStatus = zsNormStatus(signer?.status || doc.status || m.zapsignStatus);
     const statusAnterior = m.zapsignStatus;
 
     m.zapsignStatus = novoStatus;
@@ -30995,7 +31235,7 @@ async function zsVerificarTodosGlobal(){
       try {
         const doc = await ZapSignAPI.getDoc(m.zapsignToken);
         const signer = doc.signers?.[0];
-        const novo = signer?.status || doc.status || m.zapsignStatus;
+        const novo = zsNormStatus(signer?.status || doc.status || m.zapsignStatus);
         if(novo !== m.zapsignStatus){
           m.zapsignStatus = novo;
           if(novo==='SIGNED' && !m.assinadoEm){
@@ -31162,7 +31402,7 @@ function getAlertas(){
   }
 
   // Parcelas de acordo vencendo nos próximos 5 dias
-  (DB.devedores||[]).forEach(d=>{
+  (DB.devedores||[]).filter(d=>!d.arquivado && !d.isDraft).forEach(d=>{
     (d.acordos||[]).forEach(ac=>{
       (ac.parcelas||[]).filter(p=>!p.pago && p.vencimento >= todayStr && p.vencimento <= in5str).forEach(p=>{
         alerts.push({ tipo:'warning', msg:`Parcela de ${d.nome} vence em ${p.vencimento} (${fmtR(p.valor)})` });
@@ -31668,15 +31908,22 @@ function selecionarTodosFiltrados(){
   if(selectedDevIds.size > 0 && selectedDevIds.size === (window._devFilteredCount||0)){
     limparSelecao(); return;
   }
-  const filtered = devs.filter(d=>{
+  // Deve reproduzir EXATAMENTE o predicado de renderDevedores (mesma
+  // visibilidade), senão "Selecionar todos" pega registros ocultos
+  // (rascunhos, pendentes de aprovação, fora da carteira/grupo).
+  let filtered = devs.filter(d=>{
     if(d.arquivado) return false;
+    if(d.isDraft) return false;
+    if(currentUser?.tipo === 'funcionario' && !devEhDoUsuario(d)) return false;
+    if(d.status==='Pendente aprovação'||d.status==='pendente_ajuste') return false;
     const q = devFilter.q.toLowerCase();
     if(q && !(d.nome||'').toLowerCase().includes(q) && !(d.doc||'').includes(q)) return false;
     if(devFilter.statuses.length && !devFilter.statuses.includes(d.status)) return false;
     if(devFilter.clienteIds.length && !devFilter.clienteIds.includes(d.clienteId)) return false;
-    if(devFilter.resp && d.responsavel !== devFilter.resp) return false;
+    if(devFilter.resp && nomeResponsavel(d) !== devFilter.resp) return false;
     return true;
   });
+  filtered = applyGrupoViewFilterDevedores(filtered);
   filtered.forEach(d=>selectedDevIds.add(d.id));
   selectionMode = true;
   updateBulkToolbar();
@@ -31745,6 +31992,13 @@ function bulkGerarRelatorio(){
 // ── BULK: Excluir (soft delete / archive) ────────────────────
 function bulkExcluir(){
   if(!selectedDevIds.size) return;
+  // Colaborador não pode arquivar em massa (o fluxo individual exige aprovação
+  // do gestor — ver excluirDevedorIndividual). Sem este gate, a exclusão em
+  // lote contornava a aprovação prometida na UI.
+  if(ehColaborador()){
+    showToast('Exclusão em massa exige aprovação do gestor. Exclua individualmente para solicitar.','warning');
+    return;
+  }
   const n = selectedDevIds.size;
   promptModal(
     `Excluir ${n} cobrança${n>1?'s':''}`,

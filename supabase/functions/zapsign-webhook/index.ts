@@ -26,6 +26,17 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS'
 };
 
+// ⚠️ ATIVAR SÓ APÓS TROCAR PARA HEADER NO PAINEL DO ZAPSIGN.
+// O segredo via `?token=` na URL vaza em logs/histórico/referrer; o correto é mandá-lo só
+// no HEADER `Authorization: Bearer <secret>`. Enquanto a URL cadastrada no painel ainda usa
+// `?token=`, manter TRUE evita quebrar o webhook em produção. PASSO MANUAL para desligar:
+//   1. Painel ZapSign → Configurações/Webhooks → editar a URL do webhook.
+//   2. Remover `?token=<secret>` da URL e configurar o segredo no header
+//      `Authorization: Bearer <secret>` (headers customizados do webhook).
+//   3. Enviar evento de teste e confirmar 200.
+//   4. Trocar esta flag para `false` e re-deployar. A partir daí, `?token=` é IGNORADO.
+const ACEITAR_TOKEN_QUERYSTRING = true;
+
 // F-18: comparação do secret em tempo constante (não vaza, por timing, quantos
 // caracteres do segredo bateram). Hashamos os dois lados com SHA-256 (normaliza
 // o tamanho e não expõe o comprimento do segredo) e comparamos byte a byte sem
@@ -42,6 +53,12 @@ async function safeEqual(a: string, b: string): Promise<boolean> {
 function mapEvento(evt: string, docStatus?: string): string {
   const e = String(evt || '').toLowerCase();
   const s = String(docStatus || '').toLowerCase();
+  // P1 (auditoria 2026-06) — 'doc_partially_signed': UM signatário assinou, mas o
+  // documento multi-assinatura ainda NÃO está completo. Tem que ser tratado ANTES do
+  // ramo genérico 'signed' abaixo (senão cairia em 'assinado' e o webhook emitiria os
+  // boletos e concluiria o caso antes de todos assinarem). Status próprio que NÃO
+  // dispara emissão nem conclusão (o fluxo só age em novoStatus === 'assinado').
+  if (e.includes('partial')) return 'assinado_parcial';
   if (e.includes('signed') && !e.includes('refused')) return 'assinado';
   if (e.includes('refused')) return 'recusado';
   if (e.includes('expired')) return 'expirado';
@@ -243,7 +260,7 @@ Deno.serve(async (req) => {
   }
   const auth = req.headers.get('authorization') || '';
   const url = new URL(req.url);
-  const tokenQs = url.searchParams.get('token') || '';
+  const tokenQs = ACEITAR_TOKEN_QUERYSTRING ? (url.searchParams.get('token') || '') : '';
   const provided = auth.replace(/^Bearer\s+/i, '') || tokenQs;
   if (!(await safeEqual(provided, expected))) {
     return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -302,8 +319,13 @@ Deno.serve(async (req) => {
   }
 
   const acordo = acordos[0];
+  // acordos.status_zapsign tem CHECK (chk_acordos_status_zapsign) que NÃO inclui
+  // 'assinado_parcial'; persiste 'enviado' (documento ainda em assinatura) para não
+  // violar o constraint e não marcar como 'assinado'. O evento real fica registrado
+  // no devedor_eventos abaixo (tipo 'zapsign_assinado_parcial' + raw_event).
+  const statusAcordo = novoStatus === 'assinado_parcial' ? 'enviado' : novoStatus;
   const update: Record<string, unknown> = {
-    status_zapsign: novoStatus,
+    status_zapsign: statusAcordo,
     zapsign_doc_id: docId,
     zapsign_evento_em: new Date().toISOString()
   };

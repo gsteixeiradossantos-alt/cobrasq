@@ -34,6 +34,13 @@ module.exports = async function handler(req, res) {
     return res.status(400).json({ error: 'query param ?path= ausente' });
   }
 
+  // P1 (AUDITORIA-2026-07) — bloqueia path traversal: sem isto, `?path=./transfers`
+  // ou `../transfers` NÃO casa com a denylist abaixo (o prefixo fica `./transfers`),
+  // mas o Asaas normaliza a URL e alcança o endpoint bloqueado que move dinheiro.
+  if (pathParam.split('/').some((seg) => seg === '.' || seg === '..')) {
+    return res.status(403).json({ error: 'Operação não permitida por este endpoint.' });
+  }
+
   // P2 (auditoria 2026-06) — hardening: este proxy é exposto ao browser e usa a
   // chave da conta do escritório. Endpoints que MOVEM DINHEIRO ou alteram a conta
   // não devem ser alcançáveis pelo cliente: o repasse PIX é server-only (api/repassar.js).
