@@ -6031,18 +6031,24 @@ async function doLogin(type){
   }
   else if(type === 'devedor'){
     // Fallback: login com CPF + nascimento (devedores sem telefone cadastrado).
+    // O devedor é anon (sem RLS de staff), então DB.devedores vem vazio — a
+    // conferência CPF+nascimento roda no servidor via RPC SECURITY DEFINER
+    // portal_login_nascimento, que também emite o token de sessão do portal
+    // (prova de posse para o portal_meu_caso). Ver 20260706_portal_meu_caso.sql.
     const cpf = (document.getElementById('devedor-cpf').value||'').replace(/\D/g,'');
     const nasc = (document.getElementById('devedor-nasc').value||'').trim();
-    if(!cpf || !nasc){ showToast('Preencha CPF e data de nascimento.','warning'); return; }
-    const dev = (DB.devedores||[]).find(d => {
-      const docNorm = (d.doc||'').replace(/\D/g,'');
-      return docNorm === cpf && d.loginNascimento === nasc;
-    });
-    if(dev){
-      currentUser = { tipo: 'devedor', nome: dev.nome, devedorId: dev.id, avatar: initials(dev.nome), role: 'Devedor' };
+    if(cpf.length !== 11 || !nasc){ showToast('Preencha CPF (11 dígitos) e data de nascimento.','warning'); return; }
+    const supa = getSupabase();
+    if(!supa){ showToast('Sistema fora do ar. Tente novamente em instantes.','danger'); return; }
+    try{
+      const { data, error } = await supa.rpc('portal_login_nascimento', { p_cpf: cpf, p_nascimento: nasc });
+      if(error) throw new Error(error.message);
+      if(!data?.ok){ showToast(data?.erro || 'Dados não encontrados. Verifique CPF e data de nascimento.','danger'); return; }
+      const nomeDev = data.nome || 'Devedor';
+      currentUser = { tipo: 'devedor', nome: nomeDev, devedorId: data.devedor_id, portalSessao: data.sessao_token, avatar: initials(nomeDev), role: 'Devedor' };
       iniciarSessao();
-    } else {
-      showToast('Dados não encontrados. Verifique CPF e data de nascimento.','danger');
+    }catch(e){
+      showToast('Não foi possível entrar. Verifique os dados e tente novamente.','danger');
     }
   }
 }
@@ -6105,12 +6111,14 @@ async function portalValidarToken(){
     if(!data?.ok) throw new Error(data?.erro || 'Código inválido.');
 
     // Carrega devedor do DB (precisa ter sido carregado via loadRelationalData).
+    // portalSessao = token de sessão do portal emitido pela RPC (prova de posse
+    // para o portal_meu_caso, que é a fonte real dos dados do devedor anon).
     const dev = (DB.devedores||[]).find(d => d.id === data.devedor_id);
     if(!dev){
       // Devedor não está no DB local — pode estar sem permissão de leitura. Cria stub mínimo.
-      currentUser = { tipo:'devedor', nome:'Devedor', devedorId: data.devedor_id, avatar:'D', role:'Devedor' };
+      currentUser = { tipo:'devedor', nome:'Devedor', devedorId: data.devedor_id, portalSessao: data.sessao_token, avatar:'D', role:'Devedor' };
     } else {
-      currentUser = { tipo:'devedor', nome: dev.nome, devedorId: dev.id, avatar: initials(dev.nome), role:'Devedor' };
+      currentUser = { tipo:'devedor', nome: dev.nome, devedorId: dev.id, portalSessao: data.sessao_token, avatar: initials(dev.nome), role:'Devedor' };
     }
     iniciarSessao();
   } catch(e){
@@ -18720,20 +18728,50 @@ function cpSalvarNotif(){
 }
 
 // ── PORTAL DEVEDOR ───────────────────────────────────────────
-function renderPortalDevedor(){
+async function renderPortalDevedor(){
   if(!currentUser || currentUser.tipo!=='devedor') return;
   const body = document.getElementById('portalDevedorBody');
   if(!body) return;
 
-  const dev = (DB.devedores||[]).find(d=>d.id===currentUser.devedorId);
-  if(!dev){
-    body.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${ico('danger',36)}</div><h3>Dados não encontrados</h3></div>`;
-    return;
+  body.innerHTML = `<div class="empty-state"><h3>Carregando seus dados…</h3></div>`;
+
+  // Fonte autoritativa: RPC SECURITY DEFINER amarrada ao token de sessão do
+  // portal. O devedor é anon (sem RLS de staff), então DB.devedores vem vazio —
+  // por isso o portal abria em branco. A RPC devolve SÓ o caso do próprio
+  // devedor, resolvendo o devedor_id a partir da sessão (nunca do cliente).
+  // Ver 20260706_portal_meu_caso.sql.
+  let caso = null;
+  const supa = getSupabase();
+  const sess = currentUser.portalSessao;
+  if(supa && sess){
+    try{
+      const { data, error } = await supa.rpc('portal_meu_caso', { p_sessao_token: sess });
+      if(!error && data?.ok) caso = data;
+    }catch(_){ /* cai no fallback abaixo */ }
   }
 
-  const valor = parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0;
-  const acordos = dev.acordos || [];
-  const primeiroNome = (dev.nome||'').split(' ')[0];
+  // Monta o objeto de exibição a partir da RPC (devedor) ou de DB.devedores
+  // (preview de staff logado, que enxerga tudo via RLS).
+  let nome, valor, statusTxt, vencimento, acordos;
+  if(caso){
+    nome = caso.devedor?.nome || 'Devedor';
+    valor = Number(caso.divida?.valor_atual) || Number(caso.divida?.valor_orig) || 0;
+    statusTxt = caso.divida?.status || '';
+    vencimento = caso.divida?.vencimento || '';
+    acordos = Array.isArray(caso.acordos) ? caso.acordos : [];
+  } else {
+    const dev = (DB.devedores||[]).find(d=>d.id===currentUser.devedorId);
+    if(!dev){
+      body.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${ico('danger',36)}</div><h3>Não foi possível carregar seus dados</h3><p style="color:#8C7E72;">Sua sessão pode ter expirado. Entre novamente para continuar.</p></div>`;
+      return;
+    }
+    nome = dev.nome||'';
+    valor = parseValorBR(dev.valorAtual)||parseValorBR(dev.valorOrig)||0;
+    statusTxt = dev.status;
+    vencimento = dev.vencimento||'';
+    acordos = dev.acordos || [];
+  }
+  const primeiroNome = (nome||'').split(' ')[0];
   const waNr = DB.config?.whatsapp?.numero?.replace(/\D/g,'');
 
   body.innerHTML = `
@@ -18745,8 +18783,8 @@ function renderPortalDevedor(){
     <div style="background:#fff;border:1px solid #E8E4DF;border-radius:12px;padding:24px 28px;margin-bottom:16px;">
       <div style="font-family:'Inter',sans-serif;font-size:11px;color:#8C7E72;letter-spacing:.1em;text-transform:uppercase;margin-bottom:10px;">Valor a regularizar</div>
       <div style="font-family:'Playfair Display',Georgia,serif;font-size:38px;font-weight:700;color:#B45309;line-height:1;">${fmtR(valor)}</div>
-      <div style="margin-top:14px;">${statusBadgeHtml(dev.status)}</div>
-      ${dev.vencimento?`<div style="font-family:'Newsreader',Georgia,serif;font-size:13px;color:#8C7E72;margin-top:8px;">Vencimento original: ${escHtml(dev.vencimento)}</div>`:''}
+      <div style="margin-top:14px;">${statusBadgeHtml(statusTxt)}</div>
+      ${vencimento?`<div style="font-family:'Newsreader',Georgia,serif;font-size:13px;color:#8C7E72;margin-top:8px;">Vencimento original: ${escHtml(vencimento)}</div>`:''}
     </div>
 
     ${acordos.length>0?`
