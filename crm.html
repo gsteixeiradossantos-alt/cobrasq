@@ -2545,6 +2545,12 @@
   </div>
 
   <div class="card">
+    <div class="card-title">📤 Reenvio de mensagens falhadas (Z-API)</div>
+    <div style="font-size:13px; color:var(--gray-text); line-height:1.6; margin-bottom:14px;">Mensagens que falharam ao enviar pela Z-API ficam registradas aqui. Confira o motivo, e reenvie com um clique. Ao dar certo, a falha é marcada como resolvida e some da lista.</div>
+    <div id="reenviosContainer"></div>
+  </div>
+
+  <div class="card">
     <div class="card-title">🐛 Falhas reportadas pelos operadores</div>
     <div style="font-size:13px; color:var(--gray-text); line-height:1.6; margin-bottom:14px;">Problemas e bugs reportados via botão "Reportar problema". Marque como resolvida ao corrigir.</div>
     <div id="falhasContainer"></div>
@@ -2781,6 +2787,38 @@ const CARTAO_MARGEM = 0.05;
 const CARTAO_MULTIPLICADOR = 1 + CARTAO_TAXA_OPERADORA + CARTAO_MARGEM;
 const DIAS_AVISO_AMARELO = 1;
 const DIAS_AVISO_VERMELHO = 2;
+
+// ============================================================
+// PARIDADE DE JUROS/MULTA — fonte única com o app admin (index.html)
+// ============================================================
+// O gestor define "juros (% a.m.)" e "multa (%)" em Configurações → Parâmetros de
+// cálculo do faturamento (index.html), que grava em DB.config.calcParams e persiste
+// no localStorage. Como CRM e faturamento rodam na MESMA ORIGEM, compartilham o
+// localStorage — o CRM LÊ os mesmos valores (chave 'cobrasq_v6') e passa a calcular
+// com os parâmetros que o gestor configurou, sem divergência.
+//
+// Só jurosMensal e multa são configuráveis no admin; por isso apenas estes dois
+// passam a vir do config. A correção (8% a.a. → TAXA_CORRECAO_MENSAL) e a taxa de
+// serviço COBRASQ (30% → TAXA_SERVICO_PCT) NÃO são configuráveis e seguem fixas
+// aqui — idênticas às constantes COBRANCA_CORRECAO_MENSAL / COBRANCA_TAXA_SERVICO
+// do index.html (mesma metodologia "modo cobrança").
+//
+// Fallback: se o config não existir (ou o campo não for número), mantém o valor
+// hardcoded atual (TAXA_JUROS_MENSAL / MULTA_PCT) — resultado idêntico ao de antes.
+function crmCalcParams() {
+  let cp = {};
+  try {
+    const raw = localStorage.getItem('cobrasq_v6'); // KEY do DB do index.html
+    if (raw) {
+      const db = JSON.parse(raw);
+      cp = (db && db.config && db.config.calcParams) || {};
+    }
+  } catch (e) { cp = {}; }
+  return {
+    jurosMensal: typeof cp.jurosMensal === 'number' ? cp.jurosMensal : TAXA_JUROS_MENSAL,
+    multaPct:    typeof cp.multa       === 'number' ? cp.multa       : MULTA_PCT
+  };
+}
 
 // ============================================================
 // ESTADO GLOBAL
@@ -5615,9 +5653,12 @@ function _calcCobrancaSimples(valorOriginal, dataVenc, dataHoje, aplicarMulta, a
   // Núcleo na MATRIZ única (templates/calc-engine.js): correção + juros + multa +
   // taxa de serviço, total arredondado pra cima. O parcelamento (boleto/cartão)
   // segue abaixo, exclusivo do CRM. Ver docs/calc/MATRIZ.md.
+  // Juros e multa vêm de DB.config.calcParams (fonte única com o faturamento);
+  // correção e taxa de serviço seguem fixas. Ver crmCalcParams().
+  const _cp = crmCalcParams();
   const _r = CalcEngine.cobranca({ valorOriginal: valorOriginal, meses: meses,
-    correcaoMensal: TAXA_CORRECAO_MENSAL, jurosMensal: TAXA_JUROS_MENSAL,
-    multaPct: MULTA_PCT, taxaServico: TAXA_SERVICO_PCT, aplicarMulta: aplicarMulta, aplicarTaxa: aplicarTaxa });
+    correcaoMensal: TAXA_CORRECAO_MENSAL, jurosMensal: _cp.jurosMensal,
+    multaPct: _cp.multaPct, taxaServico: TAXA_SERVICO_PCT, aplicarMulta: aplicarMulta, aplicarTaxa: aplicarTaxa });
   const correcao = _r.correcao, valorCorrigido = _r.valorCorrigido, juros = _r.juros,
         multa = _r.multa, subtotal = _r.subtotal, taxa = _r.taxa, total = _r.total;
 
@@ -8719,8 +8760,112 @@ async function renderAdmin() {
   // Item #9: MP config
   renderConfigMP();
 
+  // Reenvio de mensagens Z-API falhadas (best-effort — não pode quebrar o Admin)
+  try { await renderReenviosFalhados(); } catch (e) { console.warn('renderReenviosFalhados falhou:', e); }
   // Carrega falhas reportadas
   await renderFalhasReportadas();
+}
+
+// ============================================================
+// REENVIO DE MENSAGENS FALHADAS (Z-API) — área Admin (só staff)
+// ============================================================
+// Lista as falhas pendentes de crm_envios_falhados (fallback: crm_envios_falhados_local),
+// permite reenviar reusando enviarViaZAPI() e marca como resolvida ao ter sucesso.
+let _reenviosFalhadosCache = [];
+async function renderReenviosFalhados() {
+  const cont = document.getElementById('reenviosContainer');
+  if (!cont) return;
+  // Guarda de acesso: só admin (o RLS permite qualquer autenticado ler/atualizar,
+  // então a restrição a staff é reforçada aqui na UI).
+  if (!perfilAtual || perfilAtual.role !== 'admin') { cont.innerHTML = ''; return; }
+  cont.innerHTML = '<div style="padding:14px; color:var(--gray-text); font-size:13px;">Carregando mensagens falhadas...</div>';
+
+  let falhas = [];
+  try {
+    const { data, error } = await sb.from('crm_envios_falhados')
+      .select('*')
+      .eq('status', 'pendente')
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (error) throw error;
+    falhas = data || [];
+  } catch (e) {
+    // Fallback: mensagens guardadas localmente quando o insert no banco falhou
+    try {
+      falhas = JSON.parse(localStorage.getItem('crm_envios_falhados_local') || '[]')
+        .map((f, i) => ({ ...f, id: 'local-' + i, created_at: new Date(f._ts || Date.now()).toISOString(), _local: true }));
+    } catch (e2) { falhas = []; }
+  }
+
+  _reenviosFalhadosCache = falhas;
+
+  if (!falhas.length) {
+    cont.innerHTML = '<div style="padding:20px; text-align:center; color:var(--gray-text); font-size:13px;">Nenhuma mensagem falhada pendente. ✨</div>';
+    return;
+  }
+
+  cont.innerHTML = falhas.map(f => {
+    const dt = f.created_at ? new Date(f.created_at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+    const msg = f.mensagem || '';
+    const preview = msg.length > 240 ? msg.slice(0, 240) + '…' : msg;
+    const idAttr = escapeHTML(String(f.id));
+    return '<div style="padding:14px; border:1px solid var(--gray-line); border-radius:8px; margin-bottom:10px; background:white;">' +
+      '<div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px; gap:10px;">' +
+        '<div><strong style="color:var(--navy);">📱 ' + escapeHTML(f.telefone || '—') + '</strong> <span style="font-size:11px; color:var(--gray-text);">· ' + dt + (f.tentativas ? ' · ' + f.tentativas + ' tentativa(s)' : '') + '</span></div>' +
+        '<span style="font-size:11px; padding:2px 8px; border-radius:10px; background:#FBEAEA; color:var(--red); border:1px solid var(--red); text-transform:uppercase; font-weight:600;">pendente</span>' +
+      '</div>' +
+      (f.erro ? '<div style="font-size:12px; color:var(--red); margin-bottom:6px;"><strong>Motivo:</strong> ' + escapeHTML(f.erro) + '</div>' : '') +
+      '<div style="font-size:13px; color:var(--ink); white-space:pre-wrap; background:var(--gray-light); padding:8px 10px; border-radius:6px; margin-bottom:8px;">' + escapeHTML(preview) + '</div>' +
+      (f._local
+        ? '<div style="font-size:11px; color:var(--yellow); margin-bottom:8px;">⚠ Salva localmente (não chegou ao banco). Reenvie para tentar de novo.</div>' +
+          '<div><button class="btn small success" onclick="reenviarMensagemFalhada(\'' + idAttr + '\', this)">↻ Reenviar</button></div>'
+        : '<div style="display:flex; gap:8px;">' +
+            '<button class="btn small success" onclick="reenviarMensagemFalhada(\'' + idAttr + '\', this)">↻ Reenviar</button>' +
+            '<button class="btn small secondary" onclick="marcarReenvioResolvido(\'' + idAttr + '\')">✓ Marcar resolvida</button>' +
+          '</div>') +
+    '</div>';
+  }).join('');
+}
+
+async function reenviarMensagemFalhada(id, btn) {
+  const f = _reenviosFalhadosCache.find(x => String(x.id) === String(id));
+  if (!f) { toast('Mensagem não encontrada. Recarregue o painel.', 'error'); return; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Enviando…'; }
+  try {
+    // Reusa a função de envio existente (registra nova falha automaticamente se der erro)
+    const r = await enviarViaZAPI(f.telefone, f.mensagem);
+    if (r && r.ok) {
+      if (f._local) {
+        // Remove a entrada do fallback local
+        try {
+          const arr = JSON.parse(localStorage.getItem('crm_envios_falhados_local') || '[]');
+          const idx = parseInt(String(id).replace('local-', ''), 10);
+          if (!isNaN(idx) && idx >= 0 && idx < arr.length) {
+            arr.splice(idx, 1);
+            localStorage.setItem('crm_envios_falhados_local', JSON.stringify(arr));
+          }
+        } catch (e) {}
+      } else {
+        // Marca como resolvida no banco
+        try { await sb.from('crm_envios_falhados').update({ status: 'resolvida' }).eq('id', id); }
+        catch (e) { console.warn('Falha ao marcar resolvida:', e); }
+      }
+      toast('✓ Mensagem reenviada com sucesso.');
+    } else {
+      toast('Não deu certo: ' + ((r && r.error) || 'erro desconhecido'), 'error');
+    }
+  } catch (e) {
+    toast('Erro ao reenviar: ' + (e && e.message ? e.message : 'erro desconhecido'), 'error');
+  }
+  await renderReenviosFalhados();
+}
+
+async function marcarReenvioResolvido(id) {
+  if (!confirm('Marcar essa mensagem como resolvida (sem reenviar)?')) return;
+  const { error } = await sb.from('crm_envios_falhados').update({ status: 'resolvida' }).eq('id', id);
+  if (error) { toast(msgErroAmigavel(error), 'error'); return; }
+  toast('Marcada como resolvida.');
+  await renderReenviosFalhados();
 }
 
 async function renderFalhasReportadas() {
