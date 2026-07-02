@@ -19,6 +19,33 @@
 > deste relatório vão como **arquivos de migração preparados** em `supabase/migrations/`, para revisão e deploy
 > controlado. As correções de front/serverless entram no diff da branch.
 
+## Situação das correções (atualizado 2026-07-02)
+
+Os achados foram corrigidos em ondas por gravidade, na branch `claude/github-repo-audit-fixes-osxame` (PR #255).
+Cada onda passou por `npm test` + `npm run lint` verdes e `node --check` do script inline.
+
+| Onda | Gravidade | Corrigidos | Pulados (motivo) |
+|------|-----------|-----------|------------------|
+| 0 | críticos | 2 (P0 portal + multa única) | — |
+| 1 | P1 | 19 | ~5 (backend/RPC/DDL) |
+| 2 | P2 | 41 | ~6 (UI nova, DDL, infra, decisão) + 2 migrações preparadas |
+| 3 | P3 | 25 | ~16 (código morto/latente, decisão, DDL) |
+| **Total** | | **~87 em código** | **~27 dependem de decisão/backend** |
+
+**Migrações preparadas (NÃO aplicadas — revisar e aplicar com deploy coordenado):**
+- `20260704c_p0_portal_emitir_token_server_only.sql` — fecha o P0 (deploy junto com `api/mfa.js` + `index.html`).
+- `20260705_valor_capital_lock_PREPARADA.sql` — trava server-side de `valor_capital`.
+- `20260705_fin_transferencia_saldo_PREPARADA.sql` — espelho de transferências no saldo realizado.
+
+**Edge functions:** o fonte foi corrigido (`zapsign-webhook`, `beatriz-msg`, `enviar-whatsapp`,
+`cron-mensagens-agendadas`, `escavador-webhook`) mas o **deploy é manual/coordenado** — não foi feito.
+
+**Principais pendências que dependem de você (decisão/backend):** persistência de acordos (rehidratar do banco);
+portal do devedor abrir vazio + login CPF/nascimento (nova RPC `SECURITY DEFINER`); botão "Criar usuário" (Edge
+Function nova); UI de reenvio de mensagens falhadas; trava anti-duplicidade da auto-cobrança ZapSign (índice único);
+bucket `avatars` no Storage; paridade de juros/multa admin×CRM (fonte única); remover `?token=` dos webhooks
+(rotacionar no painel do provedor primeiro).
+
 ## 1. Recheck do catálogo de regressões (R-01..R-12 + invariantes)
 
 | Item | Estado |

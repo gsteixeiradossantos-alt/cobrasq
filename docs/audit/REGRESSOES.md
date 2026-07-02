@@ -107,11 +107,11 @@ no código, ou ação na UI) e o **estado-correto** esperado. Atualize ao descob
   recebeu aparecem como enviados. Fix no PR #91 (DRAFT, fora do ar).
 - **Onde:** `api/_zapi.js`, `api/cron-regua.js`.
 - **Teste:** `grep` por checagem de status real na resposta do Z-API; PR #91 mergeado?
-- **Estado-correto:** envio só vira "enviada" com confirmação do Z-API. **Última checagem 2026-07-01 — 🔴 PARCIAL:**
-  PR #91 foi **MERGEADO** (27/06) e está no ar **só na edge function** `cron-mensagens-agendadas` (v28, ACTIVE):
-  `envioConfirmado()` exige messageId/zaapId/id e ausência de error/value:false. Mas o **runtime Vercel não tem
-  a validação**: `api/_zapi.js` marca sucesso sem conferir a resposta real, então `api/cron-regua.js` (régua) e
-  os demais chamadores ainda produzem falso "enviada". Ação: portar `envioConfirmado()` para `api/_zapi.js`.
+- **Estado-correto:** envio só vira "enviada" com confirmação do Z-API. **Última checagem 2026-07-02 — 🟢 RESOLVIDO
+  (deploy pendente da edge):** PR #91 já cobria a edge `cron-mensagens-agendadas` (v28). Na auditoria 2026-07 a
+  validação foi portada para o **runtime Vercel** (`api/cron-regua.js` agora exige `messageId/zaapId` e cai no
+  retry sem marcar `sent`) e a edge `enviar-whatsapp` ganhou `envioConfirmado()`. Restam sem a checagem apenas
+  caminhos já corrigidos no fonte aguardando **deploy manual** das edge functions. Reconferir após o deploy.
 
 ## R-11 · Cobranças vazias (sem valor e sem credor)
 - **O que é:** cadastros incompletos/abandonados/teste que viram cobrança com `valor_orig`, `valor_atual` e
