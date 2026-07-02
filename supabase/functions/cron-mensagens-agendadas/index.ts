@@ -73,7 +73,11 @@ Deno.serve(async (req) => {
   // Para mídia, gera um signed URL temporário (1h) que o Z-API baixa no envio.
   async function montarEnvio(m: any): Promise<{ ok: boolean; url?: string; body?: unknown; erro?: string }> {
     const phoneDigits = String(m.telefone || '').replace(/\D/g, '');
-    const phone = phoneDigits.startsWith('55') ? phoneDigits : '55' + phoneDigits;
+    // País (55) só quando o número está em formato local (DDD + número = 10-11 díg.);
+    // 12-13 díg. já incluem o país. NÃO usar startsWith('55'): o DDD 55 (região central
+    // do RS) colide com o código do país e um celular DDD 55 sem país ('559XXXXXXXX',
+    // 11 díg.) ficaria sem o 55 de país, sendo roteado errado pelo Z-API.
+    const phone = (phoneDigits.length === 10 || phoneDigits.length === 11) ? '55' + phoneDigits : phoneDigits;
     const tipo = m.tipo || 'texto';
 
     if (tipo === 'texto') {
