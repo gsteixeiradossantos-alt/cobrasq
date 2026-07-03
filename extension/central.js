@@ -130,16 +130,57 @@ function b64DeBuffer(buf) {
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
   return btoa(bin);
 }
-async function extrairTodos() {
-  setPasso(2);
-  for (const caso of state.casos) {
-    renderFase2();
-    const principal = caso.docs.find(d => d.principal);
-    if (!principal || principal.size > 3 * 1024 * 1024) {
-      caso.extracao = 'erro';
-      caso.erroExtracao = !principal ? 'sem peça principal' : 'peça principal > 3 MB (preencha os dados na revisão)';
-      continue;
+// A Central puxa a sessão ATIVAMENTE das abas do app (mesma receita do popup):
+// sem isso, Chrome recém-aberto = token vazio no background = "sem_sessao" na IA.
+async function puxarTokenDoApp() {
+  try {
+    const tabs = await chrome.tabs.query({ url: 'https://painel.cobrasq.com.br/*' });
+    for (const tab of tabs) {
+      try {
+        const [r] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => {
+            for (let i = 0; i < localStorage.length; i++) {
+              const k = localStorage.key(i);
+              if (!k || !/^sb-.*-auth-token$/.test(k)) continue;
+              let raw = localStorage.getItem(k);
+              if (!raw) continue;
+              if (raw.startsWith('base64-')) {
+                try { raw = atob(raw.slice(7).replace(/-/g, '+').replace(/_/g, '/')); } catch (_) { continue; }
+              }
+              try {
+                const o = JSON.parse(raw);
+                const t = (o && o.access_token) || (o && o.currentSession && o.currentSession.access_token);
+                if (t) return t;
+              } catch (_) {}
+            }
+            return null;
+          },
+        });
+        if (r && r.result) { await chrome.runtime.sendMessage({ type: 'SET_TOKEN', token: r.result }); return true; }
+      } catch (_) { /* aba sem permissão/descartada: tenta a próxima */ }
     }
+  } catch (_) {}
+  return false;
+}
+async function garantirSessao() {
+  const has = await chrome.runtime.sendMessage({ type: 'HAS_TOKEN' }).catch(() => null);
+  if (has && has.hasToken) return true;
+  return puxarTokenDoApp();
+}
+function erroAmigavel(e) {
+  if (e === 'sem_sessao') return 'sem conexão com o app — deixe o painel Cobrasq aberto e logado e clique Extrair de novo';
+  return e || 'falha na IA';
+}
+async function extrairCaso(caso) {
+  caso.extracao = 'pendente'; caso.erroExtracao = null;
+  const principal = caso.docs.find(d => d.principal);
+  if (!principal || principal.size > 3 * 1024 * 1024) {
+    caso.extracao = 'erro';
+    caso.erroExtracao = !principal ? 'sem peça principal' : 'peça principal com ' + (principal.size / 1048576).toFixed(1) + ' MB (limite 3 MB) — preencha os dados na revisão';
+    return;
+  }
+  {
     try {
       const f = await principal.handle.getFile();
       const base64 = b64DeBuffer(await f.arrayBuffer());
@@ -171,6 +212,14 @@ async function extrairTodos() {
       caso.extracao = 'erro';
       caso.erroExtracao = String((e && e.message) || e);
     }
+  }
+}
+async function extrairTodos() {
+  setPasso(2);
+  await garantirSessao();
+  for (const caso of state.casos) {
+    renderFase2();
+    await extrairCaso(caso);
   }
   renderFase3();
 }
@@ -212,7 +261,9 @@ function renderFase3() {
     <p class="muted">Pasta <b>${esc(state.pastaNome)}</b> — ${state.casos.length} caso(s). Edite o que precisar. O <b>1º caso para no Finalizar</b> pra você validar; os demais seguem automáticos. Qualquer anomalia pausa o lote.</p>
   </div>` + state.casos.map(caso => `
     <div class="caso" id="rev-${caso.id}">
-      <h3>📂 ${esc(caso.nome)} ${caso.extracao === 'erro' ? `<span class="pill p-amarelo">IA falhou: revise tudo</span>` : '<span class="pill p-verde">extraído por IA</span>'}</h3>
+      <h3>📂 ${esc(caso.nome)} <span>${caso.extracao === 'erro'
+        ? `<span class="pill p-amarelo">IA falhou: ${esc(erroAmigavel(caso.erroExtracao))}</span> <button class="btn ghost" data-reextrair="${caso.id}" style="padding:3px 10px;font-size:12px;">🔁 Extrair de novo</button>`
+        : '<span class="pill p-verde">extraído por IA</span>'}</span></h3>
       <div class="grade">
         ${inputD(caso, 'comarca', 'Comarca', caso.dados.comarca)}
         ${inputD(caso, 'rito', 'Rito', caso.dados.rito)}
@@ -246,6 +297,14 @@ function renderFase3() {
   });
   document.getElementById('voltar').onclick = () => renderFase1();
   document.getElementById('rodar').onclick = iniciarLote;
+  app.querySelectorAll('button[data-reextrair]').forEach(b => b.onclick = async () => {
+    const caso = state.casos.find(c => c.id === b.dataset.reextrair);
+    if (!caso) return;
+    b.disabled = true; b.textContent = 'extraindo…';
+    await garantirSessao();
+    await extrairCaso(caso);
+    renderFase3();
+  });
 }
 
 // ── fase 4: execução ──────────────────────────────────────────────────────────
