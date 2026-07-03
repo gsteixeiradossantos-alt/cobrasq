@@ -86,9 +86,12 @@
   async function execNaPagina(payload) {
     try {
       const r = await chrome.runtime.sendMessage({ type: 'EXEC_PAGINA', ...payload });
-      if (r && r.ok) return true;
+      // M6/B7: só considera sucesso se a função REALMENTE rodou no mundo da página
+      // (resultado===true). ok:true sem resultado = função inexistente/CSP → tenta
+      // o fallback e, se nada confirmar, o chamador decide (pausa).
+      if (r && r.ok && r.resultado === true) return true;
     } catch (_) {}
-    // fallback: injeção local (só funciona sem CSP restritivo)
+    // fallback: injeção local (só funciona sem CSP restritivo — pode ser barrado).
     try {
       const code = payload.code || (payload.fn ? payload.fn + '(' + (payload.args || []).map(a => JSON.stringify(a)).join(',') + ')' : '');
       if (!code) return false;
@@ -96,7 +99,7 @@
       s.textContent = 'try{' + code + '}catch(e){}';
       (document.head || document.documentElement).appendChild(s);
       s.remove();
-      return true;
+      return false; // não há como confirmar execução via injeção local
     } catch (_) { return false; }
   }
   // Aciona "de verdade" um controle cujo gatilho é JS da página (href=javascript:… ou
@@ -109,9 +112,14 @@
     const onclick = (el.getAttribute && el.getAttribute('onclick')) || '';
     const js = /^javascript:/i.test(href) ? href.replace(/^javascript:/i, '') : (onclick || '');
     if (js) {
-      const m = js.match(/^\s*([A-Za-z_$][\w$]*)\s*\(\s*(?:'([^']*)'|"([^"]*)")?\s*\)/);
-      if (m && !m[2] && !m[3]) return execNaPagina({ fn: m[1], args: [] });
-      if (m && (m[2] || m[3])) return execNaPagina({ fn: m[1], args: [m[2] || m[3]] });
+      // B3: multi-statement (tem ';' fora do fim) → executa a expressão inteira (code),
+      // não só a 1ª função.
+      if (/;/.test(js.trim().replace(/;\s*$/, ''))) return execNaPagina({ code: js });
+      const m = js.match(/^\s*([A-Za-z_$][\w$]*)\s*\(\s*(?:'([^']*)'|"([^"]*)")?\s*\)\s*;?\s*$/);
+      if (m) {
+        const arg = m[2] !== undefined ? m[2] : m[3]; // distingue "sem arg" de arg "" (string vazia)
+        return execNaPagina(arg !== undefined ? { fn: m[1], args: [arg] } : { fn: m[1], args: [] });
+      }
       return execNaPagina({ code: js });
     }
     clicar(el); return true;
@@ -197,19 +205,31 @@
 
   // Tela: o processo (processo.do — form processoForm com #cumprirButton/#peticionarButton).
   async function telaProcesso(c) {
-    const cumprir = document.getElementById('cumprirButton');
-    const peticionar = document.getElementById('peticionarButton');
-    if (cumprir && visivel(cumprir)) { progresso(c, 'pendência encontrada → Cumprir Prazo'); clicar(cumprir); return; }
-    if (peticionar && visivel(peticionar)) { progresso(c, 'sem pendência aparente → Petição Eletrônica'); clicar(peticionar); return; }
+    // M2: os botões podem chegar por AJAX depois do document_idle — espera antes de
+    // decidir; se nunca vierem, pausa (NÃO navega embora, senão loop).
+    const btn = await esperar(() => {
+      const cu = document.getElementById('cumprirButton'), pe = document.getElementById('peticionarButton');
+      if (cu && visivel(cu)) return cu;
+      if (pe && visivel(pe)) return pe;
+      return null;
+    }, 8000);
+    if (btn && btn.id === 'cumprirButton') { progresso(c, 'pendência encontrada → Cumprir Prazo'); clicar(btn); return; }
+    if (btn) { progresso(c, 'sem pendência aparente → Petição Eletrônica'); clicar(btn); return; }
     return pausar(c, 'estou no processo mas não achei "Cumprir Prazo" nem "Petição Eletrônica" — clique você no caminho certo (se houver intimação: Ver Intimação → Cumprir Prazo) e depois Continuar');
   }
 
   // Tela: juntar documento (cumprirIntimacao/juntarDocumento — form juntarDocumentoForm).
-  // Tipo via autocomplete (#descricaoTipoDocumento → hidden #idTipoDocumento), botão
-  // "Adicionar" abre o diálogo de upload (iframe upload.do — outra instância cuida).
+  // Tipo via LUPA (#descricaoTipoDocumento → hidden #idTipoDocumento); "Adicionar"
+  // abre o diálogo de upload (iframe upload.do — outra instância cuida).
+  // B1: conta só linhas que são anexo de verdade (têm ação de remover ou um .pdf),
+  // ignora cabeçalho/placeholder "Nenhum registro encontrado".
   function linhasAnexos() {
-    return Array.from(document.querySelectorAll('.resultTable tbody tr'))
-      .filter(tr => visivel(tr) && (tr.textContent || '').trim().length > 5).length;
+    return Array.from(document.querySelectorAll('.resultTable tbody tr, #juntarDocumentoForm table tbody tr'))
+      .filter(tr => {
+        if (!visivel(tr)) return false;
+        if (/nenhum registro/i.test(tr.textContent || '')) return false;
+        return !!tr.querySelector('a[onclick*="remover"], a[onclick*="excluir"], input[type="checkbox"]') || /\.pdf/i.test(tr.textContent || '');
+      }).length;
   }
   async function telaJuntar(c) {
     if (document.querySelector('iframe[src*="upload.do"]')) return; // diálogo aberto: quem age é a instância dele
@@ -232,17 +252,24 @@
       return pausar(c, 'cliquei na <b>🔍 lupa</b> (Seleção de Tipo de Documento) — escolha <b>' + escHtml(tipoTxt) + '</b> na janela e clique <b>Continuar</b>. Se a janela não abriu, clique você na lupa ao lado do campo. Assim que o tipo for confirmado eu sigo com os anexos sozinho.');
     }
     // 2) anexos
-    if (linhasAnexos() < (c.docs || []).length) {
+    if (!(c.docs || []).length) return pausar(c, 'este caso não tem PDF para anexar — refaça na Central.'); // B6
+    if (linhasAnexos() < c.docs.length) {
       if (!c.abriuUpload) {
-        c.abriuUpload = true; await casoSalvar(c);
         const add = acharControle(['adicionar']);
         if (!add) return pausar(c, 'não achei o botão "Adicionar" para abrir o envio de arquivos — anexe você e clique Continuar');
         progresso(c, 'abrindo o envio de arquivos…');
+        await new Promise(r => setTimeout(r, 800)); // M4: deixa os handlers assentarem
         clicar(add);
+        // M4: confirma que o diálogo (iframe upload.do) abriu ANTES de marcar a flag;
+        // senão reverte e re-tenta na próxima passada (evita timeout de 3min à toa).
+        const abriu = await esperar(() => document.querySelector('iframe[src*="upload.do"]') || document.getElementById('fileUploadForm'), 8000);
+        if (!abriu) return pausar(c, 'cliquei em "Adicionar" mas o envio de arquivos não abriu — clique você e depois Continuar');
+        c.abriuUpload = true; await casoSalvar(c);
       }
       progresso(c, 'aguardando os PDFs subirem…');
-      const subiu = await esperar(() => linhasAnexos() >= (c.docs || []).length, 180000, 800);
-      if (!subiu) { c.abriuUpload = false; await casoSalvar(c); return pausar(c, 'os anexos não apareceram na lista — confira o diálogo de envio (Adicionar → escolher arquivos → Confirmar Inclusão) e clique Continuar'); }
+      const tempo = Math.max(120000, c.docs.length * 60000); // B4: proporcional aos docs
+      const subiu = await esperar(() => linhasAnexos() >= c.docs.length, tempo, 800);
+      if (!subiu) { c.abriuUpload = false; c.uploadFeito = false; await casoSalvar(c); return pausar(c, 'os anexos não apareceram na lista — confira o diálogo de envio (Adicionar → escolher arquivos → Confirmar Inclusão) e clique Continuar'); }
     }
     // 3) tudo anexado → o humano conclui e assina (senha é sempre sua)
     c.fase = 'assinar'; await casoSalvar(c);
@@ -256,10 +283,11 @@
   // mas exige codDescricao selecionado ANTES (senão alert).
   async function telaUpload(c) {
     if (c.uploadFeito) return;
+    if (!(c.docs || []).length) return; // B6
     const sel = document.getElementById('codDescricao');
     const inputArq = document.getElementById('conteudo');
     if (!sel || !inputArq) return;
-    progresso(c, 'enviando ' + (c.docs || []).length + ' PDF(s)…');
+    progresso(c, 'enviando ' + c.docs.length + ' PDF(s)…');
     const alvoTipo = norm(c.tipo_peticao || 'peticao');
     let opt = Array.from(sel.options).find(o => norm(o.textContent) === alvoTipo) ||
               Array.from(sel.options).find(o => o.value !== '0' && norm(o.textContent).includes(alvoTipo)) ||
@@ -277,10 +305,17 @@
     inputArq.files = dt.files;
     inputArq.dispatchEvent(new Event('change', { bubbles: true })); // dispara o envio automático
     c.uploadFeito = true; await casoSalvar(c);
-    // dá tempo do envio terminar e confirma a inclusão (fecha o diálogo)
-    await new Promise(r => setTimeout(r, 5000));
-    const fechar = document.getElementById('closeButton') || acharControle(['confirmar inclusao']);
-    if (fechar) clicar(fechar);
+    // M5: espera SINAL de conclusão do envio (a lista do diálogo recebe as linhas
+    // dos arquivos, ou o input volta a ficar vazio) em vez de sleep fixo de 5s —
+    // fechar cedo cancelaria upload de PDF grande. Só então confirma a inclusão.
+    await esperar(() => {
+      const linhas = document.querySelectorAll('#fileUploadForm table tbody tr, .resultTable tbody tr').length;
+      return linhas >= c.docs.length || (inputArq.value === '' && linhas > 0);
+    }, Math.max(60000, c.docs.length * 45000), 700);
+    try {
+      const fechar = document.getElementById('closeButton') || acharControle(['confirmar inclusao']);
+      if (fechar) clicar(fechar);
+    } catch (_) { /* diálogo pode ter fechado sozinho */ }
   }
 
   // Tela pré-login do Projudi (index): cartões "Magistrados…", "Advogados, Partes…",
@@ -313,12 +348,22 @@
     if (!ehCondutor()) {
       // Tela pré-login (topo): clica em "Advogados, Partes" para chegar ao login.
       if (window === window.top && c.status !== 'pausado') {
+        const naTelaAcesso = /acesso ao sistema/.test(norm(document.body ? document.body.innerText : ''));
         const acesso = acessoAdvogado();
-        if (acesso) { progresso(c, 'entrando por "Advogados, Partes"…'); await clicarPagina(acesso); return; }
+        if (acesso) {
+          progresso(c, 'entrando por "Advogados, Partes"…');
+          const ok = await clicarPagina(acesso);
+          // M8: se o clique não pôde ser executado (CSP/estrutura), entrega ao humano.
+          if (!ok) return pausar(c, 'não consegui abrir o acesso automaticamente — clique você em <b>Advogados, Partes</b> (ou faça seu login por certificado) e clique Continuar.');
+          return;
+        }
+        // M8: estamos na tela de acesso mas não achamos o cartão CPF+senha (ex.: fluxo
+        // por Certificado Digital/PIN) → pausa entregando o login ao humano.
+        if (naTelaAcesso) return pausar(c, 'faça o <b>login no Projudi</b> como preferir (CPF/CNPJ+senha ou certificado) e clique Continuar — a fila segue sozinha depois.');
       }
       // Frames coadjuvantes só cuidam do login (a tela de senha pode aparecer
       // em qualquer moldura); o resto é do userMainFrame/diálogo de upload.
-      if (temLogin() && c.status !== 'pausado') { await pausar(c, 'login'); setBody(msg('Faça o <b>login no Projudi</b> (CPF/CNPJ + senha) — a fila continua sozinha depois.', '#fff3bf')); }
+      if (temLogin() && c.status !== 'pausado') { await pausar(c, 'login'); setBody(msg('Faça o <b>login no Projudi</b> — a fila continua sozinha depois.', '#fff3bf')); }
       return;
     }
     try {
@@ -342,13 +387,19 @@
       // Despacho por formulário presente na tela (IDs reais dos saves):
       if (document.getElementById('fileUploadForm')) return await telaUpload(c);
       if (document.getElementById('juntarDocumentoForm')) return await telaJuntar(c);
-      if (document.getElementById('processoForm') && (document.getElementById('cumprirButton') || document.getElementById('peticionarButton'))) return await telaProcesso(c);
+      if (document.getElementById('processoForm')) return await telaProcesso(c); // M2: espera botões lá dentro
       if (document.getElementById('buscaProcessosQualquerInstanciaForm')) {
+        // C1 (hardening): detecção POSITIVA — se já há link do processo no resultado,
+        // vai direto p/ resultado; senão é a tela de busca.
+        if (linkDoProcesso(c.numero_processo)) return await telaResultado(c);
         if (document.getElementById('numeroProcesso')) return await telaBusca(c);
         return await telaResultado(c);
       }
-      // Qualquer outra tela (mesa do advogado etc.): navega pelo menu.
-      await abrirBuscaPeloMenu(c);
+      // M3: só navega pelo menu quando estamos claramente na "mesa do advogado";
+      // numa tela intermediária desconhecida do fluxo, PAUSA (não navega, senão loop).
+      const naMesa = document.getElementById('mesaAdvogadoForm') || /mesaAdvogado|principal\.php|home\.do/i.test(location.href || '');
+      if (naMesa) { await abrirBuscaPeloMenu(c); return; }
+      return pausar(c, 'cheguei numa tela que ainda não reconheço no fluxo — seu clique resolve (ex.: se houver intimação, Ver Intimação → Cumprir Prazo). Ajuste e clique Continuar.');
     } catch (e) { const c2 = await casoLer(); if (c2) await pausar(c2, 'erro inesperado: ' + String((e && e.message) || e)); }
     } finally { _rodandoProjudi = false; }
   }
@@ -374,7 +425,13 @@
         const c = await casoLer();
         if (c && c.sistema === 'projudi') {
           c.status = 'rodando'; c.motivo = null;
-          if (c.fase === 'assinar') c.retomadoPeloUsuario = true; // pós-assinatura: Continuar = caso concluído
+          if (c.fase === 'assinar') {
+            c.retomadoPeloUsuario = true; // pós-assinatura: Continuar = caso concluído
+          } else {
+            // C2: o humano pode ter resolvido algo (anexo/tipo) — não confiar nas
+            // flags velhas; derivar do DOM na próxima passada.
+            c.abriuUpload = false; c.uploadFeito = false;
+          }
           await casoSalvar(c); runCentral().catch(() => {});
         }
         sendResponse({ ok: true });
