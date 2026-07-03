@@ -218,9 +218,11 @@ async function carregar() {
       const job = jobs[+btn.dataset.i];
       const t = await abaEprocAtiva();
       if (!t) { alert('Abra o processo no eproc TJPR primeiro.'); return; }
-      if (await enviarParaEproc(t.id, job)) window.close();
+      if (await enviarParaEproc(t.id, { type: 'FILL_JOB', job })) window.close();
     };
   });
+  await renderPasta();
+  renderCentralLink();
 }
 
 carregar();
