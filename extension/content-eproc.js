@@ -155,7 +155,7 @@
       'font:13px/1.45 system-ui,Arial,sans-serif;color:#1a1a1a;';
     p.innerHTML =
       '<div style="background:#0c2340;color:#fff;padding:10px 12px;font-weight:600;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;">' +
-      '<span>Cobrasq · Peticionador eproc</span>' +
+      '<span>Cobrasq · Peticionador eproc <small style="opacity:.7;">v' + chrome.runtime.getManifest().version + '</small></span>' +
       '<span id="cb-close" style="cursor:pointer;opacity:.8;">✕</span></div>' +
       '<div id="cb-body" style="padding:12px;"></div>';
     document.body.appendChild(p);
@@ -539,20 +539,33 @@
       if (!anchor) return pausar(c, 'Etapa 2: assunto "' + assunto + '" não apareceu na árvore mesmo filtrando — selecione o nó manualmente, clique Incluir e depois Continuar');
       // Quem inclui de verdade é o ÍCONE do próprio nó (visto na captura real):
       // <img id="imgIncluir02190505" class="inclusaoArvore" onclick="incluirAssunto('02190505')">.
+      // O texto do nó traz o código — "Perdas e danos (02190505)" — então dá pra mirar
+      // o ícone por id na página inteira, sem depender da estrutura do li do jstree.
+      const mCod = (anchor.textContent || '').match(/\((\d{4,})\)/);
       const li = anchor.closest('li') || anchor.parentElement;
-      const icone = li && li.querySelector('img[id^="imgIncluir"], img[onclick*="incluirAssunto"], img.inclusaoArvore');
-      if (icone) {
-        progresso(c, 'Etapa 2: incluindo "' + assunto + '" pelo ícone do nó…');
-        clicar(icone);
-      } else {
-        // Fallback antigo: seleciona o nó e usa o botão Incluir geral.
-        clicar(anchor);
-        await esperar(() => (document.querySelector('#txtDesAssunto') || {}).value, 5000);
-        const incluir = qFirst(IDS.incluirAssunto);
-        if (incluir) clicar(incluir);
+      const acharIcone = () =>
+        (mCod && document.getElementById('imgIncluir' + mCod[1])) ||
+        (li && li.querySelector('img[id^="imgIncluir"], img[onclick*="incluirAssunto"], img.inclusaoArvore')) ||
+        document.querySelector('#divArvore img[id^="imgIncluir"]');
+      const diag = [];
+      let ok = false;
+      for (let tent = 0; tent < 3 && !ok; tent++) {
+        const icone = acharIcone();
+        if (icone) {
+          progresso(c, 'Etapa 2: incluindo "' + assunto + '" pelo ícone do nó… (tentativa ' + (tent + 1) + ')');
+          clicar(icone);
+          diag.push('cliquei no ícone ' + (icone.id || 'do nó'));
+        } else {
+          // Fallback antigo: seleciona o nó e usa o botão Incluir geral.
+          clicar(anchor);
+          await esperar(() => (document.querySelector('#txtDesAssunto') || {}).value, 5000);
+          const incluir = qFirst(IDS.incluirAssunto);
+          if (incluir) { clicar(incluir); diag.push('ícone não achado; usei o botão Incluir'); }
+          else diag.push('nem ícone nem botão Incluir encontrados');
+        }
+        ok = await esperar(linhaAssuntoOk, 6000);
       }
-      const ok = await esperar(linhaAssuntoOk, 8000);
-      if (!ok) return pausar(c, 'Etapa 2: não consegui incluir o assunto — inclua manualmente e Continuar');
+      if (!ok) return pausar(c, 'Etapa 2: não consegui incluir o assunto (' + diag.join(' → ') + '; a tabela "Assunto Principal" segue vazia) — inclua manualmente e Continuar');
     }
     const comp = qFirst(IDS.competencia);
     if (comp && d.competencia && comp.value === '-1' && !setSelectByText(comp, d.competencia))
