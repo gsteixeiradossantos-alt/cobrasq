@@ -257,13 +257,29 @@
     if (fechar) clicar(fechar);
   }
 
+  // Tela pré-login do Projudi (index): cartões "Magistrados…", "Advogados, Partes…",
+  // "Certificado Digital". O 1º passo é entrar por "Advogados, Partes" (CPF/senha).
+  function acessoAdvogado() {
+    const txt = norm(document.body ? document.body.innerText : '');
+    if (!txt.includes('acesso ao sistema') && !txt.includes('cadastro no sistema')) return null;
+    const cands = Array.from(document.querySelectorAll('a, div, button, li, td'));
+    const alvo = cands.find(el => visivel(el) && /advogad[oa]s?[ ,]+partes/.test(norm(el.textContent)) && norm(el.textContent).length < 200);
+    if (!alvo) return null;
+    return alvo.closest('a[href]') || (alvo.getAttribute && alvo.getAttribute('onclick') ? alvo : null) || alvo.querySelector('a[href]') || alvo;
+  }
+
   async function runCentral() {
     const c = await casoLer();
     if (!c || c.sistema !== 'projudi') return;
     if (!ehCondutor()) {
+      // Tela pré-login (topo): clica em "Advogados, Partes" para chegar ao login.
+      if (window === window.top && c.status !== 'pausado') {
+        const acesso = acessoAdvogado();
+        if (acesso) { progresso(c, 'entrando por "Advogados, Partes"…'); clicar(acesso); return; }
+      }
       // Frames coadjuvantes só cuidam do login (a tela de senha pode aparecer
       // em qualquer moldura); o resto é do userMainFrame/diálogo de upload.
-      if (temLogin() && c.status !== 'pausado') { await pausar(c, 'login'); setBody(msg('Faça o <b>login no Projudi</b> — a fila continua sozinha depois.', '#fff3bf')); }
+      if (temLogin() && c.status !== 'pausado') { await pausar(c, 'login'); setBody(msg('Faça o <b>login no Projudi</b> (CPF/CNPJ + senha) — a fila continua sozinha depois.', '#fff3bf')); }
       return;
     }
     try {
