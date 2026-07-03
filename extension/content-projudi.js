@@ -18,12 +18,14 @@
   const VERSAO = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || '?';
   const CASO_KEY = 'cobrasq_central_caso';
 
-  // ── nível do frame ───────────────────────────────────────────────────────────
-  function nivel() {
-    if (document.querySelector('frameset')) return 1;
-    if (document.getElementById('main-menu') || document.getElementById('BarraMenu')) return 2;
-    if (window !== window.top) return 3;
-    return 0; // página solta (login/autenticação fora das molduras)
+  // ── quem dirige ──────────────────────────────────────────────────────────────
+  // O Projudi tem TRÊS frames irmãos (topFrame de 45px, mainFrame com o menu e,
+  // dentro dele, o iframe userMainFrame com a tela). Checagem POSITIVA: só o
+  // userMainFrame (nome dado pelo nível 2) ou o diálogo/pop-up de upload dirigem —
+  // senão o topFrame vira "condutor" e pausa o lote à toa (visto no 1º teste real).
+  function ehCondutor() {
+    if (document.getElementById('fileUploadForm')) return true; // diálogo/pop-up de upload
+    return window !== window.top && window.name === 'userMainFrame';
   }
 
   // ── helpers (mesmo espírito do content-eproc) ────────────────────────────────
@@ -237,9 +239,12 @@
   async function runCentral() {
     const c = await casoLer();
     if (!c || c.sistema !== 'projudi') return;
-    const meuNivel = nivel();
-    if (meuNivel === 1 || meuNivel === 2) return; // frameset/menu não dirigem
-    if (meuNivel === 0 && !temLogin() && !document.getElementById('fileUploadForm')) return;
+    if (!ehCondutor()) {
+      // Frames coadjuvantes só cuidam do login (a tela de senha pode aparecer
+      // em qualquer moldura); o resto é do userMainFrame/diálogo de upload.
+      if (temLogin() && c.status !== 'pausado') { await pausar(c, 'login'); setBody(msg('Faça o <b>login no Projudi</b> — a fila continua sozinha depois.', '#fff3bf')); }
+      return;
+    }
     try {
       if (c.status === 'pausado') {
         if (c.motivo === 'login' && !temLogin()) { c.status = 'rodando'; c.motivo = null; await casoSalvar(c); }
@@ -274,9 +279,11 @@
   // ── mensageria (só o frame-condutor responde às ações) ───────────────────────
   chrome.runtime.onMessage.addListener((m, _s, sendResponse) => {
     if (!m || !m.type) return false;
-    const meuNivel = nivel();
+    // O topo SEMPRE responde (garante resposta à Central mesmo na tela de login);
+    // quem age de verdade é o condutor (userMainFrame/diálogo de upload).
+    const respondo = ehCondutor() || window === window.top;
     if (m.type === 'RUN_CENTRAL' && m.caso && m.caso.sistema === 'projudi') {
-      if (meuNivel !== 3) return false;
+      if (!respondo) return false;
       (async () => {
         await casoSalvar({ ...m.caso, status: 'rodando', motivo: null, fase: null, abriuUpload: false, uploadFeito: false, retomadoPeloUsuario: false });
         sendResponse({ ok: true });
@@ -285,7 +292,7 @@
       return true;
     }
     if (m.type === 'CONTINUAR_CENTRAL') {
-      if (meuNivel !== 3) return false;
+      if (!respondo) return false;
       (async () => {
         const c = await casoLer();
         if (c && c.sistema === 'projudi') {
