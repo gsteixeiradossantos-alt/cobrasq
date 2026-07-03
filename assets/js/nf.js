@@ -163,9 +163,69 @@ function nffDraw(){
       ? _nffFila.map(linha).join('')
       : `<div style="padding:26px 20px;font-family:'Instrument Serif',Georgia,serif;font-style:italic;font-size:16px;color:rgba(10,21,48,0.5);">Nenhum recebimento aguardando análise. Quando alguém pagar no Asaas, aparece aqui.</div>`}
   </div>`;
+  if(typeof nffRenderRail==='function') nffRenderRail();
 }
 
 function nffToggle(id){ if(_nffSel.has(id)) _nffSel.delete(id); else _nffSel.add(id); nffDraw(); }
+
+// ── rail direito (296px): resumo do mês · precisa de você · modelo ativo ─────
+function nffRenderRail(){
+  const box=document.getElementById('nff-rail'); if(!box) return;
+  const hist=(typeof _nfaHist!=='undefined'&&_nfaHist)||[];
+  const agora=new Date();
+  const noMes=r=>{ const d=r.criada_em?new Date(r.criada_em):null; return d && d.getMonth()===agora.getMonth() && d.getFullYear()===agora.getFullYear(); };
+  const mes=hist.filter(r=>noMes(r)&&nfaEffStatus(r)!=='arquivada');
+  const nEmit=mes.filter(r=>nfaEffStatus(r)==='emitida').length;
+  const nProc=mes.filter(r=>nfaEffStatus(r)==='processando').length;
+  const nErro=mes.filter(r=>nfaEffStatus(r)==='erro').length;
+  const valEmit=mes.filter(r=>nfaEffStatus(r)==='emitida').reduce((s,r)=>s+(Number(r.valor)||0),0);
+  const issRet=mes.filter(r=>nfaEffStatus(r)==='emitida').reduce((s,r)=>s+(Number(r.valor)||0)*nfaRowAliq(r)/100,0);
+  const nSemEnd=_nffFila.filter(q=>q.endereco_ok===false).length;
+  const fila=_nffFila.length;
+  const tot=Math.max(nEmit+nProc+nErro,1);
+  const mesLabel=agora.toLocaleDateString('pt-BR',{month:'long',year:'numeric'}).toUpperCase();
+  const lbl=`font-family:${NFF_C.mono};font-size:9px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;`;
+  const cardSt=(borda)=>`background:${NFF_C.card};border:0.5px solid ${borda||'rgba(10,21,48,0.12)'};border-radius:14px;padding:15px 17px;margin-bottom:14px;`;
+  const lin=(a,b,cor)=>`<div style="display:flex;justify-content:space-between;font-size:12.5px;margin-top:7px;"><span style="color:rgba(10,21,48,0.6);">${a}</span><b style="font-family:${NFF_C.mono};${cor?`color:${cor};`:''}">${b}</b></div>`;
+
+  const precisa=[];
+  if(fila) precisa.push(`<div><b>${fila} recebimento(s)</b> aguardando decisão de emissão.</div>`);
+  if(nSemEnd) precisa.push(`<div><b>${nSemEnd} tomador(es)</b> sem endereço no Asaas — não dá para emitir até corrigir.</div>`);
+  if(nErro) precisa.push(`<div><b>${nErro} nota(s) com erro</b> na prefeitura.</div>`);
+  const m=nfaModeloAtivo();
+
+  box.innerHTML=`
+    <div style="${cardSt()}">
+      <div style="${lbl}color:${NFF_C.goldDark};margin-bottom:4px;">${escHtml(mesLabel)} · RESUMO</div>
+      ${lin('Aguardando análise', fila)}
+      ${lin('Notas no mês', mes.length)}
+      ${lin('Valor emitido', nfaFmtBRL(valEmit))}
+      ${lin(`ISS retido`, '− '+nfaFmtBRL(issRet), NFF_C.vermelho)}
+      <div style="display:flex;gap:3px;margin-top:13px;height:6px;border-radius:100px;overflow:hidden;">
+        <span style="flex:${nEmit/tot};background:${NFF_C.verde};"></span>
+        <span style="flex:${nProc/tot};background:#56618A;"></span>
+        <span style="flex:${nErro/tot};background:${NFF_C.vermelho};"></span>
+      </div>
+      <div style="display:flex;gap:9px;margin-top:7px;font-size:10.5px;color:rgba(10,21,48,0.55);flex-wrap:wrap;">
+        <span><span style="color:${NFF_C.verde};">●</span> ${nEmit} emitidas</span>
+        <span><span style="color:#56618A;">●</span> ${nProc} proc.</span>
+        <span><span style="color:${NFF_C.vermelho};">●</span> ${nErro} erro</span>
+      </div>
+    </div>
+    ${precisa.length?`<div style="${cardSt('rgba(166,90,74,0.35)')}">
+      <div style="${lbl}color:${NFF_C.vermelho};margin-bottom:9px;">PRECISA DE VOCÊ</div>
+      <div style="display:flex;flex-direction:column;gap:8px;font-size:12.5px;line-height:1.5;color:${NFF_C.ink};">${precisa.join('')}</div>
+    </div>`:''}
+    <div style="${cardSt()}">
+      <div style="display:flex;align-items:center;margin-bottom:8px;">
+        <span style="${lbl}color:${NFF_C.goldDark};">MODELO ATIVO</span>
+        <button onclick="nfaIrConfigFiscal()" style="margin-left:auto;background:none;border:0;cursor:pointer;font-size:11px;font-weight:600;color:${NFF_C.goldDark};">⚙ Config</button>
+      </div>
+      <div style="font-size:13px;font-weight:600;color:${NFF_C.ink};">${escHtml(m.municipio||'Defina o município')}</div>
+      <div style="font-family:${NFF_C.mono};font-size:11px;color:rgba(10,21,48,0.55);margin-top:2px;">serviço ${escHtml(m.codigo||m.asaasId||'—')} · ISS ${escHtml(String(nfaAliquota()))}%${m.nome?' · '+escHtml(m.nome):''}</div>
+    </div>
+    <div style="padding:0 4px;font-size:11px;color:rgba(10,21,48,0.5);line-height:1.55;">Conciliação de ISS por competência, modelos por município e notificação ao tomador moram em <b>Config</b>.</div>`;
+}
 
 // ── dispensar (registra a decisão; some da fila) ─────────────────────────────
 async function nffDispensarSel(){ const ids=[..._nffSel]; _nffSel.clear(); await nffDispensar(ids); }
@@ -219,7 +279,7 @@ function nffEmitir(ids){
   if(_nffEmitindo){ showToast('Aguarde — já há uma emissão em andamento.','warning'); return; }
   if(!_nfaMunReady()){
     showToast('Informe o serviço municipal (código) no modelo ativo antes de emitir.','warning');
-    const b=document.getElementById('nfa-modelos'); if(b) b.scrollIntoView({behavior:'smooth',block:'center'});
+    if(typeof nfaIrConfigFiscal==='function') nfaIrConfigFiscal();
     return;
   }
   const sel=(ids||[]).map(id=>_nffFila.find(x=>x.id===id)).filter(Boolean);
