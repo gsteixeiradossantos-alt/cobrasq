@@ -117,7 +117,8 @@ function renderFase1(msgErro) {
     <h2 style="margin-top:0;font-size:16px;">Escolha a pasta das petições</h2>
     <p class="muted">• <b>1 caso:</b> uma pasta com os PDFs (petição inicial + procuração + documentos).<br>
     • <b>Lote:</b> uma pasta-mãe com <b>uma subpasta por caso</b>.<br>
-    Pode ser a pasta do OneDrive sincronizada no computador. Só leitura, nada sai da sua máquina além do envio ao tribunal e da peça principal à IA do sistema.</p>
+    Pode ser a pasta do OneDrive sincronizada no computador. Só leitura, nada sai da sua máquina além do envio ao tribunal e da peça principal à IA do sistema.<br>
+    ⚠️ A leitura por IA usa o servidor do app Cobrasq — deixe o <b>painel aberto e logado</b> em outra aba (a extensão conecta sozinha).</p>
     ${msgErro ? `<div class="erro">${esc(msgErro)}</div>` : ''}
     <button class="btn" id="pick">📁 Escolher pasta…</button>
   </div>`;

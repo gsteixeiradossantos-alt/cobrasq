@@ -68,7 +68,7 @@ async function claudeExtrair(base64Pdf) {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: 'claude-sonnet-5',
-      max_tokens: 2000,
+      max_tokens: 8000,
       messages: [{
         role: 'user',
         content: [
@@ -80,9 +80,12 @@ async function claudeExtrair(base64Pdf) {
   });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) return { error: (j.error && j.error.message) || ('HTTP ' + r.status) };
-  const texto = (((j || {}).content || [])[0] || {}).text || '';
+  // A resposta vem em BLOCOS (content: [...]) e o texto pode não ser o 1º bloco
+  // (modelos com raciocínio emitem um bloco de thinking antes) — junta todos.
+  const blocos = (j && j.content) || [];
+  const texto = blocos.map(b => (b && b.text) || '').join('');
   const m = texto.match(/\{[\s\S]*\}/);
-  if (!m) return { error: 'IA não devolveu JSON: ' + texto.slice(0, 120) };
+  if (!m) return { error: 'IA não devolveu JSON (parada: ' + (j && j.stop_reason) + '; blocos: ' + (blocos.map(b => b && b.type).join(',') || 'nenhum') + ') ' + texto.slice(0, 120) };
   try { return { ok: true, dados: JSON.parse(m[0]) }; }
   catch (e) { return { error: 'JSON inválido da IA: ' + String(e.message || e) }; }
 }
