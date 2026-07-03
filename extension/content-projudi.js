@@ -118,12 +118,11 @@
     return new File([bytes], r.nome, { type: 'application/pdf' });
   }
 
-  // ── telas ────────────────────────────────────────────────────────────────────
+  // ── telas (calibradas com os saves reais do Projudi TJPR) ────────────────────
   const digitos = (s) => String(s || '').replace(/\D/g, '');
-  function telaTemBusca() { return !!inputPorRotulo(['numero processo', 'numeroprocesso', 'nº do processo', 'numero do processo']); }
   function linkDoProcesso(numero) {
     const alvo = digitos(numero);
-    return Array.from(document.querySelectorAll('a')).find(a => visivel(a) && digitos(a.textContent).includes(alvo) && alvo.length >= 13) || null;
+    return Array.from(document.querySelectorAll('a[href*="processo.do"], a.link')).find(a => visivel(a) && digitos(a.textContent).includes(alvo) && alvo.length >= 13) || null;
   }
 
   async function abrirBuscaPeloMenu(c) {
@@ -137,12 +136,110 @@
     alvo.click(); // href com target=userMainFrame: navega ESTE frame (o script renasce)
   }
 
+  // Tela: Buscar Processos (form buscaProcessosQualquerInstanciaForm + #numeroProcesso).
+  async function telaBusca(c) {
+    const campo = document.getElementById('numeroProcesso');
+    progresso(c, 'buscando o processo ' + c.numero_processo + '…');
+    setInput(campo, c.numero_processo);
+    const btn = document.getElementById('pesquisar') || acharControle(['pesquisar']);
+    if (!btn) return pausar(c, 'tela de busca: não achei o botão Pesquisar — clique você e depois Continuar', campo);
+    clicar(btn); // o form navega; o script renasce na tela de resultado
+  }
+
+  // Tela: resultado da busca (mesma form, linhas com checkbox name="processos" + link p/ processo.do).
+  async function telaResultado(c) {
+    const link = await esperar(() => linkDoProcesso(c.numero_processo), 6000);
+    if (link) { progresso(c, 'abrindo o processo…'); clicar(link); return; }
+    return pausar(c, 'processo ' + c.numero_processo + ' não apareceu no resultado — confira o número (a busca fica em Buscas → Processos 1º Grau), abra o processo e clique Continuar');
+  }
+
+  // Tela: o processo (processo.do — form processoForm com #cumprirButton/#peticionarButton).
+  async function telaProcesso(c) {
+    const cumprir = document.getElementById('cumprirButton');
+    const peticionar = document.getElementById('peticionarButton');
+    if (cumprir && visivel(cumprir)) { progresso(c, 'pendência encontrada → Cumprir Prazo'); clicar(cumprir); return; }
+    if (peticionar && visivel(peticionar)) { progresso(c, 'sem pendência aparente → Petição Eletrônica'); clicar(peticionar); return; }
+    return pausar(c, 'estou no processo mas não achei "Cumprir Prazo" nem "Petição Eletrônica" — clique você no caminho certo (se houver intimação: Ver Intimação → Cumprir Prazo) e depois Continuar');
+  }
+
+  // Tela: juntar documento (cumprirIntimacao/juntarDocumento — form juntarDocumentoForm).
+  // Tipo via autocomplete (#descricaoTipoDocumento → hidden #idTipoDocumento), botão
+  // "Adicionar" abre o diálogo de upload (iframe upload.do — outra instância cuida).
+  function linhasAnexos() {
+    return Array.from(document.querySelectorAll('.resultTable tbody tr'))
+      .filter(tr => visivel(tr) && (tr.textContent || '').trim().length > 5).length;
+  }
+  async function telaJuntar(c) {
+    if (document.querySelector('iframe[src*="upload.do"]')) return; // diálogo aberto: quem age é a instância dele
+    if (c.fase === 'assinar') return; // já orientado: esperando o advogado concluir/assinar
+    // 1) tipo do documento
+    const hid = document.getElementById('idTipoDocumento');
+    const desc = document.getElementById('descricaoTipoDocumento');
+    if (desc && hid && !hid.value) {
+      progresso(c, 'definindo o tipo: ' + (c.tipo_peticao || 'Petição'));
+      setInput(desc, c.tipo_peticao || 'Petição');
+      desc.dispatchEvent(new Event('blur', { bubbles: true })); // dispara o autocomplete AJAX
+      const ok = await esperar(() => hid.value, 6000);
+      if (!ok) return pausar(c, 'não consegui confirmar o tipo "' + escHtml(c.tipo_peticao || 'Petição') + '" — digite o Tipo do Documento (autocomplete) você e clique Continuar', desc);
+    }
+    // 2) anexos
+    if (linhasAnexos() < (c.docs || []).length) {
+      if (!c.abriuUpload) {
+        c.abriuUpload = true; await casoSalvar(c);
+        const add = acharControle(['adicionar']);
+        if (!add) return pausar(c, 'não achei o botão "Adicionar" para abrir o envio de arquivos — anexe você e clique Continuar');
+        progresso(c, 'abrindo o envio de arquivos…');
+        clicar(add);
+      }
+      progresso(c, 'aguardando os PDFs subirem…');
+      const subiu = await esperar(() => linhasAnexos() >= (c.docs || []).length, 180000, 800);
+      if (!subiu) { c.abriuUpload = false; await casoSalvar(c); return pausar(c, 'os anexos não apareceram na lista — confira o diálogo de envio (Adicionar → escolher arquivos → Confirmar Inclusão) e clique Continuar'); }
+    }
+    // 3) tudo anexado → o humano conclui e assina (senha é sempre sua)
+    c.fase = 'assinar'; await casoSalvar(c);
+    const concluirBtn = acharControle(['concluir movimento', 'concluir']);
+    if (concluirBtn) destacar(concluirBtn, '#1a7f37');
+    return pausar(c, 'PDF(s) anexado(s) ✔ — confira, clique <b>Concluir Movimento</b> e ASSINE com sua senha. Depois do protocolo, clique <b>Continuar</b> na Central que eu dou o caso por concluído e sigo a fila.');
+  }
+
+  // Diálogo de upload (upload.do — form fileUploadForm; roda em iframe próprio).
+  // O onchange do input de arquivos JÁ envia sozinho (atualiza_arquivos_selecionados→enviar(2)),
+  // mas exige codDescricao selecionado ANTES (senão alert).
+  async function telaUpload(c) {
+    if (c.uploadFeito) return;
+    const sel = document.getElementById('codDescricao');
+    const inputArq = document.getElementById('conteudo');
+    if (!sel || !inputArq) return;
+    progresso(c, 'enviando ' + (c.docs || []).length + ' PDF(s)…');
+    const alvoTipo = norm(c.tipo_peticao || 'peticao');
+    let opt = Array.from(sel.options).find(o => norm(o.textContent) === alvoTipo) ||
+              Array.from(sel.options).find(o => o.value !== '0' && norm(o.textContent).includes(alvoTipo)) ||
+              Array.from(sel.options).find(o => norm(o.textContent).includes('peticao'));
+    if (!opt) {
+      opt = Array.from(sel.options).find(o => norm(o.textContent).includes('outros'));
+      const descTxt = document.getElementById('descricao');
+      if (descTxt) setInput(descTxt, (c.tipo_peticao || c.docs[0].nome.replace(/\.pdf$/i, '')).slice(0, 200));
+    }
+    if (!opt) return pausar(c, 'não achei um tipo de documento compatível no diálogo de envio — selecione o tipo, escolha os arquivos e Confirmar Inclusão; depois Continuar', sel);
+    sel.value = opt.value;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    const dt = new DataTransfer();
+    for (const d of c.docs) dt.items.add(await pedirDoc(c.id, d.idx));
+    inputArq.files = dt.files;
+    inputArq.dispatchEvent(new Event('change', { bubbles: true })); // dispara o envio automático
+    c.uploadFeito = true; await casoSalvar(c);
+    // dá tempo do envio terminar e confirma a inclusão (fecha o diálogo)
+    await new Promise(r => setTimeout(r, 5000));
+    const fechar = document.getElementById('closeButton') || acharControle(['confirmar inclusao']);
+    if (fechar) clicar(fechar);
+  }
+
   async function runCentral() {
     const c = await casoLer();
     if (!c || c.sistema !== 'projudi') return;
     const meuNivel = nivel();
-    if (meuNivel !== 3 && meuNivel !== 0) return; // só o frame da tela dirige
-    if (meuNivel === 0 && !temLogin()) return;     // página solta sem login: nada a fazer
+    if (meuNivel === 1 || meuNivel === 2) return; // frameset/menu não dirigem
+    if (meuNivel === 0 && !temLogin() && !document.getElementById('fileUploadForm')) return;
     try {
       if (c.status === 'pausado') {
         if (c.motivo === 'login' && !temLogin()) { c.status = 'rodando'; c.motivo = null; await casoSalvar(c); }
@@ -150,70 +247,28 @@
       }
       if (temLogin()) { await pausar(c, 'login'); setBody(msg('Faça o <b>login no Projudi</b> — a fila continua sozinha depois.', '#fff3bf')); return; }
 
-      const numero = c.numero_processo;
-      if (!numero) return pausar(c, 'caso sem número de processo — corrija na revisão da Central');
+      if (!c.numero_processo) return pausar(c, 'caso sem número de processo — corrija na revisão da Central');
 
       // FASE FINAL: o advogado assinou/protocolou e clicou Continuar.
-      if (c.fase === 'finalizando') {
+      if (c.fase === 'assinar' && c.status === 'rodando' && c.retomadoPeloUsuario) {
         const m = (document.body.innerText || '').match(/protocolo[^\d]{0,20}(\d[\d./-]{5,})/i);
         await casoLimpar();
-        reportar('CENTRAL_CASO_OK', { casoId: c.id, numero: (m && m[1]) || numero });
+        reportar('CENTRAL_CASO_OK', { casoId: c.id, numero: (m && m[1]) || c.numero_processo });
         setBody(msg('✅ Caso concluído — próximo da fila.', '#d3f9d8'));
         return;
       }
 
-      // 1) Tela de busca: preenche o nº e pesquisa.
-      if (telaTemBusca()) {
-        const campo = inputPorRotulo(['numero processo', 'numeroprocesso', 'numero do processo']);
-        if (digitos(campo.value) !== digitos(numero)) {
-          progresso(c, 'buscando o processo ' + numero + '…');
-          setInput(campo, numero);
-          const btn = acharControle(['pesquisar', 'consultar', 'buscar']);
-          if (!btn) return pausar(c, 'tela de busca: não achei o botão Pesquisar — clique você e depois Continuar', campo);
-          clicar(btn);
-          await esperar(() => linkDoProcesso(numero), 8000);
-        }
-        const link = linkDoProcesso(numero);
-        if (link) { progresso(c, 'abrindo o processo…'); clicar(link); return; }
-        return pausar(c, 'processo ' + numero + ' não apareceu no resultado — confira o número/abra o processo e clique Continuar');
+      // Despacho por formulário presente na tela (IDs reais dos saves):
+      if (document.getElementById('fileUploadForm')) return await telaUpload(c);
+      if (document.getElementById('juntarDocumentoForm')) return await telaJuntar(c);
+      if (document.getElementById('processoForm') && (document.getElementById('cumprirButton') || document.getElementById('peticionarButton'))) return await telaProcesso(c);
+      if (document.getElementById('buscaProcessosQualquerInstanciaForm')) {
+        if (document.getElementById('numeroProcesso')) return await telaBusca(c);
+        return await telaResultado(c);
       }
-
-      // 2) Tela do processo: pendência (Cumprir Prazo) tem prioridade; senão Peticionar.
-      const textoTela = norm((document.body.innerText || '').slice(0, 6000));
-      const nestaTela = textoTela.includes(digitos(numero).slice(0, 7)) || digitos(document.body.innerText).includes(digitos(numero));
-      if (nestaTela) {
-        const cumprir = acharControle(['cumprir prazo']);
-        const peticionar = acharControle(['peticionar', 'inserir peticao', 'juntar documento', 'movimentar']);
-        // Anexos: se a tela atual já tem campo de arquivo, é a tela da petição.
-        const inputArq = Array.from(document.querySelectorAll('input[type="file"]')).find(visivel);
-        if (inputArq) return await anexarEPausar(c, inputArq);
-        if (cumprir) { progresso(c, 'pendência encontrada → Cumprir Prazo'); clicar(cumprir); return; }
-        if (peticionar) { progresso(c, 'sem pendência → Peticionar'); clicar(peticionar); return; }
-        return pausar(c, 'estou no processo mas não achei "Cumprir Prazo" nem "Peticionar" — clique você no caminho certo (se houver intimação: Ver Intimação → Cumprir Prazo) e depois Continuar');
-      }
-
-      // 3) Qualquer outra tela (mesa do advogado etc.): navega pelo menu.
+      // Qualquer outra tela (mesa do advogado etc.): navega pelo menu.
       await abrirBuscaPeloMenu(c);
     } catch (e) { const c2 = await casoLer(); if (c2) await pausar(c2, 'erro inesperado: ' + String((e && e.message) || e)); }
-  }
-
-  async function anexarEPausar(c, inputArq) {
-    if (!c.anexou) {
-      progresso(c, 'anexando ' + (c.docs || []).length + ' PDF(s)…');
-      // Tipo do documento (se a tela tiver select/campo "Tipo"): melhor esforço.
-      const tipoSel = Array.from(document.querySelectorAll('select')).find(s => visivel(s) && norm((s.name || '') + (s.id || '')).includes('tipo'));
-      if (tipoSel && c.tipo_peticao) {
-        const opt = Array.from(tipoSel.options).find(o => norm(o.textContent).includes(norm(c.tipo_peticao)));
-        if (opt) { tipoSel.value = opt.value; tipoSel.dispatchEvent(new Event('change', { bubbles: true })); }
-      }
-      const dt = new DataTransfer();
-      for (const d of c.docs) dt.items.add(await pedirDoc(c.id, d.idx));
-      inputArq.files = dt.files;
-      inputArq.dispatchEvent(new Event('change', { bubbles: true }));
-      c.anexou = true; await casoSalvar(c);
-    }
-    c.fase = 'finalizando'; await casoSalvar(c);
-    return pausar(c, 'PDF(s) anexado(s) — confira o tipo da petição, ASSINE e protocole você (a senha é sempre sua). Depois do protocolo, clique <b>Continuar</b> na Central que eu dou o caso por concluído e sigo a fila.');
   }
 
   // ── mensageria (só o frame-condutor responde às ações) ───────────────────────
@@ -223,7 +278,7 @@
     if (m.type === 'RUN_CENTRAL' && m.caso && m.caso.sistema === 'projudi') {
       if (meuNivel !== 3) return false;
       (async () => {
-        await casoSalvar({ ...m.caso, status: 'rodando', motivo: null, anexou: false, fase: null });
+        await casoSalvar({ ...m.caso, status: 'rodando', motivo: null, fase: null, abriuUpload: false, uploadFeito: false, retomadoPeloUsuario: false });
         sendResponse({ ok: true });
         runCentral().catch(() => {});
       })();
@@ -233,7 +288,11 @@
       if (meuNivel !== 3) return false;
       (async () => {
         const c = await casoLer();
-        if (c && c.sistema === 'projudi') { c.status = 'rodando'; c.motivo = null; await casoSalvar(c); runCentral().catch(() => {}); }
+        if (c && c.sistema === 'projudi') {
+          c.status = 'rodando'; c.motivo = null;
+          if (c.fase === 'assinar') c.retomadoPeloUsuario = true; // pós-assinatura: Continuar = caso concluído
+          await casoSalvar(c); runCentral().catch(() => {});
+        }
         sendResponse({ ok: true });
       })();
       return true;
