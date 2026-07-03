@@ -116,12 +116,53 @@ async function renderPasta() {
   }
 }
 
+// Busca ATIVA da sessão: em vez de esperar a aba do app avisar, o popup varre as
+// abas do app abertas e lê o token do localStorage delas (host_permissions +
+// "scripting" já cobrem). Funciona em qualquer ordem de abrir/atualizar coisas.
+async function puxarTokenDoApp() {
+  try {
+    const tabs = await chrome.tabs.query({ url: 'https://painel.cobrasq.com.br/*' });
+    for (const tab of tabs) {
+      try {
+        const [r] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => {
+            for (let i = 0; i < localStorage.length; i++) {
+              const k = localStorage.key(i);
+              if (!k || !/^sb-.*-auth-token$/.test(k)) continue;
+              let raw = localStorage.getItem(k);
+              if (!raw) continue;
+              if (raw.startsWith('base64-')) {
+                try { raw = atob(raw.slice(7).replace(/-/g, '+').replace(/_/g, '/')); } catch (_) { continue; }
+              }
+              try {
+                const o = JSON.parse(raw);
+                const t = (o && o.access_token) || (o && o.currentSession && o.currentSession.access_token);
+                if (t) return t;
+              } catch (_) {}
+            }
+            return null;
+          },
+        });
+        if (r && r.result) { await send({ type: 'SET_TOKEN', token: r.result }); return true; }
+      } catch (_) { /* aba sem permissão/descartada: tenta a próxima */ }
+    }
+  } catch (_) {}
+  return false;
+}
+
 async function carregar() {
-  const has = await send({ type: 'HAS_TOKEN' });
+  let has = await send({ type: 'HAS_TOKEN' });
+  if (!has || !has.hasToken) {
+    // Tenta puxar da aba do app antes de desistir.
+    if (await puxarTokenDoApp()) { has = { hasToken: true }; }
+  }
   if (!has || !has.hasToken) {
     render(`<div class="warn">Sessão não encontrada.</div>
-      <p class="muted">Abra o app Cobrasq em outra aba e faça login. Depois reabra este popup.</p>
-      <button class="btn" id="reload">Tentar de novo</button>`);
+      <p class="muted">Deixe o app Cobrasq aberto e logado em outra aba, aí clique em conectar.</p>
+      <button class="btn" id="abrir-app" style="margin-bottom:6px;">Abrir o app Cobrasq</button>
+      <button class="btn ghost" id="reload">🔗 Conectar com o app</button>`);
+    document.getElementById('abrir-app').onclick = () => chrome.tabs.create({ url: 'https://painel.cobrasq.com.br/' });
     document.getElementById('reload').onclick = carregar;
     await renderPasta();
     return;
