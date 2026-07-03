@@ -364,4 +364,9 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
   return false;
 });
 
+// Abrir/recarregar a Central zera a fila (o estado dela é em memória) — então
+// limpa qualquer caso "fantasma" que tenha ficado no storage de uma rodada
+// anterior, pra ele não tentar retomar sozinho na aba do eproc.
+chrome.storage.local.remove('cobrasq_central_caso');
+
 renderFase1();

@@ -504,11 +504,32 @@
       if (!assunto) return pausar(c, 'Etapa 2: nenhum assunto informado');
       const busca = qFirst(IDS.assuntoBusca), filtrar = qFirst(IDS.filtrar);
       if (!busca || !filtrar) return pausar(c, 'Etapa 2: busca de assunto não encontrada');
-      setInput(busca, assunto); clicar(filtrar);
-      const anchor = await esperar(() =>
-        Array.from(document.querySelectorAll('#divArvore .jstree-anchor'))
-          .find(a => visivel(a) && norm(a.textContent).includes(norm(assunto))), 15000);
-      if (!anchor) return pausar(c, 'Etapa 2: assunto "' + assunto + '" não apareceu na árvore — selecione manualmente e Continuar');
+      // Nó da árvore: a busca do jstree MARCA os achados com .jstree-search (visto no
+      // teste real: <span class="jstree-search">Perdas e danos (02190505)</span>) —
+      // esse é o alvo prioritário; fallback: casar palavras no texto dos anchors.
+      const palavras = norm(assunto).split(/\W+/).filter(w => w.length >= 4);
+      const casa = (el) => {
+        const t = norm(el.textContent);
+        return t.includes(norm(assunto)) || (palavras.length && palavras.every(w => t.includes(w)));
+      };
+      const achaNo = () => {
+        const marcados = Array.from(document.querySelectorAll('#divArvore .jstree-search')).filter(visivel);
+        const alvo = marcados.length === 1 ? marcados[0] : marcados.find(casa);
+        if (alvo) return alvo.closest('.jstree-anchor') || alvo;
+        return Array.from(document.querySelectorAll('#divArvore .jstree-anchor')).find(a => visivel(a) && casa(a));
+      };
+      // O onclick do Filtrar depende dos scripts da página, que carregam DEPOIS do
+      // content script — então digita, espera a página assentar e RE-CLICA até a
+      // árvore responder (o teste real mostrou o 1º clique caindo no vazio).
+      await new Promise(r => setTimeout(r, 1500));
+      setInput(busca, assunto);
+      let anchor = null;
+      for (let tent = 0; tent < 5 && !anchor; tent++) {
+        clicar(filtrar);
+        progresso(c, 'Etapa 2: filtrando assunto "' + assunto + '"… (tentativa ' + (tent + 1) + ')');
+        anchor = await esperar(achaNo, 6000);
+      }
+      if (!anchor) return pausar(c, 'Etapa 2: assunto "' + assunto + '" não apareceu na árvore mesmo filtrando — selecione o nó manualmente, clique Incluir e depois Continuar');
       clicar(anchor);
       await esperar(() => (document.querySelector('#txtDesAssunto') || {}).value, 5000);
       const incluir = qFirst(IDS.incluirAssunto);
