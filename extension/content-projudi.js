@@ -231,6 +231,48 @@
         return !!tr.querySelector('a[onclick*="remover"], a[onclick*="excluir"], input[type="checkbox"]') || /\.pdf/i.test(tr.textContent || '');
       }).length;
   }
+  // Janela da LUPA (tipoDocumento.do) — roda no iframe da janela "Seleção de Tipo
+  // de Documento". Detecção: URL do frame OU (heading + radios na própria tela).
+  function ehDialogoTipo() {
+    if (/tipoDocumento\.do/i.test(location.href || '')) return true;
+    if (!document.querySelector('input[type="radio"]')) return false; // radios ficam no iframe, não no pai
+    const t = norm(document.body ? document.body.innerText : '');
+    return t.includes('selecao de tipo de documento') || t.includes('pesquisa de tipo de documento');
+  }
+  // Escolhe o tipo na janela: Descrição → Pesquisar → marca o radio que casa →
+  // Selecionar (o Projudi fecha o diálogo e preenche o hidden na tela-mãe).
+  async function telaDialogoTipo(c) {
+    const tipoTxt = c.tipo_peticao || 'Manifestação da Parte';
+    const alvo = norm(tipoTxt);
+    const palavras = alvo.split(/\W+/).filter(w => w.length >= 4);
+    const radiosVis = () => Array.from(document.querySelectorAll('input[type="radio"]')).filter(visivel);
+    const linhaDoRadio = (r) => { const row = r.closest('tr,li,label,div'); return norm(row ? row.textContent : ''); };
+    const casa = (r) => { const t = linhaDoRadio(r); return t.includes(alvo) || (palavras.length && palavras.every(w => t.includes(w))); };
+    await new Promise(r => setTimeout(r, 400)); // deixa o frame assentar
+    // Se o item JÁ está na lista (a janela abre com todos os tipos), escolhe direto —
+    // não filtra (evita re-submit em loop). Só filtra por Descrição se não achar.
+    let radios = radiosVis();
+    if (!radios.some(casa)) {
+      const desc = inputPorRotulo(['descricao', 'descrição']) ||
+        Array.from(document.querySelectorAll('input[type="text"],input:not([type])')).find(visivel);
+      if (desc) {
+        setInput(desc, tipoTxt);
+        const pesquisar = acharControle(['pesquisar', 'filtrar', 'consultar']);
+        if (pesquisar) await clicarPagina(pesquisar);
+        await esperar(() => radiosVis().some(casa), 6000);
+        radios = radiosVis();
+      }
+    }
+    let alvoRadio = radios.find(casa) || (radios.length === 1 ? radios[0] : null);
+    if (!alvoRadio) return pausar(c, 'não achei "' + escHtml(tipoTxt) + '" na janela de tipo — escolha você na lista e clique <b>Selecionar</b>; depois Continuar.');
+    alvoRadio.checked = true;
+    alvoRadio.dispatchEvent(new Event('change', { bubbles: true }));
+    clicar(alvoRadio);
+    const selecionar = acharControle(['selecionar']);
+    if (!selecionar) return pausar(c, 'marquei o tipo mas não achei o botão <b>Selecionar</b> — clique você; depois Continuar.');
+    progresso(c, 'tipo "' + tipoTxt + '" selecionado na janela');
+    await clicarPagina(selecionar); // Projudi fecha o diálogo e preenche #idTipoDocumento na mãe
+  }
   async function telaJuntar(c) {
     if (document.querySelector('iframe[src*="upload.do"]')) return; // diálogo aberto: quem age é a instância dele
     if (c.fase === 'assinar') return; // já orientado: esperando o advogado concluir/assinar
@@ -242,14 +284,20 @@
     const desc = document.getElementById('descricaoTipoDocumento');
     if (desc && hid && !hid.value) {
       const tipoTxt = c.tipo_peticao || 'Manifestação da Parte';
-      // pré-preenche o texto (a janela filtra por ele) SEM disparar o autocomplete.
-      desc.value = tipoTxt;
+      desc.value = tipoTxt; // a janela filtra por este texto
       const lupa = document.querySelector('a.searchButton[href*="openDialogSelecao"]') ||
         Array.from(document.querySelectorAll('a,[onclick]')).find(el => /openDialogSelecao/.test((el.getAttribute('href') || '') + (el.getAttribute('onclick') || '')));
-      // A lupa é um link javascript: — precisa rodar no mundo da página (clique nativo
-      // da extensão não executa). clicarPagina extrai e executa openDialogSelecao(...).
-      if (lupa) { progresso(c, 'abrindo a janela de Seleção de Tipo (lupa)…'); await clicarPagina(lupa); }
-      return pausar(c, 'cliquei na <b>🔍 lupa</b> (Seleção de Tipo de Documento) — escolha <b>' + escHtml(tipoTxt) + '</b> na janela e clique <b>Continuar</b>. Se a janela não abriu, clique você na lupa ao lado do campo. Assim que o tipo for confirmado eu sigo com os anexos sozinho.');
+      if (!lupa) return pausar(c, 'não achei a 🔍 lupa de Seleção de Tipo — clique você no ícone ao lado do campo, escolha "' + escHtml(tipoTxt) + '" e Continuar.');
+      progresso(c, 'abrindo a janela de Seleção de Tipo (lupa)…');
+      await clicarPagina(lupa);
+      // A janela roda num iframe (tipoDocumento.do) que TEM nosso content script —
+      // ele escolhe o item sozinho (telaDialogoTipo) e o Projudi preenche o hidden.
+      // Aqui só esperamos o hidden encher; se o usuário quiser, também pode escolher
+      // à mão que dá no mesmo. Timeout → pausa pedindo o clique.
+      const ok = await esperar(() => hid.value, 45000, 500);
+      if (!ok) return pausar(c, 'abri a janela <b>Seleção de Tipo de Documento</b> — se ela não escolher sozinha, escolha <b>' + escHtml(tipoTxt) + '</b> e clique <b>Continuar</b>. Depois eu sigo com os anexos.');
+      progresso(c, 'tipo confirmado → anexos');
+      // hid preenchido → cai fora do if e segue para os anexos nesta mesma passada.
     }
     // 2) anexos
     if (!(c.docs || []).length) return pausar(c, 'este caso não tem PDF para anexar — refaça na Central.'); // B6
@@ -345,6 +393,8 @@
     try {
     const c = await casoLer();
     if (!c || c.sistema !== 'projudi') return;
+    // A janela da lupa é um iframe não-condutor, mas precisa agir (escolher o tipo).
+    if (c.status !== 'pausado' && ehDialogoTipo()) { await telaDialogoTipo(c); return; }
     if (!ehCondutor()) {
       // Tela pré-login (topo): clica em "Advogados, Partes" para chegar ao login.
       if (window === window.top && c.status !== 'pausado') {
