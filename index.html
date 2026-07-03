@@ -1211,6 +1211,10 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
 .cob-table td.strong { font-weight: 600; }
 .cob-table td.mono { font-family: "JetBrains Mono", monospace; font-size: 12px; }
 .cob-table td.dim { color: var(--text-3); }
+/* Zebra na lista de Cobranças — separa visualmente um caso do outro. */
+#page-cobr .cob-table tbody tr:nth-child(even) { background: rgba(10,21,48,.032); }
+#page-cobr .cob-table tbody td { border-bottom: 1px solid var(--border); }
+#page-cobr .cob-table tbody tr:hover { background: var(--card-2); }
 .cob-av { width: 30px; height: 30px; border-radius: 8px; background: var(--side-bg); color: var(--accent); display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; font-family: "JetBrains Mono", monospace; flex-shrink: 0; }
 .cob-av.sm { width: 22px; height: 22px; border-radius: 6px; font-size: 9px; }
 .cob-dev-cell { display: flex; align-items: center; gap: 11px; }
@@ -1944,9 +1948,9 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
       <div class="nav-item" data-page="crm" id="nav-crm">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span><span>CRM</span>
       </div>
-      <!-- Pipeline oculto a pedido do gestor (2026-06-12) — não usa a visão kanban.
+      <!-- Pipeline oculto a pedido do gestor (2026-07-03) — não usa a visão kanban.
            Para reativar: remover display:none. -->
-      <div class="nav-item" data-page="pipeline" id="nav-pipeline">
+      <div class="nav-item" data-page="pipeline" id="nav-pipeline" style="display:none;">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="3" x2="3" y2="21"/><rect x="6" y="4" width="4" height="9"/><rect x="13" y="4" width="4" height="14"/><line x1="20" y1="3" x2="20" y2="21"/></svg></span><span>Pipeline</span>
       </div>
       <div class="nav-item" data-page="tarefas" id="nav-tarefas">
@@ -4357,6 +4361,17 @@ const STATUS_CFG = {
   'Baixar':{dot:'#8A96B8',badge:'b-gray',cls:'s-devolvida'},
   'Em andamento':{dot:'#C47A00',badge:'b-yellow',cls:'s-emcontato'}
 };
+// Rótulo de exibição da etiqueta/status: tira o prefixo numérico ("2. Acordo
+// Extrajudicial" → "Acordo Extrajudicial"). SÓ exibição — o valor salvo no
+// banco e usado em filtros/contagens continua com o prefixo.
+function statusLabel(s){ return String(s||'').replace(/^\d+(?:\.\d+)*\.?\s+/,''); }
+// Cor da etiqueta: personalizada (Config → Etiquetas, DB.config.etiquetaCores)
+// com fallback nas cores fixas do STATUS_CFG.
+function _etiquetaCor(nome){
+  const k = (nome||'').trim();
+  const custom = DB.config && DB.config.etiquetaCores && DB.config.etiquetaCores[k];
+  return custom || (STATUS_CFG[k]||{}).dot || '#8A96B8';
+}
 const ETAPAS_EXTRA = ['Notificação','Automatizar','Em contato','Proposta enviada','Acordo','Quitado','Devolvida','Sem êxito'];
 
 // Mapeia a Situação (status, vocabulário _SITUACOES_EXTRA) para a etapa do funil
@@ -6290,8 +6305,9 @@ function iniciarSessao(){
   const tipoUser = currentUser.tipo || '';
   const navRelat = document.getElementById('nav-relat');
   if(navRelat) navRelat.style.display = (tipoUser === 'gestor') ? '' : 'none';
+  // Pipeline oculto do menu para todos (2026-07-03) — página segue acessível por rota direta.
   const navPipeline = document.getElementById('nav-pipeline');
-  if(navPipeline) navPipeline.style.display = (tipoUser === 'gestor') ? '' : 'none';
+  if(navPipeline) navPipeline.style.display = 'none';
   // IMPORTACAO TEMP: menu de importação Astrea — só gestor
   const navImportacao = document.getElementById('nav-importacao');
   if(navImportacao) navImportacao.style.display = (tipoUser === 'gestor') ? '' : 'none';
@@ -6350,7 +6366,10 @@ function iniciarSessao(){
   carregarRosterAppUsers().catch(()=>{});
 
   // Handoff do CRM: se vier ?pecaDevedor=<id>, abre direto a página Peças já preenchida.
-  if(!chatHandleUrlPeca()) showPage('painel');
+  // Senão, restaura a rota da URL (#/pagina ou #/tipo/<id>) — F5 mantém a tela.
+  if(!chatHandleUrlPeca()){
+    if(!_routeGo(window.location.hash)) showPage('painel');
+  }
   // Lembrete de backup se não feito nos últimos 7 dias
   const lb = DB.config.lastBackupDate;
   if(!lb || (Date.now()-new Date(lb).getTime()) > 7*24*60*60*1000){
@@ -6520,7 +6539,50 @@ function showPage(p){
 
   // Update notifications badge
   updateNotifBadge();
+
+  // Rota na URL: grava #/... para F5 e o botão voltar do navegador funcionarem.
+  _routeWrite(p);
 }
+
+// ── ROTAS NA URL (hash) ──────────────────────────────────────
+// Cada tela grava uma rota #/pagina (detalhes: #/cobranca/<id> etc.) para que
+// atualizar a página ou usar o botão voltar não reinicie o app do zero.
+// Só hashes começando com '#/' são rotas — o hash de auth do Supabase
+// (#access_token…, recovery/invite) não bate no padrão e fica intocado.
+let _routeSilent = false;
+function _routeFor(p){
+  if(p==='cobranca-detalhe') return (typeof _detCobrId!=='undefined' && _detCobrId) ? 'cobranca/'+_detCobrId : 'cobr';
+  if(p==='devedor-detalhe')  return (typeof _detDevId!=='undefined' && _detDevId) ? 'devedor/'+_detDevId : 'devedores';
+  if(p==='cliente-detalhe')  return (typeof _detCliId!=='undefined' && _detCliId) ? 'cliente/'+_detCliId : 'clientes';
+  return p;
+}
+function _routeWrite(p){
+  // Só no shell staff logado — portais cedente/devedor não usam essas rotas.
+  if(!currentUser) return;
+  const route = '#/'+_routeFor(p);
+  if(window.location.hash === route) return;
+  _routeSilent = true;
+  window.location.hash = route;
+}
+function _routeGo(hash){
+  const m = String(hash||'').match(/^#\/([a-z-]+)(?:\/([A-Za-z0-9-]+))?$/);
+  if(!m) return false;
+  const seg = m[1], id = m[2];
+  if(id){
+    if(seg==='cobranca'){ verCobranca(id); return true; }
+    if(seg==='devedor'){ verDevedor(id); return true; }
+    if(seg==='cliente'){ verCliente(id); return true; }
+    return false;
+  }
+  if(seg.endsWith('-detalhe')) return false; // detalhe sem id não é restaurável
+  if(document.getElementById('page-'+seg)){ showPage(seg); return true; }
+  return false;
+}
+window.addEventListener('hashchange', ()=>{
+  if(_routeSilent){ _routeSilent = false; return; }
+  if(!currentUser) return; // antes do login o hash pode ser de auth do Supabase
+  _routeGo(window.location.hash);
+});
 
 // ════════════════════════════════════════════════════════════════════════════
 // IMPORTACAO TEMP START — menu temporário de importação de casos do Astrea.
@@ -8493,16 +8555,6 @@ async function renderPainel(){
     .map(id=>({ id:String(id), nome:(typeof _detUserNome==='function'?_detUserNome(id):String(id)) }))
     .sort((a,b)=>a.nome.localeCompare(b.nome));
 
-  // Atalhos do painel (chamam fluxos já existentes).
-  const atalhos = [
-    { ic:'＋', lb:'Nova cobrança',     fn:'abrirNovaCobranca()', primary:true },
-    { ic:'§',  lb:'Nova peça',         fn:"(typeof chatNovaPeca==='function'?chatNovaPeca():showPage('pecas'))" },
-    { ic:'⤓',  lb:'Importar carteira', fn:"showPage('importacao')" },
-    { ic:'✉',  lb:'WhatsApp em lote',  fn:"showPage('wa')" },
-    { ic:'✓',  lb:'Aprovações',        fn:"showPage('aprovacoes')" },
-    { ic:'∑',  lb:'Calculadora',       fn:"showPage('calc')" },
-  ];
-
   // 4 KPIs do topo (design v3): carteira, recuperado, em negociação, pendências (navy).
   const kpis = [
     { label:'Carteira ativa',        value: fmtR(totalCarteira),    sub:`${totalCasos} caso${totalCasos!==1?'s':''} em aberto`, tick:true },
@@ -8537,7 +8589,7 @@ async function renderPainel(){
       .painel-atalho:hover{border-color:var(--accent);color:var(--text);}
       .painel-atalho.primary{background:var(--ink-btn);color:var(--ink-btn-fg);border-color:var(--ink-btn);}
       .painel-atalho .ic{font-family:var(--font-mono);font-size:13px;line-height:1;}
-      .painel-prio-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+      .painel-prio-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;}
       .painel-prio{background:var(--card);border:1px solid var(--border);border-top:3px solid var(--accent);border-radius:12px;padding:16px 18px;display:flex;flex-direction:column;gap:5px;}
       .painel-prio.danger{border-top-color:var(--danger);}
       .painel-prio.navy{border-top-color:var(--side-bg);}
@@ -8572,7 +8624,7 @@ async function renderPainel(){
       #painel-organizar-btn.on{background:var(--accent);color:#2A1A05;border-color:var(--accent);}
       .painel-grid-15{display:grid;grid-template-columns:1.5fr 1fr;gap:16px;align-items:start;}
       .painel-grid-13{display:grid;grid-template-columns:1fr 1.3fr;gap:16px;align-items:start;}
-      .painel-grid-rod{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:16px;align-items:stretch;}
+      .painel-grid-rod{display:grid;grid-template-columns:1.4fr 1fr;gap:16px;align-items:stretch;}
       @media(max-width:980px){ .painel-grid-15,.painel-grid-13,.painel-grid-rod{grid-template-columns:1fr;} .painel-prio-grid{grid-template-columns:1fr;} .cob-kpis{grid-template-columns:repeat(2,1fr);} }
     </style>
 
@@ -8586,26 +8638,15 @@ async function renderPainel(){
         ${_credorOpts.length?`<select class="painel-select" onchange="painelSetFiltro('cliente',this.value)"><option value="">Todos os clientes</option>${_credorOpts.map(o=>`<option value="${escHtml(o.id)}" ${_pf.cliente===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('')}</select>`:''}
         ${(_respOpts.length && ehGestorView)?`<select class="painel-select" onchange="painelSetFiltro('operador',this.value)"><option value="">Todos os operadores</option>${_respOpts.map(o=>`<option value="${escHtml(o.id)}" ${_pf.operador===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('')}</select>`:''}
         <div class="cob-seg">${['Hoje','Semana','Mês','Trim'].map((t,i)=>`<button class="cob-seg-b ${i===2?'on':''}">${t}</button>`).join('')}</div>
-        <button id="painel-organizar-btn" class="cob-btn-ghost ${window._painelEdit?'on':''}" onclick="painelToggleEdit()">${window._painelEdit?'✓ Concluir':'⚙ Organizar'}</button>
-        <button class="cob-btn-ghost" onclick="showPage('relat')">⤓ Relatório</button>
-        <button class="cob-btn-primary" onclick="(typeof chatNovaPeca==='function'?chatNovaPeca():showPage('pecas'))">＋ Nova peça</button>
       </div>
     </div>
 
     <div id="painel-cards">
 
-      ${painelCard('atalhos', `<div class="cob-panel"><div class="cob-panel-body"><div class="painel-atalhos">${atalhos.map(a=>`<button class="painel-atalho ${a.primary?'primary':''}" onclick="${a.fn}"><span class="ic">${a.ic}</span> ${a.lb}</button>`).join('')}</div></div></div>`)}
-
       ${painelCard('prioridades', `<div class="cob-panel"><div class="cob-panel-head"><span class="cob-panel-title">Precisa de decisão hoje</span></div><div class="cob-panel-body"><div class="painel-prio-grid">
         <div class="painel-prio danger"><div class="painel-prio-n">${pendAtrasadas}</div><div class="painel-prio-l">tarefa${pendAtrasadas!==1?'s':''} atrasada${pendAtrasadas!==1?'s':''}</div><button class="painel-prio-cta" onclick="showPage('tarefas')">Revisar tarefas →</button></div>
-        <div class="painel-prio"><div class="painel-prio-n">${acordosVencendo}</div><div class="painel-prio-l">acordo${acordosVencendo!==1?'s':''} vencendo em 7 dias</div><button class="painel-prio-cta" onclick="showPage('cobr')">Ver cobranças →</button></div>
         <div class="painel-prio navy"><div class="painel-prio-n">${fmtk(carteiraParada90)}</div><div class="painel-prio-l">carteira parada há 90+ dias</div><button class="painel-prio-cta" onclick="showPage('cobr')">Priorizar →</button></div>
       </div></div></div>`)}
-
-      ${painelCard('alertas', `<div class="painel-band">
-        <div class="painel-band-head"><span class="painel-band-eye">Alertas inteligentes</span><a class="painel-band-link" onclick="showPage('tarefas')">Ver todos →</a></div>
-        ${alertas.length? alertas.slice(0,3).map(a=>`<div class="painel-band-item"><span class="dot"></span><span>${escHtml(a.msg)}</span></div>`).join('') : `<div class="painel-band-item" style="opacity:.75"><span class="dot" style="background:var(--side-fg)"></span><span>Nenhum alerta no momento.</span></div>`}
-      </div>`)}
 
       ${painelCard('kpis', `<div class="cob-kpis">${kpis.map(k=>`
         <div class="cob-kcard"${k.navy?' style="background:var(--side-bg);border-color:var(--side-bg);"':''}>
@@ -8656,23 +8697,15 @@ async function renderPainel(){
         </div></div></div>
       </div>`)}
 
-      ${painelCard('relatorios2', `<div class="painel-grid-13">
-        <div class="cob-panel"><div class="cob-panel-head"><div style="display:flex;align-items:baseline;"><span class="cob-panel-title">Pendências por tipo</span><span class="cob-panel-sub">tarefas abertas</span></div></div><div class="cob-panel-body">${pendPorTipo.length?`<div class="cob-hbars">${pendPorTipo.map(p=>`<div class="cob-hbar-row"><span class="cob-hbar-lb">${escHtml(p.nome)}</span><div class="cob-hbar-track"><div class="cob-hbar-fill" style="width:${Math.round((p.qtd/pendPorTipoMax)*100)}%;"></div></div><span class="cob-hbar-v">${p.qtd}</span></div>`).join('')}</div>`:`<div class="cob-empty"><span class="cob-empty-dot"></span> Nenhuma tarefa aberta.</div>`}</div></div>
+      ${painelCard('relatorios2', `<div>
         <div class="cob-panel">
           <div class="cob-panel-head"><span class="cob-panel-title">Atividade recente</span><div class="cob-tabs">${['Tudo','Acordos','Pagamentos','Comunicação'].map((t,i)=>`<button class="cob-tab ${i===0?'on':''}">${t}</button>`).join('')}</div></div>
           <div>${recentActivity.length === 0 ? `<div class="cob-empty"><span class="cob-empty-dot"></span> Nenhuma interação registrada ainda.</div>` : recentActivity.map((a,i)=>{ const initials=(a.devNome||'?').split(' ').slice(0,2).map(w=>w[0]).join('').toUpperCase(); return `<div class="cob-tr-click" style="display:grid;grid-template-columns:auto 1fr auto auto;gap:12px;align-items:center;padding:11px 18px;${i>0?'border-top:1px solid var(--border-2);':''}" onclick="openDrawer('${a.devId}')"><span class="cob-av sm">${initials}</span><div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--text-2);"><span style="color:var(--text);font-weight:600;">${escHtml(a.devNome||'—')}</span><span> · ${escHtml(a.tipo||'—')}</span>${a.desc?`<span style="color:var(--text-3);"> — ${escHtml(a.desc.slice(0,60))}${a.desc.length>60?'…':''}</span>`:''}</div><span style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.06em;color:${actColor(a.tipo)};border:1px solid var(--border);border-radius:4px;padding:2px 6px;white-space:nowrap;">${actLabel(a.tipo)}</span><span style="font-family:var(--font-mono);font-size:10px;color:var(--text-3);min-width:48px;text-align:right;white-space:nowrap;">${a.data||'—'}</span></div>`; }).join('')}</div>
         </div>
       </div>`)}
 
-      ${painelCard('metas', metasCardGestor())}
-
       ${painelCard('rodape', `<div class="painel-grid-rod">
         <div class="cob-panel"><div class="cob-panel-head"><span class="cob-panel-title">Fila de decisão</span><a class="cob-link" onclick="showPage('tarefas')">Ver todas →</a></div><div>${alertas.length? `<ul class="cob-attn-list">${alertas.slice(0,5).map(a=>{ const tag=a.tipo==='danger'?'URGENTE':a.tipo==='warning'?'ATENÇÃO':a.tipo==='success'?'OK':'INFO'; return `<li class="cob-attn-item"><span class="cob-urgent">${tag}</span><span class="cob-attn-txt">${escHtml(a.msg)}</span></li>`; }).join('')}</ul>` : `<div class="cob-empty"><span class="cob-empty-dot"></span> Sem pendências.</div>`}</div></div>
-        <div class="painel-equipe">
-          <div class="cob-panel-head" style="border-bottom:1px solid rgba(239,234,217,.14);"><span class="cob-panel-title" style="color:var(--side-fg);">Equipe</span><a class="cob-link" style="color:var(--accent);" onclick="rankingTarefasModal()">Ranking →</a></div>
-          ${rankEquipe.length? rankEquipe.map((x,i)=>`<div class="painel-equipe-rk"><span style="width:20px;font-family:var(--font-mono);font-size:12px;color:var(--accent);">${i+1}º</span><span style="flex:1;font-size:12.5px;font-weight:600;">${escHtml(x.nome)}</span><span style="font-family:var(--font-mono);font-size:12px;color:var(--accent);">${x.pontos} pts</span></div>`).join('') : `<div class="painel-equipe-rk" style="opacity:.7;font-size:12px;">Sem pontuação ainda.</div>`}
-          <div class="painel-equipe-meta"><div style="display:flex;justify-content:space-between;font-size:11.5px;"><span style="font-family:var(--font-mono);letter-spacing:.1em;text-transform:uppercase;color:var(--accent);">Meta do mês</span><span>${metaProg!=null?metaProg+'%':'—'}</span></div><div class="painel-equipe-track"><div class="painel-equipe-fill" style="width:${metaProg!=null?metaProg:0}%;"></div></div><div style="font-size:11px;opacity:.7;margin-top:6px;">${fmtR(totalRecuperado)}${metaMensal>0?` de ${fmtR(metaMensal)}`:''}</div></div>
-        </div>
         <div class="cob-panel"><div class="cob-panel-head"><span class="cob-panel-title">Próximos compromissos</span></div><div class="cob-panel-body" style="padding-top:8px;padding-bottom:8px;">${vencimentos.length? vencimentos.map(v=>`<div class="painel-prox-item" style="border-left-color:${v.tipo==='tarefa'?'var(--accent)':v.tipo==='lancamento'?'var(--danger)':'var(--blue)'};"><span class="painel-prox-d">${(v.data||'').slice(8,10)}/${(v.data||'').slice(5,7)}</span><span class="painel-prox-t">${escHtml(v.desc||'—')}</span>${v.valor?`<span class="painel-prox-v">${fmtk(v.valor)}</span>`:''}</div>`).join('') : `<div class="cob-empty"><span class="cob-empty-dot"></span> Nada nos próximos 7 dias.</div>`}</div></div>
       </div>`)}
 
@@ -8956,7 +8989,7 @@ function abrirBuscaGlobal(){
       <div style="max-width:560px;width:92%;margin:80px auto 0;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.25);overflow:hidden;">
         <div style="display:flex;align-items:center;gap:8px;padding:13px 16px;border-bottom:1px solid var(--border);">
           ${ico('search',15)}
-          <input type="text" id="busca-global-input" placeholder="Buscar devedor ou cliente — nome, CPF/CNPJ ou telefone…"
+          <input type="text" id="busca-global-input" placeholder="Buscar cobrança, devedor ou cliente — nome, CPF/CNPJ, telefone ou processo…"
             style="flex:1;border:none;outline:none;font-size:14px;background:transparent;color:var(--text);font-family:inherit;"
             oninput="renderBuscaGlobal(this.value)" onkeydown="if(event.key==='Escape')closeModal('modal-busca-global')">
           <span style="font-family:var(--font-mono);font-size:10px;color:var(--text-3);border:1px solid var(--border);border-radius:4px;padding:1px 5px;">ESC</span>
@@ -8969,6 +9002,10 @@ function abrirBuscaGlobal(){
   m.classList.add('open');
   const inp = document.getElementById('busca-global-input');
   if(inp){ inp.value = ''; setTimeout(()=>inp.focus(), 60); }
+  // Aquece o cache de cobranças para a busca incluir os casos.
+  if(!(DB_cobrancas||[]).length && typeof loadCobrancasFromSupabase==='function'){
+    loadCobrancasFromSupabase().then(rows=>{ if(Array.isArray(rows)) DB_cobrancas = rows; }).catch(()=>{});
+  }
   renderBuscaGlobal('');
 }
 function renderBuscaGlobal(q){
@@ -9003,11 +9040,30 @@ function renderBuscaGlobal(q){
         <div style="font-size:11px;color:var(--text-3);">${sub}</div>
       </div>
     </div>`;
+  // Cobranças (casos) — por título, documento, nº do processo ou devedor vinculado.
+  const cobs = (DB_cobrancas||[]).filter(c=>{
+    if(c.arquivado || c.is_draft) return false;
+    const partes = c.cobranca_partes||[];
+    const tit = String(c.divida?.descricao||'').toLowerCase();
+    if(tit.includes(q)) return true;
+    if((c.tipo_documento||'').toLowerCase().includes(q)) return true;
+    if((c.numero_documento||'').toLowerCase().includes(q)) return true;
+    if((c.numero_processo||'').toLowerCase().includes(q)) return true;
+    if(partes.some(p=>(p.devedores?.nome||'').toLowerCase().includes(q))) return true;
+    return qd.length>=3 && partes.some(p=>String(p.devedores?.doc||'').replace(/\D/g,'').includes(qd));
+  }).slice(0,8);
   let html = '';
+  if(cobs.length){
+    html += '<div style="font-size:10px;font-weight:700;letter-spacing:.07em;color:var(--text-3);padding:6px 10px 2px;">COBRANÇAS</div>';
+    html += cobs.map(c=>row(ico('charges',14),
+      escHtml(_cobrPrincipalNome(c)) + ((c.cobranca_partes||[]).length>1?` <span style="font-size:10px;color:var(--text-3);font-weight:500;">+${c.cobranca_partes.length-1}</span>`:''),
+      [_cobrDocLabel(c), _cobrCredorNome(c), statusLabel(c.status)].filter(s=>s&&s!=='—').map(escHtml).join(' · '),
+      `buscaGlobalAbrirCobranca('${c.id}')`)).join('');
+  }
   if(devs.length){
     html += '<div style="font-size:10px;font-weight:700;letter-spacing:.07em;color:var(--text-3);padding:6px 10px 2px;">DEVEDORES</div>';
     html += devs.map(d=>row(ico('charges',14), escHtml(d.nome||'—'),
-      [d.doc, d.tel, d.status].filter(Boolean).map(escHtml).join(' · '),
+      [d.doc, d.tel, statusLabel(d.status)].filter(Boolean).map(escHtml).join(' · '),
       `buscaGlobalAbrirDevedor('${d.id}')`,
       d.arquivado ? ' <span style="font-size:10px;color:var(--text-3);font-weight:500;">(arquivado)</span>' : '')).join('');
   }
@@ -9015,19 +9071,22 @@ function renderBuscaGlobal(q){
     html += '<div style="font-size:10px;font-weight:700;letter-spacing:.07em;color:var(--text-3);padding:8px 10px 2px;">CLIENTES</div>';
     html += clis.map(c=>row(ico('clients',14),
       escHtml(c.nomeFantasia ? `${c.nomeFantasia} (${c.nome||''})` : (c.nome||'—')),
-      escHtml(c.doc||c.cnpj||''), `buscaGlobalAbrirCliente('${escHtml((c.nome||'').replace(/'/g,''))}')`)).join('');
+      escHtml(c.doc||c.cnpj||''), `buscaGlobalAbrirCliente('${c.id}')`)).join('');
   }
   el.innerHTML = html || '<div style="padding:18px;text-align:center;color:var(--text-3);font-size:12.5px;">Nada encontrado.</div>';
 }
+// Resultados abrem a PÁGINA CHEIA de detalhe (não o drawer lateral).
+function buscaGlobalAbrirCobranca(id){
+  closeModal('modal-busca-global');
+  verCobranca(id);
+}
 function buscaGlobalAbrirDevedor(id){
   closeModal('modal-busca-global');
-  showPage('devedores');
-  setTimeout(()=>openDrawer(id), 120);
+  verDevedor(id);
 }
-function buscaGlobalAbrirCliente(nome){
+function buscaGlobalAbrirCliente(id){
   closeModal('modal-busca-global');
-  cliFilter.q = nome;
-  showPage('clientes');
+  verCliente(id);
 }
 document.addEventListener('keydown', (e)=>{
   if((e.metaKey || e.ctrlKey) && e.key && e.key.toLowerCase()==='k'){
@@ -9608,7 +9667,7 @@ function renderDevedores(){
                         <span class="cob-av">${initials||'?'}</span>
                         <div>
                           <div class="cob-dev-nm">${escHtml(d.nome||'—')}</div>
-                          <div class="cob-dev-tipo${faseDaEtiqueta(d.status,d.fase)==='judicial'?' jud':''}">${escHtml(d.status||'—')}${d.etapa?` · ${escHtml(d.etapa)}`:''}</div>
+                          <div class="cob-dev-tipo${faseDaEtiqueta(d.status,d.fase)==='judicial'?' jud':''}">${escHtml(statusLabel(d.status)||'—')}${d.etapa?` · ${escHtml(d.etapa)}`:''}</div>
                         </div>
                       </div>
                     </td>
@@ -11429,20 +11488,61 @@ function restaurarFasesJudiciais(){
   showToast('Restaurado o padrão provisório.','success');
   if(typeof renderCfgSection==='function') renderCfgSection('fases');
 }
-// Editor único de Etiquetas (Configurações → Etiquetas). Grava DB.config.etiquetas.
-function salvarEtiquetas(){
-  const txt = document.getElementById('cfg-etiquetas')?.value || '';
-  const lista = txt.split('\n').map(s=>s.trim()).filter(Boolean);
-  if(!lista.length){ showToast('Informe ao menos uma etiqueta.','warning'); return; }
+// Editor único de Etiquetas (Configurações → Etiquetas): nome + cor por linha.
+// Grava DB.config.etiquetas (nomes, formato inalterado) e DB.config.etiquetaCores
+// ({ nome: '#hex' }); renomear oferece propagar às cobranças com o nome antigo.
+function _cfgEtqRowHTML(nome, cor){
+  const n = nome||'', c = cor || _etiquetaCor(n) || '#8A96B8';
+  return `<div class="cfg-etq-row" data-orig="${escHtml(n)}" style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+    <input type="color" class="cfg-etq-cor" value="${escHtml(c)}" title="Cor da etiqueta" style="width:34px;height:30px;padding:2px;border:1px solid var(--border);border-radius:6px;background:var(--surface);cursor:pointer;"/>
+    <input type="text" class="cfg-etq-nome" value="${escHtml(n)}" placeholder="Nome da etiqueta" style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--surface);color:var(--text);"/>
+    <button type="button" onclick="this.closest('.cfg-etq-row').remove()" title="Remover" style="border:none;background:none;color:var(--danger);cursor:pointer;font-size:15px;line-height:1;">✕</button>
+  </div>`;
+}
+function addEtiquetaRow(){
+  const list = document.getElementById('cfg-etiquetas-list');
+  if(list) list.insertAdjacentHTML('beforeend', _cfgEtqRowHTML('', '#8A96B8'));
+}
+async function salvarEtiquetas(){
+  const rows = Array.from(document.querySelectorAll('#cfg-etiquetas-list .cfg-etq-row'));
+  const itens = rows.map(r=>({
+    orig: r.dataset.orig || '',
+    nome: (r.querySelector('.cfg-etq-nome')?.value||'').trim(),
+    cor:  r.querySelector('.cfg-etq-cor')?.value || ''
+  })).filter(x=>x.nome);
+  if(!itens.length){ showToast('Informe ao menos uma etiqueta.','warning'); return; }
+  const nomes = itens.map(x=>x.nome);
+  if(new Set(nomes).size !== nomes.length){ showToast('Há etiquetas com o mesmo nome.','warning'); return; }
+  // Renomeadas: oferece propagar para as cobranças que usam o nome antigo.
+  const renomeadas = itens.filter(x=>x.orig && x.nome !== x.orig);
   DB.config = DB.config || {};
-  DB.config.etiquetas = lista;
+  DB.config.etiquetas = nomes;
+  const cores = {};
+  itens.forEach(x=>{ if(x.cor) cores[x.nome] = x.cor; });
+  DB.config.etiquetaCores = cores;
   save();
-  showToast('Etiquetas salvas.','success');
+  if(renomeadas.length){
+    const supa = getSupabase();
+    const txt = renomeadas.map(x=>`"${x.orig}" → "${x.nome}"`).join(', ');
+    if(supa && confirm(`Você renomeou: ${txt}.\n\nAtualizar também as cobranças que usam o nome antigo?`)){
+      for(const x of renomeadas){
+        const { error } = await supa.from('cobrancas').update({ status: x.nome }).eq('status', x.orig);
+        if(error){ showToast(`Erro ao propagar "${x.orig}": ${error.message}`,'danger'); }
+        else (DB_cobrancas||[]).forEach(c=>{ if(c.status===x.orig) c.status=x.nome; });
+      }
+      showToast('Etiquetas salvas e cobranças atualizadas.','success');
+    } else {
+      showToast('Etiquetas salvas (cobranças existentes mantiveram o nome antigo).','success');
+    }
+  } else {
+    showToast('Etiquetas salvas.','success');
+  }
   if(typeof renderCfgSection==='function') renderCfgSection('fases');
 }
 function restaurarEtiquetas(){
   DB.config = DB.config || {};
   delete DB.config.etiquetas;
+  delete DB.config.etiquetaCores;
   save();
   showToast('Restaurada a lista padrão de etiquetas.','success');
   if(typeof renderCfgSection==='function') renderCfgSection('fases');
@@ -11453,7 +11553,7 @@ function mdevAtualizarStatusOptions(){
   if(!sel) return;
   const opcoes = _etiquetas(); // lista única (jud/extra unificadas)
   const atual = sel.value;
-  sel.innerHTML = opcoes.map(o => `<option ${o===atual?'selected':''}>${escHtml(o)}</option>`).join('');
+  sel.innerHTML = opcoes.map(o => `<option value="${escHtml(o)}" ${o===atual?'selected':''}>${escHtml(statusLabel(o))}</option>`).join('');
   // Se o status anterior não estava na nova lista, escolhe o primeiro (Cobrar/Fazer ação).
   if(!opcoes.includes(atual)) sel.value = opcoes[0];
   if(typeof updateStatusHint === 'function') updateStatusHint(sel.value);
@@ -11610,9 +11710,9 @@ function editDevedor(id){
   const statusAtual = dev.status || '';
   const opcoesFase = _etiquetas(); // lista única (jud/extra unificadas)
   const sel = document.getElementById('mdev-status');
-  let html = opcoesFase.map(o => `<option ${o===statusAtual?'selected':''}>${escHtml(o)}</option>`).join('');
+  let html = opcoesFase.map(o => `<option value="${escHtml(o)}" ${o===statusAtual?'selected':''}>${escHtml(statusLabel(o))}</option>`).join('');
   if(statusAtual && !opcoesFase.includes(statusAtual)){
-    html = `<option value="${escHtml(statusAtual)}" selected>${escHtml(statusAtual)} (legado)</option>` + html;
+    html = `<option value="${escHtml(statusAtual)}" selected>${escHtml(statusLabel(statusAtual))} (legado)</option>` + html;
   }
   sel.innerHTML = html;
   if(statusAtual) sel.value = statusAtual;
@@ -13016,7 +13116,7 @@ function diStep3(d){
         <div class="fg">
           <label>Situação <span style="font-weight:400;color:var(--text-3);">(etiqueta)</span></label>
           <select id="di-situacao" onchange="diToggleFase()" style="padding:9px 12px;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:13px;background:var(--bg);color:var(--text);width:100%;">
-            ${(function(){ const def = isJud ? '1. Ação de Cobrança' : 'Cobrar'; return _etiquetas().map(o=>`<option ${o===def?'selected':''}>${escHtml(o)}</option>`).join(''); })()}
+            ${(function(){ const def = isJud ? '1. Ação de Cobrança' : 'Cobrar'; return _etiquetas().map(o=>`<option value="${escHtml(o)}" ${o===def?'selected':''}>${escHtml(statusLabel(o))}</option>`).join(''); })()}
           </select>
         </div>
       </div>
@@ -14228,7 +14328,10 @@ function cobStatusPill(status){
   else if(/fazer|aç[ãa]o|aten/.test(s)) cls='st-acao';
   else if(/contato|contatad/.test(s)) cls='st-contato';
   else cls='st-cobrar';
-  return `<span class="cob-pill ${cls}">${escHtml(status||'—')}</span>`;
+  // Exibe sem o prefixo numérico e com a bolinha na cor da etiqueta (custom ou padrão).
+  const cor = (typeof _etiquetaCor==='function' && status) ? _etiquetaCor(status) : '';
+  const dot = cor ? `<span class="cob-sc-dot" style="background:${cor};width:7px;height:7px;margin-right:6px;flex-shrink:0;"></span>` : '';
+  return `<span class="cob-pill ${cls}">${dot}${escHtml(statusLabel(status)||'—')}</span>`;
 }
 
 async function renderCobrancas(){
@@ -14279,10 +14382,10 @@ async function renderCobrancas(){
   todas.forEach(c=>{ if(c.status) statusCounts[c.status] = (statusCounts[c.status]||0)+1; });
   const statusChips = statusVals.map(s=>{
     const isSel = cobrFilter.statuses.includes(s);
-    const dot = STATUS_CFG[s]?.dot || 'var(--slate)';
+    const dot = _etiquetaCor(s);
     return `<button class="cob-statuschip${isSel?' on':''}" onclick="toggleCobrFilterStatus('${escHtml(s)}')">
       <span class="cob-sc-dot" style="background:${dot};"></span>
-      <span>${escHtml(s)}</span>
+      <span>${escHtml(statusLabel(s))}</span>
       <span class="cob-sc-n">${statusCounts[s]||0}</span>
       ${isSel?'<span style="opacity:.6;margin-left:1px;">×</span>':''}
     </button>`;
@@ -14433,7 +14536,7 @@ async function bulkAlterarStatusCobr(){
     overlay.innerHTML=`<div style="background:var(--card);border-radius:14px;padding:24px;min-width:280px;max-width:360px;">
       <div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:12px;">Alterar status de ${selectedCobrIds.size} caso${selectedCobrIds.size!==1?'s':''}</div>
       <select id="_bulk-status-sel" style="width:100%;padding:9px;border:1px solid var(--border);border-radius:8px;font-size:13px;background:var(--surface);color:var(--text);">
-        ${statusOpts.map(s=>`<option>${s}</option>`).join('')}
+        ${statusOpts.map(s=>`<option value="${escHtml(s)}">${escHtml(statusLabel(s))}</option>`).join('')}
       </select>
       <div style="display:flex;gap:10px;margin-top:16px;justify-content:flex-end;">
         <button onclick="this.closest('[style*=fixed]').remove();window._bulkStatusRes(null);" class="cob-btn-ghost">Cancelar</button>
@@ -14758,12 +14861,22 @@ async function renderCobrancaDetalhe(){
   const isJud=(cob.fase||'')==='judicial';
   const layout=(()=>{ try{ return localStorage.getItem('cobrasq-detalhe-layout')||'dossie'; }catch(_){ return 'dossie'; } })();
 
+  // Título da cobrança: o campo "Título do caso" do Editar (divida.descricao),
+  // quando preenchido com algo além do tipo do documento; por padrão, o(s)
+  // nome(s) dos devedores vinculados.
+  const _descTit = String(d.descricao||'').trim();
+  const tituloCobr = (_descTit && _descTit.toLowerCase() !== String(tipoDoc).toLowerCase().trim())
+    ? _descTit
+    : (partes.map(p=>p.devedores?.nome).filter(Boolean).join(' · ') || _cobrDocLabel(cob));
+  // CPF/CNPJ dos devedores envolvidos (principal primeiro).
+  const docsPartes = [...new Set(partes.map(p=>p.devedores?.doc).filter(Boolean))].join(' · ') || '—';
+
   const meta=_detMeta([
-    ['Documento', escHtml(tipoDoc)],
+    ['Situação', `<span style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;" onclick="abrirTrocaStatus(event,'${cob.id}')" title="Clique para alterar a situação">${cobStatusPill(cob.status)}<span style="font-size:10px;color:var(--text-3);">▾</span></span>`],
     ['Valor atual', fmtR(vAtual), 'fr'],
     ['Vencimento', escHtml(_detData(cob.vencimento||d.vencimento))],
     ['Devedores', `${partes.length} vinculado${partes.length!==1?'s':''}`],
-    ['Responsável', escHtml(_detUserNome(cob.assigned_to))],
+    ['CPF/CNPJ', escHtml(docsPartes)],
     ['Criada em', escHtml(_detData(cob.created_at))]
   ]);
 
@@ -14800,18 +14913,21 @@ async function renderCobrancaDetalhe(){
     ${_temCapital?'':`<div style="font-size:11.5px;color:var(--text-3);margin-top:10px;">Defina o <strong>valor capital</strong> no botão <strong>Editar</strong> para acompanhar o saldo de repasses. Registre os comprovantes na aba <strong>Repasses ao cliente</strong>.</div>`}
   </div>`;
 
+  // Painel Documento: linhas vazias ("—") não aparecem — só o que está preenchido.
+  const _kvRow=(k,v)=>{ const t=(v==null?'':String(v)).trim(); return (t && t!=='—') ? `<dt>${k}</dt><dd>${escHtml(t)}</dd>` : ''; };
   const panelDoc=`<div class="cob-panel" style="padding:18px;">
     <div class="det-panel-tt">Documento</div>
     <dl class="det-kv">
       <dt>Tipo</dt><dd>${escHtml(tipoDoc)}</dd>
-      <dt>Modalidade</dt><dd>${cob.tipo_cobranca==='fisica'?'Física':(cob.tipo_cobranca==='digital'?'Digital':'—')}</dd>
-      <dt>Número</dt><dd>${escHtml(cob.numero_documento||'—')}</dd>
-      <dt>Banco</dt><dd>${escHtml(cob.banco||'—')}</dd>
-      <dt>Agência / Conta</dt><dd>${escHtml(cob.agencia_conta||'—')}</dd>
-      <dt>Entrada na carteira</dt><dd>${escHtml(_detData(cob.data_entrada))}</dd>
-      <dt>Situação</dt><dd>${escHtml(cob.status||'—')}</dd>
-      ${isJud?`<dt>Nº do processo</dt><dd>${escHtml(cob.numero_processo||'—')}</dd><dt>Vara / Tribunal</dt><dd>${escHtml(cob.vara_tribunal||'—')}</dd>${cob.numero_processo?`<dt>Andamentos (DataJud)</dt><dd><label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" ${cob.monitorar_datajud!==false?'checked':''} onchange="toggleMonitorarDataJud('${cob.id}', this.checked)" style="width:15px;height:15px;margin:0;cursor:pointer;"/><span id="mon-dj-lbl-${cob.id}" style="font-size:12px;font-weight:600;color:${cob.monitorar_datajud!==false?'var(--success,#16a34a)':'var(--text-3)'};">${cob.monitorar_datajud!==false?'Monitorando':'Pausado'}</span></label></dd>`:''}`:''}
-      <dt>Origem</dt><dd>${escHtml(cob.origem||'—')}</dd>
+      ${_kvRow('Modalidade', cob.tipo_cobranca==='fisica'?'Física':(cob.tipo_cobranca==='digital'?'Digital':''))}
+      ${_kvRow('Número', cob.numero_documento)}
+      ${_kvRow('Banco', cob.banco)}
+      ${_kvRow('Agência / Conta', cob.agencia_conta)}
+      ${_kvRow('Entrada na carteira', cob.data_entrada ? _detData(cob.data_entrada) : '')}
+      <dt>Situação</dt><dd>${escHtml(statusLabel(cob.status)||'—')}</dd>
+      ${_kvRow('Responsável', _detUserNome(cob.assigned_to))}
+      ${isJud?`${_kvRow('Nº do processo', cob.numero_processo)}${_kvRow('Vara / Tribunal', cob.vara_tribunal)}${cob.numero_processo?`<dt>Andamentos (DataJud)</dt><dd><label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" ${cob.monitorar_datajud!==false?'checked':''} onchange="toggleMonitorarDataJud('${cob.id}', this.checked)" style="width:15px;height:15px;margin:0;cursor:pointer;"/><span id="mon-dj-lbl-${cob.id}" style="font-size:12px;font-weight:600;color:${cob.monitorar_datajud!==false?'var(--success,#16a34a)':'var(--text-3)'};">${cob.monitorar_datajud!==false?'Monitorando':'Pausado'}</span></label></dd>`:''}`:''}
+      ${_kvRow('Origem', cob.origem)}
     </dl>
     ${cob.observacoes?`<div style="margin-top:12px;font-size:12.5px;color:var(--text-2);white-space:pre-wrap;">${escHtml(cob.observacoes)}</div>`:''}
   </div>`;
@@ -14891,7 +15007,7 @@ async function renderCobrancaDetalhe(){
     <div class="det-panel-tt">Andamentos / CRM</div>
     <dl class="det-kv">
       <dt>Etapa no funil</dt><dd>${escHtml(cob.passo_atual||'—')}</dd>
-      <dt>Situação</dt><dd>${escHtml(cob.status||'—')}</dd>
+      <dt>Situação</dt><dd>${escHtml(statusLabel(cob.status)||'—')}</dd>
       ${isJud?`<dt>Nº do processo</dt><dd>${escHtml(cob.numero_processo||'—')}</dd>`:''}
     </dl>
     <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
@@ -14962,7 +15078,7 @@ async function renderCobrancaDetalhe(){
     <button class="det-back" onclick="showPage('cobr')">${ico('arrow-left',14)||'←'} Voltar para Cobranças</button>
     <div class="det-head">
       <span class="det-head-av">${escHtml(_detIniciais(credor))}</span>
-      <div><div class="det-head-tt">${escHtml(_cobrDocLabel(cob))}</div><div class="det-head-sub">${cobStatusPill(cob.status)} · ${escHtml(credor)}</div></div>
+      <div><div class="det-head-tt">${escHtml(tituloCobr)}</div><div class="det-head-sub">${cobStatusPill(cob.status)} · ${escHtml(_cobrDocLabel(cob))} · ${escHtml(credor)}</div></div>
       <div class="det-head-actions">${headActions}</div>
     </div>
     ${meta}
@@ -14974,6 +15090,46 @@ async function renderCobrancaDetalhe(){
 function cobrDetTab(name){
   document.querySelectorAll('#page-cobranca-detalhe .det-tabbar [data-cobrtab]').forEach(b=>b.classList.toggle('on', b.dataset.cobrtab===name));
   document.querySelectorAll('#page-cobranca-detalhe .det-tabpane').forEach(p=>{ p.style.display = (p.dataset.pane===name)?'':'none'; });
+}
+
+// ── Troca rápida de Situação (1 clique, sem abrir "Editar cobrança") ──────────
+// Dropdown com as etiquetas coloridas; grava pela MESMA trilha do bulk
+// (update cobrancas.status) e re-renderiza detalhe + lista.
+function abrirTrocaStatus(ev, cobId){
+  ev.stopPropagation();
+  document.getElementById('status-dd-pop')?.remove();
+  const cur = ((DB_cobrancas||[]).find(x=>x.id===cobId)||{}).status || '';
+  const pop = document.createElement('div');
+  pop.id = 'status-dd-pop';
+  pop.style.cssText = 'position:fixed;z-index:10200;background:var(--card);border:1px solid var(--border);border-radius:10px;box-shadow:0 12px 30px rgba(10,21,48,.18);padding:6px;min-width:240px;max-height:320px;overflow:auto;';
+  pop.innerHTML = _etiquetas().map(s=>{
+    const on = (s===cur);
+    return `<div data-st="${escHtml(s)}" onclick="setStatusCobranca('${cobId}', this.dataset.st)"
+      style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:7px;cursor:pointer;font-size:13px;${on?'background:var(--surface-2);font-weight:600;':''}"
+      onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='${on?'var(--surface-2)':''}'">
+      <span class="cob-sc-dot" style="background:${_etiquetaCor(s)};flex-shrink:0;"></span>
+      <span style="flex:1;">${escHtml(statusLabel(s))}</span>${on?'<span style="color:var(--accent);">✓</span>':''}
+    </div>`;
+  }).join('');
+  document.body.appendChild(pop);
+  const r = (ev.currentTarget && ev.currentTarget.getBoundingClientRect) ? ev.currentTarget.getBoundingClientRect() : { left: ev.clientX, bottom: ev.clientY };
+  pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 268)) + 'px';
+  pop.style.top  = Math.max(8, Math.min(r.bottom + 6, window.innerHeight - 330)) + 'px';
+  setTimeout(()=>{
+    const close = (e)=>{ if(!pop.contains(e.target)){ pop.remove(); document.removeEventListener('click', close); } };
+    document.addEventListener('click', close);
+  }, 0);
+}
+async function setStatusCobranca(cobId, novo){
+  document.getElementById('status-dd-pop')?.remove();
+  if(!novo) return;
+  const supa = getSupabase(); if(!supa) return;
+  const { error } = await supa.from('cobrancas').update({ status: novo }).eq('id', cobId);
+  if(error){ showToast('Erro ao alterar situação: '+error.message,'danger'); return; }
+  const c = (DB_cobrancas||[]).find(x=>x.id===cobId); if(c) c.status = novo;
+  showToast('Situação → '+statusLabel(novo),'success');
+  if(document.getElementById('page-cobranca-detalhe')?.classList.contains('active')) renderCobrancaDetalhe();
+  else if(document.getElementById('page-cobr')?.classList.contains('active')) renderCobrancas();
 }
 
 // ===== Repasses ao cliente — comprovantes PIX lidos por IA, abatem o capital =====
@@ -15511,7 +15667,7 @@ function _cobrVinculadasHTML(list){
         style="display:flex;justify-content:space-between;gap:10px;padding:9px 12px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;cursor:pointer;"
         onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background=''">
       <div><strong>${escHtml(credorNome)}</strong>${papelTxt?` <span style="color:var(--text-3);font-size:11px;">· ${escHtml(papelTxt)}${principal?' (principal)':''}</span>`:''}
-        <div style="font-size:11px;color:var(--text-2);">${escHtml(cob.status||'')}</div></div>
+        <div style="font-size:11px;color:var(--text-2);">${escHtml(statusLabel(cob.status)||'')}</div></div>
       <div style="font-family:var(--font-mono);white-space:nowrap;">${valor}</div>
     </div>`;
   }).join('');
@@ -15624,7 +15780,7 @@ function abrirCobrancaModal(cob){
         <label style="font-size:12px;font-weight:600;color:var(--text-2);">Credor (cedente)</label>
         <input id="cobr-credor" list="cobr-credor-datalist" value="${credorVal}" placeholder="Razão social do credor" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;margin:4px 0 12px;"/>
         <datalist id="cobr-credor-datalist">${credoresOpts}</datalist>
-        <label style="font-size:12px;font-weight:600;color:var(--text-2);">Título do caso</label>
+        <label style="font-size:12px;font-weight:600;color:var(--text-2);">Título do caso <span style="font-weight:400;color:var(--text-3);">(se vazio, usa o nome dos devedores)</span></label>
         <input id="cobr-desc" value="${desc}" placeholder="Ex.: Cheque nº 000123" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;margin:4px 0 12px;"/>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
           <div><label style="font-size:12px;font-weight:600;color:var(--text-2);">Responsável</label>
@@ -15721,10 +15877,10 @@ function cobrSituacaoOptionsHTML(_fase, selected){
   // selecionada — para não renomear o caso ao abrir/salvar a edição.
   let html = '';
   if(selected && !opts.includes(selected)){
-    html += `<option value="${escHtml(selected)}" selected>${escHtml(selected)} (legado)</option>`;
+    html += `<option value="${escHtml(selected)}" selected>${escHtml(statusLabel(selected))} (legado)</option>`;
   }
   const sel = (selected && opts.includes(selected)) ? selected : (html ? null : opts[0]);
-  return html + opts.map(o=>`<option ${o===sel?'selected':''}>${escHtml(o)}</option>`).join('');
+  return html + opts.map(o=>`<option value="${escHtml(o)}" ${o===sel?'selected':''}>${escHtml(statusLabel(o))}</option>`).join('');
 }
 function cobrResponsavelOptionsHTML(selectedId){
   const list = Array.isArray(_rosterAppUsers) ? _rosterAppUsers : [];
@@ -26480,7 +26636,7 @@ function waPendModalVincular(){
   const linha=(d)=>{ const ini=(d.nome||'').trim().split(/\s+/).slice(0,2).map(w=>w[0]||'').join('')||'?';
     return `<button onclick="waPendVincularEscolher('${d.id}')" style="display:flex;align-items:center;gap:12px;text-align:left;padding:12px 14px;border-radius:11px;border:1px solid var(--border);background:var(--surface);cursor:pointer;width:100%;">
       <span style="width:34px;height:34px;border-radius:50%;background:var(--navy);color:var(--side-fg);display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-size:13px;flex-shrink:0;">${escHtml(ini.toUpperCase())}</span>
-      <span style="flex:1;min-width:0;"><span style="display:block;font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(d.nome||'(sem nome)')}</span><span style="display:block;font-family:var(--font-mono);font-size:10.5px;color:var(--text-3);margin-top:1px;">${escHtml(d.status||'Em andamento')} · ${fmtR(waSaldoDevedor(d))}</span></span>
+      <span style="flex:1;min-width:0;"><span style="display:block;font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(d.nome||'(sem nome)')}</span><span style="display:block;font-family:var(--font-mono);font-size:10.5px;color:var(--text-3);margin-top:1px;">${escHtml(statusLabel(d.status)||'Em andamento')} · ${fmtR(waSaldoDevedor(d))}</span></span>
       <span style="flex-shrink:0;color:var(--gold-dark);display:flex;">${ico('moveright',16)}</span></button>`; };
   waPendModalShell({
     icon:ico('link',16), iconBg:'var(--gold)', iconFg:'var(--navy)',
@@ -27140,7 +27296,7 @@ function renderWAConversas(el){
         </div>
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:14px;">
           <div style="font-size:11px;color:var(--text-2);font-weight:500;margin-bottom:6px;">Status</div>
-          <span class="badge" style="background:${(STATUS_CFG[selDev.status]||{}).bg||'var(--surface-2)'};color:${(STATUS_CFG[selDev.status]||{}).color||'var(--text-2)'};padding:3px 10px;border-radius:4px;font-size:11.5px;font-weight:600;">${escHtml(selDev.status||'—')}</span>
+          <span class="badge" style="background:${(STATUS_CFG[selDev.status]||{}).bg||'var(--surface-2)'};color:${(STATUS_CFG[selDev.status]||{}).color||'var(--text-2)'};padding:3px 10px;border-radius:4px;font-size:11.5px;font-weight:600;">${escHtml(statusLabel(selDev.status)||'—')}</span>
         </div>
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:14px;">
           <div style="font-size:11px;color:var(--text-2);font-weight:500;margin-bottom:8px;">Saldo devedor</div>
@@ -27538,13 +27694,14 @@ function renderCfgSection(section){
     const lista = _etiquetas();
     const custom = Array.isArray(DB.config?.etiquetas) && DB.config.etiquetas.length;
     el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:6px;">Etiquetas</h3>
-      <p style="font-size:12.5px;color:var(--text-2);margin-bottom:14px;">Lista única de <strong>etiquetas (Situação)</strong> (uma por linha), usada no cadastro de cobranças, devedores e na importação. Substituiu o antigo seletor Judicial/Extrajudicial — a fase passou a ser derivada automaticamente da etiqueta. ${custom?'<span style="color:var(--accent-2);font-weight:600;">Lista personalizada ativa.</span>':'Usando a lista padrão.'}</p>
-      <textarea id="cfg-etiquetas" rows="18" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:var(--font-mono);line-height:1.7;resize:vertical;background:var(--surface);color:var(--text);">${escHtml(lista.join('\n'))}</textarea>
-      <div style="display:flex;gap:8px;margin-top:12px;">
+      <p style="font-size:12.5px;color:var(--text-2);margin-bottom:14px;">Lista única de <strong>etiquetas (Situação)</strong>, com <strong>nome e cor</strong> editáveis, usada no cadastro de cobranças, devedores e na importação. A fase (judicial/extrajudicial) é derivada automaticamente da etiqueta. ${custom?'<span style="color:var(--accent-2);font-weight:600;">Lista personalizada ativa.</span>':'Usando a lista padrão.'}</p>
+      <div id="cfg-etiquetas-list">${lista.map(n=>_cfgEtqRowHTML(n)).join('')}</div>
+      <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="addEtiquetaRow()">＋ Adicionar etiqueta</button>
+      <div style="display:flex;gap:8px;margin-top:14px;">
         <button class="btn btn-primary" onclick="salvarEtiquetas()">Salvar</button>
         <button class="btn btn-ghost" onclick="restaurarEtiquetas()">Restaurar padrão</button>
       </div>
-      <div style="font-size:11.5px;color:var(--text-3);margin-top:10px;">Alterar esta lista não muda situações já gravadas nas cobranças existentes. Etiquetas de natureza judicial (ações, execução, cumprimento de sentença, acordo judicial, reajuizar, para protocolar) entram no kanban judicial; as demais, no extrajudicial.</div>`;
+      <div style="font-size:11.5px;color:var(--text-3);margin-top:10px;">Ao renomear uma etiqueta, o sistema oferece atualizar as cobranças que usam o nome antigo. Etiquetas de natureza judicial (ações, execução, cumprimento de sentença, acordo judicial, reajuizar, para protocolar) entram no kanban judicial; as demais, no extrajudicial.</div>`;
   }
   else if(section==='colaboradores'){
     const cols = DB.config.colaboradores||[];
