@@ -452,7 +452,7 @@ function renderFase4() {
     <h2 style="margin-top:0;font-size:16px;">Protocolando ${state.casos.length > 1 ? 'lote' : 'caso'} — ${concluidos}/${state.casos.length} ✓</h2>
     <p class="muted">⚠️ Mantenha esta aba aberta (ela fornece os PDFs). O login no eproc, se pedido, é você quem faz — a fila continua sozinha depois.</p>
     ${pausado ? `<div class="aviso"><b>⏸ Pausado no caso "${esc(pausado.nome)}":</b> ${pausado.statusTexto || ''}<br>
-      Ajuste na aba do eproc se preciso e escolha:
+      Ajuste na aba do tribunal se preciso e escolha:
       <div style="margin-top:8px;display:flex;gap:8px;">
         <button class="btn" id="continuar">▶ Continuar</button>
         <button class="btn ghost" id="pular">Pular este caso</button>
