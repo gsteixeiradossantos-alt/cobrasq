@@ -205,6 +205,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const tabId = (sender.tab && sender.tab.id) || msg.tabId;
         if (tabId) { await overrideDialogos(tabId); sendResponse({ ok: true }); }
         else sendResponse({ error: 'sem tabId' });
+      } else if (msg.type === 'EXEC_PAGINA') {
+        // Executa uma ação NO MUNDO DA PÁGINA (world:'MAIN') no FRAME que pediu —
+        // imune ao CSP da página (scripts injetados pela extensão são isentos).
+        // Prefere chamar a função global (msg.fn + msg.args); senão avalia msg.code.
+        const tabId = sender.tab && sender.tab.id;
+        if (tabId == null) { sendResponse({ error: 'sem tabId' }); return; }
+        try {
+          const target = { tabId, world: 'MAIN' };
+          if (sender.frameId != null) target.frameIds = [sender.frameId];
+          const [res] = await chrome.scripting.executeScript({
+            target,
+            func: (fn, args, code) => {
+              try {
+                if (fn && typeof window[fn] === 'function') { window[fn].apply(window, args || []); return true; }
+                if (code) { (0, eval)(code); return true; } // eslint-disable-line no-eval
+              } catch (e) { return 'erro: ' + (e && e.message || e); }
+              return false;
+            },
+            args: [msg.fn || null, msg.args || [], msg.code || null],
+          });
+          sendResponse({ ok: true, resultado: res && res.result });
+        } catch (e) { sendResponse({ error: String((e && e.message) || e) }); }
       } else if (msg.type === 'FETCH_PDF') {
         // Baixa o PDF da signed URL (Supabase) aqui no worker — host_permissions
         // evita problema de CORS no content script do eproc.
