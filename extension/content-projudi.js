@@ -14,6 +14,9 @@
 (() => {
   'use strict';
   if (!/projudi\.tjpr\.jus\.br$/.test(location.hostname)) return;
+  // Guarda de idempotência (manifest + reinjeção da Central). Ver CA1/M1.
+  if (window.__cobrasqProjudi) return;
+  window.__cobrasqProjudi = true;
 
   const VERSAO = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || '?';
   const CASO_KEY = 'cobrasq_central_caso';
@@ -299,7 +302,12 @@
     return alvo.querySelector('a[href],[onclick]') || alvo;
   }
 
+  // Mutex de reentrância — auto-retomar (1200ms) + RUN + CONTINUAR. Ver C3.
+  let _rodandoProjudi = false;
   async function runCentral() {
+    if (_rodandoProjudi) return;
+    _rodandoProjudi = true;
+    try {
     const c = await casoLer();
     if (!c || c.sistema !== 'projudi') return;
     if (!ehCondutor()) {
@@ -342,6 +350,7 @@
       // Qualquer outra tela (mesa do advogado etc.): navega pelo menu.
       await abrirBuscaPeloMenu(c);
     } catch (e) { const c2 = await casoLer(); if (c2) await pausar(c2, 'erro inesperado: ' + String((e && e.message) || e)); }
+    } finally { _rodandoProjudi = false; }
   }
 
   // ── mensageria (só o frame-condutor responde às ações) ───────────────────────

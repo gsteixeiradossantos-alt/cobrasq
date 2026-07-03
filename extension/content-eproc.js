@@ -14,6 +14,15 @@
 //    (Consultar→Salvar→Incluir) são os pontos que mais precisam de ajuste fino.
 
 (function () {
+  // Guarda de idempotência: o content script é injetado pelo manifest E reinjetado
+  // pela Central (chrome.scripting) quando o sendMessage falha por timing. Sem isto,
+  // rodariam 2 cópias no mesmo frame → 2 onMessage listeners → cada RUN/CONTINUAR
+  // processado 2× (duplo runCentral, duplo protocolo). Ver auditoria CA1/M1.
+  if (window.__cobrasqEproc) return;
+  window.__cobrasqEproc = true;
+  // Guarda de hostname: se a aba do tribunal foi navegada para outro site e a Central
+  // reinjeta aqui, não rodar (evita "pausas" absurdas em página alheia). Ver CM3.
+  if (!/\.tjpr\.jus\.br$/.test(location.hostname)) return;
   const SEL = window.EPROC_SEL || {};
   const TXT = window.EPROC_TXT || {};
   const DIST = window.EPROC_DIST || {};
@@ -451,12 +460,20 @@
   function temLogin() { const p = document.querySelector('input[type="password"]'); return !!(p && visivel(p)); }
   function clicar(el) { try { el.scrollIntoView({ block: 'center' }); } catch (_) {} el.click(); }
 
+  // Mutex: runCentral é chamado por autoRetomar (no load), RUN_CENTRAL e
+  // CONTINUAR_CENTRAL; sendo async e cheia de await, 2 disparos quase simultâneos
+  // entrelaçam e duplicam cliques. A trava serializa. Ver auditoria C3.
+  let _rodandoEproc = false;
   async function runCentral() {
-    const c = await casoLer();
-    if (!c) return;
-    if (c.sistema && c.sistema !== 'eproc') return; // caso do Projudi: outro script cuida
-    const etapa = detectarEtapa();
+    if (_rodandoEproc) return;
+    _rodandoEproc = true;
+    let c = null;
     try {
+      c = await casoLer();
+      if (!c) return;
+      if (c.sistema && c.sistema !== 'eproc') return; // caso do Projudi: outro script cuida
+      const etapa = detectarEtapa();
+      try {
       if (etapa === 6) { // sucesso — processa mesmo se estava pausado (1º caso validado à mão)
         const elNum = qFirst(IDS.numeroSucesso) || qFirst(SEL.resultadoProtocolo);
         const numero = elNum ? (elNum.textContent || '').trim() : '';
@@ -489,7 +506,8 @@
       const link = await esperar(() => document.querySelector('a[href*="acao=processo_cadastrar&"]'), 10000);
       if (!link) return pausar(c, 'não achei o menu "Petição Inicial" — navegue até a Etapa 1 e clique Continuar');
       clicar(link);
-    } catch (e) { await pausar(c, 'erro inesperado: ' + String((e && e.message) || e)); }
+      } catch (e) { await pausar(c, 'erro inesperado: ' + String((e && e.message) || e)); }
+    } finally { _rodandoEproc = false; }
   }
 
   async function autoE1(c) {
@@ -759,6 +777,9 @@
   }
 
   chrome.runtime.onMessage.addListener((m, _s, send) => {
+    // Só devolve true (mantém o canal aberto) nos tipos que realmente respondem —
+    // caso contrário o canal fica pendurado ("message port closed"). Ver CM2.
+    if (!m || !m.type) return false;
     if (m.type === 'FILL_JOB') {
       iniciar(m.job).catch(e => setBody(msg('Erro: ' + (e.message || e), '#ffe3e3')));
       send({ ok: true });
@@ -780,6 +801,8 @@
     } else if (m.type === 'CANCELAR_CENTRAL') {
       casoLimpar().then(() => setBody(msg('Caso cancelado pela Central.', '#f1f3f5')));
       send({ ok: true });
+    } else {
+      return false; // tipo não tratado aqui
     }
     return true;
   });
