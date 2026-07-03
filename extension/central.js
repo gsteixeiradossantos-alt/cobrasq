@@ -358,7 +358,7 @@ function renderFase3() {
     if (inp.dataset.proj === 'numero_processo') renderFase3();
   });
   document.getElementById('voltar').onclick = () => renderFase1();
-  document.getElementById('rodar').onclick = iniciarLote;
+  document.getElementById('rodar').onclick = (e) => { if (e && e.currentTarget) e.currentTarget.disabled = true; iniciarLote(); }; // CA3
   app.querySelectorAll('button[data-reextrair]').forEach(b => b.onclick = async () => {
     const caso = state.casos.find(c => c.id === b.dataset.reextrair);
     if (!caso) return;
@@ -372,13 +372,28 @@ function renderFase3() {
 // ── fase 4: execução ──────────────────────────────────────────────────────────
 const URL_SISTEMA = { eproc: 'https://eproc1g.tjpr.jus.br/eproc/', projudi: 'https://projudi.tjpr.jus.br/projudi/' };
 const SCRIPT_SISTEMA = { eproc: 'content-eproc.js', projudi: 'content-projudi.js' };
+function hostDoSistema() { return state.sistema === 'projudi' ? 'projudi.tjpr.jus.br' : 'tjpr.jus.br'; }
+async function esperarAbaPronta(tabId, timeoutMs) {
+  const fim = Date.now() + (timeoutMs || 20000);
+  while (Date.now() < fim) {
+    try { const t = await chrome.tabs.get(tabId); if (t && t.status === 'complete') return true; } catch (_) { return false; }
+    await new Promise(r => setTimeout(r, 300));
+  }
+  return true;
+}
 async function garantirAba() {
   if (state.tabId != null) {
-    try { await chrome.tabs.get(state.tabId); return state.tabId; } catch (_) { state.tabId = null; }
+    try {
+      const t = await chrome.tabs.get(state.tabId);
+      // CM3: só reusa se a aba ainda está no tribunal certo; senão abre nova
+      // (evita injetar o content script numa página alheia).
+      if (t && (t.url || t.pendingUrl || '').includes(hostDoSistema())) { await esperarAbaPronta(state.tabId, 20000); return state.tabId; }
+    } catch (_) {}
+    state.tabId = null;
   }
   const tab = await chrome.tabs.create({ url: URL_SISTEMA[state.sistema] || URL_SISTEMA.eproc, active: true });
   state.tabId = tab.id;
-  await new Promise(r => setTimeout(r, 3500)); // carregamento inicial (login pode pausar depois)
+  await esperarAbaPronta(tab.id, 25000); // espera carregar (login pode pausar depois)
   return tab.id;
 }
 function payloadDoCaso(caso) {
@@ -406,6 +421,7 @@ async function mandarParaAba(tipo, extra) {
   }
 }
 async function iniciarLote() {
+  if (state.rodando) return; // CA3: barra duplo clique em Protocolar
   if (state.sistema === 'projudi') {
     const semNum = state.casos.filter(c => !acharCnj(c.numero_processo || ''));
     if (semNum.length) { alert('Caso(s) sem número de processo válido: ' + semNum.map(c => c.nome).join(', ') + '. Corrija na revisão.'); return; }
@@ -428,16 +444,27 @@ async function iniciarLote() {
   await rodarCasoAtual();
 }
 async function rodarCasoAtual() {
+  if (!state.rodando) return; // CC2: não ressuscitar caso após Cancelar
   const caso = state.casos[state.atual];
+  if (!caso) return;
   caso.status = 'rodando'; caso.statusTexto = 'iniciando no ' + (caso.sistema === 'projudi' ? 'Projudi' : 'eproc') + '…';
   renderFase4();
   await mandarParaAba('RUN_CENTRAL', { caso: payloadDoCaso(caso) });
 }
+let _proximoTimer = null;
 function proximoCaso() {
   const prox = state.casos.findIndex((c, i) => i > state.atual && c.status === 'aguardando');
   if (prox < 0) { state.rodando = false; state.atual = -1; renderFase4(); return; }
   state.atual = prox;
-  setTimeout(() => rodarCasoAtual().catch(mostraErroGeral), 1200);
+  // CM7: espera a aba assentar antes de disparar o próximo (a página de sucesso
+  // ainda transiciona); CC2: timer guardado p/ o Cancelar poder abortar.
+  if (_proximoTimer) clearTimeout(_proximoTimer);
+  _proximoTimer = setTimeout(async () => {
+    _proximoTimer = null;
+    if (!state.rodando) return;
+    try { if (state.tabId != null) await esperarAbaPronta(state.tabId, 15000); } catch (_) {}
+    rodarCasoAtual().catch(mostraErroGeral);
+  }, 1200);
 }
 function mostraErroGeral(e) {
   const caso = state.casos[state.atual];
@@ -479,6 +506,7 @@ function renderFase4() {
   };
   const btnX = document.getElementById('cancelar');
   if (btnX) btnX.onclick = async () => {
+    if (_proximoTimer) { clearTimeout(_proximoTimer); _proximoTimer = null; } // CC2
     state.casos.forEach(c => { if (c.status === 'rodando' || c.status === 'pausado' || c.status === 'aguardando') c.status = 'pulado'; });
     state.rodando = false;
     await mandarParaAba('CANCELAR_CENTRAL', {});
@@ -491,7 +519,11 @@ function renderFase4() {
 // ── mensagens vindas do content script (aba do eproc) ─────────────────────────
 chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
   if (!m) return false;
-  const caso = state.casos.find(c => c.id === m.casoId) || state.casos[state.atual];
+  // CA4: match ESTRITO por casoId. Um content script remanescente (rodada antiga
+  // ou frame duplicado) pode emitir com casoId que não bate; nada de fallback para
+  // "o caso atual", senão marcaríamos o caso ERRADO como protocolado.
+  const casoExato = m.casoId ? state.casos.find(c => c.id === m.casoId) : null;
+  const caso = casoExato; // usado por PROGRESS/PAUSA/CASO_OK
   if (m.type === 'PEDIR_DOC') {
     (async () => {
       try {
@@ -513,23 +545,47 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
     return false;
   }
   if (m.type === 'CENTRAL_CASO_OK') {
+    // CA4: ignora conclusão de casoId desconhecido (não avança a fila indevidamente).
+    if (!caso || caso.status === 'protocolado') return false;
     (async () => {
-      if (caso) {
-        caso.status = 'protocolado'; caso.numero = m.numero || null; caso.statusTexto = 'registrando no Cobrasq…';
-        state.primeiroValidado = true;
-        renderFase4();
-        const r = await chrome.runtime.sendMessage({
-          type: 'REGISTRAR_PROTOCOLO', numero: caso.numero,
-          caso: { dados: caso.dados, tipo: caso.sistema === 'projudi' ? 'intercorrente' : 'inicial', numero_processo: caso.numero_processo || null },
-        }).catch(() => null);
-        caso.statusTexto = r && r.ok ? ('registrado no Cobrasq' + (r.cobrancaVinculada ? ' + cobrança vinculada' : ' (sem cobrança correspondente)')) : 'protocolado (registro no Cobrasq falhou: ' + ((r && r.error) || '?') + ')';
-        renderFase4();
-      }
+      caso.status = 'protocolado'; caso.numero = m.numero || null; caso.statusTexto = 'registrando no Cobrasq…';
+      state.primeiroValidado = true;
+      renderFase4();
+      const r = await chrome.runtime.sendMessage({
+        type: 'REGISTRAR_PROTOCOLO', numero: caso.numero,
+        caso: { dados: caso.dados, tipo: caso.sistema === 'projudi' ? 'intercorrente' : 'inicial', numero_processo: caso.numero_processo || null },
+      }).catch(() => null);
+      caso.statusTexto = r && r.ok ? ('registrado no Cobrasq' + (r.cobrancaVinculada ? ' + cobrança vinculada' : ' (sem cobrança correspondente)')) : 'protocolado (registro no Cobrasq falhou: ' + ((r && r.error) || '?') + ')';
+      renderFase4();
       proximoCaso();
     })();
     return false;
   }
   return false;
+});
+
+// CC1: se a aba do tribunal for FECHADA ou navegada para fora com um caso ainda
+// "rodando", a fila (100% orientada a eventos) travaria para sempre. Aqui a Central
+// detecta e pausa o caso ("aba fechada"), expondo o botão Continuar (que recria a
+// aba via garantirAba e reenvia o caso).
+function pausarPorAba(motivo) {
+  if (!state.rodando) return;
+  const caso = state.atual >= 0 ? state.casos[state.atual] : null;
+  if (caso && caso.status === 'rodando') {
+    caso.status = 'pausado';
+    caso.statusTexto = motivo;
+    state.tabId = null;
+    try { renderFase4(); } catch (_) {}
+  }
+}
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabId === state.tabId) pausarPorAba('a aba do tribunal foi fechada — clique Continuar que eu reabro e retomo.');
+});
+chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (tabId !== state.tabId || !info.url) return;
+  if (!(info.url || '').includes(hostDoSistema())) {
+    pausarPorAba('a aba saiu do site do tribunal — clique Continuar que eu reabro e retomo.');
+  }
 });
 
 // Abrir/recarregar a Central zera a fila (o estado dela é em memória) — então
