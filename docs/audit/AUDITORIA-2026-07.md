@@ -45,6 +45,11 @@ Cada onda passou por `npm test` + `npm run lint` verdes e `node --check` do scri
 - `20260705_fin_transferencia_saldo_PREPARADA.sql` — `fin_saldos_realizados` passa a somar transferências
   (status=1) no `saldo_atual`. Revisada por agente de correção + verificação antes/depois: como
   `fin_transferencia` está vazia, o output ficou **idêntico** ao anterior (conferido conta a conta).
+- `20260706_app_users_privilege_lock.sql` — **escalação de privilégio** (nova, achada ao revisar o item 4):
+  a RLS de UPDATE de `app_users` sem `WITH CHECK` deixava um colaborador se auto-promover a `proprietario`
+  (PATCH direto **ou** via view `profiles`) e alterar `pode_ver_grupo`/`grupo_economico_id` para ver dados de
+  outros grupos. Trigger barra papel/ativo/grupo por cliente não-proprietário. Revisado por agente adversarial
+  e **provado em prod** (colaborador bloqueado com 42501, sem persistir).
 
 **✅ P0 APLICADO EM PRODUÇÃO (2026-07-02, após o merge):** `20260704c` — revogado o EXECUTE de
 `anon`/`authenticated` **e do PUBLIC** (a migração original esquecia o PUBLIC, então o `anon` herdava o acesso;
