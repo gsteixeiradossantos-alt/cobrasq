@@ -476,6 +476,13 @@
       if (etapa === 3) return await autoPartes(c, 'requerentes', 'Etapa 3/5 — autores');
       if (etapa === 4) return await autoPartes(c, 'requeridos', 'Etapa 4/5 — réus');
       if (etapa === 5) return await autoE5(c);
+      // Fora do assistente com uma parte pendente = provável tela de cadastro novo
+      // (após "Novo"). NÃO navegar embora — pausamos com a ficha pra preencher.
+      if (c.parte) {
+        const p = [...(c.dados.requerentes || []), ...(c.dados.requeridos || [])]
+          .find(x => x && x.doc && String(x.doc).replace(/\D/g, '') === c.parte.doc);
+        return pausar(c, 'parece a tela de CADASTRO da parte — preencha (endereço e contato são obrigatórios), salve, inclua a parte no processo e clique Continuar.' + fichaParte(p || { doc: c.parte.doc }));
+      }
       // Fora do assistente: navega pelo menu "Petição Inicial" (evita URLs com hash).
       progresso(c, 'abrindo a Petição Inicial…');
       const link = await esperar(() => document.querySelector('a[href*="acao=processo_cadastrar&"]'), 10000);
@@ -562,6 +569,19 @@
     }
     return null;
   }
+  // Ficha da parte para as pausas: quem preenche o cadastro novo/endereço é o
+  // humano, mas entregamos prontos os dados que a IA tirou da qualificação.
+  function escHtml(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch])); }
+  function fichaParte(p) {
+    if (!p) return '';
+    const l = [];
+    if (p.nome) l.push('<b>Nome:</b> ' + escHtml(p.nome));
+    if (p.doc) l.push('<b>CPF/CNPJ:</b> ' + escHtml(p.doc));
+    if (p.endereco) l.push('<b>Endereço:</b> ' + escHtml(p.endereco));
+    if (p.email) l.push('<b>E-mail:</b> ' + escHtml(p.email));
+    if (p.telefone) l.push('<b>Telefone:</b> ' + escHtml(p.telefone));
+    return l.length ? '<br><u>Dados da inicial (copie no cadastro):</u><br>' + l.join('<br>') : '';
+  }
   async function autoPartes(c, chave, rot) {
     progresso(c, rot + '…');
     const lista = (c.dados[chave] || []).filter(p => p && p.doc);
@@ -570,11 +590,22 @@
     const falta = lista.find(p => !presentes.includes(String(p.doc).replace(/\D/g, '')));
     if (!falta) {
       if (semDoc.length && !presentes.length)
-        return pausar(c, rot + ': "' + semDoc[0].nome + '" está sem CPF/CNPJ — inclua manualmente e Continuar');
+        return pausar(c, rot + ': "' + semDoc[0].nome + '" está sem CPF/CNPJ — inclua manualmente e Continuar' + fichaParte(semDoc[0]));
       const btn = document.querySelector('#btnProxima');
       if (!btn) return pausar(c, rot + ': botão Próxima não encontrado');
+      // O "Próxima" valida endereço/contato das partes (hdnSinCadastroEnderecoObrigatorio=S):
+      // pode abrir o modal "Adicionar Endereço e Contato" em vez de avançar, ou a página
+      // recarregar de volta na mesma etapa. Contador + vigia evitam loop/silêncio.
+      c.avanco = c.avanco || {};
+      c.avanco[chave] = (c.avanco[chave] || 0) + 1;
+      await casoSalvar(c);
+      if (c.avanco[chave] > 3)
+        return pausar(c, rot + ': o eproc não avança — provavelmente falta ENDEREÇO/CONTATO de uma parte. Clique no ícone 🏠 (Adicionar Endereço e Contato) na linha da parte, complete e clique Continuar.');
       progresso(c, rot + ' ok → Próxima');
-      clicar(btn); return;
+      clicar(btn);
+      await esperar(() => false, 10000); // se navegar, este script morre aqui
+      const pendente = lista.find(p => !docsDaTabelaPartes().includes(String(p.doc).replace(/\D/g, '')));
+      return pausar(c, rot + ': cliquei em Próxima mas a página não avançou — o eproc deve estar exigindo endereço/contato da parte (modal ou aviso na tela). Complete e clique Continuar.' + fichaParte(pendente || lista[0]));
     }
     const doc = String(falta.doc).replace(/\D/g, '');
     if (c.parte && c.parte.doc === doc) {
@@ -589,7 +620,14 @@
         const ok = await esperar(() => docsDaTabelaPartes().includes(doc), 10000);
         if (ok) { c.parte = null; await casoSalvar(c); return runCentral(); }
       }
-      return pausar(c, rot + ': não consegui incluir ' + (falta.nome || doc) + ' (pode exigir endereço/cadastro novo) — inclua manualmente e clique Continuar');
+      // Consulta não devolveu Salvar/Incluir: pessoa sem cadastro no eproc.
+      // O caminho é o botão "Novo" (ao lado do Consultar) → formulário de cadastro
+      // com endereço/contato obrigatórios. Destacamos e entregamos a ficha pronta.
+      const novo = document.querySelector('#btnNovo');
+      if (novo && visivel(novo)) {
+        return pausar(c, rot + ': "' + (falta.nome || doc) + '" parece NÃO ter cadastro no eproc. Clique em <b>Novo</b> (destacado), preencha o cadastro (endereço e contato são obrigatórios), inclua a parte e clique Continuar.' + fichaParte(falta), novo);
+      }
+      return pausar(c, rot + ': não consegui incluir ' + (falta.nome || doc) + ' (pode exigir endereço/cadastro novo) — inclua manualmente e clique Continuar' + fichaParte(falta));
     }
     // 1ª tentativa desta parte: Tipo Pessoa + doc + Consultar (a página recarrega).
     const tipoSel = qFirst(IDS.tipoPessoa);
