@@ -77,25 +77,40 @@
   }
   function temLogin() { const p = document.querySelector('input[type="password"]'); return !!(p && visivel(p)); }
 
-  // Executa código NO MUNDO DA PÁGINA (o content script roda numa caixa isolada e
-  // não dispara links javascript:/onclick da página). Injeta um <script> temporário.
-  function execNaPagina(code) {
+  // Executa código NO MUNDO DA PÁGINA. Caminho BLINDADO: pede ao background rodar
+  // via chrome.scripting world:'MAIN' (isento do CSP da página). Fallback local:
+  // injeta um <script> (pode ser barrado por CSP em páginas mais novas).
+  async function execNaPagina(payload) {
     try {
+      const r = await chrome.runtime.sendMessage({ type: 'EXEC_PAGINA', ...payload });
+      if (r && r.ok) return true;
+    } catch (_) {}
+    // fallback: injeção local (só funciona sem CSP restritivo)
+    try {
+      const code = payload.code || (payload.fn ? payload.fn + '(' + (payload.args || []).map(a => JSON.stringify(a)).join(',') + ')' : '');
+      if (!code) return false;
       const s = document.createElement('script');
-      s.textContent = code;
+      s.textContent = 'try{' + code + '}catch(e){}';
       (document.head || document.documentElement).appendChild(s);
       s.remove();
       return true;
     } catch (_) { return false; }
   }
-  // Clica "de verdade" um controle cujo gatilho é JS da página (href=javascript:… ou
+  // Aciona "de verdade" um controle cujo gatilho é JS da página (href=javascript:… ou
   // onclick=…). Para <a> com URL real ou <input>/<button>, o click nativo basta.
-  function clicarPagina(el) {
+  // Extrai a chamada de função (ex.: openDialogSelecao('…')) p/ o background chamar
+  // a global direto — sem eval, imune a CSP.
+  async function clicarPagina(el) {
     if (!el) return false;
     const href = (el.getAttribute && el.getAttribute('href')) || '';
     const onclick = (el.getAttribute && el.getAttribute('onclick')) || '';
-    if (/^javascript:/i.test(href)) return execNaPagina(href.replace(/^javascript:/i, ''));
-    if (onclick) { execNaPagina(onclick); return true; }
+    const js = /^javascript:/i.test(href) ? href.replace(/^javascript:/i, '') : (onclick || '');
+    if (js) {
+      const m = js.match(/^\s*([A-Za-z_$][\w$]*)\s*\(\s*(?:'([^']*)'|"([^"]*)")?\s*\)/);
+      if (m && !m[2] && !m[3]) return execNaPagina({ fn: m[1], args: [] });
+      if (m && (m[2] || m[3])) return execNaPagina({ fn: m[1], args: [m[2] || m[3]] });
+      return execNaPagina({ code: js });
+    }
     clicar(el); return true;
   }
 
@@ -210,7 +225,7 @@
         Array.from(document.querySelectorAll('a,[onclick]')).find(el => /openDialogSelecao/.test((el.getAttribute('href') || '') + (el.getAttribute('onclick') || '')));
       // A lupa é um link javascript: — precisa rodar no mundo da página (clique nativo
       // da extensão não executa). clicarPagina extrai e executa openDialogSelecao(...).
-      if (lupa) { progresso(c, 'abrindo a janela de Seleção de Tipo (lupa)…'); clicarPagina(lupa); }
+      if (lupa) { progresso(c, 'abrindo a janela de Seleção de Tipo (lupa)…'); await clicarPagina(lupa); }
       return pausar(c, 'cliquei na <b>🔍 lupa</b> (Seleção de Tipo de Documento) — escolha <b>' + escHtml(tipoTxt) + '</b> na janela e clique <b>Continuar</b>. Se a janela não abriu, clique você na lupa ao lado do campo. Assim que o tipo for confirmado eu sigo com os anexos sozinho.');
     }
     // 2) anexos
@@ -291,7 +306,7 @@
       // Tela pré-login (topo): clica em "Advogados, Partes" para chegar ao login.
       if (window === window.top && c.status !== 'pausado') {
         const acesso = acessoAdvogado();
-        if (acesso) { progresso(c, 'entrando por "Advogados, Partes"…'); clicarPagina(acesso); return; }
+        if (acesso) { progresso(c, 'entrando por "Advogados, Partes"…'); await clicarPagina(acesso); return; }
       }
       // Frames coadjuvantes só cuidam do login (a tela de senha pode aparecer
       // em qualquer moldura); o resto é do userMainFrame/diálogo de upload.
