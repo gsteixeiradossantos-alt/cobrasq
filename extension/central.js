@@ -129,7 +129,7 @@ function novoCasoProjudi(nome, docs) {
     id: 'caso-' + Math.random().toString(36).slice(2, 9), nome, docs,
     sistema: 'projudi',
     numero_processo: numero,
-    tipo_peticao: 'Petição',
+    tipo_peticao: 'Manifestação da Parte',
     dados: {},
     extracao: 'ok', status: 'aguardando', numero: null, statusTexto: '',
   };
