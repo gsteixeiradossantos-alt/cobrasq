@@ -125,15 +125,44 @@ Deno.serve(async (req) => {
 
   // Casa o devedor pelo customer Asaas.
   let devedorId: string | null = null;
+  let devedorNome: string | null = null;
+  let devedorDoc: string | null = null;
   if (payment.customer) {
     try {
       const { data: dev } = await sb
         .from('devedores')
-        .select('id')
+        .select('id, nome, doc')
         .eq('asaas_customer_id', String(payment.customer))
         .limit(1);
-      if (dev && dev[0]) devedorId = dev[0].id;
+      if (dev && dev[0]) {
+        devedorId = dev[0].id;
+        devedorNome = dev[0].nome || null;
+        devedorDoc = dev[0].doc || null;
+      }
     } catch {/* ignore */}
+  }
+
+  // Fila de análise de NF (Emitir NF v2): TODO recebimento entra como 'pendente'
+  // — inclusive sem devedor casado (nome/cpf ficam para preencher lazy via Asaas
+  // na tela). Nada é emitido automaticamente; o usuário decide na tela Emitir NF.
+  // Upsert por asaas_payment_id: reenvio do Asaas não duplica. Best-effort: uma
+  // falha aqui não pode derrubar o fluxo existente (recibo/split/baixa).
+  try {
+    const bt = String(payment.billingType || '').toUpperCase();
+    const origem = bt === 'PIX' ? 'PIX'
+      : bt === 'BOLETO' ? 'BOLETO'
+      : (bt === 'CREDIT_CARD' || bt === 'DEBIT_CARD' || bt === 'CARTAO') ? 'CARTAO'
+      : 'OUTRO';
+    await sb.from('nf_fila_analise').upsert({
+      asaas_payment_id: String(paymentId),
+      customer_id: payment.customer ? String(payment.customer) : null,
+      nome: devedorNome,
+      cpf_cnpj: devedorDoc,
+      valor: Number(payment.value ?? 0) || 0,
+      origem
+    }, { onConflict: 'asaas_payment_id', ignoreDuplicates: true });
+  } catch (e) {
+    console.warn('[asaas-webhook] nf_fila_analise upsert falhou: ' + String((e as Error)?.message || e));
   }
 
   // Baixa best-effort na cobrança quando o externalReference é um uuid de cobranca
