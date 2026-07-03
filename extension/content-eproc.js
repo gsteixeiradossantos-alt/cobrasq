@@ -390,9 +390,27 @@
     }
   }
 
+  // Anexa um PDF vindo da PASTA LOCAL/OneDrive do usuário (via popup, sem job do app).
+  async function anexarPdfLocal(nome, base64) {
+    const bin = atob(base64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const file = new File([bytes], nome || 'documento.pdf', { type: 'application/pdf' });
+    const input = qFirst(IDS.anexo) || qFirst(SEL.anexoPdf) || byAnyLabel(TXT.anexo);
+    if (!input) { setBody(msg('Não achei o campo de anexo nesta tela — abra a etapa de Documentos.', '#ffe3e3')); return; }
+    anexarArquivo(input, file);
+    const tipoTxt = qFirst(IDS.tipoDoc); if (tipoTxt) destacar(tipoTxt, '#fab005');
+    const conf = qFirst(IDS.confirmarDocs); if (conf) destacar(conf, '#fab005');
+    setBody(msg('📎 <b>' + nome + '</b> anexado da sua pasta.', '#d3f9d8') +
+      msg('Informe o <b>Tipo</b> do documento e clique <b>Confirmar seleção de documentos</b>.', '#e7f5ff'));
+  }
+
   chrome.runtime.onMessage.addListener((m, _s, send) => {
     if (m.type === 'FILL_JOB') {
       iniciar(m.job).catch(e => setBody(msg('Erro: ' + (e.message || e), '#ffe3e3')));
+      send({ ok: true });
+    } else if (m.type === 'ANEXAR_PDF_LOCAL') {
+      anexarPdfLocal(m.nome, m.base64).catch(e => setBody(msg('Erro ao anexar: ' + (e.message || e), '#ffe3e3')));
       send({ ok: true });
     }
     return true;
