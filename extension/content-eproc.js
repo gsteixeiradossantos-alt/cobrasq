@@ -110,8 +110,26 @@
       if (score > bestScore) { best = opt; bestScore = score; }
     }
     if (best && bestScore >= 60) {
+      if (sel.value === best.value) return true; // já selecionada: não re-dispara a cascata
       sel.value = best.value; sel.dispatchEvent(new Event('change', { bubbles: true })); return true;
     }
+    return false;
+  }
+  // Os selects da Etapa 1 do eproc carregam em CASCATA via AJAX (Comarca → Rito →
+  // Área → Classe). Espera o select existir com opções e tenta casar o valor,
+  // re-tentando enquanto as opções chegam.
+  async function selecionarComEspera(ids, termos, valor, rotulo, erros, timeoutMs) {
+    if (valor == null || valor === '') return true;
+    const fim = Date.now() + (timeoutMs || 8000);
+    let el = null;
+    while (Date.now() < fim) {
+      el = (ids && qFirst(ids)) || byAnyLabel(termos);
+      if (el && el.tagName === 'SELECT' && el.options && el.options.length >= 2 && setSelectByText(el, valor)) return true;
+      if (el && el.tagName !== 'SELECT') { setInput(el, valor); return true; }
+      await new Promise(r => setTimeout(r, 300));
+    }
+    if (!el) erros.push(rotulo + ' (campo não localizado)');
+    else { erros.push(rotulo + ' (opção "' + valor + '" não apareceu na lista — confira)'); destacar(el, '#fab005'); }
     return false;
   }
   function fmtNum(n) {
@@ -204,14 +222,17 @@
     return 0;
   }
 
-  function etapa1(d, erros) {
+  async function etapa1(d, erros) {
+    // Ordem importa: Comarca dispara a cascata; Valor e Sigilo são imediatos;
+    // Rito/Área esperam as opções do AJAX; Classe por ÚLTIMO (o onchange dela
+    // recarrega a página no eproc — e aí o assistente auto-retoma na volta).
     preencherCampo(DIST.comarca, d.comarca, 'Comarca', erros, true, IDS.comarca);
     // Campo real: "Valor da Causa: (R$) (Somente números)" → sem separador de milhar.
     preencherCampo(DIST.valorCausa, d.valor_causa != null ? fmtNum(d.valor_causa).replace(/\./g, '') : null, 'Valor da causa', erros, false, IDS.valorCausa);
-    preencherCampo(DIST.rito, d.rito, 'Rito', erros, false, IDS.rito);
-    preencherCampo(DIST.area, d.area, 'Área', erros, false, IDS.area);
-    preencherCampo(DIST.classe, d.classe, 'Classe processual', erros, true, IDS.classe);
     if (d.nivel_sigilo != null) preencherCampo(DIST.sigilo, 'Nível ' + d.nivel_sigilo, 'Nível de sigilo', erros, false, IDS.sigilo);
+    await selecionarComEspera(IDS.rito, DIST.rito, d.rito, 'Rito', erros);
+    await selecionarComEspera(IDS.area, DIST.area, d.area, 'Área', erros);
+    await selecionarComEspera(IDS.classe, DIST.classe, d.classe, 'Classe processual', erros);
   }
   function etapa2(d, erros) {
     // Árvore de assuntos (jstree): a extensão pré-preenche a busca; a seleção na
@@ -288,8 +309,9 @@
     }
     if (etapa === 6) { await telaSucesso(job); return; }
     const nomes = { 1: 'Informações do processo', 2: 'Assuntos', 3: 'Partes Autoras', 4: 'Partes Rés', 5: 'Documentos' };
+    setBody(msg('<b>Etapa ' + etapa + '/5:</b> preenchendo… (aguardo as listas do eproc carregarem)'));
     const erros = [];
-    if (etapa === 1) etapa1(d, erros);
+    if (etapa === 1) await etapa1(d, erros);
     else if (etapa === 2) etapa2(d, erros);
     else if (etapa === 3) etapa3(d, erros);
     else if (etapa === 4) etapa4(d, erros);
