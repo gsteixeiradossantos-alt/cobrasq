@@ -212,22 +212,103 @@ async function nffRevalidar(id){
   nffDraw();
 }
 
-// ── emitir (nesta etapa: carrega no lote existente; a emissão direta com modal
-// de confirmação da fila chega no PR seguinte do handoff) ─────────────────────
+// ── emitir a partir da fila (modal de confirmação IRREVERSÍVEL) ──────────────
+let _nffEmitindo = false;
 function nffEmitirSel(){ nffEmitir([..._nffSel]); }
 function nffEmitir(ids){
-  const items=(ids||[]).map(id=>_nffFila.find(x=>x.id===id)).filter(q=>q&&q.endereco_ok===true);
-  if(!items.length){ showToast('Nenhum item com endereço ok para emitir.','warning'); return; }
-  let add=0;
-  items.forEach(q=>{
-    const doc=nfaDigits(q.cpf_cnpj||'');
-    const ja=_nfaRows.some(x=>nfaDigits(x.cpf)===doc && nfaParseValor(x.valorRaw)===Number(q.valor) && x.status!=='emitida');
-    if(ja) return;
-    _nfaRows.push({ nome:q.nome||'', cpf:doc?nfaMaskDoc(doc):'', valorRaw:nfaFmtBRL(q.valor), descricao:'Honorários de cobrança',
-      asaasCustomerId:q.customer_id||'', status:'pendente', nf_url:'', erro:'', ref:'', asaas:null, _nffFilaId:q.id });
-    add++;
-  });
-  nfaDrawTabela();
-  const t=document.getElementById('nfa-tabela'); if(t) t.scrollIntoView({behavior:'smooth',block:'center'});
-  showToast(add?`${add} recebimento(s) carregado(s) no lote — confirme a emissão abaixo.`:'Já estão no lote de emissão.','success');
+  if(_nffEmitindo){ showToast('Aguarde — já há uma emissão em andamento.','warning'); return; }
+  if(!_nfaMunReady()){
+    showToast('Informe o serviço municipal (código) no modelo ativo antes de emitir.','warning');
+    const b=document.getElementById('nfa-modelos'); if(b) b.scrollIntoView({behavior:'smooth',block:'center'});
+    return;
+  }
+  const sel=(ids||[]).map(id=>_nffFila.find(x=>x.id===id)).filter(Boolean);
+  const itens=sel.filter(q=>q.endereco_ok===true);
+  const deixados=sel.filter(q=>q.endereco_ok!==true);
+  if(!itens.length){ showToast('Nenhum item com endereço ok para emitir.','warning'); return; }
+  const m=nfaModeloAtivo(), aliq=nfaAliquota();
+  const total=itens.reduce((s,q)=>s+(Number(q.valor)||0),0);
+  const linhas=itens.map(q=>`<div style="display:flex;justify-content:space-between;font-size:13px;">
+      <span>${escHtml(q.nome||'(sem nome)')}</span>
+      <span style="font-family:${NFF_C.mono};font-weight:500;">${nfaFmtBRL(q.valor)}</span>
+    </div>`).join('');
+  const aviso=deixados.length?`<div style="margin-top:4px;padding:11px 13px;border-radius:10px;background:rgba(201,169,97,0.14);border:0.5px solid rgba(201,169,97,0.45);font-size:11.5px;color:#7a5b10;line-height:1.55;">
+      <b>Fica de fora:</b> ${escHtml(deixados.map(q=>(q.nome||'sem nome')+' (sem endereço)').join(' · '))}
+    </div>`:'';
+  _nffIdsModal=itens.map(q=>q.id);
+  _nfaModal(`
+    <div style="padding:22px 24px 18px;border-bottom:0.5px solid rgba(10,21,48,0.12);">
+      <div style="font-family:${NFF_C.mono};font-size:10px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:${NFF_C.goldDark};">Confirmar emissão · irreversível</div>
+      <h3 style="margin:6px 0 2px;font-size:22px;font-weight:600;color:${NFF_C.ink};">Emitir ${itens.length} nota(s)?</h3>
+      <div style="font-size:13px;color:rgba(10,21,48,0.6);">${escHtml(m.municipio||'—')} · código ${escHtml(m.codigo||m.asaasId||'—')} · ISS ${escHtml(String(aliq))}%</div>
+    </div>
+    <div style="padding:18px 24px;display:flex;flex-direction:column;gap:10px;">
+      ${linhas}
+      <div style="border-top:0.5px solid rgba(10,21,48,0.14);padding-top:10px;display:flex;justify-content:space-between;font-size:13px;">
+        <span style="color:rgba(10,21,48,0.6);">Total dos serviços</span><b style="font-family:${NFF_C.mono};">${nfaFmtBRL(total)}</b>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:13px;">
+        <span style="color:rgba(10,21,48,0.6);">ISS estimado retido</span><b style="font-family:${NFF_C.mono};color:${NFF_C.vermelho};">− ${nfaFmtBRL(total*aliq/100)}</b>
+      </div>
+      <div style="font-size:11px;color:rgba(10,21,48,0.5);">ISS é estimativa pela alíquota do modelo; o valor oficial é o que a prefeitura apura.</div>
+      ${aviso}
+    </div>
+    <div style="padding:16px 24px;display:flex;gap:10px;justify-content:flex-end;border-top:0.5px solid rgba(10,21,48,0.12);">
+      <button class="btn btn-ghost btn-sm" onclick="_nfaCloseModal()">Voltar</button>
+      <button class="btn btn-primary btn-sm" onclick="_nffEmitirConfirmado()">✓ Emitir ${itens.length} nota(s)</button>
+    </div>`);
+}
+
+let _nffIdsModal=[];
+async function _nffEmitirConfirmado(){
+  _nfaCloseModal();
+  const itens=_nffIdsModal.map(id=>_nffFila.find(x=>x.id===id)).filter(q=>q&&q.endereco_ok===true);
+  _nffIdsModal=[];
+  if(!itens.length) return;
+  _nffEmitindo=true;
+  const supa=getSupabase();
+  let uid=null; try{ const { data }=await supa.auth.getUser(); uid=data&&data.user&&data.user.id||null; }catch(_){}
+  const m=nfaModeloAtivo(), aliq=nfaAliquota(), comp=nfaCompetencia();
+  let ok=0, fail=0, done=0;
+  try{
+    // SEQUENCIAL de propósito (não paralelo): emissão real na prefeitura.
+    for(const q of itens){
+      done++;
+      showToast(`Emitindo ${done} de ${itens.length}…`,'info');
+      let ref; try{ ref=crypto.randomUUID(); }catch(_){ ref='nff-'+q.id; }
+      try{
+        const resp=await fetch('/api/emitir-nf-avulso',{
+          method:'POST',
+          headers:{ 'Content-Type':'application/json', ...(await authHeaders()) },
+          body: JSON.stringify({ nome:q.nome||'', doc:nfaDigits(q.cpf_cnpj||''), valor:Number(q.valor)||0,
+            descricao:'Honorários de cobrança', ref, asaas_customer_id:q.customer_id||null,
+            competencia:comp, aliquota:aliq, modelo_nome:m.nome||'', municipio:m.municipio||'',
+            ..._nfaMunParams() }),
+        });
+        const j=await resp.json().catch(()=>({}));
+        if(!resp.ok || !j.ok){ throw new Error(traduzirErro(j.erro||j.error||j.message||('HTTP '+resp.status))); }
+        // Decisão registrada: acha a linha criada em nf_avulsa (por ref; fallback
+        // pelo id da invoice, p/ dedup 'já emitida') e vincula na fila.
+        let nfId=null;
+        try{
+          let qr=await supa.from('nf_avulsa').select('id').eq('metadata->>ref', ref).order('criada_em',{ascending:false}).limit(1);
+          if(qr.data&&qr.data[0]) nfId=qr.data[0].id;
+          else if(j.nf_id){ qr=await supa.from('nf_avulsa').select('id').eq('nf_asaas_id', j.nf_id).order('criada_em',{ascending:false}).limit(1); if(qr.data&&qr.data[0]) nfId=qr.data[0].id; }
+        }catch(_){}
+        await supa.from('nf_fila_analise')
+          .update({ status:'emitida', decidido_em:new Date().toISOString(), decidido_por:uid, nf_avulsa_id:nfId })
+          .eq('id', q.id);
+        _nffFila=_nffFila.filter(x=>x.id!==q.id);
+        _nffSel.delete(q.id);
+        ok++;
+      }catch(e){
+        fail++;
+        showToast(`Falha em ${q.nome||'item'}: ${traduzirErro(e.message||String(e))} — segue pendente na fila.`,'danger');
+      }
+      nffDraw();
+    }
+  } finally { _nffEmitindo=false; }
+  showToast(`${ok} nota(s) enviada(s) para emissão${fail?`, ${fail} falha(s) (seguem na fila)`:''} — acompanhe no histórico abaixo.`, fail?'warning':'success');
+  if(typeof nfaUpdateNavBadge==='function') nfaUpdateNavBadge();
+  if(typeof nfaCarregarHistorico==='function') await nfaCarregarHistorico(); // nota entra como 'processando'/'emitida'
 }
