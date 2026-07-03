@@ -183,27 +183,44 @@
       const alvo = norm(tipoTxt);
       progresso(c, 'definindo o tipo: ' + tipoTxt);
       // O autocompleteJS do Projudi ouve o evento 'input', busca via AJAX e monta a
-      // lista num <div id="<campo>autocomplete-list" class="autocomplete-items"> com
-      // <div> por sugestão; o click do <div> preenche o hidden e chama select().
-      const listaId = desc.id + 'autocomplete-list';
+      // lista num <div id="<campo>autocomplete-list"> com um <div> por sugestão; o
+      // click do <div> preenche o hidden e chama select(). O 1º teste mostrou que
+      // "manif" já traz a única sugestão — então simulamos digitação de verdade
+      // (tecla a tecla, com input a cada char) e clicamos na sugestão que casa.
+      // A lista pode aparecer em #<id>autocomplete-list (novo) ou #ajaxAuto_<id> (legado).
+      const acharSug = () => {
+        const boxes = [document.getElementById(desc.id + 'autocomplete-list'), document.getElementById('ajaxAuto_' + desc.id)].filter(Boolean);
+        for (const box of boxes) {
+          const its = Array.from(box.querySelectorAll('div,li,a')).filter(d => visivel(d) && (d.textContent || '').trim());
+          if (!its.length) continue;
+          const m = its.find(d => norm(d.textContent).includes(alvo)) || its.find(d => norm(d.textContent).includes('manifestacao'));
+          if (m) return m;
+          if (its.length === 1) return its[0];
+        }
+        return null;
+      };
+      const termo = (tipoTxt.split(/\s+/).find(w => w.length >= 5) || tipoTxt).toLowerCase().slice(0, 8);
       desc.focus();
       desc.value = '';
-      // digita o suficiente pra sugestão vir (palavra distintiva do tipo).
-      const termoDigitado = (tipoTxt.split(/\s+/).find(w => w.length >= 5) || tipoTxt).slice(0, 8);
-      desc.value = termoDigitado;
-      desc.dispatchEvent(new Event('input', { bubbles: true }));
-      const sug = await esperar(() => {
-        const box = document.getElementById(listaId);
-        if (!box) return null;
-        const divs = Array.from(box.querySelectorAll('div')).filter(d => (d.textContent || '').trim());
-        if (!divs.length) return null;
-        return divs.find(d => norm(d.textContent).includes(alvo)) ||
-               divs.find(d => norm(d.textContent).includes('manifestacao')) || divs[0];
-      }, 10000);
-      if (sug) { sug.click(); }
-      else { desc.dispatchEvent(new Event('blur', { bubbles: true })); }
+      let sug = null;
+      for (let i = 0; i < termo.length && !sug; i++) {
+        const ch = termo[i];
+        desc.value += ch;
+        desc.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: ch }));
+        desc.dispatchEvent(new KeyboardEvent('keypress', { bubbles: true, key: ch }));
+        desc.dispatchEvent(new Event('input', { bubbles: true }));
+        desc.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: ch }));
+        sug = await esperar(acharSug, 1200, 150); // dá tempo do AJAX responder a cada tecla
+      }
+      if (!sug) sug = await esperar(acharSug, 6000);
+      if (sug) {
+        sug.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        sug.click();
+      } else {
+        desc.dispatchEvent(new Event('blur', { bubbles: true }));
+      }
       const ok = await esperar(() => hid.value, 6000);
-      if (!ok) return pausar(c, 'não consegui confirmar o tipo "' + escHtml(tipoTxt) + '" no autocomplete — escolha o Tipo Movimento você (digite e clique na sugestão, ou use a lupa) e clique Continuar', desc);
+      if (!ok) return pausar(c, 'não consegui confirmar o tipo "' + escHtml(tipoTxt) + '" — deixei "' + escHtml(termo) + '" digitado no campo Tipo Movimento; clique na sugestão que aparecer (ou use a 🔍 lupa ao lado) e depois Continuar.', desc);
     }
     // 2) anexos
     if (linhasAnexos() < (c.docs || []).length) {
