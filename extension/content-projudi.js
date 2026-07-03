@@ -182,26 +182,28 @@
       const tipoTxt = c.tipo_peticao || 'Manifestação da Parte';
       const alvo = norm(tipoTxt);
       progresso(c, 'definindo o tipo: ' + tipoTxt);
+      // O autocompleteJS do Projudi ouve o evento 'input', busca via AJAX e monta a
+      // lista num <div id="<campo>autocomplete-list" class="autocomplete-items"> com
+      // <div> por sugestão; o click do <div> preenche o hidden e chama select().
+      const listaId = desc.id + 'autocomplete-list';
       desc.focus();
-      setInput(desc, tipoTxt);
-      desc.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'e' }));
-      desc.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'e' }));
+      desc.value = '';
+      // digita o suficiente pra sugestão vir (palavra distintiva do tipo).
+      const termoDigitado = (tipoTxt.split(/\s+/).find(w => w.length >= 5) || tipoTxt).slice(0, 8);
+      desc.value = termoDigitado;
+      desc.dispatchEvent(new Event('input', { bubbles: true }));
       const sug = await esperar(() => {
-        const box = document.getElementById('ajaxAuto_descricaoTipoDocumento');
-        if (!box || !visivel(box)) return null;
-        const lis = Array.from(box.querySelectorAll('li')).filter(visivel);
-        return lis.find(li => norm(li.textContent).includes(alvo)) || lis[0] || null;
-      }, 8000);
-      if (sug) {
-        sug.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-        sug.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-        sug.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-        sug.click();
-      } else {
-        desc.dispatchEvent(new Event('blur', { bubbles: true })); // última tentativa: validação do blur
-      }
+        const box = document.getElementById(listaId);
+        if (!box) return null;
+        const divs = Array.from(box.querySelectorAll('div')).filter(d => (d.textContent || '').trim());
+        if (!divs.length) return null;
+        return divs.find(d => norm(d.textContent).includes(alvo)) ||
+               divs.find(d => norm(d.textContent).includes('manifestacao')) || divs[0];
+      }, 10000);
+      if (sug) { sug.click(); }
+      else { desc.dispatchEvent(new Event('blur', { bubbles: true })); }
       const ok = await esperar(() => hid.value, 6000);
-      if (!ok) return pausar(c, 'não consegui confirmar o tipo "' + escHtml(tipoTxt) + '" no autocomplete — escolha o Tipo Movimento você (a sugestão aparece ao digitar) e clique Continuar', desc);
+      if (!ok) return pausar(c, 'não consegui confirmar o tipo "' + escHtml(tipoTxt) + '" no autocomplete — escolha o Tipo Movimento você (digite e clique na sugestão, ou use a lupa) e clique Continuar', desc);
     }
     // 2) anexos
     if (linhasAnexos() < (c.docs || []).length) {
