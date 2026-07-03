@@ -27410,6 +27410,7 @@ function renderConfiguracoes(){
     {id:'categorias',icon:ico('tag',15),label:'Categorias'},
     {id:'calculo',icon:ico('ruler',15),label:'Parâmetros de cálculo'},
     {id:'fases',icon:ico('charges',15),label:'Etiquetas'},
+    {id:'fiscal',icon:ico('file',15),label:'Fiscal · NF'},
     {id:'integracoes',icon:ico('link',15),label:'Integrações'},
     {id:'notificacoes',icon:ico('bell',15),label:'Notificações'},
     {id:'senha',icon:ico('key',15),label:'Senha'},
@@ -27470,6 +27471,20 @@ function renderCfgSection(section){
   const papel = currentUser?.papel || 'proprietario';
   if(!subsecaoCfgPermitida(section, papel)){
     el.innerHTML = '<div style="padding:32px;text-align:center;color:var(--text-2);font-size:13px;">Acesso restrito ao gestor.</div>';
+    return;
+  }
+
+  if(section==='fiscal'){
+    el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:6px;">Fiscal · Emitir NF</h3>
+      <div style="font-size:12.5px;color:var(--text-2);margin-bottom:18px;">Modelos por município (serviço, código LC 116, alíquota ISS) e conciliação de ISS por competência — usados pela tela <b>Emitir NF</b>.</div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:16px;">
+        <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);margin-bottom:10px;">Serviço municipal · modelos por município</div>
+        <div id="nfa-modelos"></div>
+      </div>
+      <div id="nfa-conciliacao"></div>`;
+    nfaRenderModelos();
+    nfaCarregarServicos();
+    (async ()=>{ try{ _nfaHist = await nfaFetchHist(); nfaRenderConciliacao(); }catch(_){/* sem sessão/erro: só não mostra conciliação */} })();
     return;
   }
 
@@ -29728,14 +29743,9 @@ async function renderNfAvulsa(){
       <b>Atenção:</b> emitir é irreversível (cancelar nota é processo à parte). Cada NF precisa de <b>CPF/CNPJ</b> + endereço completo do tomador (reaproveitado do cadastro no Asaas). Use <b>Validar no Asaas</b> e <b>emita 1 de teste</b> antes do lote.
     </div>
 
+    <div style="display:grid;grid-template-columns:minmax(0,1fr) 296px;gap:22px;align-items:start;min-width:1120px;">
+    <div style="min-width:0;">
     <div id="nff-fila" style="margin-bottom:16px;"></div>
-
-    <div id="nfa-resumo"></div>
-
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:16px;">
-      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);margin-bottom:10px;">Serviço municipal · modelos por município</div>
-      <div id="nfa-modelos"></div>
-    </div>
 
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:16px;">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
@@ -29760,8 +29770,6 @@ async function renderNfAvulsa(){
       </div>
     </div>
 
-    <div id="nfa-conciliacao" style="margin-bottom:16px;"></div>
-
     <div style="margin-top:8px;">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
         <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);">Notas emitidas</div>
@@ -29774,12 +29782,12 @@ async function renderNfAvulsa(){
         </div>
       </div>
       <div id="nfa-historico" style="color:var(--text-3);font-size:13px;">Carregando…</div>
+    </div>
+    </div>
+    <div id="nff-rail" style="position:sticky;top:12px;"></div>
     </div>`;
-  nfaRenderModelos();
   nfaDrawTabela();
-  nfaRenderResumo();
-  nfaRenderConciliacao();
-  nfaCarregarServicos();
+  nfaCarregarServicos(); // popula _nfaServicos p/ _nfaMunParams (datalist só existe em Config)
   nfaCarregarHistorico();
   if(typeof nffInit==='function') nffInit(); // fila do Asaas (assets/js/nf.js)
 }
@@ -30026,7 +30034,7 @@ function nfaEmitirTeste(){
   nfaModalConfirmLote([i], true);
 }
 function nfaEmitirLote(){
-  if(!_nfaMunReady()){ showToast('Informe o serviço municipal (código) no modelo ativo antes de emitir.','warning'); const b=document.getElementById('nfa-modelos'); if(b) b.scrollIntoView({behavior:'smooth',block:'center'}); return; }
+  if(!_nfaMunReady()){ showToast('Informe o serviço municipal (código) no modelo ativo antes de emitir.','warning'); nfaIrConfigFiscal(); return; }
   const idx=_nfaRows.map((r,i)=>i).filter(i=>nfaEligible(_nfaRows[i]));
   if(!idx.length){ showToast('Nenhuma linha elegível. Valide no Asaas e confira CPF/valor.','warning'); return; }
   nfaModalConfirmLote(idx, false);
@@ -30165,20 +30173,14 @@ function nfaExportHistCsv(){
 }
 
 // ── histórico (notas emitidas) ───────────────────────────────────────────────
-async function nfaCarregarHistorico(){
-  const cont = document.getElementById('nfa-historico'); if(!cont) return;
+// Busca + dedup por (CPF/CNPJ + valor), preferindo EMITIDA > resolvida.
+// Compartilhado entre a tela Emitir NF e a seção Config → Fiscal (conciliação).
+async function nfaFetchHist(){
   const supa = getSupabase();
-  if(!supa){ cont.innerHTML = '<div style="color:var(--text-3);">Faça login para ver o histórico.</div>'; return; }
-  let rows = [];
-  try{
-    const { data, error } = await supa.from('nf_avulsa').select('*').order('criada_em',{ascending:false}).limit(300);
-    if(error) throw error;
-    rows = data||[];
-  }catch(e){
-    cont.innerHTML = `<div style="color:var(--danger);">Não consegui carregar: ${escHtml(traduzirErro(e.message||String(e)))}</div>`;
-    return;
-  }
-  // Deduplica por (CPF/CNPJ + valor): 1 linha por item, preferindo EMITIDA > resolvida.
+  if(!supa) throw new Error('Faça login para ver o histórico.');
+  const { data, error } = await supa.from('nf_avulsa').select('*').order('criada_em',{ascending:false}).limit(300);
+  if(error) throw error;
+  const rows = data||[];
   const _nfaKey = r => nfaDigits(r.doc_digits||r.doc||'') + '|' + Number(r.valor);
   const _byKey = new Map();
   for(const r of rows){
@@ -30187,12 +30189,23 @@ async function nfaCarregarHistorico(){
     const pe=nfaEffStatus(prev), ce=nfaEffStatus(r);
     if(pe!=='emitida' && ce==='emitida') _byKey.set(k,r);
   }
-  _nfaHist = Array.from(_byKey.values());
+  return Array.from(_byKey.values());
+}
+
+async function nfaCarregarHistorico(){
+  const cont = document.getElementById('nfa-historico'); if(!cont) return;
+  try{
+    _nfaHist = await nfaFetchHist();
+  }catch(e){
+    cont.innerHTML = `<div style="color:var(--danger);">Não consegui carregar: ${escHtml(traduzirErro(e.message||String(e)))}</div>`;
+    return;
+  }
   nfaRenderResumo();
   nfaRenderConciliacao();
   nfaUpdateNavBadge();
   nfaDrawTabela(); // dup/elegibilidade dependem do histórico
   nfaDrawHistorico();
+  if(typeof nffRenderRail==='function') nffRenderRail(); // rail direito (assets/js/nf.js)
 }
 
 function nfaDrawHistorico(){
@@ -30216,9 +30229,17 @@ function nfaDrawHistorico(){
   });
   const nProc=cnt('processando');
   const nPend=(_nfaHist||[]).filter(nfaPendentePdf).length; // processando + emitida-sem-PDF
-  const tabs=filtros.map(f=>`<button onclick="nfaSetFiltro('${f.k}')" style="border:1px solid ${_nfaFiltro===f.k?'var(--gold)':'var(--border)'};background:${_nfaFiltro===f.k?'rgba(201,169,97,.12)':'transparent'};border-radius:100px;padding:5px 13px;font-size:12px;cursor:pointer;color:var(--text-1,#15224A);">${f.label} <span style="color:var(--text-3);">${f.n}</span></button>`).join('');
+  // Pills no visual do protótipo: ativa = navy cheio; "Com erro" ganha tom vermelho.
+  const tabs=filtros.map(f=>{
+    const on=_nfaFiltro===f.k;
+    const st = on ? 'background:var(--navy,#0A1530);color:#EFEAD9;border:0.5px solid var(--navy,#0A1530);'
+      : f.k==='erro' && f.n>0 ? 'background:rgba(166,90,74,0.08);color:var(--danger,#A65A4A);border:0.5px solid rgba(166,90,74,0.4);'
+      : 'background:var(--surface,#FFFDF7);color:rgba(10,21,48,0.7);border:0.5px solid rgba(10,21,48,0.14);';
+    return `<button onclick="nfaSetFiltro('${f.k}')" style="${st}border-radius:100px;padding:7px 13px;font-size:12px;font-weight:600;cursor:pointer;">${f.label} <span style="font-family:var(--mono,monospace);font-size:10px;opacity:.75;">${f.n}</span></button>`;
+  }).join('');
 
-  const stCor=s=> s==='emitida'?'var(--success)': s==='erro'?'var(--danger)': s==='processando'?'#9a7a18': s==='cancelada'?'#6E748A': s==='arquivada'?'#6E748A':'var(--text-3)';
+  const stCor=s=> s==='emitida'?'var(--success,#5E7C58)': s==='erro'?'var(--danger,#A65A4A)': s==='processando'?'#56618A': s==='cancelada'?'#6E748A': s==='arquivada'?'#6E748A':'var(--text-3)';
+  const stBg=s=> s==='emitida'?'rgba(94,124,88,0.12)': s==='erro'?'rgba(166,90,74,0.12)': s==='processando'?'rgba(86,97,138,0.12)':'rgba(110,116,138,0.12)';
   const fmtData=d=> d?new Date(d).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
 
   const linha=(r)=>{
@@ -30227,7 +30248,7 @@ function nfaDrawHistorico(){
     const canal=(r.metadata&&r.metadata.canal)||'';
     const acoes=nfaAcoesHist(r,s);
     const chk=showSel?`<td style="padding:11px 6px 11px 12px;width:18px;"><input type="checkbox" ${_nfaSel.has(r.id)?'checked':''} onclick="nfaToggleSel('${r.id}')"></td>`:'';
-    const head=`<tr style="border-bottom:${exp?'none':'1px solid var(--border)'};">
+    const head=`<tr style="border-bottom:${exp?'none':'0.5px solid rgba(10,21,48,0.07)'};${s==='erro'?'background:rgba(166,90,74,0.04);':''}">
       ${chk}
       <td style="padding:10px 10px;font-size:12.5px;">
         <div style="display:flex;align-items:flex-start;gap:8px;">
@@ -30236,7 +30257,7 @@ function nfaDrawHistorico(){
           <div style="font-family:var(--mono,monospace);font-size:11px;color:var(--text-3);">${escHtml(r.doc_digits||r.doc||'')}</div></div>
         </div></td>
       <td style="padding:10px 10px;font-family:var(--mono,monospace);font-size:12.5px;text-align:right;white-space:nowrap;">${nfaFmtBRL(r.valor)}</td>
-      <td style="padding:10px 10px;white-space:nowrap;"><span style="font-family:var(--mono,monospace);font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:${stCor(s)};border:1px solid ${stCor(s)};border-radius:100px;padding:2px 8px;display:inline-flex;align-items:center;gap:5px;">${s==='processando'?'<span style="width:5px;height:5px;border-radius:50%;background:'+stCor(s)+';display:inline-block;"></span>':''}${escHtml(s)}</span></td>
+      <td style="padding:10px 10px;white-space:nowrap;"><span style="font-size:11.5px;font-weight:600;color:${stCor(s)};background:${stBg(s)};border-radius:100px;padding:4px 11px;display:inline-flex;align-items:center;gap:6px;"><span style="width:5px;height:5px;border-radius:50%;background:${stCor(s)};display:inline-block;"></span>${escHtml(s==='erro'?'com erro':s)}</span></td>
       <td style="padding:10px 10px;font-family:var(--mono,monospace);font-size:11px;color:var(--text-3);white-space:nowrap;">${fmtData(r.criada_em)}</td>
       <td style="padding:10px 10px;text-align:right;white-space:nowrap;">${acoes}</td>
     </tr>`;
@@ -30263,18 +30284,20 @@ function nfaDrawHistorico(){
     ${bannerErros}
     ${erroPanel}
     ${barra}
-    ${visiveis.length?`<div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius);">
+    ${visiveis.length?`<div style="overflow-x:auto;background:var(--surface,#FFFDF7);border:0.5px solid rgba(10,21,48,0.14);border-radius:16px;">
       <table style="width:100%;border-collapse:collapse;">
-        <thead><tr style="background:var(--surface-2);text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);">
-          ${showSel?`<th style="padding:8px 6px 8px 12px;width:18px;"><input type="checkbox" onclick="nfaSelAll(this.checked)" ${visiveis.length&&visiveis.every(r=>_nfaSel.has(r.id))?'checked':''}></th>`:''}
-          <th style="padding:8px 10px;font-weight:600;">Tomador</th>
-          <th style="padding:8px 10px;font-weight:600;text-align:right;">Valor</th>
-          <th style="padding:8px 10px;font-weight:600;">Status</th>
-          <th style="padding:8px 10px;font-weight:600;">Quando</th>
-          <th style="padding:8px 10px;"></th>
+        <thead><tr style="background:#F2EBDC;text-align:left;font-family:var(--mono,monospace);font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.12em;color:var(--gold-dark,#9C7F40);border-bottom:0.5px solid rgba(10,21,48,0.12);">
+          ${showSel?`<th style="padding:11px 6px 11px 12px;width:18px;"><input type="checkbox" onclick="nfaSelAll(this.checked)" ${visiveis.length&&visiveis.every(r=>_nfaSel.has(r.id))?'checked':''}></th>`:''}
+          <th style="padding:11px 10px;font-weight:600;">Tomador</th>
+          <th style="padding:11px 10px;font-weight:600;text-align:right;">Valor</th>
+          <th style="padding:11px 10px;font-weight:600;">Status</th>
+          <th style="padding:11px 10px;font-weight:600;">Quando</th>
+          <th style="padding:11px 10px;text-align:right;">Ações</th>
         </tr></thead>
         <tbody>${visiveis.map(linha).join('')}</tbody>
-      </table></div>`:`<div style="padding:24px;text-align:center;color:var(--text-3);font-size:13px;border:1px dashed var(--border);border-radius:var(--radius);">Nenhuma nota neste filtro.</div>`}`;
+      </table></div>
+      <div style="font-size:11.5px;color:rgba(10,21,48,0.5);margin-top:10px;">Notas <b>com erro</b> não foram emitidas — corrija no Asaas e reemita. <b>Cancelar</b> abre o fluxo junto à prefeitura.</div>`
+      :`<div style="padding:26px 20px;font-family:'Instrument Serif',Georgia,serif;font-style:italic;font-size:16px;color:rgba(10,21,48,0.5);background:var(--surface,#FFFDF7);border:0.5px solid rgba(10,21,48,0.14);border-radius:16px;">Nenhuma nota neste filtro.</div>`}`;
 }
 
 function nfaAcoesHist(r,s){
@@ -30289,9 +30312,10 @@ function nfaAcoesHist(r,s){
     return `<button class="btn btn-ghost btn-sm" onclick="nfaAtualizarStatus()" title="Verificar status na prefeitura">↻ Atualizar</button>`;
   }
   if(s==='erro'){
-    return `<button class="btn btn-ghost btn-sm" style="color:var(--gold-dark,#9a7a18);" onclick="nfaReemitirHist('${r.id}')" title="Carrega na tabela p/ corrigir e reemitir">↻ Corrigir e reemitir</button>
-      <button class="btn btn-ghost btn-sm" style="color:var(--danger);" onclick="nfaArquivar('${r.id}')" title="Tira da fila local (não cancela nota emitida)">Cancelar emissão</button>
-      <button class="btn btn-ghost btn-sm" onclick="nfaArquivar('${r.id}')" title="Arquivar">Arquivar</button>`;
+    const asaas = r.asaas_customer_id?`<button class="btn btn-ghost btn-sm" onclick="window.open('https://www.asaas.com/customerAccount/show/${escHtml(r.asaas_customer_id)}','_blank','noopener')" title="Abrir o cadastro do tomador no Asaas p/ corrigir">Abrir no Asaas ↗</button>`:'';
+    return `<button class="btn btn-ghost btn-sm" style="color:var(--gold-dark,#9a7a18);" onclick="nfaReemitirHist('${r.id}')" title="Carrega na tabela p/ corrigir e reemitir">↻ Reemitir</button>
+      ${asaas}
+      <button class="btn btn-ghost btn-sm" onclick="nfaArquivar('${r.id}')" title="Tira da fila local (não cancela nota emitida)">Arquivar</button>`;
   }
   if(s==='arquivada'||s==='cancelada'){
     return `${pdf}<button class="btn btn-ghost btn-sm" onclick="nfaRestaurar('${r.id}')" title="Restaurar">↺ Restaurar</button>`;
@@ -30616,6 +30640,14 @@ async function nfaAtualizarStatus(silent){
   if(btn){ btn.disabled=false; btn.textContent='↻ Atualizar status'; }
   if(!silent) showToast(`${ok} emitida(s)${ainda?`, ${ainda} ainda processando`:''}${falha?`, ${falha} c/ problema`:''}.`, ok?'success':'warning');
   await nfaCarregarHistorico();
+}
+
+// Config → Fiscal · NF (modelos por município + conciliação ISS moram lá).
+function nfaIrConfigFiscal(){
+  const b=document.getElementById('nfa-modelos');
+  if(b){ b.scrollIntoView({behavior:'smooth',block:'center'}); return; } // já está na Config
+  if(typeof setCfgSection==='function'){ window._cfgSection='fiscal'; }
+  showPage('config');
 }
 
 // Badge da sidebar (fila aguardando análise + processando + erro).
