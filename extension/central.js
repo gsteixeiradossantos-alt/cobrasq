@@ -16,11 +16,14 @@ const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&
 const digitos = (s) => String(s || '').replace(/\D/g, '');
 
 // Defaults do escritório (mesmos do app) — a IA sobrescreve o que extrair.
+// Autora padrão: quase sempre é a própria COBRASQ; se a IA extrair outra, prevalece
+// a extração (e tudo segue editável na revisão).
+const AUTOR_PADRAO = { nome: 'COBRASQ RECUPERADORA DE CREDITO E COBRANCA LTDA', doc: '34.626.848/0001-42' };
 const DEFAULTS = {
   comarca: 'Dois Vizinhos', rito: 'Juizado Especial Estadual', area: 'Juizado Especial Cível',
   classe: 'Procedimento do Juizado Especial Cível', assuntos: ['Perdas e Danos'],
   competencia: 'Matéria Residual', nivel_sigilo: '0', valor_causa: null,
-  requerentes: [], requeridos: [],
+  requerentes: [{ ...AUTOR_PADRAO }], requeridos: [],
 };
 
 // Tipos de documento do eproc (códigos reais do select da etapa 5; OUT exige observação).
@@ -151,8 +154,11 @@ async function extrairTodos() {
           competencia: limpa(d.competencia) ?? caso.dados.competencia,
           valor_causa: (typeof d.valor_causa === 'number' && d.valor_causa > 0) ? d.valor_causa : caso.dados.valor_causa,
           assuntos: (Array.isArray(d.assuntos) && d.assuntos.length) ? d.assuntos : caso.dados.assuntos,
-          requerentes: Array.isArray(d.requerentes) ? d.requerentes.filter(p => p && p.nome) : [],
-          requeridos: Array.isArray(d.requeridos) ? d.requeridos.filter(p => p && p.nome) : [],
+          // Partes: a extração só substitui o default (COBRASQ autora) se achou algo.
+          requerentes: (Array.isArray(d.requerentes) && d.requerentes.filter(p => p && p.nome).length)
+            ? d.requerentes.filter(p => p && p.nome) : caso.dados.requerentes,
+          requeridos: (Array.isArray(d.requeridos) && d.requeridos.filter(p => p && p.nome).length)
+            ? d.requeridos.filter(p => p && p.nome) : caso.dados.requeridos,
         };
         caso.extracao = 'ok';
       } else {
@@ -193,7 +199,9 @@ function partesHtml(caso, chave, rotulo) {
         <input style="flex:1;" data-caso="${caso.id}" data-parte="${chave}.${i}.telefone" value="${esc(p.telefone || '')}" placeholder="telefone">
       </div>
     </div>`).join('');
-  return `<div style="margin-top:6px;"><label class="muted"><b>${rotulo}</b></label>${linhas || '<div class="muted">— nenhum (preencha ou será pausado)</div>'}</div>`;
+  const alerta = lista.some(p => p && digitos(p.doc).length >= 11) ? ''
+    : ' <span class="pill p-verm">sem CPF/CNPJ — o caso vai pausar no eproc</span>';
+  return `<div style="margin-top:6px;"><label class="muted"><b>${rotulo}</b>${alerta}</label>${linhas || '<div class="muted">— nenhum (preencha ou será pausado)</div>'}</div>`;
 }
 function renderFase3() {
   setPasso(3);
@@ -274,6 +282,8 @@ async function iniciarLote() {
     const dup = digs('requerentes').find(d => reus.has(d));
     if (dup) { alert('Caso "' + caso.nome + '": o CPF/CNPJ ' + dup + ' aparece como autor E réu — o eproc rejeita isso. Corrija na revisão.'); return; }
   }
+  const semReu = state.casos.filter(c => !(c.dados.requeridos || []).some(p => p && digitos(p.doc).length >= 11));
+  if (semReu.length && !confirm('Caso(s) sem réu com CPF/CNPJ: ' + semReu.map(c => c.nome).join(', ') + '.\nEles vão PAUSAR na etapa de réus para você incluir manualmente. Continuar mesmo assim?')) return;
   state.rodando = true;
   state.atual = state.casos.findIndex(c => c.status === 'aguardando');
   if (state.atual < 0) { renderFase4(); return; }

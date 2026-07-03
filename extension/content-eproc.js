@@ -537,10 +537,20 @@
         anchor = await esperar(achaNo, 6000);
       }
       if (!anchor) return pausar(c, 'Etapa 2: assunto "' + assunto + '" não apareceu na árvore mesmo filtrando — selecione o nó manualmente, clique Incluir e depois Continuar');
-      clicar(anchor);
-      await esperar(() => (document.querySelector('#txtDesAssunto') || {}).value, 5000);
-      const incluir = qFirst(IDS.incluirAssunto);
-      if (incluir) clicar(incluir);
+      // Quem inclui de verdade é o ÍCONE do próprio nó (visto na captura real):
+      // <img id="imgIncluir02190505" class="inclusaoArvore" onclick="incluirAssunto('02190505')">.
+      const li = anchor.closest('li') || anchor.parentElement;
+      const icone = li && li.querySelector('img[id^="imgIncluir"], img[onclick*="incluirAssunto"], img.inclusaoArvore');
+      if (icone) {
+        progresso(c, 'Etapa 2: incluindo "' + assunto + '" pelo ícone do nó…');
+        clicar(icone);
+      } else {
+        // Fallback antigo: seleciona o nó e usa o botão Incluir geral.
+        clicar(anchor);
+        await esperar(() => (document.querySelector('#txtDesAssunto') || {}).value, 5000);
+        const incluir = qFirst(IDS.incluirAssunto);
+        if (incluir) clicar(incluir);
+      }
       const ok = await esperar(linhaAssuntoOk, 8000);
       if (!ok) return pausar(c, 'Etapa 2: não consegui incluir o assunto — inclua manualmente e Continuar');
     }
@@ -582,11 +592,22 @@
     if (p.telefone) l.push('<b>Telefone:</b> ' + escHtml(p.telefone));
     return l.length ? '<br><u>Dados da inicial (copie no cadastro):</u><br>' + l.join('<br>') : '';
   }
+  // Janela/modal do eproc (jQuery-UI ou Bootstrap) — ex.: "Adicionar Endereço e Contato".
+  function dialogoAberto() {
+    return Array.from(document.querySelectorAll('.ui-dialog, #divInfraDialog, .modal.show'))
+      .find(el => visivel(el) && el.offsetHeight > 60) || null;
+  }
   async function autoPartes(c, chave, rot) {
     progresso(c, rot + '…');
+    // Os bundles JS do eproc carregam DEPOIS do content script; clique cedo demais em
+    // botão de onclick inline cai no vazio (visto ao vivo no Filtrar e no Próxima).
+    await new Promise(r => setTimeout(r, 1500));
     const lista = (c.dados[chave] || []).filter(p => p && p.doc);
     const semDoc = (c.dados[chave] || []).filter(p => p && p.nome && !p.doc);
     const presentes = docsDaTabelaPartes();
+    // Tabela vazia e nada para incluir = a IA não extraiu essa ponta. NUNCA avançar assim.
+    if (!lista.length && !presentes.length)
+      return pausar(c, rot + ': nenhuma parte com CPF/CNPJ nos dados do caso — a IA não extraiu. Inclua manualmente aqui (Consultar/Novo) e clique Continuar, ou corrija na revisão da Central e recomece o caso.' + fichaParte(semDoc[0]));
     const falta = lista.find(p => !presentes.includes(String(p.doc).replace(/\D/g, '')));
     if (!falta) {
       if (semDoc.length && !presentes.length)
@@ -602,10 +623,15 @@
       if (c.avanco[chave] > 3)
         return pausar(c, rot + ': o eproc não avança — provavelmente falta ENDEREÇO/CONTATO de uma parte. Clique no ícone 🏠 (Adicionar Endereço e Contato) na linha da parte, complete e clique Continuar.');
       progresso(c, rot + ' ok → Próxima');
-      clicar(btn);
-      await esperar(() => false, 10000); // se navegar, este script morre aqui
+      for (let tent = 0; tent < 3; tent++) {
+        clicar(btn);
+        await esperar(() => false, 6000); // se navegar, este script morre aqui
+        const dlg = dialogoAberto();
+        if (dlg) return pausar(c, rot + ': o eproc abriu uma janela (provável endereço/contato da parte). Complete-a e clique Continuar.' + fichaParte(lista[0]));
+        progresso(c, rot + ': Próxima não respondeu, tentando de novo… (' + (tent + 2) + '/3)');
+      }
       const pendente = lista.find(p => !docsDaTabelaPartes().includes(String(p.doc).replace(/\D/g, '')));
-      return pausar(c, rot + ': cliquei em Próxima mas a página não avançou — o eproc deve estar exigindo endereço/contato da parte (modal ou aviso na tela). Complete e clique Continuar.' + fichaParte(pendente || lista[0]));
+      return pausar(c, rot + ': cliquei em Próxima 3× e a página não avançou — o eproc deve estar exigindo endereço/contato da parte (modal ou aviso na tela). Complete e clique Continuar.' + fichaParte(pendente || lista[0]));
     }
     const doc = String(falta.doc).replace(/\D/g, '');
     if (c.parte && c.parte.doc === doc) {
@@ -620,6 +646,8 @@
         const ok = await esperar(() => docsDaTabelaPartes().includes(doc), 10000);
         if (ok) { c.parte = null; await casoSalvar(c); return runCentral(); }
       }
+      const dlgParte = dialogoAberto();
+      if (dlgParte) return pausar(c, rot + ': o eproc abriu uma janela — complete-a (endereço/contato?) e clique Continuar.' + fichaParte(falta));
       // Consulta não devolveu Salvar/Incluir: pessoa sem cadastro no eproc.
       // O caminho é o botão "Novo" (ao lado do Consultar) → formulário de cadastro
       // com endereço/contato obrigatórios. Destacamos e entregamos a ficha pronta.
@@ -639,7 +667,15 @@
     const consultar = document.querySelector('#btnConsultar') || qFirst(IDS.consultar);
     if (!consultar) return pausar(c, rot + ': botão Consultar não encontrado');
     progresso(c, rot + ': consultando ' + (falta.nome || doc) + '…');
-    clicar(consultar);
+    // O Consultar normalmente recarrega a página (o script morre e retoma na volta);
+    // se a consulta responder na própria tela (Salvar/Incluir aparecem), seguimos.
+    for (let tent = 0; tent < 3; tent++) {
+      clicar(consultar);
+      const respondeu = await esperar(() => acharBotaoParte(['salvar']) || acharBotaoParte(['incluir']) || dialogoAberto(), 6000);
+      if (respondeu) return runCentral();
+      progresso(c, rot + ': Consultar não respondeu, tentando de novo… (' + (tent + 2) + '/3)');
+    }
+    return pausar(c, rot + ': o botão Consultar não respondeu — consulte o CPF/CNPJ manualmente e clique Continuar' + fichaParte(falta), consultar);
   }
 
   async function pedirDoc(casoId, idx) {
