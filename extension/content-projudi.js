@@ -174,15 +174,34 @@
   async function telaJuntar(c) {
     if (document.querySelector('iframe[src*="upload.do"]')) return; // diálogo aberto: quem age é a instância dele
     if (c.fase === 'assinar') return; // já orientado: esperando o advogado concluir/assinar
-    // 1) tipo do documento
+    // 1) tipo do movimento ("JUNTADA DE …") — autocomplete: digita, espera a lista
+    // #ajaxAuto_descricaoTipoDocumento e CLICA na sugestão (só digitar não confirma).
     const hid = document.getElementById('idTipoDocumento');
     const desc = document.getElementById('descricaoTipoDocumento');
     if (desc && hid && !hid.value) {
-      progresso(c, 'definindo o tipo: ' + (c.tipo_peticao || 'Petição'));
-      setInput(desc, c.tipo_peticao || 'Petição');
-      desc.dispatchEvent(new Event('blur', { bubbles: true })); // dispara o autocomplete AJAX
+      const tipoTxt = c.tipo_peticao || 'Manifestação da Parte';
+      const alvo = norm(tipoTxt);
+      progresso(c, 'definindo o tipo: ' + tipoTxt);
+      desc.focus();
+      setInput(desc, tipoTxt);
+      desc.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'e' }));
+      desc.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'e' }));
+      const sug = await esperar(() => {
+        const box = document.getElementById('ajaxAuto_descricaoTipoDocumento');
+        if (!box || !visivel(box)) return null;
+        const lis = Array.from(box.querySelectorAll('li')).filter(visivel);
+        return lis.find(li => norm(li.textContent).includes(alvo)) || lis[0] || null;
+      }, 8000);
+      if (sug) {
+        sug.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        sug.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        sug.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+        sug.click();
+      } else {
+        desc.dispatchEvent(new Event('blur', { bubbles: true })); // última tentativa: validação do blur
+      }
       const ok = await esperar(() => hid.value, 6000);
-      if (!ok) return pausar(c, 'não consegui confirmar o tipo "' + escHtml(c.tipo_peticao || 'Petição') + '" — digite o Tipo do Documento (autocomplete) você e clique Continuar', desc);
+      if (!ok) return pausar(c, 'não consegui confirmar o tipo "' + escHtml(tipoTxt) + '" no autocomplete — escolha o Tipo Movimento você (a sugestão aparece ao digitar) e clique Continuar', desc);
     }
     // 2) anexos
     if (linhasAnexos() < (c.docs || []).length) {
