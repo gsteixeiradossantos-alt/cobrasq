@@ -19,10 +19,46 @@ async function getToken() {
   return token || null;
 }
 
+// CM8: fetch com timeout (o SW não pode ficar preso num request pendurado).
+async function fetchTimeout(url, opts = {}, ms = 60000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try { return await fetch(url, { ...opts, signal: ctrl.signal }); }
+  finally { clearTimeout(t); }
+}
+
+// CC3/M10: relê o token de uma aba do app aberta (a sessão pode ter renovado, ou o
+// token guardado expirou). Mesma técnica do popup — host_permissions + scripting.
+async function refrescarTokenDoApp() {
+  try {
+    const tabs = await chrome.tabs.query({ url: `${API_BASE}/*` });
+    for (const tab of tabs) {
+      try {
+        const [r] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => {
+            for (let i = 0; i < localStorage.length; i++) {
+              const k = localStorage.key(i);
+              if (!k || !/^sb-.*-auth-token$/.test(k)) continue;
+              let raw = localStorage.getItem(k);
+              if (!raw) continue;
+              if (raw.startsWith('base64-')) { try { raw = atob(raw.slice(7).replace(/-/g, '+').replace(/_/g, '/')); } catch (_) { continue; } }
+              try { const o = JSON.parse(raw); const t = (o && o.access_token) || (o && o.currentSession && o.currentSession.access_token); if (t) return t; } catch (_) {}
+            }
+            return null;
+          },
+        });
+        if (r && r.result) { await chrome.storage.session.set({ token: r.result }); return r.result; }
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return null;
+}
+
 async function apiGetJobs() {
   const token = await getToken();
   if (!token) return { error: 'sem_sessao' };
-  const r = await fetch(`${API_BASE}/api/eproc-peticionamento?status=preparado`, {
+  const r = await fetchTimeout(`${API_BASE}/api/eproc-peticionamento?status=preparado`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   const j = await r.json().catch(() => ({}));
@@ -33,7 +69,7 @@ async function apiGetJobs() {
 async function apiReport(payload) {
   const token = await getToken();
   if (!token) return { error: 'sem_sessao' };
-  const r = await fetch(`${API_BASE}/api/eproc-peticionamento`, {
+  const r = await fetchTimeout(`${API_BASE}/api/eproc-peticionamento`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -63,7 +99,7 @@ Se um campo não constar na peça, use null (ou [] em listas). Não invente docu
 async function claudeExtrair(base64Pdf) {
   const token = await getToken();
   if (!token) return { error: 'sem_sessao' };
-  const r = await fetch(`${API_BASE}/api/claude`, {
+  const r = await fetchTimeout(`${API_BASE}/api/claude`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -77,7 +113,7 @@ async function claudeExtrair(base64Pdf) {
         ],
       }],
     }),
-  });
+  }, 120000); // extração de PDF pela IA pode demorar
   const j = await r.json().catch(() => ({}));
   if (!r.ok) return { error: (j.error && j.error.message) || ('HTTP ' + r.status) };
   // A resposta vem em BLOCOS (content: [...]) e o texto pode não ser o 1º bloco
@@ -95,7 +131,7 @@ let _cfgCache = null;
 async function configSupabase() {
   if (_cfgCache) return _cfgCache;
   const token = await getToken();
-  const r = await fetch(`${API_BASE}/api/config`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  const r = await fetchTimeout(`${API_BASE}/api/config`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
   const j = await r.json().catch(() => ({}));
   const url = j.supabaseUrl || j.url || j.SUPABASE_URL || (j.supabase && j.supabase.url);
   const anon = j.supabaseAnonKey || j.anonKey || j.anon || j.SUPABASE_ANON_KEY || (j.supabase && j.supabase.anonKey);
@@ -103,17 +139,22 @@ async function configSupabase() {
   _cfgCache = { url: String(url).replace(/\/+$/, ''), anon };
   return _cfgCache;
 }
-async function pgrest(path, opts = {}) {
+async function pgrest(path, opts = {}, _jaRenovou = false) {
   const cfg = await configSupabase();
   const token = await getToken();
   if (!cfg || !token) throw new Error('config/sessão indisponível p/ registro');
-  const r = await fetch(`${cfg.url}/rest/v1/${path}`, {
+  const r = await fetchTimeout(`${cfg.url}/rest/v1/${path}`, {
     ...opts,
     headers: {
       'Content-Type': 'application/json', apikey: cfg.anon, Authorization: `Bearer ${token}`,
       Prefer: opts.prefer || 'return=representation', ...(opts.headers || {}),
     },
   });
+  // CC3/M10: token expirado (401/403) → renova da aba do app e repete UMA vez.
+  if ((r.status === 401 || r.status === 403) && !_jaRenovou) {
+    const novo = await refrescarTokenDoApp();
+    if (novo) return pgrest(path, opts, true);
+  }
   const t = await r.text();
   let d; try { d = JSON.parse(t); } catch { d = t; }
   if (!r.ok) throw new Error(`PostgREST ${path}: ${r.status} — ${typeof d === 'string' ? d : JSON.stringify(d)}`);
@@ -135,10 +176,23 @@ async function registrarProtocolo({ numero, caso }) {
       } catch (_) { /* sem vínculo: registra mesmo assim */ }
     }
     const reqPrincipal = ((caso && caso.dados || {}).requeridos || [])[0];
-    const doc = digitos(reqPrincipal && reqPrincipal.doc);
+    const docRaw = (reqPrincipal && reqPrincipal.doc) || '';
+    const doc = digitos(docRaw);
     if (!cobrancaId && doc) {
-      const devs = await pgrest(`devedores?select=id,doc&limit=500`);
-      const dev = (Array.isArray(devs) ? devs : []).find(d => digitos(d.doc) === doc);
+      // CA2: filtra no SERVIDOR pelo doc (raw + só-dígitos) em vez de baixar 500 e
+      // casar no cliente (que perdia o vínculo em bases grandes). Fallback: scan
+      // limitado só se o filtro server-side não achar.
+      const fmts = [...new Set([docRaw, doc].filter(Boolean).map(encodeURIComponent))];
+      let dev = null;
+      if (fmts.length) {
+        const orExpr = fmts.map(f => `doc.eq.${f}`).join(',');
+        const devs = await pgrest(`devedores?select=id,doc&or=(${orExpr})&limit=5`);
+        dev = (Array.isArray(devs) ? devs : []).find(d => digitos(d.doc) === doc) || (Array.isArray(devs) && devs[0]) || null;
+      }
+      if (!dev) {
+        const devs = await pgrest(`devedores?select=id,doc&limit=1000`);
+        dev = (Array.isArray(devs) ? devs : []).find(d => digitos(d.doc) === doc) || null;
+      }
       if (dev) {
         const cobs = await pgrest(`cobrancas?id=eq.${dev.id}&select=id,numero_processo`);
         if (Array.isArray(cobs) && cobs[0]) {
@@ -152,12 +206,25 @@ async function registrarProtocolo({ numero, caso }) {
         }
       }
     }
+    // CM6: idempotência client-side (sem mexer no schema). Se já existe um
+    // peticionamento com este protocolo (ou processo+tipo), não insere de novo.
+    try {
+      const chave = numero
+        ? `proc_peticionamentos?protocolo_num=eq.${encodeURIComponent(numero)}&select=id&limit=1`
+        : (numProcesso ? `proc_peticionamentos?numero_processo=eq.${encodeURIComponent(numProcesso)}&tipo=eq.${encodeURIComponent(tipo)}&select=id&limit=1` : null);
+      if (chave) {
+        const jaTem = await pgrest(chave);
+        if (Array.isArray(jaTem) && jaTem[0]) return { ok: true, cobrancaVinculada: !!cobrancaId, jaRegistrado: true };
+      }
+    } catch (_) { /* se a checagem falhar, segue e tenta inserir */ }
     await pgrest('proc_peticionamentos', {
       method: 'POST', prefer: 'return=minimal',
       body: JSON.stringify({
         cobranca_id: cobrancaId, devedor_id: cobrancaId, numero_processo: numProcesso,
         tipo, status: 'protocolado', protocolo_num: numero || null,
         protocolado_em: new Date().toISOString(),
+        // dados_distribuicao carrega requeridos (doc/nome) — reconciliação manual
+        // possível mesmo quando o vínculo falha (CM5).
         dados_distribuicao: (caso && caso.dados) || null,
       }),
     });
@@ -230,7 +297,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } else if (msg.type === 'FETCH_PDF') {
         // Baixa o PDF da signed URL (Supabase) aqui no worker — host_permissions
         // evita problema de CORS no content script do eproc.
-        const r = await fetch(msg.url);
+        const r = await fetchTimeout(msg.url, {}, 90000);
         if (!r.ok) { sendResponse({ error: 'HTTP ' + r.status }); return; }
         const buf = await r.arrayBuffer();
         let bin = ''; const bytes = new Uint8Array(buf);
