@@ -39,18 +39,19 @@ Cada onda passou por `npm test` + `npm run lint` verdes e `node --check` do scri
 - `20260706_infra_reaper_lock_agendadas.sql` — coluna `processando_desde` + índice.
 - `20260706_infra_uniq_auto_cobranca.sql` — índice único parcial anti-duplicidade.
 - `20260706_infra_bucket_avatars.sql` — bucket `avatars` + policies.
+- `20260705_valor_capital_lock_PREPARADA.sql` — trava server-side de `valor_capital` **com isenção do backend**
+  (`service_role`/sem-JWT passam; só cliente authenticated/anon não-proprietário é barrado). Revisada
+  adversarialmente por agente de segurança (fail-closed provado) antes de aplicar.
+- `20260705_fin_transferencia_saldo_PREPARADA.sql` — `fin_saldos_realizados` passa a somar transferências
+  (status=1) no `saldo_atual`. Revisada por agente de correção + verificação antes/depois: como
+  `fin_transferencia` está vazia, o output ficou **idêntico** ao anterior (conferido conta a conta).
 
 **✅ P0 APLICADO EM PRODUÇÃO (2026-07-02, após o merge):** `20260704c` — revogado o EXECUTE de
 `anon`/`authenticated` **e do PUBLIC** (a migração original esquecia o PUBLIC, então o `anon` herdava o acesso;
 corrigido). Verificado: `anon`/`authenticated` não executam mais `portal_emitir_token`; `service_role` mantém
 (o `/api/mfa` server-side funciona). Vazamento do token fechado de fato.
 
-**⏸️ AINDA NÃO aplicadas (por risco — de propósito):**
-- `20260705_valor_capital_lock_PREPARADA.sql` — **segurada**: o gatilho barra `valor_capital` de quem não é
-  proprietário, e jobs de backend rodam como `service_role` (≠ proprietário) — pode barrar backfill legítimo.
-  Testar em staging antes.
-- `20260705_fin_transferencia_saldo_PREPARADA.sql` — **esqueleto** (precisa mesclar a def vigente de
-  `fin_saldos_realizados` de prod, que não está versionada). Não aplicar cega.
+**⏸️ AINDA NÃO aplicadas:** nenhuma — todas as migrações da auditoria estão em produção.
 
 **Edge functions:**
 - ✅ **`criar-usuario` DEPLOYADA** (2026-07-06, v1, ACTIVE, `verify_jwt=true`) — o botão Admin volta a funcionar.
