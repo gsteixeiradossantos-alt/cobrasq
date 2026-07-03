@@ -12,6 +12,8 @@
 // lendo dos handles da pasta — por isso ela deve FICAR ABERTA durante o lote.
 
 const app = document.getElementById('app');
+// Versão visível no topo — pra nunca mais restar dúvida de qual build está rodando.
+try { document.querySelector('header small').textContent += ' · versão ' + chrome.runtime.getManifest().version; } catch (_) {}
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const digitos = (s) => String(s || '').replace(/\D/g, '');
 
