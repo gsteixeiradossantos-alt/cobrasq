@@ -427,6 +427,224 @@
       msg('Informe o <b>Tipo</b> do documento e clique <b>Confirmar seleção de documentos</b>.', '#e7f5ff'));
   }
 
+  // ═══════════════════ CENTRAL DE PETICIONAMENTO — modo AUTO ═══════════════════
+  // O caso ativo fica em chrome.storage.local (sobrevive às recargas do wizard).
+  // A cada página, runCentral() detecta onde está e executa a etapa. Qualquer
+  // anomalia → pausar() (circuit breaker): avisa a Central e espera Continuar.
+  const CASO_KEY = 'cobrasq_central_caso';
+  async function casoLer() { const o = await chrome.storage.local.get(CASO_KEY); return o[CASO_KEY] || null; }
+  async function casoSalvar(c) { await chrome.storage.local.set({ [CASO_KEY]: c }); }
+  async function casoLimpar() { await chrome.storage.local.remove(CASO_KEY); }
+  function reportar(tipo, extra) { try { chrome.runtime.sendMessage({ type: tipo, ...(extra || {}) }); } catch (_) {} }
+  function progresso(c, texto) { setBody(msg('<b>Central:</b> ' + texto)); reportar('CENTRAL_PROGRESS', { casoId: c.id, texto }); }
+  async function pausar(c, motivo, el) {
+    c.status = 'pausado'; c.motivo = motivo; await casoSalvar(c);
+    if (el) destacar(el, '#fa5252');
+    setBody(msg('⏸ <b>Pausado:</b> ' + motivo, '#fff3bf') + msg('Ajuste aqui se preciso e use os botões na aba da <b>Central</b>.', '#e7f5ff'));
+    reportar('CENTRAL_PAUSA', { casoId: c.id, motivo });
+  }
+  async function esperar(cond, timeoutMs, passoMs) {
+    const fim = Date.now() + (timeoutMs || 15000);
+    while (Date.now() < fim) { const v = cond(); if (v) return v; await new Promise(r => setTimeout(r, passoMs || 300)); }
+    return null;
+  }
+  function temLogin() { const p = document.querySelector('input[type="password"]'); return !!(p && visivel(p)); }
+  function clicar(el) { try { el.scrollIntoView({ block: 'center' }); } catch (_) {} el.click(); }
+
+  async function runCentral() {
+    const c = await casoLer();
+    if (!c) return;
+    const etapa = detectarEtapa();
+    try {
+      if (etapa === 6) { // sucesso — processa mesmo se estava pausado (1º caso validado à mão)
+        const elNum = qFirst(IDS.numeroSucesso) || qFirst(SEL.resultadoProtocolo);
+        const numero = elNum ? (elNum.textContent || '').trim() : '';
+        await casoLimpar();
+        reportar('CENTRAL_CASO_OK', { casoId: c.id, numero });
+        setBody(msg('🎉 <b>Distribuído!</b> Nº ' + numero, '#d3f9d8'));
+        const nova = document.querySelector('#btnNovaPeticao');
+        if (nova) clicar(nova); // deixa a tela pronta pro próximo caso da fila
+        return;
+      }
+      if (c.status === 'pausado') {
+        if (c.motivo === 'login' && !temLogin()) { c.status = 'rodando'; c.motivo = null; await casoSalvar(c); }
+        else { setBody(msg('⏸ <b>Pausado:</b> ' + (c.motivo || ''), '#fff3bf') + msg('Use os botões na aba da Central.', '#e7f5ff')); return; }
+      }
+      if (temLogin()) { await pausar(c, 'login'); setBody(msg('Faça o <b>login no eproc</b> — a fila continua sozinha depois.', '#fff3bf')); return; }
+      if (etapa === 1) return await autoE1(c);
+      if (etapa === 2) return await autoE2(c);
+      if (etapa === 3) return await autoPartes(c, 'requerentes', 'Etapa 3/5 — autores');
+      if (etapa === 4) return await autoPartes(c, 'requeridos', 'Etapa 4/5 — réus');
+      if (etapa === 5) return await autoE5(c);
+      // Fora do assistente: navega pelo menu "Petição Inicial" (evita URLs com hash).
+      progresso(c, 'abrindo a Petição Inicial…');
+      const link = await esperar(() => document.querySelector('a[href*="acao=processo_cadastrar&"]'), 10000);
+      if (!link) return pausar(c, 'não achei o menu "Petição Inicial" — navegue até a Etapa 1 e clique Continuar');
+      clicar(link);
+    } catch (e) { await pausar(c, 'erro inesperado: ' + String((e && e.message) || e)); }
+  }
+
+  async function autoE1(c) {
+    progresso(c, 'Etapa 1/5 — informações do processo…');
+    const erros = [];
+    await etapa1(c.dados, erros);
+    if (erros.length) return pausar(c, 'Etapa 1: ' + erros.join(' · '));
+    const btn = qFirst(IDS.avancar);
+    if (!btn) return pausar(c, 'Etapa 1: botão Próxima não encontrado');
+    progresso(c, 'Etapa 1 ok → Próxima');
+    clicar(btn);
+  }
+
+  function linhaAssuntoOk() { return !!document.querySelector('#tblAssuntoPrincipal tbody tr'); }
+  async function autoE2(c) {
+    progresso(c, 'Etapa 2/5 — assuntos…');
+    const d = c.dados;
+    if (!linhaAssuntoOk()) {
+      const assunto = (d.assuntos || [])[0];
+      if (!assunto) return pausar(c, 'Etapa 2: nenhum assunto informado');
+      const busca = qFirst(IDS.assuntoBusca), filtrar = qFirst(IDS.filtrar);
+      if (!busca || !filtrar) return pausar(c, 'Etapa 2: busca de assunto não encontrada');
+      setInput(busca, assunto); clicar(filtrar);
+      const anchor = await esperar(() =>
+        Array.from(document.querySelectorAll('#divArvore .jstree-anchor'))
+          .find(a => visivel(a) && norm(a.textContent).includes(norm(assunto))), 15000);
+      if (!anchor) return pausar(c, 'Etapa 2: assunto "' + assunto + '" não apareceu na árvore — selecione manualmente e Continuar');
+      clicar(anchor);
+      await esperar(() => (document.querySelector('#txtDesAssunto') || {}).value, 5000);
+      const incluir = qFirst(IDS.incluirAssunto);
+      if (incluir) clicar(incluir);
+      const ok = await esperar(linhaAssuntoOk, 8000);
+      if (!ok) return pausar(c, 'Etapa 2: não consegui incluir o assunto — inclua manualmente e Continuar');
+    }
+    const comp = qFirst(IDS.competencia);
+    if (comp && d.competencia && comp.value === '-1' && !setSelectByText(comp, d.competencia))
+      return pausar(c, 'Etapa 2: competência "' + d.competencia + '" não está na lista', comp);
+    const btn = document.querySelector('button[name="sbmProcessoEtapa2"]');
+    if (!btn) return pausar(c, 'Etapa 2: botão Próxima não encontrado');
+    progresso(c, 'Etapa 2 ok → Próxima');
+    clicar(btn);
+  }
+
+  function docsDaTabelaPartes() {
+    return Array.from(document.querySelectorAll('#tblPartes tbody td'))
+      .map(td => (td.textContent || '').replace(/\D/g, '')).filter(s => s.length === 11 || s.length === 14);
+  }
+  function acharBotaoParte(termos) {
+    const cands = Array.from(document.querySelectorAll('input[type="submit"],input[type="button"],button,a'))
+      .filter(el => visivel(el) && !/^btn(Proxima|Anterior|Cancelar|Consultar|Novo|Voltar|IncluirAssunto|Salvar$)/.test(el.id || ''));
+    for (const t of termos) {
+      const alvo = norm(t);
+      for (const el of cands) {
+        const txt = norm(((el.value || '') + ' ' + (el.textContent || '') + ' ' + (el.title || '')).trim());
+        if (txt === alvo || txt.includes(alvo)) return el;
+      }
+    }
+    return null;
+  }
+  async function autoPartes(c, chave, rot) {
+    progresso(c, rot + '…');
+    const lista = (c.dados[chave] || []).filter(p => p && p.doc);
+    const semDoc = (c.dados[chave] || []).filter(p => p && p.nome && !p.doc);
+    const presentes = docsDaTabelaPartes();
+    const falta = lista.find(p => !presentes.includes(String(p.doc).replace(/\D/g, '')));
+    if (!falta) {
+      if (semDoc.length && !presentes.length)
+        return pausar(c, rot + ': "' + semDoc[0].nome + '" está sem CPF/CNPJ — inclua manualmente e Continuar');
+      const btn = document.querySelector('#btnProxima');
+      if (!btn) return pausar(c, rot + ': botão Próxima não encontrado');
+      progresso(c, rot + ' ok → Próxima');
+      clicar(btn); return;
+    }
+    const doc = String(falta.doc).replace(/\D/g, '');
+    if (c.parte && c.parte.doc === doc) {
+      // Já consultamos: procura os botões de conclusão da consulta (Salvar / Incluir).
+      const salvar = acharBotaoParte(['salvar']);
+      if (salvar && !c.parte.salvou) { c.parte.salvou = true; await casoSalvar(c); progresso(c, rot + ': salvando dados da Receita…'); clicar(salvar); return; }
+      const incluir = acharBotaoParte(['incluir']);
+      if (incluir && !c.parte.incluiu) {
+        c.parte.incluiu = true; await casoSalvar(c);
+        progresso(c, rot + ': incluindo ' + (falta.nome || doc) + '…');
+        clicar(incluir);
+        const ok = await esperar(() => docsDaTabelaPartes().includes(doc), 10000);
+        if (ok) { c.parte = null; await casoSalvar(c); return runCentral(); }
+      }
+      return pausar(c, rot + ': não consegui incluir ' + (falta.nome || doc) + ' (pode exigir endereço/cadastro novo) — inclua manualmente e clique Continuar');
+    }
+    // 1ª tentativa desta parte: Tipo Pessoa + doc + Consultar (a página recarrega).
+    const tipoSel = qFirst(IDS.tipoPessoa);
+    if (tipoSel) setSelectByText(tipoSel, doc.length === 11 ? 'Pessoa Física' : 'Pessoa Jurídica');
+    const docEl = qFirst(IDS.docParte);
+    if (!docEl) return pausar(c, rot + ': campo CPF/CNPJ não encontrado');
+    setInput(docEl, falta.doc);
+    c.parte = { doc }; await casoSalvar(c);
+    const consultar = document.querySelector('#btnConsultar') || qFirst(IDS.consultar);
+    if (!consultar) return pausar(c, rot + ': botão Consultar não encontrado');
+    progresso(c, rot + ': consultando ' + (falta.nome || doc) + '…');
+    clicar(consultar);
+  }
+
+  async function pedirDoc(casoId, idx) {
+    const r = await chrome.runtime.sendMessage({ type: 'PEDIR_DOC', casoId, idx });
+    if (!r || !r.ok) throw new Error('PDF ' + (idx + 1) + ': ' + ((r && r.error) || 'a aba da Central está fechada?'));
+    const bin = atob(r.base64); const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new File([bytes], r.nome, { type: 'application/pdf' });
+  }
+  function uploadsProntos() {
+    return Array.from(document.querySelectorAll('input[id^="fleArquivo_"]')).filter(i => i.value).length;
+  }
+  async function autoE5(c) {
+    progresso(c, 'Etapa 5/5 — documentos…');
+    const n = (c.docs || []).length;
+    const naTabela = () => document.querySelectorAll('#tbDocumentosCadastradas tbody tr').length;
+    if (naTabela() < n) {
+      if (uploadsProntos() === 0) {
+        const input = qFirst(IDS.anexo);
+        if (!input) return pausar(c, 'Etapa 5: uploader não encontrado');
+        progresso(c, 'Etapa 5: baixando e anexando ' + n + ' PDF(s)…');
+        const dt = new DataTransfer();
+        for (const d of c.docs) dt.items.add(await pedirDoc(c.id, d.idx));
+        input.files = dt.files;
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      const okUp = await esperar(() => uploadsProntos() >= n, 120000, 600);
+      if (!okUp) return pausar(c, 'Etapa 5: upload dos PDFs não concluiu (' + uploadsProntos() + '/' + n + ') — confira e Continuar');
+      // Tipos: a ordem dos fieldsets segue a ordem de anexação (= ordem de c.docs).
+      let iDoc = 0;
+      for (const fld of Array.from(document.querySelectorAll('fieldset[id^="fldInfDocumento"]'))) {
+        const nId = (fld.id || '').replace('fldInfDocumento', '');
+        const fle = document.getElementById('fleArquivo_' + nId);
+        if (!fle || !fle.value) continue;
+        const meta = c.docs[iDoc++]; if (!meta) break;
+        const hidden = document.getElementById('selTipoArquivo_' + nId);
+        const txt = document.getElementById('txtTipo_' + nId);
+        const usaOut = !meta.selVal;
+        if (hidden) hidden.value = meta.selVal || '11';
+        if (txt) txt.value = usaOut ? 'OUTROS' : meta.tipoTxt;
+        if (usaOut || meta.selVal === '11') {
+          const obs = document.getElementById('txtObservacao_' + nId);
+          if (obs) { obs.style.display = 'inline-block'; obs.value = meta.obs || meta.tipoTxt || meta.nome; }
+        }
+      }
+      const conf = qFirst(IDS.confirmarDocs);
+      if (!conf) return pausar(c, 'Etapa 5: botão "Confirmar seleção de documentos" não encontrado');
+      progresso(c, 'Etapa 5: confirmando ' + n + ' documento(s)…');
+      clicar(conf);
+      const okTb = await esperar(() => naTabela() >= n, 120000, 600);
+      if (!okTb) return pausar(c, 'Etapa 5: documentos não entraram na tabela (' + naTabela() + '/' + n + ') — confira os tipos e Continuar');
+    }
+    const fin = qFirst(IDS.finalizar);
+    if (!fin) return pausar(c, 'Etapa 5: botão Finalizar não encontrado');
+    if (c.primeiro && !c.validado) {
+      c.validado = true;
+      destacar(fin);
+      return pausar(c, '1º caso do lote: confira as etapas e clique VOCÊ em Finalizar — depois disso a fila segue sozinha');
+    }
+    progresso(c, 'finalizando (protocolo automático)…');
+    await chrome.runtime.sendMessage({ type: 'OVERRIDE_DIALOGS' }).catch(() => {});
+    clicar(fin);
+  }
+
   chrome.runtime.onMessage.addListener((m, _s, send) => {
     if (m.type === 'FILL_JOB') {
       iniciar(m.job).catch(e => setBody(msg('Erro: ' + (e.message || e), '#ffe3e3')));
@@ -434,13 +652,30 @@
     } else if (m.type === 'ANEXAR_PDF_LOCAL') {
       anexarPdfLocal(m.nome, m.base64).catch(e => setBody(msg('Erro ao anexar: ' + (e.message || e), '#ffe3e3')));
       send({ ok: true });
+    } else if (m.type === 'RUN_CENTRAL') {
+      (async () => {
+        await casoSalvar({ ...m.caso, status: 'rodando', motivo: null, parte: null, validado: false });
+        runCentral().catch(() => {});
+      })();
+      send({ ok: true });
+    } else if (m.type === 'CONTINUAR_CENTRAL') {
+      (async () => {
+        const c = await casoLer();
+        if (c) { c.status = 'rodando'; c.motivo = null; await casoSalvar(c); runCentral().catch(() => {}); }
+      })();
+      send({ ok: true });
+    } else if (m.type === 'CANCELAR_CENTRAL') {
+      casoLimpar().then(() => setBody(msg('Caso cancelado pela Central.', '#f1f3f5')));
+      send({ ok: true });
     }
     return true;
   });
 
-  // Auto-retoma a distribuição a cada recarregamento de página (após "Próxima"),
-  // enquanto houver job ativo guardado e a página parecer uma etapa do assistente.
+  // Auto-retoma a cada recarregamento de página: primeiro a Central (modo auto),
+  // senão o job assistido do app (fluxo antigo).
   (async function autoRetomar() {
+    const c = await casoLer();
+    if (c) { runCentral().catch(() => {}); return; }
     const job = await lerJobAtivo();
     if (job && job.tipo === 'inicial' && detectarEtapa() > 0) {
       preencherDistribuicao(job).catch(() => {});

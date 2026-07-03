@@ -151,6 +151,15 @@ async function puxarTokenDoApp() {
   return false;
 }
 
+// Botão fixo pra abrir a Central de Peticionamento (lote de iniciais com IA).
+function renderCentralLink() {
+  const div = document.createElement('div');
+  div.style.cssText = 'margin-top:10px;';
+  div.innerHTML = '<button class="btn" id="abrir-central" style="background:#1a7f37;">⚖️ Central de Peticionamento (lote)</button>';
+  body.appendChild(div);
+  div.querySelector('#abrir-central').onclick = () => chrome.tabs.create({ url: chrome.runtime.getURL('central.html') });
+}
+
 async function carregar() {
   let has = await send({ type: 'HAS_TOKEN' });
   if (!has || !has.hasToken) {
@@ -165,6 +174,7 @@ async function carregar() {
     document.getElementById('abrir-app').onclick = () => chrome.tabs.create({ url: 'https://painel.cobrasq.com.br/' });
     document.getElementById('reload').onclick = carregar;
     await renderPasta();
+    renderCentralLink();
     return;
   }
 
@@ -174,6 +184,7 @@ async function carregar() {
     render(`<div class="warn">Erro: ${esc(res.error)}</div><button class="btn" id="reload">Tentar de novo</button>`);
     document.getElementById('reload').onclick = carregar;
     await renderPasta();
+    renderCentralLink();
     return;
   }
   const jobs = (res && res.jobs) || [];
@@ -182,6 +193,7 @@ async function carregar() {
       <button class="btn ghost" id="reload">Atualizar</button>`);
     document.getElementById('reload').onclick = carregar;
     await renderPasta();
+    renderCentralLink();
     return;
   }
 
