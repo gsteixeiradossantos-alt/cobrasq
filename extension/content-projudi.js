@@ -77,6 +77,28 @@
   }
   function temLogin() { const p = document.querySelector('input[type="password"]'); return !!(p && visivel(p)); }
 
+  // Executa código NO MUNDO DA PÁGINA (o content script roda numa caixa isolada e
+  // não dispara links javascript:/onclick da página). Injeta um <script> temporário.
+  function execNaPagina(code) {
+    try {
+      const s = document.createElement('script');
+      s.textContent = code;
+      (document.head || document.documentElement).appendChild(s);
+      s.remove();
+      return true;
+    } catch (_) { return false; }
+  }
+  // Clica "de verdade" um controle cujo gatilho é JS da página (href=javascript:… ou
+  // onclick=…). Para <a> com URL real ou <input>/<button>, o click nativo basta.
+  function clicarPagina(el) {
+    if (!el) return false;
+    const href = (el.getAttribute && el.getAttribute('href')) || '';
+    const onclick = (el.getAttribute && el.getAttribute('onclick')) || '';
+    if (/^javascript:/i.test(href)) return execNaPagina(href.replace(/^javascript:/i, ''));
+    if (onclick) { execNaPagina(onclick); return true; }
+    clicar(el); return true;
+  }
+
   // ── busca de controles por texto (rótulos/valores/títulos) ───────────────────
   function acharControle(termos, tags) {
     const cands = Array.from(document.querySelectorAll(tags || 'input[type="submit"],input[type="button"],button,a'))
@@ -186,8 +208,10 @@
       desc.value = tipoTxt;
       const lupa = document.querySelector('a.searchButton[href*="openDialogSelecao"]') ||
         Array.from(document.querySelectorAll('a,[onclick]')).find(el => /openDialogSelecao/.test((el.getAttribute('href') || '') + (el.getAttribute('onclick') || '')));
-      if (lupa) { progresso(c, 'abrindo a janela de Seleção de Tipo (lupa)…'); clicar(lupa); }
-      return pausar(c, 'abri a janela <b>Seleção de Tipo de Documento</b> — escolha <b>' + escHtml(tipoTxt) + '</b> (filtre/clique no item) e depois clique <b>Continuar</b>. Assim que o tipo for confirmado eu sigo com os anexos sozinho.' + (lupa ? '' : '<br><i>(não achei a lupa nesta tela — clique você no ícone 🔍 ao lado do campo.)</i>'));
+      // A lupa é um link javascript: — precisa rodar no mundo da página (clique nativo
+      // da extensão não executa). clicarPagina extrai e executa openDialogSelecao(...).
+      if (lupa) { progresso(c, 'abrindo a janela de Seleção de Tipo (lupa)…'); clicarPagina(lupa); }
+      return pausar(c, 'cliquei na <b>🔍 lupa</b> (Seleção de Tipo de Documento) — escolha <b>' + escHtml(tipoTxt) + '</b> na janela e clique <b>Continuar</b>. Se a janela não abriu, clique você na lupa ao lado do campo. Assim que o tipo for confirmado eu sigo com os anexos sozinho.');
     }
     // 2) anexos
     if (linhasAnexos() < (c.docs || []).length) {
@@ -246,10 +270,18 @@
   function acessoAdvogado() {
     const txt = norm(document.body ? document.body.innerText : '');
     if (!txt.includes('acesso ao sistema') && !txt.includes('cadastro no sistema')) return null;
-    const cands = Array.from(document.querySelectorAll('a, div, button, li, td'));
-    const alvo = cands.find(el => visivel(el) && /advogad[oa]s?[ ,]+partes/.test(norm(el.textContent)) && norm(el.textContent).length < 200);
-    if (!alvo) return null;
-    return alvo.closest('a[href]') || (alvo.getAttribute && alvo.getAttribute('onclick') ? alvo : null) || alvo.querySelector('a[href]') || alvo;
+    // O cartão "Advogados, Partes" — pega o elemento MAIS INTERNO que casa (o clicável
+    // costuma ser um <a>/<div onclick> pequeno), depois sobe até achar href/onclick.
+    const cands = Array.from(document.querySelectorAll('a, div, button, li, td, span'));
+    const casam = cands.filter(el => visivel(el) && /advogad[oa]s?[ ,]+partes/.test(norm(el.textContent)) && norm(el.textContent).length < 220);
+    if (!casam.length) return null;
+    const alvo = casam[casam.length - 1]; // mais interno = mais específico
+    let el = alvo;
+    for (let i = 0; i < 5 && el; i++) {
+      if ((el.getAttribute && (el.getAttribute('onclick') || /^javascript:|\.do|\.php|=/.test(el.getAttribute('href') || ''))) ) return el;
+      el = el.parentElement;
+    }
+    return alvo.querySelector('a[href],[onclick]') || alvo;
   }
 
   async function runCentral() {
@@ -259,7 +291,7 @@
       // Tela pré-login (topo): clica em "Advogados, Partes" para chegar ao login.
       if (window === window.top && c.status !== 'pausado') {
         const acesso = acessoAdvogado();
-        if (acesso) { progresso(c, 'entrando por "Advogados, Partes"…'); clicar(acesso); return; }
+        if (acesso) { progresso(c, 'entrando por "Advogados, Partes"…'); clicarPagina(acesso); return; }
       }
       // Frames coadjuvantes só cuidam do login (a tela de senha pode aparecer
       // em qualquer moldura); o resto é do userMainFrame/diálogo de upload.
