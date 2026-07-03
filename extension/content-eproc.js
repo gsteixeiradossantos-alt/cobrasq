@@ -703,6 +703,10 @@
   }
   async function autoE5(c) {
     progresso(c, 'Etapa 5/5 — documentos…');
+    // Padrão do escritório: "Opção por Juízo 100% Digital" sempre marcada
+    // (checkbox #chkJuizoDigital desta tela; click dispara o onchange da página).
+    const jd = document.querySelector('#chkJuizoDigital');
+    if (jd && visivel(jd) && !jd.checked) { jd.click(); progresso(c, 'Etapa 5: ✔ Juízo 100% Digital marcado'); }
     const n = (c.docs || []).length;
     const naTabela = () => document.querySelectorAll('#tbDocumentosCadastradas tbody tr').length;
     if (naTabela() < n) {
