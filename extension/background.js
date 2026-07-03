@@ -124,10 +124,19 @@ async function pgrest(path, opts = {}) {
 async function registrarProtocolo({ numero, caso }) {
   try {
     const digitos = (doc) => String(doc || '').replace(/\D/g, '');
+    const tipo = (caso && caso.tipo) || 'inicial';
+    const numProcesso = (caso && caso.numero_processo) || numero || null;
     let cobrancaId = null;
+    // Intercorrente: o processo já existe — vincula pela cobrança com o mesmo nº.
+    if (tipo === 'intercorrente' && numProcesso) {
+      try {
+        const cobs = await pgrest(`cobrancas?numero_processo=eq.${encodeURIComponent(numProcesso)}&select=id&limit=1`);
+        if (Array.isArray(cobs) && cobs[0]) cobrancaId = cobs[0].id;
+      } catch (_) { /* sem vínculo: registra mesmo assim */ }
+    }
     const reqPrincipal = ((caso && caso.dados || {}).requeridos || [])[0];
     const doc = digitos(reqPrincipal && reqPrincipal.doc);
-    if (doc) {
+    if (!cobrancaId && doc) {
       const devs = await pgrest(`devedores?select=id,doc&limit=500`);
       const dev = (Array.isArray(devs) ? devs : []).find(d => digitos(d.doc) === doc);
       if (dev) {
@@ -146,8 +155,8 @@ async function registrarProtocolo({ numero, caso }) {
     await pgrest('proc_peticionamentos', {
       method: 'POST', prefer: 'return=minimal',
       body: JSON.stringify({
-        cobranca_id: cobrancaId, devedor_id: cobrancaId, numero_processo: numero || null,
-        tipo: 'inicial', status: 'protocolado', protocolo_num: numero || null,
+        cobranca_id: cobrancaId, devedor_id: cobrancaId, numero_processo: numProcesso,
+        tipo, status: 'protocolado', protocolo_num: numero || null,
         protocolado_em: new Date().toISOString(),
         dados_distribuicao: (caso && caso.dados) || null,
       }),

@@ -454,6 +454,7 @@
   async function runCentral() {
     const c = await casoLer();
     if (!c) return;
+    if (c.sistema && c.sistema !== 'eproc') return; // caso do Projudi: outro script cuida
     const etapa = detectarEtapa();
     try {
       if (etapa === 6) { // sucesso — processa mesmo se estava pausado (1º caso validado à mão)
