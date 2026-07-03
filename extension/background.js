@@ -47,8 +47,8 @@ async function apiReport(payload) {
 const PROMPT_EXTRACAO = `Você é assistente de um escritório de cobrança que distribui petições iniciais no eproc TJPR.
 Leia a petição inicial anexa e devolva SOMENTE um JSON válido (sem cercas de código, sem comentários) com:
 {
- "requerentes": [{"nome": "...", "doc": "CPF ou CNPJ com pontuação, ou null"}],
- "requeridos":  [{"nome": "...", "doc": "CPF ou CNPJ com pontuação, ou null"}],
+ "requerentes": [{"nome": "...", "doc": "CPF ou CNPJ com pontuação, ou null", "endereco": "endereço completo da qualificação (rua, nº, bairro, cidade/UF, CEP) ou null", "email": "e-mail ou null", "telefone": "telefone/celular ou null"}],
+ "requeridos":  [{"nome": "...", "doc": "CPF ou CNPJ com pontuação, ou null", "endereco": "endereço completo da qualificação (rua, nº, bairro, cidade/UF, CEP) ou null", "email": "e-mail ou null", "telefone": "telefone/celular ou null"}],
  "valor_causa": 1234.56,
  "comarca": "cidade do foro/comarca indicada no endereçamento",
  "classe": "classe processual (ex.: Procedimento do Juizado Especial Cível)",

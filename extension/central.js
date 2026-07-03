@@ -180,9 +180,18 @@ function inputD(caso, campo, rotulo, valor) {
 }
 function partesHtml(caso, chave, rotulo) {
   const lista = caso.dados[chave] || [];
-  const linhas = lista.map((p, i) => `<div style="display:flex;gap:6px;margin:3px 0;" class="partes">
-      <input style="flex:2;" data-caso="${caso.id}" data-parte="${chave}.${i}.nome" value="${esc(p.nome || '')}" placeholder="nome">
-      <input style="flex:1;" data-caso="${caso.id}" data-parte="${chave}.${i}.doc" value="${esc(p.doc || '')}" placeholder="CPF/CNPJ">
+  // Endereço/e-mail/telefone: o eproc EXIGE endereço+contato da parte (cadastro novo
+  // ou complemento). Vêm da qualificação da inicial via IA; usados nas pausas guiadas.
+  const linhas = lista.map((p, i) => `<div style="margin:3px 0 8px;" class="partes">
+      <div style="display:flex;gap:6px;">
+        <input style="flex:2;" data-caso="${caso.id}" data-parte="${chave}.${i}.nome" value="${esc(p.nome || '')}" placeholder="nome">
+        <input style="flex:1;" data-caso="${caso.id}" data-parte="${chave}.${i}.doc" value="${esc(p.doc || '')}" placeholder="CPF/CNPJ">
+      </div>
+      <div style="display:flex;gap:6px;margin-top:3px;">
+        <input style="flex:3;" data-caso="${caso.id}" data-parte="${chave}.${i}.endereco" value="${esc(p.endereco || '')}" placeholder="endereço (rua, nº, cidade/UF, CEP) — p/ cadastro no eproc">
+        <input style="flex:1.4;" data-caso="${caso.id}" data-parte="${chave}.${i}.email" value="${esc(p.email || '')}" placeholder="e-mail">
+        <input style="flex:1;" data-caso="${caso.id}" data-parte="${chave}.${i}.telefone" value="${esc(p.telefone || '')}" placeholder="telefone">
+      </div>
     </div>`).join('');
   return `<div style="margin-top:6px;"><label class="muted"><b>${rotulo}</b></label>${linhas || '<div class="muted">— nenhum (preencha ou será pausado)</div>'}</div>`;
 }
@@ -257,6 +266,14 @@ async function mandarParaAba(tipo, extra) {
   }
 }
 async function iniciarLote() {
+  // O eproc rejeita a mesma pessoa nos dois polos (hdnSinValidarPoloOposto=S):
+  // barra aqui, antes de abrir o tribunal, com aviso apontando o caso.
+  for (const caso of state.casos) {
+    const digs = (l) => (caso.dados[l] || []).map(p => String(p && p.doc || '').replace(/\D/g, '')).filter(Boolean);
+    const reus = new Set(digs('requeridos'));
+    const dup = digs('requerentes').find(d => reus.has(d));
+    if (dup) { alert('Caso "' + caso.nome + '": o CPF/CNPJ ' + dup + ' aparece como autor E réu — o eproc rejeita isso. Corrija na revisão.'); return; }
+  }
   state.rodando = true;
   state.atual = state.casos.findIndex(c => c.status === 'aguardando');
   if (state.atual < 0) { renderFase4(); return; }
@@ -286,7 +303,7 @@ function renderFase4() {
   app.innerHTML = `<div class="card">
     <h2 style="margin-top:0;font-size:16px;">Protocolando ${state.casos.length > 1 ? 'lote' : 'caso'} — ${concluidos}/${state.casos.length} ✓</h2>
     <p class="muted">⚠️ Mantenha esta aba aberta (ela fornece os PDFs). O login no eproc, se pedido, é você quem faz — a fila continua sozinha depois.</p>
-    ${pausado ? `<div class="aviso"><b>⏸ Pausado no caso "${esc(pausado.nome)}":</b> ${esc(pausado.statusTexto || '')}<br>
+    ${pausado ? `<div class="aviso"><b>⏸ Pausado no caso "${esc(pausado.nome)}":</b> ${pausado.statusTexto || ''}<br>
       Ajuste na aba do eproc se preciso e escolha:
       <div style="margin-top:8px;display:flex;gap:8px;">
         <button class="btn" id="continuar">▶ Continuar</button>
@@ -295,7 +312,7 @@ function renderFase4() {
       </div></div>` : ''}
   </div>` + state.casos.map(c => `
     <div class="caso"><h3>📂 ${esc(c.nome)} ${pill(c)}</h3>
-      <div class="muted">${c.numero ? '<b>Nº ' + esc(c.numero) + '</b> · ' : ''}${esc(c.statusTexto || '')}</div>
+      <div class="muted">${c.numero ? '<b>Nº ' + esc(c.numero) + '</b> · ' : ''}${esc(String(c.statusTexto || '').replace(/<[^>]*>/g, ' '))}</div>
     </div>`).join('') + `
     <div class="card" style="display:flex;gap:10px;justify-content:flex-end;">
       ${!state.rodando ? '<button class="btn ghost" id="denovo">↩ Nova pasta</button>' : ''}
