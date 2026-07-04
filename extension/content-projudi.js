@@ -68,6 +68,16 @@
   function msg(t, cor) { return '<div style="padding:6px 8px;border-radius:6px;background:' + (cor || '#f1f3f5') + ';margin-bottom:8px;">' + t + '</div>'; }
 
   async function casoLer() { const o = await chrome.storage.local.get(CASO_KEY); return o[CASO_KEY] || null; }
+  // Relê o caso APÓS uma espera longa (25s do tipo, minutos do upload): outra
+  // mensagem/frame pode ter gravado estado novo — gravar o `c` capturado antes da
+  // espera sobregravaria (last-write-wins) um Continuar do usuário ou um motivo de
+  // pausa mais específico. null = aborta a passada (outra execução assumiu).
+  async function casoAposEspera(c) {
+    const cur = await casoLer();
+    if (!cur || cur.sistema !== 'projudi' || cur.id !== c.id) return null;
+    if (cur.status === 'pausado') return null; // já pausado por outro frame: preserva o motivo dele
+    return cur;
+  }
   async function casoSalvar(c) { await chrome.storage.local.set({ [CASO_KEY]: c }); }
   async function casoLimpar() { await chrome.storage.local.remove(CASO_KEY); }
   function reportar(tipo, extra) { try { chrome.runtime.sendMessage({ type: tipo, ...(extra || {}) }); } catch (_) {} }
@@ -249,7 +259,10 @@
     const radiosVis = () => Array.from(document.querySelectorAll('input[type="radio"]')).filter(visivel);
     const linhaDoRadio = (r) => { const row = r.closest('tr,li,label,div'); return norm(row ? row.textContent : ''); };
     const casa = (r) => { const t = linhaDoRadio(r); return t.includes(alvo) || (palavras.length && palavras.every(w => t.includes(w))); };
+    // A árvore de tipos chega por AJAX (ajaxtags) DEPOIS do load — espera os rádios
+    // aparecerem (até 8s) antes de decidir qualquer coisa (senão pausa cedo demais).
     await new Promise(r => setTimeout(r, 400)); // deixa o frame assentar
+    await esperar(() => radiosVis().length, 8000, 300);
     // Se o item JÁ está na lista (a janela abre com todos os tipos), escolhe direto —
     // não filtra (evita re-submit em loop). Só filtra por Descrição se não achar.
     let radios = radiosVis();
@@ -329,8 +342,10 @@
       // janelas/execuções separadas (a janela é um iframe de verdade — tjpr.js).
       const ok = await esperar(() => hid.value, 25000, 500);
       if (!ok) {
-        c.abriuLupa = false; await casoSalvar(c); // permite reabrir na próxima passada
-        return pausar(c, 'a janela de Seleção abriu, mas não consegui confirmar "<b>' + escHtml(tipoTxt) + '</b>" sozinho — na janela, clique no tipo e em <b>Selecionar</b>; depois <b>Continuar</b>. (a fila segue sozinha)');
+        const cur = await casoAposEspera(c); // F-A1: não sobregravar estado mais novo
+        if (!cur) return;
+        cur.abriuLupa = false; await casoSalvar(cur); // permite reabrir na próxima passada
+        return pausar(cur, 'a janela de Seleção abriu, mas não consegui confirmar "<b>' + escHtml(tipoTxt) + '</b>" sozinho — na janela, clique no tipo e em <b>Selecionar</b>; depois <b>Continuar</b>. (a fila segue sozinha)');
       }
       progresso(c, 'tipo confirmado → anexos');
     }
@@ -352,10 +367,19 @@
       progresso(c, 'aguardando os PDFs subirem…');
       const tempo = Math.max(120000, c.docs.length * 60000); // B4: proporcional aos docs
       const subiu = await esperar(() => linhasAnexos() >= c.docs.length, tempo, 800);
-      if (!subiu) { c.abriuUpload = false; c.uploadFeito = false; await casoSalvar(c); return pausar(c, 'os anexos não apareceram na lista — confira o diálogo de envio (Adicionar → escolher arquivos → Confirmar Inclusão) e clique Continuar'); }
+      if (!subiu) {
+        const cur = await casoAposEspera(c); // F-A1
+        if (!cur) return;
+        cur.abriuUpload = false; cur.uploadFeito = false; await casoSalvar(cur);
+        return pausar(cur, 'os anexos não apareceram na lista — confira o diálogo de envio (Adicionar → escolher arquivos → Confirmar Inclusão) e clique Continuar');
+      }
     }
     // 3) tudo anexado → o humano conclui e assina (senha é sempre sua)
-    c.fase = 'assinar'; await casoSalvar(c);
+    // F-A1: houve esperas longas acima — regrava sobre o estado ATUAL do storage;
+    // se outro frame pausou/trocou o caso nesse meio-tempo, aborta a passada.
+    const cFinal = await casoAposEspera(c);
+    if (!cFinal) return;
+    cFinal.fase = 'assinar'; await casoSalvar(cFinal); c = cFinal;
     const concluirBtn = acharControle(['concluir movimento', 'concluir']);
     if (concluirBtn) destacar(concluirBtn, '#1a7f37');
     return pausar(c, 'PDF(s) anexado(s) ✔ — confira, clique <b>Concluir Movimento</b> e ASSINE com sua senha. Depois do protocolo, clique <b>Continuar</b> na Central que eu dou o caso por concluído e sigo a fila.');
@@ -413,22 +437,28 @@
     // colado em "Advogados" (ex.: "Advogados, Procuradores, Partes…" ou o complemento
     // "Membros do MP, Peritos e demais usuários externos ao TJPR"), então casamos por
     // QUALQUER palavra-chave externa e excluímos as internas.
+    // F-A4: escolhe SÓ entre CLICÁVEIS e por PONTUAÇÃO (título "advogad…" curto ganha)
+    // — "último elemento do DOM" podia cair num rodapé/aviso que citasse advogados.
     const externo = /advogad|procurador|\bpartes?\b|usuarios? externos|membros do mp|\bperitos?\b/;
     const interno = /magistrados?|servidores?/;
-    const casam = Array.from(document.querySelectorAll('a, div, button, li, td, span, h1, h2, h3, p'))
-      .filter(el => visivel(el) && norm(el.textContent).length < 240)
-      .filter(el => { const t = norm(el.textContent); return externo.test(t) && !interno.test(t); });
-    if (!casam.length) return null;
-    const alvo = casam[casam.length - 1]; // mais interno = mais específico
-    let el = alvo;
-    for (let i = 0; i < 6 && el; i++) {
-      if (el.tagName === 'A' && el.getAttribute('href')) return el;
-      if (el.getAttribute && el.getAttribute('onclick')) return el;
-      const dentro = el.querySelector && el.querySelector('a[href],[onclick]');
-      if (dentro && visivel(dentro)) return dentro;
-      el = el.parentElement;
-    }
-    return alvo;
+    const pontua = (t) => (t.startsWith('advogad') ? 0 : /advogad/.test(t) ? 1 : 2) * 1000 + t.length;
+    const clicaveis = Array.from(document.querySelectorAll('a[href], [onclick], button'))
+      .filter(visivel)
+      .map(el => ({ el, t: norm(el.textContent) }))
+      .filter(o => o.t && o.t.length < 240 && externo.test(o.t) && !interno.test(o.t))
+      .sort((a, b) => pontua(a.t) - pontua(b.t));
+    if (clicaveis.length) return clicaveis[0].el;
+    // Fallback (cartão com listener JS, sem href/onclick no atributo): elemento de
+    // TEXTO que melhor pontua; o clique borbulha até o listener do cartão.
+    const textuais = Array.from(document.querySelectorAll('a, div, button, li, td, span, h1, h2, h3'))
+      .filter(el => visivel(el))
+      .map(el => ({ el, t: norm(el.textContent) }))
+      .filter(o => o.t && o.t.length < 240 && externo.test(o.t) && !interno.test(o.t))
+      .sort((a, b) => pontua(a.t) - pontua(b.t));
+    if (!textuais.length) return null;
+    const alvo = textuais[0].el;
+    const dentro = alvo.querySelector && alvo.querySelector('a[href],[onclick]');
+    return (dentro && visivel(dentro)) ? dentro : alvo;
   }
 
   // Mutex de reentrância — auto-retomar (1200ms) + RUN + CONTINUAR. Ver C3.
