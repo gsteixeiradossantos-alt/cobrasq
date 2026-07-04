@@ -281,10 +281,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const tabId = sender.tab && sender.tab.id;
         if (tabId == null) { sendResponse({ error: 'sem tabId' }); return; }
         try {
-          const target = { tabId, world: 'MAIN' };
+          // ATENÇÃO (causa raiz v0.8.2): world é propriedade da INJEÇÃO, não do
+          // target — dentro do target a API rejeita a chamada inteira ("Unexpected
+          // property") e NENHUMA função da página roda. Ficou meses silencioso
+          // porque o erro voltava como {error} e o fallback local também é barrado.
+          const target = { tabId };
           if (sender.frameId != null) target.frameIds = [sender.frameId];
           const [res] = await chrome.scripting.executeScript({
             target,
+            world: 'MAIN',
             func: (fn, args, code, calls) => {
               try {
                 const lista = (calls && calls.length) ? calls : (fn ? [{ fn, args }] : null);

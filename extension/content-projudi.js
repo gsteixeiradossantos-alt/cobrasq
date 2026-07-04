@@ -96,11 +96,12 @@
   async function execNaPagina(payload) {
     try {
       const r = await chrome.runtime.sendMessage({ type: 'EXEC_PAGINA', ...payload });
+      console.log('[cobrasq exec]', JSON.stringify(payload).slice(0, 140), '→', JSON.stringify(r));
       // M6/B7: só considera sucesso se a função REALMENTE rodou no mundo da página
       // (resultado===true). ok:true sem resultado = função inexistente/CSP → tenta
       // o fallback e, se nada confirmar, o chamador decide (pausa).
       if (r && r.ok && r.resultado === true) return true;
-    } catch (_) {}
+    } catch (e) { console.log('[cobrasq exec ERRO]', String(e)); }
     // fallback: injeção local (só funciona sem CSP restritivo — pode ser barrado).
     try {
       const code = payload.code || (payload.fn ? payload.fn + '(' + (payload.args || []).map(a => JSON.stringify(a)).join(',') + ')' : '');
@@ -498,8 +499,10 @@
     // A janela da lupa é um iframe não-condutor, mas precisa agir (escolher o tipo).
     if (c.status !== 'pausado' && ehDialogoTipo()) { await telaDialogoTipo(c); return; }
     if (!ehCondutor()) {
-      // Tela pré-login (topo): clica em "Advogados, Partes" para chegar ao login.
-      if (window === window.top && c.status !== 'pausado') {
+      // Tela pré-login: clica em "Advogados, Partes" para chegar ao login. O cartão
+      // pode estar no TOPO ou num FRAME (o Projudi usa frameset até no acesso) — só
+      // age o frame cujo PRÓPRIO documento contém o cartão.
+      if (c.status !== 'pausado') {
         const naTelaAcesso = /acesso ao sistema/.test(norm(document.body ? document.body.innerText : ''));
         const acesso = acessoAdvogado();
         if (acesso) {
