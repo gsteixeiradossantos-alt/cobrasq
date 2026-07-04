@@ -404,19 +404,30 @@
   // "Certificado Digital". O 1º passo é entrar por "Advogados, Partes" (CPF/senha).
   function acessoAdvogado() {
     const txt = norm(document.body ? document.body.innerText : '');
-    if (!txt.includes('acesso ao sistema') && !txt.includes('cadastro no sistema')) return null;
-    // O cartão "Advogados, Partes" — pega o elemento MAIS INTERNO que casa (o clicável
-    // costuma ser um <a>/<div onclick> pequeno), depois sobe até achar href/onclick.
-    const cands = Array.from(document.querySelectorAll('a, div, button, li, td, span'));
-    const casam = cands.filter(el => visivel(el) && /advogad[oa]s?[ ,]+partes/.test(norm(el.textContent)) && norm(el.textContent).length < 220);
+    const naTela = txt.includes('acesso ao sistema') || txt.includes('cadastro no sistema') ||
+      txt.includes('usuarios externos') || /advogad/.test(txt);
+    if (!naTela) return null;
+    // Queremos o cartão de usuários EXTERNOS (advogados, procuradores, partes, MP,
+    // peritos) — NUNCA o de magistrados/servidores. O título nem sempre traz "Partes"
+    // colado em "Advogados" (ex.: "Advogados, Procuradores, Partes…" ou o complemento
+    // "Membros do MP, Peritos e demais usuários externos ao TJPR"), então casamos por
+    // QUALQUER palavra-chave externa e excluímos as internas.
+    const externo = /advogad|procurador|\bpartes?\b|usuarios? externos|membros do mp|\bperitos?\b/;
+    const interno = /magistrados?|servidores?/;
+    const casam = Array.from(document.querySelectorAll('a, div, button, li, td, span, h1, h2, h3, p'))
+      .filter(el => visivel(el) && norm(el.textContent).length < 240)
+      .filter(el => { const t = norm(el.textContent); return externo.test(t) && !interno.test(t); });
     if (!casam.length) return null;
     const alvo = casam[casam.length - 1]; // mais interno = mais específico
     let el = alvo;
-    for (let i = 0; i < 5 && el; i++) {
-      if ((el.getAttribute && (el.getAttribute('onclick') || /^javascript:|\.do|\.php|=/.test(el.getAttribute('href') || ''))) ) return el;
+    for (let i = 0; i < 6 && el; i++) {
+      if (el.tagName === 'A' && el.getAttribute('href')) return el;
+      if (el.getAttribute && el.getAttribute('onclick')) return el;
+      const dentro = el.querySelector && el.querySelector('a[href],[onclick]');
+      if (dentro && visivel(dentro)) return dentro;
       el = el.parentElement;
     }
-    return alvo.querySelector('a[href],[onclick]') || alvo;
+    return alvo;
   }
 
   // Mutex de reentrância — auto-retomar (1200ms) + RUN + CONTINUAR. Ver C3.
