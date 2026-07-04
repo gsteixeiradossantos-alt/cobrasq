@@ -265,59 +265,31 @@
     }
     let alvoRadio = radios.find(casa) || (radios.length === 1 ? radios[0] : null);
     if (!alvoRadio) return pausar(c, 'não achei "' + escHtml(tipoTxt) + '" na janela de tipo — escolha você na lista e clique <b>Selecionar</b>; depois Continuar.');
+    // SELEÇÃO ROBUSTA: o Projudi (ajaxtags) registra a escolha pelo onclick do rádio/
+    // linha, não só pelo .checked — então marca, dispara a sequência de mouse COMPLETA
+    // (mousedown→mouseup→click) e, se o rádio/linha tiver onclick da página, executa
+    // de verdade no mundo MAIN. Sem isso, o "Selecionar" acha que nada foi escolhido.
+    try { alvoRadio.scrollIntoView({ block: 'center' }); } catch (_) {}
     alvoRadio.checked = true;
+    const linhaEl = alvoRadio.closest('label,td,tr,li,a') || alvoRadio;
+    for (const ev of ['mousedown', 'mouseup', 'click']) {
+      try { alvoRadio.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true })); } catch (_) {}
+      try { if (linhaEl !== alvoRadio) linhaEl.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true })); } catch (_) {}
+    }
     alvoRadio.dispatchEvent(new Event('change', { bubbles: true }));
-    clicar(alvoRadio);
+    const comClickJs = [alvoRadio, linhaEl, alvoRadio.closest('a')].find(e => e && e.getAttribute && e.getAttribute('onclick'));
+    if (comClickJs) await clicarPagina(comClickJs);
+    await new Promise(r => setTimeout(r, 300));
     const selecionar = acharControle(['selecionar']);
     if (!selecionar) return pausar(c, 'marquei o tipo mas não achei o botão <b>Selecionar</b> — clique você; depois Continuar.');
     progresso(c, 'tipo "' + tipoTxt + '" selecionado na janela');
     await clicarPagina(selecionar); // Projudi fecha o diálogo e preenche #idTipoDocumento na mãe
   }
-  // Resolve o TIPO buscando a lista oficial do servidor (a mesma da lupa), na sessão
-  // atual, e preenchendo #descricaoTipoDocumento + #idTipoDocumento diretamente.
-  // Retorna 'ok' ou uma string curta com o motivo da falha (p/ diagnóstico na tela).
-  async function resolverTipoPeloServidor(c, tipoTxt, desc, hid) {
-    try {
-      const alvo = norm(tipoTxt);
-      const palavras = alvo.split(/\W+/).filter(w => w.length >= 4);
-      const casaTexto = (t) => { t = norm(t); return t.includes(alvo) || (palavras.length && palavras.every(w => t.includes(w))); };
-      // tipoCompetencia varia por processo — extrai do HTML da página (default '9').
-      const mComp = (document.documentElement.innerHTML || '').match(/openDialogSelecaoTipoDocumento\([^)]*?,\s*'(\d+)'\s*\)/);
-      const tipoComp = (mComp && mComp[1]) || '9';
-      const base = '/projudi/processo/tipoDocumento.do?actionType=filtrarArvorePelaDescricao' +
-        '&parentForm=juntarDocumentoForm&parentIdField=idTipoDocumento&parentDescricaoField=descricaoTipoDocumento&tipoCompetencia=' + tipoComp;
-      progresso(c, 'buscando a lista de tipos no servidor…');
-      const buscar = async (url) => {
-        const resp = await fetch(url, { credentials: 'same-origin' });
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        const html = await resp.text();
-        return new DOMParser().parseFromString(html, 'text/html');
-      };
-      // 1ª tentativa: lista completa (a janela abre com tudo). Se vier vazia, filtra.
-      let doc = await buscar(base);
-      let radios = Array.from(doc.querySelectorAll('input[type="radio"]'));
-      if (!radios.length) {
-        doc = await buscar(base + '&descricao=' + encodeURIComponent(tipoTxt));
-        radios = Array.from(doc.querySelectorAll('input[type="radio"]'));
-      }
-      if (!radios.length) return '0 tipos';
-      const descDoRadio = (r) => {
-        const row = r.closest('tr,li,label,div');
-        let t = row ? row.textContent : '';
-        if (!t.trim() && r.id) { const lb = doc.querySelector('label[for="' + r.id + '"]'); t = lb ? lb.textContent : ''; }
-        return (t || '').replace(/\s+/g, ' ').trim();
-      };
-      const achado = radios.map(r => ({ id: r.value, txt: descDoRadio(r) }))
-        .filter(o => o.id && o.txt)
-        .find(o => casaTexto(o.txt));
-      if (!achado) return 'sem match em ' + radios.length;
-      desc.value = achado.txt;
-      hid.value = achado.id;
-      desc.dispatchEvent(new Event('change', { bubbles: true }));
-      hid.dispatchEvent(new Event('change', { bubbles: true }));
-      progresso(c, 'tipo: ' + achado.txt + ' (id ' + achado.id + ')');
-      return 'ok';
-    } catch (e) { return String((e && e.message) || e).slice(0, 40); }
+  // Acha a lupinha do campo "Tipo de Documento" (abre a janela oficial de Seleção).
+  function acharLupaTipo() {
+    return document.querySelector('a.searchButton[href*="openDialogSelecao"], a[href*="openDialogSelecaoTipoDocumento"]') ||
+      Array.from(document.querySelectorAll('a,[onclick]')).find(el =>
+        /openDialogSelecaoTipoDocumento|openDialogSelecao/.test((el.getAttribute('href') || '') + (el.getAttribute('onclick') || ''))) || null;
   }
   async function telaJuntar(c) {
     if (document.querySelector('iframe[src*="upload.do"]')) return; // diálogo aberto: quem age é a instância dele
@@ -330,20 +302,26 @@
     const desc = document.getElementById('descricaoTipoDocumento');
     if (desc && hid && !hid.value) {
       const tipoTxt = c.tipo_peticao || 'Manifestação da Parte';
-      // CAMINHO PRIMÁRIO (determinístico): busca a lista de tipos direto do servidor
-      // (mesma sessão) e preenche o hidden — sem abrir/clicar a janela da lupa.
-      const r = await resolverTipoPeloServidor(c, tipoTxt, desc, hid);
-      if (r === 'ok') { progresso(c, 'tipo confirmado → anexos'); /* segue aos anexos */ }
-      else {
-        // Fallback: tenta a lupa (comportamento antigo) e pausa se nada preencher.
-        const lupa = document.querySelector('a.searchButton[href*="openDialogSelecao"]') ||
-          Array.from(document.querySelectorAll('a,[onclick]')).find(el => /openDialogSelecao/.test((el.getAttribute('href') || '') + (el.getAttribute('onclick') || '')));
-        desc.value = tipoTxt;
-        if (lupa) { progresso(c, 'servidor não resolveu (' + r + ') — tentando a lupa…'); await clicarPagina(lupa); }
-        const ok = await esperar(() => hid.value, 20000, 500);
-        if (!ok) return pausar(c, 'não consegui definir o tipo automaticamente (' + escHtml(r) + ') — escolha <b>' + escHtml(tipoTxt) + '</b> no campo/lupa e clique <b>Continuar</b>. Depois eu sigo com os anexos.');
-        progresso(c, 'tipo confirmado → anexos');
+      // O tipo NÃO é texto livre: o Projudi só aceita o item escolhido na janela de
+      // Seleção (ela preenche #idTipoDocumento sozinha). Então abrimos a LUPA e a
+      // instância da extensão dentro do iframe da janela marca o item e clica
+      // Selecionar (ver telaDialogoTipo). Nada de digitar o texto — isso não vale.
+      if (!c.abriuLupa) {
+        const lupa = acharLupaTipo();
+        if (!lupa) return pausar(c, 'não achei a lupinha ao lado de "Tipo de Documento" — clique você nela, escolha <b>' + escHtml(tipoTxt) + '</b>, clique <b>Selecionar</b> e depois Continuar.');
+        progresso(c, 'abrindo a janela de Seleção de Tipo…');
+        await clicarPagina(lupa);
+        c.abriuLupa = true; await casoSalvar(c);
       }
+      // A janela (iframe) se encarrega de escolher e clicar Selecionar; aqui só
+      // esperamos o Projudi preencher o hidden. NÃO segura o mutex do iframe: são
+      // janelas/execuções separadas (a janela é um iframe de verdade — tjpr.js).
+      const ok = await esperar(() => hid.value, 25000, 500);
+      if (!ok) {
+        c.abriuLupa = false; await casoSalvar(c); // permite reabrir na próxima passada
+        return pausar(c, 'a janela de Seleção abriu, mas não consegui confirmar "<b>' + escHtml(tipoTxt) + '</b>" sozinho — na janela, clique no tipo e em <b>Selecionar</b>; depois <b>Continuar</b>. (a fila segue sozinha)');
+      }
+      progresso(c, 'tipo confirmado → anexos');
     }
     // 2) anexos
     if (!(c.docs || []).length) return pausar(c, 'este caso não tem PDF para anexar — refaça na Central.'); // B6
@@ -509,7 +487,7 @@
     if (m.type === 'RUN_CENTRAL' && m.caso && m.caso.sistema === 'projudi') {
       if (!respondo) return false;
       (async () => {
-        await casoSalvar({ ...m.caso, status: 'rodando', motivo: null, fase: null, abriuUpload: false, uploadFeito: false, retomadoPeloUsuario: false });
+        await casoSalvar({ ...m.caso, status: 'rodando', motivo: null, fase: null, abriuLupa: false, abriuUpload: false, uploadFeito: false, retomadoPeloUsuario: false });
         sendResponse({ ok: true });
         runCentral().catch(() => {});
       })();
@@ -526,7 +504,7 @@
           } else {
             // C2: o humano pode ter resolvido algo (anexo/tipo) — não confiar nas
             // flags velhas; derivar do DOM na próxima passada.
-            c.abriuUpload = false; c.uploadFeito = false;
+            c.abriuLupa = false; c.abriuUpload = false; c.uploadFeito = false;
           }
           await casoSalvar(c); runCentral().catch(() => {});
         }
