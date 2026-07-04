@@ -280,10 +280,20 @@
     const comClickJs = [alvoRadio, linhaEl, alvoRadio.closest('a')].find(e => e && e.getAttribute && e.getAttribute('onclick'));
     if (comClickJs) await clicarPagina(comClickJs);
     await new Promise(r => setTimeout(r, 300));
-    const selecionar = acharControle(['selecionar']);
+    // Botão real do Projudi (capturado): <input id="selectButton" value="Selecionar"
+    // onclick="disableScreen(); selectTipoDocumento();">. Miramos pelo id; clicarPagina
+    // roda esse onclick no mundo MAIN (selectTipoDocumento lê o rádio marcado, escreve
+    // #idTipoDocumento na tela-mãe e fecha a janela).
+    const selecionar = document.getElementById('selectButton') || acharControle(['selecionar']);
     if (!selecionar) return pausar(c, 'marquei o tipo mas não achei o botão <b>Selecionar</b> — clique você; depois Continuar.');
-    progresso(c, 'tipo "' + tipoTxt + '" selecionado na janela');
-    await clicarPagina(selecionar); // Projudi fecha o diálogo e preenche #idTipoDocumento na mãe
+    progresso(c, 'tipo "' + tipoTxt + '" selecionado → confirmando');
+    await clicarPagina(selecionar);
+    // Rede de segurança: se em ~2,5s a tela-mãe não recebeu o id, chama a função
+    // oficial do Projudi diretamente (a mesma que o botão dispara).
+    const preencheu = await esperar(() => {
+      try { const f = window.parent && window.parent.document.getElementById('idTipoDocumento'); return f && f.value; } catch (_) { return false; }
+    }, 2500, 400);
+    if (!preencheu) await execNaPagina({ code: 'try{selectTipoDocumento();}catch(e){}' });
   }
   // Acha a lupinha do campo "Tipo de Documento" (abre a janela oficial de Seleção).
   function acharLupaTipo() {
