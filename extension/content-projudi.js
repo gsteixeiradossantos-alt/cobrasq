@@ -96,12 +96,11 @@
   async function execNaPagina(payload) {
     try {
       const r = await chrome.runtime.sendMessage({ type: 'EXEC_PAGINA', ...payload });
-      console.log('[cobrasq exec]', JSON.stringify(payload).slice(0, 140), '→', JSON.stringify(r));
       // M6/B7: só considera sucesso se a função REALMENTE rodou no mundo da página
       // (resultado===true). ok:true sem resultado = função inexistente/CSP → tenta
       // o fallback e, se nada confirmar, o chamador decide (pausa).
       if (r && r.ok && r.resultado === true) return true;
-    } catch (e) { console.log('[cobrasq exec ERRO]', String(e)); }
+    } catch (_) {}
     // fallback: injeção local (só funciona sem CSP restritivo — pode ser barrado).
     try {
       const code = payload.code || (payload.fn ? payload.fn + '(' + (payload.args || []).map(a => JSON.stringify(a)).join(',') + ')' : '');
@@ -156,7 +155,7 @@
     for (const t of termos) {
       const alvo = norm(t);
       for (const el of cands) {
-        const txt = norm(((el.value || '') + ' ' + (el.textContent || '') + ' ' + (el.title || '')).trim());
+        const txt = norm(((el.value || '') + ' ' + (el.textContent || '') + ' ' + (el.title || '') + ' ' + (el.alt || '')).trim());
         if (txt === alvo || txt.includes(alvo)) return el;
       }
     }
@@ -380,8 +379,15 @@
     if (!(c.docs || []).length) return pausar(c, 'este caso não tem PDF para anexar — refaça na Central.'); // B6
     if (linhasAnexos() < c.docs.length) {
       if (!c.abriuUpload) {
-        const add = acharControle(['adicionar']);
-        if (!add) return pausar(c, 'não achei o botão "Adicionar" para abrir o envio de arquivos — anexe você e clique Continuar');
+        // Botão que abre o envio de arquivos — cobre rótulos e tipos de controle
+        // variados (input button/image, <a>, <button>) e a lupa/ícone de "+".
+        const add = acharControle(['adicionar arquivo', 'adicionar documento', 'adicionar', 'incluir arquivo', 'incluir documento', 'incluir', 'anexar arquivo', 'anexar'],
+          'input[type=submit],input[type=button],input[type=image],button,a,[onclick]');
+        if (!add) {
+          const botoes = Array.from(document.querySelectorAll('input[type=submit],input[type=button],input[type=image],button,a'))
+            .filter(visivel).map(b => norm((b.value || b.textContent || b.title || b.alt || '')).trim()).filter(Boolean).slice(0, 14).join(' · ');
+          return pausar(c, 'não achei o botão para anexar (procurei Adicionar/Incluir/Anexar). Botões visíveis agora: <b>' + escHtml(botoes || '(nenhum)') + '</b>. Clique você no botão de anexar e depois Continuar — me diga qual era o nome certo.');
+        }
         progresso(c, 'abrindo o envio de arquivos…');
         await new Promise(r => setTimeout(r, 800)); // M4: deixa os handlers assentarem
         clicar(add);

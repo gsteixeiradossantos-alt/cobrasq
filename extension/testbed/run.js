@@ -5,8 +5,8 @@
 const { chromium } = require('playwright');
 const path = require('path');
 
-const EXT = require('path').join(__dirname, '..');
-const UDD = require('os').tmpdir() + '/cobrasq-e2e-' + Date.now();
+const EXT = '/home/user/cobrasq-faturamento/extension';
+const UDD = '/tmp/claude-0/-home-user-cobrasq-faturamento/bf393b4d-f61d-5c07-8c08-612a2d9ed228/scratchpad/testbed/udd-' + Date.now();
 
 const CASO = {
   id: 'teste-e2e-1', sistema: 'projudi', status: 'rodando', motivo: null,
@@ -40,6 +40,18 @@ const CASO = {
   await sw.evaluate((caso) => chrome.storage.local.set({ cobrasq_central_caso: caso }), CASO);
   console.log('caso semeado no chrome.storage.local');
 
+  // MOCK do PEDIR_DOC: no real, a aba da Central devolve o PDF. Aqui, um listener
+  // no service worker responde com um PDF mínimo válido em base64 — assim testamos
+  // a INJEÇÃO do arquivo no input do Projudi de verdade (DataTransfer → input.files).
+  await sw.evaluate(() => {
+    const PDF_B64 = 'JVBERi0xLjQKMSAwIG9iago8PC9UeXBlL0NhdGFsb2c+PgplbmRvYmoKdHJhaWxlcgo8PC9Sb290IDEgMCBSPj4KJSVFT0Y=';
+    chrome.runtime.onMessage.addListener((m, s, send) => {
+      if (m && m.type === 'PEDIR_DOC') { send({ ok: true, nome: '1. Sisbajud - 0001381-69.2026.8.16.0209.pdf', base64: PDF_B64 }); return true; }
+      return false;
+    });
+  });
+  console.log('mock PEDIR_DOC instalado no SW');
+
   // ── Cenário A: juntada ─────────────────────────────────────────────────────
   const page = await ctx.newPage();
   page.on('console', (m) => { if (m.type() === 'error') console.log('[console.error]', m.text().slice(0, 200)); });
@@ -61,18 +73,34 @@ const CASO = {
     if (!estado) continue;
     if (i % 8 === 0) console.log(`  t=${(i * 0.5).toFixed(0)}s hid="${estado.hid}" janela=${estado.janelaAberta} painel="${(estado.painel || '').replace(/\n/g, ' | ').slice(0, 140)}"`);
     if (estado.hid) {
-      resultadoA = `SUCESSO: hid=${estado.hid} desc="${estado.desc}" janelaAindaAberta=${estado.janelaAberta}`;
-      // espera mais um pouco pra ver o pós (fechar janela / passo anexos)
-      await page.waitForTimeout(4000);
-      const dep = await umf().evaluate(() => ({
-        janelaAberta: !!document.querySelector('div[id^="window_"]'),
-        painel: (document.querySelector('#cobrasq-projudi-panel #cbp-body') || {}).innerText || '',
-      })).catch(() => ({}));
-      resultadoA += ` | depois: janela=${dep.janelaAberta} painel="${(dep.painel || '').replace(/\n/g, ' | ').slice(0, 160)}"`;
+      resultadoA = `tipo OK (hid=${estado.hid} "${estado.desc}")`;
       break;
     }
   }
-  console.log('\n=== CENÁRIO A (tipo pela lupa): ' + resultadoA + '\n');
+  console.log('CENÁRIO A — passo 1 (tipo): ' + resultadoA);
+
+  // passo 2: anexo — espera a linha do PDF aparecer na tabela da tela-mãe e a
+  // pausa final "Concluir Movimento / assine".
+  let resultadoAnexo = 'TIMEOUT: anexo não concluiu em 40s';
+  for (let i = 0; i < 80; i++) {
+    await page.waitForTimeout(500);
+    const f = umf();
+    if (!f) continue;
+    const est = await f.evaluate(() => ({
+      linhas: document.querySelectorAll('#anexosBody tr').length,
+      temPdfNaLista: /\.pdf/i.test((document.getElementById('anexosBody') || {}).textContent || ''),
+      uploadAberto: !!document.querySelector('iframe[src*="upload.do"]'),
+      fase: null,
+      painel: (document.querySelector('#cobrasq-projudi-panel #cbp-body') || {}).innerText || '',
+    })).catch(() => null);
+    if (!est) continue;
+    if (i % 6 === 0) console.log(`  anexo t=${(i * 0.5).toFixed(0)}s linhas=${est.linhas} pdf=${est.temPdfNaLista} upl=${est.uploadAberto} painel="${(est.painel || '').replace(/\n/g, ' | ').slice(0, 120)}"`);
+    if (est.temPdfNaLista && /concluir movimento|assine|anexado/i.test(est.painel)) {
+      resultadoAnexo = `SUCESSO: PDF na lista + pausa p/ assinar ("${est.painel.replace(/\n/g, ' | ').slice(0, 120)}")`;
+      break;
+    }
+  }
+  console.log('\n=== CENÁRIO A completo: ' + resultadoAnexo + '\n');
   await page.screenshot({ path: path.join(__dirname, 'cenarioA.png'), fullPage: true });
   await page.close();
 
