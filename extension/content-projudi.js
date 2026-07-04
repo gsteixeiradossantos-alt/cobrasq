@@ -453,52 +453,50 @@
         .map(e => (e.tagName.toLowerCase() + '#' + (e.id || '') + '[' + (e.type || e.name || '') + ']')).slice(0, 12).join(' · ');
       return pausar(c, 'a janela de envio abriu, mas não achei o campo de <b>escolher arquivo</b>. Campos vistos: <b>' + escHtml(campos || '(nenhum)') + '</b>. Anexe você o PDF e clique Continuar — e me diga como é essa janela.');
     }
-    const sel = document.getElementById('codDescricao') ||
-      document.querySelector('#fileUploadForm select, form[name="fileUploadForm"] select, select');
     progresso(c, 'enviando ' + c.docs.length + ' PDF(s)…');
-    if (sel) {
-      const alvoTipo = norm(c.tipo_peticao || 'peticao');
-      let opt = Array.from(sel.options).find(o => norm(o.textContent) === alvoTipo) ||
-                Array.from(sel.options).find(o => o.value !== '0' && norm(o.textContent).includes(alvoTipo)) ||
-                Array.from(sel.options).find(o => norm(o.textContent).includes('peticao'));
-      if (!opt) {
-        opt = Array.from(sel.options).find(o => norm(o.textContent).includes('outros'));
-        const descTxt = document.getElementById('descricao') || document.querySelector('#fileUploadForm input[type="text"]');
-        if (descTxt) setInput(descTxt, (c.tipo_peticao || c.docs[0].nome.replace(/\.pdf$/i, '')).slice(0, 200));
-      }
-      if (opt) { sel.value = opt.value; sel.dispatchEvent(new Event('change', { bubbles: true })); }
-    }
+    // ORDEM REAL do diálogo do Projudi (capturado): o select de tipo (name="tipos",
+    // id="tipo0"…) SÓ EXISTE depois que o arquivo é escolhido — o onchange do input
+    // (atualiza_arquivos_selecionados) o cria. Então: 1) injeta o arquivo, 2) espera
+    // o(s) select(s) aparecer(em) e escolhe o tipo, 3) Confirmar Inclusão.
+    // 1) injeta o(s) arquivo(s)
     const dt = new DataTransfer();
     for (const d of c.docs) dt.items.add(await pedirDoc(c.id, d.idx));
     inputArq.files = dt.files;
     inputArq.dispatchEvent(new Event('input', { bubbles: true }));
-    inputArq.dispatchEvent(new Event('change', { bubbles: true })); // dispara o envio automático
-    c.uploadFeito = true; await casoSalvar(c);
-    // M5: espera SINAL de conclusão (lista recebe as linhas OU o input esvazia).
-    const subiu = await esperar(() => {
-      const linhas = document.querySelectorAll('#fileUploadForm table tbody tr, .resultTable tbody tr').length;
-      return linhas >= c.docs.length || (inputArq.value === '' && linhas > 0);
-    }, Math.max(60000, c.docs.length * 45000), 700);
-    // Botão de confirmar/enviar, se houver (alguns diálogos exigem clique explícito).
-    try {
-      const enviar = document.getElementById('closeButton') ||
-        acharControle(['confirmar inclusao', 'confirmar inclusão', 'confirmar', 'enviar', 'incluir', 'anexar', 'ok'],
-          'input[type=submit],input[type=button],button,a');
-      if (enviar) clicar(enviar);
-    } catch (_) {}
-    // Se nada subiu, não fecha à toa: mantém a janela e avisa (com diagnóstico).
-    if (!subiu) {
-      const st = 'input.files=' + (inputArq.files ? inputArq.files.length : 0);
-      return pausar(c, 'injetei o PDF no campo (' + st + '), mas a janela não confirmou o envio sozinha. Clique <b>Confirmar Inclusão</b> (ou Enviar) na janela e depois Continuar — me diga o nome do botão de confirmar.');
+    inputArq.dispatchEvent(new Event('change', { bubbles: true })); // dispara atualiza_arquivos_selecionados()
+    // 2) escolhe o tipo do documento em CADA select que surgir (um por arquivo)
+    const acharSelects = () => Array.from(document.querySelectorAll(
+      'select[name="tipos"], select[id^="tipo"], #codDescricao, #fileUploadForm select, form[name="fileUploadForm"] select')).filter(visivel);
+    await esperar(() => acharSelects().some(s => s.options.length > 1), 8000, 300);
+    const alvoTipo = norm(c.tipo_peticao || 'peticao');
+    for (const sel of acharSelects()) {
+      const val = (o) => o.value && o.value !== '0';
+      const opt = Array.from(sel.options).find(o => val(o) && norm(o.textContent) === alvoTipo) ||
+                  Array.from(sel.options).find(o => val(o) && norm(o.textContent).includes(alvoTipo)) ||
+                  Array.from(sel.options).find(o => val(o) && norm(o.textContent) === 'peticao') || // "Petição" (não "Petição Inicial")
+                  Array.from(sel.options).find(o => val(o) && norm(o.textContent).includes('peticao') && !norm(o.textContent).includes('inicial')) ||
+                  Array.from(sel.options).find(o => val(o) && norm(o.textContent).includes('outros'));
+      if (opt) { sel.value = opt.value; sel.dispatchEvent(new Event('change', { bubbles: true })); }
     }
+    c.uploadFeito = true; await casoSalvar(c);
+    // 3) Confirmar Inclusão (id="closeButton" → validar_e_fechar): fecha o diálogo e
+    //    devolve o arquivo à lista de Arquivos da tela-mãe.
+    await new Promise(r => setTimeout(r, 300));
+    const enviar = document.getElementById('closeButton') ||
+      acharControle(['confirmar inclusao', 'confirmar inclusão', 'confirmar', 'enviar', 'incluir', 'anexar', 'ok'],
+        'input[type=submit],input[type=button],button,a');
+    if (enviar) clicar(enviar);
   }
 
   // Tela pré-login do Projudi (index): cartões "Magistrados…", "Advogados, Partes…",
   // "Certificado Digital". O 1º passo é entrar por "Advogados, Partes" (CPF/senha).
   function acessoAdvogado() {
     const txt = norm(document.body ? document.body.innerText : '');
-    const naTela = txt.includes('acesso ao sistema') || txt.includes('cadastro no sistema') ||
-      txt.includes('usuarios externos') || /advogad/.test(txt);
+    // JÁ LOGADO? (menu/atribuição/Sair na tela) → NÃO é a tela de acesso. Sem isto,
+    // o texto "Atribuição: Advogado (...)" da tela logada casava e clicava errado.
+    if (/\bsair\b|atribuicao|acoes 1|acoes 2|\bintimacoes\b|\baudiencias\b|\bestatisticas\b/.test(txt)) return null;
+    // Só a tela de acesso de verdade (tem esse cabeçalho e NÃO tem o menu logado).
+    const naTela = txt.includes('acesso ao sistema') || txt.includes('cadastro no sistema') || txt.includes('usuarios externos');
     if (!naTela) return null;
     // Queremos o cartão de usuários EXTERNOS (advogados, procuradores, partes, MP,
     // peritos) — NUNCA o de magistrados/servidores. O título nem sempre traz "Partes"
