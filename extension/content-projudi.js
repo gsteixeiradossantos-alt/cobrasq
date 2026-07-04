@@ -247,11 +247,24 @@
   // B1: conta só linhas que são anexo de verdade (têm ação de remover ou um .pdf),
   // ignora cabeçalho/placeholder "Nenhum registro encontrado".
   function linhasAnexos() {
+    // Conta SÓ linhas que representam um ARQUIVO anexado de verdade. Antes bastava
+    // ter um checkbox → contava linhas de OUTRAS tabelas do form (intimação, partes,
+    // movimento) e a extensão "achava" que já tinha anexo e PULAVA o Adicionar (bug
+    // reproduzido no testbed). Agora exige sinal de arquivo: nome com extensão de
+    // documento OU (ação de remover/excluir + célula de tamanho Kb/MB).
+    // (?![a-z]) e não \b: no textContent as células vêm coladas ("nome.pdf120Kb"),
+    // e \b falharia entre "pdf" e "1". A extensão só não pode ser seguida de LETRA.
+    const EXT = /\.(pdf|docx?|odt|rtf|txt|jpe?g|png|tiff?|zip|p7s|xml|html?)(?![a-z])/i;
+    const TAM = /\b\d+([.,]\d+)?\s*(kb|mb|bytes)\b/i;
+    const VAZIO = /nenhum\s+(registro|documento|arquivo|anexo|item)|nada\s+encontrado/i;
     return Array.from(document.querySelectorAll('.resultTable tbody tr, #juntarDocumentoForm table tbody tr'))
       .filter(tr => {
         if (!visivel(tr)) return false;
-        if (/nenhum registro/i.test(tr.textContent || '')) return false;
-        return !!tr.querySelector('a[onclick*="remover"], a[onclick*="excluir"], input[type="checkbox"]') || /\.pdf/i.test(tr.textContent || '');
+        const txt = tr.textContent || '';
+        if (VAZIO.test(txt)) return false;
+        if (EXT.test(txt)) return true;
+        const temRemover = tr.querySelector('a[onclick*="remover" i], a[onclick*="excluir" i], a[href*="remover" i], a[href*="excluir" i], img[onclick*="remover" i]');
+        return !!temRemover && TAM.test(txt);
       }).length;
   }
   // Janela da LUPA (tipoDocumento.do) — roda no iframe da janela "Seleção de Tipo
