@@ -18,6 +18,9 @@ const server = https.createServer({
   else if (u.pathname === '/projudi/juntar.do') file = 'juntar.html';
   else if (u.pathname === '/projudi/processo/tipoDocumento.do') file = 'tipoDocumento.html';
   else if (u.pathname === '/projudi/upload.do') file = 'upload.html';
+  else if (u.pathname === '/projudi/inline') file = 'framesetInline.html';
+  else if (u.pathname === '/projudi/mainInline.html') file = 'mainInline.html';
+  else if (u.pathname === '/projudi/juntarInline.do') file = 'juntarInline.html';
   else if (u.pathname === '/projudi/prelogin') file = 'prelogin-frameset.html';
   else if (u.pathname === '/projudi/prelogin-conteudo') file = 'prelogin.html';
   else file = u.pathname.split('/').pop();

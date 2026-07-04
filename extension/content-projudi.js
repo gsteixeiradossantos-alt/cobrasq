@@ -252,9 +252,10 @@
     // movimento) e a extensão "achava" que já tinha anexo e PULAVA o Adicionar (bug
     // reproduzido no testbed). Agora exige sinal de arquivo: nome com extensão de
     // documento OU (ação de remover/excluir + célula de tamanho Kb/MB).
-    // (?![a-z]) e não \b: no textContent as células vêm coladas ("nome.pdf120Kb"),
-    // e \b falharia entre "pdf" e "1". A extensão só não pode ser seguida de LETRA.
-    const EXT = /\.(pdf|docx?|odt|rtf|txt|jpe?g|png|tiff?|zip|p7s|xml|html?)(?![a-z])/i;
+    // Extensão SEM âncora de fim: no textContent as células vêm coladas — o nome do
+    // arquivo gruda na Descrição e no tamanho ("nome.pdfPetição120Kb"), então tanto
+    // \b quanto (?![a-z]) falhavam (bugs pegos no testbed). Basta o ponto+extensão.
+    const EXT = /\.(pdf|docx?|odt|rtf|txt|jpe?g|png|tiff?|zip|p7s|xml|html?)/i;
     const TAM = /\b\d+([.,]\d+)?\s*(kb|mb|bytes)\b/i;
     const VAZIO = /nenhum\s+(registro|documento|arquivo|anexo|item)|nada\s+encontrado/i;
     return Array.from(document.querySelectorAll('.resultTable tbody tr, #juntarDocumentoForm table tbody tr'))
@@ -406,9 +407,15 @@
         clicar(add);
         // M4: confirma que o diálogo (iframe upload.do) abriu ANTES de marcar a flag;
         // senão reverte e re-tenta na próxima passada (evita timeout de 3min à toa).
-        const abriu = await esperar(() => document.querySelector('iframe[src*="upload.do"]') || document.getElementById('fileUploadForm'), 8000);
+        const abriu = await esperar(() => document.querySelector('iframe[src*="upload.do"]') || document.getElementById('fileUploadForm') || document.querySelector('input[type="file"]'), 8000);
         if (!abriu) return pausar(c, 'cliquei em "Adicionar" mas o envio de arquivos não abriu — clique você e depois Continuar');
         c.abriuUpload = true; await casoSalvar(c);
+      }
+      // Se o envio abriu EMBUTIDO nesta mesma tela (não num iframe separado), a
+      // instância deste frame precisa conduzir o upload — senão ninguém age e o
+      // lote fica preso em "aguardando" (o telaJuntar segura o mutex do frame).
+      if (document.getElementById('fileUploadForm') || document.querySelector('input[type="file"]')) {
+        await telaUpload(c);
       }
       progresso(c, 'aguardando os PDFs subirem…');
       const tempo = Math.max(120000, c.docs.length * 60000); // B4: proporcional aos docs
@@ -437,38 +444,53 @@
   async function telaUpload(c) {
     if (c.uploadFeito) return;
     if (!(c.docs || []).length) return; // B6
-    const sel = document.getElementById('codDescricao');
-    const inputArq = document.getElementById('conteudo');
-    if (!sel || !inputArq) return;
-    progresso(c, 'enviando ' + c.docs.length + ' PDF(s)…');
-    const alvoTipo = norm(c.tipo_peticao || 'peticao');
-    let opt = Array.from(sel.options).find(o => norm(o.textContent) === alvoTipo) ||
-              Array.from(sel.options).find(o => o.value !== '0' && norm(o.textContent).includes(alvoTipo)) ||
-              Array.from(sel.options).find(o => norm(o.textContent).includes('peticao'));
-    if (!opt) {
-      opt = Array.from(sel.options).find(o => norm(o.textContent).includes('outros'));
-      const descTxt = document.getElementById('descricao');
-      if (descTxt) setInput(descTxt, (c.tipo_peticao || c.docs[0].nome.replace(/\.pdf$/i, '')).slice(0, 200));
+    // Campo de arquivo e select de tipo: por ID conhecido OU genérico (o diálogo real
+    // pode usar outros IDs — antes desistíamos calado e o lote ficava "aguardando").
+    const inputArq = document.getElementById('conteudo') ||
+      document.querySelector('#fileUploadForm input[type="file"], form[name="fileUploadForm"] input[type="file"], input[type="file"]');
+    if (!inputArq) {
+      const campos = Array.from(document.querySelectorAll('input,select')).filter(visivel)
+        .map(e => (e.tagName.toLowerCase() + '#' + (e.id || '') + '[' + (e.type || e.name || '') + ']')).slice(0, 12).join(' · ');
+      return pausar(c, 'a janela de envio abriu, mas não achei o campo de <b>escolher arquivo</b>. Campos vistos: <b>' + escHtml(campos || '(nenhum)') + '</b>. Anexe você o PDF e clique Continuar — e me diga como é essa janela.');
     }
-    if (!opt) return pausar(c, 'não achei um tipo de documento compatível no diálogo de envio — selecione o tipo, escolha os arquivos e Confirmar Inclusão; depois Continuar', sel);
-    sel.value = opt.value;
-    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    const sel = document.getElementById('codDescricao') ||
+      document.querySelector('#fileUploadForm select, form[name="fileUploadForm"] select, select');
+    progresso(c, 'enviando ' + c.docs.length + ' PDF(s)…');
+    if (sel) {
+      const alvoTipo = norm(c.tipo_peticao || 'peticao');
+      let opt = Array.from(sel.options).find(o => norm(o.textContent) === alvoTipo) ||
+                Array.from(sel.options).find(o => o.value !== '0' && norm(o.textContent).includes(alvoTipo)) ||
+                Array.from(sel.options).find(o => norm(o.textContent).includes('peticao'));
+      if (!opt) {
+        opt = Array.from(sel.options).find(o => norm(o.textContent).includes('outros'));
+        const descTxt = document.getElementById('descricao') || document.querySelector('#fileUploadForm input[type="text"]');
+        if (descTxt) setInput(descTxt, (c.tipo_peticao || c.docs[0].nome.replace(/\.pdf$/i, '')).slice(0, 200));
+      }
+      if (opt) { sel.value = opt.value; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+    }
     const dt = new DataTransfer();
     for (const d of c.docs) dt.items.add(await pedirDoc(c.id, d.idx));
     inputArq.files = dt.files;
+    inputArq.dispatchEvent(new Event('input', { bubbles: true }));
     inputArq.dispatchEvent(new Event('change', { bubbles: true })); // dispara o envio automático
     c.uploadFeito = true; await casoSalvar(c);
-    // M5: espera SINAL de conclusão do envio (a lista do diálogo recebe as linhas
-    // dos arquivos, ou o input volta a ficar vazio) em vez de sleep fixo de 5s —
-    // fechar cedo cancelaria upload de PDF grande. Só então confirma a inclusão.
-    await esperar(() => {
+    // M5: espera SINAL de conclusão (lista recebe as linhas OU o input esvazia).
+    const subiu = await esperar(() => {
       const linhas = document.querySelectorAll('#fileUploadForm table tbody tr, .resultTable tbody tr').length;
       return linhas >= c.docs.length || (inputArq.value === '' && linhas > 0);
     }, Math.max(60000, c.docs.length * 45000), 700);
+    // Botão de confirmar/enviar, se houver (alguns diálogos exigem clique explícito).
     try {
-      const fechar = document.getElementById('closeButton') || acharControle(['confirmar inclusao']);
-      if (fechar) clicar(fechar);
-    } catch (_) { /* diálogo pode ter fechado sozinho */ }
+      const enviar = document.getElementById('closeButton') ||
+        acharControle(['confirmar inclusao', 'confirmar inclusão', 'confirmar', 'enviar', 'incluir', 'anexar', 'ok'],
+          'input[type=submit],input[type=button],button,a');
+      if (enviar) clicar(enviar);
+    } catch (_) {}
+    // Se nada subiu, não fecha à toa: mantém a janela e avisa (com diagnóstico).
+    if (!subiu) {
+      const st = 'input.files=' + (inputArq.files ? inputArq.files.length : 0);
+      return pausar(c, 'injetei o PDF no campo (' + st + '), mas a janela não confirmou o envio sozinha. Clique <b>Confirmar Inclusão</b> (ou Enviar) na janela e depois Continuar — me diga o nome do botão de confirmar.');
+    }
   }
 
   // Tela pré-login do Projudi (index): cartões "Magistrados…", "Advogados, Partes…",
@@ -559,8 +581,14 @@
       }
 
       // Despacho por formulário presente na tela (IDs reais dos saves):
-      if (document.getElementById('fileUploadForm')) return await telaUpload(c);
+      // Só trata como diálogo de upload se o campo de arquivo estiver VISÍVEL —
+      // senão, num upload EMBUTIDO (form escondido no mesmo doc da juntada), o
+      // roteador chamaria telaUpload antes da telaJuntar e o lote travava.
+      const upForm = document.getElementById('fileUploadForm');
+      const upFileVis = upForm && visivel(upForm.querySelector('input[type="file"]') || upForm);
+      if (upForm && upFileVis) return await telaUpload(c);
       if (document.getElementById('juntarDocumentoForm')) return await telaJuntar(c);
+      if (upForm) return await telaUpload(c); // upload em iframe próprio sem juntada na tela
       if (document.getElementById('processoForm')) return await telaProcesso(c); // M2: espera botões lá dentro
       if (document.getElementById('buscaProcessosQualquerInstanciaForm')) {
         // C1 (hardening): detecção POSITIVA — se já há link do processo no resultado,
