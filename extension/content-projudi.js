@@ -112,25 +112,38 @@
       return false; // não há como confirmar execução via injeção local
     } catch (_) { return false; }
   }
+  // "f1('a'); f2();" → [{fn:'f1',args:['a']},{fn:'f2',args:[]}] — ou null se houver
+  // qualquer coisa além de chamadas simples. Motivo (CAUSA RAIZ v0.8.1): o caminho
+  // antigo mandava multi-statement para eval no mundo MAIN, e o eval é BLOQUEADO
+  // pelo CSP da página — por isso "openDialogSelecao(x)" (1 função) sempre abria a
+  // janela, mas "disableScreen(); selectTipoDocumento();" (2 funções) nunca rodava.
+  function extrairChamadas(js) {
+    const stmts = js.split(';').map(s => s.trim()).filter(s => s && s !== 'void(0)' && !/^return\b/.test(s));
+    if (!stmts.length) return null;
+    const calls = [];
+    for (const st of stmts) {
+      const m = st.match(/^([A-Za-z_$][\w$]*)\s*\(\s*(?:'([^']*)'|"([^"]*)")?\s*\)$/);
+      if (!m) return null;
+      const arg = m[2] !== undefined ? m[2] : m[3]; // distingue "sem arg" de arg "" (string vazia)
+      calls.push(arg !== undefined ? { fn: m[1], args: [arg] } : { fn: m[1], args: [] });
+    }
+    return calls;
+  }
   // Aciona "de verdade" um controle cujo gatilho é JS da página (href=javascript:… ou
-  // onclick=…). Para <a> com URL real ou <input>/<button>, o click nativo basta.
-  // Extrai a chamada de função (ex.: openDialogSelecao('…')) p/ o background chamar
-  // a global direto — sem eval, imune a CSP.
+  // onclick=…). onclick INLINE: o clique NATIVO já dispara o handler no mundo da
+  // página (é assim que o clique humano funciona; o Projudi inteiro usa onclick
+  // inline, logo o CSP permite). href=javascript:… vira chamada(s) de função global
+  // via background world:MAIN — NUNCA eval (bloqueado pelo CSP).
   async function clicarPagina(el) {
     if (!el) return false;
     const href = (el.getAttribute && el.getAttribute('href')) || '';
     const onclick = (el.getAttribute && el.getAttribute('onclick')) || '';
+    if (onclick && !/^javascript:/i.test(href)) { clicar(el); return true; }
     const js = /^javascript:/i.test(href) ? href.replace(/^javascript:/i, '') : (onclick || '');
     if (js) {
-      // B3: multi-statement (tem ';' fora do fim) → executa a expressão inteira (code),
-      // não só a 1ª função.
-      if (/;/.test(js.trim().replace(/;\s*$/, ''))) return execNaPagina({ code: js });
-      const m = js.match(/^\s*([A-Za-z_$][\w$]*)\s*\(\s*(?:'([^']*)'|"([^"]*)")?\s*\)\s*;?\s*$/);
-      if (m) {
-        const arg = m[2] !== undefined ? m[2] : m[3]; // distingue "sem arg" de arg "" (string vazia)
-        return execNaPagina(arg !== undefined ? { fn: m[1], args: [arg] } : { fn: m[1], args: [] });
-      }
-      return execNaPagina({ code: js });
+      const calls = extrairChamadas(js);
+      if (calls) return execNaPagina(calls.length === 1 ? { fn: calls[0].fn, args: calls[0].args } : { calls });
+      return execNaPagina({ code: js }); // último recurso (pode ser barrado por CSP)
     }
     clicar(el); return true;
   }
@@ -291,23 +304,31 @@
       try { if (linhaEl !== alvoRadio) linhaEl.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true })); } catch (_) {}
     }
     alvoRadio.dispatchEvent(new Event('change', { bubbles: true }));
-    const comClickJs = [alvoRadio, linhaEl, alvoRadio.closest('a')].find(e => e && e.getAttribute && e.getAttribute('onclick'));
-    if (comClickJs) await clicarPagina(comClickJs);
     await new Promise(r => setTimeout(r, 300));
-    // Botão real do Projudi (capturado): <input id="selectButton" value="Selecionar"
-    // onclick="disableScreen(); selectTipoDocumento();">. Miramos pelo id; clicarPagina
-    // roda esse onclick no mundo MAIN (selectTipoDocumento lê o rádio marcado, escreve
-    // #idTipoDocumento na tela-mãe e fecha a janela).
-    const selecionar = document.getElementById('selectButton') || acharControle(['selecionar']);
-    if (!selecionar) return pausar(c, 'marquei o tipo mas não achei o botão <b>Selecionar</b> — clique você; depois Continuar.');
+    // GARANTIA (independente do JS da página): escreve o resultado DIRETO na tela-mãe
+    // — exatamente o que selectTipoDocumento() faria (os nomes dos campos vêm na
+    // própria URL da janela: parentIdField/parentDescricaoField). Mesma origem, ok.
+    const rowSel = alvoRadio.closest('tr,li,label,div');
+    const descricaoRaw = (((rowSel ? rowSel.textContent : '') || tipoTxt).replace(/\s+/g, ' ').trim()).slice(0, 200);
+    const q = new URLSearchParams(location.search || '');
+    try {
+      const pdoc = window.parent.document;
+      const pid = pdoc.getElementById(q.get('parentIdField') || 'idTipoDocumento');
+      const pdesc = pdoc.getElementById(q.get('parentDescricaoField') || 'descricaoTipoDocumento');
+      if (pid && alvoRadio.value) {
+        pid.value = alvoRadio.value;
+        if (pdesc) pdesc.value = descricaoRaw;
+        pid.dispatchEvent(new Event('change', { bubbles: true }));
+        if (pdesc) pdesc.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    } catch (_) {}
     progresso(c, 'tipo "' + tipoTxt + '" selecionado → confirmando');
-    await clicarPagina(selecionar);
-    // Rede de segurança: se em ~2,5s a tela-mãe não recebeu o id, chama a função
-    // oficial do Projudi diretamente (a mesma que o botão dispara).
-    const preencheu = await esperar(() => {
-      try { const f = window.parent && window.parent.document.getElementById('idTipoDocumento'); return f && f.value; } catch (_) { return false; }
-    }, 2500, 400);
-    if (!preencheu) await execNaPagina({ code: 'try{selectTipoDocumento();}catch(e){}' });
+    // Via oficial p/ FECHAR a janela: clique NATIVO no Selecionar (#selectButton,
+    // onclick inline "disableScreen(); selectTipoDocumento();" roda no mundo da
+    // página no clique, como um clique humano). Se não fechar, a tela-mãe fecha o
+    // overlay sozinha — o campo já está garantido pelo bloco acima.
+    const selecionar = document.getElementById('selectButton') || acharControle(['selecionar']);
+    if (selecionar) clicar(selecionar);
   }
   // Acha a lupinha do campo "Tipo de Documento" (abre a janela oficial de Seleção).
   function acharLupaTipo() {
@@ -348,6 +369,11 @@
         return pausar(cur, 'a janela de Seleção abriu, mas não consegui confirmar "<b>' + escHtml(tipoTxt) + '</b>" sozinho — na janela, clique no tipo e em <b>Selecionar</b>; depois <b>Continuar</b>. (a fila segue sozinha)');
       }
       progresso(c, 'tipo confirmado → anexos');
+      // Se a janela da lupa ainda estiver aberta (Selecionar não fechou), fecha pelo
+      // X do Window ('<id>_close', onclick inline Windows.close roda no clique
+      // nativo) — o overlay modal bloquearia o botão "Adicionar" dos anexos.
+      const sobraX = document.querySelector('div[id$="_close"]');
+      if (sobraX && visivel(sobraX)) { clicar(sobraX); await new Promise(r => setTimeout(r, 400)); }
     }
     // 2) anexos
     if (!(c.docs || []).length) return pausar(c, 'este caso não tem PDF para anexar — refaça na Central.'); // B6

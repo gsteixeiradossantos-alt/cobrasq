@@ -273,9 +273,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (tabId) { await overrideDialogos(tabId); sendResponse({ ok: true }); }
         else sendResponse({ error: 'sem tabId' });
       } else if (msg.type === 'EXEC_PAGINA') {
-        // Executa uma ação NO MUNDO DA PÁGINA (world:'MAIN') no FRAME que pediu —
-        // imune ao CSP da página (scripts injetados pela extensão são isentos).
-        // Prefere chamar a função global (msg.fn + msg.args); senão avalia msg.code.
+        // Executa uma ação NO MUNDO DA PÁGINA (world:'MAIN') no FRAME que pediu.
+        // Prefere chamadas de função global (msg.fn+msg.args ou msg.calls=[{fn,args}])
+        // — o eval de msg.code fica como ÚLTIMO recurso: no mundo MAIN o eval é
+        // sujeito ao CSP da página e costuma ser bloqueado (causa raiz do Selecionar
+        // do Projudi nunca disparar em multi-statement).
         const tabId = sender.tab && sender.tab.id;
         if (tabId == null) { sendResponse({ error: 'sem tabId' }); return; }
         try {
@@ -283,14 +285,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (sender.frameId != null) target.frameIds = [sender.frameId];
           const [res] = await chrome.scripting.executeScript({
             target,
-            func: (fn, args, code) => {
+            func: (fn, args, code, calls) => {
               try {
-                if (fn && typeof window[fn] === 'function') { window[fn].apply(window, args || []); return true; }
+                const lista = (calls && calls.length) ? calls : (fn ? [{ fn, args }] : null);
+                if (lista) {
+                  let rodou = false;
+                  for (const ch of lista) {
+                    if (ch && ch.fn && typeof window[ch.fn] === 'function') { window[ch.fn].apply(window, ch.args || []); rodou = true; }
+                  }
+                  if (rodou) return true;
+                }
                 if (code) { (0, eval)(code); return true; } // eslint-disable-line no-eval
               } catch (e) { return 'erro: ' + (e && e.message || e); }
               return false;
             },
-            args: [msg.fn || null, msg.args || [], msg.code || null],
+            args: [msg.fn || null, msg.args || [], msg.code || null, msg.calls || null],
           });
           sendResponse({ ok: true, resultado: res && res.result });
         } catch (e) { sendResponse({ error: String((e && e.message) || e) }); }
