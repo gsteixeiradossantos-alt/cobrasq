@@ -235,9 +235,10 @@
   // de Documento". Detecção: URL do frame OU (heading + radios na própria tela).
   function ehDialogoTipo() {
     if (/tipoDocumento\.do/i.test(location.href || '')) return true;
-    if (!document.querySelector('input[type="radio"]')) return false; // radios ficam no iframe, não no pai
-    const t = norm(document.body ? document.body.innerText : '');
-    return t.includes('selecao de tipo de documento') || t.includes('pesquisa de tipo de documento');
+    // Fallback same-doc: exige SINAIS exclusivos do diálogo (#selectButton + rádios).
+    // NÃO usar o texto "Seleção de Tipo de Documento": ele também aparece na tela de
+    // juntada (é o título da lupinha) e faria a juntada ser confundida com a janela.
+    return !!document.getElementById('selectButton') && !!document.querySelector('input[type="radio"]');
   }
   // Escolhe o tipo na janela: Descrição → Pesquisar → marca o radio que casa →
   // Selecionar (o Projudi fecha o diálogo e preenche o hidden na tela-mãe).
