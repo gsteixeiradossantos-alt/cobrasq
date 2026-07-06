@@ -28013,6 +28013,11 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
         </div>
         <button class="btn btn-ghost btn-sm" id="btn-test-zapsign" onclick="testarZapSign()">Testar conexão</button>
         <span id="zapsign-test-result" style="font-size:12px;margin-left:8px;"></span>
+        ${DB.config.zapsignToken?`<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">
+          <button class="btn btn-ghost btn-sm" id="btn-recuperar-assinados" onclick="recuperarAssinadosZapSign()" title="Puxa do ZapSign os documentos assinados/enviados que ainda não constam nas fichas dos clientes. Ação única — depois disso, cada novo envio já entra sozinho.">Recuperar assinados (uma vez)</button>
+          <span id="recuperar-assinados-result" style="font-size:12px;margin-left:8px;color:var(--text-3);"></span>
+          <div style="font-size:11px;color:var(--text-3);margin-top:6px;">Recupera documentos de clientes enviados/assinados antes da correção de 06/07. Rodar uma única vez.</div>
+        </div>`:''}
       </div>
 
       <!-- ── Z-Api ────────────────────────────────── -->
@@ -28314,6 +28319,79 @@ async function testarAsaas(){
   btn.disabled=false;
 }
 
+// Recuperação ÚNICA dos documentos de cliente que foram enviados/assinados no
+// ZapSign ANTES do fix de 06/07 (o upload no bucket falhava em silêncio, então a
+// linha em cliente_documentos nunca existiu e o webhook não casou o assinado).
+// Owner-only, idempotente (pula tokens já registrados). Após rodar, o vínculo-na-
+// hora cobre todos os próximos envios — este botão não é mais necessário.
+async function recuperarAssinadosZapSign(){
+  if(typeof ehColaborador==='function' && ehColaborador()){ showToast('Ação restrita ao proprietário.','warning'); return; }
+  if(!DB.config?.zapsignToken){ showToast('Configure o ZapSign primeiro.','warning'); return; }
+  const supa=getSupabase(); if(!supa){ showToast('Sem conexão com o banco.','danger'); return; }
+  if(!confirm('Buscar no ZapSign os documentos de clientes já enviados/assinados que não constam nas fichas e trazê-los para o sistema?\n\nÉ uma ação única e segura de repetir (o que já existe é ignorado).')) return;
+  const btn=document.getElementById('btn-recuperar-assinados');
+  const res=document.getElementById('recuperar-assinados-result');
+  if(btn){ btn.disabled=true; btn.textContent='Recuperando…'; }
+  if(res) res.textContent='Consultando o ZapSign…';
+  let recuperados=0, pulados=0, erros=0;
+  try{
+    const u=(await supa.auth.getUser()).data?.user;
+    const clientes=(DB.clientes||[]).filter(c=>c&&c.nome&&c.id).map(c=>({ id:c.id, nome:String(c.nome).trim() }))
+      .sort((a,b)=>b.nome.length-a.nome.length); // nomes mais longos primeiro (evita casar por prefixo)
+    const { data:jaTem }=await supa.from('cliente_documentos').select('zapsign_doc_id').not('zapsign_doc_id','is',null);
+    const tokensJa=new Set((jaTem||[]).map(x=>x.zapsign_doc_id).filter(Boolean));
+    const achaCliente=nome=>{ const n=' '+String(nome||'')+' '; return clientes.find(c=>n.includes(' — '+c.nome+' — ')||n.includes(' — '+c.nome+' '))||clientes.find(c=>String(nome||'').includes(c.nome)); };
+    // varre a conta ZapSign (paginado)
+    const encontrados=[];
+    for(let pg=1; pg<=25; pg++){
+      const r=await fetch('/api/zapsign?path='+encodeURIComponent('docs/')+'&page='+pg, { headers:{ ...(await authHeaders()) } });
+      const j=await r.json().catch(()=>null);
+      if(!r.ok) throw new Error((j&&(j.detail||j.error||j.message))||('HTTP '+r.status));
+      const lista=(j&&(j.results||j))||[];
+      if(!Array.isArray(lista)||!lista.length) break;
+      encontrados.push(...lista);
+      if(!j.next) break;
+    }
+    if(res) res.textContent=`${encontrados.length} documento(s) no ZapSign; casando com os clientes…`;
+    const salvar=async(item, det, cli)=>{
+      const token=item.token||null;
+      if(token&&tokensJa.has(token)){ pulados++; return; }
+      const assinado=String((det&&det.status)||item.status||'').toLowerCase()==='signed';
+      const fileUrl=(det&&(det.signed_file||det.original_file))||item.signed_file||item.original_file||null;
+      if(!fileUrl){ erros++; console.warn('[recuperar zapsign] sem arquivo:', item.name); return; }
+      const fr=await fetch('/api/zapsign?fileUrl='+encodeURIComponent(fileUrl), { headers:{ ...(await authHeaders()) } });
+      if(!fr.ok){ erros++; console.warn('[recuperar zapsign] download falhou:', item.name, fr.status); return; }
+      const blob=await fr.blob();
+      const path=(u?.id?u.id+'/':'')+'clientes/'+cli.id+'/zapsign_'+(assinado?'assinado':'enviado')+'_'+Date.now()+'_'+Math.random().toString(36).slice(2,7)+'.pdf';
+      const { error:eUp }=await supa.storage.from('peticao-assets').upload(path, blob, { contentType:'application/pdf' });
+      if(eUp){ erros++; console.warn('[recuperar zapsign] upload:', eUp.message); return; }
+      const nomeDoc=String(item.name||'Documento ZapSign');
+      const { error:eIns }=await supa.from('cliente_documentos').insert({
+        cliente_id:cli.id, tipo:/procura/i.test(nomeDoc)?'procuracao':'outros', nome:nomeDoc,
+        storage_path:path, mime_type:'application/pdf', size_bytes:blob.size, uploaded_by:u?.id, ativo:true,
+        zapsign_doc_id:token, zapsign_status:assinado?'assinado':'enviado',
+        assinado_storage_path:assinado?path:null });
+      if(eIns){ erros++; console.warn('[recuperar zapsign] insert:', eIns.message); return; }
+      if(token) tokensJa.add(token);
+      recuperados++;
+    };
+    for(const doc of encontrados){
+      const cli=achaCliente(doc.name);
+      if(!cli) continue; // documento de outro contexto (ex.: acordo de devedor) — ignora
+      let det=null;
+      try{ det=await ZapSignAPI.getDoc(doc.token); }catch(_){ }
+      await salvar(doc, det||doc, cli);
+      for(const ex of (det&&det.extra_docs)||[]){ const c2=achaCliente(ex.name)||cli; try{ await salvar(ex, ex, c2); }catch(_){ erros++; } }
+    }
+    if(typeof logAtividade==='function') logAtividade('Recuperou assinados do ZapSign (única vez)', `${recuperados} recuperado(s), ${pulados} já constavam, ${erros} erro(s)`);
+    const msg=`${recuperados} recuperado(s)`+(pulados?`, ${pulados} já constavam`:'')+(erros?`, ${erros} com erro (ver console)`:'')+'.';
+    if(res) res.textContent=msg;
+    showToast(recuperados?('Documentos recuperados: '+msg):('Nada novo a recuperar'+(pulados?` (${pulados} já constavam)`:'')+'.'), recuperados?'success':'info');
+  }catch(e){
+    if(res) res.textContent='Falha: '+(e&&e.message||e);
+    showToast('Falha ao consultar o ZapSign: '+(e&&e.message||e),'danger');
+  }finally{ if(btn){ btn.disabled=false; btn.textContent='Recuperar assinados (uma vez)'; } }
+}
 async function testarZapSign(){
   const token = document.getElementById('cfg-zapsign-token')?.value;
   const res = document.getElementById('zapsign-test-result');
