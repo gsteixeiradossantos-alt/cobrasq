@@ -4819,7 +4819,6 @@ function devedorToRow(d){
   }
   const row = {
     id: d.id,
-    cliente_id: d.clienteId || null,
     nome: d.nome || '',
     doc: d.doc || null,
     doc_hash: d.docHash || null,
@@ -4858,6 +4857,12 @@ function devedorToRow(d){
   // FASE C2 (tempo-2): status/funil/encerramento/dívida NÃO são mais gravados no
   // devedor — só em `cobrancas` (fonte única). assigned_to (responsável) permanece.
   if(d.assignedTo) row.assigned_to = d.assignedTo;
+  // cliente_id (credor) — MESMO guard do assigned_to: o upsert em massa do
+  // flushRelational() reescreve DB.devedores inteiro a cada save; uma aba/dispositivo
+  // com estado velho (clienteId vazio) ZERAVA o vínculo no banco → o caso sumia da
+  // contagem em Clientes E da visão do cedente (RLS devedores_cedente_scope usa
+  // devedores.cliente_id). Ausência = "preserva o que está no banco". Ver R-13.
+  if(d.clienteId) row.cliente_id = d.clienteId;
   return row;
 }
 
@@ -5155,6 +5160,22 @@ function _mergeDividaFromCobrancas(){
 // com o blob desatualizado. Volta a false assim que uma carga dá certo.
 let _relReadFailed = false;
 
+// Lápide anti-ressurreição (ver migração 20260706_registro_excluidos_tombstone).
+// Guarda as chaves 'cliente:<id>'/'devedor:<id>' de tudo que foi excluído de propósito,
+// para o flushRelational() NÃO reenviar essas linhas no upsert em massa (defesa em
+// profundidade — o trigger no banco é a guarda autoritativa). Carregada no login.
+let _tombstones = new Set();
+const _tombKey = (tipo, id) => tipo + ':' + id;
+async function loadTombstones(){
+  const supa = getSupabase();
+  if(!supa) return;
+  try{
+    const { data, error } = await supa.from('registro_excluidos').select('tipo,id');
+    if(error){ console.warn('[rel] loadTombstones:', error.message); return; }
+    _tombstones = new Set((data||[]).map(r=>_tombKey(r.tipo, r.id)));
+  }catch(e){ console.warn('[rel] loadTombstones ex:', e && e.message); }
+}
+
 async function loadRelationalData(){
   // Sobrescreve DB.devedores e DB.clientes com dados das tabelas relacionais
   // (fonte da verdade pós-Fase 2.5). Roda só após login — antes disso, RLS
@@ -5166,7 +5187,8 @@ async function loadRelationalData(){
   const [devedoresRel, clientesRel, cobrancasRel] = await Promise.all([
     loadDevedoresFromSupabase(),
     loadClientesFromSupabase(),
-    loadCobrancasFromSupabase()
+    loadCobrancasFromSupabase(),
+    loadTombstones()
   ]);
   // Fase 3 — modo seguro: se a carga FALHOU (null = erro de RLS/rede; ≠ [] que é
   // vazio legítimo), NÃO tratar o blob como verdade — bloqueia a escrita relacional
@@ -5233,8 +5255,11 @@ async function flushRelational(){
     const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
     if(!sess?.data?.session) return; // sem sessão, RLS bloqueia escrita
     if(Array.isArray(DB.clientes) && DB.clientes.length){
-      const rows = DB.clientes.map(clienteToRow);
-      const { error } = await supa.from('clientes').upsert(rows, { onConflict:'id' });
+      // Não reenviar cadastros já excluídos (lápide) — evita ressuscitar linhas que
+      // outra aba/dispositivo apagou. O trigger no banco é a guarda final; isto só
+      // poupa o round-trip e mantém o batch limpo.
+      const rows = DB.clientes.filter(c=>!_tombstones.has(_tombKey('cliente', c.id))).map(clienteToRow);
+      const { error } = rows.length ? await supa.from('clientes').upsert(rows, { onConflict:'id' }) : { error:null };
       if(error){
         console.warn('[rel] syncClientes:', error.message);
         // 23505 = unique_violation (idx_clientes_doc_digits_unique): CNPJ/CPF já ativo.
@@ -5245,8 +5270,8 @@ async function flushRelational(){
       }
     }
     if(Array.isArray(DB.devedores) && DB.devedores.length){
-      const rows = DB.devedores.map(devedorToRow);
-      const { error } = await supa.from('devedores').upsert(rows, { onConflict:'id' });
+      const rows = DB.devedores.filter(d=>!_tombstones.has(_tombKey('devedor', d.id))).map(devedorToRow);
+      const { error } = rows.length ? await supa.from('devedores').upsert(rows, { onConflict:'id' }) : { error:null };
       if(error){
         console.warn('[rel] syncDevedores:', error.message);
         // PR-F: traduz erro de duplicação (idx_devedores_doc_digits_unique)
@@ -5272,6 +5297,27 @@ function syncRelational(){
 
 // Rede de segurança: ao fechar/atualizar a aba, tenta gravar pendências relacionais (best-effort).
 window.addEventListener('beforeunload', ()=>{ try{ flushRelational(); }catch(_){} });
+
+// Exclusão definitiva de cliente/devedor: grava a LÁPIDE (memória + banco `registro_excluidos`)
+// e apaga a linha relacional. A lápide em memória barra o reenvio no próximo flush ANTES de
+// qualquer await; a lápide no banco + trigger impedem que o upsert em massa de QUALQUER aba/
+// dispositivo (mesmo com lista velha) ressuscite o registro. Ver R-12. Os callers continuam
+// removendo o item do DB (blob) e chamando save() — aqui só cuidamos do lado relacional.
+async function excluirComTombstone(tipo, id, motivo){
+  if(!id) return;
+  _tombstones.add(_tombKey(tipo, id)); // efetivo já no flush agendado por save()
+  const supa = getSupabase();
+  if(!supa) return;
+  try{
+    const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
+    const uid = sess?.data?.session?.user?.id || null;
+    await supa.from('registro_excluidos').upsert(
+      { tipo, id, excluido_por: uid, motivo: motivo || null }, { onConflict:'tipo,id' });
+    const tabela = tipo === 'cliente' ? 'clientes' : 'devedores';
+    const { error } = await supa.from(tabela).delete().eq('id', id);
+    if(error) console.warn('[excluir] '+tabela+':', error.message);
+  }catch(e){ console.warn('[excluir] ex:', e && e.message); }
+}
 
 // ── FLUXO DE RECOVERY DE SENHA ────────────────────────────────
 function mostrarRecuperacao(modo){
@@ -11092,18 +11138,21 @@ function salvarClienteRascunho(){
 // Limpa rascunhos vencidos no carregamento (TTL 30 dias)
 function limparRascunhosVencidos(){
   const agora = new Date();
-  let removidos = 0;
+  const removidos = [];
+  const vencido = (o)=> o.isDraft && o.draftExpiresAt && new Date(o.draftExpiresAt) <= agora;
   if (DB.devedores) {
-    const antes = DB.devedores.length;
-    DB.devedores = DB.devedores.filter(d => !d.isDraft || !d.draftExpiresAt || new Date(d.draftExpiresAt) > agora);
-    removidos += antes - DB.devedores.length;
+    DB.devedores = DB.devedores.filter(d => { if(vencido(d)){ removidos.push(['devedor', d.id]); return false; } return true; });
   }
   if (DB.clientes) {
-    const antes = DB.clientes.length;
-    DB.clientes = DB.clientes.filter(c => !c.isDraft || !c.draftExpiresAt || new Date(c.draftExpiresAt) > agora);
-    removidos += antes - DB.clientes.length;
+    DB.clientes = DB.clientes.filter(c => { if(vencido(c)){ removidos.push(['cliente', c.id]); return false; } return true; });
   }
-  if (removidos > 0) { save(); console.info('S12: '+removidos+' rascunho(s) vencido(s) removidos.'); }
+  if (removidos.length) {
+    // Lápide + delete relacional dos rascunhos vencidos — antes ficavam presos no
+    // relacional (is_draft=true) e o blob só os removia em memória.
+    removidos.forEach(([tipo,id])=> excluirComTombstone(tipo, id, 'rascunho vencido'));
+    save();
+    console.info('S12: '+removidos.length+' rascunho(s) vencido(s) removidos.');
+  }
 }
 // Roda na inicialização (1x por load)
 setTimeout(() => { try { limparRascunhosVencidos(); } catch(e) { console.warn('S12 cleanup:',e); } }, 2000);
@@ -12478,6 +12527,7 @@ function excluirDevedor(id){
   }
   confirmDel(()=>{
     DB.devedores = (DB.devedores||[]).filter(d=>d.id!==id);
+    excluirComTombstone('devedor', id); // lápide + delete relacional (anti-ressurreição)
     save();
     closeDrawer();
     renderDevedores();
@@ -12520,7 +12570,6 @@ async function syncDevedorCobranca(d){
   try{
     const row = {
       id: d.id,
-      cliente_id: d.clienteId || null,
       status: d.status || null,
       fase: d.fase || 'extrajudicial',
       valor_orig: _devNumOrNull(d.valorOrig),
@@ -12537,6 +12586,9 @@ async function syncDevedorCobranca(d){
       updated_at: new Date().toISOString()
     };
     if(d.assignedTo) row.assigned_to = d.assignedTo;
+    // cliente_id (credor): só grava quando há valor — nunca deixa uma aba velha
+    // com clienteId vazio zerar o vínculo do caso. Ver devedorToRow e R-13.
+    if(d.clienteId) row.cliente_id = d.clienteId;
     const { error:eup } = await supa.from('cobrancas').upsert(row, { onConflict:'id' });
     if(eup){ console.warn('[sync cobranca] upsert:', eup.message); return false; }
     // Garante a parte principal (devedor_id == cobranca_id). Idempotente.
@@ -17247,6 +17299,7 @@ async function executarPedidoLocal(pedido){
         logAtividade?.('Arquivou cobrança (aprovado)', `"${dev.nome}" — ${dev.doc||''}`, dev.id);
       } else {
         DB.devedores = DB.devedores.filter(d=>d.id!==pedido.recurso_id);
+        await excluirComTombstone('devedor', pedido.recurso_id); // lápide + delete relacional
       }
       save();
       if(typeof renderDevedores === 'function') renderDevedores();
@@ -17255,6 +17308,7 @@ async function executarPedidoLocal(pedido){
     case 'excluir_cliente': {
       DB.clientes = (DB.clientes||[]).filter(c=>c.id!==pedido.recurso_id);
       (DB.devedores||[]).forEach(d=>{ if(d.clienteId===pedido.recurso_id) d.clienteId=''; });
+      await excluirComTombstone('cliente', pedido.recurso_id); // lápide + delete relacional
       save();
       if(typeof renderClientes === 'function') renderClientes();
       break;
@@ -17728,18 +17782,11 @@ function excluirCliente(id){
     // Unlink devedores (memória + blob)
     (DB.devedores||[]).forEach(d=>{ if(d.clienteId===id) d.clienteId=''; });
     save();
-    // Apaga TAMBÉM no relacional. O app recarrega clientes do banco em
-    // loadRelationalData() (fonte da verdade) e flushRelational() só faz UPSERT,
-    // nunca DELETE — então sem este delete o cliente "reaparecia" no próximo
-    // refresh. A FK cliente_id (devedores/cobrancas) é ON DELETE SET NULL,
-    // então os vínculos relacionais caem sozinhos.
-    try{
-      const supa = getSupabase();
-      if(supa){
-        const { error } = await supa.from('clientes').delete().eq('id', id);
-        if(error){ showToast('Removido na tela, mas o servidor recusou a exclusão ('+error.message+'). Use Arquivar.','danger'); }
-      }
-    }catch(e){ showToast('Falha ao excluir no servidor: '+e.message,'danger'); }
+    // Lápide + delete relacional. Antes o flushRelational() só fazia UPSERT (nunca
+    // DELETE), então uma aba/dispositivo com a lista velha "reanimava" o cliente no
+    // próximo save. A lápide (registro_excluidos + trigger) fecha isso na origem.
+    // A FK cliente_id (devedores/cobrancas) é ON DELETE SET NULL → vínculos caem sozinhos.
+    await excluirComTombstone('cliente', id);
     renderClientes();
   }, 'Excluir este cliente? Os devedores vinculados serão desvinculados.');
 }
@@ -32725,6 +32772,7 @@ function excluirPermanenteDevedor(devId){
       }
       logAtividade('Excluiu permanentemente', `"${dev.nome}" — ${dev.doc||''}`, devId);
       DB.devedores = (DB.devedores||[]).filter(d=>d.id!==devId);
+      excluirComTombstone('devedor', devId, 'exclusão permanente (auditoria)'); // lápide
       save();
       // Refresh wherever we are
       if(window._cfgSection === 'auditoria') renderCfgSection('auditoria');
