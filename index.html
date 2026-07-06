@@ -2964,6 +2964,7 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
           <button type="button" class="btn btn-ghost btn-sm" onclick="gerarDocCliente('cessao')">Contrato de cessão</button>
           <button type="button" class="btn btn-ghost btn-sm" onclick="gerarDocCliente('procuracao')">Procuração</button>
           <button type="button" class="btn btn-ghost btn-sm" onclick="gerarDocCliente('declaracao')">Declaração de cessão</button>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="abrirAnexoICliente(document.getElementById('mcli-id')?.value)">Anexo I</button>
         </div>
         <div id="mcli-docs-zapsign-row" style="display:none;margin-top:6px;">
           <button type="button" class="btn btn-outline btn-sm" style="width:100%;" onclick="abrirModalDocLote()">✍ Enviar p/ assinatura digital</button>
@@ -15683,7 +15684,10 @@ async function renderClienteDetalhe(){
     const it=m[s]; return it?`<span style="font-size:9.5px;font-weight:700;padding:1px 7px;border-radius:10px;background:${it[1]};color:#fff;text-transform:uppercase;letter-spacing:.03em;">${it[0]}</span>`:'';
   };
   const panelDocumentos=`<div class="cob-panel" style="padding:18px;">
-    <div class="det-panel-tt">Documentos${docsCli.length?` (${docsCli.length})`:''}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <div class="det-panel-tt">Documentos${docsCli.length?` (${docsCli.length})`:''}</div>
+      <button class="btn btn-ghost btn-sm" onclick="abrirAnexoICliente('${cli.id}')" title="Relação de créditos objeto da cessão">Anexo I ↗</button>
+    </div>
     ${docsCli.length? docsCli.map(dc=>{
       const path=dc.assinado_storage_path||dc.storage_path;
       return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;border:1px solid var(--border);border-radius:8px;padding:9px 12px;margin-bottom:7px;">
@@ -29047,6 +29051,137 @@ function _docClienteHtml(tipo, d){
   }
   return null;
 }
+// ── ANEXO I — Identificação dos créditos objeto da cessão de crédito ──────────
+// Gerado da pasta do cliente: seleção manual dos créditos, CPF/CNPJ mascarado
+// (LGPD) e cópia imutável anexada em cliente_documentos a cada geração.
+function _mascararDocLgpd(doc){
+  const d=String(doc||'').replace(/\D/g,'');
+  if(d.length===11) return `${d.slice(0,3)}.***.***-${d.slice(9)}`;
+  if(d.length===14) return `${d.slice(0,2)}.***.***/${d.slice(8,12)}-${d.slice(12)}`;
+  return doc||'—';
+}
+let _anexo1Ctx=null;
+function _anexo1Fechar(){ document.getElementById('anexo1-overlay')?.remove(); _anexo1Ctx=null; }
+async function abrirAnexoICliente(clienteId){
+  if(!clienteId){ showToast('Salve o cliente antes de gerar o Anexo I.','warning'); return; }
+  const supa=getSupabase();
+  if(!supa){ showToast('Sem conexão com o banco.','danger'); return; }
+  showToast('Carregando créditos do cliente…','info');
+  const { data:cc } = await supa.from('clientes').select('*').eq('id',clienteId).maybeSingle();
+  const cli=cc||(DB.clientes||[]).find(c=>c.id===clienteId);
+  if(!cli){ showToast('Cliente não encontrado.','danger'); return; }
+  const { data:co } = await supa.from('cobrancas')
+    .select('id,valor_orig,valor_atual,status,tipo_documento,divida,is_draft, cobranca_partes(principal,devedores(nome,doc))')
+    .eq('cliente_id',clienteId).eq('arquivado',false);
+  const creditos=(co||[]).filter(c=>!c.is_draft).map(c=>{
+    const p=(c.cobranca_partes||[]).find(x=>x.principal)||(c.cobranca_partes||[])[0]||{};
+    return { id:c.id, nome:p.devedores?.nome||'—', doc:p.devedores?.doc||'',
+      titulo:c.tipo_documento||c.divida?.titulo||c.divida?.descricao||'Cobrança',
+      nominal:(+c.valor_orig||+c.valor_atual||0), status:statusLabel(c.status)||'—',
+      encerrada:/quitad|devolvid/i.test(c.status||'') };
+  }).sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR'));
+  if(!creditos.length){ showToast('Esse cliente não tem cobranças para listar.','warning'); return; }
+  _anexo1Fechar();
+  _anexo1Ctx={ cli, creditos };
+  const linhas=creditos.map((k,i)=>`
+    <label style="display:flex;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer;">
+      <input type="checkbox" class="anexo1-chk" data-i="${i}" ${k.encerrada?'':'checked'} onchange="_anexo1Atualizar()" style="width:15px;height:15px;flex-shrink:0;">
+      <span style="flex:1;min-width:0;">
+        <span style="display:block;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(k.nome)}</span>
+        <span style="display:block;font-size:10.5px;color:var(--text-3);">${escHtml(_mascararDocLgpd(k.doc))} · ${escHtml(k.titulo)} · ${escHtml(k.status)}</span>
+      </span>
+      <span style="font-size:12px;font-weight:600;white-space:nowrap;">${fmtR(k.nominal)}</span>
+    </label>`).join('');
+  const ov=document.createElement('div');
+  ov.id='anexo1-overlay';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(10,21,48,.45);z-index:9000;display:flex;align-items:center;justify-content:center;';
+  ov.innerHTML=`
+  <div style="background:var(--surface,#fff);border-radius:14px;padding:24px 26px;width:min(520px,94vw);max-height:86vh;display:flex;flex-direction:column;box-shadow:0 18px 60px rgba(0,0,0,.25);">
+    <div style="font-family:var(--font-display,serif);font-size:19px;font-weight:700;color:var(--navy,#0A1530);">Anexo I — ${escHtml(cli.nome_fantasia||cli.nomeFantasia||cli.nome||'')}</div>
+    <div style="font-size:12.5px;color:var(--text-3,#666);margin:4px 0 12px;">Marque os créditos que entram na relação de cessão. Cada geração fica salva na pasta do cliente.</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.anexo1-chk').forEach(c=>c.checked=true);_anexo1Atualizar();">Marcar todas</button>
+      <button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.anexo1-chk').forEach(c=>c.checked=false);_anexo1Atualizar();">Desmarcar todas</button>
+    </div>
+    <div style="overflow-y:auto;flex:1;min-height:0;">${linhas}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px;padding-top:12px;border-top:1px solid var(--border,#ddd);">
+      <span id="anexo1-resumo" style="font-size:12px;color:var(--text-2,#444);"></span>
+      <span style="display:flex;gap:8px;">
+        <button class="cob-btn-ghost" onclick="_anexo1Fechar()">Cancelar</button>
+        <button class="cob-btn-primary" onclick="gerarAnexoICliente()">Gerar Anexo I</button>
+      </span>
+    </div>
+  </div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) _anexo1Fechar(); });
+  document.body.appendChild(ov);
+  _anexo1Atualizar();
+}
+function _anexo1Atualizar(){
+  if(!_anexo1Ctx) return;
+  const sel=[...document.querySelectorAll('.anexo1-chk:checked')].map(c=>_anexo1Ctx.creditos[+c.dataset.i]);
+  const el=document.getElementById('anexo1-resumo');
+  if(el) el.textContent=`${sel.length} crédito${sel.length!==1?'s':''} · ${fmtR(sel.reduce((s,k)=>s+k.nominal,0))}`;
+}
+function _anexoIHtml(cli, creditos){
+  const d={ nome:cli.nome, doc:cli.doc, rua:_gv(cli,'rua'), numero:_gv(cli,'numero'), complemento:_gv(cli,'complemento'),
+    bairro:_gv(cli,'bairro'), cidade:_gv(cli,'cidade'), uf:_gv(cli,'uf'), cep:_gv(cli,'cep') };
+  const end=_docClienteEndereco(d);
+  const digits=(d.doc||'').replace(/\D/g,'');
+  const isPJ=digits.length>11;
+  const natureza=isPJ?'sociedade empresária limitada':'pessoa física';
+  const inscr=isPJ?'inscrita':'inscrito(a)';
+  const parteCli=`<strong>${escHtml(d.nome||'—')}</strong>, ${natureza}, ${inscr} no <strong>${escHtml(d.doc||'____________')}</strong>, com endereço na ${escHtml(end)}, doravante denominad${isPJ?'a':'o(a)'} de <strong>Cedente</strong>.`;
+  const COBRASQ_PRE=`<strong>COBRASQ Recuperadora de Crédito e Cobrança Ltda</strong>, sociedade empresária limitada, inscrita no CNPJ sob o n. 34.626.848/0001-42, com sede na Av. Rio Grande do Sul, n. 380, sala 201, Ed. Mara, centro, CEP.: 85660–000, município de Dois Vizinhos, Estado do Paraná, neste ato representada por seu sócio administrador, Sr. <strong>Gustavo Souza Teixeira dos Santos</strong>, CPF sob o n. 103.513.639-20, doravante denominada de <strong>Cessionária</strong>.`;
+  const total=creditos.reduce((s,k)=>s+k.nominal,0);
+  const linhas=creditos.map((k,i)=>`<tr>
+    <td class="a1-num">${String(i+1).padStart(2,'0')}</td>
+    <td>${escHtml(k.nome)}</td>
+    <td class="a1-doc">${escHtml(_mascararDocLgpd(k.doc))}</td>
+    <td>${escHtml(k.titulo)}</td>
+    <td class="a1-val">${fmtR(k.nominal)}</td>
+  </tr>`).join('');
+  const corpo=`
+<style>
+.a1-sub{text-align:center;font-family:var(--serif-edit);font-style:italic;font-size:13pt;color:var(--graphite);margin:-6px 0 20px}
+table.a1{width:100%;border-collapse:collapse;margin-top:18px;font-size:9.5pt}
+table.a1 th{font-family:var(--mono);font-size:7pt;font-weight:500;text-transform:uppercase;letter-spacing:.1em;color:var(--accent-2);text-align:left;padding:7px 8px;border-bottom:1.2px solid var(--ink)}
+table.a1 td{padding:7px 8px;border-bottom:.7px solid var(--line);vertical-align:top}
+table.a1 .a1-num{font-family:var(--mono);font-size:8.5pt;color:var(--accent-2);white-space:nowrap}
+table.a1 .a1-doc{font-family:var(--mono);font-size:8.5pt;white-space:nowrap}
+table.a1 .a1-val{text-align:right;font-weight:600;white-space:nowrap}
+table.a1 tfoot td{border-top:1.2px solid var(--ink);border-bottom:none;font-weight:600;color:var(--ink);padding-top:9px}
+table.a1 tr{page-break-inside:avoid}
+</style>
+<div class="a1-sub">Identificação dos créditos objeto da cessão de crédito</div>
+<p><strong>Cedente:</strong> ${parteCli}</p>
+<p><strong>Cessionária:</strong> ${COBRASQ_PRE}</p>
+<table class="a1">
+  <thead><tr><th>Nº</th><th>Nome do Devedor</th><th>CPF/CNPJ</th><th>Título</th><th style="text-align:right;">Valor nominal</th></tr></thead>
+  <tbody>${linhas}</tbody>
+  <tfoot><tr><td colspan="4">Valor nominal total dos créditos cedidos</td><td class="a1-val">${fmtR(total)}</td></tr></tfoot>
+</table>`;
+  return _docClienteShell('Anexo I',
+    [['Cedente', cli.nome||'—'],['CNPJ / CPF', cli.doc||'—'],['Cessionária','COBRASQ Recuperadora de Crédito e Cobrança Ltda'],['Créditos cedidos', String(creditos.length)]],
+    corpo, []);
+}
+async function gerarAnexoICliente(){
+  if(!_anexo1Ctx) return;
+  const { cli, creditos }=_anexo1Ctx;
+  const sel=[...document.querySelectorAll('.anexo1-chk:checked')].map(c=>creditos[+c.dataset.i]);
+  if(!sel.length){ showToast('Marque ao menos um crédito.','warning'); return; }
+  _anexo1Fechar();
+  const html=_anexoIHtml(cli, sel);
+  const win=window.open('','_blank','width=900,height=900');
+  if(win){ win.document.write(html); win.document.close(); }
+  else showToast('Popup bloqueado — permita popups para visualizar.','warning');
+  const dt=new Date(), dd=String(dt.getDate()).padStart(2,'0'), mm=String(dt.getMonth()+1).padStart(2,'0');
+  const nomeArq=`Anexo I — ${sel.length} crédito${sel.length!==1?'s':''} — ${dd}-${mm}-${dt.getFullYear()}.html`;
+  const anexou=await _anexarDocClienteGerado('outros', html, nomeArq, cli.id);
+  if(anexou && typeof _detCliId!=='undefined' && _detCliId===cli.id && typeof renderClienteDetalhe==='function') renderClienteDetalhe();
+  if(typeof logAtividade==='function') logAtividade('Gerou Anexo I', `${sel.length} crédito(s) — ${cli.nome||''}`, cli.id);
+  showToast(anexou ? 'Anexo I gerado e salvo na pasta do cliente.' : 'Anexo I gerado — não foi possível salvar na pasta (verifique a conexão).', anexou?'success':'warning');
+}
+
 async function gerarDocCliente(tipo){
   const d=_docClienteDados();
   if(!d.nome){ showToast('Informe ao menos a razão social do cliente.','warning'); return; }
@@ -29333,8 +29468,8 @@ async function _registrarDocClienteZapSign({clienteId, tipo, nome, base64Pdf, do
     return true;
   }catch(e){ console.warn('[registrar doc cliente zapsign]', e&&e.message||e); return false; }
 }
-async function _anexarDocClienteGerado(tipoCol, html, nomeArq){
-  const clienteId=document.getElementById('mcli-id')?.value;
+async function _anexarDocClienteGerado(tipoCol, html, nomeArq, clienteIdOpt){
+  const clienteId=clienteIdOpt||document.getElementById('mcli-id')?.value;
   if(!clienteId) return false;          // cliente ainda não salvo → só abre p/ impressão
   const supa=getSupabase(); if(!supa) return false;
   try{
