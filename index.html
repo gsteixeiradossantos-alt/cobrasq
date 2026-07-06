@@ -15687,7 +15687,10 @@ async function renderClienteDetalhe(){
   const panelDocumentos=`<div class="cob-panel" style="padding:18px;">
     <div style="display:flex;justify-content:space-between;align-items:center;">
       <div class="det-panel-tt">Documentos${docsCli.length?` (${docsCli.length})`:''}</div>
-      <button class="btn btn-ghost btn-sm" onclick="abrirAnexoICliente('${cli.id}')" title="Relação de créditos objeto da cessão">Anexo I ↗</button>
+      <span style="display:flex;gap:6px;">
+        <button class="btn btn-ghost btn-sm" onclick="abrirAnexoICliente('${cli.id}')" title="Relação de créditos objeto da cessão">Anexo I ↗</button>
+        <button class="btn btn-ghost btn-sm" onclick="mcliBackfillZapSign('${cli.id}')" title="Importa do ZapSign documentos deste cliente que não constam na ficha (enviados/assinados)">Recuperar do ZapSign</button>
+      </span>
     </div>
     ${docsCli.length? docsCli.map(dc=>{
       const path=dc.assinado_storage_path||dc.storage_path;
@@ -16503,7 +16506,8 @@ async function mcliUploadDoc(ev, tipo){
   const supa = getSupabase(); if(!supa){ alert('Supabase não configurado.'); return; }
   try {
     const u = (await supa.auth.getUser()).data?.user;
-    const path = 'clientes/'+clienteId+'/'+tipo+'_'+Date.now()+'_'+file.name.replace(/[^\w.\-]/g,'_');
+    // RLS do bucket exige a 1ª pasta = uid do usuário (policy peticao_assets_insert).
+    const path = (u?.id?u.id+'/':'')+'clientes/'+clienteId+'/'+tipo+'_'+Date.now()+'_'+file.name.replace(/[^\w.\-]/g,'_');
     const { error: errUp } = await supa.storage.from('peticao-assets').upload(path, file, { contentType: file.type });
     if(errUp){ alert('Upload falhou: '+errUp.message); return; }
     const { error: errIns } = await supa.from('cliente_documentos').insert({
@@ -28890,9 +28894,10 @@ function _docClienteEndereco(d){
   return [d.rua, d.numero&&('nº '+d.numero), d.complemento, d.bairro,
     (d.cidade&&d.uf)?(d.cidade+'/'+d.uf):(d.cidade||d.uf), d.cep&&('CEP '+d.cep)].filter(Boolean).join(', ') || '—';
 }
-function _docClienteShell(titulo, fichaItems, corpoHtml, assinaturas){
+function _docClienteShell(titulo, fichaItems, corpoHtml, assinaturas, opts){
   const meses=['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
-  const dt=new Date(); const dataExt=dt.getDate()+' de '+meses[dt.getMonth()]+' de '+dt.getFullYear();
+  const dt=(opts&&opts.data)?new Date(String(opts.data).slice(0,10)+'T12:00:00'):new Date();
+  const dataExt=dt.getDate()+' de '+meses[dt.getMonth()]+' de '+dt.getFullYear();
   const ficha=(fichaItems||[]).filter(Boolean).map(a=>`<div class="item"><span class="rot">${escHtml(a[0])}</span><span class="val">${escHtml(a[1])}</span></div>`).join('');
   const ass=(assinaturas||[]).map(a=>`<div class="ass"><div class="ass-linha"></div><div class="ass-nome">${escHtml(a[0])}</div><div class="ass-cargo">${escHtml(a[1])}</div></div>`).join('');
   return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>${escHtml(titulo)} — COBRASQ</title>
@@ -28961,7 +28966,8 @@ function _docClienteHtml(tipo, d){
   const denom = isPJ ? 'denominada' : 'denominado(a)';
   const nm = escHtml(d.nome||'—');
   // Preâmbulo da parte (cedente/outorgante) reutilizado nos 3 documentos.
-  const parteCli = `<strong>${nm}</strong>, ${natureza}, ${inscr} no <strong>${escHtml(docCli)}</strong>, com endereço na ${escHtml(end)}`;
+  const endClause = (end && end!=='—') ? `, com endereço na ${escHtml(end)}` : '';
+  const parteCli = `<strong>${nm}</strong>, ${natureza}, ${inscr} no <strong>${escHtml(docCli)}</strong>${endClause}`;
   const COBRASQ_PRE = `<strong>COBRASQ Recuperadora de Crédito e Cobrança Ltda</strong>, sociedade empresária limitada, inscrita no CNPJ sob o n. 34.626.848/0001-42, com sede na Av. Rio Grande do Sul, n. 380, sala 201, Ed. Mara, centro, CEP.: 85660–000, município de Dois Vizinhos, Estado do Paraná, neste ato representada por seu sócio administrador, Sr. <strong>Gustavo Souza Teixeira dos Santos</strong>, CPF sob o n. 103.513.639-20, doravante denominada de <strong>Cessionária</strong>.`;
 
   if(tipo==='procuracao'){
@@ -29100,6 +29106,10 @@ async function abrirAnexoICliente(clienteId){
   <div style="background:var(--surface,#fff);border-radius:14px;padding:24px 26px;width:min(520px,94vw);max-height:86vh;display:flex;flex-direction:column;box-shadow:0 18px 60px rgba(0,0,0,.25);">
     <div style="font-family:var(--font-display,serif);font-size:19px;font-weight:700;color:var(--navy,#0A1530);">Anexo I — ${escHtml(cli.nome_fantasia||cli.nomeFantasia||cli.nome||'')}</div>
     <div style="font-size:12.5px;color:var(--text-3,#666);margin:4px 0 12px;">Marque os créditos que entram na relação de cessão. Cada geração fica salva na pasta do cliente.</div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+      <label style="font-size:12px;color:var(--text-2,#444);white-space:nowrap;">Data do documento (= data do contrato):</label>
+      <input type="date" id="anexo1-data" value="${hoje()}" style="padding:6px 8px;border:1px solid var(--border,#ddd);border-radius:8px;font-size:12.5px;background:var(--surface,#fff);color:var(--text,#222);">
+    </div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
       <button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.anexo1-chk').forEach(c=>c.checked=true);_anexo1Atualizar();">Marcar todas</button>
       <button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.anexo1-chk').forEach(c=>c.checked=false);_anexo1Atualizar();">Desmarcar todas</button>
@@ -29123,7 +29133,7 @@ function _anexo1Atualizar(){
   const el=document.getElementById('anexo1-resumo');
   if(el) el.textContent=`${sel.length} crédito${sel.length!==1?'s':''} · ${fmtR(sel.reduce((s,k)=>s+k.nominal,0))}`;
 }
-function _anexoIHtml(cli, creditos){
+function _anexoIHtml(cli, creditos, dataDoc){
   const d={ nome:cli.nome, doc:cli.doc, rua:_gv(cli,'rua'), numero:_gv(cli,'numero'), complemento:_gv(cli,'complemento'),
     bairro:_gv(cli,'bairro'), cidade:_gv(cli,'cidade'), uf:_gv(cli,'uf'), cep:_gv(cli,'cep') };
   const end=_docClienteEndereco(d);
@@ -29131,7 +29141,8 @@ function _anexoIHtml(cli, creditos){
   const isPJ=digits.length>11;
   const natureza=isPJ?'sociedade empresária limitada':'pessoa física';
   const inscr=isPJ?'inscrita':'inscrito(a)';
-  const parteCli=`<strong>${escHtml(d.nome||'—')}</strong>, ${natureza}, ${inscr} no <strong>${escHtml(d.doc||'____________')}</strong>, com endereço na ${escHtml(end)}, doravante denominad${isPJ?'a':'o(a)'} de <strong>Cedente</strong>.`;
+  const endClause=(end&&end!=='—')?`, com endereço na ${escHtml(end)}`:'';
+  const parteCli=`<strong>${escHtml(d.nome||'—')}</strong>, ${natureza}, ${inscr} no <strong>${escHtml(d.doc||'____________')}</strong>${endClause}, doravante denominad${isPJ?'a':'o(a)'} de <strong>Cedente</strong>.`;
   const COBRASQ_PRE=`<strong>COBRASQ Recuperadora de Crédito e Cobrança Ltda</strong>, sociedade empresária limitada, inscrita no CNPJ sob o n. 34.626.848/0001-42, com sede na Av. Rio Grande do Sul, n. 380, sala 201, Ed. Mara, centro, CEP.: 85660–000, município de Dois Vizinhos, Estado do Paraná, neste ato representada por seu sócio administrador, Sr. <strong>Gustavo Souza Teixeira dos Santos</strong>, CPF sob o n. 103.513.639-20, doravante denominada de <strong>Cessionária</strong>.`;
   const total=creditos.reduce((s,k)=>s+k.nominal,0);
   const linhas=creditos.map((k,i)=>`<tr>
@@ -29163,20 +29174,21 @@ table.a1 tr{page-break-inside:avoid}
 </table>`;
   return _docClienteShell('Anexo I',
     [['Cedente', cli.nome||'—'],['CNPJ / CPF', cli.doc||'—'],['Cessionária','COBRASQ Recuperadora de Crédito e Cobrança Ltda'],['Créditos cedidos', String(creditos.length)]],
-    corpo, []);
+    corpo, [], { data: dataDoc });
 }
 async function gerarAnexoICliente(){
   if(!_anexo1Ctx) return;
   const { cli, creditos }=_anexo1Ctx;
   const sel=[...document.querySelectorAll('.anexo1-chk:checked')].map(c=>creditos[+c.dataset.i]);
   if(!sel.length){ showToast('Marque ao menos um crédito.','warning'); return; }
+  const dataDoc=document.getElementById('anexo1-data')?.value||hoje();
   _anexo1Fechar();
-  const html=_anexoIHtml(cli, sel);
+  const html=_anexoIHtml(cli, sel, dataDoc);
   const win=window.open('','_blank','width=900,height=900');
   if(win){ win.document.write(html); win.document.close(); }
   else showToast('Popup bloqueado — permita popups para visualizar.','warning');
-  const dt=new Date(), dd=String(dt.getDate()).padStart(2,'0'), mm=String(dt.getMonth()+1).padStart(2,'0');
-  const nomeArq=`Anexo I — ${sel.length} crédito${sel.length!==1?'s':''} — ${dd}-${mm}-${dt.getFullYear()}.html`;
+  const [aa,mm,dd]=String(dataDoc).slice(0,10).split('-');
+  const nomeArq=`Anexo I — ${sel.length} crédito${sel.length!==1?'s':''} — ${dd}-${mm}-${aa}.html`;
   const anexou=await _anexarDocClienteGerado('outros', html, nomeArq, cli.id);
   if(anexou && typeof _detCliId!=='undefined' && _detCliId===cli.id && typeof renderClienteDetalhe==='function') renderClienteDetalhe();
   if(typeof logAtividade==='function') logAtividade('Gerou Anexo I', `${sel.length} crédito(s) — ${cli.nome||''}`, cli.id);
@@ -29445,6 +29457,66 @@ async function enviarLoteDocClienteZapSign(){
   }
 }
 // Salva o HTML gerado em cliente_documentos (bucket peticao-assets), espelhando mcliUploadDoc.
+// Recupera do ZapSign documentos deste cliente que não constam na ficha — ex.: os
+// envios em que a RLS do bucket rejeitou o upload em silêncio (caminho sem uid).
+// Casa pelo padrão de nome "{Peça} — {razão social} — {data}" usado nos envios.
+async function mcliBackfillZapSign(clienteId){
+  const supa=getSupabase(); if(!supa){ showToast('Sem conexão com o banco.','danger'); return; }
+  const { data:cc }=await supa.from('clientes').select('id,nome,nome_fantasia').eq('id',clienteId).maybeSingle();
+  if(!cc||!cc.nome){ showToast('Cliente não encontrado.','danger'); return; }
+  showToast('Consultando o ZapSign…','info');
+  let recuperados=0, pulados=0, erros=0;
+  try{
+    const u=(await supa.auth.getUser()).data?.user;
+    const { data:jaTem }=await supa.from('cliente_documentos').select('zapsign_doc_id').eq('cliente_id',clienteId);
+    const tokensJa=new Set((jaTem||[]).map(x=>x.zapsign_doc_id).filter(Boolean));
+    const alvo=' — '+String(cc.nome).trim()+' — ';
+    const encontrados=[];
+    for(let pg=1; pg<=10; pg++){
+      const r=await fetch('/api/zapsign?path='+encodeURIComponent('docs/')+'&page='+pg, { headers:{ ...(await authHeaders()) } });
+      const j=await r.json().catch(()=>null);
+      if(!r.ok) throw new Error((j&&(j.detail||j.error))||('HTTP '+r.status));
+      const lista=(j&&(j.results||j))||[];
+      if(!Array.isArray(lista)||!lista.length) break;
+      for(const doc of lista){ if(String(doc.name||'').includes(alvo)) encontrados.push(doc); }
+      if(!j.next) break;
+    }
+    if(!encontrados.length){ showToast('Nenhum documento com o nome deste cliente no ZapSign.','warning'); return; }
+    const salvar=async(item, det)=>{
+      const token=item.token||null;
+      if(token&&tokensJa.has(token)){ pulados++; return; }
+      const assinado=String((det&&det.status)||item.status||'').toLowerCase()==='signed';
+      const fileUrl=(det&&(det.signed_file||det.original_file))||item.signed_file||item.original_file||null;
+      if(!fileUrl){ erros++; console.warn('[backfill zapsign] sem arquivo:', item.name); return; }
+      const fr=await fetch('/api/zapsign?fileUrl='+encodeURIComponent(fileUrl), { headers:{ ...(await authHeaders()) } });
+      if(!fr.ok){ erros++; console.warn('[backfill zapsign] download falhou:', item.name); return; }
+      const blob=await fr.blob();
+      const path=(u?.id?u.id+'/':'')+'clientes/'+clienteId+'/zapsign_'+(assinado?'assinado':'enviado')+'_'+Date.now()+'.pdf';
+      const { error:eUp }=await supa.storage.from('peticao-assets').upload(path, blob, { contentType:'application/pdf' });
+      if(eUp){ erros++; console.warn('[backfill zapsign] upload:', eUp.message); return; }
+      const nomeDoc=String(item.name||'Documento ZapSign');
+      const { error:eIns }=await supa.from('cliente_documentos').insert({
+        cliente_id:clienteId, tipo:/procura/i.test(nomeDoc)?'procuracao':'outros', nome:nomeDoc,
+        storage_path:path, mime_type:'application/pdf', size_bytes:blob.size, uploaded_by:u?.id, ativo:true,
+        zapsign_doc_id:token, zapsign_status:assinado?'assinado':'enviado',
+        assinado_storage_path:assinado?path:null });
+      if(eIns){ erros++; console.warn('[backfill zapsign] insert:', eIns.message); return; }
+      if(token) tokensJa.add(token);
+      recuperados++;
+    };
+    for(const doc of encontrados){
+      let det=null;
+      try{ det=await ZapSignAPI.getDoc(doc.token); }catch(_){ }
+      await salvar(doc, det);
+      // Peças extras do mesmo envelope (envio em lote: procuração/declaração etc.)
+      for(const ex of (det&&det.extra_docs)||[]){ try{ await salvar(ex, ex); }catch(_){ erros++; } }
+    }
+    if(typeof logAtividade==='function') logAtividade('Recuperou documentos do ZapSign', recuperados+' doc(s) — '+cc.nome, clienteId);
+    if(typeof _detCliId!=='undefined'&&_detCliId===clienteId&&typeof renderClienteDetalhe==='function') renderClienteDetalhe();
+    showToast(recuperados+' documento(s) recuperado(s)'+(pulados?', '+pulados+' já constavam':'')+(erros?', '+erros+' com erro (ver console)':'')+'.', recuperados?'success':'warning');
+  }catch(e){ showToast('Falha ao consultar o ZapSign: '+(e&&e.message||e),'danger'); }
+}
+
 // Registra no cadastro do cliente (cliente_documentos) um documento ENVIADO ao
 // ZapSign, guardando o token p/ o webhook casar o PDF ASSINADO de volta — espelha
 // o fluxo do devedor (acordos.zapsign_doc_id). Guarda o PDF gerado em peticao-assets
@@ -29457,7 +29529,8 @@ async function _registrarDocClienteZapSign({clienteId, tipo, nome, base64Pdf, do
     const u=(await supa.auth.getUser()).data?.user;
     const bin=atob(base64Pdf); const arr=new Uint8Array(bin.length);
     for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
-    const path='clientes/'+clienteId+'/enviado_'+(tipo||'doc')+'_'+Date.now()+'.pdf';
+    // RLS do bucket exige a 1ª pasta = uid do usuário (policy peticao_assets_insert).
+    const path=(u?.id?u.id+'/':'')+'clientes/'+clienteId+'/enviado_'+(tipo||'doc')+'_'+Date.now()+'.pdf';
     const { error:eUp }=await supa.storage.from('peticao-assets')
       .upload(path, new Blob([arr],{type:'application/pdf'}), { contentType:'application/pdf' });
     if(eUp) throw eUp;
@@ -29467,7 +29540,11 @@ async function _registrarDocClienteZapSign({clienteId, tipo, nome, base64Pdf, do
       zapsign_doc_id:docToken||null, zapsign_status:'enviado', signer_link:signerLink||null });
     if(eIns) throw eIns;
     return true;
-  }catch(e){ console.warn('[registrar doc cliente zapsign]', e&&e.message||e); return false; }
+  }catch(e){
+    console.warn('[registrar doc cliente zapsign]', e&&e.message||e);
+    if(typeof showToast==='function') showToast('Documento ENVIADO ao ZapSign, mas o registro na ficha do cliente falhou: '+(e&&e.message||e),'danger');
+    return false;
+  }
 }
 async function _anexarDocClienteGerado(tipoCol, html, nomeArq, clienteIdOpt){
   const clienteId=clienteIdOpt||document.getElementById('mcli-id')?.value;
@@ -29475,7 +29552,8 @@ async function _anexarDocClienteGerado(tipoCol, html, nomeArq, clienteIdOpt){
   const supa=getSupabase(); if(!supa) return false;
   try{
     const u=(await supa.auth.getUser()).data?.user;
-    const path='clientes/'+clienteId+'/gerado_'+tipoCol+'_'+Date.now()+'.html';
+    // RLS do bucket exige a 1ª pasta = uid do usuário (policy peticao_assets_insert).
+    const path=(u?.id?u.id+'/':'')+'clientes/'+clienteId+'/gerado_'+tipoCol+'_'+Date.now()+'.html';
     const blob=new Blob([html],{type:'text/html'});
     const { error:eUp }=await supa.storage.from('peticao-assets').upload(path, blob, { contentType:'text/html' });
     if(eUp) throw eUp;
