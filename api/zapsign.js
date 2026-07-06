@@ -18,29 +18,6 @@ module.exports = async function handler(req, res) {
   const user = await requireUser(req, res);
   if (!user) return;
 
-  // Download passthrough dos arquivos do ZapSign (signed_file/original_file ficam
-  // em S3 sem CORS — o navegador não consegue baixá-los direto). Só hosts do ZapSign.
-  const fileUrl = req.query.fileUrl || '';
-  if (fileUrl) {
-    let u;
-    try { u = new URL(fileUrl); } catch (_) { return res.status(400).json({ error: 'fileUrl inválida' }); }
-    const hostOk = u.protocol === 'https:' && (
-      u.hostname.endsWith('.zapsign.com.br') ||
-      (u.hostname.endsWith('.s3.amazonaws.com') && /zapsign/i.test(u.hostname)) ||
-      (u.hostname === 's3.amazonaws.com' && /^\/zapsign/i.test(u.pathname))
-    );
-    if (!hostOk) return res.status(400).json({ error: 'host não permitido para download' });
-    try {
-      const rr = await fetch(fileUrl);
-      if (!rr.ok) return res.status(502).json({ error: 'download falhou: HTTP ' + rr.status });
-      const buf = Buffer.from(await rr.arrayBuffer());
-      res.setHeader('Content-Type', rr.headers.get('content-type') || 'application/pdf');
-      return res.status(200).send(buf);
-    } catch (e) {
-      return res.status(502).json({ error: 'download falhou: ' + (e && e.message || e) });
-    }
-  }
-
   // Credencial SÓ via env var (gestor confirmou ZAPSIGN_TOKEN setada no Vercel).
   const token = process.env.ZAPSIGN_TOKEN || '';
   const pathParam = (req.query.path || '').replace(/^\/+/, '');
