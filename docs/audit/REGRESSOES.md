@@ -155,6 +155,35 @@ no código, ou ação na UI) e o **estado-correto** esperado. Atualize ao descob
   nova action `portal-challenge` em `api/mfa.js`, e `portalEnviarToken` migrado para o endpoint. Os 3 precisam subir
   **juntos** (migração isolada quebra o portal). Fecha também o antigo P1 de entrega via Z-API no blob staff-only.
 
+## R-14 · Cadastro excluído ressuscita (cliente/devedor "voltam") ⚠️
+- **O que é:** clientes/devedores apagados reaparecem (ex.: os de teste "lalala" e "—"). O `save()` regrava a
+  LISTA INTEIRA de `DB.clientes`/`DB.devedores` via `flushRelational()` → `.upsert(onConflict:id)`; uma aba/
+  dispositivo com estado velho **reinsere** o que outra sessão apagou. Piorado por caminhos de exclusão que só
+  filtravam o blob e **nunca faziam DELETE relacional** (`excluirDevedor`, `excluirPermanenteDevedor`,
+  `executarPedidoLocal`, `limparRascunhosVencidos`).
+- **Onde:** `index.html` `flushRelational` (filtro por lápide), `excluirComTombstone`, `loadTombstones`;
+  migração `20260706_registro_excluidos_tombstone.sql` (tabela `registro_excluidos` + trigger
+  `trg_bloqueia_ressurreicao` em `clientes`/`devedores`, que RETURN NULL — pula o INSERT tombado sem abortar o batch).
+- **Teste:** excluir um cadastro, abrir 2ª aba com a lista velha e salvar → **não** reaparece.
+  SQL: `select tgname from pg_trigger where tgname='trg_bloqueia_ressurreicao';` (2 linhas) e
+  `select count(*) from registro_excluidos;`. Grep: `grep -n "excluirComTombstone\|_tombstones" index.html`.
+- **Estado-correto:** toda exclusão grava a lápide (`registro_excluidos`) + DELETE relacional; o trigger barra
+  qualquer reinserção de id tombado. **Última checagem:** fix na branch `claude/tombstone-anti-ressurreicao`
+  (migração ainda **não aplicada** em prod).
+
+## R-15 · `devedores.cliente_id` zerado por aba desatualizada ⚠️
+- **O que é:** o vínculo credor↔caso some do devedor: o upsert em massa de `devedorToRow` gravava
+  `cliente_id: d.clienteId || null`, então uma aba velha com `clienteId` vazio **zerava** a coluna no banco.
+  Não é cosmético — a RLS do cedente (`devedores_cedente_scope`/`_grupo`) filtra por `devedores.cliente_id`, então
+  o caso some da **contagem em Clientes E da visão do cedente no portal**. O relatório (#298) segue certo porque lê
+  de `cobrancas.cliente_id`.
+- **Onde:** `index.html` `devedorToRow` (~4834) e `syncDevedorCobranca` (~12535) — guard `if(d.clienteId) row.cliente_id = ...`
+  (mesmo padrão do `assigned_to`, F-01). Backfill de dados: `update devedores d set cliente_id=c.cliente_id from cobrancas c where c.id=d.id and c.cliente_id is not null and d.cliente_id is distinct from c.cliente_id`.
+- **Teste:** `select count(*) from cobrancas c join devedores d on d.id=c.id where c.cliente_id is not null and d.cliente_id is null` deve ser **0**;
+  grep garante o guard `if(d.clienteId)` (nunca `cliente_id: d.clienteId || null` na literal do row).
+- **Estado-correto:** ausência de credor selecionado **preserva** o vínculo no banco (não zera). **Última checagem:**
+  7 casos quebrados em 3 credores (Paula Bordin ×5) — fix na branch; backfill pendente de aplicação.
+
 ---
 
 ### Invariantes guardadas (não quebrar)

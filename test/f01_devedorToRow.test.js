@@ -102,6 +102,14 @@ check('assigned_to OMITIDO quando string vazia', !has(r3,'assigned_to'));
 var r4 = devedorToRow({ id:'d4', nome:'X' }); // undefined
 check('assigned_to OMITIDO quando ausente', !has(r4,'assigned_to'));
 
+// 2b) cliente_id (credor) — MESMA proteção do assigned_to (R-15): uma aba velha com
+// clienteId vazio NÃO pode zerar o vínculo no banco (some da contagem em Clientes E da
+// visão do cedente, cuja RLS filtra por devedores.cliente_id).
+var rc = devedorToRow({ id:'c1', nome:'X', clienteId: GESTOR });
+check('cliente_id presente quando há valor', has(rc,'cliente_id') && rc.cliente_id === GESTOR);
+check('cliente_id OMITIDO quando string vazia', !has(devedorToRow({ id:'c2', nome:'X', clienteId:'' }),'cliente_id'));
+check('cliente_id OMITIDO quando ausente', !has(r4,'cliente_id'));
+
 // 3) Campos 100% do CRM: omitidos quando vazios, enviados quando há valor.
 check('passo_atual OMITIDO quando vazio', !has(r4,'passo_atual'));
 check('encerramento OMITIDO quando vazio', !has(r4,'encerramento'));
