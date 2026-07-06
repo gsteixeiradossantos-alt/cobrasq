@@ -14342,6 +14342,7 @@ function toggleCobrFilterStatus(s){
 let cobrView = 'lista';
 let cobSelectionMode = false;
 let selectedCobrIds = new Set();
+let _cobrVisiveis = []; // ids dos casos visíveis no último render (p/ "selecionar todos")
 
 async function loadCobrancasFromSupabase(){
   const supa = getSupabase();
@@ -14394,14 +14395,18 @@ function cobStatusPill(status){
   return `<span class="cob-pill ${cls}">${dot}${escHtml(statusLabel(status)||'—')}</span>`;
 }
 
-async function renderCobrancas(){
+async function renderCobrancas(opts){
   const el = document.getElementById('page-cobr');
   if(!el) return;
-  el.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text-2);">Carregando cobranças…</div>`;
-  const rows = await loadCobrancasFromSupabase();
-  if(Array.isArray(rows)) DB_cobrancas = rows;
-  // roster p/ resolver nome do responsável nas linhas e no filtro.
-  if(typeof carregarRosterAppUsers==='function' && !Array.isArray(_rosterAppUsers)){ try{ await carregarRosterAppUsers(); }catch(_){} }
+  // Interações de seleção redesenham só com os dados já em memória — sem refetch nem tela "Carregando…".
+  const soLocal = !!(opts && opts.soLocal) && Array.isArray(DB_cobrancas);
+  if(!soLocal){
+    el.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text-2);">Carregando cobranças…</div>`;
+    const rows = await loadCobrancasFromSupabase();
+    if(Array.isArray(rows)) DB_cobrancas = rows;
+    // roster p/ resolver nome do responsável nas linhas e no filtro.
+    if(typeof carregarRosterAppUsers==='function' && !Array.isArray(_rosterAppUsers)){ try{ await carregarRosterAppUsers(); }catch(_){} }
+  }
 
   const todas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft);
   const q = (cobrFilter.q||'').trim().toLowerCase();
@@ -14422,6 +14427,7 @@ async function renderCobrancas(){
     }
     return true;
   }).sort((a,b)=> _cobrPrincipalNome(a).localeCompare(_cobrPrincipalNome(b),'pt-BR',{sensitivity:'base'}));
+  _cobrVisiveis = cobr.map(c=>c.id);
 
   // KPIs sobre todas as cobranças ativas (independem do filtro de busca).
   const totalCarteira = todas.reduce((s,c)=>s + (+c.valor_atual || +c.valor_orig || 0), 0);
@@ -14545,7 +14551,7 @@ async function renderCobrancas(){
       <button class="cob-btn-ghost" onclick="bulkAlterarStatusCobr()">Alterar status</button>
       <button class="cob-btn-ghost" onclick="bulkExportarCobr()">Exportar CSV</button>
       ${!ehColaborador()?`<button class="cob-btn-ghost" style="color:var(--danger);" onclick="bulkExcluirCobr()">Excluir</button>`:''}
-      <button class="cob-btn-ghost" onclick="selectedCobrIds.clear();renderCobrancas();">Limpar seleção</button>
+      <button class="cob-btn-ghost" onclick="selectedCobrIds.clear();renderCobrancas({soLocal:true});">Limpar seleção</button>
     </div>` : ''}
     <div class="cob-panel">
       ${cobr.length === 0
@@ -14559,7 +14565,7 @@ async function renderCobrancas(){
           ? `<div class="det-devcards">${cobr.map(cardCaso).join('')}</div>`
           : `<table class="cob-table">
             <thead><tr>
-              ${cobSelectionMode?`<th style="width:36px;"><input type="checkbox" style="width:16px;height:16px;cursor:pointer;" onchange="cobr.forEach(c=>toggleCobrSelection(c.id,this.checked));renderCobrancas();" title="Selecionar todos"></th>`:''}
+              ${cobSelectionMode?`<th style="width:36px;"><input type="checkbox" ${cobr.length && cobr.every(c=>selectedCobrIds.has(c.id))?'checked':''} style="width:16px;height:16px;cursor:pointer;" onchange="toggleCobrSelectAll(this.checked)" title="Selecionar todos"></th>`:''}
               <th>Caso / devedor principal</th>
               <th>Credor</th>
               <th class="num">Valor</th>
@@ -14581,11 +14587,15 @@ async function renderCobrancas(){
 function toggleCobrSelectionMode(){
   cobSelectionMode = !cobSelectionMode;
   if(!cobSelectionMode) selectedCobrIds.clear();
-  renderCobrancas();
+  renderCobrancas({soLocal:true});
 }
 function toggleCobrSelection(id, on){
   if(on) selectedCobrIds.add(id); else selectedCobrIds.delete(id);
-  renderCobrancas();
+  renderCobrancas({soLocal:true});
+}
+function toggleCobrSelectAll(on){
+  _cobrVisiveis.forEach(id=>{ if(on) selectedCobrIds.add(id); else selectedCobrIds.delete(id); });
+  renderCobrancas({soLocal:true});
 }
 async function bulkAlterarStatusCobr(){
   if(!selectedCobrIds.size){ showToast('Nenhum caso selecionado.','warning'); return; }
