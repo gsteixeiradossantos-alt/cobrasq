@@ -400,8 +400,17 @@ function calcularJud(){
   renderJud(estado); autoSalvarCalculo();
 }
 
+// Lista unificada de itens do cálculo (item 1 = principal; 2+ = valores adicionais).
+// Cada um traz seu resultado próprio (linhas mês a mês, saldoCorrigido, jurosAcumulados).
+function itensCalc(r){
+  var itens=[{n:1, valor:r.params.valorOriginal, dataCorr:r.params.dataCorrecao, dataJuros:r.params.dataJuros, res:r.principal}];
+  (r.parcelasResultados||[]).forEach(function(pr,i){ itens.push({n:i+2, valor:pr.valor, dataCorr:pr.dataCorr, dataJuros:pr.dataJuros, res:pr.resultado}); });
+  return itens;
+}
 function renderJud(r){
   var p=r.principal, html='';
+  var itens=itensCalc(r), temExtras=itens.length>1;
+  var nominalSoma=itens.reduce(function(s,it){return s+it.valor;},0);
   html+='<div class="card"><div class="kpi">';
   html+=kpi('Valor corrigido',B(r.saldoCorrigidoTotal));
   html+=kpi('Juros',B(r.jurosAcumuladosTotal));
@@ -409,14 +418,24 @@ function renderJud(r){
   if(r.totalHonC>0) html+=kpi('Honorários',B(r.totalHonC));
   html+=kpi('Total geral',B(r.totalGeral),true);
   html+='</div>';
-  // breakdown
-  html+='<div style="margin-top:6px">';
-  html+=bd('Valor nominal (soma)', B(r.params.valorOriginal + r.parcelasResultados.reduce(function(s,x){return s+x.valor;},0)));
-  html+=bd('+ Correção '+r.params.indice+' (composta, pró-rata)', B(r.saldoCorrigidoTotal - (r.params.valorOriginal + r.parcelasResultados.reduce(function(s,x){return s+x.valor;},0))));
-  html+=bd('+ Juros (simples, Súmula 121)', B(r.jurosAcumuladosTotal));
-  if(r.multaAgregada>0) html+=bd('+ Multa', B(r.multaAgregada));
-  if(r.totalHonC>0) html+=bd('+ Honorários', B(r.totalHonC));
-  html+='</div>';
+  // breakdown / composição por item
+  if(temExtras){
+    html+='<div class="mono" style="margin:14px 0 6px">Composição por item · '+itens.length+' valores</div>';
+    itens.forEach(function(it){
+      html+='<div class="bd"><span><b>Item '+it.n+'</b> · '+B(it.valor)+' <span class="muted">· termo '+fmtData(it.dataCorr)+'</span></span><span>corrigido '+B(it.res.saldoCorrigido)+' + juros '+B(it.res.jurosAcumulados)+'</span></div>';
+    });
+    html+='<div class="bd" style="font-weight:600"><span>Soma dos '+itens.length+' itens</span><span>corrigido '+B(r.saldoCorrigidoTotal)+' + juros '+B(r.jurosAcumuladosTotal)+'</span></div>';
+    if(r.multaAgregada>0) html+=bd('+ Multa (sobre a soma)', B(r.multaAgregada));
+    if(r.totalHonC>0) html+=bd('+ Honorários (sobre a soma)', B(r.totalHonC));
+  } else {
+    html+='<div style="margin-top:6px">';
+    html+=bd('Valor nominal', B(nominalSoma));
+    html+=bd('+ Correção '+r.params.indice+' (composta, pró-rata)', B(r.saldoCorrigidoTotal - nominalSoma));
+    html+=bd('+ Juros (simples, Súmula 121)', B(r.jurosAcumuladosTotal));
+    if(r.multaAgregada>0) html+=bd('+ Multa', B(r.multaAgregada));
+    if(r.totalHonC>0) html+=bd('+ Honorários', B(r.totalHonC));
+    html+='</div>';
+  }
   if(r.aplicouGarantia) html+='<div class="warn" style="margin-top:10px;color:var(--success);border-left-color:var(--success)">✓ Garantia STJ aplicada — índice médio negativo no período; valor atualizado mínimo = nominal.</div>';
   if(p._extrapolacao) html+='<div class="warn" style="margin-top:10px">⚠ Índice não publicado a partir de '+p._extrapolacao.primeiroMes+' ('+p._extrapolacao.qtd+' mês/meses) — esses meses não foram corrigidos.</div>';
   html+='<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px">'+
@@ -425,9 +444,17 @@ function renderJud(r){
     '<button class="btn ghost sm" onclick="renderCenarios()">Comparar cenários</button></div>';
   html+='<div id="cenarios"></div>';
   html+='</div>';
-  // memorial
-  html+='<div class="card"><h2>Memorial mês a mês</h2><div style="overflow-x:auto">'+memorialTabela(p.linhas)+'</div>';
-  html+='<div class="hint" style="margin-top:8px">Índices atualizados até '+E.INDICES_ATE+'. Conferência humana obrigatória antes de uso processual.</div></div>';
+  // memorial — individualizado por item quando há adicionais
+  if(temExtras){
+    html+='<div class="card"><h2>Memorial mês a mês · por item</h2>';
+    itens.forEach(function(it){
+      html+='<details'+(it.n===1?' open':'')+' style="margin-bottom:8px;border:1px solid var(--border);border-radius:8px;padding:8px 12px"><summary class="mono" style="cursor:pointer;padding:2px 0;color:var(--gold-deep)">Item '+it.n+' — '+B(it.valor)+' · termo '+fmtData(it.dataCorr)+' → corrigido '+B(it.res.saldoCorrigido)+' + juros '+B(it.res.jurosAcumulados)+'</summary><div style="overflow-x:auto;margin-top:8px">'+memorialTabela(it.res.linhas)+'</div></details>';
+    });
+    html+='<div class="hint" style="margin-top:8px">Cada valor é corrigido individualmente pelo seu termo inicial e juros próprios; multa e honorários incidem sobre a soma. Índices até '+E.INDICES_ATE+'. Conferência humana obrigatória antes de uso processual.</div></div>';
+  } else {
+    html+='<div class="card"><h2>Memorial mês a mês</h2><div style="overflow-x:auto">'+memorialTabela(p.linhas)+'</div>';
+    html+='<div class="hint" style="margin-top:8px">Índices atualizados até '+E.INDICES_ATE+'. Conferência humana obrigatória antes de uso processual.</div></div>';
+  }
   $('resultado').innerHTML=html;
 }
 function memorialTabela(linhas){
@@ -540,8 +567,19 @@ async function iaParecer(){
 function exportarPDF(){
   if(!estado){alert('Calcule primeiro.');return;}
   var r=estado, win=window.open('','_blank');
-  var nominalSoma=r.params.valorOriginal+r.parcelasResultados.reduce(function(s,x){return s+x.valor;},0);
-  var rows=memorialTabela(r.principal.linhas);
+  var itens=itensCalc(r), temExtras=itens.length>1;
+  var nominalSoma=itens.reduce(function(s,it){return s+it.valor;},0);
+  var compRows, memoriais;
+  if(temExtras){
+    compRows=''; memoriais='';
+    itens.forEach(function(it){ compRows+='<tr><td>Item '+it.n+' · '+B(it.valor)+' · termo '+fmtData(it.dataCorr)+'</td><td>corr. '+B(it.res.saldoCorrigido-it.valor)+' + juros '+B(it.res.jurosAcumulados)+'</td></tr>'; });
+    compRows+='<tr><td><b>Soma corrigida ('+itens.length+' itens)</b></td><td><b>'+B(r.saldoCorrigidoTotal)+'</b></td></tr><tr><td>(+) Juros de mora (soma)</td><td>'+B(r.jurosAcumuladosTotal)+'</td></tr>';
+    itens.forEach(function(it){ memoriais+='<div class="itemhdr">Item '+it.n+' — '+B(it.valor)+'</div><div class="itemsub">Termo correção '+fmtData(it.dataCorr)+' · termo juros '+fmtData(it.dataJuros)+' · corrigido '+B(it.res.saldoCorrigido)+' + juros '+B(it.res.jurosAcumulados)+'</div>'+memorialTabela(it.res.linhas); });
+  } else {
+    compRows='<tr><td>Valor nominal</td><td>'+B(nominalSoma)+'</td></tr><tr><td>+ Correção monetária ('+r.params.indice+')</td><td>'+B(r.saldoCorrigidoTotal-nominalSoma)+'</td></tr><tr><td>+ Juros de mora</td><td>'+B(r.jurosAcumuladosTotal)+'</td></tr>';
+    memoriais=memorialTabela(r.principal.linhas);
+  }
+  compRows+=(r.multaAgregada>0?'<tr><td>+ Multa'+(temExtras?' (sobre a soma)':'')+'</td><td>'+B(r.multaAgregada)+'</td></tr>':'')+(r.totalHonC>0?'<tr><td>+ Honorários'+(temExtras?' (sobre a soma)':'')+'</td><td>'+B(r.totalHonC)+'</td></tr>':'');
   var css='@page{size:A4;margin:14mm 12mm 16mm}*{box-sizing:border-box}'+
     'body{font-family:"Inter Tight",Arial,sans-serif;color:#0A1530;margin:0;font-size:11px;-webkit-print-color-adjust:exact;print-color-adjust:exact}'+
     '.band{background:#0A1530;color:#F4F2EC;padding:16px 22px;display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #C9A961}'+
@@ -553,19 +591,16 @@ function exportarPDF(){
     'th{font-size:8px;letter-spacing:.06em;text-transform:uppercase;color:#8A93A3;text-align:right;border-bottom:1px solid #0A1530;padding:5px 6px}th:first-child{text-align:left}'+
     'td{text-align:right;padding:4px 6px;border-bottom:1px solid #E6E3D7}td:first-child{text-align:left}'+
     '.tot{display:flex;justify-content:space-between;margin:14px 22px 0;padding:10px 14px;background:#0A1530;color:#fff;border-radius:6px;font-weight:700}.tot b{color:#C9A961}'+
-    '.foot{margin:20px 22px 0;font-size:9px;color:#8A93A3;border-top:1px solid #C9A961;padding-top:8px}';
+    '.foot{margin:20px 22px 0;font-size:9px;color:#8A93A3;border-top:1px solid #C9A961;padding-top:8px}'+
+    '.itemhdr{margin:16px 22px 1px;font-family:"Fraunces",serif;font-weight:500;font-size:12px;color:#0A1530}.itemsub{margin:0 22px 3px;font-size:8.5px;color:#8A93A3}';
   var html='<!doctype html><html><head><meta charset=utf-8><title>Cálculo COBRASQ</title>'+
     '<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=Fraunces:wght@300;500&family=Instrument+Serif:ital@1&display=swap" rel=stylesheet>'+
     '<style>'+css+'</style></head><body>'+
     '<div class="band"><div class="wm">cobrasq<b>.</b></div><div class="co">COBRASQ Recuperadora de Crédito e Cobrança Ltda.<br>CNPJ 34.626.848/0001-42 · Dois Vizinhos/PR<br>contato@cobrasq.com.br · (46) 98822-6533</div></div>'+
     '<h1>Memória de cálculo</h1><div class="sub">Atualização monetária · '+r.params.indice+' · juros simples (Súmula 121 STF) · garantia STJ · índices até '+E.INDICES_ATE+'</div>'+
-    '<table><tr><td>Valor nominal</td><td>'+B(nominalSoma)+'</td></tr>'+
-    '<tr><td>+ Correção monetária ('+r.params.indice+')</td><td>'+B(r.saldoCorrigidoTotal-nominalSoma)+'</td></tr>'+
-    '<tr><td>+ Juros de mora</td><td>'+B(r.jurosAcumuladosTotal)+'</td></tr>'+
-    (r.multaAgregada>0?'<tr><td>+ Multa</td><td>'+B(r.multaAgregada)+'</td></tr>':'')+
-    (r.totalHonC>0?'<tr><td>+ Honorários</td><td>'+B(r.totalHonC)+'</td></tr>':'')+'</table>'+
+    '<table>'+compRows+'</table>'+
     '<div class="tot"><span>TOTAL GERAL</span><b>'+B(r.totalGeral)+'</b></div>'+
-    '<h1 style="margin-top:22px">Demonstrativo mês a mês</h1>'+rows+
+    '<h1 style="margin-top:22px">Demonstrativo mês a mês'+(temExtras?' · por item':'')+'</h1>'+memoriais+
     '<div class="foot">Documento gerado pela Calculadora Jurídica COBRASQ. Cálculo de conferência — revisão humana obrigatória antes de uso processual. '+new Date().toLocaleDateString('pt-BR')+'.</div>'+
     '<script>window.onload=function(){setTimeout(function(){window.print();},400);}<\/script></body></html>';
   win.document.write(html); win.document.close();
