@@ -15898,7 +15898,10 @@ async function renderClienteDetalhe(){
   const panelDocumentos=`<div class="cob-panel" style="padding:18px;">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
       <div class="det-panel-tt" style="margin:0;">Documentos &amp; contratos</div>
-      <button class="btn btn-ghost btn-sm" onclick="mcliUploadDocFolder()">${ico('plus',12)||'+'} Anexar arquivo</button>
+      <span style="display:flex;gap:6px;flex-wrap:wrap;">
+        ${_zapOn?`<button class="btn btn-ghost btn-sm" onclick="abrirVincularZapSign('${cli.id}')" title="Ver os documentos do ZapSign e vincular os deste cliente à ficha">Vincular do ZapSign</button>`:''}
+        <button class="btn btn-ghost btn-sm" onclick="mcliUploadDocFolder()">${ico('plus',12)||'+'} Anexar arquivo</button>
+      </span>
     </div>
     <div style="font-size:11.5px;color:var(--text-3);margin:4px 0 12px;">Modelos do escritório no timbrado COBRASQ — revise o texto antes de enviar. Cada peça gerada ou enviada fica salva aqui na hora.</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
@@ -28233,11 +28236,6 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
         </div>
         <button class="btn btn-ghost btn-sm" id="btn-test-zapsign" onclick="testarZapSign()">Testar conexão</button>
         <span id="zapsign-test-result" style="font-size:12px;margin-left:8px;"></span>
-        ${DB.config.zapsignToken?`<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">
-          <button class="btn btn-ghost btn-sm" id="btn-recuperar-assinados" onclick="recuperarAssinadosZapSign()" title="Puxa do ZapSign os documentos assinados/enviados que ainda não constam nas fichas dos clientes. Ação única — depois disso, cada novo envio já entra sozinho.">Recuperar assinados (uma vez)</button>
-          <span id="recuperar-assinados-result" style="font-size:12px;margin-left:8px;color:var(--text-3);"></span>
-          <div style="font-size:11px;color:var(--text-3);margin-top:6px;">Recupera documentos de clientes enviados/assinados antes da correção de 06/07. Rodar uma única vez.</div>
-        </div>`:''}
       </div>
 
       <!-- ── Z-Api ────────────────────────────────── -->
@@ -28539,78 +28537,111 @@ async function testarAsaas(){
   btn.disabled=false;
 }
 
-// Recuperação ÚNICA dos documentos de cliente que foram enviados/assinados no
-// ZapSign ANTES do fix de 06/07 (o upload no bucket falhava em silêncio, então a
-// linha em cliente_documentos nunca existiu e o webhook não casou o assinado).
-// Owner-only, idempotente (pula tokens já registrados). Após rodar, o vínculo-na-
-// hora cobre todos os próximos envios — este botão não é mais necessário.
-async function recuperarAssinadosZapSign(){
-  if(typeof ehColaborador==='function' && ehColaborador()){ showToast('Ação restrita ao proprietário.','warning'); return; }
-  if(!DB.config?.zapsignToken){ showToast('Configure o ZapSign primeiro.','warning'); return; }
+// ── Seletor manual: vincular documento assinado do ZapSign ao cliente ─────────
+// Abre a lista real da conta ZapSign (nome, status, data); o operador escolhe e
+// vincula. Confere o CPF/CNPJ do assinante contra o cadastro antes de gravar.
+let _vincZapCli=null, _vincZapDocs=[], _vincZapLinked=new Set();
+function _vincZapClose(){ document.getElementById('vinczap-overlay')?.remove(); _vincZapCli=null; _vincZapDocs=[]; }
+async function abrirVincularZapSign(clienteId){
+  if(!DB.config?.zapsignToken){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
   const supa=getSupabase(); if(!supa){ showToast('Sem conexão com o banco.','danger'); return; }
-  if(!confirm('Buscar no ZapSign os documentos de clientes já enviados/assinados que não constam nas fichas e trazê-los para o sistema?\n\nÉ uma ação única e segura de repetir (o que já existe é ignorado).')) return;
-  const btn=document.getElementById('btn-recuperar-assinados');
-  const res=document.getElementById('recuperar-assinados-result');
-  if(btn){ btn.disabled=true; btn.textContent='Recuperando…'; }
-  if(res) res.textContent='Consultando o ZapSign…';
-  let recuperados=0, pulados=0, erros=0;
+  const cli=(DB.clientes||[]).find(c=>c.id===clienteId)||(typeof _detCliObj!=='undefined'?_detCliObj:null);
+  _vincZapClose();
+  _vincZapCli={ id:clienteId, nome:(cli&&cli.nome)||'', fantasia:(cli&&(cli.nome_fantasia||cli.nomeFantasia||cli.nome))||'', doc:(cli&&cli.doc)||'' };
+  const ov=document.createElement('div'); ov.id='vinczap-overlay';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(10,21,48,.45);z-index:9000;display:flex;align-items:center;justify-content:center;';
+  ov.innerHTML=`<div style="background:var(--surface,#fff);border-radius:14px;padding:22px 24px;width:min(640px,95vw);max-height:88vh;display:flex;flex-direction:column;box-shadow:0 18px 60px rgba(0,0,0,.25);">
+    <div style="font-family:var(--font-display,serif);font-size:18px;font-weight:700;color:var(--navy,#0A1530);">Vincular documento do ZapSign</div>
+    <div style="font-size:12.5px;color:var(--text-3,#666);margin:3px 0 12px;">Selecione o(s) documento(s) de <b>${escHtml(_vincZapCli.fantasia||'este cliente')}</b> e vincule à ficha. Confira o assinante antes de vincular.</div>
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;">
+      <input type="search" id="vinczap-busca" placeholder="Buscar por nome…" oninput="_vincZapPinta()" style="flex:1;padding:8px 10px;border:1px solid var(--border,#ddd);border-radius:8px;font-size:13px;background:var(--surface,#fff);color:var(--text,#222);">
+      <label style="font-size:12px;color:var(--text-2,#444);display:flex;align-items:center;gap:6px;white-space:nowrap;"><input type="checkbox" id="vinczap-soassinados" checked onchange="_vincZapPinta()"> só assinados</label>
+    </div>
+    <div id="vinczap-lista" style="overflow-y:auto;flex:1;min-height:140px;"><div style="padding:26px;text-align:center;color:var(--text-3,#666);">Carregando do ZapSign…</div></div>
+    <div style="display:flex;justify-content:flex-end;margin-top:12px;padding-top:12px;border-top:1px solid var(--border,#ddd);">
+      <button class="cob-btn-ghost" onclick="_vincZapClose()">Fechar</button>
+    </div>
+  </div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) _vincZapClose(); });
+  document.body.appendChild(ov);
   try{
-    const u=(await supa.auth.getUser()).data?.user;
-    const clientes=(DB.clientes||[]).filter(c=>c&&c.nome&&c.id).map(c=>({ id:c.id, nome:String(c.nome).trim() }))
-      .sort((a,b)=>b.nome.length-a.nome.length); // nomes mais longos primeiro (evita casar por prefixo)
-    const { data:jaTem }=await supa.from('cliente_documentos').select('zapsign_doc_id').not('zapsign_doc_id','is',null);
-    const tokensJa=new Set((jaTem||[]).map(x=>x.zapsign_doc_id).filter(Boolean));
-    const achaCliente=nome=>{ const n=' '+String(nome||'')+' '; return clientes.find(c=>n.includes(' — '+c.nome+' — ')||n.includes(' — '+c.nome+' '))||clientes.find(c=>String(nome||'').includes(c.nome)); };
-    // varre a conta ZapSign (paginado)
-    const encontrados=[];
-    for(let pg=1; pg<=25; pg++){
+    const { data:linked }=await supa.from('cliente_documentos').select('zapsign_doc_id').not('zapsign_doc_id','is',null);
+    _vincZapLinked=new Set((linked||[]).map(x=>x.zapsign_doc_id).filter(Boolean));
+    const docs=[];
+    for(let pg=1; pg<=5; pg++){
       const r=await fetch('/api/zapsign?path='+encodeURIComponent('docs/')+'&page='+pg, { headers:{ ...(await authHeaders()) } });
       const j=await r.json().catch(()=>null);
       if(!r.ok) throw new Error((j&&(j.detail||j.error||j.message))||('HTTP '+r.status));
       const lista=(j&&(j.results||j))||[];
       if(!Array.isArray(lista)||!lista.length) break;
-      encontrados.push(...lista);
+      docs.push(...lista);
       if(!j.next) break;
     }
-    if(res) res.textContent=`${encontrados.length} documento(s) no ZapSign; casando com os clientes…`;
-    const salvar=async(item, det, cli)=>{
-      const token=item.token||null;
-      if(token&&tokensJa.has(token)){ pulados++; return; }
-      const assinado=String((det&&det.status)||item.status||'').toLowerCase()==='signed';
-      const fileUrl=(det&&(det.signed_file||det.original_file))||item.signed_file||item.original_file||null;
-      if(!fileUrl){ erros++; console.warn('[recuperar zapsign] sem arquivo:', item.name); return; }
-      const fr=await fetch('/api/zapsign?fileUrl='+encodeURIComponent(fileUrl), { headers:{ ...(await authHeaders()) } });
-      if(!fr.ok){ erros++; console.warn('[recuperar zapsign] download falhou:', item.name, fr.status); return; }
-      const blob=await fr.blob();
-      const path=(u?.id?u.id+'/':'')+'clientes/'+cli.id+'/zapsign_'+(assinado?'assinado':'enviado')+'_'+Date.now()+'_'+Math.random().toString(36).slice(2,7)+'.pdf';
-      const { error:eUp }=await supa.storage.from('peticao-assets').upload(path, blob, { contentType:'application/pdf' });
-      if(eUp){ erros++; console.warn('[recuperar zapsign] upload:', eUp.message); return; }
-      const nomeDoc=String(item.name||'Documento ZapSign');
-      const { error:eIns }=await supa.from('cliente_documentos').insert({
-        cliente_id:cli.id, tipo:/procura/i.test(nomeDoc)?'procuracao':'outros', nome:nomeDoc,
-        storage_path:path, mime_type:'application/pdf', size_bytes:blob.size, uploaded_by:u?.id, ativo:true,
-        zapsign_doc_id:token, zapsign_status:assinado?'assinado':'enviado',
-        assinado_storage_path:assinado?path:null });
-      if(eIns){ erros++; console.warn('[recuperar zapsign] insert:', eIns.message); return; }
-      if(token) tokensJa.add(token);
-      recuperados++;
-    };
-    for(const doc of encontrados){
-      const cli=achaCliente(doc.name);
-      if(!cli) continue; // documento de outro contexto (ex.: acordo de devedor) — ignora
-      let det=null;
-      try{ det=await ZapSignAPI.getDoc(doc.token); }catch(_){ }
-      await salvar(doc, det||doc, cli);
-      for(const ex of (det&&det.extra_docs)||[]){ const c2=achaCliente(ex.name)||cli; try{ await salvar(ex, ex, c2); }catch(_){ erros++; } }
+    _vincZapDocs=docs;
+    _vincZapPinta();
+  }catch(e){ const el=document.getElementById('vinczap-lista'); if(el) el.innerHTML=`<div style="padding:22px;color:var(--danger,#C83A1E);">Falha ao consultar o ZapSign: ${escHtml(e&&e.message||String(e))}</div>`; }
+}
+function _vincZapPinta(){
+  const el=document.getElementById('vinczap-lista'); if(!el||!_vincZapCli) return;
+  const q=(document.getElementById('vinczap-busca')?.value||'').toLowerCase();
+  const soAss=document.getElementById('vinczap-soassinados')?.checked;
+  const nomeCli=(_vincZapCli.nome||'').toLowerCase();
+  let rows=_vincZapDocs.slice();
+  if(soAss) rows=rows.filter(d=>String(d.status||'').toLowerCase()==='signed');
+  if(q) rows=rows.filter(d=>String(d.name||'').toLowerCase().includes(q));
+  rows.sort((a,b)=>((nomeCli&&String(b.name||'').toLowerCase().includes(nomeCli))?1:0)-((nomeCli&&String(a.name||'').toLowerCase().includes(nomeCli))?1:0));
+  if(!rows.length){ el.innerHTML=`<div style="padding:22px;text-align:center;color:var(--text-3,#666);">Nenhum documento ${soAss?'assinado ':''}encontrado no ZapSign.</div>`; return; }
+  el.innerHTML=rows.map(d=>{
+    const assinado=String(d.status||'').toLowerCase()==='signed';
+    const prov=nomeCli && String(d.name||'').toLowerCase().includes(nomeCli);
+    const ja=_vincZapLinked.has(d.token);
+    const data=(String(d.created_at||'').slice(0,10).split('-').reverse().join('/'))||'sem data';
+    const st=assinado?'<span style="color:#2E7D4F;font-weight:600;">Assinado</span>':`<span style="color:var(--text-3,#666);">${escHtml(d.status||'—')}</span>`;
+    return `<div style="display:flex;align-items:center;gap:10px;border:1px solid var(--border,#ddd);border-radius:9px;padding:9px 11px;margin-bottom:6px;${prov?'background:rgba(201,169,97,.10);':''}">
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(d.name||'Documento')}${prov?' <span style="font-size:9.5px;font-weight:700;color:#9C7F40;border:1px solid #9C7F40;border-radius:8px;padding:0 6px;">provável</span>':''}</div>
+        <div style="font-size:10.5px;color:var(--text-3,#666);margin-top:2px;">${st} · ${data}</div>
+      </div>
+      ${ja?'<span style="font-size:11px;color:var(--text-3,#666);white-space:nowrap;">já vinculado</span>'
+          :`<button class="btn btn-primary btn-sm" onclick="_vincZapAttach('${d.token}', this)">Vincular</button>`}
+    </div>`;
+  }).join('');
+}
+async function _vincZapAttach(token, btn){
+  const supa=getSupabase(); if(!supa){ showToast('Sem conexão.','danger'); return; }
+  const clienteId=_vincZapCli&&_vincZapCli.id; if(!clienteId) return;
+  const item=_vincZapDocs.find(d=>d.token===token)||{};
+  const nome=item.name||'Documento ZapSign';
+  const orig=btn?btn.textContent:''; if(btn){ btn.disabled=true; btn.textContent='Vinculando…'; }
+  try{
+    let det=null; try{ det=await ZapSignAPI.getDoc(token); }catch(_){ det=item; }
+    // Conferência por CPF/CNPJ do assinante (quando disponível no ZapSign).
+    const cliDigits=String(_vincZapCli.doc||'').replace(/\D/g,'');
+    const signerDocs=((det&&det.signers)||[]).map(sg=>String(sg.cpf||sg.cnpj||sg.tax_id||'').replace(/\D/g,'')).filter(Boolean);
+    if(cliDigits && signerDocs.length && !signerDocs.includes(cliDigits)){
+      if(!confirm('Atenção: o documento do assinante ('+signerDocs.join(', ')+') é diferente do cadastro deste cliente ('+(_vincZapCli.doc||'—')+').\n\nVincular mesmo assim?')){ if(btn){ btn.disabled=false; btn.textContent=orig; } return; }
     }
-    if(typeof logAtividade==='function') logAtividade('Recuperou assinados do ZapSign (única vez)', `${recuperados} recuperado(s), ${pulados} já constavam, ${erros} erro(s)`);
-    const msg=`${recuperados} recuperado(s)`+(pulados?`, ${pulados} já constavam`:'')+(erros?`, ${erros} com erro (ver console)`:'')+'.';
-    if(res) res.textContent=msg;
-    showToast(recuperados?('Documentos recuperados: '+msg):('Nada novo a recuperar'+(pulados?` (${pulados} já constavam)`:'')+'.'), recuperados?'success':'info');
-  }catch(e){
-    if(res) res.textContent='Falha: '+(e&&e.message||e);
-    showToast('Falha ao consultar o ZapSign: '+(e&&e.message||e),'danger');
-  }finally{ if(btn){ btn.disabled=false; btn.textContent='Recuperar assinados (uma vez)'; } }
+    const assinado=String((det&&det.status)||'').toLowerCase()==='signed';
+    const fileUrl=(det&&(det.signed_file||det.original_file))||item.signed_file||item.original_file||null;
+    if(!fileUrl) throw new Error('documento sem arquivo disponível no ZapSign');
+    const fr=await fetch('/api/zapsign?fileUrl='+encodeURIComponent(fileUrl), { headers:{ ...(await authHeaders()) } });
+    if(!fr.ok) throw new Error('download HTTP '+fr.status);
+    const blob=await fr.blob();
+    const u=(await supa.auth.getUser()).data?.user;
+    const path=(u?.id?u.id+'/':'')+'clientes/'+clienteId+'/zapsign_'+(assinado?'assinado':'enviado')+'_'+Date.now()+'.pdf';
+    const { error:eUp }=await supa.storage.from('peticao-assets').upload(path, blob, { contentType:'application/pdf' });
+    if(eUp) throw eUp;
+    const { error:eIns }=await supa.from('cliente_documentos').insert({
+      cliente_id:clienteId, tipo:/procura/i.test(nome)?'procuracao':'outros', nome,
+      storage_path:path, mime_type:'application/pdf', size_bytes:blob.size, uploaded_by:u?.id, ativo:true,
+      zapsign_doc_id:token, zapsign_status:assinado?'assinado':'enviado', assinado_storage_path:assinado?path:null });
+    if(eIns) throw eIns;
+    _vincZapLinked.add(token);
+    if(typeof logAtividade==='function') logAtividade('Vinculou documento do ZapSign', nome+' → '+(_vincZapCli.nome||''), clienteId);
+    showToast('Documento vinculado à ficha.','success');
+    if(btn){ btn.textContent='Vinculado ✓'; btn.classList.remove('btn-primary'); btn.classList.add('btn-ghost'); btn.disabled=true; }
+    if(typeof _detCliId!=='undefined' && _detCliId===clienteId && typeof renderClienteDetalhe==='function') renderClienteDetalhe();
+  }catch(e){ showToast('Falha ao vincular: '+(e&&e.message||e),'danger'); if(btn){ btn.disabled=false; btn.textContent=orig; } }
 }
 async function testarZapSign(){
   const token = document.getElementById('cfg-zapsign-token')?.value;
