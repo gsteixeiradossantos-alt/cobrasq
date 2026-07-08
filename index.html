@@ -5284,6 +5284,8 @@ async function loadRelationalData(){
   if(Array.isArray(cobrancasRel)) DB_cobrancas = cobrancasRel;
   // FASE C2 (tempo-2): leitores do cliente passam a ver a dívida de cobrancas.
   _mergeDividaFromCobrancas();
+  // Valor atualizado sempre corrente: recalcula HOJE em memória (compute-on-read).
+  _refrescarValorAtualHoje();
   await loadGruposEconomicos();
   // Reidrata os acordos da tabela dedicada (salvarAcordo/toggleParcela persistem lá).
   await _reidratarAcordos(DB.devedores);
@@ -5859,6 +5861,64 @@ async function viaCepLookup(cepStr, prefix, force){
   }
 }
 
+// ── Formatação automática de campos (máscaras) ───────────────────────────────
+// Delegação ÚNICA no documento: aplica a máscara certa a QUALQUER input listado,
+// inclusive os renderizados dinamicamente (di-*, cobr-*, cpnc-*), sem depender de
+// um oninput por campo. As funções de máscara são idempotentes, então convivem
+// sem conflito com os handlers inline já existentes (recalc, viaCEP, etc.).
+//   • Valores  → R$ 1.000,00   • CPF/CNPJ → 123.456.789-00 / 12.345.678/0001-00
+//   • Telefone → (46) 99922-3332 / (46) 9922-3332   • CEP → 85660-000
+// Campos que JÁ tinham máscara (mdev-tel, mdev-cep, mcli-cep, wa-numero, waNCTel)
+// não precisam entrar aqui — o handler inline deles continua valendo.
+const _MASK_MONEY = new Set(['mlanc-valor','mlanc-juros','mlanc-multa','mlanc-desconto',
+  'mtransf-valor','mcust-valor-previsto','mcust-valor-bloqueado','mcust-valor-sacado',
+  'mrec-valor','macord-valor','di-valor','mpag-valor','cpnc-valor',
+  'cobr-valor-capital','cobr-valor-atual']);
+const _MASK_DOC = new Set(['mdev-doc','mcli-doc','di-doc','cpnc-doc','mctf-doc',
+  'cfg-cnpj','devedor-cpf']);
+const _MASK_TEL = new Set(['mcli-tel','di-tel','cpnc-tel','mctf-tel',
+  'cfg-zapi-admin-tel','mudou-tel']);
+const _MASK_CEP = new Set(['mdr-end-cep']);
+document.addEventListener('input', function(e){
+  const el = e.target;
+  if(!el || el.tagName !== 'INPUT' || !el.id) return;
+  try{
+    if(_MASK_MONEY.has(el.id)) maskMoneyBR(el);
+    else if(_MASK_DOC.has(el.id)) mascaraDoc(el);
+    else if(_MASK_TEL.has(el.id)) mascaraTel(el);
+    else if(_MASK_CEP.has(el.id)) maskCEP(el);
+  }catch(_){}
+}, true);
+
+// Formata um campo de percentual como "12,34%" (usado em juros/multa de config).
+// parseValorBR aceita "12,34", "12.34" e "12,34%" → número; salvarParamsCalculo
+// já lê com parseFloat(replace(',','.')), que ignora o "%" final.
+function formatPercentBR(el){
+  if(!el) return;
+  const raw = String(el.value||'').trim();
+  if(!raw){ el.value=''; return; }
+  const n = parseValorBR(raw.replace('%',''));
+  if(!isFinite(n)) return;
+  el.value = n.toLocaleString('pt-BR',{minimumFractionDigits:2, maximumFractionDigits:2}) + '%';
+}
+
+// Formata valores JÁ preenchidos (ex.: ao abrir um cadastro existente) — o
+// evento 'input' não dispara quando o .value é setado por código. Só documento,
+// telefone e CEP: são strip-and-group, sem ambiguidade. Valores monetários NÃO
+// entram aqui (maskMoneyBR trata dígitos como centavos e "1234" viraria 12,34;
+// o valor já é normalizado por valorBRParaInput/toFixed nos pontos que populam).
+function _aplicarMascarasNoModal(root){
+  if(!root || !root.querySelectorAll) return;
+  root.querySelectorAll('input').forEach(el=>{
+    if(!el.id || !el.value) return;
+    try{
+      if(_MASK_DOC.has(el.id)) mascaraDoc(el);
+      else if(_MASK_TEL.has(el.id)) mascaraTel(el);
+      else if(_MASK_CEP.has(el.id)) maskCEP(el);
+    }catch(_){}
+  });
+}
+
 // IMPLEMENTADO S8: serializa endereço estruturado em string única (fallback p/ schema atual)
 // TODO: criar migration Supabase para colunas separadas (cep, rua, numero, complemento, bairro, cidade, uf)
 function serializeEndereco(prefix){
@@ -5996,6 +6056,8 @@ function openModal(id){
   // recém-preenchidos (setTimeout 0 = roda depois do caller terminar de setar os campos).
   if(id === 'modal-devedor') setTimeout(()=>{ try{ checarDupDocDevedor(); }catch(_){} }, 0);
   if(id === 'modal-cliente') setTimeout(()=>{ try{ checarDupDocCliente(); }catch(_){} }, 0);
+  // Formata doc/telefone/CEP já preenchidos ao abrir um cadastro existente.
+  setTimeout(()=>{ try{ _aplicarMascarasNoModal(el); }catch(_){} }, 0);
 }
 function closeModal(id){
   const el = document.getElementById(id);
@@ -9405,6 +9467,53 @@ function calcDividaCobranca(valorOrig, vencStr){
     taxa: r.taxa, subtotal: r.subtotal, total: r.total, diasAtraso, meses: r.meses };
 }
 
+// ── Valor atualizado HOJE (compute-on-read) ──────────────────────────────────
+// Fonte única de verdade para exibir/somar a dívida nas listas, cards e totais.
+// Deriva de valorOrig + vencimento pela MESMA régua do modal/cobrança
+// (calcDividaCobranca), então o número nunca fica "congelado" no banco.
+// Memoizado por (orig|venc|dia) — calcDividaCobranca faz loop mês-a-mês e há
+// dezenas de chamadas por render. GUARDA: casos com acordo aceito ou já
+// judiciais NÃO correm pela régua de mora (valor renegociado/fixado) — usa o
+// valor gravado. Sem vencimento também usa o gravado (ou o original).
+// Aceita as DUAS formas de objeto que circulam no app: o devedor camelCase
+// (d.valorOrig / d.valorAtual / d.vencimento / d.acordoFinal / d.fase) e a linha
+// de cobrança snake_case (c.valor_orig / c.valor_atual / c.acordo_final).
+const _dividaCache = new Map();
+function dividaAtualHoje(d){
+  if(!d) return 0;
+  const rawOrig  = d.valorOrig  != null ? d.valorOrig  : d.valor_orig;
+  const rawAtual = d.valorAtual != null ? d.valorAtual : d.valor_atual;
+  const acordo   = d.acordoFinal != null ? d.acordoFinal : d.acordo_final;
+  const orig = parseValorBR(rawOrig) || parseValorBR(rawAtual) || 0;
+  if(!orig) return parseValorBR(rawAtual) || 0;
+  if(acordo || d.fase === 'judicial') return parseValorBR(rawAtual) || orig;
+  const venc = String(d.vencimento || '').trim();
+  if(!venc) return parseValorBR(rawAtual) || orig;
+  const hojeKey = new Date().toISOString().slice(0,10);
+  const key = orig + '|' + venc + '|' + hojeKey;
+  if(_dividaCache.has(key)) return _dividaCache.get(key);
+  const total = calcDividaCobranca(orig, venc).total || orig;
+  _dividaCache.set(key, total);
+  return total;
+}
+
+// Reescreve, EM MEMÓRIA, o valor atualizado de cada caso ativo com o valor de
+// HOJE (deriva de valor original + vencimento). Roda no fim da carga relacional,
+// logo após _mergeDividaFromCobrancas(), então todos os ~70 leitores (listas,
+// cards, totais, relatórios) passam a ver o número corrigido sem tocar cada um.
+// Casos com acordo aceito / judiciais / sem vencimento ficam intactos (guarda em
+// dividaAtualHoje). O valor gravado no banco vira espelho no próximo flush.
+function _refrescarValorAtualHoje(){
+  const aplicar = (obj, atualKey, origKey) => {
+    const rawOrig = obj[origKey];
+    if(!(parseValorBR(rawOrig) > 0)) return;   // sem original: não mexe
+    const fresh = dividaAtualHoje(obj);
+    if(fresh && isFinite(fresh)) obj[atualKey] = fresh;
+  };
+  for(const c of (DB_cobrancas||[])) aplicar(c, 'valor_atual', 'valor_orig');
+  for(const d of (DB.devedores||[])) aplicar(d, 'valorAtual', 'valorOrig');
+}
+
 function _fmtR(n){ return 'R$ ' + (Number(n)||0).toLocaleString('pt-BR', { minimumFractionDigits:2, maximumFractionDigits:2 }); }
 function _fmtPct(p){ return (p*100).toLocaleString('pt-BR', { minimumFractionDigits:2, maximumFractionDigits:2 }) + '%'; }
 
@@ -11879,6 +11988,12 @@ function editDevedor(id){
     const el = document.getElementById(id);
     if(el && el.value) maskMoneyBR(el);
   });
+  // Valor atualizado corrente ao ABRIR: recalcula com a data de hoje (a mesma
+  // conta do input/IA). Sem isto o campo mostrava o valor congelado do banco.
+  // Guarda: acordo aceito ou caso judicial ficam com o valor gravado (renegociado/fixo).
+  if(!dev.acordoFinal && dev.fase !== 'judicial' && typeof mdevRecalcularValorAtualizado === 'function'){
+    mdevRecalcularValorAtualizado();
+  }
 
   // IMPLEMENTADO S2: carrega dívidas adicionais do Supabase
   mdevCarregarDividas(dev.id);
@@ -14484,7 +14599,11 @@ async function loadCobrancasFromSupabase(){
       .select('*, cobranca_partes(id, devedor_id, papel, principal, devedores(nome, doc, telefone))')
       .order('created_at', { ascending:false });
     if(error){ console.warn('[rel] loadCobrancas:', error.message); return null; }
-    return data || [];
+    const rows = data || [];
+    // Valor atualizado sempre corrente (compute-on-read) — painel, busca e a
+    // tela Cobranças passam a ver a dívida corrigida de hoje, não o congelado.
+    try{ for(const c of rows){ if(parseValorBR(c.valor_orig) > 0){ const f = dividaAtualHoje(c); if(f && isFinite(f)) c.valor_atual = f; } } }catch(_){}
+    return rows;
   }catch(e){ console.warn('[rel] loadCobrancas ex:', e.message); return null; }
 }
 
@@ -28025,8 +28144,8 @@ function renderCfgSection(section){
         Usados na atualização de dívidas e no padrão da multa ao iniciar execuções. A correção monetária segue a tabela <strong>INPC</strong> (TJ-PR); juros e multa abaixo são editáveis.
       </p>
       <div class="frow">
-        <div class="fg"><label>Juros de mora (% ao mês)</label><input type="number" step="0.1" min="0" id="cfg-calc-juros" value="${(p.juros*100).toLocaleString('pt-BR',{maximumFractionDigits:2})}"/></div>
-        <div class="fg"><label>Multa padrão (%)</label><input type="number" step="0.5" min="0" max="100" id="cfg-calc-multa" value="${(p.multa*100).toLocaleString('pt-BR',{maximumFractionDigits:2})}"/></div>
+        <div class="fg"><label>Juros de mora (% ao mês)</label><input type="text" inputmode="decimal" id="cfg-calc-juros" value="${(p.juros*100).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}%" onfocus="this.value=this.value.replace('%','')" onblur="formatPercentBR(this)"/></div>
+        <div class="fg"><label>Multa padrão (%)</label><input type="text" inputmode="decimal" id="cfg-calc-multa" value="${(p.multa*100).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}%" onfocus="this.value=this.value.replace('%','')" onblur="formatPercentBR(this)"/></div>
       </div>
       <div style="font-size:11.5px;color:var(--text-3);margin:-4px 0 16px;">Juros 1% a.m. (art. 406 CC + Súmula 121 STF) e multa 2% (limite CDC art. 52, §1º) são os padrões.</div>
       <button class="btn btn-primary" onclick="salvarParamsCalculo()">Salvar</button>
