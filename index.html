@@ -18521,6 +18521,26 @@ function cpDevs(){
   // Item 8: rascunho nunca aparece no portal do cedente (não é cobrança ainda).
   return (DB.devedores||[]).filter(d=>d.clienteId===currentUser.clienteId && !d.isDraft);
 }
+function cpPapelLbl(p){ return ({emitente:'Emitente',endossante:'Endossante',avalista:'Avalista',fiador:'Fiador',devedor_solidario:'Devedor solidário'}[p]||p||'Parte'); }
+// Casos do cedente = COBRANÇAS cujo credor é ele (cobrancas.cliente_id), não rascunho/arquivada.
+// Case-centric: cada item traz TODAS as partes (principal + coobrigados) e uma buscaKey.
+// Escopar pela cobrança (e não por devedor.clienteId) faz aparecer casos cujo devedor
+// principal tem cadastro em outro credor (ex.: coobrigado compartilhado) — ver RLS devedores_cedente_parte.
+function cpCasos(){
+  const cid = currentUser.clienteId;
+  const src = (typeof DB_cobrancas!=='undefined'? DB_cobrancas : []) || [];
+  return src.filter(c=>c && c.cliente_id===cid && !c.is_draft && !c.arquivado).map(c=>{
+    const partes=(c.cobranca_partes||[]).slice().sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
+    const pr=partes.find(p=>p.principal)||partes[0]||null;
+    const nomes=partes.map(p=>p.devedores&&p.devedores.nome).filter(Boolean);
+    const docs =partes.map(p=>p.devedores&&p.devedores.doc).filter(Boolean);
+    const val=(+c.valor_atual||+c.valor_orig||(c.divida&&+c.divida.totalAvista)||0);
+    return { id:c.id, status:c.status||'', fase:c.fase||'',
+      nome:(pr&&pr.devedores&&pr.devedores.nome)||(c.divida&&c.divida.descricao)||'Caso',
+      doc:(pr&&pr.devedores&&pr.devedores.doc)||'', valor:val, partes:partes,
+      buscaKey:(nomes.join(' ')+' '+docs.join(' ')).toLowerCase() };
+  });
+}
 // ── Helpers de UI do portal (marca v3) ──
 function cpStatusKey(s){
   s=(s||'').toLowerCase();
@@ -18999,14 +19019,15 @@ function cpExtratoPDF(){
 async function cpRenderDashboard(body){
   const cli = (DB.clientes||[]).find(c=>c.id===currentUser.clienteId);
   const devs = cpDevs();
-  const ativas    = devs.filter(d=>!ehForaRegua(d.status)).length;
-  const judicial  = devs.filter(d=>d.fase==='judicial').length;
-  const acordo    = devs.filter(d=>ehAcordo(d.status)).length;
-  const quitadas  = devs.filter(d=>ehRecuperado(d.status)).length;
+  const casos = cpCasos();  // case-centric (mesmo escopo da carteira) p/ os KPIs por caso
+  const ativas    = casos.filter(x=>!ehForaRegua(x.status)).length;
+  const judicial  = casos.filter(x=>x.fase==='judicial').length;
+  const acordo    = casos.filter(x=>ehAcordo(x.status)).length;
+  const quitadas  = casos.filter(x=>ehRecuperado(x.status)).length;
   const semDoc    = devs.filter(d=>!(d.documentos&&d.documentos.length)).length;
-  const total     = devs.length;
+  const total     = casos.length;
   const pctExito  = total>0?((quitadas/total)*100).toFixed(1):'0.0';
-  const carteira  = devs.reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
+  const carteira  = casos.reduce((s,x)=>s+(x.valor||0),0);
   // "Repassado a você" = soma REAL dos repasses ao cliente (não o valor dos casos quitados, que enganava).
   let recuperado = 0;
   window._cpDashRep = [];
@@ -19030,7 +19051,7 @@ async function cpRenderDashboard(body){
   acts.sort((a,b)=>String(b.dt).localeCompare(String(a.dt)));
   // Distribuição por status
   const dist=[['judicial','Ação judicial','var(--st-judicial)'],['acordo','Acordo','var(--gold-2)'],['quitado','Quitado/Devolvida','var(--st-quitado)'],['cobrar','A cobrar','var(--st-cobrar)'],['semexito','Sem êxito','var(--st-semexito)']]
-    .map(([k,l,c])=>({l,c,n:devs.filter(d=>cpStatusKey(d.status)===k).length})).filter(x=>x.n>0);
+    .map(([k,l,c])=>({l,c,n:casos.filter(x=>cpStatusKey(x.status)===k).length})).filter(z=>z.n>0);
   const semDocCase=devs.find(d=>!(d.documentos&&d.documentos.length));
   const ring=`conic-gradient(var(--pgold) 0% ${pctExito}%, var(--paper-2) ${pctExito}% 100%)`;
 
@@ -19091,33 +19112,32 @@ async function cpRenderDashboard(body){
 }
 
 function cpRenderCarteira(body){
-  const devs = cpDevs();
+  const casos = cpCasos();
   const filter = body._filter||'';
   const sortKey = body._sortKey || 'nome';   // default: por nome
   const sortDir = body._sortDir || 'asc';    // default: crescente
-  const filtrada = filter ? devs.filter(d=>cpStatusKey(d.status)===filter) : devs;
-  const _vNum=d=>parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0;
+  const filtrada = filter ? casos.filter(x=>cpStatusKey(x.status)===filter) : casos;
   const _cmp=(a,b)=>{ let r;
-    if(sortKey==='valor') r=_vNum(a)-_vNum(b);
+    if(sortKey==='valor') r=(a.valor||0)-(b.valor||0);
     else if(sortKey==='status') r=String(a.status||'').localeCompare(String(b.status||''),'pt-BR',{sensitivity:'base'});
-    else if(sortKey==='fase') r=String(a.fase||'').localeCompare(String(b.fase||''),'pt-BR',{sensitivity:'base'});
     else r=String(a.nome||'').localeCompare(String(b.nome||''),'pt-BR',{sensitivity:'base'});
     if(r===0) r=String(a.nome||'').localeCompare(String(b.nome||''),'pt-BR',{sensitivity:'base'});
     return sortDir==='desc'? -r : r;
   };
   const visible = filtrada.slice().sort(_cmp);
   const sortOpts=[['nome','Nome'],['status','Situação'],['valor','Valor']];
-  const totalVal = devs.reduce((s,d)=>s+(parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0),0);
+  const totalVal = casos.reduce((s,x)=>s+(x.valor||0),0);
   const chips=[['','Todos'],['cobrar','A cobrar'],['acordo','Acordo'],['judicial','Ação judicial'],['quitado','Quitado'],['semexito','Sem êxito']]
-    .map(([k,l])=>({k,l,n: k? devs.filter(d=>cpStatusKey(d.status)===k).length : devs.length}));
-  const row = d => {
-    const ini = (d.nome||'?').split(' ').filter(Boolean).slice(0,2).map(s=>s[0]).join('').toUpperCase();
-    const val = parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0;
-    return `<div class="cp-cart-row" onclick="cpVerDevedor('${d.id}')" style="display:grid;grid-template-columns:2.4fr 1.3fr 1.2fr 1.4fr 28px;gap:10px;align-items:center;padding:14px 18px;border-top:1px solid var(--pline);cursor:pointer;transition:background .12s;" onmouseenter="this.style.background='rgba(226,219,198,.45)'" onmouseleave="this.style.background=''">
-      <div style="display:flex;align-items:center;gap:11px;min-width:0;"><span style="width:34px;height:34px;border-radius:50%;background:var(--ink);color:var(--cream);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;flex-shrink:0;">${ini}</span><span style="font-size:13.5px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(d.nome||'—')}</span></div>
-      <div class="cp-mono" style="font-size:11.5px;color:var(--mute);">${escHtml(d.doc||'—')}</div>
-      <div class="cp-num" style="font-size:16px;color:var(--ink);">${fmtR(val)}</div>
-      <div>${cpPill(d.status)}</div>
+    .map(([k,l])=>({k,l,n: k? casos.filter(x=>cpStatusKey(x.status)===k).length : casos.length}));
+  const row = x => {
+    const ini = (x.nome||'?').split(' ').filter(Boolean).slice(0,2).map(s=>s[0]).join('').toUpperCase();
+    const extras=(x.partes||[]).filter(p=>!p.principal);
+    const extraHtml = extras.length ? `<div style="font-size:11px;color:var(--mute);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">+ ${extras.map(p=>escHtml((p.devedores&&p.devedores.nome)||'—')+' · '+cpPapelLbl(p.papel)).join(' · ')}</div>` : '';
+    return `<div class="cp-cart-row" onclick="cpVerDevedor('${x.id}')" style="display:grid;grid-template-columns:2.4fr 1.3fr 1.2fr 1.4fr 28px;gap:10px;align-items:center;padding:14px 18px;border-top:1px solid var(--pline);cursor:pointer;transition:background .12s;" onmouseenter="this.style.background='rgba(226,219,198,.45)'" onmouseleave="this.style.background=''">
+      <div style="display:flex;align-items:center;gap:11px;min-width:0;"><span style="width:34px;height:34px;border-radius:50%;background:var(--ink);color:var(--cream);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;flex-shrink:0;">${ini}</span><div style="min-width:0;"><div style="font-size:13.5px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(x.nome||'—')}</div>${extraHtml}</div></div>
+      <div class="cp-mono" style="font-size:11.5px;color:var(--mute);">${escHtml(x.doc||'—')}</div>
+      <div class="cp-num" style="font-size:16px;color:var(--ink);">${fmtR(x.valor||0)}</div>
+      <div>${cpPill(x.status)}</div>
       <div style="color:var(--mute);"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m9 18 6-6-6-6"/></svg></div>
     </div>`;
   };
@@ -19125,7 +19145,7 @@ function cpRenderCarteira(body){
     <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:18px;flex-wrap:wrap;gap:12px;">
       <div>
         <div class="cp-h1">Minha Carteira</div>
-        <div style="font-size:13px;color:var(--mute);margin-top:5px;">${devs.length} de ${devs.length} cobranças · valor total <strong class="cp-mono" style="color:var(--ink);">${fmtR(totalVal)}</strong></div>
+        <div style="font-size:13px;color:var(--mute);margin-top:5px;">${casos.length} caso${casos.length!==1?'s':''} · valor total <strong class="cp-mono" style="color:var(--ink);">${fmtR(totalVal)}</strong></div>
       </div>
       <div style="display:flex;gap:9px;flex-wrap:wrap;">
         <button class="cp-btn cp-btn-primary" onclick="gerarRelatorioCarteira(currentUser.clienteId)"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> Relatório de andamento</button>
@@ -19144,9 +19164,9 @@ function cpRenderCarteira(body){
     </div>
     <div class="cp-card" style="padding:0;overflow:hidden;">
       <div style="display:grid;grid-template-columns:2.4fr 1.3fr 1.2fr 1.4fr 28px;gap:10px;padding:12px 18px;background:rgba(226,219,198,.4);">
-        ${['Devedor','CPF / CNPJ','Valor','Situação',''].map(h=>`<div class="cp-label">${h}</div>`).join('')}
+        ${['Partes do caso','CPF / CNPJ','Valor','Situação',''].map(h=>`<div class="cp-label">${h}</div>`).join('')}
       </div>
-      ${visible.length? visible.map(row).join('') : `<div style="padding:48px;text-align:center;color:var(--mute);font-size:13px;">Nenhuma cobrança neste filtro.</div>`}
+      ${visible.length? visible.map(row).join('') : `<div style="padding:48px;text-align:center;color:var(--mute);font-size:13px;">Nenhum caso neste filtro.</div>`}
     </div>`;
 }
 
@@ -19175,7 +19195,19 @@ function cpFiltrarCarteira(q){
 }
 
 function cpVerDevedor(id){
-  const d = (DB.devedores||[]).find(x=>x.id===id);
+  const cob=(typeof DB_cobrancas!=='undefined'?DB_cobrancas:[]||[]).find(c=>c.id===id);
+  let d = (DB.devedores||[]).find(x=>x.id===id);
+  if(!d && cob){
+    // Principal do caso não está em DB.devedores (ex.: coobrigado cujo cadastro é de outro
+    // credor). Deriva um "d" leve das partes da própria cobrança para não abortar a tela.
+    const _pt=(cob.cobranca_partes||[]).slice().sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
+    const _pr=_pt.find(p=>p.principal)||_pt[0]||{};
+    d={ id:cob.id, nome:(_pr.devedores&&_pr.devedores.nome)||(cob.divida&&cob.divida.descricao)||'Caso',
+        doc:(_pr.devedores&&_pr.devedores.doc)||'', status:cob.status||'', fase:cob.fase||'',
+        valorAtual:(cob.valor_atual!=null?fmtR(cob.valor_atual).replace(/^R\$\s*/,''):''),
+        valorOrig:(cob.valor_orig!=null?fmtR(cob.valor_orig).replace(/^R\$\s*/,''):''),
+        comprovantes:[], historico:[] };
+  }
   if(!d) return;
   cpPage='detalhe';
   const _eb=document.getElementById('cpTopbarEyebrow'); if(_eb) _eb.textContent='Acompanhar';
@@ -19188,7 +19220,8 @@ function cpVerDevedor(id){
   const hist  = d.historico||[];
 
   const ini = (d.nome||'?').split(' ').filter(Boolean).slice(0,2).map(s=>s[0]).join('').toUpperCase();
-  const cob=(typeof DB_cobrancas!=='undefined'?DB_cobrancas:[]||[]).find(c=>c.id===id);
+  const _partesCaso=((cob&&cob.cobranca_partes)||[]).slice().sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
+  const partesHtml = _partesCaso.length>1 ? `<div class="cp-card" style="margin-bottom:18px;"><div class="cp-label" style="margin-bottom:12px;">Partes do caso (${_partesCaso.length})</div>${_partesCaso.map(p=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:9px 0;border-top:1px solid var(--pline);"><div style="min-width:0;"><span style="font-size:13.5px;font-weight:600;color:var(--ink);">${escHtml((p.devedores&&p.devedores.nome)||'—')}</span>${p.principal?' <span class="cp-mono" style="font-size:9px;color:var(--gold-2);text-transform:uppercase;letter-spacing:.1em;">principal</span>':''}<div class="cp-mono" style="font-size:11px;color:var(--mute);">${escHtml((p.devedores&&p.devedores.doc)||'—')}</div></div><span class="cp-label" style="white-space:nowrap;">${cpPapelLbl(p.papel)}</span></div>`).join('')}</div>` : '';
   const capital=cob?((cob.valor_capital!=null)?+cob.valor_capital:((cob.divida&&cob.divida.valorCapital!=null)?+cob.divida.valorCapital:(+cob.valor_orig||(parseValorBR(d.valorOrig)||0)))):(parseValorBR(d.valorOrig)||0);
   const stepIdx=cpStepIndex(d.status);
   const STEPS=['Registrada na COBRASQ','Notificação e cobrança','Acordo ou ação judicial','Quitada pelo devedor','Repassada a você'];
@@ -19213,6 +19246,7 @@ function cpVerDevedor(id){
         <div class="cp-num" style="font-size:36px;color:var(--pgold);">${fmtR(valor)}</div>
       </div>
     </div>
+    ${partesHtml}
     <div class="cp-card" style="margin-bottom:18px;">
       <div class="cp-label" style="margin-bottom:18px;">Jornada do caso</div>
       <div class="cp-steps">${stepHtml}</div>
