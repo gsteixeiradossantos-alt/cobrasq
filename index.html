@@ -16478,6 +16478,8 @@ async function salvarCobranca(){
   garantirUmPrincipal(resp);
 
   window._salvandoCobr = true;
+  // Anti-órfão: id do credor criado NESTE save (fora do try p/ o catch poder desfazer).
+  let credorCriadoId = null;
   try{
     const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
     const uidUser = sess?.data?.session?.user?.id || null;
@@ -16492,10 +16494,19 @@ async function salvarCobranca(){
       else{
         // F-22: colaborador não cria credor direto — deve passar pelo fluxo de aprovação (Clientes).
         if(ehColaborador()){ showToast('Credor não cadastrado. Cadastre-o em Clientes (vai para aprovação do gestor) antes de vincular à cobrança.','danger'); return; }
-        const { data, error } = await supa.from('clientes')
-          .insert({ nome: credorNome, metadata:{ origem:'cobranca_form' } }).select('id').single();
-        if(error) throw new Error('credor: '+error.message);
-        clienteId = data.id;
+        // Anti-órfão (1/2): DB.clientes é carregado no login e pode estar defasado — não conter
+        // um credor criado/desarquivado em outra sessão. Reconfirma no servidor por nome antes de
+        // inserir; senão criamos um credor DUPLICADO a cada tentativa de salvar (bug das Lamesi órfãs).
+        const { data: jaCli } = await supa.from('clientes').select('id')
+          .ilike('nome', credorNome).eq('is_draft', false).eq('arquivado', false)
+          .limit(1).maybeSingle();
+        if(jaCli){ clienteId = jaCli.id; }
+        else{
+          const { data, error } = await supa.from('clientes')
+            .insert({ nome: credorNome, metadata:{ origem:'cobranca_form' } }).select('id').single();
+          if(error) throw new Error('credor: '+error.message);
+          clienteId = data.id; credorCriadoId = data.id;
+        }
       }
     }
 
@@ -16603,6 +16614,18 @@ async function salvarCobranca(){
     renderCobrancas();
   }catch(e){
     console.warn('[cobr] salvar:', e);
+    // Anti-órfão (2/2): se ESTE save criou um credor novo e depois algo falhou (ex.: trava de
+    // CPF do devedor), remove o credor recém-criado para não deixar cadastro vazio. Só apaga se
+    // ele continuar sem casos/devedores (nunca toca em credor preexistente ou já povoado).
+    if(credorCriadoId){
+      try{
+        const [{ count: nCob }, { count: nDev }] = await Promise.all([
+          supa.from('cobrancas').select('id',{count:'exact',head:true}).eq('cliente_id', credorCriadoId),
+          supa.from('devedores').select('id',{count:'exact',head:true}).eq('cliente_id', credorCriadoId)
+        ]);
+        if(!nCob && !nDev){ await supa.from('clientes').delete().eq('id', credorCriadoId); }
+      }catch(_){}
+    }
     showToast('Não foi possível salvar: '+e.message,'danger');
   }finally{ window._salvandoCobr = false; }
 }
