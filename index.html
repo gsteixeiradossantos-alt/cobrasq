@@ -24323,7 +24323,8 @@ async function renderContasGridSrv(){
       </div>` : ''}
       ${(s.qtd_pago||s.qtd_pendente) ? `<div style="margin-top:6px;font-size:10.5px;color:var(--text-3);font-family:var(--font-mono);">${s.qtd_pago||0} pagos · ${s.qtd_pendente||0} pendentes</div>` : ''}
       <div style="display:flex;gap:16px;margin-top:12px;padding-top:10px;border-top:1px solid var(--border);">
-        <span style="font-size:12px;color:var(--gold-dark);font-weight:600;cursor:pointer;" onclick="finVerLancamentosDaConta('${c.id}')">Ver lançamentos →</span>
+        <span style="font-size:12px;color:var(--gold-dark);font-weight:600;cursor:pointer;" onclick="renderFinExtratoConta('${c.id}')">Ver extrato →</span>
+        <span style="font-size:12px;color:var(--text-3);font-weight:600;cursor:pointer;" onclick="finVerLancamentosDaConta('${c.id}')">Lançamentos</span>
         ${bankBal!=null && Math.abs(diff||0)>0.01 ? `<span style="font-size:12px;color:var(--gold-dark);font-weight:600;cursor:pointer;" onclick="setFinTab('conciliacao')">Conciliar</span>` : ''}
       </div>
     </div>`;
@@ -24335,6 +24336,67 @@ function finVerLancamentosDaConta(contaId){
   window._finLancState.filtros = Object.assign({}, window._finLancState.filtros, { contaId:String(contaId) });
   window._finLancState.page = 1;
   setFinTab('lancamentos');
+}
+
+// Tela 04 — Extrato da conta com saldo corrido (dia a dia) a partir do saldo inicial.
+async function renderFinExtratoConta(contaId){
+  const el=document.getElementById('fin-content'); if(!el) return;
+  el.innerHTML=`<div style="text-align:center;padding:30px;color:var(--text-3);"><div class="mv2-spinner" style="margin:0 auto 8px;width:26px;height:26px;border-width:3px;"></div>Carregando extrato…</div>`;
+  const incNaoPagos=!!window._extNaoPagos;
+  let conta=null, lances=[], saldoInicial=0, saldoAtual=0;
+  try{
+    const dim=await finApi.loadDimensoes(true);
+    conta=(dim.contas||[]).find(c=>c.id==contaId)||{descricao:'Conta',id:contaId};
+    saldoInicial=+conta.saldo_inicial||0;
+    const sb=getSupabase();
+    try{ const {data}=await sb.rpc('fin_saldos_realizados'); const r=(data||[]).find(x=>x.conta_id==contaId); saldoAtual=(r&&r.saldo_atual!=null)?+r.saldo_atual:saldoInicial; }catch(_){ saldoAtual=saldoInicial; }
+    const {data}=await sb.from('fin_lancamento').select('id,descricao,valor,tipo_movimento,status,data_pagamento,data_vencimento,data_competencia').eq('conta_id',contaId).limit(3000);
+    lances=data||[];
+  }catch(e){ el.innerHTML=`<div class="panel" style="padding:20px;color:var(--danger);">Erro: ${escHtml(e.message||String(e))}</div>`; return; }
+
+  const items=lances.filter(l=> l.status===1 || (incNaoPagos && l.status===0))
+    .map(l=>{ const dt=(l.data_pagamento||l.data_vencimento||l.data_competencia||'').slice(0,10); const sgn=l.tipo_movimento===1?1:-1; return Object.assign({}, l, {_dt:dt, _delta:sgn*Math.abs(+l.valor||0)}); })
+    .filter(l=>l._dt)
+    .sort((a,b)=> a._dt<b._dt?-1:a._dt>b._dt?1:0);
+  let run=saldoInicial;
+  for(const it of items){ it._before=run; run+=it._delta; it._after=run; }
+  const totEntradas=items.filter(i=>i._delta>0).reduce((s,i)=>s+i._delta,0);
+  const totSaidas=items.filter(i=>i._delta<0).reduce((s,i)=>s+Math.abs(i._delta),0);
+
+  const byDay={}, order=[];
+  for(const it of items){ if(!byDay[it._dt]){ byDay[it._dt]=[]; order.push(it._dt); } byDay[it._dt].push(it); }
+  const daysDesc=[...order].reverse();
+  const fmtD=s=>(s||'').split('-').reverse().join('/');
+  const dispBal = conta.bank_balance!=null? +conta.bank_balance : saldoAtual;
+  let updatedAgo='';
+  if(conta.bank_balance_at){ const d=new Date(conta.bank_balance_at); const days=Math.floor((Date.now()-d.getTime())/86400000); updatedAgo= days<=0?'hoje':days===1?'ontem':`há ${days}d`; }
+
+  const daysHtml=daysDesc.map(day=>{
+    const arr=byDay[day];
+    const before=arr[0]._before, after=arr[arr.length-1]._after;
+    const dEnt=arr.filter(i=>i._delta>0).reduce((s,i)=>s+i._delta,0);
+    const dSai=arr.filter(i=>i._delta<0).reduce((s,i)=>s+Math.abs(i._delta),0);
+    const rows=arr.map(it=>`<tr>
+      <td style="padding:9px 14px;">${escHtml(it.descricao||'—')}${it.status===0?' <span class="fin-st pend" style="font-size:9.5px;">não pago</span>':''}</td>
+      <td style="padding:9px 14px;text-align:right;font-family:var(--font-mono);color:${it._delta>=0?'var(--success)':'#A65A4A'};">${it._delta>=0?'+':'−'} ${fmtR(Math.abs(it._delta))}</td>
+      <td style="padding:9px 14px;text-align:right;font-family:var(--font-mono);color:var(--text-3);">${fmtR(it._after)}</td>
+    </tr>`).join('');
+    return `<tr><td colspan="3" style="padding:8px 14px;background:#FBF8EF;font-family:var(--font-mono);font-size:11px;color:var(--gold-dark);letter-spacing:.05em;">${fmtD(day)}</td></tr>
+      ${rows}
+      <tr><td colspan="3" style="padding:8px 14px;background:var(--surface-2);font-size:11.5px;color:var(--text-2);">Saldo dia anterior <b style="font-family:var(--font-mono);">${fmtR(before)}</b> · Entradas <b style="color:var(--success);font-family:var(--font-mono);">${fmtR(dEnt)}</b> · Saídas <b style="color:#A65A4A;font-family:var(--font-mono);">${fmtR(dSai)}</b> · Saldo do dia <b style="font-family:'Fraunces',Georgia,serif;font-weight:400;color:var(--navy);">${fmtR(after)}</b></td></tr>`;
+  }).join('');
+
+  el.innerHTML=`
+    <div style="margin-bottom:14px;font-size:12.5px;color:var(--text-3);"><span style="cursor:pointer;color:var(--gold-dark);font-weight:600;" onclick="setFinTab('contas')">Contas e carteiras</span> › Extrato</div>
+    <div class="fin-hero" style="margin-bottom:14px;"><div><h1 style="font-size:24px;">${escHtml(conta.descricao)}</h1><div class="fin-sub">saldo ${fmtR(dispBal)}${updatedAgo?' · atualizado '+updatedAgo:''}</div></div>
+      <label style="font-size:12.5px;color:var(--text-2);display:flex;align-items:center;gap:7px;cursor:pointer;"><input type="checkbox" ${incNaoPagos?'checked':''} onchange="window._extNaoPagos=this.checked;renderFinExtratoConta('${contaId}')"> Considerar não pagos</label>
+    </div>
+    <div class="panel" style="display:flex;gap:22px;padding:12px 16px;margin-bottom:14px;flex-wrap:wrap;">
+      <span style="font-size:12.5px;color:var(--text-3);">Entradas <b style="color:var(--success);font-family:var(--font-mono);">${fmtR(totEntradas)}</b></span>
+      <span style="font-size:12.5px;color:var(--text-3);">Saídas <b style="color:#A65A4A;font-family:var(--font-mono);">${fmtR(totSaidas)}</b></span>
+      <span style="font-size:12.5px;color:var(--text-3);">Saldo atual <b style="font-family:'Fraunces',Georgia,serif;font-weight:400;color:var(--navy);">${fmtR(saldoAtual)}</b></span>
+    </div>
+    <div class="panel">${items.length?`<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Descrição</th><th style="text-align:right;">Valor</th><th style="text-align:right;">Saldo</th></tr></thead><tbody>${daysHtml}</tbody></table></div>`:`<div class="empty-state" style="padding:30px;"><div class="empty-state-title">Sem movimentos ${incNaoPagos?'':'realizados '}nesta conta</div></div>`}</div>`;
 }
 
 function _popularSelectLogoConta(currentKey){
