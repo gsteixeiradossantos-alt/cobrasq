@@ -17,6 +17,12 @@ module.exports = async function handler(req, res) {
   applyCors(req, res);
   if (req.method === 'OPTIONS') return res.status(200).end();
 
+  // SYNC CONTROLLE DESATIVADO (a pedido, 2026-07-09): o financeiro do cobrasq
+  // passou a ser independente/manual — não reimporta mais do Controlle. Reativar:
+  // trocar para false (+ recolocar o cron no vercel.json e a chamada ao abrir).
+  const SYNC_CONTROLLE_DESATIVADO = true;
+  if (SYNC_CONTROLLE_DESATIVADO) return res.status(200).json({ ok: true, disabled: true, totais: { lancamentos: 0 }, note: 'Sincronização com o Controlle desativada.' });
+
   const user = await requireUser(req, res);
   if (!user) return; // requireUser já respondeu 401/5xx
 

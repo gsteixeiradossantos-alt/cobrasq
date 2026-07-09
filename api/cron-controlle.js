@@ -15,6 +15,11 @@
 const { runSync, controlleGet } = require('./_controlle-sync.js');
 
 module.exports = async function handler(req, res) {
+  // CRON CONTROLLE DESATIVADO (a pedido, 2026-07-09): financeiro do cobrasq virou
+  // independente/manual. Reativar: trocar para false (+ recolocar o cron no vercel.json).
+  const CRON_CONTROLLE_DESATIVADO = true;
+  if (CRON_CONTROLLE_DESATIVADO) return res.status(200).json({ ok: true, disabled: true, note: 'Cron Controlle desativado.' });
+
   const expect = process.env.CRON_SECRET || '';
   if (!expect) return res.status(500).json({ error: 'CRON_SECRET não configurado no servidor.' });
   const authHeader = req.headers['authorization'] || '';
