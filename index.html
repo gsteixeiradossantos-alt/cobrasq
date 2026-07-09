@@ -4384,10 +4384,17 @@ let selectedDevIds = new Set();
 let selectionMode = false;
 let selectedClienteIds = new Set();
 let cliSelMode = false;
+// Acordeão de grupo econômico na tela Clientes: guarda os grupos expandidos.
+let _gruposEcoExpandidos = new Set();
+function toggleGrupoEco(gid){
+  if(_gruposEcoExpandidos.has(gid)) _gruposEcoExpandidos.delete(gid); else _gruposEcoExpandidos.add(gid);
+  if(typeof renderClientes==='function') renderClientes();
+}
 let selectedProcIds = new Set();
 let procSelMode = false;
 let _reportDevIds = [];
 let _reportClienteId = null;
+let _reportGrupoId = null;   // relatório de grupo econômico (separado por empresa)
 
 // ── CONSTANTS ───────────────────────────────────────────────
 const MESES = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
@@ -9215,7 +9222,14 @@ function renderBuscaGlobal(q){
         <div style="font-size:11px;color:var(--text-3);">${sub}</div>
       </div>
     </div>`;
-  // Cobranças (casos) — por título, documento, nº do processo ou devedor vinculado.
+  // Busca por GRUPO econômico e por nome/fantasia do credor → traz as cobranças das empresas casadas.
+  const gruposMatch = new Set((DB.gruposEconomicos||[]).filter(g=>(g.nome||'').toLowerCase().includes(q)).map(g=>g.id));
+  const credoresAlvo = new Set((DB.clientes||[]).filter(c=>{
+    if(c.arquivado || c.isDraft) return false;
+    if(gruposMatch.size && c.grupoEconomicoId && gruposMatch.has(c.grupoEconomicoId)) return true;
+    return (c.nome||'').toLowerCase().includes(q) || (c.nomeFantasia||'').toLowerCase().includes(q);
+  }).map(c=>c.id));
+  // Cobranças (casos) — por título, documento, nº do processo, devedor, credor ou grupo econômico.
   const cobs = (DB_cobrancas||[]).filter(c=>{
     if(c.arquivado || c.is_draft) return false;
     const partes = c.cobranca_partes||[];
@@ -9224,9 +9238,10 @@ function renderBuscaGlobal(q){
     if((c.tipo_documento||'').toLowerCase().includes(q)) return true;
     if((c.numero_documento||'').toLowerCase().includes(q)) return true;
     if((c.numero_processo||'').toLowerCase().includes(q)) return true;
+    if(credoresAlvo.has(c.cliente_id)) return true;
     if(partes.some(p=>(p.devedores?.nome||'').toLowerCase().includes(q))) return true;
     return qd.length>=3 && partes.some(p=>String(p.devedores?.doc||'').replace(/\D/g,'').includes(qd));
-  }).slice(0,8);
+  }).slice(0, credoresAlvo.size ? 60 : 8);
   let html = '';
   if(cobs.length){
     html += '<div style="font-size:10px;font-weight:700;letter-spacing:.07em;color:var(--text-3);padding:6px 10px 2px;">COBRANÇAS</div>';
@@ -16747,44 +16762,89 @@ function renderClientes(){
               ${cliSelMode ? '' : '<th class="num" style="width:120px;"></th>'}
             </tr></thead>
             <tbody>
-              ${cliRows.map((r)=>{
-                const c = r.c;
-                const carteira = r.carteira, recuperado = r.recuperado;
-                const taxaN = carteira>0?((recuperado/carteira)*100):0;
-                const taxa = carteira>0?taxaN.toFixed(1)+'%':'—';
-                const initials = (c.nome||'?').split(' ').filter(Boolean).slice(0,2).map(s=>s[0]).join('').toUpperCase();
-                const fantasia = c.nomeFantasia || c.nome_fantasia || '';
-                const isSel = selectedClienteIds.has(c.id);
-                return `<tr class="${cliSelMode?'cob-tr-click':''}"${isSel?' style="background:var(--active-bg);"':''}
-                  onclick="${cliSelMode?`toggleClienteSel('${c.id}',event)`:`verCliente('${c.id}')`}">
-                  ${cliSelMode ? `<td class="w1" onclick="event.stopPropagation()"><input type="checkbox" ${isSel?'checked':''} onchange="toggleClienteSel('${c.id}',event)" /></td>` : ''}
-                  <td>
-                    <div class="cob-dev-cell">
-                      <span class="cob-av">${initials}</span>
-                      <div style="min-width:0;">
-                        <div class="cob-dev-nm">${escHtml(c.nome||'—')}</div>
-                        ${fantasia ? `<div style="font-size:11px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(fantasia)}</div>` : ''}
+              ${(()=>{
+                // Linha de um cliente (indent=true para membro de grupo no acordeão).
+                const linhaHtml = (r, indent)=>{
+                  const c = r.c;
+                  const carteira = r.carteira, recuperado = r.recuperado;
+                  const taxaN = carteira>0?((recuperado/carteira)*100):0;
+                  const taxa = carteira>0?taxaN.toFixed(1)+'%':'—';
+                  const initials = (c.nome||'?').split(' ').filter(Boolean).slice(0,2).map(s=>s[0]).join('').toUpperCase();
+                  const fantasia = c.nomeFantasia || c.nome_fantasia || '';
+                  const isSel = selectedClienteIds.has(c.id);
+                  return `<tr class="${cliSelMode?'cob-tr-click':''}"${isSel?' style="background:var(--active-bg);"':''}
+                    onclick="${cliSelMode?`toggleClienteSel('${c.id}',event)`:`verCliente('${c.id}')`}">
+                    ${cliSelMode ? `<td class="w1" onclick="event.stopPropagation()"><input type="checkbox" ${isSel?'checked':''} onchange="toggleClienteSel('${c.id}',event)" /></td>` : ''}
+                    <td${indent?' style="padding-left:34px;"':''}>
+                      <div class="cob-dev-cell">
+                        <span class="cob-av">${initials}</span>
+                        <div style="min-width:0;">
+                          <div class="cob-dev-nm">${escHtml(c.nome||'—')}</div>
+                          ${fantasia ? `<div style="font-size:11px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(fantasia)}</div>` : ''}
+                        </div>
                       </div>
-                    </div>
-                  </td>
-                  <td class="mono dim">${escHtml(c.doc||'—')}</td>
-                  <td class="dim">${escHtml(c.responsavel||'—')}</td>
-                  <td class="num mono strong">${r.nDevs}</td>
-                  <td class="num mono strong">${fmtR(carteira)}</td>
-                  <td class="num"><span class="cob-rate${taxaN>0?' pos':''}">${taxa}</span></td>
-                  <td>${c.loginEmail?'<span class="cob-pill st-acordo">Ativo</span>':'<span class="cob-portal-off">—</span>'}</td>
-                  ${cliSelMode ? '' : `<td class="num" onclick="event.stopPropagation()">
-                    <div style="display:flex;gap:4px;justify-content:flex-end;">
-                      ${podeGerirCredor ? `
-                      <button class="cob-row-act" onclick="gerarRelatorioCarteira('${c.id}')" title="Relatório">${ico('file',13)}</button>
-                      <button class="cob-row-act" onclick="editCliente('${c.id}')" title="Editar">${ico('edit',13)}</button>
-                      <button class="cob-row-act" onclick="arquivarCliente('${c.id}')" title="Arquivar (some da lista, reversível via SQL)">${ico('archive',13)||'📁'}</button>
-                      ` : ''}
-                      <button class="cob-row-act" style="color:var(--bord);" onclick="excluirCliente('${c.id}')" title="${podeGerirCredor ? 'Excluir' : 'Solicitar exclusão ao gestor'}">${ico('trash',13)}</button>
-                    </div>
-                  </td>`}
-                </tr>`;
-              }).join('')}
+                    </td>
+                    <td class="mono dim">${escHtml(c.doc||'—')}</td>
+                    <td class="dim">${escHtml(c.responsavel||'—')}</td>
+                    <td class="num mono strong">${r.nDevs}</td>
+                    <td class="num mono strong">${fmtR(carteira)}</td>
+                    <td class="num"><span class="cob-rate${taxaN>0?' pos':''}">${taxa}</span></td>
+                    <td>${c.loginEmail?'<span class="cob-pill st-acordo">Ativo</span>':'<span class="cob-portal-off">—</span>'}</td>
+                    ${cliSelMode ? '' : `<td class="num" onclick="event.stopPropagation()">
+                      <div style="display:flex;gap:4px;justify-content:flex-end;">
+                        ${podeGerirCredor ? `
+                        <button class="cob-row-act" onclick="gerarRelatorioCarteira('${c.id}')" title="Relatório">${ico('file',13)}</button>
+                        <button class="cob-row-act" onclick="editCliente('${c.id}')" title="Editar">${ico('edit',13)}</button>
+                        <button class="cob-row-act" onclick="arquivarCliente('${c.id}')" title="Arquivar (some da lista, reversível via SQL)">${ico('archive',13)||'📁'}</button>
+                        ` : ''}
+                        <button class="cob-row-act" style="color:var(--bord);" onclick="excluirCliente('${c.id}')" title="${podeGerirCredor ? 'Excluir' : 'Solicitar exclusão ao gestor'}">${ico('trash',13)}</button>
+                      </div>
+                    </td>`}
+                  </tr>`;
+                };
+                // Só agrupa fora da busca e fora do modo seleção (senão a lista é plana).
+                const agrupar = !cliFilter.q && !cliSelMode;
+                if(!agrupar) return cliRows.map(r=>linhaHtml(r,false)).join('');
+                const grpNome = new Map((DB.gruposEconomicos||[]).map(g=>[g.id,g.nome]));
+                const membros = new Map();
+                cliRows.forEach(r=>{ const gid=r.c.grupoEconomicoId; if(gid && grpNome.has(gid)){ if(!membros.has(gid)) membros.set(gid,[]); membros.get(gid).push(r); } });
+                const multi = new Set([...membros].filter(([,arr])=>arr.length>=2).map(([g])=>g));
+                const feitos = new Set(); const out = [];
+                cliRows.forEach(r=>{
+                  const gid = r.c.grupoEconomicoId;
+                  if(gid && multi.has(gid)){
+                    if(feitos.has(gid)) return; feitos.add(gid);
+                    const ms = membros.get(gid); const exp = _gruposEcoExpandidos.has(gid);
+                    const gDevs = ms.reduce((s,m)=>s+m.nDevs,0);
+                    const gCart = ms.reduce((s,m)=>s+m.carteira,0);
+                    const gRec  = ms.reduce((s,m)=>s+m.recuperado,0);
+                    const gTaxaN = gCart>0?((gRec/gCart)*100):0;
+                    const gTaxa = gCart>0?gTaxaN.toFixed(1)+'%':'—';
+                    out.push(`<tr class="cob-tr-click" onclick="toggleGrupoEco('${gid}')" style="background:var(--active-bg);">
+                      <td>
+                        <div class="cob-dev-cell">
+                          <span class="cob-av" style="background:var(--navy,#1f3a5f);color:#fff;font-size:12px;">${exp?'▾':'▸'}</span>
+                          <div style="min-width:0;">
+                            <div class="cob-dev-nm">${escHtml(grpNome.get(gid)||'Grupo')} <span style="font-weight:400;color:var(--text-3);">· ${ms.length} empresas</span></div>
+                            <div style="font-size:11px;color:var(--text-3);">Grupo econômico</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td class="mono dim">—</td>
+                      <td class="dim">—</td>
+                      <td class="num mono strong">${gDevs}</td>
+                      <td class="num mono strong">${fmtR(gCart)}</td>
+                      <td class="num"><span class="cob-rate${gTaxaN>0?' pos':''}">${gTaxa}</span></td>
+                      <td>—</td>
+                      <td class="num" onclick="event.stopPropagation()">${podeGerirCredor?`<button class="cob-row-act" onclick="gerarRelatorioGrupo('${gid}')" title="Relatório do grupo">${ico('file',13)}</button>`:''}</td>
+                    </tr>`);
+                    if(exp) ms.forEach(m=>out.push(linhaHtml(m,true)));
+                    return;
+                  }
+                  out.push(linhaHtml(r,false));
+                });
+                return out.join('');
+              })()}
             </tbody>
           </table>
           <div class="cob-table-foot"><span>${cliRows.length} cliente${cliRows.length!==1?'s':''}</span></div>`}
@@ -34211,6 +34271,89 @@ function gerarRelatorioCarteira(clienteId){
   abrirModalRelatorio(devs.map(d=>d.id), clienteId);
 }
 
+// Relatório de GRUPO econômico — casos separados por empresa cedente, com subtotais + total do grupo.
+function gerarRelatorioGrupo(gid){
+  const nome = ((DB.gruposEconomicos||[]).find(g=>g.id===gid)||{}).nome || 'Grupo';
+  const credores = (DB.clientes||[]).filter(c=>c.grupoEconomicoId===gid && !c.arquivado && !c.isDraft);
+  const devs = (DB.devedores||[]).filter(d=>!d.isDraft && credores.some(c=>c.id===d.clienteId));
+  if(!devs.length){ showToast('Nenhum caso neste grupo.','warning'); return; }
+  _reportGrupoId = gid; _reportDevIds = devs.map(d=>d.id); _reportClienteId = null;
+  document.getElementById('modal-relatorio-body').innerHTML = `
+    <div style="margin-bottom:16px;padding:12px 14px;background:var(--bg);border-radius:var(--radius-sm);font-size:13px;">
+      <strong>Tipo:</strong> Relatório de Grupo Econômico<br>
+      <strong>Grupo:</strong> ${escHtml(nome)}<br>
+      <strong>Empresas:</strong> ${credores.length} · <strong>Casos:</strong> ${devs.length}
+    </div>
+    <div style="margin-bottom:16px;">
+      <label style="display:block;margin-bottom:6px;font-size:13px;font-weight:500;">Período de Referência</label>
+      <input type="text" id="rel-periodo" placeholder="Ex: Janeiro a Abril de 2026"
+        style="width:100%;padding:8px 10px;border:1px solid var(--border-2);border-radius:var(--radius-sm);background:var(--surface);color:var(--text);">
+    </div>
+    <div>
+      <label style="display:block;margin-bottom:8px;font-size:13px;font-weight:500;">Formato</label>
+      <div style="display:flex;gap:20px;">
+        <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13px;"><input type="radio" name="rel-fmt" value="pdf" checked> PDF (janela de impressão)</label>
+        <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13px;"><input type="radio" name="rel-fmt" value="word"> Word / Pages (.doc)</label>
+      </div>
+    </div>`;
+  openModal('modal-relatorio');
+}
+
+function buildReportHtmlGrupo(gid, periodo){
+  const nome = ((DB.gruposEconomicos||[]).find(g=>g.id===gid)||{}).nome || 'Grupo';
+  const credores = (DB.clientes||[]).filter(c=>c.grupoEconomicoId===gid && !c.arquivado && !c.isDraft)
+    .slice().sort((a,b)=>(a.nome||'').localeCompare(b.nome||'','pt-BR',{sensitivity:'base'}));
+  const porEmpresa = credores.map(cli=>{
+    const ds = (DB.devedores||[]).filter(d=>!d.isDraft && d.clienteId===cli.id);
+    const sub = ds.reduce((s,d)=>s+(parseValorBR(d.valorOrig)||0),0);
+    return { cli, ds, sub };
+  }).filter(x=>x.ds.length);
+  const allDevs = porEmpresa.flatMap(x=>x.ds);
+  const valorTotal = allDevs.reduce((s,d)=>s+(parseValorBR(d.valorOrig)||0),0);
+  const hoje_str = new Date().toLocaleDateString('pt-BR',{day:'numeric',month:'long',year:'numeric'});
+  const resp = DB.config.nome||'Gustavo Teixeira';
+  const cargo = 'Proprietário';
+  const instEnd = 'Av. Rio Grande do Sul, n.º 380, Sala 201, Edifício Mara — Centro, Dois Vizinhos/PR';
+  const instCnpj = DB.config.cnpj||'34.626.848/0001-42';
+  const instW='(46) 98822-6533', instE='contato@cobrasq.com.br', instS='www.cobrasq.com.br';
+
+  const indicHtml = `<div class="indicadores">
+    <div class="indicador"><div class="rotulo">Empresas</div><div class="valor">${porEmpresa.length}</div><div class="detalhe">no grupo</div></div>
+    <div class="indicador"><div class="rotulo">Casos Ativos</div><div class="valor">${allDevs.length}</div><div class="detalhe">cobranças em andamento</div></div>
+    <div class="indicador"><div class="rotulo">Valor Nominal Total</div><div class="valor" style="font-size:13pt;">${fmtR(valorTotal)}</div><div class="detalhe">soma do grupo</div></div>
+  </div>`;
+  const subsHtml = porEmpresa.map(({cli,ds,sub})=>
+    `<h3>${escHtml(cli.nome)}</h3><p>${ds.length} caso${ds.length>1?'s':''}, totalizando <strong>${fmtR(sub)}</strong> em valor nominal.</p>`
+  ).join('');
+  const linhaDev = (d)=>{
+    const enc=_faseEncerrada(d);
+    const dt=d.createdAt||d.entrada||'';
+    const dtF=dt?new Date(dt+'T12:00:00').toLocaleDateString('pt-BR'):'—';
+    return `<tr>
+      <td class="devedor">${escHtml(d.nome||'—')}</td>
+      <td class="processo">${escHtml(d.numero_processo||d.numeroProcesso||'—')}</td>
+      <td class="valor-num">${fmtR(parseValorBR(d.valorOrig)||0)}</td>
+      <td class="fase"><span class="etiqueta ${enc?'etiqueta-encerrada':'etiqueta-execucao'}">${escHtml(_faseLabel(d))}</span></td>
+      <td>${dtF}</td>
+    </tr>`;
+  };
+  const tabelaHtml = `<h3>Quadro Consolidado por Empresa</h3>
+    <table class="tabela-consolidada">
+      <thead><tr><th>Devedor</th><th>Processo</th><th>Valor Nominal</th><th>Situação</th><th>Ingresso</th></tr></thead>
+      ${porEmpresa.map(({cli,ds,sub})=>`<tbody>
+        <tr><td colspan="5" style="background:#F0ECE0;font-family:var(--mono);font-weight:600;font-size:8pt;text-transform:uppercase;letter-spacing:.06em;color:var(--ink);">${escHtml(cli.nome)}${cli.doc?` · ${escHtml(cli.doc)}`:''} — ${ds.length} caso${ds.length>1?'s':''}</td></tr>
+        ${ds.map(linhaDev).join('')}
+        <tr><td colspan="2" style="text-align:right;font-weight:600;color:var(--ink);">Subtotal</td><td class="valor-num">${fmtR(sub)}</td><td colspan="2"></td></tr>
+      </tbody>`).join('')}
+      <tfoot><tr><td colspan="2">Total do Grupo</td><td class="valor-num">${fmtR(valorTotal)}</td><td colspan="2">${allDevs.length} casos · ${porEmpresa.length} empresas</td></tr></tfoot>
+    </table>`;
+  const sumario = [
+    `O grupo econômico <strong>${escHtml(nome)}</strong> reúne <strong>${porEmpresa.length} empresa${porEmpresa.length>1?'s':''}</strong>, com <strong>${allDevs.length} caso${allDevs.length>1?'s':''}</strong> em cobrança e valor nominal agregado de <strong>${fmtR(valorTotal)}</strong>.`,
+    `O quadro abaixo detalha os casos separados por empresa cedente, com subtotais por empresa e total consolidado do grupo.`
+  ];
+  return _reportTemplate({credorNome:nome,periodo,dataEmissao:hoje_str,resp,cargo,kicker:'Relatório de Andamento — Grupo Econômico',fichaHtml:indicHtml,sumario,detalheHtml:subsHtml,tabelaHtml,notasHtml:_reportNotasHtml(allDevs),proxHtml:_reportProxHtml(allDevs),instEnd,instCnpj,instW,instE,instS});
+}
+
 function abrirModalRelatorio(devIds, forceClienteId){
   _reportDevIds = devIds;
   _reportClienteId = forceClienteId||null;
@@ -34280,6 +34423,23 @@ function abrirModalRelatorio(devIds, forceClienteId){
 function gerarRelatorio(){
   const periodo = (document.getElementById('rel-periodo').value||'').trim() || 'Período atual';
   const fmt = document.querySelector('input[name="rel-fmt"]:checked').value;
+  if(_reportGrupoId){
+    const gid = _reportGrupoId; _reportGrupoId = null;
+    const nomeG = ((DB.gruposEconomicos||[]).find(g=>g.id===gid)||{}).nome || 'grupo';
+    const htmlG = buildReportHtmlGrupo(gid, periodo);
+    closeModal('modal-relatorio');
+    if(fmt==='pdf'){
+      const w = window.open('','_blank'); w.document.write(htmlG); w.document.close(); setTimeout(()=>w.print(), 900);
+    } else {
+      const wrapperG = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset="UTF-8"></head><body>${htmlG}</body></html>`;
+      const blobG = new Blob([wrapperG],{type:'application/msword'});
+      const urlG = URL.createObjectURL(blobG);
+      const aG = document.createElement('a');
+      aG.download = 'relatorio-grupo-'+nomeG.toLowerCase().replace(/\s+/g,'-')+'-'+hoje()+'.doc';
+      aG.href = urlG; aG.click(); URL.revokeObjectURL(urlG);
+    }
+    return;
+  }
   let devIds = [..._reportDevIds];
   let clienteId = _reportClienteId;
   const credorSel = document.getElementById('rel-credor-sel');
