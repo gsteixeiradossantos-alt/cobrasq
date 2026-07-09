@@ -33,24 +33,34 @@ module.exports = async function handler(req, res) {
   // 3) entrada
   const body = (typeof req.body === 'object' && req.body) || {};
   const clienteId = String(body.clienteId || '').trim();
+  const grupoEconomicoId = String(body.grupoEconomicoId || '').trim();
   const email = String(body.email || '').trim().toLowerCase();
   const senha = String(body.senha || '');
   const nome = String(body.nome || '').trim();
-  if (!clienteId || !email || senha.length < 6) {
-    return res.status(400).json({ error: 'Informe clienteId, e-mail e senha (mín. 6 caracteres).' });
+  if ((!clienteId && !grupoEconomicoId) || !email || senha.length < 6) {
+    return res.status(400).json({ error: 'Informe clienteId ou grupoEconomicoId, e-mail e senha (mín. 6 caracteres).' });
   }
   if (!SB_URL || !SB_KEY) {
     return res.status(500).json({ error: 'Servidor sem SUPABASE_SERVICE_ROLE_KEY configurada.' });
   }
 
-  // 4) o cliente existe?
-  let cliente;
-  try {
-    const cs = await sbFetch(`clientes?id=eq.${clienteId}&select=id,nome,nome_fantasia,app_user_id`);
-    cliente = Array.isArray(cs) && cs[0] ? cs[0] : null;
-    if (!cliente) return res.status(404).json({ error: 'Cliente não encontrado.' });
-  } catch (e) {
-    return res.status(500).json({ error: 'Falha ao buscar cliente: ' + e.message });
+  // 4) valida o alvo: cliente único OU grupo econômico
+  let cliente = null;
+  if (clienteId) {
+    try {
+      const cs = await sbFetch(`clientes?id=eq.${clienteId}&select=id,nome,nome_fantasia,app_user_id`);
+      cliente = Array.isArray(cs) && cs[0] ? cs[0] : null;
+      if (!cliente) return res.status(404).json({ error: 'Cliente não encontrado.' });
+    } catch (e) {
+      return res.status(500).json({ error: 'Falha ao buscar cliente: ' + e.message });
+    }
+  } else {
+    try {
+      const gs = await sbFetch(`grupos_economicos?id=eq.${grupoEconomicoId}&select=id,nome`);
+      if (!(Array.isArray(gs) && gs[0])) return res.status(404).json({ error: 'Grupo econômico não encontrado.' });
+    } catch (e) {
+      return res.status(500).json({ error: 'Falha ao buscar grupo: ' + e.message });
+    }
   }
 
   // 5) cria o usuário no GoTrue (admin). Já confirma o e-mail p/ permitir login imediato.
@@ -60,7 +70,7 @@ module.exports = async function handler(req, res) {
       method: 'POST',
       headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password: senha, email_confirm: true,
-        user_metadata: { nome: nome || cliente.nome_fantasia || cliente.nome || '', papel: 'cedente' } }),
+        user_metadata: { nome: nome || (cliente && (cliente.nome_fantasia || cliente.nome)) || '', papel: 'cedente' } }),
     });
     const data = await r.json().catch(() => ({}));
     if (r.ok && data && data.id) {
@@ -87,19 +97,25 @@ module.exports = async function handler(req, res) {
     return res.status(502).json({ error: 'Erro ao criar usuário: ' + e.message });
   }
 
-  // 6) app_users (papel cedente) + liga clientes.app_user_id
+  // 6) app_users (papel cedente). Cliente único → ref_id + clientes.app_user_id.
+  //    Grupo econômico → grupo_economico_id + pode_ver_grupo (RLS *_cedente_grupo).
   try {
+    const appRow = grupoEconomicoId
+      ? { id: uid, nome: nome || 'Cedente do grupo', papel: 'cedente', grupo_economico_id: grupoEconomicoId, pode_ver_grupo: true, ativo: true }
+      : { id: uid, nome: nome || cliente.nome_fantasia || cliente.nome || '', papel: 'cedente', ref_id: clienteId, ativo: true };
     await sbFetch('app_users?on_conflict=id', {
       method: 'POST',
       prefer: 'resolution=merge-duplicates,return=representation',
-      body: JSON.stringify({ id: uid, nome: nome || cliente.nome_fantasia || cliente.nome || '', papel: 'cedente', ref_id: clienteId, ativo: true }),
+      body: JSON.stringify(appRow),
     });
-    await sbFetch(`clientes?id=eq.${clienteId}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ app_user_id: uid }),
-    });
+    if (clienteId) {
+      await sbFetch(`clientes?id=eq.${clienteId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ app_user_id: uid }),
+      });
+    }
   } catch (e) {
-    return res.status(500).json({ error: 'Usuário criado, mas falhou ao vincular ao cliente: ' + e.message });
+    return res.status(500).json({ error: 'Usuário criado, mas falhou ao vincular: ' + e.message });
   }
 
   return res.status(200).json({ ok: true, userId: uid, email });
