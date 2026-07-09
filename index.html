@@ -6106,31 +6106,52 @@ async function viaCepLookup(cepStr, prefix, force){
 }
 
 // ── Formatação automática de campos (máscaras) ───────────────────────────────
-// Delegação ÚNICA no documento: aplica a máscara certa a QUALQUER input listado,
-// inclusive os renderizados dinamicamente (di-*, cobr-*, cpnc-*), sem depender de
-// um oninput por campo. As funções de máscara são idempotentes, então convivem
-// sem conflito com os handlers inline já existentes (recalc, viaCEP, etc.).
+// Detecção por ID (allowlist, p/ campos sem placeholder padrão) OU por
+// PLACEHOLDER-modelo — assim QUALQUER campo que use os placeholders do app
+// (0,00 · 000.000.000-00 · (00) 00000-0000 · 00000-000), inclusive telas novas
+// ou renderizadas dinamicamente (calculadora, editar cobrança/cliente, acordos),
+// ganha máscara sem precisar listar cada id. Idempotente — convive com os
+// handlers inline já existentes (recalc, viaCEP, etc.).
 //   • Valores  → R$ 1.000,00   • CPF/CNPJ → 123.456.789-00 / 12.345.678/0001-00
 //   • Telefone → (46) 99922-3332 / (46) 9922-3332   • CEP → 85660-000
-// Campos que JÁ tinham máscara (mdev-tel, mdev-cep, mcli-cep, wa-numero, waNCTel)
-// não precisam entrar aqui — o handler inline deles continua valendo.
 const _MASK_MONEY = new Set(['mlanc-valor','mlanc-juros','mlanc-multa','mlanc-desconto',
   'mtransf-valor','mcust-valor-previsto','mcust-valor-bloqueado','mcust-valor-sacado',
-  'mrec-valor','macord-valor','di-valor','mpag-valor','cpnc-valor',
+  'mrec-valor','macord-valor','macord-entrada','di-valor','mpag-valor','cpnc-valor',
   'cobr-valor-capital','cobr-valor-atual']);
 const _MASK_DOC = new Set(['mdev-doc','mcli-doc','di-doc','cpnc-doc','mctf-doc',
   'cfg-cnpj','devedor-cpf']);
 const _MASK_TEL = new Set(['mcli-tel','di-tel','cpnc-tel','mctf-tel',
   'cfg-zapi-admin-tel','mudou-tel']);
 const _MASK_CEP = new Set(['mdr-end-cep']);
+// Decide o tipo de máscara de um input. Só campos de texto. Exclui, de propósito,
+// nº de processo CNJ (0000000-00.0000.…), chave PIX/e-mail e agência/conta.
+function _maskTipoDoCampo(el){
+  if(!el || el.tagName !== 'INPUT') return '';
+  const id = el.id || '';
+  if(_MASK_MONEY.has(id)) return 'money';
+  if(_MASK_DOC.has(id))   return 'doc';
+  if(_MASK_TEL.has(id))   return 'tel';
+  if(_MASK_CEP.has(id))   return 'cep';
+  if((el.type||'text').toLowerCase() !== 'text') return ''; // date/number/email/etc: não mexe
+  const ph = (el.getAttribute('placeholder')||'').trim();
+  if(!ph) return '';
+  if(/^R?\$?\s?\d{1,3}(\.\d{3})*,\d{2}$/.test(ph)) return 'money';         // 0,00 · R$ 0,00 · 1.000,00
+  if(/(000\.000\.000-00|00\.000\.000\/0000-00)/.test(ph)
+     && !/pix|e-?mail|ex\.?:/i.test(ph)) return 'doc';                     // CPF/CNPJ (não PIX/e-mail)
+  if(/^\(\d{2}\)\s?\d{4,5}-\d{4}$/.test(ph)) return 'tel';                 // (00) 00000-0000
+  if(/^\d{5}-\d{3}$/.test(ph)) return 'cep';                              // 00000-000
+  return '';
+}
 document.addEventListener('input', function(e){
   const el = e.target;
-  if(!el || el.tagName !== 'INPUT' || !el.id) return;
+  if(!el || el.tagName !== 'INPUT') return;
   try{
-    if(_MASK_MONEY.has(el.id)) maskMoneyBR(el);
-    else if(_MASK_DOC.has(el.id)) mascaraDoc(el);
-    else if(_MASK_TEL.has(el.id)) mascaraTel(el);
-    else if(_MASK_CEP.has(el.id)) maskCEP(el);
+    switch(_maskTipoDoCampo(el)){
+      case 'money': maskMoneyBR(el); break;
+      case 'doc':   mascaraDoc(el);  break;
+      case 'tel':   mascaraTel(el);  break;
+      case 'cep':   maskCEP(el);     break;
+    }
   }catch(_){}
 }, true);
 
@@ -6146,19 +6167,21 @@ function formatPercentBR(el){
   el.value = n.toLocaleString('pt-BR',{minimumFractionDigits:2, maximumFractionDigits:2}) + '%';
 }
 
-// Formata valores JÁ preenchidos (ex.: ao abrir um cadastro existente) — o
-// evento 'input' não dispara quando o .value é setado por código. Só documento,
-// telefone e CEP: são strip-and-group, sem ambiguidade. Valores monetários NÃO
-// entram aqui (maskMoneyBR trata dígitos como centavos e "1234" viraria 12,34;
-// o valor já é normalizado por valorBRParaInput/toFixed nos pontos que populam).
+// Formata valores JÁ preenchidos (ex.: ao abrir um cadastro/edição existente) —
+// o evento 'input' não dispara quando o .value é setado por código. Money usa a
+// combinação SEGURA valorBRParaInput()+maskMoneyBR(): trata "1234" como reais
+// inteiros e "1234,56"/"1234.56" como já-com-centavos (sem o bug de virar 12,34).
 function _aplicarMascarasNoModal(root){
   if(!root || !root.querySelectorAll) return;
   root.querySelectorAll('input').forEach(el=>{
-    if(!el.id || !el.value) return;
+    if(!el.value) return;
     try{
-      if(_MASK_DOC.has(el.id)) mascaraDoc(el);
-      else if(_MASK_TEL.has(el.id)) mascaraTel(el);
-      else if(_MASK_CEP.has(el.id)) maskCEP(el);
+      switch(_maskTipoDoCampo(el)){
+        case 'money': el.value = valorBRParaInput(el.value); maskMoneyBR(el); break;
+        case 'doc':   mascaraDoc(el);  break;
+        case 'tel':   mascaraTel(el);  break;
+        case 'cep':   maskCEP(el);     break;
+      }
     }catch(_){}
   });
 }
@@ -16682,6 +16705,8 @@ function abrirCobrancaModal(cob){
   { const tipoFinal = tipoCobrV || (cob ? 'digital' : ''); if(tipoFinal){ const tr=document.getElementById(tipoFinal==='fisica'?'cobr-tipo-fisica':'cobr-tipo-digital'); if(tr) tr.checked=true; } }
   cobrSelectMode('manual');
   cobrInitResponsavel(assignedV);
+  // Formata os valores capital/atual (e docs) já preenchidos ao abrir a edição.
+  try{ _aplicarMascarasNoModal(overlay); }catch(_){}
 }
 
 // ── img/01: helpers do fluxo único de Nova cobrança ──────────────────────────
