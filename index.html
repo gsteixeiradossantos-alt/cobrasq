@@ -14698,6 +14698,30 @@ function cobStatusBadge(c){
   return `<button class="cob-badge" style="--cor:${cor};" onclick="event.stopPropagation();abrirTrocaStatus(event,'${c.id}')" title="Clique para alterar a situação">${escHtml(statusLabel(c.status)||'—')}<span class="cx">▾</span></button>`;
 }
 
+// ── Processo unificado (Opção 1): 2+ cobranças do mesmo devedor litigadas num processo só.
+// O vínculo vive em cobrancas.metadata.casoUnificado.id (compartilhado). Cada cobrança
+// mantém seu credor/valor/repasse (contabilidade por loja); a LISTA colapsa os irmãos num
+// card único com valor somado, e o detalhe mostra os créditos.
+function _cobrUnifId(c){ return (c && c.metadata && c.metadata.casoUnificado && c.metadata.casoUnificado.id) || null; }
+function _cobrColapsaUnificados(list){
+  (list||[]).forEach(c=>{ if(c) delete c._unif; });
+  const membros = new Map(); const out = [];
+  for(const c of (list||[])){
+    const uid = _cobrUnifId(c);
+    if(!uid){ out.push(c); continue; }
+    if(membros.has(uid)){ membros.get(uid).push(c); continue; }
+    membros.set(uid, [c]); out.push(c); // 1º irmão = representante do card
+  }
+  for(const c of out){
+    const uid = _cobrUnifId(c); if(!uid) continue;
+    const irmaos = membros.get(uid) || [c];
+    if(irmaos.length < 2) continue; // só colapsa se realmente há 2+
+    c._unif = { irmaos, total: irmaos.reduce((s,x)=>s+(+x.valor_atual||+x.valor_orig||0),0),
+      credores: [...new Set(irmaos.map(x=>_cobrCredorNome(x)))] };
+  }
+  return out;
+}
+
 async function renderCobrancas(opts){
   const el = document.getElementById('page-cobr');
   if(!el) return;
@@ -14740,11 +14764,11 @@ async function renderCobrancas(opts){
     valor:  (a,b)=> (+b.valor_atual||+b.valor_orig||0) - (+a.valor_atual||+a.valor_orig||0),
     antigo: (a,b)=> (_cobrAgingDias(b)||0) - (_cobrAgingDias(a)||0)
   };
-  const cobr = naAba
+  const cobr = _cobrColapsaUnificados(naAba
     .filter(c=> !cobrFilter.statuses.length || cobrFilter.statuses.includes(c.status))
-    .sort(_sorters[cobrFilter.ord] || _sorters.nome);
+    .sort(_sorters[cobrFilter.ord] || _sorters.nome));
   _cobrVisiveis = cobr.map(c=>c.id);
-  const somaFiltro = cobr.reduce((s,c)=> s + (+c.valor_atual||+c.valor_orig||0), 0);
+  const somaFiltro = cobr.reduce((s,c)=> s + (c._unif? c._unif.total : (+c.valor_atual||+c.valor_orig||0)), 0);
 
   // KPIs sobre todas as cobranças ativas (independem do filtro de busca).
   const totalCarteira = todas.reduce((s,c)=>s + (+c.valor_atual || +c.valor_orig || 0), 0);
@@ -14787,7 +14811,8 @@ async function renderCobrancas(opts){
     const aging = _cobrAgingDias(c);
     const agingTxt = (aging!=null && aging>0) ? `${aging}d em aberto` : '';
     const agingOld = (aging!=null && aging>=365);
-    const vAtual=+c.valor_atual||+c.valor_orig||0, vOrig=+c.valor_orig||0;
+    const vAtual=c._unif? c._unif.total : (+c.valor_atual||+c.valor_orig||0), vOrig=+c.valor_orig||0;
+    const unifChip = c._unif? `<span class="det-chip" style="background:var(--navy,#1f3a5f);color:#fff;" title="${escHtml(c._unif.credores.join(' + '))}">⚖ Processo unificado · ${c._unif.irmaos.length} créditos</span>` : '';
     const cor = _etiquetaCor(c.status);
     const isSel = selectedCobrIds.has(c.id);
     const check = cobSelectionMode ? `<label class="cob-caso-check" onclick="event.stopPropagation()"><input type="checkbox" ${isSel?'checked':''} onchange="toggleCobrSelection('${c.id}',this.checked)" style="width:16px;height:16px;cursor:pointer;"></label>` : '';
@@ -14797,9 +14822,9 @@ async function renderCobrancas(opts){
       <div class="cob-caso-main">
         <div class="cob-caso-nome">${escHtml(princNome)}${princPapel?` <span class="papel">· ${escHtml(princPapel)}</span>`:''} ${extra}</div>
         <div class="cob-caso-doc">${escHtml(_cobrDocLabel(c))}</div>
-        <div class="cob-caso-chips">${selo}<span class="cob-caso-fase">${faseProc}</span></div>
+        <div class="cob-caso-chips">${selo}<span class="cob-caso-fase">${faseProc}</span>${unifChip}</div>
       </div>
-      <div class="cob-caso-credor">${escHtml(_cobrCredorNome(c))}<div class="resp">${escHtml(_detUserNome(c.assigned_to))}</div></div>
+      <div class="cob-caso-credor">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}<div class="resp">${escHtml(_detUserNome(c.assigned_to))}</div></div>
       <div class="cob-caso-vs">
         <div class="cob-caso-valor"><div class="v">${fmtR(vAtual)}</div>${(vOrig&&vOrig!==vAtual)?`<div class="orig">orig. ${fmtR(vOrig)}</div>`:''}</div>
         <div class="cob-caso-statusblk">${cobStatusBadge(c)}${agingTxt?`<div class="cob-caso-aging${agingOld?' old':''}">${agingTxt}</div>`:''}</div>
@@ -14817,10 +14842,11 @@ async function renderCobrancas(opts){
     return `<div class="cob-panel cob-card cob-tr-click" style="--cor:${cor};padding:14px;cursor:pointer;" onclick="verCobranca('${c.id}')">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;"><div class="strong" style="font-size:14px;font-weight:700;">${escHtml(princ?.devedores?.nome||'—')}${extra}</div>${cobStatusBadge(c)}</div>
       <div style="font-size:12.5px;color:var(--text-2);margin-top:4px;">${escHtml(_cobrDocLabel(c))}</div>
-      <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">${escHtml(_cobrCredorNome(c))}</div>
+      <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}</div>
+      ${c._unif?`<div style="margin-top:4px;"><span class="det-chip" style="background:var(--navy,#1f3a5f);color:#fff;">⚖ Processo unificado · ${c._unif.irmaos.length} créditos</span></div>`:''}
       <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
         <span class="det-chip">${fis?'Física':'Digital'}${isJud?' · Judicial':''}${isJud&&c.numero_processo?` · <span class="mono">${escHtml(c.numero_processo)}</span>`:''}</span>
-        <span class="mono" style="font-weight:600;">${fmtR(+c.valor_atual||+c.valor_orig||0)}</span>
+        <span class="mono" style="font-weight:600;">${fmtR(c._unif? c._unif.total : (+c.valor_atual||+c.valor_orig||0))}</span>
       </div>
       ${(aging!=null && aging>0)?`<div class="cob-caso-aging${agingOld?' old':''}" style="margin-top:6px;">${aging}d em aberto</div>`:''}
     </div>`;
@@ -15483,9 +15509,21 @@ async function renderCobrancaDetalhe(){
     ${repasses.length? repasses.map(repRow).join('') : _detEmpty('Nenhum repasse registrado. Use "Enviar comprovantes (IA)" para subir os comprovantes PIX enviados ao cliente.')}
   </div>`;
 
+  // Painel "Processo unificado": lista os créditos irmãos (mesmo processo/ação), com total.
+  const _unifId = _cobrUnifId(cob);
+  const _unifIrmaos = _unifId ? (DB_cobrancas||[]).filter(x=>_cobrUnifId(x)===_unifId) : [];
+  const panelUnificado = (_unifId && _unifIrmaos.length>1) ? `<div class="cob-panel" style="padding:18px;">
+    <div class="det-panel-tt">⚖ Processo unificado</div>
+    <div style="font-size:12.5px;color:var(--text-2);margin:6px 0 12px;">Esta cobrança integra uma <strong>ação única</strong> que reúne ${_unifIrmaos.length} créditos do mesmo devedor (litisconsórcio ativo). O repasse continua <strong>separado por credor</strong>.</div>
+    <dl class="det-kv">
+      ${_unifIrmaos.map(x=>`<dt>${escHtml(_cobrCredorNome(x))}${x.id===cob.id?' <span style="font-size:10px;color:var(--text-3);">(este)</span>':''}</dt><dd>${fmtR(+x.valor_atual||+x.valor_orig||0)} · ${escHtml(statusLabel(x.status)||'—')}${x.id!==cob.id?` · <a href="#" onclick="verCobranca('${x.id}');return false;">abrir</a>`:''}</dd>`).join('')}
+      <dt style="font-weight:700;">Total da ação</dt><dd style="font-weight:700;">${fmtR(_unifIrmaos.reduce((s,x)=>s+(+x.valor_atual||+x.valor_orig||0),0))}</dd>
+    </dl>
+  </div>` : '';
+
   // Abas (img/04): Resumo · Devedores · Histórico · Documentos do caso · Repasses · Andamentos/CRM.
   const _tabs=[
-    ['resumo','Resumo', panelValores+panelDoc],
+    ['resumo','Resumo', panelValores+panelUnificado+panelDoc],
     ['devedores',`Devedores (${partes.length})`, panelDevedores(false)],
     ['hist','Histórico', panelHist],
     ['docs',`Documentos do caso${anexos.length?` (${anexos.length})`:''}`, panelDocGerar+panelAnexos],
