@@ -14738,14 +14738,24 @@ async function renderCobrancas(opts){
   const todas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft);
   const q = (cobrFilter.q||'').trim().toLowerCase();
   const qDigits = docSoDigitos(q);
+  // Filtro por GRUPO econômico: o dropdown Credor pode trazer "grp:<id>" (todas as empresas
+  // do grupo) e a busca aceita o NOME do grupo (ex.: "tic tac").
+  const _grupoSel = (cobrFilter.credor||'').startsWith('grp:') ? cobrFilter.credor.slice(4) : null;
+  const _idsGrupoSel = _grupoSel ? new Set((DB.clientes||[]).filter(cl=>cl.grupoEconomicoId===_grupoSel).map(cl=>cl.id)) : null;
+  const _gruposQ = q ? (DB.gruposEconomicos||[]).filter(g=>(g.nome||'').toLowerCase().includes(q)).map(g=>g.id) : [];
+  const _credoresDeGrupoQ = _gruposQ.length ? new Set((DB.clientes||[]).filter(cl=>cl.grupoEconomicoId && _gruposQ.includes(cl.grupoEconomicoId)).map(cl=>cl.id)) : null;
   // base = passa em busca/credor/responsável/fase (SEM aba nem chips) → alimenta as contagens das abas.
   const base = todas.filter(c=>{
-    if(cobrFilter.credor && c.cliente_id !== cobrFilter.credor) return false;
+    if(cobrFilter.credor){
+      if(_idsGrupoSel){ if(!_idsGrupoSel.has(c.cliente_id)) return false; }
+      else if(c.cliente_id !== cobrFilter.credor) return false;
+    }
     if(cobrFilter.responsavel && c.assigned_to !== cobrFilter.responsavel) return false;
     if(cobrFilter.fase && (c.fase||'extrajudicial') !== cobrFilter.fase) return false;
     if(q){
       const partes = c.cobranca_partes || [];
       const hit = _cobrCredorNome(c).toLowerCase().includes(q)
+        || (_credoresDeGrupoQ && _credoresDeGrupoQ.has(c.cliente_id))
         || (c.numero_documento||'').toLowerCase().includes(q)
         || (c.tipo_documento||'').toLowerCase().includes(q)
         || partes.some(p=>(p.devedores?.nome||'').toLowerCase().includes(q))
@@ -14780,6 +14790,13 @@ async function renderCobrancas(opts){
   const credorOpts = credorIds.map(cid=>({ id:cid, nome:_cobrCredorNome({cliente_id:cid}) }))
     .sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR',{sensitivity:'base'}))
     .map(o=>`<option value="${escHtml(o.id)}" ${cobrFilter.credor===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('');
+  // Grupos econômicos que têm casos → bloco "Grupos" no topo do filtro de credor (1 clique = todas as empresas do grupo).
+  const _credorIdsSet = new Set(credorIds);
+  const gruposComCasos = (DB.gruposEconomicos||[]).filter(g=>(DB.clientes||[]).some(cl=>cl.grupoEconomicoId===g.id && _credorIdsSet.has(cl.id)))
+    .sort((a,b)=>(a.nome||'').localeCompare(b.nome||'','pt-BR',{sensitivity:'base'}));
+  const grupoOpts = gruposComCasos.length
+    ? `<optgroup label="Grupos">${gruposComCasos.map(g=>`<option value="grp:${escHtml(g.id)}" ${cobrFilter.credor==='grp:'+g.id?'selected':''}>Grupo: ${escHtml(g.nome)}</option>`).join('')}</optgroup>`
+    : '';
   const respIds = [...new Set(todas.map(c=>c.assigned_to).filter(Boolean))];
   const respOpts = respIds.map(uid=>({ id:uid, nome:_detUserNome(uid) }))
     .sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR',{sensitivity:'base'}))
@@ -14889,7 +14906,7 @@ async function renderCobrancas(opts){
         <input type="search" id="cobr-search" placeholder="Buscar documento, devedor, credor, CPF/CNPJ…" value="${escHtml(cobrFilter.q)}"
           style="border:none;outline:none;background:transparent;font-size:13px;color:var(--text);flex:1;width:0;min-width:0;"/>
       </div>
-      <select id="cobr-f-credor" style="${selStyle}" onchange="cobrFilter.credor=this.value;renderCobrancas();"><option value="">Credor: todos</option>${credorOpts}</select>
+      <select id="cobr-f-credor" style="${selStyle}" onchange="cobrFilter.credor=this.value;renderCobrancas();"><option value="">Credor: todos</option>${grupoOpts}${credorOpts}</select>
       <select id="cobr-f-resp" style="${selStyle}" onchange="cobrFilter.responsavel=this.value;renderCobrancas();"><option value="">Responsável: todos</option>${respOpts}</select>
       <select id="cobr-f-ord" style="${selStyle}" onchange="cobrFilter.ord=this.value;renderCobrancas();">
         <option value="nome" ${cobrFilter.ord==='nome'?'selected':''}>Ordenar: nome</option>
