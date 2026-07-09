@@ -23624,10 +23624,19 @@ async function renderFinVisao(el){
     try{ const {data:c}=await _sb.from('clientes').select('nome').eq('id',worst.credId).maybeSingle(); if(c&&c.nome) nome=c.nome; }catch(_){}
     return { nome, total:worst.total, dias:worst.dias };
   }
+  // Carteira ativa em aberto = soma de valor_atual das cobranças ativas
+  // (não arquivadas, não rascunho, sem encerramento). Denominador da "Recuperação do mês".
+  async function _carteiraAtiva(){
+    if(!_sb) return 0;
+    try{
+      const { data } = await _sb.from('cobrancas').select('valor_atual,arquivado,is_draft,encerramento').limit(5000);
+      return (data||[]).filter(c=>!c.arquivado && !c.is_draft && !c.encerramento).reduce((s,c)=>s+(+c.valor_atual||0),0);
+    }catch(_){ return 0; }
+  }
 
-  let kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas, serie, fluxo, automacao, atraso, repAtraso;
+  let kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas, serie, fluxo, automacao, atraso, repAtraso, carteira;
   try {
-    [kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas, serie, fluxo, automacao, atraso, repAtraso] = await Promise.all([
+    [kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas, serie, fluxo, automacao, atraso, repAtraso, carteira] = await Promise.all([
       finApi.getKpisMes().catch(()=>({ receitaMes:0, despesaMes:0, saldoMes:0, aReceber30d:0, qtdMes:0 })),
       finApi.getRecentes(8),
       finApi.loadDimensoes(),
@@ -23641,6 +23650,7 @@ async function renderFinVisao(el){
       _automacaoStats().catch(()=>null),
       _atrasoAgg().catch(()=>({ count:0, total:0 })),
       _repasseAtrasado().catch(()=>null),
+      _carteiraAtiva().catch(()=>0),
     ]);
   } catch(e){
     el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--danger);">
@@ -23793,11 +23803,11 @@ async function renderFinVisao(el){
         <div class="note" style="margin-top:8px;">pagamentos pendentes nos próximos 7 dias</div>
       </div>
 
-      ${(()=>{ const recuperado=+kpis.receitaMes||0; const aberto=(inad&&inad.devList?inad.devList:[]).reduce((s,g)=>s+(+(g.agg&&(g.agg.nominal!=null?g.agg.nominal:g.agg.total))||0),0); const den=recuperado+aberto; const pct=den>0?(recuperado/den*100):0; return `
+      ${(()=>{ const recuperado=+kpis.receitaMes||0; const cart=+carteira||0; const pct=cart>0?(recuperado/cart*100):0; return `
       <div class="fin-card">
         <div class="fin-card-head"><div class="t">Recuperação do mês</div></div>
         <div style="display:flex;align-items:baseline;gap:8px;margin-top:4px;">${_bigNum(pct.toFixed(1).replace('.',',')+'%','var(--success)')}${recuperado>0?'<span style="color:var(--success);font-size:13px;">▲</span>':''}</div>
-        <div class="note" style="margin-top:8px;padding:0;">${fmtR(recuperado)} recuperado · ${fmtR(aberto)} vencido em aberto</div>
+        <div class="note" style="margin-top:8px;padding:0;">${fmtR(recuperado)} recebido no mês${cart>0?` de ${fmtR(cart)} em carteira`:''}</div>
       </div>`; })()}
 
       <div class="fin-card">
@@ -23927,6 +23937,9 @@ async function renderFinLancamentos(el){
   const optsContato = ['<option value="">Contato: todos</option>'].concat(
     dim.contatos.map(c=>`<option value="${c.id}" ${f.contatoId==c.id?'selected':''}>${escHtml(c.nome)}</option>`)
   ).join('');
+  // Conta do Asaas → filtro "Origem: via Asaas" (recebimentos que caíram na conta Asaas).
+  const _asaasConta = (dim.contas||[]).find(c=>/asaas/i.test((c.descricao||'')+' '+(c.banco_nome||'')));
+  window._finAsaasContaId = _asaasConta ? String(_asaasConta.id) : null;
 
   el.innerHTML = `
     <div class="panel" style="margin-bottom:14px;">
@@ -23943,6 +23956,10 @@ async function renderFinLancamentos(el){
           <option value="parcial" ${f.status==='parcial'?'selected':''}>Parciais</option>
         </select>
         <select id="filtLancConta" onchange="aplicarFiltrosLancs()" style="max-width:160px;">${optsConta}</select>
+        <select id="filtLancOrigem" onchange="aplicarFiltrosLancs()" title="${window._finAsaasContaId?'Filtra recebimentos na conta Asaas':'Nenhuma conta Asaas identificada'}">
+          <option value="">Origem: todas</option>
+          <option value="asaas" ${f.origem==='asaas'?'selected':''} ${!window._finAsaasContaId?'disabled':''}>Via Asaas</option>
+        </select>
         <select id="filtLancContato" onchange="aplicarFiltrosLancs()" style="max-width:180px;">${optsContato}</select>
         <input type="date" id="filtLancDataIni" value="${f.dataIni||''}" onchange="_filtrarLancsDebounced()" oninput="_filtrarLancsDebounced()" placeholder="De"/>
         <input type="date" id="filtLancDataFim" value="${f.dataFim||''}" onchange="_filtrarLancsDebounced()" oninput="_filtrarLancsDebounced()" placeholder="Até"/>
@@ -23994,11 +24011,19 @@ function aplicarFiltrosLancs(){
     const elI = document.getElementById('filtLancDataIni'); if(elI) elI.value = dataIni;
     const elF = document.getElementById('filtLancDataFim'); if(elF) elF.value = dataFim;
   }
+  const origem = document.getElementById('filtLancOrigem')?.value||'';
+  let contaId = document.getElementById('filtLancConta')?.value||'';
+  // "Origem: via Asaas" filtra pela conta do Asaas (sincroniza o seletor de Conta).
+  if(origem==='asaas' && window._finAsaasContaId){
+    contaId = window._finAsaasContaId;
+    const selConta = document.getElementById('filtLancConta'); if(selConta) selConta.value = contaId;
+  }
   st.filtros = {
     tipo: document.getElementById('filtLancTipo')?.value||'',
     status: document.getElementById('filtLancStatus')?.value||'',
-    contaId: document.getElementById('filtLancConta')?.value||'',
+    contaId,
     contatoId: document.getElementById('filtLancContato')?.value||'',
+    origem,
     dataIni,
     dataFim,
     busca: (document.getElementById('filtLancBusca')?.value||'').trim(),
@@ -24008,7 +24033,7 @@ function aplicarFiltrosLancs(){
 }
 
 function limparFiltrosLancs(){
-  ['filtLancTipo','filtLancStatus','filtLancConta','filtLancContato','filtLancBusca']
+  ['filtLancTipo','filtLancStatus','filtLancConta','filtLancOrigem','filtLancContato','filtLancBusca']
     .forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
   // "Limpar" volta ao período padrão (mês corrente), não a "todos".
   const mc = _finMesCorrente();
