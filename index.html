@@ -15069,6 +15069,23 @@ async function ativarAcessoCedente(){
     showToast('Acesso do cedente ativado / senha atualizada. O cliente entra com esse e-mail e a senha definida.','success');
   }catch(e){ showToast('Falha ao ativar acesso: '+(e.message||e),'danger'); }
 }
+// Cria/ativa o login do cedente vinculado a um GRUPO econômico (vê todas as empresas do grupo).
+async function ativarAcessoGrupo(gid){
+  if(currentUser?.tipo !== 'gestor'){ showToast('Apenas o proprietário pode ativar o acesso do grupo.','danger'); return; }
+  const grupo = (DB.gruposEconomicos||[]).find(g=>g.id===gid) || {};
+  const nome = grupo.nome || 'Grupo';
+  const email = (prompt(`Ativar acesso do cedente para o "${nome}" (todas as empresas do grupo).\n\nE-mail de login:`)||'').trim().toLowerCase();
+  if(!email) return;
+  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){ showToast('E-mail inválido.','warning'); return; }
+  const senha = (prompt('Senha do acesso (mín. 6 caracteres):')||'');
+  if(senha.length<6){ showToast('Senha muito curta (mín. 6 caracteres).','warning'); return; }
+  try{
+    const resp = await fetch('/api/criar-cedente',{ method:'POST', headers:{'Content-Type':'application/json', ...(await authHeaders())}, body:JSON.stringify({ grupoEconomicoId:gid, email, senha, nome }) });
+    const data = await resp.json().catch(()=>({}));
+    if(!resp.ok || data.error){ throw new Error(data.error||('HTTP '+resp.status)); }
+    showToast('Acesso do grupo ativado. O cedente entra pela aba Cedente e vê os casos de TODAS as empresas do grupo.','success');
+  }catch(e){ showToast('Falha ao ativar acesso do grupo: '+(e.message||e),'danger'); }
+}
 function verCliente(id){ _detCliId=id; showPage('cliente-detalhe'); }
 
 function _detData(s){
@@ -16836,7 +16853,7 @@ function renderClientes(){
                       <td class="num mono strong">${fmtR(gCart)}</td>
                       <td class="num"><span class="cob-rate${gTaxaN>0?' pos':''}">${gTaxa}</span></td>
                       <td>—</td>
-                      <td class="num" onclick="event.stopPropagation()">${podeGerirCredor?`<button class="cob-row-act" onclick="gerarRelatorioGrupo('${gid}')" title="Relatório do grupo">${ico('file',13)}</button>`:''}</td>
+                      <td class="num" onclick="event.stopPropagation()">${podeGerirCredor?`<button class="cob-row-act" onclick="gerarRelatorioGrupo('${gid}')" title="Relatório do grupo">${ico('file',13)}</button><button class="cob-row-act" onclick="ativarAcessoGrupo('${gid}')" title="Ativar acesso do cedente (grupo)">${ico('clients',13)||'🔓'}</button>`:''}</td>
                     </tr>`);
                     if(exp) ms.forEach(m=>out.push(linhaHtml(m,true)));
                     return;
@@ -17722,7 +17739,7 @@ async function carregarAppUser(supa, userId){
   if(!supa || !userId) return { status:'error', user:null };
   try {
     const { data, error } = await supa.from('app_users')
-      .select('papel, nome, cargo, ativo, ref_id, pode_ver_grupo, cliente_grupo_id, avatar_url, avatar_cor')
+      .select('papel, nome, cargo, ativo, ref_id, pode_ver_grupo, cliente_grupo_id, grupo_economico_id, avatar_url, avatar_cor')
       .eq('id', userId)
       .maybeSingle();
     if(error){ console.warn('carregarAppUser:', error.message); return { status:'error', user:null }; }
@@ -17755,7 +17772,8 @@ function montarCurrentUserDeAppUser(appUser, authUser){
       avatar: initials(appUser.nome || authUser.email),
       role: 'Cedente',
       supaId: authUser.id,
-      clienteId: appUser.ref_id || ''
+      clienteId: appUser.ref_id || '',
+      grupoEconomicoId: appUser.grupo_economico_id || null
     };
   }
   const tipo  = papel === 'proprietario' ? 'gestor' : 'funcionario';
@@ -18600,9 +18618,18 @@ function cpAplicarPremiumUI(){
   if(con) con.style.display = prem?'':'none';
 }
 
+// Cedente de GRUPO: enxerga TODAS as empresas do grupo econômico. Cedente de cliente
+// único: só o próprio cliente. cpClienteIds() unifica os dois casos.
+function cpEhGrupo(){ return !!(currentUser && currentUser.grupoEconomicoId); }
+function cpClienteIds(){
+  if(cpEhGrupo()) return (DB.clientes||[]).filter(c=>c.grupoEconomicoId===currentUser.grupoEconomicoId).map(c=>c.id);
+  return currentUser && currentUser.clienteId ? [currentUser.clienteId] : [];
+}
+function cpNomeEmpresa(cid){ const c=(DB.clientes||[]).find(x=>x.id===cid); return c ? (c.nome||c.nomeFantasia||c.nome_fantasia||'—') : '—'; }
 function cpDevs(){
   // Item 8: rascunho nunca aparece no portal do cedente (não é cobrança ainda).
-  return (DB.devedores||[]).filter(d=>d.clienteId===currentUser.clienteId && !d.isDraft);
+  const ids = cpClienteIds();
+  return (DB.devedores||[]).filter(d=>ids.includes(d.clienteId) && !d.isDraft);
 }
 function cpPapelLbl(p){ return ({emitente:'Emitente',endossante:'Endossante',avalista:'Avalista',fiador:'Fiador',devedor_solidario:'Devedor solidário'}[p]||p||'Parte'); }
 // Casos do cedente = COBRANÇAS cujo credor é ele (cobrancas.cliente_id), não rascunho/arquivada.
@@ -18610,15 +18637,16 @@ function cpPapelLbl(p){ return ({emitente:'Emitente',endossante:'Endossante',ava
 // Escopar pela cobrança (e não por devedor.clienteId) faz aparecer casos cujo devedor
 // principal tem cadastro em outro credor (ex.: coobrigado compartilhado) — ver RLS devedores_cedente_parte.
 function cpCasos(){
-  const cid = currentUser.clienteId;
+  const ids = cpClienteIds();
   const src = (typeof DB_cobrancas!=='undefined'? DB_cobrancas : []) || [];
-  return src.filter(c=>c && c.cliente_id===cid && !c.is_draft && !c.arquivado).map(c=>{
+  return src.filter(c=>c && ids.includes(c.cliente_id) && !c.is_draft && !c.arquivado).map(c=>{
     const partes=(c.cobranca_partes||[]).slice().sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
     const pr=partes.find(p=>p.principal)||partes[0]||null;
     const nomes=partes.map(p=>p.devedores&&p.devedores.nome).filter(Boolean);
     const docs =partes.map(p=>p.devedores&&p.devedores.doc).filter(Boolean);
     const val=(+c.valor_atual||+c.valor_orig||(c.divida&&+c.divida.totalAvista)||0);
-    return { id:c.id, status:c.status||'', fase:c.fase||'',
+    return { id:c.id, status:c.status||'', fase:c.fase||'', clienteId:c.cliente_id,
+      empresa: cpNomeEmpresa(c.cliente_id),
       nome:(pr&&pr.devedores&&pr.devedores.nome)||(c.divida&&c.divida.descricao)||'Caso',
       doc:(pr&&pr.devedores&&pr.devedores.doc)||'', valor:val, partes:partes,
       buscaKey:(nomes.join(' ')+' '+docs.join(' ')).toLowerCase() };
@@ -19196,6 +19224,8 @@ async function cpRenderDashboard(body){
 
 function cpRenderCarteira(body){
   const casos = cpCasos();
+  const ehGrupo = cpEhGrupo();
+  const porEmpresa = ehGrupo && body._porEmpresa!==false;   // grupo: default agrupado por empresa
   const filter = body._filter||'';
   const sortKey = body._sortKey || 'nome';   // default: por nome
   const sortDir = body._sortDir || 'asc';    // default: crescente
@@ -19216,22 +19246,37 @@ function cpRenderCarteira(body){
     const ini = (x.nome||'?').split(' ').filter(Boolean).slice(0,2).map(s=>s[0]).join('').toUpperCase();
     const extras=(x.partes||[]).filter(p=>!p.principal);
     const extraHtml = extras.length ? `<div style="font-size:11px;color:var(--mute);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">+ ${extras.map(p=>escHtml((p.devedores&&p.devedores.nome)||'—')+' · '+cpPapelLbl(p.papel)).join(' · ')}</div>` : '';
+    const empHtml = (ehGrupo && !porEmpresa) ? `<div style="font-size:11px;color:var(--mute);font-style:italic;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(x.empresa||'')}</div>` : '';
     return `<div class="cp-cart-row" onclick="cpVerDevedor('${x.id}')" style="display:grid;grid-template-columns:2.4fr 1.3fr 1.2fr 1.4fr 28px;gap:10px;align-items:center;padding:14px 18px;border-top:1px solid var(--pline);cursor:pointer;transition:background .12s;" onmouseenter="this.style.background='rgba(226,219,198,.45)'" onmouseleave="this.style.background=''">
-      <div style="display:flex;align-items:center;gap:11px;min-width:0;"><span style="width:34px;height:34px;border-radius:50%;background:var(--ink);color:var(--cream);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;flex-shrink:0;">${ini}</span><div style="min-width:0;"><div style="font-size:13.5px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(x.nome||'—')}</div>${extraHtml}</div></div>
+      <div style="display:flex;align-items:center;gap:11px;min-width:0;"><span style="width:34px;height:34px;border-radius:50%;background:var(--ink);color:var(--cream);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;flex-shrink:0;">${ini}</span><div style="min-width:0;"><div style="font-size:13.5px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(x.nome||'—')}</div>${extraHtml}${empHtml}</div></div>
       <div class="cp-mono" style="font-size:11.5px;color:var(--mute);">${escHtml(x.doc||'—')}</div>
       <div class="cp-num" style="font-size:16px;color:var(--ink);">${fmtR(x.valor||0)}</div>
       <div>${cpPill(x.status)}</div>
       <div style="color:var(--mute);"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m9 18 6-6-6-6"/></svg></div>
     </div>`;
   };
+  // Grupo + "por empresa": seções por empresa com subtotal, reusando `row`.
+  const _agrupaEmpresa = (list)=>{
+    const byE = new Map();
+    list.forEach(x=>{ const k=x.empresa||'—'; if(!byE.has(k)) byE.set(k,[]); byE.get(k).push(x); });
+    return [...byE.entries()].sort((a,b)=>a[0].localeCompare(b[0],'pt-BR',{sensitivity:'base'})).map(([emp,rows])=>{
+      const sub=rows.reduce((s,x)=>s+(x.valor||0),0);
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:11px 18px;background:rgba(226,219,198,.55);border-top:1px solid var(--pline);">
+        <span style="font-size:12px;font-weight:700;color:var(--ink);text-transform:uppercase;letter-spacing:.04em;">${escHtml(emp)}</span>
+        <span class="cp-mono" style="font-size:12px;color:var(--mute);">${rows.length} caso${rows.length!==1?'s':''} · ${fmtR(sub)}</span>
+      </div>` + rows.map(row).join('');
+    }).join('');
+  };
+  const _segBtn = (on,label,val)=>`<button onclick="(function(){const b=document.getElementById('portalCedenteBody');b._porEmpresa=${val};cpRenderCarteira(b);})()" style="padding:6px 13px;border:none;background:${on?'var(--ink)':'transparent'};color:${on?'var(--cream)':'var(--ink)'};font:inherit;font-size:12px;font-weight:600;cursor:pointer;">${label}</button>`;
   body.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:18px;flex-wrap:wrap;gap:12px;">
       <div>
         <div class="cp-h1">Minha Carteira</div>
-        <div style="font-size:13px;color:var(--mute);margin-top:5px;">${casos.length} caso${casos.length!==1?'s':''} · valor total <strong class="cp-mono" style="color:var(--ink);">${fmtR(totalVal)}</strong></div>
+        <div style="font-size:13px;color:var(--mute);margin-top:5px;">${casos.length} caso${casos.length!==1?'s':''} · valor total <strong class="cp-mono" style="color:var(--ink);">${fmtR(totalVal)}</strong>${ehGrupo?` · ${new Set(casos.map(x=>x.clienteId)).size} empresas`:''}</div>
       </div>
-      <div style="display:flex;gap:9px;flex-wrap:wrap;">
-        <button class="cp-btn cp-btn-primary" onclick="gerarRelatorioCarteira(currentUser.clienteId)"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> Relatório de andamento</button>
+      <div style="display:flex;gap:9px;flex-wrap:wrap;align-items:center;">
+        ${ehGrupo?`<div style="display:flex;border:1px solid var(--pline);border-radius:100px;overflow:hidden;">${_segBtn(porEmpresa,'Por empresa',true)}${_segBtn(!porEmpresa,'Lista única',false)}</div>`:''}
+        <button class="cp-btn cp-btn-primary" onclick="${ehGrupo?`gerarRelatorioGrupo('${currentUser.grupoEconomicoId}')`:`gerarRelatorioCarteira(currentUser.clienteId)`}"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> Relatório de andamento</button>
         <button class="cp-btn cp-btn-outline" onclick="cpNavigate('nova-cobranca')">+ Nova cobrança</button>
       </div>
     </div>
@@ -19249,7 +19294,7 @@ function cpRenderCarteira(body){
       <div style="display:grid;grid-template-columns:2.4fr 1.3fr 1.2fr 1.4fr 28px;gap:10px;padding:12px 18px;background:rgba(226,219,198,.4);">
         ${['Partes do caso','CPF / CNPJ','Valor','Situação',''].map(h=>`<div class="cp-label">${h}</div>`).join('')}
       </div>
-      ${visible.length? visible.map(row).join('') : `<div style="padding:48px;text-align:center;color:var(--mute);font-size:13px;">Nenhum caso neste filtro.</div>`}
+      ${visible.length? (porEmpresa ? _agrupaEmpresa(visible) : visible.map(row).join('')) : `<div style="padding:48px;text-align:center;color:var(--mute);font-size:13px;">Nenhum caso neste filtro.</div>`}
     </div>`;
 }
 
