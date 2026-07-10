@@ -15190,6 +15190,11 @@ async function renderCobrancas(opts){
       </div>
     </div>
 
+    ${(() => { const dev=_relAutoDevidos(); return dev.length?`<div class="cob-panel" style="padding:12px 16px;margin-bottom:4px;display:flex;align-items:center;gap:12px;border-left:3px solid var(--gold,#C9A961);">
+      <div style="flex:1;font-size:13px;"><b>${dev.length} relatório${dev.length!==1?'s':''} de andamento a enviar</b> <span style="color:var(--text-3);">— credores com envio automático (30 dias) vencido.</span></div>
+      <button class="cob-btn-primary" onclick="abrirFilaRelatorioAuto()">Revisar e enviar</button>
+    </div>`:''; })()}
+
     ${(() => {
       const zapiOk = !!(DB.config?.zapiInstanceId && DB.config?.zapiToken);
       const elegiveis = (DB.devedores||[]).filter(d=>!d.arquivado && (d.tel||d.telefone)).length;
@@ -16399,6 +16404,7 @@ async function renderClienteDetalhe(){
   const panelPortal=`<div class="cob-panel" style="padding:18px;">
     <div class="det-panel-tt">Portal do cedente</div>
     <div style="display:flex;align-items:center;gap:8px;font-size:13px;"><span class="det-chip ${portalAtivo?'princ':''}">${portalAtivo?'Ativo':'Inativo'}</span><span style="color:var(--text-3);font-size:11.5px;">acesso do credor ao acompanhamento</span></div></div>`;
+  const panelRelAuto=_relAutoPanel(cli);
 
   // Documentos do cliente: gerados, enviados p/ assinatura e ASSINADOS (volta do webhook).
   const _docStatusChip=(s)=>{
@@ -16454,7 +16460,7 @@ async function renderClienteDetalhe(){
       <div class="det-head-actions">${!ehColaborador()?`<button class="cob-btn-primary" onclick="editCliente('${cli.id}')">${ico('edit',14)} Editar cadastro</button>`:''}</div>
     </div>
     ${meta}
-    <div class="det-body"><div class="det-col">${panelCarteira}${panelDocumentos}${panelObs}</div><div class="det-col">${panelDados}${panelPortal}</div></div>
+    <div class="det-body"><div class="det-col">${panelCarteira}${panelDocumentos}${panelObs}</div><div class="det-col">${panelDados}${panelPortal}${panelRelAuto}</div></div>
   </div>`;
 }
 
@@ -34173,6 +34179,154 @@ async function _relColetarCobrancas(){
 }
 
 function _relFechar(){ document.getElementById('rel-cobr-overlay')?.remove(); }
+
+// ── RELATÓRIO DE ANDAMENTO AUTOMÁTICO (a cada 30 dias, por WhatsApp) ───────────
+// Opt-in por cliente (metadata.relatorioAuto). O sistema marca quem "venceu" o
+// ciclo; o operador revisa e envia com 1 clique (não dispara sozinho). Reaproveita
+// o gerador de relatório (_relHtmlCredor), o PDF no servidor (_htmlParaPdfBase64)
+// e o Z-API (sendDocumentPdf). Sem função serverless nova, sem migração.
+function _relAutoCfg(cli){
+  const r=((cli&&cli.metadata)||{}).relatorioAuto||{};
+  return { ativo:!!r.ativo, intervaloDias:r.intervaloDias||30, ultimoEnvio:r.ultimoEnvio||null, proximo:r.proximo||null };
+}
+function _relAutoTel(cli){ return (cli && (cli.telefone||cli.tel)) || ''; }
+function _relAutoDevido(cli){
+  const c=_relAutoCfg(cli); if(!c.ativo) return false;
+  if(!c.ultimoEnvio) return true;                 // ativado e nunca enviado → já entra no lote
+  return String(c.proximo||'') <= hoje();
+}
+function _relAutoBR(iso){ return iso?String(iso).slice(0,10).split('-').reverse().join('/'):''; }
+function _relAutoAddDias(iso, n){ const d=new Date(String(iso).slice(0,10)+'T12:00:00'); d.setDate(d.getDate()+(n||30)); return d.toISOString().slice(0,10); }
+async function _relAutoSalvarCfg(clienteId, patch){
+  const cli=(DB.clientes||[]).find(c=>c.id===clienteId); if(!cli) return false;
+  const meta=Object.assign({}, cli.metadata||{});
+  meta.relatorioAuto=Object.assign({}, meta.relatorioAuto||{}, patch);
+  cli.metadata=meta;                               // blob em memória
+  const supa=getSupabase();
+  if(supa){ const { error }=await supa.from('clientes').update({ metadata:meta }).eq('id', clienteId); if(error){ showToast('Falha ao salvar: '+error.message,'danger'); return false; } }
+  if(typeof save==='function'){ try{ save(); }catch(_){ } }
+  return true;
+}
+async function _relAutoToggle(clienteId, on){
+  const ok=await _relAutoSalvarCfg(clienteId, on?{ ativo:true, intervaloDias:30 }:{ ativo:false });
+  if(ok){ showToast(on?'Relatório automático ativado (30 dias).':'Relatório automático desativado.', on?'success':'info');
+    if(typeof _detCliId!=='undefined'&&_detCliId===clienteId&&typeof renderClienteDetalhe==='function') renderClienteDetalhe(); }
+}
+// Painel opt-in exibido na pasta do cliente (coluna direita).
+function _relAutoPanel(cli){
+  const tel=_relAutoTel(cli), c=_relAutoCfg(cli);
+  const body = tel
+    ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+         <span style="font-size:13px;color:var(--text-2);">Enviar a cada 30 dias por WhatsApp</span>
+         <label style="position:relative;display:inline-flex;cursor:pointer;"><input type="checkbox" ${c.ativo?'checked':''} onchange="_relAutoToggle('${cli.id}', this.checked)" style="width:16px;height:16px;cursor:pointer;"></label>
+       </div>
+       <div style="font-size:11px;color:var(--text-3);margin-top:7px;">${c.ativo?(c.ultimoEnvio?('Último: '+_relAutoBR(c.ultimoEnvio)+' · próximo: '+_relAutoBR(c.proximo)):'Ativado — entra no próximo lote de envio (você aprova antes).'):'Relatório de andamento deste credor, enviado automaticamente. Você revisa e dispara com 1 clique.'}</div>`
+    : `<div style="font-size:12px;color:var(--text-3);">Cadastre um telefone deste cliente para ativar o envio por WhatsApp.</div>`;
+  return `<div class="cob-panel" style="padding:18px;"><div class="det-panel-tt">Relatório automático</div>${body}</div>`;
+}
+
+// ── Fila "a enviar" + envio ────────────────────────────────────────────────────
+function _relAutoDevidos(){
+  return (DB.clientes||[]).filter(c=>c&&!c.arquivado&&!c.isDraft&&_relAutoTel(c)&&_relAutoDevido(c))
+    .sort((a,b)=>String(a.nomeFantasia||a.nome_fantasia||a.nome).localeCompare(String(b.nomeFantasia||b.nome_fantasia||b.nome),'pt-BR'));
+}
+function _relAutoFechar(){ document.getElementById('relauto-overlay')?.remove(); }
+function abrirFilaRelatorioAuto(){
+  const dev=_relAutoDevidos();
+  _relAutoFechar();
+  const ov=document.createElement('div'); ov.id='relauto-overlay';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(10,21,48,.45);z-index:9000;display:flex;align-items:center;justify-content:center;';
+  ov.innerHTML=`<div style="background:var(--surface,#fff);border-radius:14px;padding:22px 24px;width:min(560px,95vw);max-height:88vh;display:flex;flex-direction:column;box-shadow:0 18px 60px rgba(0,0,0,.25);">
+    <div style="font-family:var(--font-display,serif);font-size:18px;font-weight:700;color:var(--navy,#0A1530);">Relatórios de andamento a enviar</div>
+    <div style="font-size:12.5px;color:var(--text-3,#666);margin:3px 0 12px;">Credores com automação de 30 dias vencida. Confira (Ver) antes de disparar no WhatsApp.</div>
+    <div id="relauto-lista" style="overflow-y:auto;flex:1;min-height:120px;">
+      ${dev.length?dev.map(c=>{
+        const nome=escHtml(c.nomeFantasia||c.nome_fantasia||c.nome), tel=escHtml(_relAutoTel(c)), cfg=_relAutoCfg(c);
+        const ult=cfg.ultimoEnvio?('último: '+_relAutoBR(cfg.ultimoEnvio)):'primeiro envio';
+        return `<div class="relauto-row" data-id="${c.id}" style="display:flex;align-items:center;gap:10px;border:1px solid var(--border);border-radius:9px;padding:9px 11px;margin-bottom:6px;">
+          <div style="flex:1;min-width:0;"><div style="font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${nome}</div><div style="font-size:10.5px;color:var(--text-3);">WhatsApp ${tel} · ${ult}</div></div>
+          <button class="btn btn-ghost btn-sm" onclick="_relAutoVer('${c.id}')">Ver</button>
+          <button class="btn btn-primary btn-sm" onclick="_relAutoEnviarUm('${c.id}', this)">Enviar</button>
+        </div>`;
+      }).join(''):'<div style="padding:22px;text-align:center;color:var(--text-3);">Nada vencido no momento.</div>'}
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;padding-top:12px;border-top:1px solid var(--border,#ddd);">
+      <span style="font-size:11.5px;color:var(--text-3);">${dev.length} credor${dev.length!==1?'es':''} na fila</span>
+      <span style="display:flex;gap:8px;">
+        <button class="cob-btn-ghost" onclick="_relAutoFechar()">Fechar</button>
+        ${dev.length?`<button class="cob-btn-primary" onclick="_relAutoEnviarTodos(this)">Enviar todos (${dev.length})</button>`:''}
+      </span>
+    </div>
+  </div>`;
+  ov.addEventListener('click',e=>{ if(e.target===ov) _relAutoFechar(); });
+  document.body.appendChild(ov);
+}
+async function _relAutoHtmlDe(clienteId){
+  const cli=(DB.clientes||[]).find(c=>c.id===clienteId); if(!cli) return { erro:'cliente não encontrado' };
+  const todos=await _relColetarCobrancas();
+  const casos=todos.filter(k=>k.credorId===clienteId);
+  if(!casos.length) return { erro:'sem cobranças ativas' };
+  return { html:_relHtmlCredor(casos[0].credor||cli.nomeFantasia||cli.nome, casos), nCasos:casos.length, cli };
+}
+async function _relAutoVer(clienteId){
+  showToast('Gerando prévia…','info');
+  const r=await _relAutoHtmlDe(clienteId);
+  if(r.erro){ showToast('Sem cobranças ativas deste credor.','warning'); return; }
+  const w=window.open('','_blank'); if(!w){ showToast('Libere pop-ups para ver o relatório.','warning'); return; }
+  w.document.write(r.html); w.document.close();
+}
+async function _relAutoSalvarCopiaPdf(clienteId, b64, nome){
+  const supa=getSupabase(); if(!supa||!b64) return null;
+  try{
+    const u=(await supa.auth.getUser()).data?.user;
+    const bin=atob(b64); const arr=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+    const path=(u?.id?u.id+'/':'')+'clientes/'+clienteId+'/relatorio_'+Date.now()+'.pdf';
+    const { error:eUp }=await supa.storage.from('peticao-assets').upload(path, new Blob([arr],{type:'application/pdf'}), { contentType:'application/pdf' });
+    if(eUp) return null;
+    await supa.from('cliente_documentos').insert({ cliente_id:clienteId, tipo:'outros', nome, storage_path:path, mime_type:'application/pdf', size_bytes:arr.length, uploaded_by:u?.id, ativo:true });
+    return path;
+  }catch(_){ return null; }
+}
+// btn null → modo lote (sem confirmação individual). Retorna true/false.
+async function _relAutoEnviarUm(clienteId, btn){
+  const cli=(DB.clientes||[]).find(c=>c.id===clienteId); if(!cli){ return false; }
+  const tel=_relAutoTel(cli); if(!tel){ showToast('Cliente sem telefone.','warning'); return false; }
+  if(!(DB.config?.zapiInstanceId&&DB.config?.zapiToken)){ showToast('Configure o Z-API em Configurações → Integrações.','warning'); return false; }
+  const nomeCli=cli.nomeFantasia||cli.nome_fantasia||cli.nome;
+  if(btn && !confirm('Enviar o relatório de andamento para '+nomeCli+' no WhatsApp '+tel+'?')) return false;
+  const orig=btn?btn.textContent:''; if(btn){ btn.disabled=true; btn.textContent='Enviando…'; }
+  try{
+    const r=await _relAutoHtmlDe(clienteId);
+    if(r.erro) throw new Error('sem cobranças ativas deste credor');
+    const b64=await _htmlParaPdfBase64(r.html,{filename:'relatorio.pdf'});
+    const dataBR=new Date().toLocaleDateString('pt-BR');
+    const fileName='Relatorio-de-andamento-'+dataBR.replace(/\//g,'-')+'.pdf';
+    const path=await _relAutoSalvarCopiaPdf(clienteId, b64, 'Relatório de andamento — '+dataBR+'.pdf');
+    let docParam='data:application/pdf;base64,'+b64;
+    const supa=getSupabase();
+    if(path&&supa){ try{ const { data:su }=await supa.storage.from('peticao-assets').createSignedUrl(path, 3600); if(su&&su.signedUrl) docParam=su.signedUrl; }catch(_){ } }
+    const cap=(cli.nomeFantasia||'COBRASQ')+' — Relatório de andamento das suas cobranças ('+dataBR+').';
+    await ZApiAPI.sendDocumentPdf(tel, docParam, fileName, cap);
+    const prox=_relAutoAddDias(hoje(), _relAutoCfg(cli).intervaloDias||30);
+    await _relAutoSalvarCfg(clienteId, { ativo:true, ultimoEnvio:hoje(), proximo:prox });
+    if(typeof logAtividade==='function') logAtividade('Enviou relatório de andamento (WhatsApp)', nomeCli, clienteId);
+    showToast('Relatório enviado para '+nomeCli+'.','success');
+    document.querySelector('.relauto-row[data-id="'+clienteId+'"]')?.remove();
+    return true;
+  }catch(e){ showToast('Falha ao enviar p/ '+nomeCli+': '+(e&&e.message||e),'danger'); if(btn){ btn.disabled=false; btn.textContent=orig; } return false; }
+}
+async function _relAutoEnviarTodos(btn){
+  const rows=[...document.querySelectorAll('.relauto-row')];
+  if(!rows.length){ showToast('Nada a enviar.','info'); return; }
+  if(!confirm('Enviar o relatório para os '+rows.length+' credores da lista, por WhatsApp?')) return;
+  if(btn){ btn.disabled=true; btn.textContent='Enviando…'; }
+  let ok=0, err=0;
+  for(const row of rows){ const id=row.getAttribute('data-id'); const sent=await _relAutoEnviarUm(id, null); sent?ok++:err++; }
+  showToast(ok+' enviado(s)'+(err?', '+err+' com erro':'')+'.', ok?'success':'warning');
+  if(btn){ btn.disabled=false; btn.textContent='Enviar todos'; }
+  if(!document.querySelectorAll('.relauto-row').length) _relAutoFechar();
+  if(typeof renderCobrancas==='function' && document.getElementById('page-cobr')?.classList.contains('active')) renderCobrancas();
+}
 
 function abrirRelatorioCobrancas(){
   _relFechar();
