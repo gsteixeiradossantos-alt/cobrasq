@@ -96,8 +96,11 @@ Leia a petição inicial anexa e devolva SOMENTE um JSON válido (sem cercas de 
 }
 Se um campo não constar na peça, use null (ou [] em listas). Não invente documentos.`;
 
-async function claudeExtrair(base64Pdf) {
-  const token = await getToken();
+async function claudeExtrair(base64Pdf, _jaRenovou = false) {
+  // Token guardado pode ter expirado (sessão longa) — se não houver, tenta puxar da
+  // aba do painel ANTES de falhar.
+  let token = await getToken();
+  if (!token) token = await refrescarTokenDoApp();
   if (!token) return { error: 'sem_sessao' };
   const r = await fetchTimeout(`${API_BASE}/api/claude`, {
     method: 'POST',
@@ -114,8 +117,18 @@ async function claudeExtrair(base64Pdf) {
       }],
     }),
   }, 120000); // extração de PDF pela IA pode demorar
+  // CC3/M10: token expirado (401/403) → renova da aba do painel e repete UMA vez
+  // (mesma proteção que o pgrest já tinha; faltava aqui — causa do "IA falhou: HTTP 401").
+  if ((r.status === 401 || r.status === 403) && !_jaRenovou) {
+    const novo = await refrescarTokenDoApp();
+    if (novo && novo !== token) return claudeExtrair(base64Pdf, true);
+  }
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) return { error: (j.error && j.error.message) || ('HTTP ' + r.status) };
+  if (!r.ok) {
+    const base = (j.error && j.error.message) || ('HTTP ' + r.status);
+    if (r.status === 401 || r.status === 403) return { error: base + ' — sua sessão expirou. Recarregue o painel do Cobrasq (F5), confirme que está logado, e clique "Extrair de novo".' };
+    return { error: base };
+  }
   // A resposta vem em BLOCOS (content: [...]) e o texto pode não ser o 1º bloco
   // (modelos com raciocínio emitem um bloco de thinking antes) — junta todos.
   const blocos = (j && j.content) || [];
