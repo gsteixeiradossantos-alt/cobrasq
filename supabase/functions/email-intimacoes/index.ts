@@ -89,8 +89,8 @@ function extrairJson(t: string): any {
 }
 
 // ── Claude ───────────────────────────────────────────────────────────────────
-async function extrair(assunto: string, remetente: string, corpo: string): Promise<any[]> {
-  const conteudo = `ASSUNTO: ${assunto}\nDE: ${remetente}\n\nCORPO:\n${corpo}`.slice(0, 60000);
+async function extrair(assunto: string, remetente: string, corpo: string, dataEmail: string): Promise<any[]> {
+  const conteudo = `ASSUNTO: ${assunto}\nDE: ${remetente}\nDATA DO E-MAIL: ${dataEmail}\n\nCORPO:\n${corpo}`.slice(0, 60000);
   for (let tentativa = 0; tentativa < 3; tentativa++) {
     try {
       const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -119,7 +119,7 @@ async function carregarCobrancasMap(): Promise<Map<string, string>> {
 
 // ── Grava um e-mail (1..N atos) ──────────────────────────────────────────────
 async function processarEmail(msg: { uid: string; from: string; subject: string; date: string; body: string }, cobrMap: Map<string, string>): Promise<number> {
-  const atos = await extrair(msg.subject, msg.from, msg.body);
+  const atos = await extrair(msg.subject, msg.from, msg.body, msg.date || '');
   let gravados = 0;
   for (const a of atos) {
     if (!a || a.relevante === false) continue;
@@ -226,7 +226,14 @@ Deno.serve(async (req) => {
     const r = await varrerIMAP();
     return new Response(JSON.stringify({ ok: true, modo: 'imap', ...r }), { headers: { 'content-type': 'application/json' } });
   } catch (e) {
-    console.error('[email-intimacoes]', e instanceof Error ? e.message : String(e));
-    return new Response(JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }), { status: 500, headers: { 'content-type': 'application/json' } });
+    const err: any = e;
+    const detalhe = {
+      error: err instanceof Error ? err.message : String(err),
+      code: err?.code ?? null,
+      authFailed: err?.authenticationFailed ?? null,
+      responseText: err?.responseText ?? null,
+    };
+    console.error('[email-intimacoes]', JSON.stringify(detalhe));
+    return new Response(JSON.stringify({ ok: false, ...detalhe }), { status: 500, headers: { 'content-type': 'application/json' } });
   }
 });
