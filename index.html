@@ -2250,6 +2250,9 @@ body:not(.cobr-cream) .cob-stpop, .dark .cob-stpop { background: var(--card); }
       <div class="nav-item" data-page="repasses" id="nav-repasses">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></span><span>Repasses a clientes</span>
       </div>
+      <div class="nav-item" data-page="custodias" id="nav-custodias">
+        <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/><path d="M9 12l2 2 4-4"/></svg></span><span>Custódias judiciais</span>
+      </div>
       <div class="nav-item" data-page="nf-avulsa" id="nav-nf-avulsa" style="display:none;">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg></span><span>Emitir NF</span><span id="nav-nf-badge" style="display:none;margin-left:auto;font-size:10px;font-weight:700;background:var(--danger);color:#fff;border-radius:100px;padding:1px 7px;min-width:16px;text-align:center;"></span>
       </div>
@@ -2449,6 +2452,11 @@ body:not(.cobr-cream) .cob-stpop, .dark .cob-stpop { background: var(--card); }
     <!-- PAGE: REPASSES A CLIENTES (dinheiro recebido dos devedores que a COBRASQ deve repassar aos cedentes/credores) -->
     <div id="page-repasses" class="page-content">
       <!-- renderRepassesClientes() -->
+    </div>
+
+    <!-- PAGE: CUSTÓDIAS JUDICIAIS (dinheiro retido em juízo, fora do caixa livre, até o alvará → levantamento → rateio → repasse) -->
+    <div id="page-custodias" class="page-content">
+      <!-- renderCustodias() -->
     </div>
 
     <!-- PAGE: RELATÓRIOS -->
@@ -6839,6 +6847,7 @@ const PAGE_TITLES = {
   relat:'Relatórios', wa:'WhatsApp', intimacoes:'Intimações', config:'Configurações', calc:'Calculadora Jurídica',
   aprovacoes:'Aprovações', tarefas:'Tarefas', delegacao:'Delegação', assinaturas:'Assinaturas', 'consultas-premium':'Consultas Premium',
   repasses:'Repasses a clientes',
+  custodias:'Custódias judiciais',
   importacao:'Importação', /* IMPORTACAO TEMP */
   'cobranca-detalhe':'Cobrança', 'devedor-detalhe':'Devedor', 'cliente-detalhe':'Cliente'
 };
@@ -6855,6 +6864,7 @@ const PAGE_BREADCRUMBS = {
   pecas:     ['Peças & Ações Judiciais'],
   fin:       ['Financeiro'],
   repasses:  ['Financeiro','Repasses a clientes'],
+  custodias: ['Financeiro','Custódias judiciais'],
   relat:     ['Relatórios'],
   wa:        ['Comunicação','WhatsApp'],
   intimacoes:['Comunicação','Intimações & andamentos'],
@@ -6883,6 +6893,7 @@ const PAGE_RENDERERS = {
   pecas: ()=>renderPecas(),
   fin: ()=>renderFinanceiro(),
   repasses: ()=>renderRepassesClientes(),
+  custodias: ()=>renderCustodias(),
   relat: ()=>renderRelatorios(),
   'nf-avulsa': ()=>renderNfAvulsa(),
   wa: ()=>renderWhatsApp(),
@@ -6900,7 +6911,7 @@ const PAGE_RENDERERS = {
 };
 
 // Páginas com dados agregados de toda a carteira/credores — só gestor (proprietário).
-const ADMIN_ONLY_PAGES = new Set(['fin','repasses','relat','pipeline','importacao','delegacao','nf-avulsa' /* IMPORTACAO TEMP */]);
+const ADMIN_ONLY_PAGES = new Set(['fin','repasses','custodias','relat','pipeline','importacao','delegacao','nf-avulsa' /* IMPORTACAO TEMP */]);
 
 // ===== Controlle top-nav (reskin v4): sincroniza aba ativa + menu "Mais" =====
 function syncCtrlNav(p){
@@ -23860,6 +23871,290 @@ async function _repSalvarNovaReceita(){
     if(btn){ btn.style.pointerEvents=''; btn.style.opacity=''; }
     if(st){ st.style.color='#A65A4A'; st.textContent='Erro: '+(e.message||e); }
   }
+}
+
+// ══════════════════════════════════════════════════════════════
+// MÓDULO "CUSTÓDIAS JUDICIAIS"  (página própria #/custodias)
+// ──────────────────────────────────────────────────────────────
+// Dinheiro retido em juízo (fora do caixa livre) até o alvará. Ciclo:
+//   bloqueado → depositado → alvara → levantado → rateado
+// No RATEIO (levantado → conta Asaas), o valor se divide: (−) custas, (−) honorários
+// advocatícios, (−) honorário COBRASQ, (=) repasse ao cedente → cria uma fin_operacao
+// pendente que ALIMENTA o módulo Repasses (A revisar). Tabela relacional fin_custodia.
+// Visual pixel-fiel do handoff (custodias.render.js). Endpoints server-side em
+// /api/automacao?action=custodia (op=registrar|avancar|levantar|ratear).
+// ══════════════════════════════════════════════════════════════
+let _cusState = { view:'painel', id:null, rows:[], devMap:{}, credMap:{}, loaded:false, needsMigration:false };
+try { window._cusState = _cusState; } catch(_){}
+const _CUS_ORDER = ['bloqueado','depositado','alvara','levantado','rateado'];
+const _CUS_STATUS = {
+  bloqueado:  { label:'Bloqueado',       dot:'#A65A4A', badge:'color:#A65A4A;background:#F3E7E2;' },
+  depositado: { label:'Depositado',      dot:'#0A1530', badge:'color:#0A1530;background:#EFEAD9;' },
+  alvara:     { label:'Alvará expedido', dot:'#9C7F40', badge:'color:#9C7F40;background:#FBF8EF;border:1px solid #E0D3A8;' },
+  levantado:  { label:'Levantado',       dot:'#5E7C58', badge:'color:#5E7C58;background:#E9EDE2;' },
+  rateado:    { label:'Rateado',         dot:'#5E7C58', badge:'color:#5E7C58;background:#E9EDE2;' },
+};
+
+async function _cusLoad(){
+  _cusState.needsMigration=false;
+  const sb=getSupabase();
+  const r=await sb.from('fin_custodia').select('*').order('criada_em',{ascending:false}).limit(1000);
+  if(r.error){
+    // tabela ainda não migrada (42P01) → sinaliza para a UI mostrar o aviso de setup.
+    if(/relation|does not exist|42P01|schema cache|not find/i.test(r.error.message||'')){ _cusState.needsMigration=true; _cusState.rows=[]; _cusState.loaded=true; return; }
+    throw r.error;
+  }
+  _cusState.rows=r.data||[];
+  _cusState.devMap={}; _cusState.credMap={};
+  const dIds=[...new Set(_cusState.rows.map(c=>c.devedor_id).filter(Boolean))];
+  const cIds=[...new Set(_cusState.rows.map(c=>c.credor_id).filter(Boolean))];
+  if(dIds.length){ const {data}=await sb.from('devedores').select('id,nome').in('id',dIds); (data||[]).forEach(d=>_cusState.devMap[d.id]=d.nome); }
+  if(cIds.length){ const {data}=await sb.from('clientes').select('id,nome').in('id',cIds); (data||[]).forEach(c=>_cusState.credMap[c.id]=c.nome); }
+  _cusState.loaded=true;
+}
+
+async function renderCustodias(keepData){
+  const page=document.getElementById('page-custodias'); if(!page) return;
+  if(!keepData || !_cusState.loaded){
+    page.innerHTML=`<div style="text-align:center;padding:60px;color:#8892A6;"><div class="mv2-spinner" style="margin:0 auto 10px;width:26px;height:26px;border-width:3px;"></div>Carregando custódias…</div>`;
+    try{ await _cusLoad(); }
+    catch(e){ page.innerHTML=`<div style="padding:26px 30px;"><div style="background:#F7ECE8;border:1px solid #E7CFC7;border-radius:10px;padding:20px;color:#7d3f33;">Erro ao carregar custódias: ${escHtml(e.message||String(e))}</div></div>`; return; }
+  }
+  if(_cusState.needsMigration){ page.innerHTML=_cusRenderSetup(); return; }
+  page.innerHTML = _cusState.view==='detalhe' ? _cusRenderDetalhe(_cusState.id) : _cusRenderPainel();
+}
+function _cusGoPainel(){ _cusState.view='painel'; _cusState.id=null; renderCustodias(true); }
+function _cusDetalhe(id){ _cusState.view='detalhe'; _cusState.id=id; renderCustodias(true); }
+function _cusGet(id){ return _cusState.rows.find(c=>String(c.id)===String(id)); }
+
+function _cusRenderSetup(){
+  return `<div style="padding:26px 30px 34px;max-width:900px;">
+    <div style="font-family:'Fraunces',Georgia,serif;font-size:24px;font-weight:400;color:#0A1530;margin-bottom:16px;">Custódias judiciais</div>
+    <div style="background:#FBF8EF;border:1px solid #E0D3A8;border-radius:12px;padding:22px;">
+      <div style="font-size:14px;font-weight:700;color:#9C7F40;margin-bottom:8px;">Módulo aguardando migração</div>
+      <div style="font-size:13px;color:#5b5544;line-height:1.6;">A tabela <code style="font-family:'JetBrains Mono',monospace;">fin_custodia</code> ainda não existe no banco. Aplique a migração <code style="font-family:'JetBrains Mono',monospace;">supabase/migrations/20260710_fin_custodia.sql</code> (em produção — ação gated) e recarregue esta página.</div>
+    </div>
+  </div>`;
+}
+
+// Tela 20 — Painel de custódias (verbatim do handoff, sem o ctrlNav/moldura 1280).
+function _cusRenderPainel(){
+  const rows=_cusState.rows, dm=_cusState.devMap, cm=_cusState.credMap;
+  const retidoSt=['bloqueado','depositado','alvara'];
+  const retido=rows.filter(c=>retidoSt.includes(c.status)).reduce((s,c)=>s+(+c.valor||0),0);
+  const nRetido=rows.filter(c=>retidoSt.includes(c.status)).length;
+  const aguard=rows.filter(c=>['bloqueado','depositado'].includes(c.status)).reduce((s,c)=>s+(+c.valor||0),0);
+  const nAguard=rows.filter(c=>['bloqueado','depositado'].includes(c.status)).length;
+  const mesKey=(new Date()).toISOString().slice(0,7);
+  const levMes=rows.filter(c=>c.status==='levantado'||c.status==='rateado').reduce((s,c)=>s+(+c.valor||0),0);
+  const gc='1.5fr 1fr 130px 200px 120px';
+  const proxima=(c)=>{
+    if(c.status==='bloqueado') return `<span onclick="_cusAvancar('${c.id}','depositado')" style="text-align:right;font-size:12px;color:#9C7F40;font-weight:600;cursor:pointer;">Aguardar depósito</span>`;
+    if(c.status==='depositado') return `<span onclick="_cusAvancar('${c.id}','alvara')" style="text-align:right;font-size:12px;color:#9C7F40;font-weight:600;cursor:pointer;">Cobrar alvará</span>`;
+    if(c.status==='alvara') return `<span style="text-align:right;"><span onclick="_cusLevantar('${c.id}')" style="font-size:12px;font-weight:700;color:#0A1530;background:#C9A961;padding:6px 10px;border-radius:8px;cursor:pointer;">Levantar</span></span>`;
+    if(c.status==='levantado') return `<span style="text-align:right;"><span onclick="_cusDetalhe('${c.id}')" style="font-size:12px;font-weight:700;color:#0A1530;background:#C9A961;padding:6px 10px;border-radius:8px;cursor:pointer;">Ratear</span></span>`;
+    return `<span onclick="_cusDetalhe('${c.id}')" style="text-align:right;font-size:12px;color:#9C7F40;font-weight:600;cursor:pointer;">Ver detalhe</span>`;
+  };
+  const linhas=rows.map((c,i)=>{
+    const stt=_CUS_STATUS[c.status]||_CUS_STATUS.bloqueado;
+    const bg=i%2===1?'background:#FDFBF4;':'';
+    const dev=dm[c.devedor_id]||c.devedor_nome||'—';
+    const cred=cm[c.credor_id]||c.credor_nome||'—';
+    return `<div onclick="_cusDetalhe('${c.id}')" style="display:grid;grid-template-columns:${gc};align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid #F3EFE3;font-size:13px;cursor:pointer;${bg}"><span><div style="color:#0A1530;font-weight:600;">${escHtml(dev)}</div><div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:rgba(10,21,48,.5);">${escHtml(c.processo_cnj||'—')}${c.vara?' · '+escHtml(c.vara):''}</div></span><span style="color:#5b5544;">${escHtml(cred)}</span><span style="text-align:right;font-weight:700;color:#0A1530;">${fmtR(c.valor)}</span><span style="text-align:center;"><span style="font-size:10.5px;font-weight:700;${stt.badge}padding:4px 9px;border-radius:20px;">● ${stt.label}</span></span><span onclick="event.stopPropagation()">${proxima(c)}</span></div>`;
+  }).join('');
+  const tabela = rows.length ? `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;overflow:hidden;box-shadow:0 1px 2px rgba(16,24,40,.04);">
+      <div style="display:grid;grid-template-columns:${gc};align-items:center;gap:12px;padding:11px 18px;background:#FBF8EF;font-family:'JetBrains Mono',monospace;font-size:10.5px;font-weight:700;color:#8892A6;text-transform:uppercase;letter-spacing:.09em;"><span>Processo / Devedor</span><span>Cedente</span><span style="text-align:right;">Em custódia</span><span style="text-align:center;">Situação</span><span style="text-align:right;">Próxima ação</span></div>
+      ${linhas}
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:14px;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:rgba(10,21,48,.5);"><span>Situações:</span><span style="color:#A65A4A;">● Bloqueado</span><span style="color:#0A1530;">● Depositado</span><span style="color:#9C7F40;">● Alvará expedido</span><span style="color:#5E7C58;">● Levantado</span></div>`
+    : `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:40px;text-align:center;color:#8892A6;font-size:13px;">Nenhuma custódia registrada. Clique em <b>+ Registrar custódia</b> para começar.</div>`;
+  return `<div style="padding:26px 30px 34px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+      <span style="font-family:'Fraunces',Georgia,serif;font-size:24px;font-weight:400;color:#0A1530;">Custódias judiciais</span>
+      <span onclick="_cusModalRegistrar()" style="font-size:13px;font-weight:700;color:#0A1530;background:#C9A961;padding:9px 16px;border-radius:9px;cursor:pointer;">+ Registrar custódia</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:20px;">
+      <div style="background:#0A1530;border-radius:12px;padding:18px 20px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#C9A961;margin-bottom:8px;">Em custódia (retido)</div><div style="font-family:'Fraunces',Georgia,serif;font-size:27px;font-weight:400;color:#EFEAD9;">${fmtR(retido)}</div><div style="font-size:11px;color:rgba(239,234,217,.6);margin-top:4px;">${nRetido} processo${nRetido!==1?'s':''} · não é caixa livre</div></div>
+      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,.04);"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#8892A6;margin-bottom:8px;">Aguardando alvará</div><div style="font-family:'Fraunces',Georgia,serif;font-size:27px;font-weight:400;color:#0A1530;">${fmtR(aguard)}</div><div style="font-size:11px;color:rgba(10,21,48,.5);margin-top:4px;">${nAguard} processo${nAguard!==1?'s':''}</div></div>
+      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,.04);"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#8892A6;margin-bottom:8px;">Levantado no mês</div><div style="font-family:'Fraunces',Georgia,serif;font-size:27px;font-weight:400;color:#5E7C58;">${fmtR(levMes)}</div><div style="font-size:11px;color:rgba(10,21,48,.5);margin-top:4px;">a ratear e repassar</div></div>
+    </div>
+    ${tabela}
+  </div>`;
+}
+
+// Tela 21 — Detalhe da custódia (linha do tempo + rateio + conciliação + próximos passos).
+function _cusRenderDetalhe(id){
+  const c=_cusGet(id);
+  if(!c) return `<div style="padding:26px 30px;">Custódia não encontrada. <span onclick="_cusGoPainel()" style="color:#9C7F40;cursor:pointer;">‹ voltar</span></div>`;
+  const dm=_cusState.devMap, cm=_cusState.credMap;
+  const dev=dm[c.devedor_id]||c.devedor_nome||'—';
+  const cred=cm[c.credor_id]||c.credor_nome||'—';
+  const hist=(c.historico||[]).reduce((m,h)=>{ m[h.etapa]=h; return m; },{});
+  const curIdx=_CUS_ORDER.indexOf(c.status);
+  const nodes=[
+    {key:'bloqueio',    idx:0, titulo:'Bloqueio',        sub:'SISBAJUD'},
+    {key:'deposito',    idx:1, titulo:'Depósito judicial', sub:'Tribunal de Justiça'},
+    {key:'alvara',      idx:2, titulo:'Alvará expedido',  sub:'liberação'},
+    {key:'levantamento',idx:3, titulo:'Levantamento',     sub:'→ conta Asaas'},
+    {key:'rateio',      idx:4, titulo:'Rateio & repasse',  sub:'destinação'},
+  ];
+  const pct=Math.max(0, Math.min(1, curIdx/4)); // linha de progresso
+  const nodeHtml=nodes.map(n=>{
+    const done=curIdx>=n.idx;
+    const h=hist[n.key];
+    const dot = done
+      ? `<span style="width:28px;height:28px;border-radius:50%;background:#5E7C58;color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;${curIdx===n.idx?'border:3px solid #C9D6BE;':''}">✓</span>`
+      : `<span style="width:28px;height:28px;border-radius:50%;background:#fff;border:2px dashed #C9A961;color:#9C7F40;display:flex;align-items:center;justify-content:center;font-size:12px;">•</span>`;
+    const data = h&&h.data ? `<div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(10,21,48,.55);margin-top:3px;">${_repDM(h.data)}</div>` : `<div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(10,21,48,.4);margin-top:3px;">—</div>`;
+    const valor = h&&h.valor!=null ? `<div style="font-size:12px;font-weight:700;color:${done?'#0A1530':'rgba(10,21,48,.4)'};margin-top:2px;">${fmtR(h.valor)}</div>` : `<div style="font-size:12px;color:rgba(10,21,48,.4);margin-top:2px;">${done?'—':'a fazer'}</div>`;
+    const titCol = (!done && n.idx>curIdx) ? '#9C7F40' : '#0A1530';
+    return `<div style="display:flex;flex-direction:column;align-items:center;gap:9px;position:relative;">${dot}<div style="text-align:center;"><div style="font-size:12.5px;font-weight:700;color:${titCol};">${n.titulo}</div><div style="font-size:10.5px;color:rgba(10,21,48,.5);">${n.sub}</div>${data}${valor}</div></div>`;
+  }).join('');
+
+  // Rateio: se já rateado, mostra os valores salvos; senão, editável (padrão 10% adv / 30% COBRASQ).
+  const rat=c.rateio||{};
+  const lev = rat.levantado!=null ? +rat.levantado : (+c.valor||0);
+  const rateado = c.status==='rateado';
+  const custasV = rat.custas!=null?+rat.custas:0;
+  const hadvPct = rat.honorarios_adv_pct!=null?+rat.honorarios_adv_pct:10;
+  const hcobPct = rat.honorario_cobrasq_pct!=null?+rat.honorario_cobrasq_pct:30;
+  const hadvV = rat.honorarios_adv!=null?+rat.honorarios_adv:_r2(lev*hadvPct/100);
+  const hcobV = rat.honorario_cobrasq!=null?+rat.honorario_cobrasq:_r2(lev*hcobPct/100);
+  const repV  = rat.repasse_cedente!=null?+rat.repasse_cedente:_r2(lev-custasV-hadvV-hcobV);
+  const inp = (idv,val,extra)=> rateado
+    ? `<span style="font-family:'JetBrains Mono',monospace;font-size:13.5px;font-weight:600;">${val}</span>`
+    : `<input id="${idv}" value="${val}" oninput="_cusRateioCalc()" style="width:90px;text-align:right;border:1px solid #E6E1D2;border-radius:6px;padding:5px 8px;font-family:'JetBrains Mono',monospace;font-size:13px;${extra||''}">`;
+  const rateioCard=`<div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:20px 24px;box-shadow:0 1px 2px rgba(16,24,40,.04);">
+    <div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#9C7F40;margin-bottom:16px;">Destinação do valor levantado (rateio)</div>
+    <div style="display:flex;justify-content:space-between;padding:11px 0;border-bottom:1px solid #F3EFE3;"><span style="font-size:13.5px;font-weight:600;color:#0A1530;">Valor levantado</span><span style="font-family:'Fraunces',Georgia,serif;font-size:18px;color:#0A1530;" id="cus-lev" data-lev="${lev}">${fmtR(lev)}</span></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #F3EFE3;"><span style="font-size:13px;color:#5b5544;">(−) Custas processuais</span><span style="color:#A65A4A;">${rateado?('− '+fmtR(custasV)):inp('cus-custas',_repN(custasV))}</span></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #F3EFE3;"><span style="font-size:13px;color:#5b5544;">(−) Honorários advocatícios · ${rateado?hadvPct+'%':inp('cus-hadv',hadvPct,'width:52px;')+(rateado?'':'%')}</span><span style="font-size:13.5px;font-weight:600;color:#A65A4A;" id="cus-hadv-v">− ${fmtR(hadvV)}</span></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #F3EFE3;"><span style="font-size:13px;color:#5b5544;">(−) Honorário COBRASQ · ${rateado?hcobPct+'%':inp('cus-hcob',hcobPct,'width:52px;')+(rateado?'':'%')}</span><span style="font-size:13.5px;font-weight:700;color:#5E7C58;" id="cus-hcob-v">− ${fmtR(hcobV)}</span></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px;margin-top:14px;background:#FBF8EF;border:1px solid #E0D3A8;border-radius:10px;"><span style="font-size:13.5px;font-weight:700;color:#0A1530;">= Repasse ao cedente</span><span style="font-family:'Fraunces',Georgia,serif;font-size:22px;color:#9C7F40;" id="cus-rep-v">${fmtR(repV)}</span></div>
+  </div>`;
+
+  const passosCard = rateado
+    ? `<div style="background:#E9EDE2;border:1px solid #C9D6BE;border-radius:12px;padding:20px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#5E7C58;margin-bottom:10px;">Concluído</div><div style="font-size:13px;color:#3f5a3a;">Rateado e enviado a Repasses › A revisar (${fmtR(repV)}).</div></div>`
+    : `<div style="background:#0A1530;border-radius:12px;padding:20px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#C9A961;margin-bottom:14px;">Próximos passos</div><div style="display:flex;flex-direction:column;gap:10px;"><span id="cus-ratear-btn" onclick="_cusRatear('${c.id}')" style="font-size:13px;font-weight:700;color:#0A1530;background:#C9A961;padding:11px;border-radius:9px;text-align:center;cursor:pointer;">Ratear e repassar <span id="cus-ratear-val">${fmtR(repV)}</span></span><span onclick="showToast('Prestação de contas em breve.','info')" style="font-size:12.5px;font-weight:600;color:#EFEAD9;border:1px solid rgba(239,234,217,.25);padding:10px;border-radius:9px;text-align:center;cursor:pointer;">Gerar prestação de contas</span><span onclick="showToast('Anexo em breve.','info')" style="font-size:12.5px;font-weight:600;color:#EFEAD9;border:1px solid rgba(239,234,217,.25);padding:10px;border-radius:9px;text-align:center;cursor:pointer;">Anexar alvará / comprovante</span></div></div>`;
+
+  const conciliado = c.status==='levantado'||c.status==='rateado';
+  const stt=_CUS_STATUS[c.status]||_CUS_STATUS.bloqueado;
+  const levH=hist['levantamento'];
+  return `<div style="padding:26px 30px 34px;">
+    <div style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#9C7F40;margin-bottom:8px;cursor:pointer;" onclick="_cusGoPainel()">‹ Custódias › Processo</div>
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:22px;">
+      <div>
+        <div style="font-family:'Fraunces',Georgia,serif;font-size:24px;font-weight:400;color:#0A1530;">${escHtml(dev)} <span style="color:rgba(10,21,48,.45);font-size:16px;">· devedor</span></div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:rgba(10,21,48,.6);margin-top:4px;">Proc. ${escHtml(c.processo_cnj||'—')}${c.vara?' · '+escHtml(c.vara):''}</div>
+        <div style="font-size:12.5px;color:#5b5544;margin-top:6px;">Cedente: <b style="color:#0A1530;">${escHtml(cred)}</b>${c.advogado?' · Adv.: '+escHtml(c.advogado):''}</div>
+      </div>
+      <span style="font-size:10.5px;font-weight:700;${stt.badge}padding:6px 12px;border-radius:20px;">● ${stt.label}${c.status==='levantado'?' · a ratear':''}</span>
+    </div>
+    <div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:26px 28px 22px;margin-bottom:16px;box-shadow:0 1px 2px rgba(16,24,40,.04);">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#9C7F40;margin-bottom:24px;">Linha do tempo do valor</div>
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);position:relative;">
+        <div style="position:absolute;top:13px;left:10%;right:10%;height:2px;background:linear-gradient(90deg,#5E7C58 0%,#5E7C58 ${pct*100}%,#E0DAC9 ${pct*100}%,#E0DAC9 100%);"></div>
+        ${nodeHtml}
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1.2fr 1fr;gap:16px;">
+      ${rateioCard}
+      <div style="display:flex;flex-direction:column;gap:16px;">
+        <div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,.04);">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#8892A6;margin-bottom:12px;">Conciliação da conta judicial</div>
+          <div style="display:flex;align-items:center;gap:10px;"><span style="width:26px;height:26px;border-radius:50%;background:${conciliado?'#E9EDE2':'#F3EFE3'};color:${conciliado?'#5E7C58':'#9C7F40'};display:flex;align-items:center;justify-content:center;font-size:13px;">${conciliado?'✓':'•'}</span><div><div style="font-size:13px;font-weight:600;color:#0A1530;">Tribunal de Justiça</div><div style="font-size:11px;color:rgba(10,21,48,.55);">${conciliado&&levH?('Levantamento batido com o extrato · '+_repDM(levH.data)):'Aguardando levantamento'}</div></div></div>
+        </div>
+        ${passosCard}
+      </div>
+    </div>
+  </div>`;
+}
+
+function _r2(n){ return Math.round((Number(n)||0)*100)/100; }
+// Recalcula o rateio ao vivo no detalhe (custas R$, honor. adv %, honor. COBRASQ %).
+function _cusRateioCalc(){
+  const levEl=document.getElementById('cus-lev'); if(!levEl) return;
+  const lev=+levEl.getAttribute('data-lev')||0;
+  const custas=_repParseNum(document.getElementById('cus-custas')?.value);
+  const hadvP=Math.max(0,Math.min(100,parseFloat(String(document.getElementById('cus-hadv')?.value||'0').replace(',','.'))||0));
+  const hcobP=Math.max(0,Math.min(100,parseFloat(String(document.getElementById('cus-hcob')?.value||'0').replace(',','.'))||0));
+  const hadv=_r2(lev*hadvP/100), hcob=_r2(lev*hcobP/100);
+  const rep=_r2(lev-custas-hadv-hcob);
+  const set=(id,v)=>{ const e=document.getElementById(id); if(e) e.textContent=v; };
+  set('cus-hadv-v','− '+fmtR(hadv)); set('cus-hcob-v','− '+fmtR(hcob)); set('cus-rep-v',fmtR(rep)); set('cus-ratear-val',fmtR(rep));
+}
+
+// Ações do ciclo — todas via /api/automacao?action=custodia (op=...).
+async function _cusPost(op, payload){
+  const res=await fetch('/api/automacao?action=custodia&op='+op,{ method:'POST', headers:{ ...(await authHeaders()), 'Content-Type':'application/json' }, body: JSON.stringify(payload||{}) });
+  const j=await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(j.error||('HTTP '+res.status));
+  return j;
+}
+async function _cusAvancar(id, to){
+  try{ showToast('Atualizando…','info'); await _cusPost('avancar',{ id, to }); _cusState.loaded=false; await renderCustodias(); showToast('Situação atualizada.','success'); }
+  catch(e){ showToast('Erro: '+(e.message||e),'danger'); }
+}
+async function _cusLevantar(id){
+  if(!confirm('Registrar o LEVANTAMENTO deste alvará (entra na conta Asaas)?')) return;
+  try{ showToast('Registrando levantamento…','info'); await _cusPost('levantar',{ id }); _cusState.loaded=false; _cusDetalhe(id); await renderCustodias(true); showToast('Levantado. Agora faça o rateio.','success'); }
+  catch(e){ showToast('Erro: '+(e.message||e),'danger'); }
+}
+async function _cusRatear(id){
+  const custas=_repParseNum(document.getElementById('cus-custas')?.value);
+  const hadvP=parseFloat(String(document.getElementById('cus-hadv')?.value||'0').replace(',','.'))||0;
+  const hcobP=parseFloat(String(document.getElementById('cus-hcob')?.value||'0').replace(',','.'))||0;
+  const btn=document.getElementById('cus-ratear-btn'); if(btn){ btn.style.pointerEvents='none'; btn.style.opacity='.6'; }
+  try{
+    showToast('Rateando e enviando a Repasses…','info');
+    const j=await _cusPost('ratear',{ id, custas, honorarios_adv_pct:hadvP, honorario_cobrasq_pct:hcobP });
+    _cusState.loaded=false; await renderCustodias(); _cusGoPainel();
+    showToast(`Rateado — repasse de ${fmtR(j.repasse_cedente)} criado em Repasses › A revisar.`,'success');
+  }catch(e){ if(btn){ btn.style.pointerEvents=''; btn.style.opacity=''; } showToast('Erro no rateio: '+(e.message||e),'danger'); }
+}
+
+// Modal "Registrar custódia" (não está nas 2 telas do handoff — cadastro mínimo).
+async function _cusModalRegistrar(){
+  let clientes=[], devedores=[];
+  try{ const sb=getSupabase(); const [cs,ds]=await Promise.all([ sb.from('clientes').select('id,nome').order('nome').limit(1000), sb.from('devedores').select('id,nome').order('nome').limit(1000) ]); clientes=cs.data||[]; devedores=ds.data||[]; }catch(_){}
+  const optC=`<option value="">Cliente/cedente…</option>`+clientes.map(c=>`<option value="${c.id}">${escHtml(c.nome||'—')}</option>`).join('');
+  const optD=`<option value="">Devedor…</option>`+devedores.map(d=>`<option value="${d.id}">${escHtml(d.nome||'—')}</option>`).join('');
+  const fs='width:100%;border:1px solid #E6E1D2;border-radius:7px;padding:9px 11px;font-size:13px;color:#0A1530;background:#FBFAF6;';
+  const html=`<div onclick="_cusCloseModal(event)" style="position:fixed;inset:0;z-index:100000;background:rgba(10,21,48,.42);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:40px 16px;">
+    <div onclick="event.stopPropagation()" style="width:560px;max-width:100%;background:#fff;border-radius:12px;box-shadow:0 32px 80px rgba(10,21,48,.32);overflow:hidden;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:18px 24px;border-bottom:1px solid #EFEAD9;"><div style="font-size:18px;font-weight:700;color:#0A1530;">Registrar custódia</div><span onclick="_cusCloseModal()" style="font-size:20px;color:#B8BEC8;cursor:pointer;">×</span></div>
+      <div style="padding:20px 24px;display:grid;grid-template-columns:1fr 1fr;gap:13px;">
+        <div style="grid-column:1/-1;"><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Processo (nº CNJ)</div><input id="cus-f-cnj" placeholder="5001234-56.2025.8.16.0069" style="${fs}font-family:'JetBrains Mono',monospace;"></div>
+        <div style="grid-column:1/-1;"><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Vara</div><input id="cus-f-vara" placeholder="Vara Cível de Dois Vizinhos" style="${fs}"></div>
+        <div><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Devedor</div><select id="cus-f-dev" style="${fs}">${optD}</select></div>
+        <div><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Cliente / cedente</div><select id="cus-f-cred" style="${fs}">${optC}</select></div>
+        <div><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Advogado(a)</div><input id="cus-f-adv" placeholder="Dra. … OAB/PR …" style="${fs}"></div>
+        <div><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Valor em custódia</div><input id="cus-f-valor" placeholder="0,00" style="${fs}font-family:'JetBrains Mono',monospace;font-weight:700;"></div>
+        <div style="grid-column:1/-1;"><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Situação inicial</div><select id="cus-f-status" style="${fs}"><option value="bloqueado">Bloqueado (SISBAJUD)</option><option value="depositado">Depósito judicial</option><option value="alvara">Alvará expedido</option></select></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:14px 24px;border-top:1px solid #EFEAD9;background:#FCFBF7;"><span id="cus-f-status-msg" style="font-size:11.5px;color:#8892A6;"></span><div style="display:flex;gap:10px;"><span onclick="_cusCloseModal()" style="font-size:13px;font-weight:600;color:#5b6473;border:1px solid #E6E1D2;padding:10px 18px;border-radius:8px;cursor:pointer;">Cancelar</span><span id="cus-f-save" onclick="_cusSalvarRegistro()" style="font-size:13px;font-weight:700;color:#0A1530;background:#C9A961;padding:10px 22px;border-radius:8px;cursor:pointer;">Registrar</span></div></div>
+    </div>
+  </div>`;
+  let ov=document.getElementById('__cusmodal'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='__cusmodal'; ov.innerHTML=html; document.body.appendChild(ov);
+}
+function _cusCloseModal(){ const ov=document.getElementById('__cusmodal'); if(ov) ov.remove(); }
+async function _cusSalvarRegistro(){
+  const cnj=(document.getElementById('cus-f-cnj')?.value||'').trim();
+  const vara=(document.getElementById('cus-f-vara')?.value||'').trim();
+  const devedor_id=document.getElementById('cus-f-dev')?.value||'';
+  const credor_id=document.getElementById('cus-f-cred')?.value||'';
+  const advogado=(document.getElementById('cus-f-adv')?.value||'').trim();
+  const valor=_repParseNum(document.getElementById('cus-f-valor')?.value);
+  const status=document.getElementById('cus-f-status')?.value||'bloqueado';
+  const msg=document.getElementById('cus-f-status-msg'); const btn=document.getElementById('cus-f-save');
+  if(!cnj){ if(msg){msg.style.color='#A65A4A';msg.textContent='Informe o nº do processo.';} return; }
+  if(!(valor>0)){ if(msg){msg.style.color='#A65A4A';msg.textContent='Informe o valor.';} return; }
+  if(btn){ btn.style.pointerEvents='none'; btn.style.opacity='.6'; }
+  try{
+    await _cusPost('registrar',{ processo_cnj:cnj, vara, devedor_id:devedor_id||undefined, credor_id:credor_id||undefined, advogado, valor, status });
+    _cusCloseModal(); _cusState.loaded=false; await renderCustodias(); showToast('Custódia registrada.','success');
+  }catch(e){ if(btn){ btn.style.pointerEvents=''; btn.style.opacity=''; } if(msg){ msg.style.color='#A65A4A'; msg.textContent='Erro: '+(e.message||e); } }
 }
 
 // Screen 13 — "A repassar ao cedente": agrega fin_operacao por cedente (modelo por

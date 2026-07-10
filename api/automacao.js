@@ -19,6 +19,7 @@ const handlers = {
   'backfill-asaas-customers': require('./_backfill-asaas-customers.js'),
   'boletos-para-lancamentos': require('./_boletos-para-lancamentos.js'),
   'repasse-nova-receita': require('./_repasse-nova-receita.js'),
+  'custodia': require('./_custodia.js'),
   'diagnostico-financeiro': require('./_diagnostico-financeiro.js'),
   'eproc-peticionamento': require('./_eproc-peticionamento.js'),
   'criar-cedente': require('./_criar-cedente.js'),
