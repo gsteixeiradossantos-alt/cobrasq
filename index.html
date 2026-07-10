@@ -23101,6 +23101,7 @@ function renderFinanceiro(){
         <div class="fin-sub" id="fin-header-sub">${mesLabel} · carregando…</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-ghost btn-sm" onclick="importarBoletosAsaas('dry')" title="Cadastra os boletos ativos do Asaas como lançamentos (prévia → cria 1 → cria todos)">${ico('sync',13)} Importar boletos Asaas</button>
         <button class="btn btn-gold btn-sm" onclick="abrirNovaCobrancaAsaasGlobal()">${ico('plus',13)} Nova cobrança</button>
         <button class="btn btn-primary btn-sm" onclick="abrirNovoLancamento()">${ico('plus',13)} Novo lançamento</button>
       </div>
@@ -23138,6 +23139,41 @@ function renderFinanceiro(){
 // Sincronização SOB DEMANDA com o Controlle: botão "Sincronizar Controlle" e disparo
 // automático ao abrir o Financeiro. silent:true = automático (debounce de 5 min, sem alertas).
 // Chama /api/sync-controlle (autenticado; o servidor exige papel=proprietario).
+// Importa os boletos ATIVOS do Asaas como lançamentos (receita/pendente, conta Asaas,
+// categoria Acordos). Fluxo em 3 passos: prévia → cria 1 (teste) → cria todos.
+// Backend: /api/automacao?action=boletos-para-lancamentos (proprietário; chave no servidor).
+async function importarBoletosAsaas(modo){
+  modo = modo || 'dry';
+  const call = async (m)=>{
+    const headers = Object.assign({ 'Content-Type':'application/json' }, await authHeaders());
+    const r = await fetch('/api/automacao?action=boletos-para-lancamentos&modo='+m, { method:'POST', headers });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
+    return j;
+  };
+  try{
+    if(typeof showToast==='function') showToast('Consultando boletos do Asaas…','info');
+    const j = await call(modo);
+    const s = j.resumo || {};
+    if(modo==='dry'){
+      let msg = `Boletos ativos: ${s.total_boletos}\nA criar: ${s.a_criar}  (já cadastrados: ${s.ja_cadastrados})\nCom contato vinculado: ${s.com_contato}  ·  Sem cadastro (cus_): ${s.sem_cadastro_cus}\nParcelamentos (customers c/ >1 boleto): ${s.parcelamentos}\n\nPrévia (primeiros):\n`
+        + (j.previa||[]).map(p=>`• ${p.descricao} — ${fmtR(p.valor)} (venc ${p.vencimento||'—'})${p.matched?'':' [sem cadastro]'}`).join('\n')
+        + `\n\nCriar SÓ 1 (teste) agora?`;
+      if(confirm(msg)) return importarBoletosAsaas('um');
+    } else if(modo==='um'){
+      const c = (j.criados||[])[0];
+      if(!c){ alert('Nada a criar (todos já cadastrados).'); return; }
+      renderFinanceiro();
+      if(confirm(`Criado 1 lançamento de teste (id ${c.id}):\n${c.descricao} — ${fmtR(c.valor)} (venc ${c.vencimento||'—'})\n\nConfira em Lançamentos. Criar TODOS os ${s.a_criar} restantes agora?`)){
+        return importarBoletosAsaas('todos');
+      }
+    } else {
+      alert(`Pronto! Criados ${ (j.criados||[]).length } lançamentos a partir dos boletos ativos do Asaas.`);
+      renderFinanceiro();
+    }
+  }catch(e){ alert('Falha ao importar boletos: '+(e.message||e)); }
+}
+
 async function sincronizarControlle(opts){
   opts = opts || {};
   const silent = !!opts.silent;
