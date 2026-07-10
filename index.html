@@ -23445,6 +23445,7 @@ function _repShell(innerHtml, agg){
         <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#8892A6;margin-top:4px;">${mesLabel} · ${nSaldo} cliente${nSaldo!==1?'s':''} com saldo a repassar</div>
       </div>
       <div style="display:flex;gap:8px;">
+        <span onclick="_repModalNovaReceita()" style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;color:#5b6473;background:#fff;border:1px solid #E6E1D2;padding:8px 13px;border-radius:7px;cursor:pointer;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>Nova receita</span>
         <span onclick="_repExportar()" style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;color:#5b6473;background:#fff;border:1px solid #E6E1D2;padding:8px 13px;border-radius:7px;cursor:pointer;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>Exportar</span>
         <span onclick="_repGoTab('arepassar')" style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700;color:#0A1530;background:#C9A961;padding:8px 15px;border-radius:7px;cursor:pointer;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>Fazer repasse</span>
       </div>
@@ -23765,6 +23766,100 @@ function _repRenderCustodias(){
     <div style="font-size:15px;font-weight:700;color:#0A1530;margin-bottom:6px;">Custódias judiciais</div>
     <div style="font-size:12.5px;color:#8892A6;max-width:520px;margin:0 auto;">Valores recuperados em ações judiciais que ficam em custódia (alvará/depósito) antes do repasse ao cliente. O controle dedicado entra em etapa futura — por ora, os repasses via Asaas aparecem nas demais abas.</div>
   </div>`;
+}
+
+// Tela 03 — Nova receita: cadastro manual de uma receita recebida. Ao vincular o
+// cliente/cedente, mostra a "Sugestão de repasse" (split capital/honorário ao vivo).
+// Ao salvar, cria a fin_operacao (pendente) via /api/automacao?action=repasse-nova-receita
+// → aparece em "A revisar". Capital → cliente; juros/encargos = honorário (recebido − capital).
+const _repParseNum = s => { s=String(s==null?'':s).trim().replace(/[R$\s.]/g,'').replace(',', '.'); const n=parseFloat(s); return isNaN(n)?0:n; };
+async function _repModalNovaReceita(){
+  // carrega clientes e devedores para os selects (best-effort; devedores truncados p/ leveza).
+  let clientes=[], devedores=[];
+  try{ const sb=getSupabase();
+    const [cs,ds]=await Promise.all([
+      sb.from('clientes').select('id,nome').order('nome').limit(1000),
+      sb.from('devedores').select('id,nome').order('nome').limit(1000)
+    ]);
+    clientes=cs.data||[]; devedores=ds.data||[];
+  }catch(_){}
+  const hojeISO=new Date().toISOString().slice(0,10);
+  const optC=`<option value="">Selecione o cliente…</option>`+clientes.map(c=>`<option value="${c.id}">${escHtml(c.nome||'—')}</option>`).join('');
+  const optD=`<option value="">— sem devedor —</option>`+devedores.map(d=>`<option value="${d.id}">${escHtml(d.nome||'—')}</option>`).join('');
+  const fieldStyle='width:100%;border:1px solid #E6E1D2;border-radius:7px;padding:9px 11px;font-size:13px;color:#0A1530;background:#FBFAF6;';
+  const html=`
+  <div onclick="_repCloseNR(event)" style="position:fixed;inset:0;z-index:100000;background:rgba(10,21,48,.42);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:40px 16px;">
+    <div onclick="event.stopPropagation()" style="width:560px;max-width:100%;background:#fff;border-radius:12px;box-shadow:0 32px 80px rgba(10,21,48,.32);overflow:hidden;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:18px 24px;border-bottom:1px solid #EFEAD9;">
+        <div style="font-size:18px;font-weight:700;color:#0A1530;">Nova receita</div>
+        <span onclick="_repCloseNR()" style="font-size:20px;color:#B8BEC8;cursor:pointer;">×</span>
+      </div>
+      <div style="padding:20px 24px;">
+        <div style="display:inline-flex;background:#F5F2EA;border-radius:8px;padding:3px;margin-bottom:18px;">
+          <span style="font-size:12.5px;font-weight:700;color:#fff;background:#5E7C58;padding:7px 20px;border-radius:6px;">Entrada</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-bottom:6px;">
+          <div style="grid-column:1 / -1;"><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Descrição</div><input id="rnr-desc" value="Acordo — parcela recebida" style="${fieldStyle}"></div>
+          <div><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Valor recebido</div><input id="rnr-valor" oninput="_repNRCalc()" placeholder="0,00" style="${fieldStyle}font-family:'JetBrains Mono',monospace;font-weight:700;color:#5E7C58;"></div>
+          <div><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Data</div><input id="rnr-data" type="date" value="${hojeISO}" style="${fieldStyle}font-family:'JetBrains Mono',monospace;"></div>
+          <div><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Conta</div><div style="${fieldStyle}">Asaas</div></div>
+          <div><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Categoria</div><div style="${fieldStyle}">Acordos</div></div>
+          <div><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Devedor <span style="color:#8892A6;font-weight:400;">(opcional)</span></div><select id="rnr-devedor" style="${fieldStyle}">${optD}</select></div>
+          <div><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Capital da dívida <span style="color:#9C7F40;">(→ cliente)</span></div><input id="rnr-capital" oninput="_repNRCalc()" placeholder="0,00" style="${fieldStyle}font-family:'JetBrains Mono',monospace;font-weight:700;color:#9C7F40;"></div>
+          <div style="grid-column:1 / -1;"><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Cliente / cedente <span style="color:#9C7F40;">(vincula o repasse)</span></div><select id="rnr-cliente" style="width:100%;border:1.5px solid #C9A961;border-radius:7px;padding:9px 11px;font-size:13px;font-weight:600;color:#0A1530;background:#FBF8EF;">${optC}</select></div>
+        </div>
+        <div style="background:#0A1530;border-radius:11px;padding:16px 18px;margin-top:16px;">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:13px;"><span style="width:20px;height:20px;border-radius:6px;background:#C9A961;color:#0A1530;display:flex;align-items:center;justify-content:center;font-size:12px;">⚡</span><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#E8C877;">Sugestão de repasse · você revisa</span></div>
+          <div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid rgba(239,234,217,.12);"><span style="font-size:12.5px;color:rgba(239,234,217,.75);">Valor recebido</span><span id="rnr-s-rec" style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#EFEAD9;">R$ 0,00</span></div>
+          <div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid rgba(239,234,217,.12);"><span style="font-size:12.5px;color:rgba(239,234,217,.75);">(−) Juros, multa e encargos <span style="color:#9BB893;">(seu honorário)</span></span><span id="rnr-s-jur" style="font-family:'JetBrains Mono',monospace;font-size:13px;color:#9BB893;">R$ 0,00</span></div>
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0 0;"><span style="font-size:13px;font-weight:700;color:#EFEAD9;">Capital da dívida → cliente</span><span id="rnr-s-cap" style="font-family:'JetBrains Mono',monospace;font-size:17px;font-weight:700;color:#E8C877;">R$ 0,00</span></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:12px;padding:11px 14px;background:#FBF8EF;border:1px solid #EFE7D2;border-radius:9px;">
+          <span style="width:34px;height:20px;border-radius:20px;background:#5E7C58;position:relative;flex-shrink:0;"><span style="position:absolute;top:2px;right:2px;width:16px;height:16px;border-radius:50%;background:#fff;"></span></span>
+          <span style="font-size:12.5px;color:#0A1530;">Ao salvar, cria uma <b>sugestão pendente</b> em "A revisar". Você confere os valores e efetiva. Regra: o cliente recebe o capital; juros e encargos são seu honorário.</span>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:14px 24px;border-top:1px solid #EFEAD9;background:#FCFBF7;">
+        <span id="rnr-status" style="font-size:11.5px;color:#8892A6;"></span>
+        <div style="display:flex;gap:10px;"><span onclick="_repCloseNR()" style="font-size:13px;font-weight:600;color:#5b6473;border:1px solid #E6E1D2;padding:10px 18px;border-radius:8px;cursor:pointer;">Cancelar</span><span id="rnr-save" onclick="_repSalvarNovaReceita()" style="font-size:13px;font-weight:700;color:#0A1530;background:#C9A961;padding:10px 22px;border-radius:8px;cursor:pointer;">Salvar receita</span></div>
+      </div>
+    </div>
+  </div>`;
+  let ov=document.getElementById('__repnr'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='__repnr'; ov.innerHTML=html; document.body.appendChild(ov);
+}
+function _repCloseNR(){ const ov=document.getElementById('__repnr'); if(ov) ov.remove(); }
+function _repNRCalc(){
+  const rec=_repParseNum(document.getElementById('rnr-valor')?.value);
+  let cap=_repParseNum(document.getElementById('rnr-capital')?.value);
+  if(cap>rec) cap=rec;
+  const jur=Math.max(0, rec-cap);
+  const set=(id,v)=>{ const e=document.getElementById(id); if(e) e.textContent=fmtR(v); };
+  set('rnr-s-rec',rec); set('rnr-s-jur',jur); set('rnr-s-cap',cap);
+}
+async function _repSalvarNovaReceita(){
+  const rec=_repParseNum(document.getElementById('rnr-valor')?.value);
+  const cap=Math.min(_repParseNum(document.getElementById('rnr-capital')?.value), rec);
+  const credId=document.getElementById('rnr-cliente')?.value||'';
+  const devId=document.getElementById('rnr-devedor')?.value||'';
+  const desc=(document.getElementById('rnr-desc')?.value||'').trim();
+  const data=document.getElementById('rnr-data')?.value||'';
+  const st=document.getElementById('rnr-status'); const btn=document.getElementById('rnr-save');
+  if(!(rec>0)){ if(st){st.textContent='Informe o valor recebido.';st.style.color='#A65A4A';} return; }
+  if(!credId){ if(st){st.textContent='Selecione o cliente/cedente.';st.style.color='#A65A4A';} return; }
+  if(btn){ btn.style.pointerEvents='none'; btn.style.opacity='.6'; }
+  if(st){ st.style.color='#8892A6'; st.textContent='Salvando…'; }
+  try{
+    const res=await fetch('/api/automacao?action=repasse-nova-receita',{ method:'POST', headers:{ ...(await authHeaders()), 'Content-Type':'application/json' }, body: JSON.stringify({ descricao:desc, valor_recebido:rec, valor_capital:cap, recebido_em:data, credor_id:credId, devedor_id:devId||undefined }) });
+    const j=await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(j.error||('HTTP '+res.status));
+    _repCloseNR();
+    showToast(j.valor_capital>0?`Receita salva — sugestão de ${fmtR(j.valor_capital)} criada em "A revisar".`:'Receita salva (sem capital a repassar).','success');
+    _repState.loaded=false; _repState.tab='arevisar'; _repState._focusCred=null; await renderRepassesClientes();
+  }catch(e){
+    if(btn){ btn.style.pointerEvents=''; btn.style.opacity=''; }
+    if(st){ st.style.color='#A65A4A'; st.textContent='Erro: '+(e.message||e); }
+  }
 }
 
 // Screen 13 — "A repassar ao cedente": agrega fin_operacao por cedente (modelo por
