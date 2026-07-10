@@ -15675,6 +15675,14 @@ async function renderCobrancaDetalhe(){
     ['Criada em', escHtml(_detData(cob.created_at))]
   ]);
 
+  // Processo unificado (litisconsórcio): créditos irmãos do mesmo processo/ação.
+  // Calculado aqui em cima para que o painel de Valores também mostre o total da ação
+  // (cada crédito mantém seu próprio capital/repasse — o repasse é separado por credor).
+  const _unifId = _cobrUnifId(cob);
+  const _unifIrmaos = _unifId ? (DB_cobrancas||[]).filter(x=>_cobrUnifId(x)===_unifId) : [];
+  const _unifTotal = _unifIrmaos.reduce((s,x)=>s+(+x.valor_atual||+x.valor_orig||0),0);
+  const _ehUnif = !!_unifId && _unifIrmaos.length>1;
+
   // Painel unificado: capital (= original, sem juros), enviados e saldo como números
   // grandes em dourado; juros/multa/correção/valor atualizado no detalhamento menor.
   const _temCapital = (vCapital!=null);
@@ -15684,6 +15692,13 @@ async function renderCobrancaDetalhe(){
       <div class="det-panel-tt" style="margin:0;">Valores da dívida</div>
       ${quitadoCliente?'<span class="cob-pill st-quitado">✓ Quitado ao cliente</span>':''}
     </div>
+    ${_ehUnif?`<div style="margin-top:12px;padding:10px 14px;border:1px solid var(--border);border-radius:9px;background:var(--navy,#1f3a5f);color:#fff;display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;">
+      <div>
+        <div style="font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;opacity:.85;">⚖ Valor total da ação (${_unifIrmaos.length} créditos)</div>
+        <div style="font-size:11px;opacity:.8;margin-top:1px;">soma dos créditos deste processo unificado · abaixo, os valores deste crédito</div>
+      </div>
+      <div style="font-size:22px;font-weight:700;font-family:var(--font-mono);white-space:nowrap;">${fmtR(_unifTotal)}</div>
+    </div>`:''}
     <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;margin-top:14px;">
       <div>
         <div style="font-size:10.5px;color:var(--text-3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Valor capital da dívida</div>
@@ -15860,14 +15875,12 @@ async function renderCobrancaDetalhe(){
   </div>`;
 
   // Painel "Processo unificado": lista os créditos irmãos (mesmo processo/ação), com total.
-  const _unifId = _cobrUnifId(cob);
-  const _unifIrmaos = _unifId ? (DB_cobrancas||[]).filter(x=>_cobrUnifId(x)===_unifId) : [];
-  const panelUnificado = (_unifId && _unifIrmaos.length>1) ? `<div class="cob-panel" style="padding:18px;">
+  const panelUnificado = _ehUnif ? `<div class="cob-panel" style="padding:18px;">
     <div class="det-panel-tt">⚖ Processo unificado</div>
     <div style="font-size:12.5px;color:var(--text-2);margin:6px 0 12px;">Esta cobrança integra uma <strong>ação única</strong> que reúne ${_unifIrmaos.length} créditos do mesmo devedor (litisconsórcio ativo). O repasse continua <strong>separado por credor</strong>.</div>
     <dl class="det-kv">
       ${_unifIrmaos.map(x=>`<dt>${escHtml(_cobrCredorNome(x))}${x.id===cob.id?' <span style="font-size:10px;color:var(--text-3);">(este)</span>':''}</dt><dd>${fmtR(+x.valor_atual||+x.valor_orig||0)} · ${escHtml(statusLabel(x.status)||'—')}${x.id!==cob.id?` · <a href="#" onclick="verCobranca('${x.id}');return false;">abrir</a>`:''}</dd>`).join('')}
-      <dt style="font-weight:700;">Total da ação</dt><dd style="font-weight:700;">${fmtR(_unifIrmaos.reduce((s,x)=>s+(+x.valor_atual||+x.valor_orig||0),0))}</dd>
+      <dt style="font-weight:700;">Total da ação</dt><dd style="font-weight:700;">${fmtR(_unifTotal)}</dd>
     </dl>
   </div>` : '';
 
@@ -19537,8 +19550,12 @@ async function cpRenderDashboard(body){
   // comprovantes pendentes de aprovação
   const compPendentes = devs.reduce((s,d)=>s+((d.comprovantes||[]).filter(c=>c.status==='pendente').length),0);
 
-  // Capital total (≈ valor_capital ?? valor_orig por caso) e saldo a receber
-  const cobr=(typeof DB_cobrancas!=='undefined'?DB_cobrancas:[]||[]).filter(c=>c.cliente_id===currentUser.clienteId);
+  // Capital total (≈ valor_capital ?? valor_orig por caso) e saldo a receber.
+  // Escopa por cpClienteIds() (não por currentUser.clienteId direto), senão o cedente
+  // de GRUPO — cujas cobranças ficam sob as empresas do grupo, não sob o id do grupo —
+  // teria capitalTotal 0 e o "saldo a receber" apareceria zerado.
+  const _cpCapIds=cpClienteIds();
+  const cobr=(typeof DB_cobrancas!=='undefined'?DB_cobrancas:[]||[]).filter(c=>_cpCapIds.includes(c.cliente_id));
   const capitalTotal=cobr.reduce((s,c)=>s+((c.valor_capital!=null)?+c.valor_capital:((c.divida&&c.divida.valorCapital!=null)?+c.divida.valorCapital:(+c.valor_orig||parseValorBR((devs.find(d=>d.id===c.id)||{}).valorOrig)||0))),0);
   const saldoReceber=Math.max(capitalTotal-recuperado,0);
   const pctVolta=capitalTotal>0?Math.min(100,(recuperado/capitalTotal)*100):0;
