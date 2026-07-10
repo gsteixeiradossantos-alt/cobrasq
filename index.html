@@ -23369,6 +23369,7 @@ function renderFinTab(tab){
 // Financeiro e lê o MESMO fin_operacao — as duas ficam coerentes.
 // ══════════════════════════════════════════════════════════════
 let _repState = { tab:'painel', ops:[], credMap:{}, devMap:{}, loaded:false };
+try { window._repState = _repState; } catch(_){} // mesma referência (debug/testes); mutações via props
 const _REP_MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 const _repIsPend = o => o.repasse_status==='pendente' || o.repasse_status==='preparado';
 const _repDM = s => { s=(s||'').slice(0,10); return s ? s.split('-').slice(1).reverse().join('/') : '—'; }; // dd/MM
@@ -23576,16 +23577,123 @@ async function renderRepassesClientes(keepData){
   let inner;
   if(_repState.tab==='painel') inner=_repRenderPainel(agg);
   else if(_repState.tab==='arevisar') inner=_repRenderRevisar();
-  else if(_repState.tab==='arepassar') inner=_repPlaceholder('A repassar — fila de pagamento');
+  else if(_repState.tab==='arepassar') inner=_repRenderARepassar();
   else if(_repState.tab==='feitos') inner=_repPlaceholder('Repasses feitos');
   else if(_repState.tab==='custodias') inner=_repPlaceholder('Custódias judiciais');
   else inner=_repRenderPainel(agg);
   page.innerHTML=_repShell(inner, agg);
 }
 function _repGoTab(t){ _repState.tab=t; renderRepassesClientes(true); }
-function _repExportar(){ if(typeof toast==='function') toast('Exportação em breve.'); }
-function _repFazer(credId){ _repState.tab='arepassar'; _repState._focusCred=credId; renderRepassesClientes(true); }
+function _repExportar(){ showToast('Exportação em breve.','info'); }
+function _repFazer(credId){ _repModalFazer(credId); }
 function _repExtrato(credId){ _repState.tab='feitos'; _repState._focusCred=credId; renderRepassesClientes(true); }
+
+const _repN = v => (Number(v)||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+
+// Aba "A repassar": cedentes com capital pendente → cada um abre o modal de repasse (tela 02).
+function _repRenderARepassar(){
+  const c=_repAgg();
+  const pend=c.cedentes.filter(x=>x.temPend);
+  const banner=`<div style="display:flex;align-items:center;gap:11px;background:#0A1530;border-radius:10px;padding:12px 16px;margin-bottom:18px;"><span style="width:24px;height:24px;border-radius:7px;background:#C9A961;color:#0A1530;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;">⚡</span><span style="font-size:12.5px;color:#EFEAD9;">Confirme o repasse por cliente. Sai <b style="color:#E8C877;">1 PIX por devedor</b> (nunca somado) para a chave PIX do cliente, cada um identificado pela parcela e pelo devedor.</span></div>`;
+  if(!pend.length) return banner+`<div style="background:#fff;border:1px solid #E6E1D2;border-radius:11px;padding:34px;text-align:center;color:#8892A6;font-size:13px;">Nenhum repasse pendente. Tudo em dia. 🎉</div>`;
+  const rows=pend.map(x=>`<div style="display:grid;grid-template-columns:1.4fr 150px 140px 140px 120px;align-items:center;gap:10px;padding:13px 18px;border-bottom:1px solid #F1ECE0;font-size:13px;"><span style="font-weight:600;color:#0A1530;">${escHtml(x.nome)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#0A1530;">${fmtR(x.recebido)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#5E7C58;">${fmtR(x.honorario)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;font-weight:700;color:#9C7F40;">${fmtR(x.aRepassar)}</span><span style="text-align:right;"><span onclick="_repModalFazer('${x.credId}')" style="font-size:11.5px;font-weight:700;color:#0A1530;background:#C9A961;padding:5px 13px;border-radius:7px;cursor:pointer;">Repassar</span></span></div>`).join('');
+  return banner+`<div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;overflow:hidden;">
+    <div style="display:grid;grid-template-columns:1.4fr 150px 140px 140px 120px;align-items:center;gap:10px;padding:10px 18px;background:#F5F2EA;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#8892A6;text-transform:uppercase;letter-spacing:.08em;"><span>Cliente / cedente</span><span style="text-align:right;">Recebido</span><span style="text-align:right;">Honorário</span><span style="text-align:right;">A repassar</span><span style="text-align:right;">Ação</span></div>
+    ${rows}
+  </div>`;
+}
+
+// Modal — Fazer repasse (tela 02): lista os recebimentos pendentes do cedente, monta
+// 1 PIX por devedor (nº de parcela editável), resumo e confirma via /api/repassar (N chamadas).
+function _repModalFazer(credId){
+  const ops=_repState.ops.filter(o=>o.credor_id===credId && _repIsPend(o))
+    .slice().sort((a,b)=>(a.recebido_em||'').localeCompare(b.recebido_em||''));
+  if(!ops.length){ showToast('Nada pendente para este cliente.','info'); return; }
+  const cred=_repState.credMap[credId]||{nome:'—',pix:null};
+  const dm=_repState.devMap;
+  const somaRec=ops.reduce((s,o)=>s+(+o.valor_recebido||0),0);
+  const somaHon=ops.reduce((s,o)=>s+(+o.valor_honorario||0),0);
+  const somaCap=ops.reduce((s,o)=>s+(+o.valor_capital||0),0);
+  const hoje=new Date().toLocaleDateString('pt-BR');
+  const parcOf=o=>(o.parcela&&o.total_parcelas)?`${o.parcela}/${o.total_parcelas}`:'acordo';
+  const recRows=ops.map(o=>`<div style="display:grid;grid-template-columns:26px 1fr 100px 100px 100px;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid #F3EFE3;font-size:12.5px;"><span style="width:16px;height:16px;border-radius:4px;background:#5E7C58;color:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;">✓</span><span style="color:#0A1530;">${escHtml(dm[o.devedor_id]||'—')} <span style="color:#8892A6;">· ${parcOf(o)} · ${_repDM(o.recebido_em)}</span></span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#0A1530;">${_repN(o.valor_recebido)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#5E7C58;">${_repN(o.valor_honorario)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;font-weight:600;color:#9C7F40;">${_repN(o.valor_capital)}</span></div>`).join('');
+  const pixRows=ops.map(o=>`<div style="display:flex;align-items:center;gap:8px;margin-bottom:7px;"><input id="reppix-parc-${o.id}" value="${o.parcela||''}" style="width:44px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;color:#0A1530;background:#fff;border:1px solid #D9CFB6;border-radius:6px;padding:7px 0;"><span style="font-size:13px;color:#8892A6;">-</span><div style="flex:1;font-size:13px;color:#0A1530;background:#fff;border:1px solid #E6E1D2;border-radius:6px;padding:7px 11px;">${escHtml(dm[o.devedor_id]||'—')}</div><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:600;color:#9C7F40;width:90px;text-align:right;">${fmtR(o.valor_capital)}</span></div>`).join('');
+  const n=ops.length;
+  const html=`
+  <div onclick="_repCloseModal(event)" style="position:fixed;inset:0;z-index:100000;background:rgba(10,21,48,.42);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:34px 16px;">
+    <div onclick="event.stopPropagation()" style="width:660px;max-width:100%;background:#fff;border-radius:12px;box-shadow:0 32px 80px rgba(10,21,48,.32);overflow:hidden;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;padding:20px 24px;border-bottom:1px solid #EFEAD9;">
+        <div>
+          <div style="font-size:18px;font-weight:700;color:#0A1530;">Repasse a ${escHtml(cred.nome)}</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#8892A6;margin-top:3px;">${n} recebimento${n!==1?'s':''} · ${n} PIX</div>
+        </div>
+        <span onclick="_repCloseModal()" style="font-size:20px;color:#B8BEC8;cursor:pointer;">×</span>
+      </div>
+      <div style="padding:20px 24px;overflow:auto;">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#9C7F40;margin-bottom:12px;">Recebimentos a repassar</div>
+        <div style="border:1px solid #EFEAD9;border-radius:9px;overflow:hidden;margin-bottom:18px;">
+          <div style="display:grid;grid-template-columns:26px 1fr 100px 100px 100px;align-items:center;gap:8px;padding:8px 14px;background:#F5F2EA;font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:700;color:#8892A6;text-transform:uppercase;letter-spacing:.06em;"><span></span><span>Devedor · acordo</span><span style="text-align:right;">Recebido</span><span style="text-align:right;">Juros</span><span style="text-align:right;">Capital → PIX</span></div>
+          ${recRows}
+        </div>
+        <div style="background:#F5F2EA;border:1px solid #EAE3D3;border-radius:9px;padding:13px 15px;margin-bottom:18px;">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:11px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:#0A1530;background:#C9A961;padding:2px 7px;border-radius:5px;">${n} PIX</span><span style="font-size:12px;color:#5b5544;">Um PIX por devedor ao cliente. Descrição editável — o número é a <b>parcela</b>.</span></div>
+          ${pixRows}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:18px;">
+          <div style="background:#F5F2EA;border:1px solid #EAE3D3;border-radius:9px;padding:12px 14px;"><div style="font-size:11px;color:#8892A6;">Recebido</div><div style="font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:700;color:#0A1530;margin-top:3px;">${fmtR(somaRec)}</div></div>
+          <div style="background:#EDF1EA;border:1px solid #D5E0CE;border-radius:9px;padding:12px 14px;"><div style="font-size:11px;color:#5E7C58;">Juros/encargos (fica)</div><div style="font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:700;color:#5E7C58;margin-top:3px;">${fmtR(somaHon)}</div></div>
+          <div style="background:#FBF8EF;border:1px solid #E0D3A8;border-radius:9px;padding:12px 14px;"><div style="font-size:11px;color:#9C7F40;">Capital a repassar · ${n} PIX</div><div style="font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:700;color:#9C7F40;margin-top:3px;">${fmtR(somaCap)}</div></div>
+        </div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#9C7F40;margin-bottom:12px;">Pagamento</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+          <div><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Conta de origem</div><div style="border:1px solid #E6E1D2;border-radius:7px;padding:9px 11px;font-size:13px;color:#0A1530;background:#FBFAF6;">Asaas</div></div>
+          <div><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Forma</div><div style="border:1px solid #E6E1D2;border-radius:7px;padding:9px 11px;font-size:13px;color:#0A1530;background:#FBFAF6;">PIX</div></div>
+          <div><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Chave PIX do cliente</div><input id="rep-pixkey" value="${cred.pix?escHtml(cred.pix):''}" placeholder="CPF/CNPJ, e-mail, telefone ou chave" style="width:100%;border:1px solid #E6E1D2;border-radius:7px;padding:9px 11px;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#0A1530;background:#FBFAF6;"></div>
+          <div><div style="font-size:11px;font-weight:600;color:#8892A6;margin-bottom:5px;">Data do repasse</div><div style="border:1px solid #E6E1D2;border-radius:7px;padding:9px 11px;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#0A1530;background:#FBFAF6;">${hoje}</div></div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;padding:11px 14px;background:#FBF8EF;border:1px solid #EFE7D2;border-radius:9px;"><span style="width:16px;height:16px;border-radius:4px;background:#5E7C58;color:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;">✓</span><span style="font-size:12.5px;color:#0A1530;">Comprovante e prestação de contas são enviados ao cliente automaticamente após cada PIX.</span></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:14px 24px;border-top:1px solid #EFEAD9;background:#FCFBF7;">
+        <span id="rep-modal-status" style="font-size:11.5px;color:#8892A6;">Cria ${n} PIX no Asaas — um por devedor — e dá baixa nos recebimentos.</span>
+        <div style="display:flex;gap:10px;"><span onclick="_repCloseModal()" style="font-size:13px;font-weight:600;color:#5b6473;border:1px solid #E6E1D2;padding:10px 18px;border-radius:8px;cursor:pointer;">Cancelar</span><span id="rep-modal-confirm" onclick="_repConfirmarLote('${credId}')" style="font-size:13px;font-weight:700;color:#0A1530;background:#C9A961;padding:10px 20px;border-radius:8px;cursor:pointer;">Confirmar · ${n} PIX · ${fmtR(somaCap)}</span></div>
+      </div>
+    </div>
+  </div>`;
+  let ov=document.getElementById('__repmodal'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='__repmodal'; ov.innerHTML=html; document.body.appendChild(ov);
+}
+// O card interno faz stopPropagation, então o backdrop só recebe clique de fora → fecha sempre.
+function _repCloseModal(){ const ov=document.getElementById('__repmodal'); if(ov) ov.remove(); }
+
+// Confirma o repasse do cedente: 1 chamada /api/repassar por operação (= 1 PIX por
+// devedor, nunca somado). Descrição PIX = "<nº parcela editado> - <nome do devedor>".
+async function _repConfirmarLote(credId){
+  const ops=_repState.ops.filter(o=>o.credor_id===credId && _repIsPend(o));
+  if(!ops.length){ _repCloseModal(); return; }
+  const pixKey=(document.getElementById('rep-pixkey')?.value||'').trim();
+  const btn=document.getElementById('rep-modal-confirm'); const st=document.getElementById('rep-modal-status');
+  if(btn){ btn.style.pointerEvents='none'; btn.style.opacity='.6'; }
+  const dm=_repState.devMap;
+  let ok=0, fail=0; const erros=[];
+  for(let i=0;i<ops.length;i++){
+    const o=ops[i];
+    if(st) st.textContent=`Enviando PIX ${i+1}/${ops.length}…`;
+    const parc=(document.getElementById('reppix-parc-'+o.id)?.value||o.parcela||'').toString().trim();
+    const dev=dm[o.devedor_id]||'';
+    const descricao=(parc?parc+' - ':'')+dev;
+    try{
+      const res=await fetch('/api/repassar',{ method:'POST', headers:{ ...(await authHeaders()), 'Content-Type':'application/json' }, body: JSON.stringify({ operacao_id:o.id, pix_key:pixKey||undefined, descricao }) });
+      const j=await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(j.error||('HTTP '+res.status));
+      if(j.skipped) { /* já em andamento/efetuado — conta como ok */ }
+      ok++;
+    }catch(e){ fail++; erros.push((dev||o.id)+': '+(e.message||e)); }
+  }
+  _repCloseModal();
+  showToast(`Repasse: ${ok} PIX enviado${ok!==1?'s':''}${fail?`, ${fail} com erro`:''}.`, fail?'danger':'success');
+  if(erros.length) console.warn('[repasse lote]', erros);
+  _repState.loaded=false; await renderRepassesClientes();
+}
 
 // Screen 13 — "A repassar ao cedente": agrega fin_operacao por cedente (modelo por
 // capital: valor_recebido = recebido do devedor; valor_capital = repasse ao cedente;
