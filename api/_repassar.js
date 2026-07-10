@@ -111,7 +111,9 @@ module.exports = async function handler(req, res) {
       value: round2(op.valor_capital),
       pixAddressKey: pixKey,
       operationType: 'PIX',
-      description: `Repasse Cobrasq — ${credor.nome || 'credor'}${op.parcela ? ' — parcela ' + op.parcela + '/' + op.total_parcelas : ''}`,
+      // Descrição editável (regra "Repasses a clientes": "<nº parcela> - <devedor>").
+      // Se o front não mandar, cai no texto padrão. Trunca em 500 (limite Asaas).
+      description: (body.descricao && String(body.descricao).trim().slice(0, 500)) || `Repasse Cobrasq — ${credor.nome || 'credor'}${op.parcela ? ' — parcela ' + op.parcela + '/' + op.total_parcelas : ''}`,
       externalReference: op.id,
     };
     if (body.pix_key_type) transferPayload.pixAddressKeyType = body.pix_key_type;
