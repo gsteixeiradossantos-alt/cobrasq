@@ -23578,12 +23578,12 @@ async function renderRepassesClientes(keepData){
   if(_repState.tab==='painel') inner=_repRenderPainel(agg);
   else if(_repState.tab==='arevisar') inner=_repRenderRevisar();
   else if(_repState.tab==='arepassar') inner=_repRenderARepassar();
-  else if(_repState.tab==='feitos') inner=_repPlaceholder('Repasses feitos');
-  else if(_repState.tab==='custodias') inner=_repPlaceholder('Custódias judiciais');
+  else if(_repState.tab==='feitos') inner=_repRenderFeitos();
+  else if(_repState.tab==='custodias') inner=_repRenderCustodias();
   else inner=_repRenderPainel(agg);
   page.innerHTML=_repShell(inner, agg);
 }
-function _repGoTab(t){ _repState.tab=t; renderRepassesClientes(true); }
+function _repGoTab(t){ _repState.tab=t; _repState._focusCred=null; renderRepassesClientes(true); }
 function _repExportar(){ showToast('Exportação em breve.','info'); }
 function _repFazer(credId){ _repModalFazer(credId); }
 function _repExtrato(credId){ _repState.tab='feitos'; _repState._focusCred=credId; renderRepassesClientes(true); }
@@ -23693,6 +23693,78 @@ async function _repConfirmarLote(credId){
   showToast(`Repasse: ${ok} PIX enviado${ok!==1?'s':''}${fail?`, ${fail} com erro`:''}.`, fail?'danger':'success');
   if(erros.length) console.warn('[repasse lote]', erros);
   _repState.loaded=false; await renderRepassesClientes();
+}
+
+// Aba "Repasses feitos": lista de cedentes com movimento → clique abre o extrato (tela 05).
+function _repRenderFeitos(){
+  if(_repState._focusCred) return _repRenderExtrato(_repState._focusCred);
+  const c=_repAgg();
+  if(!c.cedentes.length) return `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:11px;padding:34px;text-align:center;color:#8892A6;font-size:13px;">Nenhum repasse registrado ainda.</div>`;
+  const repByCred={};
+  for(const o of _repState.ops){ if(o.repasse_status==='efetuado'){ const k=o.credor_id||'?'; repByCred[k]=(repByCred[k]||0)+(+o.valor_capital||0); } }
+  const rows=c.cedentes.map(x=>{
+    const repassado=repByCred[x.credId]||0;
+    return `<div onclick="_repVerExtrato('${x.credId}')" style="display:grid;grid-template-columns:1.4fr 150px 150px 140px 90px;align-items:center;gap:10px;padding:13px 18px;border-bottom:1px solid #F1ECE0;font-size:13px;cursor:pointer;"><span style="font-weight:600;color:#0A1530;">${escHtml(x.nome)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#0A1530;">${fmtR(x.recebido)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#5E7C58;font-weight:600;">${fmtR(repassado)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;font-weight:700;color:${x.aRepassar>0?'#9C7F40':'#8892A6'};">${x.aRepassar>0?fmtR(x.aRepassar):'—'}</span><span style="text-align:right;font-size:11.5px;color:#9C7F40;">Ver extrato ›</span></div>`;
+  }).join('');
+  return `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;overflow:hidden;">
+    <div style="display:grid;grid-template-columns:1.4fr 150px 150px 140px 90px;align-items:center;gap:10px;padding:10px 18px;background:#F5F2EA;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#8892A6;text-transform:uppercase;letter-spacing:.08em;"><span>Cliente / cedente</span><span style="text-align:right;">Recuperado</span><span style="text-align:right;">Repassado</span><span style="text-align:right;">A repassar</span><span></span></div>
+    ${rows}
+  </div>`;
+}
+function _repVerExtrato(credId){ _repState._focusCred=credId; renderRepassesClientes(true); }
+function _repVoltarFeitos(){ _repState._focusCred=null; renderRepassesClientes(true); }
+
+// Tela 05 — Extrato do cliente: parcela a parcela ligando receita recebida → repasse.
+// Estados: efetuado='Pago'; pendente/preparado='Exigível · a repassar'. No relacional
+// as fin_operacao já nascem recebidas, então 'Previsto · não exigível' fica vazio.
+function _repRenderExtrato(credId){
+  const cred=_repState.credMap[credId]||{nome:'—'};
+  const dm=_repState.devMap;
+  const ops=_repState.ops.filter(o=>o.credor_id===credId)
+    .slice().sort((a,b)=>(b.recebido_em||'').localeCompare(a.recebido_em||''));
+  const recuperado=ops.reduce((s,o)=>s+(+o.valor_recebido||0),0);
+  const repassado=ops.filter(o=>o.repasse_status==='efetuado').reduce((s,o)=>s+(+o.valor_capital||0),0);
+  const exigivel=ops.filter(_repIsPend).reduce((s,o)=>s+(+o.valor_capital||0),0);
+  const previsto=0; // sem parcelas de receita não-recebidas no modelo relacional atual.
+  const parcOf=o=>o.parcela||'—';
+  const rows=ops.map(o=>{
+    const pago=o.repasse_status==='efetuado';
+    const cap=+o.valor_capital||0;
+    const pill=pago
+      ? `<span style="font-size:10.5px;font-weight:700;color:#5E7C58;background:#E9EDE2;padding:4px 10px;border-radius:20px;">✓ Pago ${_repDM(o.repasse_efetuado_em||o.recebido_em)}</span>`
+      : `<span style="font-size:10.5px;font-weight:700;color:#9C7F40;background:#FBF8EF;border:1px solid #E0D3A8;padding:4px 10px;border-radius:20px;">Exigível · a repassar</span>`;
+    return `<div style="display:grid;grid-template-columns:1.5fr 1.1fr 130px 130px 150px;align-items:center;gap:10px;padding:13px 18px;border-bottom:1px solid #F1ECE0;font-size:13px;"><span style="color:#0A1530;font-weight:600;">${parcOf(o)} - ${escHtml(dm[o.devedor_id]||'—')}</span><span style="font-size:12px;color:#5E7C58;">${_repDM(o.recebido_em)} · <b>recebida</b></span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#0A1530;">${fmtR(o.valor_recebido)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;font-weight:700;color:${pago?'#0A1530':'#9C7F40'};">${fmtR(cap)}</span><span style="text-align:center;">${pill}</span></div>`;
+  }).join('');
+  const kpi=(bg,brd,lblCol,lbl,valCol,val)=>`<div style="background:${bg};border:1px solid ${brd};border-radius:10px;padding:15px 17px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:${lblCol};margin-bottom:7px;">${lbl}</div><div style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:700;color:${valCol};">${val}</div></div>`;
+  return `
+    <div style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#9C7F40;margin-bottom:10px;cursor:pointer;" onclick="_repVoltarFeitos()">‹ Repasses feitos</div>
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:18px;">
+      <div>
+        <div style="font-size:20px;font-weight:700;color:#0A1530;letter-spacing:-.01em;">${escHtml(cred.nome)}</div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#8892A6;margin-top:3px;">${ops.length} operação${ops.length!==1?'ões':''} · cliente/cedente</div>
+      </div>
+      <span onclick="showToast('Prestação de contas (PDF) em breve.','info')" style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700;color:#0A1530;background:#C9A961;padding:9px 15px;border-radius:8px;cursor:pointer;">Prestação de contas (PDF)</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:14px;margin-bottom:20px;">
+      ${kpi('#fff','#E6E1D2','#8892A6','Recuperado','#0A1530',fmtR(recuperado))}
+      ${kpi('#fff','#E6E1D2','#8892A6','Repassado','#5E7C58',fmtR(repassado))}
+      ${kpi('#FBF8EF','#E0D3A8','#9C7F40','Exigível a repassar','#9C7F40',fmtR(exigivel))}
+      ${kpi('#fff','#E6E1D2','#8892A6','Previsto (não exigível)','#9AA3B2',fmtR(previsto))}
+    </div>
+    <div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;overflow:hidden;">
+      <div style="display:grid;grid-template-columns:1.5fr 1.1fr 130px 130px 150px;align-items:center;gap:10px;padding:11px 18px;background:#F5F2EA;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#8892A6;text-transform:uppercase;letter-spacing:.08em;"><span>Parcela · devedor</span><span>Receita (parcela de entrada)</span><span style="text-align:right;">Recebido</span><span style="text-align:right;">Capital → cliente</span><span style="text-align:center;">Repasse</span></div>
+      ${ops.length?rows:`<div style="padding:28px;text-align:center;color:#8892A6;font-size:13px;">Sem operações para este cliente.</div>`}
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:14px;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#8892A6;"><span>Repasse:</span><span style="color:#5E7C58;">● Pago</span><span style="color:#9C7F40;">● Exigível</span><span style="color:#8892A6;">● Previsto (aguardando recebimento)</span></div>`;
+}
+
+// Custódias judiciais: valores recebidos em juízo que ficam em custódia (fora do fluxo
+// de PIX automático). Ainda sem fonte de dados dedicada no relacional — placeholder honesto.
+function _repRenderCustodias(){
+  return `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:11px;padding:40px;text-align:center;">
+    <div style="font-size:15px;font-weight:700;color:#0A1530;margin-bottom:6px;">Custódias judiciais</div>
+    <div style="font-size:12.5px;color:#8892A6;max-width:520px;margin:0 auto;">Valores recuperados em ações judiciais que ficam em custódia (alvará/depósito) antes do repasse ao cliente. O controle dedicado entra em etapa futura — por ora, os repasses via Asaas aparecem nas demais abas.</div>
+  </div>`;
 }
 
 // Screen 13 — "A repassar ao cedente": agrega fin_operacao por cedente (modelo por
