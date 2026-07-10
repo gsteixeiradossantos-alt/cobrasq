@@ -2247,6 +2247,9 @@ body:not(.cobr-cream) .cob-stpop, .dark .cob-stpop { background: var(--card); }
       <div class="nav-item" data-page="fin" id="nav-fin">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></span><span>Financeiro</span>
       </div>
+      <div class="nav-item" data-page="repasses" id="nav-repasses">
+        <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg></span><span>Repasses a clientes</span>
+      </div>
       <div class="nav-item" data-page="nf-avulsa" id="nav-nf-avulsa" style="display:none;">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg></span><span>Emitir NF</span><span id="nav-nf-badge" style="display:none;margin-left:auto;font-size:10px;font-weight:700;background:var(--danger);color:#fff;border-radius:100px;padding:1px 7px;min-width:16px;text-align:center;"></span>
       </div>
@@ -2441,6 +2444,11 @@ body:not(.cobr-cream) .cob-stpop, .dark .cob-stpop { background: var(--card); }
     <!-- PAGE: FINANCEIRO -->
     <div id="page-fin" class="page-content">
       <!-- JS will populate -->
+    </div>
+
+    <!-- PAGE: REPASSES A CLIENTES (dinheiro recebido dos devedores que a COBRASQ deve repassar aos cedentes/credores) -->
+    <div id="page-repasses" class="page-content">
+      <!-- renderRepassesClientes() -->
     </div>
 
     <!-- PAGE: RELATÓRIOS -->
@@ -6830,6 +6838,7 @@ const PAGE_TITLES = {
   pipeline:'Pipeline', crm:'CRM', clientes:'Clientes', docs:'Documentos', pecas:'Peças & Ações Judiciais', fin:'Financeiro',
   relat:'Relatórios', wa:'WhatsApp', intimacoes:'Intimações', config:'Configurações', calc:'Calculadora Jurídica',
   aprovacoes:'Aprovações', tarefas:'Tarefas', delegacao:'Delegação', assinaturas:'Assinaturas', 'consultas-premium':'Consultas Premium',
+  repasses:'Repasses a clientes',
   importacao:'Importação', /* IMPORTACAO TEMP */
   'cobranca-detalhe':'Cobrança', 'devedor-detalhe':'Devedor', 'cliente-detalhe':'Cliente'
 };
@@ -6845,6 +6854,7 @@ const PAGE_BREADCRUMBS = {
   assinaturas:['Assinaturas'],
   pecas:     ['Peças & Ações Judiciais'],
   fin:       ['Financeiro'],
+  repasses:  ['Financeiro','Repasses a clientes'],
   relat:     ['Relatórios'],
   wa:        ['Comunicação','WhatsApp'],
   intimacoes:['Comunicação','Intimações & andamentos'],
@@ -6872,6 +6882,7 @@ const PAGE_RENDERERS = {
   assinaturas: ()=>renderAssinaturas(),
   pecas: ()=>renderPecas(),
   fin: ()=>renderFinanceiro(),
+  repasses: ()=>renderRepassesClientes(),
   relat: ()=>renderRelatorios(),
   'nf-avulsa': ()=>renderNfAvulsa(),
   wa: ()=>renderWhatsApp(),
@@ -6889,7 +6900,7 @@ const PAGE_RENDERERS = {
 };
 
 // Páginas com dados agregados de toda a carteira/credores — só gestor (proprietário).
-const ADMIN_ONLY_PAGES = new Set(['fin','relat','pipeline','importacao','delegacao','nf-avulsa' /* IMPORTACAO TEMP */]);
+const ADMIN_ONLY_PAGES = new Set(['fin','repasses','relat','pipeline','importacao','delegacao','nf-avulsa' /* IMPORTACAO TEMP */]);
 
 // ===== Controlle top-nav (reskin v4): sincroniza aba ativa + menu "Mais" =====
 function syncCtrlNav(p){
@@ -23346,10 +23357,176 @@ function renderFinTab(tab){
 }
 
 // ══════════════════════════════════════════════════════════════
-// PR-UI: Repasses · Diagnóstico · Importação Asaas (consomem os
-// endpoints /api/repassar, /api/diagnostico-financeiro, /api/importar-asaas
-// e a tabela fin_operacao). Aditivo — segue o padrão das demais renderFin*.
+// MÓDULO "REPASSES A CLIENTES"  (página própria #/repasses)
+// ──────────────────────────────────────────────────────────────
+// Controle do dinheiro que a COBRASQ recebe dos devedores e precisa repassar aos
+// clientes/cedentes. REUSA o modelo relacional que já existe (fin_operacao):
+//   valor_recebido = recebido do devedor · valor_capital = capital → repasse ao cliente
+//   valor_honorario = juros/multa/encargos → honorário da COBRASQ
+//   repasse_status: 'pendente'|'preparado' (a repassar) · 'efetuado' (pago)
+// Visual pixel-fiel do handoff (telas/01..05). Sub-navegação por pills.
+// Aditivo: a aba antiga "A repassar ao cedente" (renderFinRepasses) continua no
+// Financeiro e lê o MESMO fin_operacao — as duas ficam coerentes.
 // ══════════════════════════════════════════════════════════════
+let _repState = { tab:'painel', ops:[], credMap:{}, devMap:{}, loaded:false };
+const _REP_MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+const _repIsPend = o => o.repasse_status==='pendente' || o.repasse_status==='preparado';
+const _repDM = s => { s=(s||'').slice(0,10); return s ? s.split('-').slice(1).reverse().join('/') : '—'; }; // dd/MM
+function _repDaysSince(s){ s=(s||'').slice(0,10); if(!s) return null; const d=new Date(s+'T00:00:00'); const now=new Date(); return Math.floor((now-d)/86400000); }
+
+async function _repLoad(){
+  const sb = getSupabase();
+  const r = await sb.from('fin_operacao')
+    .select('id,credor_id,devedor_id,parcela,total_parcelas,valor_recebido,valor_capital,valor_honorario,recebido_em,repasse_status,repasse_efetuado_em,repasse_comprovante_url')
+    .order('recebido_em',{ascending:false}).limit(2000);
+  if(r.error) throw r.error;
+  _repState.ops = r.data || [];
+  _repState.credMap = {}; _repState.devMap = {};
+  const cIds=[...new Set(_repState.ops.map(o=>o.credor_id).filter(Boolean))];
+  if(cIds.length){
+    // chave_pix é opcional no schema — tenta trazer; se a coluna não existir, cai p/ id,nome.
+    let data=null;
+    try{ const q=await sb.from('clientes').select('id,nome,chave_pix').in('id',cIds); if(q.error) throw q.error; data=q.data; }
+    catch(_){ const q2=await sb.from('clientes').select('id,nome').in('id',cIds); data=q2.data; }
+    (data||[]).forEach(c=>_repState.credMap[c.id]={nome:c.nome, pix:c.chave_pix||null});
+  }
+  const dIds=[...new Set(_repState.ops.map(o=>o.devedor_id).filter(Boolean))];
+  if(dIds.length){ const {data}=await sb.from('devedores').select('id,nome').in('id',dIds); (data||[]).forEach(d=>_repState.devMap[d.id]=d.nome); }
+  _repState.loaded = true;
+}
+
+// Agrega fin_operacao por cedente (recebido / honorário / a repassar / último repasse).
+function _repAgg(){
+  const ops=_repState.ops, cm=_repState.credMap;
+  const mesKey=(new Date()).toISOString().slice(0,7);
+  const inMes=d=>(d||'').slice(0,7)===mesKey;
+  const byCred={};
+  for(const o of ops){
+    const k=o.credor_id||'?';
+    if(!byCred[k]) byCred[k]={credId:o.credor_id, nome:(cm[o.credor_id]&&cm[o.credor_id].nome)||'—', recebido:0, honorario:0, aRepassar:0, temPend:false, ultimoRepasse:null, ultimoAtraso:false, oldestPend:null};
+    const g=byCred[k];
+    g.recebido += +o.valor_recebido||0;
+    g.honorario += +o.valor_honorario||0;
+    if(_repIsPend(o)){ g.aRepassar += +o.valor_capital||0; g.temPend=true; if(!g.oldestPend || (o.recebido_em||'')<g.oldestPend) g.oldestPend=o.recebido_em||''; }
+    if(o.repasse_status==='efetuado'){ const d=o.repasse_efetuado_em||o.recebido_em; if(d && (!g.ultimoRepasse || d>g.ultimoRepasse)) g.ultimoRepasse=d; }
+  }
+  const cedentes=Object.values(byCred).sort((a,b)=>b.recebido-a.recebido);
+  const kpiARepassar=ops.filter(_repIsPend).reduce((s,o)=>s+(+o.valor_capital||0),0);
+  const repMesOps=ops.filter(o=>o.repasse_status==='efetuado'&&inMes(o.repasse_efetuado_em));
+  const kpiRepassadoMes=repMesOps.reduce((s,o)=>s+(+o.valor_capital||0),0);
+  const kpiHonorMes=ops.filter(o=>inMes(o.recebido_em)).reduce((s,o)=>s+(+o.valor_honorario||0),0);
+  const nComSaldo=cedentes.filter(c=>c.aRepassar>0).length;
+  const totRecebido=cedentes.reduce((s,c)=>s+c.recebido,0);
+  const totHonor=cedentes.reduce((s,c)=>s+c.honorario,0);
+  const totRepassar=cedentes.reduce((s,c)=>s+c.aRepassar,0);
+  return { cedentes, kpiARepassar, kpiRepassadoMes, repMesOps, kpiHonorMes, nComSaldo, totRecebido, totHonor, totRepassar };
+}
+
+// Shell comum: hero + pills. innerHtml = conteúdo da aba ativa.
+function _repShell(innerHtml, agg){
+  const now=new Date();
+  const mesLabel=_REP_MESES[now.getMonth()]+' de '+now.getFullYear();
+  const nSaldo=agg.nComSaldo;
+  const nRevisar=_repState.ops.filter(_repIsPend).length;
+  const tab=_repState.tab;
+  const pill=(id,label,badge)=>{
+    const active=tab===id;
+    const base=`font-size:13px;font-weight:${active?700:500};padding:7px 15px;border-radius:8px;cursor:pointer;`;
+    const style=active?`${base}color:#fff;background:#0A1530;`:`${base}color:#6B7683;`;
+    const b=badge!=null&&badge!==0?` <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:700;color:#0A1530;background:#C9A961;padding:1px 6px;border-radius:9px;">${badge}</span>`:'';
+    return `<span onclick="_repGoTab('${id}')" style="display:inline-flex;align-items:center;gap:6px;${style}">${label}${b}</span>`;
+  };
+  return `
+  <div style="padding:22px 26px;max-width:1180px;">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:20px;">
+      <div>
+        <div style="font-size:22px;font-weight:700;color:#0A1530;letter-spacing:-.01em;">Repasses a clientes</div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:#8892A6;margin-top:4px;">${mesLabel} · ${nSaldo} cliente${nSaldo!==1?'s':''} com saldo a repassar</div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <span onclick="_repExportar()" style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;color:#5b6473;background:#fff;border:1px solid #E6E1D2;padding:8px 13px;border-radius:7px;cursor:pointer;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>Exportar</span>
+        <span onclick="_repGoTab('arepassar')" style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700;color:#0A1530;background:#C9A961;padding:8px 15px;border-radius:7px;cursor:pointer;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>Fazer repasse</span>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:20px;border-bottom:1px solid #E6E1D2;padding-bottom:14px;">
+      ${pill('painel','Painel')}
+      ${pill('arevisar','A revisar',nRevisar)}
+      ${pill('arepassar','A repassar')}
+      ${pill('feitos','Repasses feitos')}
+      ${pill('custodias','Custódias judiciais')}
+    </div>
+    ${innerHtml}
+  </div>`;
+}
+
+function _repRenderPainel(agg){
+  const c=agg;
+  // alerta de repasse atrasado: cedente pendente com recebimento mais antigo.
+  let alerta='';
+  const pend=c.cedentes.filter(x=>x.temPend&&x.oldestPend).sort((a,b)=>(a.oldestPend||'').localeCompare(b.oldestPend||''));
+  if(pend.length){ const top=pend[0]; const dias=_repDaysSince(top.oldestPend); if(dias!=null&&dias>=3){
+    alerta=`<div style="display:flex;align-items:center;gap:10px;background:#F7ECE8;border:1px solid #E7CFC7;border-radius:9px;padding:10px 15px;margin-bottom:16px;"><span style="width:20px;height:20px;border-radius:50%;background:#A65A4A;color:#EFEAD9;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;">!</span><span style="font-size:12.5px;color:#7d3f33;">Repasse a <b>${escHtml(top.nome)}</b> pendente há ${dias} dias — <b>${fmtR(top.aRepassar)}</b>.</span><span onclick="_repGoTab('arepassar')" style="font-size:12.5px;font-weight:700;color:#A65A4A;margin-left:auto;cursor:pointer;">Repassar agora →</span></div>`;
+  }}
+  const gridCols='1.4fr 150px 140px 140px 130px 110px';
+  const rows=c.cedentes.map((x,i)=>{
+    const bg=x.temPend&&i>0&&x.ultimoAtraso?'':'';
+    const dataUlt = x.temPend
+      ? `<span style="text-align:right;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:${(_repDaysSince(x.oldestPend)||0)>=8?'#A65A4A':'#8892A6'};">${_repDM(x.oldestPend)}${(_repDaysSince(x.oldestPend)||0)>=8?' · atraso':''}</span>`
+      : `<span style="text-align:right;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#8892A6;">${_repDM(x.ultimoRepasse)}</span>`;
+    const acao = x.temPend
+      ? `<span style="text-align:right;"><span onclick="_repFazer('${x.credId}')" style="font-size:11.5px;font-weight:700;color:#0A1530;background:#C9A961;padding:5px 11px;border-radius:7px;cursor:pointer;">Repassar</span></span>`
+      : `<span style="text-align:right;"><span onclick="_repExtrato('${x.credId}')" style="font-size:11px;font-weight:600;color:#5E7C58;cursor:pointer;">✓ Comprovante</span></span>`;
+    return `<div style="display:grid;grid-template-columns:${gridCols};align-items:center;gap:10px;padding:13px 18px;border-bottom:1px solid #F1ECE0;font-size:13px;${bg}"><span style="font-weight:600;color:#0A1530;">${escHtml(x.nome)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#0A1530;">${fmtR(x.recebido)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#5E7C58;">${fmtR(x.honorario)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;font-weight:700;color:${x.aRepassar>0?'#9C7F40':'#8892A6'};">${x.aRepassar>0?fmtR(x.aRepassar):'—'}</span>${dataUlt}${acao}</div>`;
+  }).join('');
+  const tabela = c.cedentes.length ? `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;overflow:hidden;">
+      <div style="display:grid;grid-template-columns:${gridCols};align-items:center;gap:10px;padding:10px 18px;background:#F5F2EA;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#8892A6;text-transform:uppercase;letter-spacing:.08em;"><span>Cliente / cedente</span><span style="text-align:right;">Recebido</span><span style="text-align:right;">Honorário (juros)</span><span style="text-align:right;">A repassar (capital)</span><span style="text-align:right;">Último repasse</span><span style="text-align:right;">Ação</span></div>
+      ${rows}
+      <div style="display:grid;grid-template-columns:${gridCols};align-items:center;gap:10px;padding:12px 18px;background:#0A1530;font-family:'JetBrains Mono',monospace;"><span style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#C9A961;">Total no mês</span><span style="text-align:right;font-size:11.5px;color:#EFEAD9;">${fmtR(c.totRecebido)}</span><span style="text-align:right;font-size:11.5px;color:#9BB893;">${fmtR(c.totHonor)}</span><span style="text-align:right;font-size:11.5px;color:#E0C575;">${fmtR(c.totRepassar)}</span><span></span><span></span></div>
+    </div>`
+    : `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:34px;text-align:center;color:#8892A6;font-size:13px;">Nenhum recebimento processado ainda. Os repasses aparecem aqui quando uma receita vinculada a um devedor é recebida.</div>`;
+  return `
+    <div style="display:flex;align-items:center;gap:11px;background:#0A1530;border-radius:10px;padding:12px 16px;margin-bottom:16px;">
+      <span style="width:24px;height:24px;border-radius:7px;background:#C9A961;color:#0A1530;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;">⚡</span>
+      <span style="font-size:12.5px;color:#EFEAD9;">Repasses são <b style="color:#E8C877;">sugeridos automaticamente</b> quando entra uma receita vinculada a um devedor com capital em aberto — o cliente recebe o capital da dívida e os juros/encargos são seu honorário. Você só confirma o pagamento.</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:14px;margin-bottom:16px;">
+      <div style="background:#0A1530;border-radius:10px;padding:16px 18px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#C9A961;margin-bottom:8px;">A repassar agora</div><div style="font-family:'JetBrains Mono',monospace;font-size:23px;font-weight:700;color:#EFEAD9;">${fmtR(c.kpiARepassar)}</div><div style="font-size:11px;color:rgba(239,234,217,.6);margin-top:3px;">${c.nComSaldo} cliente${c.nComSaldo!==1?'s':''} aguardando</div></div>
+      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:16px 18px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#8892A6;margin-bottom:8px;">Repassado no mês</div><div style="font-family:'JetBrains Mono',monospace;font-size:23px;font-weight:700;color:#0A1530;">${fmtR(c.kpiRepassadoMes)}</div><div style="font-size:11px;color:#8892A6;margin-top:3px;">${c.repMesOps.length} repasse${c.repMesOps.length!==1?'s':''} concluído${c.repMesOps.length!==1?'s':''}</div></div>
+      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:16px 18px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#8892A6;margin-bottom:8px;">Honorários no mês</div><div style="font-family:'JetBrains Mono',monospace;font-size:23px;font-weight:700;color:#5E7C58;">${fmtR(c.kpiHonorMes)}</div><div style="font-size:11px;color:#8892A6;margin-top:3px;">sua receita líquida</div></div>
+      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:16px 18px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#8892A6;margin-bottom:8px;">Clientes com saldo</div><div style="font-family:'JetBrains Mono',monospace;font-size:23px;font-weight:700;color:#0A1530;">${c.nComSaldo}</div><div style="font-size:11px;color:#8892A6;margin-top:3px;">de ${c.cedentes.length} cedente${c.cedentes.length!==1?'s':''} com movimento</div></div>
+    </div>
+    ${alerta}
+    ${tabela}`;
+}
+
+function _repPlaceholder(titulo){
+  return `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:40px;text-align:center;">
+    <div style="font-size:15px;font-weight:700;color:#0A1530;margin-bottom:6px;">${titulo}</div>
+    <div style="font-size:12.5px;color:#8892A6;">Em construção — próxima etapa deste módulo.</div>
+  </div>`;
+}
+
+async function renderRepassesClientes(keepData){
+  const page=document.getElementById('page-repasses'); if(!page) return;
+  if(!keepData || !_repState.loaded){
+    page.innerHTML=`<div style="text-align:center;padding:60px;color:#8892A6;"><div class="mv2-spinner" style="margin:0 auto 10px;width:26px;height:26px;border-width:3px;"></div>Carregando repasses…</div>`;
+    try{ await _repLoad(); }
+    catch(e){ page.innerHTML=`<div style="padding:22px 26px;"><div style="background:#F7ECE8;border:1px solid #E7CFC7;border-radius:10px;padding:20px;color:#7d3f33;">Erro ao carregar repasses: ${escHtml(e.message||String(e))}</div></div>`; return; }
+  }
+  const agg=_repAgg();
+  let inner;
+  if(_repState.tab==='painel') inner=_repRenderPainel(agg);
+  else if(_repState.tab==='arevisar') inner=_repPlaceholder('A revisar — sugestões de repasse');
+  else if(_repState.tab==='arepassar') inner=_repPlaceholder('A repassar — fila de pagamento');
+  else if(_repState.tab==='feitos') inner=_repPlaceholder('Repasses feitos');
+  else if(_repState.tab==='custodias') inner=_repPlaceholder('Custódias judiciais');
+  else inner=_repRenderPainel(agg);
+  page.innerHTML=_repShell(inner, agg);
+}
+function _repGoTab(t){ _repState.tab=t; renderRepassesClientes(true); }
+function _repExportar(){ if(typeof toast==='function') toast('Exportação em breve.'); }
+function _repFazer(credId){ _repState.tab='arepassar'; _repState._focusCred=credId; renderRepassesClientes(true); }
+function _repExtrato(credId){ _repState.tab='feitos'; _repState._focusCred=credId; renderRepassesClientes(true); }
 
 // Screen 13 — "A repassar ao cedente": agrega fin_operacao por cedente (modelo por
 // capital: valor_recebido = recebido do devedor; valor_capital = repasse ao cedente;
