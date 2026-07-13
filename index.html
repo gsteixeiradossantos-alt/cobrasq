@@ -11547,10 +11547,16 @@ function negRenderPainel(devId){
     <div style="margin-top:8px;">${telBotaoMarcar(devId)}</div>
   </div>`;
 
+  // Onda C — cockpit de propostas de pagamento (3 cards + slider de parcelas).
+  html += `<div id="pag-cards-${devId}" style="margin-top:14px;"></div>`;
+
   // Área onde os blocos de mensagem são renderizados após escolher a opção
   html += `<div id="neg-msgs-${devId}" style="margin-top:16px;"></div>`;
 
   box.innerHTML = html;
+
+  // Onda C: renderiza os 3 cards de proposta com base no cálculo do caso.
+  try{ if(typeof pagRenderCards === 'function') pagRenderCards(devId); }catch(_){}
 }
 
 // Clicou numa opção → renderiza os blocos de mensagem (com assinatura aplicada).
@@ -11909,6 +11915,220 @@ function telAtualizarBadgeHeader(dev){
     badge.textContent = '📵 Telefone inválido';
   } else if(badge){
     badge.remove();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ONDA C — Formas de pagamento (3 cards) + proposta via WhatsApp + Mercado Pago
+// Portado de crm.html: renderDividaCalc/calcularDivida (L5690-5726, cards de
+// pagamento) + enviarPropostaPagamento (L5729-5781) + ajustarSliderParcelas
+// (L8645) + lerConfigMP/salvarConfigMP/renderConfigMP (L3873-3894).
+// REUSA da Onda A: _negCasoAdapter (cálculo à vista/boleto/cartão), fmtR,
+// negComAssinatura, _aavEnviarWhats, _negRegistrarHistorico, escHtml, showToast.
+// Aditivo, sem migração; MP real (backend) fica como TODO gated — aqui só texto.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Config Mercado Pago (localStorage, paridade com o CRM) ──────────────────
+const PAG_MP_CONFIG_KEY = 'crm_mp_config';
+function pagLerConfigMP(){
+  try{ return JSON.parse(localStorage.getItem(PAG_MP_CONFIG_KEY) || '{}'); }
+  catch(_){ return {}; }
+}
+function pagSalvarConfigMP(){
+  const cb = document.getElementById('pagMpAtivo');
+  const pk = document.getElementById('pagMpPublicKey');
+  const tx = document.getElementById('pagMpTaxa');
+  const cfg = {
+    ativo: !!(cb && cb.checked),
+    publicKey: (pk && pk.value) || '',
+    taxa: (tx && parseFloat(tx.value)) || 4.99
+  };
+  try{ localStorage.setItem(PAG_MP_CONFIG_KEY, JSON.stringify(cfg)); }catch(_){}
+  // TODO(gated): persistir em supabase quando a integração real do MP existir.
+  if(typeof showToast==='function') showToast('Mercado Pago '+(cfg.ativo?'habilitado':'desabilitado')+'.','success');
+  const st = document.getElementById('pag-mp-status');
+  if(st) st.innerHTML = cfg.ativo
+    ? '<span class="int-dot int-dot-ok"></span>Habilitado'
+    : '<span class="int-dot int-dot-idle"></span>Desabilitado';
+}
+function pagRenderConfigMP(){
+  const cfg = pagLerConfigMP();
+  const cb = document.getElementById('pagMpAtivo');
+  const pk = document.getElementById('pagMpPublicKey');
+  const tx = document.getElementById('pagMpTaxa');
+  if(cb) cb.checked = !!cfg.ativo;
+  if(pk) pk.value = cfg.publicKey || '';
+  if(tx) tx.value = cfg.taxa != null ? cfg.taxa : '4.99';
+}
+
+// Estado do slider de parcelas do boleto, por devedor (nº atual escolhido).
+window._pagParcelas = window._pagParcelas || {};
+
+// Recalcula UMA opção de boleto para n parcelas usando a MESMA régua da Onda A
+// (Price 2,99% a.m. + R$6 fixo, mínimo R$256/parcela). Espelha ajustarSliderParcelas.
+function _pagBoletoParaN(total, n){
+  if(!(total > 0) || n < 1) return null;
+  let valorParc;
+  if(n === 1) valorParc = total;
+  else {
+    const i = NEG_PARCELA_BOLETO_JUROS_MENSAL;
+    const fator = (i * Math.pow(1 + i, n)) / (Math.pow(1 + i, n) - 1);
+    valorParc = total * fator;
+  }
+  const arred = Math.ceil(valorParc + NEG_PARCELA_BOLETO_FIXO);
+  return { n, parcela: arred, total: arred * n, abaixoMin: arred < NEG_PARCELA_VALOR_MIN };
+}
+
+// Renderiza os 3 cards de proposta (à vista PIX / boleto Nx / cartão 12x).
+function pagRenderCards(devId){
+  const box = document.getElementById('pag-cards-'+devId);
+  if(!box) return;
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  const caso = _negCasoAdapter(dev);
+  const total = caso.divida.totalAvista || 0;
+  const mp = pagLerConfigMP();
+
+  // Nº de parcelas do boleto: começa no máximo viável (caso.divida.boleto12.n) ou 12.
+  let nParc = window._pagParcelas[devId];
+  if(nParc == null) nParc = (caso.divida.boleto12 && caso.divida.boleto12.n) || 12;
+  window._pagParcelas[devId] = nParc;
+  const boletoOpt = _pagBoletoParaN(total, nParc);
+
+  const cardCss = 'flex:1;min-width:150px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:13px;';
+  const titCss  = 'font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);margin-bottom:6px;';
+  const valCss  = 'font-family:var(--font-mono);font-size:16px;font-weight:700;color:var(--navy);margin-bottom:2px;';
+  const descCss = 'font-size:11px;color:var(--text-3);margin-bottom:10px;';
+  const btnEnv  = (op,label)=>`<button class="btn btn-primary btn-sm" style="width:100%;margin-bottom:5px;" onclick="pagEnviarProposta('${devId}','${op}')">📱 ${label||'Enviar essa opção'}</button>`;
+  const btnCopy = (op)=>`<button class="btn btn-ghost btn-sm" style="width:100%;" onclick="pagCopiarProposta('${devId}','${op}',this)">Copiar</button>`;
+
+  let html = `<div style="border-top:1px dashed var(--border);padding-top:12px;">
+    <div style="font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--navy);margin-bottom:8px;">💳 Formas de pagamento — proposta</div>`;
+
+  if(!(total > 0)){
+    html += `<div style="font-size:12px;color:var(--text-3);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:12px 14px;">Sem valor calculado para este caso. Cadastre valor original e vencimento para gerar as propostas.</div></div>`;
+    box.innerHTML = html;
+    return;
+  }
+
+  html += `<div style="display:flex;gap:8px;flex-wrap:wrap;">`;
+
+  // Card 1 — À vista PIX (Asaas)
+  html += `<div style="${cardCss}">
+    <div style="${titCss}">À vista · PIX</div>
+    <div style="${valCss}">${fmtR(total)}</div>
+    <div style="${descCss}">Pagamento único (via Asaas)</div>
+    ${btnEnv('avista')}${btnCopy('avista')}
+  </div>`;
+
+  // Card 2 — Boleto parcelado Nx (com slider)
+  const boletoDisp = boletoOpt && !boletoOpt.abaixoMin;
+  html += `<div style="${cardCss}">
+    <div style="${titCss}">Boleto parcelado</div>
+    <div style="${valCss}">${boletoDisp ? (boletoOpt.n+'x '+fmtR(boletoOpt.parcela)) : '—'}</div>
+    <div style="${descCss}">${boletoDisp ? ('Total '+fmtR(boletoOpt.total)) : 'Parcela mínima '+fmtR(NEG_PARCELA_VALOR_MIN)}</div>
+    <div style="margin-bottom:10px;">
+      <div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--text-3);margin-bottom:3px;"><span>Parcelas</span><span id="pag-parc-lbl-${devId}" style="font-weight:700;color:var(--navy);">${nParc}x</span></div>
+      <input type="range" min="1" max="${NEG_PARCELA_MAX_QTD}" value="${nParc}" oninput="pagAjustarParcelas('${devId}',this.value)" style="width:100%;">
+    </div>
+    ${boletoDisp ? btnEnv('boleto') : `<div style="font-size:11px;color:var(--text-3);text-align:center;padding:6px 0;">Reduza as parcelas até ${fmtR(NEG_PARCELA_VALOR_MIN)}</div>`}${boletoDisp ? btnCopy('boleto') : ''}
+  </div>`;
+
+  // Card 3 — Cartão 12x (Mercado Pago quando habilitado; senão proposta-texto genérica)
+  const cartaoParc = caso.divida.cartao12Parcela || 0;
+  const cartaoTotal = caso.divida.cartao12Total || 0;
+  html += `<div style="${cardCss}${mp.ativo?'border-color:#009EE3;':''}">
+    <div style="${titCss}">Cartão 12x${mp.ativo?' · <span style="color:#009EE3;">Mercado Pago</span>':''}</div>
+    <div style="${valCss}">12x ${fmtR(cartaoParc)}</div>
+    <div style="${descCss}">Total ${fmtR(cartaoTotal)}${mp.ativo?'':' · habilite o MP em Configurações'}</div>
+    ${btnEnv('cartao')}${btnCopy('cartao')}
+  </div>`;
+
+  html += `</div>`;
+  if(!mp.ativo){
+    html += `<div style="font-size:10.5px;color:var(--text-3);margin-top:8px;">O card do cartão envia só a proposta-texto. Para gerar link de pagamento real, habilite o Mercado Pago em <b>Configurações → Integrações</b>. <!-- TODO(gated): gerar link real via api (dispatch em automacao.js como ação _mercadopago) + secret MP --></div>`;
+  }
+  html += `</div>`;
+  box.innerHTML = html;
+}
+
+// Slider: atualiza o nº de parcelas do boleto e re-renderiza os cards ao vivo.
+function pagAjustarParcelas(devId, qtd){
+  let n = parseInt(qtd, 10);
+  if(isNaN(n) || n < 1) n = 1;
+  if(n > NEG_PARCELA_MAX_QTD) n = NEG_PARCELA_MAX_QTD;
+  window._pagParcelas[devId] = n;
+  const lbl = document.getElementById('pag-parc-lbl-'+devId);
+  if(lbl) lbl.textContent = n+'x';
+  pagRenderCards(devId);
+}
+
+// Monta o texto da proposta de UMA forma de pagamento (usa valores do caso).
+// Espelha enviarPropostaPagamento (crm.html L5729); valores sempre do adaptador.
+function pagMontarProposta(devId, opcao){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return null;
+  const caso = _negCasoAdapter(dev);
+  const total = caso.divida.totalAvista || 0;
+  if(!(total > 0)) return null;
+  const primeiroNome = (dev.nome || '').trim().split(/\s+/)[0] || 'tudo bem';
+  let texto = '';
+  if(opcao === 'avista'){
+    texto = 'Oi ' + primeiroNome + '! Pra fechar o acordo, a opção à vista pelo PIX fica em *' + fmtR(total) + '*. Posso te mandar a chave?';
+  } else if(opcao === 'boleto'){
+    const n = window._pagParcelas[devId] || (caso.divida.boleto12 && caso.divida.boleto12.n) || 12;
+    const opt = _pagBoletoParaN(total, n);
+    if(!opt || opt.abaixoMin) return null;
+    texto = 'Oi ' + primeiroNome + '! Opção parcelada no boleto: *' + opt.n + 'x de ' + fmtR(opt.parcela) + '* (total ' + fmtR(opt.total) + '). Topa?';
+  } else if(opcao === 'cartao'){
+    const parc = caso.divida.cartao12Parcela || 0;
+    const tot = caso.divida.cartao12Total || (parc * 12);
+    texto = 'Oi ' + primeiroNome + '! No cartão posso parcelar em *12x de ' + fmtR(parc) + '* sem juros (total ' + fmtR(tot) + '). Topa?';
+  } else {
+    return null;
+  }
+  return texto;
+}
+
+// Copia a proposta (com assinatura) para a área de transferência.
+function pagCopiarProposta(devId, opcao, btn){
+  const texto = pagMontarProposta(devId, opcao);
+  if(!texto){ if(typeof showToast==='function') showToast('Não foi possível montar a proposta.','warning'); return; }
+  const msg = (typeof negComAssinatura==='function') ? negComAssinatura(texto) : texto;
+  const done = ()=>{ if(btn){ const o=btn.textContent; btn.textContent='Copiado!'; setTimeout(()=>btn.textContent=o,1200); } };
+  try{ navigator.clipboard.writeText(msg).then(done, done); }catch(_){ done(); }
+}
+
+// Envia a proposta de pagamento via WhatsApp (reusa _aavEnviarWhats, com
+// confirmação como negEnviarBloco) + registra no histórico + marca aguardando.
+async function pagEnviarProposta(devId, opcao){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  const tel = String(dev.tel||'').replace(/\D/g,'');
+  if(!tel){ if(typeof showToast==='function') showToast('Devedor sem telefone cadastrado.','warning'); return; }
+  const base = pagMontarProposta(devId, opcao);
+  if(!base){ if(typeof showToast==='function') showToast('Não foi possível montar a proposta.','warning'); return; }
+  const texto = (typeof negComAssinatura==='function') ? negComAssinatura(base) : base;
+  const labels = { avista:'à vista (PIX)', boleto:'boleto parcelado', cartao:'cartão 12x' };
+
+  // TODO(gated): quando MP habilitado e opcao==='cartao', gerar link real de
+  // pagamento via api (dispatch em automacao.js como ação _mercadopago) + secret
+  // MP — hoje envia só a proposta-texto (paridade com o CRM).
+
+  const prev = texto.length > 400 ? texto.slice(0,400)+'\n…' : texto;
+  if(!confirm('CONFIRMAR envio da proposta ('+(labels[opcao]||opcao)+') via WhatsApp (Z-API):\n\nPara: '+tel+'\n\nMensagem:\n"""\n'+prev+'\n"""\n\nSerá enviada IMEDIATAMENTE pelo número COBRASQ. Continuar?')) return;
+  if(typeof _aavEnviarWhats !== 'function'){ if(typeof showToast==='function') showToast('Envio Z-API indisponível nesta build.','danger'); return; }
+  const r = await _aavEnviarWhats(tel, texto);
+  if(r && r.ok){
+    if(typeof showToast==='function') showToast('Proposta de pagamento enviada via WhatsApp.','success');
+    if(typeof _negRegistrarHistorico==='function') _negRegistrarHistorico(dev, '💳 Proposta de pagamento enviada ('+(labels[opcao]||opcao)+'): '+base.slice(0,100));
+    if(typeof _negPersistMeta==='function') _negPersistMeta(devId, { aguardando_resposta:true });
+  } else {
+    if(r && r.code === 'numero_sem_whatsapp'){
+      if(typeof showToast==='function') showToast('Número sem WhatsApp ativo (tentamos com e sem o 9).','warning');
+      if(typeof telMarcarInvalido==='function' && confirm('O número '+tel+' não tem WhatsApp ativo.\n\nMarcar este telefone como inválido e abrir a busca de novo número?')){
+        await telMarcarInvalido(devId, 'Número sem WhatsApp ativo (envio da proposta falhou).', true);
+      }
+    } else {
+      if(typeof showToast==='function') showToast('Falha ao enviar: '+((r&&r.error)||'erro desconhecido'),'danger');
+    }
   }
 }
 
@@ -31339,10 +31559,37 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
         <button class="btn btn-ghost btn-sm" style="margin-top:10px;color:var(--text-3);" onclick="carregarRegraDefault()">Carregar modelo padrão</button>
       </div>
 
+      <!-- ── Mercado Pago (Onda C) — gateway de cartão ──────────────────────
+           Persiste em localStorage (crm_mp_config), independente do "Salvar
+           todas". Aqui o card só habilita a PROPOSTA-texto de cartão 12x na aba
+           Negociar. Link de pagamento real = TODO(gated): backend + secret MP. -->
+      <div class="int-card" id="pag-mp-card">
+        <div class="int-card-header">
+          <div class="int-card-logo" style="color:#009EE3;">${ico('card',20)||'💳'}</div>
+          <div>
+            <div class="int-card-name">Mercado Pago — Cartão</div>
+            <div class="int-card-sub">Habilita a proposta de cartão 12x na negociação • link de pagamento real em breve</div>
+          </div>
+          <div class="int-status" id="pag-mp-status">${pagLerConfigMP().ativo?'<span class="int-dot int-dot-ok"></span>Habilitado':'<span class="int-dot int-dot-idle"></span>Desabilitado'}</div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px;cursor:pointer;">
+          <input type="checkbox" id="pagMpAtivo" onchange="pagSalvarConfigMP()"> Habilitar Mercado Pago (gateway de cartão)
+        </label>
+        <div class="frow">
+          <div class="fg"><label>Public Key</label><input type="text" id="pagMpPublicKey" placeholder="APP_USR-..." onblur="pagSalvarConfigMP()"/></div>
+          <div class="fg"><label>Taxa do cartão (%)</label><input type="text" id="pagMpTaxa" placeholder="Ex: 4.99" onblur="pagSalvarConfigMP()"/></div>
+        </div>
+        <div style="margin-top:8px;padding:10px 12px;background:var(--surface2);border-radius:var(--radius-sm);font-size:11.5px;color:var(--text-2);line-height:1.6;">
+          Enquanto habilitado, o card <b>Cartão 12x</b> na aba <b>Negociar</b> monta a proposta com os valores do cartão e envia via WhatsApp. A geração de <b>link de pagamento real</b> (cobrança no Mercado Pago) exige backend e ficará disponível numa próxima entrega.
+        </div>
+      </div>
+
       <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
         <button class="btn btn-primary" onclick="salvarIntegracoes()">Salvar todas as integrações</button>
       </div>
       <div id="cfg-int-msg" style="margin-top:8px;font-size:12px;text-align:right;"></div>`;
+    // Onda C: hidrata os campos do MP a partir do localStorage após montar o HTML.
+    try{ if(typeof pagRenderConfigMP === 'function') pagRenderConfigMP(); }catch(_){}
   }
   else if(section==='notificacoes'){
     const n = DB.config.notif||{};
