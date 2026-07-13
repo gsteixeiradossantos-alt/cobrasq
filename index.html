@@ -30091,18 +30091,13 @@ function renderCfgSection(section){
       </div>`;
   }
   else if(section==='usuarios'){
-    const users = DB.config.usuarios||[];
-    el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:18px;">Usuários do sistema</h3>
-      ${users.length ? `<div class="tbl-wrap" style="margin-bottom:18px;"><table class="tbl"><thead><tr><th>Nome</th><th>E-mail</th><th>Perfil</th><th></th></tr></thead><tbody>
-        ${users.map((u,i)=>`<tr><td><strong>${u.nome}</strong></td><td style="font-size:12px;color:var(--text-3)">${u.email}</td><td><span class="badge b-blue">${u.perfil||'Usuário'}</span></td><td><button class="btn btn-danger btn-xs" onclick="delUsuario(${i})">Remover</button></td></tr>`).join('')}
-      </tbody></table></div>` : '<div style="color:var(--text-3);font-size:13px;margin-bottom:14px;">Nenhum usuário adicional.</div>'}
-      <div style="background:var(--surface2);border-radius:var(--r-sm);padding:14px;">
-        <div style="font-size:11px;font-weight:700;color:var(--text-3);text-transform:uppercase;margin-bottom:10px;">Novo usuário</div>
-        <div class="frow"><div class="fg"><label>Nome</label><input type="text" id="cfg-user-nome"/></div><div class="fg"><label>E-mail</label><input type="email" id="cfg-user-email"/></div></div>
-        <div class="frow"><div class="fg"><label>Senha</label><input type="text" id="cfg-user-senha"/></div><div class="fg"><label>Perfil</label><select id="cfg-user-perfil"><option>Usuário</option><option>Administrador</option></select></div></div>
-        <button class="btn btn-primary" onclick="criarUsuario()">Criar usuário</button>
-        <div id="cfg-user-msg" style="margin-top:8px;font-size:12px;"></div>
-      </div>`;
+    // Onda 3 #12 — gestão de usuários NATIVA sobre app_users (fonte da verdade; o CRM lê a
+    // view profiles automaticamente). Substitui o legado DB.config.usuarios (blob morto,
+    // não logava). Listar + criar (via Edge Function criar-usuario). Async fill.
+    el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:6px;">Usuários do sistema</h3>
+      <div style="font-size:12.5px;color:var(--text-2);margin-bottom:16px;">Equipe com acesso ao sistema (login). O CRM enxerga os mesmos usuários automaticamente.</div>
+      <div id="cfg-usuarios-host"><div style="color:var(--text-3);font-size:13px;">Carregando usuários…</div></div>`;
+    renderCfgUsuariosApp();
   }
   else if(section==='categorias'){
     el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:18px;">Categorias de lançamentos</h3>
@@ -30531,6 +30526,67 @@ function addColaborador(){ showToast('Esta área é legado. Use Configurações 
 function delColaborador(){ showToast('Esta área é legado. Use Configurações → Usuários para gerenciar acessos.','warning'); }
 async function criarUsuario(){ const nome=(document.getElementById('cfg-user-nome')?.value||'').trim(); const email=(document.getElementById('cfg-user-email')?.value||'').trim(); const senha=(document.getElementById('cfg-user-senha')?.value||'').trim(); const perfil=document.getElementById('cfg-user-perfil')?.value; const msg=document.getElementById('cfg-user-msg'); if(!nome||!email||!senha){if(msg){msg.style.color='var(--danger)';msg.textContent='Preencha todos os campos.';}return;} if(!DB.config.usuarios)DB.config.usuarios=[]; const senhaHash=await hashSenha(senha); DB.config.usuarios.push({nome,email,senha:senhaHash,perfil}); save(); if(msg){msg.style.color='var(--success)';msg.textContent='Usuário criado!';} setTimeout(()=>renderCfgSection('usuarios'),1500); }
 function delUsuario(i){ DB.config.usuarios.splice(i,1); save(); renderCfgSection('usuarios'); }
+
+// Onda 3 #12 — lista/cria usuários reais em app_users (fonte da verdade). Criar passa pela
+// Edge Function criar-usuario (auth + app_users + profiles, gated a proprietário no servidor).
+// Role-change e desativar ficam DEFERIDOS (operações mais sensíveis; entram depois com guardas).
+const _PAPEL_LABEL = { proprietario:'Administrador', colaborador:'Colaborador', cedente:'Cedente', devedor:'Devedor' };
+async function renderCfgUsuariosApp(){
+  const host=document.getElementById('cfg-usuarios-host'); if(!host) return;
+  const isOwner = (currentUser?.papel==='proprietario') || (currentUser?.tipo==='gestor');
+  let rows=[];
+  try{
+    const sb=getSupabase();
+    if(!sb){ host.innerHTML=`<div style="color:var(--text-3);font-size:13px;">Supabase indisponível.</div>`; return; }
+    const r=await sb.from('app_users').select('id,nome,email,papel,ativo,cargo').order('nome');
+    if(r.error) throw r.error;
+    rows=r.data||[];
+  }catch(e){ host.innerHTML=`<div style="color:var(--danger);font-size:13px;">Não foi possível carregar usuários: ${escHtml(e.message||String(e))}</div>`; return; }
+  const staff=rows.filter(u=>['proprietario','colaborador'].includes(u.papel));
+  const linha=u=>{
+    const meu = currentUser?.supaId===u.id || currentUser?.email===u.email;
+    const badge = u.papel==='proprietario' ? '<span class="badge b-gold">Administrador</span>' : '<span class="badge b-blue">Colaborador</span>';
+    const st = u.ativo===false ? '<span style="font-size:11px;color:var(--danger);">inativo</span>' : '<span style="font-size:11px;color:var(--success);">ativo</span>';
+    return `<tr><td><strong>${escHtml(u.nome||'—')}</strong>${meu?' <span style="font-size:10.5px;color:var(--text-3);">(você)</span>':''}</td><td style="font-size:12px;color:var(--text-3);">${escHtml(u.email||'—')}</td><td>${badge}</td><td>${st}</td></tr>`;
+  };
+  const tabela = staff.length
+    ? `<div class="tbl-wrap" style="margin-bottom:18px;"><table class="tbl"><thead><tr><th>Nome</th><th>E-mail</th><th>Papel</th><th>Status</th></tr></thead><tbody>${staff.map(linha).join('')}</tbody></table></div>`
+    : `<div style="color:var(--text-3);font-size:13px;margin-bottom:14px;">Nenhum usuário da equipe.</div>`;
+  const form = isOwner ? `
+    <div style="background:var(--surface2);border-radius:var(--r-sm);padding:14px;">
+      <div style="font-size:11px;font-weight:700;color:var(--text-3);text-transform:uppercase;margin-bottom:10px;">Novo usuário</div>
+      <div class="frow"><div class="fg"><label>Nome</label><input type="text" id="cfg-au-nome"/></div><div class="fg"><label>E-mail</label><input type="email" id="cfg-au-email"/></div></div>
+      <div class="frow"><div class="fg"><label>Senha provisória</label><input type="text" id="cfg-au-senha" placeholder="mín. 6 caracteres"/></div><div class="fg"><label>Papel</label><select id="cfg-au-papel"><option value="colaborador">Colaborador</option><option value="proprietario">Administrador</option></select></div></div>
+      <button class="btn btn-primary" id="cfg-au-btn" onclick="criarUsuarioApp()">Criar usuário</button>
+      <div id="cfg-au-msg" style="margin-top:8px;font-size:12px;"></div>
+      <div style="margin-top:10px;font-size:11px;color:var(--text-3);">Alterar papel e desativar usuários entram numa próxima etapa (com trava de "último admin"). Por ora, use o CRM se precisar disso.</div>
+    </div>` : `<div style="font-size:12px;color:var(--text-3);">Só o administrador cria usuários.</div>`;
+  host.innerHTML = tabela + form;
+}
+async function criarUsuarioApp(){
+  const nome=(document.getElementById('cfg-au-nome')?.value||'').trim();
+  const email=(document.getElementById('cfg-au-email')?.value||'').trim();
+  const senha=(document.getElementById('cfg-au-senha')?.value||'').trim();
+  const papel=document.getElementById('cfg-au-papel')?.value||'colaborador';
+  const msg=document.getElementById('cfg-au-msg'); const btn=document.getElementById('cfg-au-btn');
+  const err=t=>{ if(msg){ msg.style.color='var(--danger)'; msg.textContent=t; } };
+  if(!nome||!email||!senha){ return err('Preencha nome, e-mail e senha.'); }
+  if(senha.length<6){ return err('A senha precisa ter ao menos 6 caracteres.'); }
+  const role = papel==='proprietario' ? 'admin' : 'operador'; // vocabulário da Edge Function
+  if(btn){ btn.disabled=true; btn.style.opacity='.6'; }
+  if(msg){ msg.style.color='var(--text-3)'; msg.textContent='Criando usuário…'; }
+  try{
+    const sb=getSupabase();
+    const { data, error } = await sb.functions.invoke('criar-usuario', { body:{ nome, email, password:senha, role } });
+    if(error) throw error;
+    if(data && data.error) throw new Error(data.error);
+    if(msg){ msg.style.color='var(--success)'; msg.textContent='Usuário criado ✅'; }
+    setTimeout(()=>renderCfgUsuariosApp(), 1200);
+  }catch(e){
+    if(btn){ btn.disabled=false; btn.style.opacity=''; }
+    err('Erro ao criar: '+(e.message||e));
+  }
+}
 function addCategoria(tipo){ const id=tipo==='receita'?'nova-cat-rec':'nova-cat-des'; const v=(document.getElementById(id)?.value||'').trim(); if(!v)return; if(!DB.config.categorias)DB.config.categorias={receita:[],despesa:[]}; DB.config.categorias[tipo].push(v); save(); renderCfgSection('categorias'); }
 function delCategoria(tipo,i){ DB.config.categorias[tipo].splice(i,1); save(); renderCfgSection('categorias'); }
 function salvarIntegracoes(){
