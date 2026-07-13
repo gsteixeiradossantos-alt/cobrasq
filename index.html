@@ -10902,6 +10902,7 @@ function renderDrawerBody(devId){
   const ctx = _drawerCtx(dev);
   const tabsData = [
     {id:'resumo',    label:'Resumo'},
+    {id:'negociar',  label:'Negociar'},
     {id:'hist',      label:'Histórico',  count:ctx.hist.length||0},
     {id:'acordos',   label:'Acordos',    count:ctx.acordos.length||0},
     {id:'docs',      label:'Documentos'},
@@ -10934,6 +10935,7 @@ function setDrawerTab(tab, devId, btnEl){
   if(!body) return;
   body.innerHTML = _drawerTabHtml(tab, dev, _drawerCtx(dev));
   if(tab==='resumo') renderDrawerComunicacao(devId);
+  if(tab==='negociar') negRenderPainel(devId);
   if(tab==='acordos') renderDrawerAcordosStatus(devId);
   if(tab==='cobrancas') renderDrawerAsaas(devId);
   if(tab==='docs') renderDrawerDocumentos(devId);
@@ -10987,8 +10989,735 @@ function _drawerAbrirConversa(tel){
   }, 250);
 }
 
+// ============================================================
+// ONDA A — COCKPIT DE NEGOCIAÇÃO NO CASO
+// Motor de scripts portado VERBATIM do crm.html (PASSOS, obterOpcoesPasso,
+// SCRIPTS/obterMensagens, assinatura). Roda DENTRO do drawer do devedor no app.
+// Estado do passo vive em cobrancas.metadata.passo_negociacao (sem migração).
+// Envio reusa a edge `enviar-whatsapp` (via _aavEnviarWhats — mesma do CRM).
+// Nomes prefixados `neg`/`_neg` para não colidir com o app.
+// ============================================================
+
+// PASSOS — verbatim de crm.html L6075
+const negPASSOS = {
+  AGUARDANDO_1: 'Aguardando 1ª abordagem',
+  ENVIADA_1: '1ª mensagem enviada',
+  ENVIADA_2: '2ª mensagem enviada',
+  ENVIADA_3: '3ª mensagem (última) enviada',
+  EM_NEGOCIACAO: 'Em negociação',
+  AGUARDANDO_AUTORIZACAO: 'Aguardando autorização Dr. Gustavo',
+  AGUARDANDO_PROVA: 'Aguardando prova de pagamento',
+  AGUARDANDO_ANALISE_RECLAMACAO: 'Aguardando análise de reclamação',
+  AGUARDANDO_DEPT_JURIDICO: 'Encaminhado ao judicial',
+  SEM_CONTATO_TELEFONE: 'Sem contato — buscando novo telefone'
+};
+
+// obterOpcoesPasso — verbatim de crm.html L6088
+function negObterOpcoesPasso(caso) {
+  const passo = caso.passoAtual;
+  if (passo === negPASSOS.AGUARDANDO_1) return [{ id: 'enviar-1', label: 'Enviar 1ª mensagem (curiosidade)', tipo: 'success' }];
+  if (passo === negPASSOS.ENVIADA_1) return [
+    { id: 'devedor-respondeu', label: 'Devedor respondeu, vamos negociar', tipo: 'success' },
+    { id: 'explicar-contexto', label: 'Explicar o contexto', tipo: 'success' },
+    { id: 'tergiversou', label: 'Devedor pediu pra falar depois' },
+    { id: 'sem-resposta-1', label: 'Sem resposta há 1+ dia, enviar 2ª' },
+    { id: 'sem-dinheiro', label: 'Devedor disse que está sem dinheiro' },
+    { id: 'contesta', label: 'Devedor diz que já pagou ou contesta', tipo: 'escalation' },
+    { id: 'nao-pago-rebatida', label: 'Não paga juros/honorários — rebater (CDC/CC)', tipo: 'escalation' },
+    { id: 'nao-pago-escalar-gestor', label: 'Não paga adicionais — escalar pro gestor', tipo: 'escalation' },
+    { id: 'nao-pago-capital-direto', label: 'Fechar só com o capital (sem juros/multa)', tipo: 'escalation' },
+    { id: 'reclama-servico', label: 'Devedor reclama do serviço/produto', tipo: 'escalation' },
+    { id: 'ameaca', label: 'Devedor ameaçou', tipo: 'escalation' },
+    { id: 'recusa', label: 'Devedor recusou definitivamente', tipo: 'escalation' }
+  ];
+  if (passo === negPASSOS.ENVIADA_2) return [
+    { id: 'devedor-respondeu', label: 'Devedor respondeu, vamos negociar', tipo: 'success' },
+    { id: 'explicar-contexto', label: 'Explicar o contexto', tipo: 'success' },
+    { id: 'tergiversou', label: 'Devedor pediu pra falar depois' },
+    { id: 'sem-resposta-2', label: 'Sem resposta há 1+ dia, enviar 3ª (última)' },
+    { id: 'sem-dinheiro', label: 'Devedor disse que está sem dinheiro' },
+    { id: 'contesta', label: 'Devedor diz que já pagou ou contesta', tipo: 'escalation' },
+    { id: 'nao-pago-rebatida', label: 'Não paga juros/honorários — rebater (CDC/CC)', tipo: 'escalation' },
+    { id: 'nao-pago-escalar-gestor', label: 'Não paga adicionais — escalar pro gestor', tipo: 'escalation' },
+    { id: 'nao-pago-capital-direto', label: 'Fechar só com o capital (sem juros/multa)', tipo: 'escalation' },
+    { id: 'reclama-servico', label: 'Devedor reclama do serviço/produto', tipo: 'escalation' },
+    { id: 'ameaca', label: 'Devedor ameaçou', tipo: 'escalation' },
+    { id: 'recusa', label: 'Devedor recusou definitivamente', tipo: 'escalation' }
+  ];
+  if (passo === negPASSOS.ENVIADA_3) return [
+    { id: 'devedor-respondeu', label: 'Devedor respondeu agora', tipo: 'success' },
+    { id: 'sem-retorno-final', label: 'Não respondeu, encerrar e escalar', tipo: 'escalation' },
+    { id: 'recusa', label: 'Devedor recusou definitivamente', tipo: 'escalation' }
+  ];
+  if (passo === negPASSOS.EM_NEGOCIACAO) return [
+    { id: 'aceitou-avista', label: 'Devedor aceitou à vista (PIX)', tipo: 'success' },
+    { id: 'aceitou-boleto', label: 'Devedor aceitou parcelamento boleto', tipo: 'success' },
+    { id: 'aceitou-cartao', label: 'Devedor aceitou cartão 12x', tipo: 'success' },
+    { id: 'sem-dinheiro', label: 'Devedor disse que está sem dinheiro' },
+    { id: 'pediu-fora-padrao', label: 'Devedor pediu condição fora do padrão', tipo: 'escalation' },
+    { id: 'nao-pago-rebatida', label: 'Não paga juros/honorários — rebater (CDC/CC)', tipo: 'escalation' },
+    { id: 'nao-pago-escalar-gestor', label: 'Não paga adicionais — escalar pro gestor', tipo: 'escalation' },
+    { id: 'nao-pago-capital-direto', label: 'Fechar só com o capital (sem juros/multa)', tipo: 'escalation' },
+    { id: 'reclama-juros-parc', label: 'Devedor reclama dos juros do parcelamento', tipo: 'escalation' },
+    { id: 'tergiversou', label: 'Devedor pediu pra falar depois' },
+    { id: 'recusa', label: 'Devedor recusou definitivamente', tipo: 'escalation' },
+    { id: 'contesta', label: 'Devedor agora contesta a dívida', tipo: 'escalation' },
+    { id: 'reclama-servico', label: 'Devedor reclama do serviço/produto', tipo: 'escalation' }
+  ];
+  if (passo === negPASSOS.SEM_CONTATO_TELEFONE) {
+    return []; // tela tratada separadamente (Onda B)
+  }
+  if (passo === negPASSOS.AGUARDANDO_AUTORIZACAO) return [
+    { id: 'autorizado', label: 'Dr. Gustavo autorizou a exceção', tipo: 'success' },
+    { id: 'negado', label: 'Dr. Gustavo NEGOU a exceção' }
+  ];
+  if (passo === negPASSOS.AGUARDANDO_PROVA) return [
+    { id: 'prova-procede', label: 'Prova procede, dívida cancelada', tipo: 'escalation' },
+    { id: 'prova-improcede', label: 'Prova não procede, voltar a negociar' },
+    { id: 'sem-resposta-prova', label: 'Devedor não enviou prova após 2 dias' }
+  ];
+  if (passo === negPASSOS.AGUARDANDO_ANALISE_RECLAMACAO) return [
+    { id: 'aceitou-avista', label: 'Devedor aceitou à vista (PIX) mesmo com reclamação', tipo: 'success' },
+    { id: 'aceitou-boleto', label: 'Devedor aceitou parcelamento boleto mesmo com reclamação', tipo: 'success' },
+    { id: 'aceitou-cartao', label: 'Devedor aceitou cartão 12x mesmo com reclamação', tipo: 'success' },
+    { id: 'reclamacao-procede', label: 'Devedor enviou prova, credor confirmou defeito', tipo: 'escalation' },
+    { id: 'reclamacao-improcede', label: 'Devedor enviou prova, credor diz que NÃO procede' },
+    { id: 'reclamacao-insiste-sem-prova', label: 'Devedor insiste verbalmente, mas não envia fotos/prova' },
+    { id: 'reclamacao-sem-resposta-1', label: 'Sem resposta há 1+ dia, enviar 2ª insistência' },
+    { id: 'reclamacao-sem-resposta-2', label: 'Sem resposta há 1+ dia após 2ª, enviar 3ª (última)' },
+    { id: 'reclamacao-sem-retorno-final', label: '3ª enviada, ignorou completamente, encerrar pro judicial', tipo: 'escalation' },
+    { id: 'recusa', label: 'Devedor recusou definitivamente', tipo: 'escalation' }
+  ];
+  if (passo === negPASSOS.AGUARDANDO_DEPT_JURIDICO) return [
+    { id: 'reabriu', label: 'Devedor reconsiderou e voltou', tipo: 'success' },
+    { id: 'finalizar-judicial', label: 'Prazo expirou, encerrar para judicial', tipo: 'escalation' }
+  ];
+  return [];
+}
+
+// obterMensagens/SCRIPTS — verbatim de crm.html L6171 (textos idênticos).
+// fmtBRL do CRM == fmtR do app (mesmo toLocaleString pt-BR/BRL); usamos fmtR.
+function negObterMensagens(opcaoId, caso) {
+  const fmtBRL = (typeof fmtR === 'function') ? fmtR : (v)=>('R$ '+(Number(v)||0).toFixed(2));
+  const d = caso.divida;
+  const nomeDevedor = caso.devedor.split(' ')[0];
+  const valorAvista = fmtBRL(d.totalAvista);
+  const boleto12 = d.boleto12 ? d.boleto12.n + 'x de ' + fmtBRL(d.boleto12.parcela) : 'parcelamento indisponível';
+  const cartao12 = d.cartao12Parcela != null ? '12x sem juros de ' + fmtBRL(d.cartao12Parcela) : 'parcelamento indisponível';
+
+  const SCRIPTS = {
+    'enviar-1': {
+      titulo: 'Script D — 1ª abordagem (curiosidade)',
+      blocos: [{ label: 'Mensagem única', texto: 'Boa tarde, ' + nomeDevedor + '! Tudo bem? Você teria um minutinho? Preciso falar contigo.' }],
+      proximoPasso: negPASSOS.ENVIADA_1, aguardando: true
+    },
+    'explicar-contexto': {
+      titulo: 'Script K — Explicar o contexto da dívida',
+      requerOperadora: true,
+      blocos: [
+        { label: 'Bloco 1 — Apresentação', texto: nomeDevedor + ', meu nome é [OPERADORA], falo da empresa COBRASQ.' },
+        { label: 'Bloco 2 — Apresentação da dívida', texto: 'Entro em contato para verificar contigo sobre uma pendência sua com a empresa ' + caso.credor + ', no valor atualizado de ' + valorAvista + '.' },
+        { label: 'Bloco 3 — Convite à negociação', texto: 'Gostaria de saber se você tem interesse em negociar essa pendência de forma amigável. Resolver direto comigo é a melhor opção, porque consigo te oferecer condições que não existem mais quando o caso passa para a fase judicial.' },
+        { label: 'Bloco 4 — Aviso e pergunta final', texto: 'Sinceramente, prefiro não seguir por esse caminho, mas se não chegarmos a um consenso, será nossa única alternativa. É mais trabalhoso para todo mundo e o valor sempre fica maior pra você. Posso te apresentar as opções de pagamento?' }
+      ],
+      proximoPasso: negPASSOS.EM_NEGOCIACAO, aguardando: true
+    },
+    'sem-resposta-1': {
+      titulo: 'Script E — 2ª tentativa',
+      blocos: [{ label: 'Mensagem única', texto: 'Oi ' + nomeDevedor + ', tudo bem? Aqui é da COBRASQ de novo. Vi que minha mensagem anterior passou despercebida.\n\nTenho um assunto importante pra resolver com você, e prefiro fazer isso direto, sem complicar. Me retorna quando puder, mesmo que seja só pra dizer que não tem como conversar agora.' }],
+      proximoPasso: negPASSOS.ENVIADA_2, aguardando: true
+    },
+    'sem-resposta-2': {
+      titulo: 'Script F — 3ª tentativa (última)',
+      blocos: [
+        { label: 'Bloco 1', texto: nomeDevedor + ', aqui é da COBRASQ. Esta é minha última tentativa de resolver de forma amigável a pendência em seu nome com ' + caso.credor + ', no valor atualizado de ' + valorAvista + '.' },
+        { label: 'Bloco 2', texto: 'Se não receber retorno em 2 dias úteis, o caso será encaminhado para a próxima fase, que envolve cobrança judicial. Isso significa custas, juros maiores e visita do oficial de justiça ao seu endereço, e o valor cobrado fica bem maior que o atual.\n\nAinda dá tempo de resolver direto comigo. À vista no PIX por ' + valorAvista + ', boleto em ' + boleto12 + ', ou cartão em ' + cartao12 + '. É só me responder.' }
+      ],
+      proximoPasso: negPASSOS.ENVIADA_3, aguardando: true
+    },
+    'devedor-respondeu': {
+      titulo: 'Script B — Apresentar as 3 formas de pagamento',
+      blocos: [{ label: 'Mensagem única', texto: 'Ótimo, ' + nomeDevedor + '. Posso te oferecer 3 formas:\n\n1) À vista no PIX, no valor de ' + valorAvista + '\n2) Boleto parcelado em ' + boleto12 + '\n3) Cartão de crédito em ' + cartao12 + '\n\nQuanto antes paga, menos paga no total. Qual das três faz mais sentido pra você hoje?' }],
+      proximoPasso: negPASSOS.EM_NEGOCIACAO, aguardando: true
+    },
+    'tergiversou': {
+      titulo: 'Script G — Tergiversação (reagendar)',
+      blocos: [{ label: 'Mensagem única', texto: 'Tranquilo, ' + nomeDevedor + '. Posso te retornar daqui a 2 horas?\n\nSe preferir, me diz qual horário fica melhor pra você, e me organizo pra falar nesse momento.' }],
+      proximoPasso: null, aguardando: true
+    },
+    'sem-dinheiro': {
+      titulo: 'Script A — Sem dinheiro (persuasão)',
+      blocos: [
+        { label: 'Bloco 1 — Acolhimento', texto: 'Entendo, ' + nomeDevedor + '. Sei que não é uma situação fácil, e justamente por isso estou aqui pra encontrar uma saída que caiba no seu momento.' },
+        { label: 'Bloco 2 — Convite ao diálogo', texto: 'A vantagem de resolver direto comigo é que você ainda tem flexibilidade. Posso parcelar de várias formas. Você consegue uma parcela mensal de mais ou menos quanto, dentro do seu orçamento atual?' },
+        { label: 'Bloco 3 — Proposta sob medida', texto: 'Me dá uma faixa que caiba, qualquer coisa entre R$ 250 e R$ 500 já abre opções. Aí eu monto a proposta na sua medida, no boleto ou no cartão de crédito em até 12 vezes sem juros.' },
+        { label: 'Bloco 4 — Aviso processual', texto: 'Se a gente deixar o caso seguir sem acordo, ele vai pra cobrança judicial, e aí entram custas, juros maiores, oficial de justiça indo até você, e o valor final fica bem maior do que o que conseguimos fechar agora. Por isso prefiro resolver com você.' }
+      ],
+      proximoPasso: negPASSOS.EM_NEGOCIACAO, aguardando: true
+    },
+    'pediu-fora-padrao': {
+      titulo: 'Script H — Bloco 1 (fora do padrão)',
+      blocos: [{ label: 'Mensagem única', texto: 'Entendi, ' + nomeDevedor + '. Essa condição específica eu preciso confirmar com a equipe. Já vou verificar e te retorno ainda hoje com a resposta.' }],
+      alertaInterno: 'AÇÃO NECESSÁRIA: avise o Dr. Gustavo no grupo do escritório com o pedido específico do devedor. Aguarde a decisão antes de prosseguir.',
+      proximoPasso: negPASSOS.AGUARDANDO_AUTORIZACAO, aguardando: false
+    },
+    'nao-pago-rebatida': {
+      titulo: 'Rebater "não pago juros/honorários" (CDC art. 52 / CC arts. 406-407)',
+      blocos: [
+        { label: 'Mensagem única — argumento legal', texto: 'Entendo, ' + nomeDevedor + '. Mas juros, multa contratual e honorários não são decisão nossa — estão previstos no contrato que você assinou e na lei (CDC art. 52 §1º e Código Civil arts. 406 e 407). Não dá pra simplesmente zerar.\n\nO que cabe negociação aqui é prazo, forma de pagamento e parcela. Se a gente não fecha agora, o caso vira ação judicial — aí entra ainda custas, honorários sucumbenciais (mais 10-20%), oficial de justiça. O valor sempre cresce. Posso fechar com você nas condições atuais?' }
+      ],
+      objecaoAdicionais: 'rebatida',
+      proximoPasso: negPASSOS.EM_NEGOCIACAO, aguardando: true
+    },
+    'nao-pago-escalar-gestor': {
+      titulo: 'Escalar pro gestor — autorização de desconto nos adicionais',
+      blocos: [
+        { label: 'Mensagem única', texto: nomeDevedor + ', vou levar pro gestor a possibilidade de um desconto nos adicionais (juros/multa). Te retorno hoje ainda com a posição.' }
+      ],
+      alertaInterno: 'AÇÃO: avise o Dr. Gustavo no grupo do escritório. Anote a proposta exata do devedor (quanto ele topa pagar e em quantas parcelas). Aguarde decisão antes de prosseguir.',
+      objecaoAdicionais: 'escalar-gestor',
+      proximoPasso: negPASSOS.AGUARDANDO_AUTORIZACAO, aguardando: false
+    },
+    'nao-pago-capital-direto': {
+      titulo: 'Fechar só com capital (sem juros/multa/honorários)',
+      blocos: [
+        { label: 'Mensagem única', texto: nomeDevedor + ', vou abrir uma exceção: fechamos hoje só com o valor de capital, sem juros/multa/honorários, e encerramos o caso. Pra isso, preciso fechar agora — me confirma se topa, e em quantas parcelas (à vista no PIX ou parcelado).' }
+      ],
+      alertaInterno: 'ATENÇÃO: concessão de capital direto reduz o valor cobrado em 30-50%. Confirme com Dr. Gustavo se for caso atípico ou de valor alto.',
+      objecaoAdicionais: 'capital-direto',
+      proximoPasso: negPASSOS.EM_NEGOCIACAO, aguardando: true
+    },
+    'autorizado': {
+      titulo: 'Script H — Bloco 2 (autorizado)',
+      blocos: [{ label: 'Mensagem única', texto: nomeDevedor + ', boa notícia. Consegui aprovação para a condição que conversamos. Esta é uma exceção que abrimos pro seu caso, então vale a pena fechar hoje. Confirma pra eu já preparar o acordo?' }],
+      alertaInterno: 'Lembrete: ajuste manualmente o valor/parcelas autorizado pelo Dr. Gustavo na mensagem antes de enviar.',
+      proximoPasso: negPASSOS.EM_NEGOCIACAO, aguardando: true
+    },
+    'negado': {
+      titulo: 'Script H — Bloco 2 alternativo (negado)',
+      blocos: [{ label: 'Mensagem única', texto: nomeDevedor + ', conversei com a equipe e infelizmente não consigo flexibilizar além do que é o padrão da casa. O que posso oferecer é ' + boleto12 + ' no boleto, ou ' + cartao12 + ' no cartão.\n\nSe conseguir adequar à sua realidade, fechamos hoje mesmo. Se realmente não couber, é melhor a gente saber agora do que travar.' }],
+      proximoPasso: negPASSOS.EM_NEGOCIACAO, aguardando: true
+    },
+    'contesta': {
+      titulo: 'Script C — Devedor contesta a dívida',
+      blocos: [
+        { label: 'Bloco 1', texto: 'Entendi, ' + nomeDevedor + '. Vou checar isso com a equipe pra não te cobrar algo indevido.\n\nPra eu agilizar a verificação, você consegue me enviar o comprovante de pagamento, ou qualquer documento que mostre que essa dívida não procede? Pode ser foto, PDF, print do extrato, o que tiver à mão.' },
+        { label: 'Bloco 2 (após receber prova ou após o prazo)', texto: 'Assim que receber, encaminho pra análise e te retorno em até 2 dias úteis com a posição. Se realmente houver algo errado, ajustamos imediatamente. Se a cobrança proceder, voltamos a conversar sobre as formas de regularização.' }
+      ],
+      alertaInterno: 'AÇÃO NECESSÁRIA: registre no Astrea como "Devedor contesta - aguardando prova". Avise Dr. Gustavo se for caso complexo.',
+      proximoPasso: negPASSOS.AGUARDANDO_PROVA, aguardando: false
+    },
+    'ameaca': {
+      titulo: 'Script I — Devedor ameaça',
+      blocos: [{ label: 'Mensagem única', texto: 'Entendi, ' + nomeDevedor + '. Caso prefira que seu advogado entre em contato conosco, fico à disposição pelo número da COBRASQ. Aguardo o retorno dele.' }],
+      alertaInterno: 'AÇÃO IMEDIATA: dê print da conversa AGORA. Avise Dr. Gustavo no grupo do escritório imediatamente. Não envie mais nenhuma mensagem nesta conversa até receber orientação.',
+      proximoPasso: null, aguardando: false,
+      encerrar: { tipo: 'escalado', motivo: 'Devedor ameaçou - escalado para Dr. Gustavo' }
+    },
+    'recusa': {
+      titulo: 'Script J — Recusa definitiva (encaminhamento ao judicial)',
+      blocos: [
+        { label: 'Bloco 1', texto: nomeDevedor + ', agradeço a sua atenção.' },
+        { label: 'Bloco 2', texto: 'Como não foi possível chegarmos a um acordo amigável, o caso será encaminhado para a fase judicial. A partir desse momento, a cobrança deixa de seguir as condições que conversamos aqui e passa a observar os encargos previstos em lei e em contrato.' },
+        { label: 'Bloco 3', texto: 'Na prática, ao valor atual serão somados juros legais de mora, correção monetária pelos índices oficiais, multas, custas processuais, honorários e afins, podendo haver bloqueio de conta bancária, veículo, imóveis, percentual de salário, etc.' },
+        { label: 'Bloco 4', texto: 'Caso decida reconsiderar antes do protocolo da ação, ainda dá tempo de fechar nas condições atuais. É só me responder em 24 horas. Após isso, a próxima conversa será com o nosso departamento jurídico, já em sede processual.' }
+      ],
+      proximoPasso: negPASSOS.AGUARDANDO_DEPT_JURIDICO, aguardando: true
+    },
+    'reabriu': {
+      titulo: 'Devedor voltou após aviso de judicial',
+      blocos: [{ label: 'Mensagem única', texto: 'Que bom que voltou, ' + nomeDevedor + '. As condições continuam as mesmas: à vista no PIX por ' + valorAvista + ', boleto em ' + boleto12 + ', ou cartão em ' + cartao12 + '.\n\nQual delas funciona pra você?' }],
+      proximoPasso: negPASSOS.EM_NEGOCIACAO, aguardando: true
+    },
+    'finalizar-judicial': {
+      titulo: 'Encerramento — encaminhar ao judicial',
+      blocos: [],
+      alertaInterno: 'AÇÃO: registre no Astrea como "Encaminhado ao Departamento Jurídico". Comunique Dr. Gustavo. Caso será encerrado neste painel.',
+      proximoPasso: null, aguardando: false,
+      encerrar: { tipo: 'judicial', motivo: 'Encaminhado ao departamento jurídico após recusa e prazo expirado' }
+    },
+    'sem-retorno-final': {
+      titulo: 'Encerramento — sem retorno após 3 tentativas',
+      blocos: [],
+      alertaInterno: 'AÇÃO: registre no Astrea como "Sem retorno após 3 tentativas". Comunique Dr. Gustavo para definir próximo passo.',
+      proximoPasso: null, aguardando: false,
+      encerrar: { tipo: 'sem-retorno', motivo: 'Sem retorno após 3 tentativas amigáveis' }
+    },
+    'prova-procede': {
+      titulo: 'Encerramento — prova procede',
+      blocos: [],
+      alertaInterno: 'AÇÃO: registre no Astrea que a dívida foi cancelada. Comunique o credor por meio do Dr. Gustavo. Caso encerrado.',
+      proximoPasso: null, aguardando: false,
+      encerrar: { tipo: 'escalado', motivo: 'Prova de pagamento procede - dívida cancelada' }
+    },
+    'prova-improcede': {
+      titulo: 'Prova não procede — retomar negociação',
+      blocos: [{ label: 'Mensagem única', texto: nomeDevedor + ', verificamos os documentos enviados e a cobrança permanece em aberto. Volto a propor as três formas de pagamento:\n\n1) À vista no PIX: ' + valorAvista + '\n2) Boleto em ' + boleto12 + '\n3) Cartão em ' + cartao12 + '\n\nQual delas funciona pra você?' }],
+      proximoPasso: negPASSOS.EM_NEGOCIACAO, aguardando: true
+    },
+    'sem-resposta-prova': {
+      titulo: 'Devedor sumiu após pedir prova',
+      blocos: [{ label: 'Mensagem única', texto: nomeDevedor + ', não recebi os documentos sobre a contestação que você fez. Sem essa documentação, a cobrança permanece como está. Posso retomar as opções de pagamento ou prefere me enviar a prova ainda hoje?' }],
+      proximoPasso: null, aguardando: true
+    },
+    'reclama-juros-parc': {
+      titulo: 'Reclama dos juros do parcelamento',
+      blocos: [
+        { label: 'Mensagem única', texto: 'Entendi, ' + nomeDevedor + '. Os juros do parcelamento são a remuneração do prazo concedido — quanto mais tempo, mais peso. Mas dá pra reduzir, sim. Posso te oferecer (a) à vista no PIX por ' + valorAvista + ' (zero juros), ou (b) menos parcelas — me diz o valor que você consegue por mês e eu calculo quantas vezes.' }
+      ],
+      proximoPasso: negPASSOS.EM_NEGOCIACAO, aguardando: true
+    },
+    'reclama-servico': {
+      titulo: 'Script L — Reclamação de serviço (pedido amigável de evidências)',
+      blocos: [{ label: 'Mensagem única — pedido amigável', texto: 'Entendi, ' + nomeDevedor + '. Posso te garantir que vamos verificar a sua reclamação com o credor com toda atenção. Você consegue me explicar com mais detalhes o que aconteceu? Se tiver foto, vídeo, print do seu contato com ' + caso.credor + ' ou qualquer comprovação, me envia também — assim agilizo a análise.' }],
+      alertaInterno: 'AÇÃO NECESSÁRIA: registre no Astrea como "Reclamação de serviço – aguardando evidências do devedor". Avise Dr. Gustavo no grupo do escritório com os detalhes da reclamação reportada.',
+      proximoPasso: negPASSOS.AGUARDANDO_ANALISE_RECLAMACAO, aguardando: true
+    },
+    'reclamacao-procede': {
+      titulo: 'Script L2 — Credor confirmou defeito (postura paralela + ressarcimento pós-pagamento)',
+      blocos: [
+        { label: 'Bloco 1 — Postura: paralelismo', texto: nomeDevedor + ', conversei com ' + caso.credor + '. Confirmaram que vão analisar com atenção sua reclamação. Antes de seguir, é importante deixar claro: a análise da reclamação corre em paralelo, NÃO suspende a cobrança da dívida. Pagamento do serviço prestado e eventual defeito do produto são obrigações independentes pelo contrato.' },
+        { label: 'Bloco 2 — Ressarcimento pós-pagamento', texto: 'Se a ' + caso.credor + ' confirmar oficialmente que o defeito é de fábrica e que procede, aí sim — DEPOIS da regularização do pagamento — eles avaliam ressarcimento, troca ou o que for cabível. É etapa pós-pagamento, não condição pra pagar.' },
+        { label: 'Bloco 3 — Aviso processual + retomada das 3 formas', texto: 'Sem o acordo sobre a dívida, o caminho é o ingresso da ação judicial, com encargos: custas, juros maiores, oficial de justiça, possível bloqueio de conta/bens. Continua valendo a pena fechar nas condições atuais. As 3 formas seguem: à vista no PIX por ' + valorAvista + ', boleto em ' + boleto12 + ', ou cartão em ' + cartao12 + '. Posso seguir com qual?' }
+      ],
+      alertaInterno: 'AÇÃO: registre no Astrea que a reclamação procede mas o pagamento segue. Após pagamento, abrir tratativa de ressarcimento/troca com o credor.',
+      proximoPasso: negPASSOS.EM_NEGOCIACAO, aguardando: true
+    },
+    'reclamacao-improcede': {
+      titulo: 'Reclamação não procede — retomar negociação',
+      blocos: [{ label: 'Mensagem única', texto: nomeDevedor + ', verificamos a documentação que você enviou junto com ' + caso.credor + '. A análise apontou que a reclamação não procede pelo que foi apresentado. Sendo assim, voltamos pra negociação da dívida. As 3 formas de pagamento continuam: à vista no PIX por ' + valorAvista + ', boleto em ' + boleto12 + ', ou cartão em ' + cartao12 + '. Qual fechamos?' }],
+      proximoPasso: negPASSOS.EM_NEGOCIACAO, aguardando: true
+    },
+    'reclamacao-insiste-sem-prova': {
+      titulo: 'Devedor insiste sem mandar provas (cobrança firme das fotos)',
+      blocos: [{ label: 'Mensagem única — firme', texto: nomeDevedor + ', pra eu poder pedir uma análise da reclamação à ' + caso.credor + ', PRECISO das fotos/comprovações por escrito. Sem isso não há como avançar — eles não analisam relato verbal sem materialidade. Você consegue me enviar foto, vídeo ou print do contato anterior com a empresa? Enquanto isso, lembrando: a cobrança da dívida segue. Você prefere me mandar as fotos agora, ou seguimos pro fechamento das 3 formas de pagamento?' }],
+      proximoPasso: null, aguardando: true
+    },
+    'reclamacao-sem-resposta-1': {
+      titulo: 'Reclamação — 2ª insistência (sem evidências)',
+      blocos: [{ label: 'Mensagem única', texto: 'Oi ' + nomeDevedor + ', aqui é da COBRASQ de novo. Vi que ainda não recebi as fotos/comprovações da reclamação que você apresentou. Sem essa documentação, não consigo solicitar a análise pra ' + caso.credor + '. Pode me enviar?' }],
+      proximoPasso: null, aguardando: true
+    },
+    'reclamacao-sem-resposta-2': {
+      titulo: 'Reclamação — 3ª e última insistência (ultimato)',
+      blocos: [{ label: 'Mensagem única — ultimato', texto: nomeDevedor + ', esta é minha última tentativa de obter as comprovações da reclamação. Sem as fotos/prints em até 2 dias úteis, considerarei a reclamação sem materialidade e a cobrança seguirá normalmente. Após esse prazo, o caso vai pro departamento jurídico. Ainda dá tempo de me mandar as fotos ou fechar nas 3 formas de pagamento.' }],
+      proximoPasso: null, aguardando: true
+    },
+    'reclamacao-sem-retorno-final': {
+      titulo: 'Encerramento — reclamação sem comprovação após 3 tentativas',
+      blocos: [],
+      alertaInterno: 'AÇÃO: registre no Astrea como "Reclamação sem comprovação após 3 tentativas — encaminhado ao Departamento Jurídico". Comunique Dr. Gustavo. Caso será encerrado neste painel.',
+      proximoPasso: null, aguardando: false,
+      encerrar: { tipo: 'judicial', motivo: 'Reclamação sem comprovação após 3 tentativas — encaminhado ao judicial' }
+    },
+    'aceitou-avista': {
+      titulo: 'Devedor aceitou à vista (PIX)',
+      blocos: [{ label: 'Mensagem única', texto: 'Perfeito, ' + nomeDevedor + '. Vou te enviar agora o termo de acordo para assinatura digital. Após a assinatura, você recebe a chave PIX automaticamente. Tudo bem?' }],
+      proximoPasso: null, aguardando: false,
+      irParaFechamento: { forma: 'avista', valor: d.totalAvista }
+    },
+    'aceitou-boleto': {
+      titulo: 'Devedor aceitou parcelamento boleto',
+      blocos: [{ label: 'Mensagem única', texto: 'Perfeito, ' + nomeDevedor + '. Vou te enviar agora o termo de acordo para assinatura digital. Após a assinatura, os boletos são emitidos automaticamente. Tudo bem?' }],
+      proximoPasso: null, aguardando: false,
+      irParaFechamento: { forma: 'boleto', parcelas: d.boleto12 ? d.boleto12.n : 12, valor: d.boleto12 ? d.boleto12.parcela : 0, total: d.boleto12 ? d.boleto12.total : 0 }
+    },
+    'aceitou-cartao': {
+      titulo: 'Devedor aceitou cartão 12x',
+      blocos: [{ label: 'Mensagem única', texto: 'Perfeito, ' + nomeDevedor + '. Vou te enviar agora o termo de acordo para assinatura digital. Após a assinatura, você recebe o link do cartão. Tudo bem?' }],
+      proximoPasso: null, aguardando: false,
+      irParaFechamento: { forma: 'cartao', parcelas: 12, valor: d.cartao12Parcela, total: d.cartao12Total }
+    }
+  };
+  return SCRIPTS[opcaoId];
+}
+
+// ── Assinatura — verbatim de crm.html L3247-3285 (adaptado p/ o app) ──
+function negPrimeiroNome(nomeCompleto) {
+  if (!nomeCompleto) return '';
+  const partes = String(nomeCompleto).trim().split(/\s+/);
+  return partes[0] || '';
+}
+// [OPERADORA] → primeiro nome do operador logado (no CRM vinha de perfilAtual.nome).
+function negAplicarOperadora(texto) {
+  const nome = negNomeOperador();
+  const nomeNaMensagem = negPrimeiroNome(nome);
+  return texto.replace(/\[OPERADORA\]/g, nomeNaMensagem || '[seu nome]');
+}
+// Nome do operador: usuário logado do app (currentUser) com fallback pra DB.config.nome.
+function negNomeOperador() {
+  return (typeof currentUser !== 'undefined' && currentUser && currentUser.nome)
+      || (DB && DB.config && DB.config.nome) || '';
+}
+// Prepend `*Nome:*\n\n` na mensagem antes de enviar. Não duplica se já houver.
+function negComAssinatura(texto) {
+  if (!texto) return texto;
+  const nome = negPrimeiroNome(negNomeOperador());
+  if (!nome) return texto;
+  if (/^\*[^*\n]+:\*\s*\n/.test(texto)) return texto;
+  return '*' + nome + ':*\n\n' + texto;
+}
+
+// ── Parcelamento (boleto/cartão) — constantes verbatim de crm.html L2781-2787 ──
+const NEG_PARCELA_BOLETO_JUROS_MENSAL = 0.0299;
+const NEG_PARCELA_BOLETO_FIXO = 6;
+const NEG_PARCELA_VALOR_MIN = 256;
+const NEG_PARCELA_MAX_QTD = 12;
+const NEG_CARTAO_MULTIPLICADOR = 1 + (0.0499 * 12) + 0.05;
+
+// Adaptador casos→devedor/cobrança. Monta o shape que os scripts do CRM esperam
+// (caso.devedor, caso.credor, caso.divida.{totalAvista,boleto12,cartao12Parcela,...},
+// caso.passoAtual) a partir do devedor do app. total à vista = dividaAtualHoje()
+// (compute-on-read do app); parcelamento = mesma régua do CRM (_calcCobrancaSimples).
+function _negCasoAdapter(dev){
+  const cob = (typeof DB_cobrancas !== 'undefined' && Array.isArray(DB_cobrancas))
+    ? DB_cobrancas.find(c=>c.id===dev.id) : null;
+  const credor = (typeof _cobrCredorNome === 'function' && cob) ? _cobrCredorNome(cob)
+    : (dev.clienteId ? (((DB.clientes||[]).find(c=>c.id===dev.clienteId)||{}).nome || 'o credor') : 'o credor');
+  // Valor atualizado HOJE (fonte única do app). Fallback pro valor gravado.
+  const total = (typeof dividaAtualHoje === 'function')
+    ? (dividaAtualHoje(dev) || parseValorBR(dev.valorAtual) || parseValorBR(dev.valorOrig) || 0)
+    : (parseValorBR(dev.valorAtual) || parseValorBR(dev.valorOrig) || 0);
+  // Parcelamento: boleto (Price 2,99% a.m. + R$6 fixo, mín. R$256) e cartão (×mult/12).
+  let boleto12 = null;
+  for (let n = 1; n <= NEG_PARCELA_MAX_QTD; n++) {
+    let valorParc;
+    if (n === 1) valorParc = total;
+    else {
+      const i = NEG_PARCELA_BOLETO_JUROS_MENSAL;
+      const fator = (i * Math.pow(1 + i, n)) / (Math.pow(1 + i, n) - 1);
+      valorParc = total * fator;
+    }
+    const arred = Math.ceil(valorParc + NEG_PARCELA_BOLETO_FIXO);
+    if (arred >= NEG_PARCELA_VALOR_MIN) { boleto12 = { n, parcela: arred, total: arred * n }; }
+  }
+  const cartaoTotal = Math.ceil(total * NEG_CARTAO_MULTIPLICADOR);
+  const cartao12Parcela = total > 0 ? Math.ceil(cartaoTotal / 12) : null;
+  return {
+    id: dev.id,
+    devedor: dev.nome || '',
+    telefone: dev.tel || '',
+    credor: credor || 'o credor',
+    passoAtual: _negPassoAtual(dev),
+    divida: {
+      totalAvista: total,
+      boleto12: boleto12,
+      cartao12Total: cartaoTotal,
+      cartao12Parcela: cartao12Parcela
+    }
+  };
+}
+
+// ── PASSO 4 — estado do passo (cobrancas.metadata.passo_negociacao) ──
+// Deriva um passo inicial conservador a partir do status público quando ausente.
+function _negMapStatusParaPasso(status){
+  const s = (status||'').toLowerCase();
+  if (/negocia/.test(s))                                  return negPASSOS.EM_NEGOCIACAO;
+  if (/contato|contatad|abordad|1ª|abordagem/.test(s))    return negPASSOS.ENVIADA_1;
+  if (/judicial/.test(s))                                 return negPASSOS.AGUARDANDO_DEPT_JURIDICO;
+  // status novo / 'Cobrar' / 'Fazer ação' / vazio → começa a abordagem.
+  return negPASSOS.AGUARDANDO_1;
+}
+function _negCobDe(dev){
+  return (typeof DB_cobrancas !== 'undefined' && Array.isArray(DB_cobrancas))
+    ? DB_cobrancas.find(c=>c.id===dev.id) : null;
+}
+function _negPassoAtual(dev){
+  const cob = _negCobDe(dev);
+  const meta = (cob && cob.metadata) || {};
+  if (meta.passo_negociacao) return meta.passo_negociacao;
+  // sem estado gravado: deriva do status público (mapa conservador).
+  return _negMapStatusParaPasso(dev.status || (cob && cob.status));
+}
+// Persiste passo_negociacao (+ aguardando_resposta / encerramento_negociacao) no
+// metadata da cobrança, fazendo MERGE com o metadata existente (não sobrescreve).
+// Mantém também o espelho em memória (cob.metadata) pra UI ler sem refetch.
+async function _negPersistMeta(devId, patch){
+  const supa = (typeof getSupabase === 'function') ? getSupabase() : null;
+  const cob = (typeof DB_cobrancas !== 'undefined' && Array.isArray(DB_cobrancas))
+    ? DB_cobrancas.find(c=>c.id===devId) : null;
+  const metaAtual = (cob && cob.metadata) || {};
+  const novoMeta = Object.assign({}, metaAtual, patch);
+  if (cob) cob.metadata = novoMeta; // espelho em memória
+  if (!supa) return { ok:false, error:'sem sessão' };
+  try{
+    // Lê o metadata do servidor antes de gravar pra não perder chaves de outra aba.
+    let base = novoMeta;
+    try{
+      const { data } = await supa.from('cobrancas').select('metadata').eq('id', devId).maybeSingle();
+      if (data && data.metadata && typeof data.metadata === 'object') base = Object.assign({}, data.metadata, patch);
+    }catch(_){}
+    const { error } = await supa.from('cobrancas').update({ metadata: base, updated_at:new Date().toISOString() }).eq('id', devId);
+    if (cob) cob.metadata = base;
+    if (error) return { ok:false, error:error.message };
+    return { ok:true };
+  }catch(e){ return { ok:false, error: e && e.message }; }
+}
+
+// Registra no HISTÓRICO do devedor (mesmo mecanismo do app: dev.historico + save()).
+function _negRegistrarHistorico(dev, acao){
+  if (!dev.historico) dev.historico = [];
+  const autor = negNomeOperador() || 'Sistema';
+  dev.historico.push({ id:(typeof uid==='function'?uid():String(Date.now())), tipo:'Negociação',
+    data:(typeof hoje==='function'?hoje():new Date().toISOString().slice(0,10)), desc:acao, autor });
+  dev.updatedAt = (typeof hoje==='function'?hoje():'');
+  try{ if (typeof save==='function') save(); }catch(_){}
+  try{ if (typeof logAtividade==='function') logAtividade('Negociação', acao, dev.id); }catch(_){}
+}
+
+// ── UI: painel "Negociar" no drawer ──
+function negRenderPainel(devId){
+  const box = document.getElementById('neg-panel-'+devId);
+  if(!box) return;
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  const caso = _negCasoAdapter(dev);
+  const passo = caso.passoAtual;
+  const cob = _negCobDe(dev);
+  const encerrada = cob && cob.metadata && cob.metadata.encerramento_negociacao;
+  const aguardando = cob && cob.metadata && cob.metadata.aguardando_resposta;
+
+  let html = '';
+  // Cabeçalho: passo atual
+  html += `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+    <div>
+      <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin-bottom:3px;">Passo atual</div>
+      <div style="font-size:14px;font-weight:600;color:var(--navy);">${escHtml(passo)}${aguardando?' <span style="font-size:10.5px;color:#9C7F40;font-weight:600;">· aguardando resposta</span>':''}</div>
+    </div>
+    <div style="text-align:right;">
+      <div style="font-size:10.5px;color:var(--text-3);">À vista</div>
+      <div style="font-family:var(--font-mono);font-size:13px;font-weight:600;color:var(--text);">${fmtR(caso.divida.totalAvista||0)}</div>
+    </div>
+  </div>`;
+
+  if(encerrada){
+    html += `<div style="background:#FCE4E4;border-left:4px solid #C0392B;padding:12px 14px;border-radius:6px;font-size:12.5px;color:#7A2E24;">
+      <strong>Negociação encerrada</strong><br>${escHtml(encerrada.motivo||'')}
+      <div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" onclick="negReabrir('${devId}')">Reabrir negociação</button></div>
+    </div>`;
+    box.innerHTML = html;
+    return;
+  }
+
+  if(passo === negPASSOS.SEM_CONTATO_TELEFONE){
+    html += `<div style="font-size:12.5px;color:var(--text-2);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:12px 14px;">
+      Sem contato — busca de novo telefone é tratada na página WhatsApp / Onda B.
+    </div>`;
+    box.innerHTML = html;
+    return;
+  }
+
+  const opcoes = negObterOpcoesPasso(caso);
+  const grupos = {
+    success:    { titulo:'✓ Caminho positivo',       cor:'var(--success,#2E7D5B)', opcoes:[] },
+    escalation: { titulo:'⚠ Conflito / objeção',      cor:'var(--danger,#C0392B)',  opcoes:[] },
+    neutra:     { titulo:'⏱ Sem retorno / aguardar',  cor:'var(--text-3)',          opcoes:[] }
+  };
+  opcoes.forEach(op=>{
+    const cat = op.tipo==='success' ? 'success' : (op.tipo==='escalation' ? 'escalation' : 'neutra');
+    grupos[cat].opcoes.push(op);
+  });
+  ['success','escalation','neutra'].forEach(k=>{
+    const g = grupos[k];
+    if(!g.opcoes.length) return;
+    html += `<div style="margin-bottom:14px;">
+      <div style="font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:${g.cor};margin-bottom:7px;">${g.titulo}</div>
+      <div style="display:flex;flex-direction:column;gap:6px;">`;
+    g.opcoes.forEach(op=>{
+      const bg = op.tipo==='success' ? '#EAF6EF' : (op.tipo==='escalation' ? '#FCECEA' : 'var(--surface-2)');
+      const bd = op.tipo==='success' ? '#B7E0CB' : (op.tipo==='escalation' ? '#F0C6BF' : 'var(--border)');
+      html += `<button onclick="negExecutarOpcao('${devId}','${op.id}')" style="text-align:left;padding:9px 12px;background:${bg};border:1px solid ${bd};border-radius:7px;font-size:12.5px;color:var(--text);font-weight:500;cursor:pointer;">${escHtml(op.label)}</button>`;
+    });
+    html += `</div></div>`;
+  });
+
+  // Sempre disponível: Formas de pagamento (Script B)
+  html += `<div style="border-top:1px dashed var(--border);margin-top:6px;padding-top:12px;">
+    <div style="font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--navy);margin-bottom:7px;">⚡ Sempre disponível</div>
+    <button onclick="negExecutarOpcao('${devId}','devedor-respondeu')" style="text-align:left;width:100%;padding:9px 12px;background:#EAF6EF;border:1px solid #B7E0CB;border-radius:7px;font-size:12.5px;color:var(--text);font-weight:500;cursor:pointer;">💳 Formas de pagamento</button>
+  </div>`;
+
+  // Área onde os blocos de mensagem são renderizados após escolher a opção
+  html += `<div id="neg-msgs-${devId}" style="margin-top:16px;"></div>`;
+
+  box.innerHTML = html;
+}
+
+// Clicou numa opção → renderiza os blocos de mensagem (com assinatura aplicada).
+function negExecutarOpcao(devId, opcaoId){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  const caso = _negCasoAdapter(dev);
+  const script = negObterMensagens(opcaoId, caso);
+  if(!script) return;
+  const area = document.getElementById('neg-msgs-'+devId);
+  if(!area) return;
+
+  // Encerramento sem mensagem (blocos vazios): registra e encerra.
+  if(!script.blocos || script.blocos.length === 0){
+    if(script.encerrar){ negEncerrar(devId, opcaoId, script); }
+    return;
+  }
+
+  window._negAberto = window._negAberto || {};
+  window._negAberto[devId] = { opcaoId, script };
+
+  let html = `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px;">`;
+  html += `<div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:10px;">${escHtml(script.titulo)}</div>`;
+  if(script.alertaInterno){
+    html += `<div style="background:#FCE4E4;border-left:4px solid #C0392B;padding:10px 12px;border-radius:6px;margin-bottom:12px;font-size:12px;color:#7A2E24;"><strong>⚠ Alerta interno:</strong> ${escHtml(script.alertaInterno)}</div>`;
+  }
+  if(script.requerOperadora){
+    const nomeOp = negNomeOperador() || '(sem nome)';
+    html += `<div style="background:#FBF6E6;border-left:4px solid #B8860B;padding:9px 12px;border-radius:6px;margin-bottom:12px;font-size:12px;color:#5C3A00;">✍ Mensagem assinada como <strong>${escHtml(nomeOp)}</strong> (edite seu nome no perfil).</div>`;
+  }
+  html += `<div style="font-size:11.5px;color:var(--text-3);margin-bottom:10px;">✏️ Você pode editar cada bloco antes de enviar/copiar. A assinatura é aplicada automaticamente no envio.</div>`;
+
+  script.blocos.forEach((b, idx)=>{
+    const textoFinal = script.requerOperadora ? negAplicarOperadora(b.texto) : b.texto;
+    const rows = Math.min(12, Math.max(3, textoFinal.split('\n').length + Math.ceil(textoFinal.length/60)));
+    html += `<div style="margin-bottom:12px;">
+      <div style="font-size:11px;font-weight:600;color:var(--text-2);margin-bottom:4px;">${escHtml(b.label)}</div>
+      <textarea id="neg-tx-${devId}-${idx}" rows="${rows}" style="width:100%;font-size:12.5px;line-height:1.5;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-family:inherit;resize:vertical;background:var(--surface-2);color:var(--text);">${escHtml(textoFinal)}</textarea>
+      <div style="display:flex;gap:6px;margin-top:6px;">
+        <button class="btn btn-primary btn-sm" onclick="negEnviarBloco('${devId}','${opcaoId}',${idx})">📱 Enviar via WhatsApp</button>
+        <button class="btn btn-ghost btn-sm" onclick="negCopiarBloco('${devId}',${idx},this)">Copiar</button>
+      </div>
+    </div>`;
+  });
+
+  html += `<div style="border-top:1px solid var(--border);margin-top:6px;padding-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+    <button class="btn btn-primary btn-sm" onclick="negConfirmarEnvio('${devId}','${opcaoId}')">✓ Marcar como enviado e avançar</button>
+    <button class="btn btn-ghost btn-sm" onclick="negCancelarMsgs('${devId}')">Cancelar</button>
+  </div>`;
+  html += `</div>`;
+  area.innerHTML = html;
+  area.scrollIntoView({ behavior:'smooth', block:'nearest' });
+}
+
+function negCancelarMsgs(devId){
+  const area = document.getElementById('neg-msgs-'+devId);
+  if(area) area.innerHTML = '';
+  if(window._negAberto) delete window._negAberto[devId];
+}
+
+function negCopiarBloco(devId, idx, btn){
+  const ta = document.getElementById('neg-tx-'+devId+'-'+idx);
+  if(!ta) return;
+  const texto = negComAssinatura(ta.value);
+  const done = ()=>{ if(btn){ const o=btn.textContent; btn.textContent='Copiado!'; setTimeout(()=>btn.textContent=o,1200); } };
+  try{ navigator.clipboard.writeText(texto).then(done, done); }catch(_){ done(); }
+}
+
+// Envia UM bloco via a edge enviar-whatsapp (reusa _aavEnviarWhats do app).
+async function negEnviarBloco(devId, opcaoId, idx){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  const tel = String(dev.tel||'').replace(/\D/g,'');
+  if(!tel){ showToast('Devedor sem telefone cadastrado.','warning'); return; }
+  const ta = document.getElementById('neg-tx-'+devId+'-'+idx);
+  if(!ta) return;
+  const texto = negComAssinatura(ta.value);
+  // Confirmação antes do envio imediato pelo número COBRASQ (paridade com o CRM).
+  const prev = texto.length > 400 ? texto.slice(0,400)+'\n…' : texto;
+  if(!confirm('CONFIRMAR envio via WhatsApp (Z-API):\n\nPara: '+tel+'\n\nMensagem:\n"""\n'+prev+'\n"""\n\nSerá enviada IMEDIATAMENTE pelo número COBRASQ. Continuar?')) return;
+  if(typeof _aavEnviarWhats !== 'function'){ showToast('Envio Z-API indisponível nesta build.','danger'); return; }
+  const r = await _aavEnviarWhats(tel, texto);
+  if(r && r.ok){
+    showToast('Mensagem enviada via WhatsApp.','success');
+    ta.setAttribute('data-neg-enviado','1');
+  } else {
+    // Onda B trata número inválido em profundidade; aqui só avisa + registra falha.
+    if(r && r.code === 'numero_sem_whatsapp'){
+      showToast('Número sem WhatsApp ativo (tentamos com e sem o 9). Revise o telefone — tratamento completo virá na Onda B.','warning');
+    } else {
+      showToast('Falha ao enviar: '+((r&&r.error)||'erro desconhecido'),'danger');
+    }
+  }
+}
+
+// "Marcar como enviado e avançar": registra histórico + aplica o próximo passo.
+async function negConfirmarEnvio(devId, opcaoId){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  const caso = _negCasoAdapter(dev);
+  const script = negObterMensagens(opcaoId, caso);
+  if(!script) return;
+
+  // Fechamento (aceitou avista/boleto/cartão): não inventa fluxo — registra e sugere
+  // usar o fluxo de acordo já existente no app. (irParaFechamento)
+  if(script.irParaFechamento){
+    const f = script.irParaFechamento;
+    _negRegistrarHistorico(dev, 'Devedor aceitou pagamento ('+(f.forma||'')+'). '+ (f.forma==='avista'? ('À vista '+fmtR(f.valor||0)) : ((f.parcelas||'')+'x de '+fmtR(f.valor||0))) + '. Seguir para fechamento do acordo.');
+    // TODO(Onda futura): abrir aqui o wizard de acordo do app (abrirAcordo) já
+    // pré-preenchido. Por ora deixamos o operador acionar o Acordo manualmente.
+    await _negPersistMeta(devId, { passo_negociacao: negPASSOS.EM_NEGOCIACAO, aguardando_resposta: false });
+    showToast('Registrado. Abra "Acordos" para formalizar o fechamento.','success');
+    negCancelarMsgs(devId);
+    negRenderPainel(devId);
+    if(typeof renderDrawerBody==='function' && currentDevId===devId) { /* mantém aba negociar */ }
+    return;
+  }
+
+  // Encerramento com mensagem enviada (ex.: recusa → aviso judicial não encerra;
+  // encerrar só quando script.encerrar existe — aqui blocos>0 e encerrar são raros).
+  if(script.encerrar){
+    await negEncerrar(devId, opcaoId, script);
+    return;
+  }
+
+  _negRegistrarHistorico(dev, 'Negociação — enviou "'+(script.titulo||opcaoId)+'".');
+
+  // Aplica próximo passo, se houver. aguardando marca aguardando_resposta.
+  const patch = {};
+  if(script.proximoPasso){ patch.passo_negociacao = script.proximoPasso; }
+  patch.aguardando_resposta = !!script.aguardando;
+  if(Object.keys(patch).length){ await _negPersistMeta(devId, patch); }
+
+  showToast('Caso atualizado.','success');
+  negCancelarMsgs(devId);
+  negRenderPainel(devId);
+}
+
+// Encerramento (ameaça, recusa+prazo, prova procede, judicial): registra histórico,
+// grava encerramento no metadata. NÃO altera a taxonomia de status público
+// automaticamente — quando fizer sentido óbvio (judicial), documenta e sugere.
+async function negEncerrar(devId, opcaoId, script){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  const enc = script.encerrar || { tipo:'encerrado', motivo:'Negociação encerrada' };
+  _negRegistrarHistorico(dev, 'Negociação ENCERRADA ('+(enc.tipo||'')+'): '+(enc.motivo||''));
+  if(script.alertaInterno){ _negRegistrarHistorico(dev, 'Alerta: '+script.alertaInterno); }
+  await _negPersistMeta(devId, {
+    encerramento_negociacao: { tipo: enc.tipo, motivo: enc.motivo, quando: new Date().toISOString() },
+    aguardando_resposta: false
+  });
+  // Caso "judicial": mudança de status público é óbvia — mas fazemos apenas em
+  // memória + histórico e avisamos o operador para confirmar no fluxo do app
+  // (evita reclassificar o caso sem intenção; o app tem regras próprias de fase).
+  if(enc.tipo === 'judicial'){
+    showToast('Negociação encerrada (judicial). Encaminhe ao Teixeira & Azzolin pelo fluxo do app.','info');
+  } else {
+    showToast('Negociação encerrada.','info');
+  }
+  negCancelarMsgs(devId);
+  negRenderPainel(devId);
+}
+
+async function negReabrir(devId){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  _negRegistrarHistorico(dev, 'Negociação reaberta pelo operador.');
+  await _negPersistMeta(devId, { encerramento_negociacao: null, aguardando_resposta: false });
+  negRenderPainel(devId);
+}
+
 function _drawerTabHtml(tab, dev, ctx){
   const {devId,valor,cliNome,hist,acordos,activeAcordo,pago,saldo,proxVenc,proxDias} = ctx;
+
+  if(tab==='negociar'){
+    return `<div style="flex:1;overflow-y:auto;padding:24px;">
+      <div style="max-width:640px;">
+        <div style="font-size:15px;font-weight:700;color:var(--navy);margin-bottom:4px;">Negociar</div>
+        <div style="font-size:12px;color:var(--text-3);margin-bottom:18px;">Scripts guiados de cobrança extrajudicial. Escolha a situação, revise a mensagem e envie via WhatsApp.</div>
+        <div id="neg-panel-${devId}"><div style="font-size:12px;color:var(--text-3);">Carregando…</div></div>
+      </div>
+    </div>`;
+  }
   const tags = dev.tags||[];
 
   if(tab==='resumo'){
