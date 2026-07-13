@@ -11604,8 +11604,10 @@ function negExecutarOpcao(devId, opcaoId){
     html += `<div style="margin-bottom:12px;">
       <div style="font-size:11px;font-weight:600;color:var(--text-2);margin-bottom:4px;">${escHtml(b.label)}</div>
       <textarea id="neg-tx-${devId}-${idx}" rows="${rows}" style="width:100%;font-size:12.5px;line-height:1.5;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-family:inherit;resize:vertical;background:var(--surface-2);color:var(--text);">${escHtml(textoFinal)}</textarea>
-      <div style="display:flex;gap:6px;margin-top:6px;">
+      <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">
         <button class="btn btn-primary btn-sm" onclick="negEnviarBloco('${devId}','${opcaoId}',${idx})">📱 Enviar via WhatsApp</button>
+        <button class="btn btn-ghost btn-sm" onclick="agAbrirModal('${devId}',${idx})" title="Agendar o envio desta mensagem para uma data/hora">🕓 Agendar</button>
+        <button class="btn btn-ghost btn-sm" onclick="biaAbrir('${devId}','neg-tx-${devId}-${idx}')" title="Beatriz IA sugere uma reformulação desta mensagem">✨ Sugerir com IA</button>
         <button class="btn btn-ghost btn-sm" onclick="negCopiarBloco('${devId}',${idx},this)">Copiar</button>
       </div>
     </div>`;
@@ -11624,6 +11626,210 @@ function negCancelarMsgs(devId){
   const area = document.getElementById('neg-msgs-'+devId);
   if(area) area.innerHTML = '';
   if(window._negAberto) delete window._negAberto[devId];
+}
+
+// ============================================================
+// Onda G · M1 — Agendar mensagem a partir do caso (aba Negociar)
+// Reusa a infra de agendamento já existente da página WhatsApp:
+// crm_mensagens_agendadas + proximoEnvioUtil/proximoSlotComercial +
+// negComAssinatura. O worker server-side cron-mensagens-agendadas envia
+// no horário marcado (mesma tabela/coluna que a aba "Agendados").
+// Prefixo ag*/_ag* (sem colisão — grep confirmado).
+// ============================================================
+window._agCtx = window._agCtx || { devId:null };
+
+// Abre o modal de agendamento pré-preenchido com o texto do bloco atual
+// (com assinatura aplicada, igual ao envio) + default de horário útil.
+function agAbrirModal(devId, blocoIdx){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev){ showToast('Caso não encontrado.','danger'); return; }
+  const tel = String(dev.tel||'').replace(/\D/g,'');
+  if(!tel){ showToast('Devedor sem telefone cadastrado.','warning'); return; }
+  // Texto vem do bloco clicado (se houver) com a assinatura do operador.
+  let texto = '';
+  if(blocoIdx!=null){
+    const ta = document.getElementById('neg-tx-'+devId+'-'+blocoIdx);
+    if(ta) texto = negComAssinatura(ta.value);
+  }
+  window._agCtx = { devId };
+  agFecharModal();
+  const quandoDefault = (typeof proximoEnvioUtil==='function') ? proximoEnvioUtil() : '';
+  const ov = document.createElement('div');
+  ov.id = 'agModal';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:1300;background:rgba(10,21,48,.42);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;padding:24px;';
+  ov.innerHTML = `<div style="width:520px;max-width:100%;background:var(--surface);border-radius:16px;overflow:hidden;box-shadow:var(--shadow-lg,0 12px 40px rgba(0,0,0,.25));">
+    <div style="padding:18px 22px;background:var(--navy);color:var(--side-fg,#fff);display:flex;align-items:center;justify-content:space-between;">
+      <div style="font-size:15px;font-weight:600;">🕓 Agendar mensagem</div>
+      <button onclick="agFecharModal()" style="width:28px;height:28px;border-radius:50%;border:1px solid rgba(239,234,217,.3);background:transparent;color:var(--side-fg,#fff);cursor:pointer;font-size:15px;">✕</button>
+    </div>
+    <div style="padding:20px 22px;">
+      <div style="font-size:12.5px;color:var(--text-2);margin-bottom:14px;">Para <strong>${escHtml(dev.nome||'(sem nome)')}</strong> · ${escHtml(tel)}. O envio acontece automaticamente no horário marcado (worker COBRASQ).</div>
+      <label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);display:block;margin-bottom:5px;">Data e hora</label>
+      <input type="datetime-local" id="agQuando" value="${escHtml(quandoDefault)}" style="width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font:inherit;font-size:13px;background:var(--surface-2);color:var(--text);margin-bottom:14px;">
+      <label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);display:block;margin-bottom:5px;">Mensagem</label>
+      <textarea id="agMensagem" rows="7" style="width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font:inherit;font-size:13px;line-height:1.5;resize:vertical;background:var(--surface-2);color:var(--text);">${escHtml(texto)}</textarea>
+      <div style="font-size:11px;color:var(--text-3);margin-top:6px;">A assinatura do operador já está aplicada. Edite à vontade antes de agendar.</div>
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px;">
+        <button onclick="agFecharModal()" style="padding:10px 15px;border-radius:9px;border:1px solid var(--border);background:var(--surface);color:var(--text-2);cursor:pointer;font-size:12.5px;font-weight:600;">Cancelar</button>
+        <button id="agBtnConfirm" onclick="agConfirmar()" style="padding:10px 18px;border-radius:9px;border:0;background:var(--navy);color:var(--side-fg,#fff);cursor:pointer;font-size:12.5px;font-weight:600;">Agendar envio</button>
+      </div>
+    </div>
+  </div>`;
+  ov.addEventListener('mousedown', e=>{ if(e.target===ov) agFecharModal(); });
+  document.body.appendChild(ov);
+  const t=document.getElementById('agMensagem'); if(t) setTimeout(()=>t.focus(),60);
+}
+
+function agFecharModal(){ const ov=document.getElementById('agModal'); if(ov) ov.remove(); }
+
+// Grava em crm_mensagens_agendadas (mesma tabela/colunas da aba Agendados):
+// devedor_id = caso_id, telefone, mensagem, agendada_para, operador_id, origem.
+async function agConfirmar(){
+  const ctx = window._agCtx || {};
+  const dev = (DB.devedores||[]).find(d=>d.id===ctx.devId); if(!dev){ showToast('Caso não encontrado.','danger'); return; }
+  const supa = (typeof getSupabase==='function') ? getSupabase() : null;
+  if(!supa){ showToast('Supabase indisponível.','danger'); return; }
+  const tel = String(dev.tel||'').replace(/\D/g,'');
+  if(!tel){ showToast('Devedor sem telefone.','warning'); return; }
+  const quando = document.getElementById('agQuando')?.value;
+  const msg = (document.getElementById('agMensagem')?.value||'').trim();
+  if(!quando){ showToast('Informe data/hora.','danger'); return; }
+  if(!msg){ showToast('Mensagem vazia.','danger'); return; }
+  const dt = new Date(quando);
+  if(isNaN(dt.getTime()) || dt <= new Date()){ showToast('A data deve ser no futuro.','danger'); return; }
+  const btn = document.getElementById('agBtnConfirm');
+  if(btn){ btn.disabled=true; btn.textContent='Agendando…'; }
+  try{
+    const { data:auth } = await supa.auth.getUser();
+    const operadorId = auth?.user?.id || (currentUser && currentUser.id) || null;
+    const { error } = await supa.from('crm_mensagens_agendadas').insert({
+      devedor_id: dev.id,
+      operador_id: operadorId,
+      telefone: tel,
+      tipo: 'texto',
+      mensagem: msg,
+      agendada_para: dt.toISOString(),
+      status: 'pendente',
+      origem: 'manual'
+    });
+    if(error) throw error;
+    if(typeof _negRegistrarHistorico==='function'){
+      _negRegistrarHistorico(dev, 'Mensagem agendada para '+dt.toLocaleString('pt-BR')+'.');
+    }
+    showToast('Mensagem agendada para '+dt.toLocaleString('pt-BR')+'.','success');
+    agFecharModal();
+  }catch(e){
+    showToast('Falha ao agendar: '+(e.message||e),'danger');
+    if(btn){ btn.disabled=false; btn.textContent='Agendar envio'; }
+  }
+}
+
+// ============================================================
+// Onda G · M2 — Beatriz IA: sugerir mensagem no caso (aba Negociar)
+// Reusa a Edge Function beatriz-msg (Claude Haiku), a MESMA que a página
+// WhatsApp usa em waPendSugerir. Escolhe a intenção, pede 3 sugestões e
+// joga o texto escolhido no textarea do bloco (fluxo de envio da Onda A).
+// Prefixo bia*/_bia* (sem colisão — grep confirmado).
+// depende da Edge beatriz-msg (não cria Edge nova).
+// ============================================================
+window._biaCtx = window._biaCtx || { devId:null, alvoTextareaId:null, ultimas:[], processando:false };
+
+const BIA_INTENCOES = [
+  ['primeira_abordagem','Primeira abordagem'],
+  ['follow_up','Follow-up (sem resposta)'],
+  ['proposta_pagamento','Proposta de pagamento'],
+  ['lembrete_assinatura','Lembrete de assinatura do acordo'],
+  ['ultima_tentativa','Última tentativa antes de judicial'],
+  ['sem_telefone','Pedir telefone novo (empresa)'],
+  ['objecao_resposta','Resposta a objeção']
+];
+
+// Abre o modal da Beatriz mirando o textarea `alvoTextareaId` do bloco.
+function biaAbrir(devId, alvoTextareaId){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev){ showToast('Caso não encontrado.','danger'); return; }
+  window._biaCtx = { devId, alvoTextareaId: alvoTextareaId||null, ultimas:[], processando:false };
+  biaFechar();
+  const opts = BIA_INTENCOES.map(([v,l])=>`<option value="${v}">${escHtml(l)}</option>`).join('');
+  const ov = document.createElement('div');
+  ov.id = 'biaModal';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:1300;background:rgba(10,21,48,.42);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;padding:24px;';
+  ov.innerHTML = `<div style="width:560px;max-width:100%;max-height:82vh;overflow-y:auto;background:var(--surface);border-radius:16px;box-shadow:var(--shadow-lg,0 12px 40px rgba(0,0,0,.25));">
+    <div style="padding:18px 22px;background:var(--navy);color:var(--side-fg,#fff);display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;">
+      <div style="font-size:15px;font-weight:600;">✨ Beatriz sugere…</div>
+      <button onclick="biaFechar()" style="width:28px;height:28px;border-radius:50%;border:1px solid rgba(239,234,217,.3);background:transparent;color:var(--side-fg,#fff);cursor:pointer;font-size:15px;">✕</button>
+    </div>
+    <div style="padding:20px 22px;">
+      <div style="font-size:12.5px;color:var(--text-2);margin-bottom:14px;">IA assistente. Sugere mensagens curtas e profissionais — você revisa e envia pelo fluxo normal.</div>
+      <label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);display:block;margin-bottom:5px;">Intenção</label>
+      <select id="biaIntencao" style="width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font:inherit;font-size:13px;background:var(--surface-2);color:var(--text);margin-bottom:12px;">${opts}</select>
+      <label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);display:block;margin-bottom:5px;">Contexto extra (opcional)</label>
+      <textarea id="biaContexto" rows="2" placeholder="ex: disse que perdeu o emprego; já ligamos 3 vezes…" style="width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font:inherit;font-size:13px;resize:vertical;background:var(--surface-2);color:var(--text);"></textarea>
+      <button id="biaBtnSugerir" onclick="biaSugerir()" style="margin-top:12px;width:100%;padding:11px;border-radius:9px;border:0;background:var(--navy);color:var(--side-fg,#fff);cursor:pointer;font-size:13px;font-weight:600;">✨ Sugerir</button>
+      <div id="biaResultado" style="margin-top:14px;"></div>
+    </div>
+  </div>`;
+  ov.addEventListener('mousedown', e=>{ if(e.target===ov) biaFechar(); });
+  document.body.appendChild(ov);
+}
+
+function biaFechar(){ const ov=document.getElementById('biaModal'); if(ov) ov.remove(); }
+
+// Chama a Edge beatriz-msg (mesma assinatura do CRM/WhatsApp) e mostra 3 sugestões.
+async function biaSugerir(){
+  const ctx = window._biaCtx || {};
+  if(ctx.processando) return;
+  const supa = (typeof getSupabase==='function') ? getSupabase() : null;
+  const res = document.getElementById('biaResultado');
+  if(!supa){ if(res) res.innerHTML='<div style="color:var(--danger);font-size:13px;">IA indisponível (sem sessão Supabase).</div>'; return; }
+  const dev = (DB.devedores||[]).find(d=>d.id===ctx.devId); if(!dev) return;
+  ctx.processando = true;
+  const btn = document.getElementById('biaBtnSugerir');
+  if(btn){ btn.disabled=true; btn.textContent='⏳ Pensando…'; }
+  if(res) res.innerHTML = '<div style="color:var(--text-3);font-size:13px;padding:8px 0;">Aguarde…</div>';
+  try{
+    const intencao = document.getElementById('biaIntencao')?.value || 'primeira_abordagem';
+    const contexto = (document.getElementById('biaContexto')?.value||'').trim();
+    const { data, error } = await supa.functions.invoke('beatriz-msg', {
+      body: { caso_id: dev.id, intencao, contexto_extra: contexto || null }
+    });
+    if(error) throw error;
+    if(data && data.error) throw new Error(data.error);
+    const sugestoes = (data && Array.isArray(data.sugestoes)) ? data.sugestoes : [];
+    ctx.ultimas = sugestoes;
+    if(!sugestoes.length){ if(res) res.innerHTML='<div style="color:var(--text-3);font-size:13px;">Beatriz não retornou sugestões. Tente de novo.</div>'; return; }
+    if(res){
+      res.innerHTML = sugestoes.map((s,i)=>{
+        const safe = escHtml(s.texto||'');
+        const tom = escHtml(s.tom||'?');
+        return `<div style="border:1px solid var(--border);border-radius:9px;padding:11px 13px;margin-bottom:9px;background:var(--surface-2);">
+          <div style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--gold-dark,#9C7F40);font-weight:700;margin-bottom:5px;">Sugestão ${i+1} · tom ${tom}</div>
+          <div style="font-size:13px;white-space:pre-wrap;margin-bottom:9px;color:var(--text);">${safe}</div>
+          <button onclick="biaUsar(${i})" style="width:100%;padding:9px;border-radius:8px;border:0;background:#2E7D5B;color:#fff;cursor:pointer;font-size:12.5px;font-weight:600;">✓ Usar essa</button>
+        </div>`;
+      }).join('');
+    }
+  }catch(e){
+    if(res) res.innerHTML = '<div style="color:var(--danger);font-size:13px;">Erro: '+escHtml((e&&e.message)||String(e))+'</div>';
+  }finally{
+    ctx.processando = false;
+    if(btn){ btn.disabled=false; btn.textContent='✨ Sugerir'; }
+  }
+}
+
+// Joga o texto escolhido no textarea do bloco (revisar/enviar pelo fluxo da Onda A).
+function biaUsar(idx){
+  const ctx = window._biaCtx || {};
+  const s = ctx.ultimas && ctx.ultimas[idx];
+  if(!s) return;
+  const alvo = ctx.alvoTextareaId ? document.getElementById(ctx.alvoTextareaId) : null;
+  if(alvo){
+    alvo.value = s.texto;
+    try{ alvo.dispatchEvent(new Event('input')); }catch(_){}
+    showToast('Sugestão aplicada no bloco — revise antes de enviar.','success');
+  } else {
+    try{ navigator.clipboard.writeText(s.texto); showToast('Sugestão copiada.','success'); }
+    catch(_){ showToast('Copie manualmente.','warning'); }
+  }
+  biaFechar();
 }
 
 function negCopiarBloco(devId, idx, btn){
