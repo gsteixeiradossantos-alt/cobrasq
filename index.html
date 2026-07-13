@@ -14922,7 +14922,7 @@ const PAPEL_LABELS = {
   fiador:'Fiador', devedor_solidario:'Devedor solidário', sucessor:'Sucessor'
 };
 let DB_cobrancas = [];          // cache local (com cobranca_partes embutidas)
-let cobrFilter = { q:'', credor:'', responsavel:'', fase:'', statuses:[], tab:'todos', ord:'nome' };
+let cobrFilter = { q:'', credor:'', responsavel:'', fase:'', statuses:[], tab:'todos', pend:'agir', ord:'nome' };
 let cobrChipsOpen = false; // chips detalhados de status recolhidos por padrão
 function toggleCobrFilterStatus(s){
   const i = cobrFilter.statuses.indexOf(s);
@@ -15026,6 +15026,76 @@ function cobStatusBadge(c){
   return `<button class="cob-badge" style="--cor:${cor};" onclick="event.stopPropagation();abrirTrocaStatus(event,'${c.id}')" title="Clique para alterar a situação">${escHtml(statusLabel(c.status)||'—')}<span class="cx">▾</span></button>`;
 }
 
+// ── Estado de PENDÊNCIA da cobrança (derivado — sem migração) ─────────────────
+// Consolida sinais que já existem em 3 estados: 🔴 agir (ato pendente) · 🟡 aguardando
+// (sem ação nossa) · ✅ concluído (nada a fazer). Os sinais mais finos (acordo zapsign/
+// boletos, WhatsApp aguardando, petição/intimação, última atividade) vêm de _cobrSinais,
+// buscado em LOTE e de forma defensiva; se faltarem, degrada para status+aging.
+let _cobrSinais = null; // { acordoPorDev, waAguardando:Set, peticaoPreparada:Set, intimacaoNova:Set, ultimaAtividade }
+async function _carregarSinaisPendencia(cobrs){
+  const sinais = { acordoPorDev:{}, waAguardando:new Set(), peticaoPreparada:new Set(), intimacaoNova:new Set(), ultimaAtividade:{} };
+  const sb = (typeof getSupabase==='function') ? getSupabase() : null;
+  if(!sb || !Array.isArray(cobrs) || !cobrs.length) return sinais;
+  const devIds = [...new Set(cobrs.flatMap(c=>(c.cobranca_partes||[]).map(p=>p.devedor_id)).filter(Boolean))];
+  const _chunks = (arr,n)=>{ const o=[]; for(let i=0;i<arr.length;i+=n) o.push(arr.slice(i,i+n)); return o; };
+  // 1) Acordos por devedor: status_zapsign, boletos_emitidos, parcelas.
+  try{ for(const ch of _chunks(devIds,200)){ const {data}=await sb.from('acordos').select('devedor_id,status,status_zapsign,metadata,parcelas').in('devedor_id',ch); (data||[]).forEach(a=>{ if(!a.devedor_id) return; (sinais.acordoPorDev[a.devedor_id]=sinais.acordoPorDev[a.devedor_id]||[]).push(a); }); } }catch(_){}
+  // 2) WhatsApp aguardando resposta humana (fila global — filtra por devedor).
+  try{ const {data}=await sb.from('whatsapp_atendimentos').select('devedor_id,estado').eq('estado','aguardando_humano'); (data||[]).forEach(w=>{ if(w.devedor_id) sinais.waAguardando.add(w.devedor_id); }); }catch(_){}
+  // 3) Petições prontas para protocolar.
+  try{ const {data}=await sb.from('proc_peticionamentos').select('cobranca_id,devedor_id,status').eq('status','preparado'); (data||[]).forEach(p=>{ if(p.cobranca_id) sinais.peticaoPreparada.add(p.cobranca_id); if(p.devedor_id) sinais.peticaoPreparada.add(p.devedor_id); }); }catch(_){}
+  // 4) Intimações/andamentos novos (DataJud) não lidos.
+  try{ const {data}=await sb.from('proc_intimacoes').select('devedor_id,lida').eq('lida',false); (data||[]).forEach(i=>{ if(i.devedor_id) sinais.intimacaoNova.add(i.devedor_id); }); }catch(_){}
+  // 5) Última atividade por devedor (evento mais recente) → dias sem atividade.
+  try{ for(const ch of _chunks(devIds,200)){ const {data}=await sb.from('devedor_eventos').select('devedor_id,criado_em').in('devedor_id',ch).order('criado_em',{ascending:false}).limit(3000); (data||[]).forEach(e=>{ if(e.devedor_id && !sinais.ultimaAtividade[e.devedor_id]) sinais.ultimaAtividade[e.devedor_id]=e.criado_em; }); } }catch(_){}
+  return sinais;
+}
+function _diasDesde(iso){ if(!iso) return null; const d=new Date(String(iso).slice(0,10)); if(isNaN(d.getTime())) return null; return Math.floor((Date.now()-d.getTime())/86400000); }
+// Taxonomia aprovada (limiares 2/7/14) — devolve { estado, motivo, proximaAcao, urgencia }.
+function cobPendencia(c, sinais){
+  sinais = sinais || _cobrSinais || {};
+  const status = (c.status||'').trim();
+  const parte = (c.cobranca_partes||[]).find(p=>p.principal) || (c.cobranca_partes||[])[0] || {};
+  const devId = parte.devedor_id;
+  const macro = cobMacroGrupo(status, c.fase);
+  const acordos = (sinais.acordoPorDev && sinais.acordoPorDev[devId]) || [];
+  const hoje = new Date(new Date().toISOString().slice(0,10));
+  // ✅ concluído
+  const acordoPago = acordos.some(a=> Array.isArray(a.parcelas) && a.parcelas.length && a.parcelas.every(p=>p.pago));
+  if(macro==='encerrados' || acordoPago) return { estado:'concluido', motivo: acordoPago?'Acordo quitado':(statusLabel(status)||'Encerrada'), proximaAcao:null };
+  // dias sem atividade (evento mais recente → etapa → updated → created)
+  const ult = (sinais.ultimaAtividade && sinais.ultimaAtividade[devId]) || c.etapa_atualizada_em || c.updated_at || c.created_at;
+  const dias = _diasDesde(ult);
+  // 🔴 sinais fortes de "agir"
+  if(devId && sinais.waAguardando && sinais.waAguardando.has(devId)) return { estado:'agir', urgencia:(dias!=null&&dias>=2?'alta':'media'), motivo:'Cliente respondeu no WhatsApp', proximaAcao:'whatsapp' };
+  if(sinais.peticaoPreparada && (sinais.peticaoPreparada.has(c.id) || sinais.peticaoPreparada.has(devId))) return { estado:'agir', urgencia:'alta', motivo:'Peça pronta — protocolar', proximaAcao:'peticao' };
+  if(devId && sinais.intimacaoNova && sinais.intimacaoNova.has(devId)) return { estado:'agir', urgencia:'alta', motivo:'Andamento judicial novo', proximaAcao:'judicial' };
+  if(acordos.some(a=> (a.status_zapsign==='assinado') && !(a.metadata && a.metadata.boletos_emitidos))) return { estado:'agir', urgencia:'alta', motivo:'Acordo assinado — emitir boletos', proximaAcao:'boleto' };
+  if(acordos.some(a=> Array.isArray(a.parcelas) && a.parcelas.some(p=> !p.pago && p.vencimento && new Date(String(p.vencimento).slice(0,10)) < hoje))) return { estado:'agir', urgencia:'alta', motivo:'Parcela do acordo vencida', proximaAcao:'cobrar' };
+  // 🟡 aguardando (sem ação nossa)
+  if(acordos.some(a=> ['enviado','visualizado','pendente'].includes(a.status_zapsign||''))) return { estado:'aguardando', motivo:'Acordo enviado — aguardando assinatura', proximaAcao:null };
+  // 🔴 esquecido (fora de acordo/judicial, que têm espera legítima)
+  if(dias!=null && dias>=7 && macro!=='acordos' && macro!=='judicial') return { estado:'agir', urgencia:(dias>=14?'alta':'media'), motivo:`Sem movimento há ${dias} dias`, proximaAcao:'contato' };
+  // 🟡 acordo em pagamento / judicial aguardando movimento
+  if(macro==='acordos') return { estado:'aguardando', motivo:'Acordo em pagamento', proximaAcao:null };
+  if(macro==='judicial') return { estado:'aguardando', motivo:'No judicial — aguardando movimento', proximaAcao:null };
+  // agir: cobrança ativa (novo/cobrar/contato). "Notificação/proposta enviada" recente = aguardando retorno.
+  if(/notifica|proposta/i.test(status) && dias!=null && dias<3) return { estado:'aguardando', motivo:'Aguardando retorno do devedor', proximaAcao:null };
+  return { estado:'agir', urgencia:(dias!=null&&dias>=7?'media':'baixa'), motivo:(status? statusLabel(status):'Novo — iniciar cobrança'), proximaAcao:'contato' };
+}
+const _COB_PEND_META = {
+  agir:       { lbl:'Agir', fg:'#A65A4A', bg:'#F7ECE8', bd:'#E7CFC7' },
+  aguardando: { lbl:'Aguardando', fg:'#9C7F40', bg:'#FBF8EF', bd:'#E0D3A8' },
+  concluido:  { lbl:'Concluído', fg:'#5E7C58', bg:'#E9EDE2', bd:'#CFE0C6' }
+};
+function cobPendPill(pend, withMotivo){
+  if(!pend) return '';
+  const m = _COB_PEND_META[pend.estado] || _COB_PEND_META.aguardando;
+  const dot = `<span style="width:7px;height:7px;border-radius:50%;background:${m.fg};display:inline-block;flex-shrink:0;"></span>`;
+  const mot = withMotivo && pend.motivo ? `<span style="color:var(--text-3);font-weight:500;">· ${escHtml(pend.motivo)}</span>` : '';
+  return `<span class="cob-pend-pill" title="${escHtml(pend.motivo||'')}" style="display:inline-flex;align-items:center;gap:6px;font-size:10.5px;font-weight:700;color:${m.fg};background:${m.bg};border:1px solid ${m.bd};padding:2px 9px;border-radius:20px;">${dot}${m.lbl}${mot}</span>`;
+}
+
 // ── Processo unificado (Opção 1): 2+ cobranças do mesmo devedor litigadas num processo só.
 // O vínculo vive em cobrancas.metadata.casoUnificado.id (compartilhado). Cada cobrança
 // mantém seu credor/valor/repasse (contabilidade por loja); a LISTA colapsa os irmãos num
@@ -15061,6 +15131,8 @@ async function renderCobrancas(opts){
     if(Array.isArray(rows)) DB_cobrancas = rows;
     // roster p/ resolver nome do responsável nas linhas e no filtro.
     if(typeof carregarRosterAppUsers==='function' && !Array.isArray(_rosterAppUsers)){ try{ await carregarRosterAppUsers(); }catch(_){} }
+    // Sinais de pendência em lote (defensivo — nunca aborta o render).
+    try{ _cobrSinais = await _carregarSinaisPendencia((DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft)); }catch(_){ _cobrSinais = _cobrSinais || {}; }
   }
 
   const todas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft);
@@ -15095,8 +15167,12 @@ async function renderCobrancas(opts){
   // Contagens das abas macro (derivadas de base).
   const macroCounts = { todos: base.length, agir:0, judicial:0, acordos:0, encerrados:0 };
   base.forEach(c=>{ const g=cobMacroGrupo(c.status,c.fase); if(macroCounts[g]!=null) macroCounts[g]++; });
+  // Pendência derivada (🔴 agir / 🟡 aguardando / ✅ concluído) — guarda em c._pend p/ reuso na linha.
+  const pendCounts = { todos: base.length, agir:0, aguardando:0, concluido:0 };
+  base.forEach(c=>{ c._pend = cobPendencia(c, _cobrSinais); if(pendCounts[c._pend.estado]!=null) pendCounts[c._pend.estado]++; });
+  const _pendFiltro = (c)=> !cobrFilter.pend || cobrFilter.pend==='todos' || (c._pend && c._pend.estado)===cobrFilter.pend;
   // naAba = base restrita à aba ativa (alimenta os chips de status). cobr = naAba + chips + ordenação.
-  const naAba = base.filter(c=> cobrFilter.tab==='todos' || cobMacroGrupo(c.status,c.fase)===cobrFilter.tab);
+  const naAba = base.filter(c=> (cobrFilter.tab==='todos' || cobMacroGrupo(c.status,c.fase)===cobrFilter.tab) && _pendFiltro(c));
   const _sorters = {
     nome:   (a,b)=> _cobrPrincipalNome(a).localeCompare(_cobrPrincipalNome(b),'pt-BR',{sensitivity:'base'}),
     valor:  (a,b)=> (+b.valor_atual||+b.valor_orig||0) - (+a.valor_atual||+a.valor_orig||0),
@@ -15167,7 +15243,7 @@ async function renderCobrancas(opts){
       <div class="cob-caso-main">
         <div class="cob-caso-nome">${escHtml(princNome)}${princPapel?` <span class="papel">· ${escHtml(princPapel)}</span>`:''} ${extra}</div>
         <div class="cob-caso-doc">${escHtml(_cobrDocLabel(c))}</div>
-        <div class="cob-caso-chips">${selo}<span class="cob-caso-fase">${faseProc}</span>${unifChip}</div>
+        <div class="cob-caso-chips">${cobPendPill(c._pend, true)}${selo}<span class="cob-caso-fase">${faseProc}</span>${unifChip}</div>
       </div>
       <div class="cob-caso-credor">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}<div class="resp">${escHtml(_detUserNome(c.assigned_to))}</div></div>
       <div class="cob-caso-vs">
@@ -15186,6 +15262,7 @@ async function renderCobrancas(opts){
     const aging=_cobrAgingDias(c); const agingOld=(aging!=null && aging>=365);
     return `<div class="cob-panel cob-card cob-tr-click" style="--cor:${cor};padding:14px;cursor:pointer;" onclick="verCobranca('${c.id}')">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;"><div class="strong" style="font-size:14px;font-weight:700;">${escHtml(princ?.devedores?.nome||'—')}${extra}</div>${cobStatusBadge(c)}</div>
+      ${c._pend?`<div style="margin-top:5px;">${cobPendPill(c._pend, true)}</div>`:''}
       <div style="font-size:12.5px;color:var(--text-2);margin-top:4px;">${escHtml(_cobrDocLabel(c))}</div>
       <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}</div>
       ${c._unif?`<div style="margin-top:4px;"><span class="det-chip" style="background:var(--navy,#1f3a5f);color:#fff;">⚖ Processo unificado · ${c._unif.irmaos.length} créditos</span></div>`:''}
@@ -15247,7 +15324,11 @@ async function renderCobrancas(opts){
         <option value="antigo" ${cobrFilter.ord==='antigo'?'selected':''}>Ordenar: mais antigo</option>
       </select>
       <div class="det-seg"><button class="${cobrView!=='cards'?'on':''}" onclick="cobrView='lista';renderCobrancas();">Lista</button><button class="${cobrView==='cards'?'on':''}" onclick="cobrView='cards';renderCobrancas();">Cards</button></div>
-      ${(cobrFilter.q||cobrFilter.credor||cobrFilter.responsavel||cobrFilter.fase||cobrFilter.statuses.length||cobrFilter.tab!=='todos') ? `<button class="cob-btn-ghost" onclick="cobrFilter={q:'',credor:'',responsavel:'',fase:'',statuses:[],tab:'todos',ord:'nome'};cobrChipsOpen=false;renderCobrancas();">Limpar filtros</button>` : ''}
+      ${(cobrFilter.q||cobrFilter.credor||cobrFilter.responsavel||cobrFilter.fase||cobrFilter.statuses.length||cobrFilter.tab!=='todos'||cobrFilter.pend!=='agir') ? `<button class="cob-btn-ghost" onclick="cobrFilter={q:'',credor:'',responsavel:'',fase:'',statuses:[],tab:'todos',pend:'agir',ord:'nome'};cobrChipsOpen=false;renderCobrancas();">Limpar filtros</button>` : ''}
+    </div>
+    <!-- Triagem por PENDÊNCIA (derivada) — 🔴 agir / 🟡 aguardando / ✅ concluído -->
+    <div class="cob-mtabs" style="margin-top:4px;">
+      ${[['agir','Agir agora','#A65A4A'],['aguardando','Aguardando','#9C7F40'],['concluido','Concluído','#5E7C58'],['todos','Todos','']].map(([k,lbl,cor])=>`<button class="cob-mtab ${cobrFilter.pend===k?'on':''}" onclick="cobrFilter.pend='${k}';renderCobrancas();">${cor?`<span style="width:8px;height:8px;border-radius:50%;background:${cor};display:inline-block;margin-right:6px;"></span>`:''}${lbl} <span class="cob-mtab-n">${pendCounts[k]!=null?pendCounts[k]:''}</span></button>`).join('')}
     </div>
     <!-- Abas macro de status (reduzem o ruído dos chips sempre visíveis) -->
     <div class="cob-mtabs">
@@ -15687,7 +15768,25 @@ async function renderCobrancaDetalhe(){
   // grandes em dourado; juros/multa/correção/valor atualizado no detalhamento menor.
   const _temCapital = (vCapital!=null);
   const _bigNum = (txt,extra)=>`<div class="det-bigval" style="font-size:25px;${extra||''}">${txt}</div>`;
-  const panelValores=`<div class="cob-panel" style="padding:18px;">
+  // Banner de PENDÊNCIA (derivado) no topo do Resumo: estado + motivo + próxima ação.
+  const _sinaisDet = Object.assign({}, _cobrSinais||{});
+  const _devPrinc = (partes[0]||{}).devedor_id || '';
+  if(hist && hist[0] && hist[0].criado_em && _devPrinc){ _sinaisDet.ultimaAtividade = Object.assign({}, _sinaisDet.ultimaAtividade||{}); if(!_sinaisDet.ultimaAtividade[_devPrinc]) _sinaisDet.ultimaAtividade[_devPrinc]=hist[0].criado_em; }
+  const _pend = cobPendencia(cob, _sinaisDet);
+  const _pm = _COB_PEND_META[_pend.estado] || _COB_PEND_META.aguardando;
+  const _telPrinc = (partes[0]||{}).devedores?.telefone || '';
+  let _acaoBtn = '';
+  if(_pend.estado!=='concluido'){
+    if(['whatsapp','contato','cobrar'].includes(_pend.proximaAcao) && _telPrinc) _acaoBtn = _detWa(_telPrinc);
+    else if(_pend.proximaAcao==='boleto' && _devPrinc) _acaoBtn = `<button class="cob-btn-ghost" onclick="openDrawer('${_devPrinc}')">Emitir boleto →</button>`;
+    else if(['peticao','judicial'].includes(_pend.proximaAcao)) _acaoBtn = `<button class="cob-btn-ghost" onclick="showPage('pecas')">Abrir peça →</button>`;
+  }
+  const bannerPend = `<div class="cob-panel" style="padding:11px 16px;margin-bottom:10px;display:flex;flex-direction:row;align-items:center;gap:12px;border-left:3px solid ${_pm.fg};background:${_pm.bg};">
+    <span style="width:9px;height:9px;border-radius:50%;background:${_pm.fg};flex-shrink:0;"></span>
+    <div style="flex:1;min-width:0;"><span style="font-weight:700;color:${_pm.fg};font-size:13px;">${_pm.lbl}</span> <span style="color:var(--text-2);font-size:13px;">· ${escHtml(_pend.motivo||'')}</span></div>
+    ${_acaoBtn}
+  </div>`;
+  const panelValores=bannerPend+`<div class="cob-panel" style="padding:18px;">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
       <div class="det-panel-tt" style="margin:0;">Valores da dívida</div>
       ${quitadoCliente?'<span class="cob-pill st-quitado">✓ Quitado ao cliente</span>':''}
