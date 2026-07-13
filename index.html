@@ -12904,6 +12904,117 @@ function _astreaCopiar(){
   catch(_){ try{ ta.select(); document.execCommand('copy'); done(); }catch(e){ showToast('Não foi possível copiar.','warning'); } }
 }
 
+// ── Onda D — CHECKLIST JUDICIAL ──────────────────────────────
+// Portado de crm.html (CHECKLIST_JUDICIAL_ITENS ~L7146, abrirChecklistJudicial
+// ~L7153, atualizarItemChecklistJud ~L7172). Adaptado ao modelo devedor/cobrança
+// do app: em vez de casosCache/atualizarCaso, grava direto na coluna
+// cobrancas.checklist_judicial (JSONB) e registra no histórico do devedor via
+// _negRegistrarHistorico (Onda A). Aditivo — não toca crm.html.
+const CHECKLIST_JUDICIAL_ITENS = [
+  { key: 'astrea', label: 'Registrar no Astrea' },
+  { key: 'notificar_gustavo', label: 'Notificar Dr. Gustavo' },
+  { key: 'congelar_extrajudicial', label: 'Congelar negociação extrajudicial' },
+  { key: 'gerar_peca_inicial', label: 'Gerar peça inicial (link em "Gerar peça judicial")' }
+];
+
+// Lê o checklist judicial da cobrança do devedor (coluna checklist_judicial).
+// Formato: { <item_key>: { feito, quando, por }, fase? }.
+function _judChecklistDe(dev){
+  const cob = _negCobDe(dev);
+  const cl = cob && cob.checklist_judicial;
+  return (cl && typeof cl === 'object') ? cl : {};
+}
+
+// Persiste o checklist na coluna cobrancas.checklist_judicial (análogo a
+// _negPersistMeta, mas na coluna própria — NÃO em metadata). Mantém espelho em
+// memória (cob.checklist_judicial) pra UI ler sem refetch.
+async function _judPersistChecklist(devId, checklist){
+  const supa = (typeof getSupabase === 'function') ? getSupabase() : null;
+  const cob = (typeof DB_cobrancas !== 'undefined' && Array.isArray(DB_cobrancas))
+    ? DB_cobrancas.find(c=>c.id===devId) : null;
+  if (cob) cob.checklist_judicial = checklist; // espelho em memória
+  if (!supa) return { ok:false, error:'sem sessão' };
+  try{
+    const { error } = await supa.from('cobrancas')
+      .update({ checklist_judicial: checklist, updated_at:new Date().toISOString() })
+      .eq('id', devId);
+    if (error) return { ok:false, error:error.message };
+    return { ok:true };
+  }catch(e){ return { ok:false, error: e && e.message }; }
+}
+
+// Marca/desmarca um item: registra {feito, quando, por}, grava na coluna e
+// registra no histórico do devedor. Re-renderiza a aba Processo.
+async function judToggleItem(devId, key, checked){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  const cl = Object.assign({}, _judChecklistDe(dev));
+  const por = (typeof negNomeOperador==='function' ? negNomeOperador() : '') || '?';
+  if (checked){
+    cl[key] = { feito: true, quando: new Date().toISOString(), por };
+  } else {
+    delete cl[key];
+  }
+  const res = await _judPersistChecklist(devId, cl);
+  if(res && res.ok===false){ try{ showToast('Não consegui salvar o checklist: '+(res.error||''),'warning'); }catch(_){} }
+  const itemLabel = (CHECKLIST_JUDICIAL_ITENS.find(i=>i.key===key)||{}).label || key;
+  if (typeof _negRegistrarHistorico==='function'){
+    _negRegistrarHistorico(dev, 'Checklist judicial: '+(checked?'✓':'✗')+' '+itemLabel+' (por '+por+').');
+  }
+  // Re-render da aba Processo pra mostrar timestamp/responsável.
+  const box = document.getElementById('jud-checklist-'+devId);
+  if(box){ box.innerHTML = _judRenderItens(dev); }
+}
+
+// Monta os itens do checklist (usado no primeiro render e no re-render pós-marcar).
+function _judRenderItens(dev){
+  const cl = _judChecklistDe(dev);
+  return CHECKLIST_JUDICIAL_ITENS.map(it=>{
+    const st = cl[it.key];
+    const marcado = !!(st && st.feito);
+    const meta = (marcado && st.quando)
+      ? `<span style="font-size:11px;color:var(--text-3);margin-left:8px;">— ${escHtml(new Date(st.quando).toLocaleString('pt-BR'))} por ${escHtml(st.por||'?')}</span>`
+      : '';
+    return `<label style="display:flex;align-items:center;gap:10px;padding:9px 4px;border-bottom:1px solid var(--border);cursor:pointer;">
+      <input type="checkbox" ${marcado?'checked':''} onchange="judToggleItem('${dev.id}', '${it.key}', this.checked)">
+      <span style="font-size:13px;color:var(--text);">${escHtml(it.label)}${meta}</span>
+    </label>`;
+  }).join('');
+}
+
+// Rótulos amigáveis das fases (a fase vive em checklist_judicial.fase, como no crm).
+const JUD_FASES = {
+  'pre-protocolo': 'Pré-protocolo',
+  'distribuido': 'Distribuído',
+  'citacao': 'Citação',
+  'defesa': 'Fase de defesa',
+  'sentenca': 'Sentença',
+  'recursal': 'Fase recursal'
+};
+
+// Painel do checklist judicial para embutir na aba Processo.
+function _judRenderPainel(dev){
+  const cl = _judChecklistDe(dev);
+  const ehJud = (dev.fase === 'judicial');
+  const fase = cl.fase ? (JUD_FASES[cl.fase] || cl.fase) : null;
+  const faseHtml = fase
+    ? `<span style="font-size:11px;font-weight:600;color:var(--gold-deep,#9C7F40);background:var(--surface-2,#f7f5ef);border:1px solid var(--border);border-radius:20px;padding:3px 10px;">Fase: ${escHtml(fase)}</span>`
+    : '';
+  const aviso = ehJud ? '' :
+    `<div style="background:var(--surface-2,#f7f5ef);border-left:3px solid var(--border);padding:8px 12px;border-radius:6px;font-size:11.5px;color:var(--text-3);margin-bottom:10px;">Este checklist é para casos judiciais. Esta cobrança ainda está em fase extrajudicial — os itens abaixo servem de preparação para o ajuizamento.</div>`;
+  return `
+    <div class="panel" style="margin-bottom:16px;">
+      <div class="panel-header">
+        <span class="panel-title">⚖ Checklist judicial</span>
+        ${faseHtml}
+      </div>
+      <div class="panel-body">
+        ${aviso}
+        <p style="font-size:12px;color:var(--text-3);margin:0 0 8px;">Cada item registra data e responsável quando marcado.</p>
+        <div id="jud-checklist-${dev.id}">${_judRenderItens(dev)}</div>
+      </div>
+    </div>`;
+}
+
 function renderProcessoTab(dev){
   const fase = dev.fase || 'extrajudicial';
   const etapa = dev.etapa || '';
@@ -12951,6 +13062,7 @@ function renderProcessoTab(dev){
         </div>
       </div>
     </div>`:''}
+    ${_judRenderPainel(dev)}
   `;
 }
 
