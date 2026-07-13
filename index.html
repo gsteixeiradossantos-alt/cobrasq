@@ -10836,6 +10836,7 @@ function renderDrawerBody(devId){
   }
 
   body.innerHTML = _drawerTabHtml('resumo', dev, ctx);
+  renderDrawerComunicacao(devId);
 }
 
 function setDrawerTab(tab, devId, btnEl){
@@ -10850,8 +10851,57 @@ function setDrawerTab(tab, devId, btnEl){
   const body = document.getElementById('devDrawer-body');
   if(!body) return;
   body.innerHTML = _drawerTabHtml(tab, dev, _drawerCtx(dev));
+  if(tab==='resumo') renderDrawerComunicacao(devId);
   if(tab==='cobrancas') renderDrawerAsaas(devId);
   if(tab==='docs') renderDrawerDocumentos(devId);
+}
+
+// Onda 1 · #2 — Comunicação no caso: hub de WhatsApp dentro do drawer do devedor.
+// Reusa whatsapp_atendimentos/vw_conversas_pendentes (mesma fonte de renderWAPendentes),
+// escopado pelo telefone do devedor. Aditivo; não toca no crm.html.
+async function renderDrawerComunicacao(devId){
+  const box = document.getElementById('drawer-comm-'+devId); if(!box) return;
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  const tel = String(dev.tel||'').replace(/\D/g,'');
+  const reguaOn = !!(DB.config?.zapiInstanceId && DB.config?.zapiToken);
+  const reguaHtml = `<div style="display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--text-2);margin-top:10px;"><span style="width:7px;height:7px;border-radius:50%;background:${reguaOn?'#5E7C58':'#A65A4A'};flex-shrink:0;"></span>Régua de WhatsApp ${reguaOn?'ativa':'pausada'}</div>`;
+  const waBtn = tel ? `<button onclick="window.open('https://wa.me/55${tel}','_blank')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);font-weight:500;text-align:left;cursor:pointer;">💬 Enviar WhatsApp</button>` : '';
+  if(!tel){ box.innerHTML = `<div style="font-size:12px;color:var(--text-3);">Sem telefone cadastrado.</div>${reguaHtml}`; return; }
+  const dk = tel.slice(-8);
+  let pend=null;
+  try{
+    const supa=getSupabase();
+    if(supa){
+      const r1=await supa.from('whatsapp_atendimentos').select('telefone,estado,intencao,resumo,ultima_resposta_em').eq('estado','aguardando_humano').ilike('telefone','%'+dk).limit(1);
+      if(r1.data&&r1.data[0]) pend={ resumo:r1.data[0].resumo, quando:r1.data[0].ultima_resposta_em, intencao:r1.data[0].intencao };
+      if(!pend){ const r2=await supa.from('vw_conversas_pendentes').select('telefone,texto,recebida_em').ilike('telefone','%'+dk).order('recebida_em',{ascending:false}).limit(1); if(r2.data&&r2.data[0]) pend={ resumo:r2.data[0].texto, quando:r2.data[0].recebida_em }; }
+    }
+  }catch(_){ /* degrada sem quebrar */ }
+  let pendHtml;
+  if(pend){
+    const txt = escHtml(String(pend.resumo||'(conversa pendente)').slice(0,100));
+    pendHtml = `<div style="background:#FBF8EF;border:1px solid #E0D3A8;border-radius:8px;padding:10px 12px;margin-bottom:8px;">
+      <div style="display:flex;align-items:center;gap:7px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#9C7F40;margin-bottom:5px;"><span style="width:7px;height:7px;border-radius:50%;background:#9C7F40;flex-shrink:0;"></span>Conversa pendente</div>
+      <div style="font-size:12px;color:var(--text-2);line-height:1.4;">${txt}</div>
+      <button onclick="_drawerAbrirConversa('${tel}')" style="margin-top:8px;width:100%;padding:7px 10px;background:var(--gold);color:var(--navy);border:none;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;">Abrir conversa →</button>
+    </div>`;
+  } else {
+    pendHtml = `<div style="font-size:12px;color:var(--text-3);margin-bottom:8px;">Nenhuma conversa pendente.</div>`;
+  }
+  box.innerHTML = pendHtml + waBtn + reguaHtml;
+}
+// Abre a conversa na página WhatsApp NATIVA (não no CRM), já focada no telefone.
+function _drawerAbrirConversa(tel){
+  try{ closeDrawer(); }catch(_){}
+  showPage('wa');
+  let tries=0;
+  const t=setInterval(()=>{ tries++;
+    if(typeof waPendSelecionarTel==='function' && window._waPend && Array.isArray(window._waPend.lista) && window._waPend.lista.length){
+      try{ waPendSelecionarTel(tel); }catch(_){}
+      clearInterval(t);
+    }
+    if(tries>20) clearInterval(t);
+  }, 250);
 }
 
 function _drawerTabHtml(tab, dev, ctx){
@@ -10958,6 +11008,8 @@ function _drawerTabHtml(tab, dev, ctx){
           :'<div class="empty-state"><h3>Sem histórico</h3><p>Nenhuma interação registrada ainda.</p></div>'}
       </div>
       <div style="border-left:1px solid var(--border);background:var(--surface-2);padding:20px;overflow-y:auto">
+        <div style="font-size:11px;color:var(--text-3);font-weight:600;letter-spacing:.10em;text-transform:uppercase;margin-bottom:10px">Comunicação</div>
+        <div id="drawer-comm-${devId}" style="margin-bottom:22px;"><div style="font-size:12px;color:var(--text-3);">Carregando conversa…</div></div>
         <div style="font-size:11px;color:var(--text-3);font-weight:600;letter-spacing:.10em;text-transform:uppercase;margin-bottom:10px">Ações rápidas</div>
         <div style="display:grid;gap:6px;margin-bottom:22px">
           ${dev.tel?`<button onclick="window.open('https://wa.me/55${dev.tel.replace(/\D/g,'')}','_blank')" style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);font-weight:500;text-align:left;cursor:pointer">💬 Enviar WhatsApp</button>`:''}
