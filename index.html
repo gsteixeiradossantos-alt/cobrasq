@@ -11604,8 +11604,10 @@ function negExecutarOpcao(devId, opcaoId){
     html += `<div style="margin-bottom:12px;">
       <div style="font-size:11px;font-weight:600;color:var(--text-2);margin-bottom:4px;">${escHtml(b.label)}</div>
       <textarea id="neg-tx-${devId}-${idx}" rows="${rows}" style="width:100%;font-size:12.5px;line-height:1.5;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-family:inherit;resize:vertical;background:var(--surface-2);color:var(--text);">${escHtml(textoFinal)}</textarea>
-      <div style="display:flex;gap:6px;margin-top:6px;">
+      <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">
         <button class="btn btn-primary btn-sm" onclick="negEnviarBloco('${devId}','${opcaoId}',${idx})">📱 Enviar via WhatsApp</button>
+        <button class="btn btn-ghost btn-sm" onclick="agAbrirModal('${devId}',${idx})" title="Agendar o envio desta mensagem para uma data/hora">🕓 Agendar</button>
+        <button class="btn btn-ghost btn-sm" onclick="biaAbrir('${devId}','neg-tx-${devId}-${idx}')" title="Beatriz IA sugere uma reformulação desta mensagem">✨ Sugerir com IA</button>
         <button class="btn btn-ghost btn-sm" onclick="negCopiarBloco('${devId}',${idx},this)">Copiar</button>
       </div>
     </div>`;
@@ -11626,6 +11628,210 @@ function negCancelarMsgs(devId){
   if(window._negAberto) delete window._negAberto[devId];
 }
 
+// ============================================================
+// Onda G · M1 — Agendar mensagem a partir do caso (aba Negociar)
+// Reusa a infra de agendamento já existente da página WhatsApp:
+// crm_mensagens_agendadas + proximoEnvioUtil/proximoSlotComercial +
+// negComAssinatura. O worker server-side cron-mensagens-agendadas envia
+// no horário marcado (mesma tabela/coluna que a aba "Agendados").
+// Prefixo ag*/_ag* (sem colisão — grep confirmado).
+// ============================================================
+window._agCtx = window._agCtx || { devId:null };
+
+// Abre o modal de agendamento pré-preenchido com o texto do bloco atual
+// (com assinatura aplicada, igual ao envio) + default de horário útil.
+function agAbrirModal(devId, blocoIdx){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev){ showToast('Caso não encontrado.','danger'); return; }
+  const tel = String(dev.tel||'').replace(/\D/g,'');
+  if(!tel){ showToast('Devedor sem telefone cadastrado.','warning'); return; }
+  // Texto vem do bloco clicado (se houver) com a assinatura do operador.
+  let texto = '';
+  if(blocoIdx!=null){
+    const ta = document.getElementById('neg-tx-'+devId+'-'+blocoIdx);
+    if(ta) texto = negComAssinatura(ta.value);
+  }
+  window._agCtx = { devId };
+  agFecharModal();
+  const quandoDefault = (typeof proximoEnvioUtil==='function') ? proximoEnvioUtil() : '';
+  const ov = document.createElement('div');
+  ov.id = 'agModal';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:1300;background:rgba(10,21,48,.42);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;padding:24px;';
+  ov.innerHTML = `<div style="width:520px;max-width:100%;background:var(--surface);border-radius:16px;overflow:hidden;box-shadow:var(--shadow-lg,0 12px 40px rgba(0,0,0,.25));">
+    <div style="padding:18px 22px;background:var(--navy);color:var(--side-fg,#fff);display:flex;align-items:center;justify-content:space-between;">
+      <div style="font-size:15px;font-weight:600;">🕓 Agendar mensagem</div>
+      <button onclick="agFecharModal()" style="width:28px;height:28px;border-radius:50%;border:1px solid rgba(239,234,217,.3);background:transparent;color:var(--side-fg,#fff);cursor:pointer;font-size:15px;">✕</button>
+    </div>
+    <div style="padding:20px 22px;">
+      <div style="font-size:12.5px;color:var(--text-2);margin-bottom:14px;">Para <strong>${escHtml(dev.nome||'(sem nome)')}</strong> · ${escHtml(tel)}. O envio acontece automaticamente no horário marcado (worker COBRASQ).</div>
+      <label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);display:block;margin-bottom:5px;">Data e hora</label>
+      <input type="datetime-local" id="agQuando" value="${escHtml(quandoDefault)}" style="width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font:inherit;font-size:13px;background:var(--surface-2);color:var(--text);margin-bottom:14px;">
+      <label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);display:block;margin-bottom:5px;">Mensagem</label>
+      <textarea id="agMensagem" rows="7" style="width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font:inherit;font-size:13px;line-height:1.5;resize:vertical;background:var(--surface-2);color:var(--text);">${escHtml(texto)}</textarea>
+      <div style="font-size:11px;color:var(--text-3);margin-top:6px;">A assinatura do operador já está aplicada. Edite à vontade antes de agendar.</div>
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px;">
+        <button onclick="agFecharModal()" style="padding:10px 15px;border-radius:9px;border:1px solid var(--border);background:var(--surface);color:var(--text-2);cursor:pointer;font-size:12.5px;font-weight:600;">Cancelar</button>
+        <button id="agBtnConfirm" onclick="agConfirmar()" style="padding:10px 18px;border-radius:9px;border:0;background:var(--navy);color:var(--side-fg,#fff);cursor:pointer;font-size:12.5px;font-weight:600;">Agendar envio</button>
+      </div>
+    </div>
+  </div>`;
+  ov.addEventListener('mousedown', e=>{ if(e.target===ov) agFecharModal(); });
+  document.body.appendChild(ov);
+  const t=document.getElementById('agMensagem'); if(t) setTimeout(()=>t.focus(),60);
+}
+
+function agFecharModal(){ const ov=document.getElementById('agModal'); if(ov) ov.remove(); }
+
+// Grava em crm_mensagens_agendadas (mesma tabela/colunas da aba Agendados):
+// devedor_id = caso_id, telefone, mensagem, agendada_para, operador_id, origem.
+async function agConfirmar(){
+  const ctx = window._agCtx || {};
+  const dev = (DB.devedores||[]).find(d=>d.id===ctx.devId); if(!dev){ showToast('Caso não encontrado.','danger'); return; }
+  const supa = (typeof getSupabase==='function') ? getSupabase() : null;
+  if(!supa){ showToast('Supabase indisponível.','danger'); return; }
+  const tel = String(dev.tel||'').replace(/\D/g,'');
+  if(!tel){ showToast('Devedor sem telefone.','warning'); return; }
+  const quando = document.getElementById('agQuando')?.value;
+  const msg = (document.getElementById('agMensagem')?.value||'').trim();
+  if(!quando){ showToast('Informe data/hora.','danger'); return; }
+  if(!msg){ showToast('Mensagem vazia.','danger'); return; }
+  const dt = new Date(quando);
+  if(isNaN(dt.getTime()) || dt <= new Date()){ showToast('A data deve ser no futuro.','danger'); return; }
+  const btn = document.getElementById('agBtnConfirm');
+  if(btn){ btn.disabled=true; btn.textContent='Agendando…'; }
+  try{
+    const { data:auth } = await supa.auth.getUser();
+    const operadorId = auth?.user?.id || (currentUser && currentUser.id) || null;
+    const { error } = await supa.from('crm_mensagens_agendadas').insert({
+      devedor_id: dev.id,
+      operador_id: operadorId,
+      telefone: tel,
+      tipo: 'texto',
+      mensagem: msg,
+      agendada_para: dt.toISOString(),
+      status: 'pendente',
+      origem: 'manual'
+    });
+    if(error) throw error;
+    if(typeof _negRegistrarHistorico==='function'){
+      _negRegistrarHistorico(dev, 'Mensagem agendada para '+dt.toLocaleString('pt-BR')+'.');
+    }
+    showToast('Mensagem agendada para '+dt.toLocaleString('pt-BR')+'.','success');
+    agFecharModal();
+  }catch(e){
+    showToast('Falha ao agendar: '+(e.message||e),'danger');
+    if(btn){ btn.disabled=false; btn.textContent='Agendar envio'; }
+  }
+}
+
+// ============================================================
+// Onda G · M2 — Beatriz IA: sugerir mensagem no caso (aba Negociar)
+// Reusa a Edge Function beatriz-msg (Claude Haiku), a MESMA que a página
+// WhatsApp usa em waPendSugerir. Escolhe a intenção, pede 3 sugestões e
+// joga o texto escolhido no textarea do bloco (fluxo de envio da Onda A).
+// Prefixo bia*/_bia* (sem colisão — grep confirmado).
+// depende da Edge beatriz-msg (não cria Edge nova).
+// ============================================================
+window._biaCtx = window._biaCtx || { devId:null, alvoTextareaId:null, ultimas:[], processando:false };
+
+const BIA_INTENCOES = [
+  ['primeira_abordagem','Primeira abordagem'],
+  ['follow_up','Follow-up (sem resposta)'],
+  ['proposta_pagamento','Proposta de pagamento'],
+  ['lembrete_assinatura','Lembrete de assinatura do acordo'],
+  ['ultima_tentativa','Última tentativa antes de judicial'],
+  ['sem_telefone','Pedir telefone novo (empresa)'],
+  ['objecao_resposta','Resposta a objeção']
+];
+
+// Abre o modal da Beatriz mirando o textarea `alvoTextareaId` do bloco.
+function biaAbrir(devId, alvoTextareaId){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev){ showToast('Caso não encontrado.','danger'); return; }
+  window._biaCtx = { devId, alvoTextareaId: alvoTextareaId||null, ultimas:[], processando:false };
+  biaFechar();
+  const opts = BIA_INTENCOES.map(([v,l])=>`<option value="${v}">${escHtml(l)}</option>`).join('');
+  const ov = document.createElement('div');
+  ov.id = 'biaModal';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:1300;background:rgba(10,21,48,.42);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;padding:24px;';
+  ov.innerHTML = `<div style="width:560px;max-width:100%;max-height:82vh;overflow-y:auto;background:var(--surface);border-radius:16px;box-shadow:var(--shadow-lg,0 12px 40px rgba(0,0,0,.25));">
+    <div style="padding:18px 22px;background:var(--navy);color:var(--side-fg,#fff);display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;">
+      <div style="font-size:15px;font-weight:600;">✨ Beatriz sugere…</div>
+      <button onclick="biaFechar()" style="width:28px;height:28px;border-radius:50%;border:1px solid rgba(239,234,217,.3);background:transparent;color:var(--side-fg,#fff);cursor:pointer;font-size:15px;">✕</button>
+    </div>
+    <div style="padding:20px 22px;">
+      <div style="font-size:12.5px;color:var(--text-2);margin-bottom:14px;">IA assistente. Sugere mensagens curtas e profissionais — você revisa e envia pelo fluxo normal.</div>
+      <label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);display:block;margin-bottom:5px;">Intenção</label>
+      <select id="biaIntencao" style="width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font:inherit;font-size:13px;background:var(--surface-2);color:var(--text);margin-bottom:12px;">${opts}</select>
+      <label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);display:block;margin-bottom:5px;">Contexto extra (opcional)</label>
+      <textarea id="biaContexto" rows="2" placeholder="ex: disse que perdeu o emprego; já ligamos 3 vezes…" style="width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:8px;font:inherit;font-size:13px;resize:vertical;background:var(--surface-2);color:var(--text);"></textarea>
+      <button id="biaBtnSugerir" onclick="biaSugerir()" style="margin-top:12px;width:100%;padding:11px;border-radius:9px;border:0;background:var(--navy);color:var(--side-fg,#fff);cursor:pointer;font-size:13px;font-weight:600;">✨ Sugerir</button>
+      <div id="biaResultado" style="margin-top:14px;"></div>
+    </div>
+  </div>`;
+  ov.addEventListener('mousedown', e=>{ if(e.target===ov) biaFechar(); });
+  document.body.appendChild(ov);
+}
+
+function biaFechar(){ const ov=document.getElementById('biaModal'); if(ov) ov.remove(); }
+
+// Chama a Edge beatriz-msg (mesma assinatura do CRM/WhatsApp) e mostra 3 sugestões.
+async function biaSugerir(){
+  const ctx = window._biaCtx || {};
+  if(ctx.processando) return;
+  const supa = (typeof getSupabase==='function') ? getSupabase() : null;
+  const res = document.getElementById('biaResultado');
+  if(!supa){ if(res) res.innerHTML='<div style="color:var(--danger);font-size:13px;">IA indisponível (sem sessão Supabase).</div>'; return; }
+  const dev = (DB.devedores||[]).find(d=>d.id===ctx.devId); if(!dev) return;
+  ctx.processando = true;
+  const btn = document.getElementById('biaBtnSugerir');
+  if(btn){ btn.disabled=true; btn.textContent='⏳ Pensando…'; }
+  if(res) res.innerHTML = '<div style="color:var(--text-3);font-size:13px;padding:8px 0;">Aguarde…</div>';
+  try{
+    const intencao = document.getElementById('biaIntencao')?.value || 'primeira_abordagem';
+    const contexto = (document.getElementById('biaContexto')?.value||'').trim();
+    const { data, error } = await supa.functions.invoke('beatriz-msg', {
+      body: { caso_id: dev.id, intencao, contexto_extra: contexto || null }
+    });
+    if(error) throw error;
+    if(data && data.error) throw new Error(data.error);
+    const sugestoes = (data && Array.isArray(data.sugestoes)) ? data.sugestoes : [];
+    ctx.ultimas = sugestoes;
+    if(!sugestoes.length){ if(res) res.innerHTML='<div style="color:var(--text-3);font-size:13px;">Beatriz não retornou sugestões. Tente de novo.</div>'; return; }
+    if(res){
+      res.innerHTML = sugestoes.map((s,i)=>{
+        const safe = escHtml(s.texto||'');
+        const tom = escHtml(s.tom||'?');
+        return `<div style="border:1px solid var(--border);border-radius:9px;padding:11px 13px;margin-bottom:9px;background:var(--surface-2);">
+          <div style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--gold-dark,#9C7F40);font-weight:700;margin-bottom:5px;">Sugestão ${i+1} · tom ${tom}</div>
+          <div style="font-size:13px;white-space:pre-wrap;margin-bottom:9px;color:var(--text);">${safe}</div>
+          <button onclick="biaUsar(${i})" style="width:100%;padding:9px;border-radius:8px;border:0;background:#2E7D5B;color:#fff;cursor:pointer;font-size:12.5px;font-weight:600;">✓ Usar essa</button>
+        </div>`;
+      }).join('');
+    }
+  }catch(e){
+    if(res) res.innerHTML = '<div style="color:var(--danger);font-size:13px;">Erro: '+escHtml((e&&e.message)||String(e))+'</div>';
+  }finally{
+    ctx.processando = false;
+    if(btn){ btn.disabled=false; btn.textContent='✨ Sugerir'; }
+  }
+}
+
+// Joga o texto escolhido no textarea do bloco (revisar/enviar pelo fluxo da Onda A).
+function biaUsar(idx){
+  const ctx = window._biaCtx || {};
+  const s = ctx.ultimas && ctx.ultimas[idx];
+  if(!s) return;
+  const alvo = ctx.alvoTextareaId ? document.getElementById(ctx.alvoTextareaId) : null;
+  if(alvo){
+    alvo.value = s.texto;
+    try{ alvo.dispatchEvent(new Event('input')); }catch(_){}
+    showToast('Sugestão aplicada no bloco — revise antes de enviar.','success');
+  } else {
+    try{ navigator.clipboard.writeText(s.texto); showToast('Sugestão copiada.','success'); }
+    catch(_){ showToast('Copie manualmente.','warning'); }
+  }
+  biaFechar();
+}
+
 function negCopiarBloco(devId, idx, btn){
   const ta = document.getElementById('neg-tx-'+devId+'-'+idx);
   if(!ta) return;
@@ -11643,8 +11849,10 @@ async function negEnviarBloco(devId, opcaoId, idx){
   if(!ta) return;
   const texto = negComAssinatura(ta.value);
   // Confirmação antes do envio imediato pelo número COBRASQ (paridade com o CRM).
+  // Onda F · M2: respeita "pular confirmação Z-API" das Configurações (padrão = confirmar).
+  const _pularConfirm = (typeof wcfgLerPularConfirm==='function') && wcfgLerPularConfirm();
   const prev = texto.length > 400 ? texto.slice(0,400)+'\n…' : texto;
-  if(!confirm('CONFIRMAR envio via WhatsApp (Z-API):\n\nPara: '+tel+'\n\nMensagem:\n"""\n'+prev+'\n"""\n\nSerá enviada IMEDIATAMENTE pelo número COBRASQ. Continuar?')) return;
+  if(!_pularConfirm && !confirm('CONFIRMAR envio via WhatsApp (Z-API):\n\nPara: '+tel+'\n\nMensagem:\n"""\n'+prev+'\n"""\n\nSerá enviada IMEDIATAMENTE pelo número COBRASQ. Continuar?')) return;
   if(typeof _aavEnviarWhats !== 'function'){ showToast('Envio Z-API indisponível nesta build.','danger'); return; }
   const r = await _aavEnviarWhats(tel, texto);
   if(r && r.ok){
@@ -12122,8 +12330,10 @@ async function pagEnviarProposta(devId, opcao){
   // pagamento via api (dispatch em automacao.js como ação _mercadopago) + secret
   // MP — hoje envia só a proposta-texto (paridade com o CRM).
 
+  // Onda F · M2: respeita "pular confirmação Z-API" das Configurações (padrão = confirmar).
+  const _pularConfirm = (typeof wcfgLerPularConfirm==='function') && wcfgLerPularConfirm();
   const prev = texto.length > 400 ? texto.slice(0,400)+'\n…' : texto;
-  if(!confirm('CONFIRMAR envio da proposta ('+(labels[opcao]||opcao)+') via WhatsApp (Z-API):\n\nPara: '+tel+'\n\nMensagem:\n"""\n'+prev+'\n"""\n\nSerá enviada IMEDIATAMENTE pelo número COBRASQ. Continuar?')) return;
+  if(!_pularConfirm && !confirm('CONFIRMAR envio da proposta ('+(labels[opcao]||opcao)+') via WhatsApp (Z-API):\n\nPara: '+tel+'\n\nMensagem:\n"""\n'+prev+'\n"""\n\nSerá enviada IMEDIATAMENTE pelo número COBRASQ. Continuar?')) return;
   if(typeof _aavEnviarWhats !== 'function'){ if(typeof showToast==='function') showToast('Envio Z-API indisponível nesta build.','danger'); return; }
   const r = await _aavEnviarWhats(tel, texto);
   if(r && r.ok){
@@ -31303,6 +31513,7 @@ function renderConfiguracoes(){
     {id:'prazos',icon:ico('clock',15),label:'Prazos das etapas'},
     {id:'fases',icon:ico('charges',15),label:'Etiquetas'},
     {id:'fiscal',icon:ico('file',15),label:'Fiscal · NF'},
+    {id:'templates',icon:ico('file',15),label:'Templates de peça'},
     {id:'integracoes',icon:ico('link',15),label:'Integrações'},
     {id:'notificacoes',icon:ico('bell',15),label:'Notificações'},
     {id:'senha',icon:ico('key',15),label:'Senha'},
@@ -31377,6 +31588,15 @@ function renderCfgSection(section){
     nfaRenderModelos();
     nfaCarregarServicos();
     (async ()=>{ try{ _nfaHist = await nfaFetchHist(); nfaRenderConciliacao(); }catch(_){/* sem sessão/erro: só não mostra conciliação */} })();
+    return;
+  }
+
+  if(section==='templates'){
+    // Onda F · M3 — CRUD admin de peticao_templates (só proprietário, via gate cfg).
+    el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:6px;">Templates de peça</h3>
+      <div style="font-size:12.5px;color:var(--text-2);margin-bottom:18px;">Modelos usados na geração de peças jurídicas. Use variáveis no formato <code>{{devedor.nome}}</code>, <code>{{cliente.razao_social}}</code>, <code>{{divida.valor_atual_brl}}</code> no corpo. Só templates <b>ativos</b> aparecem na geração.</div>
+      <div id="cfg-templates-host"><div style="color:var(--text-3);font-size:13px;">Carregando templates…</div></div>`;
+    tplRenderList();
     return;
   }
 
@@ -31662,6 +31882,35 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
         <span id="zapi-test-result" style="font-size:12px;margin-left:8px;"></span>
       </div>
 
+      <!-- ── Onda F · M2 · Envio de WhatsApp (modo + confirmação) ─────────────
+           Modo wa.me (manual) x Z-API (envio direto) e "pular confirmação Z-API".
+           Persiste nas MESMAS chaves localStorage do CRM (cobrasq_whatsapp_modo /
+           cobrasq_pular_confirm_zapi). O "pular confirmação" é respeitado pelos
+           envios das Ondas A/C (negEnviarBloco/pagEnviarProposta). -->
+      <div class="int-card">
+        <div class="int-card-header">
+          <div class="int-card-logo">${ico('whatsapp',20)}</div>
+          <div><div class="int-card-name">Envio de WhatsApp</div><div class="int-card-sub">Modo de envio e confirmação antes de disparar pelo Z-API</div></div>
+        </div>
+        <div class="fg" style="margin-bottom:12px;">
+          <label>Modo de envio</label>
+          <div style="display:flex;flex-direction:column;gap:8px;margin-top:4px;">
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+              <input type="radio" name="wcfgModo" value="wa.me" ${wcfgObterModo()!=='zapi'?'checked':''} onchange="wcfgTrocarModo(this.value)"/>
+              <span><strong>wa.me (manual)</strong> — abre o WhatsApp com a mensagem pronta para você enviar</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+              <input type="radio" name="wcfgModo" value="zapi" ${wcfgObterModo()==='zapi'?'checked':''} onchange="wcfgTrocarModo(this.value)"/>
+              <span><strong>Z-API (envio direto)</strong> — envia imediatamente pelo número da empresa</span>
+            </label>
+          </div>
+        </div>
+        <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;cursor:pointer;padding:10px 12px;background:var(--surface2);border-radius:var(--radius-sm);">
+          <input type="checkbox" id="wcfg-pular-confirm" ${wcfgLerPularConfirm()?'checked':''} onchange="wcfgTrocarPularConfirm(this.checked)" style="margin-top:2px;"/>
+          <span>Pular a confirmação antes de enviar via Z-API <span style="color:var(--text-3);">— quando ligado, os envios de negociação e proposta disparam sem o pop-up de confirmação. Deixe desligado para revisar cada envio.</span></span>
+        </label>
+      </div>
+
       <!-- ── Régua de Cobrança ─────────────────────── -->
       <div class="int-card">
         <div class="int-card-header">
@@ -31943,14 +32192,33 @@ async function renderCfgUsuariosApp(){
     rows=r.data||[];
   }catch(e){ host.innerHTML=`<div style="color:var(--danger);font-size:13px;">Não foi possível carregar usuários: ${escHtml(e.message||String(e))}</div>`; return; }
   const staff=rows.filter(u=>['proprietario','colaborador'].includes(u.papel));
+  // Onda F · M1 — proprietário edita papel + ativa/desativa direto em app_users.
+  // A coluna "Ações" só aparece para o proprietário (gate por papel), como no CRM.
   const linha=u=>{
     const meu = currentUser?.supaId===u.id || currentUser?.email===u.email;
     const badge = u.papel==='proprietario' ? '<span class="badge b-gold">Administrador</span>' : '<span class="badge b-blue">Colaborador</span>';
     const st = u.ativo===false ? '<span style="font-size:11px;color:var(--danger);">inativo</span>' : '<span style="font-size:11px;color:var(--success);">ativo</span>';
-    return `<tr><td><strong>${escHtml(u.nome||'—')}</strong>${meu?' <span style="font-size:10.5px;color:var(--text-3);">(você)</span>':''}</td><td style="font-size:12px;color:var(--text-3);">${escHtml(u.email||'—')}</td><td>${badge}</td><td>${st}</td></tr>`;
+    let acoesCell='';
+    if(isOwner){
+      if(meu){
+        // Proteção: o próprio usuário logado não muda o próprio papel nem se desativa.
+        acoesCell = `<td style="font-size:11px;color:var(--text-3);">—</td>`;
+      } else {
+        const uid = escHtml(u.id||'');
+        const papelSel = `<select onchange="usrAlterarPapel('${uid}', this.value, this)" style="padding:5px 8px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;background:var(--bg);color:var(--text);">
+            <option value="colaborador" ${u.papel==='colaborador'?'selected':''}>Colaborador</option>
+            <option value="proprietario" ${u.papel==='proprietario'?'selected':''}>Administrador</option>
+          </select>`;
+        const inativo = u.ativo===false;
+        const btnAtivo = `<button class="btn btn-${inativo?'primary':'danger'} btn-xs" onclick="usrAlternarAtivo('${uid}', ${!inativo}, this)">${inativo?'Ativar':'Desativar'}</button>`;
+        acoesCell = `<td><div style="display:flex;gap:6px;align-items:center;">${papelSel}${btnAtivo}</div></td>`;
+      }
+    }
+    return `<tr><td><strong>${escHtml(u.nome||'—')}</strong>${meu?' <span style="font-size:10.5px;color:var(--text-3);">(você)</span>':''}</td><td style="font-size:12px;color:var(--text-3);">${escHtml(u.email||'—')}</td><td>${badge}</td><td>${st}</td>${acoesCell}</tr>`;
   };
+  const thAcoes = isOwner ? '<th>Ações</th>' : '';
   const tabela = staff.length
-    ? `<div class="tbl-wrap" style="margin-bottom:18px;"><table class="tbl"><thead><tr><th>Nome</th><th>E-mail</th><th>Papel</th><th>Status</th></tr></thead><tbody>${staff.map(linha).join('')}</tbody></table></div>`
+    ? `<div class="tbl-wrap" style="margin-bottom:18px;"><table class="tbl"><thead><tr><th>Nome</th><th>E-mail</th><th>Papel</th><th>Status</th>${thAcoes}</tr></thead><tbody>${staff.map(linha).join('')}</tbody></table></div>`
     : `<div style="color:var(--text-3);font-size:13px;margin-bottom:14px;">Nenhum usuário da equipe.</div>`;
   const form = isOwner ? `
     <div style="background:var(--surface2);border-radius:var(--r-sm);padding:14px;">
@@ -31959,9 +32227,79 @@ async function renderCfgUsuariosApp(){
       <div class="frow"><div class="fg"><label>Senha provisória</label><input type="text" id="cfg-au-senha" placeholder="mín. 6 caracteres"/></div><div class="fg"><label>Papel</label><select id="cfg-au-papel"><option value="colaborador">Colaborador</option><option value="proprietario">Administrador</option></select></div></div>
       <button class="btn btn-primary" id="cfg-au-btn" onclick="criarUsuarioApp()">Criar usuário</button>
       <div id="cfg-au-msg" style="margin-top:8px;font-size:12px;"></div>
-      <div style="margin-top:10px;font-size:11px;color:var(--text-3);">Alterar papel e desativar usuários entram numa próxima etapa (com trava de "último admin"). Por ora, use o CRM se precisar disso.</div>
-    </div>` : `<div style="font-size:12px;color:var(--text-3);">Só o administrador cria usuários.</div>`;
+      <div style="margin-top:10px;font-size:11px;color:var(--text-3);">Alterar papel e ativar/desativar acima gravam direto no cadastro de usuários. Você não pode mudar o próprio papel nem se desativar.</div>
+    </div>` : `<div style="font-size:12px;color:var(--text-3);">Só o administrador cria e gerencia usuários.</div>`;
   host.innerHTML = tabela + form;
+}
+
+// Onda F · M1 — proprietário muda o papel de OUTRO usuário direto em app_users.
+// Porta a intenção de alternarRole (crm.html) adaptada para app_users (papel:
+// proprietario/colaborador). Trava de "último admin ativo" + proteção do próprio user.
+// GATED: pode exigir policy UPDATE app_users p/ proprietario OU Edge nova
+// (a policy default `own_update_users` só permite auth.uid()=id, i.e. a própria linha).
+async function usrAlterarPapel(userId, novoPapel, sel){
+  const isOwner = (currentUser?.papel==='proprietario') || (currentUser?.tipo==='gestor');
+  if(!isOwner){ showToast('Só o administrador pode alterar papéis.','danger'); return; }
+  if(currentUser?.supaId===userId){ showToast('Você não pode alterar o próprio papel.','warning'); if(typeof renderCfgUsuariosApp==='function') renderCfgUsuariosApp(); return; }
+  const sb=getSupabase(); if(!sb){ showToast('Sem conexão com o banco.','danger'); return; }
+  // Trava: não rebaixar o último administrador ativo.
+  try{
+    if(novoPapel==='colaborador'){
+      const alvo = await sb.from('app_users').select('papel,ativo').eq('id',userId).single();
+      if(!alvo.error && alvo.data && alvo.data.papel==='proprietario' && alvo.data.ativo!==false){
+        const c = await sb.from('app_users').select('id',{count:'exact',head:true}).eq('papel','proprietario').eq('ativo',true);
+        if(!c.error && (c.count||0) <= 1){ showToast('Não é possível rebaixar o último administrador ativo.','danger'); if(typeof renderCfgUsuariosApp==='function') renderCfgUsuariosApp(); return; }
+      }
+    }
+  }catch(_){}
+  const label = novoPapel==='proprietario' ? 'Administrador' : 'Colaborador';
+  if(!confirm('Alterar o papel deste usuário para "'+label+'"?')){ if(typeof renderCfgUsuariosApp==='function') renderCfgUsuariosApp(); return; }
+  if(sel){ sel.disabled=true; }
+  try{
+    const { error } = await sb.from('app_users').update({ papel: novoPapel }).eq('id', userId);
+    if(error) throw error;
+    showToast('Papel alterado.','success');
+    if(typeof carregarRosterAppUsers==='function'){ try{ await carregarRosterAppUsers(true); }catch(_){} }
+    if(typeof renderCfgUsuariosApp==='function') renderCfgUsuariosApp();
+  }catch(e){
+    if(sel){ sel.disabled=false; }
+    // GATED: se a RLS de UPDATE não permitir ao proprietário editar outra linha,
+    // isto falha aqui em runtime — mostra erro claro e recarrega o estado real.
+    showToast('Erro ao alterar papel: '+(e.message||e)+' (pode exigir policy/Edge).','danger');
+    if(typeof renderCfgUsuariosApp==='function') renderCfgUsuariosApp();
+  }
+}
+
+// Onda F · M1 — proprietário ativa/desativa OUTRO usuário (coluna app_users.ativo).
+// Porta a intenção de alternarAtivo (crm.html). Desativado não faz login.
+// GATED: pode exigir policy UPDATE app_users p/ proprietario OU Edge nova.
+async function usrAlternarAtivo(userId, novoAtivo, btn){
+  const isOwner = (currentUser?.papel==='proprietario') || (currentUser?.tipo==='gestor');
+  if(!isOwner){ showToast('Só o administrador pode ativar/desativar usuários.','danger'); return; }
+  if(currentUser?.supaId===userId){ showToast('Você não pode desativar o próprio acesso.','warning'); return; }
+  const sb=getSupabase(); if(!sb){ showToast('Sem conexão com o banco.','danger'); return; }
+  // Trava: não desativar o último administrador ativo.
+  try{
+    if(novoAtivo===false){
+      const alvo = await sb.from('app_users').select('papel').eq('id',userId).single();
+      if(!alvo.error && alvo.data && alvo.data.papel==='proprietario'){
+        const c = await sb.from('app_users').select('id',{count:'exact',head:true}).eq('papel','proprietario').eq('ativo',true);
+        if(!c.error && (c.count||0) <= 1){ showToast('Não é possível desativar o último administrador ativo.','danger'); return; }
+      }
+    }
+  }catch(_){}
+  if(!confirm(novoAtivo ? 'Reativar este usuário?' : 'Desativar este usuário? Ele não conseguirá mais fazer login.')){ return; }
+  if(btn){ btn.disabled=true; }
+  try{
+    const { error } = await sb.from('app_users').update({ ativo: novoAtivo }).eq('id', userId);
+    if(error) throw error;
+    showToast(novoAtivo ? 'Usuário ativado.' : 'Usuário desativado.','success');
+    if(typeof renderCfgUsuariosApp==='function') renderCfgUsuariosApp();
+  }catch(e){
+    if(btn){ btn.disabled=false; }
+    // GATED: idem — a policy default só libera a própria linha (auth.uid()=id).
+    showToast('Erro ao atualizar status: '+(e.message||e)+' (pode exigir policy/Edge).','danger');
+  }
 }
 async function criarUsuarioApp(){
   const nome=(document.getElementById('cfg-au-nome')?.value||'').trim();
@@ -31987,6 +32325,150 @@ async function criarUsuarioApp(){
     err('Erro ao criar: '+(e.message||e));
   }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Onda F · M2 — Config de envio WhatsApp (modo + pular confirmação Z-API)
+// Porta obterModoEnvioWhatsApp/definirModoEnvioWhatsApp + lerPularConfirmZapi/
+// definirPularConfirmZapi do CRM, usando AS MESMAS chaves localStorage
+// (cobrasq_whatsapp_modo / cobrasq_pular_confirm_zapi) para paridade total.
+// ════════════════════════════════════════════════════════════════════════════
+const WCFG_MODO_KEY = 'cobrasq_whatsapp_modo';
+const WCFG_PULAR_CONFIRM_KEY = 'cobrasq_pular_confirm_zapi';
+function wcfgObterModo(){
+  try{ return localStorage.getItem(WCFG_MODO_KEY) || 'wa.me'; }catch(e){ return 'wa.me'; }
+}
+function wcfgDefinirModo(modo){
+  try{ localStorage.setItem(WCFG_MODO_KEY, modo); }catch(e){}
+}
+function wcfgLerPularConfirm(){
+  try{ return localStorage.getItem(WCFG_PULAR_CONFIRM_KEY) === '1'; }catch(e){ return false; }
+}
+function wcfgDefinirPularConfirm(v){
+  try{ localStorage.setItem(WCFG_PULAR_CONFIRM_KEY, v ? '1' : '0'); }catch(e){}
+}
+function wcfgTrocarModo(novoModo){
+  wcfgDefinirModo(novoModo);
+  if(typeof showToast==='function') showToast('Modo de envio: '+(novoModo==='zapi'?'Z-API (envio direto)':'wa.me (manual)')+'.','success');
+}
+function wcfgTrocarPularConfirm(checked){
+  wcfgDefinirPularConfirm(!!checked);
+  if(typeof showToast==='function') showToast(checked ? 'Confirmação Z-API desativada.' : 'Confirmação Z-API reativada.','success');
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Onda F · M3 — CRUD admin de templates de peça (peticao_templates)
+// Porta a intenção de renderAdmin/_insereTemplate/deletarTemplate do CRM, numa
+// versão simples (textarea de conteúdo, sem Quill/logo/versionamento). A tela de
+// geração de peças (petCarregarTemplates) consome os templates ativos.
+// ════════════════════════════════════════════════════════════════════════════
+const TPL_TIPOS = ['execucao_extrajudicial','monitoria','inicial_cobranca','cumprimento_sentenca','execucao_titulo'];
+let _tplCache = [];
+let _tplEditId = null;
+async function tplRenderList(){
+  const host = document.getElementById('cfg-templates-host'); if(!host) return;
+  const sb = getSupabase();
+  if(!sb){ host.innerHTML = `<div style="color:var(--text-3);font-size:13px;">Supabase indisponível.</div>`; return; }
+  host.innerHTML = `<div style="color:var(--text-3);font-size:13px;">Carregando templates…</div>`;
+  let rows=[];
+  try{
+    const r = await sb.from('peticao_templates').select('id,tipo,nome,descricao,ativo,updated_at').order('nome');
+    if(r.error) throw r.error;
+    rows = r.data||[];
+  }catch(e){ host.innerHTML = `<div style="color:var(--danger);font-size:13px;">Não foi possível carregar templates: ${escHtml(e.message||String(e))}</div>`; return; }
+  _tplCache = rows;
+  const lista = rows.length ? rows.map(t=>{
+    const inativo = t.ativo===false;
+    return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:8px;${inativo?'opacity:.55;':''}">
+      <div style="min-width:0;">
+        <div style="font-weight:600;font-size:13px;">${escHtml(t.nome||'—')}${inativo?' <span style="font-size:10px;background:#999;color:#fff;padding:1px 6px;border-radius:3px;">INATIVO</span>':''}</div>
+        <div style="font-size:11.5px;color:var(--text-3);">${escHtml(t.tipo||'')}${t.descricao?' · '+escHtml(t.descricao):''}</div>
+      </div>
+      <div style="display:flex;gap:6px;flex-shrink:0;">
+        <button class="btn btn-ghost btn-xs" onclick="tplEditar('${escHtml(t.id)}')">Editar</button>
+        <button class="btn btn-danger btn-xs" onclick="tplExcluir('${escHtml(t.id)}')">Excluir</button>
+      </div>
+    </div>`;
+  }).join('') : `<div style="color:var(--text-3);font-size:13px;margin-bottom:12px;">Nenhum template ainda. Clique em "Novo template".</div>`;
+  host.innerHTML = `<div id="cfg-templates-list">${lista}</div>
+    <button class="btn btn-primary btn-sm" style="margin-top:6px;" onclick="tplEditar('new')">＋ Novo template</button>`;
+}
+function tplEditar(id){
+  _tplEditId = (id==='new'||!id) ? null : id;
+  const host = document.getElementById('cfg-templates-host'); if(!host) return;
+  const t = _tplEditId ? (_tplCache.find(x=>x.id===_tplEditId)||{}) : {};
+  // Carrega o corpo completo (a lista não traz conteudo_html) antes de renderizar o editor.
+  const montar = (data)=>{
+    const d = data||t;
+    const opts = TPL_TIPOS.map(tp=>`<option value="${tp}" ${d.tipo===tp?'selected':''}>${tp}</option>`).join('');
+    host.innerHTML = `
+      <div style="font-size:11px;font-weight:700;color:var(--text-3);text-transform:uppercase;margin-bottom:12px;">${_tplEditId?'Editar template':'Novo template'}</div>
+      <div class="frow"><div class="fg"><label>Nome</label><input type="text" id="tpl-nome" value="${escHtml(d.nome||'')}"/></div><div class="fg"><label>Tipo</label><select id="tpl-tipo" style="padding:9px 12px;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:13px;background:var(--bg);color:var(--text);width:100%;">${opts}</select></div></div>
+      <div class="fg"><label>Descrição</label><input type="text" id="tpl-descricao" value="${escHtml(d.descricao||'')}"/></div>
+      <div class="fg"><label>Corpo (HTML) — use variáveis no formato {{devedor.nome}}</label><textarea id="tpl-conteudo" rows="12" style="width:100%;font-family:ui-monospace,monospace;font-size:12px;resize:vertical;">${escHtml(d.conteudo_html||'')}</textarea></div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin:6px 0 12px;cursor:pointer;"><input type="checkbox" id="tpl-ativo" ${d.ativo===false?'':'checked'}/> Template ativo (aparece na geração de peças)</label>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-primary" id="tpl-save-btn" onclick="tplSalvar()">Salvar template</button>
+        <button class="btn btn-ghost" onclick="tplRenderList()">Cancelar</button>
+      </div>
+      <div id="tpl-msg" style="margin-top:8px;font-size:12px;"></div>`;
+  };
+  if(!_tplEditId){ montar({}); return; }
+  const sb = getSupabase();
+  if(!sb){ montar(t); return; }
+  sb.from('peticao_templates').select('*').eq('id',_tplEditId).single()
+    .then(r=>{ if(r.error){ showToast('Erro ao ler template: '+r.error.message,'danger'); montar(t); } else montar(r.data); })
+    .catch(()=>montar(t));
+}
+async function tplSalvar(){
+  const isOwner = (currentUser?.papel==='proprietario') || (currentUser?.tipo==='gestor');
+  if(!isOwner){ showToast('Só o administrador pode salvar templates.','danger'); return; }
+  const nome=(document.getElementById('tpl-nome')?.value||'').trim();
+  const tipo=document.getElementById('tpl-tipo')?.value||'inicial_cobranca';
+  const descricao=(document.getElementById('tpl-descricao')?.value||'').trim();
+  const conteudo_html=document.getElementById('tpl-conteudo')?.value||'';
+  const ativo=!!document.getElementById('tpl-ativo')?.checked;
+  const msg=document.getElementById('tpl-msg'); const btn=document.getElementById('tpl-save-btn');
+  const err=t=>{ if(msg){ msg.style.color='var(--danger)'; msg.textContent=t; } };
+  if(!nome){ return err('Informe um nome.'); }
+  const sb=getSupabase(); if(!sb){ return err('Sem conexão com o banco.'); }
+  // Deriva as variáveis {{token}} do corpo (a geração de peças usa isso p/ auto-fill).
+  const usadas = new Set();
+  String(conteudo_html).replace(/\{\{([a-zA-Z0-9_.]+)\}\}/g,(_,k)=>{ usadas.add(k); return _; });
+  const variaveis = Array.from(usadas).map(k=>({ key:k, label:k, tipo:'text' }));
+  if(btn){ btn.disabled=true; }
+  if(msg){ msg.style.color='var(--text-3)'; msg.textContent='Salvando…'; }
+  try{
+    if(_tplEditId){
+      const { error } = await sb.from('peticao_templates').update({ nome, tipo, descricao, conteudo_html, ativo }).eq('id', _tplEditId);
+      if(error) throw error;
+    } else {
+      const { error } = await sb.from('peticao_templates').insert({ nome, tipo, descricao, conteudo_html, variaveis, ativo, versao:1 });
+      if(error) throw error;
+    }
+    showToast('Template salvo.','success');
+    tplRenderList();
+  }catch(e){
+    if(btn){ btn.disabled=false; }
+    err('Erro ao salvar: '+(e.message||e));
+  }
+}
+async function tplExcluir(id){
+  const isOwner = (currentUser?.papel==='proprietario') || (currentUser?.tipo==='gestor');
+  if(!isOwner){ showToast('Só o administrador pode excluir templates.','danger'); return; }
+  const t = _tplCache.find(x=>x.id===id);
+  const nome = t ? (t.nome||'') : '';
+  const conf = prompt('Para EXCLUIR definitivamente o template "'+nome+'", digite o nome:');
+  if(conf===null) return;
+  if(conf.trim()!==String(nome).trim()){ showToast('Nome não confere.','warning'); return; }
+  const sb=getSupabase(); if(!sb){ showToast('Sem conexão com o banco.','danger'); return; }
+  try{
+    const { error } = await sb.from('peticao_templates').delete().eq('id', id);
+    if(error) throw error;
+    showToast('Template excluído.','success');
+    tplRenderList();
+  }catch(e){ showToast('Erro ao excluir: '+(e.message||e),'danger'); }
+}
+
 function addCategoria(tipo){ const id=tipo==='receita'?'nova-cat-rec':'nova-cat-des'; const v=(document.getElementById(id)?.value||'').trim(); if(!v)return; if(!DB.config.categorias)DB.config.categorias={receita:[],despesa:[]}; DB.config.categorias[tipo].push(v); save(); renderCfgSection('categorias'); }
 function delCategoria(tipo,i){ DB.config.categorias[tipo].splice(i,1); save(); renderCfgSection('categorias'); }
 function salvarIntegracoes(){
