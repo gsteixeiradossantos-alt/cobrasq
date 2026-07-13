@@ -10797,6 +10797,9 @@ function openDrawer(devId){
 
   document.getElementById('devDrawer-status').outerHTML = `<span id="devDrawer-status" class="badge ${getBadgeClass(dev.status)}">${dev.status||'—'}</span>`;
 
+  // Onda B: selo "📵 Telefone inválido" no cabeçalho quando a flag estiver setada.
+  try{ telAtualizarBadgeHeader(dev); }catch(_){}
+
   const metaEl = document.getElementById('devDrawer-meta');
   if(metaEl){
     const cliNome = dev.clienteId ? ((DB.clientes||[]).find(c=>c.id===dev.clienteId)||{}).nome||'—' : '—';
@@ -11475,6 +11478,13 @@ function negRenderPainel(devId){
   const cob = _negCobDe(dev);
   const encerrada = cob && cob.metadata && cob.metadata.encerramento_negociacao;
   const aguardando = cob && cob.metadata && cob.metadata.aguardando_resposta;
+  const telInvalido = _telInvalidoDe(dev);
+
+  // Onda B: telefone inválido tem precedência — mostra o painel de busca de novo número.
+  if(telInvalido){
+    box.innerHTML = telRenderChecklist(devId);
+    return;
+  }
 
   let html = '';
   // Cabeçalho: passo atual
@@ -11534,6 +11544,7 @@ function negRenderPainel(devId){
   html += `<div style="border-top:1px dashed var(--border);margin-top:6px;padding-top:12px;">
     <div style="font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--navy);margin-bottom:7px;">⚡ Sempre disponível</div>
     <button onclick="negExecutarOpcao('${devId}','devedor-respondeu')" style="text-align:left;width:100%;padding:9px 12px;background:#EAF6EF;border:1px solid #B7E0CB;border-radius:7px;font-size:12.5px;color:var(--text);font-weight:500;cursor:pointer;">💳 Formas de pagamento</button>
+    <div style="margin-top:8px;">${telBotaoMarcar(devId)}</div>
   </div>`;
 
   // Área onde os blocos de mensagem são renderizados após escolher a opção
@@ -11624,9 +11635,12 @@ async function negEnviarBloco(devId, opcaoId, idx){
     showToast('Mensagem enviada via WhatsApp.','success');
     ta.setAttribute('data-neg-enviado','1');
   } else {
-    // Onda B trata número inválido em profundidade; aqui só avisa + registra falha.
+    // Onda B: número sem WhatsApp → oferece marcar como inválido e abrir a busca.
     if(r && r.code === 'numero_sem_whatsapp'){
-      showToast('Número sem WhatsApp ativo (tentamos com e sem o 9). Revise o telefone — tratamento completo virá na Onda B.','warning');
+      showToast('Número sem WhatsApp ativo (tentamos com e sem o 9).','warning');
+      if(confirm('O número '+tel+' não tem WhatsApp ativo.\n\nMarcar este telefone como inválido e abrir a busca de novo número?')){
+        await telMarcarInvalido(devId, 'Número sem WhatsApp ativo (envio Z-API falhou).', true);
+      }
     } else {
       showToast('Falha ao enviar: '+((r&&r.error)||'erro desconhecido'),'danger');
     }
@@ -11704,6 +11718,198 @@ async function negReabrir(devId){
   _negRegistrarHistorico(dev, 'Negociação reaberta pelo operador.');
   await _negPersistMeta(devId, { encerramento_negociacao: null, aguardando_resposta: false });
   negRenderPainel(devId);
+}
+
+// ============================================================
+// ONDA B — TELEFONE INVÁLIDO + BUSCA DE NOVO NÚMERO
+// Portado do crm.html (marcarTelefoneInvalido L4047, gerarMensagemEmpresa L4067,
+// ler/salvar/atualizarChecklistTelefone L4072-4115, atualizarTelefoneEReativar L4152).
+// Adaptado ao modelo devedor/cobrança do app: SEM migração — flag vive em
+// cobrancas.metadata.tel_invalido (via _negPersistMeta) e checklist em localStorage.
+// Reusa _negPersistMeta / _negRegistrarHistorico / negNomeOperador da Onda A.
+// Prefixo `tel`/`_tel`.
+// ============================================================
+
+// Lê a flag tel_invalido do metadata da cobrança do devedor.
+function _telInvalidoDe(dev){
+  const cob = _negCobDe(dev);
+  return (cob && cob.metadata && cob.metadata.tel_invalido) || null;
+}
+// Idem, a partir de um objeto cobrança direto (uso na lista).
+function _telInvalidoCob(cob){
+  return (cob && cob.metadata && cob.metadata.tel_invalido) || null;
+}
+
+// Chave do checklist no localStorage, por id do devedor/cobrança (== id do caso no app).
+function _telChecklistKey(devId){ return 'cobrasq_checklist_tel_' + devId; }
+
+function telLerChecklist(devId){
+  try{
+    const raw = localStorage.getItem(_telChecklistKey(devId));
+    return raw ? JSON.parse(raw) : { buscou_sistema:false, conseguiu_novo:false, qual_novo_numero:'', notas:'' };
+  }catch(e){ return { buscou_sistema:false, conseguiu_novo:false, qual_novo_numero:'', notas:'' }; }
+}
+
+function telSalvarChecklist(devId, dados){
+  try{ localStorage.setItem(_telChecklistKey(devId), JSON.stringify(dados)); }catch(e){}
+}
+
+// Atualiza UM campo do checklist e persiste. Registra no histórico a 1ª vez de cada
+// marcação booleana (paridade com atualizarChecklistTel do CRM).
+function telAtualizarChecklist(devId, campo, valor){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  const cl = telLerChecklist(devId);
+  const antes = cl[campo];
+  cl[campo] = valor;
+  telSalvarChecklist(devId, cl);
+  if((campo==='buscou_sistema' || campo==='conseguiu_novo') && valor && !antes){
+    const labels = {
+      buscou_sistema:'Buscou telefone em sistema externo (Serasa/SPC/Google)',
+      conseguiu_novo:'Conseguiu novo número de contato'
+    };
+    _negRegistrarHistorico(dev, 'Busca de contato: '+labels[campo]+'.');
+  }
+}
+
+// Monta a mensagem pronta para pedir telefone atualizado ao credor.
+// Portado de gerarMensagemEmpresa (crm.html L4067), adaptado ao devedor do app.
+function telGerarMsgEmpresa(dev){
+  const caso = _negCasoAdapter(dev);
+  const idCurto = String(dev.id || '').slice(-8);
+  const nome = dev.nome || (caso && caso.devedor) || 'o devedor';
+  const credor = (caso && caso.credor) || 'em vosso favor';
+  return 'Bom dia! Aqui é da COBRASQ Recuperadora de Crédito. Estamos tentando contato com ' + nome +
+    ' referente à dívida (' + credor + ', cadastro #' + idCurto + '), porém o telefone que temos cadastrado ' +
+    'não pertence mais a essa pessoa. Vocês teriam um telefone, e-mail ou endereço atualizado pra nos repassar? Obrigado!';
+}
+
+// Marca o telefone como inválido: grava flag no metadata + histórico. NÃO inventa status.
+// Portado de marcarTelefoneInvalido (crm.html L4047).
+async function telMarcarInvalido(devId, motivo, skipConfirm){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  if(!skipConfirm && !confirm('Marcar o telefone como inválido / não pertence mais ao devedor?\n\nO caso entra em "busca de novo número" e um checklist é aberto.')) return;
+  const flag = {
+    em: new Date().toISOString(),
+    por: negNomeOperador() || 'Sistema',
+    motivo: motivo || 'Telefone inválido / número não pertence mais ao devedor'
+  };
+  await _negPersistMeta(devId, { tel_invalido: flag });
+  _negRegistrarHistorico(dev, 'Telefone marcado como INVÁLIDO ('+(dev.tel||'—')+'). Iniciada busca de novo número.');
+  showToast('Telefone marcado como inválido. Siga o checklist de busca.','warning');
+  // Reflete no cabeçalho e reabre a aba Negociar com o painel de checklist.
+  if(currentDevId === devId){
+    try{ telAtualizarBadgeHeader(dev); }catch(_){}
+    const btn = document.querySelector('[data-htab=negociar]');
+    if(btn){ setDrawerTab('negociar', devId, btn); }
+    else { negRenderPainel(devId); }
+  }
+  // Atualiza a lista de cobranças (badge) de forma defensiva.
+  try{ if(typeof renderCobrancas==='function' && document.getElementById('page-cobr')) renderCobrancas({soLocal:true}); }catch(_){}
+}
+
+// Salva o novo número: atualiza dev.tel (+save), limpa a flag, registra histórico e
+// limpa o checklist. Portado de atualizarTelefoneEReativar (crm.html L4152).
+async function telSalvarNovoNumero(devId){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  const inp = document.getElementById('tel-novo-'+devId);
+  const bruto = inp ? String(inp.value||'').trim() : '';
+  const digits = bruto.replace(/\D/g,'');
+  if(!bruto || digits.length < 10){ showToast('Telefone inválido (informe DDD + número).','danger'); return; }
+  if(!confirm('Atualizar o telefone para '+bruto+' e reativar o contato?')) return;
+  const antigo = dev.tel || '—';
+  dev.tel = bruto;
+  dev.updatedAt = (typeof hoje==='function'?hoje():'');
+  try{ if(typeof save==='function') save(); }catch(_){}
+  // Limpa a flag no metadata.
+  await _negPersistMeta(devId, { tel_invalido: null });
+  _negRegistrarHistorico(dev, 'Telefone atualizado de '+antigo+' para '+bruto+'. Contato reativado.');
+  // Marca o checklist como concluído + limpa após reativar.
+  const cl = telLerChecklist(devId); cl.conseguiu_novo = true; cl.qual_novo_numero = bruto; telSalvarChecklist(devId, cl);
+  try{ localStorage.removeItem(_telChecklistKey(devId)); }catch(_){}
+  showToast('Telefone atualizado. Contato reativado.','success');
+  // Redesenha cabeçalho, corpo (para sumir o painel de inválido) e a lista.
+  if(currentDevId === devId){
+    try{ renderDrawerBody(devId); }catch(_){ try{ negRenderPainel(devId); }catch(__){} }
+    try{ if(typeof openDevDrawer==='function'){ /* header re-render via renderDrawerBody chain */ } telAtualizarBadgeHeader(dev); }catch(_){}
+  }
+  try{ if(typeof renderCobrancas==='function' && document.getElementById('page-cobr')) renderCobrancas({soLocal:true}); }catch(_){}
+}
+
+// Copia a mensagem ao credor (do textarea editável) para a área de transferência.
+function telCopiarMsgEmpresa(devId, btn){
+  const ta = document.getElementById('tel-msgcredor-'+devId);
+  if(!ta) return;
+  const texto = ta.value;
+  const done = ()=>{ if(btn){ const o=btn.textContent; btn.textContent='Copiado!'; setTimeout(()=>btn.textContent=o,1200); } showToast('Mensagem copiada.','success'); };
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(texto).then(done, done); }
+    else { ta.select(); document.execCommand('copy'); done(); }
+  }catch(_){ done(); }
+}
+
+// Painel de checklist de busca de novo número (renderizado dentro da aba Negociar,
+// quando tel_invalido está setado). Portado de renderTelaSemContatoTelefone (crm.html L4083).
+function telRenderChecklist(devId){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return '';
+  const cl = telLerChecklist(devId);
+  const flag = _telInvalidoDe(dev);
+  const msg = telGerarMsgEmpresa(dev);
+  const quando = flag && flag.em ? (new Date(flag.em)).toLocaleString('pt-BR') : '';
+  return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;">
+    <div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:#9C7F40;margin-bottom:6px;">📵 Telefone inválido / não pertence mais</div>
+    <div style="font-size:12px;color:var(--text-2);margin-bottom:14px;">Marcado como inválido${quando?(' em '+escHtml(quando)):''}${flag&&flag.por?(' por '+escHtml(flag.por)):''}. Siga o checklist abaixo para recuperar o contato.</div>
+
+    <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:14px;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);margin-bottom:8px;">Checklist de busca</div>
+      <label style="display:block;padding:5px 0;cursor:pointer;font-size:12.5px;"><input type="checkbox" ${cl.buscou_sistema?'checked':''} onchange="telAtualizarChecklist('${devId}','buscou_sistema',this.checked)"> 🔍 Busquei em sistema externo (Serasa, SPC, Google, redes sociais)</label>
+      <label style="display:block;padding:5px 0;cursor:pointer;font-size:12.5px;"><input type="checkbox" ${cl.conseguiu_novo?'checked':''} onchange="telAtualizarChecklist('${devId}','conseguiu_novo',this.checked)"> ✅ Consegui um novo número de contato</label>
+      <div style="margin-top:8px;">
+        <div style="font-size:11px;color:var(--text-3);margin-bottom:4px;">Anotações (onde procurou, o que encontrou)</div>
+        <textarea id="tel-notas-${devId}" rows="2" onchange="telAtualizarChecklist('${devId}','notas',this.value)" style="width:100%;font-size:12.5px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-family:inherit;resize:vertical;background:var(--surface-2);color:var(--text);">${escHtml(cl.notas||'')}</textarea>
+      </div>
+    </div>
+
+    <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:14px;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);margin-bottom:6px;">Mensagem para o credor</div>
+      <div style="font-size:11.5px;color:var(--text-3);margin-bottom:8px;">Edite se necessário e copie para colar no WhatsApp ou e-mail do credor.</div>
+      <textarea id="tel-msgcredor-${devId}" rows="4" style="width:100%;font-size:12.5px;line-height:1.5;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-family:inherit;resize:vertical;background:var(--surface-2);color:var(--text);">${escHtml(msg)}</textarea>
+      <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="telCopiarMsgEmpresa('${devId}',this)">📋 Copiar mensagem para o credor</button>
+    </div>
+
+    <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);margin-bottom:6px;">Novo telefone</div>
+      <div style="font-size:11.5px;color:var(--text-3);margin-bottom:8px;">Ao salvar, o cadastro é atualizado, a marca de inválido é removida e o contato é reativado.</div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input type="text" id="tel-novo-${devId}" placeholder="Ex: (44) 9 9123-4567" value="${escHtml(cl.qual_novo_numero||'')}" style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:13.5px;background:var(--surface-2);color:var(--text);">
+        <button class="btn btn-primary btn-sm" onclick="telSalvarNovoNumero('${devId}')">Salvar e reativar</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// Botão "📵 Telefone inválido" (usado no painel Negociar e no Resumo).
+function telBotaoMarcar(devId){
+  return `<button class="btn btn-ghost btn-sm" onclick="telMarcarInvalido('${devId}')" title="Marcar telefone como inválido e abrir a busca de novo número" style="display:flex;align-items:center;gap:6px;">📵 Telefone inválido</button>`;
+}
+
+// Selo "📵 Telefone inválido" para o cabeçalho do drawer (span devDrawer-telbadge).
+function telAtualizarBadgeHeader(dev){
+  const host = document.getElementById('devDrawer-status');
+  if(!host || !host.parentNode) return;
+  let badge = document.getElementById('devDrawer-telbadge');
+  const invalido = _telInvalidoDe(dev);
+  if(invalido){
+    if(!badge){
+      badge = document.createElement('span');
+      badge.id = 'devDrawer-telbadge';
+      badge.className = 'badge';
+      badge.style.cssText = 'background:#FBF6E6;color:#9C7F40;border:1px solid #E0D3A8;';
+      host.parentNode.insertBefore(badge, host.nextSibling);
+    }
+    badge.textContent = '📵 Telefone inválido';
+  } else if(badge){
+    badge.remove();
+  }
 }
 
 function _drawerTabHtml(tab, dev, ctx){
@@ -11825,6 +12031,9 @@ function _drawerTabHtml(tab, dev, ctx){
         <div style="font-size:11px;color:var(--text-3);font-weight:600;letter-spacing:.10em;text-transform:uppercase;margin-bottom:10px">Ações rápidas</div>
         <div style="display:grid;gap:6px;margin-bottom:22px">
           ${dev.tel?`<button onclick="window.open('https://wa.me/55${dev.tel.replace(/\D/g,'')}','_blank')" style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);font-weight:500;text-align:left;cursor:pointer">💬 Enviar WhatsApp</button>`:''}
+          ${_telInvalidoDe(dev)
+            ? `<button onclick="setDrawerTab('negociar','${devId}',document.querySelector('[data-htab=negociar]'))" style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:#FBF6E6;border:1px solid #E0D3A8;border-radius:6px;font-size:12.5px;color:#9C7F40;font-weight:600;text-align:left;cursor:pointer">📵 Telefone inválido · buscar novo número</button>`
+            : `<button onclick="telMarcarInvalido('${devId}')" style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);font-weight:500;text-align:left;cursor:pointer">📵 Telefone inválido</button>`}
           <button onclick="abrirHistorico('${devId}')" style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);font-weight:500;text-align:left;cursor:pointer">📝 Registrar contato</button>
           <button onclick="registrarPromessa('${devId}')" style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);font-weight:500;text-align:left;cursor:pointer">📅 Registrar promessa</button>
           <button onclick="abrirAcordo('${devId}')" style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);font-weight:500;text-align:left;cursor:pointer">🤝 Novo acordo</button>
@@ -16244,7 +16453,7 @@ async function renderCobrancas(opts){
     const cor=_etiquetaCor(c.status);
     const aging=_cobrAgingDias(c); const agingOld=(aging!=null && aging>=365);
     return `<div class="cob-panel cob-card cob-tr-click" style="--cor:${cor};padding:14px;cursor:pointer;" onclick="verCobranca('${c.id}')">
-      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;"><div class="strong" style="font-size:14px;font-weight:700;">${escHtml(princ?.devedores?.nome||'—')}${extra}</div>${cobStatusBadge(c)}</div>
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;"><div class="strong" style="font-size:14px;font-weight:700;">${escHtml(princ?.devedores?.nome||'—')}${extra}${_telInvalidoCob(c)?` <span class="det-chip" style="background:#FBF6E6;color:#9C7F40;border:1px solid #E0D3A8;" title="Telefone inválido — buscando novo número">📵</span>`:''}</div>${cobStatusBadge(c)}</div>
       ${c._pend?`<div style="margin-top:5px;">${cobPendPill(c._pend, true)}</div>`:''}
       <div style="font-size:12.5px;color:var(--text-2);margin-top:4px;">${escHtml(_cobrDocLabel(c))}</div>
       <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}</div>
