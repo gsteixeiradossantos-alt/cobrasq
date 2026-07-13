@@ -6868,6 +6868,10 @@ function iniciarSessao(){
   // Fire-and-forget: se falhar, nomeResponsavel() cai no que já estiver salvo no caso.
   carregarRosterAppUsers().catch(()=>{});
 
+  // ONDA E · M4 — alerta diário "pendências antes de fechar o dia" (só staff, 1x/dia,
+  // janela 15:45–16:30). Não intrusivo: agenda checagens; complementa o banner do Painel.
+  try{ if((tipoUser==='gestor' || tipoUser==='funcionario') && typeof adIniciarVerificacao==='function') adIniciarVerificacao(); }catch(_){}
+
   // Handoff do CRM: se vier ?pecaDevedor=<id>, abre direto a página Peças já preenchida.
   // Senão, restaura a rota da URL (#/pagina ou #/tipo/<id>) — F5 mantém a tela.
   if(!chatHandleUrlPeca()){
@@ -10976,7 +10980,13 @@ async function renderDrawerComunicacao(devId){
   } else {
     pendHtml = `<div style="font-size:12px;color:var(--text-3);margin-bottom:8px;">Nenhuma conversa pendente.</div>`;
   }
-  box.innerHTML = pendHtml + waBtn + reguaHtml;
+  // ONDA E · M2 — banner de tarefa do gestor no topo do resumo (mesmo id cobrança↔devedor).
+  let _mesaHtml = '';
+  try{
+    const cobDrawer = (typeof DB_cobrancas!=='undefined' && Array.isArray(DB_cobrancas)) ? DB_cobrancas.find(c=>c.id===devId) : null;
+    if(cobDrawer && typeof mesaBannerHTML==='function'){ const b = mesaBannerHTML(cobDrawer); if(b && _mesaDe(cobDrawer)) _mesaHtml = b; }
+  }catch(_){}
+  box.innerHTML = _mesaHtml + pendHtml + waBtn + reguaHtml;
 }
 // Abre a conversa na página WhatsApp NATIVA (não no CRM), já focada no telefone.
 function _drawerAbrirConversa(tel){
@@ -16767,7 +16777,7 @@ async function renderCobrancas(opts){
       <div class="cob-caso-main">
         <div class="cob-caso-nome">${escHtml(princNome)}${princPapel?` <span class="papel">· ${escHtml(princPapel)}</span>`:''} ${extra}</div>
         <div class="cob-caso-doc">${escHtml(_cobrDocLabel(c))}</div>
-        <div class="cob-caso-chips">${cobPendPill(c._pend, true)}${selo}<span class="cob-caso-fase">${faseProc}</span>${unifChip}</div>
+        <div class="cob-caso-chips">${cobPendPill(c._pend, true)}${cronRenderBadge(c)}${selo}<span class="cob-caso-fase">${faseProc}</span>${unifChip}</div>
       </div>
       <div class="cob-caso-credor">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}<div class="resp">${escHtml(_detUserNome(c.assigned_to))}</div></div>
       <div class="cob-caso-vs">
@@ -16786,7 +16796,7 @@ async function renderCobrancas(opts){
     const aging=_cobrAgingDias(c); const agingOld=(aging!=null && aging>=365);
     return `<div class="cob-panel cob-card cob-tr-click" style="--cor:${cor};padding:14px;cursor:pointer;" onclick="verCobranca('${c.id}')">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;"><div class="strong" style="font-size:14px;font-weight:700;">${escHtml(princ?.devedores?.nome||'—')}${extra}${_telInvalidoCob(c)?` <span class="det-chip" style="background:#FBF6E6;color:#9C7F40;border:1px solid #E0D3A8;" title="Telefone inválido — buscando novo número">📵</span>`:''}</div>${cobStatusBadge(c)}</div>
-      ${c._pend?`<div style="margin-top:5px;">${cobPendPill(c._pend, true)}</div>`:''}
+      ${c._pend?`<div style="margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${cobPendPill(c._pend, true)}${cronRenderBadge(c)}</div>`:''}
       <div style="font-size:12.5px;color:var(--text-2);margin-top:4px;">${escHtml(_cobrDocLabel(c))}</div>
       <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}</div>
       ${c._unif?`<div style="margin-top:4px;"><span class="det-chip" style="background:var(--navy,#1f3a5f);color:#fff;">⚖ Processo unificado · ${c._unif.irmaos.length} créditos</span></div>`:''}
@@ -16848,6 +16858,8 @@ async function renderCobrancas(opts){
         <option value="antigo" ${cobrFilter.ord==='antigo'?'selected':''}>Ordenar: mais antigo</option>
       </select>
       <div class="det-seg"><button class="${cobrView!=='cards'?'on':''}" onclick="cobrView='lista';renderCobrancas();">Lista</button><button class="${cobrView==='cards'?'on':''}" onclick="cobrView='cards';renderCobrancas();">Cards</button></div>
+      <!-- ONDA E · M3 — modo Quadro (kanban por etapa), convive com a triagem/abas -->
+      <div class="det-seg"><button class="${cobrViewMode!=='quadro'?'on':''}" onclick="kbToggleView('lista')" title="Visão em lista">Lista</button><button class="${cobrViewMode==='quadro'?'on':''}" onclick="kbToggleView('quadro')" title="Agrupar por etapa em colunas">Quadro</button></div>
       ${(cobrFilter.q||cobrFilter.credor||cobrFilter.responsavel||cobrFilter.fase||cobrFilter.statuses.length||cobrFilter.tab!=='todos'||cobrFilter.pend!=='agir') ? `<button class="cob-btn-ghost" onclick="cobrFilter={q:'',credor:'',responsavel:'',fase:'',statuses:[],tab:'todos',pend:'agir',ord:'nome'};cobrChipsOpen=false;renderCobrancas();">Limpar filtros</button>` : ''}
     </div>
     <!-- Triagem por PENDÊNCIA (derivada) — 🔴 agir / 🟡 aguardando / ✅ concluído -->
@@ -16884,9 +16896,11 @@ async function renderCobrancas(opts){
           <div class="cob-empty-ds"><i>Ajuste os filtros ou crie uma cobrança vinculando um ou mais devedores (emitente, endossante, avalista…).</i></div>
           <button class="cob-btn-primary" style="margin-top:14px;" onclick="abrirNovaCobranca()">${ico('plus',14)} Nova cobrança</button>
          </div></div>`
-      : (cobrView==='cards'
-        ? `<div class="det-devcards">${cobr.map(cardCaso).join('')}</div>`
-        : `<div class="cob-caso-list">${cobr.map(linhaCaso).join('')}</div>`)}`;
+      : (cobrViewMode==='quadro'
+        ? kbRenderQuadro(cobr)
+        : (cobrView==='cards'
+          ? `<div class="det-devcards">${cobr.map(cardCaso).join('')}</div>`
+          : `<div class="cob-caso-list">${cobr.map(linhaCaso).join('')}</div>`))}`;
 
   const search = document.getElementById('cobr-search');
   if(search){
@@ -17305,9 +17319,13 @@ async function renderCobrancaDetalhe(){
     else if(_pend.proximaAcao==='boleto' && _devPrinc) _acaoBtn = `<button class="cob-btn-ghost" onclick="openDrawer('${_devPrinc}')">Emitir boleto →</button>`;
     else if(['peticao','judicial'].includes(_pend.proximaAcao)) _acaoBtn = `<button class="cob-btn-ghost" onclick="showPage('pecas')">Abrir peça →</button>`;
   }
-  const bannerPend = `<div class="cob-panel" style="padding:11px 16px;margin-bottom:10px;display:flex;flex-direction:row;align-items:center;gap:12px;border-left:3px solid ${_pm.fg};background:${_pm.bg};">
+  // ONDA E · M1 — cronômetro da etapa no banner (só amarelo/vermelho). M2 — banner de tarefa do gestor.
+  const _cronBadgeDet = (typeof cronRenderBadge==='function') ? cronRenderBadge(cob) : '';
+  const _mesaBannerDet = (typeof mesaBannerHTML==='function') ? mesaBannerHTML(cob) : '';
+  const bannerPend = _mesaBannerDet + `<div class="cob-panel" style="padding:11px 16px;margin-bottom:10px;display:flex;flex-direction:row;align-items:center;gap:12px;border-left:3px solid ${_pm.fg};background:${_pm.bg};">
     <span style="width:9px;height:9px;border-radius:50%;background:${_pm.fg};flex-shrink:0;"></span>
     <div style="flex:1;min-width:0;"><span style="font-weight:700;color:${_pm.fg};font-size:13px;">${_pm.lbl}</span> <span style="color:var(--text-2);font-size:13px;">· ${escHtml(_pend.motivo||'')}</span></div>
+    ${_cronBadgeDet}
     ${_acaoBtn}
   </div>`;
   const panelValores=bannerPend+`<div class="cob-panel" style="padding:18px;">
@@ -31282,6 +31300,7 @@ function renderConfiguracoes(){
     {id:'usuarios',icon:ico('lock',15),label:'Usuários'},
     {id:'categorias',icon:ico('tag',15),label:'Categorias'},
     {id:'calculo',icon:ico('ruler',15),label:'Parâmetros de cálculo'},
+    {id:'prazos',icon:ico('clock',15),label:'Prazos das etapas'},
     {id:'fases',icon:ico('charges',15),label:'Etiquetas'},
     {id:'fiscal',icon:ico('file',15),label:'Fiscal · NF'},
     {id:'integracoes',icon:ico('link',15),label:'Integrações'},
@@ -31406,6 +31425,17 @@ function renderCfgSection(section){
       <div style="font-size:11.5px;color:var(--text-3);margin:-4px 0 16px;">Juros 1% a.m. (art. 406 CC + Súmula 121 STF) e multa 2% (limite CDC art. 52, §1º) são os padrões.</div>
       <button class="btn btn-primary" onclick="salvarParamsCalculo()">Salvar</button>
       <div id="cfg-calc-msg" style="margin-top:8px;font-size:12px;"></div>`;
+  }
+  else if(section==='prazos'){
+    // ONDA E · M1 — configurar prazo (min) por etapa. Alimenta o cronômetro (badge amarelo/vermelho).
+    el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:6px;">Prazos das etapas</h3>
+      <p style="font-size:12.5px;color:var(--text-2);margin-bottom:16px;">Tempo alvo (em minutos) que um caso pode ficar em cada etapa antes do cronômetro alertar. O caso fica <b style="color:#9C7F40;">amarelo</b> a partir de 70% do prazo e <b style="color:#A65A4A;">vermelho</b> ao estourar. Aparece ao lado da situação na tela Cobranças e no caso.</p>
+      <div id="cronPrazosEtapasContainer"></div>
+      <div style="display:flex;gap:8px;margin-top:16px;">
+        <button class="btn btn-primary" onclick="cronSalvarPrazosEtapasUI()">Salvar prazos</button>
+        <button class="btn btn-ghost" onclick="cronRestaurarPrazosDefaults()">Restaurar padrão</button>
+      </div>`;
+    cronRenderPrazosEtapasUI();
   }
   else if(section==='fases'){
     const lista = _etiquetas();
@@ -38148,6 +38178,338 @@ function downloadImportTemplate(){
   XLSX.utils.book_append_sheet(wb, ws, 'Devedores');
   XLSX.writeFile(wb, 'modelo_importacao.xlsx');
 }
+
+// ============================================================================
+// ONDA E — GESTÃO / TRIAGEM AVANÇADA
+// Portada do crm.html, adaptada ao modelo relacional do app (cobrancas cruas em
+// DB_cobrancas; sem migração). 4 módulos, cada um em seção comentada:
+//   M1 · Cronômetro por etapa (prazo configurável)   → cron*/_cron*
+//   M2 · Mesa do Gestor (tarefa no caso)              → mesa*/_mesa*
+//   M3 · Kanban por etapa (modo Quadro em Cobranças)  → kb*/_kb*
+//   M4 · Alerta diário (pendências antes de fechar)   → ad*/_ad*
+// Reuso: cobPendencia, cobPendPill, cobMacroGrupo, faseDaEtiqueta,
+//   _negRegistrarHistorico, getSupabase, currentUser, escHtml, showToast,
+//   save, DB_cobrancas, DB.devedores, renderCobrancas, renderPainel.
+// Defensivo: nenhum módulo pode quebrar o render se faltar dado.
+// ============================================================================
+
+// ── ONDA E · M1 — CRONÔMETRO POR ETAPA (prazo configurável) ─────────────────
+// Fonte do tempo: cobrancas.etapa_atualizada_em (coluna já existente). Prazos por
+// etapa em localStorage 'crm_etapa_prazos' (mesma chave/UX do CRM). O badge aparece
+// ao lado da pílula de pendência na lista e no detalhe. Sempre degrada em silêncio.
+const CRON_PRAZOS_KEY = 'crm_etapa_prazos';
+const CRON_PRAZOS_DEFAULTS = {
+  'Aguardando 1ª abordagem': 60,
+  '1ª mensagem enviada': 1440,
+  '2ª mensagem enviada': 1440,
+  '3ª mensagem enviada': 1440,
+  'Em negociação': 720,
+  'Aguardando autorização do gestor': 480,
+  'Aguardando prova do devedor': 2880,
+  'Aguardando análise de reclamação': 2880,
+  'Sem contato — buscando novo telefone': 4320
+};
+function cronLerPrazosEtapas(){
+  try{
+    const raw = localStorage.getItem(CRON_PRAZOS_KEY);
+    return raw ? Object.assign({}, CRON_PRAZOS_DEFAULTS, JSON.parse(raw)) : { ...CRON_PRAZOS_DEFAULTS };
+  }catch(e){ return { ...CRON_PRAZOS_DEFAULTS }; }
+}
+function cronSalvarPrazosEtapas(obj){
+  try{ localStorage.setItem(CRON_PRAZOS_KEY, JSON.stringify(obj || {})); }catch(e){}
+}
+function _cronPrazoMinutosDaEtapa(etapaNome){
+  const prazos = cronLerPrazosEtapas();
+  if(etapaNome && prazos[etapaNome] != null) return prazos[etapaNome];
+  return 1440; // default 24h — cobranças relacionais têm cadência mais longa que o CRM
+}
+// Etapa "efetiva" de uma cobrança relacional: passo_atual (negociação) tem precedência;
+// fallback no status público. É a chave usada para achar o prazo configurado.
+function _cronEtapaDe(c){
+  if(!c) return '';
+  const meta = c.metadata || {};
+  return meta.passo_negociacao || c.passo_atual || c.status || '';
+}
+// tempoNaEtapa (portado ~L3896 do crm) adaptado: usa etapa_atualizada_em → updated_at → created_at.
+function cronTempoNaEtapa(c){
+  if(!c) return null;
+  try{
+    let inicio = c.etapa_atualizada_em ? new Date(c.etapa_atualizada_em) : null;
+    if(!inicio || isNaN(inicio.getTime())) inicio = c.updated_at ? new Date(c.updated_at) : null;
+    if(!inicio || isNaN(inicio.getTime())) inicio = c.created_at ? new Date(c.created_at) : null;
+    if(!inicio || isNaN(inicio.getTime())) return null;
+    const minutos = Math.max(0, Math.floor((Date.now() - inicio.getTime())/60000));
+    const horas = Math.floor(minutos/60), dias = Math.floor(horas/24);
+    let texto;
+    if(minutos < 60) texto = (minutos <= 0 ? 'agora' : minutos + ' min');
+    else if(horas < 24){ const m = minutos%60; texto = horas + 'h' + (m>0?' '+m+'min':''); }
+    else { const h = horas%24; texto = dias + 'd' + (h>0?' '+h+'h':''); }
+    const prazoMin = _cronPrazoMinutosDaEtapa(_cronEtapaDe(c));
+    const pct = prazoMin > 0 ? minutos/prazoMin : 0;
+    const classe = pct < 0.7 ? 'verde' : (pct < 1.0 ? 'amarelo' : 'vermelho');
+    return { texto, classe, minutos, horas, dias, inicio, prazoMin, pct };
+  }catch(e){ return null; }
+}
+// renderCronometroBadge (portado ~L3938): só emite badge quando amarelo/vermelho —
+// verde não polui a lista. Retorna '' quando não há dado ou está no verde.
+function cronRenderBadge(c){
+  try{
+    const t = cronTempoNaEtapa(c);
+    if(!t || t.classe === 'verde') return '';
+    const sty = t.classe === 'vermelho'
+      ? 'color:#A65A4A;background:#F7ECE8;border:1px solid #E7CFC7;'
+      : 'color:#9C7F40;background:#FBF8EF;border:1px solid #E0D3A8;';
+    return `<span class="cob-cron-badge" title="Tempo na etapa (prazo ${t.prazoMin} min)" style="display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:20px;${sty}">⏱ ${escHtml(t.texto)}</span>`;
+  }catch(e){ return ''; }
+}
+// UI de configuração (portado renderPrazosEtapasUI ~L3836) — usada na aba Configurações.
+function cronRenderPrazosEtapasUI(){
+  const cont = document.getElementById('cronPrazosEtapasContainer');
+  if(!cont) return;
+  const prazos = cronLerPrazosEtapas();
+  const etapas = Object.keys(prazos);
+  cont.innerHTML = etapas.map(et=>{
+    const id = 'cronprazo_' + et.replace(/[^a-zA-Z0-9]/g,'_');
+    return `<div style="display:flex;gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid var(--border);">
+      <label style="flex:1;font-size:13px;color:var(--text);" for="${id}">${escHtml(et)}</label>
+      <input type="number" id="${id}" data-cron-etapa="${escHtml(et)}" value="${prazos[et]||1440}" min="1" max="999999" style="width:120px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);">
+      <span style="font-size:11px;color:var(--text-3);width:26px;">min</span>
+    </div>`;
+  }).join('');
+}
+function cronSalvarPrazosEtapasUI(){
+  const inputs = document.querySelectorAll('#cronPrazosEtapasContainer input[data-cron-etapa]');
+  const obj = {};
+  inputs.forEach(inp=>{ const et = inp.dataset.cronEtapa; const v = parseInt(inp.value,10);
+    if(et && !isNaN(v) && v > 0) obj[et] = v; });
+  cronSalvarPrazosEtapas(obj);
+  try{ showToast('Prazos das etapas salvos.','success'); }catch(_){}
+}
+function cronRestaurarPrazosDefaults(){
+  if(!confirm('Restaurar os prazos padrão das etapas?')) return;
+  cronSalvarPrazosEtapas({});
+  cronRenderPrazosEtapasUI();
+  try{ showToast('Prazos padrão restaurados.','success'); }catch(_){}
+}
+
+// ── ONDA E · M2 — MESA DO GESTOR (tarefa no caso) ───────────────────────────
+// Grava em cobrancas.mesa_gestor (coluna já existente). Estrutura { tarefa, por, em }.
+// Só gestor edita; operador vê o banner. Reusa _negRegistrarHistorico p/ histórico.
+function _mesaDe(c){ return (c && c.mesa_gestor && typeof c.mesa_gestor === 'object') ? c.mesa_gestor : null; }
+function _mesaPodeEditar(){
+  return (typeof currentUser !== 'undefined' && currentUser)
+    && (currentUser.papel === 'proprietario' || currentUser.tipo === 'gestor');
+}
+// Persiste a coluna mesa_gestor por update direto (análogo a _judPersistChecklist).
+async function _mesaPersist(cobId, obj){
+  const supa = (typeof getSupabase === 'function') ? getSupabase() : null;
+  const cob = (typeof DB_cobrancas !== 'undefined' && Array.isArray(DB_cobrancas))
+    ? DB_cobrancas.find(c=>c.id===cobId) : null;
+  if(cob) cob.mesa_gestor = obj; // espelho em memória
+  if(!supa) return { ok:false, error:'sem sessão' };
+  try{
+    const { error } = await supa.from('cobrancas')
+      .update({ mesa_gestor: obj, updated_at:new Date().toISOString() }).eq('id', cobId);
+    if(error) return { ok:false, error:error.message };
+    return { ok:true };
+  }catch(e){ return { ok:false, error: e && e.message }; }
+}
+// Abre o prompt de tarefa (portado abrirModalTarefa/atualizarTarefa ~L6608/6614).
+async function mesaAbrirModalTarefa(cobId){
+  if(!_mesaPodeEditar()){ try{ showToast('Apenas o gestor atribui tarefas.','warning'); }catch(_){} return; }
+  const cob = (typeof DB_cobrancas !== 'undefined' && Array.isArray(DB_cobrancas))
+    ? DB_cobrancas.find(c=>c.id===cobId) : null;
+  if(!cob){ try{ showToast('Cobrança não encontrada.','warning'); }catch(_){} return; }
+  const atual = (_mesaDe(cob) && _mesaDe(cob).tarefa) || '';
+  const txt = prompt('Tarefa/orientação para a operadora neste caso (deixe vazio para remover):', atual);
+  if(txt === null) return;
+  await mesaAtualizarTarefa(cobId, txt);
+}
+async function mesaAtualizarTarefa(cobId, txt){
+  if(!_mesaPodeEditar()) return;
+  const cob = (typeof DB_cobrancas !== 'undefined' && Array.isArray(DB_cobrancas))
+    ? DB_cobrancas.find(c=>c.id===cobId) : null;
+  if(!cob) return;
+  const limpo = String(txt||'').trim();
+  const por = (typeof currentUser !== 'undefined' && currentUser && currentUser.nome) || '?';
+  const obj = limpo
+    ? Object.assign({}, _mesaDe(cob)||{}, { tarefa: limpo, por, em: new Date().toISOString() })
+    : null;
+  const res = await _mesaPersist(cobId, obj);
+  if(res && res.ok===false){ try{ showToast('Não consegui salvar a tarefa: '+(res.error||''),'warning'); }catch(_){} }
+  // Histórico no devedor correspondente (mesmo id da cobrança no modelo 1:1).
+  try{
+    const dev = (DB.devedores||[]).find(d=>d.id===cobId);
+    if(dev && typeof _negRegistrarHistorico==='function'){
+      _negRegistrarHistorico(dev, limpo ? ('📌 Tarefa do gestor: '+limpo) : '📌 Tarefa do gestor removida');
+    }
+  }catch(_){}
+  try{ showToast(limpo ? 'Tarefa registrada.' : 'Tarefa removida.','success'); }catch(_){}
+  // Re-render das telas abertas (defensivo).
+  try{ if(document.getElementById('page-cobranca-detalhe')?.classList.contains('active')) renderCobrancaDetalhe(); }catch(_){}
+  try{ if(document.getElementById('page-cobr')?.classList.contains('active')) renderCobrancas({soLocal:true}); }catch(_){}
+}
+// Banner amarelo (topo do caso / drawer). withBtn: mostra o botão de gestão só p/ quem edita.
+function mesaBannerHTML(c){
+  try{
+    const m = _mesaDe(c);
+    const pode = _mesaPodeEditar();
+    const cobId = c && c.id;
+    if(!m || !m.tarefa){
+      // Sem tarefa: só gestor vê a chamada discreta para atribuir.
+      if(!pode || !cobId) return '';
+      return `<div class="cob-panel" style="padding:9px 14px;margin-bottom:10px;display:flex;align-items:center;gap:10px;border-left:3px solid var(--border);">
+        <span style="font-size:12.5px;color:var(--text-3);flex:1;">Nenhuma tarefa do gestor neste caso.</span>
+        <button class="cob-btn-ghost" onclick="mesaAbrirModalTarefa('${cobId}')">📌 Atribuir tarefa</button>
+      </div>`;
+    }
+    const quando = m.em ? (()=>{ try{ return new Date(m.em).toLocaleString('pt-BR'); }catch(_){ return ''; } })() : '';
+    const meta = [m.por?('por '+escHtml(m.por)):'', quando].filter(Boolean).join(' · ');
+    const btn = (pode && cobId) ? `<button class="cob-btn-ghost" onclick="mesaAbrirModalTarefa('${cobId}')">Editar</button>` : '';
+    return `<div class="cob-panel" style="padding:11px 14px;margin-bottom:10px;display:flex;align-items:flex-start;gap:10px;border-left:3px solid #E0D3A8;background:#FBF8EF;">
+      <span style="font-size:16px;line-height:1;flex-shrink:0;">📌</span>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#9C7F40;margin-bottom:2px;">Tarefa do gestor</div>
+        <div style="font-size:13px;color:var(--text);line-height:1.4;">${escHtml(m.tarefa)}</div>
+        ${meta?`<div style="font-size:10.5px;color:var(--text-3);margin-top:3px;">${meta}</div>`:''}
+      </div>
+      ${btn}
+    </div>`;
+  }catch(e){ return ''; }
+}
+
+// ── ONDA E · M3 — KANBAN POR ETAPA (modo "Quadro" da página Cobranças) ───────
+// Reativa a visão de colunas do crm (renderKanbanCobrancas ~L6566). Vira um modo
+// alternativo de renderCobrancas; convive com a triagem 🔴/🟡/✅ (o toggle de pend
+// continua ativo — o Quadro só reorganiza os MESMOS casos filtrados em colunas por
+// status/etapa). Preferência persistida em localStorage 'cobrasq_cobr_view'.
+const KB_VIEW_KEY = 'cobrasq_cobr_view';
+function kbViewGet(){ try{ return localStorage.getItem(KB_VIEW_KEY)==='quadro' ? 'quadro':'lista'; }catch(_){ return 'lista'; } }
+function kbViewSet(v){ try{ localStorage.setItem(KB_VIEW_KEY, v==='quadro'?'quadro':'lista'); }catch(_){} }
+let cobrViewMode = kbViewGet(); // 'lista' | 'quadro'
+function kbToggleView(v){ cobrViewMode = (v==='quadro')?'quadro':'lista'; kbViewSet(cobrViewMode); try{ renderCobrancas({soLocal:true}); }catch(_){} }
+// Colunas: agrupa pelos MACROS de status (agir/judicial/acordos/encerrados) — reusa
+// cobMacroGrupo/faseDaEtiqueta. Dentro de cada coluna, ordena por urgência da pendência.
+function kbRenderQuadro(cobr){
+  const grupos = { agir:[], judicial:[], acordos:[], encerrados:[] };
+  (cobr||[]).forEach(c=>{ const g = cobMacroGrupo(c.status, c.fase); (grupos[g]=grupos[g]||[]).push(c); });
+  const colDef = (typeof _COB_MACROS!=='undefined' && Array.isArray(_COB_MACROS)) ? _COB_MACROS
+    : [{key:'agir',label:'A agir'},{key:'judicial',label:'No judicial'},{key:'acordos',label:'Acordos'},{key:'encerrados',label:'Encerrados'}];
+  const _pendRank = { agir:0, aguardando:1, concluido:2 };
+  const card = c=>{
+    const partes = (c.cobranca_partes||[]).slice().sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
+    const princ = partes.find(p=>p.principal)||partes[0]||null;
+    const nome = (princ && princ.devedores && princ.devedores.nome) || '—';
+    const val = (typeof fmtR==='function') ? fmtR(+c.valor_atual||+c.valor_orig||0) : (+c.valor_atual||+c.valor_orig||0);
+    const cor = (typeof _etiquetaCor==='function') ? _etiquetaCor(c.status) : 'var(--border)';
+    const m = _mesaDe(c);
+    return `<div class="cob-panel" style="--cor:${cor};padding:10px 12px;margin-bottom:8px;cursor:pointer;border-left:3px solid ${cor};" onclick="verCobranca('${c.id}')">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;">
+        <div style="font-size:12.5px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(nome)}</div>
+      </div>
+      <div style="font-size:11px;color:var(--text-3);margin-top:2px;">${escHtml(_cobrCredorNome(c))} · <strong>${val}</strong></div>
+      ${m&&m.tarefa?`<div style="margin-top:6px;font-size:11px;background:#FBF8EF;border:1px solid #E0D3A8;border-radius:5px;padding:4px 7px;color:#9C7F40;">📌 ${escHtml(m.tarefa)}</div>`:''}
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-top:7px;">
+        ${(typeof cobPendPill==='function')?cobPendPill(c._pend,false):'<span></span>'}
+        ${cronRenderBadge(c)||'<span></span>'}
+      </div>
+    </div>`;
+  };
+  const cols = colDef.filter(cd=>grupos[cd.key] && grupos[cd.key].length).map(cd=>{
+    const lista = grupos[cd.key].slice().sort((a,b)=>(_pendRank[(a._pend&&a._pend.estado)]??1)-(_pendRank[(b._pend&&b._pend.estado)]??1));
+    return `<div style="min-width:255px;max-width:290px;flex-shrink:0;background:var(--card-2,var(--surface-2));border:1px solid var(--border);border-radius:12px;padding:11px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);margin-bottom:9px;">
+        <span>${escHtml(cd.label)}</span><span class="cob-mtab-n">${lista.length}</span>
+      </div>
+      ${lista.map(card).join('')||'<div style="font-size:11px;color:var(--text-4);padding:4px 2px;">—</div>'}
+    </div>`;
+  }).join('');
+  return `<div class="cob-kanban" style="display:flex;gap:12px;overflow-x:auto;align-items:flex-start;padding-bottom:10px;">${cols||'<div style="color:var(--text-3);font-size:13px;padding:16px;">Nenhum caso.</div>'}</div>`;
+}
+
+// ── ONDA E · M4 — ALERTA DIÁRIO (pendências antes de fechar o dia) ───────────
+// Portado verificarAlertaDiario/mostrarModalAlertaDiario (~L3972/3989). Reusa
+// cobPendencia (via checkAlertaCasosAgir/_cobrSinais). Mostra 1x por dia; complementa
+// o banner do Painel (checkAlertaCasosAgir), sem substituí-lo.
+let _adTimer = null;
+function _adChaveDia(){
+  const d = new Date();
+  const uid = (typeof currentUser !== 'undefined' && currentUser && (currentUser.supaId||currentUser.email||currentUser.nome)) || '';
+  return 'cobrasq_alerta_dia_' + d.getFullYear() + '-' + (d.getMonth()+1) + '-' + d.getDate() + '_' + uid;
+}
+function _adDeveDisparar(){
+  const agora = new Date();
+  const dia = agora.getDay(); // 0=dom 6=sáb
+  if(dia === 0 || dia === 6) return false;
+  const min = agora.getHours()*60 + agora.getMinutes();
+  if(min < (15*60+45) || min > (16*60+30)) return false; // janela 15:45–16:30
+  try{ if(localStorage.getItem(_adChaveDia())==='1') return false; }catch(_){}
+  return true;
+}
+async function adVerificarAlertaDiario(){
+  try{
+    if(typeof currentUser === 'undefined' || !currentUser) return;
+    if(!(currentUser.tipo === 'gestor' || currentUser.tipo === 'funcionario')) return;
+    if(!_adDeveDisparar()) return;
+    if(typeof cobPendencia !== 'function') return;
+    let rows = (typeof DB_cobrancas !== 'undefined' && Array.isArray(DB_cobrancas)) ? DB_cobrancas : null;
+    if(!rows && typeof loadCobrancasFromSupabase === 'function'){ try{ rows = await loadCobrancasFromSupabase(); if(Array.isArray(rows)) DB_cobrancas = rows; }catch(_){ rows = []; } }
+    rows = (rows||[]).filter(c=>!c.arquivado && !c.is_draft);
+    const sin = (typeof _cobrSinais !== 'undefined' && _cobrSinais) ? _cobrSinais : {};
+    const pendentes = rows.filter(c=>{ const p = cobPendencia(c, sin); return p && p.estado === 'agir'; });
+    if(!pendentes.length){ try{ localStorage.setItem(_adChaveDia(),'1'); }catch(_){} return; }
+    adMostrarModalAlertaDiario(pendentes, sin);
+  }catch(e){ /* best-effort */ }
+}
+function adMostrarModalAlertaDiario(casos, sin){
+  let modal = document.getElementById('adModalAlertaDiario');
+  if(modal) modal.remove();
+  modal = document.createElement('div');
+  modal.id = 'adModalAlertaDiario';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:10200;display:flex;align-items:center;justify-content:center;';
+  const _rank = { alta:0, media:1, baixa:2 };
+  const top = casos.slice().sort((a,b)=>{ const pa=cobPendencia(a,sin), pb=cobPendencia(b,sin); return (_rank[pa.urgencia]??3)-(_rank[pb.urgencia]??3); }).slice(0,3);
+  const itens = top.map(c=>{
+    const p = cobPendencia(c, sin);
+    const partes = (c.cobranca_partes||[]).slice().sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
+    const princ = partes.find(x=>x.principal)||partes[0]||null;
+    const nome = (princ && princ.devedores && princ.devedores.nome) || '—';
+    const cor = p.urgencia==='alta' ? '#A65A4A' : '#9C7F40';
+    return `<div style="padding:11px 12px;border-bottom:1px solid var(--border);cursor:pointer;" onclick="adFecharAlertaDiario();verCobranca('${c.id}');">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+        <div style="min-width:0;"><div style="font-weight:700;color:var(--text);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(nome)}</div>
+          <div style="font-size:11px;color:var(--text-3);">${escHtml(p.motivo||'')}</div></div>
+        <div style="font-size:11px;font-weight:800;color:${cor};text-transform:uppercase;white-space:nowrap;">Agir</div>
+      </div></div>`;
+  }).join('');
+  modal.innerHTML = `<div style="max-width:520px;width:calc(100% - 40px);background:var(--card,#fff);padding:22px;border-radius:14px;max-height:80vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);">
+    <h3 style="font-size:17px;font-weight:700;color:var(--text);margin-bottom:6px;">⏰ Pendências antes de fechar o dia</h3>
+    <p style="font-size:13px;color:var(--text-2);margin-bottom:14px;">Há <strong>${casos.length} caso${casos.length!==1?'s':''}</strong> pedindo ação. Os ${top.length} mais urgentes:</p>
+    <div style="border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:16px;">${itens}</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;">
+      <button class="cob-btn-ghost" onclick="adAdiarAlertaDiario()">Lembrar em 30min</button>
+      <button class="cob-btn-ghost" onclick="adFecharAlertaDiario();try{cobrFilter.pend='agir';}catch(_){};showPage('cobr');">Ver todos</button>
+      <button class="cob-btn-primary" onclick="adFecharAlertaDiario()">Já vi, obrigado</button>
+    </div></div>`;
+  document.body.appendChild(modal);
+}
+function adFecharAlertaDiario(){
+  const m = document.getElementById('adModalAlertaDiario'); if(m) m.remove();
+  try{ localStorage.setItem(_adChaveDia(),'1'); }catch(_){}
+}
+function adAdiarAlertaDiario(){
+  const m = document.getElementById('adModalAlertaDiario'); if(m) m.remove();
+  // NÃO marca como visto — reaparece em 30min se ainda dentro da janela.
+  setTimeout(()=>{ adVerificarAlertaDiario(); }, 30*60*1000);
+}
+function adIniciarVerificacao(){
+  if(_adTimer) clearInterval(_adTimer);
+  setTimeout(()=>{ adVerificarAlertaDiario(); }, 45*1000);       // 1ª checagem 45s após entrar
+  _adTimer = setInterval(()=>{ adVerificarAlertaDiario(); }, 5*60*1000); // a cada 5min
+}
+// ============================================================================
+// FIM · ONDA E
+// ============================================================================
 
 </script>
 
