@@ -10852,6 +10852,7 @@ function setDrawerTab(tab, devId, btnEl){
   if(!body) return;
   body.innerHTML = _drawerTabHtml(tab, dev, _drawerCtx(dev));
   if(tab==='resumo') renderDrawerComunicacao(devId);
+  if(tab==='acordos') renderDrawerAcordosStatus(devId);
   if(tab==='cobrancas') renderDrawerAsaas(devId);
   if(tab==='docs') renderDrawerDocumentos(devId);
 }
@@ -11543,9 +11544,50 @@ function acordoHtml(ac, ai, devId){
           </div>
         `).join('')}
         ${ac.obs?`<p style="font-size:12px;color:var(--text-3);margin-top:8px;">${ac.obs}</p>`:''}
+        <!-- Onda 1 #3 — ações do acordo dentro do caso (religa termo/ZapSign/boleto já existentes) -->
+        <div id="acordo-meta-${ac.id}" style="margin-top:10px;"></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">
+          <button class="btn btn-ghost btn-sm" onclick="abrirDocCredor('${devId}')" title="Gerar o termo do acordo e enviar para assinatura (ZapSign)">📄 Gerar termo / ZapSign</button>
+          <button class="btn btn-gold btn-sm" onclick="emitirBoletoAcordoUI('${ac.id}','${devId}')" title="Emitir boleto do acordo (usa o valor negociado)">💳 Emitir boleto</button>
+        </div>
       </div>
     </div>
   `;
+}
+
+// Onda 1 #3 — emitir boleto do acordo DE DENTRO DO CASO. Reusa /api/emitir-acordo
+// (que usa SEMPRE o valor negociado do acordo — guardrail P1-20). Aditivo.
+async function emitirBoletoAcordoUI(acordoId, devId){
+  if(!confirm('Emitir o boleto deste acordo agora? O valor será o do acordo negociado.')) return;
+  const btnHost = document.getElementById('acordo-meta-'+acordoId);
+  try{
+    showToast('Emitindo boleto do acordo…','info');
+    const r = await fetch('/api/emitir-acordo',{ method:'POST', headers:{ 'Content-Type':'application/json', ...(await authHeaders()) }, body: JSON.stringify({ acordo_id: acordoId }) });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok || j.error) throw new Error(j.error || ('HTTP '+r.status));
+    const link = j.invoice_url || j.asaas_invoice_url || (j.metadata && j.metadata.asaas_invoice_url) || '';
+    showToast(j.skipped ? ('Boleto já emitido'+(link?'':'.')) : 'Boleto emitido ✅', 'success');
+    if(btnHost && link){ btnHost.innerHTML = `<a href="${escHtml(link)}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:#5E7C58;">✓ Boleto emitido — abrir link →</a>`; }
+    else { try{ if(typeof renderDrawerAcordosStatus==='function') renderDrawerAcordosStatus(devId); }catch(_){} }
+  }catch(e){ showToast('Erro ao emitir boleto: '+(e.message||e),'danger'); }
+}
+
+// Enriquecimento assíncrono da aba Acordos: status de assinatura (ZapSign) + link do
+// boleto, lidos do acordo RELACIONAL (acordos.status_zapsign / metadata). Aditivo.
+async function renderDrawerAcordosStatus(devId){
+  const dev=(DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  const ids=(dev.acordos||[]).map(a=>a.id).filter(Boolean); if(!ids.length) return;
+  let rows=[];
+  try{ const supa=getSupabase(); if(supa){ const r=await supa.from('acordos').select('id,status,status_zapsign,metadata').in('id',ids); rows=r.data||[]; } }catch(_){ return; }
+  rows.forEach(a=>{
+    const host=document.getElementById('acordo-meta-'+a.id); if(!host) return;
+    const m=a.metadata||{}; const zs=(a.status_zapsign||'').toLowerCase(); const bits=[];
+    if(zs==='assinado' || zs==='signed') bits.push(`<span style="font-size:11px;font-weight:700;color:#5E7C58;background:#E9EDE2;padding:2px 8px;border-radius:20px;">✓ Assinado</span>`);
+    else if(['enviado','visualizado','pendente','link-opened','new'].includes(zs)) bits.push(`<span style="font-size:11px;font-weight:700;color:#9C7F40;background:#FBF8EF;border:1px solid #E0D3A8;padding:2px 8px;border-radius:20px;">Aguardando assinatura</span>`);
+    if(m.boletos_emitidos && m.asaas_invoice_url) bits.push(`<a href="${escHtml(m.asaas_invoice_url)}" target="_blank" rel="noopener" style="font-size:11.5px;font-weight:600;color:#5E7C58;">✓ Boleto emitido — abrir →</a>`);
+    else if(m.boletos_emitidos) bits.push(`<span style="font-size:11px;font-weight:600;color:#5E7C58;">✓ Boleto emitido</span>`);
+    host.innerHTML = bits.length ? `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">${bits.join('')}</div>` : '';
+  });
 }
 
 function renderProcessoTab(dev){
