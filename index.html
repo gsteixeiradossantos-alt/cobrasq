@@ -10797,6 +10797,9 @@ function openDrawer(devId){
 
   document.getElementById('devDrawer-status').outerHTML = `<span id="devDrawer-status" class="badge ${getBadgeClass(dev.status)}">${dev.status||'—'}</span>`;
 
+  // Onda B: selo "📵 Telefone inválido" no cabeçalho quando a flag estiver setada.
+  try{ telAtualizarBadgeHeader(dev); }catch(_){}
+
   const metaEl = document.getElementById('devDrawer-meta');
   if(metaEl){
     const cliNome = dev.clienteId ? ((DB.clientes||[]).find(c=>c.id===dev.clienteId)||{}).nome||'—' : '—';
@@ -11475,6 +11478,13 @@ function negRenderPainel(devId){
   const cob = _negCobDe(dev);
   const encerrada = cob && cob.metadata && cob.metadata.encerramento_negociacao;
   const aguardando = cob && cob.metadata && cob.metadata.aguardando_resposta;
+  const telInvalido = _telInvalidoDe(dev);
+
+  // Onda B: telefone inválido tem precedência — mostra o painel de busca de novo número.
+  if(telInvalido){
+    box.innerHTML = telRenderChecklist(devId);
+    return;
+  }
 
   let html = '';
   // Cabeçalho: passo atual
@@ -11534,12 +11544,19 @@ function negRenderPainel(devId){
   html += `<div style="border-top:1px dashed var(--border);margin-top:6px;padding-top:12px;">
     <div style="font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--navy);margin-bottom:7px;">⚡ Sempre disponível</div>
     <button onclick="negExecutarOpcao('${devId}','devedor-respondeu')" style="text-align:left;width:100%;padding:9px 12px;background:#EAF6EF;border:1px solid #B7E0CB;border-radius:7px;font-size:12.5px;color:var(--text);font-weight:500;cursor:pointer;">💳 Formas de pagamento</button>
+    <div style="margin-top:8px;">${telBotaoMarcar(devId)}</div>
   </div>`;
+
+  // Onda C — cockpit de propostas de pagamento (3 cards + slider de parcelas).
+  html += `<div id="pag-cards-${devId}" style="margin-top:14px;"></div>`;
 
   // Área onde os blocos de mensagem são renderizados após escolher a opção
   html += `<div id="neg-msgs-${devId}" style="margin-top:16px;"></div>`;
 
   box.innerHTML = html;
+
+  // Onda C: renderiza os 3 cards de proposta com base no cálculo do caso.
+  try{ if(typeof pagRenderCards === 'function') pagRenderCards(devId); }catch(_){}
 }
 
 // Clicou numa opção → renderiza os blocos de mensagem (com assinatura aplicada).
@@ -11624,9 +11641,12 @@ async function negEnviarBloco(devId, opcaoId, idx){
     showToast('Mensagem enviada via WhatsApp.','success');
     ta.setAttribute('data-neg-enviado','1');
   } else {
-    // Onda B trata número inválido em profundidade; aqui só avisa + registra falha.
+    // Onda B: número sem WhatsApp → oferece marcar como inválido e abrir a busca.
     if(r && r.code === 'numero_sem_whatsapp'){
-      showToast('Número sem WhatsApp ativo (tentamos com e sem o 9). Revise o telefone — tratamento completo virá na Onda B.','warning');
+      showToast('Número sem WhatsApp ativo (tentamos com e sem o 9).','warning');
+      if(confirm('O número '+tel+' não tem WhatsApp ativo.\n\nMarcar este telefone como inválido e abrir a busca de novo número?')){
+        await telMarcarInvalido(devId, 'Número sem WhatsApp ativo (envio Z-API falhou).', true);
+      }
     } else {
       showToast('Falha ao enviar: '+((r&&r.error)||'erro desconhecido'),'danger');
     }
@@ -11704,6 +11724,412 @@ async function negReabrir(devId){
   _negRegistrarHistorico(dev, 'Negociação reaberta pelo operador.');
   await _negPersistMeta(devId, { encerramento_negociacao: null, aguardando_resposta: false });
   negRenderPainel(devId);
+}
+
+// ============================================================
+// ONDA B — TELEFONE INVÁLIDO + BUSCA DE NOVO NÚMERO
+// Portado do crm.html (marcarTelefoneInvalido L4047, gerarMensagemEmpresa L4067,
+// ler/salvar/atualizarChecklistTelefone L4072-4115, atualizarTelefoneEReativar L4152).
+// Adaptado ao modelo devedor/cobrança do app: SEM migração — flag vive em
+// cobrancas.metadata.tel_invalido (via _negPersistMeta) e checklist em localStorage.
+// Reusa _negPersistMeta / _negRegistrarHistorico / negNomeOperador da Onda A.
+// Prefixo `tel`/`_tel`.
+// ============================================================
+
+// Lê a flag tel_invalido do metadata da cobrança do devedor.
+function _telInvalidoDe(dev){
+  const cob = _negCobDe(dev);
+  return (cob && cob.metadata && cob.metadata.tel_invalido) || null;
+}
+// Idem, a partir de um objeto cobrança direto (uso na lista).
+function _telInvalidoCob(cob){
+  return (cob && cob.metadata && cob.metadata.tel_invalido) || null;
+}
+
+// Chave do checklist no localStorage, por id do devedor/cobrança (== id do caso no app).
+function _telChecklistKey(devId){ return 'cobrasq_checklist_tel_' + devId; }
+
+function telLerChecklist(devId){
+  try{
+    const raw = localStorage.getItem(_telChecklistKey(devId));
+    return raw ? JSON.parse(raw) : { buscou_sistema:false, conseguiu_novo:false, qual_novo_numero:'', notas:'' };
+  }catch(e){ return { buscou_sistema:false, conseguiu_novo:false, qual_novo_numero:'', notas:'' }; }
+}
+
+function telSalvarChecklist(devId, dados){
+  try{ localStorage.setItem(_telChecklistKey(devId), JSON.stringify(dados)); }catch(e){}
+}
+
+// Atualiza UM campo do checklist e persiste. Registra no histórico a 1ª vez de cada
+// marcação booleana (paridade com atualizarChecklistTel do CRM).
+function telAtualizarChecklist(devId, campo, valor){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  const cl = telLerChecklist(devId);
+  const antes = cl[campo];
+  cl[campo] = valor;
+  telSalvarChecklist(devId, cl);
+  if((campo==='buscou_sistema' || campo==='conseguiu_novo') && valor && !antes){
+    const labels = {
+      buscou_sistema:'Buscou telefone em sistema externo (Serasa/SPC/Google)',
+      conseguiu_novo:'Conseguiu novo número de contato'
+    };
+    _negRegistrarHistorico(dev, 'Busca de contato: '+labels[campo]+'.');
+  }
+}
+
+// Monta a mensagem pronta para pedir telefone atualizado ao credor.
+// Portado de gerarMensagemEmpresa (crm.html L4067), adaptado ao devedor do app.
+function telGerarMsgEmpresa(dev){
+  const caso = _negCasoAdapter(dev);
+  const idCurto = String(dev.id || '').slice(-8);
+  const nome = dev.nome || (caso && caso.devedor) || 'o devedor';
+  const credor = (caso && caso.credor) || 'em vosso favor';
+  return 'Bom dia! Aqui é da COBRASQ Recuperadora de Crédito. Estamos tentando contato com ' + nome +
+    ' referente à dívida (' + credor + ', cadastro #' + idCurto + '), porém o telefone que temos cadastrado ' +
+    'não pertence mais a essa pessoa. Vocês teriam um telefone, e-mail ou endereço atualizado pra nos repassar? Obrigado!';
+}
+
+// Marca o telefone como inválido: grava flag no metadata + histórico. NÃO inventa status.
+// Portado de marcarTelefoneInvalido (crm.html L4047).
+async function telMarcarInvalido(devId, motivo, skipConfirm){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  if(!skipConfirm && !confirm('Marcar o telefone como inválido / não pertence mais ao devedor?\n\nO caso entra em "busca de novo número" e um checklist é aberto.')) return;
+  const flag = {
+    em: new Date().toISOString(),
+    por: negNomeOperador() || 'Sistema',
+    motivo: motivo || 'Telefone inválido / número não pertence mais ao devedor'
+  };
+  await _negPersistMeta(devId, { tel_invalido: flag });
+  _negRegistrarHistorico(dev, 'Telefone marcado como INVÁLIDO ('+(dev.tel||'—')+'). Iniciada busca de novo número.');
+  showToast('Telefone marcado como inválido. Siga o checklist de busca.','warning');
+  // Reflete no cabeçalho e reabre a aba Negociar com o painel de checklist.
+  if(currentDevId === devId){
+    try{ telAtualizarBadgeHeader(dev); }catch(_){}
+    const btn = document.querySelector('[data-htab=negociar]');
+    if(btn){ setDrawerTab('negociar', devId, btn); }
+    else { negRenderPainel(devId); }
+  }
+  // Atualiza a lista de cobranças (badge) de forma defensiva.
+  try{ if(typeof renderCobrancas==='function' && document.getElementById('page-cobr')) renderCobrancas({soLocal:true}); }catch(_){}
+}
+
+// Salva o novo número: atualiza dev.tel (+save), limpa a flag, registra histórico e
+// limpa o checklist. Portado de atualizarTelefoneEReativar (crm.html L4152).
+async function telSalvarNovoNumero(devId){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  const inp = document.getElementById('tel-novo-'+devId);
+  const bruto = inp ? String(inp.value||'').trim() : '';
+  const digits = bruto.replace(/\D/g,'');
+  if(!bruto || digits.length < 10){ showToast('Telefone inválido (informe DDD + número).','danger'); return; }
+  if(!confirm('Atualizar o telefone para '+bruto+' e reativar o contato?')) return;
+  const antigo = dev.tel || '—';
+  dev.tel = bruto;
+  dev.updatedAt = (typeof hoje==='function'?hoje():'');
+  try{ if(typeof save==='function') save(); }catch(_){}
+  // Limpa a flag no metadata.
+  await _negPersistMeta(devId, { tel_invalido: null });
+  _negRegistrarHistorico(dev, 'Telefone atualizado de '+antigo+' para '+bruto+'. Contato reativado.');
+  // Marca o checklist como concluído + limpa após reativar.
+  const cl = telLerChecklist(devId); cl.conseguiu_novo = true; cl.qual_novo_numero = bruto; telSalvarChecklist(devId, cl);
+  try{ localStorage.removeItem(_telChecklistKey(devId)); }catch(_){}
+  showToast('Telefone atualizado. Contato reativado.','success');
+  // Redesenha cabeçalho, corpo (para sumir o painel de inválido) e a lista.
+  if(currentDevId === devId){
+    try{ renderDrawerBody(devId); }catch(_){ try{ negRenderPainel(devId); }catch(__){} }
+    try{ if(typeof openDevDrawer==='function'){ /* header re-render via renderDrawerBody chain */ } telAtualizarBadgeHeader(dev); }catch(_){}
+  }
+  try{ if(typeof renderCobrancas==='function' && document.getElementById('page-cobr')) renderCobrancas({soLocal:true}); }catch(_){}
+}
+
+// Copia a mensagem ao credor (do textarea editável) para a área de transferência.
+function telCopiarMsgEmpresa(devId, btn){
+  const ta = document.getElementById('tel-msgcredor-'+devId);
+  if(!ta) return;
+  const texto = ta.value;
+  const done = ()=>{ if(btn){ const o=btn.textContent; btn.textContent='Copiado!'; setTimeout(()=>btn.textContent=o,1200); } showToast('Mensagem copiada.','success'); };
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(texto).then(done, done); }
+    else { ta.select(); document.execCommand('copy'); done(); }
+  }catch(_){ done(); }
+}
+
+// Painel de checklist de busca de novo número (renderizado dentro da aba Negociar,
+// quando tel_invalido está setado). Portado de renderTelaSemContatoTelefone (crm.html L4083).
+function telRenderChecklist(devId){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return '';
+  const cl = telLerChecklist(devId);
+  const flag = _telInvalidoDe(dev);
+  const msg = telGerarMsgEmpresa(dev);
+  const quando = flag && flag.em ? (new Date(flag.em)).toLocaleString('pt-BR') : '';
+  return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;">
+    <div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:#9C7F40;margin-bottom:6px;">📵 Telefone inválido / não pertence mais</div>
+    <div style="font-size:12px;color:var(--text-2);margin-bottom:14px;">Marcado como inválido${quando?(' em '+escHtml(quando)):''}${flag&&flag.por?(' por '+escHtml(flag.por)):''}. Siga o checklist abaixo para recuperar o contato.</div>
+
+    <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:14px;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);margin-bottom:8px;">Checklist de busca</div>
+      <label style="display:block;padding:5px 0;cursor:pointer;font-size:12.5px;"><input type="checkbox" ${cl.buscou_sistema?'checked':''} onchange="telAtualizarChecklist('${devId}','buscou_sistema',this.checked)"> 🔍 Busquei em sistema externo (Serasa, SPC, Google, redes sociais)</label>
+      <label style="display:block;padding:5px 0;cursor:pointer;font-size:12.5px;"><input type="checkbox" ${cl.conseguiu_novo?'checked':''} onchange="telAtualizarChecklist('${devId}','conseguiu_novo',this.checked)"> ✅ Consegui um novo número de contato</label>
+      <div style="margin-top:8px;">
+        <div style="font-size:11px;color:var(--text-3);margin-bottom:4px;">Anotações (onde procurou, o que encontrou)</div>
+        <textarea id="tel-notas-${devId}" rows="2" onchange="telAtualizarChecklist('${devId}','notas',this.value)" style="width:100%;font-size:12.5px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-family:inherit;resize:vertical;background:var(--surface-2);color:var(--text);">${escHtml(cl.notas||'')}</textarea>
+      </div>
+    </div>
+
+    <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:14px;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);margin-bottom:6px;">Mensagem para o credor</div>
+      <div style="font-size:11.5px;color:var(--text-3);margin-bottom:8px;">Edite se necessário e copie para colar no WhatsApp ou e-mail do credor.</div>
+      <textarea id="tel-msgcredor-${devId}" rows="4" style="width:100%;font-size:12.5px;line-height:1.5;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-family:inherit;resize:vertical;background:var(--surface-2);color:var(--text);">${escHtml(msg)}</textarea>
+      <button class="btn btn-ghost btn-sm" style="margin-top:8px;" onclick="telCopiarMsgEmpresa('${devId}',this)">📋 Copiar mensagem para o credor</button>
+    </div>
+
+    <div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);margin-bottom:6px;">Novo telefone</div>
+      <div style="font-size:11.5px;color:var(--text-3);margin-bottom:8px;">Ao salvar, o cadastro é atualizado, a marca de inválido é removida e o contato é reativado.</div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input type="text" id="tel-novo-${devId}" placeholder="Ex: (44) 9 9123-4567" value="${escHtml(cl.qual_novo_numero||'')}" style="flex:1;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:13.5px;background:var(--surface-2);color:var(--text);">
+        <button class="btn btn-primary btn-sm" onclick="telSalvarNovoNumero('${devId}')">Salvar e reativar</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// Botão "📵 Telefone inválido" (usado no painel Negociar e no Resumo).
+function telBotaoMarcar(devId){
+  return `<button class="btn btn-ghost btn-sm" onclick="telMarcarInvalido('${devId}')" title="Marcar telefone como inválido e abrir a busca de novo número" style="display:flex;align-items:center;gap:6px;">📵 Telefone inválido</button>`;
+}
+
+// Selo "📵 Telefone inválido" para o cabeçalho do drawer (span devDrawer-telbadge).
+function telAtualizarBadgeHeader(dev){
+  const host = document.getElementById('devDrawer-status');
+  if(!host || !host.parentNode) return;
+  let badge = document.getElementById('devDrawer-telbadge');
+  const invalido = _telInvalidoDe(dev);
+  if(invalido){
+    if(!badge){
+      badge = document.createElement('span');
+      badge.id = 'devDrawer-telbadge';
+      badge.className = 'badge';
+      badge.style.cssText = 'background:#FBF6E6;color:#9C7F40;border:1px solid #E0D3A8;';
+      host.parentNode.insertBefore(badge, host.nextSibling);
+    }
+    badge.textContent = '📵 Telefone inválido';
+  } else if(badge){
+    badge.remove();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ONDA C — Formas de pagamento (3 cards) + proposta via WhatsApp + Mercado Pago
+// Portado de crm.html: renderDividaCalc/calcularDivida (L5690-5726, cards de
+// pagamento) + enviarPropostaPagamento (L5729-5781) + ajustarSliderParcelas
+// (L8645) + lerConfigMP/salvarConfigMP/renderConfigMP (L3873-3894).
+// REUSA da Onda A: _negCasoAdapter (cálculo à vista/boleto/cartão), fmtR,
+// negComAssinatura, _aavEnviarWhats, _negRegistrarHistorico, escHtml, showToast.
+// Aditivo, sem migração; MP real (backend) fica como TODO gated — aqui só texto.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Config Mercado Pago (localStorage, paridade com o CRM) ──────────────────
+const PAG_MP_CONFIG_KEY = 'crm_mp_config';
+function pagLerConfigMP(){
+  try{ return JSON.parse(localStorage.getItem(PAG_MP_CONFIG_KEY) || '{}'); }
+  catch(_){ return {}; }
+}
+function pagSalvarConfigMP(){
+  const cb = document.getElementById('pagMpAtivo');
+  const pk = document.getElementById('pagMpPublicKey');
+  const tx = document.getElementById('pagMpTaxa');
+  const cfg = {
+    ativo: !!(cb && cb.checked),
+    publicKey: (pk && pk.value) || '',
+    taxa: (tx && parseFloat(tx.value)) || 4.99
+  };
+  try{ localStorage.setItem(PAG_MP_CONFIG_KEY, JSON.stringify(cfg)); }catch(_){}
+  // TODO(gated): persistir em supabase quando a integração real do MP existir.
+  if(typeof showToast==='function') showToast('Mercado Pago '+(cfg.ativo?'habilitado':'desabilitado')+'.','success');
+  const st = document.getElementById('pag-mp-status');
+  if(st) st.innerHTML = cfg.ativo
+    ? '<span class="int-dot int-dot-ok"></span>Habilitado'
+    : '<span class="int-dot int-dot-idle"></span>Desabilitado';
+}
+function pagRenderConfigMP(){
+  const cfg = pagLerConfigMP();
+  const cb = document.getElementById('pagMpAtivo');
+  const pk = document.getElementById('pagMpPublicKey');
+  const tx = document.getElementById('pagMpTaxa');
+  if(cb) cb.checked = !!cfg.ativo;
+  if(pk) pk.value = cfg.publicKey || '';
+  if(tx) tx.value = cfg.taxa != null ? cfg.taxa : '4.99';
+}
+
+// Estado do slider de parcelas do boleto, por devedor (nº atual escolhido).
+window._pagParcelas = window._pagParcelas || {};
+
+// Recalcula UMA opção de boleto para n parcelas usando a MESMA régua da Onda A
+// (Price 2,99% a.m. + R$6 fixo, mínimo R$256/parcela). Espelha ajustarSliderParcelas.
+function _pagBoletoParaN(total, n){
+  if(!(total > 0) || n < 1) return null;
+  let valorParc;
+  if(n === 1) valorParc = total;
+  else {
+    const i = NEG_PARCELA_BOLETO_JUROS_MENSAL;
+    const fator = (i * Math.pow(1 + i, n)) / (Math.pow(1 + i, n) - 1);
+    valorParc = total * fator;
+  }
+  const arred = Math.ceil(valorParc + NEG_PARCELA_BOLETO_FIXO);
+  return { n, parcela: arred, total: arred * n, abaixoMin: arred < NEG_PARCELA_VALOR_MIN };
+}
+
+// Renderiza os 3 cards de proposta (à vista PIX / boleto Nx / cartão 12x).
+function pagRenderCards(devId){
+  const box = document.getElementById('pag-cards-'+devId);
+  if(!box) return;
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  const caso = _negCasoAdapter(dev);
+  const total = caso.divida.totalAvista || 0;
+  const mp = pagLerConfigMP();
+
+  // Nº de parcelas do boleto: começa no máximo viável (caso.divida.boleto12.n) ou 12.
+  let nParc = window._pagParcelas[devId];
+  if(nParc == null) nParc = (caso.divida.boleto12 && caso.divida.boleto12.n) || 12;
+  window._pagParcelas[devId] = nParc;
+  const boletoOpt = _pagBoletoParaN(total, nParc);
+
+  const cardCss = 'flex:1;min-width:150px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:13px;';
+  const titCss  = 'font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-3);margin-bottom:6px;';
+  const valCss  = 'font-family:var(--font-mono);font-size:16px;font-weight:700;color:var(--navy);margin-bottom:2px;';
+  const descCss = 'font-size:11px;color:var(--text-3);margin-bottom:10px;';
+  const btnEnv  = (op,label)=>`<button class="btn btn-primary btn-sm" style="width:100%;margin-bottom:5px;" onclick="pagEnviarProposta('${devId}','${op}')">📱 ${label||'Enviar essa opção'}</button>`;
+  const btnCopy = (op)=>`<button class="btn btn-ghost btn-sm" style="width:100%;" onclick="pagCopiarProposta('${devId}','${op}',this)">Copiar</button>`;
+
+  let html = `<div style="border-top:1px dashed var(--border);padding-top:12px;">
+    <div style="font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--navy);margin-bottom:8px;">💳 Formas de pagamento — proposta</div>`;
+
+  if(!(total > 0)){
+    html += `<div style="font-size:12px;color:var(--text-3);background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:12px 14px;">Sem valor calculado para este caso. Cadastre valor original e vencimento para gerar as propostas.</div></div>`;
+    box.innerHTML = html;
+    return;
+  }
+
+  html += `<div style="display:flex;gap:8px;flex-wrap:wrap;">`;
+
+  // Card 1 — À vista PIX (Asaas)
+  html += `<div style="${cardCss}">
+    <div style="${titCss}">À vista · PIX</div>
+    <div style="${valCss}">${fmtR(total)}</div>
+    <div style="${descCss}">Pagamento único (via Asaas)</div>
+    ${btnEnv('avista')}${btnCopy('avista')}
+  </div>`;
+
+  // Card 2 — Boleto parcelado Nx (com slider)
+  const boletoDisp = boletoOpt && !boletoOpt.abaixoMin;
+  html += `<div style="${cardCss}">
+    <div style="${titCss}">Boleto parcelado</div>
+    <div style="${valCss}">${boletoDisp ? (boletoOpt.n+'x '+fmtR(boletoOpt.parcela)) : '—'}</div>
+    <div style="${descCss}">${boletoDisp ? ('Total '+fmtR(boletoOpt.total)) : 'Parcela mínima '+fmtR(NEG_PARCELA_VALOR_MIN)}</div>
+    <div style="margin-bottom:10px;">
+      <div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--text-3);margin-bottom:3px;"><span>Parcelas</span><span id="pag-parc-lbl-${devId}" style="font-weight:700;color:var(--navy);">${nParc}x</span></div>
+      <input type="range" min="1" max="${NEG_PARCELA_MAX_QTD}" value="${nParc}" oninput="pagAjustarParcelas('${devId}',this.value)" style="width:100%;">
+    </div>
+    ${boletoDisp ? btnEnv('boleto') : `<div style="font-size:11px;color:var(--text-3);text-align:center;padding:6px 0;">Reduza as parcelas até ${fmtR(NEG_PARCELA_VALOR_MIN)}</div>`}${boletoDisp ? btnCopy('boleto') : ''}
+  </div>`;
+
+  // Card 3 — Cartão 12x (Mercado Pago quando habilitado; senão proposta-texto genérica)
+  const cartaoParc = caso.divida.cartao12Parcela || 0;
+  const cartaoTotal = caso.divida.cartao12Total || 0;
+  html += `<div style="${cardCss}${mp.ativo?'border-color:#009EE3;':''}">
+    <div style="${titCss}">Cartão 12x${mp.ativo?' · <span style="color:#009EE3;">Mercado Pago</span>':''}</div>
+    <div style="${valCss}">12x ${fmtR(cartaoParc)}</div>
+    <div style="${descCss}">Total ${fmtR(cartaoTotal)}${mp.ativo?'':' · habilite o MP em Configurações'}</div>
+    ${btnEnv('cartao')}${btnCopy('cartao')}
+  </div>`;
+
+  html += `</div>`;
+  if(!mp.ativo){
+    html += `<div style="font-size:10.5px;color:var(--text-3);margin-top:8px;">O card do cartão envia só a proposta-texto. Para gerar link de pagamento real, habilite o Mercado Pago em <b>Configurações → Integrações</b>. <!-- TODO(gated): gerar link real via api (dispatch em automacao.js como ação _mercadopago) + secret MP --></div>`;
+  }
+  html += `</div>`;
+  box.innerHTML = html;
+}
+
+// Slider: atualiza o nº de parcelas do boleto e re-renderiza os cards ao vivo.
+function pagAjustarParcelas(devId, qtd){
+  let n = parseInt(qtd, 10);
+  if(isNaN(n) || n < 1) n = 1;
+  if(n > NEG_PARCELA_MAX_QTD) n = NEG_PARCELA_MAX_QTD;
+  window._pagParcelas[devId] = n;
+  const lbl = document.getElementById('pag-parc-lbl-'+devId);
+  if(lbl) lbl.textContent = n+'x';
+  pagRenderCards(devId);
+}
+
+// Monta o texto da proposta de UMA forma de pagamento (usa valores do caso).
+// Espelha enviarPropostaPagamento (crm.html L5729); valores sempre do adaptador.
+function pagMontarProposta(devId, opcao){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return null;
+  const caso = _negCasoAdapter(dev);
+  const total = caso.divida.totalAvista || 0;
+  if(!(total > 0)) return null;
+  const primeiroNome = (dev.nome || '').trim().split(/\s+/)[0] || 'tudo bem';
+  let texto = '';
+  if(opcao === 'avista'){
+    texto = 'Oi ' + primeiroNome + '! Pra fechar o acordo, a opção à vista pelo PIX fica em *' + fmtR(total) + '*. Posso te mandar a chave?';
+  } else if(opcao === 'boleto'){
+    const n = window._pagParcelas[devId] || (caso.divida.boleto12 && caso.divida.boleto12.n) || 12;
+    const opt = _pagBoletoParaN(total, n);
+    if(!opt || opt.abaixoMin) return null;
+    texto = 'Oi ' + primeiroNome + '! Opção parcelada no boleto: *' + opt.n + 'x de ' + fmtR(opt.parcela) + '* (total ' + fmtR(opt.total) + '). Topa?';
+  } else if(opcao === 'cartao'){
+    const parc = caso.divida.cartao12Parcela || 0;
+    const tot = caso.divida.cartao12Total || (parc * 12);
+    texto = 'Oi ' + primeiroNome + '! No cartão posso parcelar em *12x de ' + fmtR(parc) + '* sem juros (total ' + fmtR(tot) + '). Topa?';
+  } else {
+    return null;
+  }
+  return texto;
+}
+
+// Copia a proposta (com assinatura) para a área de transferência.
+function pagCopiarProposta(devId, opcao, btn){
+  const texto = pagMontarProposta(devId, opcao);
+  if(!texto){ if(typeof showToast==='function') showToast('Não foi possível montar a proposta.','warning'); return; }
+  const msg = (typeof negComAssinatura==='function') ? negComAssinatura(texto) : texto;
+  const done = ()=>{ if(btn){ const o=btn.textContent; btn.textContent='Copiado!'; setTimeout(()=>btn.textContent=o,1200); } };
+  try{ navigator.clipboard.writeText(msg).then(done, done); }catch(_){ done(); }
+}
+
+// Envia a proposta de pagamento via WhatsApp (reusa _aavEnviarWhats, com
+// confirmação como negEnviarBloco) + registra no histórico + marca aguardando.
+async function pagEnviarProposta(devId, opcao){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
+  const tel = String(dev.tel||'').replace(/\D/g,'');
+  if(!tel){ if(typeof showToast==='function') showToast('Devedor sem telefone cadastrado.','warning'); return; }
+  const base = pagMontarProposta(devId, opcao);
+  if(!base){ if(typeof showToast==='function') showToast('Não foi possível montar a proposta.','warning'); return; }
+  const texto = (typeof negComAssinatura==='function') ? negComAssinatura(base) : base;
+  const labels = { avista:'à vista (PIX)', boleto:'boleto parcelado', cartao:'cartão 12x' };
+
+  // TODO(gated): quando MP habilitado e opcao==='cartao', gerar link real de
+  // pagamento via api (dispatch em automacao.js como ação _mercadopago) + secret
+  // MP — hoje envia só a proposta-texto (paridade com o CRM).
+
+  const prev = texto.length > 400 ? texto.slice(0,400)+'\n…' : texto;
+  if(!confirm('CONFIRMAR envio da proposta ('+(labels[opcao]||opcao)+') via WhatsApp (Z-API):\n\nPara: '+tel+'\n\nMensagem:\n"""\n'+prev+'\n"""\n\nSerá enviada IMEDIATAMENTE pelo número COBRASQ. Continuar?')) return;
+  if(typeof _aavEnviarWhats !== 'function'){ if(typeof showToast==='function') showToast('Envio Z-API indisponível nesta build.','danger'); return; }
+  const r = await _aavEnviarWhats(tel, texto);
+  if(r && r.ok){
+    if(typeof showToast==='function') showToast('Proposta de pagamento enviada via WhatsApp.','success');
+    if(typeof _negRegistrarHistorico==='function') _negRegistrarHistorico(dev, '💳 Proposta de pagamento enviada ('+(labels[opcao]||opcao)+'): '+base.slice(0,100));
+    if(typeof _negPersistMeta==='function') _negPersistMeta(devId, { aguardando_resposta:true });
+  } else {
+    if(r && r.code === 'numero_sem_whatsapp'){
+      if(typeof showToast==='function') showToast('Número sem WhatsApp ativo (tentamos com e sem o 9).','warning');
+      if(typeof telMarcarInvalido==='function' && confirm('O número '+tel+' não tem WhatsApp ativo.\n\nMarcar este telefone como inválido e abrir a busca de novo número?')){
+        await telMarcarInvalido(devId, 'Número sem WhatsApp ativo (envio da proposta falhou).', true);
+      }
+    } else {
+      if(typeof showToast==='function') showToast('Falha ao enviar: '+((r&&r.error)||'erro desconhecido'),'danger');
+    }
+  }
 }
 
 function _drawerTabHtml(tab, dev, ctx){
@@ -11825,6 +12251,9 @@ function _drawerTabHtml(tab, dev, ctx){
         <div style="font-size:11px;color:var(--text-3);font-weight:600;letter-spacing:.10em;text-transform:uppercase;margin-bottom:10px">Ações rápidas</div>
         <div style="display:grid;gap:6px;margin-bottom:22px">
           ${dev.tel?`<button onclick="window.open('https://wa.me/55${dev.tel.replace(/\D/g,'')}','_blank')" style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);font-weight:500;text-align:left;cursor:pointer">💬 Enviar WhatsApp</button>`:''}
+          ${_telInvalidoDe(dev)
+            ? `<button onclick="setDrawerTab('negociar','${devId}',document.querySelector('[data-htab=negociar]'))" style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:#FBF6E6;border:1px solid #E0D3A8;border-radius:6px;font-size:12.5px;color:#9C7F40;font-weight:600;text-align:left;cursor:pointer">📵 Telefone inválido · buscar novo número</button>`
+            : `<button onclick="telMarcarInvalido('${devId}')" style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);font-weight:500;text-align:left;cursor:pointer">📵 Telefone inválido</button>`}
           <button onclick="abrirHistorico('${devId}')" style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);font-weight:500;text-align:left;cursor:pointer">📝 Registrar contato</button>
           <button onclick="registrarPromessa('${devId}')" style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);font-weight:500;text-align:left;cursor:pointer">📅 Registrar promessa</button>
           <button onclick="abrirAcordo('${devId}')" style="display:flex;align-items:center;gap:10px;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);font-weight:500;text-align:left;cursor:pointer">🤝 Novo acordo</button>
@@ -16244,7 +16673,7 @@ async function renderCobrancas(opts){
     const cor=_etiquetaCor(c.status);
     const aging=_cobrAgingDias(c); const agingOld=(aging!=null && aging>=365);
     return `<div class="cob-panel cob-card cob-tr-click" style="--cor:${cor};padding:14px;cursor:pointer;" onclick="verCobranca('${c.id}')">
-      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;"><div class="strong" style="font-size:14px;font-weight:700;">${escHtml(princ?.devedores?.nome||'—')}${extra}</div>${cobStatusBadge(c)}</div>
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;"><div class="strong" style="font-size:14px;font-weight:700;">${escHtml(princ?.devedores?.nome||'—')}${extra}${_telInvalidoCob(c)?` <span class="det-chip" style="background:#FBF6E6;color:#9C7F40;border:1px solid #E0D3A8;" title="Telefone inválido — buscando novo número">📵</span>`:''}</div>${cobStatusBadge(c)}</div>
       ${c._pend?`<div style="margin-top:5px;">${cobPendPill(c._pend, true)}</div>`:''}
       <div style="font-size:12.5px;color:var(--text-2);margin-top:4px;">${escHtml(_cobrDocLabel(c))}</div>
       <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}</div>
@@ -31130,10 +31559,37 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
         <button class="btn btn-ghost btn-sm" style="margin-top:10px;color:var(--text-3);" onclick="carregarRegraDefault()">Carregar modelo padrão</button>
       </div>
 
+      <!-- ── Mercado Pago (Onda C) — gateway de cartão ──────────────────────
+           Persiste em localStorage (crm_mp_config), independente do "Salvar
+           todas". Aqui o card só habilita a PROPOSTA-texto de cartão 12x na aba
+           Negociar. Link de pagamento real = TODO(gated): backend + secret MP. -->
+      <div class="int-card" id="pag-mp-card">
+        <div class="int-card-header">
+          <div class="int-card-logo" style="color:#009EE3;">${ico('card',20)||'💳'}</div>
+          <div>
+            <div class="int-card-name">Mercado Pago — Cartão</div>
+            <div class="int-card-sub">Habilita a proposta de cartão 12x na negociação • link de pagamento real em breve</div>
+          </div>
+          <div class="int-status" id="pag-mp-status">${pagLerConfigMP().ativo?'<span class="int-dot int-dot-ok"></span>Habilitado':'<span class="int-dot int-dot-idle"></span>Desabilitado'}</div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px;cursor:pointer;">
+          <input type="checkbox" id="pagMpAtivo" onchange="pagSalvarConfigMP()"> Habilitar Mercado Pago (gateway de cartão)
+        </label>
+        <div class="frow">
+          <div class="fg"><label>Public Key</label><input type="text" id="pagMpPublicKey" placeholder="APP_USR-..." onblur="pagSalvarConfigMP()"/></div>
+          <div class="fg"><label>Taxa do cartão (%)</label><input type="text" id="pagMpTaxa" placeholder="Ex: 4.99" onblur="pagSalvarConfigMP()"/></div>
+        </div>
+        <div style="margin-top:8px;padding:10px 12px;background:var(--surface2);border-radius:var(--radius-sm);font-size:11.5px;color:var(--text-2);line-height:1.6;">
+          Enquanto habilitado, o card <b>Cartão 12x</b> na aba <b>Negociar</b> monta a proposta com os valores do cartão e envia via WhatsApp. A geração de <b>link de pagamento real</b> (cobrança no Mercado Pago) exige backend e ficará disponível numa próxima entrega.
+        </div>
+      </div>
+
       <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:8px;">
         <button class="btn btn-primary" onclick="salvarIntegracoes()">Salvar todas as integrações</button>
       </div>
       <div id="cfg-int-msg" style="margin-top:8px;font-size:12px;text-align:right;"></div>`;
+    // Onda C: hidrata os campos do MP a partir do localStorage após montar o HTML.
+    try{ if(typeof pagRenderConfigMP === 'function') pagRenderConfigMP(); }catch(_){}
   }
   else if(section==='notificacoes'){
     const n = DB.config.notif||{};
