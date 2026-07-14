@@ -114,17 +114,21 @@ async function escolherPasta() {
     renderFase3();
     return;
   }
-  // Subpastas com PDFs → lote (1 caso por subpasta). Senão, a própria pasta é 1 caso.
-  const subs = [];
-  for await (const [nome, h] of root.entries()) if (h.kind === 'directory') subs.push([nome, h]);
-  subs.sort((a, b) => a[0].localeCompare(b[0], 'pt-BR'));
-  for (const [nome, h] of subs) {
-    const docs = await lerPdfsDaPasta(h);
-    if (docs.length) state.casos.push(novoCaso(nome, docs));
-  }
-  if (!state.casos.length) {
-    const docs = await lerPdfsDaPasta(root);
-    if (docs.length) state.casos.push(novoCaso(root.name, docs));
+  // eproc: se a pasta escolhida tem PDFs SOLTOS, ELA é o caso — usa só os PDFs dela e
+  // NÃO entra nas subpastas. Só quando NÃO há PDF solto é que a tratamos como pasta-mãe
+  // de LOTE (1 caso por subpasta). Antes, qualquer subpasta virava lote e os PDFs da
+  // própria pasta eram ignorados — daí "puxava das subpastas" sem querer.
+  const raizDocs = await lerPdfsDaPasta(root);
+  if (raizDocs.length) {
+    state.casos.push(novoCaso(root.name, raizDocs));
+  } else {
+    const subs = [];
+    for await (const [nome, h] of root.entries()) if (h.kind === 'directory') subs.push([nome, h]);
+    subs.sort((a, b) => a[0].localeCompare(b[0], 'pt-BR'));
+    for (const [nome, h] of subs) {
+      const docs = await lerPdfsDaPasta(h);
+      if (docs.length) state.casos.push(novoCaso(nome, docs));
+    }
   }
   if (!state.casos.length) { renderFase1('Nenhum PDF encontrado (nem na pasta, nem em subpastas).'); return; }
   await extrairTodos();
