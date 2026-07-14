@@ -859,7 +859,16 @@ module.exports = async function handler(req, res) {
       });
     } catch {}
 
-    res.status(200).json({ ok: true, hoje: new Date().toISOString().slice(0,10), ...resultado, calendar, contasPagar });
+    // Lembrete de assinatura ZapSign (item #11) — roda dentro do cron-regua diário.
+    // TRAVA DE SEGURANÇA: começa DESLIGADO (força dry) até LEMBRETE_ZAPSIGN_LIVE=1 no
+    // ambiente, para que o deploy não dispare envio automático sem uma conferência
+    // prévia. Com a env ligada, respeita o ?dry=1 manual normalmente.
+    const zapsignLive = process.env.LEMBRETE_ZAPSIGN_LIVE === '1';
+    let zapsign = null;
+    try { zapsign = await processarLembretesZapSign({ dry: dry || !zapsignLive }); }
+    catch (e) { zapsign = { error: e.message }; }
+
+    res.status(200).json({ ok: true, hoje: new Date().toISOString().slice(0,10), ...resultado, calendar, contasPagar, zapsign, zapsign_live: zapsignLive });
   } catch (err) {
     console.error('[cron-regua]', err);
     res.status(500).json({ ok: false, error: err.message });
