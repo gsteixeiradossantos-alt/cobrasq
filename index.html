@@ -12189,7 +12189,9 @@ function pagSalvarConfigMP(){
     taxa: (tx && parseFloat(tx.value)) || 4.99
   };
   try{ localStorage.setItem(PAG_MP_CONFIG_KEY, JSON.stringify(cfg)); }catch(_){}
-  // TODO(gated): persistir em supabase quando a integração real do MP existir.
+  // Config só controla o card no front (ativo/publicKey/taxa). A geração do link
+  // real usa o backend /api/automacao?action=mercadopago, cujo segredo
+  // (MERCADOPAGO_ACCESS_TOKEN) vive só no servidor — nunca no localStorage.
   if(typeof showToast==='function') showToast('Mercado Pago '+(cfg.ativo?'habilitado':'desabilitado')+'.','success');
   const st = document.getElementById('pag-mp-status');
   if(st) st.innerHTML = cfg.ativo
@@ -12290,7 +12292,7 @@ function pagRenderCards(devId){
 
   html += `</div>`;
   if(!mp.ativo){
-    html += `<div style="font-size:10.5px;color:var(--text-3);margin-top:8px;">O card do cartão envia só a proposta-texto. Para gerar link de pagamento real, habilite o Mercado Pago em <b>Configurações → Integrações</b>. <!-- TODO(gated): gerar link real via api (dispatch em automacao.js como ação _mercadopago) + secret MP --></div>`;
+    html += `<div style="font-size:10.5px;color:var(--text-3);margin-top:8px;">O card do cartão envia só a proposta-texto. Para gerar <b>link de pagamento real</b> (Checkout Pro), habilite o Mercado Pago em <b>Configurações → Integrações</b> (requer a env <code>MERCADOPAGO_ACCESS_TOKEN</code> no servidor).</div>`;
   }
   html += `</div>`;
   box.innerHTML = html;
@@ -12342,6 +12344,26 @@ function pagCopiarProposta(devId, opcao, btn){
   try{ navigator.clipboard.writeText(msg).then(done, done); }catch(_){ done(); }
 }
 
+// Gera o LINK DE PAGAMENTO REAL de cartão via Mercado Pago (backend). Chama a
+// ação 'mercadopago' do roteador de automação (mesmo mecanismo de
+// repasse-nova-receita/custodia); o segredo MP fica só no servidor. Devolve o
+// init_point (string) ou null quando MP não está configurado / falhou — nesse
+// caso o chamador cai no fallback proposta-texto.
+async function pagGerarLinkMP(devId, valor, credor){
+  if(!(valor > 0)) return null;
+  try{
+    const r = await fetch('/api/automacao?action=mercadopago', {
+      method:'POST',
+      headers:{ ...(await authHeaders()), 'Content-Type':'application/json' },
+      body: JSON.stringify({ valor: valor, titulo: 'Acordo - ' + (credor || 'COBRASQ'), devedor_id: devId })
+    });
+    const data = await r.json().catch(()=>({}));
+    if(data && data.ok && data.init_point) return data.init_point;
+    // ok:false (sem token/erro) → null → fallback texto no chamador.
+    return null;
+  }catch(_){ return null; }
+}
+
 // Envia a proposta de pagamento via WhatsApp (reusa _aavEnviarWhats, com
 // confirmação como negEnviarBloco) + registra no histórico + marca aguardando.
 async function pagEnviarProposta(devId, opcao){
@@ -12350,12 +12372,26 @@ async function pagEnviarProposta(devId, opcao){
   if(!tel){ if(typeof showToast==='function') showToast('Devedor sem telefone cadastrado.','warning'); return; }
   const base = pagMontarProposta(devId, opcao);
   if(!base){ if(typeof showToast==='function') showToast('Não foi possível montar a proposta.','warning'); return; }
-  const texto = (typeof negComAssinatura==='function') ? negComAssinatura(base) : base;
+  let texto = (typeof negComAssinatura==='function') ? negComAssinatura(base) : base;
   const labels = { avista:'à vista (PIX)', boleto:'boleto parcelado', cartao:'cartão 12x' };
 
-  // TODO(gated): quando MP habilitado e opcao==='cartao', gerar link real de
-  // pagamento via api (dispatch em automacao.js como ação _mercadopago) + secret
-  // MP — hoje envia só a proposta-texto (paridade com o CRM).
+  // Cartão + Mercado Pago habilitado: gera LINK DE PAGAMENTO REAL via backend
+  // (/api/automacao?action=mercadopago — segredo MP fica no servidor, exige a env
+  // MERCADOPAGO_ACCESS_TOKEN no Vercel). Se o backend responder ok:false (sem
+  // token / erro), cai no FALLBACK proposta-texto abaixo (não quebra o envio).
+  if(opcao === 'cartao' && pagLerConfigMP().ativo){
+    const caso = _negCasoAdapter(dev);
+    const valorCartao = caso.divida.cartao12Total || 0; // mesmo total usado no card
+    const link = await pagGerarLinkMP(devId, valorCartao, caso.credor);
+    if(link){
+      const msgLink = 'Oi ' + ((dev.nome||'').trim().split(/\s+/)[0] || 'tudo bem') +
+        '! Segue o link para pagamento no cartão em até 12x (total ' + fmtR(valorCartao) + '):\n' + link;
+      texto = (typeof negComAssinatura==='function') ? negComAssinatura(msgLink) : msgLink;
+    } else {
+      if(typeof showToast==='function') showToast('MP não configurado — enviando proposta em texto.','warning');
+      // segue com `texto` já montado (proposta-texto padrão) — fallback preservado.
+    }
+  }
 
   // Onda F · M2: respeita "pular confirmação Z-API" das Configurações (padrão = confirmar).
   const _pularConfirm = (typeof wcfgLerPularConfirm==='function') && wcfgLerPularConfirm();
@@ -32091,14 +32127,16 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
 
       <!-- ── Mercado Pago (Onda C) — gateway de cartão ──────────────────────
            Persiste em localStorage (crm_mp_config), independente do "Salvar
-           todas". Aqui o card só habilita a PROPOSTA-texto de cartão 12x na aba
-           Negociar. Link de pagamento real = TODO(gated): backend + secret MP. -->
+           todas". Com "ativo", o card Cartão 12x na aba Negociar gera LINK DE
+           PAGAMENTO REAL (Checkout Pro) via /api/automacao?action=mercadopago —
+           requer a env MERCADOPAGO_ACCESS_TOKEN no servidor; sem ela, cai no
+           fallback proposta-texto. O access token NUNCA vem ao front. -->
       <div class="int-card" id="pag-mp-card">
         <div class="int-card-header">
           <div class="int-card-logo" style="color:#009EE3;">${ico('card',20)||'💳'}</div>
           <div>
             <div class="int-card-name">Mercado Pago — Cartão</div>
-            <div class="int-card-sub">Habilita a proposta de cartão 12x na negociação • link de pagamento real em breve</div>
+            <div class="int-card-sub">Gera link de pagamento real (cartão até 12x) na negociação • Checkout Pro</div>
           </div>
           <div class="int-status" id="pag-mp-status">${pagLerConfigMP().ativo?'<span class="int-dot int-dot-ok"></span>Habilitado':'<span class="int-dot int-dot-idle"></span>Desabilitado'}</div>
         </div>
@@ -32110,7 +32148,7 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
           <div class="fg"><label>Taxa do cartão (%)</label><input type="text" id="pagMpTaxa" placeholder="Ex: 4.99" onblur="pagSalvarConfigMP()"/></div>
         </div>
         <div style="margin-top:8px;padding:10px 12px;background:var(--surface2);border-radius:var(--radius-sm);font-size:11.5px;color:var(--text-2);line-height:1.6;">
-          Enquanto habilitado, o card <b>Cartão 12x</b> na aba <b>Negociar</b> monta a proposta com os valores do cartão e envia via WhatsApp. A geração de <b>link de pagamento real</b> (cobrança no Mercado Pago) exige backend e ficará disponível numa próxima entrega.
+          Enquanto habilitado, o card <b>Cartão 12x</b> na aba <b>Negociar</b> gera um <b>link de pagamento real</b> (Checkout Pro do Mercado Pago, cartão em até 12x) com o valor negociado e o envia ao devedor via WhatsApp. Requer a env <code>MERCADOPAGO_ACCESS_TOKEN</code> configurada no servidor (Vercel); sem ela, o card cai automaticamente na proposta em texto.
         </div>
       </div>
 
