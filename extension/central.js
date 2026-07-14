@@ -41,9 +41,17 @@ const TIPOS_DOC = [
   [/comprovante/i, 'COMPROVANTES', '176', false],
   [/contrato/i, 'CONTRATO', '40', false],
 ];
+// Nome do documento SEM o número de ordem da frente (ex.: "01 - Petição.pdf" →
+// "Petição", "05. Declaração.pdf" → "Declaração") — é o que vai em Observação no OUTROS.
+function nomeSemNumero(nome) {
+  return String(nome || '')
+    .replace(/\.pdf$/i, '')
+    .replace(/^\s*\d{1,3}\s*[-._)\]]*\s*/, '') // tira "01 - ", "1.", "02_", "3) " etc.
+    .trim();
+}
 function classificarDoc(nome) {
   for (const [re, tipoTxt, selVal] of TIPOS_DOC) if (re.test(nome)) return { tipoTxt, selVal, obs: null };
-  return { tipoTxt: 'OUTROS', selVal: '11', obs: nome.replace(/\.pdf$/i, '').slice(0, 90) };
+  return { tipoTxt: 'OUTROS', selVal: '11', obs: nomeSemNumero(nome).slice(0, 90) };
 }
 
 // ── estado ─────────────────────────────────────────────────────────────────────
