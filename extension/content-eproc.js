@@ -20,9 +20,10 @@
   // processado 2× (duplo runCentral, duplo protocolo). Ver auditoria CA1/M1.
   if (window.__cobrasqEproc) return;
   window.__cobrasqEproc = true;
-  // Guarda de hostname: se a aba do tribunal foi navegada para outro site e a Central
-  // reinjeta aqui, não rodar (evita "pausas" absurdas em página alheia). Ver CM3.
-  if (!/\.tjpr\.jus\.br$/.test(location.hostname)) return;
+  // Guarda de hostname: só roda em domínio do eproc (multi-estado: eprocNg.tj<UF>.jus.br
+  // ou eproc.trf<N>.jus.br). Se a aba foi navegada p/ outro site e a Central reinjeta
+  // aqui, não roda (evita "pausas" absurdas em página alheia). Ver CM3.
+  if (!/^eproc[\dg]*\.[\w.-]+\.jus\.br$/i.test(location.hostname)) return;
   const SEL = window.EPROC_SEL || {};
   const TXT = window.EPROC_TXT || {};
   const DIST = window.EPROC_DIST || {};

@@ -47,9 +47,21 @@ function classificarDoc(nome) {
 }
 
 // ── estado ─────────────────────────────────────────────────────────────────────
+// O eproc é o MESMO sistema em vários tribunais — só muda o domínio
+// (eprocNg.tj<UF>.jus.br). Para somar um estado, inclua a sigla da UF em UFS_EPROC.
+const UFS_EPROC = ['pr', 'rs', 'sc', 'mg', 'ms', 'rn', 'to', 'se', 'am', 'rr', 'ac', 'ap'];
+const NOME_UF = { pr: 'Paraná', rs: 'Rio Grande do Sul', sc: 'Santa Catarina', mg: 'Minas Gerais', ms: 'Mato Grosso do Sul', rn: 'Rio Grande do Norte', to: 'Tocantins', se: 'Sergipe', am: 'Amazonas', rr: 'Roraima', ac: 'Acre', ap: 'Amapá' };
+const TRIBUNAIS_EPROC = {};
+for (const uf of UFS_EPROC) TRIBUNAIS_EPROC['tj' + uf] = {
+  nome: 'TJ' + uf.toUpperCase() + (NOME_UF[uf] ? ' — ' + NOME_UF[uf] : ''),
+  host: 'tj' + uf + '.jus.br',                         // domínio-base (cobre 1º e 2º grau)
+  url: 'https://eproc1g.tj' + uf + '.jus.br/eproc/',   // 1º grau (padrão do eproc)
+};
+
 const state = {
   fase: 1,              // 1 pasta · 2 extração · 3 revisão · 4 execução
   sistema: 'eproc',     // 'eproc' (iniciais) | 'projudi' (intercorrentes)
+  tribunal: 'tjpr',     // tribunal do eproc (multi-estado) — ver TRIBUNAIS_EPROC
   pastaNome: '',
   casos: [],            // {id, nome, docs:[{nome,handle,tipoTxt,selVal,obs,principal,size}], dados, extracao:'pendente|ok|erro', erroExtracao, status:'aguardando|rodando|pausado|protocolado|pulado|erro', numero, statusTexto}
   atual: -1,
@@ -154,6 +166,12 @@ function renderFase1(msgErro) {
       <button class="btn ${ehEproc ? '' : 'ghost'}" id="modo-eproc">⚖️ eproc — iniciais</button>
       <button class="btn ${ehEproc ? 'ghost' : ''}" id="modo-projudi">🌳 Projudi — intercorrentes</button>
     </div>
+    ${ehEproc ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+      <label for="sel-tribunal" style="font-weight:600;">Tribunal:</label>
+      <select id="sel-tribunal" style="padding:6px 8px;border-radius:6px;border:1px solid #ccc;flex:1;">
+        ${Object.keys(TRIBUNAIS_EPROC).map(k => `<option value="${k}"${k === state.tribunal ? ' selected' : ''}>${esc(TRIBUNAIS_EPROC[k].nome)}</option>`).join('')}
+      </select>
+    </div>` : ''}
     ${ehEproc ? `<p class="muted">• <b>1 caso:</b> uma pasta com os PDFs (petição inicial + procuração + documentos).<br>
     • <b>Lote:</b> uma pasta-mãe com <b>uma subpasta por caso</b>.<br>
     Pode ser a pasta do OneDrive sincronizada no computador. Só leitura, nada sai da sua máquina além do envio ao tribunal e da peça principal à IA do sistema.<br>
@@ -167,6 +185,8 @@ function renderFase1(msgErro) {
   </div>`;
   document.getElementById('modo-eproc').onclick = () => { state.sistema = 'eproc'; renderFase1(); };
   document.getElementById('modo-projudi').onclick = () => { state.sistema = 'projudi'; renderFase1(); };
+  const selTrib = document.getElementById('sel-tribunal');
+  if (selTrib) selTrib.onchange = () => { state.tribunal = selTrib.value; try { chrome.storage.local.set({ cobrasq_tribunal: state.tribunal }); } catch (_) {} };
   document.getElementById('pick').onclick = () => escolherPasta().catch(e => renderFase1(String(e.message || e)));
 }
 
@@ -370,9 +390,10 @@ function renderFase3() {
 }
 
 // ── fase 4: execução ──────────────────────────────────────────────────────────
-const URL_SISTEMA = { eproc: 'https://eproc1g.tjpr.jus.br/eproc/', projudi: 'https://projudi.tjpr.jus.br/projudi/' };
 const SCRIPT_SISTEMA = { eproc: 'content-eproc.js', projudi: 'content-projudi.js' };
-function hostDoSistema() { return state.sistema === 'projudi' ? 'projudi.tjpr.jus.br' : 'tjpr.jus.br'; }
+function tribunalAtual() { return TRIBUNAIS_EPROC[state.tribunal] || TRIBUNAIS_EPROC.tjpr; }
+function urlDoSistema() { return state.sistema === 'projudi' ? 'https://projudi.tjpr.jus.br/projudi/' : tribunalAtual().url; }
+function hostDoSistema() { return state.sistema === 'projudi' ? 'projudi.tjpr.jus.br' : tribunalAtual().host; }
 async function esperarAbaPronta(tabId, timeoutMs) {
   const fim = Date.now() + (timeoutMs || 20000);
   while (Date.now() < fim) {
@@ -391,7 +412,7 @@ async function garantirAba() {
     } catch (_) {}
     state.tabId = null;
   }
-  const tab = await chrome.tabs.create({ url: URL_SISTEMA[state.sistema] || URL_SISTEMA.eproc, active: true });
+  const tab = await chrome.tabs.create({ url: urlDoSistema(), active: true });
   state.tabId = tab.id;
   await esperarAbaPronta(tab.id, 25000); // espera carregar (login pode pausar depois)
   return tab.id;
@@ -593,4 +614,7 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
 // anterior, pra ele não tentar retomar sozinho na aba do eproc.
 chrome.storage.local.remove('cobrasq_central_caso');
 
-renderFase1();
+// Carrega o tribunal preferido (persistido) antes do 1º render; se falhar, TJPR.
+chrome.storage.local.get('cobrasq_tribunal').then(o => {
+  if (o && o.cobrasq_tribunal && TRIBUNAIS_EPROC[o.cobrasq_tribunal]) state.tribunal = o.cobrasq_tribunal;
+}).catch(() => {}).finally(() => renderFase1());
