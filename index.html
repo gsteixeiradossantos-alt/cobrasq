@@ -11346,9 +11346,19 @@ function negObterMensagens(opcaoId, caso) {
 }
 
 // ── Assinatura — verbatim de crm.html L3247-3285 (adaptado p/ o app) ──
+// ONDA I · 1 — BUG da assinatura: currentUser.nome começa com pronome de tratamento
+// ("Dr. Gustavo ...") e o 1º token sozinho virava "*Dr.:*". Se o 1º token for um
+// pronome de tratamento (Dr/Dra/Sr/Sra/Dro, com ou sem ponto), inclui o 2º token
+// para formar "Dr. Gustavo". Trata nome vazio / com um único token.
 function negPrimeiroNome(nomeCompleto) {
   if (!nomeCompleto) return '';
   const partes = String(nomeCompleto).trim().split(/\s+/);
+  if (!partes.length) return '';
+  const PRONOMES = ['dr','dra','sr','sra','dro'];
+  const primeiroLimpo = (partes[0] || '').replace(/\.$/, '').toLowerCase();
+  if (PRONOMES.indexOf(primeiroLimpo) >= 0 && partes[1]) {
+    return partes[0] + ' ' + partes[1];
+  }
   return partes[0] || '';
 }
 // [OPERADORA] → primeiro nome do operador logado (no CRM vinha de perfilAtual.nome).
@@ -11431,9 +11441,19 @@ function _negMapStatusParaPasso(status){
   // status novo / 'Cobrar' / 'Fazer ação' / vazio → começa a abordagem.
   return negPASSOS.AGUARDANDO_1;
 }
+// ONDA I · 4 — cockpit ciente da COBRANÇA (multi-devedor / N:N).
+// window._negCobIdAtivo é setado por negRenderPainel(devId, cobId) quando a chamada
+// vem do DETALHE da cobrança (onde a cobrança aberta ≠ devId em cobrança multi-parte).
+// Quando setado, resolve a cobrança por ESSE id; senão, mantém o comportamento antigo
+// (cobrança de mesmo id do devedor) — retrocompatível com o drawer.
+window._negCobIdAtivo = window._negCobIdAtivo || null;
 function _negCobDe(dev){
-  return (typeof DB_cobrancas !== 'undefined' && Array.isArray(DB_cobrancas))
-    ? DB_cobrancas.find(c=>c.id===dev.id) : null;
+  if (typeof DB_cobrancas === 'undefined' || !Array.isArray(DB_cobrancas)) return null;
+  if (window._negCobIdAtivo){
+    const porCob = DB_cobrancas.find(c=>c.id===window._negCobIdAtivo);
+    if (porCob) return porCob;
+  }
+  return DB_cobrancas.find(c=>c.id===dev.id) || null;
 }
 function _negPassoAtual(dev){
   const cob = _negCobDe(dev);
@@ -11445,10 +11465,13 @@ function _negPassoAtual(dev){
 // Persiste passo_negociacao (+ aguardando_resposta / encerramento_negociacao) no
 // metadata da cobrança, fazendo MERGE com o metadata existente (não sobrescreve).
 // Mantém também o espelho em memória (cob.metadata) pra UI ler sem refetch.
-async function _negPersistMeta(devId, patch){
+// ONDA I · 4 — cobId opcional: quando informado (ou via window._negCobIdAtivo, setado
+// pelo detalhe), persiste NESSA cobrança; senão mantém o alvo antigo (== devId).
+async function _negPersistMeta(devId, patch, cobId){
+  const alvoId = cobId || window._negCobIdAtivo || devId;
   const supa = (typeof getSupabase === 'function') ? getSupabase() : null;
   const cob = (typeof DB_cobrancas !== 'undefined' && Array.isArray(DB_cobrancas))
-    ? DB_cobrancas.find(c=>c.id===devId) : null;
+    ? DB_cobrancas.find(c=>c.id===alvoId) : null;
   const metaAtual = (cob && cob.metadata) || {};
   const novoMeta = Object.assign({}, metaAtual, patch);
   if (cob) cob.metadata = novoMeta; // espelho em memória
@@ -11457,10 +11480,10 @@ async function _negPersistMeta(devId, patch){
     // Lê o metadata do servidor antes de gravar pra não perder chaves de outra aba.
     let base = novoMeta;
     try{
-      const { data } = await supa.from('cobrancas').select('metadata').eq('id', devId).maybeSingle();
+      const { data } = await supa.from('cobrancas').select('metadata').eq('id', alvoId).maybeSingle();
       if (data && data.metadata && typeof data.metadata === 'object') base = Object.assign({}, data.metadata, patch);
     }catch(_){}
-    const { error } = await supa.from('cobrancas').update({ metadata: base, updated_at:new Date().toISOString() }).eq('id', devId);
+    const { error } = await supa.from('cobrancas').update({ metadata: base, updated_at:new Date().toISOString() }).eq('id', alvoId);
     if (cob) cob.metadata = base;
     if (error) return { ok:false, error:error.message };
     return { ok:true };
@@ -11479,7 +11502,11 @@ function _negRegistrarHistorico(dev, acao){
 }
 
 // ── UI: painel "Negociar" no drawer ──
-function negRenderPainel(devId){
+// ONDA I · 4 — cobId opcional. O detalhe passa a cobrança aberta (_detCobrId) para o
+// cockpit mirar a cobrança certa mesmo com vários devedores; o drawer chama sem cobId
+// (window._negCobIdAtivo fica null → comportamento antigo).
+function negRenderPainel(devId, cobId){
+  window._negCobIdAtivo = cobId || null;
   const box = document.getElementById('neg-panel-'+devId);
   if(!box) return;
   const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
@@ -11888,7 +11915,7 @@ async function negConfirmarEnvio(devId, opcaoId){
     await _negPersistMeta(devId, { passo_negociacao: negPASSOS.EM_NEGOCIACAO, aguardando_resposta: false });
     showToast('Registrado. Abra "Acordos" para formalizar o fechamento.','success');
     negCancelarMsgs(devId);
-    negRenderPainel(devId);
+    negRenderPainel(devId, window._negCobIdAtivo); // ONDA I · 4 — preserva cobrança ativa
     if(typeof renderDrawerBody==='function' && currentDevId===devId) { /* mantém aba negociar */ }
     return;
   }
@@ -11910,7 +11937,7 @@ async function negConfirmarEnvio(devId, opcaoId){
 
   showToast('Caso atualizado.','success');
   negCancelarMsgs(devId);
-  negRenderPainel(devId);
+  negRenderPainel(devId, window._negCobIdAtivo); // ONDA I · 4 — preserva cobrança ativa
 }
 
 // Encerramento (ameaça, recusa+prazo, prova procede, judicial): registra histórico,
@@ -11934,14 +11961,14 @@ async function negEncerrar(devId, opcaoId, script){
     showToast('Negociação encerrada.','info');
   }
   negCancelarMsgs(devId);
-  negRenderPainel(devId);
+  negRenderPainel(devId, window._negCobIdAtivo); // ONDA I · 4 — preserva cobrança ativa
 }
 
 async function negReabrir(devId){
   const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
   _negRegistrarHistorico(dev, 'Negociação reaberta pelo operador.');
   await _negPersistMeta(devId, { encerramento_negociacao: null, aguardando_resposta: false });
-  negRenderPainel(devId);
+  negRenderPainel(devId, window._negCobIdAtivo); // ONDA I · 4 — preserva cobrança ativa
 }
 
 // ============================================================
@@ -16666,7 +16693,8 @@ const PAPEL_LABELS = {
   fiador:'Fiador', devedor_solidario:'Devedor solidário', sucessor:'Sucessor'
 };
 let DB_cobrancas = [];          // cache local (com cobranca_partes embutidas)
-let cobrFilter = { q:'', credor:'', responsavel:'', fase:'', statuses:[], tab:'todos', pend:'agir', ord:'nome' };
+// ONDA I · 2 — triagem de pendência: default = Todos (era 'agir').
+let cobrFilter = { q:'', credor:'', responsavel:'', fase:'', statuses:[], tab:'todos', pend:'todos', ord:'nome' };
 let cobrChipsOpen = false; // chips detalhados de status recolhidos por padrão
 function toggleCobrFilterStatus(s){
   const i = cobrFilter.statuses.indexOf(s);
@@ -17070,16 +17098,19 @@ async function renderCobrancas(opts){
       <div class="det-seg"><button class="${cobrView!=='cards'?'on':''}" onclick="cobrView='lista';renderCobrancas();">Lista</button><button class="${cobrView==='cards'?'on':''}" onclick="cobrView='cards';renderCobrancas();">Cards</button></div>
       <!-- ONDA E · M3 — modo Quadro (kanban por etapa), convive com a triagem/abas -->
       <div class="det-seg"><button class="${cobrViewMode!=='quadro'?'on':''}" onclick="kbToggleView('lista')" title="Visão em lista">Lista</button><button class="${cobrViewMode==='quadro'?'on':''}" onclick="kbToggleView('quadro')" title="Agrupar por etapa em colunas">Quadro</button></div>
-      ${(cobrFilter.q||cobrFilter.credor||cobrFilter.responsavel||cobrFilter.fase||cobrFilter.statuses.length||cobrFilter.tab!=='todos'||cobrFilter.pend!=='agir') ? `<button class="cob-btn-ghost" onclick="cobrFilter={q:'',credor:'',responsavel:'',fase:'',statuses:[],tab:'todos',pend:'agir',ord:'nome'};cobrChipsOpen=false;renderCobrancas();">Limpar filtros</button>` : ''}
+      ${/* ONDA I · 2 — reset da triagem também volta a 'todos' */(cobrFilter.q||cobrFilter.credor||cobrFilter.responsavel||cobrFilter.fase||cobrFilter.statuses.length||cobrFilter.tab!=='todos'||cobrFilter.pend!=='todos') ? `<button class="cob-btn-ghost" onclick="cobrFilter={q:'',credor:'',responsavel:'',fase:'',statuses:[],tab:'todos',pend:'todos',ord:'nome'};cobrChipsOpen=false;renderCobrancas();">Limpar filtros</button>` : ''}
     </div>
     <!-- Triagem por PENDÊNCIA (derivada) — 🔴 agir / 🟡 aguardando / ✅ concluído -->
     <div class="cob-mtabs" style="margin-top:4px;">
       ${[['agir','Agir agora','#A65A4A'],['aguardando','Aguardando','#9C7F40'],['concluido','Concluído','#5E7C58'],['todos','Todos','']].map(([k,lbl,cor])=>`<button class="cob-mtab ${cobrFilter.pend===k?'on':''}" onclick="cobrFilter.pend='${k}';renderCobrancas();">${cor?`<span style="width:8px;height:8px;border-radius:50%;background:${cor};display:inline-block;margin-right:6px;"></span>`:''}${lbl} <span class="cob-mtab-n">${pendCounts[k]!=null?pendCounts[k]:''}</span></button>`).join('')}
     </div>
-    <!-- Abas macro de status (reduzem o ruído dos chips sempre visíveis) -->
-    <div class="cob-mtabs">
-      <button class="cob-mtab ${cobrFilter.tab==='todos'?'on':''}" onclick="cobrFilter.tab='todos';cobrFilter.statuses=[];cobrChipsOpen=false;renderCobrancas();">Todos <span class="cob-mtab-n">${macroCounts.todos}</span></button>
-      ${_COB_MACROS.map(m=>`<button class="cob-mtab ${cobrFilter.tab===m.key?'on':''}" onclick="cobrFilter.tab='${m.key}';cobrFilter.statuses=[];cobrChipsOpen=false;renderCobrancas();">${m.label} <span class="cob-mtab-n">${macroCounts[m.key]}</span></button>`).join('')}
+    <!-- ONDA I · 3 — macro-status vira FILTRO (dropdown), não abas. Mesmas opções,
+         contagens e comportamento (reseta statuses + recolhe chips) de antes. -->
+    <div style="margin:6px 0 2px;">
+      <select id="cobr-f-macro" style="${selStyle}" onchange="cobrFilter.tab=this.value;cobrFilter.statuses=[];cobrChipsOpen=false;renderCobrancas();">
+        <option value="todos" ${cobrFilter.tab==='todos'?'selected':''}>Todos (${macroCounts.todos})</option>
+        ${_COB_MACROS.map(m=>`<option value="${m.key}" ${cobrFilter.tab===m.key?'selected':''}>${m.label} (${macroCounts[m.key]})</option>`).join('')}
+      </select>
     </div>
     <!-- Status detalhados (chips multi-toggle) recolhidos por padrão atrás de "Status (N) ▾" -->
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0 2px;">
@@ -17827,7 +17858,9 @@ function cobrDetTab(name){
   const _dv = window._detNegDevId || '';
   if(!_dv) return;
   try{
-    if(name==='negociar' && typeof negRenderPainel==='function') negRenderPainel(_dv);
+    // ONDA I · 4 — passa a cobrança aberta (_detCobrId) p/ o cockpit persistir na
+    // cobrança certa mesmo em caso multi-devedor (N:N), onde cob.id ≠ devId.
+    if(name==='negociar' && typeof negRenderPainel==='function') negRenderPainel(_dv, (typeof _detCobrId!=='undefined'?_detCobrId:null));
     if(name==='acordos' && typeof renderDrawerAcordosStatus==='function') renderDrawerAcordosStatus(_dv);
   }catch(_){}
 }
@@ -17839,7 +17872,8 @@ function cobrDetTrocaDev(devId){
   window._detNegDevId = devId;
   const host = document.getElementById('det-neg-host');
   if(host){ host.innerHTML = `<div id="neg-panel-${devId}"><div style="font-size:12px;color:var(--text-3);">Carregando…</div></div>`; }
-  try{ if(typeof negRenderPainel==='function') negRenderPainel(devId); }catch(_){}
+  // ONDA I · 4 — mantém o cockpit mirando a cobrança aberta (_detCobrId) ao trocar de devedor.
+  try{ if(typeof negRenderPainel==='function') negRenderPainel(devId, (typeof _detCobrId!=='undefined'?_detCobrId:null)); }catch(_){}
   const dev=(DB.devedores||[]).find(d=>d.id===devId)||null;
   // Re-monta o pane de Processo (checklist judicial) para o devedor escolhido.
   const procPane=document.querySelector('#page-cobranca-detalhe .det-tabpane[data-pane="proc"]');
