@@ -83,8 +83,8 @@ async function apiReport(payload) {
 const PROMPT_EXTRACAO = `Você é assistente de um escritório de cobrança que distribui petições iniciais no eproc TJPR.
 Leia a petição inicial anexa e devolva SOMENTE um JSON válido (sem cercas de código, sem comentários) com:
 {
- "requerentes": [{"nome": "...", "doc": "CPF ou CNPJ com pontuação, ou null", "endereco": "endereço completo da qualificação (rua, nº, bairro, cidade/UF, CEP) ou null", "email": "e-mail ou null", "telefone": "telefone/celular ou null"}],
- "requeridos":  [{"nome": "...", "doc": "CPF ou CNPJ com pontuação, ou null", "endereco": "endereço completo da qualificação (rua, nº, bairro, cidade/UF, CEP) ou null", "email": "e-mail ou null", "telefone": "telefone/celular ou null"}],
+ "requerentes": [{"nome": "...", "doc": "CPF ou CNPJ com pontuação, ou null", "sexo": "M ou F (só p/ pessoa física; deduza do nome/tratamento; senão null)", "endereco": "endereço completo da qualificação ou null", "cep": "CEP (00000-000) ou null", "logradouro": "rua/av (sem número) ou null", "numero": "número ou null", "complemento": "complemento ou null", "bairro": "bairro ou null", "cidade": "cidade ou null", "uf": "sigla UF (2 letras) ou null", "email": "e-mail ou null", "telefone": "telefone fixo ou null", "celular": "celular ou null"}],
+ "requeridos":  [{"nome": "...", "doc": "CPF ou CNPJ com pontuação, ou null", "sexo": "M ou F (só p/ pessoa física; deduza do nome/tratamento; senão null)", "endereco": "endereço completo da qualificação ou null", "cep": "CEP (00000-000) ou null", "logradouro": "rua/av (sem número) ou null", "numero": "número ou null", "complemento": "complemento ou null", "bairro": "bairro ou null", "cidade": "cidade ou null", "uf": "sigla UF (2 letras) ou null", "email": "e-mail ou null", "telefone": "telefone fixo ou null", "celular": "celular ou null"}],
  "valor_causa": 1234.56,
  "comarca": "cidade do foro/comarca indicada no endereçamento",
  "classe": "classe processual (ex.: Procedimento do Juizado Especial Cível)",
