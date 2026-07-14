@@ -449,6 +449,174 @@ function compararFontes(blobDevs, relDevs) {
   };
 }
 
+// ============================================================
+// LEMBRETE DE ASSINATURA ZapSign (server-side) — item #11.
+// ------------------------------------------------------------
+// Substitui o worker client-side do crm.html (processarAutoCobrancaZapSign /
+// agendarAutoCobranca, ~L7309), que só rodava enquanto o crm.html estava aberto
+// no navegador de um operador. Quando o crm.html for aposentado, aquele worker
+// para — este job assume a mesma responsabilidade no servidor (roda no cron
+// diário do cron-regua, independente de qualquer aba aberta).
+//
+// O QUE FAZ (verbatim ao CRM):
+//   • acordo "aguardando assinatura" há ≥24h  -> agenda lembrete 24h
+//   • há ≥48h                                 -> agenda lembrete 48h
+//   • há ≥72h                                 -> marca o acordo como ABANDONADO
+// Estados terminais (assinado/recusado/cancelado/expirado) saem do funil.
+//
+// COMO ENVIA: NÃO envia direto. Insere uma linha em `crm_mensagens_agendadas`
+// (origem='auto_cobranca_24h'/'auto_cobranca_48h'), a MESMA fila que o CRM usava.
+// O sender é a Edge Function `cron-mensagens-agendadas` (pg_cron a cada 1 min),
+// que já envia por Z-API, faz retry e RESPEITA whatsapp_atendimentos.regua_bloqueada
+// (números marcados como spam/engano). Reusa 100% do pipeline existente — nenhuma
+// função Vercel nova, nenhum envio duplicado de canal.
+//
+// IDEMPOTÊNCIA (dupla, igual/melhor que o CRM):
+//   1. Marca no metadata do acordo (metadata.auto_cobranca_24h / _48h / _72h),
+//      espelhando as flags que o CRM gravava no histórico do caso.
+//   2. A tabela crm_mensagens_agendadas tem índice único parcial
+//      uq_crm_msg_agendadas_auto_cobranca (caso_id, origem) WHERE origem LIKE
+//      'auto_cobranca%' (migração 20260706_infra_uniq_auto_cobranca, JÁ EM PROD):
+//      um INSERT repetido do mesmo (caso_id, origem) falha com unique_violation
+//      em vez de duplicar. Tratamos 409/23505 como "já agendado" (no-op).
+//
+// TELEFONE: acordos não tem telefone; vem de devedores.telefone (join).
+// caso_id = devedor_id (no CRM o "caso" é o devedor; a FK de crm_mensagens_agendadas
+// aponta pra casos(id), que compartilha o id do devedor — mesma convenção do CRM,
+// que inseria caso_id = c.id sendo c.id o id do devedor/caso).
+
+// Textos VERBATIM do crm.html (processarAutoCobrancaZapSign).
+const LEMBRETE_ZAPSIGN_24H = 'Oi, vi que você ainda não assinou o termo. Precisa de alguma ajuda pra concluir?';
+const LEMBRETE_ZAPSIGN_48H = 'Oi! Ainda não vi sua assinatura no termo de acordo. Quer revisar algo? Tô à disposição pra resolver.';
+
+// Estados terminais: acordo não está mais "aguardando assinatura" -> fora do funil.
+// (CRM usava {assinado,recusado,cancelado}; incluímos 'expirado', que também é
+// terminal pelo CHECK chk_acordos_status_zapsign e claramente não aguarda mais.)
+const ZAPSIGN_TERMINAIS = new Set(['assinado', 'recusado', 'cancelado', 'expirado']);
+
+function horasDesde(dataStr) {
+  if (!dataStr) return null;
+  const d = new Date(dataStr);
+  if (isNaN(d)) return null;
+  return (Date.now() - d.getTime()) / 3600000;
+}
+
+async function processarLembretesZapSign({ dry } = {}) {
+  const out = { candidatos: 0, agendados_24h: 0, agendados_48h: 0, abandonados: 0, pulados: 0, falhas: 0, itens: [] };
+
+  // Acordos ainda em assinatura: status_zapsign em (enviado, visualizado, pendente),
+  // não terminal. Traz o telefone do devedor pelo join. Limite generoso: são poucos.
+  let acordos;
+  try {
+    acordos = await sbFetch(
+      'acordos?select=' + encodeURIComponent(
+        'id,devedor_id,status,status_zapsign,zapsign_evento_em,created_at,metadata,devedor:devedores(telefone,assigned_to)'
+      ) +
+      '&status_zapsign=in.(enviado,visualizado,pendente)' +
+      '&order=created_at.desc&limit=1000'
+    );
+  } catch (e) {
+    return { ...out, error: 'select acordos: ' + e.message };
+  }
+  if (!Array.isArray(acordos) || acordos.length === 0) return out;
+
+  for (const ac of acordos) {
+    const status = String(ac.status_zapsign || '').toLowerCase();
+    if (ZAPSIGN_TERMINAIS.has(status)) continue;        // já saiu do funil
+    // Só acordos ativos; um acordo cancelado no CRM tem status != 'ativo'.
+    if (ac.status && ac.status !== 'ativo') continue;
+
+    out.candidatos++;
+    const meta = (ac.metadata && typeof ac.metadata === 'object') ? ac.metadata : {};
+    // "Início da etapa" = quando o documento entrou em assinatura. Preferimos
+    // zapsign_evento_em (carimbo do webhook ao virar enviado/visualizado); fallback
+    // pro created_at do acordo. Espelha o tempoNaEtapa do CRM da forma mais fiel possível.
+    const horas = horasDesde(ac.zapsign_evento_em || ac.created_at);
+    if (horas == null) { out.pulados++; continue; }
+
+    const dev = (ac.devedor && typeof ac.devedor === 'object') ? ac.devedor : {};
+    const telefone = String(dev.telefone || '').replace(/\D/g, '');
+    const casoId = ac.devedor_id;          // caso = devedor (mesma convenção do CRM)
+    const operadorId = dev.assigned_to || null;
+
+    // ≥72h: marca o acordo como ABANDONADO (não agenda mensagem — igual ao CRM, que
+    // trocava o passoAtual e NÃO enviava cobrança). Só marca uma vez (flag no metadata).
+    if (horas >= 72) {
+      if (meta.auto_cobranca_72h) { out.pulados++; continue; }
+      out.itens.push({ acordo: ac.id, acao: 'abandonado', horas: Math.floor(horas), status: dry ? 'dry' : 'marcado' });
+      if (!dry) {
+        try {
+          await sbFetch(`acordos?id=eq.${encodeURIComponent(ac.id)}`, {
+            method: 'PATCH',
+            headers: { 'Prefer': 'return=minimal' },
+            body: JSON.stringify({
+              metadata: { ...meta,
+                auto_cobranca_72h: true,
+                auto_cobranca_72h_em: new Date().toISOString(),
+                auto_cobranca_72h_nota: 'caso marcado como ABANDONADO (>72h sem assinatura)' },
+            }),
+          });
+        } catch (e) { out.falhas++; out.itens[out.itens.length - 1].error = e.message; continue; }
+      }
+      out.abandonados++;
+      continue;
+    }
+
+    // ≥48h ou ≥24h: agenda o lembrete (um por estágio). Precisa de telefone.
+    let origem = null, corpo = null;
+    if (horas >= 48 && !meta.auto_cobranca_48h) { origem = 'auto_cobranca_48h'; corpo = LEMBRETE_ZAPSIGN_48H; }
+    else if (horas >= 24 && !meta.auto_cobranca_24h) { origem = 'auto_cobranca_24h'; corpo = LEMBRETE_ZAPSIGN_24H; }
+    if (!origem) { out.pulados++; continue; }
+
+    if (!telefone) {
+      out.itens.push({ acordo: ac.id, origem, skipped: 'sem telefone do devedor' });
+      out.pulados++; continue;
+    }
+
+    out.itens.push({ acordo: ac.id, origem, horas: Math.floor(horas), status: dry ? 'dry' : 'agendado' });
+    if (!dry) {
+      // Insere na fila. O índice único (caso_id, origem) fecha a janela de duplicidade
+      // no banco: um segundo INSERT do mesmo par cai em 409/23505 -> tratamos como no-op.
+      let jaAgendado = false;
+      try {
+        await sbFetch('crm_mensagens_agendadas', {
+          method: 'POST',
+          headers: { 'Prefer': 'return=minimal' },
+          body: JSON.stringify({
+            caso_id: casoId,
+            operador_id: operadorId,
+            telefone,
+            mensagem: corpo,
+            agendada_para: new Date(Date.now() + 60000).toISOString(),
+            status: 'pendente',
+            origem,
+          }),
+        });
+      } catch (e) {
+        // Duplicata (índice único) -> já existe o lembrete deste estágio; ok.
+        if (/409|23505|duplicate|unique/i.test(e.message)) { jaAgendado = true; }
+        else { out.falhas++; out.itens[out.itens.length - 1].error = e.message; continue; }
+      }
+
+      // Marca o estágio no metadata do acordo (idempotência espelhada ao CRM). Mesmo
+      // quando jaAgendado (a linha já existia), gravar a flag evita reprocessar toda run.
+      try {
+        await sbFetch(`acordos?id=eq.${encodeURIComponent(ac.id)}`, {
+          method: 'PATCH',
+          headers: { 'Prefer': 'return=minimal' },
+          body: JSON.stringify({
+            metadata: { ...meta, [origem]: true, [origem + '_em']: new Date().toISOString() },
+          }),
+        });
+      } catch (e) { /* não crítico: o índice único ainda impede duplicar o envio */ }
+
+      if (jaAgendado) { out.pulados++; out.itens[out.itens.length - 1].status = 'ja_agendado'; continue; }
+    }
+    if (origem === 'auto_cobranca_48h') out.agendados_48h++; else out.agendados_24h++;
+  }
+  return out;
+}
+
 module.exports = async function handler(req, res) {
   // F-09: autenticação forte de cron. Antes aceitava um bypass por user-agent
   // (/vercel-cron/i), que é trivialmente forjável -> qualquer um disparava a
@@ -691,7 +859,16 @@ module.exports = async function handler(req, res) {
       });
     } catch {}
 
-    res.status(200).json({ ok: true, hoje: new Date().toISOString().slice(0,10), ...resultado, calendar, contasPagar });
+    // Lembrete de assinatura ZapSign (item #11) — roda dentro do cron-regua diário.
+    // TRAVA DE SEGURANÇA: começa DESLIGADO (força dry) até LEMBRETE_ZAPSIGN_LIVE=1 no
+    // ambiente, para que o deploy não dispare envio automático sem uma conferência
+    // prévia. Com a env ligada, respeita o ?dry=1 manual normalmente.
+    const zapsignLive = process.env.LEMBRETE_ZAPSIGN_LIVE === '1';
+    let zapsign = null;
+    try { zapsign = await processarLembretesZapSign({ dry: dry || !zapsignLive }); }
+    catch (e) { zapsign = { error: e.message }; }
+
+    res.status(200).json({ ok: true, hoje: new Date().toISOString().slice(0,10), ...resultado, calendar, contasPagar, zapsign, zapsign_live: zapsignLive });
   } catch (err) {
     console.error('[cron-regua]', err);
     res.status(500).json({ ok: false, error: err.message });
