@@ -14,6 +14,9 @@
 <!-- calc-engine.js: MATRIZ única de cálculo de dívida (jurídica + cobrança). Em
      templates/ p/ não cair no rewrite catch-all do vercel.json. Ver docs/calc/MATRIZ.md -->
 <script src="/templates/calc-engine.js"></script>
+<!-- termo-engine.js: motor do TERMO DE ACORDO (extrajudicial + judicial p/ homologação).
+     Traz TermoEngine.montarTermoExtrajudicial/montarTermoJudicial (templates em /templates/). -->
+<script src="/templates/termo-engine.js"></script>
 <!-- Supabase JS SDK -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" crossorigin="anonymous"></script>
 <script src="/assets/js/nf.js" defer></script>
@@ -13143,6 +13146,7 @@ function acordoHtml(ac, ai, devId){
         <!-- Onda 1 #3 — ações do acordo dentro do caso (religa termo/ZapSign/boleto já existentes) -->
         <div id="acordo-meta-${ac.id}" style="margin-top:10px;"></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">
+          <button class="btn btn-ghost btn-sm" onclick="abrirTermoAcordoJ('${devId}')" title="Termo de acordo estruturado — extrajudicial ou judicial (homologação)">⚖ Termo de acordo</button>
           <button class="btn btn-ghost btn-sm" onclick="abrirDocCredor('${devId}')" title="Gerar o termo do acordo e enviar para assinatura (ZapSign)">📄 Gerar termo / ZapSign</button>
           <button class="btn btn-gold btn-sm" onclick="emitirBoletoAcordoUI('${ac.id}','${devId}')" title="Emitir boleto do acordo (usa o valor negociado)">💳 Emitir boleto</button>
         </div>
@@ -33212,6 +33216,250 @@ function abrirGerarMinuta(devId){
   chatOpen({ devId, casoId:devId, credorId: dev&&dev.clienteId, dev, tipo:'execucao' });
 }
 let _mv2SoCredor = false;
+// ══════════════════════════════════════════════════════════════════════════
+// TERMO DE ACORDO (extrajudicial + JUDICIAL) na PASTA DA COBRANÇA.
+// Porta o fluxo estruturado do CRM (aposentado) para o index.html: seletor
+// Extrajudicial|Judicial, campos do processo (nº/comarca/foro/cláusula 4) e o motor
+// window.TermoEngine (montarTermoJudicial/Extrajudicial). Reusa o pipeline de PDF/
+// ZapSign do app: edge function 'gerar-acordo-termo' (mesma do CRM) + _aavEnviarWhats.
+// Modais criados via JS (auto-contidos), sem tocar no corpo HTML.
+// ══════════════════════════════════════════════════════════════════════════
+const _TAJ_QUALIF_COBRASQ = 'sociedade empresária limitada, inscrita no CNPJ sob n. 34.626.848/0001-42, com endereço na Av. Rio Grande do Sul, n. 380, sala 201, centro, CEP 85660-000, município de Dois Vizinhos, Estado do Paraná.';
+let _tajState = { devId:null, html:'', editando:false, seq:0 };
+function _tajTipoDoc(doc){ return String(doc||'').replace(/\D/g,'').length>11 ? 'PJ' : 'PF'; }
+function _tajHojeISO(){ return new Date().toISOString().slice(0,10); }
+function _tajMaisDias(d){ const x=new Date(); x.setDate(x.getDate()+d); return x.toISOString().slice(0,10); }
+function _tajToISO(v){ v=String(v||'').trim(); if(/^\d{4}-\d{2}-\d{2}/.test(v)) return v.slice(0,10); const m=v.match(/^(\d{2})\/(\d{2})\/(\d{4})/); return m?`${m[3]}-${m[2]}-${m[1]}`:''; }
+function _tajTipoAtual(){ const el=document.querySelector('input[name="tajTipo"]:checked'); return el?el.value:'extrajudicial'; }
+function _tajEndDev(dev){
+  const e = dev.enderecoCrm || {};
+  return { rua:dev.rua||e.rua||'', numero:dev.numero||e.numero||'', complemento:dev.complemento||e.complemento||'',
+    bairro:dev.bairro||e.bairro||'', cidade:dev.cidade||e.cidade||(e.cidadeUf?String(e.cidadeUf).split('/')[0].trim():''),
+    uf:dev.uf||e.uf||(e.cidadeUf?String(e.cidadeUf).split('/')[1]||'':''), cep:dev.cep||e.cep||'' };
+}
+
+function abrirTermoAcordoJ(devId){
+  if(!window.TermoEngine){ showToast('Motor do termo não carregou — recarregue a página.','danger'); return; }
+  const dev = (DB.devedores||[]).find(d=>d.id===devId);
+  if(!dev){ showToast('Devedor não encontrado.','danger'); return; }
+  _tajState = { devId, html:'', editando:false, seq:0 };
+  const credor = (DB.clientes||[]).find(c=>c.id===dev.clienteId) || {};
+  const acs = dev.acordos||[];
+  const ac = acs.find(a=>a.status==='Ativo'||a.status==='Em andamento') || acs[0] || {};
+  const total = ac.valorTotal || ac.total || parseValorBR(dev.valorAtual) || parseValorBR(dev.valorOrig) || 0;
+  const parcArr = Array.isArray(ac.parcelas) ? ac.parcelas : [];
+  const nParc = parcArr.length || (typeof ac.parcelas==='number'?ac.parcelas:1) || 1;
+  const valorParc = (parcArr[0] && parcArr[0].valor) || (nParc ? total/nParc : total);
+  const venc1 = _tajToISO(parcArr[0] && (parcArr[0].vencimento||parcArr[0].venc)) || _tajMaisDias(30);
+  const tipoDoc = _tajTipoDoc(dev.doc);
+  const end = _tajEndDev(dev);
+  const proc = dev.processoNum || dev.numero_processo || '';
+  const comarca = dev.comarca || '';
+  const inp='style="width:100%;padding:7px;border:1px solid var(--border);border-radius:5px;font-size:13px;background:var(--surface);color:var(--text);"';
+  const lbl='style="display:block;font-size:11px;color:var(--text-3);margin-bottom:3px;"';
+  const F=(id,label,val,attrs,full)=>`<div style="${full?'grid-column:1/3;':''}"><label ${lbl}>${label}</label><input id="${id}" value="${escHtml(val==null?'':String(val))}" ${attrs||''} ${inp}></div>`;
+
+  const credNome = credor.nome || 'COBRASQ Recuperadora de Crédito e Cobrança Ltda.';
+  const html = `
+  <div style="grid-column:1/3;font-size:13px;padding:2px 0;"><strong>Devedor principal:</strong> ${escHtml(dev.nome||'')} · <strong>${tipoDoc}</strong></div>
+  <div id="tajGeneroWrap" style="grid-column:1/3;${tipoDoc==='PJ'?'display:none;':''}"><label ${lbl}>Gênero do devedor</label>
+    <label style="font-size:13px;margin-right:16px;"><input type="radio" name="tajGenero" value="F" checked> Feminino</label>
+    <label style="font-size:13px;"><input type="radio" name="tajGenero" value="M"> Masculino</label></div>
+  ${F('tajDoc','CPF/CNPJ',dev.doc||'')}
+  ${F('tajTel','Telefone (link no WhatsApp)',dev.tel||dev.telefone||'')}
+  <div style="grid-column:1/3;"><label ${lbl}>Credor</label><input id="tajCredor" value="${escHtml(credNome)}" oninput="_tajAoTrocarCredor()" ${inp}>
+    <div style="font-size:11px;color:var(--text-3);margin-top:4px;">No acordo judicial a autora é a COBRASQ. Ajuste se for o cedente real.</div></div>
+  <div style="grid-column:1/3;"><label ${lbl}>Qualificação do credor</label><textarea id="tajCredorQualif" style="width:100%;min-height:52px;padding:7px;border:1px solid var(--border);border-radius:5px;font-size:12px;background:var(--surface);color:var(--text);"></textarea></div>
+  <div style="grid-column:1/3;font-size:11px;font-weight:700;color:var(--text-3);border-top:1px solid var(--border);padding-top:8px;">ENDEREÇO DO DEVEDOR</div>
+  ${F('tajRua','Rua',end.rua)}${F('tajNumero','Nº',end.numero)}
+  ${F('tajBairro','Bairro',end.bairro)}${F('tajCidade','Cidade',end.cidade)}
+  ${F('tajUf','UF',end.uf)}${F('tajCep','CEP',end.cep)}
+  <div style="grid-column:1/3;border-top:1px solid var(--border);padding-top:8px;display:flex;justify-content:space-between;align-items:center;">
+    <strong style="font-size:12px;">Outros devedores que assinam</strong>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="_tajAddDevedor()">+ Adicionar</button></div>
+  <div id="tajDevExtras" style="grid-column:1/3;display:flex;flex-direction:column;gap:10px;"></div>
+  <div style="grid-column:1/3;font-size:11px;font-weight:700;color:var(--text-3);border-top:1px solid var(--border);padding-top:8px;">VALORES DO ACORDO</div>
+  ${F('tajTotal','Valor total (R$)',Number(total).toFixed(2),'type="number" step="0.01"')}
+  ${F('tajParcelas','Nº de parcelas',nParc,'type="number" min="1"')}
+  ${F('tajValorParc','Valor da parcela (R$)',Number(valorParc).toFixed(2),'type="number" step="0.01"')}
+  ${F('tajVenc','1º vencimento',venc1,'type="date"')}
+  ${F('tajMulta','Multa boleto (%)',10,'type="number"')}
+  ${F('tajPenal','Cláusula penal (%)',50,'type="number"')}
+  ${F('tajData','Data do acordo',_tajHojeISO(),'type="date"')}
+  <div style="grid-column:1/3;"><label ${lbl}><input type="checkbox" id="tajTemEntrada" onchange="_tajToggleEntrada()"> Tem entrada?</label>
+    <div id="tajEntradaWrap" style="display:none;grid-template-columns:1fr 1fr;gap:8px;">
+      <input id="tajEntradaValor" placeholder="Valor entrada (R$)" type="number" step="0.01" ${inp}>
+      <input id="tajEntradaVenc" type="date" ${inp}></div></div>`;
+
+  _tajEnsureModals();
+  document.getElementById('taj-campos').innerHTML = html;
+  document.getElementById('tajJudProcesso').value = proc;
+  document.getElementById('tajJudComarca').value = comarca;
+  _tajAoTrocarCredor();
+  const rExt=document.querySelector('input[name="tajTipo"][value="extrajudicial"]'); if(rExt) rExt.checked=true;
+  _tajOnTipoChange();
+  document.getElementById('taj-modal').style.display='flex';
+}
+function _tajAoTrocarCredor(){
+  const nome=(document.getElementById('tajCredor')||{}).value||''; const ta=document.getElementById('tajCredorQualif'); if(!ta) return;
+  if(/cobrasq/i.test(nome)){ ta.value=_TAJ_QUALIF_COBRASQ; return; }
+  const c=(DB.clientes||[]).find(x=>String(x.nome||'').trim().toLowerCase()===nome.trim().toLowerCase());
+  if(c && !ta.value){ const doc=c.doc||''; const isPJ=String(doc).replace(/\D/g,'').length>11; ta.value=`${isPJ?'pessoa jurídica':'pessoa física'}, inscrit${isPJ?'a':'o(a)'} no ${doc}.`; }
+}
+function _tajToggleEntrada(){ const c=document.getElementById('tajTemEntrada'); const w=document.getElementById('tajEntradaWrap'); if(w) w.style.display=(c&&c.checked)?'grid':'none'; }
+function _tajOnTipoChange(){
+  const jud=_tajTipoAtual()==='judicial';
+  const box=document.getElementById('tajJudFields'); if(box) box.style.display=jud?'grid':'none';
+  const tit=document.getElementById('taj-titulo'); if(tit) tit.textContent='Gerar termo de acordo'+(jud?' (judicial)':' (extrajudicial)');
+  if(jud) _tajOnClausula4();
+}
+function _tajOnClausula4(){
+  const mode=(document.getElementById('tajJudClausula4')||{}).value||'consolidacao';
+  const des=document.getElementById('tajJudDesistWrap'); const sis=document.getElementById('tajJudSisbajudWrap');
+  if(des) des.style.display=(mode==='desistencia')?'grid':'none';
+  if(sis) sis.style.display=(mode==='sisbajud')?'block':'none';
+}
+function _tajAddDevedor(){
+  const wrap=document.getElementById('tajDevExtras'); if(!wrap) return; const idx=++_tajState.seq;
+  const inp='style="width:100%;padding:6px;border:1px solid var(--border);border-radius:5px;font-size:13px;background:var(--surface);color:var(--text);"';
+  const lbl='style="display:block;font-size:11px;color:var(--text-3);margin-bottom:3px;"';
+  const row=document.createElement('div'); row.className='taj-dev-extra'; row.style.cssText='border:1px solid var(--border);border-radius:6px;padding:8px;';
+  row.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><strong style="font-size:12px;">Devedor adicional ${idx}</strong>
+    <button type="button" class="btn btn-ghost btn-sm" onclick="this.closest('.taj-dev-extra').remove()">remover</button></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+      <div style="grid-column:1/3;"><label ${lbl}>Nome</label><input class="tajExNome" ${inp}></div>
+      <div><label ${lbl}>CPF/CNPJ</label><input class="tajExDoc" ${inp}></div>
+      <div><label ${lbl}>Telefone (WhatsApp)</label><input class="tajExTel" ${inp}></div>
+      <div><label ${lbl}>Gênero</label><select class="tajExGenero" ${inp}><option value="F">Feminino</option><option value="M">Masculino</option></select></div>
+    </div>
+    <label style="font-size:12px;display:block;margin-top:6px;"><input type="checkbox" class="tajExMesmoEnd" checked> Mesmo endereço do principal</label>`;
+  wrap.appendChild(row);
+}
+function _tajLerExtras(){
+  return Array.from(document.querySelectorAll('#tajDevExtras .taj-dev-extra')).map(r=>{
+    const g=q=>((r.querySelector(q)||{}).value||'').trim(); const nome=g('.tajExNome'); if(!nome) return null;
+    const doc=g('.tajExDoc'); const chk=r.querySelector('.tajExMesmoEnd');
+    return { nome, documento:doc, tipo:_tajTipoDoc(doc), genero:g('.tajExGenero')||'F', telefone:g('.tajExTel'), mesmoEndereco:!!(chk&&chk.checked) };
+  }).filter(Boolean);
+}
+function _tajDados(){
+  const dev=(DB.devedores||[]).find(d=>d.id===_tajState.devId)||{};
+  const v=id=>(document.getElementById(id)||{}).value||''; const num=id=>parseFloat(v(id))||0;
+  const tipo=_tajTipoDoc(v('tajDoc')); const gEl=document.querySelector('input[name="tajGenero"]:checked'); const genero=gEl?gEl.value:'F';
+  const endereco={ rua:v('tajRua'), numero:v('tajNumero'), complemento:'', bairro:v('tajBairro'), cidade:v('tajCidade'), uf:v('tajUf'), cep:v('tajCep') };
+  const nomePrinc=dev.nome||'';
+  const principal={ nome:nomePrinc, tipo, genero, documento:v('tajDoc'), endereco, telefone:v('tajTel'), assNome:nomePrinc, assDoc:(tipo==='PJ'?'CNPJ ':'CPF ')+v('tajDoc') };
+  const extras=_tajLerExtras().map(x=>({ nome:x.nome, tipo:x.tipo, genero:x.genero, documento:x.documento, endereco:x.mesmoEndereco?endereco:{}, telefone:x.telefone, assNome:x.nome, assDoc:(x.tipo==='PJ'?'CNPJ ':'CPF ')+x.documento }));
+  const devedores=[principal].concat(extras);
+  const credorNome=v('tajCredor'); const temEnt=document.getElementById('tajTemEntrada')&&document.getElementById('tajTemEntrada').checked;
+  return {
+    credor:{ nome:credorNome, genero:'F', qualificacao:v('tajCredorQualif'), assNome:/cobrasq/i.test(credorNome)?'COBRASQ':credorNome, assDoc:'' },
+    devedores, devedor:principal,
+    acordo:{ total:num('tajTotal'), parcelas:parseInt(v('tajParcelas'),10)||1, valorParcela:num('tajValorParc'), vencimento:v('tajVenc'), multa:num('tajMulta'), penal:num('tajPenal'), entrada:temEnt?{ valor:num('tajEntradaValor'), vencimento:v('tajEntradaVenc') }:null },
+    dataAcordo:v('tajData'), tipo:_tajTipoAtual(),
+    judicial:{ numeroProcesso:v('tajJudProcesso'), comarca:v('tajJudComarca'), foro:v('tajJudForo')||'jec',
+      clausula4:{ mode:v('tajJudClausula4')||'consolidacao', procPrincipal:v('tajJudProcesso'), proc2:v('tajJudProc2'), comarca2:v('tajJudComarca2'), valorBloqueado:num('tajJudValorBloq') } }
+  };
+}
+async function tajGerarPreview(){
+  const btn=document.getElementById('taj-gerar'); if(btn){ btn.disabled=true; btn.textContent='Gerando…'; }
+  try{
+    const dados=_tajDados();
+    if(!dados.acordo.total){ showToast('Informe o valor total.','danger'); return; }
+    if(!dados.acordo.vencimento){ showToast('Informe o 1º vencimento.','danger'); return; }
+    if(dados.tipo==='judicial'){
+      if(!dados.judicial.numeroProcesso){ showToast('Informe o nº do processo.','danger'); return; }
+      if(!dados.judicial.comarca){ showToast('Informe a comarca.','danger'); return; }
+      if(dados.judicial.clausula4.mode==='desistencia' && !dados.judicial.clausula4.proc2){ showToast('Informe os autos a desistir (cláusula 4).','danger'); return; }
+    }
+    _tajState.html = dados.tipo==='judicial' ? await TermoEngine.montarTermoJudicial(dados) : await TermoEngine.montarTermoExtrajudicial(dados);
+    document.getElementById('taj-frame').srcdoc=_tajState.html;
+    _tajState.editando=false; document.getElementById('taj-editar').textContent='Editar texto';
+    document.getElementById('taj-modal').style.display='none';
+    document.getElementById('taj-prev').style.display='flex';
+  }catch(e){ showToast('Falha ao gerar termo: '+(e&&e.message?e.message:e),'danger'); }
+  finally{ if(btn){ btn.disabled=false; btn.textContent='Gerar e revisar'; } }
+}
+function tajToggleEditar(){
+  const doc=document.getElementById('taj-frame').contentDocument; if(!doc||!doc.body) return;
+  _tajState.editando=!_tajState.editando; doc.body.contentEditable=_tajState.editando?'true':'false';
+  doc.querySelectorAll('.sig-token').forEach(el=>{ el.contentEditable='false'; });
+  document.getElementById('taj-editar').textContent=_tajState.editando?'Concluir edição':'Editar texto';
+}
+function _tajHtmlFinal(){ const doc=document.getElementById('taj-frame').contentDocument; return (doc&&doc.documentElement)?('<!DOCTYPE html>'+doc.documentElement.outerHTML):_tajState.html; }
+function tajBaixarHtml(){ const b=new Blob([_tajHtmlFinal()],{type:'text/html'}); const u=URL.createObjectURL(b); const a=document.createElement('a'); a.href=u; a.download='Termo de acordo.html'; a.click(); setTimeout(()=>URL.revokeObjectURL(u),1000); }
+function tajVoltarForm(){ document.getElementById('taj-prev').style.display='none'; document.getElementById('taj-modal').style.display='flex'; }
+async function tajEnviarZapSign(){
+  const dev=(DB.devedores||[]).find(d=>d.id===_tajState.devId)||{};
+  const html=_tajHtmlFinal();
+  if(!/assdev1/.test(html) && !confirm('Não achei o campo de assinatura do devedor («assdev1»). Enviar mesmo assim?')) return;
+  const btn=document.getElementById('taj-enviar'); if(btn){ btn.disabled=true; btn.textContent='Enviando…'; }
+  try{
+    const dados=_tajDados(); const supa=getSupabase(); if(!supa) throw new Error('Faça login.');
+    // Mesma edge function do CRM: gera PDF, cria doc no ZapSign com signatários e âncoras <<assdevN>>.
+    const { data, error } = await supa.functions.invoke('gerar-acordo-termo', { body:{ casoId: _tajState.devId, html, dados } });
+    if(error){ let det=''; try{ det=(await error.context.json()).error||''; }catch(_){}; throw new Error(det||error.message); }
+    if(data && data.error) throw new Error(data.error);
+    // Envia o link de assinatura por WhatsApp a cada signatário (reusa _aavEnviarWhats).
+    let signers=(data && Array.isArray(data.signers) && data.signers.length)?data.signers:[];
+    if(!signers.length && data && data.link){ const d0=(dados.devedores&&dados.devedores[0])||dados.devedor||{}; signers=[{ nome:d0.nome||dev.nome||'', phone:d0.telefone||dev.tel||'', link:data.link }]; }
+    let nota='';
+    for(const s of signers){
+      const tel=String(s.phone||s.telefone||'').replace(/\D/g,''); if(!s.link){ nota+=` · ${s.nome||'?'}: SEM link`; continue; }
+      if(!tel){ nota+=` · ${s.nome||'?'}: sem telefone`; continue; }
+      const msg=`${s.link}\n\n*Segue o link para assinatura digital do seu acordo.* Clique, confira o documento, tire a selfie e assine na tela.`;
+      let r=null; try{ r=(typeof _aavEnviarWhats==='function')?await _aavEnviarWhats(tel,msg):null; }catch(_){}
+      nota+=` · ${s.nome||'?'}: ${(r&&r.ok)?'link enviado':'ver link no painel'}`;
+    }
+    if(typeof logAtividade==='function') logAtividade('Termo de acordo enviado ao ZapSign', `${dados.tipo} — ${dev.nome||''}${nota}`, dev.id);
+    showToast('Termo enviado ao ZapSign.'+(signers.length?'':' Sem link retornado — abra no painel ZapSign.'),'success');
+    document.getElementById('taj-prev').style.display='none';
+  }catch(e){
+    const msg=(e&&e.message?e.message:String(e));
+    const dica=/not found|Failed to send|non-2xx|404/i.test(msg)?' — (edge "gerar-acordo-termo" indisponível; use "Baixar HTML")':'';
+    showToast('Falha no envio: '+msg+dica,'danger');
+  }finally{ if(btn){ btn.disabled=false; btn.textContent='Enviar pro ZapSign'; } }
+}
+function _tajEnsureModals(){
+  if(document.getElementById('taj-modal')) return;
+  const inp='style="width:100%;padding:7px;border:1px solid var(--border);border-radius:5px;font-size:13px;background:var(--surface);color:var(--text);"';
+  const lbl='style="display:block;font-size:11px;color:var(--text-3);margin-bottom:3px;"';
+  const ov=document.createElement('div'); ov.innerHTML=`
+  <div id="taj-modal" style="display:none;position:fixed;inset:0;z-index:100000;background:rgba(10,21,48,.5);align-items:flex-start;justify-content:center;overflow:auto;padding:32px 16px;">
+    <div style="width:720px;max-width:100%;background:var(--surface,#fff);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;max-height:90vh;box-shadow:0 24px 60px rgba(0,0,0,.3);">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 22px;border-bottom:1px solid var(--border);"><h3 id="taj-titulo" style="margin:0;font-size:15px;color:var(--text);">Gerar termo de acordo</h3><span onclick="document.getElementById('taj-modal').style.display='none'" style="cursor:pointer;font-size:22px;color:var(--text-3);">×</span></div>
+      <div style="padding:18px 22px;overflow-y:auto;flex:1;">
+        <div style="display:flex;gap:8px;margin-bottom:12px;">
+          <label style="flex:1;border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:13px;cursor:pointer;color:var(--text);"><input type="radio" name="tajTipo" value="extrajudicial" checked onchange="_tajOnTipoChange()"> <strong>Extrajudicial</strong><div style="font-size:11px;color:var(--text-3);">Confissão de dívida (CPC 784)</div></label>
+          <label style="flex:1;border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:13px;cursor:pointer;color:var(--text);"><input type="radio" name="tajTipo" value="judicial" onchange="_tajOnTipoChange()"> <strong>⚖ Judicial</strong><div style="font-size:11px;color:var(--text-3);">Homologação em juízo (CPC 515, II)</div></label>
+        </div>
+        <div id="tajJudFields" style="display:none;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;padding:10px;border:1px dashed var(--border);border-radius:6px;">
+          <div style="grid-column:1/3;font-size:11px;color:var(--gold-dark,#9C7F40);text-transform:uppercase;letter-spacing:.08em;">⚖ Dados do processo</div>
+          <div><label ${lbl}>Nº do processo</label><input id="tajJudProcesso" placeholder="0000000-00.0000.8.16.0000" ${inp}></div>
+          <div><label ${lbl}>Comarca</label><input id="tajJudComarca" placeholder="Dois Vizinhos" ${inp}></div>
+          <div><label ${lbl}>Foro</label><select id="tajJudForo" ${inp}><option value="jec">Juizado Especial Cível</option><option value="vara">Vara Cível</option></select></div>
+          <div><label ${lbl}>Cláusula 4 (variável)</label><select id="tajJudClausula4" onchange="_tajOnClausula4()" ${inp}><option value="consolidacao">Consolidação neste feito</option><option value="desistencia">Concentração + desistência de outro processo</option><option value="sisbajud">Sisbajud (liberação de bloqueio)</option></select></div>
+          <div id="tajJudDesistWrap" style="display:none;grid-column:1/3;grid-template-columns:1fr 1fr;gap:10px;">
+            <div><label ${lbl}>Autos a desistir (nº)</label><input id="tajJudProc2" placeholder="0000000-00.0000.8.16.0000" ${inp}></div>
+            <div><label ${lbl}>Comarca do processo a desistir</label><input id="tajJudComarca2" placeholder="Francisco Beltrão" ${inp}></div></div>
+          <div id="tajJudSisbajudWrap" style="display:none;grid-column:1/3;"><label ${lbl}>Valor bloqueado a liberar (R$)</label><input id="tajJudValorBloq" type="number" step="0.01" placeholder="0,00" ${inp}></div>
+        </div>
+        <div id="taj-campos" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;"></div>
+      </div>
+      <div style="padding:12px 22px;border-top:1px solid var(--border);display:flex;gap:8px;"><button class="btn btn-primary" id="taj-gerar" onclick="tajGerarPreview()">Gerar e revisar</button><button class="btn btn-ghost" onclick="document.getElementById('taj-modal').style.display='none'">Cancelar</button></div>
+    </div>
+  </div>
+  <div id="taj-prev" style="display:none;position:fixed;inset:0;z-index:100001;background:rgba(10,21,48,.5);align-items:center;justify-content:center;padding:24px 16px;">
+    <div style="width:1000px;max-width:100%;height:94vh;background:var(--surface,#fff);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 24px 60px rgba(0,0,0,.3);">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 20px;border-bottom:1px solid var(--border);"><h3 style="margin:0;font-size:15px;color:var(--text);">Revisão do termo</h3><span onclick="document.getElementById('taj-prev').style.display='none'" style="cursor:pointer;font-size:22px;color:var(--text-3);">×</span></div>
+      <div style="padding:10px 20px;display:flex;gap:8px;align-items:center;"><button class="btn btn-sm" id="taj-editar" onclick="tajToggleEditar()">Editar texto</button><button class="btn btn-ghost btn-sm" onclick="tajVoltarForm()">← Ajustar dados</button></div>
+      <iframe id="taj-frame" title="Prévia do termo" style="flex:1;width:100%;border:1px solid var(--border);border-radius:6px;background:#fff;margin:0 20px;"></iframe>
+      <div style="padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:8px;"><button class="btn btn-success" id="taj-enviar" onclick="tajEnviarZapSign()">Enviar pro ZapSign</button><button class="btn btn-ghost" onclick="tajBaixarHtml()">Baixar HTML</button><button class="btn btn-ghost" onclick="document.getElementById('taj-prev').style.display='none'">Cancelar</button></div>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+}
+
 function abrirDocCredor(devId){
   if(!devId){ showToast('Selecione um devedor para gerar o documento ao cliente.','warning'); return; }
   _mv2SoCredor = true;
