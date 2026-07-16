@@ -2270,6 +2270,9 @@ body:not(.cobr-cream) .cob-stpop, .dark .cob-stpop { background: var(--card); }
       <div class="nav-item" data-page="intimacoes" id="nav-intimacoes">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span><span>Intimações <span id="nav-intimacoes-count" style="display:none;background:var(--gold);color:var(--navy);padding:1px 7px;border-radius:10px;font-size:10.5px;margin-left:4px;font-weight:600;">0</span></span>
       </div>
+      <div class="nav-item" data-page="intimvincular" id="nav-intimvincular">
+        <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg></span><span>A vincular <span id="nav-intimvincular-count" style="display:none;background:var(--gold);color:var(--navy);padding:1px 7px;border-radius:10px;font-size:10.5px;margin-left:4px;font-weight:600;">0</span></span>
+      </div>
       <div class="nav-item" data-page="consultas-premium" id="nav-consultas-premium">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></span><span>Consultas <span id="nav-consultas-count" style="display:none;background:var(--gold);color:var(--navy);padding:1px 7px;border-radius:10px;font-size:10.5px;margin-left:4px;font-weight:600;">0</span></span>
       </div>
@@ -2406,6 +2409,7 @@ body:not(.cobr-cream) .cob-stpop, .dark .cob-stpop { background: var(--card); }
 
     <!-- PAGE: PROCESSOS -->
     <div id="page-intimacoes" class="page-content"><!-- renderIntimacoes() --></div>
+    <div id="page-intimvincular" class="page-content"><!-- renderIntimVincular() --></div>
     <div id="page-consultas-premium" class="page-content"><!-- renderConsultasPremium() --></div>
     <div id="page-processos" class="page-content">
       <!-- JS will populate -->
@@ -6956,6 +6960,7 @@ const PAGE_BREADCRUMBS = {
   relat:     ['Relatórios'],
   wa:        ['Comunicação','WhatsApp'],
   intimacoes:['Comunicação','Intimações & andamentos'],
+  intimvincular:['Comunicação','Intimações a vincular'],
   config:    ['Sistema','Configurações'],
   calc:      ['Sistema','Calculadora Jurídica'],
   aprovacoes:['Sistema','Aprovações'],
@@ -6986,6 +6991,7 @@ const PAGE_RENDERERS = {
   'nf-avulsa': ()=>renderNfAvulsa(),
   wa: ()=>renderWhatsApp(),
   intimacoes: ()=>renderIntimacoes(),
+  intimvincular: ()=>renderIntimVincular(),
   'consultas-premium': ()=>renderConsultasPremium(),
   config: ()=>renderConfiguracoes(),
   calc: ()=>renderCalculadora(),
@@ -16067,6 +16073,20 @@ async function refreshIntimacoesBadge(){
     if(count>0){ badge.textContent = count>99?'99+':String(count); badge.style.display='inline-block'; }
     else { badge.style.display='none'; }
   }
+  refreshIntimVincularBadge();
+}
+
+// Badge da fila "A vincular" (intimações de e-mail sem processo cadastrado).
+async function refreshIntimVincularBadge(){
+  const supa = getSupabase(); if(!supa) return;
+  const { count, error } = await supa.from('intimacoes_email')
+    .select('id', { count:'exact', head:true }).eq('status','a_vincular');
+  if(error) return;
+  const badge = document.getElementById('nav-intimvincular-count');
+  if(badge){
+    if(count>0){ badge.textContent = count>99?'99+':String(count); badge.style.display='inline-block'; }
+    else { badge.style.display='none'; }
+  }
 }
 
 async function marcarIntimacaoLida(id, lida){
@@ -16175,6 +16195,97 @@ async function atualizarBadgeConsultas(nAbertas){
   let n=nAbertas;
   if(n==null){ try{ const supa=getSupabase(); if(supa){ const { count }=await supa.from('consultas_premium').select('id',{count:'exact',head:true}).neq('status','respondida'); n=count||0; } }catch(_){ n=0; } }
   if(n>0){ badge.textContent=String(n); badge.style.display=''; } else { badge.style.display='none'; }
+}
+
+// ── Fila "Intimações a vincular" ─────────────────────────────────────────────
+// Intimações extraídas dos e-mails cujo processo NÃO casou com nenhuma cobrança
+// cadastrada. O gestor vincula a um caso (num clique) — o ato entra na timeline
+// e o número do processo é gravado na cobrança (p/ os próximos casarem sozinhos).
+let _ivDevByLabel = {};
+function _ivLabelDev(d){ return `${d.nome||'—'}${d.doc?(' — '+d.doc):''}`; }
+function _ivSugerir(execNome, devs){
+  const n=(execNome||'').toLowerCase().replace(/[^a-zà-ú ]/gi,'').trim(); if(n.length<4) return '';
+  const toks=n.split(/\s+/).filter(t=>t.length>=3);
+  let best=null,bestScore=0;
+  for(const d of devs){ const dn=(d.nome||'').toLowerCase(); if(!dn) continue;
+    let sc=0; for(const t of toks){ if(dn.includes(t)) sc++; }
+    if(sc>bestScore){ bestScore=sc; best=d; } }
+  return (best && bestScore>=Math.min(2,toks.length)) ? _ivLabelDev(best) : '';
+}
+
+async function renderIntimVincular(){
+  const el = document.getElementById('page-intimvincular'); if(!el) return;
+  const supa = getSupabase();
+  el.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text-2);">Carregando intimações…</div>`;
+  let rows = [];
+  if(supa){ try{ const { data } = await supa.from('intimacoes_email').select('*').eq('status','a_vincular').order('recebido_em',{ascending:false}).limit(500); rows=data||[]; }catch(_){} }
+
+  const devs = (DB.devedores||[]);
+  _ivDevByLabel = {};
+  const dlOpts = devs.map(d=>{ const lbl=_ivLabelDev(d); _ivDevByLabel[lbl]=d.id; return `<option value="${escHtml(lbl)}"></option>`; }).join('');
+
+  const head = `
+    <div style="margin-bottom:14px;">
+      <h1 class="cob-h1">Intimações a vincular</h1>
+      <div style="font-size:12.5px;color:var(--text-2);margin-top:3px;">Movimentações que chegaram por e-mail de processos ainda <strong>não cadastrados</strong>. Vincule a um caso — o andamento entra na timeline e o número do processo passa a casar sozinho.</div>
+    </div>
+    <datalist id="dlDevedores">${dlOpts}</datalist>`;
+
+  if(!rows.length){
+    el.innerHTML = head + `<div class="cob-panel" style="padding:40px;text-align:center;color:var(--text-2);font-style:italic;">Nenhuma intimação pendente de vínculo. 👌</div>`;
+    return;
+  }
+
+  const rowsHtml = rows.map(r=>{
+    const sug = _ivSugerir(r.executado, devs);
+    const meta = [r.data_ato?_detData(r.data_ato):'', r.tribunal||'', r.sistema||''].filter(Boolean).join(' · ');
+    const partes = [r.exequente?('Exequente: '+r.exequente):'', r.executado?('Executado: '+r.executado):''].filter(Boolean).join('  •  ');
+    return `<div class="cob-panel" style="padding:14px 18px;margin-bottom:10px;">
+      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline;">
+        <div style="font-family:var(--font-mono);font-size:11px;color:var(--text-3);">${escHtml(meta)}</div>
+        <div style="font-family:var(--font-mono);font-size:11px;color:var(--text-3);">${escHtml(r.numero_processo||'sem número')}</div>
+      </div>
+      <div style="font-size:14px;color:var(--text);font-weight:600;margin:4px 0 2px;">${escHtml(r.ato_curado||r.ato||'Movimentação')}</div>
+      <div style="font-size:12px;color:var(--text-2);margin-bottom:10px;">${escHtml(partes)}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <input class="cob-input" id="iv-${r.id}" list="dlDevedores" value="${escHtml(sug)}" placeholder="Vincular ao caso (nome ou CPF/CNPJ)" style="flex:1;min-width:220px;height:34px;font-size:13px;">
+        <button class="btn btn-primary btn-sm" onclick="ivVincular('${r.id}')">Vincular</button>
+        <button class="btn btn-ghost btn-sm" onclick="ivIgnorar('${r.id}')" style="color:var(--danger);">Descartar</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = head + rowsHtml;
+}
+
+async function ivVincular(id){
+  const inp = document.getElementById('iv-'+id); const label=(inp?.value||'').trim();
+  const devId = _ivDevByLabel[label];
+  if(!devId){ showToast('Escolha um caso válido da lista (nome/CPF).','warning'); return; }
+  const supa = getSupabase(); if(!supa){ showToast('Sem conexão.','danger'); return; }
+  try{
+    const { data:arr } = await supa.from('intimacoes_email').select('*').eq('id',id).limit(1);
+    const r = (arr||[])[0]; if(!r){ showToast('Intimação não encontrada.','danger'); return; }
+    const evDedup = 'email:'+(r.dedup||id);
+    // 1) timeline unificada (RLS do proprietário)
+    await supa.from('devedor_eventos').insert({ devedor_id:devId, cobranca_id:devId, tipo:'andamento_judicial',
+      payload:{ acao_completa:r.ato_curado||r.ato, fonte:'email', data:r.data_ato, tribunal:r.tribunal, sistema:r.sistema, dedup:evDedup } });
+    // 2) alertas (best-effort)
+    try{ await supa.from('proc_intimacoes').insert({ fonte:'email', processo_num:r.numero_processo, data_publicacao:r.data_ato, data_intimacao:r.data_ato, conteudo:r.ato_curado||r.ato, devedor_id:devId, lida:false, dedup_key:evDedup }); }catch(_){}
+    // 3) marca vinculada
+    await supa.from('intimacoes_email').update({ status:'vinculada', cobranca_id:devId, devedor_id:devId }).eq('id',id);
+    // 4) grava o número do processo na cobrança se estiver vazio (casa os próximos sozinho)
+    if(r.numero_processo){ try{ await supa.from('cobrancas').update({ numero_processo:r.numero_processo }).eq('id',devId).is('numero_processo',null); }catch(_){} }
+    showToast('Vinculado — o andamento entrou na timeline do caso.','success');
+    renderIntimVincular();
+  }catch(e){ showToast('Falha ao vincular: '+(e.message||e),'danger'); }
+}
+
+async function ivIgnorar(id){
+  if(!confirm('Descartar esta intimação? Ela sai da fila (não entra em nenhum caso).')) return;
+  const supa = getSupabase(); if(!supa) return;
+  try{ await supa.from('intimacoes_email').update({ status:'ignorada' }).eq('id',id); showToast('Descartada.','info'); renderIntimVincular(); }
+  catch(e){ showToast('Falha: '+(e.message||e),'danger'); }
 }
 
 async function renderIntimacoes(){
