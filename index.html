@@ -5541,6 +5541,12 @@ async function loadRelationalData(){
     DB.devedores = devedoresRel;
   }
   if(Array.isArray(clientesRel))  DB.clientes  = clientesRel;
+  // Baseline por-registro dos clientes recém-carregados do servidor: flushRelational passa a
+  // enviar SÓ os clientes que mudaram nesta sessão (diff contra este snapshot), em vez de
+  // reescrever a lista inteira. Assim um save de qualquer outra coisa não regrava — nem apaga
+  // grupo_economico_id de — credores que o usuário nem tocou (bug do "grupo que some" quando o
+  // vínculo foi setado por fora, ex.: SQL/outra aba). Espelha _syncSnapshot do blob.
+  if(Array.isArray(clientesRel)) _clientesRelSnapshot = _snapClientes();
   if(Array.isArray(cobrancasRel)) DB_cobrancas = cobrancasRel;
   // FASE C2 (tempo-2): leitores do cliente passam a ver a dívida de cobrancas.
   _mergeDividaFromCobrancas();
@@ -5567,6 +5573,15 @@ async function loadRelationalData(){
 // dados novos não somem ao recarregar.
 let _relWriteTimer = null;
 
+// Baseline dos clientes já sincronizados (Map<id, JSON(clienteToRow(c))>), montado no load.
+// flushRelational envia só quem difere daqui → save por-registro-alterado (como o blob).
+let _clientesRelSnapshot = null;
+function _snapClientes(){
+  const m = new Map();
+  (DB.clientes||[]).forEach(c=>{ if(c && c.id!=null){ try{ m.set(c.id, JSON.stringify(clienteToRow(c))); }catch(_){} } });
+  return m;
+}
+
 // Fix 4: escrita relacional IMEDIATA e awaitable. O corpo antes vivia dentro do setTimeout
 // de syncRelational (debounce 1800ms) — se a página recarregava/caía antes do timer disparar,
 // a escrita (ex.: troca de responsável) nunca chegava ao banco e voltava no próximo load.
@@ -5586,10 +5601,21 @@ async function flushRelational(){
     const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
     if(!sess?.data?.session) return; // sem sessão, RLS bloqueia escrita
     if(Array.isArray(DB.clientes) && DB.clientes.length){
-      // Não reenviar cadastros já excluídos (lápide) — evita ressuscitar linhas que
-      // outra aba/dispositivo apagou. O trigger no banco é a guarda final; isto só
-      // poupa o round-trip e mantém o batch limpo.
-      const rows = DB.clientes.filter(c=>!_tombstones.has(_tombKey('cliente', c.id))).map(clienteToRow);
+      // Envio POR REGISTRO ALTERADO: só manda o cliente que mudou nesta sessão (diff contra o
+      // snapshot carregado no load), em vez do upsert em massa da lista inteira. Antes, qualquer
+      // save reescrevia TODOS os clientes a partir da memória — e se algum vínculo (ex.:
+      // grupo_economico_id) tivesse sido setado por fora depois do load, o save o zerava.
+      // Agora, credor intocado tem JSON idêntico ao baseline → não é enviado → preservado.
+      // Não reenviar cadastros já excluídos (lápide) — evita ressuscitar linhas apagadas.
+      const base = _clientesRelSnapshot; // null só se o load ainda não populou → fallback = envia
+      const rows = []; const sent = [];
+      for(const c of DB.clientes){
+        if(!c || c.id==null) continue;
+        if(_tombstones.has(_tombKey('cliente', c.id))) continue;
+        const row = clienteToRow(c); const json = JSON.stringify(row);
+        if(base && base.get(c.id) === json) continue; // inalterado → não toca no servidor
+        rows.push(row); sent.push([c.id, json]);
+      }
       const { error } = rows.length ? await supa.from('clientes').upsert(rows, { onConflict:'id' }) : { error:null };
       if(error){
         console.warn('[rel] syncClientes:', error.message);
@@ -5598,6 +5624,10 @@ async function flushRelational(){
           ? 'Já existe um cliente ATIVO com esse CNPJ/CPF. Verifique a lista de Clientes (reative ou arquive o existente em vez de duplicar).'
           : 'Não foi possível sincronizar Clientes: '+error.message;
         try { showToast(msg,'danger'); } catch(_){}
+      } else if(sent.length){
+        // Baseline avança só no sucesso — os enviados viram a nova referência da sessão.
+        if(!_clientesRelSnapshot) _clientesRelSnapshot = new Map();
+        for(const [id,json] of sent) _clientesRelSnapshot.set(id, json);
       }
     }
     if(Array.isArray(DB.devedores) && DB.devedores.length){
