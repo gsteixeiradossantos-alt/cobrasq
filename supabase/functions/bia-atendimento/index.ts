@@ -22,6 +22,9 @@ import { createClient } from 'jsr:@supabase/supabase-js@2';
 
 const MODELO = 'claude-haiku-4-5-20251001';
 const MAX_CONVERSAS_POR_RUN = 15;
+// Só atende mensagens RECENTES. Protege contra "backlog": mensagens antigas
+// acumuladas nunca são respondidas automaticamente (e não entopem a fila).
+const JANELA_HORAS = 48;
 
 const BIA_SYSTEM = `Você é a Bia, atendente virtual da COBRASQ (recuperação de crédito) no WhatsApp.
 
@@ -122,11 +125,15 @@ Deno.serve(async (req) => {
     }
   }
 
-  // 2) Fila de pendentes (última recebida sem resposta por telefone).
+  // 2) Fila de pendentes (última recebida sem resposta por telefone). SÓ recentes
+  // (últimas JANELA_HORAS h) e priorizando as mais NOVAS — assim o backlog antigo
+  // nunca é respondido nem entope a fila.
+  const desde = new Date(Date.now() - JANELA_HORAS * 3600 * 1000).toISOString();
   const { data: pend, error: errSel } = await sb
     .from('vw_conversas_pendentes')
     .select('message_id, telefone, caso_id, texto, tipo, recebida_em')
-    .order('recebida_em', { ascending: true })
+    .gte('recebida_em', desde)
+    .order('recebida_em', { ascending: false })
     .limit(MAX_CONVERSAS_POR_RUN);
   if (errSel) return new Response(JSON.stringify({ error: 'select pendentes: ' + errSel.message }), { status: 500 });
   if (!pend || pend.length === 0) return new Response(JSON.stringify({ ok: true, processadas: 0 }), { status: 200, headers: { 'Content-Type': 'application/json' } });
