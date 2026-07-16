@@ -9071,7 +9071,13 @@ async function renderPainel(){
     { lb:'90+',   min:91, max:Infinity, cor:'var(--danger)'   },
   ].map(b=>{ let val=0,qtd=0; cobrAtivas.filter(c=>!/quitad|pago|liquidad/i.test(c.status||'')).forEach(c=>{ const dias=_cobrAgingDias(c); if(dias==null) return; if(dias>=b.min && dias<=b.max){ val+=(+c.valor_atual||+c.valor_orig||0); qtd++; } }); return {...b, val, qtd}; });
   const agingTotal      = agingDefs.reduce((s,b)=>s+b.val,0) || 1;
-  const carteiraParada90 = agingDefs[3].val; // 90+ = carteira parada
+  // "Carteira parada há 90+" (CTA Priorizar → Cobranças): só o que está em "A agir"
+  // — exclui judicial em andamento (cumprimento/ação com processo), acordos e
+  // encerrados, para casar com a aba A agir. Usa a MESMA régua (cobMacroGrupo).
+  const carteiraParada90 = cobrAtivas
+    .filter(c=> !/quitad|pago|liquidad/i.test(c.status||'') && cobMacroGrupo(c.status, c.fase, c.numero_processo)==='agir')
+    .filter(c=>{ const dias=_cobrAgingDias(c); return dias!=null && dias>=91; })
+    .reduce((s,c)=>s+(+c.valor_atual||+c.valor_orig||0),0);
 
   // Carteira por situação (valor): em aberto / em acordo / judicial / quitado.
   const sitDefs = { aberto:0, acordo:0, judicial:0, quitado:0 };
@@ -16818,15 +16824,49 @@ const _COB_MACROS = [
   { key:'acordos',    label:'Acordos',     pop:'Acordo' },
   { key:'encerrados', label:'Encerrados',  pop:'Desfecho' }
 ];
-function cobMacroGrupo(status, fase){
+function cobMacroGrupo(status, fase, numeroProcesso){
   const s = (status||'').trim();
   if(!s) return 'agir';
   if((typeof ehForaRegua==='function' && ehForaRegua(s)) || /encerrad|baixad|devolvid|quitad|sem ?[êe]xito|recebido/i.test(s)) return 'encerrados';
   if(typeof ehAcordo==='function' && ehAcordo(s)) return 'acordos';
-  // "Preparar ação" (ainda não ajuizada) conta como algo a fazer → A agir.
+  // "Preparar ação" / "Reajuizar" (falta (re)ajuizar) contam como algo a fazer → A agir,
+  // mesmo que ainda exista um número de processo antigo (ex.: reajuizar após extinção).
   if(/fazer a[çc][ãa]o|para protocolar|reajuizar|analisar|automatizar|cobrar|em contato|negocia|proposta|notifica|andamento/i.test(s)) return 'agir';
-  if(/a[çc][ãa]o|cumprimento|senten|audi[êe]|cita[çc]|contesta|recurso|execu|penhora|hasta|peti[çc]/i.test(s)) return 'judicial';
-  return (typeof faseDaEtiqueta==='function' && faseDaEtiqueta(s, fase)==='judicial') ? 'judicial' : 'agir';
+  // Natureza judicial: só vai para "No judicial" DEPOIS que a ação foi protocolada
+  // (tem número de processo). Sem número = ainda falta ajuizar → fica em "A agir".
+  const ehJud = /a[çc][ãa]o|cumprimento|senten|audi[êe]|cita[çc]|contesta|recurso|execu|penhora|hasta|peti[çc]/i.test(s)
+             || (typeof faseDaEtiqueta==='function' && faseDaEtiqueta(s, fase)==='judicial');
+  if(ehJud){
+    // Sem o número informado (classificação por rótulo apenas, ex.: popover de
+    // etiquetas) mantém no judicial — comportamento legado. Com um caso concreto,
+    // só é "No judicial" depois de protocolado (tem número); senão volta a "A agir".
+    if(numeroProcesso === undefined) return 'judicial';
+    return (numeroProcesso && String(numeroProcesso).trim()) ? 'judicial' : 'agir';
+  }
+  return 'agir';
+}
+// Selo de alerta do card: caso de natureza judicial que ainda precisa de ATO nosso
+// (ajuizar ou reajuizar) e por isso aparece em "A agir". Devolve o rótulo a exibir
+// ("Fazer ação" | "Reajuizar") ou '' quando não há ação pendente. NÃO altera o status
+// salvo no banco — é puramente visual (derivado de status + número de processo).
+function cobAlertaAcao(c){
+  if(!c) return '';
+  const s = (c.status||'').trim();
+  if(!s) return '';
+  // Não sinaliza casos já resolvidos, em acordo ou com processo correndo.
+  if(cobMacroGrupo(c.status, c.fase, c.numero_processo) !== 'agir') return '';
+  if(/reajuizar/i.test(s)) return 'Reajuizar';
+  const ehJud = /fazer a[çc][ãa]o|para protocolar|a[çc][ãa]o|cumprimento|senten|audi[êe]|cita[çc]|contesta|recurso|execu|penhora|hasta|peti[çc]/i.test(s)
+             || (typeof faseDaEtiqueta==='function' && faseDaEtiqueta(s, c.fase)==='judicial');
+  const temProcesso = !!(c.numero_processo && String(c.numero_processo).trim());
+  return (ehJud && !temProcesso) ? 'Fazer ação' : '';
+}
+// Pill visual do alerta "Fazer ação"/"Reajuizar". Âmbar p/ ajuizar, bordô p/ reajuizar.
+function cobAlertaPill(c){
+  const t = cobAlertaAcao(c);
+  if(!t) return '';
+  const bg = /reajuizar/i.test(t) ? '#9B4A3F' : '#C47A00';
+  return `<span class="cob-alerta-acao" style="display:inline-flex;align-items:center;gap:4px;background:${bg};color:#fff;font-weight:700;font-size:11px;padding:2px 8px;border-radius:999px;white-space:nowrap;" title="Ação judicial pendente — ${escHtml(t)}">⚠ ${escHtml(t)}</span>`;
 }
 // Descrições curtas para o popover (fallback vazio).
 const _COB_STATUS_DESC = {
@@ -16878,7 +16918,7 @@ function cobPendencia(c, sinais){
   const status = (c.status||'').trim();
   const parte = (c.cobranca_partes||[]).find(p=>p.principal) || (c.cobranca_partes||[])[0] || {};
   const devId = parte.devedor_id;
-  const macro = cobMacroGrupo(status, c.fase);
+  const macro = cobMacroGrupo(status, c.fase, c.numero_processo);
   const acordos = (sinais.acordoPorDev && sinais.acordoPorDev[devId]) || [];
   const hoje = new Date(new Date().toISOString().slice(0,10));
   // ✅ concluído
@@ -16987,13 +17027,13 @@ async function renderCobrancas(opts){
   });
   // Contagens das abas macro (derivadas de base).
   const macroCounts = { todos: base.length, agir:0, judicial:0, acordos:0, encerrados:0 };
-  base.forEach(c=>{ const g=cobMacroGrupo(c.status,c.fase); if(macroCounts[g]!=null) macroCounts[g]++; });
+  base.forEach(c=>{ const g=cobMacroGrupo(c.status,c.fase,c.numero_processo); if(macroCounts[g]!=null) macroCounts[g]++; });
   // Pendência derivada (🔴 agir / 🟡 aguardando / ✅ concluído) — guarda em c._pend p/ reuso na linha.
   const pendCounts = { todos: base.length, agir:0, aguardando:0, concluido:0 };
   base.forEach(c=>{ c._pend = cobPendencia(c, _cobrSinais); if(pendCounts[c._pend.estado]!=null) pendCounts[c._pend.estado]++; });
   const _pendFiltro = (c)=> !cobrFilter.pend || cobrFilter.pend==='todos' || (c._pend && c._pend.estado)===cobrFilter.pend;
   // naAba = base restrita à aba ativa (alimenta os chips de status). cobr = naAba + chips + ordenação.
-  const naAba = base.filter(c=> (cobrFilter.tab==='todos' || cobMacroGrupo(c.status,c.fase)===cobrFilter.tab) && _pendFiltro(c));
+  const naAba = base.filter(c=> (cobrFilter.tab==='todos' || cobMacroGrupo(c.status,c.fase,c.numero_processo)===cobrFilter.tab) && _pendFiltro(c));
   const _sorters = {
     nome:   (a,b)=> _cobrPrincipalNome(a).localeCompare(_cobrPrincipalNome(b),'pt-BR',{sensitivity:'base'}),
     valor:  (a,b)=> (+b.valor_atual||+b.valor_orig||0) - (+a.valor_atual||+a.valor_orig||0),
@@ -17064,7 +17104,7 @@ async function renderCobrancas(opts){
       <div class="cob-caso-main">
         <div class="cob-caso-nome">${escHtml(princNome)}${princPapel?` <span class="papel">· ${escHtml(princPapel)}</span>`:''} ${extra}</div>
         <div class="cob-caso-doc">${escHtml(_cobrDocLabel(c))}</div>
-        <div class="cob-caso-chips">${cobPendPill(c._pend, true)}${cronRenderBadge(c)}${selo}<span class="cob-caso-fase">${faseProc}</span>${unifChip}</div>
+        <div class="cob-caso-chips">${cobAlertaPill(c)}${cobPendPill(c._pend, true)}${cronRenderBadge(c)}${selo}<span class="cob-caso-fase">${faseProc}</span>${unifChip}</div>
       </div>
       <div class="cob-caso-credor">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}<div class="resp">${escHtml(_detUserNome(c.assigned_to))}</div></div>
       <div class="cob-caso-vs">
@@ -17083,7 +17123,7 @@ async function renderCobrancas(opts){
     const aging=_cobrAgingDias(c); const agingOld=(aging!=null && aging>=365);
     return `<div class="cob-panel cob-card cob-tr-click" style="--cor:${cor};padding:14px;cursor:pointer;" onclick="verCobranca('${c.id}')">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;"><div class="strong" style="font-size:14px;font-weight:700;">${escHtml(princ?.devedores?.nome||'—')}${extra}${_telInvalidoCob(c)?` <span class="det-chip" style="background:#FBF6E6;color:#9C7F40;border:1px solid #E0D3A8;" title="Telefone inválido — buscando novo número">📵</span>`:''}</div>${cobStatusBadge(c)}</div>
-      ${c._pend?`<div style="margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${cobPendPill(c._pend, true)}${cronRenderBadge(c)}</div>`:''}
+      ${(c._pend||cobAlertaAcao(c))?`<div style="margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${cobAlertaPill(c)}${cobPendPill(c._pend, true)}${cronRenderBadge(c)}</div>`:''}
       <div style="font-size:12.5px;color:var(--text-2);margin-top:4px;">${escHtml(_cobrDocLabel(c))}</div>
       <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}</div>
       ${c._unif?`<div style="margin-top:4px;"><span class="det-chip" style="background:var(--navy,#1f3a5f);color:#fff;">⚖ Processo unificado · ${c._unif.irmaos.length} créditos</span></div>`:''}
@@ -39068,7 +39108,7 @@ function kbToggleView(v){ cobrViewMode = (v==='quadro')?'quadro':'lista'; kbView
 // cobMacroGrupo/faseDaEtiqueta. Dentro de cada coluna, ordena por urgência da pendência.
 function kbRenderQuadro(cobr){
   const grupos = { agir:[], judicial:[], acordos:[], encerrados:[] };
-  (cobr||[]).forEach(c=>{ const g = cobMacroGrupo(c.status, c.fase); (grupos[g]=grupos[g]||[]).push(c); });
+  (cobr||[]).forEach(c=>{ const g = cobMacroGrupo(c.status, c.fase, c.numero_processo); (grupos[g]=grupos[g]||[]).push(c); });
   const colDef = (typeof _COB_MACROS!=='undefined' && Array.isArray(_COB_MACROS)) ? _COB_MACROS
     : [{key:'agir',label:'A agir'},{key:'judicial',label:'No judicial'},{key:'acordos',label:'Acordos'},{key:'encerrados',label:'Encerrados'}];
   const _pendRank = { agir:0, aguardando:1, concluido:2 };
