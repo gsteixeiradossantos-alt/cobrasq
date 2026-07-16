@@ -65,12 +65,29 @@ module.exports = async function handler(req, res) {
     // então o page.pdf renderiza com a tipografia correta (validado: a fonte sai certa).
     await page.setContent(html, { waitUntil: 'networkidle0', timeout: 25000 });
 
-    const pdfBuffer = await page.pdf({
+    // Rodapé DE PÁGINA (footerTemplate) só p/ os documentos do cliente, que sinalizam via
+    // <meta name="pdf-footer-band">. Renderiza a faixa escura na BASE de TODA página (o
+    // @page do documento reserva a margem inferior). Gotchas do Chromium tratados:
+    // font-size explícito no root (o default é ~0) e print-color-adjust p/ o fundo escuro.
+    const comRodape = /name=["']pdf-footer-band["']/.test(html);
+    const pdfOpts = {
       format: 'A4',
       printBackground: true,      // mantém o timbrado escuro/cores do documento
-      preferCSSPageSize: true,    // respeita o @page{size:A4;margin:0} do documento
+      preferCSSPageSize: true,    // respeita o @page{size:A4;margin} do documento
       margin: { top: '0mm', right: '0mm', bottom: '0mm', left: '0mm' },
-    });
+    };
+    if (comRodape) {
+      pdfOpts.displayHeaderFooter = true;
+      pdfOpts.headerTemplate = '<span style="display:none"></span>';
+      pdfOpts.footerTemplate =
+        '<div style="width:100%;margin:0;padding:0;font-size:6.8pt;-webkit-print-color-adjust:exact;print-color-adjust:exact;">' +
+        '<div style="background:#0A1530;border-top:1.4px solid #C9A961;color:#B9C0CE;' +
+        "font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;" +
+        'font-size:6.8pt;line-height:1.7;letter-spacing:.06em;text-transform:uppercase;text-align:center;padding:8px 0 9px;">' +
+        'cobrasq.com.br&nbsp;·&nbsp;contato@cobrasq.com.br&nbsp;·&nbsp;WhatsApp (46)&nbsp;98822-6533<br>Documento confidencial.' +
+        '</div></div>';
+    }
+    const pdfBuffer = await page.pdf(pdfOpts);
 
     await browser.close();
     browser = null;
