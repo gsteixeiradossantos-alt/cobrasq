@@ -65,11 +65,12 @@ for (const uf of UFS_EPROC) TRIBUNAIS_EPROC['tj' + uf] = {
   host: 'tj' + uf + '.jus.br',                         // domínio-base (cobre 1º e 2º grau)
   url: 'https://eproc1g.tj' + uf + '.jus.br/eproc/',   // 1º grau (padrão do eproc)
 };
-// Justiça Federal da 4ª Região (mesmo eproc): JFPR/JFSC/JFRS 1º grau; TRF4 2º grau.
-TRIBUNAIS_EPROC.jfpr = { nome: 'JFPR — Justiça Federal do Paraná', host: 'jfpr.jus.br', url: 'https://eproc.jfpr.jus.br/eproc/' };
-TRIBUNAIS_EPROC.jfsc = { nome: 'JFSC — Justiça Federal de Santa Catarina', host: 'jfsc.jus.br', url: 'https://eproc.jfsc.jus.br/eproc/' };
-TRIBUNAIS_EPROC.jfrs = { nome: 'JFRS — Justiça Federal do Rio Grande do Sul', host: 'jfrs.jus.br', url: 'https://eproc.jfrs.jus.br/eproc/' };
-TRIBUNAIS_EPROC.trf4 = { nome: 'TRF4 — Tribunal Regional Federal 4ª Região', host: 'trf4.jus.br', url: 'https://eproc.trf4.jus.br/eproc/' };
+// Justiça Federal da 4ª Região (mesmo eproc, no caminho /eprocV2/ — confirmado pela
+// URL real da JFPR): JFPR/JFSC/JFRS 1º grau; TRF4 2º grau.
+TRIBUNAIS_EPROC.jfpr = { nome: 'JFPR — Justiça Federal do Paraná', host: 'jfpr.jus.br', url: 'https://eproc.jfpr.jus.br/eprocV2/' };
+TRIBUNAIS_EPROC.jfsc = { nome: 'JFSC — Justiça Federal de Santa Catarina', host: 'jfsc.jus.br', url: 'https://eproc.jfsc.jus.br/eprocV2/' };
+TRIBUNAIS_EPROC.jfrs = { nome: 'JFRS — Justiça Federal do Rio Grande do Sul', host: 'jfrs.jus.br', url: 'https://eproc.jfrs.jus.br/eprocV2/' };
+TRIBUNAIS_EPROC.trf4 = { nome: 'TRF4 — Tribunal Regional Federal 4ª Região', host: 'trf4.jus.br', url: 'https://eproc.trf4.jus.br/eprocV2/' };
 
 const state = {
   fase: 1,              // 1 pasta · 2 extração · 3 revisão · 4 execução
