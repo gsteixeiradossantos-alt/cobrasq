@@ -282,8 +282,8 @@
       } else {
         corpo += "<p>As partes ajustam que o valor bloqueado será destinado ao levantamento pela parte exequente, no montante correspondente ao débito ora reconhecido, para a conta adiante indicada, liberando-se o remanescente em favor da parte executada mediante manifestação posterior nos autos.</p>";
       }
-      corpo += "<p><strong>Dados bancários para levantamento da parte exequente:</strong> " + contaEx + ".</p>";
-      if (contaExec) corpo += "<p><strong>Dados bancários para levantamento da parte executada:</strong> " + contaExec + ".</p>";
+      corpo += "<p class=\"dados-conta\"><strong>Dados bancários para levantamento da parte exequente:</strong> " + contaEx + ".</p>";
+      if (contaExec) corpo += "<p class=\"dados-conta\"><strong>Dados bancários para levantamento da parte executada:</strong> " + contaExec + ".</p>";
       corpo += "<p>Fica pactuado que, caso posteriormente seja constatado bloqueio de valores realizado em data anterior à assinatura deste acordo, em montante superior ao descrito nesta cláusula, as partes deverão protocolar contrato aditivo no prazo de 5 (cinco) dias, a fim de definir a destinação do valor remanescente.</p>";
       return { titulo: "Do Sisbajud e destinação dos valores bloqueados", corpo: corpo };
     }
