@@ -649,7 +649,9 @@ Valor atual da dívida: ${fmtR(ctx.valor)}
 À vista com ${ctx.desc}% de desconto: ${fmtR(ctx.avista)}
 Parcelamento: até ${ctx.maxParc}x (parcela mínima ${fmtR(ctx.parcMin)})
 Link do portal: ${ctx.link}
-Momento: ${ctx.passo === 'd0' ? 'primeiro contato' : 'lembrete gentil (a pessoa ainda não resolveu)'}
+Momento: ${ctx.passo === 'd0' ? 'primeiro contato'
+  : ctx.passo === 'd15_aviso' ? 'AVISO FINAL, firme mas respeitoso e sem ameaça agressiva: a dívida ainda em aberto poderá ser registrada em órgão de proteção ao crédito; a pessoa evita isso resolvendo agora pelo link'
+  : 'lembrete gentil (a pessoa ainda não resolveu)'}
 
 Escreva a mensagem.`;
   try {
@@ -678,11 +680,24 @@ Escreva a mensagem.`;
 // FUTURO: 'serasa' (negativação em bureau) — precisa de integração externa (Serasa/
 // SPC/Boa Vista ou parceiro); não existe no sistema hoje, fica como próximo passo.
 const QUITA_STEPS = [
-  { key: 'd0',  dias: 0,  canal: 'whatsapp' },
-  { key: 'd3',  dias: 3,  canal: 'email' },
-  { key: 'd7',  dias: 7,  canal: 'whatsapp' },
-  { key: 'd12', dias: 12, canal: 'sms' },
+  { key: 'd0',        dias: 0,  canal: 'whatsapp' },
+  { key: 'd3',        dias: 3,  canal: 'email' },
+  { key: 'd7',        dias: 7,  canal: 'whatsapp' },
+  { key: 'd12',       dias: 12, canal: 'sms' },
+  // Onda 4 — negativação como ÚLTIMO recurso, com aval humano:
+  { key: 'd15_aviso', dias: 15, canal: 'whatsapp' },   // aviso final (amigável) antes da negativação
+  { key: 'd20_cand',  dias: 20, canal: 'serasa_flag' }, // NÃO negativa — marca 'candidato' p/ a fila de aprovação
 ];
+
+// Marca a cobrança como CANDIDATA à negativação (aval humano na fila). Não chama
+// bureau — só grava o estado em cobrancas.metadata.quitaNegativacao (sem migração).
+async function _marcarCandidatoNegativacao(cobId) {
+  const rows = await sbFetch(`cobrancas?id=eq.${encodeURIComponent(cobId)}&select=metadata`);
+  const meta = (rows && rows[0] && rows[0].metadata) || {};
+  if (meta.quitaNegativacao && meta.quitaNegativacao.status) return; // já no fluxo
+  meta.quitaNegativacao = { status: 'candidato', em: new Date().toISOString().slice(0, 10) };
+  await sbFetch(`cobrancas?id=eq.${encodeURIComponent(cobId)}`, { method: 'PATCH', body: JSON.stringify({ metadata: meta }) });
+}
 
 // SMS é curto (160 chars) — template direto, sem IA. Sem acento p/ compatibilidade GSM.
 function _quitaSmsMsg(ctx) {
@@ -787,6 +802,27 @@ async function reguaQuita({ dry, DB }) {
       chosen = s; break;
     }
     if (!chosen) continue;
+
+    // Passo especial: NÃO envia mensagem — marca a cobrança como CANDIDATA à
+    // negativação (entra na fila de aprovação humana). Não chama bureau nenhum.
+    if (chosen.canal === 'serasa_flag') {
+      if (!dry) {
+        const claimed = await claimEnvio({ tipo: 'quita', devedorId: a.devId, parcelaId: a.cobId, stepKey: chosen.key, canal: 'serasa_flag' });
+        if (!claimed) { out.itens.push({ dev: a.nome, step: chosen.key, skipped: 'já reivindicado' }); continue; }
+        try {
+          await _marcarCandidatoNegativacao(a.cobId);
+          await confirmarEnvio({ tipo: 'quita', devedorId: a.devId, parcelaId: a.cobId, stepKey: chosen.key });
+          out.itens.push({ dev: a.nome, step: chosen.key, status: 'candidato_negativacao' });
+        } catch (e) {
+          out.falhas++;
+          await liberarEnvio({ tipo: 'quita', devedorId: a.devId, parcelaId: a.cobId, stepKey: chosen.key });
+          out.itens.push({ dev: a.nome, step: chosen.key, error: e.message });
+        }
+      } else {
+        out.itens.push({ dev: a.nome, step: chosen.key, status: 'dry-candidato' });
+      }
+      continue;
+    }
 
     const avista = Math.max(0, a.valor * (1 - a.desc / 100));
     const maxViavel = Math.max(1, Math.min(a.maxP, Math.floor(a.valor / a.parcMin) || 1));

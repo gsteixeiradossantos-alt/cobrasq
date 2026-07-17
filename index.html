@@ -17020,7 +17020,7 @@ const PAPEL_LABELS = {
 };
 let DB_cobrancas = [];          // cache local (com cobranca_partes embutidas)
 // ONDA I · 2 — triagem de pendência: default = Todos (era 'agir').
-let cobrFilter = { q:'', credor:'', responsavel:'', fase:'', statuses:[], tab:'todos', pend:'todos', ord:'nome', quita:false };
+let cobrFilter = { q:'', credor:'', responsavel:'', fase:'', statuses:[], tab:'todos', pend:'todos', ord:'nome', quita:false, neg:false };
 let cobrChipsOpen = false; // chips detalhados de status recolhidos por padrão
 function toggleCobrFilterStatus(s){
   const i = cobrFilter.statuses.indexOf(s);
@@ -17177,6 +17177,32 @@ async function quitaSetOptOut(cobId, on){
   showToast(on?'Cobrança retirada do QuitaFácil.':'Cobrança reincluída no QuitaFácil.','info');
   if(typeof _detCobrId!=='undefined' && _detCobrId===cobId && typeof renderCobrancaDetalhe==='function') renderCobrancaDetalhe();
 }
+// ── Negativação (Onda 4) — fila de aprovação humana. cobrancas.metadata.quitaNegativacao
+// = { status:'candidato'|'aprovado'|'descartado'|'negativado'|'baixado', em, aprovado_em }.
+// A régua marca 'candidato' no D+20; o gestor aprova/descarta aqui (1 clique). A
+// inclusão real no bureau é a Parte B (depende de contrato) — aprovar só libera.
+function cobNegStatus(c){ return (c && c.metadata && c.metadata.quitaNegativacao && c.metadata.quitaNegativacao.status) || null; }
+async function _quitaSetNeg(cobId, patch, toastMsg, toastTipo){
+  const cob=(DB_cobrancas||[]).find(c=>c.id===cobId);
+  const meta=Object.assign({}, (cob&&cob.metadata)||{});
+  meta.quitaNegativacao=Object.assign({}, meta.quitaNegativacao||{}, patch);
+  if(cob) cob.metadata=meta;
+  const supa=(typeof getSupabase==='function')?getSupabase():null;
+  if(supa){ const {error}=await supa.from('cobrancas').update({metadata:meta}).eq('id',cobId); if(error){ showToast('Falha ao salvar: '+error.message,'danger'); return false; } }
+  if(typeof save==='function'){ try{ save(); }catch(_){ } }
+  if(toastMsg) showToast(toastMsg, toastTipo||'info');
+  if(typeof _detCobrId!=='undefined' && _detCobrId===cobId && typeof renderCobrancaDetalhe==='function') renderCobrancaDetalhe();
+  else if(typeof renderCobrancas==='function') renderCobrancas();
+  return true;
+}
+async function quitaAprovarNegativacao(cobId){
+  await _quitaSetNeg(cobId, { status:'aprovado', aprovado_em:new Date().toISOString().slice(0,10) },
+    'Negativação aprovada. A inclusão no bureau ocorre quando o contrato estiver ativo (Parte B).', 'success');
+}
+async function quitaDescartarNegativacao(cobId){
+  await _quitaSetNeg(cobId, { status:'descartado', descartado_em:new Date().toISOString().slice(0,10) },
+    'Retirado da fila de negativação.', 'info');
+}
 // Config da trilha por credor (clientes.metadata.quita) — limite/ativo. Faixas de
 // desconto/parcelas ficam aqui também, mas são CONSUMIDAS na Onda 2 (portal).
 async function _quitaSalvarCredorCfg(clienteId, patch){
@@ -17209,6 +17235,17 @@ async function quitaSetLimiteCredor(clienteId, v){
 function cobQuitaSelo(c){
   if(!c || !c._quita) return '';
   return `<span class="det-chip" style="background:#E9F1EA;color:#3F6B47;border:1px solid #CBE1CF;font-weight:600;" title="QuitaFácil — autonegociação (capital ${fmtR(cobCapital(c))} ≤ limite ${fmtR(quitaLimiteDe(c))})">🟢 QuitaFácil</span>`;
+}
+// Selo do fluxo de negativação (Onda 4).
+function cobNegSelo(c){
+  const st=cobNegStatus(c); if(!st) return '';
+  const M={ candidato:['🔴 Candidato a negativação','#9B4A3F','#F7ECE8','#E7CFC7'],
+            aprovado:['✔ Negativação aprovada','#8A5A00','#FBF6E6','#E0D3A8'],
+            negativado:['⚠ Negativado','#9B4A3F','#F7ECE8','#E7CFC7'],
+            baixado:['Negativação baixada','#5E7C58','#E9EDE2','#CFE0C6'],
+            descartado:['',''] };
+  const m=M[st]; if(!m||!m[0]) return '';
+  return `<span class="det-chip" style="background:${m[2]};color:${m[1]};border:1px solid ${m[3]};font-weight:600;">${m[0]}</span>`;
 }
 // Painel "Em breve" no topo da visão Quita: a visão do produto + cronograma (ondas)
 // + as ideias/regras. Aparece só quando o filtro Quita está ativo. Colapsável
@@ -17450,12 +17487,13 @@ async function renderCobrancas(opts){
   base.forEach(c=>{ const g=cobMacroGrupo(c.status,c.fase,c.numero_processo); if(macroCounts[g]!=null) macroCounts[g]++; });
   // Pendência derivada (🔴 agir / 🟡 aguardando / ✅ concluído) — guarda em c._pend p/ reuso na linha.
   const pendCounts = { todos: base.length, agir:0, aguardando:0, concluido:0 };
-  base.forEach(c=>{ c._pend = cobPendencia(c, _cobrSinais); if(pendCounts[c._pend.estado]!=null) pendCounts[c._pend.estado]++; c._quita = cobElegivelQuita(c); });
+  base.forEach(c=>{ c._pend = cobPendencia(c, _cobrSinais); if(pendCounts[c._pend.estado]!=null) pendCounts[c._pend.estado]++; c._quita = cobElegivelQuita(c); c._neg = cobNegStatus(c); });
   const quitaCount = base.filter(c=>c._quita).length;
+  const negCount = base.filter(c=>c._neg==='candidato').length;
   try{ const _nq=document.getElementById('nav-quita-count'); if(_nq){ _nq.textContent=quitaCount; _nq.style.display=quitaCount>0?'inline-block':'none'; } }catch(_){}
   const _pendFiltro = (c)=> !cobrFilter.pend || cobrFilter.pend==='todos' || (c._pend && c._pend.estado)===cobrFilter.pend;
   // naAba = base restrita à aba ativa (alimenta os chips de status). cobr = naAba + chips + ordenação.
-  const naAba = base.filter(c=> (cobrFilter.tab==='todos' || cobMacroGrupo(c.status,c.fase,c.numero_processo)===cobrFilter.tab) && _pendFiltro(c) && (!cobrFilter.quita || c._quita));
+  const naAba = base.filter(c=> (cobrFilter.tab==='todos' || cobMacroGrupo(c.status,c.fase,c.numero_processo)===cobrFilter.tab) && _pendFiltro(c) && (!cobrFilter.quita || c._quita) && (!cobrFilter.neg || c._neg==='candidato'));
   const _sorters = {
     nome:   (a,b)=> _cobrPrincipalNome(a).localeCompare(_cobrPrincipalNome(b),'pt-BR',{sensitivity:'base'}),
     valor:  (a,b)=> (+b.valor_atual||+b.valor_orig||0) - (+a.valor_atual||+a.valor_orig||0),
@@ -17526,7 +17564,7 @@ async function renderCobrancas(opts){
       <div class="cob-caso-main">
         <div class="cob-caso-nome">${escHtml(princNome)}${princPapel?` <span class="papel">· ${escHtml(princPapel)}</span>`:''} ${extra}</div>
         <div class="cob-caso-doc">${escHtml(_cobrDocLabel(c))}</div>
-        <div class="cob-caso-chips">${cobAlertaPill(c)}${cobQuitaSelo(c)}${cobPendPill(c._pend, true)}${cronRenderBadge(c)}${selo}<span class="cob-caso-fase">${faseProc}</span>${unifChip}</div>
+        <div class="cob-caso-chips">${cobAlertaPill(c)}${cobNegSelo(c)}${cobQuitaSelo(c)}${cobPendPill(c._pend, true)}${cronRenderBadge(c)}${selo}<span class="cob-caso-fase">${faseProc}</span>${unifChip}</div>
       </div>
       <div class="cob-caso-credor">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}<div class="resp">${escHtml(_detUserNome(c.assigned_to))}</div></div>
       <div class="cob-caso-vs">
@@ -17545,7 +17583,7 @@ async function renderCobrancas(opts){
     const aging=_cobrAgingDias(c); const agingOld=(aging!=null && aging>=365);
     return `<div class="cob-panel cob-card cob-tr-click" style="--cor:${cor};padding:14px;cursor:pointer;" onclick="verCobranca('${c.id}')">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;"><div class="strong" style="font-size:14px;font-weight:700;">${escHtml(princ?.devedores?.nome||'—')}${extra}${_telInvalidoCob(c)?` <span class="det-chip" style="background:#FBF6E6;color:#9C7F40;border:1px solid #E0D3A8;" title="Telefone inválido — buscando novo número">📵</span>`:''}</div>${cobStatusBadge(c)}</div>
-      ${(c._pend||cobAlertaAcao(c)||c._quita)?`<div style="margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${cobAlertaPill(c)}${cobQuitaSelo(c)}${cobPendPill(c._pend, true)}${cronRenderBadge(c)}</div>`:''}
+      ${(c._pend||cobAlertaAcao(c)||c._quita||c._neg)?`<div style="margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${cobAlertaPill(c)}${cobNegSelo(c)}${cobQuitaSelo(c)}${cobPendPill(c._pend, true)}${cronRenderBadge(c)}</div>`:''}
       <div style="font-size:12.5px;color:var(--text-2);margin-top:4px;">${escHtml(_cobrDocLabel(c))}</div>
       <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}</div>
       ${c._unif?`<div style="margin-top:4px;"><span class="det-chip" style="background:var(--navy,#1f3a5f);color:#fff;">⚖ Processo unificado · ${c._unif.irmaos.length} créditos</span></div>`:''}
@@ -17611,7 +17649,7 @@ async function renderCobrancas(opts){
       <div class="det-seg"><button class="${cobrView!=='cards'?'on':''}" onclick="cobrView='lista';renderCobrancas();">Lista</button><button class="${cobrView==='cards'?'on':''}" onclick="cobrView='cards';renderCobrancas();">Cards</button></div>
       <!-- ONDA E · M3 — modo Quadro (kanban por etapa), convive com a triagem/abas -->
       <div class="det-seg"><button class="${cobrViewMode!=='quadro'?'on':''}" onclick="kbToggleView('lista')" title="Visão em lista">Lista</button><button class="${cobrViewMode==='quadro'?'on':''}" onclick="kbToggleView('quadro')" title="Agrupar por etapa em colunas">Quadro</button></div>
-      ${/* ONDA I · 2 — reset da triagem também volta a 'todos' */(cobrFilter.q||cobrFilter.credor||cobrFilter.responsavel||cobrFilter.fase||cobrFilter.statuses.length||cobrFilter.tab!=='todos'||cobrFilter.pend!=='todos'||cobrFilter.quita) ? `<button class="cob-btn-ghost" onclick="cobrFilter={q:'',credor:'',responsavel:'',fase:'',statuses:[],tab:'todos',pend:'todos',ord:'nome',quita:false};cobrChipsOpen=false;renderCobrancas();">Limpar filtros</button>` : ''}
+      ${/* ONDA I · 2 — reset da triagem também volta a 'todos' */(cobrFilter.q||cobrFilter.credor||cobrFilter.responsavel||cobrFilter.fase||cobrFilter.statuses.length||cobrFilter.tab!=='todos'||cobrFilter.pend!=='todos'||cobrFilter.quita||cobrFilter.neg) ? `<button class="cob-btn-ghost" onclick="cobrFilter={q:'',credor:'',responsavel:'',fase:'',statuses:[],tab:'todos',pend:'todos',ord:'nome',quita:false,neg:false};cobrChipsOpen=false;renderCobrancas();">Limpar filtros</button>` : ''}
     </div>
     <!-- Triagem por PENDÊNCIA (derivada) — 🔴 agir / 🟡 aguardando / ✅ concluído -->
     <div class="cob-mtabs" style="margin-top:4px;">
@@ -17622,6 +17660,9 @@ async function renderCobrancas(opts){
       <button class="cob-mtab ${cobrFilter.quita?'on':''}" onclick="cobrFilter.quita=!cobrFilter.quita;renderCobrancas();" title="Dívidas pequenas elegíveis à autonegociação (portal do devedor). Enquadramento automático.">
         <span style="width:8px;height:8px;border-radius:50%;background:#3F6B47;display:inline-block;margin-right:6px;"></span>🟢 QuitaFácil <span class="cob-mtab-n">${quitaCount}</span>
       </button>
+      ${(negCount>0||cobrFilter.neg)?`<button class="cob-mtab ${cobrFilter.neg?'on':''}" onclick="cobrFilter.neg=!cobrFilter.neg;renderCobrancas();" title="Fila de aprovação de negativação — devedores que esgotaram a régua amigável e aguardam seu aval.">
+        <span style="width:8px;height:8px;border-radius:50%;background:#9B4A3F;display:inline-block;margin-right:6px;"></span>🔴 Negativação <span class="cob-mtab-n">${negCount}</span>
+      </button>`:''}
       <span style="font-size:12px;color:var(--text-3);">capital até R$</span>
       <input type="number" min="0" step="50" value="${quitaLimiteGlobal()}" onchange="quitaSetLimiteGlobal(this.value)" title="Limite global de capital (R$). Cada credor pode ter um override no cadastro." style="width:82px;padding:5px 8px;border:1px solid var(--border);border-radius:7px;font-size:12.5px;background:var(--surface);color:var(--text);"/>
       <span style="font-size:11.5px;color:var(--text-3);">enquadramento automático · autonegociação, sem ação judicial</span>
@@ -18057,6 +18098,14 @@ async function renderCobrancaDetalhe(){
     ...((_quitaElegBase(cob) || (cob.metadata&&cob.metadata.quitaOptOut)) ? [['QuitaFácil', (cob.metadata&&cob.metadata.quitaOptOut)
         ? `<span style="color:var(--text-3);">Fora da trilha (manual) · <button class="cob-btn-ghost" style="padding:2px 9px;font-size:11px;" onclick="quitaSetOptOut('${cob.id}',false)">Reincluir</button></span>`
         : `<span style="color:#3F6B47;font-weight:600;">🟢 Elegível — autonegociação (capital ${fmtR(cobCapital(cob))} ≤ ${fmtR(quitaLimiteDe(cob))}) · <button class="cob-btn-ghost" style="padding:2px 9px;font-size:11px;" onclick="quitaSetOptOut('${cob.id}',true)">Tirar da trilha</button></span>`]] : []),
+    ...((cob.metadata&&cob.metadata.quitaNegativacao&&cob.metadata.quitaNegativacao.status) ? [['Negativação', (()=>{ const n=cob.metadata.quitaNegativacao;
+        if(n.status==='candidato') return `<span style="color:#9B4A3F;font-weight:600;">🔴 Candidato${n.em?` (desde ${_detData(n.em)})`:''}</span> · <button class="cob-btn-ghost" style="padding:2px 10px;font-size:11px;background:#9B4A3F;color:#fff;border:none;" onclick="quitaAprovarNegativacao('${cob.id}')">Aprovar negativação</button> <button class="cob-btn-ghost" style="padding:2px 9px;font-size:11px;" onclick="quitaDescartarNegativacao('${cob.id}')">Descartar</button>`;
+        if(n.status==='aprovado') return `<span style="color:#8A5A00;font-weight:600;">✔ Aprovada${n.aprovado_em?` (${_detData(n.aprovado_em)})`:''}</span> <span style="color:var(--text-3);font-size:11px;">— aguardando contrato do bureau (Parte B)</span> · <button class="cob-btn-ghost" style="padding:2px 9px;font-size:11px;" onclick="quitaDescartarNegativacao('${cob.id}')">Cancelar</button>`;
+        if(n.status==='negativado') return `<span style="color:#9B4A3F;font-weight:600;">⚠ Negativado no bureau</span>`;
+        if(n.status==='baixado') return `<span style="color:#5E7C58;font-weight:600;">Negativação baixada (pago)</span>`;
+        if(n.status==='descartado') return `<span style="color:var(--text-3);">Descartado da fila</span> · <button class="cob-btn-ghost" style="padding:2px 9px;font-size:11px;" onclick="quitaAprovarNegativacao('${cob.id}')">Reincluir</button>`;
+        return escHtml(n.status);
+      })()]] : []),
     ['Criada em', escHtml(_detData(cob.created_at))]
   ]);
 
