@@ -17331,6 +17331,53 @@ function cobNegSelo(c){
   const m=M[st]; if(!m||!m[0]) return '';
   return `<span class="det-chip" style="background:${m[2]};color:${m[1]};border:1px solid ${m[3]};font-weight:600;">${m[0]}</span>`;
 }
+// ── Painel de RESULTADOS da trilha QuitaFácil ────────────────────────────────
+// Lê acordos (origem=quitafacil) + regua_envios (tipo=quita) e cruza com DB_cobrancas.
+// Convidados → fecharam → R$ recuperado, conversão, por canal. Read-only, sem migração.
+let _quitaResCache = null, _quitaResLoading = false;
+async function _quitaCarregarResultados(){
+  _quitaResLoading = true;
+  const supa = (typeof getSupabase==='function')?getSupabase():null;
+  const res = { acordos:[], envios:[] };
+  if(supa){
+    try{ const {data}=await supa.from('acordos').select('valor_total,parcelas,cobranca_id,devedor_id,created_at,metadata').filter('metadata->>origem','eq','quitafacil'); res.acordos=data||[]; }catch(_){}
+    try{ const {data}=await supa.from('regua_envios').select('canal,step_key,devedor_id,parcela_id').eq('tipo','quita').eq('status','sent'); res.envios=data||[]; }catch(_){}
+  }
+  _quitaResCache = res; _quitaResLoading = false;
+  return res;
+}
+function _quitaResultadosPanel(){
+  const R = _quitaResCache;
+  if(!R){ if(!_quitaResLoading){ _quitaCarregarResultados().then(()=>{ if(typeof renderCobrancas==='function') renderCobrancas(); }); }
+    return `<div class="cob-panel" style="padding:14px 18px;margin-bottom:8px;color:var(--text-3);font-size:13px;">Carregando resultados do QuitaFácil…</div>`; }
+  const msgs = (R.envios||[]).filter(e=>e.canal!=='serasa_flag');
+  const convidados = new Set(msgs.map(e=>`${e.devedor_id}|${e.parcela_id||''}`)).size;
+  const porCanal = {}; msgs.forEach(e=>{ porCanal[e.canal]=(porCanal[e.canal]||0)+1; });
+  const fechados = (R.acordos||[]).length;
+  const valorFechado = (R.acordos||[]).reduce((s,a)=>s+(+a.valor_total||0),0);
+  const recuperado = (R.acordos||[]).reduce((s,a)=> s + ((Array.isArray(a.parcelas)?a.parcelas:[]).filter(p=>p&&p.pago).reduce((x,p)=>x+(+p.valor||0),0)), 0);
+  const conv = convidados ? Math.round(fechados/convidados*100) : 0;
+  const candidatos = (DB_cobrancas||[]).filter(c=>typeof cobNegStatus==='function' && cobNegStatus(c)==='candidato').length;
+  const elegiveis = (DB_cobrancas||[]).filter(c=>!c.arquivado&&!c.is_draft&&cobElegivelQuita(c)).length;
+  const kpi=(lbl,val,sub,cor)=>`<div style="flex:1;min-width:118px;background:var(--card-2);border:1px solid var(--border);border-radius:10px;padding:11px 14px;"><div style="font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);">${lbl}</div><div style="font-size:21px;font-weight:700;color:${cor||'var(--text)'};margin-top:2px;line-height:1.15;">${val}</div>${sub?`<div style="font-size:10px;color:var(--text-4);margin-top:1px;">${sub}</div>`:''}</div>`;
+  const cl={whatsapp:'WhatsApp',email:'E-mail',sms:'SMS'};
+  const canaisTxt = Object.keys(porCanal).length ? Object.entries(porCanal).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`${cl[k]||k}: ${v}`).join(' · ') : 'nenhum envio ainda';
+  return `<div class="cob-panel" style="padding:16px 18px;margin-bottom:8px;border-left:3px solid #3F6B47;">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+      <div style="font-size:14px;font-weight:700;color:var(--navy,#0A1530);">QuitaFácil — resultados</div>
+      <button class="cob-btn-ghost" style="font-size:11px;padding:3px 9px;" onclick="_quitaResCache=null;renderCobrancas();">↻ Atualizar</button>
+    </div>
+    <div style="display:flex;gap:9px;flex-wrap:wrap;">
+      ${kpi('Elegíveis', elegiveis, 'na trilha hoje')}
+      ${kpi('Convidados', convidados, 'receberam mensagem')}
+      ${kpi('Acordos', fechados, fmtR(valorFechado)+' fechado')}
+      ${kpi('Recuperado', fmtR(recuperado), 'parcelas pagas', '#1F7A3D')}
+      ${kpi('Conversão', conv+'%', 'fechados / convidados')}
+      ${kpi('Negativação', candidatos, 'candidatos na fila', candidatos?'#9B4A3F':'var(--text)')}
+    </div>
+    <div style="font-size:11.5px;color:var(--text-3);margin-top:10px;">Envios por canal — ${canaisTxt}</div>
+  </div>`;
+}
 // Painel "Em breve" no topo da visão Quita: a visão do produto + cronograma (ondas)
 // + as ideias/regras. Aparece só quando o filtro Quita está ativo. Colapsável
 // (localStorage). Puramente informativo — some quando a trilha estiver 100% no ar.
@@ -17698,6 +17745,7 @@ async function renderCobrancas(opts){
       </div>
     </div>
 
+    ${cobrFilter.quita ? _quitaResultadosPanel() : ''}
     ${cobrFilter.quita ? _quitaEmBrevePanel() : ''}
 
     ${prescreverCount>0 ? `<div class="cob-panel" style="padding:14px 18px;margin-bottom:8px;display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:14px;border-left:4px solid #9B4A3F;background:#F7ECE8;">
