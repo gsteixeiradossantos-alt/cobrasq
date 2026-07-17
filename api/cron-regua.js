@@ -732,9 +732,12 @@ async function reguaQuita({ dry, DB }) {
   const alvos = [];
   for (const c of (cobrs || [])) {
     if (c.arquivado) continue;
-    if ((c.fase || 'extrajudicial') !== 'extrajudicial') continue;
-    if (c.numero_processo && String(c.numero_processo).trim()) continue;
-    if (/(acord|quitad|encerrad|baixad|devolvid|sem ?[êe]xito|recebid)/i.test(c.status || '')) continue;
+    if (c.numero_processo && String(c.numero_processo).trim()) continue;                       // já ajuizado
+    // Modelo: QuitaFácil só quando o AMIGÁVEL FRACASSOU (status "Fazer ação"/"Acordo
+    // infrutífero"/"encaminhado ao judicial"/"reajuizar"). Micro em amigável ("Cobrar",
+    // "Em negociação"…) NÃO entra — segue na cobrança normal.
+    if (!/fazer a[çc][ãa]o|infrut[íi]fero|encaminh\w*\s*(ao\s*)?judic|reajuizar/i.test(c.status || '')) continue;
+    if (/quitad|encerrad|recebid|baixad|devolvid|sem ?[êe]xito/i.test(c.status || '')) continue;  // terminal
     const cfg = cfgPorCredor[c.cliente_id] || {};
     const limite = (cfg.limite != null && cfg.limite !== '' && +cfg.limite > 0) ? +cfg.limite : 500;
     const capital = (c.valor_capital != null) ? +c.valor_capital

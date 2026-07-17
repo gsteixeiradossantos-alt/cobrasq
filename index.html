@@ -9205,9 +9205,12 @@ async function renderPainel(){
   // — exclui judicial em andamento (cumprimento/ação com processo), acordos e
   // encerrados, para casar com a aba A agir. Usa a MESMA régua (cobMacroGrupo).
   const carteiraParada90 = cobrAtivas
-    .filter(c=> !/quitad|pago|liquidad/i.test(c.status||'') && cobMacroGrupo(c.status, c.fase, c.numero_processo)==='agir')
+    .filter(c=> !/quitad|pago|liquidad/i.test(c.status||'') && cobMacroGrupoView(c)==='agir')
     .filter(c=>{ const dias=_cobrAgingDias(c); return dias!=null && dias>=91; })
     .reduce((s,c)=>s+(+c.valor_atual||+c.valor_orig||0),0);
+  // Cobranças a prescrever (≤6 meses): alerta grande — inclui QuitaFácil que voltou ao radar.
+  const prescreverPainel = (typeof cobPrescricaoPerto==='function') ? cobrAtivas
+    .filter(c=> cobPrescricaoPerto(c) && !/quitad|encerrad|recebid|baixad|devolvid/i.test(c.status||'')).length : 0;
 
   // Carteira por situação (valor): em aberto / em acordo / judicial / quitado.
   const sitDefs = { aberto:0, acordo:0, judicial:0, quitado:0 };
@@ -9349,6 +9352,7 @@ async function renderPainel(){
       ${painelCard('prioridades', `<div class="cob-panel"><div class="cob-panel-head"><span class="cob-panel-title">Precisa de decisão hoje</span></div><div class="cob-panel-body"><div class="painel-prio-grid">
         <div class="painel-prio danger"><div class="painel-prio-n">${pendAtrasadas}</div><div class="painel-prio-l">tarefa${pendAtrasadas!==1?'s':''} atrasada${pendAtrasadas!==1?'s':''}</div><button class="painel-prio-cta" onclick="showPage('tarefas')">Revisar tarefas →</button></div>
         <div class="painel-prio navy"><div class="painel-prio-n">${fmtk(carteiraParada90)}</div><div class="painel-prio-l">carteira parada há 90+ dias</div><button class="painel-prio-cta" onclick="showPage('cobr')">Priorizar →</button></div>
+        ${prescreverPainel>0?`<div class="painel-prio danger"><div class="painel-prio-n">${prescreverPainel}</div><div class="painel-prio-l">a prescrever (≤ 6 meses)</div><button class="painel-prio-cta" onclick="try{cobrFilter.prescrever=true;cobrFilter.tab='todos';}catch(_){}; showPage('cobr');">Ver antes de perder →</button></div>`:''}
       </div></div></div>`)}
 
       ${painelCard('kpis', `<div class="cob-kpis">${kpis.map(k=>`
@@ -17057,7 +17061,7 @@ const PAPEL_LABELS = {
 };
 let DB_cobrancas = [];          // cache local (com cobranca_partes embutidas)
 // ONDA I · 2 — triagem de pendência: default = Todos (era 'agir').
-let cobrFilter = { q:'', credor:'', responsavel:'', fase:'', statuses:[], tab:'todos', pend:'todos', ord:'nome', quita:false, neg:false };
+let cobrFilter = { q:'', credor:'', responsavel:'', fase:'', statuses:[], tab:'todos', pend:'todos', ord:'nome', quita:false, neg:false, prescrever:false };
 let cobrChipsOpen = false; // chips detalhados de status recolhidos por padrão
 function toggleCobrFilterStatus(s){
   const i = cobrFilter.statuses.indexOf(s);
@@ -17128,6 +17132,7 @@ function cobStatusPill(status){
 // Classifica o vocabulário que já existe em 4 grupos, para as abas e o popover.
 const _COB_MACROS = [
   { key:'agir',       label:'A agir',      pop:'Cobrança' },
+  { key:'quita',      label:'QuitaFácil',  pop:'QuitaFácil' },
   { key:'judicial',   label:'No judicial', pop:'Judicial' },
   { key:'acordos',    label:'Acordos',     pop:'Acordo' },
   { key:'encerrados', label:'Encerrados',  pop:'Desfecho' }
@@ -17152,6 +17157,37 @@ function cobMacroGrupo(status, fase, numeroProcesso){
     return (numeroProcesso && String(numeroProcesso).trim()) ? 'judicial' : 'agir';
   }
   return 'agir';
+}
+// ── Prescrição (regra QuitaFácil) ─────────────────────────────────────────────
+// Dívida no QuitaFácil SAI de "A agir" (é automática), SALVO quando a prescrição se
+// aproxima (≤6 meses) — aí volta pro radar. Prescrição = vencimento (ou cadastro) + 5
+// anos. Heurística operacional (NÃO considera interrupção por citação/acordo/confissão);
+// é alerta de gestão, não parecer jurídico.
+const QUITA_PRESCRICAO_ANOS = 5;
+const QUITA_PRESCRICAO_ALERTA_DIAS = 183; // ~6 meses
+function cobPrescricaoData(c){
+  const base = String((c && (c.vencimento || (c.divida&&c.divida.vencimento) || c.created_at)) || '').slice(0,10);
+  if(!base) return null;
+  const d = new Date(base+'T12:00:00'); if(isNaN(d.getTime())) return null;
+  d.setFullYear(d.getFullYear()+QUITA_PRESCRICAO_ANOS);
+  return d;
+}
+function cobDiasAtePrescricao(c){ const p=cobPrescricaoData(c); if(!p) return null; const hoje=new Date(new Date().toISOString().slice(0,10)+'T12:00:00'); return Math.floor((p-hoje)/86400000); }
+function cobPrescricaoPerto(c){ const dias=cobDiasAtePrescricao(c); return dias!=null && dias <= QUITA_PRESCRICAO_ALERTA_DIAS; } // inclui já prescrita (dias<0)
+// Macro para EXIBIÇÃO no CRM: QuitaFácil sai de "A agir" (vira 'quita'), salvo prescrição
+// perto (volta ao macro normal). NÃO altera cobMacroGrupo (usado por cobElegivelQuita —
+// evita recursão).
+function cobMacroGrupoView(c){
+  if(cobElegivelQuita(c) && !cobPrescricaoPerto(c)) return 'quita';
+  return cobMacroGrupo(c.status, c.fase, c.numero_processo);
+}
+// Selo: prescrição próxima (âmbar) / já prescrita (bordô).
+function cobPrescricaoSelo(c){
+  if(!cobPrescricaoPerto(c)) return '';
+  const dias=cobDiasAtePrescricao(c);
+  if(dias!=null && dias<0) return `<span class="det-chip" style="background:#F7ECE8;color:#9B4A3F;border:1px solid #E7CFC7;font-weight:700;" title="Prazo de prescrição já vencido (heurística venc.+5 anos)">⚠ Prescrita</span>`;
+  const meses=Math.max(0,Math.round((dias||0)/30));
+  return `<span class="det-chip" style="background:#FBF6E6;color:#8A5A00;border:1px solid #E0D3A8;font-weight:700;" title="Prescrição se aproxima (venc.+5 anos) — decida ajuizar/cobrar">⏳ Prescreve em ${meses<=0?'<1 mês':(meses+'m')}</span>`;
 }
 // ── Trilha QUITA (autonegociação de dívidas pequenas) ─────────────────────────
 // Categoria DERIVADA (compute-on-read, sem migração): cobrança extrajudicial, sem
@@ -17185,22 +17221,33 @@ function cobCapital(c){
   if(c.divida && c.divida.valorCapital!=null) return +c.divida.valorCapital;
   return (+c.valor_orig || +c.valor_atual || 0);
 }
-// Elegibilidade "de fato" (natureza + valor), IGNORANDO o opt-out manual — usada
-// para decidir se o toggle "tirar/reincluir na trilha" faz sentido no detalhe.
-function _quitaElegBase(c){
+// ── MODELO (corrigido): micro NÃO entra direto no QuitaFácil. Ela começa em "A agir"
+// (o time tenta o acordo amigável). SÓ VIRA QuitaFácil quando o amigável fracassa —
+// sinalizado pelo status "Fazer ação" / "Acordo infrutífero" (a micro que iria pro
+// processo vai pra autonegociação). Enquanto no amigável, leva só o selo "micro".
+// cobEhMicro = é dívida de valor baixo ainda ativa (sem processo, não encerrada, credor
+// ligado, capital ≤ limite). cobAmigavelFalhou = status de "esgotou o amigável".
+function cobEhMicro(c){
   if(!c) return false;
-  if((c.fase||'extrajudicial')!=='extrajudicial') return false;           // judicial fica fora
-  if(c.numero_processo && String(c.numero_processo).trim()) return false; // já tem processo
-  const macro = cobMacroGrupo(c.status, c.fase, c.numero_processo);
-  if(macro==='acordos' || macro==='encerrados' || macro==='judicial') return false;
+  if(c.numero_processo && String(c.numero_processo).trim()) return false;                 // já ajuizado
+  if(/quitad|encerrad|recebid|baixad|devolvid|sem ?[êe]xito/i.test(c.status||'')) return false; // encerrada
   const cfg = _quitaCredorCfg(c.cliente_id);
-  if(cfg && cfg.ativo===false) return false;                              // credor desligado
+  if(cfg && cfg.ativo===false) return false;                                              // credor desligado
   const cap = cobCapital(c);
   return cap>0 && cap <= quitaLimiteDe(c);
 }
+function cobAmigavelFalhou(c){ return /fazer a[çc][ãa]o|infrut[íi]fero|encaminh\w*\s*(ao\s*)?judic|reajuizar/i.test((c&&c.status)||''); }
+// Elegibilidade "de fato" (micro + amigável fracassou), IGNORANDO o opt-out manual.
+function _quitaElegBase(c){ return cobEhMicro(c) && cobAmigavelFalhou(c); }
 function cobElegivelQuita(c){
   if(c && c.metadata && c.metadata.quitaOptOut) return false;             // exceção manual
   return _quitaElegBase(c);
+}
+// Selo "micro" enquanto ainda no amigável (sinaliza que o destino é QuitaFácil, não processo).
+function cobMicroSelo(c){
+  if(!cobEhMicro(c) || cobElegivelQuita(c)) return '';                    // já virou QuitaFácil → outro selo
+  if(c && c.metadata && c.metadata.quitaOptOut) return '';
+  return `<span class="det-chip" style="background:#EEF1F5;color:#5B6B82;border:1px solid #D6DEE8;font-weight:600;" title="Dívida de valor baixo (capital ${fmtR(cobCapital(c))} ≤ ${fmtR(quitaLimiteDe(c))}). Se o acordo amigável não fechar, o destino é o QuitaFácil (não o processo).">micro</span>`;
 }
 // Opt-out/opt-in por cobrança (cobrancas.metadata.quitaOptOut) — sem migração.
 async function quitaSetOptOut(cobId, on){
@@ -17347,6 +17394,9 @@ function cobAlertaAcao(c){
   if(!c) return '';
   const s = (c.status||'').trim();
   if(!s) return '';
+  // Micro que esgotou o amigável vira QuitaFácil (autonegociação), não "fazer ação"
+  // — a menos que a prescrição esteja perto (aí volta a ser ato nosso).
+  if(typeof cobElegivelQuita==='function' && cobElegivelQuita(c) && !(typeof cobPrescricaoPerto==='function' && cobPrescricaoPerto(c))) return '';
   // Não sinaliza casos já resolvidos, em acordo ou com processo correndo.
   if(cobMacroGrupo(c.status, c.fase, c.numero_processo) !== 'agir') return '';
   if(/reajuizar/i.test(s)) return 'Reajuizar';
@@ -17520,17 +17570,18 @@ async function renderCobrancas(opts){
     return true;
   });
   // Contagens das abas macro (derivadas de base).
-  const macroCounts = { todos: base.length, agir:0, judicial:0, acordos:0, encerrados:0 };
-  base.forEach(c=>{ const g=cobMacroGrupo(c.status,c.fase,c.numero_processo); if(macroCounts[g]!=null) macroCounts[g]++; });
+  const macroCounts = { todos: base.length, agir:0, quita:0, judicial:0, acordos:0, encerrados:0 };
+  base.forEach(c=>{ const g=cobMacroGrupoView(c); if(macroCounts[g]!=null) macroCounts[g]++; });
   // Pendência derivada (🔴 agir / 🟡 aguardando / ✅ concluído) — guarda em c._pend p/ reuso na linha.
   const pendCounts = { todos: base.length, agir:0, aguardando:0, concluido:0 };
-  base.forEach(c=>{ c._pend = cobPendencia(c, _cobrSinais); if(pendCounts[c._pend.estado]!=null) pendCounts[c._pend.estado]++; c._quita = cobElegivelQuita(c); c._neg = cobNegStatus(c); });
+  base.forEach(c=>{ c._pend = cobPendencia(c, _cobrSinais); if(pendCounts[c._pend.estado]!=null) pendCounts[c._pend.estado]++; c._quita = cobElegivelQuita(c); c._neg = cobNegStatus(c); c._presc = cobPrescricaoPerto(c) && !/quitad|encerrad|recebid|baixad|devolvid/i.test(c.status||''); });
   const quitaCount = base.filter(c=>c._quita).length;
   const negCount = base.filter(c=>c._neg==='candidato').length;
+  const prescreverCount = base.filter(c=>c._presc).length;
   try{ const _nq=document.getElementById('nav-quita-count'); if(_nq){ _nq.textContent=quitaCount; _nq.style.display=quitaCount>0?'inline-block':'none'; } }catch(_){}
   const _pendFiltro = (c)=> !cobrFilter.pend || cobrFilter.pend==='todos' || (c._pend && c._pend.estado)===cobrFilter.pend;
   // naAba = base restrita à aba ativa (alimenta os chips de status). cobr = naAba + chips + ordenação.
-  const naAba = base.filter(c=> (cobrFilter.tab==='todos' || cobMacroGrupo(c.status,c.fase,c.numero_processo)===cobrFilter.tab) && _pendFiltro(c) && (!cobrFilter.quita || c._quita) && (!cobrFilter.neg || c._neg==='candidato'));
+  const naAba = base.filter(c=> (cobrFilter.tab==='todos' || cobMacroGrupoView(c)===cobrFilter.tab) && _pendFiltro(c) && (!cobrFilter.quita || c._quita) && (!cobrFilter.neg || c._neg==='candidato') && (!cobrFilter.prescrever || c._presc));
   const _sorters = {
     nome:   (a,b)=> _cobrPrincipalNome(a).localeCompare(_cobrPrincipalNome(b),'pt-BR',{sensitivity:'base'}),
     valor:  (a,b)=> (+b.valor_atual||+b.valor_orig||0) - (+a.valor_atual||+a.valor_orig||0),
@@ -17601,7 +17652,7 @@ async function renderCobrancas(opts){
       <div class="cob-caso-main">
         <div class="cob-caso-nome">${escHtml(princNome)}${princPapel?` <span class="papel">· ${escHtml(princPapel)}</span>`:''} ${extra}</div>
         <div class="cob-caso-doc">${escHtml(_cobrDocLabel(c))}</div>
-        <div class="cob-caso-chips">${cobAlertaPill(c)}${cobNegSelo(c)}${cobQuitaSelo(c)}${cobPendPill(c._pend, true)}${cronRenderBadge(c)}${selo}<span class="cob-caso-fase">${faseProc}</span>${unifChip}</div>
+        <div class="cob-caso-chips">${cobAlertaPill(c)}${cobPrescricaoSelo(c)}${cobNegSelo(c)}${cobQuitaSelo(c)}${cobMicroSelo(c)}${cobPendPill(c._pend, true)}${cronRenderBadge(c)}${selo}<span class="cob-caso-fase">${faseProc}</span>${unifChip}</div>
       </div>
       <div class="cob-caso-credor">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}<div class="resp">${escHtml(_detUserNome(c.assigned_to))}</div></div>
       <div class="cob-caso-vs">
@@ -17620,7 +17671,7 @@ async function renderCobrancas(opts){
     const aging=_cobrAgingDias(c); const agingOld=(aging!=null && aging>=365);
     return `<div class="cob-panel cob-card cob-tr-click" style="--cor:${cor};padding:14px;cursor:pointer;" onclick="verCobranca('${c.id}')">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;"><div class="strong" style="font-size:14px;font-weight:700;">${escHtml(princ?.devedores?.nome||'—')}${extra}${_telInvalidoCob(c)?` <span class="det-chip" style="background:#FBF6E6;color:#9C7F40;border:1px solid #E0D3A8;" title="Telefone inválido — buscando novo número">📵</span>`:''}</div>${cobStatusBadge(c)}</div>
-      ${(c._pend||cobAlertaAcao(c)||c._quita||c._neg)?`<div style="margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${cobAlertaPill(c)}${cobNegSelo(c)}${cobQuitaSelo(c)}${cobPendPill(c._pend, true)}${cronRenderBadge(c)}</div>`:''}
+      ${(c._pend||cobAlertaAcao(c)||c._quita||c._neg||cobEhMicro(c)||cobPrescricaoPerto(c))?`<div style="margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${cobAlertaPill(c)}${cobPrescricaoSelo(c)}${cobNegSelo(c)}${cobQuitaSelo(c)}${cobMicroSelo(c)}${cobPendPill(c._pend, true)}${cronRenderBadge(c)}</div>`:''}
       <div style="font-size:12.5px;color:var(--text-2);margin-top:4px;">${escHtml(_cobrDocLabel(c))}</div>
       <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}</div>
       ${c._unif?`<div style="margin-top:4px;"><span class="det-chip" style="background:var(--navy,#1f3a5f);color:#fff;">⚖ Processo unificado · ${c._unif.irmaos.length} créditos</span></div>`:''}
@@ -17649,6 +17700,14 @@ async function renderCobrancas(opts){
 
     ${cobrFilter.quita ? _quitaEmBrevePanel() : ''}
 
+    ${prescreverCount>0 ? `<div class="cob-panel" style="padding:14px 18px;margin-bottom:8px;display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:14px;border-left:4px solid #9B4A3F;background:#F7ECE8;">
+      <span style="font-size:22px;line-height:1;">⏳</span>
+      <div style="flex:1;min-width:200px;">
+        <div style="font-size:15px;font-weight:700;color:#9B4A3F;">${prescreverCount} cobrança${prescreverCount!==1?'s':''} a prescrever</div>
+        <div style="font-size:12.5px;color:var(--text-2);">Prazo de prescrição a ≤ 6 meses (venc. + 5 anos). Inclui QuitaFácil que voltou pro radar — decida ajuizar ou cobrar antes de perder o direito.</div>
+      </div>
+      <button class="cob-btn-primary" style="background:#9B4A3F;border:none;" onclick="cobrFilter.prescrever=true;cobrFilter.tab='todos';renderCobrancas();">Ver ${prescreverCount>1?'as '+prescreverCount:''} →</button>
+    </div>` : ''}
     ${(() => { const dev=_relAutoDevidos(); return dev.length?`<div class="cob-panel" style="padding:12px 16px;margin-bottom:4px;display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:12px;border-left:3px solid var(--gold,#C9A961);">
       <div style="flex:1;font-size:13px;"><b>${dev.length} relatório${dev.length!==1?'s':''} de andamento a enviar</b> <span style="color:var(--text-3);">— credores com envio automático (30 dias) vencido.</span></div>
       <button class="cob-btn-primary" onclick="abrirFilaRelatorioAuto()">Revisar e enviar</button>
@@ -17686,7 +17745,7 @@ async function renderCobrancas(opts){
       <div class="det-seg"><button class="${cobrView!=='cards'?'on':''}" onclick="cobrView='lista';renderCobrancas();">Lista</button><button class="${cobrView==='cards'?'on':''}" onclick="cobrView='cards';renderCobrancas();">Cards</button></div>
       <!-- ONDA E · M3 — modo Quadro (kanban por etapa), convive com a triagem/abas -->
       <div class="det-seg"><button class="${cobrViewMode!=='quadro'?'on':''}" onclick="kbToggleView('lista')" title="Visão em lista">Lista</button><button class="${cobrViewMode==='quadro'?'on':''}" onclick="kbToggleView('quadro')" title="Agrupar por etapa em colunas">Quadro</button></div>
-      ${/* ONDA I · 2 — reset da triagem também volta a 'todos' */(cobrFilter.q||cobrFilter.credor||cobrFilter.responsavel||cobrFilter.fase||cobrFilter.statuses.length||cobrFilter.tab!=='todos'||cobrFilter.pend!=='todos'||cobrFilter.quita||cobrFilter.neg) ? `<button class="cob-btn-ghost" onclick="cobrFilter={q:'',credor:'',responsavel:'',fase:'',statuses:[],tab:'todos',pend:'todos',ord:'nome',quita:false,neg:false};cobrChipsOpen=false;renderCobrancas();">Limpar filtros</button>` : ''}
+      ${/* ONDA I · 2 — reset da triagem também volta a 'todos' */(cobrFilter.q||cobrFilter.credor||cobrFilter.responsavel||cobrFilter.fase||cobrFilter.statuses.length||cobrFilter.tab!=='todos'||cobrFilter.pend!=='todos'||cobrFilter.quita||cobrFilter.neg||cobrFilter.prescrever) ? `<button class="cob-btn-ghost" onclick="cobrFilter={q:'',credor:'',responsavel:'',fase:'',statuses:[],tab:'todos',pend:'todos',ord:'nome',quita:false,neg:false,prescrever:false};cobrChipsOpen=false;renderCobrancas();">Limpar filtros</button>` : ''}
     </div>
     <!-- Triagem por PENDÊNCIA (derivada) — 🔴 agir / 🟡 aguardando / ✅ concluído -->
     <div class="cob-mtabs" style="margin-top:4px;">
