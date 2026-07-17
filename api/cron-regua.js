@@ -672,6 +672,24 @@ Escreva a mensagem.`;
   }
 }
 
+// Cadência MULTICANAL, firme mas respeitosa (não simultânea — intercala canais).
+// WhatsApp (Beatriz) → e-mail (Beatriz) → WhatsApp → SMS. Cada passo entregue só
+// se o canal estiver configurado E o devedor tiver o destino (e-mail/telefone).
+// FUTURO: 'serasa' (negativação em bureau) — precisa de integração externa (Serasa/
+// SPC/Boa Vista ou parceiro); não existe no sistema hoje, fica como próximo passo.
+const QUITA_STEPS = [
+  { key: 'd0',  dias: 0,  canal: 'whatsapp' },
+  { key: 'd3',  dias: 3,  canal: 'email' },
+  { key: 'd7',  dias: 7,  canal: 'whatsapp' },
+  { key: 'd12', dias: 12, canal: 'sms' },
+];
+
+// SMS é curto (160 chars) — template direto, sem IA. Sem acento p/ compatibilidade GSM.
+function _quitaSmsMsg(ctx) {
+  const primeiro = String(ctx.nome || '').trim().split(/\s+/)[0] || '';
+  return `${primeiro ? primeiro + ', ' : ''}resolva sua pendencia de ${fmtR(ctx.valor)} com ${ctx.desc}% de desconto a vista ou parcelado. Rapido, voce mesmo faz: ${ctx.link}`;
+}
+
 async function reguaQuita({ dry, DB }) {
   const out = { enviados: 0, falhas: 0, elegiveis: 0, itens: [] };
   const link = devLinkPortal();
@@ -692,7 +710,7 @@ async function reguaQuita({ dry, DB }) {
   const inList = credorIds.map(encodeURIComponent).join(',');
   let cobrs = [];
   try {
-    cobrs = await sbFetch(`cobrancas?cliente_id=in.(${inList})&select=id,cliente_id,arquivado,valor_atual,valor_orig,valor_capital,fase,numero_processo,status,divida,cobranca_partes(principal,devedores(id,nome,telefone))`);
+    cobrs = await sbFetch(`cobrancas?cliente_id=in.(${inList})&select=id,cliente_id,arquivado,valor_atual,valor_orig,valor_capital,fase,numero_processo,status,divida,cobranca_partes(principal,devedores(id,nome,telefone,email))`);
   } catch (e) { cobrs = []; }
 
   // 3) Filtra elegíveis (mesma regra do quita_oferta) e resolve o devedor principal.
@@ -714,6 +732,7 @@ async function reguaQuita({ dry, DB }) {
     if (!tel) continue;
     alvos.push({
       cobId: c.id, devId: dev.id, nome: dev.nome, tel,
+      email: String(dev.email || '').trim(),
       valor: +c.valor_atual || +c.valor_orig || 0,
       desc: (cfg.descAvista != null && cfg.descAvista !== '') ? +cfg.descAvista : 10,
       maxP: (cfg.maxParcelas != null && cfg.maxParcelas !== '') ? +cfg.maxParcelas : 12,
@@ -751,29 +770,47 @@ async function reguaQuita({ dry, DB }) {
   for (const a of alvos) {
     if (jaAcordo.has(a.cobId)) continue;
     const env = envios[`${a.devId}|${a.cobId}`] || {};
-    let step = null;
-    if (!env.d0) step = 'd0';
-    else if (!env.d3 && diasDesde(String(env.d0).slice(0, 10)) >= 3) step = 'd3';
-    else if (!env.d7 && diasDesde(String(env.d0).slice(0, 10)) >= 7) step = 'd7';
-    if (!step) continue;
+    // Âncora = data do D0 (1º contato). Antes do D0, só o D0 é candidato (dia 0).
+    const d0date = env.d0 ? String(env.d0).slice(0, 10) : null;
+    const anchorDays = d0date ? diasDesde(d0date) : 0;
+
+    // Escolhe o PRIMEIRO passo devido, não enviado e ENTREGÁVEL (canal configurado
+    // + destino presente). Um canal sem destino é pulado — a cadência não trava.
+    let chosen = null;
+    for (const s of QUITA_STEPS) {
+      if (env[s.key]) continue;                       // já enviado
+      if (s.key !== 'd0' && !d0date) break;           // só avança depois do D0
+      if (anchorDays < s.dias) continue;              // ainda não venceu
+      if (!canalDisponivel(s.canal)) continue;        // canal sem provedor
+      const dest = s.canal === 'email' ? a.email : a.tel;
+      if (!dest) continue;                            // sem e-mail/telefone p/ este canal
+      chosen = s; break;
+    }
+    if (!chosen) continue;
 
     const avista = Math.max(0, a.valor * (1 - a.desc / 100));
     const maxViavel = Math.max(1, Math.min(a.maxP, Math.floor(a.valor / a.parcMin) || 1));
-    const msg = await beatrizConviteQuita({ nome: a.nome, valor: a.valor, avista, desc: a.desc, maxParc: maxViavel, parcMin: a.parcMin, link, credor: credorNome, passo: step });
+    const ctx = { nome: a.nome, valor: a.valor, avista, desc: a.desc, maxParc: maxViavel, parcMin: a.parcMin, link, credor: credorNome, passo: chosen.key };
+
+    // Composição por canal: SMS = template curto; WhatsApp e e-mail = Beatriz (IA).
+    let mensagem, assunto;
+    if (chosen.canal === 'sms') mensagem = _quitaSmsMsg(ctx);
+    else mensagem = await beatrizConviteQuita(ctx);
+    if (chosen.canal === 'email') assunto = `Resolva sua pendência com ${a.desc}% de desconto — ${credorNome}`;
 
     if (!dry) {
-      const claimed = await claimEnvio({ tipo: 'quita', devedorId: a.devId, parcelaId: a.cobId, stepKey: step, canal: 'whatsapp' });
-      if (!claimed) { out.itens.push({ dev: a.nome, step, skipped: 'já reivindicado' }); continue; }
+      const claimed = await claimEnvio({ tipo: 'quita', devedorId: a.devId, parcelaId: a.cobId, stepKey: chosen.key, canal: chosen.canal });
+      if (!claimed) { out.itens.push({ dev: a.nome, step: chosen.key, canal: chosen.canal, skipped: 'já reivindicado' }); continue; }
     }
     try {
-      if (!dry) await zapiSendText(a.tel, msg);
-      if (!dry) await confirmarEnvio({ tipo: 'quita', devedorId: a.devId, parcelaId: a.cobId, stepKey: step });
+      if (!dry) await enviarPorCanal(chosen.canal, { tel: a.tel, email: a.email, mensagem, assunto });
+      if (!dry) await confirmarEnvio({ tipo: 'quita', devedorId: a.devId, parcelaId: a.cobId, stepKey: chosen.key });
       out.enviados++;
-      out.itens.push({ dev: a.nome, step, status: dry ? 'dry' : 'sent', msg: dry ? msg : undefined });
+      out.itens.push({ dev: a.nome, step: chosen.key, canal: chosen.canal, status: dry ? 'dry' : 'sent', msg: dry ? mensagem : undefined });
     } catch (e) {
       out.falhas++;
-      if (!dry) await liberarEnvio({ tipo: 'quita', devedorId: a.devId, parcelaId: a.cobId, stepKey: step });
-      out.itens.push({ dev: a.nome, step, error: e.message });
+      if (!dry) await liberarEnvio({ tipo: 'quita', devedorId: a.devId, parcelaId: a.cobId, stepKey: chosen.key });
+      out.itens.push({ dev: a.nome, step: chosen.key, canal: chosen.canal, error: e.message });
     }
   }
   return out;
