@@ -617,6 +617,168 @@ async function processarLembretesZapSign({ dry } = {}) {
   return out;
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// RÉGUA C — QUITAFÁCIL (autonegociação de dívidas pequenas)
+// Convida por WhatsApp os devedores elegíveis a resolverem sozinhos no portal.
+// Mensagem redigida pela BEATRIZ (IA, Claude Haiku) com fallback estático.
+// Cadência D0 · D+3 · D+7 (1 msg por run, no máx 3). Idempotência: regua_envios
+// tipo='quita' (parcela_id = cobranca_id). DUPLO GATE: (1) opt-in por credor
+// (clientes.metadata.quita.disparoAtivo); (2) QUITA_NOTIFICAR_LIVE=1 no ambiente.
+// ════════════════════════════════════════════════════════════════════════════
+const BEATRIZ_QUITA_SYSTEM = `Você é Beatriz, assistente da COBRASQ Recuperadora de Crédito.
+Redija UMA mensagem curta de WhatsApp (máximo 4 linhas) convidando a pessoa a resolver uma dívida pequena de forma simples e digna, pelo portal (o link vem no fim).
+Tom: educado, acolhedor, humano — NUNCA ameaçador nem com jargão jurídico.
+Use só o primeiro nome. Sem markdown (nada de asteriscos ou listas). No máximo 1 emoji. Português brasileiro, sem gerundismo.
+Deixe claro que dá para pagar à vista com desconto OU parcelar, que é rápido e que a própria pessoa resolve, sem precisar falar com ninguém.
+Termine com o link. Responda SOMENTE com o texto da mensagem, nada mais.`;
+
+function _quitaMsgFallback(ctx) {
+  const primeiro = String(ctx.nome || '').trim().split(/\s+/)[0] || 'Olá';
+  return `Olá, ${primeiro}! Aqui é a Beatriz, da ${ctx.credor}.\n`
+    + `Você tem uma pendência de ${fmtR(ctx.valor)} e dá para resolver agora, do seu jeito: à vista com ${ctx.desc}% de desconto (${fmtR(ctx.avista)}) ou parcelado em até ${ctx.maxParc}x.\n`
+    + `É rápido e você mesmo resolve por aqui, sem precisar falar com ninguém:\n${ctx.link}`;
+}
+
+async function beatrizConviteQuita(ctx) {
+  const key = process.env.ANTHROPIC_API_KEY || '';
+  if (!key) return _quitaMsgFallback(ctx);
+  const primeiro = String(ctx.nome || '').trim().split(/\s+/)[0] || '';
+  const userMsg = `Dados para a mensagem:
+Nome: ${primeiro}
+Valor atual da dívida: ${fmtR(ctx.valor)}
+À vista com ${ctx.desc}% de desconto: ${fmtR(ctx.avista)}
+Parcelamento: até ${ctx.maxParc}x (parcela mínima ${fmtR(ctx.parcMin)})
+Link do portal: ${ctx.link}
+Momento: ${ctx.passo === 'd0' ? 'primeiro contato' : 'lembrete gentil (a pessoa ainda não resolveu)'}
+
+Escreva a mensagem.`;
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 400,
+        system: BEATRIZ_QUITA_SYSTEM,
+        messages: [{ role: 'user', content: userMsg }],
+      }),
+    });
+    if (!r.ok) return _quitaMsgFallback(ctx);
+    const j = await r.json();
+    const txt = (j && j.content && j.content[0] && j.content[0].text || '').trim();
+    return txt || _quitaMsgFallback(ctx);
+  } catch (e) {
+    return _quitaMsgFallback(ctx);
+  }
+}
+
+async function reguaQuita({ dry, DB }) {
+  const out = { enviados: 0, falhas: 0, elegiveis: 0, itens: [] };
+  const link = devLinkPortal();
+  const credorNome = DB.config?.empresa || 'COBRASQ';
+
+  // 1) Credores com o portal LIGADO (opt-in). Sem nenhum → no-op (piloto seguro).
+  let credores = [];
+  try {
+    credores = await sbFetch(`clientes?select=id,nome,nome_fantasia,arquivado,metadata&metadata->quita->>disparoAtivo=eq.true`);
+  } catch (e) { credores = []; }
+  credores = (credores || []).filter(c => !c.arquivado);
+  if (!credores.length) return out;
+  const cfgPorCredor = {};
+  for (const c of credores) cfgPorCredor[c.id] = (c.metadata && c.metadata.quita) || {};
+  const credorIds = credores.map(c => c.id);
+
+  // 2) Cobranças desses credores + devedor principal (com telefone).
+  const inList = credorIds.map(encodeURIComponent).join(',');
+  let cobrs = [];
+  try {
+    cobrs = await sbFetch(`cobrancas?cliente_id=in.(${inList})&select=id,cliente_id,arquivado,valor_atual,valor_orig,valor_capital,fase,numero_processo,status,divida,cobranca_partes(principal,devedores(id,nome,telefone))`);
+  } catch (e) { cobrs = []; }
+
+  // 3) Filtra elegíveis (mesma regra do quita_oferta) e resolve o devedor principal.
+  const alvos = [];
+  for (const c of (cobrs || [])) {
+    if (c.arquivado) continue;
+    if ((c.fase || 'extrajudicial') !== 'extrajudicial') continue;
+    if (c.numero_processo && String(c.numero_processo).trim()) continue;
+    if (/(acord|quitad|encerrad|baixad|devolvid|sem ?[êe]xito|recebid)/i.test(c.status || '')) continue;
+    const cfg = cfgPorCredor[c.cliente_id] || {};
+    const limite = (cfg.limite != null && cfg.limite !== '' && +cfg.limite > 0) ? +cfg.limite : 500;
+    const capital = (c.valor_capital != null) ? +c.valor_capital
+      : (c.divida && c.divida.valorCapital != null ? +c.divida.valorCapital : (+c.valor_orig || +c.valor_atual || 0));
+    if (!(capital > 0 && capital <= limite)) continue;
+    const partes = (c.cobranca_partes || []).slice().sort((a, b) => (b.principal ? 1 : 0) - (a.principal ? 1 : 0));
+    const dev = (partes[0] || {}).devedores;
+    if (!dev || !dev.id) continue;
+    const tel = String(dev.telefone || '').replace(/\D/g, '');
+    if (!tel) continue;
+    alvos.push({
+      cobId: c.id, devId: dev.id, nome: dev.nome, tel,
+      valor: +c.valor_atual || +c.valor_orig || 0,
+      desc: (cfg.descAvista != null && cfg.descAvista !== '') ? +cfg.descAvista : 10,
+      maxP: (cfg.maxParcelas != null && cfg.maxParcelas !== '') ? +cfg.maxParcelas : 12,
+      parcMin: (cfg.parcelaMin != null && cfg.parcelaMin !== '') ? +cfg.parcelaMin : 150,
+    });
+  }
+  out.elegiveis = alvos.length;
+  if (!alvos.length) return out;
+
+  // 4) Exclui quem já tem acordo QuitaFácil (não perturbar quem já fechou).
+  const cobIds = [...new Set(alvos.map(a => a.cobId))];
+  const jaAcordo = new Set();
+  try {
+    for (let i = 0; i < cobIds.length; i += 100) {
+      const ch = cobIds.slice(i, i + 100).map(encodeURIComponent).join(',');
+      const rows = await sbFetch(`acordos?select=cobranca_id&cobranca_id=in.(${ch})&metadata->>origem=eq.quitafacil`);
+      for (const r of (rows || [])) jaAcordo.add(r.cobranca_id);
+    }
+  } catch (e) { /* melhor esforço */ }
+
+  // 5) Cadência via regua_envios (tipo='quita'): passo d0/d3/d7 devido hoje.
+  const devIds = [...new Set(alvos.map(a => a.devId))];
+  const envios = {}; // "devId|cobId" -> { d0, d3, d7 } (created_at)
+  try {
+    for (let i = 0; i < devIds.length; i += 100) {
+      const ch = devIds.slice(i, i + 100).map(encodeURIComponent).join(',');
+      const rows = await sbFetch(`regua_envios?select=devedor_id,parcela_id,step_key,created_at&tipo=eq.quita&status=eq.sent&devedor_id=in.(${ch})`);
+      for (const r of (rows || [])) {
+        const k = `${r.devedor_id}|${r.parcela_id || ''}`;
+        (envios[k] = envios[k] || {})[r.step_key] = r.created_at;
+      }
+    }
+  } catch (e) { /* melhor esforço */ }
+
+  for (const a of alvos) {
+    if (jaAcordo.has(a.cobId)) continue;
+    const env = envios[`${a.devId}|${a.cobId}`] || {};
+    let step = null;
+    if (!env.d0) step = 'd0';
+    else if (!env.d3 && diasDesde(String(env.d0).slice(0, 10)) >= 3) step = 'd3';
+    else if (!env.d7 && diasDesde(String(env.d0).slice(0, 10)) >= 7) step = 'd7';
+    if (!step) continue;
+
+    const avista = Math.max(0, a.valor * (1 - a.desc / 100));
+    const maxViavel = Math.max(1, Math.min(a.maxP, Math.floor(a.valor / a.parcMin) || 1));
+    const msg = await beatrizConviteQuita({ nome: a.nome, valor: a.valor, avista, desc: a.desc, maxParc: maxViavel, parcMin: a.parcMin, link, credor: credorNome, passo: step });
+
+    if (!dry) {
+      const claimed = await claimEnvio({ tipo: 'quita', devedorId: a.devId, parcelaId: a.cobId, stepKey: step, canal: 'whatsapp' });
+      if (!claimed) { out.itens.push({ dev: a.nome, step, skipped: 'já reivindicado' }); continue; }
+    }
+    try {
+      if (!dry) await zapiSendText(a.tel, msg);
+      if (!dry) await confirmarEnvio({ tipo: 'quita', devedorId: a.devId, parcelaId: a.cobId, stepKey: step });
+      out.enviados++;
+      out.itens.push({ dev: a.nome, step, status: dry ? 'dry' : 'sent', msg: dry ? msg : undefined });
+    } catch (e) {
+      out.falhas++;
+      if (!dry) await liberarEnvio({ tipo: 'quita', devedorId: a.devId, parcelaId: a.cobId, stepKey: step });
+      out.itens.push({ dev: a.nome, step, error: e.message });
+    }
+  }
+  return out;
+}
+
 module.exports = async function handler(req, res) {
   // F-09: autenticação forte de cron. Antes aceitava um bypass por user-agent
   // (/vercel-cron/i), que é trivialmente forjável -> qualquer um disparava a
@@ -684,13 +846,21 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, msg: 'Régua pausada globalmente.', calendar: calendarStats, contasPagar });
     }
 
+    // ===== RÉGUA C — QUITAFÁCIL (independe das outras réguas). Duplo gate:
+    // (1) opt-in por credor (metadata.quita.disparoAtivo); (2) QUITA_NOTIFICAR_LIVE=1
+    // no ambiente — sem a env, roda em DRY (Beatriz redige, mas NÃO envia). =====
+    const quitaLive = process.env.QUITA_NOTIFICAR_LIVE === '1';
+    let quita = null;
+    try { quita = await reguaQuita({ dry: dry || !quitaLive, DB }); if (quita) quita.live = quitaLive; }
+    catch (e) { quita = { error: e.message }; }
+
     const reguaCobranca = Array.isArray(DB.config?.reguaCobranca) ? DB.config.reguaCobranca
                        : Array.isArray(DB.config?.regraCobranca) ? DB.config.regraCobranca : [];
     const reguaAcordo   = Array.isArray(DB.config?.reguaAcordo) ? DB.config.reguaAcordo : [];
 
     if (reguaCobranca.length === 0 && reguaAcordo.length === 0) {
       const calendarStats = dry ? null : await processarCalendarPendingDeletes();
-      return res.status(200).json({ ok: true, msg: 'Nenhum passo configurado em nenhuma régua.', calendar: calendarStats, contasPagar });
+      return res.status(200).json({ ok: true, msg: 'Nenhum passo configurado nas réguas clássicas.', calendar: calendarStats, contasPagar, quita });
     }
 
     const credor = DB.config?.empresa || 'COBRASQ';
@@ -868,7 +1038,7 @@ module.exports = async function handler(req, res) {
     try { zapsign = await processarLembretesZapSign({ dry: dry || !zapsignLive }); }
     catch (e) { zapsign = { error: e.message }; }
 
-    res.status(200).json({ ok: true, hoje: new Date().toISOString().slice(0,10), ...resultado, calendar, contasPagar, zapsign, zapsign_live: zapsignLive });
+    res.status(200).json({ ok: true, hoje: new Date().toISOString().slice(0,10), ...resultado, calendar, contasPagar, zapsign, zapsign_live: zapsignLive, quita });
   } catch (err) {
     console.error('[cron-regua]', err);
     res.status(500).json({ ok: false, error: err.message });
