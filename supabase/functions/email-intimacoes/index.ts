@@ -169,23 +169,31 @@ async function processarEmail(msg: { uid: string; from: string; subject: string;
 }
 
 // ── IMAP: varre a caixa ──────────────────────────────────────────────────────
-async function varrerIMAP(): Promise<{ emails: number; atos: number }> {
+// Varre a caixa. Sem opts (cron) = últimos DIAS_JANELA dias, MAX_EMAILS_POR_RUN.
+// Com opts (backfill via POST) = janela `dias`, lote `limit`, filtro remetente `from`
+// (ex.: 'jus.br'). Processa do mais ANTIGO pro mais novo, até `limit` NOVOS por run.
+async function varrerIMAP(opts: { dias?: number; limit?: number; from?: string } = {}): Promise<{ emails: number; atos: number }> {
   if (!GMAIL_USER || !GMAIL_APP_PASSWORD) throw new Error('GMAIL_USER/GMAIL_APP_PASSWORD não configurados');
+  const dias = opts.dias && opts.dias > 0 ? opts.dias : DIAS_JANELA;
+  const limite = opts.limit && opts.limit > 0 ? opts.limit : MAX_EMAILS_POR_RUN;
   const client = new ImapFlow({ host: 'imap.gmail.com', port: 993, secure: true, auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD }, logger: false });
   let emails = 0, atos = 0;
   const cobrMap = await carregarCobrancasMap();
+  // Pré-carrega UIDs já processados (evita query por e-mail e re-custo de IA).
+  const { data: procData } = await sb.from('email_msgs_processadas').select('uid').limit(50000);
+  const processados = new Set((procData || []).map((x: any) => x.uid));
   await client.connect();
   const lock = await client.getMailboxLock('INBOX');
   try {
-    const since = new Date(Date.now() - DIAS_JANELA * 86400000);
-    const uids: number[] = await client.search({ since }, { uid: true }) as number[];
-    const recentes = (uids || []).slice(-MAX_EMAILS_POR_RUN);
-    for (const uid of recentes) {
+    const criterio: any = { since: new Date(Date.now() - dias * 86400000) };
+    if (opts.from) criterio.from = opts.from;
+    const uids: number[] = await client.search(criterio, { uid: true }) as number[];
+    for (const uid of (uids || [])) {
+      if (emails >= limite) break;
       const one = await client.fetchOne(String(uid), { envelope: true, source: true }, { uid: true }).catch(() => null) as any;
       if (!one) continue;
       const msgId = one.envelope?.messageId || `uid:${uid}`;
-      const { data: ja } = await sb.from('email_msgs_processadas').select('uid').eq('uid', msgId).limit(1);
-      if (ja && ja.length) continue; // já processado
+      if (processados.has(msgId)) continue; // já processado
 
       const parsed = await simpleParser(one.source as Uint8Array).catch(() => null);
       const body = (parsed?.text || (parsed?.html ? String(parsed.html).replace(/<[^>]+>/g, ' ') : '') || '').trim();
@@ -195,6 +203,7 @@ async function varrerIMAP(): Promise<{ emails: number; atos: number }> {
 
       const n = await processarEmail({ uid: msgId, from, subject, date, body }, cobrMap);
       atos += n; emails++;
+      processados.add(msgId);
       await sb.from('email_msgs_processadas').insert({ uid: msgId, assunto: subject, remetente: from, recebido_em: date, atos_extraidos: n });
     }
   } finally {
@@ -223,7 +232,7 @@ Deno.serve(async (req) => {
       }, cobrMap);
       return new Response(JSON.stringify({ ok: true, modo: 'teste', atos: n }), { headers: { 'content-type': 'application/json' } });
     }
-    const r = await varrerIMAP();
+    const r = await varrerIMAP({ dias: body?.dias, limit: body?.limit, from: body?.from });
     return new Response(JSON.stringify({ ok: true, modo: 'imap', ...r }), { headers: { 'content-type': 'application/json' } });
   } catch (e) {
     const err: any = e;
