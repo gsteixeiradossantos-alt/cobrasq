@@ -625,18 +625,34 @@ async function processarLembretesZapSign({ dry } = {}) {
 // tipo='quita' (parcela_id = cobranca_id). DUPLO GATE: (1) opt-in por credor
 // (clientes.metadata.quita.disparoAtivo); (2) QUITA_NOTIFICAR_LIVE=1 no ambiente.
 // ════════════════════════════════════════════════════════════════════════════
-const BEATRIZ_QUITA_SYSTEM = `Você é Beatriz, assistente da COBRASQ Recuperadora de Crédito.
-Redija UMA mensagem curta de WhatsApp (máximo 4 linhas) convidando a pessoa a resolver uma dívida pequena de forma simples e digna, pelo portal (o link vem no fim).
-Tom: educado, acolhedor, humano — NUNCA ameaçador nem com jargão jurídico.
-Use só o primeiro nome. Sem markdown (nada de asteriscos ou listas). No máximo 1 emoji. Português brasileiro, sem gerundismo.
-Deixe claro que dá para pagar à vista com desconto OU parcelar, que é rápido e que a própria pessoa resolve, sem precisar falar com ninguém.
-Termine com o link. Responda SOMENTE com o texto da mensagem, nada mais.`;
+const BEATRIZ_QUITA_SYSTEM = `Você é Beatriz, da COBRASQ Recuperadora de Crédito. Escreve mensagens curtas de WhatsApp para ajudar pessoas a resolverem uma pendência pequena de forma simples e digna.
+
+OBJETIVO: fazer a pessoa clicar no link e resolver sozinha, sentindo alívio — não culpa.
+
+ESTRUTURA (máximo 4 linhas curtas):
+1. Cumprimente pelo primeiro nome, tom leve e humano.
+2. Diga que há uma condição especial para encerrar a pendência de forma fácil.
+3. Traga a oferta CONCRETA: o valor à vista JÁ com o desconto, e que dá para parcelar.
+4. Feche com o convite + o link, reforçando que leva 2 minutos e a própria pessoa faz, sem falar com ninguém.
+
+TOM E REGRAS:
+- Respeitoso, acolhedor, sem julgamento. NUNCA ameace, cobre com peso ou use jargão jurídico.
+- Foque em solução e alívio ("resolver", "encerrar", "ficar em dia"), não em "dívida/inadimplência".
+- Português brasileiro natural, sem gerundismo. Sem markdown (nada de asteriscos/listas). No máximo 1 emoji.
+- Não invente valores, prazos nem descontos além dos informados. Não prometa nada fora da oferta.
+Responda SOMENTE com o texto da mensagem, nada mais.`;
 
 function _quitaMsgFallback(ctx) {
   const primeiro = String(ctx.nome || '').trim().split(/\s+/)[0] || 'Olá';
-  return `Olá, ${primeiro}! Aqui é a Beatriz, da ${ctx.credor}.\n`
-    + `Você tem uma pendência de ${fmtR(ctx.valor)} e dá para resolver agora, do seu jeito: à vista com ${ctx.desc}% de desconto (${fmtR(ctx.avista)}) ou parcelado em até ${ctx.maxParc}x.\n`
-    + `É rápido e você mesmo resolve por aqui, sem precisar falar com ninguém:\n${ctx.link}`;
+  const aviso = ctx.passo === 'd15_aviso';
+  if (aviso) {
+    return `${primeiro}, aqui é a Beatriz, da ${ctx.credor}. Ainda dá tempo de resolver sua pendência de ${fmtR(ctx.valor)} com condição especial e evitar que ela vá para os órgãos de proteção ao crédito.\n`
+      + `À vista sai por ${fmtR(ctx.avista)} (${ctx.desc}% de desconto), ou em até ${ctx.maxParc}x.\n`
+      + `Você mesmo resolve em 2 minutos, por aqui:\n${ctx.link}`;
+  }
+  return `Olá, ${primeiro}! Aqui é a Beatriz, da ${ctx.credor}. Tenho uma condição especial pra você encerrar sua pendência de ${fmtR(ctx.valor)} sem complicação.\n`
+    + `À vista sai por ${fmtR(ctx.avista)} (${ctx.desc}% de desconto). Prefere parcelar? Dá pra dividir em até ${ctx.maxParc}x.\n`
+    + `Você mesmo resolve em 2 minutos, sem falar com ninguém:\n${ctx.link}`;
 }
 
 async function beatrizConviteQuita(ctx) {
@@ -702,7 +718,7 @@ async function _marcarCandidatoNegativacao(cobId) {
 // SMS é curto (160 chars) — template direto, sem IA. Sem acento p/ compatibilidade GSM.
 function _quitaSmsMsg(ctx) {
   const primeiro = String(ctx.nome || '').trim().split(/\s+/)[0] || '';
-  return `${primeiro ? primeiro + ', ' : ''}resolva sua pendencia de ${fmtR(ctx.valor)} com ${ctx.desc}% de desconto a vista ou parcelado. Rapido, voce mesmo faz: ${ctx.link}`;
+  return `${primeiro ? primeiro + ', ' : ''}condicao especial p/ encerrar sua pendencia: a vista ${fmtR(ctx.avista)} (-${ctx.desc}%) ou ate ${ctx.maxParc}x. Voce mesmo resolve em 2 min: ${ctx.link}`;
 }
 
 // Magic-link: pede ao servidor um token opaco (portal_mint_magic) e monta o link
