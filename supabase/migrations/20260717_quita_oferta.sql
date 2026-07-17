@@ -91,10 +91,13 @@ begin
 
   -- Elegibilidade (espelha cobElegivelQuita do front): extrajudicial, sem processo,
   -- não acordo/encerrada, credor ativo, capital>0 e ≤ limite.
+  -- Modelo: micro só vira QuitaFácil quando o AMIGÁVEL FRACASSOU (status "Fazer ação"/
+  -- "Acordo infrutífero"/"encaminhado ao judicial"/"reajuizar"). Micro ainda em amigável
+  -- ("Cobrar", "Em negociação"…) NÃO é elegível — segue na cobrança normal.
   v_elegivel :=
-        coalesce(v_cob.fase, 'extrajudicial') = 'extrajudicial'
-    and coalesce(trim(v_cob.numero_processo), '') = ''
-    and coalesce(v_cob.status, '') !~* '(acord|quitad|encerrad|baixad|devolvid|sem ?[êe]xito|recebid)'
+        coalesce(trim(v_cob.numero_processo), '') = ''                                          -- não ajuizado
+    and coalesce(v_cob.status, '') ~* '(fazer a[çc][ãa]o|infrut[íi]fero|encaminh\w*\s*(ao\s*)?judic|reajuizar)'  -- amigável falhou
+    and coalesce(v_cob.status, '') !~* '(quitad|encerrad|recebid|baixad|devolvid|sem ?[êe]xito)'  -- não terminal
     and v_ativo
     and coalesce(v_capital, 0) > 0
     and coalesce(v_capital, 0) <= v_limite;
