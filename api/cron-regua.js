@@ -625,18 +625,37 @@ async function processarLembretesZapSign({ dry } = {}) {
 // tipo='quita' (parcela_id = cobranca_id). DUPLO GATE: (1) opt-in por credor
 // (clientes.metadata.quita.disparoAtivo); (2) QUITA_NOTIFICAR_LIVE=1 no ambiente.
 // ════════════════════════════════════════════════════════════════════════════
-const BEATRIZ_QUITA_SYSTEM = `Você é Beatriz, assistente da COBRASQ Recuperadora de Crédito.
-Redija UMA mensagem curta de WhatsApp (máximo 4 linhas) convidando a pessoa a resolver uma dívida pequena de forma simples e digna, pelo portal (o link vem no fim).
-Tom: educado, acolhedor, humano — NUNCA ameaçador nem com jargão jurídico.
-Use só o primeiro nome. Sem markdown (nada de asteriscos ou listas). No máximo 1 emoji. Português brasileiro, sem gerundismo.
-Deixe claro que dá para pagar à vista com desconto OU parcelar, que é rápido e que a própria pessoa resolve, sem precisar falar com ninguém.
-Termine com o link. Responda SOMENTE com o texto da mensagem, nada mais.`;
+const BEATRIZ_QUITA_SYSTEM = `Você é Beatriz, da COBRASQ Recuperadora de Crédito. Escreve mensagens curtas de WhatsApp para ajudar pessoas a resolverem uma pendência pequena de forma simples e digna.
+
+OBJETIVO: fazer a pessoa clicar no link e resolver sozinha, sentindo alívio — não culpa.
+
+ESTRUTURA (máximo 4 linhas curtas):
+1. Cumprimente pelo primeiro nome, tom leve e humano.
+2. Diga que há uma condição especial para encerrar a pendência de forma fácil.
+3. Traga a oferta CONCRETA: o valor à vista JÁ com o desconto, e que dá para parcelar.
+4. Feche com o convite + o link, reforçando que leva 2 minutos e a própria pessoa faz, sem falar com ninguém.
+
+TOM E REGRAS:
+- Respeitoso, acolhedor, sem julgamento. NUNCA ameace, cobre com peso ou use jargão jurídico.
+- Foque em solução e alívio ("resolver", "encerrar", "ficar em dia"), não em "dívida/inadimplência".
+- Português brasileiro natural, sem gerundismo. Sem markdown (nada de asteriscos/listas). No máximo 1 emoji.
+- Não invente valores, prazos nem descontos além dos informados. Não prometa nada fora da oferta.
+- Se vier um "Credor original", CITE-O para a pessoa RECONHECER a dívida (ex.: "sua pendência com a Clínica X"), deixando claro que hoje quem conduz a cobrança é a COBRASQ. Isso evita que ela ache que é golpe.
+Responda SOMENTE com o texto da mensagem, nada mais.`;
 
 function _quitaMsgFallback(ctx) {
   const primeiro = String(ctx.nome || '').trim().split(/\s+/)[0] || 'Olá';
-  return `Olá, ${primeiro}! Aqui é a Beatriz, da ${ctx.credor}.\n`
-    + `Você tem uma pendência de ${fmtR(ctx.valor)} e dá para resolver agora, do seu jeito: à vista com ${ctx.desc}% de desconto (${fmtR(ctx.avista)}) ou parcelado em até ${ctx.maxParc}x.\n`
-    + `É rápido e você mesmo resolve por aqui, sem precisar falar com ninguém:\n${ctx.link}`;
+  // Credor original: a pessoa reconhece a dívida por ele (anti-golpe). Hoje quem conduz é a COBRASQ.
+  const refCredor = ctx.credorOriginal ? ` com ${ctx.credorOriginal} (hoje conduzida pela ${ctx.credor})` : '';
+  const aviso = ctx.passo === 'd15_aviso';
+  if (aviso) {
+    return `${primeiro}, aqui é a Beatriz, da ${ctx.credor}. Ainda dá tempo de resolver sua pendência de ${fmtR(ctx.valor)}${refCredor} com condição especial e evitar que ela vá para os órgãos de proteção ao crédito.\n`
+      + `À vista sai por ${fmtR(ctx.avista)} (${ctx.desc}% de desconto), ou em até ${ctx.maxParc}x.\n`
+      + `Você mesmo resolve em 2 minutos, por aqui:\n${ctx.link}`;
+  }
+  return `Olá, ${primeiro}! Aqui é a Beatriz, da ${ctx.credor}. Tenho uma condição especial pra você encerrar sua pendência de ${fmtR(ctx.valor)}${refCredor} sem complicação.\n`
+    + `À vista sai por ${fmtR(ctx.avista)} (${ctx.desc}% de desconto). Prefere parcelar? Dá pra dividir em até ${ctx.maxParc}x.\n`
+    + `Você mesmo resolve em 2 minutos, sem falar com ninguém:\n${ctx.link}`;
 }
 
 async function beatrizConviteQuita(ctx) {
@@ -645,6 +664,7 @@ async function beatrizConviteQuita(ctx) {
   const primeiro = String(ctx.nome || '').trim().split(/\s+/)[0] || '';
   const userMsg = `Dados para a mensagem:
 Nome: ${primeiro}
+Credor original (a pessoa reconhece por ele): ${ctx.credorOriginal || '(não informado — não invente)'}
 Valor atual da dívida: ${fmtR(ctx.valor)}
 À vista com ${ctx.desc}% de desconto: ${fmtR(ctx.avista)}
 Parcelamento: até ${ctx.maxParc}x (parcela mínima ${fmtR(ctx.parcMin)})
@@ -702,7 +722,9 @@ async function _marcarCandidatoNegativacao(cobId) {
 // SMS é curto (160 chars) — template direto, sem IA. Sem acento p/ compatibilidade GSM.
 function _quitaSmsMsg(ctx) {
   const primeiro = String(ctx.nome || '').trim().split(/\s+/)[0] || '';
-  return `${primeiro ? primeiro + ', ' : ''}resolva sua pendencia de ${fmtR(ctx.valor)} com ${ctx.desc}% de desconto a vista ou parcelado. Rapido, voce mesmo faz: ${ctx.link}`;
+  const semAcento = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const ref = ctx.credorOriginal ? ` com ${semAcento(ctx.credorOriginal)}` : '';
+  return `${primeiro ? primeiro + ', ' : ''}sua pendencia${ref} (via ${semAcento(ctx.credor || 'COBRASQ')}): condicao especial p/ encerrar a vista ${fmtR(ctx.avista)} (-${ctx.desc}%) ou ate ${ctx.maxParc}x. Voce resolve em 2 min: ${ctx.link}`;
 }
 
 // Magic-link: pede ao servidor um token opaco (portal_mint_magic) e monta o link
@@ -730,7 +752,8 @@ async function reguaQuita({ dry, DB }) {
   credores = (credores || []).filter(c => !c.arquivado);
   if (!credores.length) return out;
   const cfgPorCredor = {};
-  for (const c of credores) cfgPorCredor[c.id] = (c.metadata && c.metadata.quita) || {};
+  const credorNomePorId = {}; // nome do CREDOR ORIGINAL (p/ o devedor reconhecer a dívida)
+  for (const c of credores) { cfgPorCredor[c.id] = (c.metadata && c.metadata.quita) || {}; credorNomePorId[c.id] = (c.nome_fantasia || c.nome || '').trim(); }
   const credorIds = credores.map(c => c.id);
 
   // 2) Cobranças desses credores + devedor principal (com telefone).
@@ -763,6 +786,7 @@ async function reguaQuita({ dry, DB }) {
     alvos.push({
       cobId: c.id, devId: dev.id, nome: dev.nome, tel,
       email: String(dev.email || '').trim(),
+      credorOriginal: credorNomePorId[c.cliente_id] || '',
       valor: +c.valor_atual || +c.valor_orig || 0,
       desc: (cfg.descAvista != null && cfg.descAvista !== '') ? +cfg.descAvista : 10,
       maxP: (cfg.maxParcelas != null && cfg.maxParcelas !== '') ? +cfg.maxParcelas : 12,
@@ -844,7 +868,7 @@ async function reguaQuita({ dry, DB }) {
     // Magic-link: em envio real, o link já abre o portal LOGADO (?qt=token). No dry
     // não emite token (sem efeito colateral) — usa o link base.
     const linkDev = (!dry) ? await _quitaMagicLink(link, a.devId, a.cobId) : link;
-    const ctx = { nome: a.nome, valor: a.valor, avista, desc: a.desc, maxParc: maxViavel, parcMin: a.parcMin, link: linkDev, credor: credorNome, passo: chosen.key };
+    const ctx = { nome: a.nome, valor: a.valor, avista, desc: a.desc, maxParc: maxViavel, parcMin: a.parcMin, link: linkDev, credor: credorNome, credorOriginal: a.credorOriginal, passo: chosen.key };
 
     // Composição por canal: SMS = template curto; WhatsApp e e-mail = Beatriz (IA).
     let mensagem, assunto;
