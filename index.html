@@ -16936,7 +16936,7 @@ const PAPEL_LABELS = {
 };
 let DB_cobrancas = [];          // cache local (com cobranca_partes embutidas)
 // ONDA I · 2 — triagem de pendência: default = Todos (era 'agir').
-let cobrFilter = { q:'', credor:'', responsavel:'', fase:'', statuses:[], tab:'todos', pend:'todos', ord:'nome' };
+let cobrFilter = { q:'', credor:'', responsavel:'', fase:'', statuses:[], tab:'todos', pend:'todos', ord:'nome', quita:false };
 let cobrChipsOpen = false; // chips detalhados de status recolhidos por padrão
 function toggleCobrFilterStatus(s){
   const i = cobrFilter.statuses.indexOf(s);
@@ -17031,6 +17031,81 @@ function cobMacroGrupo(status, fase, numeroProcesso){
     return (numeroProcesso && String(numeroProcesso).trim()) ? 'judicial' : 'agir';
   }
   return 'agir';
+}
+// ── Trilha QUITA (autonegociação de dívidas pequenas) ─────────────────────────
+// Categoria DERIVADA (compute-on-read, sem migração): cobrança extrajudicial, sem
+// processo, com capital ≤ limite (padrão global R$500 ou override por credor) e
+// ainda em aberto (não acordo/encerrada/judicial). Auto-enquadramento — o operador
+// só cria exceções via opt-out (cobrancas.metadata.quitaOptOut) ou desliga o credor
+// (clientes.metadata.quita.ativo=false). O DISPARO automático de mensagens ao
+// devedor é OPT-IN por credor e vive na Onda 3 (quita.disparoAtivo); aqui é só
+// visibilidade/enquadramento/filtro — não dispara nada.
+const QUITA_LIMITE_DEFAULT = 500;
+function quitaLimiteGlobal(){ const v = +(localStorage.getItem('quita_limite_global')); return (v>0) ? v : QUITA_LIMITE_DEFAULT; }
+function quitaSetLimiteGlobal(v){ const n=Math.max(0,+v||0); if(n>0) localStorage.setItem('quita_limite_global', String(n)); else localStorage.removeItem('quita_limite_global'); if(typeof renderCobrancas==='function') renderCobrancas(); }
+function _quitaCredorCfg(clienteId){ const cl=(DB.clientes||[]).find(x=>x.id===clienteId); return (cl && cl.metadata && cl.metadata.quita) || null; }
+function quitaLimiteDe(c){ const cfg=_quitaCredorCfg(c&&c.cliente_id); const l=cfg&&cfg.limite; return (l!=null && l!=='' && +l>0) ? +l : quitaLimiteGlobal(); }
+function cobCapital(c){
+  if(!c) return 0;
+  if(c.valor_capital!=null && c.valor_capital!=='') return +c.valor_capital;
+  if(c.divida && c.divida.valorCapital!=null) return +c.divida.valorCapital;
+  return (+c.valor_orig || +c.valor_atual || 0);
+}
+// Elegibilidade "de fato" (natureza + valor), IGNORANDO o opt-out manual — usada
+// para decidir se o toggle "tirar/reincluir na trilha" faz sentido no detalhe.
+function _quitaElegBase(c){
+  if(!c) return false;
+  if((c.fase||'extrajudicial')!=='extrajudicial') return false;           // judicial fica fora
+  if(c.numero_processo && String(c.numero_processo).trim()) return false; // já tem processo
+  const macro = cobMacroGrupo(c.status, c.fase, c.numero_processo);
+  if(macro==='acordos' || macro==='encerrados' || macro==='judicial') return false;
+  const cfg = _quitaCredorCfg(c.cliente_id);
+  if(cfg && cfg.ativo===false) return false;                              // credor desligado
+  const cap = cobCapital(c);
+  return cap>0 && cap <= quitaLimiteDe(c);
+}
+function cobElegivelQuita(c){
+  if(c && c.metadata && c.metadata.quitaOptOut) return false;             // exceção manual
+  return _quitaElegBase(c);
+}
+// Opt-out/opt-in por cobrança (cobrancas.metadata.quitaOptOut) — sem migração.
+async function quitaSetOptOut(cobId, on){
+  const cob=(DB_cobrancas||[]).find(c=>c.id===cobId);
+  const meta=Object.assign({}, (cob&&cob.metadata)||{});
+  if(on) meta.quitaOptOut=true; else delete meta.quitaOptOut;
+  if(cob) cob.metadata=meta;
+  const supa=(typeof getSupabase==='function')?getSupabase():null;
+  if(supa){ const {error}=await supa.from('cobrancas').update({metadata:meta}).eq('id',cobId); if(error){ showToast('Falha ao salvar: '+error.message,'danger'); return; } }
+  if(typeof save==='function'){ try{ save(); }catch(_){ } }
+  showToast(on?'Cobrança retirada da trilha Quita.':'Cobrança reincluída na trilha Quita.','info');
+  if(typeof _detCobrId!=='undefined' && _detCobrId===cobId && typeof renderCobrancaDetalhe==='function') renderCobrancaDetalhe();
+}
+// Config da trilha por credor (clientes.metadata.quita) — limite/ativo. Faixas de
+// desconto/parcelas ficam aqui também, mas são CONSUMIDAS na Onda 2 (portal).
+async function _quitaSalvarCredorCfg(clienteId, patch){
+  const cli=(DB.clientes||[]).find(c=>c.id===clienteId); if(!cli) return false;
+  const meta=Object.assign({}, cli.metadata||{});
+  meta.quita=Object.assign({}, meta.quita||{}, patch);
+  cli.metadata=meta;
+  const supa=(typeof getSupabase==='function')?getSupabase():null;
+  if(supa){ const {error}=await supa.from('clientes').update({metadata:meta}).eq('id',clienteId); if(error){ showToast('Falha ao salvar: '+error.message,'danger'); return false; } }
+  if(typeof save==='function'){ try{ save(); }catch(_){ } }
+  return true;
+}
+async function quitaToggleCredor(clienteId, on){
+  const ok=await _quitaSalvarCredorCfg(clienteId, { ativo: !!on });
+  if(ok){ showToast(on?'Trilha Quita ativada para este credor.':'Trilha Quita desligada para este credor.', on?'success':'info');
+    if(typeof _detCliId!=='undefined' && _detCliId===clienteId && typeof renderClienteDetalhe==='function') renderClienteDetalhe(); }
+}
+async function quitaSetLimiteCredor(clienteId, v){
+  const n=(v===''||v==null)?null:Math.max(0,+v||0);
+  const ok=await _quitaSalvarCredorCfg(clienteId, { limite: (n&&n>0)?n:null });
+  if(ok && typeof _detCliId!=='undefined' && _detCliId===clienteId && typeof renderClienteDetalhe==='function') renderClienteDetalhe();
+}
+// Selo visual verde da trilha (usa c._quita já calculado na lista).
+function cobQuitaSelo(c){
+  if(!c || !c._quita) return '';
+  return `<span class="det-chip" style="background:#E9F1EA;color:#3F6B47;border:1px solid #CBE1CF;font-weight:600;" title="Trilha Quita — autonegociação (capital ${fmtR(cobCapital(c))} ≤ limite ${fmtR(quitaLimiteDe(c))})">🟢 Quita</span>`;
 }
 // Selo de alerta do card: caso de natureza judicial que ainda precisa de ATO nosso
 // (ajuizar ou reajuizar) e por isso aparece em "A agir". Devolve o rótulo a exibir
@@ -17217,10 +17292,11 @@ async function renderCobrancas(opts){
   base.forEach(c=>{ const g=cobMacroGrupo(c.status,c.fase,c.numero_processo); if(macroCounts[g]!=null) macroCounts[g]++; });
   // Pendência derivada (🔴 agir / 🟡 aguardando / ✅ concluído) — guarda em c._pend p/ reuso na linha.
   const pendCounts = { todos: base.length, agir:0, aguardando:0, concluido:0 };
-  base.forEach(c=>{ c._pend = cobPendencia(c, _cobrSinais); if(pendCounts[c._pend.estado]!=null) pendCounts[c._pend.estado]++; });
+  base.forEach(c=>{ c._pend = cobPendencia(c, _cobrSinais); if(pendCounts[c._pend.estado]!=null) pendCounts[c._pend.estado]++; c._quita = cobElegivelQuita(c); });
+  const quitaCount = base.filter(c=>c._quita).length;
   const _pendFiltro = (c)=> !cobrFilter.pend || cobrFilter.pend==='todos' || (c._pend && c._pend.estado)===cobrFilter.pend;
   // naAba = base restrita à aba ativa (alimenta os chips de status). cobr = naAba + chips + ordenação.
-  const naAba = base.filter(c=> (cobrFilter.tab==='todos' || cobMacroGrupo(c.status,c.fase,c.numero_processo)===cobrFilter.tab) && _pendFiltro(c));
+  const naAba = base.filter(c=> (cobrFilter.tab==='todos' || cobMacroGrupo(c.status,c.fase,c.numero_processo)===cobrFilter.tab) && _pendFiltro(c) && (!cobrFilter.quita || c._quita));
   const _sorters = {
     nome:   (a,b)=> _cobrPrincipalNome(a).localeCompare(_cobrPrincipalNome(b),'pt-BR',{sensitivity:'base'}),
     valor:  (a,b)=> (+b.valor_atual||+b.valor_orig||0) - (+a.valor_atual||+a.valor_orig||0),
@@ -17291,7 +17367,7 @@ async function renderCobrancas(opts){
       <div class="cob-caso-main">
         <div class="cob-caso-nome">${escHtml(princNome)}${princPapel?` <span class="papel">· ${escHtml(princPapel)}</span>`:''} ${extra}</div>
         <div class="cob-caso-doc">${escHtml(_cobrDocLabel(c))}</div>
-        <div class="cob-caso-chips">${cobAlertaPill(c)}${cobPendPill(c._pend, true)}${cronRenderBadge(c)}${selo}<span class="cob-caso-fase">${faseProc}</span>${unifChip}</div>
+        <div class="cob-caso-chips">${cobAlertaPill(c)}${cobQuitaSelo(c)}${cobPendPill(c._pend, true)}${cronRenderBadge(c)}${selo}<span class="cob-caso-fase">${faseProc}</span>${unifChip}</div>
       </div>
       <div class="cob-caso-credor">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}<div class="resp">${escHtml(_detUserNome(c.assigned_to))}</div></div>
       <div class="cob-caso-vs">
@@ -17310,7 +17386,7 @@ async function renderCobrancas(opts){
     const aging=_cobrAgingDias(c); const agingOld=(aging!=null && aging>=365);
     return `<div class="cob-panel cob-card cob-tr-click" style="--cor:${cor};padding:14px;cursor:pointer;" onclick="verCobranca('${c.id}')">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;"><div class="strong" style="font-size:14px;font-weight:700;">${escHtml(princ?.devedores?.nome||'—')}${extra}${_telInvalidoCob(c)?` <span class="det-chip" style="background:#FBF6E6;color:#9C7F40;border:1px solid #E0D3A8;" title="Telefone inválido — buscando novo número">📵</span>`:''}</div>${cobStatusBadge(c)}</div>
-      ${(c._pend||cobAlertaAcao(c))?`<div style="margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${cobAlertaPill(c)}${cobPendPill(c._pend, true)}${cronRenderBadge(c)}</div>`:''}
+      ${(c._pend||cobAlertaAcao(c)||c._quita)?`<div style="margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${cobAlertaPill(c)}${cobQuitaSelo(c)}${cobPendPill(c._pend, true)}${cronRenderBadge(c)}</div>`:''}
       <div style="font-size:12.5px;color:var(--text-2);margin-top:4px;">${escHtml(_cobrDocLabel(c))}</div>
       <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}</div>
       ${c._unif?`<div style="margin-top:4px;"><span class="det-chip" style="background:var(--navy,#1f3a5f);color:#fff;">⚖ Processo unificado · ${c._unif.irmaos.length} créditos</span></div>`:''}
@@ -17374,11 +17450,20 @@ async function renderCobrancas(opts){
       <div class="det-seg"><button class="${cobrView!=='cards'?'on':''}" onclick="cobrView='lista';renderCobrancas();">Lista</button><button class="${cobrView==='cards'?'on':''}" onclick="cobrView='cards';renderCobrancas();">Cards</button></div>
       <!-- ONDA E · M3 — modo Quadro (kanban por etapa), convive com a triagem/abas -->
       <div class="det-seg"><button class="${cobrViewMode!=='quadro'?'on':''}" onclick="kbToggleView('lista')" title="Visão em lista">Lista</button><button class="${cobrViewMode==='quadro'?'on':''}" onclick="kbToggleView('quadro')" title="Agrupar por etapa em colunas">Quadro</button></div>
-      ${/* ONDA I · 2 — reset da triagem também volta a 'todos' */(cobrFilter.q||cobrFilter.credor||cobrFilter.responsavel||cobrFilter.fase||cobrFilter.statuses.length||cobrFilter.tab!=='todos'||cobrFilter.pend!=='todos') ? `<button class="cob-btn-ghost" onclick="cobrFilter={q:'',credor:'',responsavel:'',fase:'',statuses:[],tab:'todos',pend:'todos',ord:'nome'};cobrChipsOpen=false;renderCobrancas();">Limpar filtros</button>` : ''}
+      ${/* ONDA I · 2 — reset da triagem também volta a 'todos' */(cobrFilter.q||cobrFilter.credor||cobrFilter.responsavel||cobrFilter.fase||cobrFilter.statuses.length||cobrFilter.tab!=='todos'||cobrFilter.pend!=='todos'||cobrFilter.quita) ? `<button class="cob-btn-ghost" onclick="cobrFilter={q:'',credor:'',responsavel:'',fase:'',statuses:[],tab:'todos',pend:'todos',ord:'nome',quita:false};cobrChipsOpen=false;renderCobrancas();">Limpar filtros</button>` : ''}
     </div>
     <!-- Triagem por PENDÊNCIA (derivada) — 🔴 agir / 🟡 aguardando / ✅ concluído -->
     <div class="cob-mtabs" style="margin-top:4px;">
       ${[['agir','Agir agora','#A65A4A'],['aguardando','Aguardando','#9C7F40'],['concluido','Concluído','#5E7C58'],['todos','Todos','']].map(([k,lbl,cor])=>`<button class="cob-mtab ${cobrFilter.pend===k?'on':''}" onclick="cobrFilter.pend='${k}';renderCobrancas();">${cor?`<span style="width:8px;height:8px;border-radius:50%;background:${cor};display:inline-block;margin-right:6px;"></span>`:''}${lbl} <span class="cob-mtab-n">${pendCounts[k]!=null?pendCounts[k]:''}</span></button>`).join('')}
+    </div>
+    <!-- Trilha QUITA — autonegociação de dívidas pequenas (capital ≤ limite, sem ação judicial) -->
+    <div class="cob-mtabs" style="margin-top:2px;border-top:1px dashed var(--border);padding-top:5px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+      <button class="cob-mtab ${cobrFilter.quita?'on':''}" onclick="cobrFilter.quita=!cobrFilter.quita;renderCobrancas();" title="Dívidas pequenas elegíveis à autonegociação (portal do devedor). Enquadramento automático.">
+        <span style="width:8px;height:8px;border-radius:50%;background:#3F6B47;display:inline-block;margin-right:6px;"></span>🟢 Quita <span class="cob-mtab-n">${quitaCount}</span>
+      </button>
+      <span style="font-size:12px;color:var(--text-3);">capital até R$</span>
+      <input type="number" min="0" step="50" value="${quitaLimiteGlobal()}" onchange="quitaSetLimiteGlobal(this.value)" title="Limite global de capital (R$). Cada credor pode ter um override no cadastro." style="width:82px;padding:5px 8px;border:1px solid var(--border);border-radius:7px;font-size:12.5px;background:var(--surface);color:var(--text);"/>
+      <span style="font-size:11.5px;color:var(--text-3);">enquadramento automático · autonegociação, sem ação judicial</span>
     </div>
     <!-- ONDA I · 3 — macro-status vira FILTRO (dropdown), não abas. Mesmas opções,
          contagens e comportamento (reseta statuses + recolhe chips) de antes. -->
@@ -17808,6 +17893,9 @@ async function renderCobrancaDetalhe(){
     ['Devedores', `${partes.length} vinculado${partes.length!==1?'s':''}`],
     ['CPF/CNPJ', escHtml(docsPartes)],
     ...(cob.numero_processo ? [['Nº do processo', `<span style="font-family:var(--font-mono);font-size:12px;">${escHtml(cob.numero_processo)}</span>`]] : []),
+    ...((_quitaElegBase(cob) || (cob.metadata&&cob.metadata.quitaOptOut)) ? [['Trilha Quita', (cob.metadata&&cob.metadata.quitaOptOut)
+        ? `<span style="color:var(--text-3);">Fora da trilha (manual) · <button class="cob-btn-ghost" style="padding:2px 9px;font-size:11px;" onclick="quitaSetOptOut('${cob.id}',false)">Reincluir</button></span>`
+        : `<span style="color:#3F6B47;font-weight:600;">🟢 Elegível — autonegociação (capital ${fmtR(cobCapital(cob))} ≤ ${fmtR(quitaLimiteDe(cob))}) · <button class="cob-btn-ghost" style="padding:2px 9px;font-size:11px;" onclick="quitaSetOptOut('${cob.id}',true)">Tirar da trilha</button></span>`]] : []),
     ['Criada em', escHtml(_detData(cob.created_at))]
   ]);
 
@@ -18707,6 +18795,7 @@ async function renderClienteDetalhe(){
     <div class="det-panel-tt">Portal do cedente</div>
     <div style="display:flex;align-items:center;gap:8px;font-size:13px;"><span class="det-chip ${portalAtivo?'princ':''}">${portalAtivo?'Ativo':'Inativo'}</span><span style="color:var(--text-3);font-size:11.5px;">acesso do credor ao acompanhamento</span></div></div>`;
   const panelRelAuto=_relAutoPanel(cli);
+  const panelQuita=_quitaPanel(cli);
 
   // Documentos do cliente: gerados, enviados p/ assinatura e ASSINADOS (volta do webhook).
   const _docStatusChip=(s)=>{
@@ -18762,7 +18851,7 @@ async function renderClienteDetalhe(){
       <div class="det-head-actions">${!ehColaborador()?`<button class="cob-btn-primary" onclick="editCliente('${cli.id}')">${ico('edit',14)} Editar cadastro</button>`:''}</div>
     </div>
     ${meta}
-    <div class="det-body"><div class="det-col">${panelCarteira}${panelDocumentos}${panelObs}</div><div class="det-col">${panelDados}${panelPortal}${panelRelAuto}</div></div>
+    <div class="det-body"><div class="det-col">${panelCarteira}${panelDocumentos}${panelObs}</div><div class="det-col">${panelDados}${panelPortal}${panelQuita}${panelRelAuto}</div></div>
   </div>`;
 }
 
@@ -37992,6 +38081,26 @@ async function _relAutoToggle(clienteId, on){
     if(typeof _detCliId!=='undefined'&&_detCliId===clienteId&&typeof renderClienteDetalhe==='function') renderClienteDetalhe(); }
 }
 // Painel opt-in exibido na pasta do cliente (coluna direita).
+// Painel de config da Trilha Quita no detalhe do credor (ativo + limite override).
+function _quitaPanel(cli){
+  if(!cli || !cli.id) return '';
+  const cfg=(cli.metadata&&cli.metadata.quita)||{};
+  const ativo = cfg.ativo!==false;                 // default ligado (só visibilidade/enquadramento)
+  const limite = (cfg.limite!=null && cfg.limite!=='' && +cfg.limite>0) ? +cfg.limite : quitaLimiteGlobal();
+  const elegiveis = (DB_cobrancas||[]).filter(c=>c.cliente_id===cli.id && cobElegivelQuita(c)).length;
+  return `<div class="cob-panel" style="padding:18px;"><div class="det-panel-tt">Trilha Quita <span style="font-size:11px;color:var(--text-3);font-weight:400;">· autonegociação de dívidas pequenas</span></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+      <span style="font-size:13px;color:var(--text-2);">Enquadrar dívidas pequenas deste credor</span>
+      <label style="position:relative;display:inline-flex;cursor:pointer;"><input type="checkbox" ${ativo?'checked':''} onchange="quitaToggleCredor('${cli.id}', this.checked)" style="width:16px;height:16px;cursor:pointer;"></label>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:10px;${ativo?'':'opacity:.5;pointer-events:none;'}">
+      <span style="font-size:12px;color:var(--text-3);">Capital até R$</span>
+      <input type="number" min="0" step="50" value="${(cfg.limite!=null&&cfg.limite!=='')?+cfg.limite:''}" placeholder="${quitaLimiteGlobal()} (global)" onchange="quitaSetLimiteCredor('${cli.id}', this.value)" style="width:120px;padding:5px 8px;border:1px solid var(--border);border-radius:7px;font-size:12.5px;background:var(--surface);color:var(--text);"/>
+      <span style="font-size:11px;color:var(--text-4);">vazio = usa o global</span>
+    </div>
+    <div style="font-size:11px;color:var(--text-3);margin-top:8px;">${ativo?`${elegiveis} cobrança${elegiveis!==1?'s':''} elegíve${elegiveis!==1?'is':'l'} hoje (capital ≤ ${fmtR(limite)}). Enquadramento é automático; o disparo ao devedor é opt-in e entra na próxima etapa.`:'Trilha desligada — nenhuma dívida deste credor entra na autonegociação.'}</div>
+  </div>`;
+}
 function _relAutoPanel(cli){
   const tel=_relAutoTel(cli), c=_relAutoCfg(cli);
   const body = tel
