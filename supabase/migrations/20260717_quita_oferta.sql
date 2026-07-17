@@ -72,7 +72,10 @@ begin
   from public.clientes cl where cl.id = v_cob.cliente_id;
   v_cfg := coalesce(v_cfg, '{}'::jsonb);
 
-  v_ativo   := coalesce((v_cfg->>'ativo')::boolean, true);
+  -- ativo = visibilidade/enquadramento (default on). disparoAtivo = EXPOR NO PORTAL
+  -- (boleto real) — OPT-IN por credor (default OFF), a trava do piloto.
+  v_ativo   := coalesce((v_cfg->>'ativo')::boolean, true)
+               and coalesce((v_cfg->>'disparoAtivo')::boolean, false);
   v_limite  := coalesce(nullif(v_cfg->>'limite','')::numeric, 500);
   v_desc    := coalesce(nullif(v_cfg->>'descAvista','')::numeric, 10);
   v_maxp    := coalesce(nullif(v_cfg->>'maxParcelas','')::int, 12);
