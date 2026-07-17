@@ -705,6 +705,18 @@ function _quitaSmsMsg(ctx) {
   return `${primeiro ? primeiro + ', ' : ''}resolva sua pendencia de ${fmtR(ctx.valor)} com ${ctx.desc}% de desconto a vista ou parcelado. Rapido, voce mesmo faz: ${ctx.link}`;
 }
 
+// Magic-link: pede ao servidor um token opaco (portal_mint_magic) e monta o link
+// que já abre o portal logado. Falhou? devolve o link base (degradação graciosa).
+async function _quitaMagicLink(baseLink, devId, cobId) {
+  if (!baseLink) return baseLink;
+  try {
+    const tok = await sbFetch('rpc/portal_mint_magic', { method: 'POST', body: JSON.stringify({ p_devedor_id: devId, p_cobranca_id: cobId, p_dias: 30 }) });
+    const t = (typeof tok === 'string') ? tok : (tok && (tok.token || tok.portal_mint_magic)) || '';
+    if (!t) return baseLink;
+    return baseLink + (baseLink.includes('?') ? '&' : '?') + 'qt=' + encodeURIComponent(t);
+  } catch (e) { return baseLink; }
+}
+
 async function reguaQuita({ dry, DB }) {
   const out = { enviados: 0, falhas: 0, elegiveis: 0, itens: [] };
   const link = devLinkPortal();
@@ -829,7 +841,10 @@ async function reguaQuita({ dry, DB }) {
 
     const avista = Math.max(0, a.valor * (1 - a.desc / 100));
     const maxViavel = Math.max(1, Math.min(a.maxP, Math.floor(a.valor / a.parcMin) || 1));
-    const ctx = { nome: a.nome, valor: a.valor, avista, desc: a.desc, maxParc: maxViavel, parcMin: a.parcMin, link, credor: credorNome, passo: chosen.key };
+    // Magic-link: em envio real, o link já abre o portal LOGADO (?qt=token). No dry
+    // não emite token (sem efeito colateral) — usa o link base.
+    const linkDev = (!dry) ? await _quitaMagicLink(link, a.devId, a.cobId) : link;
+    const ctx = { nome: a.nome, valor: a.valor, avista, desc: a.desc, maxParc: maxViavel, parcMin: a.parcMin, link: linkDev, credor: credorNome, passo: chosen.key };
 
     // Composição por canal: SMS = template curto; WhatsApp e e-mail = Beatriz (IA).
     let mensagem, assunto;
