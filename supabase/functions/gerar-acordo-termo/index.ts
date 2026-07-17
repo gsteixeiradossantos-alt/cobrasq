@@ -70,6 +70,11 @@ Deno.serve(async (req) => {
     const devs = (Array.isArray(dados.devedores) && dados.devedores.length)
       ? dados.devedores : (dados.devedor ? [dados.devedor] : []);
     const dev = devs[0] || {};
+    // Advogado(s) da parte executada (acordo judicial): signatários opcionais que
+    // assinam nas âncoras <<assadv2>>, <<assadv3>>… (a <<assadv>> é da autora, que
+    // não assina por aqui). Sem advogado informado, o comportamento é idêntico ao
+    // anterior — array vazio, nada muda.
+    const advs = (Array.isArray(dados.advogados) ? dados.advogados : []).filter((a: any) => a && a.nome);
     const zapBody = {
       name: (String(dev.nome || "Devedor").trim() + " - Acordo Extrajudicial"),
       base64_pdf,
@@ -91,7 +96,21 @@ Deno.serve(async (req) => {
         require_document_photo: true,
         selfie_validation_type: "none",
         signature_placement: "<<assdev" + (i + 1) + ">>",
-      })),
+      })).concat(advs.map((a: any, i: number) => ({
+        name: a.nome || "",
+        email: null,
+        auth_mode: "assinaturaTela",
+        send_automatic_email: false,
+        send_automatic_whatsapp: false,
+        phone_country: "55",
+        phone_number: onlyDigits(a.telefone),
+        require_cpf: !!onlyDigits(a.documento),
+        cpf: onlyDigits(a.documento),
+        require_selfie_photo: false,
+        require_document_photo: false,
+        selfie_validation_type: "none",
+        signature_placement: "<<assadv" + (i + 2) + ">>",
+      }))),
       lang: "pt-br",
       disable_signer_emails: false,
       folder_path: "/",
@@ -114,10 +133,12 @@ Deno.serve(async (req) => {
     }
     const token = zap.token || (zap.doc && zap.doc.token);
     const linkDe = (s: any) => (s && (s.sign_url || s.signing_link || s.signUrl || s.link)) || null;
-    // Casa cada devedor (na ordem enviada) com o signer devolvido pelo ZapSign.
+    // Casa cada signatário (devedores + advogados, na MESMA ordem enviada ao ZapSign)
+    // com o signer devolvido, para que o link volte também para o advogado.
+    const allSigners = devs.concat(advs);
     const mapSigners = (z: any) => {
       const arr = (z && z.signers) || [];
-      return devs.map((d: any, i: number) => ({
+      return allSigners.map((d: any, i: number) => ({
         nome: d.nome || "",
         phone: onlyDigits(d.telefone),
         link: linkDe(arr[i]),

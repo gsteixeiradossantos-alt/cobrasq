@@ -227,18 +227,65 @@
     return foro + comarca;
   }
 
+  // Conta bancária padrão do exequente (COBRASQ / Asaas) para levantamento de valores.
+  var CONTA_EXEQ_PADRAO = {
+    banco: "461 - Asaas I.P. S.A.", agencia: "0001", conta: "917147-9",
+    tipo: "Conta de Pagamento", titular: "COBRASQ RECUPERADORA DE CREDITO E COBRANCA LTDA",
+    doc: "CNPJ 34.626.848/0001-42"
+  };
+  // Monta a frase de dados bancários a partir de um objeto de conta (texto escapado).
+  function contaFrase(c) {
+    if (!c) return "____";
+    const p = [];
+    if (c.banco) p.push("Banco " + c.banco);
+    if (c.agencia) p.push("Agência " + c.agencia);
+    if (c.conta) p.push("Conta " + c.conta + (c.tipo ? " (" + c.tipo + ")" : ""));
+    if (c.pix) p.push("PIX " + c.pix);
+    if (c.titular) p.push("titular " + c.titular);
+    if (c.doc) p.push(c.doc);
+    return p.length ? escHtml(p.join(", ")) : "____";
+  }
+  // Bloco de assinatura opcional do advogado da parte executada (âncora ZapSign <<assadv2>>).
+  function assinaturaAdvExec(adv) {
+    if (!adv || !adv.nome) return "";
+    const l2 = adv.oab ? (/oab/i.test(adv.oab) ? adv.oab : "OAB " + adv.oab) : "";
+    return '<div class="sig">' +
+      '<div class="sig-token">&lt;&lt;assadv2&gt;&gt;</div>' +
+      '<div class="sig-line"></div>' +
+      '<div class="sig-name">' + escHtml(adv.nome) + '</div>' +
+      '<div class="sig-doc">' + escHtml(l2) + '</div>' +
+      '<div class="sig-role">Advogado(a) da parte ré</div></div>';
+  }
+
   function clausula4Judicial(dados) {
     const j = dados.judicial || {};
     const c4 = j.clausula4 || {};
     const mode = c4.mode || "consolidacao";
     if (mode === "sisbajud") {
-      const v = c4.valorBloqueado ? valorCompleto(c4.valorBloqueado) : "____";
-      return {
-        titulo: "Do Sisbajud",
-        corpo:
-          "<p>A parte executada informou que houve o bloqueio do valor de <strong>" + v + "</strong>, por meio do Sistema Sisbajud. Deste modo, a parte exequente não se opõe à liberação do referido valor bloqueado para a executada.</p>" +
-          "<p>Fica pactuado que, caso posteriormente seja constatado bloqueio de valores realizado em data anterior à assinatura deste acordo, em montante superior ao descrito nesta cláusula, as partes deverão protocolar contrato aditivo no prazo de 5 (cinco) dias, a fim de definir a destinação do valor remanescente.</p>"
-      };
+      const total = c4.valorBloqueado ? valorCompleto(c4.valorBloqueado) : "____";
+      const nExeq = Number(c4.levExequente) || 0;
+      const nExec = Number(c4.levExecutado) || 0;
+      const vExeq = nExeq > 0 ? valorCompleto(nExeq) : null;
+      const vExec = nExec > 0 ? valorCompleto(nExec) : null;
+      const contaEx = contaFrase((c4.contaExequente && c4.contaExequente.conta) ? c4.contaExequente : CONTA_EXEQ_PADRAO);
+      const cExec = c4.contaExecutado || {};
+      const contaExec = (cExec.conta || cExec.pix) ? contaFrase(cExec) : null;
+      const itens = [];
+      if (vExeq) itens.push("a quantia de <strong>" + vExeq + "</strong> será levantada em favor da parte <strong>exequente</strong>, a título de amortização do débito ora reconhecido, mediante expedição do competente alvará ou transferência para a conta adiante indicada");
+      if (vExec) itens.push("a quantia de <strong>" + vExec + "</strong> será liberada em favor da parte <strong>executada</strong>" + (contaExec ? ", para a conta bancária adiante indicada" : ", mediante manifestação posterior nos autos, na qual indicará os dados bancários de sua titularidade"));
+      let corpo = "<p>A parte executada informou que houve o bloqueio do valor de <strong>" + total + "</strong>, por meio do Sistema Sisbajud nestes autos.</p>";
+      if (itens.length) {
+        const rot = ["i", "ii"];
+        corpo += "<p>As partes convencionam a seguinte destinação do valor bloqueado: " +
+          itens.map(function (t, i) { return "(" + (rot[i] || (i + 1)) + ") " + t; }).join("; ") +
+          ". Eventual saldo bloqueado remanescente, não abrangido por esta cláusula, será liberado em favor da parte executada mediante manifestação posterior nos autos.</p>";
+      } else {
+        corpo += "<p>As partes ajustam que o valor bloqueado será destinado ao levantamento pela parte exequente, no montante correspondente ao débito ora reconhecido, para a conta adiante indicada, liberando-se o remanescente em favor da parte executada mediante manifestação posterior nos autos.</p>";
+      }
+      corpo += "<p><strong>Dados bancários para levantamento da parte exequente:</strong> " + contaEx + ".</p>";
+      if (contaExec) corpo += "<p><strong>Dados bancários para levantamento da parte executada:</strong> " + contaExec + ".</p>";
+      corpo += "<p>Fica pactuado que, caso posteriormente seja constatado bloqueio de valores realizado em data anterior à assinatura deste acordo, em montante superior ao descrito nesta cláusula, as partes deverão protocolar contrato aditivo no prazo de 5 (cinco) dias, a fim de definir a destinação do valor remanescente.</p>";
+      return { titulo: "Do Sisbajud e destinação dos valores bloqueados", corpo: corpo };
     }
     if (mode === "desistencia") {
       const principal = escHtml(c4.procPrincipal || dados.judicial.numeroProcesso || "____");
@@ -289,13 +336,14 @@
     base.clausula4Titulo = c4.titulo;
     base.clausula4Corpo = c4.corpo;
     base.contatoRe = contatoReJudicial(dados);
+    base.assinaturaAdvExec = assinaturaAdvExec(dados.advogadoExec);
     return base;
   }
 
   // preenche já permitindo HTML nos valores de cláusula 4 / contato (não escapa esses)
   function preencherJudicial(templateHtml, dados) {
     const map = placeholdersJudicial(dados);
-    const rawHtml = { clausula4Corpo: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, frasePagamento: 1, credorQualificacao: 1 };
+    const rawHtml = { clausula4Corpo: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1, frasePagamento: 1, credorQualificacao: 1 };
     return templateHtml.replace(/\{\{(\w+)\}\}/g, function (m, k) {
       if (!Object.prototype.hasOwnProperty.call(map, k)) return m;
       return rawHtml[k] ? String(map[k] == null ? "" : map[k]) : escAttr(map[k]);
@@ -321,7 +369,7 @@
     qualifDevedor, qualifCredor, frasePagamento, placeholders,
     preambuloDevedores, assinaturasDevedores, generoDevedorLabel,
     preencher, carregarTemplate, montarTermoExtrajudicial,
-    enderecamentoJudicial, clausula4Judicial, contatoReJudicial,
+    enderecamentoJudicial, clausula4Judicial, contatoReJudicial, contaFrase, assinaturaAdvExec,
     placeholdersJudicial, preencherJudicial, carregarTemplateJudicial, montarTermoJudicial
   };
 })(typeof window !== "undefined" ? window : globalThis);
