@@ -17194,6 +17194,12 @@ async function quitaToggleCredor(clienteId, on){
   if(ok){ showToast(on?'QuitaFácil ativado para este credor.':'QuitaFácil desligado para este credor.', on?'success':'info');
     if(typeof _detCliId!=='undefined' && _detCliId===clienteId && typeof renderClienteDetalhe==='function') renderClienteDetalhe(); }
 }
+// Opt-in do PORTAL (boleto real ao devedor) — default OFF, trava do piloto.
+async function quitaToggleDisparo(clienteId, on){
+  const ok=await _quitaSalvarCredorCfg(clienteId, { disparoAtivo: !!on });
+  if(ok){ showToast(on?'Portal QuitaFácil LIGADO para este credor — devedores verão o boleto real.':'Portal QuitaFácil desligado para este credor.', on?'success':'info');
+    if(typeof _detCliId!=='undefined' && _detCliId===clienteId && typeof renderClienteDetalhe==='function') renderClienteDetalhe(); }
+}
 async function quitaSetLimiteCredor(clienteId, v){
   const n=(v===''||v==null)?null:Math.max(0,+v||0);
   const ok=await _quitaSalvarCredorCfg(clienteId, { limite: (n&&n>0)?n:null });
@@ -22535,6 +22541,80 @@ function cpSalvarNotif(){
 }
 
 // ── PORTAL DEVEDOR ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════
+// QuitaFácil — autonegociação no portal do devedor (ONDA 2 · ESQUELETO)
+// A oferta AUTORITATIVA (elegibilidade + desconto/parcelas por credor) vem da
+// RPC `quita_oferta` (migration 20260717_quita_oferta.sql — NÃO aplicada ainda).
+// Enquanto a RPC não existe, cai no cálculo client-side com a política GLOBAL
+// padrão (10% à vista · até 12x · mín. R$150). O fechamento real (cria acordo +
+// boleto/PIX Asaas) fica na edge function `quita-fechar` (NÃO deployada). Por isso
+// o botão degrada com uma mensagem amigável até o backend entrar no ar.
+// ──────────────────────────────────────────────────────────────────────────
+async function _quitaPortalOferta(supa, sess, valorAtual){
+  // 1) fonte autoritativa (server-side): elegibilidade real + política do credor.
+  if(supa && sess){
+    try{
+      const { data, error } = await supa.rpc('quita_oferta', { p_sessao_token: sess });
+      if(!error && data && data.ok){
+        return { fonte:'server', elegivel:!!data.elegivel, valor:Number(data.valor_atual)||valorAtual,
+          descAvista:Number(data.desc_avista), maxParcelas:Number(data.max_parcelas),
+          parcelaMin:Number(data.parcela_min), cobrancaId:data.cobranca_id||null };
+      }
+    }catch(_){ /* RPC ainda não aplicada → fallback local */ }
+  }
+  // 2) fallback client-side (esqueleto): política global padrão, elegível por valor.
+  const elegivel = valorAtual>0 && valorAtual <= (typeof QUITA_LIMITE_DEFAULT!=='undefined'?QUITA_LIMITE_DEFAULT:500);
+  return { fonte:'local', elegivel, valor:valorAtual,
+    descAvista:(typeof QUITA_DESC_AVISTA_DEFAULT!=='undefined'?QUITA_DESC_AVISTA_DEFAULT:10),
+    maxParcelas:(typeof QUITA_MAX_PARCELAS_DEFAULT!=='undefined'?QUITA_MAX_PARCELAS_DEFAULT:12),
+    parcelaMin:(typeof QUITA_PARCELA_MIN_DEFAULT!=='undefined'?QUITA_PARCELA_MIN_DEFAULT:150), cobrancaId:null };
+}
+function _quitaPortalMaxParcelas(of){ return Math.max(1, Math.min(of.maxParcelas||12, Math.floor((of.valor||0)/(of.parcelaMin||150)) || 1)); }
+function _quitaPortalBloco(of){
+  // Real-money: só expõe a oferta quando o SERVIDOR autoriza (quita_oferta, que
+  // exige o opt-in disparoAtivo do credor). O fallback local nunca abre boleto.
+  if(!of || !of.elegivel || of.fonte!=='server') return '';
+  const avista = Math.max(0, (of.valor||0) * (1 - (of.descAvista||0)/100));
+  const maxP = _quitaPortalMaxParcelas(of);
+  let opts = '';
+  for(let n=1;n<=maxP;n++){ opts += `<option value="${n}">${n}x de ${fmtR((of.valor||0)/n)}${n===1?' — à vista (sem desconto)':''}</option>`; }
+  return `<div style="background:#fff;border:1px solid #E8E4DF;border-radius:12px;padding:24px 28px;margin-bottom:16px;">
+    <div style="font-family:'Inter',sans-serif;font-size:12px;font-weight:600;color:#01205F;margin-bottom:4px;">Resolva agora, sem burocracia</div>
+    <div style="font-family:'Newsreader',Georgia,serif;font-size:14px;color:#6B5E52;line-height:1.6;margin-bottom:18px;">Escolha como prefere regularizar. O pagamento é gerado na hora, sem falar com ninguém.</div>
+    <div style="border:1px solid #CFE6D6;background:#F2FAF4;border-radius:10px;padding:16px 18px;margin-bottom:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+        <div>
+          <div style="font-family:'Inter',sans-serif;font-size:12px;color:#3F6B47;">À vista${of.descAvista?` · ${of.descAvista}% de desconto`:''}</div>
+          <div style="font-family:'Playfair Display',Georgia,serif;font-size:28px;font-weight:700;color:#1F7A3D;line-height:1.1;">${fmtR(avista)}</div>
+        </div>
+        <button onclick="quitaPortalFechar('avista',1)" style="padding:12px 22px;background:#1F7A3D;color:#fff;border:none;border-radius:8px;font-family:'Inter',sans-serif;font-size:13.5px;font-weight:600;cursor:pointer;">Pagar à vista</button>
+      </div>
+    </div>
+    <div style="border:1px solid #E8E4DF;border-radius:10px;padding:16px 18px;">
+      <div style="font-family:'Inter',sans-serif;font-size:12px;color:#8C7E72;margin-bottom:9px;">Ou parcele em até ${maxP}x <span style="color:#B08968;">(parcela mínima ${fmtR(of.parcelaMin)})</span></div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+        <select id="quita-parcelas" style="padding:10px 12px;border:1px solid #E8E4DF;border-radius:8px;font-family:'Inter',sans-serif;font-size:13.5px;background:#fff;min-width:180px;">${opts}</select>
+        <button onclick="quitaPortalFechar('parcelado', +(document.getElementById('quita-parcelas')||{}).value||1)" style="padding:12px 22px;background:#01205F;color:#fff;border:none;border-radius:8px;font-family:'Inter',sans-serif;font-size:13.5px;font-weight:600;cursor:pointer;">Gerar parcelamento</button>
+      </div>
+    </div>
+    ${of.fonte==='local'?`<div style="font-family:'Inter',sans-serif;font-size:10.5px;color:#B08968;margin-top:12px;">⚙ Prévia — a geração de boleto/PIX está em finalização.</div>`:''}
+  </div>`;
+}
+async function quitaPortalFechar(modo, parcelas){
+  // ESQUELETO: fechamento real (cria acordo + boleto/PIX Asaas) na edge function
+  // `quita-fechar` (NÃO deployada). Aqui só chamamos e degradamos com elegância.
+  const sess = currentUser && currentUser.portalSessao;
+  const supa = getSupabase();
+  try{
+    if(!supa || !sess) throw new Error('sem-sessao');
+    const { data, error } = await supa.functions.invoke('quita-fechar', { body:{ sessao: sess, modo, parcelas } });
+    if(error) throw error;
+    if(data && data.ok && data.link){ window.location.href = data.link; return; }
+    throw new Error((data && data.erro) || 'indisponivel');
+  }catch(_){
+    showToast('Estamos finalizando esta opção de pagamento — em instantes você conclui por aqui. Se preferir, fale conosco no WhatsApp.', 'info');
+  }
+}
 async function renderPortalDevedor(){
   if(!currentUser || currentUser.tipo!=='devedor') return;
   const body = document.getElementById('portalDevedorBody');
@@ -22580,6 +22660,8 @@ async function renderPortalDevedor(){
   }
   const primeiroNome = (nome||'').split(' ')[0];
   const waNr = DB.config?.whatsapp?.numero?.replace(/\D/g,'');
+  // QuitaFácil (Onda 2 · esqueleto): oferta de autonegociação p/ dívidas pequenas.
+  const quitaOf = await _quitaPortalOferta(supa, sess, valor);
 
   body.innerHTML = `
     <div style="margin-bottom:28px;">
@@ -22593,6 +22675,8 @@ async function renderPortalDevedor(){
       <div style="margin-top:14px;">${statusBadgeHtml(statusTxt)}</div>
       ${vencimento?`<div style="font-family:'Newsreader',Georgia,serif;font-size:13px;color:#8C7E72;margin-top:8px;">Vencimento original: ${escHtml(vencimento)}</div>`:''}
     </div>
+
+    ${_quitaPortalBloco(quitaOf)}
 
     ${acordos.length>0?`
     <div style="background:#fff;border:1px solid #E8E4DF;border-radius:12px;padding:24px 28px;margin-bottom:16px;">
@@ -38264,7 +38348,15 @@ function _quitaPanel(cli){
       </div>
       <div style="font-size:10.5px;color:var(--text-4);margin-top:6px;">Vazio = usa o padrão (${QUITA_DESC_AVISTA_DEFAULT}% à vista · até ${QUITA_MAX_PARCELAS_DEFAULT}x · mín. ${fmtR(QUITA_PARCELA_MIN_DEFAULT)}).</div>
     </div>
-    <div style="font-size:11px;color:var(--text-3);margin-top:10px;">${ativo?`${elegiveis} cobrança${elegiveis!==1?'s':''} elegíve${elegiveis!==1?'is':'l'} hoje (capital ≤ ${fmtR(limite)}). Enquadramento é automático; o disparo ao devedor é opt-in e entra na próxima etapa.`:'Trilha desligada — nenhuma dívida deste credor entra na autonegociação.'}</div>
+    <div style="margin-top:12px;padding-top:10px;border-top:1px dashed var(--border);${ativo?'':'opacity:.5;pointer-events:none;'}">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+        <div><span style="font-size:12.5px;font-weight:600;color:var(--text);">Oferecer no portal do devedor</span>
+          <div style="font-size:11px;color:var(--text-3);">Liga a autonegociação REAL (boleto/PIX) p/ este credor. Desligado = só aparece no CRM.</div></div>
+        <label style="position:relative;display:inline-flex;cursor:pointer;"><input type="checkbox" ${cfg.disparoAtivo?'checked':''} onchange="quitaToggleDisparo('${cli.id}', this.checked)" style="width:16px;height:16px;cursor:pointer;"></label>
+      </div>
+      ${cfg.disparoAtivo?`<div style="font-size:10.5px;color:#3F6B47;margin-top:6px;font-weight:600;">🟢 No ar para os devedores deste credor.</div>`:''}
+    </div>
+    <div style="font-size:11px;color:var(--text-3);margin-top:10px;">${ativo?`${elegiveis} cobrança${elegiveis!==1?'s':''} elegíve${elegiveis!==1?'is':'l'} hoje (capital ≤ ${fmtR(limite)}). Enquadramento é automático; o portal só expõe boleto real se o interruptor acima estiver ligado.`:'Trilha desligada — nenhuma dívida deste credor entra na autonegociação.'}</div>
   </div>`;
 }
 function _relAutoPanel(cli){
