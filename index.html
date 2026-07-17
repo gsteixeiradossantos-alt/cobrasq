@@ -4550,6 +4550,43 @@ body:not(.cobr-cream) .cob-stpop, .dark .cob-stpop { background: var(--card); }
 </div>
 
 <!-- ════════════════════════════════════════════════════════════
+     MODAL: ENVIO PARA O GRUPO — um envelope ZapSign POR EMPRESA do
+     grupo econômico. Cada representante assina só os documentos da
+     sua empresa; os envios ficam rastreados juntos (mesmo título de
+     lote). O ZapSign obriga que todo signatário de um link assine
+     TODOS os docs daquele link — por isso um link por empresa.
+     ════════════════════════════════════════════════════════════ -->
+<div id="modal-assinatura-grupo" class="overlay">
+  <div class="modal" style="max-width:600px;">
+    <div class="modal-header">
+      <span class="modal-title">Enviar para o grupo</span>
+      <button class="modal-close" onclick="closeModal('modal-assinatura-grupo')">✕</button>
+    </div>
+    <div class="modal-body" id="ag-body" style="padding:20px;max-height:80vh;overflow-y:auto;">
+      <div class="form-group">
+        <label class="form-label">Grupo econômico <span style="color:var(--danger);">*</span></label>
+        <select id="ag-grupo" class="form-input" onchange="_agSelecionarGrupo()">
+          <option value="">Carregando grupos…</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Título do envio</label>
+        <input type="text" id="ag-titulo" class="form-input" placeholder="Ex.: Termo de cessão — Grupo" autocomplete="off">
+        <div style="font-size:11px;color:var(--text-3);margin-top:4px;">Aparece no histórico de cada empresa. Se vazio, usa "Documentos".</div>
+      </div>
+      <div id="ag-empresas" style="margin-top:4px;"></div>
+      <div style="font-size:11.5px;color:var(--text-3);background:var(--surface-2);border-radius:var(--radius-sm);padding:10px 12px;margin-top:12px;">
+        Cada empresa recebe <b>um link próprio</b>: o representante dela assina apenas os documentos da sua empresa. Empresas sem PDF anexado são ignoradas.
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-assinatura-grupo')">Cancelar</button>
+      <button class="btn btn-primary" id="ag-enviar-btn" onclick="enviarAssinaturaGrupo()" disabled>Enviar para o grupo</button>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════
      MODAL: GERAR MINUTA v2 — wizard multi-step
      ════════════════════════════════════════════════════════════ -->
 <!-- ════════════════════════════════════════════════════════════
@@ -36477,7 +36514,10 @@ async function renderAssinaturas(){
         <h1 class="cob-h1">Assinaturas</h1>
         <div class="cob-h1-sub">Envie qualquer PDF (procuração, recibo, declaração…) para assinatura via ZapSign — sem cadastrar nada no painel do ZapSign.</div>
       </div>
-      <button class="btn btn-primary" onclick="abrirModalAssinaturaAvulsa()">+ Novo envio</button>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-ghost" onclick="abrirModalAssinaturaGrupo()">Enviar para o grupo</button>
+        <button class="btn btn-primary" onclick="abrirModalAssinaturaAvulsa()">+ Novo envio</button>
+      </div>
     </div>`;
   el.innerHTML = head + `<div id="aav-lista" style="padding:4px 0;color:var(--text-3);font-size:13px;">Carregando envios…</div>`;
 
@@ -36758,6 +36798,195 @@ async function aavAtualizarStatus(id){
     _aavDrawLista();
     showToast('Status: '+zsStatusLabel(novo),'success');
   }catch(e){ showToast(traduzirErro(e.message||String(e)),'danger'); }
+}
+
+// ════════════════════════════════════════════════════════════
+// ENVIO PARA O GRUPO — um envelope ZapSign POR EMPRESA do grupo
+// econômico. O ZapSign obriga que todo signatário de um link assine
+// TODOS os docs daquele link; por isso cada empresa recebe um link
+// próprio (seu representante assina só os docs dela). Reaproveita a
+// maquinaria de assinaturas avulsas: cada empresa vira uma linha
+// normal em assinaturas_avulsas, amarradas pelo título do lote.
+// ════════════════════════════════════════════════════════════
+let _agEmpresas = [];     // [{id,nome,fantasia,doc,tel}] do grupo selecionado
+let _agResultados = [];   // resultado do último envio (p/ o modal de status)
+
+async function abrirModalAssinaturaGrupo(){
+  if(!DB.config.zapsignToken){ showToast('Configure o ZapSign em Configurações → Integrações.','warning'); return; }
+  _agEmpresas = [];
+  const t=document.getElementById('ag-titulo'); if(t) t.value='';
+  const cont=document.getElementById('ag-empresas'); if(cont) cont.innerHTML='';
+  const btn=document.getElementById('ag-enviar-btn'); if(btn){ btn.disabled=true; btn.textContent='Enviar para o grupo'; }
+  const sel=document.getElementById('ag-grupo');
+  if(sel) sel.innerHTML='<option value="">Carregando grupos…</option>';
+  openModal('modal-assinatura-grupo');
+  const supa=getSupabase();
+  if(!supa){ if(sel) sel.innerHTML='<option value="">Faça login para carregar os grupos.</option>'; return; }
+  try{
+    const { data, error } = await supa.from('grupos_economicos').select('id,nome').order('nome');
+    if(error) throw error;
+    const grupos=data||[];
+    if(!grupos.length){ if(sel) sel.innerHTML='<option value="">Nenhum grupo econômico cadastrado.</option>'; return; }
+    if(sel) sel.innerHTML='<option value="">Selecione…</option>'+grupos.map(g=>`<option value="${escHtml(g.id)}">${escHtml(g.nome)}</option>`).join('');
+  }catch(e){
+    if(sel) sel.innerHTML='<option value="">Erro ao carregar grupos.</option>';
+    showToast(traduzirErro(e.message||String(e)),'danger');
+  }
+}
+
+async function _agSelecionarGrupo(){
+  const gid=(document.getElementById('ag-grupo')||{}).value||'';
+  const cont=document.getElementById('ag-empresas');
+  const btn=document.getElementById('ag-enviar-btn');
+  _agEmpresas=[];
+  if(btn) btn.disabled=true;
+  if(!cont) return;
+  if(!gid){ cont.innerHTML=''; return; }
+  cont.innerHTML='<div style="padding:10px 0;color:var(--text-3);font-size:12.5px;">Carregando empresas do grupo…</div>';
+  const supa=getSupabase();
+  if(!supa){ cont.innerHTML='<div style="padding:10px 0;color:var(--danger);font-size:12.5px;">Faça login.</div>'; return; }
+  try{
+    const { data, error } = await supa.from('clientes')
+      .select('id,nome,nome_fantasia,doc,telefone')
+      .eq('grupo_economico_id',gid).eq('arquivado',false).order('nome');
+    if(error) throw error;
+    _agEmpresas=(data||[]).map(c=>({ id:c.id, nome:c.nome||c.nome_fantasia||'Empresa', fantasia:c.nome_fantasia||'', doc:c.doc||'', tel:String(c.telefone||'').replace(/\D/g,'') }));
+    if(!_agEmpresas.length){ cont.innerHTML='<div style="padding:10px 0;color:var(--text-3);font-size:12.5px;">Esse grupo não tem empresas ativas.</div>'; return; }
+    cont.innerHTML=_agEmpresas.map((e,i)=>`
+      <div style="border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin-bottom:10px;background:var(--surface);">
+        <div style="font-size:13px;font-weight:700;margin-bottom:8px;">${escHtml(e.nome)}${e.doc?` <span style="color:var(--text-3);font-weight:500;font-size:11px;">${escHtml(e.doc)}</span>`:''}</div>
+        <div class="form-group" style="margin-bottom:8px;">
+          <label class="form-label" style="font-size:11.5px;">Quem assina <span style="color:var(--danger);">*</span></label>
+          <input type="text" id="ag-nome-${i}" class="form-input" placeholder="Nome do representante" autocomplete="off">
+        </div>
+        <div style="display:flex;gap:10px;">
+          <div class="form-group" style="flex:1;margin-bottom:8px;">
+            <label class="form-label" style="font-size:11.5px;">WhatsApp</label>
+            <input type="text" id="ag-tel-${i}" class="form-input" value="${e.tel?escHtml(e.tel):''}" placeholder="(46) 9 9999-9999" autocomplete="off">
+          </div>
+          <div class="form-group" style="flex:1;margin-bottom:8px;">
+            <label class="form-label" style="font-size:11.5px;">E-mail</label>
+            <input type="email" id="ag-email-${i}" class="form-input" placeholder="opcional" autocomplete="off">
+          </div>
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label" style="font-size:11.5px;">PDF(s) desta empresa</label>
+          <input type="file" id="ag-files-${i}" class="form-input" accept="application/pdf" multiple>
+        </div>
+      </div>`).join('');
+    if(btn) btn.disabled=false;
+  }catch(e){
+    cont.innerHTML=`<div style="padding:10px 0;color:var(--danger);font-size:12.5px;">Não consegui carregar: ${escHtml(traduzirErro(e.message||String(e)))}</div>`;
+  }
+}
+
+async function enviarAssinaturaGrupo(){
+  if(!_agEmpresas.length){ showToast('Selecione um grupo.','warning'); return; }
+  const tituloLote=(document.getElementById('ag-titulo').value||'').trim();
+  // Monta a lista de empresas com PDF anexado + valida signatário
+  const envios=[];
+  for(let i=0;i<_agEmpresas.length;i++){
+    const files=Array.from((document.getElementById('ag-files-'+i)||{}).files||[]);
+    if(!files.length) continue;                          // empresa sem PDF → ignora
+    const nome=(document.getElementById('ag-nome-'+i).value||'').trim();
+    if(!nome){ showToast(`Informe quem assina por ${_agEmpresas[i].nome}.`,'warning'); return; }
+    for(const f of files){
+      if(f.type && f.type!=='application/pdf' && !/\.pdf$/i.test(f.name)){ showToast('Só PDF é aceito: '+f.name,'warning'); return; }
+      if(f.size>20*1024*1024){ showToast('Arquivo acima de 20 MB: '+f.name,'warning'); return; }
+    }
+    envios.push({ empresa:_agEmpresas[i], nome,
+      tel:(document.getElementById('ag-tel-'+i).value||'').replace(/\D/g,''),
+      email:(document.getElementById('ag-email-'+i).value||'').trim(), files });
+  }
+  if(!envios.length){ showToast('Anexe ao menos um PDF em alguma empresa.','warning'); return; }
+
+  const btn=document.getElementById('ag-enviar-btn');
+  if(btn){ btn.disabled=true; btn.textContent='Enviando…'; }
+  const supa=getSupabase();
+  let uid0='staff';
+  if(supa){ try{ const { data:ud }=await supa.auth.getUser(); uid0=(ud&&ud.user&&ud.user.id)||'staff'; }catch(_){} }
+
+  _agResultados=[];
+  for(const env of envios){
+    const titulo=(tituloLote?tituloLote+' — ':'')+env.empresa.nome;
+    try{
+      const b64s=[]; for(const f of env.files) b64s.push(await _aavFileToB64(f));
+      const payload={ name:titulo,
+        signers:[{ name:env.nome, email:env.email||'', phone_country:'55', phone_number:env.tel||'',
+          send_automatic_email:!!env.email, send_automatic_whatsapp:!!env.tel, auth_mode:'assinaturaTela' }],
+        base64_pdf:b64s[0], lang:'pt-br' };
+      const result=await ZapSignAPI.createDoc(payload);
+      const docToken=result.token;
+      const signerToken=result.signers?.[0]?.token;
+      const signerLink=result.signers?.[0]?.sign_url || (signerToken?`https://app.zapsign.com.br/verificar/${signerToken}`:'');
+      for(let i=1;i<b64s.length;i++){
+        try{ await ZapSignAPI.addExtraDoc(docToken,{ base64_pdf:b64s[i], name:env.files[i].name.replace(/\.pdf$/i,'') }); }
+        catch(e){ console.warn('addExtraDoc falhou:',e); }
+      }
+      // arquiva os PDFs originais no bucket (best-effort)
+      const storagePaths=[];
+      if(supa){
+        for(const f of env.files){
+          try{
+            const nomeSeguro=f.name.replace(/[^a-zA-Z0-9._-]/g,'_');
+            const path=`avulsos/${uid0}/${Date.now()}_${nomeSeguro}`;
+            const { error:upErr }=await supa.storage.from('documentos').upload(path,f,{ contentType:'application/pdf', upsert:false });
+            if(!upErr) storagePaths.push(path);
+          }catch(_){}
+        }
+      }
+      // registra no histórico (mesma tabela dos avulsos)
+      let rowId=null;
+      if(supa){
+        const { data:insRow }=await supa.from('assinaturas_avulsas').insert({
+          titulo, signer_nome:env.nome, signer_tel:env.tel||null, signer_email:env.email||null,
+          n_docs:env.files.length, zapsign_doc_token:docToken, zapsign_signer_token:signerToken||null,
+          signer_link:signerLink||null, status:'PENDING', storage_paths:storagePaths
+        }).select('id').single();
+        rowId=insRow&&insRow.id;
+      }
+      // WhatsApp (best-effort, mesma edge dos avulsos)
+      let wa='sem_tel';
+      if(env.tel && DB.config.zapiInstanceId){
+        const r=await _aavEnviarWhats(env.tel,_aavMontarMsg(env.nome,titulo,signerLink));
+        if(r.ok){ wa='enviado'; await _aavSetWaStatus(rowId,'enviado',r.messageId); }
+        else{ wa=(r.code==='numero_sem_whatsapp')?'sem_whatsapp':'falhou'; await _aavSetWaStatus(rowId,wa); }
+      }
+      _agResultados.push({ empresa:env.empresa.nome, nome:env.nome, link:signerLink, wa, ok:true });
+    }catch(e){
+      _agResultados.push({ empresa:env.empresa.nome, nome:env.nome, link:'', wa:'', ok:false, erro:traduzirErro(e.message||String(e)) });
+    }
+  }
+
+  if(typeof logAtividade==='function') try{ logAtividade('Envio de grupo para assinatura', `${_agResultados.filter(r=>r.ok).length}/${_agResultados.length} empresa(s)`); }catch(_){}
+  closeModal('modal-assinatura-grupo');
+  if(btn){ btn.disabled=false; btn.textContent='Enviar para o grupo'; }
+  _agMostrarResultado();
+  renderAssinaturas();
+}
+
+function _agMostrarResultado(){
+  const okN=_agResultados.filter(r=>r.ok).length;
+  const waMap={ enviado:'✓ Link enviado por WhatsApp', sem_whatsapp:'📵 Número sem WhatsApp — envie o link manualmente', falhou:'✗ WhatsApp falhou — envie o link manualmente', sem_tel:'Sem telefone/Z-API — copie o link', '':'' };
+  const cards=_agResultados.map(r=>{
+    if(!r.ok) return `<div style="border:1px solid var(--danger);border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:8px;">
+      <div style="font-size:12.5px;font-weight:700;">${escHtml(r.empresa)}</div>
+      <div style="font-size:11.5px;color:var(--danger);">Falhou: ${escHtml(r.erro||'erro')}</div></div>`;
+    return `<div style="background:var(--surface-2);border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:8px;">
+      <div style="font-size:12.5px;font-weight:700;margin-bottom:4px;">${escHtml(r.empresa)} <span style="color:var(--text-3);font-weight:500;">— ${escHtml(r.nome)}</span></div>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <input type="text" value="${escHtml(r.link)}" readonly style="flex:1;font-size:11px;padding:5px 7px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);font-family:var(--font-mono);" onclick="this.select()">
+        <button class="btn btn-primary btn-sm" onclick="navigator.clipboard.writeText('${escHtml(r.link)}');showToast('Link copiado.','success');">Copiar</button>
+      </div>
+      <div style="font-size:11px;color:var(--text-3);margin-top:4px;">${waMap[r.wa]||''}</div></div>`;
+  }).join('');
+  document.getElementById('mzs-body').innerHTML=`
+    <div style="padding:4px 0 8px;">
+      <div style="font-size:13px;font-weight:700;color:var(--success);margin-bottom:10px;">${okN} de ${_agResultados.length} empresa(s) enviada(s).</div>
+      ${cards}
+    </div>`;
+  document.getElementById('mzs-footer').innerHTML=`<button class="btn btn-ghost" onclick="closeModal('modal-zapsign-status')">Fechar</button>`;
+  openModal('modal-zapsign-status');
 }
 
 // Renderiza aba Documentos/ZapSign no drawer
