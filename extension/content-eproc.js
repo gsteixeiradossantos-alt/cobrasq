@@ -863,8 +863,18 @@
     const naTabela = () => document.querySelectorAll('#tbDocumentosCadastradas tbody tr').length;
     if (naTabela() < n) {
       if (uploadsProntos() === 0) {
-        const input = qFirst(IDS.anexo);
-        if (!input) return pausar(c, 'Etapa 5: uploader não encontrado');
+        const acharUploader = () => qFirst(IDS.anexo) ||
+          document.querySelector('#divInfDocumentos input[type="file"], #containerDocumentos input[type="file"], .qq-uploader input[type="file"], input.qq-upload-input, input[type="file"]');
+        let input = acharUploader();
+        if (!input) {
+          // A tela pode iniciar SEM slot de arquivo — o campo só nasce ao clicar
+          // "Adicionar mais Documentos" (showInput). Clica e espera o uploader surgir.
+          const add = document.querySelector('#lblAdicionarDocumento') ||
+            acharBotao(['adicionar mais documentos', 'adicionar documento', 'adicionar arquivo', 'escolher arquivo']);
+          if (add) { progresso(c, 'Etapa 5: abrindo o campo de arquivo…'); clicar(add); }
+          input = await esperar(acharUploader, 12000, 400);
+        }
+        if (!input) return pausar(c, 'Etapa 5: não achei o campo de <b>anexar arquivo</b> — confira se a tela de Documentos carregou; anexe 1 PDF manualmente e clique Continuar. (se for eproc federal/JFPR, me avise)');
         progresso(c, 'Etapa 5: baixando e anexando ' + n + ' PDF(s)…');
         const dt = new DataTransfer();
         for (const d of c.docs) dt.items.add(await pedirDoc(c.id, d.idx));
