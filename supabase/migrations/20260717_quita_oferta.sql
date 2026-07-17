@@ -99,6 +99,7 @@ begin
   return jsonb_build_object(
     'ok', true,
     'elegivel', v_elegivel,
+    'devedor_id', v_devedor_id,   -- o próprio devedor da sessão (usado pelo quita-fechar)
     'cobranca_id', v_cob.id,
     'valor_atual', v_cob.valor_atual,
     'capital', v_capital,
