@@ -49,13 +49,29 @@ function ehTJPR(d) {
   return d && d[13] === TJPR_SEGMENTO && d.slice(14, 16) === TJPR_TRIBUNAL;
 }
 
+// Timeout por chamada ao DataJud — sem isto, uma resposta lenta/travada do órgão
+// público prende o fetch até o limite duro da function (visto em produção: "Task
+// timed out after 300 seconds" em vez de um erro tratável por processo).
+const DATAJUD_TIMEOUT_MS = 20000;
+
 // Consulta o DataJud por número de processo (20 dígitos). Retorna o _source ou null.
 async function consultarDataJud(apiKey, digitos) {
-  const r = await fetch(DATAJUD_TJPR_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `APIKey ${apiKey}` },
-    body: JSON.stringify({ query: { match: { numeroProcesso: digitos } }, size: 1 }),
-  });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), DATAJUD_TIMEOUT_MS);
+  let r;
+  try {
+    r = await fetch(DATAJUD_TJPR_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `APIKey ${apiKey}` },
+      body: JSON.stringify({ query: { match: { numeroProcesso: digitos } }, size: 1 }),
+      signal: ctrl.signal,
+    });
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new Error(`DataJud timeout (${DATAJUD_TIMEOUT_MS}ms)`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!r.ok) {
     const t = await r.text().catch(() => '');
     throw new Error(`DataJud ${r.status}: ${t.slice(0, 200)}`);
@@ -105,9 +121,31 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    const totais = { processos: alvos.length, consultados: 0, novos: 0, backfill: 0, sem_dados: 0, erros: 0, eventos: 0 };
+    // Pré-check da invariante "cobranca.id = devedor.id" (ver CLAUDE.md, dual-write
+    // blob+relacional): se ela quebrou pra algum caso (cobranca sem devedor gêmeo),
+    // o insert em proc_intimacoes falharia todo dia com FK violation (23503). Filtra
+    // esses casos ANTES de consultar o DataJud pra não gastar a chamada externa à toa,
+    // e reporta como "sem_devedor" (dado a corrigir) em vez de "erro" (ruído recorrente).
+    const idsAlvo = alvos.map((a) => a.cobrancaId);
+    const devedoresExistentes = idsAlvo.length
+      ? await sbFetch(`devedores?id=in.(${idsAlvo.join(',')})&select=id`)
+      : [];
+    const devedorIdsOk = new Set((Array.isArray(devedoresExistentes) ? devedoresExistentes : []).map((d) => d.id));
+    const alvosOrfaos = alvos.filter((a) => !devedorIdsOk.has(a.cobrancaId));
+    const alvosValidos = alvos.filter((a) => devedorIdsOk.has(a.cobrancaId));
+    if (alvosOrfaos.length) {
+      console.warn(
+        '[cron-datajud] cobranças sem devedor relacional (invariante quebrada, não sincronizadas):',
+        alvosOrfaos.map((a) => `${a.formatado} (cobranca ${a.cobrancaId})`).join(', ')
+      );
+    }
 
-    for (const alvo of alvos) {
+    const totais = {
+      processos: alvosValidos.length, consultados: 0, novos: 0, backfill: 0,
+      sem_dados: 0, erros: 0, eventos: 0, sem_devedor: alvosOrfaos.length,
+    };
+
+    for (const alvo of alvosValidos) {
       try {
         const source = await consultarDataJud(apiKey, alvo.digitos);
         totais.consultados++;
