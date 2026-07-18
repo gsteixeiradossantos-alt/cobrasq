@@ -75,6 +75,7 @@ function diasAte(dataStr) {
 
 const { sendEmail, emailDisponivel } = require('./_email.js');
 const { sendSms, smsDisponivel } = require('./_sms.js');
+const { incluirNegativacao, excluirNegativacao } = require('./_serasa.js');
 
 // Canal disponível? Permite à régua PULAR o passo sem reivindicar envio quando o canal
 // não tem provedor configurado (e-mail sem RESEND_API_KEY, SMS sem gateway).
@@ -894,6 +895,86 @@ async function reguaQuita({ dry, DB }) {
   return out;
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// NEGATIVAÇÃO — Onda 4 Parte B. Processa a fila aprovada pelo gestor (Parte A):
+//   aprovado → inclui no Serasa → negativado (guarda transactionId)
+//   negativado + acordo QuitaFácil PAGO → exclui (baixa obrigatória) → baixado
+// GATE: SERASA_LIVE=1 no ambiente (sem ela, roda em dry — não toca no bureau).
+// A chamada real ao Serasa vive no api/_serasa.js (bloco "ADAPTAR AO CONTRATO REAL").
+// ════════════════════════════════════════════════════════════════════════════
+function _serasaEndereco(dev) {
+  const ec = (dev && dev.endereco_crm) || {};
+  const rua = String(ec.rua || ec.logradouro || dev.endereco || '').trim();
+  if (!rua) return undefined;
+  return {
+    street: rua, number: String(dev.numero || ec.numero || ''),
+    district: String(dev.bairro || ec.bairro || ''),
+    city: String(dev.cidade || ''), state: String(dev.uf || ''),
+    zip: String(dev.cep || ec.cep || '').replace(/\D/g, ''),
+  };
+}
+
+async function processarNegativacoes({ dry }) {
+  const out = { incluidos: 0, baixados: 0, pendentes: 0, falhas: 0, itens: [] };
+  const live = process.env.SERASA_LIVE === '1';
+  out.live = live;
+  const efetivar = live && !dry;
+  const credorCnpj = {}; // cache cliente_id → CNPJ
+
+  // 1) INCLUSÕES — cobranças aprovadas na fila (aval humano da Parte A).
+  let aprovadas = [];
+  try {
+    aprovadas = await sbFetch(`cobrancas?metadata->quitaNegativacao->>status=eq.aprovado&select=id,cliente_id,valor_atual,valor_orig,vencimento,metadata,cobranca_partes(principal,devedores(id,nome,doc,cep,numero,bairro,cidade,uf,endereco,endereco_crm))`);
+  } catch (e) { aprovadas = []; }
+  for (const c of (aprovadas || [])) {
+    const parte = (c.cobranca_partes || []).find(p => p.principal) || (c.cobranca_partes || [])[0] || {};
+    const dev = parte.devedores;
+    if (!dev) continue;
+    if (!efetivar) { out.itens.push({ cob: c.id, acao: 'incluir', status: 'dry' }); continue; }
+    if (credorCnpj[c.cliente_id] === undefined) {
+      try { const cl = await sbFetch(`clientes?id=eq.${c.cliente_id}&select=doc`); credorCnpj[c.cliente_id] = (cl && cl[0] && cl[0].doc) || ''; } catch (_) { credorCnpj[c.cliente_id] = ''; }
+    }
+    const res = await incluirNegativacao({
+      credorCnpj: credorCnpj[c.cliente_id], devedorDoc: dev.doc, devedorNome: dev.nome,
+      valor: +c.valor_atual || +c.valor_orig || 0, vencimento: String(c.vencimento || '').slice(0, 10),
+      cobrancaId: c.id, endereco: _serasaEndereco(dev),
+    });
+    if (res.pendente) { out.pendentes++; out.itens.push({ cob: c.id, acao: 'incluir', pendente: res.pendente }); continue; }
+    if (res.ok) {
+      const meta = Object.assign({}, c.metadata || {});
+      meta.quitaNegativacao = Object.assign({}, meta.quitaNegativacao || {}, { status: 'negativado', negativado_em: new Date().toISOString().slice(0, 10), transactionId: res.transactionId || null });
+      await sbFetch(`cobrancas?id=eq.${c.id}`, { method: 'PATCH', body: JSON.stringify({ metadata: meta }) }).catch(() => {});
+      out.incluidos++; out.itens.push({ cob: c.id, acao: 'incluir', status: 'negativado', tx: res.transactionId });
+    } else { out.falhas++; out.itens.push({ cob: c.id, acao: 'incluir', erro: res.erro }); }
+  }
+
+  // 2) BAIXAS — negativado cujo acordo QuitaFácil está PAGO (exclusão obrigatória).
+  let negativados = [];
+  try {
+    negativados = await sbFetch(`cobrancas?metadata->quitaNegativacao->>status=eq.negativado&select=id,metadata,cobranca_partes(principal,devedores(doc))`);
+  } catch (e) { negativados = []; }
+  for (const c of (negativados || [])) {
+    let pago = false;
+    try {
+      const acs = await sbFetch(`acordos?cobranca_id=eq.${c.id}&metadata->>origem=eq.quitafacil&select=parcelas`);
+      pago = (acs || []).some(a => Array.isArray(a.parcelas) && a.parcelas.length && a.parcelas.every(p => p && p.pago));
+    } catch (_) { }
+    if (!pago) continue;
+    if (!efetivar) { out.itens.push({ cob: c.id, acao: 'baixar', status: 'dry' }); continue; }
+    const parte = (c.cobranca_partes || []).find(p => p.principal) || (c.cobranca_partes || [])[0] || {};
+    const nz = (c.metadata && c.metadata.quitaNegativacao) || {};
+    const res = await excluirNegativacao({ devedorDoc: parte.devedores && parte.devedores.doc, transactionId: nz.transactionId || null });
+    if (res.ok) {
+      const meta = Object.assign({}, c.metadata || {});
+      meta.quitaNegativacao = Object.assign({}, meta.quitaNegativacao || {}, { status: 'baixado', baixado_em: new Date().toISOString().slice(0, 10) });
+      await sbFetch(`cobrancas?id=eq.${c.id}`, { method: 'PATCH', body: JSON.stringify({ metadata: meta }) }).catch(() => {});
+      out.baixados++; out.itens.push({ cob: c.id, acao: 'baixar', status: 'baixado' });
+    } else if (res.pendente) { out.pendentes++; out.itens.push({ cob: c.id, acao: 'baixar', pendente: res.pendente }); }
+    else { out.falhas++; out.itens.push({ cob: c.id, acao: 'baixar', erro: res.erro }); }
+  }
+  return out;
+}
+
 module.exports = async function handler(req, res) {
   // F-09: autenticação forte de cron. Antes aceitava um bypass por user-agent
   // (/vercel-cron/i), que é trivialmente forjável -> qualquer um disparava a
@@ -969,13 +1050,18 @@ module.exports = async function handler(req, res) {
     try { quita = await reguaQuita({ dry: dry || !quitaLive, DB }); if (quita) quita.live = quitaLive; }
     catch (e) { quita = { error: e.message }; }
 
+    // Onda 4 Parte B — negativação (aprovado→inclui; pago→exclui). Gate próprio SERASA_LIVE.
+    let negativacao = null;
+    try { negativacao = await processarNegativacoes({ dry }); }
+    catch (e) { negativacao = { error: e.message }; }
+
     const reguaCobranca = Array.isArray(DB.config?.reguaCobranca) ? DB.config.reguaCobranca
                        : Array.isArray(DB.config?.regraCobranca) ? DB.config.regraCobranca : [];
     const reguaAcordo   = Array.isArray(DB.config?.reguaAcordo) ? DB.config.reguaAcordo : [];
 
     if (reguaCobranca.length === 0 && reguaAcordo.length === 0) {
       const calendarStats = dry ? null : await processarCalendarPendingDeletes();
-      return res.status(200).json({ ok: true, msg: 'Nenhum passo configurado nas réguas clássicas.', calendar: calendarStats, contasPagar, quita });
+      return res.status(200).json({ ok: true, msg: 'Nenhum passo configurado nas réguas clássicas.', calendar: calendarStats, contasPagar, quita, negativacao });
     }
 
     const credor = DB.config?.empresa || 'COBRASQ';
@@ -1153,7 +1239,7 @@ module.exports = async function handler(req, res) {
     try { zapsign = await processarLembretesZapSign({ dry: dry || !zapsignLive }); }
     catch (e) { zapsign = { error: e.message }; }
 
-    res.status(200).json({ ok: true, hoje: new Date().toISOString().slice(0,10), ...resultado, calendar, contasPagar, zapsign, zapsign_live: zapsignLive, quita });
+    res.status(200).json({ ok: true, hoje: new Date().toISOString().slice(0,10), ...resultado, calendar, contasPagar, zapsign, zapsign_live: zapsignLive, quita, negativacao });
   } catch (err) {
     console.error('[cron-regua]', err);
     res.status(500).json({ ok: false, error: err.message });
