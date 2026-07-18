@@ -20,9 +20,10 @@
   // processado 2× (duplo runCentral, duplo protocolo). Ver auditoria CA1/M1.
   if (window.__cobrasqEproc) return;
   window.__cobrasqEproc = true;
-  // Guarda de hostname: se a aba do tribunal foi navegada para outro site e a Central
-  // reinjeta aqui, não rodar (evita "pausas" absurdas em página alheia). Ver CM3.
-  if (!/\.tjpr\.jus\.br$/.test(location.hostname)) return;
+  // Guarda de hostname: só roda em domínio do eproc (multi-estado: eprocNg.tj<UF>.jus.br
+  // ou eproc.trf<N>.jus.br). Se a aba foi navegada p/ outro site e a Central reinjeta
+  // aqui, não roda (evita "pausas" absurdas em página alheia). Ver CM3.
+  if (!/^eproc[\dg]*\.[\w.-]+\.jus\.br$/i.test(location.hostname)) return;
   const SEL = window.EPROC_SEL || {};
   const TXT = window.EPROC_TXT || {};
   const DIST = window.EPROC_DIST || {};
@@ -489,6 +490,15 @@
         else { setBody(msg('⏸ <b>Pausado:</b> ' + (c.motivo || ''), '#fff3bf') + msg('Use os botões na aba da Central.', '#e7f5ff')); return; }
       }
       if (temLogin()) { await pausar(c, 'login'); setBody(msg('Faça o <b>login no eproc</b> — a fila continua sozinha depois.', '#fff3bf')); return; }
+      // Tela de CADASTRO de parte nova (pessoa_cadastrar) — tratada ANTES do despacho
+      // por etapa (a URL contém processo_cadastrar_3 e poderia ser confundida com a
+      // etapa 3). Preenche 1x; se já tentou e continua aberta, pausa.
+      if (c.parte && ehTelaCadastroPessoa()) {
+        const pc = [...(c.dados.requerentes || []), ...(c.dados.requeridos || [])]
+          .find(x => x && x.doc && String(x.doc).replace(/\D/g, '') === c.parte.doc);
+        if (!c.parte.cadastroTentado) return await preencherCadastroPessoa(c, pc, c.parte.chave === 'requerentes');
+        return pausar(c, 'a tela de cadastro ainda está aberta — complete o que faltar (ex.: <b>Data de Nascimento</b>), clique <b>Salvar</b> e depois Continuar.' + fichaParte(pc || { doc: c.parte.doc }));
+      }
       if (etapa === 1) return await autoE1(c);
       if (etapa === 2) return await autoE2(c);
       if (etapa === 3) return await autoPartes(c, 'requerentes', 'Etapa 3/5 — autores');
@@ -629,7 +639,123 @@
     return Array.from(document.querySelectorAll('.ui-dialog, #divInfraDialog, .modal.show'))
       .find(el => visivel(el) && el.offsetHeight > 60) || null;
   }
+  // ── cadastro de parte NOVA (tela pessoa_cadastrar) ──────────────────────────
+  // Contato PADRÃO do autor (definido pelo usuário): e-mail + celular fixos.
+  const AUTOR_EMAIL = 'adv.teixeiraeazzolin@gmail.com';
+  const AUTOR_CELULAR = '46988226533';
+  const UFS_BR = ['AC', 'AL', 'AM', 'AP', 'BA', 'CE', 'DF', 'ES', 'GO', 'MA', 'MG', 'MS', 'MT', 'PA', 'PB', 'PE', 'PI', 'PR', 'RJ', 'RN', 'RO', 'RR', 'RS', 'SC', 'SE', 'SP', 'TO'];
+  // Deduz o sexo pelo 1º nome (heurística — o usuário aceitou o risco). Dicionário
+  // de exceções + regra "termina em A → F, senão M".
+  const NOMES_F = new Set('ana,alice,beatriz,bruna,carla,carmen,cecilia,clara,cristina,debora,eliane,elis,ester,fatima,gabriele,helena,ines,isabel,isis,jaqueline,jennifer,liz,luz,madalena,margareth,maria,marli,mercedes,miriam,noemi,raquel,rute,ruth,sol,solange,soraia,tais,thais,vitoria'.split(','));
+  const NOMES_M = new Set('andre,benjamin,caue,cesar,darlei,davi,elias,emerson,ezequiel,gilmar,hamilton,isaac,ivan,jean,joel,jonas,josue,luca,moises,nicolas,noe,ramon,vinicius,wallace,washington,wesley'.split(','));
+  function deduzirSexo(nome) {
+    const p = norm(String(nome || '').trim().split(/\s+/)[0] || '');
+    if (!p) return null;
+    if (NOMES_F.has(p)) return 'F';
+    if (NOMES_M.has(p)) return 'M';
+    return /a$/.test(p) ? 'F' : 'M';
+  }
+  // Extrai CEP, número e UF de um endereço em texto (fallback quando não há campos
+  // estruturados vindos da IA).
+  function parseEndereco(str) {
+    const s = String(str || ''); const out = {};
+    const cep = s.match(/(\d{5})-?(\d{3})/); if (cep) out.cep = cep[1] + '-' + cep[2];
+    const num = s.match(/n[ºo°.]?\s*(\d{1,6})\b/i) || s.match(/,\s*(\d{1,6})\b/); if (num) out.numero = num[1];
+    const uf = (s.toUpperCase().match(/\b([A-Z]{2})\b/g) || []).filter(u => UFS_BR.includes(u)).pop(); if (uf) out.uf = uf;
+    return out;
+  }
+  function setSelectValor(sel, valor) { // set direto por value (ex.: 'F'/'M'/'PR')
+    if (!sel || valor == null || valor === '') return false;
+    const ok = Array.from(sel.options || []).some(o => o.value === valor);
+    if (!ok) return false;
+    sel.value = valor; sel.dispatchEvent(new Event('change', { bubbles: true })); return true;
+  }
+  function ehTelaCadastroPessoa() {
+    return !!document.getElementById('frmPessoaCadastro') || /pessoa_cadastrar/i.test(location.href || '');
+  }
+  // Preenche a tela "Cadastro de Pessoa" (PF/PJ) com o que a IA extraiu + padrões, e
+  // salva. Autor: contato fixo do escritório. Réu PF: sexo (deduzido) + etnia "não
+  // informada". Campos que a petição não traz (ex.: data de nascimento) ficam para o
+  // humano — se o eproc recusar o Salvar, pausamos com instrução.
+  async function preencherCadastroPessoa(c, parte, ehAutor) {
+    await new Promise(r => setTimeout(r, 1200)); // deixa o form/bundles assentarem
+    const doc = String((parte && parte.doc) || (c.parte && c.parte.doc) || '').replace(/\D/g, '');
+    const ehPF = doc.length === 11;
+    const p = parte || {};
+    progresso(c, 'cadastrando ' + (p.nome || doc) + ' no eproc…');
+    c.parte = { ...(c.parte || {}), doc, cadastroTentado: true }; await casoSalvar(c);
+
+    // Nome (só se o campo existir, visível, vazio e habilitado — PJ costuma vir travado
+    // e pré-preenchido pela Receita).
+    const txtNome = document.getElementById('txtNome');
+    if (txtNome && visivel(txtNome) && !txtNome.disabled && !txtNome.value && p.nome) setInput(txtNome, p.nome);
+    const txtFant = document.getElementById('txtNomeFantasia');
+    if (txtFant && visivel(txtFant) && !txtFant.value && p.nome) setInput(txtFant, p.nome);
+
+    // PF: sexo + etnia + estado civil (mínimos p/ o form aceitar).
+    if (ehPF) {
+      const sx = p.sexo || deduzirSexo(p.nome);
+      setSelectValor(document.getElementById('selSexo'), sx);
+      const selEtnia = document.getElementById('selEtnia') || byAnyLabel(['cor/raca', 'cor / raca', 'raca/cor', 'etnia', 'raca', 'cor']);
+      if (selEtnia && selEtnia.tagName === 'SELECT') (setSelectByText(selEtnia, 'nao informad') || setSelectByText(selEtnia, 'nao declarad'));
+      const selEC = document.getElementById('selEstCivil');
+      if (selEC && (!selEC.value || selEC.value === 'null')) setSelectByText(selEC, 'nao informado');
+    }
+
+    // Endereço: usa campos estruturados da IA se houver; senão, parseia do texto.
+    const pe = parseEndereco(p.endereco);
+    const cep = (p.cep || pe.cep || '').replace(/\D/g, '');
+    if (!document.querySelector('#tblEnderecos tbody tr')) {
+      const txtCep = document.getElementById('txtCep');
+      if (txtCep && cep) {
+        setInput(txtCep, cep.replace(/(\d{5})(\d{3})/, '$1-$2'));
+        const busca = document.getElementById('txtImage');
+        if (busca) { clicar(busca); await esperar(() => (document.getElementById('txtEndLog') || {}).value, 4000); }
+      }
+      const set = (id, v) => { const el = document.getElementById(id); if (el && v && !el.value) setInput(el, v); };
+      set('txtEndLog', p.logradouro || (!cep ? (p.endereco || '').slice(0, 50) : ''));
+      set('txtEndNum', p.numero || pe.numero);
+      set('txtEndComp', p.complemento);
+      set('txtBairro', p.bairro);
+      setSelectValor(document.getElementById('selUf'), p.uf || pe.uf);
+      const selLoc = document.getElementById('selLocalidade');
+      if (selLoc && p.cidade) { await esperar(() => selLoc.options.length > 1, 3000); setSelectByText(selLoc, p.cidade); }
+      const incEnd = document.getElementById('btnIncEnd');
+      if (incEnd) { clicar(incEnd); await esperar(() => document.querySelector('#tblEnderecos tbody tr'), 4000); }
+    }
+
+    // Contatos: autor = e-mail + celular FIXOS; réu = o que a IA extraiu (se houver).
+    const contatos = [];
+    if (ehAutor) { contatos.push(['2', AUTOR_EMAIL], ['3', AUTOR_CELULAR]); }
+    else { if (p.email) contatos.push(['2', p.email]); const cel = (p.celular || p.telefone || '').toString().replace(/\D/g, ''); if (cel) contatos.push(['3', cel]); }
+    const jaContatos = document.querySelectorAll('#tblContatos tbody tr').length;
+    if (!jaContatos) {
+      for (const [tipo, valor] of contatos) {
+        const selTC = document.getElementById('selTipoCont'), txtC = document.getElementById('txtContato');
+        if (!selTC || !txtC) break;
+        setSelectValor(selTC, tipo); setInput(txtC, valor);
+        const incCont = document.getElementById('btnIncCont');
+        if (incCont) { clicar(incCont); await new Promise(r => setTimeout(r, 900)); }
+      }
+    }
+
+    // Salvar (submeterFrmSalvar). Marca jaCadastrado ANTES de navegar, p/ a lista de
+    // partes re-consultar (e não reabrir "Novo" em loop).
+    const salvar = document.querySelector('button[name="sbmSalvarPessoa"]') || acharBotao(['salvar']);
+    c.parte = { ...c.parte, jaCadastrado: true }; await casoSalvar(c);
+    if (!salvar) return pausar(c, 'cadastro: não achei o botão <b>Salvar</b> — confira e salve você; depois Continuar.' + fichaParte(p));
+    progresso(c, 'salvando o cadastro de ' + (p.nome || doc) + '…');
+    clicar(salvar);
+    const saiu = await esperar(() => !ehTelaCadastroPessoa() || /processo_cadastrar_3/i.test(location.href), 6000);
+    if (!saiu) {
+      return pausar(c, 'preenchi o cadastro de <b>' + escHtml(p.nome || doc) + '</b>, mas o eproc não salvou — deve faltar um campo obrigatório que a petição não traz (ex.: <b>Data de Nascimento</b>). Complete o que estiver destacado, clique <b>Salvar</b> e depois Continuar.' + fichaParte(p));
+    }
+  }
+
   async function autoPartes(c, chave, rot) {
+    // Voltou do cadastro (pessoa recém-salva): limpa o estado p/ RE-CONSULTAR a pessoa
+    // (agora existente) e incluí-la — sem reabrir "Novo".
+    if (c.parte && c.parte.jaCadastrado && c.parte.chave === chave) { c.parte = null; await casoSalvar(c); }
     progresso(c, rot + '…');
     // Os bundles JS do eproc carregam DEPOIS do content script; clique cedo demais em
     // botão de onclick inline cai no vazio (visto ao vivo no Filtrar e no Próxima).
@@ -685,7 +811,14 @@
       // com endereço/contato obrigatórios. Destacamos e entregamos a ficha pronta.
       const novo = document.querySelector('#btnNovo');
       if (novo && visivel(novo)) {
-        return pausar(c, rot + ': "' + (falta.nome || doc) + '" parece NÃO ter cadastro no eproc. Clique em <b>Novo</b> (destacado), preencha o cadastro (endereço e contato são obrigatórios), inclua a parte e clique Continuar.' + fichaParte(falta), novo);
+        // Loop-guard: no máx. 1 tentativa de cadastro automático por parte.
+        if (c.parte && c.parte.cadastroTentado) {
+          return pausar(c, rot + ': tentei cadastrar "' + escHtml(falta.nome || doc) + '" mas o eproc ainda não incluiu — confira o cadastro (deve faltar um campo obrigatório), inclua a parte e clique Continuar.' + fichaParte(falta), novo);
+        }
+        c.parte = { ...(c.parte || {}), doc, chave, cadastroTentado: false }; await casoSalvar(c);
+        progresso(c, rot + ': "' + (falta.nome || doc) + '" sem cadastro — abrindo o cadastro (Novo)…');
+        clicar(novo); // navega para pessoa_cadastrar; o preenchimento roda lá
+        return;
       }
       return pausar(c, rot + ': não consegui incluir ' + (falta.nome || doc) + ' (pode exigir endereço/cadastro novo) — inclua manualmente e clique Continuar' + fichaParte(falta));
     }
@@ -695,7 +828,7 @@
     const docEl = qFirst(IDS.docParte);
     if (!docEl) return pausar(c, rot + ': campo CPF/CNPJ não encontrado');
     setInput(docEl, falta.doc);
-    c.parte = { doc }; await casoSalvar(c);
+    c.parte = { doc, chave }; await casoSalvar(c);
     const consultar = document.querySelector('#btnConsultar') || qFirst(IDS.consultar);
     if (!consultar) return pausar(c, rot + ': botão Consultar não encontrado');
     progresso(c, rot + ': consultando ' + (falta.nome || doc) + '…');
@@ -730,8 +863,18 @@
     const naTabela = () => document.querySelectorAll('#tbDocumentosCadastradas tbody tr').length;
     if (naTabela() < n) {
       if (uploadsProntos() === 0) {
-        const input = qFirst(IDS.anexo);
-        if (!input) return pausar(c, 'Etapa 5: uploader não encontrado');
+        const acharUploader = () => qFirst(IDS.anexo) ||
+          document.querySelector('#divInfDocumentos input[type="file"], #containerDocumentos input[type="file"], .qq-uploader input[type="file"], input.qq-upload-input, input[type="file"]');
+        let input = acharUploader();
+        if (!input) {
+          // A tela pode iniciar SEM slot de arquivo — o campo só nasce ao clicar
+          // "Adicionar mais Documentos" (showInput). Clica e espera o uploader surgir.
+          const add = document.querySelector('#lblAdicionarDocumento') ||
+            acharBotao(['adicionar mais documentos', 'adicionar documento', 'adicionar arquivo', 'escolher arquivo']);
+          if (add) { progresso(c, 'Etapa 5: abrindo o campo de arquivo…'); clicar(add); }
+          input = await esperar(acharUploader, 12000, 400);
+        }
+        if (!input) return pausar(c, 'Etapa 5: não achei o campo de <b>anexar arquivo</b> — confira se a tela de Documentos carregou; anexe 1 PDF manualmente e clique Continuar. (se for eproc federal/JFPR, me avise)');
         progresso(c, 'Etapa 5: baixando e anexando ' + n + ' PDF(s)…');
         const dt = new DataTransfer();
         for (const d of c.docs) dt.items.add(await pedirDoc(c.id, d.idx));

@@ -9,7 +9,8 @@ async function send(msg) { return chrome.runtime.sendMessage(msg); }
 
 async function abaEprocAtiva() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !/:\/\/[^/]*\.tjpr\.jus\.br\//.test(tab.url || '')) return null;
+  // eproc de qualquer estado (eprocNg.tj<UF>.jus.br / eproc.trf<N>.jus.br) ou Projudi.
+  if (!tab || !/:\/\/(eproc[\dg]*\.[\w.-]+|projudi\.[\w.-]+)\.jus\.br\//i.test(tab.url || '')) return null;
   return tab;
 }
 

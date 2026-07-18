@@ -83,8 +83,8 @@ async function apiReport(payload) {
 const PROMPT_EXTRACAO = `Você é assistente de um escritório de cobrança que distribui petições iniciais no eproc TJPR.
 Leia a petição inicial anexa e devolva SOMENTE um JSON válido (sem cercas de código, sem comentários) com:
 {
- "requerentes": [{"nome": "...", "doc": "CPF ou CNPJ com pontuação, ou null", "endereco": "endereço completo da qualificação (rua, nº, bairro, cidade/UF, CEP) ou null", "email": "e-mail ou null", "telefone": "telefone/celular ou null"}],
- "requeridos":  [{"nome": "...", "doc": "CPF ou CNPJ com pontuação, ou null", "endereco": "endereço completo da qualificação (rua, nº, bairro, cidade/UF, CEP) ou null", "email": "e-mail ou null", "telefone": "telefone/celular ou null"}],
+ "requerentes": [{"nome": "...", "doc": "CPF ou CNPJ com pontuação, ou null", "sexo": "M ou F (só p/ pessoa física; deduza do nome/tratamento; senão null)", "endereco": "endereço completo da qualificação ou null", "cep": "CEP (00000-000) ou null", "logradouro": "rua/av (sem número) ou null", "numero": "número ou null", "complemento": "complemento ou null", "bairro": "bairro ou null", "cidade": "cidade ou null", "uf": "sigla UF (2 letras) ou null", "email": "e-mail ou null", "telefone": "telefone fixo ou null", "celular": "celular ou null"}],
+ "requeridos":  [{"nome": "...", "doc": "CPF ou CNPJ com pontuação, ou null", "sexo": "M ou F (só p/ pessoa física; deduza do nome/tratamento; senão null)", "endereco": "endereço completo da qualificação ou null", "cep": "CEP (00000-000) ou null", "logradouro": "rua/av (sem número) ou null", "numero": "número ou null", "complemento": "complemento ou null", "bairro": "bairro ou null", "cidade": "cidade ou null", "uf": "sigla UF (2 letras) ou null", "email": "e-mail ou null", "telefone": "telefone fixo ou null", "celular": "celular ou null"}],
  "valor_causa": 1234.56,
  "comarca": "cidade do foro/comarca indicada no endereçamento",
  "classe": "classe processual (ex.: Procedimento do Juizado Especial Cível)",
@@ -96,8 +96,11 @@ Leia a petição inicial anexa e devolva SOMENTE um JSON válido (sem cercas de 
 }
 Se um campo não constar na peça, use null (ou [] em listas). Não invente documentos.`;
 
-async function claudeExtrair(base64Pdf) {
-  const token = await getToken();
+async function claudeExtrair(base64Pdf, _jaRenovou = false) {
+  // Token guardado pode ter expirado (sessão longa) — se não houver, tenta puxar da
+  // aba do painel ANTES de falhar.
+  let token = await getToken();
+  if (!token) token = await refrescarTokenDoApp();
   if (!token) return { error: 'sem_sessao' };
   const r = await fetchTimeout(`${API_BASE}/api/claude`, {
     method: 'POST',
@@ -114,8 +117,18 @@ async function claudeExtrair(base64Pdf) {
       }],
     }),
   }, 120000); // extração de PDF pela IA pode demorar
+  // CC3/M10: token expirado (401/403) → renova da aba do painel e repete UMA vez
+  // (mesma proteção que o pgrest já tinha; faltava aqui — causa do "IA falhou: HTTP 401").
+  if ((r.status === 401 || r.status === 403) && !_jaRenovou) {
+    const novo = await refrescarTokenDoApp();
+    if (novo && novo !== token) return claudeExtrair(base64Pdf, true);
+  }
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) return { error: (j.error && j.error.message) || ('HTTP ' + r.status) };
+  if (!r.ok) {
+    const base = (j.error && j.error.message) || ('HTTP ' + r.status);
+    if (r.status === 401 || r.status === 403) return { error: base + ' — sua sessão expirou. Recarregue o painel do Cobrasq (F5), confirme que está logado, e clique "Extrair de novo".' };
+    return { error: base };
+  }
   // A resposta vem em BLOCOS (content: [...]) e o texto pode não ser o 1º bloco
   // (modelos com raciocínio emitem um bloco de thinking antes) — junta todos.
   const blocos = (j && j.content) || [];
@@ -273,24 +286,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (tabId) { await overrideDialogos(tabId); sendResponse({ ok: true }); }
         else sendResponse({ error: 'sem tabId' });
       } else if (msg.type === 'EXEC_PAGINA') {
-        // Executa uma ação NO MUNDO DA PÁGINA (world:'MAIN') no FRAME que pediu —
-        // imune ao CSP da página (scripts injetados pela extensão são isentos).
-        // Prefere chamar a função global (msg.fn + msg.args); senão avalia msg.code.
+        // Executa uma ação NO MUNDO DA PÁGINA (world:'MAIN') no FRAME que pediu.
+        // Prefere chamadas de função global (msg.fn+msg.args ou msg.calls=[{fn,args}])
+        // — o eval de msg.code fica como ÚLTIMO recurso: no mundo MAIN o eval é
+        // sujeito ao CSP da página e costuma ser bloqueado (causa raiz do Selecionar
+        // do Projudi nunca disparar em multi-statement).
         const tabId = sender.tab && sender.tab.id;
         if (tabId == null) { sendResponse({ error: 'sem tabId' }); return; }
         try {
-          const target = { tabId, world: 'MAIN' };
+          // ATENÇÃO (causa raiz v0.8.2): world é propriedade da INJEÇÃO, não do
+          // target — dentro do target a API rejeita a chamada inteira ("Unexpected
+          // property") e NENHUMA função da página roda. Ficou meses silencioso
+          // porque o erro voltava como {error} e o fallback local também é barrado.
+          const target = { tabId };
           if (sender.frameId != null) target.frameIds = [sender.frameId];
           const [res] = await chrome.scripting.executeScript({
             target,
-            func: (fn, args, code) => {
+            world: 'MAIN',
+            func: (fn, args, code, calls) => {
               try {
-                if (fn && typeof window[fn] === 'function') { window[fn].apply(window, args || []); return true; }
+                const lista = (calls && calls.length) ? calls : (fn ? [{ fn, args }] : null);
+                if (lista) {
+                  let rodou = false;
+                  for (const ch of lista) {
+                    if (ch && ch.fn && typeof window[ch.fn] === 'function') { window[ch.fn].apply(window, ch.args || []); rodou = true; }
+                  }
+                  if (rodou) return true;
+                }
                 if (code) { (0, eval)(code); return true; } // eslint-disable-line no-eval
               } catch (e) { return 'erro: ' + (e && e.message || e); }
               return false;
             },
-            args: [msg.fn || null, msg.args || [], msg.code || null],
+            args: [msg.fn || null, msg.args || [], msg.code || null, msg.calls || null],
           });
           sendResponse({ ok: true, resultado: res && res.result });
         } catch (e) { sendResponse({ error: String((e && e.message) || e) }); }

@@ -13,7 +13,7 @@
 
 (() => {
   'use strict';
-  if (!/projudi\.tjpr\.jus\.br$/.test(location.hostname)) return;
+  if (!/(^|\.)projudi\.tjpr\.jus\.br$/.test(location.hostname)) return;
   // Guarda de idempotência (manifest + reinjeção da Central). Ver CA1/M1.
   if (window.__cobrasqProjudi) return;
   window.__cobrasqProjudi = true;
@@ -68,6 +68,16 @@
   function msg(t, cor) { return '<div style="padding:6px 8px;border-radius:6px;background:' + (cor || '#f1f3f5') + ';margin-bottom:8px;">' + t + '</div>'; }
 
   async function casoLer() { const o = await chrome.storage.local.get(CASO_KEY); return o[CASO_KEY] || null; }
+  // Relê o caso APÓS uma espera longa (25s do tipo, minutos do upload): outra
+  // mensagem/frame pode ter gravado estado novo — gravar o `c` capturado antes da
+  // espera sobregravaria (last-write-wins) um Continuar do usuário ou um motivo de
+  // pausa mais específico. null = aborta a passada (outra execução assumiu).
+  async function casoAposEspera(c) {
+    const cur = await casoLer();
+    if (!cur || cur.sistema !== 'projudi' || cur.id !== c.id) return null;
+    if (cur.status === 'pausado') return null; // já pausado por outro frame: preserva o motivo dele
+    return cur;
+  }
   async function casoSalvar(c) { await chrome.storage.local.set({ [CASO_KEY]: c }); }
   async function casoLimpar() { await chrome.storage.local.remove(CASO_KEY); }
   function reportar(tipo, extra) { try { chrome.runtime.sendMessage({ type: tipo, ...(extra || {}) }); } catch (_) {} }
@@ -102,27 +112,43 @@
       return false; // não há como confirmar execução via injeção local
     } catch (_) { return false; }
   }
+  // "f1('a'); f2();" → [{fn:'f1',args:['a']},{fn:'f2',args:[]}] — ou null se houver
+  // qualquer coisa além de chamadas simples. Motivo (CAUSA RAIZ v0.8.1): o caminho
+  // antigo mandava multi-statement para eval no mundo MAIN, e o eval é BLOQUEADO
+  // pelo CSP da página — por isso "openDialogSelecao(x)" (1 função) sempre abria a
+  // janela, mas "disableScreen(); selectTipoDocumento();" (2 funções) nunca rodava.
+  function extrairChamadas(js) {
+    const stmts = js.split(';').map(s => s.trim()).filter(s => s && s !== 'void(0)' && !/^return\b/.test(s));
+    if (!stmts.length) return null;
+    const calls = [];
+    for (const st of stmts) {
+      const m = st.match(/^([A-Za-z_$][\w$]*)\s*\(\s*(?:'([^']*)'|"([^"]*)")?\s*\)$/);
+      if (!m) return null;
+      const arg = m[2] !== undefined ? m[2] : m[3]; // distingue "sem arg" de arg "" (string vazia)
+      calls.push(arg !== undefined ? { fn: m[1], args: [arg] } : { fn: m[1], args: [] });
+    }
+    return calls;
+  }
   // Aciona "de verdade" um controle cujo gatilho é JS da página (href=javascript:… ou
-  // onclick=…). Para <a> com URL real ou <input>/<button>, o click nativo basta.
-  // Extrai a chamada de função (ex.: openDialogSelecao('…')) p/ o background chamar
-  // a global direto — sem eval, imune a CSP.
+  // onclick=…). onclick INLINE: o clique NATIVO já dispara o handler no mundo da
+  // página (é assim que o clique humano funciona; o Projudi inteiro usa onclick
+  // inline, logo o CSP permite). href=javascript:… vira chamada(s) de função global
+  // via background world:MAIN — NUNCA eval (bloqueado pelo CSP).
   async function clicarPagina(el) {
     if (!el) return false;
     const href = (el.getAttribute && el.getAttribute('href')) || '';
     const onclick = (el.getAttribute && el.getAttribute('onclick')) || '';
-    const js = /^javascript:/i.test(href) ? href.replace(/^javascript:/i, '') : (onclick || '');
-    if (js) {
-      // B3: multi-statement (tem ';' fora do fim) → executa a expressão inteira (code),
-      // não só a 1ª função.
-      if (/;/.test(js.trim().replace(/;\s*$/, ''))) return execNaPagina({ code: js });
-      const m = js.match(/^\s*([A-Za-z_$][\w$]*)\s*\(\s*(?:'([^']*)'|"([^"]*)")?\s*\)\s*;?\s*$/);
-      if (m) {
-        const arg = m[2] !== undefined ? m[2] : m[3]; // distingue "sem arg" de arg "" (string vazia)
-        return execNaPagina(arg !== undefined ? { fn: m[1], args: [arg] } : { fn: m[1], args: [] });
-      }
-      return execNaPagina({ code: js });
-    }
-    clicar(el); return true;
+    let hrefJs = /^javascript:/i.test(href) ? href.replace(/^javascript:/i, '').trim() : '';
+    // "javascript:void(0)" / "javascript:;" NÃO é ação real — trata como sem-js para
+    // cair no clique NATIVO (senão, com onclick real ao lado, o handler não dispararia).
+    if (/^(void\s*\(?\s*0\s*\)?|void\s+0)?\s*;*\s*$/i.test(hrefJs)) hrefJs = '';
+    // onclick inline (ou nada de função real no href) → CLIQUE NATIVO dispara o handler
+    // da página (como o clique humano). Prioriza onclick sobre href javascript:void(0).
+    if (onclick || !hrefJs) { clicar(el); return true; }
+    // href=javascript:funçãoReal(...) SEM onclick → executa no mundo MAIN (imune a CSP).
+    const calls = extrairChamadas(hrefJs);
+    if (calls) return execNaPagina(calls.length === 1 ? { fn: calls[0].fn, args: calls[0].args } : { calls });
+    return execNaPagina({ code: hrefJs }); // último recurso (pode ser barrado por CSP)
   }
 
   // ── busca de controles por texto (rótulos/valores/títulos) ───────────────────
@@ -132,7 +158,7 @@
     for (const t of termos) {
       const alvo = norm(t);
       for (const el of cands) {
-        const txt = norm(((el.value || '') + ' ' + (el.textContent || '') + ' ' + (el.title || '')).trim());
+        const txt = norm(((el.value || '') + ' ' + (el.textContent || '') + ' ' + (el.title || '') + ' ' + (el.alt || '')).trim());
         if (txt === alvo || txt.includes(alvo)) return el;
       }
     }
@@ -213,8 +239,15 @@
       if (pe && visivel(pe)) return pe;
       return null;
     }, 8000);
-    if (btn && btn.id === 'cumprirButton') { progresso(c, 'pendência encontrada → Cumprir Prazo'); clicar(btn); return; }
-    if (btn) { progresso(c, 'sem pendência aparente → Petição Eletrônica'); clicar(btn); return; }
+    if (btn) {
+      progresso(c, btn.id === 'cumprirButton' ? 'pendência encontrada → Cumprir Prazo' : 'sem pendência aparente → Petição Eletrônica');
+      clicar(btn);
+      // Rede de segurança: se o clique trocar o conteúdo por AJAX (sem novo load), a
+      // auto-retomada (one-shot) não re-dispara — reinvoca runCentral em 2,5s. É
+      // idempotente (mutex + despacho por formulário presente na tela).
+      setTimeout(() => runCentral().catch(() => {}), 2500);
+      return;
+    }
     return pausar(c, 'estou no processo mas não achei "Cumprir Prazo" nem "Petição Eletrônica" — clique você no caminho certo (se houver intimação: Ver Intimação → Cumprir Prazo) e depois Continuar');
   }
 
@@ -224,20 +257,44 @@
   // B1: conta só linhas que são anexo de verdade (têm ação de remover ou um .pdf),
   // ignora cabeçalho/placeholder "Nenhum registro encontrado".
   function linhasAnexos() {
-    return Array.from(document.querySelectorAll('.resultTable tbody tr, #juntarDocumentoForm table tbody tr'))
-      .filter(tr => {
-        if (!visivel(tr)) return false;
-        if (/nenhum registro/i.test(tr.textContent || '')) return false;
-        return !!tr.querySelector('a[onclick*="remover"], a[onclick*="excluir"], input[type="checkbox"]') || /\.pdf/i.test(tr.textContent || '');
-      }).length;
+    // Conta SÓ linhas que representam um ARQUIVO anexado de verdade. Antes bastava
+    // ter um checkbox → contava linhas de OUTRAS tabelas do form (intimação, partes,
+    // movimento) e a extensão "achava" que já tinha anexo e PULAVA o Adicionar (bug
+    // reproduzido no testbed). Agora exige sinal de arquivo: nome com extensão de
+    // documento OU (ação de remover/excluir + célula de tamanho Kb/MB).
+    // Extensão SEM âncora de fim: no textContent as células vêm coladas — o nome do
+    // arquivo gruda na Descrição e no tamanho ("nome.pdfPetição120Kb"), então tanto
+    // \b quanto (?![a-z]) falhavam (bugs pegos no testbed). Basta o ponto+extensão.
+    const EXT = /\.(pdf|docx?|odt|rtf|txt|jpe?g|png|tiff?|zip|p7s|xml|html?)/i;
+    const TAM = /\b\d+([.,]\d+)?\s*(kb|mb|bytes)\b/i;
+    const VAZIO = /nenhum\s+(registro|documento|arquivo|anexo|item)|nada\s+encontrado/i;
+    // Escopo: prefere a TABELA DE ARQUIVOS (cabeçalho com "Tamanho"/"Nome do arquivo")
+    // — só ela conta como anexo; assim linhas de intimação/movimento que citem ".pdf"
+    // não geram falso-positivo. Fallback: tabelas de resultado do form de juntada.
+    let tabelas = Array.from(document.querySelectorAll('.resultTable, #juntarDocumentoForm table'))
+      .filter(t => /tamanho|nome\s+do\s+arquivo/i.test(t.textContent || ''));
+    if (!tabelas.length) tabelas = Array.from(document.querySelectorAll('.resultTable, #juntarDocumentoForm table'));
+    const linhas = new Set();
+    tabelas.forEach(t => t.querySelectorAll('tbody tr, tr').forEach(tr => linhas.add(tr)));
+    let n = 0;
+    linhas.forEach(tr => {
+      if (!visivel(tr)) return;
+      const txt = tr.textContent || '';
+      if (VAZIO.test(txt)) return;
+      if (EXT.test(txt)) { n++; return; }
+      const temRemover = tr.querySelector('a[onclick*="remover" i], a[onclick*="excluir" i], a[href*="remover" i], a[href*="excluir" i], img[onclick*="remover" i]');
+      if (temRemover && TAM.test(txt)) n++;
+    });
+    return n;
   }
   // Janela da LUPA (tipoDocumento.do) — roda no iframe da janela "Seleção de Tipo
   // de Documento". Detecção: URL do frame OU (heading + radios na própria tela).
   function ehDialogoTipo() {
     if (/tipoDocumento\.do/i.test(location.href || '')) return true;
-    if (!document.querySelector('input[type="radio"]')) return false; // radios ficam no iframe, não no pai
-    const t = norm(document.body ? document.body.innerText : '');
-    return t.includes('selecao de tipo de documento') || t.includes('pesquisa de tipo de documento');
+    // Fallback same-doc: exige SINAIS exclusivos do diálogo (#selectButton + rádios).
+    // NÃO usar o texto "Seleção de Tipo de Documento": ele também aparece na tela de
+    // juntada (é o título da lupinha) e faria a juntada ser confundida com a janela.
+    return !!document.getElementById('selectButton') && !!document.querySelector('input[type="radio"]');
   }
   // Escolhe o tipo na janela: Descrição → Pesquisar → marca o radio que casa →
   // Selecionar (o Projudi fecha o diálogo e preenche o hidden na tela-mãe).
@@ -248,7 +305,10 @@
     const radiosVis = () => Array.from(document.querySelectorAll('input[type="radio"]')).filter(visivel);
     const linhaDoRadio = (r) => { const row = r.closest('tr,li,label,div'); return norm(row ? row.textContent : ''); };
     const casa = (r) => { const t = linhaDoRadio(r); return t.includes(alvo) || (palavras.length && palavras.every(w => t.includes(w))); };
+    // A árvore de tipos chega por AJAX (ajaxtags) DEPOIS do load — espera os rádios
+    // aparecerem (até 8s) antes de decidir qualquer coisa (senão pausa cedo demais).
     await new Promise(r => setTimeout(r, 400)); // deixa o frame assentar
+    await esperar(() => radiosVis().length, 8000, 300);
     // Se o item JÁ está na lista (a janela abre com todos os tipos), escolhe direto —
     // não filtra (evita re-submit em loop). Só filtra por Descrição se não achar.
     let radios = radiosVis();
@@ -265,59 +325,53 @@
     }
     let alvoRadio = radios.find(casa) || (radios.length === 1 ? radios[0] : null);
     if (!alvoRadio) return pausar(c, 'não achei "' + escHtml(tipoTxt) + '" na janela de tipo — escolha você na lista e clique <b>Selecionar</b>; depois Continuar.');
+    // SELEÇÃO ROBUSTA: o Projudi (ajaxtags) registra a escolha pelo onclick do rádio/
+    // linha, não só pelo .checked — então marca, dispara a sequência de mouse COMPLETA
+    // (mousedown→mouseup→click) e, se o rádio/linha tiver onclick da página, executa
+    // de verdade no mundo MAIN. Sem isso, o "Selecionar" acha que nada foi escolhido.
+    try { alvoRadio.scrollIntoView({ block: 'center' }); } catch (_) {}
     alvoRadio.checked = true;
+    const linhaEl = alvoRadio.closest('label,td,tr,li,a') || alvoRadio;
+    for (const ev of ['mousedown', 'mouseup', 'click']) {
+      try { alvoRadio.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true })); } catch (_) {}
+      try { if (linhaEl !== alvoRadio) linhaEl.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true })); } catch (_) {}
+    }
     alvoRadio.dispatchEvent(new Event('change', { bubbles: true }));
-    clicar(alvoRadio);
-    const selecionar = acharControle(['selecionar']);
-    if (!selecionar) return pausar(c, 'marquei o tipo mas não achei o botão <b>Selecionar</b> — clique você; depois Continuar.');
-    progresso(c, 'tipo "' + tipoTxt + '" selecionado na janela');
-    await clicarPagina(selecionar); // Projudi fecha o diálogo e preenche #idTipoDocumento na mãe
-  }
-  // Resolve o TIPO buscando a lista oficial do servidor (a mesma da lupa), na sessão
-  // atual, e preenchendo #descricaoTipoDocumento + #idTipoDocumento diretamente.
-  // Retorna 'ok' ou uma string curta com o motivo da falha (p/ diagnóstico na tela).
-  async function resolverTipoPeloServidor(c, tipoTxt, desc, hid) {
+    await new Promise(r => setTimeout(r, 300));
+    // GARANTIA (independente do JS da página): escreve o resultado DIRETO na tela-mãe
+    // — exatamente o que selectTipoDocumento() faria (os nomes dos campos vêm na
+    // própria URL da janela: parentIdField/parentDescricaoField). Mesma origem, ok.
+    // Descrição limpa: prefere o rótulo <label for> do rádio; senão o texto da linha
+    // sem o valor do rádio (evita "Petição40 120Kb…" com lixo da árvore na tela-mãe).
+    const rowSel = alvoRadio.closest('tr,li,label,div');
+    const lbl = alvoRadio.id ? document.querySelector('label[for="' + alvoRadio.id + '"]') : null;
+    let descricaoRaw = (lbl ? lbl.textContent : (rowSel ? rowSel.textContent : '')) || tipoTxt;
+    descricaoRaw = descricaoRaw.replace(/\s+/g, ' ').trim().replace(new RegExp('\\b' + (alvoRadio.value || ' ') + '\\b'), '').trim().slice(0, 200);
+    const q = new URLSearchParams(location.search || '');
     try {
-      const alvo = norm(tipoTxt);
-      const palavras = alvo.split(/\W+/).filter(w => w.length >= 4);
-      const casaTexto = (t) => { t = norm(t); return t.includes(alvo) || (palavras.length && palavras.every(w => t.includes(w))); };
-      // tipoCompetencia varia por processo — extrai do HTML da página (default '9').
-      const mComp = (document.documentElement.innerHTML || '').match(/openDialogSelecaoTipoDocumento\([^)]*?,\s*'(\d+)'\s*\)/);
-      const tipoComp = (mComp && mComp[1]) || '9';
-      const base = '/projudi/processo/tipoDocumento.do?actionType=filtrarArvorePelaDescricao' +
-        '&parentForm=juntarDocumentoForm&parentIdField=idTipoDocumento&parentDescricaoField=descricaoTipoDocumento&tipoCompetencia=' + tipoComp;
-      progresso(c, 'buscando a lista de tipos no servidor…');
-      const buscar = async (url) => {
-        const resp = await fetch(url, { credentials: 'same-origin' });
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        const html = await resp.text();
-        return new DOMParser().parseFromString(html, 'text/html');
-      };
-      // 1ª tentativa: lista completa (a janela abre com tudo). Se vier vazia, filtra.
-      let doc = await buscar(base);
-      let radios = Array.from(doc.querySelectorAll('input[type="radio"]'));
-      if (!radios.length) {
-        doc = await buscar(base + '&descricao=' + encodeURIComponent(tipoTxt));
-        radios = Array.from(doc.querySelectorAll('input[type="radio"]'));
+      const pdoc = window.parent.document;
+      const pid = pdoc.getElementById(q.get('parentIdField') || 'idTipoDocumento');
+      const pdesc = pdoc.getElementById(q.get('parentDescricaoField') || 'descricaoTipoDocumento');
+      if (pid && alvoRadio.value) {
+        pid.value = alvoRadio.value;
+        if (pdesc) pdesc.value = descricaoRaw;
+        pid.dispatchEvent(new Event('change', { bubbles: true }));
+        if (pdesc) pdesc.dispatchEvent(new Event('change', { bubbles: true }));
       }
-      if (!radios.length) return '0 tipos';
-      const descDoRadio = (r) => {
-        const row = r.closest('tr,li,label,div');
-        let t = row ? row.textContent : '';
-        if (!t.trim() && r.id) { const lb = doc.querySelector('label[for="' + r.id + '"]'); t = lb ? lb.textContent : ''; }
-        return (t || '').replace(/\s+/g, ' ').trim();
-      };
-      const achado = radios.map(r => ({ id: r.value, txt: descDoRadio(r) }))
-        .filter(o => o.id && o.txt)
-        .find(o => casaTexto(o.txt));
-      if (!achado) return 'sem match em ' + radios.length;
-      desc.value = achado.txt;
-      hid.value = achado.id;
-      desc.dispatchEvent(new Event('change', { bubbles: true }));
-      hid.dispatchEvent(new Event('change', { bubbles: true }));
-      progresso(c, 'tipo: ' + achado.txt + ' (id ' + achado.id + ')');
-      return 'ok';
-    } catch (e) { return String((e && e.message) || e).slice(0, 40); }
+    } catch (_) {}
+    progresso(c, 'tipo "' + tipoTxt + '" selecionado → confirmando');
+    // Via oficial p/ FECHAR a janela: clique NATIVO no Selecionar (#selectButton,
+    // onclick inline "disableScreen(); selectTipoDocumento();" roda no mundo da
+    // página no clique, como um clique humano). Se não fechar, a tela-mãe fecha o
+    // overlay sozinha — o campo já está garantido pelo bloco acima.
+    const selecionar = document.getElementById('selectButton') || acharControle(['selecionar']);
+    if (selecionar) clicar(selecionar);
+  }
+  // Acha a lupinha do campo "Tipo de Documento" (abre a janela oficial de Seleção).
+  function acharLupaTipo() {
+    return document.querySelector('a.searchButton[href*="openDialogSelecao"], a[href*="openDialogSelecaoTipoDocumento"]') ||
+      Array.from(document.querySelectorAll('a,[onclick]')).find(el =>
+        /openDialogSelecaoTipoDocumento|openDialogSelecao/.test((el.getAttribute('href') || '') + (el.getAttribute('onclick') || ''))) || null;
   }
   async function telaJuntar(c) {
     if (document.querySelector('iframe[src*="upload.do"]')) return; // diálogo aberto: quem age é a instância dele
@@ -330,43 +384,78 @@
     const desc = document.getElementById('descricaoTipoDocumento');
     if (desc && hid && !hid.value) {
       const tipoTxt = c.tipo_peticao || 'Manifestação da Parte';
-      // CAMINHO PRIMÁRIO (determinístico): busca a lista de tipos direto do servidor
-      // (mesma sessão) e preenche o hidden — sem abrir/clicar a janela da lupa.
-      const r = await resolverTipoPeloServidor(c, tipoTxt, desc, hid);
-      if (r === 'ok') { progresso(c, 'tipo confirmado → anexos'); /* segue aos anexos */ }
-      else {
-        // Fallback: tenta a lupa (comportamento antigo) e pausa se nada preencher.
-        const lupa = document.querySelector('a.searchButton[href*="openDialogSelecao"]') ||
-          Array.from(document.querySelectorAll('a,[onclick]')).find(el => /openDialogSelecao/.test((el.getAttribute('href') || '') + (el.getAttribute('onclick') || '')));
-        desc.value = tipoTxt;
-        if (lupa) { progresso(c, 'servidor não resolveu (' + r + ') — tentando a lupa…'); await clicarPagina(lupa); }
-        const ok = await esperar(() => hid.value, 20000, 500);
-        if (!ok) return pausar(c, 'não consegui definir o tipo automaticamente (' + escHtml(r) + ') — escolha <b>' + escHtml(tipoTxt) + '</b> no campo/lupa e clique <b>Continuar</b>. Depois eu sigo com os anexos.');
-        progresso(c, 'tipo confirmado → anexos');
+      // O tipo NÃO é texto livre: o Projudi só aceita o item escolhido na janela de
+      // Seleção (ela preenche #idTipoDocumento sozinha). Então abrimos a LUPA e a
+      // instância da extensão dentro do iframe da janela marca o item e clica
+      // Selecionar (ver telaDialogoTipo). Nada de digitar o texto — isso não vale.
+      if (!c.abriuLupa) {
+        const lupa = acharLupaTipo();
+        if (!lupa) return pausar(c, 'não achei a lupinha ao lado de "Tipo de Documento" — clique você nela, escolha <b>' + escHtml(tipoTxt) + '</b>, clique <b>Selecionar</b> e depois Continuar.');
+        progresso(c, 'abrindo a janela de Seleção de Tipo…');
+        await clicarPagina(lupa);
+        c.abriuLupa = true; await casoSalvar(c);
       }
+      // A janela (iframe) se encarrega de escolher e clicar Selecionar; aqui só
+      // esperamos o Projudi preencher o hidden. NÃO segura o mutex do iframe: são
+      // janelas/execuções separadas (a janela é um iframe de verdade — tjpr.js).
+      const ok = await esperar(() => hid.value, 25000, 500);
+      if (!ok) {
+        const cur = await casoAposEspera(c); // F-A1: não sobregravar estado mais novo
+        if (!cur) return;
+        cur.abriuLupa = false; await casoSalvar(cur); // permite reabrir na próxima passada
+        return pausar(cur, 'a janela de Seleção abriu, mas não consegui confirmar "<b>' + escHtml(tipoTxt) + '</b>" sozinho — na janela, clique no tipo e em <b>Selecionar</b>; depois <b>Continuar</b>. (a fila segue sozinha)');
+      }
+      progresso(c, 'tipo confirmado → anexos');
+      // Se a janela da lupa ainda estiver aberta (Selecionar não fechou), fecha pelo
+      // X do Window ('<id>_close', onclick inline Windows.close roda no clique
+      // nativo) — o overlay modal bloquearia o botão "Adicionar" dos anexos.
+      const sobraX = document.querySelector('div[id$="_close"]');
+      if (sobraX && visivel(sobraX)) { clicar(sobraX); await new Promise(r => setTimeout(r, 400)); }
     }
     // 2) anexos
     if (!(c.docs || []).length) return pausar(c, 'este caso não tem PDF para anexar — refaça na Central.'); // B6
     if (linhasAnexos() < c.docs.length) {
       if (!c.abriuUpload) {
-        const add = acharControle(['adicionar']);
-        if (!add) return pausar(c, 'não achei o botão "Adicionar" para abrir o envio de arquivos — anexe você e clique Continuar');
+        // Botão que abre o envio de arquivos — cobre rótulos e tipos de controle
+        // variados (input button/image, <a>, <button>) e a lupa/ícone de "+".
+        const add = acharControle(['adicionar arquivo', 'adicionar documento', 'adicionar', 'incluir arquivo', 'incluir documento', 'incluir', 'anexar arquivo', 'anexar'],
+          'input[type=submit],input[type=button],input[type=image],button,a,[onclick]');
+        if (!add) {
+          const botoes = Array.from(document.querySelectorAll('input[type=submit],input[type=button],input[type=image],button,a'))
+            .filter(visivel).map(b => norm((b.value || b.textContent || b.title || b.alt || '')).trim()).filter(Boolean).slice(0, 14).join(' · ');
+          return pausar(c, 'não achei o botão para anexar (procurei Adicionar/Incluir/Anexar). Botões visíveis agora: <b>' + escHtml(botoes || '(nenhum)') + '</b>. Clique você no botão de anexar e depois Continuar — me diga qual era o nome certo.');
+        }
         progresso(c, 'abrindo o envio de arquivos…');
         await new Promise(r => setTimeout(r, 800)); // M4: deixa os handlers assentarem
         clicar(add);
         // M4: confirma que o diálogo (iframe upload.do) abriu ANTES de marcar a flag;
         // senão reverte e re-tenta na próxima passada (evita timeout de 3min à toa).
-        const abriu = await esperar(() => document.querySelector('iframe[src*="upload.do"]') || document.getElementById('fileUploadForm'), 8000);
+        const abriu = await esperar(() => document.querySelector('iframe[src*="upload.do"]') || document.getElementById('fileUploadForm') || document.querySelector('input[type="file"]'), 8000);
         if (!abriu) return pausar(c, 'cliquei em "Adicionar" mas o envio de arquivos não abriu — clique você e depois Continuar');
         c.abriuUpload = true; await casoSalvar(c);
+      }
+      // Se o envio abriu EMBUTIDO nesta mesma tela (não num iframe separado), a
+      // instância deste frame precisa conduzir o upload — senão ninguém age e o
+      // lote fica preso em "aguardando" (o telaJuntar segura o mutex do frame).
+      if (document.getElementById('fileUploadForm') || document.querySelector('input[type="file"]')) {
+        await telaUpload(c);
       }
       progresso(c, 'aguardando os PDFs subirem…');
       const tempo = Math.max(120000, c.docs.length * 60000); // B4: proporcional aos docs
       const subiu = await esperar(() => linhasAnexos() >= c.docs.length, tempo, 800);
-      if (!subiu) { c.abriuUpload = false; c.uploadFeito = false; await casoSalvar(c); return pausar(c, 'os anexos não apareceram na lista — confira o diálogo de envio (Adicionar → escolher arquivos → Confirmar Inclusão) e clique Continuar'); }
+      if (!subiu) {
+        const cur = await casoAposEspera(c); // F-A1
+        if (!cur) return;
+        cur.abriuUpload = false; cur.uploadFeito = false; await casoSalvar(cur);
+        return pausar(cur, 'os anexos não apareceram na lista — confira o diálogo de envio (Adicionar → escolher arquivos → Confirmar Inclusão) e clique Continuar');
+      }
     }
     // 3) tudo anexado → o humano conclui e assina (senha é sempre sua)
-    c.fase = 'assinar'; await casoSalvar(c);
+    // F-A1: houve esperas longas acima — regrava sobre o estado ATUAL do storage;
+    // se outro frame pausou/trocou o caso nesse meio-tempo, aborta a passada.
+    const cFinal = await casoAposEspera(c);
+    if (!cFinal) return;
+    cFinal.fase = 'assinar'; await casoSalvar(cFinal); c = cFinal;
     const concluirBtn = acharControle(['concluir movimento', 'concluir']);
     if (concluirBtn) destacar(concluirBtn, '#1a7f37');
     return pausar(c, 'PDF(s) anexado(s) ✔ — confira, clique <b>Concluir Movimento</b> e ASSINE com sua senha. Depois do protocolo, clique <b>Continuar</b> na Central que eu dou o caso por concluído e sigo a fila.');
@@ -378,57 +467,95 @@
   async function telaUpload(c) {
     if (c.uploadFeito) return;
     if (!(c.docs || []).length) return; // B6
-    const sel = document.getElementById('codDescricao');
-    const inputArq = document.getElementById('conteudo');
-    if (!sel || !inputArq) return;
-    progresso(c, 'enviando ' + c.docs.length + ' PDF(s)…');
-    const alvoTipo = norm(c.tipo_peticao || 'peticao');
-    let opt = Array.from(sel.options).find(o => norm(o.textContent) === alvoTipo) ||
-              Array.from(sel.options).find(o => o.value !== '0' && norm(o.textContent).includes(alvoTipo)) ||
-              Array.from(sel.options).find(o => norm(o.textContent).includes('peticao'));
-    if (!opt) {
-      opt = Array.from(sel.options).find(o => norm(o.textContent).includes('outros'));
-      const descTxt = document.getElementById('descricao');
-      if (descTxt) setInput(descTxt, (c.tipo_peticao || c.docs[0].nome.replace(/\.pdf$/i, '')).slice(0, 200));
+    // Campo de arquivo e select de tipo: por ID conhecido OU genérico (o diálogo real
+    // pode usar outros IDs — antes desistíamos calado e o lote ficava "aguardando").
+    const inputArq = document.getElementById('conteudo') ||
+      document.querySelector('#fileUploadForm input[type="file"], form[name="fileUploadForm"] input[type="file"], input[type="file"]');
+    if (!inputArq) {
+      const campos = Array.from(document.querySelectorAll('input,select')).filter(visivel)
+        .map(e => (e.tagName.toLowerCase() + '#' + (e.id || '') + '[' + (e.type || e.name || '') + ']')).slice(0, 12).join(' · ');
+      return pausar(c, 'a janela de envio abriu, mas não achei o campo de <b>escolher arquivo</b>. Campos vistos: <b>' + escHtml(campos || '(nenhum)') + '</b>. Anexe você o PDF e clique Continuar — e me diga como é essa janela.');
     }
-    if (!opt) return pausar(c, 'não achei um tipo de documento compatível no diálogo de envio — selecione o tipo, escolha os arquivos e Confirmar Inclusão; depois Continuar', sel);
-    sel.value = opt.value;
-    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    progresso(c, 'enviando ' + c.docs.length + ' PDF(s)…');
+    // ORDEM REAL do diálogo do Projudi (capturado): o select de tipo (name="tipos",
+    // id="tipo0"…) SÓ EXISTE depois que o arquivo é escolhido — o onchange do input
+    // (atualiza_arquivos_selecionados) o cria. Então: 1) injeta o arquivo, 2) espera
+    // o(s) select(s) aparecer(em) e escolhe o tipo, 3) Confirmar Inclusão.
+    // 1) injeta o(s) arquivo(s)
     const dt = new DataTransfer();
     for (const d of c.docs) dt.items.add(await pedirDoc(c.id, d.idx));
     inputArq.files = dt.files;
-    inputArq.dispatchEvent(new Event('change', { bubbles: true })); // dispara o envio automático
+    inputArq.dispatchEvent(new Event('input', { bubbles: true }));
+    inputArq.dispatchEvent(new Event('change', { bubbles: true })); // dispara atualiza_arquivos_selecionados()
+    // 2) escolhe o tipo do documento em CADA select que surgir (um por arquivo)
+    const acharSelects = () => Array.from(document.querySelectorAll(
+      'select[name="tipos"], select[id^="tipo"], #codDescricao, #fileUploadForm select, form[name="fileUploadForm"] select')).filter(visivel);
+    const tiposProntos = await esperar(() => acharSelects().some(s => s.options.length > 1), 12000, 300);
+    const alvoTipo = norm(c.tipo_peticao || 'peticao');
+    let algumTipo = false;
+    for (const sel of acharSelects()) {
+      const val = (o) => o.value && o.value !== '0';
+      const opt = Array.from(sel.options).find(o => val(o) && norm(o.textContent) === alvoTipo) ||
+                  Array.from(sel.options).find(o => val(o) && norm(o.textContent).includes(alvoTipo)) ||
+                  Array.from(sel.options).find(o => val(o) && norm(o.textContent) === 'peticao') || // "Petição" (não "Petição Inicial")
+                  Array.from(sel.options).find(o => val(o) && norm(o.textContent).includes('peticao') && !norm(o.textContent).includes('inicial')) ||
+                  Array.from(sel.options).find(o => val(o) && norm(o.textContent).includes('outros'));
+      if (opt) { sel.value = opt.value; sel.dispatchEvent(new Event('change', { bubbles: true })); algumTipo = true; }
+    }
+    // Só considera enviado se o tipo FOI escolhido — senão o "Confirmar Inclusão"
+    // (validar_e_fechar) é recusado por tipo vazio, a janela não fecha e o lote ficaria
+    // 2min "aguardando". Nesse caso pausa pedindo o passo manual (com o PDF já anexado).
+    if (!tiposProntos || !algumTipo) {
+      return pausar(c, 'anexei o PDF, mas o diálogo não deixou eu escolher o <b>tipo do documento</b> sozinho — escolha o tipo (ex.: <b>Petição</b>) e clique <b>Confirmar Inclusão</b>; depois Continuar.');
+    }
     c.uploadFeito = true; await casoSalvar(c);
-    // M5: espera SINAL de conclusão do envio (a lista do diálogo recebe as linhas
-    // dos arquivos, ou o input volta a ficar vazio) em vez de sleep fixo de 5s —
-    // fechar cedo cancelaria upload de PDF grande. Só então confirma a inclusão.
-    await esperar(() => {
-      const linhas = document.querySelectorAll('#fileUploadForm table tbody tr, .resultTable tbody tr').length;
-      return linhas >= c.docs.length || (inputArq.value === '' && linhas > 0);
-    }, Math.max(60000, c.docs.length * 45000), 700);
-    try {
-      const fechar = document.getElementById('closeButton') || acharControle(['confirmar inclusao']);
-      if (fechar) clicar(fechar);
-    } catch (_) { /* diálogo pode ter fechado sozinho */ }
+    // 3) Confirmar Inclusão (id="closeButton" → validar_e_fechar): fecha o diálogo e
+    //    devolve o arquivo à lista de Arquivos da tela-mãe.
+    await new Promise(r => setTimeout(r, 300));
+    const enviar = document.getElementById('closeButton') ||
+      acharControle(['confirmar inclusao', 'confirmar inclusão', 'confirmar', 'enviar', 'incluir', 'anexar', 'ok'],
+        'input[type=submit],input[type=button],button,a');
+    if (enviar) clicar(enviar);
   }
 
   // Tela pré-login do Projudi (index): cartões "Magistrados…", "Advogados, Partes…",
   // "Certificado Digital". O 1º passo é entrar por "Advogados, Partes" (CPF/senha).
   function acessoAdvogado() {
     const txt = norm(document.body ? document.body.innerText : '');
-    if (!txt.includes('acesso ao sistema') && !txt.includes('cadastro no sistema')) return null;
-    // O cartão "Advogados, Partes" — pega o elemento MAIS INTERNO que casa (o clicável
-    // costuma ser um <a>/<div onclick> pequeno), depois sobe até achar href/onclick.
-    const cands = Array.from(document.querySelectorAll('a, div, button, li, td, span'));
-    const casam = cands.filter(el => visivel(el) && /advogad[oa]s?[ ,]+partes/.test(norm(el.textContent)) && norm(el.textContent).length < 220);
-    if (!casam.length) return null;
-    const alvo = casam[casam.length - 1]; // mais interno = mais específico
-    let el = alvo;
-    for (let i = 0; i < 5 && el; i++) {
-      if ((el.getAttribute && (el.getAttribute('onclick') || /^javascript:|\.do|\.php|=/.test(el.getAttribute('href') || ''))) ) return el;
-      el = el.parentElement;
-    }
-    return alvo.querySelector('a[href],[onclick]') || alvo;
+    // JÁ LOGADO? Usa só sinais EXCLUSIVOS da tela logada ("Atribuição: Advogado…",
+    // "Sair") — não palavras de menu (Audiências/Intimações/Estatísticas) que podem
+    // existir em menu público de consulta e dariam falso-negativo no pré-login.
+    if (/atribuicao|\bsair\b/.test(txt)) return null;
+    // Só a tela de acesso de verdade (tem esse cabeçalho e NÃO tem o menu logado).
+    const naTela = txt.includes('acesso ao sistema') || txt.includes('cadastro no sistema') || txt.includes('usuarios externos');
+    if (!naTela) return null;
+    // Queremos o cartão de usuários EXTERNOS (advogados, procuradores, partes, MP,
+    // peritos) — NUNCA o de magistrados/servidores. O título nem sempre traz "Partes"
+    // colado em "Advogados" (ex.: "Advogados, Procuradores, Partes…" ou o complemento
+    // "Membros do MP, Peritos e demais usuários externos ao TJPR"), então casamos por
+    // QUALQUER palavra-chave externa e excluímos as internas.
+    // F-A4: escolhe SÓ entre CLICÁVEIS e por PONTUAÇÃO (título "advogad…" curto ganha)
+    // — "último elemento do DOM" podia cair num rodapé/aviso que citasse advogados.
+    const externo = /advogad|procurador|\bpartes?\b|usuarios? externos|membros do mp|\bperitos?\b/;
+    const interno = /magistrados?|servidores?/;
+    const pontua = (t) => (t.startsWith('advogad') ? 0 : /advogad/.test(t) ? 1 : 2) * 1000 + t.length;
+    const clicaveis = Array.from(document.querySelectorAll('a[href], [onclick], button'))
+      .filter(visivel)
+      .map(el => ({ el, t: norm(el.textContent) }))
+      .filter(o => o.t && o.t.length < 240 && externo.test(o.t) && !interno.test(o.t))
+      .sort((a, b) => pontua(a.t) - pontua(b.t));
+    if (clicaveis.length) return clicaveis[0].el;
+    // Fallback (cartão com listener JS, sem href/onclick no atributo): elemento de
+    // TEXTO que melhor pontua; o clique borbulha até o listener do cartão.
+    const textuais = Array.from(document.querySelectorAll('a, div, button, li, td, span, h1, h2, h3'))
+      .filter(el => visivel(el))
+      .map(el => ({ el, t: norm(el.textContent) }))
+      .filter(o => o.t && o.t.length < 240 && externo.test(o.t) && !interno.test(o.t))
+      .sort((a, b) => pontua(a.t) - pontua(b.t));
+    if (!textuais.length) return null;
+    const alvo = textuais[0].el;
+    const dentro = alvo.querySelector && alvo.querySelector('a[href],[onclick]');
+    return (dentro && visivel(dentro)) ? dentro : alvo;
   }
 
   // Mutex de reentrância — auto-retomar (1200ms) + RUN + CONTINUAR. Ver C3.
@@ -442,8 +569,10 @@
     // A janela da lupa é um iframe não-condutor, mas precisa agir (escolher o tipo).
     if (c.status !== 'pausado' && ehDialogoTipo()) { await telaDialogoTipo(c); return; }
     if (!ehCondutor()) {
-      // Tela pré-login (topo): clica em "Advogados, Partes" para chegar ao login.
-      if (window === window.top && c.status !== 'pausado') {
+      // Tela pré-login: clica em "Advogados, Partes" para chegar ao login. O cartão
+      // pode estar no TOPO ou num FRAME (o Projudi usa frameset até no acesso) — só
+      // age o frame cujo PRÓPRIO documento contém o cartão.
+      if (c.status !== 'pausado') {
         const naTelaAcesso = /acesso ao sistema/.test(norm(document.body ? document.body.innerText : ''));
         const acesso = acessoAdvogado();
         if (acesso) {
@@ -481,8 +610,17 @@
       }
 
       // Despacho por formulário presente na tela (IDs reais dos saves):
-      if (document.getElementById('fileUploadForm')) return await telaUpload(c);
+      // Só trata como diálogo de upload se o campo de arquivo estiver VISÍVEL —
+      // senão, num upload EMBUTIDO (form escondido no mesmo doc da juntada), o
+      // roteador chamaria telaUpload antes da telaJuntar e o lote travava.
+      const upForm = document.getElementById('fileUploadForm');
+      const upFile = upForm && upForm.querySelector('input[type="file"]');
+      // Só trata como diálogo de upload EMBUTIDO se o campo de arquivo existir E estiver
+      // visível — senão a juntada (com um fileUploadForm oculto/sem input) seria
+      // sequestrada. O upload em iframe próprio é pego pelo ramo final.
+      if (upForm && upFile && visivel(upFile)) return await telaUpload(c);
       if (document.getElementById('juntarDocumentoForm')) return await telaJuntar(c);
+      if (upForm && upFile) return await telaUpload(c); // upload em iframe próprio sem juntada na tela
       if (document.getElementById('processoForm')) return await telaProcesso(c); // M2: espera botões lá dentro
       if (document.getElementById('buscaProcessosQualquerInstanciaForm')) {
         // C1 (hardening): detecção POSITIVA — se já há link do processo no resultado,
@@ -509,7 +647,7 @@
     if (m.type === 'RUN_CENTRAL' && m.caso && m.caso.sistema === 'projudi') {
       if (!respondo) return false;
       (async () => {
-        await casoSalvar({ ...m.caso, status: 'rodando', motivo: null, fase: null, abriuUpload: false, uploadFeito: false, retomadoPeloUsuario: false });
+        await casoSalvar({ ...m.caso, status: 'rodando', motivo: null, fase: null, abriuLupa: false, abriuUpload: false, uploadFeito: false, retomadoPeloUsuario: false });
         sendResponse({ ok: true });
         runCentral().catch(() => {});
       })();
@@ -526,7 +664,7 @@
           } else {
             // C2: o humano pode ter resolvido algo (anexo/tipo) — não confiar nas
             // flags velhas; derivar do DOM na próxima passada.
-            c.abriuUpload = false; c.uploadFeito = false;
+            c.abriuLupa = false; c.abriuUpload = false; c.uploadFeito = false;
           }
           await casoSalvar(c); runCentral().catch(() => {});
         }
