@@ -129,6 +129,17 @@ Deno.serve(async (req) => {
       }
     } catch { /* colunas/tabela ainda não migradas -> comportamento antigo */ }
 
+    // Captura o TEXTO da mensagem enviada (humano ou Bia) para o transcript
+    // completo por telefone (memória + base de aprendizado). de_bia=!humano.
+    try {
+      const cOut = extrairConteudo(body);
+      await sb.from('crm_mensagens_enviadas').upsert({
+        message_id: String(messageId), telefone, caso_id: casoId,
+        texto: cOut.texto, tipo: cOut.tipo, midia_url: cOut.midia_url,
+        de_bia: !humano, enviada_em: new Date().toISOString(), raw: body
+      }, { onConflict: 'message_id' });
+    } catch { /* best-effort: não bloqueia o webhook */ }
+
     return new Response(JSON.stringify({ ok: true, recorded_as_outbound: String(messageId), telefone, caso_id: casoId, humano }), {
       status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
     });
