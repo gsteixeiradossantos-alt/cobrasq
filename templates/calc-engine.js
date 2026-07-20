@@ -227,11 +227,22 @@
     const baseRef = { saldoCorrigido: saldoCorrigidoTotal, jurosAcumulados: jurosAcumuladosTotal, multaAcumulada: multaAgregada };
     const honContratual = calcularHonorario(params.honC || { ativo: false }, params, baseRef, TAB);
 
+    // ── custas judiciais: SÓ corrigidas (mesmo índice/termo do cálculo), sem juros/multa/honorários ──
+    let custasResultados = [], totalCustas = 0;
+    for (const cu of (params.custas || [])) {
+      const valorCu = parseValor(cu.valor); if (!valorCu || valorCu <= 0) continue;
+      const dCu = parseDataLocal(cu.data); if (!dCu || dCu > params.dataFim) continue;
+      const sub = calcularPrincipal({ ...params, valorOriginal: valorCu, dataCorrecao: dCu, dataJuros: params.dataFim,
+        taxaJurosMensal: 0, aplicarMulta: false, eventos: [], parcelasExtras: [], honC: { ativo: false } }, TAB);
+      custasResultados.push({ descricao: cu.descricao || '', data: dCu, valor: valorCu, corrigido: sub.saldoCorrigido });
+      totalCustas += sub.saldoCorrigido;
+    }
+
     const totalPrincipal = saldoCorrigidoTotal + jurosAcumuladosTotal + multaAgregada;
     const totalHonC = honContratual ? honContratual.total : 0;
-    const totalGeral = totalPrincipal + totalHonC;
+    const totalGeral = totalPrincipal + totalHonC + totalCustas;
     return { params, principal, parcelasResultados, saldoCorrigidoTotal, jurosAcumuladosTotal, multaAgregada,
-      honContratual, totalPrincipal, totalHonC, totalGeral, aplicouGarantia: principal.aplicouGarantia };
+      honContratual, custasResultados, totalCustas, totalPrincipal, totalHonC, totalGeral, aplicouGarantia: principal.aplicouGarantia };
   }
 
   // ── cobrança extrajudicial (8% a.a. + 1% a.m. + 2% + taxa 30% + parcelamento) ──
