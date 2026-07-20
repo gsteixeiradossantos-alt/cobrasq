@@ -173,14 +173,16 @@ module.exports = async function handler(req, res) {
       } catch (e) { nf = { error: e.message }; }
     }
 
-    // Recibo automático ao devedor (R4) — best-effort.
+    // Recibo automático ao devedor (R4) — best-effort. Fala como a Bia e envia o
+    // COMPROVANTE oficial do Asaas (transactionReceiptUrl) quando disponível.
     let zap = null;
     const tel = String((devedor && devedor.telefone) || '').replace(/\D/g, '');
     if (tel) {
       const parc = row.parcela && row.total_parcelas ? ` (parcela ${row.parcela}/${row.total_parcelas})` : '';
       const ola = firstName(devedor && devedor.nome);
-      const msg = `${ola ? 'Olá, ' + ola + '! ' : ''}Recebemos seu pagamento${parc} no valor de ${fmtR(valorRecebido)}. ✅\n\n` +
-        `Obrigado! Seu recibo está registrado. — Cobrasq`;
+      const recibo = String((payment && payment.transactionReceiptUrl) || '').trim();
+      const linhaRecibo = recibo ? `\n\nSegue o comprovante:\n${recibo}` : '';
+      const msg = `*Bia • COBRASQ*\n${ola ? 'Olá, ' + ola + '! ' : ''}Recebemos seu pagamento${parc} no valor de ${fmtR(valorRecebido)}. Muito obrigada!${linhaRecibo}`;
       try { zap = await zapiSendText(tel, msg); } catch (e) { zap = { error: e.message }; }
     }
 
