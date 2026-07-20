@@ -19,9 +19,19 @@
 // sem revalidar o /api/gerar-pdf, ou o "Gerar PDF" do servidor quebra (o cliente
 // cai no Imprimir como rede de segurança, mas perde o 1-clique).
 
+const crypto = require('crypto');
 const { requireUser, applyCors } = require('./_auth.js');
 const chromium = require('@sparticuz/chromium-min');
 const puppeteer = require('puppeteer-core');
+
+// Auth server-to-server (Edge Functions Supabase, ex.: recibo de pagamento da Bia): quando o
+// header x-emit-secret bate com EMIT_ACORDO_SECRET, dispensa o login de usuário. Sem isso, o
+// endpoint exige sessão Supabase (requireUser), pois o HTML pode conter PII do escritório.
+function timingSafeEq(a, b) {
+  const ab = Buffer.from(String(a || '')); const bb = Buffer.from(String(b || ''));
+  if (ab.length !== bb.length || ab.length === 0) return false;
+  return crypto.timingSafeEqual(ab, bb);
+}
 
 // chromium-min NÃO empacota o binário (mantém a função pequena → build confiável
 // na Vercel). O binário é baixado da release oficial (versão casada com o pacote)
@@ -35,8 +45,11 @@ module.exports = async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const user = await requireUser(req, res);
-  if (!user) return;
+  const s2s = timingSafeEq(req.headers['x-emit-secret'] || '', process.env.EMIT_ACORDO_SECRET || '');
+  if (!s2s) {
+    const user = await requireUser(req, res);
+    if (!user) return;
+  }
 
   let html = '';
   try {
