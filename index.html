@@ -18752,7 +18752,7 @@ function _repIAHandleFiles(fileList){
   for(const f of Array.from(fileList||[])){
     if(_repIAFiles.length>=10){ showToast('Limite de 10 arquivos.','warning'); break; }
     if(_repIAFiles.some(x=>x.name===f.name && x.size===f.size)) continue;
-    if(f.size>20*1024*1024){ showToast(`${f.name} acima de 20 MB.`,'warning'); continue; }
+    if(f.size>3*1024*1024){ showToast(`${f.name} acima de 3 MB — o servidor rejeita uploads grandes.`,'warning'); continue; }
     _repIAFiles.push(f);
   }
   _repIARenderList();
@@ -18769,22 +18769,20 @@ function _repIARenderList(){
 async function _repIAAnalisar(){
   if(!_repIAFiles.length) return;
   const body=document.getElementById('repIA-body');
-  body.innerHTML=`<div style="text-align:center;padding:40px 0;"><div class="mv2-spinner"></div><p style="margin-top:14px;font-size:13px;color:var(--text-2);">IA lendo ${_repIAFiles.length} comprovante(s)…</p></div>`;
+  const ctx=window._repasseCtx||{};
+  const itens=[];
   try{
-    const content=[];
     for(let i=0;i<_repIAFiles.length;i++){
       const file=_repIAFiles[i];
+      body.innerHTML=`<div style="text-align:center;padding:40px 0;"><div class="mv2-spinner"></div><p style="margin-top:14px;font-size:13px;color:var(--text-2);">IA lendo comprovante ${i+1} de ${_repIAFiles.length}…</p></div>`;
       const ext=(file.name.split('.').pop()||'').toLowerCase();
-      content.push({type:'text',text:`--- COMPROVANTE ${i+1} de ${_repIAFiles.length}: ${file.name} ---`});
       const b64=await new Promise((res,rej)=>{const r=new FileReader();r.onload=e=>res(e.target.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file);});
+      const content=[];
       if(ext==='pdf') content.push({type:'document',source:{type:'base64',media_type:'application/pdf',data:b64}});
       else content.push({type:'image',source:{type:'base64',media_type:ext==='png'?'image/png':(ext==='webp'?'image/webp':'image/jpeg'),data:b64}});
-    }
-    const ctx=window._repasseCtx||{};
-    content.push({type:'text',text:`Você analisa COMPROVANTES DE TRANSFERÊNCIA PIX que a COBRASQ (pagadora) enviou ao credor (destinatário). Há ${_repIAFiles.length} comprovante(s), um por bloco, na ordem acima. O cliente/credor esperado é "${ctx.clienteNome||''}"${ctx.clienteDoc?`, CNPJ/CPF ${ctx.clienteDoc}`:''}.
+      content.push({type:'text',text:`Você analisa um COMPROVANTE DE TRANSFERÊNCIA PIX que a COBRASQ (pagadora) enviou ao credor (destinatário). O cliente/credor esperado é "${ctx.clienteNome||''}"${ctx.clienteDoc?`, CNPJ/CPF ${ctx.clienteDoc}`:''}.
 
-Para CADA comprovante extraia um objeto, na MESMA ordem. Responda APENAS com JSON: {"itens":[ {...} ]}.
-Schema de cada item (campo faltante = null):
+Extraia um único objeto deste comprovante. Responda APENAS com JSON, sem markdown:
 {
  "valor": número em reais (ponto decimal, ex.: 206.00) — o valor transferido,
  "data": "AAAA-MM-DD",
@@ -18794,15 +18792,25 @@ Schema de cada item (campo faltante = null):
  "destinatario_doc": somente dígitos do CPF/CNPJ do destinatário,
  "alerta": null OU um texto curto se algo estiver estranho (destinatário diferente do credor esperado, pagador não é COBRASQ, status não confirmado, valor ilegível)
 }
-NUNCA invente valor. Se não conseguir ler o valor, deixe null e explique em "alerta". Retorne só o JSON, sem markdown.`});
-    const resp=await fetch('/api/claude',{ method:'POST', headers:{'Content-Type':'application/json', ...(await authHeaders())},
-      body:JSON.stringify({model:'claude-opus-4-5',max_tokens:2048,messages:[{role:'user',content}]}) });
-    const data=await resp.json();
-    if(data.error) throw new Error(data.error.message||'Erro na IA');
-    const aiText=(data.content?.[0]?.text||'').trim();
-    const m=aiText.match(/\{[\s\S]*\}/);
-    const parsed=JSON.parse(m?m[0]:aiText);
-    const itens=Array.isArray(parsed.itens)?parsed.itens:(Array.isArray(parsed)?parsed:[]);
+NUNCA invente valor. Se não conseguir ler o valor, deixe null e explique em "alerta".`});
+      const resp=await fetch('/api/claude',{ method:'POST', headers:{'Content-Type':'application/json', ...(await authHeaders())},
+        body:JSON.stringify({model:'claude-opus-4-5',max_tokens:1024,messages:[{role:'user',content}]}) });
+      const raw=await resp.text();
+      let data;
+      try{ data=JSON.parse(raw); }
+      catch(_){
+        throw new Error(resp.status===413
+          ? `${file.name}: arquivo grande demais para o servidor (413). Reduza o tamanho e tente de novo.`
+          : `${file.name}: resposta inválida do servidor (HTTP ${resp.status}).`);
+      }
+      if(data.error) throw new Error(`${file.name}: ${data.error.message||'erro na IA'}`);
+      const aiText=(data.content?.[0]?.text||'').trim();
+      const m=aiText.match(/\{[\s\S]*\}/);
+      let it={};
+      try{ it=JSON.parse(m?m[0]:aiText); }
+      catch(_){ it={alerta:'Não foi possível ler a resposta da IA para este comprovante.'}; }
+      itens.push(it);
+    }
     _repIAItems=itens.map((it,i)=>({
       file:_repIAFiles[i]||null,
       valor:(it.valor!=null && !isNaN(+it.valor))?+it.valor:null,
