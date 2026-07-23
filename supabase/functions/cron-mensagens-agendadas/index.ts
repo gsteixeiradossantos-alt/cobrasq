@@ -196,6 +196,19 @@ Deno.serve(async (req) => {
       await sb.from('crm_mensagens_agendadas')
         .update({ status: 'enviada', tentativas: novasTentativas, enviada_em: new Date().toISOString(), erro: null, processando_desde: null })
         .eq('id', m.id);
+      // Pausa a Bia por 24h para este telefone: mensagem agendada (lembrete,
+      // "Ana • Financeiro", etc.) saiu — se o devedor responder, quem cuida é
+      // um humano, não a IA. Seta ANTES do callback Z-API (elimina race condition).
+      try {
+        const tel = String(m.telefone || '').replace(/\D/g, '');
+        if (tel) {
+          const humanoAte = new Date(Date.now() + 1440 * 60000).toISOString();
+          await sb.from('whatsapp_atendimentos').upsert(
+            { telefone: tel.length <= 11 ? '55' + tel : tel, caso_id: m.caso_id, humano_ate: humanoAte, updated_at: new Date().toISOString() },
+            { onConflict: 'telefone' }
+          );
+        }
+      } catch { /* best-effort — tabela pode não existir ainda */ }
       enviadas++;
     } else if (novasTentativas >= MAX_TENTATIVAS) {
       await sb.from('crm_mensagens_agendadas')
