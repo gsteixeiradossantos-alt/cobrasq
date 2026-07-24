@@ -22,7 +22,7 @@ import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { PDFDocument, StandardFonts, rgb } from 'https://esm.sh/pdf-lib@1.17.1';
 import fontkit from 'https://esm.sh/@pdf-lib/fontkit@1.1.1';
 
-const MODELO = 'claude-sonnet-5';
+const MODELO = 'claude-haiku-4-5-20251001';
 const MAX_CONVERSAS_POR_RUN = 15;
 // Só atende mensagens RECENTES. Protege contra "backlog": mensagens antigas
 // acumuladas nunca são respondidas automaticamente (e não entopem a fila).
@@ -104,6 +104,7 @@ const assinar = (msg: string) => `${ASSINATURA}\n${String(msg || '').trimStart()
 // Envia em BLOCOS: quebra o texto na LINHA EM BRANCO (\n\n) e manda cada parte como uma
 // mensagem separada (como um humano digita). Assinatura só no 1º bloco. Registra status por bloco.
 async function enviarBlocos(tel: string, casoId: string | null, texto: string, sb: any, sendTextUrl: string, zapiHeaders: Record<string, string>, via = 'bia-atendimento'): Promise<{ ok: boolean; outId: string }> {
+  const loteId = crypto.randomUUID();
   const blocos = String(texto || '').split(/\n\s*\n/).map((b) => b.trim()).filter(Boolean);
   if (!blocos.length) return { ok: false, outId: '' };
   blocos[0] = `${ASSINATURA}\n${blocos[0]}`;
@@ -117,7 +118,7 @@ async function enviarBlocos(tel: string, casoId: string | null, texto: string, s
         if (oid) {
           if (!outId) outId = String(oid);
           await sb.from('crm_mensagens_status').upsert({ caso_id: casoId, message_id: String(oid), telefone_enviado: tel, status: 'sent', evento_em: new Date().toISOString(), raw_payload: { via } }, { onConflict: 'message_id' });
-          try { await sb.from('whatsapp_bia_enviadas').upsert({ message_id: String(oid), telefone: tel }, { onConflict: 'message_id' }); } catch { /* */ }
+          try { await sb.from('whatsapp_bia_enviadas').upsert({ message_id: String(oid), telefone: tel, lote_id: loteId }, { onConflict: 'message_id' }); } catch { /* */ }
         }
       }
     } catch { /* */ }
@@ -628,7 +629,7 @@ Deno.serve(async (req) => {
   if (errSel) return new Response(JSON.stringify({ error: 'select pendentes: ' + errSel.message }), { status: 500 });
   if (!pend || pend.length === 0) return new Response(JSON.stringify({ ok: true, processadas: 0 }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 
-  let respondidas = 0, handoffs = 0, puladas = 0;
+  let respondidas = 0, handoffs = 0, puladas = 0, _aiDebug = '';
 
   // Responde a um comprovante já analisado (comp) conforme a situação (agendado/efetuado/etc.).
   async function tratarComprovante(comp: any, cob: any, telefone: string, casoId: string | null, logId: number, turnos: number) {
@@ -831,8 +832,9 @@ Deno.serve(async (req) => {
         `Última mensagem do cliente: "${String(textoCliente || ('[' + c.tipo + ']')).slice(0, 600)}"`
       ].filter(Boolean).join('\n\n');
 
-      // Gera resposta (Claude Haiku, JSON).
+      // Gera resposta (Claude).
       let parsed: any = null;
+      _aiDebug = '';
       try {
         const air = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
@@ -841,16 +843,17 @@ Deno.serve(async (req) => {
           signal: AbortSignal.timeout(30000)
         });
         const aj = await air.json().catch(() => null);
-        parsed = extrairJson(aj?.content?.[0]?.text ?? '');
-      } catch {/* parsed fica null -> libera e tenta no próximo run */}
+        if (!air.ok || aj?.type === 'error') {
+          _aiDebug = `API ${air.status}: ${JSON.stringify(aj?.error || aj).slice(0, 300)}`;
+        }
+        const textBlock = (aj?.content || []).find((b: any) => b.type === 'text');
+        parsed = extrairJson(textBlock?.text ?? '');
+      } catch (e: any) { _aiDebug = `fetch error: ${e?.message || e}`; console.error('[bia-atendimento]', _aiDebug); }
 
-      // Ações sem texto (enviar_boleto/silencio/ignorar) legitimamente vêm com "resposta" vazia:
-      // o sistema é quem monta a mensagem (ou não responde). Só descarta quando NÃO houve parse
-      // ou quando uma ação que fala com o cliente veio sem texto.
       const acaoParsed = String(parsed?.acao || '').toLowerCase();
       const acaoSemTexto = ['enviar_boleto', 'silencio', 'ignorar', 'negociar_prazo', 'ja_paguei', 'quer_comprovante'].includes(acaoParsed);
       if (!parsed || (!parsed.resposta && !acaoSemTexto)) {
-        await sb.from('whatsapp_bia_log').delete().eq('id', logId); // libera p/ retry
+        await sb.from('whatsapp_bia_log').delete().eq('id', logId);
         puladas++; continue;
       }
 

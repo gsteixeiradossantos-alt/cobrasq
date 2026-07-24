@@ -10,7 +10,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 
 const SIG = '*Bia • COBRASQ*';
-const MAX_POR_RUN = 5; // cada contato envia vários blocos; menos contatos por run p/ não estourar o cron
+const MAX_POR_RUN = 10; // query limit (pode ter duplicatas de telefone que serão deduplicadas)
 
 function json(o: unknown, status = 200) {
   return new Response(JSON.stringify(o), { status, headers: { 'Content-Type': 'application/json' } });
@@ -75,10 +75,21 @@ Deno.serve(async (req) => {
     }
   }
   async function enviarTexto(tel: string, msg: string) {
-    try { await fetch(`${zBase}/send-text`, { method: 'POST', headers: zHead, body: JSON.stringify({ phone: tel, message: msg.slice(0, 4000) }) }); } catch { /* */ }
+    try {
+      const e = await fetch(`${zBase}/send-text`, { method: 'POST', headers: zHead, body: JSON.stringify({ phone: tel, message: msg.slice(0, 4000) }) });
+      const ej = await e.json().catch(() => null);
+      if (e.ok && ej && !ej.error) {
+        const oid = String(ej.messageId || ej.id || ej.zaapId || '');
+        if (oid) {
+          await sb.from('crm_mensagens_status').upsert({ message_id: oid, telefone_enviado: tel, status: 'sent', evento_em: new Date().toISOString(), raw_payload: { via: 'bia-cobranca-aprovacao' } }, { onConflict: 'message_id' });
+          try { await sb.from('whatsapp_bia_enviadas').upsert({ message_id: oid, telefone: tel, lote_id: crypto.randomUUID() }, { onConflict: 'message_id' }); } catch { /* */ }
+        }
+      }
+    } catch { /* */ }
   }
   // envia uma mensagem em BLOCOS (várias mensagens curtas) e registra status/enviadas por bloco
   async function enviarBlocos(tel: string, blocos: string[]): Promise<{ ok: boolean; outId: string }> {
+    const loteId = crypto.randomUUID();
     let ok = false, outId = '';
     for (const bloco of blocos) {
       try {
@@ -89,7 +100,7 @@ Deno.serve(async (req) => {
           const oid = String(ej.messageId || ej.id || ej.zaapId);
           if (!outId) outId = oid;
           await sb.from('crm_mensagens_status').upsert({ message_id: oid, telefone_enviado: tel, status: 'sent', evento_em: new Date().toISOString(), raw_payload: { via: 'bia-cobranca' } }, { onConflict: 'message_id' });
-          try { await sb.from('whatsapp_bia_enviadas').upsert({ message_id: oid, telefone: tel }, { onConflict: 'message_id' }); } catch { /* */ }
+          try { await sb.from('whatsapp_bia_enviadas').upsert({ message_id: oid, telefone: tel, lote_id: loteId }, { onConflict: 'message_id' }); } catch { /* */ }
         }
       } catch { /* */ }
       await new Promise((r) => setTimeout(r, 400));
@@ -218,11 +229,21 @@ Deno.serve(async (req) => {
 
   let enviadas = 0, pagas = 0, paraAcao = 0, puladas = 0, followups = 0;
   const agoraIso = new Date().toISOString();
+  const telefonesProcessados = new Set<string>();
 
   for (const c of (rows || [])) {
     const tel = String(c.telefone || '').replace(/\D/g, '');
     if (!tel) { puladas++; continue; }
     if (testeTel && tel.slice(-8) !== testeTel.slice(-8)) { puladas++; continue; }
+
+    // DEDUP: só envia mensagem pra cada telefone UMA VEZ por run.
+    // Se já mandamos, só empurra proximo_lembrete_em pra não reprocessar no próximo cron.
+    if (telefonesProcessados.has(tel)) {
+      const proxPadrao = new Date(Date.now() + 864e5).toISOString();
+      await sb.from('bia_cobranca').update({ proximo_lembrete_em: proxPadrao, updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
+      puladas++; continue;
+    }
+    telefonesProcessados.add(tel);
 
     // cede a vez ao humano / negociação viva
     const { data: at } = await sb.from('whatsapp_atendimentos').select('estado, humano_ate').eq('telefone', tel).maybeSingle();
@@ -282,7 +303,15 @@ Deno.serve(async (req) => {
       if (!ok) { puladas++; continue; }
       const nAtual = c.lembretes_enviados ?? 1;
       const proxMs = Date.now() + (nAtual <= 2 ? 1 : 2) * 864e5;
-      await sb.from('bia_cobranca').update({ ultimo_lembrete_em: agoraIso, proximo_lembrete_em: new Date(proxMs).toISOString(), observacao: 'follow-up enviado; sem resposta até 13h30', updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
+      const proxFup = new Date(proxMs).toISOString();
+      await sb.from('bia_cobranca').update({ ultimo_lembrete_em: agoraIso, proximo_lembrete_em: proxFup, observacao: 'follow-up enviado; sem resposta até 13h30', updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
+      if (c.asaas_customer_id) {
+        await sb.from('bia_cobranca')
+          .update({ proximo_lembrete_em: proxFup, updated_at: agoraIso })
+          .eq('asaas_customer_id', c.asaas_customer_id)
+          .in('status', ['ativa', 'adiada'])
+          .neq('asaas_payment_id', c.asaas_payment_id);
+      }
       await sb.from('bia_cobranca_log').insert({ asaas_payment_id: c.asaas_payment_id, telefone: tel, lembrete_num: nAtual, texto: 'FOLLOW-UP: ' + blocos.join('\n\n') });
       followups++; continue;
     }
@@ -384,6 +413,14 @@ Deno.serve(async (req) => {
       upd.data_prometida = null;
     }
     await sb.from('bia_cobranca').update(upd).eq('asaas_payment_id', c.asaas_payment_id);
+    // sincronizar siblings: empurrar proximo_lembrete_em de todos os boletos do mesmo cliente
+    if (c.asaas_customer_id) {
+      await sb.from('bia_cobranca')
+        .update({ proximo_lembrete_em: upd.proximo_lembrete_em, updated_at: agoraIso })
+        .eq('asaas_customer_id', c.asaas_customer_id)
+        .in('status', ['ativa', 'adiada'])
+        .neq('asaas_payment_id', c.asaas_payment_id);
+    }
     await sb.from('bia_cobranca_log').insert({ asaas_payment_id: c.asaas_payment_id, telefone: tel, lembrete_num: n, texto: msgLog });
     enviadas++;
   }
