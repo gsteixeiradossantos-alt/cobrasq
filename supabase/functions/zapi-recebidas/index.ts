@@ -121,7 +121,7 @@ Deno.serve(async (req) => {
     try {
       const { data: botMsg } = await sb.from('whatsapp_bia_enviadas').select('message_id').eq('message_id', String(messageId)).maybeSingle();
       if (!botMsg) {
-        let pausaMin = 30;
+        let pausaMin = 1440;
         try { const { data: cfg } = await sb.from('whatsapp_bia_config').select('humano_pausa_min').eq('id', 1).maybeSingle(); if (cfg?.humano_pausa_min != null) pausaMin = cfg.humano_pausa_min; } catch { /* usa default */ }
         const humanoAte = new Date(Date.now() + pausaMin * 60000).toISOString();
         await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, humano_ate: humanoAte, updated_at: new Date().toISOString() }, { onConflict: 'telefone' });

@@ -13,9 +13,11 @@ const corsHeaders = {
 
 function variantesComEsem9(phoneFinal: string): string[] {
   // phoneFinal: 55 + DDD(2) + 8 ou 9 dígitos
+  // Se já tem 9 após DDD -> tenta também sem o 9
+  // Se não tem 9 após DDD -> tenta também com o 9
   const variantes = [phoneFinal];
   if (phoneFinal.length === 13) {
-    // 55 + DDD(2) + 9 + 8 dígitos -> tenta sem o 9
+    // 55 + DDD(2) + 9 + 8 dígitos
     const semNove = phoneFinal.substring(0, 4) + phoneFinal.substring(5);
     variantes.push(semNove);
   } else if (phoneFinal.length === 12) {
@@ -26,7 +28,7 @@ function variantesComEsem9(phoneFinal: string): string[] {
   return variantes;
 }
 
-async function phoneExistsOnWhatsApp(instance: string, token: string, clientToken: string | undefined, phone: string): Promise<boolean> {
+async function phoneExistsOnWhatsApp(instance: string, token: string, clientToken: string|undefined, phone: string): Promise<boolean> {
   try {
     const url = `https://api.z-api.io/instances/${instance}/token/${token}/phone-exists/${phone}`;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -34,6 +36,7 @@ async function phoneExistsOnWhatsApp(instance: string, token: string, clientToke
     const r = await fetch(url, { method: 'GET', headers, signal: AbortSignal.timeout(7000) });
     if (!r.ok) return false;
     const data = await r.json().catch(() => null);
+    // Z-API retorna { exists: true/false } OU { isUser: true/false } dependendo da versão
     if (data == null) return false;
     if (typeof data.exists === 'boolean') return data.exists;
     if (typeof data.isUser === 'boolean') return data.isUser;
