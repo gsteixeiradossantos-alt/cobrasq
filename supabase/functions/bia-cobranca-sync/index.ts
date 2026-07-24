@@ -55,9 +55,13 @@ Deno.serve(async (req) => {
   const pendHoje = await pagina(`status=PENDING&dueDate%5Bge%5D=${hoje}&dueDate%5Ble%5D=${hoje}`);
   if (!pendHoje) return json({ error: 'falha payments PENDING-hoje' }, 502);
 
-  // dedup por id
+  // dedup por id; separa deletados (Asaas retorna OVERDUE mesmo com deleted=true)
   const mapa = new Map<string, any>();
-  for (const p of [...overdue, ...pendHoje]) mapa.set(p.id, p);
+  const deletados: string[] = [];
+  for (const p of [...overdue, ...pendHoje]) {
+    if (p.deleted === true) { deletados.push(p.id); continue; }
+    mapa.set(p.id, p);
+  }
   const pays = [...mapa.values()];
 
   // nome + telefone dos clientes (dedup)
@@ -101,9 +105,23 @@ Deno.serve(async (req) => {
   if (novas.length) await sb.from('bia_cobranca').insert(novas);
   for (let i = 0; i < atualizadas.length; i += 10) await Promise.all(atualizadas.slice(i, i + 10));
 
+  // marca como cancelada boletos que foram deletados no Asaas mas ainda estão ativos localmente
+  let canceladas = 0;
+  if (deletados.length) {
+    for (let i = 0; i < deletados.length; i += 50) {
+      const { data } = await sb.from('bia_cobranca')
+        .update({ status: 'cancelada', observacao: 'boleto deletado no Asaas (sync)', updated_at: agora })
+        .in('asaas_payment_id', deletados.slice(i, i + 50))
+        .in('status', ['ativa', 'adiada'])
+        .select('asaas_payment_id');
+      canceladas += (data || []).length;
+    }
+  }
+
   return json({
     ambiente: env, hoje,
     overdue_no_asaas: overdue.length, pending_hoje_no_asaas: pendHoje.length,
+    deletados_no_asaas: deletados.length, canceladas_localmente: canceladas,
     total_alvo: pays.length, novas: novas.length, atualizadas: atualizadas.length,
   });
 });

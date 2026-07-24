@@ -241,20 +241,25 @@ Deno.serve(async (req) => {
       puladas++; continue;
     }
 
-    // confere no Asaas se já pagou / pega venc/link atualizado
-    let pago = false, venc = c.venc_atual, url = c.invoice_url;
+    // confere no Asaas se já pagou / deletado / cancelado → para de cobrar
+    let pago = false, cancelado = false, venc = c.venc_atual, url = c.invoice_url;
     try {
       const r = await fetch(`${aBase}/payments/${c.asaas_payment_id}`, { headers: aHead });
       if (r.ok) {
         const p = await r.json();
         const st = String(p.status || '');
         if (['RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH'].includes(st)) pago = true;
+        if (['CANCELLED', 'REFUNDED', 'DELETED'].includes(st) || p.deleted === true) cancelado = true;
         venc = p.dueDate || venc; url = p.invoiceUrl || url;
       }
     } catch { /* mantém cache */ }
     if (pago) {
       await sb.from('bia_cobranca').update({ status: 'paga', updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
       pagas++; continue;
+    }
+    if (cancelado) {
+      await sb.from('bia_cobranca').update({ status: 'cancelada', observacao: 'boleto cancelado/deletado no Asaas', updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
+      puladas++; continue;
     }
 
     const hoje = hojeSP();
