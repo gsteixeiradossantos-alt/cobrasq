@@ -163,7 +163,16 @@ Deno.serve(async (req) => {
     (blk || []).forEach((b: any) => { const k = dk(b.telefone); if (k) bloqueados.add(k); });
   } catch { /* coluna ausente (migração 20260703 não aplicada) -> sem enforcement */ }
 
-  let enviadas = 0, falhadas = 0, bloqueadas = 0;
+  // Conversas pendentes: telefones com mensagem recebida sem resposta posterior.
+  // Se o devedor tem um pedido sem resposta, NÃO envia lembrete agendado por cima —
+  // deixa a Bia ou um humano atender primeiro. Devolve pra fila (próximo run retenta).
+  const pendentes = new Set<string>();
+  try {
+    const { data: pend } = await sb.from('vw_conversas_pendentes').select('telefone');
+    (pend || []).forEach((p: any) => { const k = dk(p.telefone); if (k) pendentes.add(k); });
+  } catch { /* view ausente → sem enforcement */ }
+
+  let enviadas = 0, falhadas = 0, bloqueadas = 0, adiadas = 0;
   for (const m of lote) {
     // Lock otimista — carimba processando_desde=now() p/ o reaper saber a idade do lock.
     const { data: lock } = await sb
@@ -180,6 +189,16 @@ Deno.serve(async (req) => {
         .update({ status: 'cancelada', erro: 'regua_bloqueada (spam/engano)', processando_desde: null })
         .eq('id', m.id);
       bloqueadas++;
+      continue;
+    }
+
+    // Conversa pendente: devedor tem mensagem sem resposta → não envia
+    // lembrete por cima; devolve pra fila e tenta no próximo run.
+    if (pendentes.has(dk(m.telefone))) {
+      await sb.from('crm_mensagens_agendadas')
+        .update({ status: 'pendente', processando_desde: null })
+        .eq('id', m.id);
+      adiadas++;
       continue;
     }
 
@@ -218,7 +237,7 @@ Deno.serve(async (req) => {
     }
   }
 
-  return new Response(JSON.stringify({ ok: true, lote: lote.length, enviadas, falhadas, bloqueadas }), {
+  return new Response(JSON.stringify({ ok: true, lote: lote.length, enviadas, falhadas, bloqueadas, adiadas }), {
     status: 200, headers: { 'Content-Type': 'application/json' }
   });
 });
