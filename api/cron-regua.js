@@ -122,6 +122,17 @@ async function zapiSendText(phone, message) {
   if (!data || typeof data !== 'object' || !(data.messageId || data.zaapId)) {
     throw new Error(`Z-API sem messageId: ${typeof data === 'string' ? data : JSON.stringify(data)}`);
   }
+  // Pausa a Bia por 24h: mensagem da régua saiu — se o devedor responder,
+  // quem cuida é um humano, não a IA. Seta ANTES do callback Z-API chegar
+  // no zapi-recebidas (elimina race condition). Best-effort.
+  try {
+    const humanoAte = new Date(Date.now() + 1440 * 60000).toISOString();
+    await sbFetch('whatsapp_atendimentos?on_conflict=telefone', {
+      method: 'POST',
+      headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ telefone: fone, humano_ate: humanoAte, updated_at: new Date().toISOString() }),
+    });
+  } catch { /* tabela pode não existir ainda */ }
   return data;
 }
 
@@ -822,6 +833,16 @@ async function reguaQuita({ dry, DB }) {
     }
   } catch (e) { /* melhor esforço */ }
 
+  // Conversas pendentes: não envia se o devedor tem mensagem sem resposta.
+  const quitaPendentes = new Set();
+  try {
+    const pendRows = await sbFetch('vw_conversas_pendentes?select=telefone');
+    for (const p of (pendRows || [])) {
+      const k = String(p.telefone || '').replace(/\D/g, '').slice(-8);
+      if (k) quitaPendentes.add(k);
+    }
+  } catch { /* view ausente → sem enforcement */ }
+
   for (const a of alvos) {
     if (jaAcordo.has(a.cobId)) continue;
     const env = envios[`${a.devId}|${a.cobId}`] || {};
@@ -842,6 +863,15 @@ async function reguaQuita({ dry, DB }) {
       chosen = s; break;
     }
     if (!chosen) continue;
+
+    // Conversa pendente → não dispara se o devedor tem msg sem resposta.
+    if (chosen.canal !== 'email' && chosen.canal !== 'serasa_flag') {
+      const telKeyQ = String(a.tel).replace(/\D/g, '').slice(-8);
+      if (telKeyQ && quitaPendentes.has(telKeyQ)) {
+        out.itens.push({ dev: a.nome, step: chosen.key, canal: chosen.canal, skipped: 'conversa_pendente' });
+        continue;
+      }
+    }
 
     // Passo especial: NÃO envia mensagem — marca a cobrança como CANDIDATA à
     // negativação (entra na fila de aprovação humana). Não chama bureau nenhum.
@@ -1078,6 +1108,17 @@ module.exports = async function handler(req, res) {
     const devIds = ativos.map(d => String(d.id || ''));
     const jaEnviados = await loadJaEnviados(devIds);
 
+    // Conversas pendentes: se o devedor tem mensagem sem resposta, NÃO envia
+    // cobrança por cima — deixa a Bia ou um humano atender primeiro.
+    const conversasPendentes = new Set();
+    try {
+      const pendRows = await sbFetch('vw_conversas_pendentes?select=telefone');
+      for (const p of (pendRows || [])) {
+        const k = String(p.telefone || '').replace(/\D/g, '').slice(-8);
+        if (k) conversasPendentes.add(k);
+      }
+    } catch { /* view ausente → sem enforcement */ }
+
     const resultado = {
       processados: ativos.length,
       source: reguaSource,
@@ -1118,6 +1159,15 @@ module.exports = async function handler(req, res) {
         }
         const dest = canal === 'email' ? (dev.email || '') : tel;
         if (!dest) { resultado.itens.push({ dev: dev.nome, tipo: 'cobranca', step: stepKey, skipped: `sem ${canal === 'email' ? 'e-mail' : 'telefone'}` }); continue; }
+
+        // Conversa pendente: devedor tem mensagem sem resposta → não cobra por cima.
+        if (canal !== 'email') {
+          const telKey = String(tel).replace(/\D/g, '').slice(-8);
+          if (telKey && conversasPendentes.has(telKey)) {
+            resultado.itens.push({ dev: dev.nome, tipo: 'cobranca', step: stepKey, skipped: 'conversa_pendente' });
+            continue;
+          }
+        }
 
         const msg = renderTemplate(step.template, {
           nome: dev.nome || '', valor: fmtR(valor), doc: dev.doc || '',
@@ -1172,6 +1222,15 @@ module.exports = async function handler(req, res) {
             }
             const dest = canal === 'email' ? (dev.email || '') : tel;
             if (!dest) { resultado.itens.push({ dev: dev.nome, tipo: 'acordo', parcela: p.numero, step: stepKey, skipped: `sem ${canal === 'email' ? 'e-mail' : 'telefone'}` }); continue; }
+
+            // Conversa pendente → não cobra por cima.
+            if (canal !== 'email') {
+              const telKeyB = String(tel).replace(/\D/g, '').slice(-8);
+              if (telKeyB && conversasPendentes.has(telKeyB)) {
+                resultado.itens.push({ dev: dev.nome, tipo: 'acordo', parcela: p.numero, step: stepKey, skipped: 'conversa_pendente' });
+                continue;
+              }
+            }
 
             const msg = renderTemplate(step.template, {
               nome: dev.nome || '', valor: fmtR(parseValorBR(dev.valorAtual) || parseValorBR(dev.valorOrig) || 0),
