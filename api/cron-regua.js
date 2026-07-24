@@ -122,6 +122,17 @@ async function zapiSendText(phone, message) {
   if (!data || typeof data !== 'object' || !(data.messageId || data.zaapId)) {
     throw new Error(`Z-API sem messageId: ${typeof data === 'string' ? data : JSON.stringify(data)}`);
   }
+  // Pausa a Bia por 24h: mensagem da régua saiu — se o devedor responder,
+  // quem cuida é um humano, não a IA. Seta ANTES do callback Z-API chegar
+  // no zapi-recebidas (elimina race condition). Best-effort.
+  try {
+    const humanoAte = new Date(Date.now() + 1440 * 60000).toISOString();
+    await sbFetch('whatsapp_atendimentos?on_conflict=telefone', {
+      method: 'POST',
+      headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: JSON.stringify({ telefone: fone, humano_ate: humanoAte, updated_at: new Date().toISOString() }),
+    });
+  } catch { /* tabela pode não existir ainda */ }
   return data;
 }
 
