@@ -793,7 +793,7 @@ Deno.serve(async (req) => {
       } catch (e: any) { _aiDebug = `fetch error: ${e?.message || e}`; console.error('[bia-atendimento]', _aiDebug); }
 
       const acaoParsed = String(parsed?.acao || '').toLowerCase();
-      const acaoSemTexto = ['enviar_boleto', 'silencio', 'ignorar', 'negociar_prazo', 'ja_paguei', 'quer_comprovante', 'credor_info'].includes(acaoParsed);
+      const acaoSemTexto = ['enviar_boleto', 'silencio', 'ignorar', 'negociar_prazo', 'ja_paguei', 'quer_comprovante', 'credor_info', 'lead_comercial'].includes(acaoParsed);
       if (!parsed || (!parsed.resposta && !acaoSemTexto)) {
         await sb.from('whatsapp_bia_log').delete().eq('id', logId);
         puladas++; continue;
@@ -806,9 +806,9 @@ Deno.serve(async (req) => {
       // TRAVA MODO SÓ BOLETO: só age em enviar_boleto. Qualquer outro assunto a Bia
       // NÃO responde nada nem avisa — deixa pro humano (a conversa fica em Pendentes).
       // EXCEÇÃO: contatos com COBRANÇA ATIVA liberam o playbook completo (negociar prazo etc.).
-      // EXCEÇÃO 2: credor_info sempre libera — é cliente/credor falando, não devedor, e o
-      // próprio bloco abaixo já é conservador (confirma telefone cadastrado antes de agir).
-      if (boletoOnly && !cobAtiva && !['enviar_boleto', 'ja_paguei', 'quer_comprovante', 'credor_info'].includes(acao)) {
+      // EXCEÇÃO 2: credor_info e lead_comercial sempre liberam — não são devedor, e os
+      // blocos abaixo são conservadores (texto fixo/verificado, não a IA improvisando).
+      if (boletoOnly && !cobAtiva && !['enviar_boleto', 'ja_paguei', 'quer_comprovante', 'credor_info', 'lead_comercial'].includes(acao)) {
         await sb.from('whatsapp_bia_log').update({ resposta: null, acao: 'skip_nao_boleto' }).eq('id', logId);
         puladas++; continue;
       }
@@ -909,6 +909,22 @@ Deno.serve(async (req) => {
         await sb.from('whatsapp_bia_log').update({ resposta: msgCliente, acao: 'handoff' }).eq('id', logId);
         await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, estado: 'aguardando_humano', intencao: 'credor_especifico', turnos: novosTurnos, resumo: `Cliente ${credor.nome} perguntou sobre "${nomeBusca}"`, motivo_handoff: 'credor_caso_especifico', updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
         await notificar(`Bia: cliente ${credor.nome_fantasia || credor.nome} pediu informação sobre um caso.\nNome buscado: ${nomeBusca}\nContato: +${telefone}\n\n${contextoHumano}`);
+        handoffs++; continue;
+      }
+
+      // LEAD comercial (quer contratar a COBRASQ, não é devedor nem cliente). Texto FIXO
+      // buscado por slug em bia_conhecimento (categoria resposta_modelo) — nunca a IA
+      // parafraseando preço/condição. Se a KB não tiver a entrada, cai num fallback curto.
+      if (acao === 'lead_comercial') {
+        let msgLead = 'Que bom seu interesse! Já vou passar seu contato pra nossa equipe comercial, eles te explicam certinho como funciona e fazem o diagnóstico gratuito da sua carteira.';
+        try {
+          const { data: kbLead } = await sb.from('bia_conhecimento').select('conteudo').eq('slug', 'explicacao-comercial-lead').eq('ativo', true).maybeSingle();
+          if (kbLead?.conteudo) msgLead = String(kbLead.conteudo);
+        } catch { /* segue com o fallback */ }
+        await enviarBlocos(telefone, casoId, msgLead, sb, sendTextUrl, zapiHeaders, 'bia-atendimento:lead');
+        await sb.from('whatsapp_bia_log').update({ resposta: msgLead, acao: 'lead_comercial' }).eq('id', logId);
+        await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, estado: 'aguardando_humano', intencao: 'lead_comercial', turnos: novosTurnos, resumo: parsed.resumo || 'Lead interessado em contratar a COBRASQ.', motivo_handoff: 'lead_comercial', updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
+        await notificar(`Bia: lead comercial interessado em contratar a COBRASQ.\nContato: +${telefone}\nJá expliquei o modelo e disse que a equipe comercial retorna. Veja em WhatsApp > Pendentes.`);
         handoffs++; continue;
       }
 
