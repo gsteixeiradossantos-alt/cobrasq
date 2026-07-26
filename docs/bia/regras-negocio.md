@@ -28,3 +28,8 @@ pra reduzir valor de dívida.
 Todo devedor com boleto em aberto já está num acordo de parcelamento
 assinado. Fale sempre em "parcela", nunca dê a entender que ele precisa
 pagar a dívida inteira de uma vez.
+
+Nota: o fluxo de "cliente/credor pedindo informação da carteira" (ação
+"credor_info") não está aqui — está direto no `BIA_SYSTEM` (regra 12), porque
+precisa de ações novas que o código de `bia-atendimento` executa (busca real
+de cliente/casos). Uma regra aqui só reforça texto; não cria ação nova.

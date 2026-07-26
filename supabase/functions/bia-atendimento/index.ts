@@ -793,7 +793,7 @@ Deno.serve(async (req) => {
       } catch (e: any) { _aiDebug = `fetch error: ${e?.message || e}`; console.error('[bia-atendimento]', _aiDebug); }
 
       const acaoParsed = String(parsed?.acao || '').toLowerCase();
-      const acaoSemTexto = ['enviar_boleto', 'silencio', 'ignorar', 'negociar_prazo', 'ja_paguei', 'quer_comprovante'].includes(acaoParsed);
+      const acaoSemTexto = ['enviar_boleto', 'silencio', 'ignorar', 'negociar_prazo', 'ja_paguei', 'quer_comprovante', 'credor_info'].includes(acaoParsed);
       if (!parsed || (!parsed.resposta && !acaoSemTexto)) {
         await sb.from('whatsapp_bia_log').delete().eq('id', logId);
         puladas++; continue;
@@ -806,7 +806,9 @@ Deno.serve(async (req) => {
       // TRAVA MODO SÓ BOLETO: só age em enviar_boleto. Qualquer outro assunto a Bia
       // NÃO responde nada nem avisa — deixa pro humano (a conversa fica em Pendentes).
       // EXCEÇÃO: contatos com COBRANÇA ATIVA liberam o playbook completo (negociar prazo etc.).
-      if (boletoOnly && !cobAtiva && !['enviar_boleto', 'ja_paguei', 'quer_comprovante'].includes(acao)) {
+      // EXCEÇÃO 2: credor_info sempre libera — é cliente/credor falando, não devedor, e o
+      // próprio bloco abaixo já é conservador (confirma telefone cadastrado antes de agir).
+      if (boletoOnly && !cobAtiva && !['enviar_boleto', 'ja_paguei', 'quer_comprovante', 'credor_info'].includes(acao)) {
         await sb.from('whatsapp_bia_log').update({ resposta: null, acao: 'skip_nao_boleto' }).eq('id', logId);
         puladas++; continue;
       }
@@ -840,6 +842,74 @@ Deno.serve(async (req) => {
           puladas++;
         }
         continue;
+      }
+
+      // CLIENTE/CREDOR pedindo info da própria carteira (não é devedor). O sistema
+      // identifica quem está escrevendo pelo telefone (tabela clientes) — nunca confia
+      // no que o cliente afirma ser. Sem telefone batendo, pede nome/CNPJ e vira handoff
+      // (não tenta casar automaticamente; humano confirma quem é).
+      if (acao === 'credor_info') {
+        const mandarC = async (txt: string): Promise<boolean> => (await enviarBlocos(telefone, casoId, txt, sb, sendTextUrl, zapiHeaders, 'bia-atendimento:credor')).ok;
+        const tipoPedido = String(parsed.tipo_pedido || '').toLowerCase();
+        const telDig8 = telefone.replace(/\D/g, '').slice(-8);
+        const { data: clientesRows } = await sb.from('clientes').select('id, nome, nome_fantasia, telefone').not('telefone', 'is', null).eq('arquivado', false);
+        const credor = (clientesRows || []).find((c: any) => String(c.telefone || '').replace(/\D/g, '').slice(-8) === telDig8);
+
+        if (!credor) {
+          const msg = 'Não encontrei seu telefone cadastrado como cliente aqui. Pode me passar o nome ou CNPJ da empresa? Vou confirmar com a equipe e já te retorno.';
+          await mandarC(msg);
+          await sb.from('whatsapp_bia_log').update({ resposta: msg, acao: 'handoff' }).eq('id', logId);
+          await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, estado: 'aguardando_humano', intencao: 'credor_nao_identificado', turnos: novosTurnos, resumo: 'Contato pediu info de carteira, mas telefone não bate com nenhum cliente cadastrado.', motivo_handoff: 'credor_nao_identificado', updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
+          await notificar(`Bia: contato não identificado pediu informações de cobrança (possível cliente/credor).\nTelefone: +${telefone}\nPedi nome/CNPJ da empresa. Veja em WhatsApp > Pendentes.`);
+          handoffs++; continue;
+        }
+
+        if (tipoPedido !== 'panorama' && tipoPedido !== 'especifico') {
+          // Ainda não sabemos se quer um caso específico ou o panorama geral -> pergunta.
+          const pergunta = parsed.resposta || 'Claro. É sobre um caso específico ou você quer o panorama geral da sua carteira?';
+          await mandarC(pergunta);
+          await sb.from('whatsapp_bia_log').update({ resposta: pergunta, acao: 'continuar' }).eq('id', logId);
+          await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, estado: 'bot', intencao: 'credor_info', turnos: novosTurnos, ultima_resposta_em: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
+          respondidas++; continue;
+        }
+
+        if (tipoPedido === 'panorama') {
+          const hojeISOc = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+          const { data: casosCredor } = await sb.from('casos').select('valor_atual, encerrado, divida_vencimento').eq('cliente_id', credor.id);
+          const lista = casosCredor || [];
+          const ativos = lista.filter((c: any) => !c.encerrado);
+          const atrasados = ativos.filter((c: any) => c.divida_vencimento && String(c.divida_vencimento).slice(0, 10) < hojeISOc);
+          const totalAberto = ativos.reduce((s: number, c: any) => s + Number(c.valor_atual || 0), 0);
+          const resumo = `Panorama da sua carteira na COBRASQ:\n\nCasos ativos: ${ativos.length}\nEm atraso: ${atrasados.length}\nValor total em aberto: R$ ${totalAberto.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n\nQualquer detalhe de um caso específico, é só me falar o nome.`;
+          await mandarC(resumo);
+          await sb.from('whatsapp_bia_log').update({ resposta: resumo, acao: 'credor_info:panorama' }).eq('id', logId);
+          await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, estado: 'resolvido', turnos: novosTurnos, updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
+          respondidas++; continue;
+        }
+
+        // tipo "especifico"
+        const nomeBusca = String(parsed?.dados_coletados?.nome || '').trim();
+        if (!nomeBusca) {
+          const pergunta = parsed.resposta || 'Claro. Qual o nome da pessoa (ou empresa) desse caso que você quer verificar?';
+          await mandarC(pergunta);
+          await sb.from('whatsapp_bia_log').update({ resposta: pergunta, acao: 'continuar' }).eq('id', logId);
+          await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, estado: 'bot', intencao: 'credor_especifico', turnos: novosTurnos, ultima_resposta_em: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
+          respondidas++; continue;
+        }
+        const { data: casosMatch } = await sb.from('casos').select('devedor, valor_orig, valor_atual, divida_vencimento, passo_atual, encerrado').eq('cliente_id', credor.id).ilike('devedor', `%${nomeBusca}%`).limit(5);
+        let msgCliente: string; let contextoHumano: string;
+        if (casosMatch && casosMatch.length) {
+          msgCliente = `Encontrei o caso do(a) ${nomeBusca} aqui na sua carteira. Vou passar pro setor responsável junto com os detalhes, e eles te retornam em breve.`;
+          contextoHumano = casosMatch.map((c: any) => `- ${c.devedor}: R$ ${Number(c.valor_atual || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })} (orig. R$ ${Number(c.valor_orig || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}), venc. ${c.divida_vencimento || '-'}, etapa: ${c.passo_atual || '-'}, ${c.encerrado ? 'encerrado' : 'em andamento'}`).join('\n');
+        } else {
+          msgCliente = `Não encontrei nenhum caso com o nome "${nomeBusca}" na sua carteira aqui. Vou confirmar com a equipe e já te retorno.`;
+          contextoHumano = '(nenhum caso encontrado com esse nome nessa carteira)';
+        }
+        await mandarC(msgCliente);
+        await sb.from('whatsapp_bia_log').update({ resposta: msgCliente, acao: 'handoff' }).eq('id', logId);
+        await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, estado: 'aguardando_humano', intencao: 'credor_especifico', turnos: novosTurnos, resumo: `Cliente ${credor.nome} perguntou sobre "${nomeBusca}"`, motivo_handoff: 'credor_caso_especifico', updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
+        await notificar(`Bia: cliente ${credor.nome_fantasia || credor.nome} pediu informação sobre um caso.\nNome buscado: ${nomeBusca}\nContato: +${telefone}\n\n${contextoHumano}`);
+        handoffs++; continue;
       }
 
       // NEGOCIAR PRAZO (só com cobrança ativa): dentro do mês do venc -> altera no Asaas sozinha;
