@@ -2225,6 +2225,9 @@ body:not(.cobr-cream) .cob-stpop, .dark .cob-stpop { background: var(--card); }
       <div class="nav-item" data-page="tarefas" id="nav-tarefas">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><span>Tarefas <span id="nav-tarefas-count" style="display:none;background:var(--gold);color:var(--navy);padding:1px 7px;border-radius:10px;font-size:10.5px;margin-left:4px;font-weight:600;">0</span></span>
       </div>
+      <div class="nav-item" data-page="audiencias" id="nav-audiencias">
+        <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></span><span>Audiências</span>
+      </div>
       <div class="nav-item" data-page="docs" id="nav-docs">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span><span>Documentos</span>
       </div>
@@ -2346,6 +2349,7 @@ body:not(.cobr-cream) .cob-stpop, .dark .cob-stpop { background: var(--card); }
             <div class="cn-more-menu" id="cnMoreMenu">
               <!-- Onda 3 #13 — CRM unificado em Cobranças; link removido do menu (reversível). -->
               <a onclick="showPage('tarefas')">Tarefas</a>
+              <a onclick="showPage('audiencias')">Audiências</a>
               <a onclick="showPage('docs')">Documentos</a>
               <a onclick="showPage('assinaturas')">Assinaturas</a>
               <a onclick="showPage('wa')">WhatsApp</a>
@@ -2445,6 +2449,7 @@ body:not(.cobr-cream) .cob-stpop, .dark .cob-stpop { background: var(--card); }
 
     <!-- PAGE: DOCUMENTOS -->
     <div id="page-tarefas" class="page-content"></div>
+    <div id="page-audiencias" class="page-content"></div>
     <div id="page-docs" class="page-content">
       <!-- JS will populate -->
     </div>
@@ -7184,7 +7189,7 @@ const PAGE_TITLES = {
   painel:'Painel', cobr:'Cobranças', devedores:'Devedores', processos:'Processos',
   pipeline:'Pipeline', crm:'CRM', clientes:'Clientes', docs:'Documentos', pecas:'Peças & Ações Judiciais', fin:'Financeiro',
   relat:'Relatórios', wa:'WhatsApp', intimacoes:'Intimações', config:'Configurações', calc:'Calculadora Jurídica',
-  aprovacoes:'Aprovações', tarefas:'Tarefas', delegacao:'Delegação', assinaturas:'Assinaturas', 'consultas-premium':'Consultas Premium',
+  aprovacoes:'Aprovações', tarefas:'Tarefas', audiencias:'Audiências', delegacao:'Delegação', assinaturas:'Assinaturas', 'consultas-premium':'Consultas Premium',
   repasses:'Repasses a clientes',
   custodias:'Custódias judiciais',
   importacao:'Importação', /* IMPORTACAO TEMP */
@@ -7213,6 +7218,7 @@ const PAGE_BREADCRUMBS = {
   calc:      ['Sistema','Calculadora Jurídica'],
   aprovacoes:['Sistema','Aprovações'],
   tarefas:   ['Tarefas'],
+  audiencias:['Audiências'],
   delegacao: ['Delegação'],
   'consultas-premium': ['Premium','Consultas'],
   importacao:['Sistema','Importação'], /* IMPORTACAO TEMP */
@@ -7246,6 +7252,7 @@ const PAGE_RENDERERS = {
   calc: ()=>renderCalculadora(),
   aprovacoes: ()=>renderAprovacoes(),
   tarefas: ()=>renderTarefas(),
+  audiencias: ()=>renderAudiencias(),
   delegacao: ()=>renderDelegacao(),
   importacao: ()=>renderImportacao(), /* IMPORTACAO TEMP */
   'cobranca-detalhe': ()=>renderCobrancaDetalhe(),
@@ -8243,6 +8250,269 @@ function abrirVinculoTarefa(id){
   if(t.vinculo.tipo==='cobranca' && typeof abrirCobrancaEdit==='function'){
     showPage('cobr'); setTimeout(()=>{ try{ abrirCobrancaEdit(t.vinculo.id); }catch(_){} }, 350);
   }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// AUDIÊNCIAS — agenda de audiências (JEC/PROJUDI) com lembretes automáticos
+// via WhatsApp. Tabela `audiencias` + fila `crm_mensagens_agendadas` (worker
+// já existente: pg_cron a cada 1min -> edge function -> Z-API). Cada audiência
+// agenda 3 lembretes: véspera 19h, dia da audiência 08h, 10min antes.
+// ══════════════════════════════════════════════════════════════════════════
+let _audCache = [];
+function _injAudModal(modalId, innerHTML, maxw){
+  let m=document.getElementById(modalId);
+  if(!m){ m=document.createElement('div'); m.id=modalId; m.className='overlay'; document.body.appendChild(m); }
+  m.innerHTML=`<div class="modal" style="max-width:${maxw||620}px;overflow-y:auto;">${innerHTML}</div>`;
+  openModal(modalId);
+}
+
+function _audReus(partes){ return (partes||[]).filter(p=>p.papel==='REU').map(p=>p.nome).join(', ') || '—'; }
+function _audAutores(partes){ return (partes||[]).filter(p=>p.papel==='AUTOR').map(p=>p.nome).join(', ') || '—'; }
+
+// Monta as 3 mensagens + horários de disparo a partir de data_hora (Date local do navegador).
+function _audMontarLembretes(aud){
+  const dh = new Date(aud.data_hora);
+  const diaAntes = new Date(dh); diaAntes.setDate(diaAntes.getDate()-1); diaAntes.setHours(19,0,0,0);
+  const diaDe = new Date(dh); diaDe.setHours(8,0,0,0);
+  const dezMin = new Date(dh.getTime() - 10*60000);
+  const reus = _audReus(aud.partes);
+  const dataFmt = dh.toLocaleDateString('pt-BR');
+  const horaFmt = dh.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+  const rodape = `Processo: ${aud.numero_processo}\n${aud.comarca||''}, sala: ${aud.sala||'—'}\nRéu(s): ${reus}`;
+  return [
+    { fase:'d1',    agendada_para:diaAntes.toISOString(), mensagem:`🔔 *Lembrete — audiência amanhã*\n${rodape}\nData: ${dataFmt} às ${horaFmt}` },
+    { fase:'dia',   agendada_para:diaDe.toISOString(),    mensagem:`📅 *Hoje tem audiência*\n${rodape}\nÀs ${horaFmt}` },
+    { fase:'min10', agendada_para:dezMin.toISOString(),   mensagem:`⏰ *Audiência em 10 minutos*\n${rodape}\nÀs ${horaFmt}` },
+  ];
+}
+
+// Recria os 3 lembretes pendentes de uma audiência (usado ao criar e ao reagendar).
+async function _audAgendarLembretes(supa, audId, aud){
+  await supa.from('crm_mensagens_agendadas').delete().eq('audiencia_id', audId).eq('status','pendente');
+  const lembretes = _audMontarLembretes(aud).filter(l => new Date(l.agendada_para) > new Date());
+  if(!lembretes.length) return;
+  const rows = lembretes.map(l => ({
+    audiencia_id: audId, telefone: aud.telefone_notificacao, tipo:'texto',
+    mensagem: l.mensagem, agendada_para: l.agendada_para, status:'pendente',
+    origem: 'audiencia_lembrete_'+l.fase
+  }));
+  const { error } = await supa.from('crm_mensagens_agendadas').insert(rows);
+  if(error) console.warn('[audiencias] falha ao agendar lembretes:', error);
+}
+
+async function renderAudiencias(){
+  const el = document.getElementById('page-audiencias');
+  if(!el) return;
+  const ehG = currentUser?.tipo === 'gestor';
+  el.innerHTML = `<div class="cob-pg-head">
+      <div><h1 class="cob-h1">Audiências</h1><div class="cob-h1-sub">Carregando…</div></div>
+    </div>`;
+  const supa = getSupabase();
+  if(!supa){ el.innerHTML = `<div class="cob-empty-big"><div class="cob-empty-tt">Supabase indisponível</div></div>`; return; }
+
+  const { data, error } = await supa.from('audiencias').select('*').order('data_hora',{ascending:true});
+  if(error){ el.innerHTML = `<div class="cob-empty-big"><div class="cob-empty-tt">Erro ao carregar audiências</div><div class="cob-empty-ds">${escHtml(error.message)}</div></div>`; return; }
+  _audCache = data || [];
+
+  // Status dos lembretes por audiência (pendente/enviado/cancelado), pra mostrar 3 bolinhas.
+  const ids = _audCache.map(a=>a.id);
+  let lembretesPorAud = {};
+  if(ids.length){
+    const { data: lem } = await supa.from('crm_mensagens_agendadas').select('audiencia_id,origem,status').in('audiencia_id', ids);
+    (lem||[]).forEach(l=>{
+      lembretesPorAud[l.audiencia_id] = lembretesPorAud[l.audiencia_id] || {};
+      const fase = (l.origem||'').replace('audiencia_lembrete_','');
+      lembretesPorAud[l.audiencia_id][fase] = l.status;
+    });
+  }
+  const dotHTML = (status)=>{
+    const cor = status==='enviada' ? '#0F8A5F' : status==='falhou' ? '#C0392B' : status==='cancelada' ? '#9AA5B1' : '#D69E2E';
+    const tit = status==='enviada' ? 'Enviado' : status==='falhou' ? 'Falhou' : status==='cancelada' ? 'Cancelado' : status ? 'Pendente' : 'Não agendado';
+    return `<span title="${tit}" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${cor};margin-right:3px;"></span>`;
+  };
+
+  const agora = new Date();
+  const proximas = _audCache.filter(a=>a.status==='agendada' && new Date(a.data_hora) >= agora);
+  const passadas = _audCache.filter(a=>!(a.status==='agendada' && new Date(a.data_hora) >= agora));
+
+  const linha = (a)=>{
+    const lem = lembretesPorAud[a.id] || {};
+    const dh = new Date(a.data_hora);
+    const statusCor = a.status==='cancelada' ? '#9AA5B1' : a.status==='realizada' ? '#0F8A5F' : '#2B6CB0';
+    return `<div class="cob-panel" style="margin-bottom:10px;padding:14px 16px;">
+      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+        <div>
+          <div style="font-weight:700;font-size:13.5px;">${escHtml(a.numero_processo)} <span style="font-weight:500;color:var(--text-3);font-size:12px;">— ${escHtml(a.tipo_audiencia||'')}</span></div>
+          <div style="font-size:12px;color:var(--text-2);margin-top:2px;">${escHtml(a.comarca||'')} · sala: ${escHtml(a.sala||'—')}</div>
+          <div style="font-size:12px;margin-top:4px;"><b>Réu(s):</b> ${escHtml(_audReus(a.partes))}</div>
+          <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;"><b>Autor(es):</b> ${escHtml(_audAutores(a.partes))}</div>
+        </div>
+        <div style="text-align:right;min-width:150px;">
+          <div style="font-weight:700;font-size:13.5px;color:${statusCor};">${dh.toLocaleDateString('pt-BR')} ${dh.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</div>
+          <div style="font-size:11px;color:var(--text-3);text-transform:uppercase;letter-spacing:.03em;margin-top:2px;">${escHtml(a.status)}</div>
+          <div style="margin-top:8px;">${dotHTML(lem.d1)}${dotHTML(lem.dia)}${dotHTML(lem.min10)}<span style="font-size:10px;color:var(--text-3);margin-left:4px;">véspera · dia · 10min</span></div>
+        </div>
+      </div>
+      ${ehG ? `<div style="display:flex;gap:6px;margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">
+        <button class="btn btn-ghost btn-sm" onclick="abrirAudienciaModal('${a.id}')">Editar</button>
+        ${a.status==='agendada' ? `<button class="btn btn-ghost btn-sm" onclick="marcarAudienciaRealizada('${a.id}')">Marcar realizada</button>
+        <button class="btn btn-ghost btn-sm" style="color:var(--danger);" onclick="cancelarAudiencia('${a.id}')">Cancelar</button>` : ''}
+        <button class="btn btn-ghost btn-sm" style="color:var(--danger);margin-left:auto;" onclick="excluirAudiencia('${a.id}')">Excluir</button>
+      </div>` : ''}
+    </div>`;
+  };
+
+  el.innerHTML = `
+    <div class="cob-pg-head">
+      <div><h1 class="cob-h1">Audiências</h1><div class="cob-h1-sub">${proximas.length} próxima${proximas.length!==1?'s':''} · lembrete WhatsApp automático (véspera 19h, dia às 08h e 10min antes)</div></div>
+      <div class="cob-head-actions">${ehG?`<button class="cob-btn-primary" onclick="abrirAudienciaModal(null)">${ico('plus',14)} Nova audiência</button>`:''}</div>
+    </div>
+    <h2 style="font-size:14px;margin:16px 0 8px;">Próximas</h2>
+    ${proximas.length ? proximas.map(linha).join('') : `<div class="cob-empty">Nenhuma audiência futura cadastrada.</div>`}
+    ${passadas.length ? `<h2 style="font-size:14px;margin:22px 0 8px;color:var(--text-3);">Realizadas / canceladas / passadas</h2>${passadas.map(linha).join('')}` : ''}
+  `;
+}
+
+// Cria a linha de parte via DOM API (evita aninhar HTML com aspas dentro de um atributo onclick).
+function _audAddParteRow(){
+  const list = document.getElementById('aud-partes-list'); if(!list) return;
+  const inp = window._audParteInp || '';
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:6px;margin-bottom:6px;';
+  row.setAttribute('data-parte-row','1');
+  const nomeInput = document.createElement('input');
+  nomeInput.placeholder = 'Nome'; nomeInput.style.cssText = inp+'flex:1;'; nomeInput.setAttribute('data-parte-nome','');
+  const papelSelect = document.createElement('select');
+  papelSelect.style.cssText = inp+'width:100px;'; papelSelect.setAttribute('data-parte-papel','');
+  papelSelect.innerHTML = '<option value="AUTOR">Autor</option><option value="REU" selected>Réu</option>';
+  const delBtn = document.createElement('button');
+  delBtn.className = 'btn btn-ghost btn-sm btn-icon'; delBtn.title = 'Remover'; delBtn.textContent = '✕';
+  delBtn.onclick = ()=>row.remove();
+  row.append(nomeInput, papelSelect, delBtn);
+  list.appendChild(row);
+}
+
+async function abrirAudienciaModal(id){
+  if(currentUser?.tipo!=='gestor') return;
+  const a = id ? _audCache.find(x=>x.id===id) : null;
+  if(id && !a) return;
+  const partes = (a && a.partes) || [];
+  const inp='width:100%;padding:8px 10px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-family:inherit;background:var(--bg);color:var(--text);';
+  const lbl='font-size:11px;font-weight:600;color:var(--text-2);display:block;margin-bottom:3px;';
+  const toLocalInput = (iso)=>{ if(!iso) return ''; const d=new Date(iso); const pad=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+  window._audParteInp = inp; // usado por _audAddParteRow (fora deste escopo)
+  const parteRow = (p)=>`<div style="display:flex;gap:6px;margin-bottom:6px;" data-parte-row="1">
+      <input value="${escHtml(p.nome||'')}" placeholder="Nome" style="${inp}flex:1;" data-parte-nome>
+      <select style="${inp}width:100px;" data-parte-papel><option value="AUTOR" ${p.papel==='AUTOR'?'selected':''}>Autor</option><option value="REU" ${p.papel==='REU'?'selected':''}>Réu</option></select>
+      <button class="btn btn-ghost btn-sm btn-icon" onclick="this.closest('[data-parte-row]').remove()" title="Remover">✕</button>
+    </div>`;
+  const partesRows = (partes.length?partes:[{nome:'',papel:'REU'}]).map(parteRow).join('');
+
+  _injAudModal('modal-aud', `
+    <div class="modal-header"><span class="modal-title">${id?'Editar':'Nova'} audiência</span><button class="modal-close" onclick="closeModal('modal-aud')">✕</button></div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:10px;">
+      <div><label style="${lbl}">Número do processo</label><input id="aud-processo" value="${escHtml(a?.numero_processo||'')}" style="${inp}"></div>
+      <div style="display:flex;gap:10px;">
+        <div style="flex:1;"><label style="${lbl}">Comarca</label><input id="aud-comarca" value="${escHtml(a?.comarca||'')}" style="${inp}"></div>
+        <div style="flex:2;"><label style="${lbl}">Órgão julgador</label><input id="aud-orgao" value="${escHtml(a?.orgao_julgador||'')}" style="${inp}"></div>
+      </div>
+      <div style="display:flex;gap:10px;">
+        <div style="flex:1;"><label style="${lbl}">Tipo</label><input id="aud-tipo" value="${escHtml(a?.tipo_audiencia||'Audiência de conciliação')}" style="${inp}"></div>
+        <div style="flex:1;"><label style="${lbl}">Sala</label><input id="aud-sala" value="${escHtml(a?.sala||'')}" style="${inp}"></div>
+      </div>
+      <div><label style="${lbl}">Data e hora</label><input id="aud-data" type="datetime-local" value="${toLocalInput(a?.data_hora)}" style="${inp}"></div>
+      <div>
+        <label style="${lbl}">Partes</label>
+        <div id="aud-partes-list">${partesRows}</div>
+        <button class="btn btn-ghost btn-sm" onclick="_audAddParteRow()">${ico('plus',12)} Adicionar parte</button>
+      </div>
+      <div><label style="${lbl}">Telefone p/ notificação WhatsApp</label><input id="aud-telefone" value="${escHtml(a?.telefone_notificacao||'46999223332')}" style="${inp}"></div>
+      <div><label style="${lbl}">Observação</label><textarea id="aud-obs" rows="2" style="${inp}resize:vertical;">${escHtml(a?.observacao||'')}</textarea></div>
+      <div style="font-size:11.5px;color:var(--text-3);">Lembretes de WhatsApp serão (re)agendados automaticamente: véspera às 19h, dia da audiência às 08h e 10 minutos antes.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-aud')">Cancelar</button>
+      <button class="btn btn-primary" id="aud-btn-salvar" onclick="salvarAudiencia('${id||''}')">${id?'Salvar':'Criar'}</button>
+    </div>
+  `, 640);
+}
+
+async function salvarAudiencia(id){
+  const supa = getSupabase(); if(!supa){ showToast('Supabase indisponível.','danger'); return; }
+  const numero_processo = (document.getElementById('aud-processo')?.value||'').trim();
+  const dataVal = document.getElementById('aud-data')?.value;
+  if(!numero_processo){ showToast('Informe o número do processo.','warning'); return; }
+  if(!dataVal){ showToast('Informe a data e hora.','warning'); return; }
+  const partes = Array.from(document.querySelectorAll('#aud-partes-list [data-parte-row]')).map(row=>({
+    nome: row.querySelector('[data-parte-nome]')?.value.trim()||'',
+    papel: row.querySelector('[data-parte-papel]')?.value||'REU'
+  })).filter(p=>p.nome);
+  const telefone = (document.getElementById('aud-telefone')?.value||'').replace(/\D/g,'');
+  if(!telefone){ showToast('Informe o telefone de notificação.','warning'); return; }
+
+  const payload = {
+    numero_processo,
+    comarca: (document.getElementById('aud-comarca')?.value||'').trim() || null,
+    orgao_julgador: (document.getElementById('aud-orgao')?.value||'').trim() || null,
+    tipo_audiencia: (document.getElementById('aud-tipo')?.value||'').trim() || 'Audiência de conciliação',
+    sala: (document.getElementById('aud-sala')?.value||'').trim() || null,
+    data_hora: new Date(dataVal).toISOString(),
+    partes,
+    telefone_notificacao: telefone,
+    observacao: (document.getElementById('aud-obs')?.value||'').trim() || null,
+  };
+
+  const btn = document.getElementById('aud-btn-salvar'); if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
+  try{
+    let audId = id;
+    if(id){
+      const { error } = await supa.from('audiencias').update(payload).eq('id', id);
+      if(error) throw error;
+    } else {
+      const { data, error } = await supa.from('audiencias').insert({ ...payload, origem:'manual', created_by: currentUser?.nome||'' }).select('id').single();
+      if(error) throw error;
+      audId = data.id;
+    }
+    await _audAgendarLembretes(supa, audId, payload);
+    showToast('Audiência salva. Lembretes agendados.','success');
+    closeModal('modal-aud');
+    renderAudiencias();
+  }catch(e){
+    showToast('Falha ao salvar: '+(e.message||e),'danger');
+    if(btn){ btn.disabled=false; btn.textContent=id?'Salvar':'Criar'; }
+  }
+}
+
+async function cancelarAudiencia(id){
+  if(currentUser?.tipo!=='gestor') return;
+  if(!confirm('Cancelar esta audiência? Os lembretes de WhatsApp ainda não enviados serão cancelados junto.')) return;
+  const supa = getSupabase(); if(!supa) return;
+  await supa.from('crm_mensagens_agendadas').update({ status:'cancelada' }).eq('audiencia_id', id).eq('status','pendente');
+  const { error } = await supa.from('audiencias').update({ status:'cancelada' }).eq('id', id);
+  if(error){ showToast('Falha ao cancelar: '+error.message,'danger'); return; }
+  showToast('Audiência cancelada.','success');
+  renderAudiencias();
+}
+
+async function marcarAudienciaRealizada(id){
+  if(currentUser?.tipo!=='gestor') return;
+  const supa = getSupabase(); if(!supa) return;
+  await supa.from('crm_mensagens_agendadas').update({ status:'cancelada' }).eq('audiencia_id', id).eq('status','pendente');
+  const { error } = await supa.from('audiencias').update({ status:'realizada' }).eq('id', id);
+  if(error){ showToast('Falha ao atualizar: '+error.message,'danger'); return; }
+  showToast('Audiência marcada como realizada.','success');
+  renderAudiencias();
+}
+
+async function excluirAudiencia(id){
+  if(currentUser?.tipo!=='gestor') return;
+  const a = _audCache.find(x=>x.id===id);
+  if(!a || !confirm(`Excluir a audiência do processo "${a.numero_processo}"? Os lembretes agendados também são removidos.`)) return;
+  const supa = getSupabase(); if(!supa) return;
+  const { error } = await supa.from('audiencias').delete().eq('id', id);
+  if(error){ showToast('Falha ao excluir: '+error.message,'danger'); return; }
+  showToast('Audiência excluída.','success');
+  renderAudiencias();
 }
 
 // ── IA (Claude) + Mermaid para o "Como fazer" ────────────────────────────────
