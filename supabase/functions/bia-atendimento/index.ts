@@ -631,6 +631,21 @@ Deno.serve(async (req) => {
 
   let respondidas = 0, handoffs = 0, puladas = 0, _aiDebug = '';
 
+  // Base de conhecimento da Bia (docs/bia/*.md -> tabela bia_conhecimento, via
+  // scripts/sync-bia-knowledge.js). Só "regra_negocio" afeta o prompt; buscada
+  // 1x por run (não por conversa). Nunca bloqueia o run se falhar.
+  let CONHECIMENTO_EXTRA = '';
+  try {
+    const { data: kb } = await sb.from('bia_conhecimento')
+      .select('titulo, conteudo').eq('categoria', 'regra_negocio').eq('ativo', true)
+      .order('ordem', { ascending: true });
+    if (kb?.length) {
+      CONHECIMENTO_EXTRA = '\n\nREGRAS ADICIONAIS (atualizadas fora do deploy, ver docs/bia/regras-negocio.md):\n' +
+        kb.map((k: any) => `- ${k.titulo}: ${k.conteudo}`).join('\n');
+      if (CONHECIMENTO_EXTRA.length > 3000) CONHECIMENTO_EXTRA = CONHECIMENTO_EXTRA.slice(0, 3000) + '\n[...]';
+    }
+  } catch { /* segue sem KB extra */ }
+
   // Responde a um comprovante já analisado (comp) conforme a situação (agendado/efetuado/etc.).
   async function tratarComprovante(comp: any, cob: any, telefone: string, casoId: string | null, logId: number, turnos: number) {
     const mandarC = (t: string) => enviarBlocos(telefone, casoId, t, sb, sendTextUrl, zapiHeaders, 'bia-atendimento:comprovante').then((r) => r.ok);
@@ -839,7 +854,7 @@ Deno.serve(async (req) => {
         const air = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
           headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-          body: JSON.stringify({ model: MODELO, max_tokens: 600, system: BIA_SYSTEM, messages: [{ role: 'user', content: ctx }] }),
+          body: JSON.stringify({ model: MODELO, max_tokens: 600, system: BIA_SYSTEM + CONHECIMENTO_EXTRA, messages: [{ role: 'user', content: ctx }] }),
           signal: AbortSignal.timeout(30000)
         });
         const aj = await air.json().catch(() => null);
