@@ -17761,6 +17761,7 @@ function cobAmigavelFalhou(c){ return /fazer a[çc][ãa]o|infrut[íi]fero|encami
 // Elegibilidade "de fato" (micro + amigável fracassou), IGNORANDO o opt-out manual.
 function _quitaElegBase(c){ return cobEhMicro(c) && cobAmigavelFalhou(c); }
 function cobElegivelQuita(c){
+  if(c && c.metadata && c.metadata.quitaOptIn) return true;               // inclusão manual do gestor (força elegível)
   if(c && c.metadata && c.metadata.quitaOptOut) return false;             // exceção manual
   return _quitaElegBase(c);
 }
@@ -17788,6 +17789,20 @@ async function quitaSetOptOut(cobId, on){
   if(supa){ const {error}=await supa.from('cobrancas').update({metadata:meta}).eq('id',cobId); if(error){ showToast('Falha ao salvar: '+error.message,'danger'); return; } }
   if(typeof save==='function'){ try{ save(); }catch(_){ } }
   showToast(on?'Cobrança retirada do QuitaFácil.':'Cobrança reincluída no QuitaFácil.','info');
+  if(typeof _detCobrId!=='undefined' && _detCobrId===cobId && typeof renderCobrancaDetalhe==='function') renderCobrancaDetalhe();
+}
+// Inclusão manual no QuitaFácil (cobrancas.metadata.quitaOptIn) — o gestor força elegibilidade
+// mesmo fora das regras automáticas (ex.: processo já baixado/extinto, mas numero_processo
+// continua preenchido por histórico). Decisão humana, sem migração.
+async function quitaSetOptIn(cobId, on){
+  const cob=(DB_cobrancas||[]).find(c=>c.id===cobId);
+  const meta=Object.assign({}, (cob&&cob.metadata)||{});
+  if(on){ meta.quitaOptIn=true; delete meta.quitaOptOut; } else { delete meta.quitaOptIn; }
+  if(cob) cob.metadata=meta;
+  const supa=(typeof getSupabase==='function')?getSupabase():null;
+  if(supa){ const {error}=await supa.from('cobrancas').update({metadata:meta}).eq('id',cobId); if(error){ showToast('Falha ao salvar: '+error.message,'danger'); return; } }
+  if(typeof save==='function'){ try{ save(); }catch(_){ } }
+  showToast(on?'Cobrança incluída manualmente no QuitaFácil.':'Inclusão manual no QuitaFácil removida.','info');
   if(typeof _detCobrId!=='undefined' && _detCobrId===cobId && typeof renderCobrancaDetalhe==='function') renderCobrancaDetalhe();
 }
 // ── Negativação (Onda 4) — fila de aprovação humana. cobrancas.metadata.quitaNegativacao
@@ -18768,9 +18783,12 @@ async function renderCobrancaDetalhe(){
     ['Vencimento', escHtml(_detData(cob.vencimento||d.vencimento)), 'mono'],
     ['Devedores', `${partes.length} vinculado${partes.length!==1?'s':''}`],
     ['Nº do processo', cob.numero_processo ? `<span style="font-family:var(--font-mono);font-size:12px;">${escHtml(cob.numero_processo)}</span>` : '<span style="color:var(--text-4);">—</span>'],
-    ...((_quitaElegBase(cob) || (cob.metadata&&cob.metadata.quitaOptOut)) ? [['QuitaFácil', (cob.metadata&&cob.metadata.quitaOptOut)
+    ...((_quitaElegBase(cob) || (cob.metadata&&cob.metadata.quitaOptOut) || (cob.metadata&&cob.metadata.quitaOptIn)) ? [['QuitaFácil', (cob.metadata&&cob.metadata.quitaOptOut)
         ? `<span style="color:var(--text-3);">Fora da trilha (manual) · <button class="cob-btn-ghost" style="padding:2px 9px;font-size:11px;" onclick="quitaSetOptOut('${cob.id}',false)">Reincluir</button></span>`
-        : `<span style="color:#3F6B47;font-weight:600;">🟢 Elegível — autonegociação (capital ${fmtR(cobCapital(cob))} ≤ ${fmtR(quitaLimiteDe(cob))}) · <button class="cob-btn-ghost" style="padding:2px 9px;font-size:11px;" onclick="quitaSetOptOut('${cob.id}',true)">Tirar da trilha</button></span>`]] : []),
+        : (cob.metadata&&cob.metadata.quitaOptIn)
+        ? `<span style="color:#3F6B47;font-weight:600;">🟢 Elegível — inclusão manual do gestor · <button class="cob-btn-ghost" style="padding:2px 9px;font-size:11px;" onclick="quitaSetOptIn('${cob.id}',false)">Remover inclusão</button></span>`
+        : `<span style="color:#3F6B47;font-weight:600;">🟢 Elegível — autonegociação (capital ${fmtR(cobCapital(cob))} ≤ ${fmtR(quitaLimiteDe(cob))}) · <button class="cob-btn-ghost" style="padding:2px 9px;font-size:11px;" onclick="quitaSetOptOut('${cob.id}',true)">Tirar da trilha</button></span>`]]
+      : [['QuitaFácil', `<span style="color:var(--text-3);">Fora das regras automáticas · <button class="cob-btn-ghost" style="padding:2px 9px;font-size:11px;" onclick="quitaSetOptIn('${cob.id}',true)">Colocar em Quita Fácil</button></span>`]]),
     ...((cob.metadata&&cob.metadata.quitaNegativacao&&cob.metadata.quitaNegativacao.status) ? [['Negativação', (()=>{ const n=cob.metadata.quitaNegativacao;
         if(n.status==='candidato') return `<span style="color:#9B4A3F;font-weight:600;">🔴 Candidato${n.em?` (desde ${_detData(n.em)})`:''}</span> · <button class="cob-btn-ghost" style="padding:2px 10px;font-size:11px;background:#9B4A3F;color:#fff;border:none;" onclick="quitaAprovarNegativacao('${cob.id}')">Aprovar negativação</button> <button class="cob-btn-ghost" style="padding:2px 9px;font-size:11px;" onclick="quitaDescartarNegativacao('${cob.id}')">Descartar</button>`;
         if(n.status==='aprovado') return `<span style="color:#8A5A00;font-weight:600;">✔ Aprovada${n.aprovado_em?` (${_detData(n.aprovado_em)})`:''}</span> <span style="color:var(--text-3);font-size:11px;">— aguardando contrato do bureau (Parte B)</span> · <button class="cob-btn-ghost" style="padding:2px 9px;font-size:11px;" onclick="quitaDescartarNegativacao('${cob.id}')">Cancelar</button>`;
