@@ -129,14 +129,37 @@ module.exports = async function handler(req, res) {
         const credorNome = (credor && credor.nome) || '';
         const devNome = (devedor && devedor.nome) || 'devedor';
         const parcTxt = row.parcela && row.total_parcelas ? ` ${row.parcela}/${row.total_parcelas}` : '';
-        const rec = await sbFetch('fin_lancamento', { method: 'POST', body: JSON.stringify({
-          descricao: `Recebimento — ${devNome}${parcTxt}`,
-          valor: valorRecebido, valor_pago: valorRecebido,
-          tipo_movimento: 1, status: 1,
-          data_competencia: row.recebido_em, data_pagamento: row.recebido_em,
-          numero_parcela: row.parcela, total_parcelas: row.total_parcelas,
-        }) }).catch(() => null);
-        const lancReceitaId = (rec && rec[0] && rec[0].id) || null;
+
+        // Evita duplicar quando já existe uma linha PENDENTE pré-cadastrada pra este
+        // devedor sem asaas_payment_id (ex.: import manual de PDF/planilha — caso real
+        // 2026-07-26: 50 lançamentos de agosto importados do extrato Asaas antes do
+        // webhook confirmar o pagamento de verdade). Casa por devedor_id (raw_payload)
+        // + valor aproximado; se achar, BAIXA a linha existente em vez de criar outra.
+        let lancReceitaId = null;
+        let pendenteExistente = null;
+        if (devedor && devedor.id) {
+          const candidatos = await sbFetch(
+            `fin_lancamento?tipo_movimento=eq.1&status=eq.0&raw_payload->>devedor_id=eq.${devedor.id}&select=id,valor,observacoes&order=criada_em.desc&limit=20`
+          ).catch(() => []);
+          pendenteExistente = (candidatos || []).find(c => Math.abs(Number(c.valor) - valorRecebido) < 0.05) || null;
+        }
+
+        if (pendenteExistente) {
+          await sbFetch(`fin_lancamento?id=eq.${pendenteExistente.id}`, { method: 'PATCH', body: JSON.stringify({
+            status: 1, valor_pago: valorRecebido, data_pagamento: row.recebido_em,
+            observacoes: `${pendenteExistente.observacoes || ''} | confirmado via Asaas payment ${paymentId} em ${row.recebido_em}.`,
+          }) }).catch(() => null);
+          lancReceitaId = pendenteExistente.id;
+        } else {
+          const rec = await sbFetch('fin_lancamento', { method: 'POST', body: JSON.stringify({
+            descricao: `Recebimento — ${devNome}${parcTxt}`,
+            valor: valorRecebido, valor_pago: valorRecebido,
+            tipo_movimento: 1, status: 1,
+            data_competencia: row.recebido_em, data_pagamento: row.recebido_em,
+            numero_parcela: row.parcela, total_parcelas: row.total_parcelas,
+          }) }).catch(() => null);
+          lancReceitaId = (rec && rec[0] && rec[0].id) || null;
+        }
         let lancDespesaId = null;
         if (valorCapital > 0) {
           const desp = await sbFetch('fin_lancamento', { method: 'POST', body: JSON.stringify({
