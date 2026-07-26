@@ -83,6 +83,11 @@ module.exports = async function handler(req, res) {
     // @page do documento reserva a margem inferior). Gotchas do Chromium tratados:
     // font-size explícito no root (o default é ~0) e print-color-adjust p/ o fundo escuro.
     const comRodape = /name=["']pdf-footer-band["']/.test(html);
+    // Rodapé RICO (endereço/CNPJ/atendimento em 2 colunas) — só para o Relatório de
+    // Andamento (sinalizado via <meta name="pdf-footer-band-rel">). Mantido separado do
+    // rodapé genérico acima para não alterar a aparência dos documentos já em produção
+    // que usam o pdf-footer-band simples (cessão/procuração/declaração etc.).
+    const comRodapeRel = /name=["']pdf-footer-band-rel["']/.test(html);
     const pdfOpts = {
       format: 'A4',
       printBackground: true,      // mantém o timbrado escuro/cores do documento
@@ -98,6 +103,19 @@ module.exports = async function handler(req, res) {
         "font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;" +
         'font-size:6.8pt;line-height:1.7;letter-spacing:.06em;text-transform:uppercase;text-align:center;padding:8px 0 9px;">' +
         'cobrasq.com.br&nbsp;·&nbsp;contato@cobrasq.com.br&nbsp;·&nbsp;WhatsApp (46)&nbsp;98822-6533<br>Documento confidencial.' +
+        '</div></div>';
+    } else if (comRodapeRel) {
+      pdfOpts.displayHeaderFooter = true;
+      pdfOpts.headerTemplate = '<span style="display:none"></span>';
+      pdfOpts.footerTemplate =
+        '<div style="width:100%;margin:0;padding:0 0.7in;font-size:7pt;-webkit-print-color-adjust:exact;print-color-adjust:exact;">' +
+        '<div style="background:#0A1530;color:#EFEAD9;border-top:1.4px solid #C9A961;border-radius:0 0 10px 10px;' +
+        "font-family:'Inter Tight',ui-sans-serif,-apple-system,sans-serif;" +
+        'display:flex;gap:20px;padding:9px 18px 10px;">' +
+        '<div style="flex:1;min-width:0;"><div style="font-family:\'JetBrains Mono\',ui-monospace,monospace;font-size:6.2pt;letter-spacing:.14em;text-transform:uppercase;color:#C9A961;margin-bottom:3px;">COBRASQ — Sede</div>' +
+        '<div style="font-size:7.2pt;line-height:1.5;opacity:.92;">Av. Rio Grande do Sul, n.º 380, Sala 201, Edifício Mara — Centro, Dois Vizinhos/PR &nbsp;·&nbsp; CNPJ 34.626.848/0001-42</div></div>' +
+        '<div style="flex:0 0 auto;max-width:2.3in;text-align:right;"><div style="font-family:\'JetBrains Mono\',ui-monospace,monospace;font-size:6.2pt;letter-spacing:.14em;text-transform:uppercase;color:#C9A961;margin-bottom:3px;">Atendimento</div>' +
+        '<div style="font-size:7.2pt;line-height:1.5;opacity:.92;">WhatsApp (46) 98822-6533 &nbsp;·&nbsp; contato@cobrasq.com.br &nbsp;·&nbsp; cobrasq.com.br</div></div>' +
         '</div></div>';
     }
     const pdfBuffer = await page.pdf(pdfOpts);
