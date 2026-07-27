@@ -1,6 +1,7 @@
 -- ============================================================
--- ⚠️ NÃO APLICADA AINDA. APLICAR MANUALMENTE no SQL Editor do projeto
---    jokbxzhcctcwnbhkhgru (Supabase). Rollback pareado em _rollback.sql.
+-- ✅ APLICADA EM PRODUÇÃO 2026-07-27 (via MCP, projeto jokbxzhcctcwnbhkhgru). Não
+--    reaplicar. Rollback pareado em _rollback.sql. As tabelas nascem VAZIAS — a carga
+--    é feita por scripts/import_cnpj_rf.py (--uf PR por enquanto).
 -- ============================================================
 -- Base pública de CNPJ da Receita Federal (Dados Públicos do CNPJ) — recorte para
 -- consulta reversa "nome do sócio + 6 dígitos do CPF → empresas". Substitui a
