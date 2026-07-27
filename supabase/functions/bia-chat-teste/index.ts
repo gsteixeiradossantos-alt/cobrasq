@@ -49,7 +49,7 @@ Deno.serve(async (req: Request) => {
       kbTitulos = kb.map((k: any) => k.titulo);
       CONHECIMENTO_EXTRA = '\n\nREGRAS ADICIONAIS (atualizadas fora do deploy, ver docs/bia/regras-negocio.md):\n' +
         kb.map((k: any) => `- ${k.titulo}: ${k.conteudo}`).join('\n');
-      if (CONHECIMENTO_EXTRA.length > 3000) CONHECIMENTO_EXTRA = CONHECIMENTO_EXTRA.slice(0, 3000) + '\n[...]';
+      if (CONHECIMENTO_EXTRA.length > 8000) CONHECIMENTO_EXTRA = CONHECIMENTO_EXTRA.slice(0, 8000) + '\n[...]';
     }
   } catch (e) {
     console.warn('[bia-chat-teste] falha ao buscar bia_conhecimento:', e);
