@@ -39,6 +39,9 @@ Deno.serve(async (req: Request) => {
   try { body = await req.json(); } catch { /* vazio */ }
   const casoId = String(body.casoId || body.caso_id || '');
   if (!casoId) return json({ error: 'mande "casoId"' }, 400);
+  // lembrete=true: reenvia um FOLLOW-UP curto pra caso já ativado (devedor não
+  // respondeu a 1ª mensagem). Não é automático ainda — disparo manual.
+  const ehLembrete = body.lembrete === true;
 
   const sb = createClient(SUPABASE_URL, SERVICE_KEY);
 
@@ -48,7 +51,8 @@ Deno.serve(async (req: Request) => {
   if (!co) return json({ error: 'caso não encontrado' }, 404);
   if (co.arquivado || co.is_draft || co.fora_crm || co.encerramento) return json({ error: 'caso arquivado, rascunho ou encerrado — não dá pra ativar o Carlos' }, 409);
   if (co.acordo_final) return json({ error: 'esse caso já tem acordo em andamento — Carlos é só pra negociação inicial' }, 409);
-  if (co.carlos_ativo) return json({ error: 'Carlos já foi ativado nesse caso' }, 409);
+  if (co.carlos_ativo && !ehLembrete) return json({ error: 'Carlos já foi ativado nesse caso' }, 409);
+  if (!co.carlos_ativo && ehLembrete) return json({ error: 'Carlos ainda não foi ativado nesse caso — não dá pra mandar lembrete' }, 409);
 
   const { data: pp } = await sb.from('cobranca_partes')
     .select('devedor_id, devedores(nome, telefone)')
@@ -84,11 +88,16 @@ Deno.serve(async (req: Request) => {
   if (testeTel) telDestino = testeTel;
 
   const primeiroNome = String(devedor.nome || '').trim().split(' ')[0] || 'tudo bem';
-  const partes = [`Oi ${primeiroNome}, aqui é o Carlos, da COBRASQ.`];
-  if (faseJudicial) {
+  const partes: string[] = [];
+  if (ehLembrete) {
+    partes.push(`Oi ${primeiroNome}, é o Carlos de novo, só retomando aqui.`);
+    partes.push(`Sua pendência de R$ ${fmtBRL(calc.totalAvista)} com ${credorNome} continua em aberto. Vamos conversar sobre como resolver?`);
+  } else if (faseJudicial) {
+    partes.push(`Oi ${primeiroNome}, aqui é o Carlos, da COBRASQ.`);
     partes.push(`Você tem uma pendência de R$ ${fmtBRL(calc.totalAvista)} com ${credorNome}, e a gente ficou responsável por resolver isso.`);
     partes.push('Quer conversar sobre como quitar isso?');
   } else {
+    partes.push(`Oi ${primeiroNome}, aqui é o Carlos, da COBRASQ.`);
     partes.push(`Você tem uma pendência de R$ ${fmtBRL(valorOriginal)} com ${credorNome}, e a gente ficou responsável por resolver isso.`);
     let opcoes = `Você pode pagar à vista por R$ ${fmtBRL(calc.totalAvista)}`;
     if (calc.boleto12) opcoes += `, ou parcelar em até ${calc.boleto12.n}x de R$ ${fmtBRL(calc.boleto12.parcela)} no boleto`;
@@ -133,7 +142,7 @@ Deno.serve(async (req: Request) => {
 
   await sb.from('cobrancas').update({
     carlos_ativo: true,
-    passo_atual: '1ª mensagem enviada (Carlos)',
+    passo_atual: ehLembrete ? 'Lembrete enviado (Carlos)' : '1ª mensagem enviada (Carlos)',
     updated_at: new Date().toISOString(),
   }).eq('id', casoId);
 
@@ -142,7 +151,7 @@ Deno.serve(async (req: Request) => {
       devedor_id: (pp as any)?.devedor_id || null,
       cobranca_id: casoId,
       tipo: 'Carlos',
-      payload: { acao: 'Carlos ativado — 1ª mensagem enviada', texto: mensagem },
+      payload: { acao: ehLembrete ? 'Carlos — lembrete/follow-up enviado (disparo manual)' : 'Carlos ativado — 1ª mensagem enviada', texto: mensagem },
       autor_nome: 'Carlos (IA)',
     });
   } catch { /* best-effort */ }
