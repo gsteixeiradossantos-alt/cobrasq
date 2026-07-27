@@ -743,9 +743,9 @@ body.fin-page-mode #page-fin.active{max-width:1180px;margin:0 auto;padding:26px 
 /* ===== FINANCEIRO — camada visual "Controlle" (creme + pills) — escopada em #page-fin ===== */
 /* Superfície creme só no modo claro (não altera o shell/dark). */
 html:not(.dark) body.fin-page-mode #page-fin.active{background:#fff;}
-/* Financeiro: fundo branco (a pedido) + leve aumento de escala das fontes (zoom). */
+/* Financeiro: fundo branco (a pedido). Zoom de 8% removido na reformulação do handoff
+   (tamanhos reais já vêm nos componentes; zoom quebrava layout de grids/larguras fixas). */
 html:not(.dark) #page-fin.active{background:#fff;}
-#page-fin.active{zoom:1.08;}
 html:not(.dark) #page-fin .panel,
 html:not(.dark) #page-fin .fin-card{background:#FBF8EF;border-color:#E6E1D2;}
 html:not(.dark) #page-fin .tbl thead th{background:#FBF8EF;border-bottom:1px solid #EFEAD9;}
@@ -9478,16 +9478,12 @@ async function renderPainel(){
   }
 
   // ── FONTE DE VERDADE: cobranças (mesmo cache/lógica da tela Cobranças) ───────
-  // Antes o painel somava DB.devedores — que pós-migração 2026-06-15 é a tabela de
-  // CONTATOS (pessoas), não de dívidas; por isso divergia da tela Cobranças. Agora
-  // agrega `cobrancas` (reusando loadCobrancasFromSupabase) → bate por construção.
   el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando painel…</div>`;
   const cobrRows = await loadCobrancasFromSupabase();
   if(Array.isArray(cobrRows)) DB_cobrancas = cobrRows;
-  // Filtros do painel (Cliente / Operador) — aplicados na fonte p/ consistência entre KPIs/aging/situação.
+  // Filtros do painel (Cliente / Operador) — aplicados na fonte p/ consistência entre os quadros.
   const _pf = window._painelFiltro || (window._painelFiltro = { cliente:'', operador:'' });
-  // "Carteira ativa" = casos EM ABERTO — exclui quitado/pago/liquidado (mesma base do Aging,
-  // que já filtra esses status). Quitadas seguem contabilizadas só no quadro "Carteira por situação".
+  // "Carteira ativa" = casos EM ABERTO — exclui quitado/pago/liquidado.
   const cobrAtivas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft
     && !/quitad|pago|liquidad/i.test(c.status||'')
     && (!_pf.cliente  || String(c.cliente_id||'')===_pf.cliente)
@@ -9496,164 +9492,80 @@ async function renderPainel(){
   const totalCarteira = cobrAtivas.reduce((s,c)=>s+(+c.valor_atual||+c.valor_orig||0), 0);
   const totalCasos    = cobrAtivas.length;
   const totalContatos = new Set(cobrAtivas.flatMap(c=>(c.cobranca_partes||[]).map(p=>p.devedor_id))).size;
-  const acordosAtivos = cobrAtivas.filter(c=>['Acordo','Acordo firmado','Em pagamento'].includes(c.status)).length;
 
   // Recuperado no mês = dinheiro que de fato entrou (parcelas de acordo pagas).
-  const ymAtual    = _metaYmd(new Date()).slice(0,7); // mês LOCAL (evita virar o mês 3h cedo em UTC-3)
-  const ymAnterior = (()=>{ const d=new Date(); d.setMonth(d.getMonth()-1,1); return _metaYmd(d).slice(0,7); })();
+  const now = new Date();
+  const ymAtual = _metaYmd(now).slice(0,7); // mês LOCAL (evita virar o mês 3h cedo em UTC-3)
   const totalRecuperado = recuperadoNoMes(ymAtual);
-  const recMesAnterior  = recuperadoNoMes(ymAnterior);
-  const deltaRecPct = recMesAnterior>0 ? Math.round(((totalRecuperado-recMesAnterior)/recMesAnterior)*100) : null;
 
-  // Contatos (DB.devedores) seguem alimentando atividade recente, vencimentos e calendário.
+  // Contatos (DB.devedores) seguem alimentando vencimentos e cache do Asaas.
   const devs = (DB.devedores || []).filter(d => !d.arquivado && !d.isDraft);
 
-  // Recent interactions (só de não-arquivados)
-  let interactions = [];
-  devs.forEach(d=>{
-    (d.historico||[]).forEach(h=>{
-      interactions.push({...h, devNome: d.nome, devId: d.id});
-    });
-  });
-  interactions.sort((a,b)=>(b.data||'').localeCompare(a.data||''));
-  const recentActivity = interactions.slice(0,5);
-
-  // ── FIX 4: Vencimentos próximos — múltiplas fontes ────────────
+  // ── Vencimentos (próximos 7 dias) — múltiplas fontes ──────────────────────
   const in7days = new Date(); in7days.setDate(in7days.getDate()+7);
   const in7str = in7days.toISOString().slice(0,10);
   const todayStr = hoje();
-
   const vencItems = [];
-  // Lançamentos financeiros pendentes — dado financeiro do escritório (fin_*),
-  // visível só para gestor. Colaborador não vê vencimentos financeiros.
   if(!ehColaborador()){
     (DB.lancamentos||[])
       .filter(l=>l.status==='pendente' && l.data >= todayStr && l.data <= in7str)
-      .forEach(l=>vencItems.push({ desc:l.descricao||'Lançamento', data:l.data, valor:+l.valor||0, icone:'dollar', tipo:'lancamento' }));
+      .forEach(l=>vencItems.push({ desc:l.descricao||'Lançamento', data:l.data, valor:+l.valor||0, tipo:'lancamento' }));
   }
-  // Vencimentos de devedores
-  devs
-    .filter(d=>d.vencimento && d.vencimento >= todayStr && d.vencimento <= in7str)
-    .forEach(d=>vencItems.push({ desc:d.nome, data:d.vencimento, valor:parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0, icone:'charges', tipo:'devedor' }));
-  // Tarefas com prazo
+  devs.filter(d=>d.vencimento && d.vencimento >= todayStr && d.vencimento <= in7str)
+    .forEach(d=>vencItems.push({ desc:d.nome, data:d.vencimento, valor:parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0, tipo:'devedor' }));
   (DB.tarefas||[])
     .filter(t=>t.status!=='Concluída' && t.prazo && t.prazo >= todayStr && t.prazo <= in7str)
-    .forEach(t=>vencItems.push({ desc:t.titulo, data:t.prazo, valor:0, icone:'target', tipo:'tarefa' }));
-  // Cobranças Asaas com vencimento próximo (cache)
+    .forEach(t=>vencItems.push({ desc:t.titulo, data:t.prazo, valor:0, tipo:'tarefa' }));
   devs.forEach(d=>{
     (d.asaasCharges||[])
       .filter(c=>['PENDING','OVERDUE'].includes(c.status) && c.dueDate && c.dueDate >= todayStr && c.dueDate <= in7str)
-      .forEach(c=>vencItems.push({ desc:d.nome, data:c.dueDate, valor:c.value||0, icone:'card', tipo:'asaas' }));
+      .forEach(c=>vencItems.push({ desc:d.nome, data:c.dueDate, valor:c.value||0, tipo:'asaas' }));
   });
-  const vencimentos = vencItems.sort((a,b)=>a.data.localeCompare(b.data)).slice(0,6);
-
-  // Datas com eventos para o calendário
-  const eventDates = new Set([
-    ...(DB.lancamentos||[]).filter(l=>l.status==='pendente'&&l.data).map(l=>l.data),
-    ...devs.filter(d=>d.vencimento).map(d=>d.vencimento),
-    ...(DB.tarefas||[]).filter(t=>t.status!=='Concluída'&&t.prazo).map(t=>t.prazo),
-    ...devs.flatMap(d=>(d.asaasCharges||[]).filter(c=>['PENDING','OVERDUE'].includes(c.status)&&c.dueDate).map(c=>c.dueDate)),
-  ]);
-
-  const alertas = getAlertas();
+  const vencimentos = vencItems.sort((a,b)=>a.data.localeCompare(b.data)).slice(0,5);
+  const eventDates7 = new Set(vencItems.map(v=>v.data));
 
   // Greeting
   const hrNow = new Date().getHours();
   const saudacao = hrNow < 12 ? 'Bom dia' : hrNow < 18 ? 'Boa tarde' : 'Boa noite';
   const nomeUsuario = (currentUser && currentUser.nome) ? currentUser.nome.split(' ')[0] : 'gestor';
-  const mesAtual = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][new Date().getMonth()];
+  const diasSemana = ['DOMINGO','SEGUNDA-FEIRA','TERÇA-FEIRA','QUARTA-FEIRA','QUINTA-FEIRA','SEXTA-FEIRA','SÁBADO'];
+  const mesesNomes = ['JANEIRO','FEVEREIRO','MARÇO','ABRIL','MAIO','JUNHO','JULHO','AGOSTO','SETEMBRO','OUTUBRO','NOVEMBRO','DEZEMBRO'];
+  const mesAtual = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][now.getMonth()];
+  const dataEyebrow = `${diasSemana[now.getDay()]}, ${now.getDate()} DE ${mesesNomes[now.getMonth()]} DE ${now.getFullYear()}`;
 
-  // (Sparklines e deltas fabricados removidos — os números agora são reais.)
-
-  // (KPIs e quadros do Painel v3 são montados abaixo, após as agregações adicionais.)
-
-  // Activity type label/color helper
-  function actLabel(tipo) {
-    const map = { 'Ligação':'LIGAÇÃO','WhatsApp':'WHATSAPP','E-mail':'EMAIL','Pagamento':'PAGO','Acordo':'ACORDO','Judicial':'JUDICIAL','Notificação':'NOTIF','Visita':'VISITA' };
-    return map[tipo] || tipo?.toUpperCase()?.slice(0,8) || 'AÇÃO';
-  }
-  function actColor(tipo) {
-    const map = { 'Pagamento':'var(--success)','Acordo':'var(--info)','Judicial':'var(--danger)','Notificação':'var(--warning)', 'WhatsApp':'#25D366' };
-    return map[tipo] || 'var(--text-3)';
-  }
-
-  // Mini calendar
-  const now = new Date();
-  const calHtml = buildMiniCalendar(now.getFullYear(), now.getMonth(), eventDates);
-
-  // Gráfico de barras — Recuperação por mês (12 meses, valor REAL recuperado) + meta
-  const monthsData = Array.from({length:12}, (_, i) => {
-    const d = new Date(now.getFullYear(), now.getMonth() - (11 - i), 1);
-    const ym = d.toISOString().slice(0,7);
-    const mName = ['JAN','FEV','MAR','ABR','MAI','JUN','JUL','AGO','SET','OUT','NOV','DEZ'][d.getMonth()];
-    return { ym, mName, rec: recuperadoNoMes(ym) };
-  });
-  const metaMensal = +(DB.config?.metaMensal) || 0;
-  const maxBarVal = Math.max(...monthsData.map(m=>m.rec), metaMensal, 1);
-
-  // ── Painel v3: agregações adicionais (aging, situação, pendências, prioridades, equipe) ──
   // Em negociação (KPI): cobranças ativas em status de negociação.
   const emNegRows    = cobrAtivas.filter(c=>/negocia/i.test(c.status||''));
   const emNegociacao = emNegRows.reduce((s,c)=>s+(+c.valor_atual||+c.valor_orig||0),0);
 
-  // Pendências (KPI navy): tarefas abertas + quantas atrasadas (mesma fonte do bloco de tarefas).
+  // Tarefas atrasadas (mesma fonte do bloco de tarefas em todo o app).
   const _alTar        = contarAlertasTarefas();
-  const pendAbertas   = minhasTarefas().filter(t=>t.status!=='Concluída').length;
   const pendAtrasadas = _alTar.atrasadas;
 
-  // Aging da carteira por VALOR (base = cobranças ativas, igual à Carteira ativa): 0-30/30-60/60-90/90+.
-  const agingDefs = [
-    { lb:'0–30',  min:0,  max:30,       cor:'var(--green)'    },
-    { lb:'30–60', min:31, max:60,       cor:'var(--accent)'   },
-    { lb:'60–90', min:61, max:90,       cor:'var(--accent-2)' },
-    { lb:'90+',   min:91, max:Infinity, cor:'var(--danger)'   },
-  ].map(b=>{ let val=0,qtd=0; cobrAtivas.filter(c=>!/quitad|pago|liquidad/i.test(c.status||'')).forEach(c=>{ const dias=_cobrAgingDias(c); if(dias==null) return; if(dias>=b.min && dias<=b.max){ val+=(+c.valor_atual||+c.valor_orig||0); qtd++; } }); return {...b, val, qtd}; });
-  const agingTotal      = agingDefs.reduce((s,b)=>s+b.val,0) || 1;
-  // "Carteira parada há 90+" (CTA Priorizar → Cobranças): só o que está em "A agir"
-  // — exclui judicial em andamento (cumprimento/ação com processo), acordos e
-  // encerrados, para casar com a aba A agir. Usa a MESMA régua (cobMacroGrupo).
-  const carteiraParada90 = cobrAtivas
+  // "Carteira parada há 90+" — só o que está em "A agir" (exclui judicial em
+  // andamento, acordos e encerrados). Usa a mesma régua de Cobranças.
+  const carteiraParada90Rows = cobrAtivas
     .filter(c=> !/quitad|pago|liquidad/i.test(c.status||'') && cobMacroGrupoView(c)==='agir')
-    .filter(c=>{ const dias=_cobrAgingDias(c); return dias!=null && dias>=91; })
-    .reduce((s,c)=>s+(+c.valor_atual||+c.valor_orig||0),0);
-  // Cobranças a prescrever (≤6 meses): alerta grande — inclui QuitaFácil que voltou ao radar.
-  const prescreverPainel = (typeof cobPrescricaoPerto==='function') ? cobrAtivas
-    .filter(c=> cobPrescricaoPerto(c) && !/quitad|encerrad|recebid|baixad|devolvid/i.test(c.status||'')).length : 0;
+    .filter(c=>{ const dias=_cobrAgingDias(c); return dias!=null && dias>=91; });
+  const carteiraParada90 = carteiraParada90Rows.reduce((s,c)=>s+(+c.valor_atual||+c.valor_orig||0),0);
 
-  // Carteira por situação (valor): em aberto / em acordo / judicial / quitado.
+  // Carteira por situação (valor + qtd): em aberto / em acordo / judicial / quitado.
   const sitDefs = { aberto:0, acordo:0, judicial:0, quitado:0 };
+  const sitQtd  = { aberto:0, acordo:0, judicial:0, quitado:0 };
   (DB_cobrancas||[]).filter(c=>!c.is_draft
     && (!_pf.cliente  || String(c.cliente_id||'')===_pf.cliente)
     && (!_pf.operador || String(c.assigned_to||'')===_pf.operador)).forEach(c=>{
     const v=(+c.valor_atual||+c.valor_orig||0); const s=(c.status||'').toLowerCase();
-    if(/quitad|pago|liquidad/.test(s)) sitDefs.quitado+=v;
-    else if(c.arquivado) return;                                   // arquivado não-quitado fica fora
-    else if(c.fase==='judicial' || /judicial/.test(s)) sitDefs.judicial+=v;
-    else if(/acordo/.test(s)) sitDefs.acordo+=v;
-    else sitDefs.aberto+=v;
+    if(/quitad|pago|liquidad/.test(s)){ sitDefs.quitado+=v; sitQtd.quitado++; }
+    else if(c.arquivado) return;
+    else if(c.fase==='judicial' || /judicial/.test(s)){ sitDefs.judicial+=v; sitQtd.judicial++; }
+    else if(/acordo/.test(s)){ sitDefs.acordo+=v; sitQtd.acordo++; }
+    else { sitDefs.aberto+=v; sitQtd.aberto++; }
   });
-  const sitMax = Math.max(sitDefs.aberto, sitDefs.acordo, sitDefs.judicial, sitDefs.quitado, 1);
+  const sitTotalVal   = (sitDefs.aberto+sitDefs.acordo+sitDefs.judicial+sitDefs.quitado) || 1;
+  const sitTotalCasos = sitQtd.aberto+sitQtd.acordo+sitQtd.judicial+sitQtd.quitado;
 
-  // Pendências por tipo (tarefas abertas agrupadas pelo seu tipo real — top 6).
-  const pendPorTipo = (()=>{ const m={}; minhasTarefas().filter(t=>t.status!=='Concluída').forEach(t=>{ const nm=(typeof tipoPorId==='function' && tipoPorId(t.tipo)?.nome) || 'Sem tipo'; m[nm]=(m[nm]||0)+1; }); return Object.entries(m).map(([nome,qtd])=>({nome,qtd})).sort((a,b)=>b.qtd-a.qtd).slice(0,6); })();
-  const pendPorTipoMax = Math.max(1, ...pendPorTipo.map(p=>p.qtd));
-
-  // Acordos vencendo: parcelas de acordo não pagas nos próximos 7 dias.
-  const _hojeP = hoje(); const _in7P = new Date(Date.now()+7*86400000).toISOString().slice(0,10);
-  let acordosVencendo = 0;
-  (DB.devedores||[]).filter(d=>!d.arquivado && !d.isDraft).forEach(d=>{ (d.acordos||[]).forEach(ac=>{ (ac.parcelas||[]).forEach(p=>{ if(!p.pago && p.vencimento && p.vencimento>=_hojeP && p.vencimento<=_in7P) acordosVencendo++; }); }); });
-
-  // Equipe: ranking real (pontos) + meta do mês (recuperado vs metaMensal).
-  const rankEquipe = calcRankingTarefas().slice(0,4);
+  const metaMensal = +(DB.config?.metaMensal) || 0;
   const metaProg   = metaMensal>0 ? Math.min(100, Math.round((totalRecuperado/metaMensal)*100)) : null;
-  // Recuperado/Meta/gráfico vêm de recuperadoNoMes (DB.devedores/acordos), modelo distinto de
-  // DB_cobrancas — não respondem aos filtros Cliente/Operador. Sinaliza isso quando há filtro ativo.
-  const _pfAtivo   = !!(_pf.cliente || _pf.operador);
-
-  // Projeção do mês seguinte (ILUSTRATIVA): média dos últimos 3 meses com recuperação.
-  const _ult3    = monthsData.slice(-3).map(m=>m.rec);
-  const projecao = Math.round((_ult3.reduce((s,v)=>s+v,0))/(_ult3.length||1));
-  const projMnm  = ['JAN','FEV','MAR','ABR','MAI','JUN','JUL','AGO','SET','OUT','NOV','DEZ'][(now.getMonth()+1)%12];
 
   // Opções dos filtros (a partir de TODAS as cobranças ativas, não as já filtradas).
   const _allCobr   = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft);
@@ -9664,171 +9576,277 @@ async function renderPainel(){
     .map(id=>({ id:String(id), nome:(typeof _detUserNome==='function'?_detUserNome(id):String(id)) }))
     .sort((a,b)=>a.nome.localeCompare(b.nome));
 
-  // 4 KPIs do topo (design v3): carteira, recuperado, em negociação, pendências (navy).
-  const kpis = [
-    { label:'Carteira ativa',        value: fmtR(totalCarteira),    sub:`${totalCasos} caso${totalCasos!==1?'s':''} em aberto`, tick:true },
-    { label:'Recuperado · '+mesAtual, value: fmtR(totalRecuperado),  sub: (totalRecuperado===0 ? 'nenhuma baixa registrada' : (metaProg!=null?`${metaProg}% da meta`:'parcelas de acordo pagas')) + (_pfAtivo?' · total global (ignora filtros)':''), delta: totalRecuperado===0?null:deltaRecPct },
-    { label:'Em negociação',         value: fmtR(emNegociacao),     sub:`${emNegRows.length} cobrança${emNegRows.length!==1?'s':''}` },
-    { label:'Pendências',            value: String(pendAbertas),    sub: pendAtrasadas?`${pendAtrasadas} atrasada${pendAtrasadas!==1?'s':''}`:'em dia', navy:true },
-  ];
+  // ── Precisa de decisão hoje — mesma régua de pendência da tela Cobranças ──────
+  if(!_cobrSinais){ try{ _cobrSinais = await _carregarSinaisPendencia(cobrAtivas); }catch(_){ _cobrSinais = _cobrSinais || {}; } }
+  const _fila = [];
+  cobrAtivas.forEach(c=>{
+    const pend = cobPendencia(c, _cobrSinais);
+    if(pend.estado !== 'agir') return;
+    const parte = (c.cobranca_partes||[]).find(p=>p.principal) || (c.cobranca_partes||[])[0] || {};
+    const devId = parte.devedor_id || '';
+    const grupo = pend.proximaAcao==='boleto' ? 'Dinheiro' : ['peticao','judicial'].includes(pend.proximaAcao) ? 'Jurídico' : 'Cobrança';
+    const tag = pend.proximaAcao==='boleto' ? 'ACORDO' : ['peticao','judicial'].includes(pend.proximaAcao) ? 'JUDICIAL' : pend.proximaAcao==='whatsapp' ? 'RESPOSTA' : (pend.urgencia==='alta'?'URGENTE':pend.urgencia==='media'?'ATENÇÃO':'NOVO');
+    const peso = (pend.urgencia==='alta' || pend.proximaAcao==='boleto') ? 3 : pend.urgencia==='media' ? 2 : 1;
+    const acaoLabel = pend.proximaAcao==='boleto'?'Gerar boleto':pend.proximaAcao==='peticao'?'Abrir peça':pend.proximaAcao==='judicial'?'Ver processo':'Abrir caso';
+    _fila.push({
+      grupo, tag, peso, devId,
+      nome: _cobrCredorNome(c) + (parte?.devedores?.nome ? (' · '+parte.devedores.nome) : ''),
+      meta: pend.motivo || '—',
+      valor: (+c.valor_atual||+c.valor_orig||0),
+      acaoLabel,
+      onAcao: pend.proximaAcao==='peticao' ? `showPage('pecas')` : (devId?`openDrawer('${devId}')`:`showPage('cobr')`)
+    });
+  });
+  // Prescrição perto (mesmo se a pendência-base não for 'agir' — risco de perder o caso).
+  cobrAtivas.forEach(c=>{
+    if(!cobPrescricaoPerto(c)) return;
+    const parte = (c.cobranca_partes||[]).find(p=>p.principal) || (c.cobranca_partes||[])[0] || {};
+    if(_fila.some(f=>f.devId && parte.devedor_id && f.devId===parte.devedor_id)) return;
+    const dias = cobDiasAtePrescricao(c);
+    _fila.push({
+      grupo:'Jurídico', tag:'PRESCRIÇÃO', peso:3, devId: parte.devedor_id||'',
+      nome: _cobrCredorNome(c) + (parte?.devedores?.nome ? (' · '+parte.devedores.nome) : ''),
+      meta: (dias!=null && dias<0) ? 'Prazo de prescrição já vencido' : `Prescreve em ${Math.max(0,Math.round((dias||0)/30))} meses`,
+      valor: (+c.valor_atual||+c.valor_orig||0),
+      acaoLabel:'Priorizar',
+      onAcao: `try{cobrFilter.prescrever=true;cobrFilter.tab='todos';}catch(_){}; showPage('cobr')`
+    });
+  });
+  // Repasses ao cedente pendentes (mesmo dado do módulo #/repasses — fin_operacao).
+  try{
+    if(!_repState.loaded) await _repLoad();
+    const _aggRep = _repAgg();
+    _aggRep.cedentes.filter(x=>x.temPend && x.oldestPend).forEach(x=>{
+      const diasP = _repDaysSince(x.oldestPend);
+      if(diasP==null || diasP<3) return;
+      _fila.push({
+        grupo:'Dinheiro', tag:'REPASSE', peso: diasP>=10?3:2, devId:'',
+        nome: x.nome, meta:`Repasse ao cedente pendente há ${diasP} dias`,
+        valor: x.aRepassar, acaoLabel:'Repassar', onAcao:`showPage('repasses')`
+      });
+    });
+  }catch(_){}
+  _fila.sort((a,b)=> b.peso-a.peso || b.valor-a.valor);
+  const filaGrupo = window._painelFilaGrupo || 'Tudo';
+  const filaFiltrada = filaGrupo==='Tudo' ? _fila : _fila.filter(f=>f.grupo===filaGrupo);
+  const FILA_MOSTRAR = 7;
+  const filaVisivel = filaFiltrada.slice(0, FILA_MOSTRAR);
+  const filaAtrasados = _fila.filter(f=>f.peso===3).length;
+  const tagCores = {
+    'URGENTE':   { bg:'#FBEAE7', fg:'#A65A4A' }, 'ATENÇÃO': { bg:'#FBF3E1', fg:'#9C7F40' },
+    'NOVO':      { bg:'#E4EAF5', fg:'#3A5288' }, 'PRESCRIÇÃO': { bg:'#FBF3E1', fg:'#9C7F40' },
+    'ACORDO':    { bg:'#E4EAF5', fg:'#3A5288' }, 'JUDICIAL': { bg:'#FBEAE7', fg:'#A65A4A' },
+    'RESPOSTA':  { bg:'#E4EAF5', fg:'#3A5288' }, 'REPASSE':  { bg:'#FBF3E1', fg:'#9C7F40' },
+  };
 
-  // Helper: embrulha cada quadro com a barra flutuante do modo Organizar.
-  function painelCard(id, inner){
-    return `<section class="painel-card" data-card="${id}">
-      <div class="painel-card-bar">
-        <button onclick="painelMove('${id}',-1)" title="Subir">↑</button>
-        <button onclick="painelMove('${id}',1)" title="Descer">↓</button>
-        <button data-hidetoggle onclick="painelHide('${id}')">ocultar</button>
-      </div>${inner}</section>`;
-  }
+  // ── Acordos do mês ──────────────────────────────────────────────────────────
+  let acordosMesRows = [];
+  try{
+    const supa = getSupabase();
+    if(supa){
+      const ymIni = ymAtual+'-01';
+      const dNext = new Date(now.getFullYear(), now.getMonth()+1, 1).toISOString().slice(0,10);
+      const r = await supa.from('acordos').select('id,valor_total,parcelas,created_at,status_zapsign')
+        .eq('status_zapsign','assinado').gte('created_at', ymIni).lt('created_at', dNext);
+      if(!r.error) acordosMesRows = r.data||[];
+    }
+  }catch(_){}
+  const acordadoNoMes   = acordosMesRows.reduce((s,a)=>s+(+a.valor_total||0),0);
+  const parcelasGeradas = acordosMesRows.reduce((s,a)=>s+(Array.isArray(a.parcelas)?a.parcelas.length:0),0);
+
+  // "A receber no mês" — boletos Asaas ativos (PENDING) com vencimento no mês (cache por devedor).
+  const inicioMes = ymAtual+'-01';
+  const fimMes    = new Date(now.getFullYear(), now.getMonth()+1, 0).toISOString().slice(0,10);
+  let aReceberMes = 0, aReceberQtd = 0;
+  devs.forEach(d=>{ (d.asaasCharges||[]).filter(c=>c.status==='PENDING' && c.dueDate && c.dueDate>=inicioMes && c.dueDate<=fimMes).forEach(c=>{ aReceberMes+=(+c.value||0); aReceberQtd++; }); });
+
+  // Dias úteis restantes no mês (seg–sex; sem calendário de feriados).
+  let diasUteisRest=0; { const d=new Date(now); d.setDate(d.getDate()+1); while(d.getMonth()===now.getMonth()){ const dow=d.getDay(); if(dow!==0&&dow!==6) diasUteisRest++; d.setDate(d.getDate()+1); } }
+  const faltamMeta       = Math.max(0, metaMensal - totalRecuperado);
+  const fecharPorDiaUtil = diasUteisRest>0 ? faltamMeta/diasUteisRest : faltamMeta;
+  const pctRecComprometido  = metaMensal>0 ? Math.min(100, (totalRecuperado/metaMensal)*100) : 0;
+  const pctAcordComprometido = metaMensal>0 ? Math.min(100-pctRecComprometido, (acordadoNoMes/metaMensal)*100) : 0;
+  const pctMetaComprometido = Math.round(pctRecComprometido+pctAcordComprometido);
+
+  // ── Riscos silenciosos ────────────────────────────────────────────────────
+  const prescreverRows = cobrAtivas.filter(c=>cobPrescricaoPerto(c) && !/quitad|encerrad|recebid|baixad|devolvid/i.test(c.status||''));
+  let riscoAsaasValor=0; const riscoAsaasDevs=new Set();
+  devs.forEach(d=>{ (d.asaasCharges||[]).filter(c=>c.status==='OVERDUE').forEach(c=>{ riscoAsaasValor+=(+c.value||0); riscoAsaasDevs.add(d.id); }); });
+
+  // ── Próximos 7 dias (tiras de dia + lista de compromissos) ────────────────
+  const diasSemanaCurta = ['DOM','SEG','TER','QUA','QUI','SEX','SÁB'];
+  const dias7 = Array.from({length:7}, (_,i)=>{
+    const d = new Date(now); d.setDate(d.getDate()+i);
+    const iso = d.toISOString().slice(0,10);
+    return { dow:diasSemanaCurta[d.getDay()], num:String(d.getDate()).padStart(2,'0'), hoje:i===0, temEvento:eventDates7.has(iso) };
+  });
 
   el.innerHTML = `
     <style>
-      #painel-cards{display:flex;flex-direction:column;gap:16px;margin-top:18px;}
-      .painel-card{position:relative;}
-      .painel-card-bar{display:none;position:absolute;top:-11px;right:10px;z-index:6;gap:3px;background:var(--card);border:1px solid var(--accent);border-radius:8px;padding:3px;box-shadow:0 3px 10px rgba(10,21,48,.14);}
-      #painel-cards.editing .painel-card-bar{display:inline-flex;}
-      #painel-cards.editing .painel-card{outline:1px dashed var(--accent);outline-offset:4px;border-radius:12px;}
-      #painel-cards.editing .painel-card.is-hidden{opacity:.4;}
-      .painel-card-bar button{border:0;background:transparent;color:var(--text-2);font-family:var(--font-mono);font-size:11px;cursor:pointer;padding:3px 7px;border-radius:5px;line-height:1;}
-      .painel-card-bar button:hover{background:var(--card-2);color:var(--text);}
-      .painel-eyebrow{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--text-3);}
-      .painel-atalhos{display:flex;gap:9px;flex-wrap:wrap;}
-      .painel-atalho{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--border);background:var(--card);border-radius:20px;padding:8px 15px;font-size:12.5px;color:var(--text-2);cursor:pointer;font-family:inherit;}
-      .painel-atalho:hover{border-color:var(--accent);color:var(--text);}
-      .painel-atalho.primary{background:var(--ink-btn);color:var(--ink-btn-fg);border-color:var(--ink-btn);}
-      .painel-atalho .ic{font-family:var(--font-mono);font-size:13px;line-height:1;}
-      .painel-prio-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;}
-      .painel-prio{background:var(--card);border:1px solid var(--border);border-top:3px solid var(--accent);border-radius:12px;padding:16px 18px;display:flex;flex-direction:column;gap:5px;}
-      .painel-prio.danger{border-top-color:var(--danger);}
-      .painel-prio.navy{border-top-color:var(--side-bg);}
-      .painel-prio-n{font-family:"Fraunces",serif;font-size:30px;line-height:1.05;color:var(--text);}
-      .painel-prio-l{font-size:12.5px;color:var(--text-2);line-height:1.35;}
-      .painel-prio-cta{margin-top:5px;align-self:flex-start;font-size:11.5px;font-weight:600;color:var(--accent-2);background:none;border:0;cursor:pointer;font-family:inherit;padding:0;}
-      .painel-band{background:var(--side-bg);border-radius:12px;padding:15px 18px;display:flex;flex-direction:column;gap:11px;}
-      .painel-band-head{display:flex;align-items:center;justify-content:space-between;}
-      .painel-band-eye{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);}
-      .painel-band-link{font-size:12px;color:var(--side-fg);opacity:.85;cursor:pointer;text-decoration:none;}
-      .painel-band-item{display:flex;align-items:flex-start;gap:10px;color:var(--side-fg);font-size:12.5px;line-height:1.45;}
-      .painel-band-item .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);margin-top:5px;flex-shrink:0;}
-      .painel-aging-bar{display:flex;height:32px;border-radius:8px;overflow:hidden;border:1px solid var(--border);}
-      .painel-aging-seg{display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-size:10px;color:#fff;min-width:3px;}
-      .painel-aging-legend{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:13px;}
-      .painel-aging-cell .lb{font-family:var(--font-mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-3);display:flex;align-items:center;gap:6px;}
-      .painel-aging-cell .lb i{width:9px;height:9px;border-radius:2px;flex-shrink:0;}
-      .painel-aging-cell .v{font-size:13.5px;font-weight:600;color:var(--text);margin-top:3px;}
-      .painel-aging-cell .c{font-size:10.5px;color:var(--text-3);}
-      .painel-prox-item{display:flex;align-items:center;gap:12px;padding:10px 0 10px 12px;border-bottom:1px solid var(--border-2);border-left:3px solid var(--accent);}
-      .painel-prox-item:last-child{border-bottom:0;}
-      .painel-prox-d{font-family:var(--font-mono);font-size:10px;color:var(--text-3);min-width:46px;}
-      .painel-prox-t{flex:1;font-size:12.5px;color:var(--text-2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-      .painel-prox-v{font-family:var(--font-mono);font-size:11.5px;color:var(--text);}
-      .painel-equipe{background:var(--side-bg);border-radius:12px;overflow:hidden;color:var(--side-fg);display:flex;flex-direction:column;height:100%;}
-      .painel-equipe-rk{display:flex;align-items:center;gap:11px;padding:10px 16px;}
-      .painel-equipe-rk + .painel-equipe-rk{border-top:1px solid rgba(239,234,217,.1);}
-      .painel-equipe-meta{margin-top:auto;padding:14px 16px;border-top:1px solid rgba(239,234,217,.14);}
-      .painel-equipe-track{height:8px;border-radius:5px;background:rgba(239,234,217,.16);overflow:hidden;margin-top:7px;}
-      .painel-equipe-fill{height:100%;background:var(--accent);border-radius:5px;}
-      .painel-select{font-family:inherit;font-size:12.5px;color:var(--text-2);background:var(--card);border:1px solid var(--border);border-radius:9px;padding:8px 11px;cursor:pointer;max-width:170px;}
-      #painel-organizar-btn.on{background:var(--accent);color:#2A1A05;border-color:var(--accent);}
-      .painel-grid-15{display:grid;grid-template-columns:1.5fr 1fr;gap:16px;align-items:start;}
-      .painel-grid-13{display:grid;grid-template-columns:1fr 1.3fr;gap:16px;align-items:start;}
-      .painel-grid-rod{display:grid;grid-template-columns:1.4fr 1fr;gap:16px;align-items:stretch;}
-      @media(max-width:980px){ .painel-grid-15,.painel-grid-13,.painel-grid-rod{grid-template-columns:1fr;} .painel-prio-grid{grid-template-columns:1fr;} .cob-kpis{grid-template-columns:repeat(2,1fr);} }
+      #page-painel .pnl-eyebrow{font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent-2);}
+      #page-painel .pnl-h1{font-family:var(--font-display);font-size:26px;font-weight:400;letter-spacing:-.01em;color:var(--text);margin-top:4px;}
+      #page-painel .pnl-sub{font-size:13.5px;color:var(--text-2);margin-top:3px;}
+      #page-painel .pnl-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:16px;}
+      #page-painel .pnl-head-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+      #page-painel .pnl-select{font-family:inherit;font-size:12.5px;color:var(--text-2);background:var(--card);border:1px solid var(--border);border-radius:7px;padding:8px 12px;cursor:pointer;max-width:170px;}
+      #page-painel .pnl-seg{display:flex;border:1px solid var(--border);border-radius:7px;overflow:hidden;background:var(--card);}
+      #page-painel .pnl-seg button{border:0;background:transparent;padding:7px 14px;font-size:12.5px;font-weight:500;cursor:pointer;color:var(--text-2);font-family:inherit;}
+      #page-painel .pnl-seg button.on{background:var(--side-bg);color:#fff;}
+      #page-painel .pnl-alerts:empty{display:none;}
+      #page-painel .pnl-alerts > *{margin-bottom:14px;}
+      #page-painel .pnl-acordos-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px 24px;}
+      #page-painel .pnl-acordos-lb{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-3);}
+      #page-painel .pnl-acordos-lb.hl{color:var(--accent-2);}
+      #page-painel .pnl-acordos-v{font-family:var(--font-mono);font-size:19px;font-weight:600;color:var(--text);margin-top:3px;}
+      #page-painel .pnl-acordos-v.hl{color:var(--accent-2);}
+      #page-painel .pnl-acordos-v.green{color:var(--success);}
+      #page-painel .pnl-acordos-sub{font-size:11.5px;color:var(--text-3);margin-top:2px;}
+      #page-painel .pnl-barwrap{display:flex;flex-direction:column;gap:6px;margin-top:16px;}
+      #page-painel .pnl-bar{height:8px;background:var(--card-2);border-radius:4px;overflow:hidden;display:flex;}
+      #page-painel .pnl-bar-legend{display:flex;gap:14px;font-size:11px;color:var(--text-3);align-items:center;}
+      #page-painel .pnl-bar-legend i{width:7px;height:7px;border-radius:2px;display:inline-block;margin-right:5px;}
+      #page-painel .pnl-grid2{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(320px,1fr);gap:16px;align-items:start;}
+      #page-painel .pnl-col{display:flex;flex-direction:column;gap:16px;min-width:0;}
+      #page-painel .pnl-chips{display:flex;gap:6px;margin-left:auto;flex-wrap:wrap;}
+      #page-painel .pnl-chip{padding:5px 11px;border-radius:20px;font-size:12px;cursor:pointer;border:1px solid var(--border);background:var(--card);color:var(--text-2);}
+      #page-painel .pnl-chip.on{background:var(--side-bg);color:#fff;border-color:var(--side-bg);}
+      #page-painel .pnl-fila-row{display:flex;align-items:center;gap:14px;padding:12px 16px;border-bottom:1px solid var(--border-2);}
+      #page-painel .pnl-fila-row:last-child{border-bottom:0;}
+      #page-painel .pnl-fila-bar{width:3px;height:32px;border-radius:2px;flex-shrink:0;}
+      #page-painel .pnl-fila-nome{font-size:13.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      #page-painel .pnl-fila-meta{font-size:12px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      #page-painel .pnl-fila-txt{display:flex;flex-direction:column;gap:2px;min-width:200px;flex:1;}
+      #page-painel .pnl-fila-valor{font-family:var(--font-mono);font-size:13px;font-weight:500;text-align:right;width:110px;flex-shrink:0;color:var(--text);}
+      #page-painel .pnl-fila-tag{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.1em;padding:3px 8px;border-radius:4px;width:94px;text-align:center;flex-shrink:0;}
+      #page-painel .pnl-fila-acao{font-size:12.5px;font-weight:600;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;white-space:nowrap;flex-shrink:0;background:var(--card);}
+      #page-painel .pnl-fila-foot{padding:11px 16px;display:flex;align-items:center;}
+      #page-painel .pnl-sit-bar{display:flex;height:12px;border-radius:6px;overflow:hidden;margin-bottom:14px;}
+      #page-painel .pnl-sit-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;}
+      #page-painel .pnl-sit-lb{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text-2);}
+      #page-painel .pnl-sit-lb i{width:7px;height:7px;border-radius:2px;display:inline-block;}
+      #page-painel .pnl-sit-v{font-family:var(--font-mono);font-size:15px;font-weight:600;color:var(--text);}
+      #page-painel .pnl-sit-c{font-size:11.5px;color:var(--text-3);}
+      #page-painel .pnl-dark{background:var(--side-bg);border-radius:12px;padding:18px;color:#fff;display:flex;flex-direction:column;gap:14px;}
+      #page-painel .pnl-dark-lb{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--side-fg-mute);}
+      #page-painel .pnl-dark-v{font-family:var(--font-mono);font-size:26px;font-weight:600;letter-spacing:-.01em;color:#fff;}
+      #page-painel .pnl-dark-sub{font-size:12px;color:var(--side-fg-mute);}
+      #page-painel .pnl-dark-hr{height:1px;background:rgba(255,255,255,.12);}
+      #page-painel .pnl-dark-2col{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+      #page-painel .pnl-dias7{display:flex;gap:5px;margin-bottom:14px;}
+      #page-painel .pnl-dia{flex:1;border:1px solid var(--border);background:var(--card);border-radius:6px;padding:7px 4px;display:flex;flex-direction:column;align-items:center;gap:3px;}
+      #page-painel .pnl-dia.hoje{background:var(--side-bg);border-color:var(--side-bg);}
+      #page-painel .pnl-dia .dow{font-family:var(--font-mono);font-size:9px;letter-spacing:.08em;color:var(--text-3);}
+      #page-painel .pnl-dia.hoje .dow{color:var(--side-fg-mute);}
+      #page-painel .pnl-dia .num{font-family:var(--font-mono);font-size:14px;font-weight:600;color:var(--text);}
+      #page-painel .pnl-dia.hoje .num{color:#fff;}
+      #page-painel .pnl-dia .dot{width:5px;height:5px;border-radius:50%;background:var(--border);}
+      #page-painel .pnl-dia .dot.on{background:var(--accent);}
+      #page-painel .pnl-comp{display:flex;gap:10px;padding:9px 0;border-top:1px solid var(--border-2);}
+      #page-painel .pnl-comp:first-child{border-top:0;}
+      #page-painel .pnl-risco-row{display:flex;align-items:center;gap:10px;padding:9px 0;}
+      #page-painel .pnl-risco-hr{height:1px;background:var(--border-2);}
+      #page-painel .pnl-risco-v{font-family:var(--font-mono);font-size:17px;font-weight:600;width:80px;flex-shrink:0;}
+      @media(max-width:980px){ #page-painel .pnl-grid2,#page-painel .pnl-dark-2col{grid-template-columns:1fr;} #page-painel .pnl-acordos-grid{grid-template-columns:repeat(2,1fr);} .cob-kpis{grid-template-columns:repeat(2,1fr);} }
     </style>
 
-    <div class="cob-pg-head">
+    <div class="pnl-head">
       <div>
-        <div class="painel-eyebrow">Painel do Gestor · ${mesAtual} ${now.getFullYear()}</div>
-        <h1 class="cob-h1" style="margin-top:6px;">${saudacao}, ${escHtml(nomeUsuario)}.</h1>
-        <div class="cob-h1-sub">Resumo da operação${alertas.length>0?`. <b>${alertas.length} ${alertas.length===1?'item':'itens'}</b> ${alertas.length===1?'precisa':'precisam'} de atenção.`:'.'}</div>
+        <div class="pnl-eyebrow">${dataEyebrow}</div>
+        <h1 class="pnl-h1">${saudacao}, ${escHtml(nomeUsuario)}.</h1>
+        <div class="pnl-sub">${_fila.length>0?`<b>${_fila.length}</b> ${_fila.length===1?'item pede':'itens pedem'} decisão hoje${filaAtrasados>0?` — <b>${filaAtrasados}</b> já ${filaAtrasados===1?'está atrasado':'estão atrasados'}.`:'.'}`:'Nenhum item pendente de decisão hoje.'}</div>
       </div>
-      <div class="cob-head-actions">
-        ${_credorOpts.length?`<select class="painel-select" onchange="painelSetFiltro('cliente',this.value)"><option value="">Todos os clientes</option>${_credorOpts.map(o=>`<option value="${escHtml(o.id)}" ${_pf.cliente===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('')}</select>`:''}
-        ${(_respOpts.length && ehGestorView)?`<select class="painel-select" onchange="painelSetFiltro('operador',this.value)"><option value="">Todos os operadores</option>${_respOpts.map(o=>`<option value="${escHtml(o.id)}" ${_pf.operador===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('')}</select>`:''}
-        <div class="cob-seg">${['Hoje','Semana','Mês','Trim'].map((t,i)=>`<button class="cob-seg-b ${i===2?'on':''}">${t}</button>`).join('')}</div>
+      <div class="pnl-head-actions">
+        ${_credorOpts.length?`<select class="pnl-select" onchange="painelSetFiltro('cliente',this.value)"><option value="">Todos os clientes</option>${_credorOpts.map(o=>`<option value="${escHtml(o.id)}" ${_pf.cliente===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('')}</select>`:''}
+        ${(_respOpts.length && ehGestorView)?`<select class="pnl-select" onchange="painelSetFiltro('operador',this.value)"><option value="">Todos os operadores</option>${_respOpts.map(o=>`<option value="${escHtml(o.id)}" ${_pf.operador===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('')}</select>`:''}
+        <div class="pnl-seg">${['Hoje','Semana','Mês','Trim'].map((t,i)=>`<button class="${i===2?'on':''}">${t}</button>`).join('')}</div>
       </div>
     </div>
+
+    <div class="pnl-alerts" id="painel-alerts"></div>
 
     ${(() => { const dev=(typeof _relAutoDevidos==='function')?_relAutoDevidos():[]; return dev.length?`<div class="cob-panel" style="padding:12px 16px;margin-bottom:14px;display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:12px;border-left:3px solid var(--accent,#C9A961);">
       <div style="flex:1;font-size:13px;"><b>${dev.length} relatório${dev.length!==1?'s':''} de andamento a enviar</b> <span style="color:var(--text-3);">— credores com envio automático (30 dias) vencido.</span></div>
       <button class="cob-btn-primary" onclick="abrirFilaRelatorioAuto()">Revisar e enviar</button>
     </div>`:''; })()}
 
-    <div id="painel-cards">
-
-      ${painelCard('prioridades', `<div class="cob-panel"><div class="cob-panel-head"><span class="cob-panel-title">Precisa de decisão hoje</span></div><div class="cob-panel-body"><div class="painel-prio-grid">
-        <div class="painel-prio danger"><div class="painel-prio-n">${pendAtrasadas}</div><div class="painel-prio-l">tarefa${pendAtrasadas!==1?'s':''} atrasada${pendAtrasadas!==1?'s':''}</div><button class="painel-prio-cta" onclick="showPage('tarefas')">Revisar tarefas →</button></div>
-        <div class="painel-prio navy"><div class="painel-prio-n">${fmtk(carteiraParada90)}</div><div class="painel-prio-l">carteira parada há 90+ dias</div><button class="painel-prio-cta" onclick="showPage('cobr')">Priorizar →</button></div>
-        ${prescreverPainel>0?`<div class="painel-prio danger"><div class="painel-prio-n">${prescreverPainel}</div><div class="painel-prio-l">a prescrever (≤ 6 meses)</div><button class="painel-prio-cta" onclick="try{cobrFilter.prescrever=true;cobrFilter.tab='todos';}catch(_){}; showPage('cobr');">Ver antes de perder →</button></div>`:''}
-      </div></div></div>`)}
-
-      ${painelCard('kpis', `<div class="cob-kpis">${kpis.map(k=>`
-        <div class="cob-kcard"${k.navy?' style="background:var(--side-bg);border-color:var(--side-bg);"':''}>
-          <div class="cob-kcard-top">
-            <span class="cob-kcard-role"${k.navy?' style="color:var(--accent);"':''}>${escHtml(k.label)}</span>
-            <span class="cob-kcard-tick"${(k.tick||k.navy)?' style="background:var(--accent);"':''}></span>
-          </div>
-          <div class="cob-kcard-val fr"${k.navy?' style="color:var(--side-fg);"':''}>${k.value}</div>
-          <div class="cob-kcard-sub"${k.navy?' style="color:rgba(239,234,217,.6);"':''}>${typeof k.delta==='number'?`<span class="cob-kdelta ${k.delta>=0?'up':'down'}">${k.delta>=0?'+':''}${k.delta}%</span> `:''}${k.sub||''}</div>
-        </div>`).join('')}</div>`)}
-
-      ${painelCard('aging', `<div class="cob-panel"><div class="cob-panel-head"><div style="display:flex;align-items:baseline;"><span class="cob-panel-title">Aging da carteira</span><span class="cob-panel-sub">por valor em aberto</span></div></div><div class="cob-panel-body">
-        <div class="painel-aging-bar">${agingDefs.some(b=>b.val>0)? agingDefs.map(b=>{ if(b.val<=0) return ''; const pct=(b.val/agingTotal)*100; return `<div class="painel-aging-seg" style="flex:${b.val};background:${b.cor};" title="${b.lb} dias — ${fmtR(b.val)} (${b.qtd})">${pct>=10?b.lb:''}</div>`; }).join('') : `<div class="painel-aging-seg" style="flex:1;background:var(--card-2);color:var(--text-3);">sem carteira em aberto</div>`}</div>
-        <div class="painel-aging-legend">${agingDefs.map(b=>`<div class="painel-aging-cell"><div class="lb"><i style="background:${b.cor}"></i>${b.lb} dias</div><div class="v">${fmtk(b.val)}</div><div class="c">${b.qtd} caso${b.qtd!==1?'s':''}</div></div>`).join('')}</div>
-      </div></div>`)}
-
-      ${painelCard('relatorios', `<div class="${ehGestorView?'painel-grid-15':''}">
-        ${ehGestorView ? `<div class="cob-panel">
-          <div class="cob-panel-head"><div style="display:flex;align-items:baseline;"><span class="cob-panel-title">Recuperação por mês</span><span class="cob-panel-sub">recuperado vs. meta · projeção ilustrativa</span></div></div>
-          <div class="cob-panel-body">
-          ${(()=>{
-            const metaRatio = metaMensal>0 ? Math.min(1, metaMensal/maxBarVal) : 0;
-            const metaTop = Math.round(158*(1-metaRatio));
-            const allZero = monthsData.every(m=>!m.rec);
-            const projH = projecao>0 ? Math.max(2, Math.round((projecao/maxBarVal)*100)) : 0;
-            return `<div class="cob-chart">
-              <div class="cob-chart-grid">
-                <div class="cob-chart-y">${[1,0.75,0.5,0.25,0].map(f=>`<span>${fmtk(maxBarVal*f).replace('R$ ','')}</span>`).join('')}</div>
-                <div class="cob-chart-plot">
-                  ${metaMensal>0?`<div class="cob-meta-line" style="top:${metaTop}px;"><span class="cob-meta-tag">META ${fmtk(metaMensal).replace('R$ ','')}</span></div>`:''}
-                  <div class="cob-bars">
-                    ${monthsData.map(m=>{ const h = m.rec>0 ? Math.max(2, Math.round((m.rec/maxBarVal)*100)) : 0; return `<div class="cob-bar-col"><div class="cob-bar" style="height:${h}%;" title="${m.mName}/${m.ym.slice(0,4)}: ${fmtR(m.rec)}"></div><span class="cob-bar-lb">${m.mName}</span></div>`; }).join('')}
-                    <div class="cob-bar-col"><div class="cob-bar" style="height:${projH}%;background:transparent;border:1.5px dashed var(--accent);opacity:1;" title="Projeção ${projMnm}: ${fmtR(projecao)}"></div><span class="cob-bar-lb">${projMnm}</span></div>
-                  </div>
-                </div>
-              </div>
-              <div class="cob-chart-note">
-                <span class="cob-legend"><i style="background:var(--accent);"></i> Recuperado</span>
-                <span class="cob-legend"><i class="dashed"></i> Projeção (${fmtk(projecao)})</span>
-                ${allZero?`<span class="cob-chart-empty">sem recuperação registrada no período</span>`:''}
-              </div>
-            </div>`;
-          })()}
-          </div>
-        </div>` : ''}
-        <div class="cob-panel"><div class="cob-panel-head"><span class="cob-panel-title">Carteira por situação</span></div><div class="cob-panel-body"><div class="cob-hbars">
-          ${[['Em aberto',sitDefs.aberto,'var(--slate)'],['Em acordo',sitDefs.acordo,'var(--green)'],['Judicial',sitDefs.judicial,'var(--bord)'],['Quitado',sitDefs.quitado,'var(--accent-2)']].map(par=>`<div class="cob-hbar-row"><span class="cob-hbar-lb">${par[0]}</span><div class="cob-hbar-track"><div class="cob-hbar-fill" style="width:${Math.round((par[1]/sitMax)*100)}%;background:${par[2]};"></div></div><span class="cob-hbar-v">${fmtk(par[1])}</span></div>`).join('')}
-        </div></div></div>
-      </div>`)}
-
-      ${painelCard('relatorios2', `<div>
-        <div class="cob-panel">
-          <div class="cob-panel-head"><span class="cob-panel-title">Atividade recente</span><div class="cob-tabs">${['Tudo','Acordos','Pagamentos','Comunicação'].map((t,i)=>`<button class="cob-tab ${i===0?'on':''}">${t}</button>`).join('')}</div></div>
-          <div>${recentActivity.length === 0 ? `<div class="cob-empty"><span class="cob-empty-dot"></span> Nenhuma interação registrada ainda.</div>` : recentActivity.map((a,i)=>{ const initials=(a.devNome||'?').split(' ').slice(0,2).map(w=>w[0]).join('').toUpperCase(); return `<div class="cob-tr-click" style="display:grid;grid-template-columns:auto 1fr auto auto;gap:12px;align-items:center;padding:11px 18px;${i>0?'border-top:1px solid var(--border-2);':''}" onclick="openDrawer('${a.devId}')"><span class="cob-av sm">${initials}</span><div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:var(--text-2);"><span style="color:var(--text);font-weight:600;">${escHtml(a.devNome||'—')}</span><span> · ${escHtml(a.tipo||'—')}</span>${a.desc?`<span style="color:var(--text-3);"> — ${escHtml(a.desc.slice(0,60))}${a.desc.length>60?'…':''}</span>`:''}</div><span style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.06em;color:${actColor(a.tipo)};border:1px solid var(--border);border-radius:4px;padding:2px 6px;white-space:nowrap;">${actLabel(a.tipo)}</span><span style="font-family:var(--font-mono);font-size:10px;color:var(--text-3);min-width:48px;text-align:right;white-space:nowrap;">${a.data||'—'}</span></div>`; }).join('')}</div>
+    <div class="cob-panel" style="margin-bottom:16px;">
+      <div class="cob-panel-head"><span class="cob-panel-title">Acordos de ${mesAtual.toLowerCase()}</span><span class="cob-panel-sub">${acordosMesRows.length} fechado${acordosMesRows.length!==1?'s':''} · ${parcelasGeradas} parcela${parcelasGeradas!==1?'s':''} gerada${parcelasGeradas!==1?'s':''}</span><a class="cob-link" style="margin-left:auto;" onclick="showPage('cobr')">Ver acordos →</a></div>
+      <div class="cob-panel-body">
+        <div class="pnl-acordos-grid">
+          <div><div class="pnl-acordos-lb">ACORDADO NO MÊS</div><div class="pnl-acordos-v">${fmtR(acordadoNoMes)}</div><div class="pnl-acordos-sub">${acordosMesRows.length} acordo${acordosMesRows.length!==1?'s':''} assinado${acordosMesRows.length!==1?'s':''}</div></div>
+          <div><div class="pnl-acordos-lb">A RECEBER EM ${mesAtual.toUpperCase()}</div><div class="pnl-acordos-v green">${fmtR(aReceberMes)}</div><div class="pnl-acordos-sub">${aReceberQtd} boleto${aReceberQtd!==1?'s':''} ativo${aReceberQtd!==1?'s':''}</div></div>
+          <div><div class="pnl-acordos-lb">META DO MÊS</div><div class="pnl-acordos-v">${fmtR(metaMensal)}</div><div class="pnl-acordos-sub">recuperado ${fmtR(totalRecuperado)}${metaProg!=null?` · ${metaProg}%`:''}</div></div>
+          <div><div class="pnl-acordos-lb hl">FECHAR POR DIA ÚTIL</div><div class="pnl-acordos-v hl">${fmtR(fecharPorDiaUtil)}</div><div class="pnl-acordos-sub">${faltamMeta>0?`faltam ${fmtR(faltamMeta)} em ${diasUteisRest} dia${diasUteisRest!==1?'s':''}`:'meta atingida'}</div></div>
         </div>
-      </div>`)}
+        <div class="pnl-barwrap">
+          <div class="pnl-bar"><div style="width:${pctRecComprometido}%;background:var(--success);"></div><div style="width:${pctAcordComprometido}%;background:var(--accent);"></div></div>
+          <div class="pnl-bar-legend"><span><i style="background:var(--success);"></i>Recuperado</span><span><i style="background:var(--accent);"></i>Acordado a receber</span><span style="margin-left:auto;font-family:var(--font-mono);">${pctMetaComprometido}% da meta comprometido</span></div>
+        </div>
+      </div>
+    </div>
 
-      ${painelCard('rodape', `<div class="painel-grid-rod">
-        <div class="cob-panel"><div class="cob-panel-head"><span class="cob-panel-title">Fila de decisão</span><a class="cob-link" onclick="showPage('tarefas')">Ver todas →</a></div><div>${alertas.length? `<ul class="cob-attn-list">${alertas.slice(0,5).map(a=>{ const tag=a.tipo==='danger'?'URGENTE':a.tipo==='warning'?'ATENÇÃO':a.tipo==='success'?'OK':'INFO'; return `<li class="cob-attn-item"><span class="cob-urgent">${tag}</span><span class="cob-attn-txt">${escHtml(a.msg)}</span></li>`; }).join('')}</ul>` : `<div class="cob-empty"><span class="cob-empty-dot"></span> Sem pendências.</div>`}</div></div>
-        <div class="cob-panel"><div class="cob-panel-head"><span class="cob-panel-title">Próximos compromissos</span></div><div class="cob-panel-body" style="padding-top:8px;padding-bottom:8px;">${vencimentos.length? vencimentos.map(v=>`<div class="painel-prox-item" style="border-left-color:${v.tipo==='tarefa'?'var(--accent)':v.tipo==='lancamento'?'var(--danger)':'var(--blue)'};"><span class="painel-prox-d">${(v.data||'').slice(8,10)}/${(v.data||'').slice(5,7)}</span><span class="painel-prox-t">${escHtml(v.desc||'—')}</span>${v.valor?`<span class="painel-prox-v">${fmtk(v.valor)}</span>`:''}</div>`).join('') : `<div class="cob-empty"><span class="cob-empty-dot"></span> Nada nos próximos 7 dias.</div>`}</div></div>
-      </div>`)}
+    <div class="pnl-grid2">
+      <div class="pnl-col">
+        <div class="cob-panel">
+          <div class="cob-panel-head"><span class="cob-panel-title">Precisa de decisão hoje</span><span class="cob-panel-sub">${_fila.length} ite${_fila.length!==1?'ns':'m'} · ordenados por risco</span>
+            <div class="pnl-chips">${['Tudo','Cobrança','Dinheiro','Jurídico'].map(g=>`<span class="pnl-chip ${filaGrupo===g?'on':''}" onclick="window._painelFilaGrupo='${g}';renderPainel();">${g}</span>`).join('')}</div>
+          </div>
+          <div>${filaVisivel.length? filaVisivel.map(f=>{ const tc=tagCores[f.tag]||{bg:'var(--card-2)',fg:'var(--text-2)'}; return `<div class="pnl-fila-row">
+              <div class="pnl-fila-bar" style="background:${f.peso===3?'var(--danger)':f.peso===2?'var(--accent)':'var(--info)'};"></div>
+              <div class="pnl-fila-txt"><div class="pnl-fila-nome">${escHtml(f.nome)}</div><div class="pnl-fila-meta">${escHtml(f.meta)}</div></div>
+              <div class="pnl-fila-valor">${fmtR(f.valor)}</div>
+              <div class="pnl-fila-tag" style="background:${tc.bg};color:${tc.fg};">${f.tag}</div>
+              <button class="pnl-fila-acao" onclick="${f.onAcao}">${escHtml(f.acaoLabel)}</button>
+            </div>`; }).join('') : `<div class="cob-empty"><span class="cob-empty-dot"></span> Nenhum item pendente${filaGrupo!=='Tudo'?` em ${filaGrupo}`:''}.</div>`}</div>
+          <div class="pnl-fila-foot"><span style="font-size:12.5px;color:var(--text-3);">Mostrando ${filaVisivel.length} de ${filaFiltrada.length}</span><a class="cob-link" style="margin-left:auto;" onclick="showPage('cobr')">Ver todos os itens →</a></div>
+        </div>
 
-      ${painelCard('calendario', `<div class="cob-panel"><div class="cob-panel-head"><span class="cob-panel-title">Calendário</span></div><div data-cal>${calHtml}</div></div>`)}
+        <div class="cob-panel">
+          <div class="cob-panel-head"><span class="cob-panel-title">Carteira por situação</span><span class="cob-panel-sub">${fmtR(sitTotalVal)} · ${sitTotalCasos} casos</span><a class="cob-link" style="margin-left:auto;" onclick="showPage('cobr')">Abrir carteira →</a></div>
+          <div class="cob-panel-body">
+            <div class="pnl-sit-bar">${[['aberto','var(--slate)'],['acordo','var(--accent)'],['judicial','var(--side-bg)'],['quitado','var(--success)']].map(([k,cor])=>`<div style="width:${Math.round((sitDefs[k]/sitTotalVal)*100)}%;background:${cor};"></div>`).join('')}</div>
+            <div class="pnl-sit-grid">
+              ${[['Em aberto','aberto','var(--slate)'],['Em acordo','acordo','var(--accent)'],['Judicial','judicial','var(--side-bg)'],['Quitado','quitado','var(--success)']].map(([lb,k,cor])=>`<div><div class="pnl-sit-lb"><i style="background:${cor};"></i>${lb}</div><div class="pnl-sit-v">${fmtk(sitDefs[k])}</div><div class="pnl-sit-c">${sitQtd[k]} caso${sitQtd[k]!==1?'s':''}</div></div>`).join('')}
+            </div>
+          </div>
+        </div>
+      </div>
 
+      <div class="pnl-col">
+        <div class="pnl-dark">
+          <div><div class="pnl-dark-lb">CARTEIRA ATIVA</div><div class="pnl-dark-v">${fmtR(totalCarteira)}</div><div class="pnl-dark-sub">${totalCasos} caso${totalCasos!==1?'s':''} em aberto · ${totalContatos} cliente${totalContatos!==1?'s':''}</div></div>
+          <div class="pnl-dark-hr"></div>
+          <div class="pnl-dark-2col">
+            <div><div class="pnl-dark-lb">RECUPERADO · ${mesAtual.toUpperCase()}</div><div class="pnl-dark-v" style="font-size:17px;color:#A8C6A0;">${fmtR(totalRecuperado)}</div></div>
+            <div><div class="pnl-dark-lb">EM NEGOCIAÇÃO</div><div class="pnl-dark-v" style="font-size:17px;color:#E2CE9E;">${fmtR(emNegociacao)}</div><div class="pnl-dark-sub">${emNegRows.length} cobrança${emNegRows.length!==1?'s':''}</div></div>
+          </div>
+          <div>
+            <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--side-fg-mute);margin-bottom:6px;"><span>Meta do mês</span><span style="font-family:var(--font-mono);">${metaProg!=null?metaProg+'%':'—'} de ${fmtR(metaMensal)}</span></div>
+            <div style="height:6px;background:rgba(255,255,255,.12);border-radius:3px;overflow:hidden;"><div style="height:100%;width:${metaProg||0}%;background:var(--accent);"></div></div>
+          </div>
+        </div>
+
+        <div class="cob-panel">
+          <div class="cob-panel-head"><span class="cob-panel-title">Próximos 7 dias</span><a class="cob-link" style="margin-left:auto;" onclick="showPage('tarefas')">Agenda completa →</a></div>
+          <div class="cob-panel-body">
+            <div class="pnl-dias7">${dias7.map(d=>`<div class="pnl-dia ${d.hoje?'hoje':''}"><span class="dow">${d.dow}</span><span class="num">${d.num}</span><div class="dot ${d.temEvento?'on':''}"></div></div>`).join('')}</div>
+            ${vencimentos.length? vencimentos.map(v=>`<div class="pnl-comp"><div style="font-family:var(--font-mono);font-size:11.5px;color:var(--text-3);width:56px;flex-shrink:0;">${(v.data||'').slice(8,10)}/${(v.data||'').slice(5,7)}</div><div style="min-width:0;"><div style="font-size:12.5px;font-weight:500;color:var(--text);">${escHtml(v.desc||'—')}</div>${v.valor?`<div style="font-size:11.5px;color:var(--text-3);">${fmtR(v.valor)}</div>`:''}</div></div>`).join('') : `<div class="cob-empty"><span class="cob-empty-dot"></span> Nada nos próximos 7 dias.</div>`}
+          </div>
+        </div>
+
+        <div class="cob-panel">
+          <div class="cob-panel-head"><span class="cob-panel-title">Riscos silenciosos</span></div>
+          <div class="cob-panel-body">
+            <div class="pnl-risco-row"><div class="pnl-risco-v" style="color:var(--danger);">${fmtk(carteiraParada90)}</div><div style="font-size:12px;color:var(--text-2);line-height:1.35;">parados há 90+ dias<br><span style="color:var(--text-3);">${carteiraParada90Rows.length} caso${carteiraParada90Rows.length!==1?'s':''} sem interação</span></div><a class="cob-link" style="margin-left:auto;white-space:nowrap;" onclick="showPage('cobr')">Priorizar →</a></div>
+            <div class="pnl-risco-hr"></div>
+            <div class="pnl-risco-row"><div class="pnl-risco-v" style="color:var(--accent-2);">${prescreverRows.length} caso${prescreverRows.length!==1?'s':''}</div><div style="font-size:12px;color:var(--text-2);line-height:1.35;">a prescrever (≤ 6 meses)${prescreverRows[0]?`<br><span style="color:var(--text-3);">${escHtml(_cobrCredorNome(prescreverRows[0]))} · ${fmtR(+prescreverRows[0].valor_atual||+prescreverRows[0].valor_orig||0)}</span>`:''}</div><a class="cob-link" style="margin-left:auto;white-space:nowrap;" onclick="try{cobrFilter.prescrever=true;cobrFilter.tab='todos';}catch(_){}; showPage('cobr');">Ver →</a></div>
+            <div class="pnl-risco-hr"></div>
+            <div class="pnl-risco-row"><div class="pnl-risco-v" style="color:var(--info);">${fmtk(riscoAsaasValor)}</div><div style="font-size:12px;color:var(--text-2);line-height:1.35;">boletos vencidos no Asaas<br><span style="color:var(--text-3);">${riscoAsaasDevs.size} devedor${riscoAsaasDevs.size!==1?'es':''} inadimplente${riscoAsaasDevs.size!==1?'s':''}</span></div><a class="cob-link" style="margin-left:auto;white-space:nowrap;" onclick="showPage('cobr')">Cobrar →</a></div>
+          </div>
+        </div>
+      </div>
     </div>
   `;
-  painelApplyLayout(el);
 
   // Alerta visual (gestor): acordos assinados sem boleto emitido — corrente travada/falha.
   checkAlertaBoletosPendentes(el);
@@ -9836,12 +9854,15 @@ async function renderPainel(){
   checkAlertaCasosAgir(el);
 }
 
-// ── Painel v3: filtros + modo "Organizar" (ocultar/reordenar quadros, persistido em localStorage) ──
+// ── Painel v3: filtros de Cliente/Operador ────────────────────────────────────
 function painelSetFiltro(kind, val){
   window._painelFiltro = window._painelFiltro || { cliente:'', operador:'' };
   window._painelFiltro[kind] = val || '';
   renderPainel();
 }
+/* Modo "Organizar" (arrastar/ocultar quadros) do Painel v2 — desativado na reformulação
+   do handoff (ordem fixa e curada dos blocos), mas mantido aqui comentado para reaproveitar
+   caso volte a ser necessário. Não há mais botão #painel-organizar-btn na UI que o acione.
 function painelLoadLayout(){
   try{ const j=JSON.parse(localStorage.getItem('cobrasq_painel_layout')||'{}');
     return { order: Array.isArray(j.order)?j.order:[], hidden: (j.hidden&&typeof j.hidden==='object')?j.hidden:{} };
@@ -9884,6 +9905,7 @@ function painelHide(id){
   lay.hidden[id] = !lay.hidden[id]; painelSaveLayout(lay);
   painelApplyLayout(document.getElementById('page-painel'));
 }
+*/
 
 // Banner no Painel quando há acordos ASSINADOS sem boleto emitido — mesmo sinal do
 // WhatsApp de falha (ALERT_WHATSAPP_TO) e da view funil_automacao, agora visível no app.
@@ -9898,7 +9920,8 @@ async function checkAlertaBoletosPendentes(painelEl){
     const emitir   = data.filter(a => !(a.metadata && a.metadata.boletos_emitidos));
     const reenviar = data.filter(a => (a.metadata && a.metadata.boletos_emitidos) && !(a.metadata && a.metadata.whatsapp_ok));
     const total = emitir.length + reenviar.length;
-    const el = painelEl || document.getElementById('page-painel'); if(!el) return;
+    const pgEl = painelEl || document.getElementById('page-painel'); if(!pgEl) return;
+    const el = pgEl.querySelector('#painel-alerts') || pgEl;
     const old = el.querySelector('#cob-alert-boletos'); if(old) old.remove();
     if(!total) return;
     const ic = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
@@ -9910,7 +9933,7 @@ async function checkAlertaBoletosPendentes(painelEl){
       <div>Acordos assinados pendentes: ${partes.join(' · ')}. Clique para resolver — gera o boleto e/ou reenvia o link por WhatsApp.</div>
       <button id="btn-resolver-pendentes" style="margin-left:auto;color:#fff;background:var(--danger);border:0;border-radius:8px;padding:8px 14px;font-size:12.5px;font-weight:600;cursor:pointer;white-space:nowrap;" onclick="resolverBoletosPendentes()">Resolver ${total} agora →</button>
     </div>`;
-    el.insertAdjacentHTML('afterbegin', html);
+    el.insertAdjacentHTML('beforeend', html);
   }catch(e){ /* best-effort: alerta não pode quebrar o painel */ }
 }
 
@@ -9919,7 +9942,8 @@ async function checkAlertaBoletosPendentes(painelEl){
 // sinais degrada p/ status+aging. Best-effort, aditivo.
 async function checkAlertaCasosAgir(painelEl){
   try{
-    const el = painelEl || document.getElementById('page-painel'); if(!el) return;
+    const pgEl = painelEl || document.getElementById('page-painel'); if(!pgEl) return;
+    const el = pgEl.querySelector('#painel-alerts') || pgEl;
     const old = el.querySelector('#cob-alert-agir'); if(old) old.remove();
     if(typeof cobPendencia!=='function') return;
     let rows = Array.isArray(DB_cobrancas) ? DB_cobrancas : null;
@@ -9936,7 +9960,7 @@ async function checkAlertaCasosAgir(painelEl){
       <div><b>${agir}</b> caso${agir!==1?'s':''} precisa${agir!==1?'m':''} de ação${urg?` — <b>${urg}</b> urgente${urg!==1?'s':''}`:''}.</div>
       <button style="margin-left:auto;color:var(--navy);background:var(--gold);border:0;border-radius:8px;padding:8px 14px;font-size:12.5px;font-weight:700;cursor:pointer;white-space:nowrap;" onclick="try{cobrFilter.pend='agir';}catch(_){}; showPage('cobr');">Ver casos →</button>
     </div>`;
-    el.insertAdjacentHTML('afterbegin', html);
+    el.insertAdjacentHTML('beforeend', html);
   }catch(e){ /* best-effort */ }
 }
 
@@ -25906,8 +25930,49 @@ window.finApi = (function(){
     return cache;
   }
 
+  // IDs de lançamento cuja categoria contém "repasse" (usado pelo filtro TIPO=Repasses,
+  // que não é uma coluna própria — deriva da categoria, igual ao mockup do handoff).
+  async function _idsCategoriaRepasse(){
+    const sb = _sb();
+    const { data } = await sb.from('fin_lancamento_categoria').select('lancamento_id,fin_categoria(descricao)').limit(5000);
+    return (data||[]).filter(r=>/repasse/i.test((r.fin_categoria&&r.fin_categoria.descricao)||'')).map(r=>r.lancamento_id);
+  }
+  // IDs de lançamento cuja categoria bate com categoriaId (usado pelo filtro "Categoria").
+  async function _idsPorCategoria(categoriaId){
+    const sb = _sb();
+    const { data } = await sb.from('fin_lancamento_categoria').select('lancamento_id').eq('categoria_id', categoriaId).limit(5000);
+    return (data||[]).map(r=>r.lancamento_id);
+  }
+  // Aplica os filtros de Movimentações (tipoView/situacao + os filtros clássicos) numa query.
+  // `ids` traz os lookups assíncronos já resolvidos pelo chamador: { repasse, categoria }.
+  function _aplicarFiltrosMov(q, filtros, ids){
+    const f = filtros||{};
+    if(f.tipoView === 'entradas') q = q.eq('tipo_movimento', 1);
+    else if(f.tipoView === 'saidas') q = q.eq('tipo_movimento', 0);
+    else if(f.tipoView === 'repasses') q = q.in('id', (ids.repasse&&ids.repasse.length)?ids.repasse:['00000000-0000-0000-0000-000000000000']);
+    if(f.situacao === 'pendentes') q = q.eq('status', 0);
+    else if(f.situacao === 'atraso') q = q.eq('status', 0).lt('data_vencimento', hoje());
+    else if(f.situacao === 'conciliados') q = q.eq('conciliado', true);
+    if(f.contaId) q = q.eq('conta_id', f.contaId);
+    if(f.categoriaId) q = q.in('id', (ids.categoria&&ids.categoria.length)?ids.categoria:['00000000-0000-0000-0000-000000000000']);
+    if(f.contatoId) q = q.eq('contato_id', f.contatoId);
+    if(f.busca) q = q.ilike('descricao', '%'+f.busca+'%');
+    if(f.dataIni) q = q.gte('data_competencia', f.dataIni);
+    if(f.dataFim) q = q.lte('data_competencia', f.dataFim);
+    return q;
+  }
+  async function _resolverIdsFiltro(filtros){
+    const f = filtros||{};
+    const [repasse, categoria] = await Promise.all([
+      f.tipoView==='repasses' ? _idsCategoriaRepasse() : Promise.resolve(null),
+      f.categoriaId ? _idsPorCategoria(f.categoriaId) : Promise.resolve(null),
+    ]);
+    return { repasse, categoria };
+  }
+
   async function listLancamentos({ page=1, perPage=50, filtros={} } = {}){
     const sb = _sb();
+    const ids = await _resolverIdsFiltro(filtros);
     let q = sb.from('fin_lancamento').select(
       'id,controlle_payment_id,descricao,data_competencia,data_vencimento,data_pagamento,'+
       'valor,valor_pago,juros,multa,desconto,tipo_movimento,status,conta_id,contato_id,'+
@@ -25915,16 +25980,7 @@ window.finApi = (function(){
       'fin_conta(descricao,banco_nome),fin_contato(nome,documento)',
       { count: 'exact' }
     );
-    if(filtros.tipo === 'receita') q = q.eq('tipo_movimento', 1);
-    else if(filtros.tipo === 'despesa') q = q.eq('tipo_movimento', 0);
-    if(filtros.status === 'pago') q = q.eq('status', 1);
-    else if(filtros.status === 'pendente') q = q.eq('status', 0);
-    else if(filtros.status === 'parcial') q = q.eq('status', 2);
-    if(filtros.contaId) q = q.eq('conta_id', filtros.contaId);
-    if(filtros.contatoId) q = q.eq('contato_id', filtros.contatoId);
-    if(filtros.busca) q = q.ilike('descricao', '%'+filtros.busca+'%');
-    if(filtros.dataIni) q = q.gte('data_competencia', filtros.dataIni);
-    if(filtros.dataFim) q = q.lte('data_competencia', filtros.dataFim);
+    q = _aplicarFiltrosMov(q, filtros, ids);
 
     const from = (page-1)*perPage;
     const to = from + perPage - 1;
@@ -25933,13 +25989,13 @@ window.finApi = (function(){
     const { data, count, error } = await q;
     if(error) throw error;
 
-    const ids = (data||[]).map(l=>l.id);
+    const lancIds = (data||[]).map(l=>l.id);
     let catsByLanc = {};
-    if(ids.length){
+    if(lancIds.length){
       const { data: rateios } = await sb
         .from('fin_lancamento_categoria')
         .select('lancamento_id,valor,fin_categoria(id,descricao)')
-        .in('lancamento_id', ids);
+        .in('lancamento_id', lancIds);
       for(const r of (rateios||[])){
         if(!catsByLanc[r.lancamento_id]) catsByLanc[r.lancamento_id] = [];
         catsByLanc[r.lancamento_id].push(r);
@@ -25952,6 +26008,24 @@ window.finApi = (function(){
       page, perPage,
       totalPages: Math.max(1, Math.ceil((count||0)/perPage))
     };
+  }
+
+  // Totais (entradas/saídas/líquido) de TODO o conjunto filtrado — não só a página atual.
+  async function sumLancamentos(filtros){
+    const sb = _sb();
+    const ids = await _resolverIdsFiltro(filtros);
+    let entradas=0, saidas=0, from=0;
+    for(;;){
+      let q = sb.from('fin_lancamento').select('valor,tipo_movimento');
+      q = _aplicarFiltrosMov(q, filtros, ids);
+      q = q.order('id',{ascending:true}).range(from, from+999);
+      const { data, error } = await q;
+      if(error) throw error;
+      for(const r of (data||[])){ const v=Math.abs(+r.valor||0); if(r.tipo_movimento===1) entradas+=v; else saidas+=v; }
+      if(!data || data.length<1000) break;
+      from += 1000;
+    }
+    return { entradas, saidas, liquido: entradas-saidas };
   }
 
   async function getKpisMes(opts){
@@ -26000,7 +26074,7 @@ window.finApi = (function(){
   async function getRecentes(limit=8){
     const sb = _sb();
     const { data } = await sb.from('fin_lancamento')
-      .select('id,descricao,data_competencia,data_pagamento,valor,tipo_movimento,status,fin_conta(descricao)')
+      .select('id,descricao,data_competencia,data_vencimento,data_pagamento,valor,tipo_movimento,status,conciliado,fin_conta(descricao)')
       .order('data_competencia', { ascending: false, nullsFirst: false })
       .limit(limit);
     return data || [];
@@ -26092,6 +26166,44 @@ window.finApi = (function(){
   async function deleteLancamento(id){
     const sb = _sb();
     const { error } = await sb.from('fin_lancamento').delete().eq('id', id);
+    if(error) throw error;
+  }
+
+  // ── Ações em lote da aba Movimentações — cada uma é UMA chamada (UPDATE/DELETE ...
+  // WHERE id IN (...)), atômica no Postgres, sobre todos os ids selecionados de uma vez.
+  async function confirmarPagamentoLote(ids, opts){
+    opts = opts || {};
+    // pagarLancamento calcula o valor de cada lançamento individualmente (não é um
+    // UPDATE único, pois o valor pago depende do valor de cada linha).
+    await Promise.all(ids.map(id => pagarLancamento(id, opts)));
+  }
+  async function conciliarLote(ids){
+    const sb = _sb();
+    const { error } = await sb.from('fin_lancamento').update({ conciliado:true }).in('id', ids);
+    if(error) throw error;
+  }
+  async function alterarContaLote(ids, contaId){
+    const sb = _sb();
+    const { error } = await sb.from('fin_lancamento').update({ conta_id: contaId }).in('id', ids);
+    if(error) throw error;
+  }
+  async function reagendarLote(ids, dataVencimento){
+    const sb = _sb();
+    const { error } = await sb.from('fin_lancamento').update({ data_vencimento: dataVencimento }).in('id', ids);
+    if(error) throw error;
+  }
+  async function alterarCategoriaLote(ids, categoriaId){
+    const sb = _sb();
+    const { data: lancs, error: e1 } = await sb.from('fin_lancamento').select('id,valor').in('id', ids);
+    if(e1) throw e1;
+    const { error: e2 } = await sb.from('fin_lancamento_categoria').delete().in('lancamento_id', ids);
+    if(e2) throw e2;
+    const rows = (lancs||[]).map(l => ({ lancamento_id:l.id, categoria_id:categoriaId, valor:Math.abs(+l.valor||0) }));
+    if(rows.length){ const { error: e3 } = await sb.from('fin_lancamento_categoria').insert(rows); if(e3) throw e3; }
+  }
+  async function excluirLote(ids){
+    const sb = _sb();
+    const { error } = await sb.from('fin_lancamento').delete().in('id', ids);
     if(error) throw error;
   }
 
@@ -26502,12 +26614,19 @@ window.finApi = (function(){
   return {
     loadDimensoes,
     listLancamentos,
+    sumLancamentos,
     getKpisMes,
     getRecentes,
     getLancamento,
     saveLancamento,
     pagarLancamento,
     deleteLancamento,
+    confirmarPagamentoLote,
+    conciliarLote,
+    alterarContaLote,
+    reagendarLote,
+    alterarCategoriaLote,
+    excluirLote,
     saveConta, deactivateConta, reactivateConta,
     saveCategoria, deactivateCategoria,
     saveContato, deactivateContato,
@@ -26532,23 +26651,24 @@ function _finMesCorrente(){
   return { dataIni: fmt(ini), dataFim: fmt(fim) };
 }
 
-// State da paginação/filtros da aba lançamentos (default de período: mês corrente)
-window._finLancState = window._finLancState || { page:1, filtros:_finMesCorrente(), totalPages:1, total:0, loading:false };
+// State da paginação/filtros da aba Movimentações (default de período: mês corrente).
+// tipoView: 'tudo'|'entradas'|'saidas'|'repasses' · situacao: 'todos'|'pendentes'|'atraso'|'conciliados'
+window._finLancState = window._finLancState || { page:1, filtros:Object.assign({tipoView:'tudo',situacao:'todos'},_finMesCorrente()), totalPages:1, total:0, loading:false, sel:new Set(), totais:{entradas:0,saidas:0} };
 
 // Agrupamento das antigas 14 abas em 5 seções (navegação de topo estilo CRM).
 // Cada sub-aba reaproveita as funções renderFin* existentes via renderFinTab().
+// Reformulação do handoff: só 3 abas visíveis no topo (Caixa/Movimentações/Recebíveis —
+// ver FIN_SECTIONS_VISIVEIS abaixo). "Cadastros" e "Relatórios" saem do topo do Financeiro
+// (entram como atalhos em Configurações/Relatórios — ver _finSectionOf), mas os próprios
+// subtabs/renderFin* continuam aqui, intactos, para não duplicar nenhuma tela já pronta.
 const FIN_SECTIONS = {
-  visao:         { label:'Visão geral', subtabs:[{id:'visao', label:'Visão geral'}] },
-  cobrancas:     { label:'Inadimplência & Execução', subtabs:[
-                     {id:'cobrancas', label:'Inadimplência'},
-                     {id:'asaas', label:'Todas as cobranças'},
-                     {id:'judicial', label:'Custódias judiciais'} ] },
-  movimentacoes: { label:'Movimentações', subtabs:[
-                     {id:'lancamentos', label:'Lançamentos'},
-                     {id:'transferencias', label:'Transferências'},
-                     {id:'recorrencias', label:'Recorrências'},
-                     {id:'repasses', label:'Repasses'},
-                     {id:'conciliacao', label:'Conciliação'} ] },
+  visao:         { label:'Caixa', sub:'o dinheiro da COBRASQ', subtabs:[{id:'visao', label:'Caixa'}] },
+  movimentacoes: { label:'Movimentações', sub:'analisar e confirmar', subtabs:[
+                     {id:'lancamentos', label:'Movimentações'} ] },
+  cobrancas:     { label:'Recebíveis', sub:'o dinheiro do cedente', subtabs:[
+                     {id:'cobrancas', label:'Recebíveis'} ] },
+  // Legado — sem pill própria no topo (ver FIN_SECTIONS_VISIVEIS), mas as sub-abas
+  // continuam roteáveis via setFinTab(...) a partir de Configurações/Relatórios.
   cadastros:     { label:'Cadastros', subtabs:[
                      {id:'contas', label:'Contas'},
                      {id:'cartoes', label:'Cartões'},
@@ -26558,8 +26678,23 @@ const FIN_SECTIONS = {
   relatorios:    { label:'Relatórios', subtabs:[
                      {id:'relatorios', label:'Relatórios'},
                      {id:'diagnostico', label:'Diagnóstico'} ] },
+  // Sub-telas antigas de Movimentações/Inadimplência, dobradas em filtros/ações
+  // (Transferências e Recorrências → tipo de lançamento; Conciliação → ação em lote;
+  // Repasses → fila "Repasses ao cedente" dentro de Recebíveis; Todas as cobranças/
+  // Custódias judiciais → sem pill própria, ainda roteáveis por link direto).
+  _legado:       { label:'', subtabs:[
+                     {id:'transferencias', label:'Transferências'},
+                     {id:'recorrencias', label:'Recorrências'},
+                     {id:'repasses', label:'Repasses'},
+                     {id:'conciliacao', label:'Conciliação'},
+                     {id:'asaas', label:'Todas as cobranças'},
+                     {id:'judicial', label:'Custódias judiciais'} ] },
   // Importação Asaas movida p/ o menu lateral "Importação" (renderImportacao, aba Asaas).
 };
+// Só estas 3 aparecem como pill no topo do Financeiro (ordem = handoff: Caixa,
+// Movimentações, Recebíveis). As demais chaves de FIN_SECTIONS continuam existindo
+// só para _finSectionOf resolver o breadcrumb de telas acessadas por link direto.
+const FIN_SECTIONS_VISIVEIS = ['visao','movimentacoes','cobrancas'];
 function _finSectionOf(tab){
   for(const [key,s] of Object.entries(FIN_SECTIONS)){
     if(s.subtabs.some(t=>t.id===tab)) return key;
@@ -26638,9 +26773,7 @@ function renderFinanceiro(){
     <div id="fin-contas-bar" style="margin-bottom:18px;"></div>
 
     <div class="fin-secnav">
-      ${Object.entries(FIN_SECTIONS).map(([key,s])=>
-        `<div class="fin-pill" data-sec="${key}" onclick="setFinSection('${key}')">${escHtml(s.label)}</div>`
-      ).join('')}
+      ${FIN_SECTIONS_VISIVEIS.map(key=>{ const s=FIN_SECTIONS[key]; return `<div class="fin-pill" data-sec="${key}" onclick="setFinSection('${key}')">${escHtml(s.label)}${s.sub?`<span style="font-weight:400;color:var(--text-3);margin-left:7px;">${escHtml(s.sub)}</span>`:''}</div>`; }).join('')}
     </div>
 
     <div class="fin-subnav" id="fin-subnav"></div>
@@ -26841,7 +26974,7 @@ function renderFinTab(tab){
   const pf = document.getElementById('page-fin'); if(pf) pf.classList.toggle('fin-on-visao', tab==='visao');
 
   if(tab==='visao') renderFinVisao(el);
-  else if(tab==='cobrancas') renderFinCobrancas(el);
+  else if(tab==='cobrancas') renderFinRecebiveis(el);
   else if(tab==='lancamentos') renderFinLancamentos(el);
   else if(tab==='contas') renderFinContas(el);
   else if(tab==='categorias') renderFinCategorias(el);
@@ -27863,6 +27996,274 @@ function calcSimuladorRepasse(){
   </div>`;
 }
 
+// ══════════════════════════════════════════════════════════════
+// FINANCEIRO · RECEBÍVEIS — "o dinheiro do cedente" (handoff de reformulação)
+// Consolida a antiga "Inadimplência & Execução" (Asaas) + "A repassar ao cedente"
+// (fin_operacao) numa única aba, com o card novo "Assinado → lançar → repassar".
+// ══════════════════════════════════════════════════════════════
+
+// Acordos assinados que ainda não tiveram as parcelas lançadas em Movimentações
+// e/ou o repasse ao cedente cadastrado. Flags de controle vivem em acordos.metadata
+// (mesmo padrão já usado para boletos_emitidos/whatsapp_ok) — evita duplicar lançamento
+// se o botão for clicado 2×.
+async function _carregarAcordosPendProvidencia(){
+  const sb = getSupabase(); if(!sb) return [];
+  const { data, error } = await sb.from('acordos')
+    .select('id,valor_total,parcelas,devedor_id,cobranca_id,created_at,metadata,status_zapsign')
+    .eq('status_zapsign','assinado').order('created_at',{ascending:false}).limit(200);
+  if(error || !Array.isArray(data)) return [];
+  const devIds = [...new Set(data.map(a=>a.devedor_id).filter(Boolean))];
+  const cobIds = [...new Set(data.map(a=>a.cobranca_id).filter(Boolean))];
+  const devMap = {}, cobMap = {};
+  if(devIds.length){ const { data:devs } = await sb.from('devedores').select('id,nome').in('id',devIds); (devs||[]).forEach(d=>devMap[d.id]=d.nome); }
+  if(cobIds.length){ const { data:cobs } = await sb.from('cobrancas').select('id,cliente_id').in('id',cobIds); (cobs||[]).forEach(c=>cobMap[c.id]=c.cliente_id); }
+  const credIds = [...new Set(Object.values(cobMap).filter(Boolean))];
+  const credMap = {};
+  if(credIds.length){ const { data:creds } = await sb.from('clientes').select('id,nome,metadata,taxa_honorarios').in('id',credIds); (creds||[]).forEach(c=>credMap[c.id]=c); }
+  return data.map(a=>{
+    const parcelas = Array.isArray(a.parcelas) ? a.parcelas : [];
+    const credorId = cobMap[a.cobranca_id];
+    const credor = credMap[credorId];
+    const taxaPct = credor ? (+(credor.metadata?.percentualHonorarios || credor.metadata?.taxaRecuperacao || credor.taxa_honorarios) || 0) : 0;
+    const lancado = !!(a.metadata && a.metadata.parcelasLancadas);
+    const repassado = !!(a.metadata && a.metadata.repasseCadastrado);
+    return {
+      id:a.id, valorTotal:+a.valor_total||0, parcelas, devedorId:a.devedor_id,
+      devedorNome: devMap[a.devedor_id]||'—', credorId, credorNome: credor?credor.nome:'—',
+      taxaPct, repasseEstimado: (+a.valor_total||0) * (1-taxaPct/100),
+      lancado, repassado,
+      status: (lancado && repassado) ? 'completo' : (lancado ? 'falta_repasse' : 'a_lancar'),
+    };
+  }).filter(a=>!(a.lancado && a.repassado)); // some da lista só quando as duas providências já foram feitas
+}
+
+// "Lançar parcelas": cria N fin_lancamento previstos (Recuperação, conta Asaas, status
+// pendente) a partir das parcelas do acordo. Idempotente via acordos.metadata.parcelasLancadas.
+async function finLancarParcelasAcordo(acordoId){
+  const sb = getSupabase(); if(!sb) return;
+  const { data:a, error } = await sb.from('acordos').select('id,parcelas,devedor_id,metadata').eq('id',acordoId).maybeSingle();
+  if(error || !a){ showToast('Acordo não encontrado.','danger'); return; }
+  if(a.metadata && a.metadata.parcelasLancadas){ showToast('Parcelas já lançadas para este acordo.','info'); return; }
+  const parcelas = Array.isArray(a.parcelas) ? a.parcelas : [];
+  if(!parcelas.length){ showToast('Acordo sem parcelas.','warning'); return; }
+  const { data:dev } = await sb.from('devedores').select('nome').eq('id',a.devedor_id).maybeSingle();
+  const devNome = dev?.nome || '—';
+  let contaId = null;
+  try{ const dim = await finApi.loadDimensoes(); const asaasConta = (dim.contas||[]).find(c=>/asaas/i.test((c.descricao||'')+' '+(c.banco_nome||''))); contaId = asaasConta ? asaasConta.id : ((dim.contas||[])[0]||{}).id||null; }catch(_){}
+  const rows = parcelas.map((p,i)=>({
+    descricao: `Parcela ${i+1}/${parcelas.length} · ${devNome}`,
+    data_competencia: p.vencimento || hoje(),
+    data_vencimento: p.vencimento || hoje(),
+    valor: Math.abs(+p.valor||0),
+    tipo_movimento: 1,
+    status: p.pago ? 1 : 0,
+    conta_id: contaId,
+  }));
+  const { error: e2 } = await sb.from('fin_lancamento').insert(rows);
+  if(e2){ showToast('Erro ao lançar parcelas: '+e2.message,'danger'); return; }
+  const novaMeta = Object.assign({}, a.metadata||{}, { parcelasLancadas:true });
+  await sb.from('acordos').update({ metadata: novaMeta }).eq('id', acordoId);
+  showToast('Parcelas lançadas em Movimentações.','success');
+  renderFinTab('cobrancas');
+}
+
+// "Cadastrar repasse": abre pendência em fin_operacao com o valor já líquido do
+// honorário do contrato do cedente. Idempotente via acordos.metadata.repasseCadastrado.
+async function finCadastrarRepasseAcordo(acordoId){
+  const sb = getSupabase(); if(!sb) return;
+  const pend = (window._recebiveisAcordosPend||[]).find(a=>a.id===acordoId);
+  if(!pend){ showToast('Acordo não encontrado.','danger'); return; }
+  const { data:a } = await sb.from('acordos').select('metadata').eq('id',acordoId).maybeSingle();
+  if(a && a.metadata && a.metadata.repasseCadastrado){ showToast('Repasse já cadastrado para este acordo.','info'); return; }
+  const honorario = pend.valorTotal - pend.repasseEstimado;
+  if(!confirm(`Cadastrar repasse ao credor ${pend.credorNome}?\n\nBruto: ${fmtR(pend.valorTotal)}\nHonorário (${pend.taxaPct||0}%): ${fmtR(honorario)}\nRepasse ao credor: ${fmtR(pend.repasseEstimado)}`)) return;
+  const { error } = await sb.from('fin_operacao').insert({
+    credor_id: pend.credorId, devedor_id: pend.devedorId,
+    total_parcelas: (pend.parcelas||[]).length || 1,
+    valor_recebido: pend.valorTotal, valor_capital: pend.repasseEstimado, valor_honorario: honorario,
+    recebido_em: hoje(), repasse_status: 'pendente',
+  });
+  if(error){ showToast('Erro ao cadastrar repasse: '+error.message,'danger'); return; }
+  const novaMeta = Object.assign({}, (a&&a.metadata)||{}, { repasseCadastrado:true });
+  await sb.from('acordos').update({ metadata: novaMeta }).eq('id', acordoId);
+  showToast('Repasse cadastrado — aparece em "Repasses ao cedente".','success');
+  renderFinTab('cobrancas');
+}
+
+async function renderFinRecebiveis(el){
+  el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--text-3);"><div class="mv2-spinner" style="margin:0 auto 8px;width:26px;height:26px;border-width:3px;"></div>Carregando recebíveis…</div>`;
+
+  let ops=[], credMap={}, inad={devList:[],charges:[],oldestAll:null}, acordosPend=[], pendenteAsaas=[];
+  try{
+    const sb = getSupabase();
+    const r = await sb.from('fin_operacao')
+      .select('id,credor_id,devedor_id,parcela,total_parcelas,valor_recebido,valor_capital,valor_honorario,recebido_em,repasse_status,repasse_efetuado_em')
+      .order('recebido_em',{ascending:false}).limit(1000);
+    ops = r.data||[];
+    const cIds=[...new Set(ops.map(o=>o.credor_id).filter(Boolean))];
+    if(cIds.length){ const {data}=await sb.from('clientes').select('id,nome').in('id',cIds); (data||[]).forEach(c=>credMap[c.id]=c.nome); }
+  }catch(e){ el.innerHTML = `<div class="panel" style="padding:20px;color:var(--danger);">Erro ao carregar repasses: ${escHtml(e.message||String(e))}</div>`; return; }
+
+  try{ inad = await _loadInadimplentes(); }catch(_){}
+  try{ acordosPend = await _carregarAcordosPendProvidencia(); window._recebiveisAcordosPend = acordosPend; }catch(_){}
+  // "A receber (30d)": boletos Asaas PENDING com vencimento nos próximos 30 dias.
+  if(DB.config.asaasKey){
+    try{
+      const fim30 = new Date(Date.now()+30*86400000).toISOString().slice(0,10);
+      const r = await AsaasAPI.req('GET','/payments?limit=100&sort=dueDate&order=asc&status=PENDING').catch(()=>({data:[]}));
+      pendenteAsaas = (r?.data||[]).filter(c=>c.dueDate && c.dueDate<=fim30);
+    }catch(_){}
+  }
+
+  const isPend = o => o.repasse_status==='pendente' || o.repasse_status==='preparado';
+  const _mesKey = (new Date()).toISOString().slice(0,7);
+  const inMes = d => (d||'').slice(0,7)===_mesKey;
+  const byCred = {};
+  for(const o of ops){
+    const k=o.credor_id||'?';
+    if(!byCred[k]) byCred[k]={credId:o.credor_id, nome:credMap[o.credor_id]||'—', recebido:0, honorario:0, aRepassar:0, temPend:false, oldestPend:null};
+    const g=byCred[k];
+    g.recebido += +o.valor_recebido||0;
+    g.honorario += +o.valor_honorario||0;
+    if(isPend(o)){ g.aRepassar += +o.valor_capital||0; g.temPend=true; if(!g.oldestPend || (o.recebido_em||'')<g.oldestPend) g.oldestPend=o.recebido_em||''; }
+  }
+  const cedentes = Object.values(byCred).sort((a,b)=>b.aRepassar-a.aRepassar);
+
+  const kpiAReceber30 = pendenteAsaas.reduce((s,c)=>s+(+c.value||0),0);
+  const kpiVencido = (inad.charges||[]).reduce((s,c)=>s+(+c.value||0),0);
+  const honorMes = ops.filter(o=>inMes(o.recebido_em)).reduce((s,o)=>s+(+o.valor_honorario||0),0);
+  const recebidoMes = ops.filter(o=>inMes(o.recebido_em)).reduce((s,o)=>s+(+o.valor_recebido||0),0);
+  const honorPct = recebidoMes>0 ? Math.round((honorMes/recebidoMes)*100) : 0;
+  const kpiARepassar = ops.filter(isPend).reduce((s,o)=>s+(+o.valor_capital||0),0);
+  const repassarPend = cedentes.filter(c=>c.temPend).sort((a,b)=>(a.oldestPend||'').localeCompare(b.oldestPend||''));
+  const piorAtraso = repassarPend[0] ? _repDaysSince(repassarPend[0].oldestPend) : null;
+  const repMesOps = ops.filter(o=>o.repasse_status==='efetuado'&&inMes(o.repasse_efetuado_em));
+  const repassadoMes = repMesOps.reduce((s,o)=>s+(+o.valor_capital||0),0);
+  const devidoCedentes = kpiARepassar;
+
+  // Composição dos recebíveis (Asaas): vencido / vence em 7 dias / a vencer (30 dias).
+  const in7 = new Date(Date.now()+7*86400000).toISOString().slice(0,10);
+  const venceEm7 = pendenteAsaas.filter(c=>c.dueDate<=in7).reduce((s,c)=>s+(+c.value||0),0);
+  const aVencer30 = pendenteAsaas.filter(c=>c.dueDate>in7).reduce((s,c)=>s+(+c.value||0),0);
+  const composTotal = kpiVencido + venceEm7 + aVencer30 || 1;
+
+  const acordosHtml = acordosPend.length ? acordosPend.slice(0,6).map(a=>{
+    const statusMap = { a_lancar:['A LANÇAR','#FBF3E1','#9C7F40'], falta_repasse:['FALTA REPASSE','#FBF3E1','#9C7F40'], completo:['COMPLETO','#E9F0E7','#4C6647'] };
+    const [stLabel,stBg,stFg] = statusMap[a.status]||statusMap.a_lancar;
+    const lancBtn = a.lancado
+      ? `<span style="font-size:12px;font-weight:600;padding:6px 11px;border-radius:6px;background:#E9F0E7;color:#4C6647;border:1px solid #CFE0CB;white-space:nowrap;">Parcelas lançadas</span>`
+      : `<span style="font-size:12px;font-weight:600;padding:6px 11px;border-radius:6px;background:#0A1530;color:#fff;cursor:pointer;white-space:nowrap;" onclick="finLancarParcelasAcordo('${a.id}')">Lançar parcelas</span>`;
+    const repBtn = a.repassado
+      ? `<span style="font-size:12px;font-weight:600;padding:6px 11px;border-radius:6px;background:#E9F0E7;color:#4C6647;border:1px solid #CFE0CB;white-space:nowrap;">Repasse cadastrado</span>`
+      : `<span style="font-size:12px;font-weight:600;padding:6px 11px;border-radius:6px;background:#fff;color:#9C7F40;border:1px solid #DFC992;cursor:pointer;white-space:nowrap;" onclick="finCadastrarRepasseAcordo('${a.id}')">Cadastrar repasse</span>`;
+    return `<div style="display:flex;align-items:center;gap:12px;padding:11px 18px;border-bottom:1px solid #F2EFE6;">
+      <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:200px;">
+        <div style="display:flex;align-items:center;gap:8px;"><span style="font-size:13px;font-weight:600;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(a.devedorNome)}</span><span style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.08em;padding:2px 6px;border-radius:3px;background:${stBg};color:${stFg};white-space:nowrap;">${stLabel}</span></div>
+        <span style="font-size:11.5px;color:#A6AEBD;">${a.parcelas.length}x · repasse ao credor ${fmtR(a.repasseEstimado)} · ${escHtml(a.credorNome)}</span>
+      </div>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;width:96px;text-align:right;flex-shrink:0;">${fmtR(a.valorTotal)}</span>
+      ${lancBtn}${repBtn}
+    </div>`;
+  }).join('') : `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">Nenhum acordo pendente de providência</div></div>`;
+
+  const repassesHtml = repassarPend.length ? repassarPend.slice(0,6).map(c=>{
+    const dias = c.oldestPend ? _repDaysSince(c.oldestPend) : null;
+    const atrasado = dias!=null && dias>=5;
+    return `<div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #F2EFE6;">
+      <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:0;">
+        <span style="font-size:13px;font-weight:500;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(c.nome)}</span>
+        <span style="font-size:11.5px;color:#A6AEBD;">${dias!=null?`recebido há ${dias} dia${dias!==1?'s':''}`:'—'}</span>
+      </div>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;">${fmtR(c.aRepassar)}</span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.08em;padding:3px 8px;border-radius:4px;background:${atrasado?'#FBEAE7':'#FBF3E1'};color:${atrasado?'#A65A4A':'#9C7F40'};">${atrasado?'ATRASADO':'A FAZER'}</span>
+    </div>`;
+  }).join('') : `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">Nenhum repasse pendente</div></div>`;
+
+  const inadHtml = !DB.config.asaasKey ? `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">Asaas não configurado</div></div>`
+    : (!inad.devList.length ? `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">Nenhuma parcela em atraso</div></div>`
+    : inad.devList.slice(0,6).map(g=>{
+        const dev=g.dev; const dias = g.agg.oldest ? Math.max(0,Math.round((Date.now()-new Date(g.agg.oldest.slice(0,10)+'T00:00:00'))/86400000)) : 0;
+        const nome = dev?escHtml(dev.nome):`Cliente Asaas ${escHtml(g.custId)}`;
+        return `<div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #F2EFE6;">
+          <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:0;">
+            <span style="font-size:13px;font-weight:500;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${nome}</span>
+            <span style="font-size:11.5px;color:#A6AEBD;">vencido há ${dias} dia${dias!==1?'s':''} · ${g.agg.count} parcela${g.agg.count!==1?'s':''}</span>
+          </div>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:#A65A4A;">${fmtR(g.agg.total)}</span>
+          ${dev?`<span style="font-size:12px;color:#3A5288;font-weight:500;cursor:pointer;white-space:nowrap;" onclick="openDrawer('${dev.id}')">Cobrar →</span>`:'<span style="font-size:11px;color:#A6AEBD;">sem vínculo</span>'}
+        </div>`;
+      }).join(''));
+
+  el.innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:16px;">
+      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:4px;">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">A RECEBER · 30 DIAS</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;">${fmtR(kpiAReceber30)}</span>
+        <span style="font-size:11.5px;color:#A6AEBD;">${pendenteAsaas.length} boleto${pendenteAsaas.length!==1?'s':''} ativo${pendenteAsaas.length!==1?'s':''}</span>
+      </div>
+      <div style="background:#fff;border:1px solid #E7CFC7;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:4px;">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#A65A4A;">VENCIDO</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;color:#A65A4A;">${fmtR(kpiVencido)}</span>
+        <span style="font-size:11.5px;color:#A6AEBD;">${inad.devList.length} devedor${inad.devList.length!==1?'es':''} inadimplente${inad.devList.length!==1?'s':''}</span>
+      </div>
+      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:4px;">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">HONORÁRIOS COBRASQ</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;color:#9C7F40;">${fmtR(honorMes)}</span>
+        <span style="font-size:11.5px;color:#A6AEBD;">${honorPct}% sobre o recuperado</span>
+      </div>
+      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:4px;">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">A REPASSAR</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;">${fmtR(kpiARepassar)}</span>
+        <span style="font-size:11.5px;color:${piorAtraso!=null&&piorAtraso>=5?'#A65A4A':'#A6AEBD'};">${piorAtraso!=null?`1 atrasado há ${piorAtraso} dias`:'em dia'}</span>
+      </div>
+    </div>
+
+    <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;margin-bottom:16px;">
+      <div style="padding:14px 18px 11px;border-bottom:1px solid #EFEBE0;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+        <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Assinado → lançar → repassar</div>
+        <div style="font-size:12.5px;color:#8A94A6;">${acordosPend.length} acordo${acordosPend.length!==1?'s':''} sem providência</div>
+        <a class="cob-link" style="margin-left:auto;" onclick="showPage('cobr')">Ver todos os acordos →</a>
+      </div>
+      ${acordosHtml}
+      <div style="padding:11px 18px;background:#FBFAF6;font-size:11.5px;color:#8A94A6;line-height:1.4;">Lançar parcelas cria as entradas previstas em Movimentações; cadastrar repasse abre a pendência na fila abaixo.</div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start;margin-bottom:16px;">
+      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;">
+        <div style="padding:14px 16px 12px;border-bottom:1px solid #EFEBE0;display:flex;align-items:baseline;gap:10px;">
+          <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Repasses ao cedente</div>
+          <div style="font-size:12.5px;color:#8A94A6;">${repassarPend.length} na fila</div>
+          <a class="cob-link" style="margin-left:auto;" onclick="renderFinTab('repasses')">Repassar em lote →</a>
+        </div>
+        ${repassesHtml}
+      </div>
+      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;">
+        <div style="padding:14px 16px 12px;border-bottom:1px solid #EFEBE0;display:flex;align-items:baseline;gap:10px;">
+          <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Inadimplência</div>
+          <div style="font-size:12.5px;color:#8A94A6;">boletos Asaas vencidos</div>
+          <a class="cob-link" style="margin-left:auto;" onclick="setFinTab('judicial')">Custódias judiciais →</a>
+        </div>
+        ${inadHtml}
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start;">
+      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:14px;"><div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Composição dos recebíveis</div><span style="font-size:12px;color:#8A94A6;margin-left:auto;">Asaas · tempo real</span></div>
+        <div style="display:flex;height:10px;border-radius:5px;overflow:hidden;margin-bottom:12px;">
+          <div style="width:${Math.round(kpiVencido/composTotal*100)}%;background:#A65A4A;"></div><div style="width:${Math.round(venceEm7/composTotal*100)}%;background:#C9A961;"></div><div style="width:${Math.round(aVencer30/composTotal*100)}%;background:#5E7C58;"></div>
+        </div>
+        ${[['Vencido',kpiVencido,'#A65A4A'],['Vence em 7 dias',venceEm7,'#C9A961'],['A vencer (30 dias)',aVencer30,'#5E7C58']].map(([lb,v,cor])=>`<div style="display:flex;align-items:center;gap:9px;padding:7px 0;"><div style="width:7px;height:7px;border-radius:2px;background:${cor};"></div><span style="font-size:12.5px;color:#5A5F66;">${lb}</span><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:600;margin-left:auto;">${fmtR(v)}</span></div>`).join('')}
+      </div>
+      <div style="background:#0A1530;border-radius:9px;padding:18px;color:#fff;display:flex;flex-direction:column;gap:12px;">
+        <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;color:#fff;">Divisão do recuperado · ${['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'][new Date().getMonth()]}</div>
+        ${[['Recuperado no mês',recebidoMes,'#C9CEDC',400],['Honorários COBRASQ',honorMes,'#E2CE9E',400],['Devido aos cedentes',devidoCedentes,'#C9CEDC',400],['Já repassado',repassadoMes,'#A8C6A0',600]].map(([lb,v,cor,w])=>`<div style="display:flex;align-items:center;gap:10px;"><span style="font-size:12.5px;color:${cor};font-weight:${w};">${lb}</span><div style="flex:1;border-bottom:1px dotted rgba(255,255,255,.18);"></div><span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:${w};color:${cor};">${fmtR(v)}</span></div>`).join('')}
+        <div style="font-size:11.5px;color:#8E98B0;line-height:1.45;padding-top:4px;">O que entra no Asaas não é caixa da COBRASQ até o repasse ser feito. Esta aba existe para separar as duas coisas.</div>
+      </div>
+    </div>
+  `;
+}
+
 async function renderFinDiagnostico(el){
   el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--text-3);">Carregando diagnóstico…</div>`;
   let d;
@@ -28112,15 +28513,43 @@ async function renderFinVisao(el){
     }
     return { meses, mesesLabel, fat, ebitda:fat.map((f,i)=>f-desp[i]), jm, ticket:fat.map((f,i)=>cli[i].size?f/cli[i].size:0) };
   }
-  // Fluxo de caixa projetado: deltas diários dos lançamentos pendentes nos próximos 14 dias.
+  // Fluxo de caixa projetado — entradas/saídas previstas (lançamentos pendentes) nos
+  // próximos 30 dias, separadas (não só o delta líquido) para o gráfico de barras duplas.
   async function _fluxoDiario(){
     if(!_sb) return null;
-    const N=14, fim=new Date(_now.getTime()+N*86400000).toISOString().slice(0,10);
+    const N=30, fim=new Date(_now.getTime()+N*86400000).toISOString().slice(0,10);
     const { data } = await _sb.from('fin_lancamento').select('data_vencimento,valor,tipo_movimento')
-      .eq('status',0).gte('data_vencimento',_hoje).lte('data_vencimento',fim).limit(2000);
-    const byDay={}; for(const r of (data||[])){ const d=(r.data_vencimento||'').slice(0,10); if(!d) continue; byDay[d]=(byDay[d]||0)+Math.abs(+r.valor||0)*(r.tipo_movimento===1?1:-1); }
-    const dias=[]; for(let k=0;k<N;k++){ const dt=new Date(_now.getTime()+k*86400000); const key=dt.toISOString().slice(0,10); dias.push({ key, label: dt.toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'}), delta: byDay[key]||0 }); }
+      .eq('status',0).gte('data_vencimento',_hoje).lte('data_vencimento',fim).limit(3000);
+    const byDay={};
+    for(const r of (data||[])){
+      const d=(r.data_vencimento||'').slice(0,10); if(!d) continue;
+      if(!byDay[d]) byDay[d]={ in:0, out:0 };
+      const v=Math.abs(+r.valor||0);
+      if(r.tipo_movimento===1) byDay[d].in+=v; else byDay[d].out+=v;
+    }
+    const dias=[];
+    for(let k=0;k<N;k++){
+      const dt=new Date(_now.getTime()+k*86400000); const key=dt.toISOString().slice(0,10);
+      const g=byDay[key]||{in:0,out:0};
+      dias.push({ key, label: String(dt.getDate()).padStart(2,'0'), in:g.in, out:g.out, delta:g.in-g.out });
+    }
     return { dias };
+  }
+  // DRE simplificado do mês (receitas e despesas por categoria, sinal preservado) — base
+  // para o card "Resultado por categoria". Resultado final usa kpis.saldoMes (mesma fonte
+  // do KPI "Resultado do mês", evita divergência entre os dois números).
+  async function _dreMes(){
+    if(!_sb) return [];
+    const { data } = await _sb.from('fin_lancamento_categoria')
+      .select('valor,fin_categoria(descricao),fin_lancamento!inner(data_competencia,tipo_movimento)')
+      .gte('fin_lancamento.data_competencia',_mesIni).lte('fin_lancamento.data_competencia',_mesFim).limit(2000);
+    const map = {};
+    for(const r of (data||[])){
+      const nm = (r.fin_categoria&&r.fin_categoria.descricao) || '(sem categoria)';
+      const sinal = (r.fin_lancamento&&r.fin_lancamento.tipo_movimento===1) ? 1 : -1;
+      map[nm] = (map[nm]||0) + sinal*Math.abs(+r.valor||0);
+    }
+    return Object.entries(map).map(([nome,valor])=>({nome,valor})).sort((a,b)=>b.valor-a.valor);
   }
 
   // Painel de automação: funil de acordos (funil_automacao) + repasses (fin_operacao).
@@ -28179,9 +28608,9 @@ async function renderFinVisao(el){
     }catch(_){ return 0; }
   }
 
-  let kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas, serie, fluxo, automacao, atraso, repAtraso, carteira;
+  let kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas, serie, fluxo, automacao, atraso, repAtraso, carteira, dre;
   try {
-    [kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas, serie, fluxo, automacao, atraso, repAtraso, carteira] = await Promise.all([
+    [kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas, serie, fluxo, automacao, atraso, repAtraso, carteira, dre] = await Promise.all([
       finApi.getKpisMes().catch(()=>({ receitaMes:0, despesaMes:0, saldoMes:0, aReceber30d:0, qtdMes:0 })),
       finApi.getRecentes(8),
       finApi.loadDimensoes(),
@@ -28196,6 +28625,7 @@ async function renderFinVisao(el){
       _atrasoAgg().catch(()=>({ count:0, total:0 })),
       _repasseAtrasado().catch(()=>null),
       _carteiraAtiva().catch(()=>0),
+      _dreMes().catch(()=>[]),
     ]);
   } catch(e){
     el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--danger);">
@@ -28263,13 +28693,24 @@ async function renderFinVisao(el){
     }).join('');
   }
 
-  // ---- Coluna direita: últimos lançamentos ----
+  // ---- Coluna esquerda: últimas movimentações (chip de status + link p/ Movimentações) ----
+  const _statusPill = (l) => {
+    const isReceita = l.tipo_movimento === 1;
+    if(l.conciliado) return { txt:'CONCILIADO', bg:'#E9F0E7', fg:'#4C6647' };
+    if(l.status===1 || l.data_pagamento) return { txt:'PAGO', bg:'#F5F2EA', fg:'#6B7683' };
+    if(l.data_vencimento && l.data_vencimento < _hoje) return { txt:'ATRASADO', bg:'#FBEAE7', fg:'#A65A4A' };
+    return { txt: isReceita?'A RECEBER':'A PAGAR', bg:'#FBF3E1', fg:'#9C7F40' };
+  };
   const recentesHtml = recentes.length
     ? recentes.map(l=>{
         const isReceita = l.tipo_movimento === 1;
-        return `<div class="fin-row">
-          <span title="${escHtml(l.descricao||'')}">${escHtml(l.descricao||'—')}</span>
-          <span class="v ${isReceita?'pos':'neg'}">${isReceita?'+':'−'} ${fmtR(Math.abs(+l.valor||0))}</span>
+        const st = _statusPill(l);
+        const dt = (l.data_competencia||'').slice(5,10).split('-').reverse().join('/');
+        return `<div class="fin-row" style="align-items:center;gap:12px;">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#8A94A6;width:42px;flex-shrink:0;">${dt||'—'}</span>
+          <span style="min-width:0;flex:1;" title="${escHtml(l.descricao||'')}">${escHtml(l.descricao||'—')}${l.fin_conta&&l.fin_conta.descricao?`<span style="display:block;font-size:11px;color:#A6AEBD;">${escHtml(l.fin_conta.descricao)}</span>`:''}</span>
+          <span class="v ${isReceita?'pos':'neg'}" style="flex-shrink:0;">${isReceita?'+':'−'} ${fmtR(Math.abs(+l.valor||0))}</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.06em;padding:3px 8px;border-radius:4px;background:${st.bg};color:${st.fg};flex-shrink:0;white-space:nowrap;">${st.txt}</span>
         </div>`;
       }).join('')
     : `<div class="note">Nenhum lançamento recente.</div>`;
@@ -28309,42 +28750,86 @@ async function renderFinVisao(el){
     const tipoLabel=(window.TIPO_CONTA_LABEL||{})[c.tipo]||c.banco_nome||'—';
     return `<div class="fin-chip"><div class="cn" title="${escHtml(c.descricao)}">${escHtml(c.descricao)}</div><div class="ct">${escHtml(tipoLabel)}</div><div class="cv ${saldo<0?'neg':''}">${fmtR(saldo)}</div></div>`;
   }).join('') || '<div class="note" style="padding:0;">Nenhuma conta no saldo geral.</div>';
-  const _bigNum = (n, cor) => `<span style="font-family:'Fraunces',Georgia,serif;font-size:34px;font-weight:600;line-height:1;color:${cor};">${n}</span>`;
-  const _heroNum = (v) => `<div style="font-family:'Fraunces',Georgia,serif;font-size:30px;font-weight:600;color:var(--navy);margin:2px 0 12px;">${v}</div>`;
+  // Card "Resultado por categoria" (DRE simplificado do mês) — última linha em negrito
+  // com o mesmo total do KPI "Resultado do mês" (fonte única: kpis.saldoMes).
+  const dreHtml = (dre&&dre.length) ? dre.map(d=>`<div style="display:flex;align-items:center;gap:10px;padding:7px 0;"><span style="font-size:12.5px;color:#5A5F66;">${escHtml(d.nome)}</span><div style="flex:1;border-bottom:1px dotted #DDD7C7;"></div><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:500;color:${d.valor<0?'#A65A4A':'#5A5F66'};">${d.valor<0?'−':''}${fmtR(Math.abs(d.valor))}</span></div>`).join('') : '<div class="note">Sem lançamentos categorizados no mês.</div>';
+
+  // Fluxo de caixa · 30 dias (barras duplas entrada/saída) — amostra rótulo a cada ~5 dias.
+  const fluxoDias = (fluxo&&fluxo.dias) ? fluxo.dias : [];
+  const fluxoMax = Math.max(1, ...fluxoDias.map(d=>Math.max(d.in,d.out)));
+  const fluxoSaldoProj = saldoContas + fluxoDias.reduce((s,d)=>s+d.in-d.out,0);
+  const fluxoHtml = fluxoDias.length ? `
+    <div style="display:flex;align-items:flex-end;gap:3px;height:150px;padding-bottom:22px;position:relative;border-bottom:1px solid #E6E1D2;">
+      ${fluxoDias.map((d,i)=>{ const hIn=Math.max(d.in>0?3:0,Math.round(d.in/fluxoMax*100)); const hOut=Math.max(d.out>0?3:0,Math.round(d.out/fluxoMax*100)); return `<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;position:relative;" title="${d.label}: entrada ${fmtR(d.in)} · saída ${fmtR(d.out)}"><div style="width:100%;max-width:14px;height:${hIn}%;background:#5E7C58;border-radius:2px 2px 0 0;"></div><div style="width:100%;max-width:14px;height:${hOut}%;background:#D8B7AF;border-radius:0 0 2px 2px;"></div>${i%5===0?`<span style="position:absolute;bottom:-20px;font-family:'JetBrains Mono',monospace;font-size:9px;color:#A6AEBD;">${d.label}</span>`:''}</div>`; }).join('')}
+    </div>
+    <div style="display:flex;gap:16px;margin-top:14px;font-size:11.5px;color:#6B7683;">
+      <span style="display:flex;align-items:center;gap:6px;"><i style="width:8px;height:8px;background:#5E7C58;border-radius:2px;display:inline-block;"></i>Entradas previstas</span>
+      <span style="display:flex;align-items:center;gap:6px;"><i style="width:8px;height:8px;background:#D8B7AF;border-radius:2px;display:inline-block;"></i>Saídas previstas</span>
+    </div>` : `<div class="note">Sem lançamentos previstos nos próximos 30 dias.</div>`;
 
   el.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
-      <div style="font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:400;color:#0A1530;letter-spacing:-.01em;">${(function(){var h=new Date().getHours();return h<12?'Bom dia':h<18?'Boa tarde':'Boa noite';})()}, ${escHtml(((typeof currentUser!=='undefined'&&currentUser&&(currentUser.nome||''))||'Gustavo').split(' ')[0])}</div>
-      <div style="font-size:13px;font-weight:600;color:#6B7683;border:1px solid #D9E1EC;background:#fff;padding:8px 14px;border-radius:9px;">Personalizar</div>
-    </div>
-    <div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:20px 22px;margin-bottom:16px;box-shadow:0 1px 2px rgba(16,24,40,.04);">
-      <div style="font-family:'JetBrains Mono',monospace;font-weight:600;color:#8892A6;text-transform:uppercase;letter-spacing:.14em;font-size:9px;">Saldo geral</div>
-      <div style="font-size:30px;font-family:'Fraunces',Georgia,serif;font-weight:400;color:#0A1530;margin:4px 0 16px;">${fmtR(saldoContas)}</div>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;">
-        ${(dim.contas||[]).filter(c=>c.incluir_no_saldo_geral!==false).slice(0,6).map(c=>{ const s2=_saldoConta(c); const tp=(window.TIPO_CONTA_LABEL||{})[c.tipo]||c.banco_nome||'—'; return `<div style="flex:1;min-width:150px;border:1px solid #EFEAD9;border-radius:10px;padding:11px 13px;"><div style="font-size:12.5px;font-weight:600;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(c.descricao)}</div><div style="font-size:11px;color:#8A94A6;">${escHtml(tp)}</div><div style="font-size:15px;font-weight:700;color:${s2<0?'#A65A4A':'#5E7C58'};margin-top:5px;">${fmtR(s2)}</div></div>`; }).join('')}
+    <div style="display:grid;grid-template-columns:1.15fr 1fr 1fr 1fr;gap:14px;margin-bottom:16px;">
+      <div style="background:#0A1530;border-radius:9px;padding:16px;color:#fff;display:flex;flex-direction:column;gap:4px;">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8E98B0;">SALDO GERAL · ${(dim.contas||[]).filter(c=>c.incluir_no_saldo_geral!==false).length} CONTA${(dim.contas||[]).filter(c=>c.incluir_no_saldo_geral!==false).length!==1?'S':''}</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:24px;font-weight:600;">${fmtR(saldoContas)}</span>
+        <span style="font-size:11.5px;color:#8E98B0;">${fluxoDias.length?`projetado ${fmtR(fluxoSaldoProj)} em 30 dias`:'sem projeção'}</span>
+      </div>
+      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:4px;">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">ENTRADAS · MÊS</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;color:#5E7C58;">+${fmtR(kpis.receitaMes)}</span>
+        <span style="font-size:11.5px;color:#A6AEBD;">${kpis.qtdMes||0} lançamento${kpis.qtdMes!==1?'s':''}</span>
+      </div>
+      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:4px;">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">SAÍDAS · MÊS</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;color:#A65A4A;">−${fmtR(kpis.despesaMes)}</span>
+      </div>
+      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:4px;">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">RESULTADO DO MÊS</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;color:${kpis.saldoMes>=0?'#0A1530':'#A65A4A'};">${fmtR(kpis.saldoMes)}</span>
+        <span style="font-size:11.5px;color:#A6AEBD;">${(+kpis.receitaMes)>0?`margem ${((+kpis.saldoMes/(+kpis.receitaMes))*100).toFixed(1).replace('.',',')}%`:'—'}</span>
       </div>
     </div>
-    ${repAtraso ? `<div style="display:flex;align-items:center;gap:10px;background:#F7ECE8;border:1px solid #E7CFC7;border-radius:10px;padding:11px 16px;margin-bottom:16px;"><span style="width:22px;height:22px;border-radius:50%;background:#A65A4A;color:#EFEAD9;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;">!</span><span style="font-size:13px;color:#7d3f33;font-weight:500;">Repasse ao cedente <b>${escHtml(repAtraso.nome)}</b> pendente há ${repAtraso.dias} dia${repAtraso.dias!==1?'s':''} — <b>${fmtR(repAtraso.total)}</b>.</span><span style="font-size:13px;font-weight:700;color:#A65A4A;margin-left:auto;cursor:pointer;" onclick="setFinTab('repasses')">Repassar agora →</span></div>` : ''}
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:16px;margin-bottom:16px;">
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,.04);"><div style="font-size:13px;font-weight:600;color:#6B7683;">Contas a receber na semana</div><div style="display:flex;align-items:baseline;gap:10px;margin-top:8px;"><span style="font-size:24px;font-family:'Fraunces',Georgia,serif;font-weight:400;color:#0A1530;">${aReceber.count}</span><span style="font-size:16px;font-weight:700;color:#5E7C58;">${fmtR(aReceber.total)}</span></div><div style="margin-top:12px;font-size:12.5px;font-weight:700;color:#9C7F40;cursor:pointer;" onclick="window._finTab='lancamentos';renderFinanceiro()">Resolver →</div></div>
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,.04);"><div style="font-size:13px;font-weight:600;color:#6B7683;">Contas a pagar na semana</div><div style="display:flex;align-items:baseline;gap:10px;margin-top:8px;"><span style="font-size:24px;font-family:'Fraunces',Georgia,serif;font-weight:400;color:#0A1530;">${aPagar.count}</span><span style="font-size:16px;font-weight:700;color:#A65A4A;">${fmtR(aPagar.total)}</span></div><div style="margin-top:12px;font-size:12.5px;font-weight:700;color:#9C7F40;cursor:pointer;" onclick="window._finTab='lancamentos';renderFinanceiro()">Resolver →</div></div>
-      ${(()=>{ const recuperado=+kpis.receitaMes||0; const cart=+carteira||0; const pct=cart>0?(recuperado/cart*100):0; return `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,.04);"><div style="font-size:13px;font-weight:600;color:#6B7683;">Recuperação do mês</div><div style="display:flex;align-items:baseline;gap:10px;margin-top:8px;"><span style="font-size:24px;font-family:'Fraunces',Georgia,serif;font-weight:400;color:#5E7C58;">${pct.toFixed(1).replace('.',',')}%</span>${recuperado>0?`<span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#5E7C58;">▲</span>`:''}</div><div style="margin-top:12px;font-size:12px;color:#8892A6;">${fmtR(recuperado)}${cart>0?` de ${fmtR(cart)} em carteira`:''}</div></div>`; })()}
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,.04);"><div style="font-size:13px;font-weight:600;color:#6B7683;">Lançamentos em atraso</div><div style="display:flex;align-items:baseline;gap:10px;margin-top:8px;"><span style="font-size:24px;font-family:'Fraunces',Georgia,serif;font-weight:400;color:#A65A4A;">${atraso.count}</span><span style="font-size:16px;font-weight:700;color:#A65A4A;">${fmtR(atraso.total)}</span></div><div style="margin-top:12px;font-size:12.5px;font-weight:700;color:#9C7F40;cursor:pointer;" onclick="window._finTab='lancamentos';renderFinanceiro()">Resolver →</div></div>
-    </div>
-    ${(fluxo && fluxo.dias && fluxo.dias.length) ? (()=>{ const dias=fluxo.dias.slice(0,7); const mx=Math.max(1,...dias.map(d=>Math.abs(d.delta))); const bars=dias.map((d,i)=>{ const h=Math.max(8,Math.round(Math.abs(d.delta)/mx*120)); const grad=i===2?'linear-gradient(180deg,#0A1530,#2c426f)':(d.delta<0?'linear-gradient(180deg,#9C7F40,#c2a24f)':'linear-gradient(180deg,#3A5288,#5a72a8)'); return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;"><div style="width:80%;height:${h}px;background:${grad};border-radius:6px 6px 0 0;"></div></div>`; }).join(''); const labels=dias.map(d=>`<div style="flex:1;text-align:center;font-size:11px;color:#8A94A6;">${d.label}</div>`).join(''); return `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:18px 22px;margin-bottom:16px;box-shadow:0 1px 2px rgba(16,24,40,.04);"><div style="font-size:14px;font-weight:700;color:#0A1530;margin-bottom:16px;">Fluxo de caixa diário</div><div style="display:flex;align-items:flex-end;gap:26px;height:150px;padding:0 6px;border-bottom:1px solid #EFEAD9;">${bars}</div><div style="display:flex;gap:26px;padding:8px 6px 0;">${labels}</div></div>`; })() : ''}
-    <div style="display:grid;grid-template-columns:1.3fr 1fr;gap:16px;">
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:18px 22px;box-shadow:0 1px 2px rgba(16,24,40,.04);">
-        <div style="font-size:14px;font-weight:700;color:#0A1530;margin-bottom:14px;">Top despesas</div>
-        <div style="display:flex;flex-direction:column;gap:12px;">
-          ${(topDespesas.itens||[]).slice(0,4).map((it,i)=>{ const pct=topDespesas.total>0?Math.round(it.valor/topDespesas.total*100):0; const pal=[['#F3E7E2','#A65A4A','#A65A4A'],['#FDF0E8','#9C7F40','#9C7F40'],['#EEF1F6','#6B7683','#A0A9B8']][i]||['#EEF1F6','#6B7683','#A0A9B8']; return `<div style="display:flex;align-items:center;gap:12px;"><span style="width:22px;height:22px;border-radius:6px;background:${pal[0]};color:${pal[1]};font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;">${i+1}</span><div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:600;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(it.nome)}</div><div style="height:6px;background:#F0F3F8;border-radius:4px;margin-top:6px;"><div style="width:${pct}%;height:6px;background:${pal[2]};border-radius:4px;"></div></div></div><div style="text-align:right;flex-shrink:0;"><div style="font-size:13px;font-weight:700;color:#A65A4A;">R$ -${fmtR(it.valor).replace(/^R\$\s*/,'')}</div><div style="font-size:11px;color:#8A94A6;">${pct}%</div></div></div>`; }).join('')||'<div style="font-size:12px;color:#8A94A6;">Sem despesas no mês.</div>'}
+
+    ${atraso.count>0 ? `<div style="border:1px solid #E7CFC7;background:#FBEAE7;border-radius:9px;padding:12px 16px;display:flex;align-items:center;gap:14px;margin-bottom:16px;">
+      <span style="width:24px;height:24px;border-radius:50%;background:#A65A4A;color:#fff;display:grid;place-items:center;font-size:13px;font-weight:700;flex-shrink:0;">!</span>
+      <span style="font-size:13.5px;color:#7D3F33;"><strong style="font-weight:600;">${atraso.count} lançamento${atraso.count!==1?'s':''} em atraso · ${fmtR(atraso.total)}.</strong></span>
+      <span style="margin-left:auto;background:#A65A4A;color:#fff;font-size:12.5px;font-weight:600;padding:7px 13px;border-radius:6px;cursor:pointer;white-space:nowrap;" onclick="window._finTab='lancamentos';renderFinanceiro()">Resolver →</span>
+    </div>` : ''}
+    ${repAtraso ? `<div style="display:flex;align-items:center;gap:10px;background:#F7ECE8;border:1px solid #E7CFC7;border-radius:9px;padding:11px 16px;margin-bottom:16px;"><span style="width:22px;height:22px;border-radius:50%;background:#A65A4A;color:#EFEAD9;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;">!</span><span style="font-size:13px;color:#7d3f33;font-weight:500;">Repasse ao cedente <b>${escHtml(repAtraso.nome)}</b> pendente há ${repAtraso.dias} dia${repAtraso.dias!==1?'s':''} — <b>${fmtR(repAtraso.total)}</b>.</span><span style="font-size:13px;font-weight:700;color:#A65A4A;margin-left:auto;cursor:pointer;" onclick="setFinTab('repasses')">Repassar agora →</span></div>` : ''}
+
+    <div style="display:grid;grid-template-columns:minmax(0,1.6fr) minmax(300px,1fr);gap:16px;align-items:start;">
+      <div style="display:flex;flex-direction:column;gap:16px;min-width:0;">
+        <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;">
+          <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+            <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Fluxo de caixa · próximos 30 dias</div>
+            <div style="font-size:12.5px;color:#8A94A6;">projeção com lançamentos pendentes</div>
+          </div>
+          ${fluxoHtml}
+        </div>
+        <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;">
+          <div style="padding:14px 16px 12px;border-bottom:1px solid #EFEBE0;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">
+            <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Últimas movimentações</div>
+            <div style="font-size:12.5px;color:#8A94A6;">${recentes.length} lançamento${recentes.length!==1?'s':''}</div>
+            <div style="font-size:12.5px;color:#3A5288;font-weight:500;cursor:pointer;margin-left:auto;" onclick="window._finTab='lancamentos';renderFinanceiro()">Abrir aba completa →</div>
+          </div>
+          ${recentesHtml}
         </div>
       </div>
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:18px 22px;box-shadow:0 1px 2px rgba(16,24,40,.04);">
-        <div style="font-size:14px;font-weight:700;color:#0A1530;margin-bottom:16px;">Balanço do mês</div>
-        <div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #EFEAD9;"><span style="font-size:13px;color:#6B7683;">Entradas</span><span style="font-size:14px;font-weight:700;color:#5E7C58;">${fmtR(kpis.receitaMes)}</span></div>
-        <div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #EFEAD9;"><span style="font-size:13px;color:#6B7683;">Saídas</span><span style="font-size:14px;font-weight:700;color:#A65A4A;">${fmtR(kpis.despesaMes)}</span></div>
-        <div style="display:flex;justify-content:space-between;padding:12px 0 0;"><span style="font-size:13px;font-weight:700;color:#0A1530;">Resultado do mês</span><span style="font-size:16px;font-family:'Fraunces',Georgia,serif;font-weight:400;color:${kpis.saldoMes>=0?'#5E7C58':'#A65A4A'};">${fmtR(kpis.saldoMes)}</span></div>
-        ${serie&&serie.ebitda?`<div style="margin-top:16px;padding-top:14px;border-top:1px solid #EFEAD9;display:flex;justify-content:space-between;align-items:center;"><span style="font-size:13px;color:#6B7683;">Lucro/prejuízo (EBITDA)</span><span style="font-size:14px;font-weight:700;color:#0A1530;">${fmtR(serie.ebitda[11])}</span></div>`:''}
+      <div style="display:flex;flex-direction:column;gap:16px;min-width:0;">
+        <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;">
+          <div style="display:flex;align-items:baseline;margin-bottom:10px;"><div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Contas</div><span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:10px;color:#A6AEBD;">${(dim.contas||[]).length} ATIVAS</span></div>
+          ${contasHtml}
+          <div style="padding-top:11px;font-size:12.5px;color:#3A5288;font-weight:500;cursor:pointer;" onclick="window._finTab='lancamentos';renderFinanceiro()">Conciliar extrato →</div>
+        </div>
+        <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;">
+          <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:10px;"><div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Resultado por categoria</div><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#A6AEBD;margin-left:auto;">DRE · MÊS</span></div>
+          ${dreHtml}
+          <div style="display:flex;align-items:center;gap:10px;padding:9px 0 0;border-top:1px solid #E6E1D2;margin-top:4px;"><span style="font-size:12.5px;font-weight:700;color:#0A1530;">Resultado (EBITDA)</span><div style="flex:1;"></div><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:700;color:${kpis.saldoMes>=0?'#0A1530':'#A65A4A'};">${fmtR(kpis.saldoMes)}</span></div>
+        </div>
+        <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;">
+          <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;margin-bottom:11px;">Top despesas do mês</div>
+          ${(topDespesas.itens||[]).length ? (topDespesas.itens||[]).slice(0,3).map(it=>{ const pct=topDespesas.total>0?Math.round(it.valor/topDespesas.total*100):0; return `<div style="display:flex;flex-direction:column;gap:5px;padding:7px 0;"><div style="display:flex;align-items:baseline;"><span style="font-size:12.5px;color:#5A5F66;">${escHtml(it.nome)}</span><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:500;margin-left:auto;">${fmtR(it.valor)}</span></div><div style="height:5px;background:#F2EFE6;border-radius:3px;overflow:hidden;"><div style="height:100%;width:${pct}%;background:#D8B7AF;"></div></div></div>`; }).join('') : '<div class="note">Sem despesas no mês.</div>'}
+        </div>
       </div>
     </div>
   `;
@@ -28411,56 +28896,102 @@ async function renderFinLancamentos(el){
   // Carrega dimensões pra popular os filtros (cache de 1 min)
   let dim = { contas:[], categorias:[], contatos:[] };
   try { dim = await finApi.loadDimensoes(); } catch(e){ console.warn(e); }
+  window._finLancDim = dim;
 
   const st = window._finLancState;
+  st.sel = st.sel || new Set();
   const f = st.filtros;
 
-  const optsConta = ['<option value="">Conta: todas</option>'].concat(
+  const optsConta = ['<option value="">Conta ▾</option>'].concat(
     dim.contas.map(c=>`<option value="${c.id}" ${f.contaId==c.id?'selected':''}>${escHtml(c.descricao)}</option>`)
   ).join('');
-  const optsContato = ['<option value="">Contato: todos</option>'].concat(
-    dim.contatos.map(c=>`<option value="${c.id}" ${f.contatoId==c.id?'selected':''}>${escHtml(c.nome)}</option>`)
+  const optsCategoria = ['<option value="">Categoria ▾</option>'].concat(
+    (dim.categorias||[]).map(c=>`<option value="${c.id}" ${f.categoriaId==c.id?'selected':''}>${escHtml(c.descricao)}</option>`)
   ).join('');
-  // Conta do Asaas → filtro "Origem: via Asaas" (recebimentos que caíram na conta Asaas).
-  const _asaasConta = (dim.contas||[]).find(c=>/asaas/i.test((c.descricao||'')+' '+(c.banco_nome||'')));
-  window._finAsaasContaId = _asaasConta ? String(_asaasConta.id) : null;
+
+  const mesLabel = (()=>{ const d=new Date(); return ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][d.getMonth()]+' de '+d.getFullYear(); })();
 
   el.innerHTML = `
-    <div class="fin-lanc-tools">
-      <div class="fin-lanc-search"><span class="ic">${ico('search',14)}</span><input type="search" id="filtLancBusca" value="${escHtml(f.busca||'')}" placeholder="Buscar por descrição, valor ou contato…" oninput="_filtrarLancsDebounced()"></div>
-      <select id="filtLancConta" class="fin-chipsel" onchange="aplicarFiltrosLancs()">${optsConta}</select>
-      <select id="filtLancTipo" class="fin-chipsel" onchange="aplicarFiltrosLancs()">
-        <option value="">Tipo: todos</option><option value="receita" ${f.tipo==='receita'?'selected':''}>Receitas</option><option value="despesa" ${f.tipo==='despesa'?'selected':''}>Despesas</option>
-      </select>
-      <select id="filtLancStatus" class="fin-chipsel" onchange="aplicarFiltrosLancs()">
-        <option value="">Status: todos</option><option value="pago" ${f.status==='pago'?'selected':''}>Efetivados</option><option value="pendente" ${f.status==='pendente'?'selected':''}>Pendentes</option><option value="parcial" ${f.status==='parcial'?'selected':''}>Parciais</option>
-      </select>
-      <select id="filtLancOrigem" class="fin-chipsel" onchange="aplicarFiltrosLancs()">
-        <option value="">Origem: todas</option><option value="asaas" ${f.origem==='asaas'?'selected':''} ${!window._finAsaasContaId?'disabled':''}>Via Asaas</option>
-      </select>
-      <select id="filtLancContato" class="fin-chipsel" style="max-width:170px;" onchange="aplicarFiltrosLancs()">${optsContato}</select>
-      <button class="fin-chiplink" onclick="limparFiltrosLancs()">Limpar</button>
-      <div class="fin-lanc-right">
-        <input type="date" id="filtLancDataIni" value="${f.dataIni||''}" class="fin-chipsel" onchange="_filtrarLancsDebounced()">
-        <input type="date" id="filtLancDataFim" value="${f.dataFim||''}" class="fin-chipsel" onchange="_filtrarLancsDebounced()">
-        <button class="btn btn-gold btn-sm" onclick="abrirNovoLancamento()">${ico('plus',13)} adicionar</button>
+    <style>
+      #page-fin .mov-eyebrow{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:#9C7F40;}
+      #page-fin .mov-h1{font-family:'Fraunces',Georgia,serif;font-size:22px;margin-top:4px;}
+      #page-fin .mov-sub{font-size:13px;color:#6B7683;margin-top:3px;}
+      #page-fin .mov-toolbar{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:16px;}
+      #page-fin .mov-toolbar-r{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+      #page-fin .mov-search{display:flex;align-items:center;gap:7px;border:1px solid #E6E1D2;border-radius:7px;padding:8px 11px;background:#fff;font-size:12.5px;color:#8A94A6;width:230px;}
+      #page-fin .mov-search input{border:0;outline:0;background:transparent;flex:1;font-size:12.5px;color:#0A1530;}
+      #page-fin .mov-select{padding:8px 12px;border:1px solid #E6E1D2;border-radius:7px;background:#fff;font-size:12.5px;color:#5A5F66;cursor:pointer;}
+      #page-fin .mov-btnline{padding:8px 12px;border:1px solid #E6E1D2;border-radius:7px;background:#fff;font-size:12.5px;color:#5A5F66;cursor:pointer;}
+      #page-fin .mov-filtros{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:14px;}
+      #page-fin .mov-filtros-grupo{display:flex;gap:6px;align-items:center;}
+      #page-fin .mov-filtros-lb{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;color:#A6AEBD;}
+      #page-fin .mov-chip{padding:5px 12px;border-radius:20px;font-size:12px;cursor:pointer;border:1px solid #E6E1D2;background:#fff;color:#6B7683;}
+      #page-fin .mov-chip.on{background:#0A1530;color:#fff;border-color:#0A1530;}
+      #page-fin .mov-sep{width:1px;height:20px;background:#E6E1D2;}
+      #page-fin .mov-table{background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;}
+      #page-fin .mov-thead{display:flex;align-items:center;gap:14px;padding:10px 16px;background:#F7F4EC;border-bottom:1px solid #E6E1D2;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#8A94A6;}
+      #page-fin .mov-row{display:flex;align-items:center;gap:14px;padding:11px 16px;border-bottom:1px solid #F2EFE6;background:#fff;}
+      #page-fin .mov-row.sel{background:#F6F3EA;}
+      #page-fin .mov-row:hover{background:#FBFAF6;}
+      #page-fin .mov-box{width:16px;height:16px;border-radius:4px;border:1px solid #CFC8B6;background:#fff;color:#fff;display:grid;place-items:center;font-size:10px;cursor:pointer;flex-shrink:0;}
+      #page-fin .mov-box.on{background:#0A1530;border-color:#0A1530;}
+      #page-fin .mov-c-data{width:46px;flex-shrink:0;font-family:'JetBrains Mono',monospace;font-size:12px;color:#8A94A6;}
+      #page-fin .mov-c-desc{flex:1;min-width:180px;display:flex;align-items:center;gap:10px;}
+      #page-fin .mov-c-desc .bar{width:3px;height:24px;border-radius:2px;flex-shrink:0;}
+      #page-fin .mov-c-desc .tx{font-size:13px;font-weight:500;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      #page-fin .mov-c-cat{width:104px;flex-shrink:0;font-size:11.5px;color:#6B7683;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      #page-fin .mov-c-conta{width:96px;flex-shrink:0;font-size:11.5px;color:#8A94A6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      #page-fin .mov-c-valor{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;width:112px;text-align:right;flex-shrink:0;}
+      #page-fin .mov-c-sit{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.08em;width:86px;text-align:center;padding:3px 0;border-radius:4px;flex-shrink:0;}
+      #page-fin .mov-c-acao{width:74px;text-align:right;flex-shrink:0;font-size:12px;color:#3A5288;font-weight:500;cursor:pointer;}
+      #page-fin .mov-foot{display:flex;align-items:center;gap:24px;padding:13px 16px;background:#FBFAF6;}
+      #page-fin .mov-bulkbar{position:sticky;bottom:12px;z-index:5;display:flex;align-items:center;gap:12px;background:#0A1530;border-radius:9px;padding:12px 16px;box-shadow:0 8px 24px rgba(10,21,48,.28);margin-top:14px;flex-wrap:wrap;}
+      #page-fin .mov-bulkbtn{border:1px solid rgba(255,255,255,.24);color:#E6E9F0;font-size:12.5px;padding:7px 13px;border-radius:6px;cursor:pointer;background:transparent;font-family:inherit;}
+      #page-fin .mov-bulkbtn.primary{background:#5E7C58;color:#fff;border-color:#5E7C58;}
+      #page-fin .mov-bulkbtn.danger{border-color:rgba(214,150,138,.5);color:#E8A99C;}
+    </style>
+
+    <div class="mov-toolbar">
+      <div>
+        <div class="mov-eyebrow">${escHtml(mesLabel.toUpperCase())} · TODAS AS CONTAS</div>
+        <div class="mov-h1">Movimentações</div>
+        <div class="mov-sub">Selecione linhas para confirmar pagamento, conciliar ou reclassificar em lote.</div>
+      </div>
+      <div class="mov-toolbar-r">
+        <div class="mov-search">${ico('search',14)}<input type="search" id="filtLancBusca" value="${escHtml(f.busca||'')}" placeholder="Buscar descrição, valor, contato…" oninput="_filtrarLancsDebounced()"></div>
+        <select id="filtLancConta" class="mov-select" onchange="aplicarFiltrosLancs()">${optsConta}</select>
+        <select id="filtLancCategoria" class="mov-select" onchange="aplicarFiltrosLancs()">${optsCategoria}</select>
+        <div class="mov-btnline" onclick="exportarLancsCsv()">Exportar</div>
       </div>
     </div>
-    <div class="panel">
-      <div id="lancs-summary" class="fin-lanc-summary"><span style="font-size:12px;color:var(--text-3);">Carregando…</span></div>
-      <div class="tbl-wrap">
-        <table class="tbl" id="tblLancs">
-          <thead><tr>
-            <th style="width:30px;"></th><th style="width:34px;"></th><th>Descrição</th><th>Categoria</th>
-            <th style="text-align:right;">Valor</th><th style="width:64px;">Contas</th><th style="width:80px;"></th>
-          </tr></thead>
-          <tbody id="lancsTbody">
-            <tr><td colspan="7" style="padding:30px;text-align:center;color:var(--text-3);"><div class="mv2-spinner" style="margin:0 auto 8px;width:24px;height:24px;border-width:3px;"></div>Carregando lançamentos…</td></tr>
-          </tbody>
-        </table>
+
+    <div class="mov-filtros">
+      <div class="mov-filtros-grupo"><span class="mov-filtros-lb">TIPO</span>
+        ${[['tudo','Tudo'],['entradas','Entradas'],['saidas','Saídas'],['repasses','Repasses']].map(([k,lb])=>`<span class="mov-chip ${f.tipoView===k?'on':''}" onclick="setFiltroMovTipo('${k}')">${lb}</span>`).join('')}
       </div>
+      <div class="mov-sep"></div>
+      <div class="mov-filtros-grupo"><span class="mov-filtros-lb">SITUAÇÃO</span>
+        ${[['todos','Todos'],['pendentes','Pendentes'],['atraso','Em atraso'],['conciliados','Conciliados']].map(([k,lb])=>`<span class="mov-chip ${f.situacao===k?'on':''}" onclick="setFiltroMovSituacao('${k}')">${lb}</span>`).join('')}
+      </div>
+      <span id="lancs-contador" style="margin-left:auto;font-size:12.5px;color:#8A94A6;"></span>
+    </div>
+
+    <div class="mov-table">
+      <div class="mov-thead">
+        <div class="mov-box" id="mov-box-all" onclick="toggleSelAllLancs()"></div>
+        <span class="mov-c-data">DATA</span>
+        <span class="mov-c-desc" style="flex:1;"><span>DESCRIÇÃO</span></span>
+        <span class="mov-c-cat">CATEGORIA</span>
+        <span class="mov-c-conta">CONTA</span>
+        <span class="mov-c-valor">VALOR</span>
+        <span class="mov-c-sit">SITUAÇÃO</span>
+        <span class="mov-c-acao">AÇÃO</span>
+      </div>
+      <div id="lancsTbody"><div style="padding:30px;text-align:center;color:var(--text-3);"><div class="mv2-spinner" style="margin:0 auto 8px;width:24px;height:24px;border-width:3px;"></div>Carregando lançamentos…</div></div>
+      <div class="mov-foot" id="lancs-totais"></div>
     </div>
     <div id="lancs-pagination" style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;padding:8px 4px;font-size:12.5px;color:var(--text-2);"></div>
+    <div id="lancs-bulkbar"></div>
   `;
 
   await carregarPaginaLancs();
@@ -28472,45 +29003,31 @@ function _filtrarLancsDebounced(){
   _filtLancTimer = setTimeout(aplicarFiltrosLancs, 350);
 }
 
-function aplicarFiltrosLancs(){
+function setFiltroMovTipo(tipoView){
   const st = window._finLancState;
-  let dataIni = document.getElementById('filtLancDataIni')?.value||'';
-  let dataFim = document.getElementById('filtLancDataFim')?.value||'';
-  // Auto-swap se invertido (usuário trocou a ordem)
-  if(dataIni && dataFim && dataIni > dataFim){
-    const tmp = dataIni; dataIni = dataFim; dataFim = tmp;
-    const elI = document.getElementById('filtLancDataIni'); if(elI) elI.value = dataIni;
-    const elF = document.getElementById('filtLancDataFim'); if(elF) elF.value = dataFim;
-  }
-  const origem = document.getElementById('filtLancOrigem')?.value||'';
-  let contaId = document.getElementById('filtLancConta')?.value||'';
-  // "Origem: via Asaas" filtra pela conta do Asaas (sincroniza o seletor de Conta).
-  if(origem==='asaas' && window._finAsaasContaId){
-    contaId = window._finAsaasContaId;
-    const selConta = document.getElementById('filtLancConta'); if(selConta) selConta.value = contaId;
-  }
-  st.filtros = {
-    tipo: document.getElementById('filtLancTipo')?.value||'',
-    status: document.getElementById('filtLancStatus')?.value||'',
-    contaId,
-    contatoId: document.getElementById('filtLancContato')?.value||'',
-    origem,
-    dataIni,
-    dataFim,
-    busca: (document.getElementById('filtLancBusca')?.value||'').trim(),
-  };
+  st.filtros.tipoView = tipoView;
+  st.sel.clear();
   st.page = 1;
-  carregarPaginaLancs();
+  renderFinTab('lancamentos');
+}
+function setFiltroMovSituacao(situacao){
+  const st = window._finLancState;
+  st.filtros.situacao = situacao;
+  st.sel.clear();
+  st.page = 1;
+  renderFinTab('lancamentos');
 }
 
-function limparFiltrosLancs(){
-  ['filtLancTipo','filtLancStatus','filtLancConta','filtLancOrigem','filtLancContato','filtLancBusca']
-    .forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
-  // "Limpar" volta ao período padrão (mês corrente), não a "todos".
-  const mc = _finMesCorrente();
-  const elI = document.getElementById('filtLancDataIni'); if(elI) elI.value = mc.dataIni;
-  const elF = document.getElementById('filtLancDataFim'); if(elF) elF.value = mc.dataFim;
-  aplicarFiltrosLancs();
+function aplicarFiltrosLancs(){
+  const st = window._finLancState;
+  st.filtros = Object.assign({}, st.filtros, {
+    contaId: document.getElementById('filtLancConta')?.value||'',
+    categoriaId: document.getElementById('filtLancCategoria')?.value||'',
+    busca: (document.getElementById('filtLancBusca')?.value||'').trim(),
+  });
+  st.page = 1;
+  st.sel.clear();
+  carregarPaginaLancs();
 }
 
 function irParaPaginaLancs(p){
@@ -28520,59 +29037,190 @@ function irParaPaginaLancs(p){
   carregarPaginaLancs();
 }
 
+// ── Seleção em lote ───────────────────────────────────────────────────────────
+function toggleSelLanc(id){
+  const st = window._finLancState;
+  if(st.sel.has(id)) st.sel.delete(id); else st.sel.add(id);
+  _atualizarLinhasESelecao();
+}
+function toggleSelAllLancs(){
+  const st = window._finLancState;
+  const visiveis = (st._visiveis||[]);
+  const todosMarcados = visiveis.length>0 && visiveis.every(id=>st.sel.has(id));
+  if(todosMarcados) visiveis.forEach(id=>st.sel.delete(id));
+  else visiveis.forEach(id=>st.sel.add(id));
+  _atualizarLinhasESelecao();
+}
+function limparSelLancs(){
+  window._finLancState.sel.clear();
+  _atualizarLinhasESelecao();
+}
+// Redesenha só o estado visual das linhas/checkbox/barra de lote — sem refazer a query.
+function _atualizarLinhasESelecao(){
+  const st = window._finLancState;
+  const visiveis = st._visiveis||[];
+  document.querySelectorAll('#lancsTbody [data-lanc-id]').forEach(row=>{
+    const id = row.getAttribute('data-lanc-id');
+    const on = st.sel.has(id);
+    row.classList.toggle('sel', on);
+    const box = row.querySelector('.mov-box');
+    if(box){ box.classList.toggle('on', on); box.innerHTML = on?'✓':''; }
+  });
+  const allOn = visiveis.length>0 && visiveis.every(id=>st.sel.has(id));
+  const boxAll = document.getElementById('mov-box-all');
+  if(boxAll){ boxAll.classList.toggle('on', allOn); boxAll.innerHTML = allOn?'✓':''; }
+  _renderBulkBar();
+}
+function _renderBulkBar(){
+  const st = window._finLancState;
+  const bar = document.getElementById('lancs-bulkbar');
+  if(!bar) return;
+  const n = st.sel.size;
+  if(!n){ bar.innerHTML=''; return; }
+  const saldo = (st._porId||{});
+  let soma = 0;
+  st.sel.forEach(id=>{ const l=saldo[id]; if(l) soma += (l.tipo_movimento===1?1:-1)*Math.abs(+l.valor||0); });
+  const fmtSaldo = (soma<0?'−':'+') + fmtR(Math.abs(soma));
+  bar.innerHTML = `<div class="mov-bulkbar">
+    <div style="display:flex;flex-direction:column;gap:1px;">
+      <span style="font-size:12.5px;font-weight:600;color:#fff;">${n} selecionado${n!==1?'s':''}</span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#8E98B0;">saldo da seleção ${fmtSaldo}</span>
+    </div>
+    <div style="width:1px;height:26px;background:rgba(255,255,255,.14);margin-left:6px;"></div>
+    <button class="mov-bulkbtn primary" onclick="loteConfirmarPagamento()">Confirmar pagamento</button>
+    <button class="mov-bulkbtn" onclick="loteConciliar()">Conciliar</button>
+    <button class="mov-bulkbtn" onclick="loteAlterarCategoria()">Alterar categoria</button>
+    <button class="mov-bulkbtn" onclick="loteAlterarConta()">Alterar conta</button>
+    <button class="mov-bulkbtn" onclick="loteReagendar()">Reagendar</button>
+    <button class="mov-bulkbtn danger" onclick="loteExcluir()">Excluir</button>
+    <span style="margin-left:auto;font-size:12.5px;color:#8E98B0;cursor:pointer;white-space:nowrap;" onclick="limparSelLancs()">Limpar seleção ✕</span>
+  </div>`;
+}
+
+// ── Ações em lote (uma transação por ação — ver finApi.*Lote) ────────────────
+async function loteConfirmarPagamento(){
+  const st = window._finLancState; const ids=[...st.sel]; if(!ids.length) return;
+  if(!confirm(`Confirmar pagamento de ${ids.length} lançamento(s)?`)) return;
+  try{ await finApi.confirmarPagamentoLote(ids); showToast('Pagamento confirmado.','success'); limparSelLancs(); await carregarPaginaLancs(); _loadFinHeader(); }
+  catch(e){ showToast('Erro: '+e.message,'danger'); }
+}
+async function loteConciliar(){
+  const st = window._finLancState; const ids=[...st.sel]; if(!ids.length) return;
+  try{ await finApi.conciliarLote(ids); showToast('Lançamentos conciliados.','success'); limparSelLancs(); await carregarPaginaLancs(); }
+  catch(e){ showToast('Erro: '+e.message,'danger'); }
+}
+async function loteAlterarCategoria(){
+  const st = window._finLancState; const ids=[...st.sel]; if(!ids.length) return;
+  const dim = window._finLancDim||{categorias:[]};
+  const opts = (dim.categorias||[]).map(c=>`${c.id}::${c.descricao}`).join('\n');
+  const escolha = prompt(`Nova categoria para ${ids.length} lançamento(s).\nDigite o nome exatamente como cadastrado:\n\n${(dim.categorias||[]).map(c=>c.descricao).join(', ')}`);
+  if(!escolha) return;
+  const cat = (dim.categorias||[]).find(c=>c.descricao.trim().toLowerCase()===escolha.trim().toLowerCase());
+  if(!cat){ showToast('Categoria não encontrada.','danger'); return; }
+  try{ await finApi.alterarCategoriaLote(ids, cat.id); showToast('Categoria alterada.','success'); limparSelLancs(); await carregarPaginaLancs(); }
+  catch(e){ showToast('Erro: '+e.message,'danger'); }
+}
+async function loteAlterarConta(){
+  const st = window._finLancState; const ids=[...st.sel]; if(!ids.length) return;
+  const dim = window._finLancDim||{contas:[]};
+  const escolha = prompt(`Nova conta para ${ids.length} lançamento(s).\nDigite o nome exatamente como cadastrado:\n\n${(dim.contas||[]).map(c=>c.descricao).join(', ')}`);
+  if(!escolha) return;
+  const conta = (dim.contas||[]).find(c=>c.descricao.trim().toLowerCase()===escolha.trim().toLowerCase());
+  if(!conta){ showToast('Conta não encontrada.','danger'); return; }
+  try{ await finApi.alterarContaLote(ids, conta.id); showToast('Conta alterada.','success'); limparSelLancs(); await carregarPaginaLancs(); }
+  catch(e){ showToast('Erro: '+e.message,'danger'); }
+}
+async function loteReagendar(){
+  const st = window._finLancState; const ids=[...st.sel]; if(!ids.length) return;
+  const novaData = prompt(`Reagendar ${ids.length} lançamento(s) para (AAAA-MM-DD):`, hoje());
+  if(!novaData) return;
+  try{ await finApi.reagendarLote(ids, novaData); showToast('Vencimento reagendado.','success'); limparSelLancs(); await carregarPaginaLancs(); }
+  catch(e){ showToast('Erro: '+e.message,'danger'); }
+}
+async function loteExcluir(){
+  const st = window._finLancState; const ids=[...st.sel]; if(!ids.length) return;
+  if(!confirm(`Excluir ${ids.length} lançamento(s)? Esta ação não pode ser desfeita.`)) return;
+  try{ await finApi.excluirLote(ids); showToast('Lançamentos excluídos.','success'); limparSelLancs(); await carregarPaginaLancs(); _loadFinHeader(); }
+  catch(e){ showToast('Erro: '+e.message,'danger'); }
+}
+
+function exportarLancsCsv(){
+  const st = window._finLancState;
+  const rows = st._ultimaLista||[];
+  if(!rows.length){ showToast('Nada para exportar.','info'); return; }
+  const linhas = [['Data','Descrição','Categoria','Conta','Valor','Situação']];
+  rows.forEach(l=>{
+    const cats=(l._categorias||[]).map(c=>c.fin_categoria&&c.fin_categoria.descricao).filter(Boolean).join('; ');
+    linhas.push([l.data_competencia||'', l.descricao||'', cats, (l.fin_conta&&l.fin_conta.descricao)||'', (l.tipo_movimento===1?'':'-')+Math.abs(+l.valor||0).toFixed(2).replace('.',','), l.conciliado?'Conciliado':(l.status===1?'Pago':'Pendente')]);
+  });
+  const csv = linhas.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(';')).join('\n');
+  const blob = new Blob(['﻿'+csv], {type:'text/csv;charset=utf-8;'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'movimentacoes.csv'; a.click();
+}
+
+// Mapeia status/vencimento/conciliado para o chip de situação do handoff.
+function _movSituacaoPill(l){
+  if(l.conciliado) return { txt:'CONCILIADO', bg:'#E9F0E7', fg:'#4C6647' };
+  if(l.status===1) return { txt:'PAGO', bg:'#F5F2EA', fg:'#6B7683' };
+  if(l.status===3) return { txt:'CANCELADO', bg:'#F5F2EA', fg:'#6B7683' };
+  if(l.data_vencimento && l.data_vencimento < hoje()) return { txt:'ATRASADO', bg:'#FBEAE7', fg:'#A65A4A' };
+  return { txt: l.tipo_movimento===1?'A RECEBER':'A PAGAR', bg:'#FBF3E1', fg:'#9C7F40' };
+}
+
 async function carregarPaginaLancs(){
   const st = window._finLancState;
   if(st.loading) return;
   st.loading = true;
   const tbody = document.getElementById('lancsTbody');
   const pag = document.getElementById('lancs-pagination');
-  const summary = document.getElementById('lancs-summary');
+  const contador = document.getElementById('lancs-contador');
+  const totaisEl = document.getElementById('lancs-totais');
   try {
-    const res = await finApi.listLancamentos({ page: st.page, perPage: 50, filtros: st.filtros });
+    const [res, totais] = await Promise.all([
+      finApi.listLancamentos({ page: st.page, perPage: 50, filtros: st.filtros }),
+      finApi.sumLancamentos(st.filtros).catch(()=>({entradas:0,saidas:0,liquido:0})),
+    ]);
     st.totalPages = res.totalPages;
     st.total = res.total;
+    st._ultimaLista = res.rows;
+    st._visiveis = res.rows.map(l=>l.id);
+    st._porId = Object.fromEntries(res.rows.map(l=>[l.id,l]));
+    if(contador) contador.textContent = `${res.rows.length} de ${res.total} lançamentos`;
+    if(totaisEl) totaisEl.innerHTML = `<span style="font-size:12.5px;color:#8A94A6;">Totais do filtro</span>
+      <div style="margin-left:auto;display:flex;gap:24px;">
+        <div style="display:flex;flex-direction:column;align-items:flex-end;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#A6AEBD;">ENTRADAS</span><span style="font-family:'JetBrains Mono',monospace;font-size:13.5px;font-weight:600;color:#5E7C58;">+${fmtR(totais.entradas)}</span></div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#A6AEBD;">SAÍDAS</span><span style="font-family:'JetBrains Mono',monospace;font-size:13.5px;font-weight:600;color:#A65A4A;">−${fmtR(totais.saidas)}</span></div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#A6AEBD;">LÍQUIDO</span><span style="font-family:'JetBrains Mono',monospace;font-size:13.5px;font-weight:600;color:${totais.liquido>=0?'#0A1530':'#A65A4A'};">${totais.liquido<0?'−':''}${fmtR(Math.abs(totais.liquido))}</span></div>
+      </div>`;
     if(!res.rows.length){
-      if(tbody) tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state" style="padding:24px"><div class="empty-state-icon">${ico('dollar',36)}</div><div class="empty-state-title">Nenhum lançamento encontrado</div></div></td></tr>`;
+      if(tbody) tbody.innerHTML = `<div class="empty-state" style="padding:34px 20px;"><div class="empty-state-icon">${ico('dollar',36)}</div><div class="empty-state-title">Nenhum lançamento encontrado</div></div>`;
       if(pag) pag.innerHTML = '';
-      if(summary) summary.innerHTML = '<span style="font-size:12.5px;color:var(--text-3);">Sem resultados</span>';
+      _renderBulkBar();
       return;
     }
     if(tbody){
-      const groups={}, order=[];
-      res.rows.forEach(l=>{ const d=(l.data_pagamento||l.data_competencia||'').slice(0,10)||'—'; if(!groups[d]){groups[d]=[];order.push(d);} groups[d].push(l); });
-      const catPill=(l)=>{ const cats=(l._categorias||[]).map(c=>c.fin_categoria&&c.fin_categoria.descricao).filter(Boolean); const lab=cats.length>1?`${cats[0]} +${cats.length-1}`:(cats[0]||'—'); return `<span class="fin-catpill">${escHtml(lab)} <span style="font-size:8px;color:var(--text-3);">▾</span></span>`; };
-      const cav=(nome)=>`<span class="fin-cav" style="background:${/asaas/i.test(nome||'')?'var(--gold)':'var(--navy)'};">${escHtml((nome||'?').trim().slice(0,1).toUpperCase())}</span>`;
-      let html='';
-      for(const d of order){
-        const arr=groups[d]; let ent=0,sai=0;
-        html+=`<tr class="fin-daygrp"><td colspan="7">${d==='—'?'sem data':d.split('-').reverse().join('/')}</td></tr>`;
-        for(const l of arr){
-          const isRec=l.tipo_movimento===1, isPago=l.status===1, cancel=l.status===3;
-          const v=Math.abs(+l.valor||0); if(!cancel){ if(isRec) ent+=v; else sai+=v; }
-          const viaAsaas=isRec && /asaas/i.test((l.fin_conta&&(l.fin_conta.descricao||l.fin_conta.banco_nome))||'');
-          const parc=(l.numero_parcela&&l.total_parcelas)?`<span style="font-size:10.5px;color:var(--text-3);margin-left:6px;">${l.numero_parcela}/${l.total_parcelas}</span>`:'';
-          const pend=(!isPago&&!cancel)?'<span class="fin-st pend" style="margin-left:8px;font-size:9px;">pendente</span>':'';
-          html+=`<tr>
-            <td style="padding:10px 14px;"><input type="checkbox" style="cursor:pointer;"></td>
-            <td style="padding:10px 4px;text-align:center;"><span class="fin-ti ${isRec?'rec':'des'}">${isRec?'↗':'↘'}</span></td>
-            <td style="padding:10px 14px;font-weight:500;color:var(--text);cursor:pointer;" onclick="verLancamentoDrawer('${l.id}')">${escHtml(l.descricao||'—')}${parc}${viaAsaas?'<span class="fin-asaas-badge">via Asaas</span>':''}${l.conciliado?'<span title="Conciliado" style="color:var(--success);font-size:10px;margin-left:4px;">●</span>':''}${pend}</td>
-            <td style="padding:10px 14px;">${catPill(l)}</td>
-            <td style="padding:10px 14px;text-align:right;font-family:var(--font-mono);font-weight:700;color:${cancel?'var(--text-3)':isRec?'var(--success)':'#A65A4A'};${cancel?'text-decoration:line-through;':''}">${isRec?'+':'−'} ${fmtR(v)}</td>
-            <td style="padding:10px 14px;">${cav(l.fin_conta&&l.fin_conta.descricao)}</td>
-            <td style="padding:10px 14px;text-align:right;white-space:nowrap;">${(!isPago&&!cancel)?`<button class="btn btn-ghost btn-xs" title="Baixar" onclick="event.stopPropagation();abrirPagarLancamento('${l.id}')">${ico('check',12)}</button>`:''}<button class="btn btn-ghost btn-xs" title="Editar" onclick="event.stopPropagation();editarLancamento('${l.id}')">${ico('edit',12)}</button></td>
-          </tr>`;
-        }
-        html+=`<tr class="fin-dayfoot"><td colspan="7">Entrada realizada <b style="color:var(--success);font-family:var(--font-mono);">${fmtR(ent)}</b> &nbsp;·&nbsp; Saída realizada <b style="color:#A65A4A;font-family:var(--font-mono);">−${fmtR(sai)}</b></td></tr>`;
-      }
-      tbody.innerHTML=html;
-    }
-    if(summary){
-      summary.innerHTML = `<span style="font-size:13px;font-weight:600;color:var(--text);">${res.total.toLocaleString('pt-BR')} lançamentos</span><span style="font-size:12px;color:var(--text-3);">Página ${st.page} de ${st.totalPages}</span>`;
+      const catLabel=(l)=>{ const cats=(l._categorias||[]).map(c=>c.fin_categoria&&c.fin_categoria.descricao).filter(Boolean); return cats.length ? (cats.length>1?`${cats[0]} +${cats.length-1}`:cats[0]) : '—'; };
+      const contaLabel=(l)=> (l.fin_conta&&l.fin_conta.descricao) || '—';
+      tbody.innerHTML = res.rows.map(l=>{
+        const isRec = l.tipo_movimento===1;
+        const st2 = _movSituacaoPill(l);
+        const sel = st.sel.has(l.id);
+        const dt = (l.data_competencia||'').slice(5,10).split('-').reverse().join('/');
+        return `<div class="mov-row ${sel?'sel':''}" data-lanc-id="${l.id}">
+          <div class="mov-box ${sel?'on':''}" onclick="toggleSelLanc('${l.id}')">${sel?'✓':''}</div>
+          <span class="mov-c-data">${dt||'—'}</span>
+          <div class="mov-c-desc"><div class="bar" style="background:${isRec?'#5E7C58':'#A65A4A'};"></div><span class="tx" title="${escHtml(l.descricao||'')}">${escHtml(l.descricao||'—')}</span></div>
+          <span class="mov-c-cat" title="${escHtml(catLabel(l))}">${escHtml(catLabel(l))}</span>
+          <span class="mov-c-conta" title="${escHtml(contaLabel(l))}">${escHtml(contaLabel(l))}</span>
+          <span class="mov-c-valor" style="color:${isRec?'#5E7C58':'#A65A4A'};">${isRec?'+':'−'} ${fmtR(Math.abs(+l.valor||0))}</span>
+          <span class="mov-c-sit" style="background:${st2.bg};color:${st2.fg};">${st2.txt}</span>
+          <span class="mov-c-acao" onclick="verLancamentoDrawer('${l.id}')">Abrir</span>
+        </div>`;
+      }).join('');
     }
     if(pag){
       const buttons = [];
       buttons.push(`<button class="btn btn-ghost btn-xs" ${st.page<=1?'disabled':''} onclick="irParaPaginaLancs(${st.page-1})">← Anterior</button>`);
-      // Janela de páginas
       const around = 2;
       const pages = new Set([1, st.totalPages, st.page]);
       for(let i=Math.max(1,st.page-around); i<=Math.min(st.totalPages,st.page+around); i++) pages.add(i);
@@ -28587,9 +29235,10 @@ async function carregarPaginaLancs(){
       pag.innerHTML = `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">${buttons.join('')}</div>
         <span style="font-size:11.5px;color:var(--text-3);">${res.total.toLocaleString('pt-BR')} no total</span>`;
     }
+    _atualizarLinhasESelecao();
   } catch(e){
     console.warn('Erro carregar lançamentos:', e.message);
-    if(tbody) tbody.innerHTML = `<tr><td colspan="7" style="padding:30px;text-align:center;color:var(--danger);">Erro: ${escHtml(e.message)}</td></tr>`;
+    if(tbody) tbody.innerHTML = `<div style="padding:30px;text-align:center;color:var(--danger);">Erro: ${escHtml(e.message)}</div>`;
   } finally {
     st.loading = false;
   }
@@ -30972,6 +31621,10 @@ function renderRelatorios(){
         <h1 class="cob-h1">Relatórios</h1>
         <div style="font-size:12.5px;color:var(--text-2);margin-top:3px;">Faturamento, cobranças e performance</div>
       </div>
+      <div style="display:flex;gap:8px;">
+        <span style="font-size:12.5px;font-weight:600;color:var(--text-2);border:1px solid var(--border);padding:8px 13px;border-radius:8px;cursor:pointer;" onclick="showPage('fin');setFinTab('relatorios')">Relatórios do Financeiro →</span>
+        <span style="font-size:12.5px;font-weight:600;color:var(--text-2);border:1px solid var(--border);padding:8px 13px;border-radius:8px;cursor:pointer;" onclick="showPage('fin');setFinTab('diagnostico')">Diagnóstico financeiro →</span>
+      </div>
     </div>
     <div class="tabs" style="margin-bottom:20px;">
       <div class="tab ${activeTab==='mensal'?'active':''}" onclick="setRelatTab('mensal',this)">Faturamento Mensal</div>
@@ -33131,6 +33784,7 @@ function renderConfiguracoes(){
     {id:'colaboradores',icon:ico('clients',15),label:'Colaboradores'},
     {id:'usuarios',icon:ico('lock',15),label:'Usuários'},
     {id:'categorias',icon:ico('tag',15),label:'Categorias'},
+    {id:'fin-cadastros',icon:ico('dollar',15),label:'Cadastros financeiros'},
     {id:'calculo',icon:ico('ruler',15),label:'Parâmetros de cálculo'},
     {id:'prazos',icon:ico('clock',15),label:'Prazos das etapas'},
     {id:'fases',icon:ico('charges',15),label:'Etiquetas'},
@@ -33210,6 +33864,28 @@ function renderCfgSection(section){
     nfaRenderModelos();
     nfaCarregarServicos();
     (async ()=>{ try{ _nfaHist = await nfaFetchHist(); nfaRenderConciliacao(); }catch(_){/* sem sessão/erro: só não mostra conciliação */} })();
+    return;
+  }
+
+  if(section==='fin-cadastros'){
+    // Cadastros do Financeiro (Contas/Cartões/Categorias/Contatos/Centros de custo) saíram
+    // do topo do Financeiro na reformulação do handoff (só 3 abas: Caixa/Movimentações/
+    // Recebíveis) — o CRUD continua morando lá (renderFin*), aqui é só o atalho de entrada.
+    const atalhos = [
+      {id:'contas', label:'Contas', desc:'Contas bancárias e caixas físicos usados nos lançamentos.'},
+      {id:'cartoes', label:'Cartões', desc:'Cartões de crédito/débito vinculados às contas.'},
+      {id:'categorias', label:'Categorias financeiras', desc:'Plano de contas usado no DRE e nos lançamentos.'},
+      {id:'contatos', label:'Contatos', desc:'Fornecedores e clientes usados nos lançamentos.'},
+      {id:'centroscusto', label:'Centros de custo', desc:'Rateio de despesas por centro de custo.'},
+    ];
+    el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:6px;">Cadastros financeiros</h3>
+      <div style="font-size:12.5px;color:var(--text-2);margin-bottom:18px;">Telas do Financeiro — abrem na aba Financeiro do menu principal.</div>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        ${atalhos.map(a=>`<div style="display:flex;align-items:center;gap:14px;padding:13px 16px;border:1px solid var(--border);border-radius:10px;cursor:pointer;" onclick="showPage('fin');setFinTab('${a.id}')">
+          <div style="flex:1;min-width:0;"><div style="font-size:13.5px;font-weight:600;color:var(--text);">${escHtml(a.label)}</div><div style="font-size:12px;color:var(--text-3);">${escHtml(a.desc)}</div></div>
+          <span style="font-size:12.5px;color:var(--accent-2);font-weight:600;">Abrir →</span>
+        </div>`).join('')}
+      </div>`;
     return;
   }
 
