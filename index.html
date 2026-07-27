@@ -9495,7 +9495,11 @@ async function renderPainel(){
 
   // Recuperado no mês = dinheiro que de fato entrou (parcelas de acordo pagas).
   const now = new Date();
-  const ymAtual = _metaYmd(now).slice(0,7); // mês LOCAL (evita virar o mês 3h cedo em UTC-3)
+  // Mês de referência do card "Acordos do mês" — navegável (‹ Hoje ›), independente do
+  // resto do Painel (fila de decisão, carteira ativa, riscos seguem sempre "hoje real").
+  const _mesOffset = +(window._painelMesOffset)||0;
+  const mesRef = new Date(now.getFullYear(), now.getMonth()+_mesOffset, 1);
+  const ymAtual = _metaYmd(mesRef).slice(0,7); // mês LOCAL (evita virar o mês 3h cedo em UTC-3)
   const totalRecuperado = recuperadoNoMes(ymAtual);
 
   // Contatos (DB.devedores) seguem alimentando vencimentos e cache do Asaas.
@@ -9530,7 +9534,7 @@ async function renderPainel(){
   const nomeUsuario = (currentUser && currentUser.nome) ? currentUser.nome.split(' ')[0] : 'gestor';
   const diasSemana = ['DOMINGO','SEGUNDA-FEIRA','TERÇA-FEIRA','QUARTA-FEIRA','QUINTA-FEIRA','SEXTA-FEIRA','SÁBADO'];
   const mesesNomes = ['JANEIRO','FEVEREIRO','MARÇO','ABRIL','MAIO','JUNHO','JULHO','AGOSTO','SETEMBRO','OUTUBRO','NOVEMBRO','DEZEMBRO'];
-  const mesAtual = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][now.getMonth()];
+  const mesAtual = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][mesRef.getMonth()];
   const dataEyebrow = `${diasSemana[now.getDay()]}, ${now.getDate()} DE ${mesesNomes[now.getMonth()]} DE ${now.getFullYear()}`;
 
   // Em negociação (KPI): cobranças ativas em status de negociação.
@@ -9645,7 +9649,7 @@ async function renderPainel(){
     const supa = getSupabase();
     if(supa){
       const ymIni = ymAtual+'-01';
-      const dNext = new Date(now.getFullYear(), now.getMonth()+1, 1).toISOString().slice(0,10);
+      const dNext = new Date(mesRef.getFullYear(), mesRef.getMonth()+1, 1).toISOString().slice(0,10);
       const r = await supa.from('acordos').select('id,valor_total,parcelas,created_at,status_zapsign')
         .eq('status_zapsign','assinado').gte('created_at', ymIni).lt('created_at', dNext);
       if(!r.error) acordosMesRows = r.data||[];
@@ -9656,17 +9660,29 @@ async function renderPainel(){
 
   // "A receber no mês" — boletos Asaas ativos (PENDING) com vencimento no mês (cache por devedor).
   const inicioMes = ymAtual+'-01';
-  const fimMes    = new Date(now.getFullYear(), now.getMonth()+1, 0).toISOString().slice(0,10);
+  const fimMes    = new Date(mesRef.getFullYear(), mesRef.getMonth()+1, 0).toISOString().slice(0,10);
   let aReceberMes = 0, aReceberQtd = 0;
   devs.forEach(d=>{ (d.asaasCharges||[]).filter(c=>c.status==='PENDING' && c.dueDate && c.dueDate>=inicioMes && c.dueDate<=fimMes).forEach(c=>{ aReceberMes+=(+c.value||0); aReceberQtd++; }); });
 
-  // Dias úteis restantes no mês (seg–sex; sem calendário de feriados).
-  let diasUteisRest=0; { const d=new Date(now); d.setDate(d.getDate()+1); while(d.getMonth()===now.getMonth()){ const dow=d.getDay(); if(dow!==0&&dow!==6) diasUteisRest++; d.setDate(d.getDate()+1); } }
+  // Dias úteis do mês de referência (seg–sex; sem calendário de feriados). No mês
+  // corrente, conta só os que restam (a partir de amanhã) — meta prospectiva; em
+  // outro mês (navegado via ‹ ›), conta o mês inteiro — é só uma média informativa.
+  let diasUteisRest=0;
+  if(_mesOffset===0){
+    const d=new Date(now); d.setDate(d.getDate()+1);
+    while(d.getMonth()===now.getMonth()){ const dow=d.getDay(); if(dow!==0&&dow!==6) diasUteisRest++; d.setDate(d.getDate()+1); }
+  } else {
+    const d=new Date(mesRef.getFullYear(), mesRef.getMonth(), 1);
+    while(d.getMonth()===mesRef.getMonth()){ const dow=d.getDay(); if(dow!==0&&dow!==6) diasUteisRest++; d.setDate(d.getDate()+1); }
+  }
   const faltamMeta       = Math.max(0, metaMensal - totalRecuperado);
-  const fecharPorDiaUtil = diasUteisRest>0 ? faltamMeta/diasUteisRest : faltamMeta;
+  const fecharPorDiaUtil = _mesOffset===0
+    ? (diasUteisRest>0 ? faltamMeta/diasUteisRest : faltamMeta)
+    : (diasUteisRest>0 ? acordadoNoMes/diasUteisRest : acordadoNoMes);
   const pctRecComprometido  = metaMensal>0 ? Math.min(100, (totalRecuperado/metaMensal)*100) : 0;
   const pctAcordComprometido = metaMensal>0 ? Math.min(100-pctRecComprometido, (acordadoNoMes/metaMensal)*100) : 0;
   const pctMetaComprometido = Math.round(pctRecComprometido+pctAcordComprometido);
+  const _mesAnoDiff = mesRef.getFullYear()!==now.getFullYear();
 
   // ── Riscos silenciosos ────────────────────────────────────────────────────
   const prescreverRows = cobrAtivas.filter(c=>cobPrescricaoPerto(c) && !/quitad|encerrad|recebid|baixad|devolvid/i.test(c.status||''));
@@ -9701,6 +9717,8 @@ async function renderPainel(){
       #page-painel .pnl-acordos-v.hl{color:var(--accent-2);}
       #page-painel .pnl-acordos-v.green{color:var(--success);}
       #page-painel .pnl-acordos-sub{font-size:11.5px;color:var(--text-3);margin-top:2px;}
+      #page-painel .pnl-mes-nav{font-size:15px;color:var(--text-3);cursor:pointer;padding:0 2px;margin:0 5px;user-select:none;line-height:1;}
+      #page-painel .pnl-mes-nav:hover{color:var(--text);}
       #page-painel .pnl-barwrap{display:flex;flex-direction:column;gap:6px;margin-top:16px;}
       #page-painel .pnl-bar{height:8px;background:var(--card-2);border-radius:4px;overflow:hidden;display:flex;}
       #page-painel .pnl-bar-legend{display:flex;gap:14px;font-size:11px;color:var(--text-3);align-items:center;}
@@ -9770,13 +9788,22 @@ async function renderPainel(){
     </div>`:''; })()}
 
     <div class="cob-panel" style="margin-bottom:16px;">
-      <div class="cob-panel-head"><span class="cob-panel-title">Acordos de ${mesAtual.toLowerCase()}</span><span class="cob-panel-sub">${acordosMesRows.length} fechado${acordosMesRows.length!==1?'s':''} · ${parcelasGeradas} parcela${parcelasGeradas!==1?'s':''} gerada${parcelasGeradas!==1?'s':''}</span><a class="cob-link" style="margin-left:auto;" onclick="showPage('cobr')">Ver acordos →</a></div>
+      <div class="cob-panel-head">
+        <span class="pnl-mes-nav" onclick="painelSetMes(-1)" title="Mês anterior">‹</span>
+        <span class="cob-panel-title">Acordos de ${mesAtual.toLowerCase()}${_mesAnoDiff?` de ${mesRef.getFullYear()}`:''}</span>
+        <span class="pnl-mes-nav" onclick="painelSetMes(1)" title="Próximo mês">›</span>
+        ${_mesOffset!==0?`<a class="cob-link" style="margin-left:8px;" onclick="painelResetMes()">Hoje</a>`:''}
+        <span class="cob-panel-sub">${acordosMesRows.length} fechado${acordosMesRows.length!==1?'s':''} · ${parcelasGeradas} parcela${parcelasGeradas!==1?'s':''} gerada${parcelasGeradas!==1?'s':''}</span>
+        <a class="cob-link" style="margin-left:auto;" onclick="showPage('cobr')">Ver acordos →</a>
+      </div>
       <div class="cob-panel-body">
         <div class="pnl-acordos-grid">
           <div><div class="pnl-acordos-lb">ACORDADO NO MÊS</div><div class="pnl-acordos-v">${fmtR(acordadoNoMes)}</div><div class="pnl-acordos-sub">${acordosMesRows.length} acordo${acordosMesRows.length!==1?'s':''} assinado${acordosMesRows.length!==1?'s':''}</div></div>
           <div><div class="pnl-acordos-lb">A RECEBER EM ${mesAtual.toUpperCase()}</div><div class="pnl-acordos-v green">${fmtR(aReceberMes)}</div><div class="pnl-acordos-sub">${aReceberQtd} boleto${aReceberQtd!==1?'s':''} ativo${aReceberQtd!==1?'s':''}</div></div>
           <div><div class="pnl-acordos-lb">META DO MÊS</div><div class="pnl-acordos-v">${fmtR(metaMensal)}</div><div class="pnl-acordos-sub">recuperado ${fmtR(totalRecuperado)}${metaProg!=null?` · ${metaProg}%`:''}</div></div>
-          <div><div class="pnl-acordos-lb hl">FECHAR POR DIA ÚTIL</div><div class="pnl-acordos-v hl">${fmtR(fecharPorDiaUtil)}</div><div class="pnl-acordos-sub">${faltamMeta>0?`faltam ${fmtR(faltamMeta)} em ${diasUteisRest} dia${diasUteisRest!==1?'s':''}`:'meta atingida'}</div></div>
+          ${_mesOffset===0
+            ? `<div><div class="pnl-acordos-lb hl">FECHAR POR DIA ÚTIL</div><div class="pnl-acordos-v hl">${fmtR(fecharPorDiaUtil)}</div><div class="pnl-acordos-sub">${faltamMeta>0?`faltam ${fmtR(faltamMeta)} em ${diasUteisRest} dia${diasUteisRest!==1?'s':''}`:'meta atingida'}</div></div>`
+            : `<div><div class="pnl-acordos-lb hl">MÉDIA POR DIA ÚTIL</div><div class="pnl-acordos-v hl">${fmtR(fecharPorDiaUtil)}</div><div class="pnl-acordos-sub">${diasUteisRest} dia${diasUteisRest!==1?'s ':' '}${diasUteisRest!==1?'úteis':'útil'} no mês</div></div>`}
         </div>
         <div class="pnl-barwrap">
           <div class="pnl-bar"><div style="width:${pctRecComprometido}%;background:var(--success);"></div><div style="width:${pctAcordComprometido}%;background:var(--accent);"></div></div>
@@ -9858,6 +9885,16 @@ async function renderPainel(){
 function painelSetFiltro(kind, val){
   window._painelFiltro = window._painelFiltro || { cliente:'', operador:'' };
   window._painelFiltro[kind] = val || '';
+  renderPainel();
+}
+
+// Navegação de mês do card "Acordos do mês" (‹ Hoje ›) — não afeta o resto do Painel.
+function painelSetMes(delta){
+  window._painelMesOffset = (+(window._painelMesOffset)||0) + delta;
+  renderPainel();
+}
+function painelResetMes(){
+  window._painelMesOffset = 0;
   renderPainel();
 }
 /* Modo "Organizar" (arrastar/ocultar quadros) do Painel v2 — desativado na reformulação
