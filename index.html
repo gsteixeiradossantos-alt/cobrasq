@@ -21420,6 +21420,50 @@ function cnpjLookupErroMsg(r){
     default:           return 'Erro de rede. Verifique a conexão e tente novamente.';
   }
 }
+
+// ─── CNPJ → sócios (QSA) ────────────────────────────────────────────────────
+// Consulta o quadro societário de um CNPJ (grátis, browser-side, sem token).
+// Fonte 1: CNPJá Open (open.cnpja.com — traz company.members[] com nome/CPF mascarado
+// e o papel do sócio). Fonte 2 (fallback): BrasilAPI (data.qsa[]). Retorna sempre
+// { ok:true, fonte, socios:[{nome, doc, papel}] } ou { ok:false, error }.
+function _normSocioDoc(s){
+  // Mantém o CPF/CNPJ como veio (a Receita já entrega mascarado, ex.: "***456789**").
+  return String(s == null ? '' : s).trim();
+}
+async function cnpjSociosLookup(cnpj){
+  cnpj = String(cnpj||'').replace(/\D/g,'');
+  if(cnpj.length !== 14) return { ok:false, error:'cnpj_invalido' };
+  // 1) CNPJá Open
+  try{
+    const r = await _cnpjFetch(`https://open.cnpja.com/office/${cnpj}`);
+    if(r.ok){
+      const j = await r.json();
+      const membros = (j && j.company && Array.isArray(j.company.members)) ? j.company.members : [];
+      const socios = membros.map(m=>{
+        const p = (m && m.person) || {};
+        return { nome:p.name||'', doc:_normSocioDoc(p.taxId||p.tax_id||''),
+          papel:(m.role && (m.role.text||m.role)) || '' };
+      }).filter(s=>s.nome);
+      if(socios.length) return { ok:true, fonte:'CNPJá Open', socios };
+    }
+  }catch(_){ /* tenta o fallback */ }
+  // 2) BrasilAPI (qsa)
+  try{
+    const r2 = await _cnpjFetch(`https://brasilapi.com.br/api/cnpj/v1/${cnpj}`);
+    if(r2.ok){
+      const j2 = await r2.json();
+      const qsa = Array.isArray(j2.qsa) ? j2.qsa : [];
+      const socios = qsa.map(q=>({
+        nome: q.nome_socio || q.nome || '',
+        doc: _normSocioDoc(q.cnpj_cpf_do_socio || q.cpf_cnpj_socio || ''),
+        papel: q.qualificacao_socio || q.codigo_qualificacao_socio || ''
+      })).filter(s=>s.nome);
+      return { ok:true, fonte:'BrasilAPI', socios };
+    }
+    if(r2.status===404) return { ok:false, error:'not_found' };
+  }catch(_){ /* cai no erro genérico */ }
+  return { ok:false, error:'network' };
+}
 function mcliRenderCnpjImport(){
   const wrap = document.getElementById('mcli-cnpj-wrap');
   if(!wrap) return;
@@ -35459,6 +35503,11 @@ function abrirTermoAcordoJ(devId){
     <label style="font-size:13px;"><input type="radio" name="tajGenero" value="M"> Masculino</label></div>
   ${F('tajDoc','CPF/CNPJ',dev.doc||'')}
   ${F('tajTel','Telefone (link no WhatsApp)',dev.tel||dev.telefone||'')}
+  <div style="grid-column:1/3;">
+    <button type="button" class="btn btn-ghost btn-sm" id="taj-verificar" onclick="_tajVerificarDoc()">🔎 Verificar sócios / empresas</button>
+    <span style="font-size:11px;color:var(--text-3);margin-left:8px;">PJ → sócios (grátis) · PF → empresas no nome (miolo do CPF)</span>
+    <div id="tajVerifBox" style="display:none;margin-top:8px;padding:8px 10px;background:var(--active-bg);border-radius:6px;"></div>
+  </div>
   <div style="grid-column:1/3;"><label ${lbl}>Credor</label><input id="tajCredor" value="${escHtml(credNome)}" oninput="_tajAoTrocarCredor()" ${inp}>
     <div style="font-size:11px;color:var(--text-3);margin-top:4px;">No acordo judicial a autora é a COBRASQ. Ajuste se for o cedente real.</div></div>
   <div style="grid-column:1/3;"><label ${lbl}>Qualificação do credor</label><textarea id="tajCredorQualif" style="width:100%;min-height:52px;padding:7px;border:1px solid var(--border);border-radius:5px;font-size:12px;background:var(--surface);color:var(--text);"></textarea></div>
@@ -35511,7 +35560,7 @@ function _tajOnClausula4(){
   if(des) des.style.display=(mode==='desistencia')?'grid':'none';
   if(sis) sis.style.display=(mode==='sisbajud')?'grid':'none';
 }
-function _tajAddDevedor(){
+function _tajAddDevedor(prefill){
   const wrap=document.getElementById('tajDevExtras'); if(!wrap) return; const idx=++_tajState.seq;
   const inp='style="width:100%;padding:6px;border:1px solid var(--border);border-radius:5px;font-size:13px;background:var(--surface);color:var(--text);"';
   const lbl='style="display:block;font-size:11px;color:var(--text-3);margin-bottom:3px;"';
@@ -35526,6 +35575,17 @@ function _tajAddDevedor(){
     </div>
     <label style="font-size:12px;display:block;margin-top:6px;"><input type="checkbox" class="tajExMesmoEnd" checked> Mesmo endereço do principal</label>`;
   wrap.appendChild(row);
+  // Pré-preenche quando adicionado a partir da verificação de sócios/empresas (avalista).
+  if(prefill){
+    const set=(sel,v)=>{ const el=row.querySelector(sel); if(el && v!=null) el.value=v; };
+    set('.tajExNome', prefill.nome||'');
+    // Só leva o documento se vier completo (o QSA público vem mascarado — não serve p/ ZapSign).
+    const docLimpo=String(prefill.documento||'').replace(/\D/g,'');
+    set('.tajExDoc', (docLimpo.length===11||docLimpo.length===14) ? prefill.documento : '');
+    set('.tajExTel', prefill.telefone||'');
+    if(prefill.genero){ const g=row.querySelector('.tajExGenero'); if(g) g.value=prefill.genero; }
+  }
+  return row;
 }
 function _tajLerExtras(){
   return Array.from(document.querySelectorAll('#tajDevExtras .taj-dev-extra')).map(r=>{
@@ -35534,6 +35594,90 @@ function _tajLerExtras(){
     return { nome, documento:doc, tipo:_tajTipoDoc(doc), genero:g('.tajExGenero')||'F', telefone:g('.tajExTel'), mesmoEndereco:!!(chk&&chk.checked) };
   }).filter(Boolean);
 }
+// ── Verificação de sócios/empresas do devedor (avalista) ───────────────────
+// PJ (CNPJ) → quadro societário (grátis, browser-side). PF (CPF) → empresas no nome
+// via proxy pago gated (/api/automacao?action=cnpja). Resultado permite adicionar
+// como signatário extra (avalista), que herda a âncora <<assdevN>> no ZapSign.
+async function _tajVerificarDoc(){
+  const doc=(document.getElementById('tajDoc')||{}).value||'';
+  const d=String(doc).replace(/\D/g,'');
+  const box=document.getElementById('tajVerifBox'); if(!box) return;
+  const btn=document.getElementById('taj-verificar');
+  const msg=(html)=>{ box.style.display='block'; box.innerHTML=html; };
+  if(d.length!==11 && d.length!==14){ msg('<div style="color:var(--danger);font-size:12px;">Informe um CPF (11 dígitos) ou CNPJ (14) válido no campo CPF/CNPJ acima.</div>'); return; }
+  if(btn){ btn.disabled=true; btn.textContent='Consultando…'; }
+  msg('<div style="font-size:12px;color:var(--text-3);">Consultando…</div>');
+  try{
+    if(d.length===14){
+      const r=await cnpjSociosLookup(d);
+      if(!r.ok){ msg('<div style="color:var(--danger);font-size:12px;">'+escHtml(cnpjLookupErroMsg(r))+'</div>'); return; }
+      _tajRenderSocios(r);
+    } else {
+      const dev=(DB.devedores||[]).find(x=>x.id===_tajState.devId)||{};
+      const nome=dev.nome||'';
+      if(!nome){ msg('<div style="color:var(--danger);font-size:12px;">Devedor sem nome cadastrado — a busca reversa por CPF precisa do nome completo.</div>'); return; }
+      const resp=await fetch('/api/automacao?action=cnpja',{ method:'POST', headers:{ 'Content-Type':'application/json', ...(await authHeaders()) }, body:JSON.stringify({ nome, cpf:d }) });
+      const j=await resp.json().catch(()=>({}));
+      if(!resp.ok){ msg('<div style="color:var(--danger);font-size:12px;">'+escHtml(j.error||('Falha HTTP '+resp.status))+'</div>'); return; }
+      _tajRenderEmpresasPF(j, nome, d);
+    }
+  }catch(e){ msg('<div style="color:var(--danger);font-size:12px;">Erro: '+escHtml((e&&e.message)||String(e))+'</div>'); }
+  finally{ if(btn){ btn.disabled=false; btn.textContent='🔎 Verificar sócios / empresas'; } }
+}
+function _tajRenderSocios(r){
+  const box=document.getElementById('tajVerifBox'); if(!box) return;
+  const socios=(r&&r.socios)||[]; _tajState._socios=socios;
+  if(!socios.length){ box.innerHTML='<div style="font-size:12px;color:var(--text-3);">Nenhum sócio no quadro societário (fonte: '+escHtml((r&&r.fonte)||'?')+').</div>'; return; }
+  const linhas=socios.map((s,i)=>`
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);">
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:12.5px;font-weight:600;">${escHtml(s.nome)}</div>
+        <div style="font-size:11px;color:var(--text-3);">${escHtml([s.doc,s.papel].filter(Boolean).join(' · '))||'—'}</div>
+      </div>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="_tajAddAvalistaFromSocio(${i})">+ avalista</button>
+    </div>`).join('');
+  box.innerHTML=`<div style="font-size:11px;font-weight:700;color:var(--text-3);margin-bottom:4px;">SÓCIOS · fonte: ${escHtml(r.fonte)}</div>${linhas}
+    <div style="font-size:10.5px;color:var(--text-3);margin-top:6px;">O CPF do sócio vem <strong>mascarado</strong> na base pública — preencha o documento completo na linha do avalista antes de enviar ao ZapSign.</div>`;
+}
+function _tajRenderEmpresasPF(j, nome, cpf){
+  const box=document.getElementById('tajVerifBox'); if(!box) return;
+  if(j && j.pendente){
+    const link=j.fallbackUrl||('https://casadosdados.com.br/solucao/cnpj/busca-avancada?socio='+encodeURIComponent(nome||''));
+    box.innerHTML=`<div style="font-size:12px;color:var(--text-2);">
+      Busca automática por sócio <strong>indisponível</strong>: ${escHtml(j.motivo||'provedor pago não configurado')}.
+      <div style="margin-top:4px;font-size:11px;color:var(--text-3);">${escHtml(j.hint||'')}</div>
+      <a href="${escHtml(link)}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm" style="margin-top:8px;">Buscar por nome na Casa dos Dados ↗</a>
+    </div>`;
+    return;
+  }
+  const empresas=(j&&j.empresas)||[]; _tajState._empresas=empresas;
+  const miolo=(String(cpf||'').replace(/\D/g,'').slice(3,9))||'—';
+  if(!empresas.length){ box.innerHTML=`<div style="font-size:12px;color:var(--text-3);">Nenhuma empresa encontrada no nome de <strong>${escHtml(nome||'')}</strong> (miolo do CPF ${escHtml(miolo)}).</div>`; return; }
+  const linhas=empresas.map((e,i)=>{
+    const tag = e.confere===true ? '<span style="font-size:10px;color:var(--success);font-weight:700;">✓ confere CPF</span>'
+              : e.confere===false ? '<span style="font-size:10px;color:var(--danger);font-weight:700;">✗ CPF não bate</span>' : '';
+    return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);">
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:12.5px;font-weight:600;">${escHtml(e.nome||'')} ${tag}</div>
+        <div style="font-size:11px;color:var(--text-3);">${escHtml([e.cnpj,e.papel].filter(Boolean).join(' · '))}</div>
+      </div>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="_tajAddAvalistaFromEmpresa(${i})">+ avalista</button>
+    </div>`;
+  }).join('');
+  const fonte=(j&&j.fonte)?' · fonte: '+escHtml(j.fonte):'';
+  box.innerHTML=`<div style="font-size:11px;font-weight:700;color:var(--text-3);margin-bottom:4px;">EMPRESAS NO NOME · miolo do CPF ${escHtml(miolo)}${fonte}</div>${linhas}`;
+}
+function _tajAddAvalistaFromSocio(i){
+  const s=(_tajState._socios||[])[i]; if(!s) return;
+  _tajAddDevedor({ nome:s.nome, documento:s.doc, tipo:'PF' });
+  if(typeof showToast==='function') showToast('Sócio adicionado como signatário — complete o CPF/telefone.','success');
+}
+function _tajAddAvalistaFromEmpresa(i){
+  const e=(_tajState._empresas||[])[i]; if(!e) return;
+  _tajAddDevedor({ nome:e.nome, documento:e.cnpj, tipo:'PJ' });
+  if(typeof showToast==='function') showToast('Empresa adicionada como signatária — informe o CPF do representante e o telefone.','success');
+}
+
 function _tajDados(){
   const dev=(DB.devedores||[]).find(d=>d.id===_tajState.devId)||{};
   const v=id=>(document.getElementById(id)||{}).value||''; const num=id=>parseFloat(v(id))||0;
