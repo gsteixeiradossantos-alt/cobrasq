@@ -2393,6 +2393,12 @@ body:not(.cobr-cream) .cob-stpop, .dark .cob-stpop { background: var(--card); }
             <option value="filiais">Apenas filiais</option>
           </select>
         </div>
+        <div id="topbar-viewas-wrap" style="display:none;align-items:center;gap:6px;padding:0 8px;border-right:1px solid var(--border);height:30px;margin-right:4px;">
+          <button class="topbar-btn" id="btn-viewas-abrir" title="Ver o sistema como outro usuário" onclick="viewAsAbrirModal()" style="display:flex;align-items:center;gap:5px;font-size:12px;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            Ver como
+          </button>
+        </div>
         <button class="topbar-btn" id="btn-topbar-add" title="Novo" style="display:none"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         <button class="topbar-btn" id="btn-topbar-import" title="Importar" style="display:none"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></button>
         <div style="width:1px;height:22px;background:var(--border);margin:0 4px;"></div>
@@ -4294,6 +4300,26 @@ body:not(.cobr-cream) .cob-stpop, .dark .cob-stpop { background: var(--card); }
     <div class="modal-footer">
       <button class="btn btn-ghost" data-close="modal-confirm">Cancelar</button>
       <button class="btn btn-danger" id="btn-confirm-delete">&#128465; Excluir</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: VER COMO (pré-visualização de outro usuário) -->
+<div id="modal-viewas" class="overlay">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <span class="modal-title">Ver como</span>
+      <button class="modal-close" data-close="modal-viewas">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:12.5px;color:var(--text-3);line-height:1.5;margin:0 0 10px;">
+        Pré-visualização com os dados já carregados — não é login real, e telas com regra própria de
+        servidor (ex.: portal do cedente premium) podem não refletir 100% o que a pessoa veria.
+      </p>
+      <input type="text" id="viewas-busca" placeholder="Buscar colaborador, cliente/cedente ou devedor…"
+        style="width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:13px;background:var(--bg);color:var(--text);margin-bottom:10px;"
+        oninput="viewAsFiltrar(this.value)">
+      <div id="viewas-resultados" style="max-height:340px;overflow-y:auto;"></div>
     </div>
   </div>
 </div>
@@ -7149,6 +7175,7 @@ function iniciarSessao(){
   hidratarPodeVerGrupo().finally(()=>{
     refreshGrupoViewTopbar();
   });
+  refreshViewAsTopbar();
 
   // Aquece o roster de usuários (app_users) pra resolver nomes de responsável na tela.
   // Fire-and-forget: se falhar, nomeResponsavel() cai no que já estiver salvo no caso.
@@ -20955,6 +20982,122 @@ function applyGrupoViewFilterDevedores(list){
   if(!podeVerGrupoAtual()) return list;
   const clientesPermitidos = new Set(applyGrupoViewFilterClientes(DB.clientes||[]).map(c=>c.id));
   return list.filter(d => !d.clienteId || clientesPermitidos.has(d.clienteId));
+}
+
+// ─── "VER COMO" — pré-visualização de outro usuário (só o Administrador) ───
+// Não é login real: não troca sessão/senha, só filtra os dados já carregados
+// (RLS do proprietário já bypassa tudo) e roteia pra tela daquele tipo de usuário.
+// _viewAsRealUser guarda o currentUser de verdade enquanto dura a simulação.
+let _viewAsUser = null;
+let _viewAsRealUser = null;
+
+function refreshViewAsTopbar(){
+  const wrap = document.getElementById('topbar-viewas-wrap');
+  if(wrap) wrap.style.display = (currentUser && currentUser.tipo === 'gestor' && !_viewAsUser) ? 'flex' : 'none';
+}
+
+async function viewAsAbrirModal(){
+  if(!currentUser || currentUser.tipo !== 'gestor'){ showToast('Só o administrador pode usar "Ver como".','danger'); return; }
+  const busca = document.getElementById('viewas-busca');
+  if(busca) busca.value = '';
+  if(typeof carregarRosterAppUsers==='function' && !Array.isArray(_rosterAppUsers)){ try{ await carregarRosterAppUsers(); }catch(_){} }
+  viewAsFiltrar('');
+  openModal('modal-viewas');
+  setTimeout(()=>busca?.focus(), 100);
+}
+
+function _viewAsNorm(s){
+  return String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().trim();
+}
+function viewAsFiltrar(termoRaw){
+  const host = document.getElementById('viewas-resultados');
+  if(!host) return;
+  const norm = _viewAsNorm;
+  const termo = norm(termoRaw||'').trim();
+  const LIMITE = 25;
+  const jsStr = (s)=> String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+  const linha = (tipo, id, nome, sub)=> `<div class="viewas-row" onclick="viewAsIniciar('${tipo}','${jsStr(id)}','${jsStr(nome)}')"
+      style="display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:var(--radius-sm);cursor:pointer;" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''">
+      <div style="width:28px;height:28px;border-radius:50%;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;">${escHtml(initials(nome))}</div>
+      <div style="min-width:0;"><div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(nome)}</div><div style="font-size:11px;color:var(--text-3);">${sub}</div></div>
+    </div>`;
+  const bloco = (titulo, itens)=> itens.length ? `<div style="font-size:10.5px;font-weight:700;color:var(--text-3);text-transform:uppercase;margin:10px 0 4px;">${titulo}</div>${itens.join('')}` : '';
+
+  const colabs = (Array.isArray(_rosterAppUsers) ? _rosterAppUsers : [])
+    .filter(u => u && u.nome && u.id !== currentUser?.supaId && (!termo || norm(u.nome).includes(termo) || norm(u.email||'').includes(termo)))
+    .slice(0, LIMITE)
+    .map(u=>linha('colaborador', u.id, u.nome, 'Colaborador'));
+
+  const cedentes = (DB.clientes||[])
+    .filter(c => !c.arquivado && (!termo || norm(c.nome).includes(termo) || norm(c.nomeFantasia||'').includes(termo) || docSoDigitos(c.doc).includes(termo.replace(/\D/g,''))))
+    .slice(0, LIMITE)
+    .map(c=>linha('cedente', c.id, c.nome, 'Cliente / cedente'));
+
+  const devedoresList = termo.length >= 2 ? (DB.devedores||[])
+    .filter(d => norm(d.nome).includes(termo) || (termo.replace(/\D/g,'').length>=3 && docSoDigitos(d.doc).includes(termo.replace(/\D/g,''))))
+    .slice(0, LIMITE)
+    .map(d=>linha('devedor', d.id, d.nome, 'Devedor')) : [];
+
+  const partes = [bloco('Colaboradores', colabs), bloco('Cedentes', cedentes), bloco('Devedores', devedoresList)].filter(Boolean);
+  host.innerHTML = partes.length ? partes.join('') : (termo.length < 2
+    ? '<div style="padding:14px 4px;font-size:12.5px;color:var(--text-3);">Digite ao menos 2 letras para buscar devedores (lista pode ser grande). Colaboradores e cedentes já aparecem acima.</div>'
+    : '<div style="padding:14px 4px;font-size:12.5px;color:var(--text-3);">Nada encontrado.</div>');
+}
+
+function viewAsIniciar(tipo, id, nome){
+  if(!currentUser || currentUser.tipo !== 'gestor'){ showToast('Só o administrador pode usar "Ver como".','danger'); return; }
+  closeModal('modal-viewas');
+  if(tipo === 'colaborador'){
+    // Não troca de tela nem de currentUser — só pré-filtra Cobranças/Devedores por esse responsável,
+    // reaproveitando os filtros que já existem (sem risco de RLS, é tudo array já em memória).
+    _viewAsUser = { tipo, id, nome };
+    if(typeof cobrFilter === 'object') cobrFilter.responsavel = id;
+    if(typeof devFilter === 'object') devFilter.resp = id;
+    showPage('cobr');
+    if(typeof renderCobrancas === 'function') renderCobrancas();
+    viewAsRenderBanner();
+    refreshViewAsTopbar();
+    return;
+  }
+  _viewAsRealUser = _viewAsRealUser || currentUser;
+  _viewAsUser = { tipo, id, nome };
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  if(tipo === 'cedente'){
+    currentUser = { tipo:'cedente', clienteId:id, nome, email:'', avatar:initials(nome), role:'Cedente (pré-visualização)', supaId:_viewAsRealUser.supaId, grupoEconomicoId:null };
+    document.getElementById('portalCedente')?.classList.add('active');
+    if(typeof cpPage !== 'undefined') cpPage = 'dashboard';
+    if(typeof renderPortalCedente === 'function') renderPortalCedente();
+  } else if(tipo === 'devedor'){
+    // Sem portalSessao de propósito: renderPortalDevedor() já tem fallback pra ler
+    // DB.devedores direto (visão de staff) quando não há token de sessão do portal.
+    currentUser = { tipo:'devedor', devedorId:id, nome, avatar:initials(nome), role:'Devedor (pré-visualização)' };
+    document.getElementById('portalDevedor')?.classList.add('active');
+    if(typeof renderPortalDevedor === 'function') renderPortalDevedor();
+  }
+  viewAsRenderBanner();
+  refreshViewAsTopbar();
+}
+
+function viewAsSair(){
+  if(_viewAsRealUser){ currentUser = _viewAsRealUser; _viewAsRealUser = null; }
+  _viewAsUser = null;
+  if(typeof cobrFilter === 'object') cobrFilter.responsavel = '';
+  if(typeof devFilter === 'object') devFilter.resp = '';
+  document.getElementById('viewas-banner')?.remove();
+  if(typeof iniciarSessao === 'function') iniciarSessao();
+  refreshViewAsTopbar();
+}
+
+function viewAsRenderBanner(){
+  document.getElementById('viewas-banner')?.remove();
+  if(!_viewAsUser) return;
+  const rotulo = { colaborador:'colaborador', cedente:'cliente/cedente', devedor:'devedor' }[_viewAsUser.tipo] || _viewAsUser.tipo;
+  const div = document.createElement('div');
+  div.id = 'viewas-banner';
+  div.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#7c3aed;color:#fff;padding:8px 16px;font-size:13px;display:flex;align-items:center;justify-content:center;gap:12px;box-shadow:0 2px 8px rgba(0,0,0,.15);';
+  div.innerHTML = `<span>&#128065; Visualizando como <strong>${escHtml(_viewAsUser.nome)}</strong> (${rotulo}) — pré-visualização, não é login real</span>
+    <button onclick="viewAsSair()" style="background:#fff;color:#7c3aed;border:none;border-radius:5px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer;">Sair da pré-visualização</button>`;
+  document.body.prepend(div);
 }
 // ─── IMPLEMENTADO S7: Beatriz — Cadastro empresa via cartão CNPJ / contrato social ───
 let _mcliDiFile = null;
