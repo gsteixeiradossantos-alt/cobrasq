@@ -96,30 +96,39 @@ Deno.serve(async (req: Request) => {
     partes.push(opcoes);
     partes.push('Como você prefere seguir?');
   }
-  const mensagem = partes.join('\n\n') + '\n\n*Carlos • COBRASQ*';
+  const mensagem = partes.join('\n\n'); // registro/histórico: texto completo, sem assinatura duplicada por bloco
 
   const zHead: Record<string, string> = { 'Content-Type': 'application/json' };
   if (ZAPI_CLIENT_TOKEN) zHead['Client-Token'] = ZAPI_CLIENT_TOKEN;
   const sendUrl = `https://api.z-api.io/instances/${ZAPI_INSTANCE}/token/${ZAPI_TOKEN}/send-text`;
 
+  // Envia em BLOCOS (uma mensagem de WhatsApp por parte, como um humano digita),
+  // assinatura só no TOPO do 1º bloco — mesmo padrão do enviarBlocos em bia-atendimento.
+  const blocos = partes.slice();
+  blocos[0] = `*Carlos • COBRASQ*\n${blocos[0]}`;
+  const loteId = crypto.randomUUID();
   let envioOk = false;
   let outId = '';
-  try {
-    const r = await fetch(sendUrl, { method: 'POST', headers: zHead, body: JSON.stringify({ phone: telDestino, message: mensagem.slice(0, 4000) }) });
-    const rj = await r.json().catch(() => null);
-    if (r.ok && rj && !rj.error) {
-      envioOk = true;
-      outId = String(rj.messageId || rj.id || rj.zaapId || '');
-    } else {
-      return json({ error: `Z-API recusou o envio: ${JSON.stringify(rj || {}).slice(0, 300)}` }, 502);
+  for (const bloco of blocos) {
+    try {
+      const r = await fetch(sendUrl, { method: 'POST', headers: zHead, body: JSON.stringify({ phone: telDestino, message: bloco.slice(0, 4000) }) });
+      const rj = await r.json().catch(() => null);
+      if (r.ok && rj && !rj.error) {
+        envioOk = true;
+        const oid = String(rj.messageId || rj.id || rj.zaapId || '');
+        if (oid) {
+          if (!outId) outId = oid;
+          try { await sb.from('crm_mensagens_status').upsert({ message_id: oid, telefone_enviado: telDestino, status: 'sent', evento_em: new Date().toISOString(), raw_payload: { via: 'carlos-iniciar' } }, { onConflict: 'message_id' }); } catch { /* best-effort */ }
+          try { await sb.from('whatsapp_bia_enviadas').upsert({ message_id: oid, telefone: telDestino, lote_id: loteId }, { onConflict: 'message_id' }); } catch { /* best-effort */ }
+        }
+      } else if (bloco === blocos[0]) {
+        // se o 1º bloco falhar, aborta — não faz sentido mandar o resto sem a abertura
+        return json({ error: `Z-API recusou o envio: ${JSON.stringify(rj || {}).slice(0, 300)}` }, 502);
+      }
+    } catch (e: any) {
+      if (bloco === blocos[0]) return json({ error: `falha ao enviar via Z-API: ${e?.message || e}` }, 502);
     }
-  } catch (e: any) {
-    return json({ error: `falha ao enviar via Z-API: ${e?.message || e}` }, 502);
-  }
-
-  if (outId) {
-    try { await sb.from('crm_mensagens_status').upsert({ message_id: outId, telefone_enviado: telDestino, status: 'sent', evento_em: new Date().toISOString(), raw_payload: { via: 'carlos-iniciar' } }, { onConflict: 'message_id' }); } catch { /* best-effort */ }
-    try { await sb.from('whatsapp_bia_enviadas').upsert({ message_id: outId, telefone: telDestino, lote_id: crypto.randomUUID() }, { onConflict: 'message_id' }); } catch { /* best-effort */ }
+    await new Promise((r) => setTimeout(r, 400));
   }
 
   await sb.from('cobrancas').update({
