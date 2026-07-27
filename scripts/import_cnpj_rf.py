@@ -36,7 +36,7 @@ except ImportError:
 
 ROOT = Path(__file__).parent
 ENV_FILE = ROOT / ".env.local"
-BASE = "https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj"
+BASE = "https://arquivos.receitafederal.gov.br/cnpj/dados_abertos_cnpj"
 # O servidor da RFB (gov.br atrás de WAF) devolve 403 para o User-Agent padrão do
 # urllib. Nos passamos por um navegador em toda requisição.
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -101,7 +101,7 @@ def descobrir_mes(env: dict) -> str:
     print("❌ Não encontrei um mês publicado automaticamente.")
     print(f"   Última URL testada: {ultima_url}")
     print("   Defina RF_MES=AAAA-MM em .env.local (veja os meses em")
-    print("   https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj/ )")
+    print("   https://arquivos.receitafederal.gov.br/cnpj/dados_abertos_cnpj/ )")
     print("   ou ajuste RF_BASE_URL se a Receita mudou o caminho.")
     sys.exit(1)
 
