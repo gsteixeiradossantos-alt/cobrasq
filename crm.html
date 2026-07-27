@@ -1936,6 +1936,7 @@
 
   <div class="btn-row" style="margin-top:14px;">
     <button class="btn success small" id="btnIrFechamento" onclick="navegarPara('fechamento', casoAtual)" style="display:none;">💼 Tela de fechamento (gerar acordo)</button>
+    <button class="btn primary small" id="btnAtivarCarlos" onclick="ativarCarlos()" style="display:none;">🤖 Ativar Carlos</button>
     <button class="btn secondary small" id="btnEditarCaso" onclick="abrirModalEditarCaso()">Editar dados do caso</button>
     <button class="btn secondary small" id="btnTelefoneInvalido" onclick="marcarTelefoneInvalido()">📵 Telefone inválido</button>
     <button class="btn secondary small" onclick="abrirResumoAstrea(casoAtual)">📋 Resumo pro Astrea</button>
@@ -3544,6 +3545,7 @@ async function carregarCasos() {
     encerrado: c.encerrado,
     encerramento: c.encerramento,
     acordoFinal: c.acordo_final,
+    carlosAtivo: !!c.carlos_ativo,
     criadoEm: c.created_at,
     updatedAt: c.updated_at,
     etapaAtualizadaEm: c.etapa_atualizada_em || c.created_at,
@@ -6535,6 +6537,16 @@ async function renderConversa() {
   const btnFech = document.getElementById('btnIrFechamento');
   if (btnFech) btnFech.style.display = (caso.acordoFinal && !caso.encerrado) ? 'inline-flex' : 'none';
 
+  // Botão "Ativar Carlos" — só pra caso "a cobrar" sem acordo, sem Carlos já
+  // ativado, com dívida calculada (precisa de valor/vencimento pro cálculo).
+  const btnCarlos = document.getElementById('btnAtivarCarlos');
+  if (btnCarlos) {
+    const dividaCalculada = temDivida || (d.valorOriginal > 0 && d.vencimento);
+    const podeAtivar = !caso.encerrado && !caso.acordoFinal && !caso.carlosAtivo && dividaCalculada;
+    btnCarlos.style.display = podeAtivar ? 'inline-flex' : 'none';
+    btnCarlos.textContent = caso.carlosAtivo ? '🤖 Carlos já ativado' : '🤖 Ativar Carlos';
+  }
+
   // Item #10: Reabrir acordo — aparece pra casos com acordoFinal (encerrados ou em andamento)
   const btnReabrir = document.getElementById('btnReabrirAcordo');
   if (btnReabrir) {
@@ -7561,6 +7573,35 @@ async function confirmarHistoricoManual() {
 // ============================================================
 // ITEM #10: REABRIR ACORDO
 // ============================================================
+// Ativa o Carlos (IA de negociação inicial) num caso "a cobrar": manda a
+// 1ª mensagem de verdade via WhatsApp (não é rascunho, não tem como desfazer
+// o envio). Backend: edge function carlos-iniciar.
+async function ativarCarlos() {
+  const caso = casosCache.find(c => c.id === casoAtual);
+  if (!caso) { toast('Caso não encontrado.', 'error'); return; }
+  if (caso.carlosAtivo) { toast('Carlos já foi ativado nesse caso.', 'error'); return; }
+  if (caso.acordoFinal) { toast('Esse caso já tem acordo em andamento.', 'error'); return; }
+  if (!confirm('Ativar o Carlos pra "' + caso.devedor + '"?\n\nIsso ENVIA AGORA, de verdade, a primeira mensagem de negociação pelo WhatsApp do devedor. Não tem como desfazer o envio.')) return;
+
+  const btn = document.getElementById('btnAtivarCarlos');
+  if (btn) { btn.disabled = true; btn.textContent = 'Enviando...'; }
+  try {
+    const { data, error } = await sb.functions.invoke('carlos-iniciar', { body: { casoId: caso.id } });
+    if (error || !data || !data.ok) {
+      const msg = (data && data.error) || (error && error.message) || 'falha desconhecida';
+      toast('Não deu pra ativar o Carlos: ' + msg, 'error');
+      return;
+    }
+    toast('Carlos ativado — 1ª mensagem enviada.' + (data.testeUsado ? ' (foi pro número de TESTE configurado, não pro devedor)' : ''));
+    await carregarCasos();
+    await renderConversa();
+  } catch (e) {
+    toast('Erro ao ativar o Carlos: ' + (e && e.message ? e.message : e), 'error');
+  } finally {
+    if (btn) { btn.disabled = false; }
+  }
+}
+
 async function reabrirAcordo() {
   const caso = casosCache.find(c => c.id === casoAtual);
   if (!caso) return;
