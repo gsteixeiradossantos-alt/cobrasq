@@ -57,29 +57,43 @@ def load_env() -> dict:
 
 
 def http_exists(url: str) -> bool:
-    req = urllib.request.Request(url, method="HEAD")
-    try:
-        with urllib.request.urlopen(req, context=SSL_CTX, timeout=30) as r:
-            return r.status == 200
-    except urllib.error.HTTPError:
-        return False
-    except Exception:
-        return False
+    # Alguns espelhos da RFB recusam HEAD (403/405); nesse caso tenta um GET de 2 bytes.
+    for method in ("HEAD", "GET"):
+        req = urllib.request.Request(url, method=method)
+        if method == "GET":
+            req.add_header("Range", "bytes=0-1")
+        try:
+            with urllib.request.urlopen(req, context=SSL_CTX, timeout=30) as r:
+                if r.status in (200, 206):
+                    return True
+        except urllib.error.HTTPError as e:
+            if e.code in (200, 206):
+                return True
+            continue  # HEAD 403/405 → tenta GET; GET com erro real → não existe
+        except Exception:
+            continue
+    return False
 
 
 def descobrir_mes(env: dict) -> str:
     if env.get("RF_MES"):
         return env["RF_MES"]
-    # Tenta os últimos 4 meses (a RFB publica com atraso). Usa o grupo Empresas0 como sonda.
+    # Tenta o mês atual e volta até 8 meses (a RFB publica com atraso). Sonda = Empresas0.
     y, m = date.today().year, date.today().month
-    for _ in range(4):
+    ultima_url = ""
+    for _ in range(9):
+        mes = f"{y:04d}-{m:02d}"
+        ultima_url = f"{BASE}/{mes}/Empresas0.zip"
+        if http_exists(ultima_url):
+            return mes
         m -= 1
         if m == 0:
             m = 12; y -= 1
-        mes = f"{y:04d}-{m:02d}"
-        if http_exists(f"{BASE}/{mes}/Empresas0.zip"):
-            return mes
-    print("❌ Não encontrei um mês publicado. Defina RF_MES=AAAA-MM em .env.local.")
+    print("❌ Não encontrei um mês publicado automaticamente.")
+    print(f"   Última URL testada: {ultima_url}")
+    print("   Defina RF_MES=AAAA-MM em .env.local (veja os meses em")
+    print("   https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj/ )")
+    print("   ou ajuste RF_BASE_URL se a Receita mudou o caminho.")
     sys.exit(1)
 
 
@@ -224,6 +238,9 @@ def main():
     args = ap.parse_args()
 
     env = load_env()
+    global BASE
+    if env.get("RF_BASE_URL"):
+        BASE = env["RF_BASE_URL"].rstrip("/")
     uf = args.uf.strip().upper()
     work = Path(args.work_dir); work.mkdir(parents=True, exist_ok=True)
     mes = descobrir_mes(env)
