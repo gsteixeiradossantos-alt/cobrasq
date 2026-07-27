@@ -1796,6 +1796,20 @@ body:not(.cobr-cream) .cob-stpop, .dark .cob-stpop { background: var(--card); }
 .stat-mini-val{ font-family:var(--font-display); font-weight:400; color:var(--text); }
 
 @media (max-width: 1180px) { .cob-row-2, .cob-calc, .cob-fin-banks, .cob-calc-modes { grid-template-columns: 1fr; } .cob-kpis { grid-template-columns: 1fr 1fr; } }
+
+/* "Ver como" — trava visual de escrita enquanto o admin pré-visualiza outro usuário.
+   É bloqueio de UI (clique não faz nada), não é trava de banco — o botão "Sair da
+   pré-visualização" no banner fica sempre fora dessa regra. */
+body.viewas-readonly .btn-primary:not(#viewas-banner *),
+body.viewas-readonly .btn-danger:not(#viewas-banner *),
+body.viewas-readonly .btn-success:not(#viewas-banner *) {
+  opacity: .45; pointer-events: none; cursor: not-allowed;
+}
+body.viewas-readonly input:not(#viewas-busca),
+body.viewas-readonly textarea,
+body.viewas-readonly select {
+  pointer-events: none; opacity: .7;
+}
 </style>
 <style id="dlg3-style">
 /* ===== Delegação v3 — "Marinho & Champagne" (escopado em .dlg3 / .bia-drawer) ===== */
@@ -5124,14 +5138,21 @@ function _diffParaMerge(){
   return tem ? p : null;
 }
 
+// Aba aberta pelo "Ver como" (?viewas=1) usa uma chave de storage própria pro
+// Supabase Auth — assim a sessão dela fica isolada e nunca sobrescreve a sessão
+// do administrador guardada na aba original (mesma origem = mesmo localStorage
+// por padrão, daí precisar de uma chave separada).
+function _viewAsTab(){
+  try { return new URLSearchParams(window.location.search).get('viewas') === '1'; } catch(_){ return false; }
+}
 function getSupabase(){
   if(_supa) return _supa;
   const url = DB.config.supabaseUrl||'';
   const key = DB.config.supabaseAnonKey||'';
   if(url && key && window.supabase){
-    _supa = window.supabase.createClient(url, key, {
-      auth: { persistSession: true, autoRefreshToken: true }
-    });
+    const authOpts = { persistSession: true, autoRefreshToken: true };
+    if(_viewAsTab()) authOpts.storageKey = 'cobrasq-viewas-auth-token';
+    _supa = window.supabase.createClient(url, key, { auth: authOpts });
     _supaReady = true;
   }
   return _supa;
@@ -21044,7 +21065,7 @@ function viewAsFiltrar(termoRaw){
     : '<div style="padding:14px 4px;font-size:12.5px;color:var(--text-3);">Nada encontrado.</div>');
 }
 
-function viewAsIniciar(tipo, id, nome){
+async function viewAsIniciar(tipo, id, nome){
   if(!currentUser || currentUser.tipo !== 'gestor'){ showToast('Só o administrador pode usar "Ver como".','danger'); return; }
   closeModal('modal-viewas');
   if(tipo === 'colaborador'){
@@ -21068,12 +21089,26 @@ function viewAsIniciar(tipo, id, nome){
     if(typeof cpPage !== 'undefined') cpPage = 'dashboard';
     if(typeof renderPortalCedente === 'function') renderPortalCedente();
   } else if(tipo === 'devedor'){
-    // Sem portalSessao de propósito: renderPortalDevedor() já tem fallback pra ler
-    // DB.devedores direto (visão de staff) quando não há token de sessão do portal.
-    currentUser = { tipo:'devedor', devedorId:id, nome, avatar:initials(nome), role:'Devedor (pré-visualização)' };
+    // Devedor não tem Supabase Auth — reusa o MESMO mecanismo real de
+    // portal_sessoes que portal_login_nascimento usa, via RPC gated a
+    // proprietario (admin_emitir_sessao_portal). Sessão real, sem tocar
+    // em Supabase Auth, então renderPortalDevedor() bate 100% (não cai
+    // no fallback que lia DB.devedores direto).
+    const supa = (typeof getSupabase==='function') ? getSupabase() : null;
+    try{
+      if(!supa) throw new Error('sistema fora do ar');
+      const { data, error } = await supa.rpc('admin_emitir_sessao_portal', { p_devedor_id: id });
+      if(error) throw error;
+      if(!data?.ok) throw new Error(data?.erro || 'falha ao emitir sessão');
+      currentUser = { tipo:'devedor', devedorId:id, nome, portalSessao:data.sessao_token, avatar:initials(nome), role:'Devedor (pré-visualização — somente leitura)' };
+    }catch(e){
+      showToast('Não deu pra abrir a sessão real de '+nome+': '+(e.message||e)+' — mostrando com os dados já carregados.','warning');
+      currentUser = { tipo:'devedor', devedorId:id, nome, avatar:initials(nome), role:'Devedor (pré-visualização — somente leitura)' };
+    }
     document.getElementById('portalDevedor')?.classList.add('active');
-    if(typeof renderPortalDevedor === 'function') renderPortalDevedor();
+    if(typeof renderPortalDevedor === 'function') await renderPortalDevedor();
   }
+  document.body.classList.add('viewas-readonly');
   viewAsRenderBanner();
   refreshViewAsTopbar();
 }
@@ -21083,6 +21118,7 @@ function viewAsSair(){
   _viewAsUser = null;
   if(typeof cobrFilter === 'object') cobrFilter.responsavel = '';
   if(typeof devFilter === 'object') devFilter.resp = '';
+  document.body.classList.remove('viewas-readonly');
   document.getElementById('viewas-banner')?.remove();
   if(typeof iniciarSessao === 'function') iniciarSessao();
   refreshViewAsTopbar();
@@ -21092,10 +21128,13 @@ function viewAsRenderBanner(){
   document.getElementById('viewas-banner')?.remove();
   if(!_viewAsUser) return;
   const rotulo = { colaborador:'colaborador', cedente:'cliente/cedente', devedor:'devedor' }[_viewAsUser.tipo] || _viewAsUser.tipo;
+  const aviso = _viewAsUser.tipo === 'devedor'
+    ? 'sessão real, somente leitura — ações de edição/exclusão ficam bloqueadas'
+    : 'pré-visualização com os dados já carregados (não é sessão real) — ações de edição/exclusão ficam bloqueadas';
   const div = document.createElement('div');
   div.id = 'viewas-banner';
   div.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#7c3aed;color:#fff;padding:8px 16px;font-size:13px;display:flex;align-items:center;justify-content:center;gap:12px;box-shadow:0 2px 8px rgba(0,0,0,.15);';
-  div.innerHTML = `<span>&#128065; Visualizando como <strong>${escHtml(_viewAsUser.nome)}</strong> (${rotulo}) — pré-visualização, não é login real</span>
+  div.innerHTML = `<span>&#128065; Visualizando como <strong>${escHtml(_viewAsUser.nome)}</strong> (${rotulo}) — ${aviso}.</span>
     <button onclick="viewAsSair()" style="background:#fff;color:#7c3aed;border:none;border-radius:5px;padding:4px 10px;font-size:12px;font-weight:700;cursor:pointer;">Sair da pré-visualização</button>`;
   document.body.prepend(div);
 }
