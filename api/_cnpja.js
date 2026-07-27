@@ -27,6 +27,7 @@
 //   Query/body: { nome, cpf }  →  { ok:true, empresas:[{cnpj, nome, papel, confere}] }
 
 const { requireUser, applyCors } = require('./_auth.js');
+const { sbFetch } = require('./_sb.js');
 
 const BASE = (process.env.CNPJA_BASE_URL || 'https://api.cnpja.com').replace(/\/+$/, '');
 
@@ -69,9 +70,32 @@ module.exports = async function handler(req, res) {
   if (!nome) return res.status(400).json({ error: 'Informe o nome completo do devedor.' });
   if (cpf && cpf.length !== 11) return res.status(400).json({ error: 'CPF inválido (11 dígitos).' });
 
+  // 1) FONTE GRATUITA: base pública da Receita Federal carregada no Supabase (rf_socios),
+  //    consultada pela RPC buscar_empresas_por_socio. Se a migração/carga ainda não foi
+  //    feita (import_cnpj_rf.py), a RPC falha → cai no CNPJá pago (fallback) abaixo.
+  try {
+    const rows = await sbFetch('rpc/buscar_empresas_por_socio', {
+      method: 'POST',
+      body: JSON.stringify({ p_nome: nome, p_cpf: cpf || null }),
+    });
+    if (Array.isArray(rows)) {
+      const empresas = rows.map((r) => ({
+        cnpj: onlyDigits(r.cnpj),
+        nome: r.nome || '',
+        papel: r.papel || '',
+        confere: (r.confere === true || r.confere === false) ? r.confere : null,
+      })).filter((e) => e.cnpj);
+      return res.status(200).json({ ok: true, fonte: 'Receita Federal (Supabase)', empresas, total: empresas.length });
+    }
+  } catch (e) {
+    // RPC/tabela ausente ou Supabase indisponível — segue para o CNPJá pago (fallback).
+    console.warn('[cnpja] RPC Supabase indisponível, tentando CNPJá:', e && e.message);
+  }
+
+  // 2) FALLBACK PAGO: API Comercial do CNPJá (busca por sócio), gated por CNPJA_TOKEN.
   const token = process.env.CNPJA_TOKEN || '';
   if (!token) {
-    // Gated: sem token pago, orienta o operador a usar a busca manual gratuita.
+    // Sem base local nem token pago: orienta o operador a usar a busca manual gratuita.
     return res.status(200).json({
       pendente: true,
       motivo: 'CNPJA_TOKEN não configurada no servidor.',
