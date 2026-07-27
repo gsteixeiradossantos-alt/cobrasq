@@ -37,6 +37,17 @@ except ImportError:
 ROOT = Path(__file__).parent
 ENV_FILE = ROOT / ".env.local"
 BASE = "https://arquivos.receitafederal.gov.br/dados/cnpj/dados_abertos_cnpj"
+# O servidor da RFB (gov.br atrás de WAF) devolve 403 para o User-Agent padrão do
+# urllib. Nos passamos por um navegador em toda requisição.
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+
+def _req(url: str, method: str = "GET", extra: dict | None = None) -> urllib.request.Request:
+    headers = {"User-Agent": UA, "Accept": "*/*"}
+    if extra:
+        headers.update(extra)
+    return urllib.request.Request(url, method=method, headers=headers)
 
 # Índices das colunas (arquivos SEM cabeçalho, ';'-separados, aspas '"', latin-1).
 EST = dict(basico=0, ordem=1, dv=2, matriz=3, fantasia=4, situacao=5, uf=19, municipio=20)
@@ -59,9 +70,7 @@ def load_env() -> dict:
 def http_exists(url: str) -> bool:
     # Alguns espelhos da RFB recusam HEAD (403/405); nesse caso tenta um GET de 2 bytes.
     for method in ("HEAD", "GET"):
-        req = urllib.request.Request(url, method=method)
-        if method == "GET":
-            req.add_header("Range", "bytes=0-1")
+        req = _req(url, method, {"Range": "bytes=0-1"} if method == "GET" else None)
         try:
             with urllib.request.urlopen(req, context=SSL_CTX, timeout=30) as r:
                 if r.status in (200, 206):
@@ -103,7 +112,7 @@ def baixar(url: str, dest: Path):
         return
     print(f"  ↓ {url}")
     tmp = dest.with_suffix(dest.suffix + ".part")
-    with urllib.request.urlopen(url, context=SSL_CTX, timeout=120) as r, open(tmp, "wb") as f:
+    with urllib.request.urlopen(_req(url), context=SSL_CTX, timeout=120) as r, open(tmp, "wb") as f:
         total = int(r.headers.get("Content-Length") or 0)
         done = 0
         while True:
