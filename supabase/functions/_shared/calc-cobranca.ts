@@ -46,19 +46,43 @@ export interface CalcCobranca {
   fixo?: boolean;
 }
 
+// Mesma régua de parcelamento em boleto usada em qualquer modo: juros de
+// financiamento de 2,99% a.m. (composto) + R$6,00 fixo por parcela, só
+// oferece a opção se a parcela ficar >= R$256 (parcelaMin), até 12x.
+function gerarBoletoOptions(total: number): BoletoOption[] {
+  const boletoOptions: BoletoOption[] = [];
+  for (let n = 1; n <= COB.parcelaMax; n++) {
+    let vp: number;
+    if (n === 1) vp = total;
+    else {
+      const i = COB.boletoJuros;
+      const f = (i * Math.pow(1 + i, n)) / (Math.pow(1 + i, n) - 1);
+      vp = total * f;
+    }
+    const arred = Math.ceil(vp + COB.boletoFixo);
+    if (arred >= COB.parcelaMin) boletoOptions.push({ n, parcela: arred, total: arred * n });
+  }
+  return boletoOptions;
+}
+
 // VALOR FIXO: casos que já têm o valor atualizado definido manualmente (ex.:
 // dívida em fase judicial — cumprimento de sentença, execução — onde o valor
-// segue cálculo judicial próprio, não a fórmula de cobrança extrajudicial
-// daqui, e não tem "vencimento" no sentido de parcela recorrente). Não
-// calcula NADA, não gera opção de parcelamento — só embala o valor já dado.
+// segue cálculo judicial próprio, não a fórmula de correção/juros/multa
+// extrajudicial daqui, e não tem "vencimento" no sentido de parcela
+// recorrente). Não recalcula o valor à vista — só embala o que já foi dado —
+// mas PODE oferecer parcelamento em boleto (mesma régua de sempre: 2,99%
+// a.m. + R$6/parcela, mín. R$256, máx. 12x), decisão que o Carlos já pode
+// tomar sozinho. Cartão parcelado não entra aqui — não autorizado nesse modo.
 // Sinal de quando usar: divida.vencimento ausente MAS divida.totalAvista
 // presente (dívida já "madura"/virou ação, sem data de vencimento futura).
 export function valorFixo(totalAvista: number): CalcCobranca {
+  const boletoOptions = gerarBoletoOptions(totalAvista);
+  const boleto12 = boletoOptions.find((o) => o.n === 12) || boletoOptions[boletoOptions.length - 1] || null;
   return {
     valorOriginal: totalAvista,
     totalAvista,
-    boletoOptions: [],
-    boleto12: null,
+    boletoOptions,
+    boleto12,
     cartao12Total: totalAvista,
     cartao12Parcela: totalAvista,
     fixo: true,
@@ -81,18 +105,7 @@ export function calcularCobranca(valorOriginal: number, vencimentoISO: string, h
   const taxa = subtotal * COB.taxaServ;
   const total = Math.ceil(subtotal + taxa);
 
-  const boletoOptions: BoletoOption[] = [];
-  for (let n = 1; n <= COB.parcelaMax; n++) {
-    let vp: number;
-    if (n === 1) vp = total;
-    else {
-      const i = COB.boletoJuros;
-      const f = (i * Math.pow(1 + i, n)) / (Math.pow(1 + i, n) - 1);
-      vp = total * f;
-    }
-    const arred = Math.ceil(vp + COB.boletoFixo);
-    if (arred >= COB.parcelaMin) boletoOptions.push({ n, parcela: arred, total: arred * n });
-  }
+  const boletoOptions = gerarBoletoOptions(total);
   const boleto12 = boletoOptions.find((o) => o.n === 12) || boletoOptions[boletoOptions.length - 1] || null;
   const cartao12Total = Math.ceil(total * COB.cartaoMult);
   const cartao12Parcela = Math.ceil(cartao12Total / 12);

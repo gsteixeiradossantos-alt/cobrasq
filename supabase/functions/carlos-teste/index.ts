@@ -93,8 +93,9 @@ Deno.serve(async (req: Request) => {
     faseJudicial ? 'CASO JÁ EM FASE JUDICIAL (cumprimento de sentença/execução) — NÃO diga "pode virar processo", já é processo, representado pelo Teixeira e Azzolin.' : '',
     calc.fixo
       ? [
-          `VALOR FIXO já definido (dívida em fase judicial, sem cálculo automático): R$ ${fmtBRL(calc.totalAvista)}.`,
-          `Só existe essa forma de pagamento. Se a pessoa pedir pra parcelar, isso é "fora_padrao" — você não calcula parcela nesse modo.`,
+          `VALOR FIXO já definido (dívida em fase judicial, sem cálculo automático de correção/juros): à vista R$ ${fmtBRL(calc.totalAvista)}.`,
+          calc.boleto12 ? `BOLETO PARCELADO calculado (mesma régua de sempre): ${calc.boleto12.n}x de R$ ${fmtBRL(calc.boleto12.parcela)} (total R$ ${fmtBRL(calc.boleto12.total)}). Você PODE oferecer e decidir isso sozinho, dentro do máximo de ${calc.boleto12.n}x.` : 'Parcelamento em boleto indisponível pra esse valor (parcela ficaria abaixo do mínimo).',
+          `NÃO ofereça cartão parcelado nesse modo, mesmo que pareça óbvio — isso é "fora_padrao". Qualquer outra condição (mais parcelas, desconto) também é "fora_padrao".`,
         ].join('\n')
       : [
           `Dívida original de R$ ${fmtBRL(calc.valorOriginal)}, ainda não formalizada em acordo (caso "a cobrar").`,

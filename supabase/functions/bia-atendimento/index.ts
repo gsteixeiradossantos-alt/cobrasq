@@ -788,8 +788,9 @@ Deno.serve(async (req) => {
           calc
             ? (calc.fixo
                 ? [
-                    `VALOR FIXO já definido (dívida em fase judicial, sem cálculo automático): R$ ${calc.totalAvista.toFixed(2)}.`,
-                    `Só existe essa forma de pagamento. Se a pessoa pedir pra parcelar, isso é "fora_padrao" — você não calcula parcela nesse modo.`,
+                    `VALOR FIXO já definido (dívida em fase judicial, sem cálculo automático de correção/juros): à vista R$ ${calc.totalAvista.toFixed(2)}.`,
+                    calc.boleto12 ? `BOLETO PARCELADO calculado (mesma régua de sempre): ${calc.boleto12.n}x de R$ ${calc.boleto12.parcela.toFixed(2)} (total R$ ${calc.boleto12.total.toFixed(2)}). Você PODE oferecer e decidir isso sozinho, dentro do máximo de ${calc.boleto12.n}x.` : 'Parcelamento em boleto indisponível pra esse valor (parcela ficaria abaixo do mínimo).',
+                    `NÃO ofereça cartão parcelado nesse modo, mesmo que pareça óbvio — isso é "fora_padrao". Qualquer outra condição (mais parcelas, desconto) também é "fora_padrao".`,
                   ].join('\n')
                 : [
                     `Dívida original de R$ ${valorOriginalC.toFixed(2)}, ainda não formalizada em acordo (caso "a cobrar").`,
