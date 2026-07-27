@@ -15,7 +15,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
-import { calcularCobranca } from '../_shared/calc-cobranca.ts';
+import { calcularCobranca, valorFixo } from '../_shared/calc-cobranca.ts';
 
 function json(obj: unknown, status = 200) {
   return new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json' } });
@@ -63,10 +63,16 @@ Deno.serve(async (req: Request) => {
 
   const valorOriginal = Number(co.divida?.valorOriginal || 0);
   const vencimento = co.divida?.vencimento || null;
-  if (!(valorOriginal > 0) || !vencimento) return json({ error: 'dívida não calculada — edite o caso e informe valor/vencimento antes de ativar o Carlos' }, 400);
+  const totalAvistaSalvo = Number(co.divida?.totalAvista || 0);
+  // VALOR FIXO: sem vencimento mas com valor já definido = dívida "madura"/já
+  // virou ação judicial (cumprimento de sentença, execução) — segue cálculo
+  // judicial próprio, não a fórmula de cobrança extrajudicial daqui. Não
+  // recalcula nada, não oferece parcelamento automático.
+  const faseJudicial = !vencimento && totalAvistaSalvo > 0;
+  if (!faseJudicial && (!(valorOriginal > 0) || !vencimento)) return json({ error: 'dívida não calculada — edite o caso e informe valor/vencimento (ou o valor atualizado, se for caso judicial) antes de ativar o Carlos' }, 400);
 
   const hoje = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-  const calc = calcularCobranca(valorOriginal, vencimento, hoje);
+  const calc = faseJudicial ? valorFixo(totalAvistaSalvo) : calcularCobranca(valorOriginal, vencimento!, hoje);
   if (!calc) return json({ error: 'não consegui calcular a dívida (valor/vencimento inválido)' }, 400);
 
   // telefone de destino: respeita o modo de teste global, se ligado (mesma
@@ -79,12 +85,17 @@ Deno.serve(async (req: Request) => {
 
   const primeiroNome = String(devedor.nome || '').trim().split(' ')[0] || 'tudo bem';
   const partes = [`Oi ${primeiroNome}, aqui é o Carlos, da COBRASQ.`];
-  partes.push(`Você tem uma pendência de R$ ${fmtBRL(valorOriginal)} com ${credorNome}, e a gente ficou responsável por resolver isso.`);
-  let opcoes = `Você pode pagar à vista por R$ ${fmtBRL(calc.totalAvista)}`;
-  if (calc.boleto12) opcoes += `, ou parcelar em até ${calc.boleto12.n}x de R$ ${fmtBRL(calc.boleto12.parcela)} no boleto`;
-  opcoes += `, ou ${12}x de R$ ${fmtBRL(calc.cartao12Parcela)} no cartão.`;
-  partes.push(opcoes);
-  partes.push('Como você prefere seguir?');
+  if (faseJudicial) {
+    partes.push(`Você tem uma pendência de R$ ${fmtBRL(calc.totalAvista)} com ${credorNome}, e a gente ficou responsável por resolver isso.`);
+    partes.push('Quer conversar sobre como quitar isso?');
+  } else {
+    partes.push(`Você tem uma pendência de R$ ${fmtBRL(valorOriginal)} com ${credorNome}, e a gente ficou responsável por resolver isso.`);
+    let opcoes = `Você pode pagar à vista por R$ ${fmtBRL(calc.totalAvista)}`;
+    if (calc.boleto12) opcoes += `, ou parcelar em até ${calc.boleto12.n}x de R$ ${fmtBRL(calc.boleto12.parcela)} no boleto`;
+    opcoes += `, ou ${12}x de R$ ${fmtBRL(calc.cartao12Parcela)} no cartão.`;
+    partes.push(opcoes);
+    partes.push('Como você prefere seguir?');
+  }
   const mensagem = partes.join('\n\n') + '\n\n*Carlos • COBRASQ*';
 
   const zHead: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -127,5 +138,5 @@ Deno.serve(async (req: Request) => {
     });
   } catch { /* best-effort */ }
 
-  return json({ ok: true, enviado: envioOk, telefone: telDestino, calc, mensagem, testeUsado: !!testeTel });
+  return json({ ok: true, enviado: envioOk, telefone: telDestino, calc, faseJudicial, mensagem, testeUsado: !!testeTel });
 });

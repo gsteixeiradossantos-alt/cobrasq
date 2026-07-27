@@ -11,7 +11,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { MODELO, CARLOS_SYSTEM, extrairJson } from '../_shared/carlos-system.ts';
-import { calcularCobranca } from '../_shared/calc-cobranca.ts';
+import { calcularCobranca, valorFixo } from '../_shared/calc-cobranca.ts';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -47,6 +47,7 @@ Deno.serve(async (req: Request) => {
   let credorNome = 'Construmix Materiais de Construção';
   let calc: ReturnType<typeof calcularCobranca> = null;
   let fonte = 'ficticio';
+  let faseJudicial = false;
 
   if (casoId) {
     // SOMENTE LEITURA — nenhuma escrita nesta function.
@@ -64,7 +65,11 @@ Deno.serve(async (req: Request) => {
     credorNome = cli?.nome_fantasia || cli?.nome || 'credor';
     const valorOriginal = Number(co.divida?.valorOriginal || 0);
     const vencimento = co.divida?.vencimento || null;
-    if (valorOriginal > 0 && vencimento) {
+    const totalAvistaSalvo = Number(co.divida?.totalAvista || 0);
+    faseJudicial = !vencimento && totalAvistaSalvo > 0;
+    if (faseJudicial) {
+      calc = valorFixo(totalAvistaSalvo);
+    } else if (valorOriginal > 0 && vencimento) {
       calc = calcularCobranca(valorOriginal, vencimento, hoje);
     }
     fonte = 'real';
@@ -85,13 +90,21 @@ Deno.serve(async (req: Request) => {
 
   const ctxDivida = [
     `Devedor: ${devedorNome}. Credor original: ${credorNome}.`,
-    `Dívida original de R$ ${fmtBRL(calc.valorOriginal)}, ainda não formalizada em acordo (caso "a cobrar").`,
-    `FORMAS DE PAGAMENTO JÁ CALCULADAS PELO SISTEMA (use exatamente estes números, nunca invente outro):`,
-    `- À VISTA: R$ ${fmtBRL(calc.totalAvista)} (pagamento único)`,
-    calc.boleto12 ? `- BOLETO PARCELADO: ${calc.boleto12.n}x de R$ ${fmtBRL(calc.boleto12.parcela)} (total R$ ${fmtBRL(calc.boleto12.total)})` : '- BOLETO PARCELADO: indisponível pra esse valor',
-    `- CARTÃO PARCELADO: 12x de R$ ${fmtBRL(calc.cartao12Parcela)} (total R$ ${fmtBRL(calc.cartao12Total)})`,
-    `Máximo de parcelas permitido: ${calc.boleto12?.n ?? 12}x. Qualquer pedido acima disso é "fora_padrao".`,
-  ].join('\n');
+    faseJudicial ? 'CASO JÁ EM FASE JUDICIAL (cumprimento de sentença/execução) — NÃO diga "pode virar processo", já é processo, representado pelo Teixeira e Azzolin.' : '',
+    calc.fixo
+      ? [
+          `VALOR FIXO já definido (dívida em fase judicial, sem cálculo automático): R$ ${fmtBRL(calc.totalAvista)}.`,
+          `Só existe essa forma de pagamento. Se a pessoa pedir pra parcelar, isso é "fora_padrao" — você não calcula parcela nesse modo.`,
+        ].join('\n')
+      : [
+          `Dívida original de R$ ${fmtBRL(calc.valorOriginal)}, ainda não formalizada em acordo (caso "a cobrar").`,
+          `FORMAS DE PAGAMENTO JÁ CALCULADAS PELO SISTEMA (use exatamente estes números, nunca invente outro):`,
+          `- À VISTA: R$ ${fmtBRL(calc.totalAvista)} (pagamento único)`,
+          calc.boleto12 ? `- BOLETO PARCELADO: ${calc.boleto12.n}x de R$ ${fmtBRL(calc.boleto12.parcela)} (total R$ ${fmtBRL(calc.boleto12.total)})` : '- BOLETO PARCELADO: indisponível pra esse valor',
+          `- CARTÃO PARCELADO: 12x de R$ ${fmtBRL(calc.cartao12Parcela)} (total R$ ${fmtBRL(calc.cartao12Total)})`,
+          `Máximo de parcelas permitido: ${calc.boleto12?.n ?? 12}x. Qualquer pedido acima disso é "fora_padrao".`,
+        ].join('\n'),
+  ].filter(Boolean).join('\n');
 
   const ctx = [
     `Hoje é ${hoje}.`,

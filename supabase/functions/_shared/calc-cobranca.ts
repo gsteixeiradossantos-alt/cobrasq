@@ -43,6 +43,26 @@ export interface CalcCobranca {
   boleto12: BoletoOption | null;
   cartao12Total: number;
   cartao12Parcela: number;
+  fixo?: boolean;
+}
+
+// VALOR FIXO: casos que já têm o valor atualizado definido manualmente (ex.:
+// dívida em fase judicial — cumprimento de sentença, execução — onde o valor
+// segue cálculo judicial próprio, não a fórmula de cobrança extrajudicial
+// daqui, e não tem "vencimento" no sentido de parcela recorrente). Não
+// calcula NADA, não gera opção de parcelamento — só embala o valor já dado.
+// Sinal de quando usar: divida.vencimento ausente MAS divida.totalAvista
+// presente (dívida já "madura"/virou ação, sem data de vencimento futura).
+export function valorFixo(totalAvista: number): CalcCobranca {
+  return {
+    valorOriginal: totalAvista,
+    totalAvista,
+    boletoOptions: [],
+    boleto12: null,
+    cartao12Total: totalAvista,
+    cartao12Parcela: totalAvista,
+    fixo: true,
+  };
 }
 
 // mesma fórmula de templates/calc-engine.js#calcularCobranca, com
