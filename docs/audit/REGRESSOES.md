@@ -259,6 +259,42 @@ propósito — dá o mesmo resultado sem depender do trigger estar de pé.
 
 ---
 
+## R-18 · Trigger testado só por service_role (quebra o caminho da tela)
+
+**O que acontece.** Um trigger que grava numa tabela com RLS é testado pelo
+caminho que ignora RLS — `service_role`, uma skill, um script — e vai para
+produção quebrando o caminho de quem está logado na tela. O erro nem parece do
+trigger: aparece como falha da operação principal.
+
+Aconteceu em 29/07 com `trg_audiencias_agendar_lembretes`: criar ou editar
+audiência pela UI passou a dar
+
+```
+ERROR: new row violates row-level security policy for table "crm_mensagens_agendadas"
+```
+
+porque o INSERT dos lembretes não preenchia `operador_id`, exigido pela policy.
+A skill `audiencias-cobrasq` inserta via service_role e não sentia nada.
+
+**Teste — obrigatório para TODO trigger novo, antes de aplicar:**
+```sql
+begin;
+  set local role authenticated;
+  set local request.jwt.claims = '{"sub":"<app_users.id>","role":"authenticated"}';
+  -- a operação que dispara o trigger
+rollback;
+```
+Rodar como gestor E como colaborador. Se levantar `permission denied` ou
+`violates row-level security policy`, o trigger não está pronto.
+
+**Checar também:** se o trigger LÊ outra tabela, o usuário precisa de SELECT
+nela (senão é `permission denied`, não linha filtrada); e a função precisa de
+`SET search_path` (advisor `function_search_path_mutable`).
+
+**Corrigido:** `20260729_fix_audiencias_trigger_operador_id.sql`.
+
+---
+
 ### Invariantes guardadas (não quebrar)
 - **F-04** view `casos`/`view_casos` SEMPRE `WITH (security_invoker = true)`.
 - **F-20** trigger anti-encolhimento do blob + rebase do baseline no cliente.
