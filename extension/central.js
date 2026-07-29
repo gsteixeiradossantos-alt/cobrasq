@@ -228,10 +228,10 @@ function renderFase1(msgErro) {
     • <b>Subpasta</b> = 1 petição com vários anexos (número no nome da subpasta ou de um PDF).<br>
     Sem IA nesta versão: o PDF vai como anexo e você confere tipo/número na revisão. A assinatura/senha no protocolo é <b>sempre sua</b>.</p>`}
     ${msgErro ? `<div class="erro">${esc(msgErro)}</div>` : ''}
-    ${!ehEproc ? `<label style="display:flex;align-items:center;gap:8px;margin:8px 0;padding:8px 10px;border:1px solid ${state.autoConcluir ? '#1a7f37' : '#ccc'};border-radius:8px;cursor:pointer;">
+    <label style="display:flex;align-items:center;gap:8px;margin:8px 0;padding:8px 10px;border:1px solid ${state.autoConcluir ? '#1a7f37' : '#ccc'};border-radius:8px;cursor:pointer;">
       <input type="checkbox" id="auto-concluir" ${state.autoConcluir ? 'checked' : ''} style="width:16px;height:16px;">
-      <span><b>Modo automático</b> — pula a revisão e <b>conclui sozinho</b>. O <b>1º caso você confere</b> (rede de segurança); os demais protocolam automaticamente <u>se os arquivos já forem <code>.p7s</code> assinados</u>. ⚠️ Protocolo é irreversível.</span>
-    </label>` : ''}
+      <span><b>Modo automático</b> — o <b>1º caso você confere</b> (rede de segurança); os demais ${ehEproc ? '<b>finalizam/protocolam</b>' : '<b>concluem</b>'} sozinhos${ehEproc ? '' : ' <u>se os arquivos já forem <code>.p7s</code> assinados</u>'}. ⚠️ Protocolo é irreversível.</span>
+    </label>
     <div style="display:flex;gap:10px;flex-wrap:wrap;">
       <button class="btn" id="pick">📁 Escolher pasta…</button>
       <button class="btn ghost" id="pick-arqs">📄 Escolher arquivos…</button>

@@ -961,10 +961,15 @@
     // Trava de segurança: NUNCA finalizar (protocolo automático) sem ao menos 1 documento
     // na tabela — uma inicial sem PDF seria protocolada vazia.
     if (naTabela() < 1) return pausar(c, 'Etapa 5: nenhum documento na tabela — anexe ao menos a petição inicial e clique Continuar.');
-    if (c.primeiro && !c.validado) {
-      c.validado = true;
+    // Mesmo toggle "Modo automático" do Projudi: SEM ele ligado, ou no 1º caso do lote,
+    // o protocolo é SEU — destaca Finalizar e pausa. Com auto ligado, do 2º em diante,
+    // finaliza sozinho. Nos dois casos, a tela de sucesso (etapa 6) faz a fila seguir.
+    if (!c.autoConcluir || (c.primeiro && !c.validado)) {
+      c.validado = true; await casoSalvar(c);
       destacar(fin);
-      return pausar(c, '1º caso do lote: confira as etapas e clique VOCÊ em Finalizar — depois disso a fila segue sozinha');
+      return pausar(c, c.autoConcluir
+        ? '1º caso do lote: confira as etapas e clique VOCÊ em <b>Finalizar</b> — depois disso os próximos seguem sozinhos.'
+        : 'Confira as etapas e clique VOCÊ em <b>Finalizar</b> — a fila segue sozinha após o protocolo (modo automático desligado).');
     }
     progresso(c, 'finalizando (protocolo automático)…');
     await chrome.runtime.sendMessage({ type: 'OVERRIDE_DIALOGS' }).catch(() => {});
