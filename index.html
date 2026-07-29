@@ -19399,6 +19399,37 @@ function _cobrRespRowHTML(principal, parte){
   </div>`;
 }
 
+// Terceiro interessado: NÃO é devedor. Vive em `cobranca_terceiros`, tabela que a régua de
+// WhatsApp, a negativação, o QuitaFácil e o portal do devedor não consultam — justamente para
+// que quem não deve nunca seja cobrado. Uso típico: cônjuge/companheiro a intimar na penhora
+// de bem comum (arts. 842 e 843 do CPC), em resguardo da meação.
+const TERCEIRO_QUALIDADES = {
+  conjuge: 'Cônjuge',
+  companheiro: 'Companheiro(a)',
+  coproprietario: 'Coproprietário(a)',
+  condomino: 'Condômino(a)',
+  credor_hipotecario: 'Credor hipotecário',
+  outro: 'Outro'
+};
+let _cobrTercSeq = 0;
+function _cobrTercRowHTML(t){
+  const idx = _cobrTercSeq++;
+  const nome = escHtml(t?.nome || '');
+  const doc  = escHtml(t?.doc || '');
+  const qual = t?.qualidade || 'conjuge';
+  const opts = Object.entries(TERCEIRO_QUALIDADES)
+    .map(([v,l])=>`<option value="${v}" ${v===qual?'selected':''}>${l}</option>`).join('');
+  return `<div class="cobr-terc-row" data-idx="${idx}" data-id="${escHtml(t?.id||'')}" style="display:grid;grid-template-columns:1.8fr 1.1fr 1.3fr auto;gap:8px;align-items:center;margin-bottom:8px;">
+    <input class="cobr-terc-nome" value="${nome}" placeholder="Nome do terceiro" style="padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;"/>
+    <input class="cobr-terc-doc" value="${doc}" placeholder="CPF/CNPJ" style="padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;"/>
+    <select class="cobr-terc-qualidade" style="padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;">${opts}</select>
+    <label style="display:flex;align-items:center;gap:4px;font-size:11.5px;white-space:nowrap;cursor:pointer;">
+      <input type="checkbox" class="cobr-terc-intimado" ${t?.intimado?'checked':''}/> intimado
+      <button type="button" onclick="this.closest('.cobr-terc-row').remove()" title="Remover" style="border:none;background:none;color:var(--danger);cursor:pointer;font-size:15px;line-height:1;">✕</button>
+    </label>
+  </div>`;
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // TELAS DE DETALHE — Cobrança · Devedor · Cliente (modelo Ástrea separado)
 // Dívida lida de `cobrancas`/`cobranca_partes` (fonte única); pessoa de
@@ -19600,6 +19631,12 @@ async function renderCobrancaDetalhe(){
       .select('*, cobranca_partes(devedor_id,papel,principal,devedores(id,nome,doc,telefone,cidade,uf))')
       .eq('id',id).maybeSingle();
     cob=data||null;
+    // Terceiros interessados (cônjuge a intimar): tabela própria, fora dos fluxos de cobrança.
+    try{
+      const { data:tc } = await supa.from('cobranca_terceiros')
+        .select('id,nome,doc,qualidade,intimado').eq('cobranca_id',id);
+      window._cobrTerceiros = tc || [];
+    }catch(_){ window._cobrTerceiros = []; }
     const { data:ev } = await supa.from('devedor_eventos')
       .select('tipo,payload,criado_em').eq('cobranca_id',id).order('criado_em',{ascending:false}).limit(25);
     hist=ev||[];
@@ -19801,6 +19838,15 @@ async function renderCobrancaDetalhe(){
   const panelDevedores=(asCards)=>`<div class="det2-panel">
     <div class="det2-panel-tt">Devedores vinculados (${partesUnif.length})${_ehUnif?' <span style="font-weight:400;font-size:11.5px;color:var(--d-text-3);">· caso unificado, '+_unifIrmaos.length+' créditos</span>':''}</div>
     ${partesUnif.length? (asCards?`<div class="det-devcards">${partesUnif.map(devCard).join('')}</div>`:partesUnif.map(devRow).join('')) : `<div class="det2-empty"><span class="ic">${ico('user',20)}</span><div class="tt">Nenhum responsável vinculado.</div></div>`}
+    ${(window._cobrTerceiros||[]).length? `<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--d-border);">
+      <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--d-text-3);margin-bottom:8px;">Terceiros interessados · não respondem pela dívida</div>
+      ${(window._cobrTerceiros||[]).map(t=>`<div style="display:flex;align-items:center;gap:8px;font-size:12.5px;padding:4px 0;">
+        <span style="color:var(--d-ink);font-weight:600;">${escHtml(t.nome||'')}</span>
+        ${t.doc?`<span style="color:var(--d-text-3);">${escHtml(t.doc)}</span>`:''}
+        <span style="font-size:10.5px;padding:1px 7px;border-radius:20px;background:var(--d-bg-2);color:var(--d-text-3);">${escHtml(TERCEIRO_QUALIDADES[t.qualidade]||t.qualidade||'')}</span>
+        ${t.intimado?'<span style="font-size:10.5px;color:var(--d-success);">✓ intimado</span>':'<span style="font-size:10.5px;color:var(--d-warn,#b7791f);">a intimar</span>'}
+      </div>`).join('')}
+    </div>`:''}
   </div>`;
 
   const _histTagColor=(tipo)=>{ const t=(tipo||'').toLowerCase();
@@ -20797,8 +20843,8 @@ function abrirNovaCobranca(){ abrirCobrancaModal(null); }
 
 async function abrirCobrancaEdit(id){
   let cob = (DB_cobrancas||[]).find(c=>c.id===id);
+  const supa = getSupabase();
   if(!cob){
-    const supa = getSupabase();
     if(supa){
       const { data } = await supa.from('cobrancas')
         .select('*, cobranca_partes(id, devedor_id, papel, principal, devedores(nome, doc, telefone))')
@@ -20807,6 +20853,14 @@ async function abrirCobrancaEdit(id){
     }
   }
   if(!cob){ showToast('Cobrança não encontrada.','danger'); return; }
+  // Terceiros ficam fora do select mestre (caso de exceção): busca sob demanda ao editar.
+  if(supa && !Array.isArray(cob.cobranca_terceiros)){
+    try{
+      const { data: terc } = await supa.from('cobranca_terceiros')
+        .select('id, nome, doc, qualidade, intimado').eq('cobranca_id', id);
+      cob = Object.assign({}, cob, { cobranca_terceiros: terc || [] });
+    }catch(_){ /* tabela ausente em ambiente antigo: segue sem terceiros */ }
+  }
   abrirCobrancaModal(cob);
 }
 
@@ -20906,6 +20960,9 @@ function abrirCobrancaModal(cob){
   const respHTML = partes.length
     ? partes.map(p=>_cobrRespRowHTML(false, p)).join('')
     : _cobrRespRowHTML(true, null);
+  // Terceiros interessados: lista vem vazia por padrão (é caso de exceção, ligado a penhora).
+  const terceiros = Array.isArray(cob?.cobranca_terceiros) ? cob.cobranca_terceiros : [];
+  const tercHTML = terceiros.map(t=>_cobrTercRowHTML(t)).join('');
 
   const overlay = document.createElement('div');
   overlay.id = 'cobr-modal-overlay';
@@ -21005,6 +21062,14 @@ function abrirCobrancaModal(cob){
         </div>
         <div style="font-size:11.5px;color:var(--text-3);margin-bottom:8px;">Busque um devedor existente ou cadastre rápido (nome, CPF/CNPJ, WhatsApp). Marque um como <strong>principal</strong> (recebe a régua de WhatsApp). Ex.: cheque com emitente + endossante.</div>
         <div id="cobr-resp-list">${respHTML}</div>
+
+        <!-- Terceiros interessados (não devedores) -->
+        <div style="display:flex;justify-content:space-between;align-items:center;margin:18px 0 8px;">
+          <strong style="font-size:13px;">Terceiros interessados</strong>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('cobr-terc-list').insertAdjacentHTML('beforeend', _cobrTercRowHTML())">+ Adicionar terceiro</button>
+        </div>
+        <div style="font-size:11.5px;color:var(--text-3);margin-bottom:8px;">Quem <strong>não deve</strong> a dívida mas precisa ser intimado, como o cônjuge ou companheiro(a) do executado na penhora de bem comum (arts. 842 e 843 do CPC). <strong>Não entra em régua de cobrança, negativação nem portal do devedor.</strong></div>
+        <div id="cobr-terc-list">${tercHTML}</div>
       </div>
       <div style="padding:14px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px;">
         <button class="btn btn-ghost btn-sm" onclick="document.getElementById('cobr-modal-overlay').remove();window._cobrEditId=null;">Cancelar</button>
@@ -21303,6 +21368,24 @@ async function salvarCobranca(){
       // Evita cobrança órfã: se acabamos de CRIAR a cobrança e a parte falhou, desfaz.
       if(!editId && cobId){ try{ await supa.from('cobrancas').delete().eq('id', cobId); }catch(_){} }
       throw new Error('responsáveis: '+epar.message);
+    }
+
+    // Terceiros interessados (cônjuge/companheiro a intimar). Substitui o conjunto, igual às
+    // partes. Falha aqui NÃO desfaz a cobrança: é dado acessório, e derrubar a cobrança inteira
+    // por causa dele seria pior que salvar sem o terceiro.
+    try{
+      const terc = Array.from(document.querySelectorAll('#cobr-terc-list .cobr-terc-row')).map(row=>({
+        cobranca_id: cobId,
+        nome: (row.querySelector('.cobr-terc-nome')?.value||'').trim(),
+        doc: (row.querySelector('.cobr-terc-doc')?.value||'').trim() || null,
+        qualidade: row.querySelector('.cobr-terc-qualidade')?.value || 'conjuge',
+        intimado: !!row.querySelector('.cobr-terc-intimado')?.checked
+      })).filter(t=>t.nome);
+      await supa.from('cobranca_terceiros').delete().eq('cobranca_id', cobId);
+      if(terc.length) await supa.from('cobranca_terceiros').insert(terc);
+    }catch(eterc){
+      console.warn('terceiros interessados:', eterc?.message||eterc);
+      showToast('Cobrança salva, mas os terceiros interessados não foram gravados.','warning');
     }
 
 
