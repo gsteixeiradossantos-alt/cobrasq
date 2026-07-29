@@ -199,13 +199,48 @@ function renderFase1(msgErro) {
     • <b>Subpasta</b> = 1 petição com vários anexos (número no nome da subpasta ou de um PDF).<br>
     Sem IA nesta versão: o PDF vai como anexo e você confere tipo/número na revisão. A assinatura/senha no protocolo é <b>sempre sua</b>.</p>`}
     ${msgErro ? `<div class="erro">${esc(msgErro)}</div>` : ''}
-    <button class="btn" id="pick">📁 Escolher pasta…</button>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      <button class="btn" id="pick">📁 Escolher pasta…</button>
+      <button class="btn ghost" id="pick-arqs">📄 Escolher arquivos…</button>
+    </div>
+    <p class="muted" style="margin-top:6px;">${ehEproc
+      ? '📄 <b>Arquivos</b>: os PDFs escolhidos formam <b>1 caso</b> (a inicial + documentos). Para lote de vários casos, use a <b>pasta</b> (uma subpasta por caso).'
+      : '📄 <b>Arquivos</b>: selecione vários PDFs de uma vez — <b>cada PDF vira 1 petição</b> (lote). O número do processo vem do nome do arquivo.'}</p>
   </div>`;
   document.getElementById('modo-eproc').onclick = () => { state.sistema = 'eproc'; renderFase1(); };
   document.getElementById('modo-projudi').onclick = () => { state.sistema = 'projudi'; renderFase1(); };
   const selTrib = document.getElementById('sel-tribunal');
   if (selTrib) selTrib.onchange = () => { state.tribunal = selTrib.value; try { chrome.storage.local.set({ cobrasq_tribunal: state.tribunal }); } catch (_) {} };
   document.getElementById('pick').onclick = () => escolherPasta().catch(e => renderFase1(String(e.message || e)));
+  document.getElementById('pick-arqs').onclick = () => escolherArquivos().catch(e => renderFase1(String(e.message || e)));
+}
+
+// Alternativa à pasta: o usuário seleciona os PDFs direto (multi-seleção). No Projudi,
+// cada PDF vira 1 caso (lote de intercorrentes); no eproc, todos formam 1 caso.
+async function escolherArquivos() {
+  let handles;
+  try {
+    handles = await window.showOpenFilePicker({ multiple: true, types: [{ description: 'PDFs', accept: { 'application/pdf': ['.pdf'] } }] });
+  } catch (e) { if (e && e.name === 'AbortError') return; throw e; }
+  const docs = [];
+  for (const h of (handles || [])) {
+    if (h.kind !== 'file') continue;
+    const f = await h.getFile();
+    if (!/\.pdf$/i.test(f.name)) continue;
+    docs.push({ nome: f.name, handle: h, size: f.size, ...classificarDoc(f.name) });
+  }
+  if (!docs.length) { renderFase1('Nenhum PDF selecionado.'); return; }
+  docs.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  state.pastaNome = docs.length === 1 ? docs[0].nome : (docs.length + ' arquivos');
+  state.casos = [];
+  if (state.sistema === 'projudi') {
+    for (const d of docs) state.casos.push(novoCasoProjudi(d.nome, [d]));
+    state.casos.forEach(c => { c.extracao = 'ok'; }); // sem IA no modo Projudi (v1)
+    renderFase3();
+    return;
+  }
+  state.casos.push(novoCaso(state.pastaNome, docs));
+  await extrairTodos();
 }
 
 // ── fase 2: extração por IA ───────────────────────────────────────────────────
