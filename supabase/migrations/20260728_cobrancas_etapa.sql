@@ -12,9 +12,13 @@
 -- feita, tem de re-declarar `WITH (security_invoker = true)` (guarda anti-drift
 -- F-04 — ver supabase/migrations/README.md).
 --
--- NÃO APLICADA EM PRODUÇÃO. Aplicar é ação gated (CLAUDE.md). Enquanto não for
--- aplicada, o app deriva a etapa em runtime por estas mesmas regras (cobEtapa()
--- no index.html) — a coluna, quando existe, tem precedência.
+-- APLICADA EM PRODUÇÃO em 29/07/2026, com autorização expressa do dono.
+-- Backfill: 221 casos ativos, nenhum nulo — cobrar 71 · em_acao 62 · execucao 44
+-- · encerrado 30 · acordo 11 · fazer_acao 3 (negociando e travado ficaram em 0:
+-- não há status de negociação em uso hoje e a atividade mais antiga da carteira
+-- tem 79 dias, abaixo do corte de 90).
+-- O app segue derivando a etapa em runtime quando a coluna vier vazia (cobEtapa()
+-- no index.html); a coluna tem precedência quando preenchida.
 -- ============================================================================
 
 begin;
@@ -45,7 +49,8 @@ create index if not exists cobrancas_etapa_idx
 --   4 em_acao    — judicial já protocolado
 --   5 acordo     — qualquer etiqueta de acordo
 --   6 negociando — conversa em curso
---   7 travado    — sem movimento há 90+ dias
+--   7 travado    — sem movimento há 90+ dias (evento mais recente do devedor,
+--                   mesma fonte de sinais.ultimaAtividade no app)
 --   8 cobrar     — o resto
 update public.cobrancas c
 set etapa = case
@@ -63,7 +68,13 @@ set etapa = case
     then 'acordo'
   when coalesce(c.status,'') ~* 'negocia|proposta|em contato|contatad'
     then 'negociando'
-  when coalesce(c.updated_at, c.created_at) < now() - interval '90 days'
+  when coalesce(
+         (select max(e.criado_em)
+            from public.cobranca_partes cp
+            join public.devedor_eventos e on e.devedor_id = cp.devedor_id
+           where cp.cobranca_id = c.id),
+         c.etapa_atualizada_em, c.updated_at, c.created_at
+       ) < now() - interval '90 days'
     then 'travado'
   else 'cobrar'
 end,

@@ -9,9 +9,10 @@
 -- A chave passa a viver no banco: (acordo_id, numero_parcela) UNIQUE. O app faz
 -- upsert com ignoreDuplicates, então o segundo clique simplesmente não faz nada.
 --
--- NÃO APLICADA EM PRODUÇÃO. Aplicar é ação gated (CLAUDE.md). Enquanto isso o
--- app detecta a ausência da coluna e cai no insert antigo (protegido só pela
--- flag) — sem quebrar a tela.
+-- APLICADA EM PRODUÇÃO em 29/07/2026, com autorização expressa do dono. Não
+-- houve backfill: a coluna nasceu vazia, então nenhum índice podia colidir.
+-- O fallback no app (insert antigo quando a coluna não existe) fica de pé para
+-- ambientes que ainda não tenham a migração.
 -- ============================================================================
 
 begin;
