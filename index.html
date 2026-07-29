@@ -28991,8 +28991,25 @@ async function finLancarParcelasAcordo(acordoId){
     tipo_movimento: 1,
     status: p.pago ? 1 : 0,
     conta_id: contaId,
+    acordo_id: acordoId,
+    numero_parcela: i+1,
+    total_parcelas: parcelas.length,
   }));
-  const { error: e2 } = await sb.from('fin_lancamento').insert(rows);
+  // Idempotência de verdade: a chave (acordo_id, numero_parcela) é UNIQUE no banco
+  // (migração 20260728_fin_lancamento_acordo.sql), então dois cliques rápidos não
+  // duplicam nada — o segundo colide e é ignorado. A flag em metadata sozinha era
+  // um read-then-write: dois cliques liam "false" antes de qualquer um gravar.
+  let e2 = null;
+  const up = await sb.from('fin_lancamento')
+    .upsert(rows, { onConflict:'acordo_id,numero_parcela', ignoreDuplicates:true });
+  e2 = up.error;
+  // Enquanto a migração não estiver aplicada em produção (ação gated), a coluna
+  // acordo_id não existe: cai para o insert antigo, protegido só pela flag.
+  if(e2 && /acordo_id|column|constraint|conflict/i.test(e2.message||'')){
+    const semCol = rows.map(({acordo_id, ...r})=>r);
+    const ins = await sb.from('fin_lancamento').insert(semCol);
+    e2 = ins.error;
+  }
   if(e2){ showToast('Erro ao lançar parcelas: '+e2.message,'danger'); return; }
   const novaMeta = Object.assign({}, a.metadata||{}, { parcelasLancadas:true });
   await sb.from('acordos').update({ metadata: novaMeta }).eq('id', acordoId);
