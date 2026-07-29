@@ -1127,16 +1127,23 @@ Deno.serve(async (req) => {
           handoffs++; await notificar(`Bia: prazo (${brNova}) falhou no Asaas.\nContato: ${cobAtiva.nome || ('+' + telefone)}\nVeja em Pendentes.`); continue;
         }
         // fora do mês -> precisa do SEU aval: cria pedido de aprovação e avisa com CÓDIGO.
+        // Se o cliente pediu data FIXA todo mês (recorrente=true), o pedido já nasce
+        // como data_recorrente — aprovar move TODOS os boletos a vencer pro dia fixo.
+        // (Antes, recorrente fora do mês virava só prazo avulso e a intenção "todo
+        // mês" se perdia — achado da auditoria 29/07.)
+        const ehRecorrenteFora = parsed.recorrente === true;
+        const diaFixoFora = brNova.slice(0, 2);
         const { data: apRow } = await sb.from('bia_aprovacoes').insert({
-          tipo: 'prazo_fora_do_mes', asaas_payment_id: cobAtiva.asaas_payment_id, telefone,
-          nome: cobAtiva.nome, data_pedida: dataPedida, motivo: motivo || null, status: 'pendente'
+          tipo: ehRecorrenteFora ? 'data_recorrente' : 'prazo_fora_do_mes', asaas_payment_id: cobAtiva.asaas_payment_id, telefone,
+          nome: cobAtiva.nome, data_pedida: dataPedida,
+          motivo: ehRecorrenteFora ? `Vencimento recorrente todo dia ${diaFixoFora}. ${motivo || ''}`.trim() : (motivo || null), status: 'pendente'
         }).select('id').single();
         const cod = apRow?.id ?? '';
-        await mandarN(`${pnome ? pnome + ', ' : ''}essa data eu preciso confirmar com a equipe. Já anotei seu pedido para ${brNova} e a gente te retorna rapidinho, tá?`);
-        await sb.from('whatsapp_bia_log').update({ resposta: `prazo fora do mês (${brNova}) -> aprovação #${cod}`, acao: 'handoff' }).eq('id', logId);
-        await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, estado: 'aguardando_humano', intencao: 'negociacao', dados_coletados: { ...dados, data_pedida: dataPedida }, turnos: novosTurnos, resumo: `Pediu prazo p/ ${brNova} (fora do mês do venc ${vencOrig}). Aprovação #${cod}.`, motivo_handoff: 'prazo_fora_do_mes', updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
+        await mandarN(`${pnome ? pnome + ', ' : ''}essa data eu preciso confirmar com a equipe. Já anotei seu pedido para ${brNova}${ehRecorrenteFora ? ` (e pra ficar fixo todo dia ${diaFixoFora})` : ''} e a gente te retorna rapidinho, tá?`);
+        await sb.from('whatsapp_bia_log').update({ resposta: `prazo fora do mês (${brNova}${ehRecorrenteFora ? ', recorrente' : ''}) -> aprovação #${cod}`, acao: 'handoff' }).eq('id', logId);
+        await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, estado: 'aguardando_humano', intencao: 'negociacao', dados_coletados: { ...dados, data_pedida: dataPedida }, turnos: novosTurnos, resumo: `Pediu prazo p/ ${brNova}${ehRecorrenteFora ? ` (fixo todo dia ${diaFixoFora})` : ''} (fora do mês do venc ${vencOrig}). Aprovação #${cod}.`, motivo_handoff: 'prazo_fora_do_mes', updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
         handoffs++;
-        await notificarAdmin(`Bia: pedido de PRAZO fora do mês.\nContato: ${cobAtiva.nome || ('+' + telefone)}\nBoleto R$ ${cobAtiva.valor} venc ${vencOrig} -> pediu ${brNova}.${motivo ? `\nMotivo: ${motivo}` : ''}\n\nPra autorizar, responda: APROVAR ${cod} (aplica +11%) ou APROVAR ${cod} SEM (sem acréscimo) ou NEGAR ${cod}`);
+        await notificarAdmin(`Bia: pedido de ${ehRecorrenteFora ? `VENCIMENTO RECORRENTE (todo dia ${diaFixoFora}, fora do mês)` : 'PRAZO fora do mês'}.\nContato: ${cobAtiva.nome || ('+' + telefone)}\nBoleto R$ ${cobAtiva.valor} venc ${vencOrig} -> pediu ${brNova}.${motivo ? `\nMotivo: ${motivo}` : ''}\n\nPra autorizar, responda: APROVAR ${cod} (aplica +11%) ou APROVAR ${cod} SEM (sem acréscimo) ou NEGAR ${cod}`);
         continue;
       }
 
