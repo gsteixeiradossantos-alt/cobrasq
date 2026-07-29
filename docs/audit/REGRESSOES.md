@@ -186,6 +186,41 @@ no código, ou ação na UI) e o **estado-correto** esperado. Atualize ao descob
 
 ---
 
+## R-16 · View `casos` SECURITY DEFINER + grant `anon` (F-04 de novo) ⚠️ P0
+
+**O que acontece.** Uma redefinição de `public.casos` que esquece
+`WITH (security_invoker = true)` faz a view rodar como o dono (`postgres`) e
+passar por cima da RLS. Somando o grant histórico para `anon`, a carteira
+inteira fica legível **sem login** com a chave anon que vai dentro do
+`index.html`. Aconteceu em 27/07/2026 (`casos_view_add_carlos_ativo`) e só foi
+achado na auditoria de 29/07.
+
+**Teste (externo, com a chave anon do projeto):**
+```
+GET /rest/v1/casos?select=id&limit=1   →  deve ser 401
+```
+Se vier `HTTP 206` com `content-range`, está vazando. Conferir também
+`vw_bia_respostas_humanas` e `vw_bia_metricas_semanal`.
+
+**Cuidado ao interpretar:** `clientes` e `acordos` devolvem `HTTP 200` com corpo
+`[]` e `content-range: */0` — isso é o estado CERTO (grant existe, RLS filtra).
+O sinal de vazamento é a CONTAGEM, não o 200.
+
+**Teste no banco:**
+```sql
+select coalesce((select option_value from pg_options_to_table(c.reloptions)
+                  where option_name='security_invoker'),'(ausente)')
+from pg_class c join pg_namespace n on n.oid=c.relnamespace and n.nspname='public'
+where c.relname='casos';   -- tem que ser 'true'
+```
+
+**Corrigido em 29/07/2026 (parcial):** `20260729_p0_views_revoke_anon.sql` tirou
+o `anon` das três views. **Pendente:** `alter view public.casos set
+(security_invoker = true)` — hoje um colaborador logado ainda enxerga os 145
+casos pela view, não só os seus.
+
+---
+
 ### Invariantes guardadas (não quebrar)
 - **F-04** view `casos`/`view_casos` SEMPRE `WITH (security_invoker = true)`.
 - **F-20** trigger anti-encolhimento do blob + rebase do baseline no cliente.
