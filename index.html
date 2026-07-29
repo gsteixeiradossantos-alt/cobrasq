@@ -1558,6 +1558,9 @@ body.cobr-cream:not(.dark) #page-cobr {
    de texto flexível precisa de min-width próprio (nunca min-width:0, senão some)
    e as fixas encolhem um pouco a 1280 em vez de empurrar a página pro scroll. */
 .cob-tab-row { display: grid; grid-template-columns: 16px minmax(190px,1fr) minmax(112px,132px) minmax(120px,150px) minmax(112px,130px) 112px 104px 52px 34px; align-items: center; gap: 12px; padding: 12px 16px; }
+.cob-th { cursor: pointer; user-select: none; display: inline-flex; align-items: center; white-space: nowrap; }
+.cob-th:hover { color: var(--text); }
+.cob-th.num { justify-content: flex-end; }
 .cob-tab-head { background: #F7F4EC; border-bottom: 1px solid var(--border); font-family: "JetBrains Mono", monospace; font-size: 9.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--text-3); }
 html.dark .cob-tab-head { background: var(--card-2); }
 .cob-tab-body .cob-tab-row { border-bottom: 1px solid var(--divisor, #F2EFE6); cursor: pointer; }
@@ -18159,8 +18162,23 @@ const PAPEL_LABELS = {
 let DB_cobrancas = [];          // cache local (com cobranca_partes embutidas)
 // ONDA I · 2 — triagem de pendência: default = Todos (era 'agir').
 // Filtro da tela: UMA etapa do ciclo (single) + N recortes (multi, AND).
-let cobrFilter = { q:'', credor:'', responsavel:'', ord:'nome', etapa:'todos',
+// `ord` é a coluna e `dir` o sentido — os dois são dirigidos tanto pelo select
+// quanto pelo clique no cabeçalho da tabela.
+let cobrFilter = { q:'', credor:'', responsavel:'', ord:'nome', dir:'asc', etapa:'todos',
                    atrasada:false, prescrever:false, quita:false, semcontato:false, semresp:false, neg:false };
+// Sentido natural de cada coluna no primeiro clique: texto sobe (A→Z), número e
+// data descem (maior/mais antigo primeiro) — que é o que se quer ver de cara.
+const _COB_ORD_DIR_PADRAO = { nome:'asc', credor:'asc', foro:'asc', acao:'asc',
+                              valor:'desc', etapa:'asc', antigo:'desc' };
+function cobrOrdenarPor(key){
+  if(cobrFilter.ord === key) cobrFilter.dir = (cobrFilter.dir === 'asc') ? 'desc' : 'asc';
+  else { cobrFilter.ord = key; cobrFilter.dir = _COB_ORD_DIR_PADRAO[key] || 'asc'; }
+  renderCobrancas({soLocal:true});
+}
+function cobrOrdSeta(key){
+  if(cobrFilter.ord !== key) return '<span class="sort-arrow sort-arrow-idle">↕</span>';
+  return `<span class="sort-arrow sort-arrow-active">${cobrFilter.dir === 'asc' ? '↑' : '↓'}</span>`;
+}
 let cobrView = 'lista';
 let cobSelectionMode = false;
 let selectedCobrIds = new Set();
@@ -18196,6 +18214,13 @@ function _cobrDocLabel(c){
   const tipo = c.tipo_documento || c.divida?.titulo || c.divida?.descricao || 'Cobrança';
   const num = c.numero_documento ? ` nº ${c.numero_documento}` : '';
   return `${tipo}${num}`;
+}
+// Foro exibido na coluna FORO. Vive aqui (e não inline na linha) para que a
+// ordenação por essa coluna use exatamente o mesmo texto que aparece na tela.
+function _cobrForo(c){
+  if(!c) return '';
+  if((c.fase||'') !== 'judicial') return 'Extrajudicial';
+  return c.foro || c.vara || c.comarca || c.numero_processo || 'Judicial';
 }
 function _cobrAgingDias(c){
   const base = c.vencimento || c.data_entrada || c.created_at;
@@ -18879,14 +18904,31 @@ async function renderCobrancas(opts){
 
   const naEtapa = base.filter(c=> cobrFilter.etapa==='todos' || c._etapa===cobrFilter.etapa);
   const recortes = cobRecortesAtivos();
+  // Um comparador por coluna, TODOS em ordem crescente. O sentido é aplicado uma
+  // vez só, no fim — assim asc e desc nunca divergem por engano.
+  const _txt = (v)=> String(v==null?'':v);
+  const _cmp = (a,b)=> a.localeCompare(b,'pt-BR',{sensitivity:'base'});
+  const _ordemEtapa = _COB_ETAPAS.filter(e=>e.key!=='todos').map(e=>e.key);
   const _sorters = {
-    nome:   (a,b)=> _cobrPrincipalNome(a).localeCompare(_cobrPrincipalNome(b),'pt-BR',{sensitivity:'base'}),
-    valor:  (a,b)=> (+b.valor_atual||+b.valor_orig||0) - (+a.valor_atual||+a.valor_orig||0),
-    antigo: (a,b)=> (_cobrAgingDias(b)||0) - (_cobrAgingDias(a)||0)
+    nome:   (a,b)=> _cmp(_cobrPrincipalNome(a), _cobrPrincipalNome(b)),
+    credor: (a,b)=> _cmp(_txt(_cobrCredorNome(a)), _txt(_cobrCredorNome(b))),
+    foro:   (a,b)=> _cmp(_txt(_cobrForo(a)), _txt(_cobrForo(b))),
+    acao:   (a,b)=> _cmp(_txt(cobProximaAcao(a, a._etapa)), _txt(cobProximaAcao(b, b._etapa))),
+    valor:  (a,b)=> _val(a) - _val(b),
+    // Etapa ordena pelo CICLO (cobrar → … → encerrado), não pelo alfabeto:
+    // alfabética colocaria "Acordo ativo" antes de "Cobrar", que não é o fluxo.
+    etapa:  (a,b)=> _ordemEtapa.indexOf(a._etapa) - _ordemEtapa.indexOf(b._etapa),
+    antigo: (a,b)=> (_cobrAgingDias(a)||0) - (_cobrAgingDias(b)||0),
   };
+  const _ordAtual = _sorters[cobrFilter.ord] ? cobrFilter.ord : 'nome';
+  const _sinal = (cobrFilter.dir === 'desc') ? -1 : 1;
   const cobr = _cobrColapsaUnificados(naEtapa
     .filter(c=> recortes.every(r=>r.test(c)))
-    .sort(_sorters[cobrFilter.ord] || _sorters.nome));
+    .sort((a,b)=>{
+      const r = _sorters[_ordAtual](a,b);
+      // Desempate estável pelo nome, senão a lista dança entre renders.
+      return r !== 0 ? r * _sinal : _cmp(_cobrPrincipalNome(a), _cobrPrincipalNome(b));
+    }));
   _cobrVisiveis = cobr.map(c=>c.id);
   // Contador DERIVADO da lista exibida. Um contador que discorda da lista é pior
   // que nenhum — por isso soma o que está na tela, nunca uma tabela fixa.
@@ -18929,10 +18971,7 @@ async function renderCobrancas(opts){
     const princNome = princ?.devedores?.nome || '—';
     const princPapel = princ ? (PAPEL_LABELS[princ.papel]||princ.papel||'') : '';
     const extra = partes.length>1 ? ` +${partes.length-1}` : '';
-    const isJud = (c.fase||'')==='judicial';
-    const foro = isJud
-      ? (c.foro || c.vara || c.comarca || c.numero_processo || 'Judicial')
-      : 'Extrajudicial';
+    const foro = _cobrForo(c);
     const aging = _cobrAgingDias(c);
     const vAtual = _val(c), vOrig = +c.valor_orig||0;
     // Alerta curto que explica a linha: o que segura o caso hoje.
@@ -19004,13 +19043,12 @@ async function renderCobrancas(opts){
           </div>
           <select id="cobr-f-credor" style="${selStyle}" onchange="cobrFilter.credor=this.value;renderCobrancas({soLocal:true});"><option value="">Credor: todos</option>${grupoOpts}${credorOpts}</select>
           <select id="cobr-f-resp" style="${selStyle}" onchange="cobrFilter.responsavel=this.value;renderCobrancas({soLocal:true});"><option value="">Responsável: todos</option>${respOpts}</select>
-          <select id="cobr-f-ord" style="${selStyle}" onchange="cobrFilter.ord=this.value;renderCobrancas({soLocal:true});">
-            <option value="nome" ${cobrFilter.ord==='nome'?'selected':''}>Ordenar: nome</option>
-            <option value="valor" ${cobrFilter.ord==='valor'?'selected':''}>Maior valor</option>
-            <option value="antigo" ${cobrFilter.ord==='antigo'?'selected':''}>Mais antigo</option>
+          <select id="cobr-f-ord" style="${selStyle}" onchange="cobrFilter.ord=this.value;cobrFilter.dir=_COB_ORD_DIR_PADRAO[this.value]||'asc';renderCobrancas({soLocal:true});">
+            ${[['nome','Devedor'],['credor','Credor'],['foro','Foro'],['acao','Próxima ação'],['valor','Valor atual'],['etapa','Etapa do ciclo'],['antigo','Idade']]
+              .map(([k,l])=>`<option value="${k}" ${cobrFilter.ord===k?'selected':''}>Ordenar: ${l}</option>`).join('')}
           </select>
           <div class="det-seg"><button class="${cobrViewMode!=='quadro'?'on':''}" onclick="kbToggleView('lista')" title="Tabela">Tabela</button><button class="${cobrViewMode==='quadro'?'on':''}" onclick="kbToggleView('quadro')" title="Agrupar por etapa em colunas">Quadro</button><button class="${cobrView==='cards'?'on':''}" onclick="cobrView=(cobrView==='cards'?'lista':'cards');renderCobrancas({soLocal:true});" title="Cards">Cards</button></div>
-          ${temFiltro ? `<button class="cob-btn-ghost" onclick="cobrFilter={q:'',credor:'',responsavel:'',ord:'nome',etapa:'todos',atrasada:false,prescrever:false,quita:false,semcontato:false,semresp:false,neg:false};renderCobrancas({soLocal:true});">Limpar filtros</button>` : ''}
+          ${temFiltro ? `<button class="cob-btn-ghost" onclick="cobrFilter={q:'',credor:'',responsavel:'',ord:'nome',dir:'asc',etapa:'todos',atrasada:false,prescrever:false,quita:false,semcontato:false,semresp:false,neg:false};renderCobrancas({soLocal:true});">Limpar filtros</button>` : ''}
         </div>
       </div>
     </div>
@@ -19079,8 +19117,13 @@ async function renderCobrancas(opts){
         : `<div class="cob-tab">
             <div class="cob-tab-row cob-tab-head">
               <label onclick="event.stopPropagation()" style="display:flex;"><input type="checkbox" ${cobr.length && cobr.every(c=>selectedCobrIds.has(c.id))?'checked':''} onchange="toggleCobrSelectAll(this.checked)" style="width:16px;height:16px;cursor:pointer;"></label>
-              <span>Devedor</span><span>Credor</span><span>Foro</span><span>Próxima ação</span>
-              <span style="text-align:right;">Valor atual</span><span>Etapa</span><span style="text-align:right;">Idade</span><span></span>
+              <span class="cob-th" onclick="cobrOrdenarPor('nome')">Devedor${cobrOrdSeta('nome')}</span>
+              <span class="cob-th" onclick="cobrOrdenarPor('credor')">Credor${cobrOrdSeta('credor')}</span>
+              <span class="cob-th" onclick="cobrOrdenarPor('foro')">Foro${cobrOrdSeta('foro')}</span>
+              <span class="cob-th" onclick="cobrOrdenarPor('acao')">Próxima ação${cobrOrdSeta('acao')}</span>
+              <span class="cob-th num" onclick="cobrOrdenarPor('valor')">Valor atual${cobrOrdSeta('valor')}</span>
+              <span class="cob-th" onclick="cobrOrdenarPor('etapa')">Etapa${cobrOrdSeta('etapa')}</span>
+              <span class="cob-th num" onclick="cobrOrdenarPor('antigo')">Idade${cobrOrdSeta('antigo')}</span><span></span>
             </div>
             ${cobr.length
               ? `<div class="cob-tab-body">${cobr.map(linhaTabela).join('')}</div>`
