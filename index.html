@@ -34162,21 +34162,37 @@ function waPendRestaurar(tel){
   waPendReabrir(tel, a.caso_id); waPendBadgeUpdate(); waPendRepaint();
 }
 
+// Divide por linha em branco em BLOCOS (uma mensagem de WhatsApp por bloco,
+// como um humano digita) — mesmo padrão de enviarBlocos em bia-cobranca/
+// carlos-iniciar. Sem isso, uma resposta com parágrafo saía como um textão
+// só numa bolha única (achado real: escalada manual pro Matheus, 29/07).
+function waPendDividirBlocos(texto){
+  return String(texto||'').split(/\n\s*\n+/).map(b=>b.trim()).filter(Boolean);
+}
 // ── Enviar texto (na hora ou agendado) — usado por sugestões e 1-toque ──────
 async function waPendEnviarTexto(p, texto){
   const supa=getSupabase(); if(!supa) throw new Error('Supabase indisponível.');
   const dev=waDevedorDe(p);
+  const blocos = waPendDividirBlocos(texto);
+  if(!blocos.length) throw new Error('Mensagem vazia.');
   if(dentroHorarioComercial()){
-    const { data, error }=await supa.functions.invoke('enviar-whatsapp',{ body:{ telefone:p.telefone, mensagem:texto } });
-    if(error) throw error;
-    if(data && data.error) throw new Error(data.message||data.error);
+    for(let i=0;i<blocos.length;i++){
+      const { data, error }=await supa.functions.invoke('enviar-whatsapp',{ body:{ telefone:p.telefone, mensagem:blocos[i] } });
+      if(error) throw error;
+      if(data && data.error) throw new Error(data.message||data.error);
+      if(i < blocos.length-1) await new Promise(r=>setTimeout(r,400));
+    }
     return 'enviada';
   } else {
     const { data:auth }=await supa.auth.getUser();
-    const { error }=await supa.from('crm_mensagens_agendadas').insert({
+    const base = proximoSlotComercial();
+    const rows = blocos.map((bloco,i)=>({
       devedor_id:dev?dev.id:(p.caso_id||null), operador_id:auth?.user?.id||null,
-      telefone:p.telefone, tipo:'texto', mensagem:texto,
-      agendada_para:proximoSlotComercial().toISOString(), status:'pendente', origem:'resposta_humana' });
+      telefone:p.telefone, tipo:'texto', mensagem:bloco,
+      // +i segundos: garante a ordem certa dos blocos quando o cron os pega
+      // (mesmo agendada_para em todas as linhas seria ordem não-garantida).
+      agendada_para:new Date(base.getTime()+i*1000).toISOString(), status:'pendente', origem:'resposta_humana' }));
+    const { error }=await supa.from('crm_mensagens_agendadas').insert(rows);
     if(error) throw error;
     return 'agendada';
   }
