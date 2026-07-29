@@ -9510,6 +9510,13 @@ function delegacaoBiaChat(texto){
   delegacaoBiaSugerir();
 }
 
+// Clique numa tira de dia do card "Próximos 7 dias": filtra a lista por aquele dia;
+// clicar no mesmo dia de novo (ou em "ver os 7 dias") volta à janela inteira.
+function painelToggleDia(iso){
+  window._painelDiaSel = (window._painelDiaSel===iso) ? null : iso;
+  renderPainel();
+}
+
 async function renderPainel(){
   const el = document.getElementById('page-painel');
   if(!el) return;
@@ -9554,9 +9561,12 @@ async function renderPainel(){
   const devs = (DB.devedores || []).filter(d => !d.arquivado && !d.isDraft);
 
   // ── Vencimentos (próximos 7 dias) — múltiplas fontes ──────────────────────
-  const in7days = new Date(); in7days.setDate(in7days.getDate()+7);
-  const in7str = in7days.toISOString().slice(0,10);
-  const todayStr = hoje();
+  // Datas LOCAIS (_metaYmd), não hoje()/toISOString(): em UTC-3, depois das 21h o
+  // dia UTC já virou e o card passava a esconder os compromissos de hoje. A janela
+  // é hoje + 6 dias, para bater exatamente com as 7 tiras de dia desenhadas abaixo.
+  const in7days = new Date(); in7days.setDate(in7days.getDate()+6);
+  const in7str = _metaYmd(in7days);
+  const todayStr = _metaYmd(new Date());
   const vencItems = [];
   if(!ehColaborador()){
     (DB.lancamentos||[])
@@ -9628,10 +9638,16 @@ async function renderPainel(){
 
   const _ordemTipo = { audiencia:0, tarefa:1, parcela:2, boleto:3, asaas:3, devedor:4, lancamento:5 };
   vencItems.sort((a,b)=> a.data.localeCompare(b.data) || (_ordemTipo[a.tipo]??9)-(_ordemTipo[b.tipo]??9));
-  const VENC_MOSTRAR = 8;
-  const vencimentos = vencItems.slice(0, VENC_MOSTRAR);
-  const vencOcultos = Math.max(0, vencItems.length - VENC_MOSTRAR);
   const eventDates7 = new Set(vencItems.map(v=>v.data));
+
+  // Dia selecionado nas tiras (clique filtra a lista; clicar de novo volta aos 7 dias).
+  // Se a aba ficou aberta e a data saiu da janela, a seleção se desfaz sozinha.
+  let diaSel = window._painelDiaSel || null;
+  if(diaSel && (diaSel < todayStr || diaSel > in7str)){ diaSel = null; window._painelDiaSel = null; }
+  const vencDoDia = diaSel ? vencItems.filter(v=>v.data===diaSel) : vencItems;
+  const VENC_MOSTRAR = diaSel ? 20 : 8;   // filtrado por dia a lista é curta: mostra tudo
+  const vencimentos = vencDoDia.slice(0, VENC_MOSTRAR);
+  const vencOcultos = Math.max(0, vencDoDia.length - VENC_MOSTRAR);
 
   // Greeting
   const hrNow = new Date().getHours();
@@ -9811,8 +9827,10 @@ async function renderPainel(){
   const diasSemanaCurta = ['DOM','SEG','TER','QUA','QUI','SEX','SÁB'];
   const dias7 = Array.from({length:7}, (_,i)=>{
     const d = new Date(now); d.setDate(d.getDate()+i);
-    const iso = d.toISOString().slice(0,10);
-    return { dow:diasSemanaCurta[d.getDay()], num:String(d.getDate()).padStart(2,'0'), hoje:i===0, temEvento:eventDates7.has(iso) };
+    const iso = _metaYmd(d);
+    const qtd = vencItems.filter(v=>v.data===iso).length;
+    return { iso, dow:diasSemanaCurta[d.getDay()], num:String(d.getDate()).padStart(2,'0'),
+             hoje:i===0, temEvento:eventDates7.has(iso), qtd, sel:iso===diaSel };
   });
 
   el.innerHTML = `
@@ -9869,7 +9887,11 @@ async function renderPainel(){
       #page-painel .pnl-dark-hr{height:1px;background:rgba(255,255,255,.12);}
       #page-painel .pnl-dark-2col{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
       #page-painel .pnl-dias7{display:flex;gap:5px;margin-bottom:14px;}
-      #page-painel .pnl-dia{flex:1;border:1px solid var(--border);background:var(--card);border-radius:6px;padding:7px 4px;display:flex;flex-direction:column;align-items:center;gap:3px;}
+      #page-painel .pnl-dia{flex:1;border:1px solid var(--border);background:var(--card);border-radius:6px;padding:7px 4px;display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;transition:border-color .12s,box-shadow .12s;}
+      #page-painel .pnl-dia:hover{border-color:var(--accent);}
+      #page-painel .pnl-dia.vazio{cursor:default;opacity:.55;}
+      #page-painel .pnl-dia.vazio:hover{border-color:var(--border);}
+      #page-painel .pnl-dia.sel{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);}
       #page-painel .pnl-dia.hoje{background:var(--side-bg);border-color:var(--side-bg);}
       #page-painel .pnl-dia .dow{font-family:var(--font-mono);font-size:9px;letter-spacing:.08em;color:var(--text-3);}
       #page-painel .pnl-dia.hoje .dow{color:var(--side-fg-mute);}
@@ -9972,10 +9994,10 @@ async function renderPainel(){
         </div>
 
         <div class="cob-panel">
-          <div class="cob-panel-head"><span class="cob-panel-title">Próximos 7 dias</span><a class="cob-link" style="margin-left:auto;" onclick="showPage('tarefas')">Agenda completa →</a></div>
+          <div class="cob-panel-head"><span class="cob-panel-title">${diaSel? diaSel.slice(8,10)+'/'+diaSel.slice(5,7) : 'Próximos 7 dias'}</span>${diaSel?`<a class="cob-link" style="margin-left:8px;" onclick="painelToggleDia('${diaSel}')">↺ ver os 7 dias</a>`:''}<a class="cob-link" style="margin-left:auto;" onclick="showPage('tarefas')">Agenda completa →</a></div>
           <div class="cob-panel-body">
-            <div class="pnl-dias7">${dias7.map(d=>`<div class="pnl-dia ${d.hoje?'hoje':''}"><span class="dow">${d.dow}</span><span class="num">${d.num}</span><div class="dot ${d.temEvento?'on':''}"></div></div>`).join('')}</div>
-            ${vencimentos.length? vencimentos.map(v=>`<div class="pnl-comp"><div style="font-family:var(--font-mono);font-size:11.5px;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};width:56px;flex-shrink:0;">${(v.data||'').slice(8,10)}/${(v.data||'').slice(5,7)}</div><div style="min-width:0;">${v.rotulo?`<div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};">${escHtml(v.rotulo)}</div>`:''}<div style="font-size:12.5px;font-weight:500;color:var(--text);">${escHtml(v.desc||'—')}</div>${v.valor?`<div style="font-size:11.5px;color:var(--text-3);">${fmtR(v.valor)}</div>`:''}</div></div>`).join('')+(vencOcultos?`<div style="padding:9px 0 0;font-size:11.5px;color:var(--text-3);">+${vencOcultos} ${vencOcultos===1?'compromisso':'compromissos'} — ver agenda completa</div>`:'') : `<div class="cob-empty"><span class="cob-empty-dot"></span> Nada nos próximos 7 dias.</div>`}
+            <div class="pnl-dias7">${dias7.map(d=>`<div class="pnl-dia ${d.hoje?'hoje':''} ${d.sel?'sel':''} ${d.qtd?'':'vazio'}"${d.qtd?` onclick="painelToggleDia('${d.iso}')" title="${d.qtd} ${d.qtd===1?'compromisso':'compromissos'} em ${d.iso.slice(8,10)}/${d.iso.slice(5,7)}"`:' title="nada neste dia"'}><span class="dow">${d.dow}</span><span class="num">${d.num}</span><div class="dot ${d.temEvento?'on':''}"></div></div>`).join('')}</div>
+            ${vencimentos.length? vencimentos.map(v=>`<div class="pnl-comp"><div style="font-family:var(--font-mono);font-size:11.5px;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};width:56px;flex-shrink:0;">${(v.data||'').slice(8,10)}/${(v.data||'').slice(5,7)}</div><div style="min-width:0;">${v.rotulo?`<div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};">${escHtml(v.rotulo)}</div>`:''}<div style="font-size:12.5px;font-weight:500;color:var(--text);">${escHtml(v.desc||'—')}</div>${v.valor?`<div style="font-size:11.5px;color:var(--text-3);">${fmtR(v.valor)}</div>`:''}</div></div>`).join('')+(vencOcultos?`<div style="padding:9px 0 0;font-size:11.5px;color:var(--text-3);">+${vencOcultos} ${vencOcultos===1?'compromisso':'compromissos'} — ver agenda completa</div>`:'') : `<div class="cob-empty"><span class="cob-empty-dot"></span> ${diaSel? 'Nada em '+diaSel.slice(8,10)+'/'+diaSel.slice(5,7)+'.' : 'Nada nos próximos 7 dias.'}</div>`}
           </div>
         </div>
 
