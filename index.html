@@ -19271,6 +19271,7 @@ async function bulkAlterarStatusCobr(){
   const { error } = await supa.from('cobrancas').update({ status: novoStatus }).in('id', ids);
   if(error){ showToast('Erro: '+error.message,'danger'); return; }
   (DB_cobrancas||[]).filter(c=>ids.includes(c.id)).forEach(c=>c.status=novoStatus);
+  _syncStatusBlob(ids, novoStatus);   // idem: o portal do cedente lê o blob
   selectedCobrIds.clear(); cobSelectionMode = false;
   showToast(`${ids.length} caso${ids.length!==1?'s':''} → ${novoStatus}`,'success');
   renderCobrancas();
@@ -20129,6 +20130,24 @@ function abrirTrocaStatus(ev, cobId){
   pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 256)) + 'px';
   pop.style.top  = Math.max(8, Math.min(r.bottom + 6, window.innerHeight - 360)) + 'px';
 }
+// ── Sincroniza o STATUS no blob (dual-write) ─────────────────────────────────
+// `devedores` e `cobrancas` compartilham o mesmo id (1:1). O relacional é a
+// fonte, mas o PORTAL DO CEDENTE lê o blob (DB.devedores) — inclusive para
+// contar "ativas / em acordo / quitadas" no painel dele. Gravar só no relacional
+// deixa o cliente vendo um status velho: um caso quitado aparecendo como acordo
+// em curso, um caso em cumprimento de sentença aparecendo como "Devolvida".
+// Toda via que muda status TEM que passar por aqui.
+function _syncStatusBlob(ids, novo){
+  const alvo = Array.isArray(ids) ? ids : [ids];
+  let n = 0;
+  alvo.forEach(id=>{
+    const d = (DB.devedores||[]).find(x=>x.id===id);
+    if(d && d.status !== novo){ d.status = novo; n++; }
+  });
+  if(n) { try{ save(); }catch(e){ console.warn('[status] blob não sincronizou:', e && e.message); } }
+  return n;
+}
+
 async function setStatusCobranca(cobId, novo){
   _fecharTrocaStatus();
   if(!novo) return;
@@ -20136,6 +20155,7 @@ async function setStatusCobranca(cobId, novo){
   const { error } = await supa.from('cobrancas').update({ status: novo }).eq('id', cobId);
   if(error){ showToast('Erro ao alterar situação: '+error.message,'danger'); return; }
   const c = (DB_cobrancas||[]).find(x=>x.id===cobId); if(c) c.status = novo;
+  _syncStatusBlob(cobId, novo);   // sem isto o portal do cedente fica no status velho
   const nome = c ? (typeof _cobrPrincipalNome==='function' ? _cobrPrincipalNome(c) : '') : '';
   showToast((nome && nome!=='—' ? nome+' → ' : 'Situação → ')+statusLabel(novo),'success');
   if(document.getElementById('page-cobranca-detalhe')?.classList.contains('active')) renderCobrancaDetalhe();
