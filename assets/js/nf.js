@@ -113,13 +113,41 @@ function _nffBtn(label, onclick, kind, title){
   return `<button onclick="${onclick}" ${title?`title="${escHtml(title)}"`:''} style="${base}${st}">${label}</button>`;
 }
 
+// Prontidão para emitir (handoff v3 §9): a fila não é uma lista de recebimentos,
+// é uma lista de "dá para emitir agora?". Três estados, que somam o total:
+//   pronto        CPF/CNPJ + endereço confirmado no Asaas
+//   falta_end     tem documento, falta (ou ainda está sendo checado) o endereço
+//   sem_id        nem documento tem — o tomador não está identificado
+function nffProntidao(q){
+  if(!q || !q.cpf_cnpj || !nfaDigits(q.cpf_cnpj)) return 'sem_id';
+  return q.endereco_ok === true ? 'pronto' : 'falta_end';
+}
+function nffPronto(q){ return nffProntidao(q)==='pronto'; }
+
 function nffDraw(){
   const box=document.getElementById('nff-fila'); if(!box) return;
   const grid='display:grid;grid-template-columns:30px minmax(230px,1.5fr) 100px 62px 88px 236px;gap:10px;align-items:center;padding:12px 20px;';
   const soma=_nffFila.reduce((s,q)=>s+(Number(q.valor)||0),0);
   _nffFila.forEach(q=>{ if(!_nffFila.some(x=>x.id===q.id)) _nffSel.delete(q.id); });
+  // Item que deixou de estar pronto não pode continuar selecionado — senão o
+  // contador do botão de lote e a seleção visível discordam.
+  [..._nffSel].forEach(id=>{ const q=_nffFila.find(x=>x.id===id); if(!q || !nffPronto(q)) _nffSel.delete(id); });
   const selItems=_nffFila.filter(q=>_nffSel.has(q.id));
   const selOk=selItems.filter(q=>q.endereco_ok===true);
+  const nPronto=_nffFila.filter(q=>nffProntidao(q)==='pronto').length;
+  const nFaltaEnd=_nffFila.filter(q=>nffProntidao(q)==='falta_end').length;
+  const nSemId=_nffFila.filter(q=>nffProntidao(q)==='sem_id').length;
+  const kpi=(role,val,sub,bg,fg,bd)=>`<div style="background:${bg};border:1px solid ${bd};border-radius:9px;padding:14px 16px;">
+      <div style="font-family:${NFF_C.mono};font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:${fg};opacity:.75;">${role}</div>
+      <div style="font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:400;color:${fg};margin-top:6px;line-height:1;">${val}</div>
+      <div style="font-size:11.5px;color:${fg};opacity:.7;margin-top:6px;">${sub}</div>
+    </div>`;
+  const kpis=`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px;">
+      ${kpi('A emitir', _nffFila.length, nfaFmtBRL(soma)+' recebidos', NFF_C.ink, '#FFFFFF', NFF_C.ink)}
+      ${kpi('Prontos agora', nPronto, 'documento e endereço ok', '#FFFFFF', '#4C6647', '#CFE0CB')}
+      ${kpi('Falta endereço', nFaltaEnd, 'completar no Asaas', '#FFFFFF', '#7A6428', '#DFC992')}
+      ${kpi('Sem identificação', nSemId, 'sem CPF/CNPJ do tomador', '#FFFFFF', '#7D3F33', '#E7CFC7')}
+    </div>`;
 
   const headerDir = selItems.length
     ? `<span style="font-family:${NFF_C.mono};font-size:11px;color:rgba(10,21,48,0.6);">${selItems.length} selecionado(s)</span>
@@ -129,6 +157,7 @@ function nffDraw(){
 
   const linha=(q)=>{
     const on=_nffSel.has(q.id);
+    const pronto=nffPronto(q);
     const endTxt = q.endereco_ok===true ? `<span style="color:${NFF_C.verde};">endereço ok</span>`
       : q.endereco_ok===false ? `<span style="color:${NFF_C.vermelho};font-weight:600;">sem endereço no Asaas</span>`
       : `<span style="color:rgba(10,21,48,0.45);">verificando endereço…</span>`;
@@ -139,7 +168,7 @@ function nffDraw(){
       : `${_nffBtn('Dispensar', `nffDispensar(['${q.id}'])`, 'ghost')}`;
     const doc = q.cpf_cnpj ? nfaMaskDoc(nfaDigits(q.cpf_cnpj)) : 'sem CPF';
     return `<div style="${grid}border-top:0.5px solid rgba(10,21,48,0.07);">
-      <div onclick="nffToggle('${q.id}')" role="checkbox" aria-checked="${on}" style="width:16px;height:16px;border-radius:4px;cursor:pointer;border:1.5px solid ${on?NFF_C.gold:'rgba(10,21,48,0.3)'};background:${on?NFF_C.gold:'transparent'};display:flex;align-items:center;justify-content:center;">
+      <div ${pronto?`onclick="nffToggle('${q.id}')"`:''} role="checkbox" aria-checked="${on}" aria-disabled="${!pronto}" title="${pronto?'':'Só entra no lote depois de completar o cadastro do tomador'}" style="width:16px;height:16px;border-radius:4px;cursor:${pronto?'pointer':'not-allowed'};border:1.5px solid ${on?NFF_C.gold:(pronto?'rgba(10,21,48,0.3)':'rgba(10,21,48,0.12)')};background:${on?NFF_C.gold:(pronto?'transparent':'#F5F2EA')};display:flex;align-items:center;justify-content:center;">
         ${on?`<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#0A1530" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`:''}
       </div>
       <div style="min-width:0;">
@@ -153,7 +182,7 @@ function nffDraw(){
     </div>`;
   };
 
-  box.innerHTML=`<div style="background:${NFF_C.card};border:0.5px solid rgba(201,169,97,0.55);border-radius:16px;overflow:hidden;">
+  box.innerHTML=`${_nffFila.length?kpis:''}<div style="background:${NFF_C.card};border:0.5px solid rgba(201,169,97,0.55);border-radius:16px;overflow:hidden;">
     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:13px 20px;background:rgba(201,169,97,0.08);border-bottom:0.5px solid rgba(201,169,97,0.35);">
       <span style="font-family:${NFF_C.mono};font-size:10px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:${NFF_C.goldDark};">Recebidos no Asaas · aguardando sua análise</span>
       ${_nffFila.length?`<span style="font-family:${NFF_C.mono};font-size:11px;color:rgba(10,21,48,0.55);">${nfaFmtBRL(soma)} recebidos</span>`:''}
@@ -166,7 +195,12 @@ function nffDraw(){
   if(typeof nffRenderRail==='function') nffRenderRail();
 }
 
-function nffToggle(id){ if(_nffSel.has(id)) _nffSel.delete(id); else _nffSel.add(id); nffDraw(); }
+function nffToggle(id){
+  const q=_nffFila.find(x=>x.id===id);
+  if(!q || !nffPronto(q)) return; // não pronto não entra no lote
+  if(_nffSel.has(id)) _nffSel.delete(id); else _nffSel.add(id);
+  nffDraw();
+}
 
 // ── rail direito (296px): resumo do mês · precisa de você · modelo ativo ─────
 function nffRenderRail(){
