@@ -271,8 +271,49 @@
     return pausar(c, 'processo ' + c.numero_processo + ' não apareceu no resultado — confira o número (a busca fica em Buscas → Processos 1º Grau), abra o processo e clique Continuar');
   }
 
+  // Telas da intimação (intimacao.do): (a) aviso "Existem mais intimações não lidas…
+  // Confirma?" → Continuar; (b) a intimação em si → "Cumprir Prazo" (abre a juntada).
+  function ehTelaIntimacao() {
+    if (document.getElementById('intimacaoForm')) return true;
+    const cont = document.getElementById('continueButton');
+    return !!cont && /intima[cç][oõ]es\s+n[aã]o\s+lidas|todas\s+ter[aã]o\s+seu\s+prazo/i.test(document.body ? document.body.innerText : '');
+  }
+  async function telaIntimacao(c) {
+    // (a) aviso de confirmação (sem "Cumprir Prazo" ainda) → Continuar p/ visualizar.
+    if (!document.getElementById('cumprirButton')) {
+      const cont = document.getElementById('continueButton') ||
+        acharControle(['continuar'], 'input[type=submit],input[type=button],button,a');
+      if (cont && visivel(cont)) {
+        progresso(c, 'intimação: confirmando visualização…');
+        clicar(cont);
+        setTimeout(() => runCentral().catch(() => {}), 2500);
+        return;
+      }
+    }
+    // (b) a intimação → "Cumprir Prazo" (cumprirIntimacao.do → juntada → upload).
+    const cumprir = document.getElementById('cumprirButton') ||
+      acharControle(['cumprir prazo', 'cumprir'], 'input[type=submit],input[type=button],button,a');
+    if (cumprir && visivel(cumprir)) {
+      progresso(c, 'intimação → Cumprir Prazo');
+      clicar(cumprir);
+      setTimeout(() => runCentral().catch(() => {}), 2500);
+      return;
+    }
+    return pausar(c, 'estou na intimação mas não achei <b>Cumprir Prazo</b> — clique você e depois Continuar.');
+  }
+
   // Tela: o processo (processo.do — form processoForm com #cumprirButton/#peticionarButton).
   async function telaProcesso(c) {
+    // PRIORIDADE: se há intimação não lida (Pendências → "Ver Intimação"), o caminho é
+    // CUMPRIR O PRAZO dela — não "Petição Eletrônica" (petição avulsa, sem vínculo).
+    const verIntim = document.querySelector('#quadroPendencias a[href*="intimacao.do"]') ||
+      Array.from(document.querySelectorAll('#quadroPendencias a, a')).find(a => visivel(a) && /ver\s+intima[cç][aã]o/i.test(a.textContent || ''));
+    if (verIntim && visivel(verIntim)) {
+      progresso(c, 'intimação pendente → abrindo (Cumprir Prazo)…');
+      clicar(verIntim);
+      setTimeout(() => runCentral().catch(() => {}), 2500);
+      return;
+    }
     // M2: os botões podem chegar por AJAX depois do document_idle — espera antes de
     // decidir; se nunca vierem, pausa (NÃO navega embora, senão loop).
     const btn = await esperar(() => {
@@ -671,6 +712,7 @@
       if (upForm && upFile && visivel(upFile)) return await telaUpload(c);
       if (document.getElementById('juntarDocumentoForm')) return await telaJuntar(c);
       if (upForm && upFile) return await telaUpload(c); // upload em iframe próprio sem juntada na tela
+      if (ehTelaIntimacao()) return await telaIntimacao(c); // aviso/"Cumprir Prazo"
       if (document.getElementById('processoForm')) return await telaProcesso(c); // M2: espera botões lá dentro
       if (document.getElementById('buscaProcessosQualquerInstanciaForm')) {
         // C1 (hardening): detecção POSITIVA — se já há link do processo no resultado,
