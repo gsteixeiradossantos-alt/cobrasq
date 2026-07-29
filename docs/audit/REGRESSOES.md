@@ -214,10 +214,48 @@ from pg_class c join pg_namespace n on n.oid=c.relnamespace and n.nspname='publi
 where c.relname='casos';   -- tem que ser 'true'
 ```
 
-**Corrigido em 29/07/2026 (parcial):** `20260729_p0_views_revoke_anon.sql` tirou
-o `anon` das três views. **Pendente:** `alter view public.casos set
-(security_invoker = true)` — hoje um colaborador logado ainda enxerga os 145
-casos pela view, não só os seus.
+**Corrigido em 29/07/2026, completo:**
+1. `20260729_p0_views_revoke_anon.sql` — tirou o `anon` das três views (fechou o
+   acesso sem login).
+2. `20260729_devedores_colaborador_parte.sql` — policy "se o caso é meu, o
+   devedor do caso é visível para mim", que era o que travava o passo 3.
+3. `20260729_f04_casos_security_invoker.sql` — a view voltou a respeitar a RLS.
+
+Conferido por perfil: colaboradora 145 → **62** casos (0 sem devedor), gestor
+**145** (0 sem devedor).
+
+**Ainda DEFINER:** `vw_bia_respostas_humanas` e `vw_bia_metricas_semanal`. Sem
+`anon`, então não vazam para fora; entre logados seguem sem RLS. Não têm
+consumidor no código — avaliar dropar em vez de consertar.
+
+---
+
+## R-17 · Coluna derivada que ninguém mantém (a tela mente sobre o banco)
+
+**O que acontece.** Um estado que era derivado em runtime vira COLUNA no banco,
+a tela passa a ler a coluna com precedência — e as vias que gravam a origem do
+dado não escrevem a coluna junto. A tela passa a contradizer o próprio banco.
+
+Aconteceu em 29/07 com `cobrancas.etapa`: o dono moveu 3 casos de "Cobrar" para
+"Fazer ação" em lote, o `status` gravou certo e o pipeline continuou mostrando
+os 3 em "Cobrar". São 5+ lugares que gravam `status` (popover, barra de lote,
+Bia, importação, sync do acordo) e nenhum escrevia `etapa`.
+
+**Teste:**
+```sql
+select status, etapa, count(*) from public.cobrancas
+ where coalesce(arquivado,false)=false and coalesce(is_draft,false)=false
+ group by 1,2 having status ilike '%fazer a%' and etapa <> 'fazer_acao';
+```
+Qualquer linha aqui é desincronia. Vale para qualquer par origem/derivado.
+
+**A regra.** Coluna derivada só ganha precedência na tela DEPOIS que existe um
+trigger mantendo-a. Patch em cada call site não conta — basta esquecer um (ou
+entrar um novo pela Bia) e o bug volta calado.
+
+**Corrigido:** `20260729_cobrancas_etapa_trigger.sql` (trigger BEFORE INSERT OR
+UPDATE OF status, numero_processo). A tela segue derivando em runtime de
+propósito — dá o mesmo resultado sem depender do trigger estar de pé.
 
 ---
 
