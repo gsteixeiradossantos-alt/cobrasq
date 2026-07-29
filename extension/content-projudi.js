@@ -125,6 +125,10 @@
   function reportar(tipo, extra) { try { chrome.runtime.sendMessage({ type: tipo, ...(extra || {}) }); } catch (_) {} }
   function progresso(c, texto) { setBody(msg('<b>Central (Projudi):</b> ' + texto)); reportar('CENTRAL_PROGRESS', { casoId: c.id, texto }); }
   async function pausar(c, motivo, el) {
+    // Toda pausa CANCELA o auto-concluir em voo: sem isto, uma pausa (ex.: login expirado)
+    // no meio do "Concluir Movimento" deixava a flag viva e, ao retomar, a simples volta à
+    // tela do processo era lida como "protocolado" — falso sucesso em ato irreversível.
+    c.autoConcluindo = false;
     c.status = 'pausado'; c.motivo = motivo; await casoSalvar(c);
     if (el) destacar(el, '#fa5252');
     setBody(msg('⏸ <b>Pausado:</b> ' + motivo, '#fff3bf') + msg('Faça na tela o que a mensagem pede e use <b>Continuar</b> na aba da Central.', '#e7f5ff'));
