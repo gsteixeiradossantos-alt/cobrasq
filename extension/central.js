@@ -83,6 +83,8 @@ const state = {
   atual: -1,
   tabId: null,
   primeiroValidado: false,
+  autoConcluir: false,  // Projudi: modo automático (pula revisão; 1º caso você confere,
+                        // demais concluem sozinhos SE os arquivos já forem .p7s assinados)
   rodando: false,
 };
 
@@ -226,6 +228,10 @@ function renderFase1(msgErro) {
     • <b>Subpasta</b> = 1 petição com vários anexos (número no nome da subpasta ou de um PDF).<br>
     Sem IA nesta versão: o PDF vai como anexo e você confere tipo/número na revisão. A assinatura/senha no protocolo é <b>sempre sua</b>.</p>`}
     ${msgErro ? `<div class="erro">${esc(msgErro)}</div>` : ''}
+    ${!ehEproc ? `<label style="display:flex;align-items:center;gap:8px;margin:8px 0;padding:8px 10px;border:1px solid ${state.autoConcluir ? '#1a7f37' : '#ccc'};border-radius:8px;cursor:pointer;">
+      <input type="checkbox" id="auto-concluir" ${state.autoConcluir ? 'checked' : ''} style="width:16px;height:16px;">
+      <span><b>Modo automático</b> — pula a revisão e <b>conclui sozinho</b>. O <b>1º caso você confere</b> (rede de segurança); os demais protocolam automaticamente <u>se os arquivos já forem <code>.p7s</code> assinados</u>. ⚠️ Protocolo é irreversível.</span>
+    </label>` : ''}
     <div style="display:flex;gap:10px;flex-wrap:wrap;">
       <button class="btn" id="pick">📁 Escolher pasta…</button>
       <button class="btn ghost" id="pick-arqs">📄 Escolher arquivos…</button>
@@ -238,6 +244,8 @@ function renderFase1(msgErro) {
   document.getElementById('modo-projudi').onclick = () => { state.sistema = 'projudi'; renderFase1(); };
   const selTrib = document.getElementById('sel-tribunal');
   if (selTrib) selTrib.onchange = () => { state.tribunal = selTrib.value; try { chrome.storage.local.set({ cobrasq_tribunal: state.tribunal }); } catch (_) {} };
+  const auto = document.getElementById('auto-concluir');
+  if (auto) auto.onclick = () => { state.autoConcluir = auto.checked; try { chrome.storage.local.set({ cobrasq_auto_concluir: state.autoConcluir }); } catch (_) {} renderFase1(); };
   document.getElementById('pick').onclick = () => escolherPasta().catch(e => renderFase1(String(e.message || e)));
   document.getElementById('pick-arqs').onclick = () => escolherArquivos().catch(e => renderFase1(String(e.message || e)));
 }
@@ -509,6 +517,7 @@ function payloadDoCaso(caso) {
     dados: caso.dados,
     docs: caso.docs.map((d, i) => ({ idx: i, nome: d.nome, tipoTxt: d.tipoTxt, selVal: d.selVal, obs: d.obs, principal: !!d.principal })),
     primeiro: !state.primeiroValidado,
+    autoConcluir: !!state.autoConcluir, // Projudi: concluir sozinho (após o 1º caso)
   };
 }
 async function mandarParaAba(tipo, extra) {
@@ -697,7 +706,8 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
 // anterior, pra ele não tentar retomar sozinho na aba do eproc.
 chrome.storage.local.remove('cobrasq_central_caso');
 
-// Carrega o tribunal preferido (persistido) antes do 1º render; se falhar, TJPR.
-chrome.storage.local.get('cobrasq_tribunal').then(o => {
+// Carrega o tribunal preferido e o modo automático (persistidos) antes do 1º render.
+chrome.storage.local.get(['cobrasq_tribunal', 'cobrasq_auto_concluir']).then(o => {
   if (o && o.cobrasq_tribunal && TRIBUNAIS_EPROC[o.cobrasq_tribunal]) state.tribunal = o.cobrasq_tribunal;
+  if (o && typeof o.cobrasq_auto_concluir === 'boolean') state.autoConcluir = o.cobrasq_auto_concluir;
 }).catch(() => {}).finally(() => renderFase1());

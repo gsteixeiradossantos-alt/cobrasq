@@ -250,7 +250,9 @@ async function registrarProtocolo({ numero, caso }) {
 // Override de diálogos nativos na página (modo auto): confirm→true, alert→captura.
 async function overrideDialogos(tabId) {
   await chrome.scripting.executeScript({
-    target: { tabId }, world: 'MAIN',
+    // allFrames: o Projudi roda em frameset — o "Concluir Movimento" (e o confirm que
+    // ele dispara) vivem no userMainFrame, não no topo; sem isto o override não pega lá.
+    target: { tabId, allFrames: true }, world: 'MAIN',
     func: () => {
       if (window.__cbDialogosOk) return;
       window.__cbDialogosOk = true;

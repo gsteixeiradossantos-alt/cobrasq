@@ -429,7 +429,7 @@
     const rowSel = alvoRadio.closest('tr,li,label,div');
     const lbl = alvoRadio.id ? document.querySelector('label[for="' + alvoRadio.id + '"]') : null;
     let descricaoRaw = (lbl ? lbl.textContent : (rowSel ? rowSel.textContent : '')) || tipoTxt;
-    descricaoRaw = descricaoRaw.replace(/\s+/g, ' ').trim().replace(new RegExp('\\b' + (alvoRadio.value || ' ') + '\\b'), '').trim().slice(0, 200);
+    descricaoRaw = descricaoRaw.replace(/\s+/g, ' ').trim().replace(new RegExp('\\b' + (alvoRadio.value || '') + '\\b'), '').trim().slice(0, 200);
     const q = new URLSearchParams(location.search || '');
     try {
       const pdoc = window.parent.document;
@@ -538,8 +538,24 @@
     // se outro frame pausou/trocou o caso nesse meio-tempo, aborta a passada.
     const cFinal = await casoAposEspera(c);
     if (!cFinal) return;
-    cFinal.fase = 'assinar'; await casoSalvar(cFinal); c = cFinal;
+    cFinal.fase = 'assinar'; c = cFinal;
     const concluirBtn = acharControle(['concluir movimento', 'concluir']);
+    // MODO AUTOMÁTICO: conclui sozinho SÓ quando é seguro — auto ligado, não é o 1º caso
+    // (esse você confere), todos os anexos são .p7s (já assinados, sem certificado no
+    // meio) e não ficou assinatura pendente. Fora disso, sempre entrega ao humano.
+    const todosP7s = (c.docs || []).length > 0 && (c.docs || []).every(d => /\.p7s$/i.test(d.nome || ''));
+    const podeAuto = c.autoConcluir && !c.primeiro && todosP7s && !c.assinaturaPendente && concluirBtn;
+    if (podeAuto) {
+      c.autoConcluindo = true; await casoSalvar(c);
+      // Auto-aceita qualquer confirm() do "Concluir Movimento" (você optou pelo modo auto).
+      await chrome.runtime.sendMessage({ type: 'OVERRIDE_DIALOGS' }).catch(() => {});
+      progresso(c, 'modo automático: concluindo o movimento…');
+      destacar(concluirBtn, '#1a7f37');
+      await new Promise(r => setTimeout(r, 700));
+      clicar(concluirBtn);
+      return; // na próxima carga, o dirigir detecta a conclusão e segue a fila
+    }
+    await casoSalvar(c);
     if (concluirBtn) destacar(concluirBtn, '#1a7f37');
     return pausar(c, 'PDF(s) anexado(s) ✔ — confira, clique <b>Concluir Movimento</b> e ASSINE com sua senha. Depois do protocolo, clique <b>Continuar</b> na Central que eu dou o caso por concluído e sigo a fila.');
   }
@@ -601,11 +617,17 @@
     const confirmar = document.getElementById('closeButton') ||
       acharControle(['confirmar inclusao', 'confirmar inclusão'], 'input[type=submit],input[type=button],button,a');
     if (assinar && visivel(assinar)) {
-      c.fase = 'assinar'; await casoSalvar(c);
+      // Exige CERTIFICADO → o modo automático NUNCA conclui isto (a assinatura é sua).
+      c.assinaturaPendente = true; c.fase = 'assinar'; await casoSalvar(c);
       destacar(assinar, '#1a7f37');
       return pausar(c, 'PDF(s) anexado(s) ✔ — clique <b>Assinar Arquivos</b>, assine com seu <b>certificado</b> e depois <b>Concluir Movimento</b>. Terminado o protocolo, clique <b>Continuar</b> na Central que eu sigo a fila.');
     }
-    if (confirmar && visivel(confirmar)) { clicar(confirmar); return; }
+    if (confirmar && visivel(confirmar)) {
+      // "Confirmar Inclusão" (ex.: .p7s já assinado) → sem certificado pendente; o
+      // modo automático pode concluir o movimento depois (na tela de juntada).
+      c.assinaturaPendente = false; await casoSalvar(c);
+      clicar(confirmar); return;
+    }
     return pausar(c, 'anexei o(s) PDF(s) — conclua o envio (Assinar Arquivos / Confirmar Inclusão) e clique Continuar.');
   }
 
@@ -691,6 +713,39 @@
 
       if (!c.numero_processo) return pausar(c, 'caso sem número de processo — corrija na revisão da Central');
 
+      // MODO AUTOMÁTICO: já clicamos "Concluir Movimento"; esta é a carga seguinte.
+      if (c.autoConcluindo && c.status === 'rodando') {
+        // Se ainda há form de juntada/upload na tela, o clique NÃO avançou (ex.: exigiu
+        // certificado, validação falhou) → aborta o auto e entrega ao humano (segurança).
+        if (document.getElementById('juntarDocumentoForm') || document.getElementById('fileUploadForm')) {
+          c.autoConcluindo = false; await casoSalvar(c);
+          return pausar(c, 'modo automático: o <b>Concluir Movimento</b> não avançou (pode ter exigido certificado). Conclua você e clique <b>Continuar</b> na Central.');
+        }
+        // Confirma a conclusão por um SINAL POSITIVO (recibo de protocolo, mensagem de
+        // sucesso, ou de volta à tela do processo/mesa) — não só "o form sumiu", pra não
+        // dar caso por concluído numa tela intermediária/erro.
+        const txt = norm(document.body ? document.body.innerText : '');
+        const m = (document.body.innerText || '').match(/protocolo[^\d]{0,20}(\d[\d./-]{5,})/i);
+        const sucesso = m || /movimento (concluido|registrado|realizado)|operacao realizada|com sucesso|protocolad/.test(txt) ||
+          document.getElementById('processoForm') || document.getElementById('mesaAdvogadoForm');
+        if (!sucesso) {
+          // Ainda carregando/tela desconhecida — dá mais uma passada antes de desistir.
+          await new Promise(r => setTimeout(r, 1500));
+          const txt2 = norm(document.body ? document.body.innerText : '');
+          const ok2 = /movimento (concluido|registrado|realizado)|operacao realizada|com sucesso|protocolad/.test(txt2) ||
+            document.getElementById('processoForm') || document.getElementById('mesaAdvogadoForm') ||
+            (document.body.innerText || '').match(/protocolo[^\d]{0,20}(\d[\d./-]{5,})/i);
+          if (!ok2) {
+            c.autoConcluindo = false; await casoSalvar(c);
+            return pausar(c, 'modo automático: não confirmei a conclusão do movimento — confira se protocolou; se sim, clique <b>Continuar</b>.');
+          }
+        }
+        await casoLimpar();
+        reportar('CENTRAL_CASO_OK', { casoId: c.id, numero: (m && m[1]) || c.numero_processo });
+        setBody(msg('✅ Caso concluído automaticamente — próximo da fila.', '#d3f9d8'));
+        return;
+      }
+
       // FASE FINAL: o advogado assinou/protocolou e clicou Continuar.
       if (c.fase === 'assinar' && c.status === 'rodando' && c.retomadoPeloUsuario) {
         const m = (document.body.innerText || '').match(/protocolo[^\d]{0,20}(\d[\d./-]{5,})/i);
@@ -739,7 +794,7 @@
     if (m.type === 'RUN_CENTRAL' && m.caso && m.caso.sistema === 'projudi') {
       if (!respondo) return false;
       (async () => {
-        await casoSalvar({ ...m.caso, status: 'rodando', motivo: null, fase: null, abriuLupa: false, abriuUpload: false, uploadFeito: false, retomadoPeloUsuario: false });
+        await casoSalvar({ ...m.caso, status: 'rodando', motivo: null, fase: null, abriuLupa: false, abriuUpload: false, uploadFeito: false, retomadoPeloUsuario: false, assinaturaPendente: false, autoConcluindo: false });
         sendResponse({ ok: true });
         runCentral().catch(() => {});
       })();
