@@ -1,0 +1,48 @@
+-- ============================================================================
+-- F-04 · PASSO 2 — a view `casos` volta a respeitar a RLS
+--
+-- APLICADA EM PRODUÇÃO em 29/07/2026, com autorização do dono.
+-- (Passo 1 = 20260729_p0_views_revoke_anon.sql, que tirou o `anon`.)
+--
+-- O passo 1 fechou o acesso ANÔNIMO. Entre LOGADOS a RLS seguia sem valer,
+-- porque a view roda com os privilégios do dono (postgres): a colaboradora
+-- abria o CRM e via os 145 casos do escritório, não os 62 dela.
+--
+-- O QUE TRAVAVA LIGAR ANTES. Simulando o JWT dela, 2 dos 62 casos perderiam o
+-- nome do devedor: a cobrança tinha sido transferida para ela e o devedor
+-- ficou registrado com outra pessoa — duas metades da mesma coisa que se
+-- separaram. Com a view em DEFINER ninguém percebia, porque ela abria as duas
+-- gavetas de qualquer jeito.
+--
+-- Resolvido na policy `devedores_colaborador_parte` (arquivo irmão): se o caso
+-- é meu, o devedor do caso é visível para mim. Só então esta migração entrou.
+--
+-- ── MEDIDO NA HORA, simulando o JWT de cada perfil ──────────────────────────
+--   colaboradora Natália · antes 145 · depois  62 · sem devedor: 0
+--   gestor Gustavo       · antes 145 · depois 145 · sem devedor: 0
+--
+-- O cedente não entra na conta: `casos` é lida só pelo crm.html (staff). O
+-- portal do cedente usa outro caminho (RPCs security-definer / blob).
+--
+-- ROLLBACK: alter view public.casos reset (security_invoker);
+--   (derruba a RLS de novo — só usar se o CRM quebrar de verdade.)
+-- ============================================================================
+
+alter view public.casos set (security_invoker = true);
+
+-- ── VERIFICAÇÃO ────────────────────────────────────────────────────────────
+-- select coalesce((select option_value from pg_options_to_table(c.reloptions)
+--                   where option_name='security_invoker'),'(ausente)')
+--   from pg_class c join pg_namespace n on n.oid=c.relnamespace and n.nspname='public'
+--  where c.relname='casos';                       -- tem que ser 'true'
+--
+-- Por perfil (rodar dentro de begin/rollback):
+--   set local role authenticated;
+--   set local request.jwt.claims = '{"sub":"<uuid do app_users>","role":"authenticated"}';
+--   select count(*), count(*) filter (where jsonb_array_length(partes)=0) from public.casos;
+--
+-- ── AINDA ABERTO ───────────────────────────────────────────────────────────
+-- `vw_bia_respostas_humanas` e `vw_bia_metricas_semanal` continuam DEFINER. O
+-- `anon` já saiu das duas (passo 1), então não vazam para fora; entre logados
+-- seguem sem RLS. Não têm consumidor no código — avaliar dropar em vez de
+-- consertar.
