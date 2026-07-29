@@ -9227,6 +9227,53 @@ function renderPainelColaborador(){
 // "dinheiro que entrou" (canal principal de recuperação). Usa pagoEm (data da
 // baixa) e cai para vencimento em parcelas antigas sem data. Asaas RECEIVED e
 // baixas avulsas: follow-up (sem carga em massa hoje).
+// Recuperado numa JANELA de datas (usado pelo segmented Hoje/Semana/Mês/Trim do
+// Painel). Mesma fonte de recuperadoNoMes: parcela de acordo efetivamente paga.
+function recuperadoEntre(deYmd, ateYmd){
+  let total = 0;
+  for(const d of (DB.devedores||[])){
+    for(const ac of (d.acordos||[])){
+      for(const pa of (ac.parcelas||[])){
+        if(!pa.pago) continue;
+        const ref = String(pa.pagoEm || pa.vencimento || '').slice(0,10);
+        if(ref && ref >= deYmd && ref <= ateYmd) total += (typeof pa.valor==='number') ? pa.valor : (parseValorBR(pa.valor)||0);
+      }
+    }
+  }
+  return total;
+}
+// Janela do segmented. `metaFator` converte a meta MENSAL na meta do período,
+// proporcional a dias ÚTEIS — meta de um dia não é meta do mês dividida por 30.
+const _PNL_PERIODOS = ['hoje','semana','mes','trim'];
+function painelPeriodo(){ const v=String(window._painelPeriodo||'mes'); return _PNL_PERIODOS.includes(v)?v:'mes'; }
+function painelSetPeriodo(p){ window._painelPeriodo = p; renderPainel(); }
+function _pnlDiasUteis(de, ate){
+  let n=0; const d=new Date(de+'T12:00:00'), fim=new Date(ate+'T12:00:00');
+  while(d<=fim){ const w=d.getDay(); if(w!==0 && w!==6) n++; d.setDate(d.getDate()+1); }
+  return n;
+}
+function painelJanela(){
+  const per = painelPeriodo();
+  const hoje = new Date();
+  const ymd = _metaYmd;
+  const mes0 = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
+  const mesFim = new Date(hoje.getFullYear(), hoje.getMonth()+1, 0);
+  const uteisMes = _pnlDiasUteis(ymd(mes0), ymd(mesFim)) || 1;
+  let de, ate, label;
+  if(per==='hoje'){ de=ate=ymd(hoje); label='hoje'; }
+  else if(per==='semana'){
+    const ini=new Date(hoje); ini.setDate(ini.getDate()-((ini.getDay()+6)%7)); // segunda
+    const fim=new Date(ini); fim.setDate(fim.getDate()+6);
+    de=ymd(ini); ate=ymd(fim); label='na semana';
+  } else if(per==='trim'){
+    const t0=new Date(hoje.getFullYear(), Math.floor(hoje.getMonth()/3)*3, 1);
+    const t1=new Date(t0.getFullYear(), t0.getMonth()+3, 0);
+    de=ymd(t0); ate=ymd(t1); label='no trimestre';
+  } else { de=ymd(mes0); ate=ymd(mesFim); label='no mês'; }
+  const metaFator = (per==='mes') ? 1 : (_pnlDiasUteis(de, ate) / uteisMes);
+  return { per, de, ate, label, metaFator };
+}
+
 function recuperadoNoMes(ym){
   let total = 0;
   for(const d of (DB.devedores||[])){
@@ -9864,8 +9911,28 @@ async function renderPainel(){
   const mesAtual = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][mesRef.getMonth()];
   const dataEyebrow = `${diasSemana[now.getDay()]}, ${now.getDate()} DE ${mesesNomes[now.getMonth()]} DE ${now.getFullYear()}`;
 
-  // Em negociação (KPI): cobranças ativas em status de negociação.
-  const emNegRows    = cobrAtivas.filter(c=>/negocia/i.test(c.status||''));
+  // Segmented de período (Hoje · Semana · Mês · Trim): recalcula recuperado,
+  // negociação e meta do card escuro. O card "Acordos do mês" NÃO entra — ele é
+  // mensal por definição e tem a própria navegação ‹ Hoje ›.
+  const _pnlJan = painelJanela();
+  const recuperadoPeriodo = recuperadoEntre(_pnlJan.de, _pnlJan.ate);
+  const metaPeriodo = (+(DB.config?.metaMensal)||0) * _pnlJan.metaFator;
+  const metaProgPeriodo = metaPeriodo>0 ? Math.min(100, Math.round((recuperadoPeriodo/metaPeriodo)*100)) : null;
+
+  // Em negociação: cobranças ativas em status de negociação que se MEXERAM na
+  // janela — "em negociação hoje" é o que andou hoje, não o estoque inteiro.
+  const emNegTodas   = cobrAtivas.filter(c=>/negocia/i.test(c.status||''));
+  const emNegRows    = (_pnlJan.per==='mes')
+    ? emNegTodas
+    : emNegTodas.filter(c=>{
+        // Data LOCAL, não os 10 primeiros chars do ISO: em UTC-3, depois das 21h o
+        // dia UTC já virou e o caso mexido "hoje" ficava fora da janela de hoje.
+        const t = c.updated_at || c.etapa_atualizada_em || c.created_at;
+        if(!t) return false;
+        const d = new Date(t); if(isNaN(d.getTime())) return false;
+        const u = _metaYmd(d);
+        return u>=_pnlJan.de && u<=_pnlJan.ate;
+      });
   const emNegociacao = emNegRows.reduce((s,c)=>s+(+c.valor_atual||+c.valor_orig||0),0);
 
   // Tarefas atrasadas (mesma fonte do bloco de tarefas em todo o app).
@@ -10138,7 +10205,7 @@ async function renderPainel(){
       <div class="pnl-head-actions">
         ${_credorOpts.length?`<select class="pnl-select" onchange="painelSetFiltro('cliente',this.value)"><option value="">Todos os clientes</option>${_credorOpts.map(o=>`<option value="${escHtml(o.id)}" ${_pf.cliente===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('')}</select>`:''}
         ${(_respOpts.length && ehGestorView)?`<select class="pnl-select" onchange="painelSetFiltro('operador',this.value)"><option value="">Todos os operadores</option>${_respOpts.map(o=>`<option value="${escHtml(o.id)}" ${_pf.operador===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('')}</select>`:''}
-        <div class="pnl-seg">${['Hoje','Semana','Mês','Trim'].map((t,i)=>`<button class="${i===2?'on':''}">${t}</button>`).join('')}</div>
+        <div class="pnl-seg">${[['hoje','Hoje'],['semana','Semana'],['mes','Mês'],['trim','Trim']].map(([k,t])=>`<button class="${_pnlJan.per===k?'on':''}" onclick="painelSetPeriodo('${k}')">${t}</button>`).join('')}</div>
       </div>
     </div>
 
@@ -10207,12 +10274,12 @@ async function renderPainel(){
           <div><div class="pnl-dark-lb">CARTEIRA ATIVA</div><div class="pnl-dark-v">${fmtR(totalCarteira)}</div><div class="pnl-dark-sub">${totalCasos} caso${totalCasos!==1?'s':''} em aberto · ${totalContatos} cliente${totalContatos!==1?'s':''}</div></div>
           <div class="pnl-dark-hr"></div>
           <div class="pnl-dark-2col">
-            <div><div class="pnl-dark-lb">RECUPERADO · ${mesAtual.toUpperCase()}</div><div class="pnl-dark-v" style="font-size:17px;color:#A8C6A0;">${fmtR(totalRecuperado)}</div></div>
+            <div><div class="pnl-dark-lb">RECUPERADO ${escHtml(_pnlJan.label.toUpperCase())}</div><div class="pnl-dark-v" style="font-size:17px;color:#A8C6A0;">${fmtR(recuperadoPeriodo)}</div></div>
             <div><div class="pnl-dark-lb">EM NEGOCIAÇÃO</div><div class="pnl-dark-v" style="font-size:17px;color:#E2CE9E;">${fmtR(emNegociacao)}</div><div class="pnl-dark-sub">${emNegRows.length} cobrança${emNegRows.length!==1?'s':''}</div></div>
           </div>
           <div>
-            <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--side-fg-mute);margin-bottom:6px;"><span>Meta do mês</span><span style="font-family:var(--font-mono);">${metaProg!=null?metaProg+'%':'—'} de ${fmtR(metaMensal)}</span></div>
-            <div style="height:6px;background:rgba(255,255,255,.12);border-radius:3px;overflow:hidden;"><div style="height:100%;width:${metaProg||0}%;background:var(--accent);"></div></div>
+            <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--side-fg-mute);margin-bottom:6px;"><span>Meta ${escHtml(_pnlJan.label)}</span><span style="font-family:var(--font-mono);">${metaProgPeriodo!=null?metaProgPeriodo+'%':'—'} de ${fmtR(metaPeriodo)}</span></div>
+            <div style="height:6px;background:rgba(255,255,255,.12);border-radius:3px;overflow:hidden;"><div style="height:100%;width:${metaProgPeriodo||0}%;background:var(--accent);"></div></div>
           </div>
         </div>
 
