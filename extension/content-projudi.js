@@ -304,6 +304,18 @@
 
   // Tela: o processo (processo.do — form processoForm com #cumprirButton/#peticionarButton).
   async function telaProcesso(c) {
+    // GUARDA DE PROCESSO CERTO (bug do lote): ao começar um caso NOVO, a tela ainda pode
+    // ser a do processo ANTERIOR (após concluir, o Projudi permanece na tela do processo).
+    // Se o número ABERTO não for o deste caso, NÃO peticiona aqui — senão junta a peça no
+    // PROCESSO ERRADO. Vai buscar o processo certo pelo menu.
+    const alvo = digitos(c.numero_processo);
+    const ident = ((document.getElementById('barraTituloStatusProcessual') || {}).textContent || '') + ' ' + (document.title || '');
+    const mCnj = ident.match(/\d{7}-?\d{2}\.?\d{4}\.?\d\.?\d{2}\.?\d{4}/);
+    const abertoDig = mCnj ? digitos(mCnj[0]) : '';
+    if (alvo.length >= 13 && abertoDig && abertoDig !== alvo) {
+      progresso(c, 'a tela aberta é de OUTRO processo — indo buscar ' + c.numero_processo + '…');
+      return abrirBuscaPeloMenu(c);
+    }
     // PRIORIDADE: se há intimação não lida (Pendências → "Ver Intimação"), o caminho é
     // CUMPRIR O PRAZO dela — não "Petição Eletrônica" (petição avulsa, sem vínculo).
     const verIntim = document.querySelector('#quadroPendencias a[href*="intimacao.do"]') ||
