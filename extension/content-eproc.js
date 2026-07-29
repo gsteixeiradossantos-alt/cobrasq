@@ -696,7 +696,12 @@
   // estruturados vindos da IA).
   function parseEndereco(str) {
     const s = String(str || ''); const out = {};
-    const cep = s.match(/(\d{5})-?(\d{3})/); if (cep) out.cep = cep[1] + '-' + cep[2];
+    // CEP: NÃO casar "8 dígitos quaisquer" (um CPF/telefone sem máscara no texto viraria
+    // CEP e dispararia a busca que sobrescreve o endereço). Aceita só: "CEP 12345-678",
+    // "CEP: 12345678" ou o formato pontuado 12345-678 (com o hífen). Sem hífen, exige a
+    // palavra CEP por perto.
+    const cep = s.match(/cep[:\s]*?(\d{5})-?(\d{3})\b/i) || s.match(/\b(\d{5})-(\d{3})\b/);
+    if (cep) out.cep = cep[1] + '-' + cep[2];
     const num = s.match(/n[ºo°.]?\s*(\d{1,6})\b/i) || s.match(/,\s*(\d{1,6})\b/); if (num) out.numero = num[1];
     const uf = (s.toUpperCase().match(/\b([A-Z]{2})\b/g) || []).filter(u => UFS_BR.includes(u)).pop(); if (uf) out.uf = uf;
     return out;
@@ -843,6 +848,13 @@
       }
       const dlgParte = dialogoAberto();
       if (dlgParte) return pausar(c, rot + ': o eproc abriu uma janela — complete-a (endereço/contato?) e clique Continuar.' + fichaParte(falta));
+      // ANTI-DUPLICATA: se JÁ clicamos "Incluir" (o botão existia → a pessoa EXISTE no
+      // eproc) mas o doc não apareceu na tabela, NÃO abrir "Novo" (criaria cadastro
+      // duplicado). Costuma ser CPF mascarado na tabela (`***.456.789-01` → 8 dígitos,
+      // não casa 11/14) ou inclusão mais lenta que os 10s. Entrega ao humano.
+      if (c.parte && c.parte.incluiu) {
+        return pausar(c, rot + ': cliquei em <b>Incluir</b> "' + escHtml(falta.nome || doc) + '" mas não confirmei na tabela (o CPF pode estar mascarado). <b>Verifique se a parte já consta</b> — se sim, clique Continuar; se faltar, inclua-a e Continuar. NÃO use "Novo" pra não duplicar.' + fichaParte(falta));
+      }
       // Consulta não devolveu Salvar/Incluir: pessoa sem cadastro no eproc.
       // O caminho é o botão "Novo" (ao lado do Consultar) → formulário de cadastro
       // com endereço/contato obrigatórios. Destacamos e entregamos a ficha pronta.
@@ -946,6 +958,9 @@
     }
     const fin = qFirst(IDS.finalizar);
     if (!fin) return pausar(c, 'Etapa 5: botão Finalizar não encontrado');
+    // Trava de segurança: NUNCA finalizar (protocolo automático) sem ao menos 1 documento
+    // na tabela — uma inicial sem PDF seria protocolada vazia.
+    if (naTabela() < 1) return pausar(c, 'Etapa 5: nenhum documento na tabela — anexe ao menos a petição inicial e clique Continuar.');
     if (c.primeiro && !c.validado) {
       c.validado = true;
       destacar(fin);

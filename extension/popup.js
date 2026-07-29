@@ -9,8 +9,11 @@ async function send(msg) { return chrome.runtime.sendMessage(msg); }
 
 async function abaEprocAtiva() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  // eproc de qualquer estado (eprocNg.tj<UF>.jus.br / eproc.trf<N>.jus.br) ou Projudi.
-  if (!tab || !/:\/\/(eproc[\dg]*\.[\w.-]+|projudi\.[\w.-]+)\.jus\.br\//i.test(tab.url || '')) return null;
+  // SÓ eproc (estadual eprocNg.tj<UF>.jus.br ou federal eproc.trf<N>/jf<UF>.jus.br). O
+  // popup injeta content-eproc.js e manda FILL_JOB/ANEXAR_PDF_LOCAL — o Projudi não
+  // entende essas mensagens (seria no-op silencioso). Peticionamento no Projudi é pela
+  // Central (⚖️), que injeta o content certo por sistema.
+  if (!tab || !/:\/\/eproc[\dg]*\.[\w.-]+\.jus\.br\//i.test(tab.url || '')) return null;
   return tab;
 }
 

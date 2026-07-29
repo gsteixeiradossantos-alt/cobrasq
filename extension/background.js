@@ -248,11 +248,12 @@ async function registrarProtocolo({ numero, caso }) {
 }
 
 // Override de diálogos nativos na página (modo auto): confirm→true, alert→captura.
-async function overrideDialogos(tabId) {
+async function overrideDialogos(tabId, allFrames) {
   await chrome.scripting.executeScript({
-    // allFrames: o Projudi roda em frameset — o "Concluir Movimento" (e o confirm que
-    // ele dispara) vivem no userMainFrame, não no topo; sem isto o override não pega lá.
-    target: { tabId, allFrames: true }, world: 'MAIN',
+    // allFrames só quando pedido (Projudi é frameset — o "Concluir Movimento" e o
+    // confirm que ele dispara vivem no userMainFrame). No eproc (página única) fica no
+    // topo, pra não sequestrar confirm() de frames/telas fora do fluxo.
+    target: { tabId, allFrames: !!allFrames }, world: 'MAIN',
     func: () => {
       if (window.__cbDialogosOk) return;
       window.__cbDialogosOk = true;
@@ -285,7 +286,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse(await registrarProtocolo(msg));
       } else if (msg.type === 'OVERRIDE_DIALOGS') {
         const tabId = (sender.tab && sender.tab.id) || msg.tabId;
-        if (tabId) { await overrideDialogos(tabId); sendResponse({ ok: true }); }
+        if (tabId) { await overrideDialogos(tabId, msg.allFrames); sendResponse({ ok: true }); }
         else sendResponse({ error: 'sem tabId' });
       } else if (msg.type === 'EXEC_PAGINA') {
         // Executa uma ação NO MUNDO DA PÁGINA (world:'MAIN') no FRAME que pediu.

@@ -554,7 +554,10 @@ async function iniciarLote() {
   state.rodando = true;
   state.atual = state.casos.findIndex(c => c.status === 'aguardando');
   if (state.atual < 0) { renderFase4(); return; }
-  await rodarCasoAtual();
+  // Sem .catch aqui, uma falha de abrir/injetar na aba (tabs.create/executeScript)
+  // deixaria o lote travado sem botões (o Protocolar já foi desabilitado). Trata igual
+  // ao próximo caso: mostra o erro com os controles de recuperação.
+  await rodarCasoAtual().catch(mostraErroGeral);
 }
 async function rodarCasoAtual() {
   if (!state.rodando) return; // CC2: não ressuscitar caso após Cancelar
@@ -580,8 +583,10 @@ function proximoCaso() {
   }, 1200);
 }
 function mostraErroGeral(e) {
+  // Marca como PAUSADO (não 'erro' mudo): assim a UI mostra Continuar/Pular/Cancelar e
+  // o lote não fica congelado sem saída.
   const caso = state.casos[state.atual];
-  if (caso) { caso.status = 'erro'; caso.statusTexto = String((e && e.message) || e); }
+  if (caso) { caso.status = 'pausado'; caso.statusTexto = '⚠ erro ao rodar: ' + String((e && e.message) || e) + ' — tente Continuar, Pular o caso ou Cancelar o lote.'; }
   renderFase4();
 }
 function renderFase4() {

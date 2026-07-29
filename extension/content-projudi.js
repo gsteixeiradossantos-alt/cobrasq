@@ -548,7 +548,8 @@
     if (podeAuto) {
       c.autoConcluindo = true; await casoSalvar(c);
       // Auto-aceita qualquer confirm() do "Concluir Movimento" (você optou pelo modo auto).
-      await chrome.runtime.sendMessage({ type: 'OVERRIDE_DIALOGS' }).catch(() => {});
+      // allFrames: o confirm vive no userMainFrame do frameset.
+      await chrome.runtime.sendMessage({ type: 'OVERRIDE_DIALOGS', allFrames: true }).catch(() => {});
       progresso(c, 'modo automático: concluindo o movimento…');
       destacar(concluirBtn, '#1a7f37');
       await new Promise(r => setTimeout(r, 700));
@@ -574,7 +575,13 @@
     // GUARDA ANTI-DUPLICATA (bug visto: peça juntada 2×): ao concluir o upload, o Projudi
     // RECARREGA o diálogo (finaliza_upload). O content script morre nesse reload e retoma
     // aqui — se a lista JÁ tem os arquivos, NÃO reenvia; vai direto para a conclusão.
-    if (linhasUpload() < c.docs.length) {
+    // PARCIAL (algumas linhas, mas < docs): NÃO reenviar o conjunto todo (o Projudi
+    // ANEXA por cima → duplicaria o que já subiu). Entrega ao humano pra ele completar.
+    const jaSubiu = linhasUpload();
+    if (jaSubiu > 0 && jaSubiu < c.docs.length) {
+      return pausar(c, 'envio parcial: ' + jaSubiu + '/' + c.docs.length + ' PDF(s) já entraram. Para não duplicar, <b>anexe você o(s) que falta(m)</b> no diálogo e clique <b>Continuar</b>.');
+    }
+    if (jaSubiu < c.docs.length) {
       const inputArq = document.getElementById('conteudo') ||
         document.querySelector('#fileUploadForm input[type="file"], form[name="fileUploadForm"] input[type="file"], input[type="file"]');
       if (!inputArq) {
@@ -721,25 +728,22 @@
           c.autoConcluindo = false; await casoSalvar(c);
           return pausar(c, 'modo automático: o <b>Concluir Movimento</b> não avançou (pode ter exigido certificado). Conclua você e clique <b>Continuar</b> na Central.');
         }
-        // Confirma a conclusão por um SINAL POSITIVO (recibo de protocolo, mensagem de
-        // sucesso, ou de volta à tela do processo/mesa) — não só "o form sumiu", pra não
-        // dar caso por concluído numa tela intermediária/erro.
-        const txt = norm(document.body ? document.body.innerText : '');
-        const m = (document.body.innerText || '').match(/protocolo[^\d]{0,20}(\d[\d./-]{5,})/i);
-        const sucesso = m || /movimento (concluido|registrado|realizado)|operacao realizada|com sucesso|protocolad/.test(txt) ||
-          document.getElementById('processoForm') || document.getElementById('mesaAdvogadoForm');
-        if (!sucesso) {
-          // Ainda carregando/tela desconhecida — dá mais uma passada antes de desistir.
+        // Confirma a conclusão SÓ por MENSAGEM EXPLÍCITA de sucesso do Projudi. NÃO
+        // basta "o form sumiu", nem estar na tela do processo, nem achar um número de
+        // protocolo (a tela do processo mostra o protocolo DELE o tempo todo) — esses
+        // sinais também aparecem em telas de erro/redirect e dariam falso "concluído"
+        // num protocolo IRREVERSÍVEL. Na dúvida, PAUSA e o humano confirma.
+        const temSucesso = () => /movimento (concluido|registrado|realizado|inserido)|juntada realizada|operacao realizada|realizad[oa] com sucesso|conclu[ií]d[oa] com sucesso|protocolad[oa] com sucesso/
+          .test(norm(document.body ? document.body.innerText : ''));
+        if (!temSucesso()) {
+          // Ainda carregando? Dá mais uma passada curta antes de decidir.
           await new Promise(r => setTimeout(r, 1500));
-          const txt2 = norm(document.body ? document.body.innerText : '');
-          const ok2 = /movimento (concluido|registrado|realizado)|operacao realizada|com sucesso|protocolad/.test(txt2) ||
-            document.getElementById('processoForm') || document.getElementById('mesaAdvogadoForm') ||
-            (document.body.innerText || '').match(/protocolo[^\d]{0,20}(\d[\d./-]{5,})/i);
-          if (!ok2) {
+          if (!temSucesso()) {
             c.autoConcluindo = false; await casoSalvar(c);
-            return pausar(c, 'modo automático: não confirmei a conclusão do movimento — confira se protocolou; se sim, clique <b>Continuar</b>.');
+            return pausar(c, 'modo automático: <b>não confirmei</b> a conclusão do movimento pela mensagem da tela. Verifique se protocolou — se sim, clique <b>Continuar</b> na Central; se não, conclua e depois Continuar.');
           }
         }
+        const m = (document.body.innerText || '').match(/protocolo[^\d]{0,20}(\d[\d./-]{5,})/i);
         await casoLimpar();
         reportar('CENTRAL_CASO_OK', { casoId: c.id, numero: (m && m[1]) || c.numero_processo });
         setBody(msg('✅ Caso concluído automaticamente — próximo da fila.', '#d3f9d8'));
