@@ -1,0 +1,38 @@
+-- ============================================================================
+-- FIX · trigger de lembretes de audiência quebrava a tela
+--
+-- APLICADA EM PRODUÇÃO em 29/07/2026.
+--
+-- O trigger trg_audiencias_agendar_lembretes veio do PR #443 e foi aplicado em
+-- produção com o PR ainda ABERTO. Ele quebrava criar/editar audiência pela UI:
+--
+--   ERROR: new row violates row-level security policy
+--          for table "crm_mensagens_agendadas"
+--
+-- CAUSA. O INSERT dos lembretes não preenchia `operador_id`, e a policy
+-- msg_agendada_insert_owner exige `operador_id = auth.uid()`. A coluna não tem
+-- default, então ficava NULL, o with_check dava NULL e a linha era barrada —
+-- derrubando junto o INSERT/UPDATE da própria audiência.
+--
+-- POR QUE PASSOU. A skill audiencias-cobrasq insere via service_role, que
+-- ignora RLS. O caminho testado funcionava; o que quebrava era o da tela.
+--
+-- CORREÇÕES
+--   1. operador_id = auth.uid() no INSERT (NULL em service_role, inofensivo).
+--   2. SET search_path = public — a função nasceu sem, que é o advisor
+--      function_search_path_mutable. O repo tem a migração
+--      harden_function_search_path justamente por essa classe de problema.
+--
+-- VERIFICADO depois de aplicar, simulando o JWT do gestor dentro de
+-- begin/rollback: UPDATE em audiência agendada passa, 13 lembretes pendentes
+-- seguem de pé.
+--
+-- O corpo completo da função corrigida está em produção; este arquivo é o
+-- registro da correção. Ver o PR #443 para a versão original.
+-- ============================================================================
+
+-- (aplicado via CREATE OR REPLACE FUNCTION public.audiencias_agendar_lembretes()
+--  com as duas correções acima — corpo idêntico ao do #443 no restante)
+
+-- ROLLBACK: reaplicar a versão do #443 (sem operador_id). NÃO recomendado:
+-- volta a quebrar "Nova audiência" e a edição de audiência na tela.
