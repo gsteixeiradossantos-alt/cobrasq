@@ -37,15 +37,25 @@ async function refrescarTokenDoApp() {
         const [r] = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           func: () => {
+            // Pega o token da sessão MAIS NOVA (maior expires_at) — se houver mais de uma
+            // chave sb-*-auth-token (projetos/sessões antigas), a velha daria 401.
+            let best = null, bestExp = -1;
             for (let i = 0; i < localStorage.length; i++) {
               const k = localStorage.key(i);
               if (!k || !/^sb-.*-auth-token$/.test(k)) continue;
               let raw = localStorage.getItem(k);
               if (!raw) continue;
               if (raw.startsWith('base64-')) { try { raw = atob(raw.slice(7).replace(/-/g, '+').replace(/_/g, '/')); } catch (_) { continue; } }
-              try { const o = JSON.parse(raw); const t = (o && o.access_token) || (o && o.currentSession && o.currentSession.access_token); if (t) return t; } catch (_) {}
+              try {
+                const o = JSON.parse(raw);
+                const sess = (o && o.access_token) ? o : (o && o.currentSession) ? o.currentSession : null;
+                const t = sess && sess.access_token;
+                if (!t) continue;
+                const exp = Number(sess.expires_at || 0);
+                if (exp >= bestExp) { bestExp = exp; best = t; }
+              } catch (_) {}
             }
-            return null;
+            return best;
           },
         });
         if (r && r.result) { await chrome.storage.session.set({ token: r.result }); return r.result; }
@@ -55,25 +65,28 @@ async function refrescarTokenDoApp() {
   return null;
 }
 
-async function apiGetJobs() {
+async function apiGetJobs(_jaRenovou = false) {
   const token = await getToken();
-  if (!token) return { error: 'sem_sessao' };
+  if (!token) { if (!_jaRenovou && await refrescarTokenDoApp()) return apiGetJobs(true); return { error: 'sem_sessao' }; }
   const r = await fetchTimeout(`${API_BASE}/api/eproc-peticionamento?status=preparado`, {
     headers: { Authorization: `Bearer ${token}` },
   });
+  // token velho no cache → renova da aba do app (logada) e repete UMA vez.
+  if ((r.status === 401 || r.status === 403) && !_jaRenovou && await refrescarTokenDoApp()) return apiGetJobs(true);
   const j = await r.json().catch(() => ({}));
   if (!r.ok) return { error: j.error || ('HTTP ' + r.status) };
   return j; // { ok, jobs }
 }
 
-async function apiReport(payload) {
+async function apiReport(payload, _jaRenovou = false) {
   const token = await getToken();
-  if (!token) return { error: 'sem_sessao' };
+  if (!token) { if (!_jaRenovou && await refrescarTokenDoApp()) return apiReport(payload, true); return { error: 'sem_sessao' }; }
   const r = await fetchTimeout(`${API_BASE}/api/eproc-peticionamento`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
+  if ((r.status === 401 || r.status === 403) && !_jaRenovou && await refrescarTokenDoApp()) return apiReport(payload, true);
   const j = await r.json().catch(() => ({}));
   if (!r.ok) return { error: j.error || ('HTTP ' + r.status) };
   return j;

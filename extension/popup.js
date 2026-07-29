@@ -131,6 +131,9 @@ async function puxarTokenDoApp() {
         const [r] = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           func: () => {
+            // Sessão MAIS NOVA (maior expires_at): mais de uma chave sb-*-auth-token
+            // (sessão antiga) faria escolher um token velho → 401.
+            let best = null, bestExp = -1;
             for (let i = 0; i < localStorage.length; i++) {
               const k = localStorage.key(i);
               if (!k || !/^sb-.*-auth-token$/.test(k)) continue;
@@ -141,11 +144,14 @@ async function puxarTokenDoApp() {
               }
               try {
                 const o = JSON.parse(raw);
-                const t = (o && o.access_token) || (o && o.currentSession && o.currentSession.access_token);
-                if (t) return t;
+                const sess = (o && o.access_token) ? o : (o && o.currentSession) ? o.currentSession : null;
+                const t = sess && sess.access_token;
+                if (!t) continue;
+                const exp = Number(sess.expires_at || 0);
+                if (exp >= bestExp) { bestExp = exp; best = t; }
               } catch (_) {}
             }
-            return null;
+            return best;
           },
         });
         if (r && r.result) { await send({ type: 'SET_TOKEN', token: r.result }); return true; }

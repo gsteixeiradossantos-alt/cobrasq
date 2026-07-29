@@ -107,7 +107,7 @@ async function lerPdfsDaPasta(dirHandle) {
       docs.push({ nome, handle: h, size: f.size, ...classificarDoc(nome) });
     }
   }
-  docs.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  docs.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR', { numeric: true, sensitivity: 'base' }));
   return docs;
 }
 async function escolherPasta() {
@@ -122,7 +122,7 @@ async function escolherPasta() {
     for (const d of raiz) state.casos.push(novoCasoProjudi(d.nome, [d]));
     const subs = [];
     for await (const [nome, h] of root.entries()) if (h.kind === 'directory') subs.push([nome, h]);
-    subs.sort((a, b) => a[0].localeCompare(b[0], 'pt-BR'));
+    subs.sort((a, b) => a[0].localeCompare(b[0], 'pt-BR', { numeric: true, sensitivity: 'base' }));
     for (const [nome, h] of subs) {
       const docs = await lerPdfsDaPasta(h);
       if (docs.length) state.casos.push(novoCasoProjudi(nome, docs));
@@ -142,7 +142,7 @@ async function escolherPasta() {
   } else {
     const subs = [];
     for await (const [nome, h] of root.entries()) if (h.kind === 'directory') subs.push([nome, h]);
-    subs.sort((a, b) => a[0].localeCompare(b[0], 'pt-BR'));
+    subs.sort((a, b) => a[0].localeCompare(b[0], 'pt-BR', { numeric: true, sensitivity: 'base' }));
     for (const [nome, h] of subs) {
       const docs = await lerPdfsDaPasta(h);
       if (docs.length) state.casos.push(novoCaso(nome, docs));
@@ -268,7 +268,7 @@ async function escolherArquivos() {
     docs.push({ nome: f.name, handle: h, size: f.size, ...classificarDoc(f.name) });
   }
   if (!docs.length) { renderFase1('Nenhum PDF selecionado.'); return; }
-  docs.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  docs.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR', { numeric: true, sensitivity: 'base' }));
   state.pastaNome = docs.length === 1 ? docs[0].nome : (docs.length + ' arquivos');
   state.casos = [];
   if (state.sistema === 'projudi') {
@@ -297,6 +297,9 @@ async function puxarTokenDoApp() {
         const [r] = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           func: () => {
+            // Sessão MAIS NOVA (maior expires_at): mais de uma chave sb-*-auth-token
+            // (sessão antiga) faria escolher um token velho → 401.
+            let best = null, bestExp = -1;
             for (let i = 0; i < localStorage.length; i++) {
               const k = localStorage.key(i);
               if (!k || !/^sb-.*-auth-token$/.test(k)) continue;
@@ -307,11 +310,14 @@ async function puxarTokenDoApp() {
               }
               try {
                 const o = JSON.parse(raw);
-                const t = (o && o.access_token) || (o && o.currentSession && o.currentSession.access_token);
-                if (t) return t;
+                const sess = (o && o.access_token) ? o : (o && o.currentSession) ? o.currentSession : null;
+                const t = sess && sess.access_token;
+                if (!t) continue;
+                const exp = Number(sess.expires_at || 0);
+                if (exp >= bestExp) { bestExp = exp; best = t; }
               } catch (_) {}
             }
-            return null;
+            return best;
           },
         });
         if (r && r.result) { await chrome.runtime.sendMessage({ type: 'SET_TOKEN', token: r.result }); return true; }
