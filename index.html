@@ -9568,12 +9568,69 @@ async function renderPainel(){
   (DB.tarefas||[])
     .filter(t=>t.status!=='Concluída' && t.prazo && t.prazo >= todayStr && t.prazo <= in7str)
     .forEach(t=>vencItems.push({ desc:t.titulo, data:t.prazo, valor:0, tipo:'tarefa' }));
+  // Cache Asaas por devedor — só existe para quem já teve o drawer de cobranças
+  // aberto alguma vez. Cobertura parcial por natureza; a fonte de verdade dos
+  // boletos vivos é bia_cobranca (abaixo), que dedupa contra este cache.
   devs.forEach(d=>{
     (d.asaasCharges||[])
       .filter(c=>['PENDING','OVERDUE'].includes(c.status) && c.dueDate && c.dueDate >= todayStr && c.dueDate <= in7str)
       .forEach(c=>vencItems.push({ desc:d.nome, data:c.dueDate, valor:c.value||0, tipo:'asaas' }));
   });
-  const vencimentos = vencItems.sort((a,b)=>a.data.localeCompare(b.data)).slice(0,5);
+
+  // Fontes relacionais (Supabase). Sem elas o card mostrava "Nada nos próximos 7
+  // dias" mesmo com audiência amanhã: audiências, boletos vivos e parcelas de
+  // acordo nunca estiveram no blob que as linhas acima leem.
+  try{
+    const supa = getSupabase();
+    if(supa){
+      const [rAud, rBia, rAcd] = await Promise.all([
+        supa.from('audiencias')
+          .select('numero_processo,comarca,tipo_audiencia,data_hora,status,partes')
+          .gte('data_hora', todayStr+'T00:00:00')
+          .lte('data_hora', in7str+'T23:59:59')
+          .neq('status','cancelada'),
+        supa.from('bia_cobranca')
+          .select('nome,valor,venc_atual,status')
+          .gte('venc_atual', todayStr).lte('venc_atual', in7str)
+          .not('status','in','("paga","cancelada")'),
+        supa.from('acordos')
+          .select('id,devedor_id,parcelas,status')
+          .eq('status','ativo').not('parcelas','is',null),
+      ]);
+      const nomePorDevedor = new Map(devs.map(d=>[d.id, d.nome]));
+      (rAud.data||[]).forEach(a=>{
+        const dt   = new Date(a.data_hora);
+        const hora = String(dt.getHours()).padStart(2,'0')+':'+String(dt.getMinutes()).padStart(2,'0');
+        const reu  = (Array.isArray(a.partes)?a.partes:[]).find(p=>/r[ée]u|execut/i.test(p.papel||''));
+        vencItems.push({
+          desc: `${hora} · ${reu?reu.nome:(a.numero_processo||'—')}${a.comarca?' — '+a.comarca:''}`,
+          data: _metaYmd(dt), valor:0, tipo:'audiencia', rotulo:'AUDIÊNCIA',
+        });
+      });
+      (rBia.data||[]).forEach(b=>{
+        // Não repetir o que o cache do Asaas já trouxe (mesmo nome + mesma data).
+        if(vencItems.some(v=>v.tipo==='asaas' && v.data===b.venc_atual && v.desc===b.nome)) return;
+        vencItems.push({
+          desc:b.nome||'—', data:b.venc_atual, valor:+b.valor||0, tipo:'boleto',
+          rotulo: b.status==='ativa' ? 'BOLETO' : 'BOLETO · '+String(b.status||'').toUpperCase(),
+        });
+      });
+      (rAcd.data||[]).forEach(ac=>{
+        (Array.isArray(ac.parcelas)?ac.parcelas:[]).forEach(p=>{
+          if(p.pago || !p.vencimento) return;
+          if(p.vencimento < todayStr || p.vencimento > in7str) return;
+          const nome = nomePorDevedor.get(ac.devedor_id) || 'Acordo';
+          vencItems.push({ desc:`${nome} — parcela ${p.numero ?? '?'}`, data:p.vencimento, valor:+p.valor||0, tipo:'parcela', rotulo:'PARCELA' });
+        });
+      });
+    }
+  }catch(_){}
+
+  const _ordemTipo = { audiencia:0, tarefa:1, parcela:2, boleto:3, asaas:3, devedor:4, lancamento:5 };
+  vencItems.sort((a,b)=> a.data.localeCompare(b.data) || (_ordemTipo[a.tipo]??9)-(_ordemTipo[b.tipo]??9));
+  const VENC_MOSTRAR = 8;
+  const vencimentos = vencItems.slice(0, VENC_MOSTRAR);
+  const vencOcultos = Math.max(0, vencItems.length - VENC_MOSTRAR);
   const eventDates7 = new Set(vencItems.map(v=>v.data));
 
   // Greeting
@@ -9918,7 +9975,7 @@ async function renderPainel(){
           <div class="cob-panel-head"><span class="cob-panel-title">Próximos 7 dias</span><a class="cob-link" style="margin-left:auto;" onclick="showPage('tarefas')">Agenda completa →</a></div>
           <div class="cob-panel-body">
             <div class="pnl-dias7">${dias7.map(d=>`<div class="pnl-dia ${d.hoje?'hoje':''}"><span class="dow">${d.dow}</span><span class="num">${d.num}</span><div class="dot ${d.temEvento?'on':''}"></div></div>`).join('')}</div>
-            ${vencimentos.length? vencimentos.map(v=>`<div class="pnl-comp"><div style="font-family:var(--font-mono);font-size:11.5px;color:var(--text-3);width:56px;flex-shrink:0;">${(v.data||'').slice(8,10)}/${(v.data||'').slice(5,7)}</div><div style="min-width:0;"><div style="font-size:12.5px;font-weight:500;color:var(--text);">${escHtml(v.desc||'—')}</div>${v.valor?`<div style="font-size:11.5px;color:var(--text-3);">${fmtR(v.valor)}</div>`:''}</div></div>`).join('') : `<div class="cob-empty"><span class="cob-empty-dot"></span> Nada nos próximos 7 dias.</div>`}
+            ${vencimentos.length? vencimentos.map(v=>`<div class="pnl-comp"><div style="font-family:var(--font-mono);font-size:11.5px;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};width:56px;flex-shrink:0;">${(v.data||'').slice(8,10)}/${(v.data||'').slice(5,7)}</div><div style="min-width:0;">${v.rotulo?`<div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};">${escHtml(v.rotulo)}</div>`:''}<div style="font-size:12.5px;font-weight:500;color:var(--text);">${escHtml(v.desc||'—')}</div>${v.valor?`<div style="font-size:11.5px;color:var(--text-3);">${fmtR(v.valor)}</div>`:''}</div></div>`).join('')+(vencOcultos?`<div style="padding:9px 0 0;font-size:11.5px;color:var(--text-3);">+${vencOcultos} ${vencOcultos===1?'compromisso':'compromissos'} — ver agenda completa</div>`:'') : `<div class="cob-empty"><span class="cob-empty-dot"></span> Nada nos próximos 7 dias.</div>`}
           </div>
         </div>
 
