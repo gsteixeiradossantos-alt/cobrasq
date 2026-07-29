@@ -154,6 +154,31 @@ function acharCnj(texto) {
   const m = String(texto || '').match(/(\d{7})[-. ]?(\d{2})[. ]?(\d{4})[. ]?8[. ]?16[. ]?(\d{4})/);
   return m ? `${m[1]}-${m[2]}.${m[3]}.8.16.${m[4]}` : null;
 }
+// Tipo do MOVIMENTO no Projudi, derivado do NOME do arquivo. Padrão do lote:
+// "<processo>_<Tipo>_vN.pdf.p7s" (ex.: ..._Manifestacao_v1 → "Manifestação";
+// ..._ReqDiligencia_v1 → "Requerimento de Diligência"). MAPA_EVENTO cobre as
+// abreviações/acentos; o resto é "humanizado" e casado pela lupa do Projudi.
+// >>> Complete MAPA_EVENTO com a lista da skill "petição em lote". <<<
+const MAPA_EVENTO = {
+  manifestacao: 'Manifestação',
+  reqdiligencia: 'Requerimento de Diligência',
+  requerimentodediligencia: 'Requerimento de Diligência',
+};
+function chaveTipo(s) {
+  return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z]/g, '');
+}
+function tipoEventoDoNome(nome) {
+  let base = String(nome || '').replace(/\.(pdf\.p7s|p7s|pdf)$/i, '');
+  base = base.replace(/[ _.-]+v?\d+$/i, '');          // tira "_v1", "-v2", " 1"
+  const seg = (base.split('_').pop() || base).trim(); // último trecho separado por "_"
+  const k = chaveTipo(seg);
+  if (!k) return null;
+  if (MAPA_EVENTO[k]) return MAPA_EVENTO[k];
+  // sem mapa: separa CamelCase e deixa a lupa do Projudi casar (ex.: "PedidoPenhora"
+  // → "Pedido Penhora"). Se ainda assim não achar, o Projudi pausa pra você escolher.
+  const humano = seg.replace(/([a-zà-ÿ])([A-ZÀ-Ý])/g, '$1 $2').replace(/[_.-]+/g, ' ').trim();
+  return humano || null;
+}
 function novoCasoProjudi(nome, docs) {
   docs.forEach((d, i) => d.principal = (i === 0));
   const numero = acharCnj(nome) || acharCnj(docs.map(d => d.nome).join(' '));
@@ -161,7 +186,7 @@ function novoCasoProjudi(nome, docs) {
     id: 'caso-' + Math.random().toString(36).slice(2, 9), nome, docs,
     sistema: 'projudi',
     numero_processo: numero,
-    tipo_peticao: 'Manifestação da Parte',
+    tipo_peticao: tipoEventoDoNome(nome) || 'Manifestação da Parte', // do nome do arquivo
     dados: {},
     extracao: 'ok', status: 'aguardando', numero: null, statusTexto: '',
   };
