@@ -1,18 +1,15 @@
 // Supabase Edge Function: criar-usuario
 // Cria um novo usuário de acesso ao sistema (Auth + app_users; profiles é view derivada).
-// Chamada pelo botão Admin > "Criar usuário" (crm.html -> sb.functions.invoke('criar-usuario')).
-// Antes esta função NÃO existia e o botão dava 404.
+// Chamada pelo botão Configurações → Usuários → "Criar usuário".
 //
 // verify_jwt: true — a função ainda revalida a sessão e o PAPEL do chamador por dentro
 // (defesa em profundidade; verify_jwt sozinho não garante que o chamador seja admin).
 //
-// Contrato de entrada (o que o CRM manda hoje):
+// Contrato de entrada:
 //   { nome: string, email: string, password: string, role: 'operador'|'admin' }
 // Aliases tolerados (compat com index.html/legado): senha->password, papel->role.
 //
-// Autorização: SÓ o 'proprietario' (admin de fato) pode criar usuários. O papel é lido
-// via service-role a partir do id do chamador (mesmo espírito do check de beatriz-msg,
-// que valida a sessão com o token do usuário antes de agir).
+// Autorização: SÓ o 'proprietario' (admin de fato) pode criar usuários.
 //
 // Mapeamento role (vocabulário do CRM) -> papel (vocabulário de app_users):
 //   'admin'    -> papel 'proprietario'  + profiles.role 'admin'
@@ -116,8 +113,8 @@ Deno.serve(async (req) => {
   }
   const novoId = created.user.id;
 
-  // 6) Insere em app_users (fonte de papel/RLS) e profiles (perfil exibido no app).
-  // Se o insert em app_users falhar, faz rollback do usuário do Auth para não deixar órfão.
+  // 6) Insere em app_users (fonte de papel/RLS).
+  // Se o insert falhar, faz rollback do usuário do Auth para não deixar órfão.
   const { error: errApp } = await admin.from('app_users').insert({
     id: novoId,
     nome,
