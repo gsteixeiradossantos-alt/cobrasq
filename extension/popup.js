@@ -62,7 +62,7 @@ function b64DeBuffer(buf) {
 async function listarPdfs(handle) {
   const arqs = [];
   for await (const [nome, h] of handle.entries()) {
-    if (h.kind === 'file' && /\.pdf$/i.test(nome)) arqs.push(h);
+    if (h.kind === 'file' && /\.(pdf|p7s)$/i.test(nome)) arqs.push(h); // .pdf ou .pdf.p7s (assinado)
   }
   // Mais recentes primeiro (limite de 12 pra não lotar o popup).
   const comData = await Promise.all(arqs.map(async h => ({ h, f: await h.getFile() })));

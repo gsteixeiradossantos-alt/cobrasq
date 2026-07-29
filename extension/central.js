@@ -41,11 +41,13 @@ const TIPOS_DOC = [
   [/comprovante/i, 'COMPROVANTES', '176', false],
   [/contrato/i, 'CONTRATO', '40', false],
 ];
+// Documentos aceitos: PDF ou PDF assinado (.pdf.p7s / .p7s — envelope PKCS#7).
+const EH_DOC = /\.(pdf|p7s)$/i;
 // Nome do documento SEM o número de ordem da frente (ex.: "01 - Petição.pdf" →
 // "Petição", "05. Declaração.pdf" → "Declaração") — é o que vai em Observação no OUTROS.
 function nomeSemNumero(nome) {
   return String(nome || '')
-    .replace(/\.pdf$/i, '')
+    .replace(/\.(pdf\.p7s|p7s|pdf)$/i, '')
     .replace(/^\s*\d{1,3}\s*[-._)\]]*\s*/, '') // tira "01 - ", "1.", "02_", "3) " etc.
     .trim();
 }
@@ -98,7 +100,7 @@ function setPasso(n) {
 async function lerPdfsDaPasta(dirHandle) {
   const docs = [];
   for await (const [nome, h] of dirHandle.entries()) {
-    if (h.kind === 'file' && /\.pdf$/i.test(nome)) {
+    if (h.kind === 'file' && EH_DOC.test(nome)) {           // .pdf ou .pdf.p7s (assinado)
       const f = await h.getFile();
       docs.push({ nome, handle: h, size: f.size, ...classificarDoc(nome) });
     }
@@ -220,13 +222,16 @@ function renderFase1(msgErro) {
 async function escolherArquivos() {
   let handles;
   try {
-    handles = await window.showOpenFilePicker({ multiple: true, types: [{ description: 'PDFs', accept: { 'application/pdf': ['.pdf'] } }] });
+    handles = await window.showOpenFilePicker({
+      multiple: true,
+      types: [{ description: 'PDF ou PDF assinado', accept: { 'application/pdf': ['.pdf'], 'application/pkcs7-signature': ['.p7s', '.pdf.p7s'] } }],
+    });
   } catch (e) { if (e && e.name === 'AbortError') return; throw e; }
   const docs = [];
   for (const h of (handles || [])) {
     if (h.kind !== 'file') continue;
     const f = await h.getFile();
-    if (!/\.pdf$/i.test(f.name)) continue;
+    if (!EH_DOC.test(f.name)) continue;
     docs.push({ nome: f.name, handle: h, size: f.size, ...classificarDoc(f.name) });
   }
   if (!docs.length) { renderFase1('Nenhum PDF selecionado.'); return; }
