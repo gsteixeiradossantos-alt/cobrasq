@@ -18,6 +18,48 @@
   if (window.__cobrasqProjudi) return;
   window.__cobrasqProjudi = true;
 
+  // ── Botão de SUPORTE: copia o HTML pro clipboard (pro usuário colar no chat).
+  // O Projudi é frameset — captura a ÁRVORE inteira de frames de mesma origem, e o
+  // botão aparece só em frames de conteúdo (pula o topFrame de 45px e o frameset).
+  function copiarTextoSuporte(txt) {
+    return (navigator.clipboard ? navigator.clipboard.writeText(txt).then(() => true).catch(() => false) : Promise.resolve(false))
+      .then(ok => {
+        if (ok) return true;
+        const ta = document.createElement('textarea'); ta.value = txt;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0;';
+        (document.body || document.documentElement).appendChild(ta); ta.focus(); ta.select();
+        let r = false; try { r = document.execCommand('copy'); } catch (_) {} ta.remove(); return r;
+      });
+  }
+  function htmlDaPaginaSuporte() {
+    function serializar(win, rotulo) {
+      let out;
+      try { out = '\n\n<!-- ===== ' + rotulo + ': ' + (win.location && win.location.href) + ' ===== -->\n' + win.document.documentElement.outerHTML; }
+      catch (_) { return '\n\n<!-- ' + rotulo + ': (outra origem — não acessível) -->'; }
+      try { for (let i = 0; i < win.frames.length; i++) out += serializar(win.frames[i], rotulo + '>frame[' + i + ']'); } catch (_) {}
+      return out;
+    }
+    let raiz; try { raiz = window.top; } catch (_) { raiz = window; }
+    return '<!-- CAPTURA PROJUDI (arvore de frames) -->' + serializar(raiz, 'TOP');
+  }
+  function botaoCapturaSuporte() {
+    if (!document.body || window.innerHeight < 150) return;  // pula frameset e topFrame
+    if (document.getElementById('cobrasq-cap-html')) return;
+    const b = document.createElement('button');
+    b.id = 'cobrasq-cap-html'; b.textContent = '📋 HTML';
+    b.title = 'Copiar o HTML desta página para enviar ao suporte (Claude)';
+    b.style.cssText = 'position:fixed;bottom:16px;left:16px;z-index:2147483647;background:#0c2340;color:#fff;border:0;border-radius:8px;padding:8px 12px;font:12px system-ui,Arial,sans-serif;cursor:pointer;opacity:.8;box-shadow:0 4px 14px rgba(0,0,0,.2);';
+    b.addEventListener('click', async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const html = htmlDaPaginaSuporte();
+      const ok = await copiarTextoSuporte(html);
+      b.textContent = ok ? ('✅ copiado (' + Math.round(html.length / 1024) + ' KB) — cole no chat') : '⚠ não copiou — use o F12';
+      setTimeout(() => { b.textContent = '📋 HTML'; }, 5000);
+    }, true);
+    document.body.appendChild(b);
+  }
+  try { botaoCapturaSuporte(); } catch (_) {}
+
   const VERSAO = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || '?';
   const CASO_KEY = 'cobrasq_central_caso';
 

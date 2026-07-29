@@ -24,6 +24,43 @@
   // ou eproc.trf<N>.jus.br). Se a aba foi navegada p/ outro site e a Central reinjeta
   // aqui, não roda (evita "pausas" absurdas em página alheia). Ver CM3.
   if (!/^eproc[\dg]*\.[\w.-]+\.jus\.br$/i.test(location.hostname)) return;
+
+  // ── Botão de SUPORTE: copia o HTML desta página (+ iframes de mesma origem)
+  // pro clipboard, pro usuário colar no chat. Sempre visível, independe da fila.
+  function copiarTextoSuporte(txt) {
+    return (navigator.clipboard ? navigator.clipboard.writeText(txt).then(() => true).catch(() => false) : Promise.resolve(false))
+      .then(ok => {
+        if (ok) return true;
+        const ta = document.createElement('textarea'); ta.value = txt;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0;';
+        (document.body || document.documentElement).appendChild(ta); ta.focus(); ta.select();
+        let r = false; try { r = document.execCommand('copy'); } catch (_) {} ta.remove(); return r;
+      });
+  }
+  function htmlDaPaginaSuporte() {
+    let html = '<!-- ===== PAGINA: ' + location.href + ' ===== -->\n' + document.documentElement.outerHTML;
+    for (const f of Array.from(document.querySelectorAll('iframe'))) {
+      try { const d = f.contentDocument; if (d && d.documentElement) html += '\n\n<!-- ===== IFRAME: ' + (f.src || f.id || '(sem src)') + ' ===== -->\n' + d.documentElement.outerHTML; } catch (_) { /* iframe de outra origem */ }
+    }
+    return html;
+  }
+  function botaoCapturaSuporte() {
+    if (window.top !== window) return;                     // só no frame principal
+    if (document.getElementById('cobrasq-cap-html')) return;
+    const b = document.createElement('button');
+    b.id = 'cobrasq-cap-html'; b.textContent = '📋 HTML';
+    b.title = 'Copiar o HTML desta página para enviar ao suporte (Claude)';
+    b.style.cssText = 'position:fixed;bottom:16px;left:16px;z-index:2147483647;background:#0c2340;color:#fff;border:0;border-radius:8px;padding:8px 12px;font:12px system-ui,Arial,sans-serif;cursor:pointer;opacity:.8;box-shadow:0 4px 14px rgba(0,0,0,.2);';
+    b.addEventListener('click', async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const html = htmlDaPaginaSuporte();
+      const ok = await copiarTextoSuporte(html);
+      b.textContent = ok ? ('✅ copiado (' + Math.round(html.length / 1024) + ' KB) — cole no chat') : '⚠ não copiou — use o F12';
+      setTimeout(() => { b.textContent = '📋 HTML'; }, 5000);
+    }, true);
+    (document.body || document.documentElement).appendChild(b);
+  }
+  try { botaoCapturaSuporte(); } catch (_) {}
   const SEL = window.EPROC_SEL || {};
   const TXT = window.EPROC_TXT || {};
   const DIST = window.EPROC_DIST || {};
