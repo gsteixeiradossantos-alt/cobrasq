@@ -491,6 +491,12 @@ const SCRIPT_SISTEMA = { eproc: 'content-eproc.js', projudi: 'content-projudi.js
 function tribunalAtual() { return TRIBUNAIS_EPROC[state.tribunal] || TRIBUNAIS_EPROC.tjpr; }
 function urlDoSistema() { return state.sistema === 'projudi' ? 'https://projudi.tjpr.jus.br/projudi/' : tribunalAtual().url; }
 function hostDoSistema() { return state.sistema === 'projudi' ? 'projudi.tjpr.jus.br' : tribunalAtual().host; }
+// Compara pelo HOSTNAME de verdade (não substring da URL inteira — "?x=tjpr.jus.br"
+// na query de outra página passava; e o pause-guard CC1 deixava de pausar).
+function urlNoSistema(url) {
+  try { const h = new URL(url).hostname; const alvo = hostDoSistema(); return h === alvo || h.endsWith('.' + alvo); }
+  catch (_) { return false; }
+}
 async function esperarAbaPronta(tabId, timeoutMs) {
   const fim = Date.now() + (timeoutMs || 20000);
   while (Date.now() < fim) {
@@ -505,7 +511,7 @@ async function garantirAba() {
       const t = await chrome.tabs.get(state.tabId);
       // CM3: só reusa se a aba ainda está no tribunal certo; senão abre nova
       // (evita injetar o content script numa página alheia).
-      if (t && (t.url || t.pendingUrl || '').includes(hostDoSistema())) { await esperarAbaPronta(state.tabId, 20000); return state.tabId; }
+      if (t && urlNoSistema(t.url || t.pendingUrl || '')) { await esperarAbaPronta(state.tabId, 20000); return state.tabId; }
     } catch (_) {}
     state.tabId = null;
   }
@@ -543,7 +549,7 @@ async function iniciarLote() {
   if (state.rodando) return; // CA3: barra duplo clique em Protocolar
   if (state.sistema === 'projudi') {
     const semNum = state.casos.filter(c => !acharCnj(c.numero_processo || ''));
-    if (semNum.length) { alert('Caso(s) sem número de processo válido: ' + semNum.map(c => c.nome).join(', ') + '. Corrija na revisão.'); return; }
+    if (semNum.length) { alert('Caso(s) sem número de processo válido: ' + semNum.map(c => c.nome).join(', ') + '. Corrija na revisão.'); renderFase3(); return; }
     state.casos.forEach(c => { c.numero_processo = acharCnj(c.numero_processo); });
   } else {
     // O eproc rejeita a mesma pessoa nos dois polos (hdnSinValidarPoloOposto=S):
@@ -552,10 +558,12 @@ async function iniciarLote() {
       const digs = (l) => (caso.dados[l] || []).map(p => String(p && p.doc || '').replace(/\D/g, '')).filter(Boolean);
       const reus = new Set(digs('requeridos'));
       const dup = digs('requerentes').find(d => reus.has(d));
-      if (dup) { alert('Caso "' + caso.nome + '": o CPF/CNPJ ' + dup + ' aparece como autor E réu — o eproc rejeita isso. Corrija na revisão.'); return; }
+      // renderFase3() nos early-returns: sem isso o botão Protocolar (desabilitado no
+      // clique, CA3) ficava MORTO para sempre após corrigir o dado (auditoria).
+      if (dup) { alert('Caso "' + caso.nome + '": o CPF/CNPJ ' + dup + ' aparece como autor E réu — o eproc rejeita isso. Corrija na revisão.'); renderFase3(); return; }
     }
     const semReu = state.casos.filter(c => !(c.dados.requeridos || []).some(p => p && digitos(p.doc).length >= 11));
-    if (semReu.length && !confirm('Caso(s) sem réu com CPF/CNPJ: ' + semReu.map(c => c.nome).join(', ') + '.\nEles vão PAUSAR na etapa de réus para você incluir manualmente. Continuar mesmo assim?')) return;
+    if (semReu.length && !confirm('Caso(s) sem réu com CPF/CNPJ: ' + semReu.map(c => c.nome).join(', ') + '.\nEles vão PAUSAR na etapa de réus para você incluir manualmente. Continuar mesmo assim?')) { renderFase3(); return; }
   }
   state.rodando = true;
   state.atual = state.casos.findIndex(c => c.status === 'aguardando');
@@ -616,24 +624,35 @@ function renderFase4() {
     <div class="card" style="display:flex;gap:10px;justify-content:flex-end;">
       ${!state.rodando ? '<button class="btn ghost" id="denovo">↩ Nova pasta</button>' : ''}
     </div>`;
+  // Os botões agem sobre o caso PAUSADO exibido no banner — não sobre state.atual às
+  // cegas (auditoria: se divergirem, Pular marcava o caso ERRADO; e state.atual = -1
+  // após o fim do lote estourava TypeError silencioso dentro do onclick async).
+  // Todos com .catch: uma falha de aba (tribunal fora do ar) não pode engolir o clique
+  // e deixar a fila congelada sem botões.
   const btnC = document.getElementById('continuar');
-  if (btnC) btnC.onclick = async () => {
-    const caso = state.casos[state.atual];
+  if (btnC) btnC.onclick = () => {
+    const caso = pausado;
+    if (!caso) return;
     caso.status = 'rodando'; caso.statusTexto = 'retomando…'; renderFase4();
-    await mandarParaAba('CONTINUAR_CENTRAL', {});
+    mandarParaAba('CONTINUAR_CENTRAL', {}).catch(mostraErroGeral);
   };
   const btnP = document.getElementById('pular');
-  if (btnP) btnP.onclick = async () => {
-    state.casos[state.atual].status = 'pulado';
-    await mandarParaAba('CANCELAR_CENTRAL', {});
-    proximoCaso();
+  if (btnP) btnP.onclick = () => {
+    const caso = pausado;
+    if (!caso) return;
+    caso.status = 'pulado';
+    if (state.casos[state.atual] === caso || state.atual < 0) {
+      mandarParaAba('CANCELAR_CENTRAL', {}).catch(() => {}).then(() => proximoCaso());
+    } else {
+      renderFase4(); // caso fora da vez: só marca; a fila corrente segue intocada
+    }
   };
   const btnX = document.getElementById('cancelar');
-  if (btnX) btnX.onclick = async () => {
+  if (btnX) btnX.onclick = () => {
     if (_proximoTimer) { clearTimeout(_proximoTimer); _proximoTimer = null; } // CC2
     state.casos.forEach(c => { if (c.status === 'rodando' || c.status === 'pausado' || c.status === 'aguardando') c.status = 'pulado'; });
     state.rodando = false;
-    await mandarParaAba('CANCELAR_CENTRAL', {});
+    mandarParaAba('CANCELAR_CENTRAL', {}).catch(() => {}).then(() => { try { renderFase4(); } catch (_) {} });
     renderFase4();
   };
   const btnN = document.getElementById('denovo');
@@ -649,28 +668,39 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
   const casoExato = m.casoId ? state.casos.find(c => c.id === m.casoId) : null;
   const caso = casoExato; // usado por PROGRESS/PAUSA/CASO_OK
   if (m.type === 'PEDIR_DOC') {
+    const c = state.casos.find(x => x.id === m.casoId);
+    const d = c && c.docs[m.idx];
+    // Caso DESCONHECIDO: NÃO responder (auditoria: uma 2ª aba da Central aberta
+    // respondia "doc não encontrado" ANTES da aba certa terminar de ler o arquivo —
+    // o primeiro sendResponse vence e o lote falhava em série). Sem resposta desta
+    // aba, a aba que conhece o caso responde.
+    if (!d) return false;
     (async () => {
       try {
-        const c = state.casos.find(x => x.id === m.casoId);
-        const d = c && c.docs[m.idx];
-        if (!d) { sendResponse({ error: 'doc não encontrado' }); return; }
         const f = await d.handle.getFile();
         sendResponse({ ok: true, nome: d.nome, base64: b64DeBuffer(await f.arrayBuffer()) });
       } catch (e) { sendResponse({ error: String((e && e.message) || e) }); }
     })();
     return true;
   }
+  // Status TERMINAL não regride (auditoria): um PAUSA/PROGRESS atrasado ou duplicado
+  // (Projudi roda em vários frames) devolvia caso protocolado/pulado para "pausado",
+  // e os botões Continuar/Pular passavam a agir sobre o caso errado.
+  const terminal = caso && (caso.status === 'protocolado' || caso.status === 'pulado' || caso.status === 'erro');
   if (m.type === 'CENTRAL_PROGRESS') {
-    if (caso) { caso.statusTexto = m.texto || ''; renderFase4(); }
+    if (caso && !terminal) { caso.statusTexto = m.texto || ''; renderFase4(); }
     return false;
   }
   if (m.type === 'CENTRAL_PAUSA') {
-    if (caso) { caso.status = 'pausado'; caso.statusTexto = m.motivo || 'anomalia'; renderFase4(); }
+    if (caso && !terminal) { caso.status = 'pausado'; caso.statusTexto = m.motivo || 'anomalia'; renderFase4(); }
     return false;
   }
   if (m.type === 'CENTRAL_CASO_OK') {
-    // CA4: ignora conclusão de casoId desconhecido (não avança a fila indevidamente).
-    if (!caso || caso.status === 'protocolado') return false;
+    // CA4 + auditoria: ignora casoId desconhecido E caso em status terminal (um OK
+    // tardio de caso PULADO marcava-o protocolado e avançava a fila em DOBRO — dois
+    // casos rodando ao mesmo tempo na mesma aba).
+    if (!caso || terminal) return false;
+    const eraAtual = state.casos[state.atual] === caso;
     (async () => {
       caso.status = 'protocolado'; caso.numero = m.numero || null; caso.statusTexto = 'registrando no Cobrasq…';
       state.primeiroValidado = true;
@@ -681,7 +711,9 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
       }).catch(() => null);
       caso.statusTexto = r && r.ok ? ('registrado no Cobrasq' + (r.cobrancaVinculada ? ' + cobrança vinculada' : ' (sem cobrança correspondente)')) : 'protocolado (registro no Cobrasq falhou: ' + ((r && r.error) || '?') + ')';
       renderFase4();
-      proximoCaso();
+      // Só o caso ATUAL avança a fila — um OK de caso antigo não pode disparar o
+      // próximo enquanto outro já roda.
+      if (eraAtual) proximoCaso();
     })();
     return false;
   }
@@ -707,7 +739,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (tabId !== state.tabId || !info.url) return;
-  if (!(info.url || '').includes(hostDoSistema())) {
+  if (!urlNoSistema(info.url)) {
     pausarPorAba('a aba saiu do site do tribunal — clique Continuar que eu reabro e retomo.');
   }
 });

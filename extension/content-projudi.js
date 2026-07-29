@@ -275,26 +275,49 @@
     return pausar(c, 'processo ' + c.numero_processo + ' não apareceu no resultado — confira o número (a busca fica em Buscas → Processos 1º Grau), abra o processo e clique Continuar');
   }
 
+  // Confere se a TELA atual pertence ao processo do caso (guarda fail-closed da
+  // auditoria: telas VELHAS de juntada/intimação de outro processo eram roteadas
+  // direto para a ação — peça ia parar no processo errado). 'ok' = número do caso
+  // está na tela; 'errado' = a tela mostra outro CNJ; 'desconhecido' = nenhum CNJ
+  // legível (tela ainda carregando ou sem número).
+  const RE_CNJ = /\d{7}-?\d{2}\.?\d{4}\.?\d\.?\d{2}\.?\d{4}/;
+  function confereProcessoNaTela(c, doc) {
+    const alvo = digitos(c.numero_processo);
+    if (alvo.length < 13) return 'desconhecido';
+    const d = doc || document;
+    const corpo = d.body ? d.body.innerText : '';
+    if (digitos(corpo).includes(alvo)) return 'ok';
+    return RE_CNJ.test(corpo) ? 'errado' : 'desconhecido';
+  }
+
   // Telas da intimação (intimacao.do): (a) aviso "Existem mais intimações não lidas…
-  // Confirma?" → Continuar; (b) a intimação em si → "Cumprir Prazo" (abre a juntada).
+  // Confirma?" → PAUSA (decisão do usuário: confirmar inicia o prazo de TODAS as
+  // intimações não lidas, inclusive de outros casos); (b) a intimação em si →
+  // "Cumprir Prazo" (abre a juntada), com guarda de processo certo.
   function ehTelaIntimacao() {
     if (document.getElementById('intimacaoForm')) return true;
     const cont = document.getElementById('continueButton');
     return !!cont && /intima[cç][oõ]es\s+n[aã]o\s+lidas|todas\s+ter[aã]o\s+seu\s+prazo/i.test(document.body ? document.body.innerText : '');
   }
   async function telaIntimacao(c) {
-    // (a) aviso de confirmação (sem "Cumprir Prazo" ainda) → Continuar p/ visualizar.
+    // (a) aviso de confirmação (sem "Cumprir Prazo" ainda) → PAUSA. Confirmar aqui
+    // inicia o prazo LEGAL de TODAS as intimações não lidas do advogado (o próprio
+    // aviso diz isso) — efeito colateral fora do caso corrente; a decisão é humana.
     if (!document.getElementById('cumprirButton')) {
       const cont = document.getElementById('continueButton') ||
         acharControle(['continuar'], 'input[type=submit],input[type=button],button,a');
       if (cont && visivel(cont)) {
-        progresso(c, 'intimação: confirmando visualização…');
-        clicar(cont);
-        setTimeout(() => runCentral().catch(() => {}), 2500);
-        return;
+        destacar(cont, '#fab005');
+        return pausar(c, 'o Projudi avisa que há <b>mais intimações não lidas</b> e que TODAS terão o prazo iniciado ao continuar. Decida você: clique <b>Continuar</b> na tela do Projudi (se quiser prosseguir) e depois <b>Continuar</b> na Central.');
       }
     }
-    // (b) a intimação → "Cumprir Prazo" (cumprirIntimacao.do → juntada → upload).
+    // (b) a intimação → "Cumprir Prazo" — SÓ se a tela for do processo do caso.
+    const conf = confereProcessoNaTela(c);
+    if (conf !== 'ok') {
+      return pausar(c, 'não confirmei que esta intimação é do processo <b>' + escHtml(c.numero_processo) + '</b>' +
+        (conf === 'errado' ? ' (a tela mostra OUTRO processo — pode ser tela antiga)' : ' (número não visível na tela)') +
+        ' — abra a intimação certa e clique Continuar.');
+    }
     const cumprir = document.getElementById('cumprirButton') ||
       acharControle(['cumprir prazo', 'cumprir'], 'input[type=submit],input[type=button],button,a');
     if (cumprir && visivel(cumprir)) {
@@ -312,13 +335,31 @@
     // ser a do processo ANTERIOR (após concluir, o Projudi permanece na tela do processo).
     // Se o número ABERTO não for o deste caso, NÃO peticiona aqui — senão junta a peça no
     // PROCESSO ERRADO. Vai buscar o processo certo pelo menu.
+    // FAIL-CLOSED (auditoria): o título pode chegar por AJAX depois do load — ESPERA o
+    // número aparecer; se não der pra confirmar, PAUSA (antes: seguia em frente e podia
+    // peticionar no processo anterior). Anti-loop: no máx. 2 idas à busca por caso.
     const alvo = digitos(c.numero_processo);
-    const ident = ((document.getElementById('barraTituloStatusProcessual') || {}).textContent || '') + ' ' + (document.title || '');
-    const mCnj = ident.match(/\d{7}-?\d{2}\.?\d{4}\.?\d\.?\d{2}\.?\d{4}/);
-    const abertoDig = mCnj ? digitos(mCnj[0]) : '';
-    if (alvo.length >= 13 && abertoDig && abertoDig !== alvo) {
-      progresso(c, 'a tela aberta é de OUTRO processo — indo buscar ' + c.numero_processo + '…');
-      return abrirBuscaPeloMenu(c);
+    let abertoDig = '';
+    await esperar(() => {
+      const ident = ((document.getElementById('barraTituloStatusProcessual') || {}).textContent || '') + ' ' + (document.title || '');
+      const mCnj = ident.match(RE_CNJ);
+      if (mCnj) { abertoDig = digitos(mCnj[0]); return true; }
+      return false;
+    }, 6000, 400);
+    if (alvo.length >= 13) {
+      if (!abertoDig) {
+        return pausar(c, 'não consegui LER o número do processo desta tela para confirmar que é o <b>' + escHtml(c.numero_processo) + '</b> — confira (abra o processo certo se preciso) e clique Continuar.');
+      }
+      if (abertoDig !== alvo) {
+        c.buscaErrada = (c.buscaErrada || 0) + 1;
+        if (c.buscaErrada > 2) {
+          return pausar(c, 'fui buscar o processo <b>' + escHtml(c.numero_processo) + '</b> 2× e continuo caindo em OUTRO processo — abra você o processo certo e clique Continuar.');
+        }
+        await casoSalvar(c);
+        progresso(c, 'a tela aberta é de OUTRO processo — indo buscar ' + c.numero_processo + '…');
+        return abrirBuscaPeloMenu(c);
+      }
+      c.buscaErrada = 0; // achou o certo: zera o contador p/ futuras navegações do caso
     }
     // PRIORIDADE: se há intimação não lida (Pendências → "Ver Intimação"), o caminho é
     // CUMPRIR O PRAZO dela — não "Petição Eletrônica" (petição avulsa, sem vínculo).
@@ -372,7 +413,12 @@
     // não geram falso-positivo. Fallback: tabelas de resultado do form de juntada.
     let tabelas = Array.from(document.querySelectorAll('.resultTable, #juntarDocumentoForm table'))
       .filter(t => /tamanho|nome\s+do\s+arquivo/i.test(t.textContent || ''));
-    if (!tabelas.length) tabelas = Array.from(document.querySelectorAll('.resultTable, #juntarDocumentoForm table'));
+    // Fallback (nenhuma tabela com cabeçalho de arquivos): critério ENDURECIDO — exige
+    // extensão E tamanho na MESMA linha. Auditoria: só a extensão deixava linha de
+    // intimação/movimento que citasse "nome.pdf" contar como anexo → a extensão pulava
+    // o upload achando que já tinha anexo (e, no modo auto, concluiria sem arquivo).
+    const fallback = !tabelas.length;
+    if (fallback) tabelas = Array.from(document.querySelectorAll('.resultTable, #juntarDocumentoForm table'));
     const linhas = new Set();
     tabelas.forEach(t => t.querySelectorAll('tbody tr, tr').forEach(tr => linhas.add(tr)));
     let n = 0;
@@ -380,6 +426,7 @@
       if (!visivel(tr)) return;
       const txt = tr.textContent || '';
       if (VAZIO.test(txt)) return;
+      if (fallback) { if (EXT.test(txt) && TAM.test(txt)) n++; return; }
       if (EXT.test(txt)) { n++; return; }
       const temRemover = tr.querySelector('a[onclick*="remover" i], a[onclick*="excluir" i], a[href*="remover" i], a[href*="excluir" i], img[onclick*="remover" i]');
       if (temRemover && TAM.test(txt)) n++;
@@ -445,7 +492,10 @@
     const rowSel = alvoRadio.closest('tr,li,label,div');
     const lbl = alvoRadio.id ? document.querySelector('label[for="' + alvoRadio.id + '"]') : null;
     let descricaoRaw = (lbl ? lbl.textContent : (rowSel ? rowSel.textContent : '')) || tipoTxt;
-    descricaoRaw = descricaoRaw.replace(/\s+/g, ' ').trim().replace(new RegExp('\\b' + (alvoRadio.value || '') + '\\b'), '').trim().slice(0, 200);
+    // Escapa metacaracteres do value (auditoria: um "(" no value estourava SyntaxError
+    // engolido e o diálogo ficava mudo até o timeout de 25s).
+    const valEsc = String(alvoRadio.value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    descricaoRaw = descricaoRaw.replace(/\s+/g, ' ').trim().replace(new RegExp(valEsc ? '\\b' + valEsc + '\\b' : '(?!)'), '').trim().slice(0, 200);
     const q = new URLSearchParams(location.search || '');
     try {
       const pdoc = window.parent.document;
@@ -475,6 +525,15 @@
   async function telaJuntar(c) {
     if (document.querySelector('iframe[src*="upload.do"]')) return; // diálogo aberto: quem age é a instância dele
     if (c.fase === 'assinar') return; // já orientado: esperando o advogado concluir/assinar
+    // GUARDA FAIL-CLOSED (auditoria): uma tela de juntada VELHA (lote anterior
+    // cancelado, outro processo) era usada direto — os PDFs do caso novo iam parar no
+    // processo errado e o modo auto CONCLUIRIA. Só age se a tela confirmar o número.
+    const confJ = confereProcessoNaTela(c);
+    if (confJ !== 'ok') {
+      return pausar(c, 'não confirmei que esta tela de juntada é do processo <b>' + escHtml(c.numero_processo) + '</b>' +
+        (confJ === 'errado' ? ' (a tela mostra OUTRO processo — provável tela antiga)' : ' (número não visível)') +
+        ' — feche a tela antiga se houver, abra o processo certo (Ver Intimação → Cumprir Prazo) e clique Continuar.');
+    }
     // 1) tipo do movimento ("JUNTADA DE …") — autocomplete: digita, espera a lista
     // via LUPA (determinístico): openDialogSelecao abre a janela oficial de Seleção
     // de Tipo de Documento; ao escolher o item, o próprio Projudi preenche o hidden
@@ -570,6 +629,10 @@
       destacar(concluirBtn, '#1a7f37');
       await new Promise(r => setTimeout(r, 700));
       clicar(concluirBtn);
+      // WATCHDOG (auditoria): se o clique não navegar (confirm preso, clique no vazio),
+      // nada mais reinvocaria o fluxo — o lote ficaria mudo. Em 6s o dirigir reavalia:
+      // form ainda na tela → pausa; navegou → detecção de conclusão normal.
+      setTimeout(() => runCentral().catch(() => {}), 6000);
       return; // na próxima carga, o dirigir detecta a conclusão e segue a fila
     }
     await casoSalvar(c);
@@ -593,9 +656,32 @@
     // aqui — se a lista JÁ tem os arquivos, NÃO reenvia; vai direto para a conclusão.
     // PARCIAL (algumas linhas, mas < docs): NÃO reenviar o conjunto todo (o Projudi
     // ANEXA por cima → duplicaria o que já subiu). Entrega ao humano pra ele completar.
+    // GUARDA DE DIÁLOGO VELHO (auditoria): um diálogo de upload remanescente de OUTRO
+    // caso é "condutor" e agiria com o caso novo. O diálogo em si não mostra o número —
+    // confere no frame-PAI (mesma origem): se a tela-mãe mostra outro processo, pausa.
+    try {
+      if (window.parent && window.parent !== window) {
+        const confPai = confereProcessoNaTela(c, window.parent.document);
+        if (confPai === 'errado') {
+          return pausar(c, 'a janela de envio pertence a OUTRO processo (tela antiga?) — feche-a, abra o processo <b>' + escHtml(c.numero_processo) + '</b> e clique Continuar.');
+        }
+      }
+    } catch (_) { /* frame-pai inacessível: segue (o telaJuntar já foi guardado) */ }
     const jaSubiu = linhasUpload();
     if (jaSubiu > 0 && jaSubiu < c.docs.length) {
       return pausar(c, 'envio parcial: ' + jaSubiu + '/' + c.docs.length + ' PDF(s) já entraram. Para não duplicar, <b>anexe você o(s) que falta(m)</b> no diálogo e clique <b>Continuar</b>.');
+    }
+    if (jaSubiu >= c.docs.length && !c.uploadFeito) {
+      // Lista já "cheia" SEM termos enviado nada nesta passada: confere se são MESMO os
+      // nossos arquivos (auditoria: staging abandonado de outra tentativa passava batido
+      // e o Confirmar Inclusão validava arquivos alheios). Nome não bate → humano decide.
+      const txtTabela = norm(Array.from(document.querySelectorAll(
+        '#fileUploadForm .resultTable, form[name="fileUploadForm"] .resultTable')).map(t => t.textContent || '').join(' '));
+      const nossos = (c.docs || []).filter(d => txtTabela.includes(norm(d.nome)));
+      if (txtTabela && nossos.length < c.docs.length) {
+        return pausar(c, 'a lista de envio já tem ' + jaSubiu + ' arquivo(s), mas só reconheci ' + nossos.length + '/' + c.docs.length +
+          ' pelo nome — pode haver arquivo de outra tentativa. Confira a lista (remova o que não for deste caso), complete se faltar e clique <b>Continuar</b>.');
+      }
     }
     if (jaSubiu < c.docs.length) {
       const inputArq = document.getElementById('conteudo') ||
@@ -821,28 +907,43 @@
     if (m.type === 'RUN_CENTRAL' && m.caso && m.caso.sistema === 'projudi') {
       if (!respondo) return false;
       (async () => {
-        await casoSalvar({ ...m.caso, status: 'rodando', motivo: null, fase: null, abriuLupa: false, abriuUpload: false, uploadFeito: false, retomadoPeloUsuario: false, assinaturaPendente: false, autoConcluindo: false });
-        sendResponse({ ok: true });
-        runCentral().catch(() => {});
+        const gravar = () => casoSalvar({ ...m.caso, status: 'rodando', motivo: null, fase: null, abriuLupa: false, abriuUpload: false, uploadFeito: false, retomadoPeloUsuario: false, assinaturaPendente: false, autoConcluindo: false });
+        if (ehCondutor()) {
+          await gravar();
+          sendResponse({ ok: true });
+          runCentral().catch(() => {});
+        } else {
+          // TOPO = fallback (auditoria M4): grava com ATRASO e só se o condutor não
+          // gravou antes — um save tardio do topo regravava "rodando" por cima de uma
+          // pausa recém-salva pelo condutor (a pausa "sumia" e nada dirigia).
+          sendResponse({ ok: true });
+          setTimeout(async () => {
+            const cur = await casoLer();
+            if (!cur || cur.id !== m.caso.id) { await gravar(); runCentral().catch(() => {}); }
+          }, 900);
+        }
       })();
       return true;
     }
     if (m.type === 'CONTINUAR_CENTRAL') {
       if (!respondo) return false;
       (async () => {
-        const c = await casoLer();
-        if (c && c.sistema === 'projudi') {
-          c.status = 'rodando'; c.motivo = null;
-          if (c.fase === 'assinar') {
-            c.retomadoPeloUsuario = true; // pós-assinatura: Continuar = caso concluído
-          } else {
-            // C2: o humano pode ter resolvido algo (anexo/tipo) — não confiar nas
-            // flags velhas; derivar do DOM na próxima passada.
-            c.abriuLupa = false; c.abriuUpload = false; c.uploadFeito = false;
+        const retomar = async () => {
+          const c = await casoLer();
+          if (c && c.sistema === 'projudi' && c.status !== 'rodando') {
+            c.status = 'rodando'; c.motivo = null;
+            if (c.fase === 'assinar') {
+              c.retomadoPeloUsuario = true; // pós-assinatura: Continuar = caso concluído
+            } else {
+              // C2: o humano pode ter resolvido algo (anexo/tipo) — não confiar nas
+              // flags velhas; derivar do DOM na próxima passada.
+              c.abriuLupa = false; c.abriuUpload = false; c.uploadFeito = false;
+            }
+            await casoSalvar(c); runCentral().catch(() => {});
           }
-          await casoSalvar(c); runCentral().catch(() => {});
-        }
-        sendResponse({ ok: true });
+        };
+        if (ehCondutor()) { await retomar(); sendResponse({ ok: true }); }
+        else { sendResponse({ ok: true }); setTimeout(() => { retomar().catch(() => {}); }, 900); } // topo: fallback com atraso (M4)
       })();
       return true;
     }

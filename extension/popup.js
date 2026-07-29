@@ -162,12 +162,21 @@ async function puxarTokenDoApp() {
 }
 
 // Botão fixo pra abrir a Central de Peticionamento (lote de iniciais com IA).
+// FOCA a aba existente se já houver uma (auditoria: DUAS Centrais abertas brigam pelo
+// PEDIR_DOC — a antiga responde "doc não encontrado" antes da certa e o lote falha).
 function renderCentralLink() {
   const div = document.createElement('div');
   div.style.cssText = 'margin-top:10px;';
   div.innerHTML = '<button class="btn" id="abrir-central" style="background:#1a7f37;">⚖️ Central de Peticionamento (lote)</button>';
   body.appendChild(div);
-  div.querySelector('#abrir-central').onclick = () => chrome.tabs.create({ url: chrome.runtime.getURL('central.html') });
+  div.querySelector('#abrir-central').onclick = async () => {
+    const url = chrome.runtime.getURL('central.html');
+    try {
+      const [aba] = await chrome.tabs.query({ url });
+      if (aba) { await chrome.tabs.update(aba.id, { active: true }); await chrome.windows.update(aba.windowId, { focused: true }); window.close(); return; }
+    } catch (_) {}
+    chrome.tabs.create({ url });
+  };
 }
 
 async function carregar() {

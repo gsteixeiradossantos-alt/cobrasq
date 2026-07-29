@@ -154,10 +154,14 @@ async function claudeExtrair(base64Pdf, _jaRenovou = false) {
 
 // ── Registro do protocolo no banco (PostgREST com o token; RLS aplicada) ──────
 let _cfgCache = null;
-async function configSupabase() {
+async function configSupabase(_jaRenovou = false) {
   if (_cfgCache) return _cfgCache;
   const token = await getToken();
   const r = await fetchTimeout(`${API_BASE}/api/config`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  // Se /api/config exigir auth e o token do cache estiver velho, renova e repete UMA
+  // vez — sem isto o registro do protocolo (que JÁ aconteceu no tribunal) falhava com
+  // "config/sessão indisponível".
+  if ((r.status === 401 || r.status === 403) && !_jaRenovou && await refrescarTokenDoApp()) return configSupabase(true);
   const j = await r.json().catch(() => ({}));
   const url = j.supabaseUrl || j.url || j.SUPABASE_URL || (j.supabase && j.supabase.url);
   const anon = j.supabaseAnonKey || j.anonKey || j.anon || j.SUPABASE_ANON_KEY || (j.supabase && j.supabase.anonKey);
