@@ -728,24 +728,31 @@
           c.autoConcluindo = false; await casoSalvar(c);
           return pausar(c, 'modo automático: o <b>Concluir Movimento</b> não avançou (pode ter exigido certificado). Conclua você e clique <b>Continuar</b> na Central.');
         }
-        // Confirma a conclusão SÓ por MENSAGEM EXPLÍCITA de sucesso do Projudi. NÃO
-        // basta "o form sumiu", nem estar na tela do processo, nem achar um número de
-        // protocolo (a tela do processo mostra o protocolo DELE o tempo todo) — esses
-        // sinais também aparecem em telas de erro/redirect e dariam falso "concluído"
-        // num protocolo IRREVERSÍVEL. Na dúvida, PAUSA e o humano confirma.
-        const temSucesso = () => /movimento (concluido|registrado|realizado|inserido)|juntada realizada|operacao realizada|realizad[oa] com sucesso|conclu[ií]d[oa] com sucesso|protocolad[oa] com sucesso/
-          .test(norm(document.body ? document.body.innerText : ''));
-        if (!temSucesso()) {
-          // Ainda carregando? Dá mais uma passada curta antes de decidir.
+        // Sucesso do Projudi (confirmado nas capturas): após concluir a juntada ele
+        // REDIRECIONA para a TELA DO PROCESSO (processoForm) do MESMO número, com a nova
+        // peça no topo das Movimentações — NÃO exibe banner "com sucesso". Então o sinal
+        // é: estar em processoForm E o número do processo bater (guarda contra tela de
+        // erro/outro processo). Uma mensagem explícita de sucesso também vale. O form de
+        // juntada/upload já foi descartado acima. Na dúvida, PAUSA (protocolo é irreversível).
+        const soDig = (s) => String(s || '').replace(/\D/g, '');
+        const numAlvo = soDig(c.numero_processo);
+        const confirmou = () => {
+          const corpo = document.body ? document.body.innerText : '';
+          const naTelaProcesso = !!document.getElementById('processoForm') && !!numAlvo && soDig(corpo).indexOf(numAlvo) >= 0;
+          const txtOk = /movimento (concluido|registrado|realizado|inserido)|juntada realizada|operacao realizada|realizad[oa] com sucesso|conclu[ií]d[oa] com sucesso|protocolad[oa] com sucesso/
+            .test(norm(corpo));
+          return naTelaProcesso || txtOk;
+        };
+        if (!confirmou()) {
+          // Ainda carregando/transição? Dá mais uma passada curta antes de decidir.
           await new Promise(r => setTimeout(r, 1500));
-          if (!temSucesso()) {
+          if (!confirmou()) {
             c.autoConcluindo = false; await casoSalvar(c);
-            return pausar(c, 'modo automático: <b>não confirmei</b> a conclusão do movimento pela mensagem da tela. Verifique se protocolou — se sim, clique <b>Continuar</b> na Central; se não, conclua e depois Continuar.');
+            return pausar(c, 'modo automático: <b>não confirmei</b> a conclusão pela tela. Verifique se protocolou — se sim, clique <b>Continuar</b> na Central; se não, conclua e depois Continuar.');
           }
         }
-        const m = (document.body.innerText || '').match(/protocolo[^\d]{0,20}(\d[\d./-]{5,})/i);
         await casoLimpar();
-        reportar('CENTRAL_CASO_OK', { casoId: c.id, numero: (m && m[1]) || c.numero_processo });
+        reportar('CENTRAL_CASO_OK', { casoId: c.id, numero: c.numero_processo });
         setBody(msg('✅ Caso concluído automaticamente — próximo da fila.', '#d3f9d8'));
         return;
       }
