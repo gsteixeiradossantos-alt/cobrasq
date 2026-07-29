@@ -15,6 +15,7 @@ const NODE_GLOBALS = {
   URLSearchParams: 'readonly',
   setTimeout: 'readonly',
   clearTimeout: 'readonly',
+  AbortController: 'readonly',
   __dirname: 'readonly',
   __filename: 'readonly',
 };
