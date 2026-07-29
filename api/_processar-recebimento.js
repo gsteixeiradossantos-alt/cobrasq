@@ -119,6 +119,36 @@ module.exports = async function handler(req, res) {
     const inserted = await sbFetch('fin_operacao', { method: 'POST', body: JSON.stringify(row) });
     const operacao = Array.isArray(inserted) ? inserted[0] : inserted;
 
+    // Baixa a parcela correspondente em acordos.parcelas (jsonb) — sem isso, o
+    // "Recuperado no mês" do painel (index.html: recuperadoNoMes) só soma baixa
+    // manual (toggleParcela), nunca pagamento confirmado automaticamente pelo
+    // Asaas. Best-effort: não derruba o webhook se a casada falhar.
+    if (acordo && Array.isArray(acordo.parcelas) && acordo.parcelas.length) {
+      try {
+        const parcelas = acordo.parcelas.map(p => ({ ...p }));
+        let idx = -1;
+        if (payment.installmentNumber != null) {
+          idx = parcelas.findIndex(p => Number(p.numero) === Number(payment.installmentNumber) && !p.pago);
+        }
+        if (idx < 0) {
+          // Sem installmentNumber (cobrança avulsa) — casa pela parcela em aberto de valor mais próximo.
+          idx = parcelas.reduce((best, p, i) => {
+            if (p.pago) return best;
+            const diff = Math.abs((+p.valor || 0) - valorRecebido);
+            const bestDiff = best < 0 ? Infinity : Math.abs((+parcelas[best].valor || 0) - valorRecebido);
+            return diff < bestDiff ? i : best;
+          }, -1);
+        }
+        if (idx >= 0) {
+          parcelas[idx].pago = true;
+          parcelas[idx].pagoEm = row.recebido_em;
+          const patch = { parcelas };
+          if (parcelas.every(p => p.pago)) patch.status = 'encerrado';
+          await sbFetch(`acordos?id=eq.${encodeURIComponent(acordo.id)}`, { method: 'PATCH', body: JSON.stringify(patch) });
+        }
+      } catch (e) { console.warn('[processar-recebimento] baixa de parcela:', e.message); }
+    }
+
     // Ponte fin_lancamento: registra a RECEITA do recebimento (já paga) e a DESPESA
     // de repasse (nasce ATIVA/pendente porque o recebimento confirmou; vira "pago"
     // quando o PIX de repasse efetiva — /api/repassar e /api/repasse-concluido).

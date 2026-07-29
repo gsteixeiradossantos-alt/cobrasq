@@ -9779,6 +9779,21 @@ async function renderPainel(){
   const acordadoNoMes   = acordosMesRows.reduce((s,a)=>s+(+a.valor_total||0),0);
   const parcelasGeradas = acordosMesRows.reduce((s,a)=>s+(Array.isArray(a.parcelas)?a.parcelas.length:0),0);
 
+  // ── Ações judiciais iniciadas no mês ────────────────────────────────────────
+  // "Iniciada" = petição inicial efetivamente protocolada (status='protocolado',
+  // carimbado por api/_eproc-peticionamento.js na ação 'done'), não só preparada.
+  let judicialMesRows = [];
+  try{
+    const supa = getSupabase();
+    if(supa){
+      const ymIni = ymAtual+'-01';
+      const dNext = new Date(mesRef.getFullYear(), mesRef.getMonth()+1, 1).toISOString().slice(0,10);
+      const r = await supa.from('proc_peticionamentos').select('id,numero_processo,protocolado_em')
+        .eq('tipo','inicial').eq('status','protocolado').gte('protocolado_em', ymIni).lt('protocolado_em', dNext);
+      if(!r.error) judicialMesRows = r.data||[];
+    }
+  }catch(_){}
+
   // "A receber no mês" — receitas pendentes do financeiro (fin_lancamento), não mais
   // o cache de boletos Asaas por devedor (só somava quem já tinha sido aberto nesta
   // sessão do navegador — número incompleto e enganoso, achado em 27/07/2026).
@@ -9846,7 +9861,7 @@ async function renderPainel(){
       #page-painel .pnl-seg button.on{background:var(--side-bg);color:#fff;}
       #page-painel .pnl-alerts:empty{display:none;}
       #page-painel .pnl-alerts > *{margin-bottom:14px;}
-      #page-painel .pnl-acordos-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px 24px;}
+      #page-painel .pnl-acordos-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:14px 24px;}
       #page-painel .pnl-acordos-lb{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-3);}
       #page-painel .pnl-acordos-lb.hl{color:var(--accent-2);}
       #page-painel .pnl-acordos-v{font-family:var(--font-mono);font-size:19px;font-weight:600;color:var(--text);margin-top:3px;}
@@ -9904,6 +9919,7 @@ async function renderPainel(){
       #page-painel .pnl-risco-row{display:flex;align-items:center;gap:10px;padding:9px 0;}
       #page-painel .pnl-risco-hr{height:1px;background:var(--border-2);}
       #page-painel .pnl-risco-v{font-family:var(--font-mono);font-size:17px;font-weight:600;width:80px;flex-shrink:0;}
+      @media(max-width:1180px){ #page-painel .pnl-acordos-grid{grid-template-columns:repeat(3,1fr);} }
       @media(max-width:980px){ #page-painel .pnl-grid2,#page-painel .pnl-dark-2col{grid-template-columns:1fr;} #page-painel .pnl-acordos-grid{grid-template-columns:repeat(2,1fr);} .cob-kpis{grid-template-columns:repeat(2,1fr);} }
     </style>
 
@@ -9939,6 +9955,7 @@ async function renderPainel(){
       <div class="cob-panel-body">
         <div class="pnl-acordos-grid">
           <div><div class="pnl-acordos-lb">ACORDADO NO MÊS</div><div class="pnl-acordos-v">${fmtR(acordadoNoMes)}</div><div class="pnl-acordos-sub">${acordosMesRows.length} acordo${acordosMesRows.length!==1?'s':''} assinado${acordosMesRows.length!==1?'s':''}</div></div>
+          <div><div class="pnl-acordos-lb">AÇÕES JUDICIAIS NO MÊS</div><div class="pnl-acordos-v">${judicialMesRows.length}</div><div class="pnl-acordos-sub">petiç${judicialMesRows.length!==1?'ões':'ão'} inicial${judicialMesRows.length!==1?'is':''} protocolada${judicialMesRows.length!==1?'s':''}</div></div>
           <div><div class="pnl-acordos-lb">A RECEBER EM ${mesAtual.toUpperCase()}</div><div class="pnl-acordos-v green">${fmtR(aReceberMes)}</div><div class="pnl-acordos-sub">${aReceberQtd} lançamento${aReceberQtd!==1?'s':''} pendente${aReceberQtd!==1?'s':''}</div></div>
           <div><div class="pnl-acordos-lb">META DO MÊS</div><div class="pnl-acordos-v">${fmtR(metaMensal)}</div><div class="pnl-acordos-sub">recuperado ${fmtR(totalRecuperado)}${metaProg!=null?` · ${metaProg}%`:''}</div></div>
           ${_mesOffset===0
@@ -21198,13 +21215,17 @@ async function viewAsIniciar(tipo, id, nome){
   if(!currentUser || currentUser.tipo !== 'gestor'){ showToast('Só o administrador pode usar "Ver como".','danger'); return; }
   closeModal('modal-viewas');
   if(tipo === 'colaborador'){
-    // Não troca de tela nem de currentUser — só pré-filtra Cobranças/Devedores por esse responsável,
-    // reaproveitando os filtros que já existem (sem risco de RLS, é tudo array já em memória).
+    // Troca currentUser.tipo pra 'funcionario' (igual ao login real de colaborador) pra
+    // cair no mesmo caminho de renderização restrita (renderPainelColaborador, dropdowns
+    // de operador escondidos etc.) — antes só pré-filtrava Cobranças e mostrava o painel
+    // de gestão inteiro por baixo, o que não reflete o que o colaborador realmente vê.
+    _viewAsRealUser = _viewAsRealUser || currentUser;
     _viewAsUser = { tipo, id, nome };
+    currentUser = { tipo:'funcionario', papel:'colaborador', nome, email:'', avatar:initials(nome), role:'Colaborador (pré-visualização)', supaId:id };
     if(typeof cobrFilter === 'object') cobrFilter.responsavel = id;
     if(typeof devFilter === 'object') devFilter.resp = id;
-    showPage('cobr');
-    if(typeof renderCobrancas === 'function') renderCobrancas();
+    document.body.classList.add('viewas-readonly');
+    showPage('painel');
     viewAsRenderBanner();
     refreshViewAsTopbar();
     return;
