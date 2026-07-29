@@ -8521,39 +8521,16 @@ function _injAudModal(modalId, innerHTML, maxw){
   openModal(modalId);
 }
 
-function _audReus(partes){ return (partes||[]).filter(p=>p.papel==='REU').map(p=>p.nome).join(', ') || '—'; }
-function _audAutores(partes){ return (partes||[]).filter(p=>p.papel==='AUTOR').map(p=>p.nome).join(', ') || '—'; }
+// Tolerante a "REU"/"Réu" e "AUTOR"/"Autor" — skills externas (ex.: audiencias-cobrasq)
+// gravam capitalizado/acentuado; a UI grava maiúsculo sem acento.
+const _audPapelNorm = (papel)=> String(papel||'').toUpperCase().replace(/É/g,'E');
+function _audReus(partes){ return (partes||[]).filter(p=>_audPapelNorm(p.papel)==='REU').map(p=>p.nome).join(', ') || '—'; }
+function _audAutores(partes){ return (partes||[]).filter(p=>_audPapelNorm(p.papel)==='AUTOR').map(p=>p.nome).join(', ') || '—'; }
 
-// Monta as 3 mensagens + horários de disparo a partir de data_hora (Date local do navegador).
-function _audMontarLembretes(aud){
-  const dh = new Date(aud.data_hora);
-  const diaAntes = new Date(dh); diaAntes.setDate(diaAntes.getDate()-1); diaAntes.setHours(19,0,0,0);
-  const diaDe = new Date(dh); diaDe.setHours(8,0,0,0);
-  const dezMin = new Date(dh.getTime() - 10*60000);
-  const reus = _audReus(aud.partes);
-  const dataFmt = dh.toLocaleDateString('pt-BR');
-  const horaFmt = dh.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
-  const rodape = `Processo: ${aud.numero_processo}\n${aud.comarca||''}, sala: ${aud.sala||'—'}\nRéu(s): ${reus}`;
-  return [
-    { fase:'d1',    agendada_para:diaAntes.toISOString(), mensagem:`🔔 *Lembrete — audiência amanhã*\n${rodape}\nData: ${dataFmt} às ${horaFmt}` },
-    { fase:'dia',   agendada_para:diaDe.toISOString(),    mensagem:`📅 *Hoje tem audiência*\n${rodape}\nÀs ${horaFmt}` },
-    { fase:'min10', agendada_para:dezMin.toISOString(),   mensagem:`⏰ *Audiência em 10 minutos*\n${rodape}\nÀs ${horaFmt}` },
-  ];
-}
-
-// Recria os 3 lembretes pendentes de uma audiência (usado ao criar e ao reagendar).
-async function _audAgendarLembretes(supa, audId, aud){
-  await supa.from('crm_mensagens_agendadas').delete().eq('audiencia_id', audId).eq('status','pendente');
-  const lembretes = _audMontarLembretes(aud).filter(l => new Date(l.agendada_para) > new Date());
-  if(!lembretes.length) return;
-  const rows = lembretes.map(l => ({
-    audiencia_id: audId, telefone: aud.telefone_notificacao, tipo:'texto',
-    mensagem: l.mensagem, agendada_para: l.agendada_para, status:'pendente',
-    origem: 'audiencia_lembrete_'+l.fase
-  }));
-  const { error } = await supa.from('crm_mensagens_agendadas').insert(rows);
-  if(error) console.warn('[audiencias] falha ao agendar lembretes:', error);
-}
+// Os 3 lembretes (véspera 19h, dia 08h, 10min antes) são agendados pelo trigger
+// public.audiencias_agendar_lembretes() no banco — dispara em qualquer INSERT/UPDATE
+// em `audiencias`, venha da UI, de uma skill ou de SQL direto. O front-end não
+// precisa (e não deve) duplicar essa lógica.
 
 async function renderAudiencias(){
   const el = document.getElementById('page-audiencias');
@@ -8769,16 +8746,14 @@ async function salvarAudiencia(id){
 
   const btn = document.getElementById('aud-btn-salvar'); if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
   try{
-    let audId = id;
     if(id){
       const { error } = await supa.from('audiencias').update(payload).eq('id', id);
       if(error) throw error;
     } else {
-      const { data, error } = await supa.from('audiencias').insert({ ...payload, origem:'manual', created_by: currentUser?.nome||'' }).select('id').single();
+      const { error } = await supa.from('audiencias').insert({ ...payload, origem:'manual', created_by: currentUser?.nome||'' });
       if(error) throw error;
-      audId = data.id;
     }
-    await _audAgendarLembretes(supa, audId, payload);
+    // Os 3 lembretes são agendados pelo trigger no banco (audiencias_agendar_lembretes).
     showToast('Audiência salva. Lembretes agendados.','success');
     closeModal('modal-aud');
     renderAudiencias();
@@ -8792,7 +8767,7 @@ async function cancelarAudiencia(id){
   if(currentUser?.tipo!=='gestor') return;
   if(!confirm('Cancelar esta audiência? Os lembretes de WhatsApp ainda não enviados serão cancelados junto.')) return;
   const supa = getSupabase(); if(!supa) return;
-  await supa.from('crm_mensagens_agendadas').update({ status:'cancelada' }).eq('audiencia_id', id).eq('status','pendente');
+  // O trigger no banco cancela os lembretes pendentes ao ver status != 'agendada'.
   const { error } = await supa.from('audiencias').update({ status:'cancelada' }).eq('id', id);
   if(error){ showToast('Falha ao cancelar: '+error.message,'danger'); return; }
   showToast('Audiência cancelada.','success');
@@ -8802,7 +8777,7 @@ async function cancelarAudiencia(id){
 async function marcarAudienciaRealizada(id){
   if(currentUser?.tipo!=='gestor') return;
   const supa = getSupabase(); if(!supa) return;
-  await supa.from('crm_mensagens_agendadas').update({ status:'cancelada' }).eq('audiencia_id', id).eq('status','pendente');
+  // O trigger no banco cancela os lembretes pendentes ao ver status != 'agendada'.
   const { error } = await supa.from('audiencias').update({ status:'realizada' }).eq('id', id);
   if(error){ showToast('Falha ao atualizar: '+error.message,'danger'); return; }
   showToast('Audiência marcada como realizada.','success');
