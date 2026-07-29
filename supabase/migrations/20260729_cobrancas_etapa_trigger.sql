@@ -1,7 +1,20 @@
 -- ============================================================================
 -- TRIGGER QUE MANTÉM `cobrancas.etapa` VIVA
 --
--- NÃO APLICADA EM PRODUÇÃO. Aplicar é ação gated (CLAUDE.md).
+-- APLICADA EM PRODUÇÃO em 29/07/2026, com autorização do dono.
+-- Verificações feitas na hora:
+--   · UPDATE de teste (status -> '5. Quitado') recalculou etapa -> 'encerrado' ✓
+--   · resync de toda a carteira (update ... set status = status) sem alterar dado:
+--     fazer_acao 3 -> 6 · cobrar 71 -> 68 · zero casos com status "Fazer ação"
+--     presos em outra etapa ✓
+--   · authenticated tem SELECT em devedor_eventos e cobranca_partes, então o
+--     subselect do ramo 'travado' só é filtrado pela RLS (vira NULL e cai no
+--     fallback) — não levanta permission denied na gravação do colaborador ✓
+--
+-- O passo 3 sugerido no cabeçalho (devolver a precedência da coluna à tela,
+-- revertendo o 1e4b83f) NÃO foi feito, de propósito: derivar em runtime já dá o
+-- resultado certo e não depende do trigger estar de pé. A coluna serve relatório
+-- e ordenação no banco, que é onde ela é insubstituível.
 --
 -- Contexto. A coluna `etapa` foi criada e populada em 29/07 e a tela passou a
 -- lê-la com precedência sobre a derivação em runtime. Faltou uma peça: mudar a
