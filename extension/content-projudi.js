@@ -509,58 +509,63 @@
   async function telaUpload(c) {
     if (c.uploadFeito) return;
     if (!(c.docs || []).length) return; // B6
-    // Campo de arquivo e select de tipo: por ID conhecido OU genérico (o diálogo real
-    // pode usar outros IDs — antes desistíamos calado e o lote ficava "aguardando").
-    const inputArq = document.getElementById('conteudo') ||
-      document.querySelector('#fileUploadForm input[type="file"], form[name="fileUploadForm"] input[type="file"], input[type="file"]');
-    if (!inputArq) {
-      const campos = Array.from(document.querySelectorAll('input,select')).filter(visivel)
-        .map(e => (e.tagName.toLowerCase() + '#' + (e.id || '') + '[' + (e.type || e.name || '') + ']')).slice(0, 12).join(' · ');
-      return pausar(c, 'a janela de envio abriu, mas não achei o campo de <b>escolher arquivo</b>. Campos vistos: <b>' + escHtml(campos || '(nenhum)') + '</b>. Anexe você o PDF e clique Continuar — e me diga como é essa janela.');
-    }
-    progresso(c, 'enviando ' + c.docs.length + ' PDF(s)…');
-    // FLUXO REAL (upload.do, capturado): o input #conteudo tem onchange=
-    // atualiza_arquivos_selecionados()→enviar(2), que JÁ envia o arquivo sozinho (via
-    // Uploader). O upload TERMINOU quando o arquivo vira LINHA na resultTable do
-    // diálogo. Só então marca o tipo (select tipoN/name="tipos" da linha) e confirma.
-    // Erro antigo: tratava #codDescricao (o "Tipo" do quadro "Digitar Texto", que já
-    // existe cheio de opções) como sinal de upload pronto → confirmava a janela VAZIA.
-    // 1) injeta o(s) arquivo(s) → dispara o envio automático
-    const dt = new DataTransfer();
-    for (const d of c.docs) dt.items.add(await pedirDoc(c.id, d.idx));
-    inputArq.files = dt.files;
-    inputArq.dispatchEvent(new Event('input', { bubbles: true }));
-    inputArq.dispatchEvent(new Event('change', { bubbles: true })); // atualiza_arquivos_selecionados()
-    // 2) ESPERA o upload concluir: linhas reais na resultTable (ignora "Nenhum registro").
+    // Cada arquivo enviado vira uma LINHA na resultTable com um select name="tipos".
     const linhasUpload = () => Array.from(document.querySelectorAll(
       '#fileUploadForm .resultTable tbody tr, form[name="fileUploadForm"] .resultTable tbody tr'))
-      .filter(tr => (tr.textContent || '').trim() && !/nenhum registro/i.test(tr.textContent || '')).length;
-    const subiu = await esperar(() => linhasUpload() >= c.docs.length, Math.max(90000, c.docs.length * 45000), 700);
-    if (!subiu) {
-      return pausar(c, 'anexei o(s) PDF(s), mas o envio não concluiu no diálogo (' + linhasUpload() + '/' + c.docs.length + ') — confira, escolha o tipo se pedir, clique <b>Confirmar Inclusão</b> e depois Continuar.');
+      .filter(tr => tr.querySelector('select[name="tipos"], select[id^="tipo"]')).length;
+
+    // GUARDA ANTI-DUPLICATA (bug visto: peça juntada 2×): ao concluir o upload, o Projudi
+    // RECARREGA o diálogo (finaliza_upload). O content script morre nesse reload e retoma
+    // aqui — se a lista JÁ tem os arquivos, NÃO reenvia; vai direto para a conclusão.
+    if (linhasUpload() < c.docs.length) {
+      const inputArq = document.getElementById('conteudo') ||
+        document.querySelector('#fileUploadForm input[type="file"], form[name="fileUploadForm"] input[type="file"], input[type="file"]');
+      if (!inputArq) {
+        return pausar(c, 'a janela de envio abriu, mas não achei o campo de <b>escolher arquivo</b>. Anexe você o PDF e clique Continuar.');
+      }
+      progresso(c, 'enviando ' + c.docs.length + ' PDF(s)…');
+      // #conteudo tem onchange=atualiza_arquivos_selecionados()→enviar(2), que JÁ envia.
+      const dt = new DataTransfer();
+      for (const d of c.docs) dt.items.add(await pedirDoc(c.id, d.idx));
+      inputArq.files = dt.files;
+      inputArq.dispatchEvent(new Event('input', { bubbles: true }));
+      inputArq.dispatchEvent(new Event('change', { bubbles: true }));
+      // O diálogo recarrega ao concluir → este script morre e retoma na guarda acima.
+      const subiu = await esperar(() => linhasUpload() >= c.docs.length || !document.getElementById('conteudo'),
+        Math.max(90000, c.docs.length * 45000), 700);
+      if (!subiu) return pausar(c, 'anexei o(s) PDF(s), mas o envio não concluiu (' + linhasUpload() + '/' + c.docs.length + ') — confira e clique Continuar.');
+      if (linhasUpload() < c.docs.length) return; // recarregou: retoma na próxima passada
     }
-    // 3) tipo POR ARQUIVO (selects da resultTable — tipoN/name="tipos"); NÃO o #codDescricao.
-    //    O Projudi já tenta adivinhar o tipo pelo nome; só ajustamos se veio vazio.
+    // tipo POR ARQUIVO (selects tipoN/name="tipos" da resultTable) — só se veio vazio.
     const alvoTipo = norm(c.tipo_peticao || 'peticao');
     for (const sel of Array.from(document.querySelectorAll(
-      '#fileUploadForm .resultTable select[name="tipos"], #fileUploadForm .resultTable select[id^="tipo"], form[name="fileUploadForm"] .resultTable select')).filter(visivel)) {
+      '#fileUploadForm .resultTable select[name="tipos"], #fileUploadForm .resultTable select[id^="tipo"]')).filter(visivel)) {
       if (sel.value && sel.value !== '0') continue; // já preenchido pela detecção do nome
       const val = (o) => o.value && o.value !== '0';
       const opt = Array.from(sel.options).find(o => val(o) && norm(o.textContent) === alvoTipo) ||
                   Array.from(sel.options).find(o => val(o) && norm(o.textContent).includes(alvoTipo)) ||
-                  Array.from(sel.options).find(o => val(o) && norm(o.textContent) === 'peticao') || // "Petição" (não "Petição Inicial")
+                  Array.from(sel.options).find(o => val(o) && norm(o.textContent) === 'peticao') || // "Petição"
                   Array.from(sel.options).find(o => val(o) && norm(o.textContent).includes('peticao') && !norm(o.textContent).includes('inicial')) ||
                   Array.from(sel.options).find(o => val(o) && norm(o.textContent).includes('outros'));
       if (opt) { sel.value = opt.value; sel.dispatchEvent(new Event('change', { bubbles: true })); }
     }
     c.uploadFeito = true; await casoSalvar(c);
-    // 4) Confirmar Inclusão (id="closeButton" → validar_e_fechar): fecha o diálogo e
-    //    devolve o arquivo à lista de Arquivos da tela-mãe (juntarDocumentoForm).
     await new Promise(r => setTimeout(r, 300));
-    const enviar = document.getElementById('closeButton') ||
-      acharControle(['confirmar inclusao', 'confirmar inclusão', 'confirmar', 'enviar', 'incluir', 'anexar', 'ok'],
-        'input[type=submit],input[type=button],button,a');
-    if (enviar) clicar(enviar);
+    // CONCLUSÃO. Depois do upload o botão pode ser:
+    //  • "Assinar Arquivos" (#assinarButton) → assinatura com CERTIFICADO do usuário
+    //    (AssinadorTJPR). A extensão NÃO assina — PAUSA para o humano assinar + concluir.
+    //  • "Confirmar Inclusão" (#closeButton) → ex.: arquivo .p7s já assinado; clica e segue.
+    const assinar = document.getElementById('assinarButton') ||
+      acharControle(['assinar arquivos', 'assinar'], 'input[type=submit],input[type=button],button,a');
+    const confirmar = document.getElementById('closeButton') ||
+      acharControle(['confirmar inclusao', 'confirmar inclusão'], 'input[type=submit],input[type=button],button,a');
+    if (assinar && visivel(assinar)) {
+      c.fase = 'assinar'; await casoSalvar(c);
+      destacar(assinar, '#1a7f37');
+      return pausar(c, 'PDF(s) anexado(s) ✔ — clique <b>Assinar Arquivos</b>, assine com seu <b>certificado</b> e depois <b>Concluir Movimento</b>. Terminado o protocolo, clique <b>Continuar</b> na Central que eu sigo a fila.');
+    }
+    if (confirmar && visivel(confirmar)) { clicar(confirmar); return; }
+    return pausar(c, 'anexei o(s) PDF(s) — conclua o envio (Assinar Arquivos / Confirmar Inclusão) e clique Continuar.');
   }
 
   // Tela pré-login do Projudi (index): cartões "Magistrados…", "Advogados, Partes…",
