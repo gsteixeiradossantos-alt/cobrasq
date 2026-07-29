@@ -683,8 +683,11 @@
   const UFS_BR = ['AC', 'AL', 'AM', 'AP', 'BA', 'CE', 'DF', 'ES', 'GO', 'MA', 'MG', 'MS', 'MT', 'PA', 'PB', 'PE', 'PI', 'PR', 'RJ', 'RN', 'RO', 'RR', 'RS', 'SC', 'SE', 'SP', 'TO'];
   // Deduz o sexo pelo 1º nome (heurística — o usuário aceitou o risco). Dicionário
   // de exceções + regra "termina em A → F, senão M".
-  const NOMES_F = new Set('ana,alice,beatriz,bruna,carla,carmen,cecilia,clara,cristina,debora,eliane,elis,ester,fatima,gabriele,helena,ines,isabel,isis,jaqueline,jennifer,liz,luz,madalena,margareth,maria,marli,mercedes,miriam,noemi,raquel,rute,ruth,sol,solange,soraia,tais,thais,vitoria'.split(','));
-  const NOMES_M = new Set('andre,benjamin,caue,cesar,darlei,davi,elias,emerson,ezequiel,gilmar,hamilton,isaac,ivan,jean,joel,jonas,josue,luca,moises,nicolas,noe,ramon,vinicius,wallace,washington,wesley'.split(','));
+  // Femininos que NÃO terminam em "a" (a heurística "termina em a → F" erraria pra M).
+  // É a lista mais importante: sem ela, Nicole/Adriane/Cléo etc. iam como masculino.
+  const NOMES_F = new Set(('ana,alice,beatriz,bruna,carla,carmen,carolina,caroline,carol,cecilia,clara,cristina,cristiane,debora,eliane,elis,elaine,ester,esther,fatima,gabriele,gabrielle,helena,ines,isabel,isabele,isabelle,isis,iris,jaqueline,jennifer,jasmin,yasmin,karen,karin,kelly,lais,liz,luz,luciane,juliane,daniele,madalena,margareth,marlene,marilene,maria,marli,mercedes,michele,michelle,miriam,monique,nicole,noemi,adriane,agnes,cleo,denise,doris,heloise,rebeca,raquel,rute,ruth,rosane,rosangela,sol,solange,soraia,sirlene,tais,thais,viviane,vitoria,evelyn,evelin,sharon,eloa,heloisa,ivone,ione').split(','));
+  // Masculinos de risco: os que terminam em "a" (heurística os mandaria pra F) + comuns.
+  const NOMES_M = new Set(('andre,benjamin,caua,caue,cesar,darlei,davi,elias,emerson,ezequiel,gilmar,hamilton,isaac,ivan,jean,joel,jonas,josue,luca,moises,nicolas,noe,ramon,vinicius,wallace,washington,wesley,joao,jose,antonio,francisco,carlos,paulo,pedro,lucas,luiz,luis,marcos,marcelo,rafael,daniel,rodrigo,felipe,bruno,eduardo,gustavo,leonardo,matheus,mateus,thiago,tiago,guilherme,henrique,fabio,fernando,ricardo,roberto,sergio,alexandre,diego,douglas,wagner,anderson,wilson,nelson,valdir,valter,walter,gabriel,samuel,miguel,arthur,bernardo,heitor,enzo,lorenzo,vicente,otavio,murilo,caio,juca').split(','));
   function deduzirSexo(nome) {
     const p = norm(String(nome || '').trim().split(/\s+/)[0] || '');
     if (!p) return null;
@@ -810,8 +813,18 @@
       return pausar(c, rot + ': nenhuma parte com CPF/CNPJ nos dados do caso — a IA não extraiu. Inclua manualmente aqui (Consultar/Novo) e clique Continuar, ou corrija na revisão da Central e recomece o caso.' + fichaParte(semDoc[0]));
     const falta = lista.find(p => !presentes.includes(String(p.doc).replace(/\D/g, '')));
     if (!falta) {
-      if (semDoc.length && !presentes.length)
-        return pausar(c, rot + ': "' + semDoc[0].nome + '" está sem CPF/CNPJ — inclua manualmente e Continuar' + fichaParte(semDoc[0]));
+      // Parte com NOME mas SEM CPF/CNPJ não é incluída automaticamente. ANTES só avisava
+      // quando a tabela estava vazia — se já houvesse OUTRA parte incluída, a sem-doc era
+      // silenciosamente DERRUBADA e o eproc avançava sem ela. Agora avisa SEMPRE que houver
+      // parte sem doc, uma única vez por polo (flag evita loop depois do seu Continuar).
+      if (semDoc.length) {
+        c.semDocAvisado = c.semDocAvisado || {};
+        if (!c.semDocAvisado[chave]) {
+          c.semDocAvisado[chave] = true; await casoSalvar(c);
+          const nomes = semDoc.map(p => p.nome).filter(Boolean).join(', ');
+          return pausar(c, rot + ': parte(s) <b>sem CPF/CNPJ</b>: ' + escHtml(nomes) + ' — inclua manualmente (Consultar/Novo) e clique Continuar. Se realmente não houver documento, é só clicar <b>Continuar</b> de novo para seguir sem ela.' + fichaParte(semDoc[0]));
+        }
+      }
       const btn = document.querySelector('#btnProxima');
       if (!btn) return pausar(c, rot + ': botão Próxima não encontrado');
       // O "Próxima" valida endereço/contato das partes (hdnSinCadastroEnderecoObrigatorio=S):
