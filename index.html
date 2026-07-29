@@ -35997,8 +35997,15 @@ async function renderCfgUsuariosApp(){
             <option value="proprietario" ${u.papel==='proprietario'?'selected':''}>Administrador</option>
           </select>`;
         const inativo = u.ativo===false;
-        const btnAtivo = `<button class="btn btn-${inativo?'primary':'danger'} btn-xs" onclick="usrAlternarAtivo('${uid}', ${!inativo}, this)">${inativo?'Ativar':'Desativar'}</button>`;
-        acoesCell = `<td><div style="display:flex;gap:6px;align-items:center;">${papelSel}${btnAtivo}</div></td>`;
+        // O novo estado é o INVERSO do atual: quem está ativo vira inativo (false) e
+        // vice-versa. Estava `${!inativo}`, que é o estado ATUAL — o botão "Desativar"
+        // mandava ativo=true e o "Ativar" mandava ativo=false, ou seja, gravava sempre
+        // o valor que a linha já tinha e nada mudava na tela.
+        const btnAtivo = `<button class="btn btn-${inativo?'primary':'danger'} btn-xs" onclick="usrAlternarAtivo('${uid}', ${inativo}, this)">${inativo?'Ativar':'Desativar'}</button>`;
+        // Excluir é a exceção (Desativar é o caminho normal): apaga a conta do Auth e,
+        // por cascade, a linha de app_users — liberando o e-mail para recadastro.
+        const btnExcluir = `<button class="btn btn-ghost btn-xs" style="color:var(--danger);" title="Apaga o acesso definitivamente" onclick="usrExcluirUsuario('${uid}', '${escHtml((u.nome||u.email||'').replace(/'/g,'&#39;'))}', this)">Excluir</button>`;
+        acoesCell = `<td><div style="display:flex;gap:6px;align-items:center;">${papelSel}${btnAtivo}${btnExcluir}</div></td>`;
       }
     }
     return `<tr><td><strong>${escHtml(u.nome||'—')}</strong>${meu?' <span style="font-size:10.5px;color:var(--text-3);">(você)</span>':''}</td><td style="font-size:12px;color:var(--text-3);">${escHtml(u.email||'—')}</td><td>${badge}</td><td>${st}</td>${acoesCell}</tr>`;
@@ -36014,7 +36021,7 @@ async function renderCfgUsuariosApp(){
       <div class="frow"><div class="fg"><label>Senha provisória</label><input type="text" id="cfg-au-senha" placeholder="mín. 6 caracteres"/></div><div class="fg"><label>Papel</label><select id="cfg-au-papel"><option value="colaborador">Colaborador</option><option value="proprietario">Administrador</option></select></div></div>
       <button class="btn btn-primary" id="cfg-au-btn" onclick="criarUsuarioApp()">Criar usuário</button>
       <div id="cfg-au-msg" style="margin-top:8px;font-size:12px;"></div>
-      <div style="margin-top:10px;font-size:11px;color:var(--text-3);">Alterar papel e ativar/desativar acima gravam direto no cadastro de usuários. Você não pode mudar o próprio papel nem se desativar.</div>
+      <div style="margin-top:10px;font-size:11px;color:var(--text-3);">Alterar papel e ativar/desativar acima gravam direto no cadastro de usuários. Você não pode mudar o próprio papel, se desativar nem se excluir. <strong>Desativar</strong> bloqueia o login e preserva o histórico — prefira essa opção; <strong>Excluir</strong> apaga a conta de vez e libera o e-mail para um novo cadastro.</div>
     </div>` : `<div style="font-size:12px;color:var(--text-3);">Só o administrador cria e gerencia usuários.</div>`;
   host.innerHTML = tabela + form;
 }
@@ -36088,6 +36095,39 @@ async function usrAlternarAtivo(userId, novoAtivo, btn){
     showToast('Erro ao atualizar status: '+(e.message||e)+' (pode exigir policy/Edge).','danger');
   }
 }
+
+// Exclusão DEFINITIVA de um usuário (Edge Function excluir-usuario, service-role).
+// Não dá para fazer pelo navegador: apagar só a linha de app_users deixaria a conta viva
+// no Auth e o e-mail continuaria ocupado — recriar o mesmo endereço depois daria 409.
+// As travas (só proprietário, nunca a si mesmo, nunca o último admin ativo) valem aqui e
+// se repetem no servidor, porque o cliente não é autoridade.
+async function usrExcluirUsuario(userId, nome, btn){
+  const isOwner = (currentUser?.papel==='proprietario') || (currentUser?.tipo==='gestor');
+  if(!isOwner){ showToast('Só o administrador pode excluir usuários.','danger'); return; }
+  if(currentUser?.supaId===userId){ showToast('Você não pode excluir a própria conta.','warning'); return; }
+  const sb=getSupabase(); if(!sb){ showToast('Sem conexão com o banco.','danger'); return; }
+  const quem = nome || 'este usuário';
+  if(!confirm('Excluir '+quem+' definitivamente?\n\nA conta some do sistema e o login deixa de existir. Esta ação NÃO pode ser desfeita.\n\nSe a intenção é só tirar o acesso, cancele e use "Desativar" — preserva o histórico.')) return;
+  if(btn){ btn.disabled=true; btn.textContent='Excluindo…'; }
+  try{
+    const { data, error } = await sb.functions.invoke('excluir-usuario', { body:{ user_id: userId } });
+    if(error){
+      // A Edge devolve o motivo no corpo (409 de FK, 403, 401); o SDK só entrega
+      // "non-2xx status code". Lê a resposta para mostrar a frase útil.
+      let detalhe='';
+      try{ const j = await error.context?.json?.(); detalhe = j?.error || ''; }catch(_){}
+      throw new Error(detalhe || error.message || 'falha na exclusão');
+    }
+    if(data && data.error) throw new Error(data.error);
+    showToast('Usuário excluído.','success');
+    if(typeof carregarRosterAppUsers==='function'){ try{ await carregarRosterAppUsers(true); }catch(_){} }
+    renderCfgUsuariosApp();
+  }catch(e){
+    if(btn){ btn.disabled=false; btn.textContent='Excluir'; }
+    showToast('Erro ao excluir: '+(e.message||e),'danger');
+  }
+}
+
 async function criarUsuarioApp(){
   const nome=(document.getElementById('cfg-au-nome')?.value||'').trim();
   const email=(document.getElementById('cfg-au-email')?.value||'').trim();
@@ -36103,7 +36143,13 @@ async function criarUsuarioApp(){
   try{
     const sb=getSupabase();
     const { data, error } = await sb.functions.invoke('criar-usuario', { body:{ nome, email, password:senha, role } });
-    if(error) throw error;
+    if(error){
+      // Sem isto a tela mostrava só "Edge Function returned a non-2xx status code",
+      // escondendo o motivo real ("já existe um usuário com este e-mail", sessão expirada…).
+      let detalhe='';
+      try{ const j = await error.context?.json?.(); detalhe = j?.error || ''; }catch(_){}
+      throw new Error(detalhe || error.message || 'falha ao criar');
+    }
     if(data && data.error) throw new Error(data.error);
     if(msg){ msg.style.color='var(--success)'; msg.textContent='Usuário criado ✅'; }
     setTimeout(()=>renderCfgUsuariosApp(), 1200);

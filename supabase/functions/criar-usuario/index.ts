@@ -1,5 +1,5 @@
 // Supabase Edge Function: criar-usuario
-// Cria um novo usuário de acesso ao sistema (Auth + app_users + profiles).
+// Cria um novo usuário de acesso ao sistema (Auth + app_users; profiles é view derivada).
 // Chamada pelo botão Admin > "Criar usuário" (crm.html -> sb.functions.invoke('criar-usuario')).
 // Antes esta função NÃO existia e o botão dava 404.
 //
@@ -18,7 +18,7 @@
 //   'admin'    -> papel 'proprietario'  + profiles.role 'admin'
 //   'operador' -> papel 'colaborador'   + profiles.role 'operador'
 //
-// Setup: nenhum secret novo — usa SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY
+// Setup: nenhum secret novo — usa SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY
 // (já disponíveis no runtime das Edge Functions).
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
@@ -52,24 +52,25 @@ Deno.serve(async (req) => {
   if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
 
   const SUPABASE_URL = Deno.env.get('SUPABASE_URL');
-  const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY');
   const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !SERVICE_ROLE_KEY) {
+  if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
     return json({ error: 'Ambiente Supabase incompleto no servidor.' }, 500);
   }
 
-  // 1) Autentica o CHAMADOR com o token dele (respeita a sessão).
-  const authHeader = req.headers.get('authorization') || '';
-  const userClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    global: { headers: { Authorization: authHeader } }
-  });
-  const { data: { user }, error: errAuth } = await userClient.auth.getUser();
-  if (errAuth || !user) return json({ error: 'unauthorized' }, 401);
-
-  // 2) Cliente service-role (para checar papel do chamador e criar o novo usuário).
+  // 1) Cliente service-role (valida o token do chamador, checa papel e cria o usuário).
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
     auth: { autoRefreshToken: false, persistSession: false }
   });
+
+  // 2) Autentica o CHAMADOR passando o JWT EXPLICITAMENTE para getUser(token).
+  // Antes montava um client anon com o header Authorization e chamava getUser() sem
+  // argumento — que lê a sessão do storage local. No runtime da Edge Function não há
+  // storage, então getUser() devolvia "Auth session missing" e a função respondia 401
+  // mesmo com o admin logado (era este o erro do botão "Criar usuário").
+  const token = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();
+  if (!token) return json({ error: 'unauthorized: sem token de sessão' }, 401);
+  const { data: { user }, error: errAuth } = await admin.auth.getUser(token);
+  if (errAuth || !user) return json({ error: 'unauthorized: sessão inválida ou expirada' }, 401);
 
   // 3) SÓ 'proprietario' pode criar usuários.
   const { data: caller, error: errCaller } = await admin
@@ -131,24 +132,8 @@ Deno.serve(async (req) => {
     return json({ error: 'falha ao gravar app_users: ' + errApp.message }, 500);
   }
 
-  const { error: errProf } = await admin.from('profiles').insert({
-    id: novoId,
-    nome,
-    email,
-    role: mapped.profileRole,
-    ativo: true
-  });
-  if (errProf) {
-    // profiles é secundário; não derruba o usuário já criado, mas reporta.
-    console.warn('[criar-usuario] app_users ok, profiles falhou: ' + errProf.message);
-    return json({
-      ok: true,
-      user_id: novoId,
-      email,
-      papel: mapped.papel,
-      warning: 'usuário criado, mas o perfil (profiles) não foi gravado: ' + errProf.message
-    }, 200);
-  }
-
+  // profiles NÃO recebe insert: hoje é uma VIEW derivada de app_users (traduz papel →
+  // role e filtra proprietario/colaborador). Gravar app_users já faz o perfil aparecer.
+  // O insert que existia aqui só produzia erro engolido como "warning".
   return json({ ok: true, user_id: novoId, email, papel: mapped.papel, role: mapped.profileRole }, 201);
 });
