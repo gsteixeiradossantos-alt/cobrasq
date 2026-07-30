@@ -23474,12 +23474,30 @@ function nomeResponsavel(dev){
   return '—';
 }
 
-function editCliente(id){
+async function editCliente(id){
   window._docSrcCli=null;
   if(ehColaborador()){ showToast('Apenas o gestor pode editar credores.','danger'); return; }
   window._editandoPedidoCredor = null; // edição de credor já existente, não de pedido pendente
   const c = (DB.clientes||[]).find(x=>x.id===id);
   if(!c) return;
+  // Blindagem (par do PR #467): a cópia em memória pode ser o ESQUELETO do blob
+  // congelado (cliente importado só no relacional — caso Multifer). Editar a partir
+  // dele e salvar sobrescreveria doc/telefone do servidor com vazio. Se faltar
+  // campo-chave, completa as lacunas com o registro relacional antes de popular o
+  // modal (só preenche o que está vazio — nunca sobrepõe o que o blob já tem).
+  if(!c.tel || !c.doc || !c.email || !c.chavePix){
+    try{
+      const supa=getSupabase();
+      if(supa){
+        const { data:row } = await supa.from('clientes').select('*').eq('id',id).maybeSingle();
+        if(row){
+          const rel=rowToCliente(row);
+          ['nome','doc','tel','email','chavePix','nomeFantasia','endereco','honorarios','obs','loginEmail','loginSenha']
+            .forEach(k=>{ if(!c[k] && rel[k]) c[k]=rel[k]; });
+        }
+      }
+    }catch(_){ /* sem servidor: segue com a cópia local; a trava do salvarCliente cobre o resto */ }
+  }
   document.getElementById('mcli-id').value = c.id;
   document.getElementById('mcli-nome').value = c.nome||'';
   document.getElementById('mcli-doc').value = c.doc||'';
@@ -23652,6 +23670,25 @@ async function salvarCliente(){
       closeModal('modal-cliente');
     }
     return;
+  }
+
+  // Blindagem (par do PR #467): confere contra o SERVIDOR antes de gravar por cima.
+  // Se o formulário está apagando doc/telefone que existem no relacional (modal
+  // populado por um esqueleto do blob, aba velha etc.), pede confirmação explícita —
+  // apagar de propósito continua possível, apagar sem querer não.
+  if(id){
+    try{
+      const supaG=getSupabase();
+      if(supaG){
+        const { data:rowG } = await supaG.from('clientes').select('doc,telefone').eq('id',id).maybeSingle();
+        if(rowG){
+          const perdas=[];
+          if(rowG.doc && !(cliData.doc||'').trim()) perdas.push('CNPJ/CPF ('+rowG.doc+')');
+          if(rowG.telefone && !(cliData.tel||'').trim()) perdas.push('telefone ('+rowG.telefone+')');
+          if(perdas.length && !confirm('Atenção: o cadastro no servidor tem '+perdas.join(' e ')+' preenchido, e este formulário está APAGANDO esse dado.\n\nSe você não apagou de propósito, clique em Cancelar e recarregue a página (F5) antes de editar.\n\nApagar mesmo assim?')) return;
+        }
+      }
+    }catch(_){ /* sem leitura do servidor não dá pra comparar — segue o fluxo normal */ }
   }
 
   if(!DB.clientes) DB.clientes = [];
