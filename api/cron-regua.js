@@ -145,7 +145,13 @@ function devLinkPortal() {
 }
 
 function acordoAtivo(ac) {
-  return ac && (ac.status === 'ativo' || (ac.parcelas || []).some(p => !p.pago));
+  if (!ac) return false;
+  // Cancelado/encerrado é terminal. Antes o OR abaixo ignorava o status: um acordo
+  // CANCELADO com parcelas em aberto voltava a ser "ativo", a régua seguia cobrando
+  // parcelas de um acordo morto e o caso continuava fora da régua de cobrança.
+  const st = String(ac.status || '').toLowerCase();
+  if (st === 'cancelado' || st === 'encerrado') return false;
+  return ac.status === 'ativo' || (ac.parcelas || []).some(p => !p.pago);
 }
 
 // Fase 3 — status que NÃO entram na régua de COBRANÇA (pré-acordo). Antes só os 4
@@ -814,7 +820,9 @@ async function reguaQuita({ dry, DB }) {
   try {
     for (let i = 0; i < cobIds.length; i += 100) {
       const ch = cobIds.slice(i, i + 100).map(encodeURIComponent).join(',');
-      const rows = await sbFetch(`acordos?select=cobranca_id&cobranca_id=in.(${ch})&metadata->>origem=eq.quitafacil`);
+      // status=neq.cancelado: um acordo QuitaFácil CANCELADO não pode bloquear o caso
+      // de voltar à autonegociação para sempre.
+      const rows = await sbFetch(`acordos?select=cobranca_id&cobranca_id=in.(${ch})&metadata->>origem=eq.quitafacil&status=neq.cancelado`);
       for (const r of (rows || [])) jaAcordo.add(r.cobranca_id);
     }
   } catch (e) { /* melhor esforço */ }
@@ -986,7 +994,7 @@ async function processarNegativacoes({ dry }) {
   for (const c of (negativados || [])) {
     let pago = false;
     try {
-      const acs = await sbFetch(`acordos?cobranca_id=eq.${c.id}&metadata->>origem=eq.quitafacil&select=parcelas`);
+      const acs = await sbFetch(`acordos?cobranca_id=eq.${c.id}&metadata->>origem=eq.quitafacil&status=neq.cancelado&select=parcelas`);
       pago = (acs || []).some(a => Array.isArray(a.parcelas) && a.parcelas.length && a.parcelas.every(p => p && p.pago));
     } catch (_) { }
     if (!pago) continue;
