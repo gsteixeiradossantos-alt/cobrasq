@@ -21205,6 +21205,7 @@ async function renderClienteDetalhe(){
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
       <div class="det-panel-tt" style="margin:0;">Documentos &amp; contratos</div>
       <span style="display:flex;gap:6px;flex-wrap:wrap;">
+        ${_zapOn&&docsCli.some(d=>d.zapsign_doc_id&&(d.zapsign_status!=='assinado'||!d.assinado_storage_path))?`<button class="btn btn-ghost btn-sm" onclick="reconciliarDocsClienteZapSign('${cli.id}',this)" title="Consulta o ZapSign documento a documento e atualiza quem já foi assinado (não depende do webhook)">Atualizar status</button>`:''}
         ${_zapOn?`<button class="btn btn-ghost btn-sm" onclick="abrirVincularZapSign('${cli.id}')" title="Ver os documentos do ZapSign e vincular os deste cliente à ficha">Vincular do ZapSign</button>`:''}
         <button class="btn btn-ghost btn-sm" onclick="mcliUploadDocFolder()">${ico('plus',12)||'+'} Anexar arquivo</button>
       </span>
@@ -36897,6 +36898,70 @@ async function _vincZapAttach(token, btn){
     if(typeof _detCliId!=='undefined' && _detCliId===clienteId && typeof renderClienteDetalhe==='function') renderClienteDetalhe();
   }catch(e){ showToast('Falha ao vincular: '+(e&&e.message||e),'danger'); if(btn){ btn.disabled=false; btn.textContent=orig; } }
 }
+
+// ── Reconciliação de status dos documentos do cliente ────────────────────────
+// O status de `cliente_documentos` só saía de 'enviado' quando o webhook do ZapSign
+// chegava. Se o webhook falha — e em 30/07/2026 ele estava devolvendo 401 em TODAS
+// as chamadas, por divergência entre o token da URL cadastrada no ZapSign e o
+// ZAPSIGN_WEBHOOK_SECRET — o documento fica "Enviado" para sempre, mesmo assinado.
+// Aqui a ficha vai PERGUNTAR ao ZapSign, em vez de esperar ser avisada: para cada
+// documento pendente com token, consulta o doc e, se assinado, baixa o PDF assinado
+// e atualiza a linha. Mesma lógica de _vincZapAttach, mas UPDATE em vez de INSERT
+// (não duplica a linha, que é o que aconteceria usando "Vincular do ZapSign").
+async function reconciliarDocsClienteZapSign(clienteId, btn){
+  const supa=getSupabase(); if(!supa){ showToast('Sem conexão com o banco.','danger'); return; }
+  if(!DB.config?.zapsignToken){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
+  const orig=btn?btn.textContent:''; if(btn){ btn.disabled=true; btn.textContent='Consultando…'; }
+  let assinados=0, atualizados=0, falhas=0;
+  try{
+    const { data:docs, error }=await supa.from('cliente_documentos')
+      .select('id, nome, zapsign_doc_id, zapsign_status, assinado_storage_path')
+      .eq('cliente_id',clienteId).eq('ativo',true)
+      .not('zapsign_doc_id','is',null);
+    if(error) throw error;
+    const pend=(docs||[]).filter(d=>d.zapsign_status!=='assinado' || !d.assinado_storage_path);
+    if(!pend.length){ showToast('Todos os documentos já estão com o status em dia.','info'); return; }
+    const u=(await supa.auth.getUser()).data?.user;
+    for(const d of pend){
+      try{
+        const det=await ZapSignAPI.getDoc(d.zapsign_doc_id);
+        const st=String(det?.status||'').toLowerCase();
+        const novo = st==='signed' ? 'assinado'
+                   : st==='refused' ? 'recusado'
+                   : st==='expired' ? 'expirado'
+                   : st==='cancelled'||st==='canceled' ? 'cancelado'
+                   : 'enviado';
+        const update={ zapsign_status:novo };
+        if(novo==='assinado'){
+          update.zapsign_signed_at=new Date().toISOString();
+          const fileUrl=det?.signed_file||det?.original_file||null;
+          if(fileUrl && !d.assinado_storage_path){
+            const fr=await fetch('/api/zapsign?fileUrl='+encodeURIComponent(fileUrl), { headers:{ ...(await authHeaders()) } });
+            if(fr.ok){
+              const blob=await fr.blob();
+              const path=(u?.id?u.id+'/':'')+'clientes/'+clienteId+'/zapsign_assinado_'+Date.now()+'.pdf';
+              const { error:eUp }=await supa.storage.from('peticao-assets').upload(path, blob, { contentType:'application/pdf' });
+              if(!eUp) update.assinado_storage_path=path;
+              else console.warn('[reconciliar] upload do assinado falhou:', eUp.message||eUp);
+            } else console.warn('[reconciliar] download do assinado HTTP '+fr.status);
+          }
+          assinados++;
+        }
+        const { error:eUpd }=await supa.from('cliente_documentos').update(update).eq('id', d.id);
+        if(eUpd) throw eUpd;
+        if(novo!==d.zapsign_status || update.assinado_storage_path) atualizados++;
+      }catch(e){ falhas++; console.warn('[reconciliar] '+(d.nome||d.zapsign_doc_id)+': '+(e&&e.message||e)); }
+    }
+    if(typeof logAtividade==='function') logAtividade('Reconciliou status no ZapSign', `${pend.length} consultado(s) · ${assinados} assinado(s)`, clienteId);
+    const msg = assinados ? `${assinados} documento${assinados>1?'s':''} confirmado${assinados>1?'s':''} como assinado${assinados>1?'s':''}.`
+              : atualizados ? `${atualizados} status atualizado${atualizados>1?'s':''}.`
+              : 'Nenhuma assinatura nova no ZapSign.';
+    showToast(msg + (falhas?` (${falhas} falha${falhas>1?'s':''} — ver console)`:''), falhas?'warning':(assinados?'success':'info'));
+    _detDocSync(clienteId);
+  }catch(e){ showToast('Falha ao consultar o ZapSign: '+(e&&e.message||e),'danger'); }
+  finally{ if(btn){ btn.disabled=false; btn.textContent=orig; } }
+}
+
 async function testarZapSign(){
   const token = document.getElementById('cfg-zapsign-token')?.value;
   const res = document.getElementById('zapsign-test-result');
