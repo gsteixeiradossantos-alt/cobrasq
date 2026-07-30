@@ -5038,6 +5038,7 @@ const STATUS_CFG = {
   'Quitado ao cliente':{dot:'#16a34a',badge:'b-green',cls:'s-recebido'},
   'Devolvida':{dot:'#8A96B8',badge:'b-gray',cls:'s-devolvida'},
   'Sem êxito':{dot:'#8A96B8',badge:'b-gray',cls:'s-semexito'},
+  'Quita Fácil':{dot:'#3F6B47',badge:'b-green',cls:'s-quita'},
   // Etiquetas unificadas (2026) — reusam as cores/classes existentes.
   '1. Ação de Cobrança':{dot:'#1A5FB4',badge:'b-blue',cls:'s-judicial'},
   '1.1 Ação de locupletamento ilícito':{dot:'#1A5FB4',badge:'b-blue',cls:'s-judicial'},
@@ -15282,7 +15283,8 @@ const _ETIQUETAS_DEFAULT = [
   '2. Acordo Extrajudicial', '2.1. Acordo Judicial', '3. Cumprimento de Sentença',
   '4. Ação de Execução de Título Extrajudicial', '10. Automatizar Micro',
   '5. Quitado', '6. Baixados', '7. Reajuizar', '8. Devolvida', '9. Encerrada',
-  'Análise', 'Cobrar', 'Baixar', 'Em andamento', 'Para protocolar', 'Fazer ação'
+  'Análise', 'Cobrar', 'Baixar', 'Em andamento', 'Para protocolar', 'Fazer ação',
+  'Quita Fácil'
 ];
 // Editável em Configurações → Etiquetas (DB.config.etiquetas). Fallback: lista padrão.
 function _etiquetas(){
@@ -18514,6 +18516,9 @@ const _COB_MACROS = [
 function cobMacroGrupo(status, fase, numeroProcesso){
   const s = (status||'').trim();
   if(!s) return 'agir';
+  // Status oficial "Quita Fácil" (movido manualmente ou por confirmação) — mesma
+  // coluna dos casos elegíveis computados por cobMacroGrupoView (cobElegivelQuita).
+  if(/^quita\s*f[aá]cil/i.test(s)) return 'quita';
   if((typeof ehForaRegua==='function' && ehForaRegua(s)) || /encerrad|baixad|devolvid|quitad|sem ?[êe]xito|recebido/i.test(s)) return 'encerrados';
   if(typeof ehAcordo==='function' && ehAcordo(s)) return 'acordos';
   // "Preparar ação" / "Reajuizar" (falta (re)ajuizar) contam como algo a fazer → A agir,
@@ -18978,7 +18983,8 @@ const _COB_STATUS_DESC = {
   'Audiência':'audiência marcada','Sentença':'aguardando/pós sentença',
   'Acordo':'parcelas em dia','Acordo firmado':'parcelas em dia','Acordo Extrajudicial':'parcelas em dia','Em pagamento':'pagando o acordo',
   'Quitado':'crédito recuperado','Recebido':'crédito recuperado','Devolvida':'devolvida ao credor',
-  'Sem êxito':'sem êxito','Encerrado':'encerrado','Encerrada':'encerrado'
+  'Sem êxito':'sem êxito','Encerrado':'encerrado','Encerrada':'encerrado',
+  'Quita Fácil':'autonegociação — o devedor resolve sozinho'
 };
 function cobStatusDesc(s){ const k=String(s||'').trim(); return _COB_STATUS_DESC[statusLabel(k).trim()] || _COB_STATUS_DESC[k] || ''; }
 // Badge sólido clicável na cor do status → abre o popover de troca inline.
@@ -20511,7 +20517,7 @@ function _syncStatusBlob(ids, novo){
   return n;
 }
 
-async function setStatusCobranca(cobId, novo){
+async function _setStatusCobrancaReal(cobId, novo){
   _fecharTrocaStatus();
   if(!novo) return;
   const supa = getSupabase(); if(!supa) return;
@@ -20523,6 +20529,65 @@ async function setStatusCobranca(cobId, novo){
   showToast((nome && nome!=='—' ? nome+' → ' : 'Situação → ')+statusLabel(novo),'success');
   if(document.getElementById('page-cobranca-detalhe')?.classList.contains('active')) renderCobrancaDetalhe();
   else if(document.getElementById('page-cobr')?.classList.contains('active')) renderCobrancas({soLocal:true});
+}
+
+// ── Guarda QuitaFácil (30/07, pedido do Gustavo) ─────────────────────────────
+// "Quita Fácil" virou etiqueta oficial (_ETIQUETAS_DEFAULT) — mas duas trocas de
+// status merecem confirmação humana em vez de aplicar direto:
+//  (a) Cobrar → Fazer ação num caso elegível (capital ≤ limite do credor, sem
+//      processo): pergunta se segue pro judicial mesmo assim ou desvia p/ Quita.
+//  (b) Qualquer caso → Quita Fácil manualmente: confirma sempre, mostrando se o
+//      caso bate ou não a regra de valor (o gestor pode forçar de qualquer jeito).
+function _fecharConfirmQuita(){ document.getElementById('quita-confirm-back')?.remove(); }
+function _abrirConfirmQuita({ titulo, corpo, opcoes }){
+  _fecharConfirmQuita();
+  const back = document.createElement('div');
+  back.id = 'quita-confirm-back';
+  back.style.cssText = 'position:fixed;inset:0;z-index:10300;background:rgba(10,21,48,.35);display:flex;align-items:center;justify-content:center;';
+  back.onclick = (e)=>{ if(e.target===back) _fecharConfirmQuita(); };
+  const pop = document.createElement('div');
+  pop.style.cssText = 'background:#fff;border-radius:10px;max-width:420px;width:92%;padding:20px;box-shadow:0 12px 40px rgba(0,0,0,.25);';
+  pop.innerHTML = `<div style="font-weight:700;font-size:15px;margin-bottom:8px;color:#1a1a1a;">${titulo}</div>
+    <div style="font-size:13px;color:#5B6B82;line-height:1.5;margin-bottom:16px;">${corpo}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">${opcoes}</div>`;
+  back.appendChild(pop);
+  document.body.appendChild(back);
+}
+async function setStatusCobranca(cobId, novo){
+  _fecharTrocaStatus();
+  if(!novo) return;
+  const c = (DB_cobrancas||[]).find(x=>x.id===cobId);
+  const alvo = statusLabel(novo).trim();
+
+  if(c && /^fazer a[çc][ãa]o$/i.test(alvo) && statusLabel(c.status||'').trim()!=='Quita Fácil'
+     && typeof cobEhMicro==='function' && cobEhMicro(c)){
+    const cap = cobCapital(c), lim = quitaLimiteDe(c);
+    _abrirConfirmQuita({
+      titulo: 'Este caso é elegível para QuitaFácil',
+      corpo: `Capital <b>${fmtR(cap)}</b> ≤ limite do credor (<b>${fmtR(lim)}</b>) e sem processo judicial — bate a regra de autonegociação. Confirma o envio para <b>Fazer ação</b> (vai para o fluxo judicial) mesmo assim, ou prefere mandar direto para <b>Quita Fácil</b> (o devedor resolve sozinho)?`,
+      opcoes: `<button class="btn btn-ghost btn-sm" onclick="_fecharConfirmQuita()">Cancelar</button>
+        <button class="btn btn-ghost btn-sm" onclick="_fecharConfirmQuita();_setStatusCobrancaReal('${cobId}','Fazer ação')">Manter Fazer ação</button>
+        <button class="btn btn-success btn-sm" onclick="_fecharConfirmQuita();_setStatusCobrancaReal('${cobId}','Quita Fácil')">Enviar para Quita Fácil</button>`
+    });
+    return;
+  }
+
+  if(c && /^quita\s*f[aá]cil$/i.test(alvo)){
+    const cap = cobCapital(c), lim = quitaLimiteDe(c);
+    const temProcesso = !!(c.numero_processo && String(c.numero_processo).trim());
+    const bate = typeof cobEhMicro==='function' && cobEhMicro(c);
+    _abrirConfirmQuita({
+      titulo: bate ? 'Mover para Quita Fácil' : 'Este caso NÃO bate a regra do Quita Fácil',
+      corpo: bate
+        ? `Capital <b>${fmtR(cap)}</b> ≤ limite do credor (<b>${fmtR(lim)}</b>), sem processo judicial. Confirma mover este caso para autonegociação?`
+        : `Capital <b>${fmtR(cap)}</b>${cap>lim?` acima do limite do credor (<b>${fmtR(lim)}</b>)`:''}${temProcesso?' e já tem processo judicial vinculado':''}. Mover mesmo assim é uma exceção manual — confirma?`,
+      opcoes: `<button class="btn btn-ghost btn-sm" onclick="_fecharConfirmQuita()">Cancelar</button>
+        <button class="btn btn-success btn-sm" onclick="_fecharConfirmQuita();_setStatusCobrancaReal('${cobId}','Quita Fácil')">Confirmar</button>`
+    });
+    return;
+  }
+
+  await _setStatusCobrancaReal(cobId, novo);
 }
 
 // ===== Repasses ao cliente — comprovantes PIX lidos por IA, abatem o capital =====

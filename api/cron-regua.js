@@ -169,6 +169,9 @@ const STATUS_FORA_REGUA = [
   // fase judicial -> não cobrar por WhatsApp automático
   'Ação judicial', 'Petição inicial', 'Citação', 'Contestação',
   'Audiência', 'Sentença', 'Recurso', 'Execução', 'Penhora', 'Hasta pública',
+  // "Quita Fácil" virou etiqueta oficial (30/07) -> tem cadência própria (reguaQuita),
+  // não pode também levar a régua A de cobrança normal por cima (mensagem duplicada).
+  'Quita Fácil',
 ];
 
 // ── Idempotência: lookup/registro em regua_envios ───────────────
@@ -787,9 +790,11 @@ async function reguaQuita({ dry, DB }) {
     if (c.arquivado) continue;
     if (c.numero_processo && String(c.numero_processo).trim()) continue;                       // já ajuizado
     // Modelo: QuitaFácil só quando o AMIGÁVEL FRACASSOU (status "Fazer ação"/"Acordo
-    // infrutífero"/"encaminhado ao judicial"/"reajuizar"). Micro em amigável ("Cobrar",
-    // "Em negociação"…) NÃO entra — segue na cobrança normal.
-    if (!/fazer a[çc][ãa]o|infrut[íi]fero|encaminh\w*\s*(ao\s*)?judic|reajuizar/i.test(c.status || '')) continue;
+    // infrutífero"/"encaminhado ao judicial"/"reajuizar") OU já está oficialmente na
+    // etiqueta "Quita Fácil" (30/07 — status oficial, movido com confirmação humana
+    // pelo painel). Micro em amigável ("Cobrar", "Em negociação"…) NÃO entra — segue
+    // na cobrança normal.
+    if (!/fazer a[çc][ãa]o|infrut[íi]fero|encaminh\w*\s*(ao\s*)?judic|reajuizar|quita\s*f[aá]cil/i.test(c.status || '')) continue;
     if (/quitad|encerrad|recebid|baixad|devolvid|sem ?[êe]xito/i.test(c.status || '')) continue;  // terminal
     const cfg = cfgPorCredor[c.cliente_id] || {};
     const limite = (cfg.limite != null && cfg.limite !== '' && +cfg.limite > 0) ? +cfg.limite : 500;
