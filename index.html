@@ -18555,11 +18555,14 @@ function cobPrescricaoData(c){
 }
 function cobDiasAtePrescricao(c){ const p=cobPrescricaoData(c); if(!p) return null; const hoje=new Date(new Date().toISOString().slice(0,10)+'T12:00:00'); return Math.floor((p-hoje)/86400000); }
 function cobPrescricaoPerto(c){ const dias=cobDiasAtePrescricao(c); return dias!=null && dias <= QUITA_PRESCRICAO_ALERTA_DIAS; } // inclui já prescrita (dias<0)
-// Macro para EXIBIÇÃO no CRM: QuitaFácil sai de "A agir" (vira 'quita'), salvo prescrição
-// perto (volta ao macro normal). NÃO altera cobMacroGrupo (usado por cobElegivelQuita —
-// evita recursão).
+// Macro para EXIBIÇÃO no CRM. Até 30/07 isto sobrepunha o grupo 'quita' em cima de
+// QUALQUER caso computado como elegível (cobElegivelQuita), mesmo com status real
+// "Fazer ação"/"7. Reajuizar" — daí um card aparecer na coluna QuitaFácil enquanto o
+// status gravado dizia outra coisa (confuso: pareceu ter "ido pra QuitaFácil" sem
+// ninguém confirmar nada). Agora que "Quita Fácil" é etiqueta oficial (PR #462) e a
+// transição pede confirmação humana (setStatusCobranca/salvarCobranca), a exibição
+// segue só o status real — cobMacroGrupo já resolve "Quita Fácil" para o grupo 'quita'.
 function cobMacroGrupoView(c){
-  if(cobElegivelQuita(c) && !cobPrescricaoPerto(c)) return 'quita';
   return cobMacroGrupo(c.status, c.fase, c.numero_processo);
 }
 // ════════════════════════════════════════════════════════════════════════════
@@ -18621,12 +18624,12 @@ function cobEtapa(c, sinais){
   const temProc = !!(c.numero_processo && String(c.numero_processo).trim());
   const macro = cobMacroGrupo(s, c.fase, c.numero_processo);
   if(macro === 'encerrados') return 'encerrado';
-  // QuitaFácil é EXCLUSIVO: dívida enquadrada na autonegociação não pode
-  // aparecer também em Cobrar / Fazer ação / Em ação. Só perde para status
-  // terminal (micro quitada é caso encerrado, não caso em autonegociação).
-  // Perto da prescrição ela CONTINUA aqui — quem chama a atenção é o recorte
-  // "Prescrevendo" e a faixa vermelha do topo, não uma segunda etapa.
-  if(cobElegivelQuita(c)) return 'quitafacil';
+  // QuitaFácil é EXCLUSIVO: dívida NA ETIQUETA "Quita Fácil" não pode aparecer
+  // também em Cobrar / Fazer ação / Em ação. Até 30/07 isto usava cobElegivelQuita
+  // (mera elegibilidade computada) — um caso ainda em "Fazer ação" já aparecia
+  // na etapa QuitaFácil sem ninguém ter confirmado a mudança. Agora só o status
+  // literal (via `macro`, que cobMacroGrupo já resolve) conta.
+  if(macro === 'quita') return 'quitafacil';
   if(temProc && /execu|cumprimento|penhora|hasta|expropria/i.test(s)) return 'execucao';
   if(cobAlertaAcao(c)) return 'fazer_acao';        // falta (re)ajuizar — ato nosso
   // Com processo distribuído a bola é do juízo, mesmo que a etiqueta tenha ficado
@@ -18734,7 +18737,10 @@ function cobElegivelQuita(c){
 }
 // Selo "micro" enquanto ainda no amigável (sinaliza que o destino é QuitaFácil, não processo).
 function cobMicroSelo(c){
-  if(!cobEhMicro(c) || cobElegivelQuita(c)) return '';                    // já virou QuitaFácil → outro selo
+  // "já virou QuitaFácil" agora é o STATUS literal (não mera elegibilidade) — um
+  // caso elegível ainda em "Fazer ação" continua mostrando o chip neutro "micro",
+  // em vez de ser tratado como se já tivesse migrado.
+  if(!cobEhMicro(c) || statusLabel(c.status||'').trim()==='Quita Fácil') return '';
   if(c && c.metadata && c.metadata.quitaOptOut) return '';
   return `<span class="det-chip" style="background:#EEF1F5;color:#5B6B82;border:1px solid #D6DEE8;font-weight:600;" title="Dívida de valor baixo (capital ${fmtR(cobCapital(c))} ≤ ${fmtR(quitaLimiteDe(c))}). Se o acordo amigável não fechar, o destino é o QuitaFácil (não o processo).">micro</span>`;
 }
@@ -18954,9 +18960,12 @@ function cobAlertaAcao(c){
   if(!c) return '';
   const s = (c.status||'').trim();
   if(!s) return '';
-  // Micro que esgotou o amigável vira QuitaFácil (autonegociação), não "fazer ação"
-  // — a menos que a prescrição esteja perto (aí volta a ser ato nosso).
-  if(typeof cobElegivelQuita==='function' && cobElegivelQuita(c) && !(typeof cobPrescricaoPerto==='function' && cobPrescricaoPerto(c))) return '';
+  // Caso já oficialmente na etiqueta "Quita Fácil" não precisa do alerta "Fazer
+  // ação"/"Reajuizar" — mas isso já é coberto pelo check de macro logo abaixo
+  // (cobMacroGrupo resolve "Quita Fácil" para 'quita', que não é 'agir'). Até
+  // 30/07 havia aqui uma supressão baseada em mera elegibilidade computada
+  // (cobElegivelQuita) — escondia o alerta de um caso AINDA em "Fazer ação"
+  // só por ele bater os critérios de valor, como se já tivesse migrado.
   // Não sinaliza casos já resolvidos, em acordo ou com processo correndo.
   if(cobMacroGrupo(c.status, c.fase, c.numero_processo) !== 'agir') return '';
   if(/reajuizar/i.test(s)) return 'Reajuizar';
@@ -19163,7 +19172,10 @@ async function renderCobrancas(opts){
   // Derivados por caso (uma passada só — as linhas e os contadores reusam).
   base.forEach(c=>{
     c._pend    = cobPendencia(c, _cobrSinais);
-    c._quita   = cobElegivelQuita(c);
+    // Selo/contador QuitaFácil: só o status literal, não mera elegibilidade
+    // computada (ver cobMacroGrupoView) — senão o selo aparece num caso ainda
+    // em "Fazer ação"/"7. Reajuizar" antes de qualquer confirmação humana.
+    c._quita   = cobMacroGrupo(c.status, c.fase, c.numero_processo) === 'quita';
     c._neg     = cobNegStatus(c);
     c._presc   = cobPrescricaoPerto(c) && !/quitad|encerrad|recebid|baixad|devolvid/i.test(c.status||'');
     c._diasSem = cobDiasSemContato(c, _cobrSinais);
