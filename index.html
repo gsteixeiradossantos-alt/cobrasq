@@ -42181,14 +42181,24 @@ const _relM = n => n!==1 ? 'm' : '';
 // Classifica a etiqueta livre do sistema num grupo do relatório.
 // Regra de negócio: só "quitado"/"devolvida" encerram; "encerrado"/"inativo"/
 // "arquivado" seguem como ativos (etiquetagem em aprimoramento).
+// A etiqueta define apenas O QUE está acontecendo (o rótulo). A esfera judicial ×
+// extrajudicial é resolvida em _relNorm, cruzando isto com c.fase — antes eram
+// duas leituras independentes e o documento se contradizia (ver lá).
 function _relStatusInfo(status){
-  const s = (statusLabel(status)||'').toLowerCase();
+  const s0 = (statusLabel(status)||'').toLowerCase();
+  // "título extrajudicial" é o NOME do título executado, não a via de cobrança.
+  // Sem neutralizar, "Ação de Execução de Título Extrajudicial" casa em /extrajud/
+  // e a mais judicial das ações é anunciada ao credor como tratativa amigável.
+  const s = s0.replace(/t[íi]tulo\s+extrajudicial/g, 'titulo executivo');
   if(/quitad|liquidad/.test(s))      return { g:'enc',    r:'Quitada integralmente', enc:true };
   if(/devolvid/.test(s))             return { g:'enc',    r:'Devolvida', enc:true };
   if(/cumprimento/.test(s))          return { g:'cumpr',  r:'Cumprimento de sentença', enc:false };
   if(/audi[êe]ncia/.test(s))         return { g:'jud',    r:'Audiência designada', enc:false };
   if(/senten[çc]a/.test(s))          return { g:'jud',    r:'Sentença proferida', enc:false };
   if(/acordo/.test(s))               return { g:'acordo', r:'Acordo em cumprimento', enc:false };
+  // "Reajuizar" = a ação anterior não está mais em curso; anunciá-la como ação em
+  // curso ao credor seria falso, e como tratativa extrajudicial também.
+  if(/reajuiz/.test(s))              return { g:'prejud', r:'Preparação para reajuizamento', enc:false };
   if(/fazer/.test(s))                return { g:'prejud', r:'Preparação para ajuizamento', enc:false };
   if(/extrajud|cobrar|andamento|negocia|contato/.test(s)) return { g:'extra', r:'Tratativa extrajudicial', enc:false };
   if(/a[çc][ãa]o|judicial/.test(s))  return { g:'jud',    r:'Ação judicial em curso', enc:false };
@@ -42198,13 +42208,26 @@ function _relStatusInfo(status){
 
 function _relNorm(c){
   const st = _relStatusInfo(c.status);
+  // Esfera vem de UMA fonte só, senão o documento se desmente: o KPI lia c.fase e
+  // o rótulo de cada caso lia a etiqueta, então o mesmo relatório dizia "3 judiciais
+  // · 0 extrajudiciais" no topo e "tratativa extrajudicial" na linha do devedor.
+  // Judicial quando c.fase diz judicial OU quando a etiqueta indica ação ajuizada.
+  // A promoção é só num sentido (extra → judicial, nunca o contrário): quando os
+  // dois sinais brigam, o que aponta processo é o confiável — etiqueta e fase
+  // envelhecem cada uma do seu lado, e errar para "extrajudicial" é o pior erro
+  // num documento externo, porque nega ao credor uma ação que existe.
+  const jud = (c.fase==='judicial') || st.g==='jud' || st.g==='cumpr';
+  const promove = jud && st.g==='extra';
   return {
     nome: _cobrPrincipalNome(c), credor: _cobrCredorNome(c), credorId: c.cliente_id||null,
     processo: c.numero_processo||'',
     nominal: (+c.valor_orig || +c.valor_atual || 0), atual: (+c.valor_atual || +c.valor_orig || 0),
     statusRaw: statusLabel(c.status)||'—', dias: _cobrAgingDias(c),
-    esfera: c.fase==='judicial' ? 'Judicial' : 'Extrajudicial',
-    resp: _detUserNome(c.assigned_to), g: st.g, rotulo: st.r, enc: st.enc
+    esfera: jud ? 'Judicial' : 'Extrajudicial',
+    resp: _detUserNome(c.assigned_to),
+    g: promove ? 'jud' : st.g,
+    rotulo: promove ? 'Ação judicial em curso' : st.r,
+    enc: st.enc
   };
 }
 
@@ -42678,7 +42701,7 @@ function _relHtmlCredor(nomeCredor, casos){
   const pc = v => tot ? Math.round(v/tot*100)+'%' : '0%';
   const inds = _relInd('Casos Ativos', na, ne?`${ne} encerrado${_relS(ne)} no histórico`:'em recuperação')
     + _relInd('Valor Nominal Total', _fmtR(tot), 'Base de repasse ao credor')
-    + _relInd('Esfera Judicial', jud.length, `${ext.length} extrajudicial${_relS(ext.length)} · ${pc(vj)} do valor`, 'blue');
+    + _relInd('Esfera Judicial', jud.length, `${ext.length} ${ext.length===1?'extrajudicial':'extrajudiciais'} · ${pc(vj)} do valor`, 'blue');
 
   const p1 = `Este relatório consolida a posição da carteira de <b>${escHtml(nomeCredor)}</b> sob gestão da COBRASQ. `
     + `A carteira reúne <b>${na} caso${_relS(na)} ativo${_relS(na)}</b>, que soma${_relM(na)} <b>${_fmtR(tot)}</b> em valores nominais`
