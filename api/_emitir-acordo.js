@@ -60,6 +60,11 @@ module.exports = async function handler(req, res) {
     const acs = await sbFetch(`acordos?id=eq.${encodeURIComponent(acordoId)}&select=*&limit=1`);
     const acordo = acs[0];
     if (!acordo) return res.status(404).json({ error: 'acordo não encontrado' });
+    // Acordo cancelado não emite nem reenvia boleto. Sem esta trava, a emissão faria
+    // `status: 'ativo'` mais abaixo e RESSUSCITARIA um acordo que o operador matou.
+    if (String(acordo.status || '').toLowerCase() === 'cancelado') {
+      return res.status(409).json({ error: 'acordo cancelado — reabra o acordo antes de emitir boleto', acordo_id: acordoId });
+    }
 
     const meta = acordo.metadata || {};
 
