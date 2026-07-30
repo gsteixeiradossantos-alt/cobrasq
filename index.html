@@ -19601,15 +19601,84 @@ async function bulkAlterarStatusCobr(){
     document.body.appendChild(overlay);
   });
   if(!novoStatus) return;
-  const supa = getSupabase();
   const ids = [...selectedCobrIds];
+
+  const finalizar = (n)=>{
+    selectedCobrIds.clear(); cobSelectionMode = false;
+    showToast(`${n} caso${n!==1?'s':''} atualizado${n!==1?'s':''}`,'success');
+    renderCobrancas();
+  };
+  const nomeDoCaso = (c)=> (typeof _cobrPrincipalNome==='function' ? _cobrPrincipalNome(c) : '') || '—';
+
+  // Guarda QuitaFácil (30/07) — a troca EM LOTE não passava por nenhuma das guardas
+  // de setStatusCobranca/salvarCobranca: um lote com casos de valores diferentes ia
+  // todo pra "Fazer ação" (ou "Quita Fácil") de uma vez, sem separar os elegíveis nem
+  // avisar quem não bate a regra. Mesmo tratamento, adaptado pra N casos de uma vez.
+  if(!window._quitaConfirmOK){
+    const alvoSt = statusLabel(novoStatus).trim();
+    const casos = (DB_cobrancas||[]).filter(c=>ids.includes(c.id));
+
+    if(/^fazer a[çc][ãa]o$/i.test(alvoSt)){
+      const elegiveis = casos.filter(c=>statusLabel(c.status||'').trim()!=='Quita Fácil'
+        && typeof cobEhMicro==='function' && cobEhMicro(c));
+      if(elegiveis.length){
+        const elegIds = elegiveis.map(c=>c.id);
+        const restoIds = ids.filter(id=>!elegIds.includes(id));
+        const nomes = elegiveis.map(c=>`${nomeDoCaso(c)} (${fmtR(cobCapital(c))})`).join(', ');
+        _abrirConfirmQuita({
+          titulo: `${elegiveis.length} de ${casos.length} caso(s) selecionado(s) são elegíveis para QuitaFácil`,
+          corpo: `${escHtml(nomes)}. Confirma mandar TODOS os ${casos.length} para <b>Fazer ação</b> mesmo assim, ou prefere separar os elegíveis para <b>Quita Fácil</b> (os demais seguem para Fazer ação)?`,
+          opcoes: `<button class="btn btn-ghost btn-sm" onclick="_fecharConfirmQuita()">Cancelar</button>
+            <button class="btn btn-ghost btn-sm" id="bq-lote-manter">Manter todos em Fazer ação</button>
+            <button class="btn btn-success btn-sm" id="bq-lote-separar">Separar elegíveis p/ Quita Fácil</button>`
+        });
+        document.getElementById('bq-lote-manter').onclick = async ()=>{
+          _fecharConfirmQuita();
+          if(await _bulkAplicarStatusCobr(ids, 'Fazer ação')) finalizar(ids.length);
+        };
+        document.getElementById('bq-lote-separar').onclick = async ()=>{
+          _fecharConfirmQuita();
+          let n = 0;
+          if(elegIds.length && await _bulkAplicarStatusCobr(elegIds, 'Quita Fácil')) n += elegIds.length;
+          if(restoIds.length && await _bulkAplicarStatusCobr(restoIds, 'Fazer ação')) n += restoIds.length;
+          finalizar(n);
+        };
+        return;
+      }
+    }
+
+    if(/^quita\s*f[aá]cil$/i.test(alvoSt)){
+      const naoBatem = casos.filter(c=>!(typeof cobEhMicro==='function' && cobEhMicro(c)));
+      if(naoBatem.length){
+        const nomes = naoBatem.map(c=>`${nomeDoCaso(c)} (${fmtR(cobCapital(c))})`).join(', ');
+        _abrirConfirmQuita({
+          titulo: `${naoBatem.length} de ${casos.length} caso(s) NÃO batem a regra do Quita Fácil`,
+          corpo: `${escHtml(nomes)}. Mover mesmo assim é uma exceção manual — confirma para os ${casos.length} selecionados?`,
+          opcoes: `<button class="btn btn-ghost btn-sm" onclick="_fecharConfirmQuita()">Cancelar</button>
+            <button class="btn btn-success btn-sm" id="bq-lote-confirmar">Confirmar mesmo assim</button>`
+        });
+        document.getElementById('bq-lote-confirmar').onclick = async ()=>{
+          _fecharConfirmQuita();
+          if(await _bulkAplicarStatusCobr(ids, novoStatus)) finalizar(ids.length);
+        };
+        return;
+      }
+    }
+  }
+  window._quitaConfirmOK = false;
+
+  if(await _bulkAplicarStatusCobr(ids, novoStatus)) finalizar(ids.length);
+}
+// Escrita de fato do status em lote — extraída de bulkAlterarStatusCobr pra poder
+// ser chamada 2x (elegíveis → Quita Fácil / resto → status escolhido) sem duplicar
+// a leitura/prompt de status.
+async function _bulkAplicarStatusCobr(ids, novoStatus){
+  const supa = getSupabase();
   const { error } = await supa.from('cobrancas').update({ status: novoStatus }).in('id', ids);
-  if(error){ showToast('Erro: '+error.message,'danger'); return; }
+  if(error){ showToast('Erro: '+error.message,'danger'); return false; }
   (DB_cobrancas||[]).filter(c=>ids.includes(c.id)).forEach(c=>c.status=novoStatus);
   _syncStatusBlob(ids, novoStatus);   // idem: o portal do cedente lê o blob
-  selectedCobrIds.clear(); cobSelectionMode = false;
-  showToast(`${ids.length} caso${ids.length!==1?'s':''} → ${novoStatus}`,'success');
-  renderCobrancas();
+  return true;
 }
 function bulkExportarCobr(){
   if(!selectedCobrIds.size){ showToast('Nenhum caso selecionado.','warning'); return; }
