@@ -20553,6 +20553,15 @@ function _abrirConfirmQuita({ titulo, corpo, opcoes }){
   back.appendChild(pop);
   document.body.appendChild(back);
 }
+// Reabre salvarCobranca() já com o status escolhido na confirmação (mesmo padrão do
+// _capitalConfirmOK: ajusta o campo, marca a flag e refaz o save uma vez, sem repetir
+// o alerta na segunda chamada).
+function _confirmQuitaEdicaoCobranca(novoStatus){
+  const sel = document.getElementById('cobr-situacao');
+  if(sel) sel.value = novoStatus;
+  window._quitaConfirmOK = true;
+  salvarCobranca();
+}
 async function setStatusCobranca(cobId, novo){
   _fecharTrocaStatus();
   if(!novo) return;
@@ -21575,6 +21584,45 @@ async function salvarCobranca(){
   // img/01 — campos do "caso" (Responsável, Situação, Física×Digital)
   const responsavelId = document.getElementById('cobr-responsavel')?.value || null;
   const situacao = document.getElementById('cobr-situacao')?.value || 'Cobrar';
+
+  // Guarda QuitaFácil (30/07) — a troca de Situação por AQUI ("Editar cobrança") não
+  // passava pela mesma guarda de setStatusCobranca (troca rápida de 1 clique), então
+  // dava pra mandar um caso elegível pra "Fazer ação" sem confirmar nada. Mesma regra:
+  // (a) editando um caso existente que vai para "Fazer ação" e é elegível pro
+  //     QuitaFácil (capital ≤ limite, sem processo) → confirma antes; (b) mandando
+  // explicitamente para "Quita Fácil" → confirma sempre, com os números da regra.
+  if(editId && !window._quitaConfirmOK){
+    const cAtual = (DB_cobrancas||[]).find(x=>x.id===editId) || null;
+    const alvoSt = statusLabel(situacao).trim();
+    const atualSt = statusLabel((cAtual && cAtual.status)||'').trim();
+    const fakeCob = { valor_capital: valorCapital, numero_processo: numProc, cliente_id: cAtual && cAtual.cliente_id, status: alvoSt };
+    if(/^fazer a[çc][ãa]o$/i.test(alvoSt) && atualSt!=='Quita Fácil' && typeof cobEhMicro==='function' && cobEhMicro(fakeCob)){
+      const cap = cobCapital(fakeCob), lim = quitaLimiteDe(fakeCob);
+      _abrirConfirmQuita({
+        titulo: 'Este caso é elegível para QuitaFácil',
+        corpo: `Capital <b>${fmtR(cap)}</b> ≤ limite do credor (<b>${fmtR(lim)}</b>) e sem processo judicial — bate a regra de autonegociação. Confirma o envio para <b>Fazer ação</b> (vai para o fluxo judicial) mesmo assim, ou prefere mandar direto para <b>Quita Fácil</b> (o devedor resolve sozinho)?`,
+        opcoes: `<button class="btn btn-ghost btn-sm" onclick="_fecharConfirmQuita()">Cancelar</button>
+          <button class="btn btn-ghost btn-sm" onclick="_fecharConfirmQuita();_confirmQuitaEdicaoCobranca('Fazer ação')">Manter Fazer ação</button>
+          <button class="btn btn-success btn-sm" onclick="_fecharConfirmQuita();_confirmQuitaEdicaoCobranca('Quita Fácil')">Enviar para Quita Fácil</button>`
+      });
+      return;
+    }
+    if(/^quita\s*f[aá]cil$/i.test(alvoSt)){
+      const cap = cobCapital(fakeCob), lim = quitaLimiteDe(fakeCob);
+      const temProcesso = !!(numProc && String(numProc).trim());
+      const bate = typeof cobEhMicro==='function' && cobEhMicro(fakeCob);
+      _abrirConfirmQuita({
+        titulo: bate ? 'Mover para Quita Fácil' : 'Este caso NÃO bate a regra do Quita Fácil',
+        corpo: bate
+          ? `Capital <b>${fmtR(cap)}</b> ≤ limite do credor (<b>${fmtR(lim)}</b>), sem processo judicial. Confirma mover este caso para autonegociação?`
+          : `Capital <b>${fmtR(cap)}</b>${cap>lim?` acima do limite do credor (<b>${fmtR(lim)}</b>)`:''}${temProcesso?' e já tem processo judicial vinculado':''}. Mover mesmo assim é uma exceção manual — confirma?`,
+        opcoes: `<button class="btn btn-ghost btn-sm" onclick="_fecharConfirmQuita()">Cancelar</button>
+          <button class="btn btn-success btn-sm" onclick="_fecharConfirmQuita();_confirmQuitaEdicaoCobranca('Quita Fácil')">Confirmar</button>`
+      });
+      return;
+    }
+  }
+  window._quitaConfirmOK = false;
   const tipoCobr = (document.querySelector('input[name="cobr-tipo-cobranca"]:checked')||{}).value || null;
 
   const rows = Array.from(document.querySelectorAll('#cobr-resp-list .cobr-resp-row'));
