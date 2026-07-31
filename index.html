@@ -23532,6 +23532,35 @@ function editCliente(id){
   openModal('modal-cliente');
 }
 
+// Defesa contra sobresalvamento (perda de cadastro ao editar um credor existente).
+// Rótulos dos campos relevantes — usados pra listar pro gestor o que ele está prestes a apagar.
+const CLIENTE_CAMPOS_LABEL = {
+  doc: 'CPF/CNPJ', nomeFantasia: 'Nome fantasia', email: 'E-mail', tel: 'Telefone',
+  chavePix: 'Chave PIX', cep: 'CEP', rua: 'Rua', numero: 'Número', bairro: 'Bairro',
+  cidade: 'Cidade', uf: 'UF', honorarios: 'Honorários', obs: 'Observações',
+  loginEmail: 'Login (e-mail)'
+};
+function clienteCamposQueVaoEsvaziar(antigo, novo){
+  if(!antigo) return [];
+  return Object.keys(CLIENTE_CAMPOS_LABEL)
+    .filter(campo => String(antigo[campo]||'').trim() && !String(novo[campo]||'').trim())
+    .map(campo => CLIENTE_CAMPOS_LABEL[campo]);
+}
+async function registrarHistoricoCliente(antigo){
+  try {
+    const supa = getSupabase();
+    if(!supa || !antigo?.id) return;
+    await supa.from('clientes_historico').insert({
+      cliente_id: antigo.id,
+      snapshot: antigo,
+      alterado_por: currentUser?.nome || currentUser?.email || 'desconhecido'
+    });
+  } catch(e){
+    // Best-effort: nunca bloquear o save por causa da auditoria.
+    console.warn('Falha ao registrar histórico de cliente:', e);
+  }
+}
+
 async function salvarCliente(){
   // F-22: o bloqueio duro saiu daqui. Colaborador pode preencher e enviar; em vez de gravar
   // direto, abrimos um pedido de aprovação (ver branch logo após montar o cliData). Editar
@@ -23608,6 +23637,13 @@ async function salvarCliente(){
     updatedAt: hoje()
   };
 
+  // Guarda de campos críticos: se a tela mandar doc/fantasia em branco mas o registro já
+  // tinha valor, preserva o valor antigo em vez de apagar (mesmo padrão do logoBase64 acima).
+  if(existingCli){
+    if(!cliData.doc && existingCli.doc) cliData.doc = existingCli.doc;
+    if(!cliData.nomeFantasia && existingCli.nomeFantasia) cliData.nomeFantasia = existingCli.nomeFantasia;
+  }
+
   // F-22+: gestor revisou/ajustou um pedido de credor pendente. Grava as edições no próprio
   // pedido e aprova (não grava direto em DB.clientes — quem materializa é executarPedidoLocal).
   if(window._editandoPedidoCredor && window._editandoPedidoCredor.id){
@@ -23652,6 +23688,22 @@ async function salvarCliente(){
       closeModal('modal-cliente');
     }
     return;
+  }
+
+  // Detecção de regressão: se essa edição vai apagar campo que já estava preenchido,
+  // avisa explicitamente antes de gravar por cima. E registra o estado anterior no
+  // histórico (best-effort) pra qualquer perda ser reversível.
+  if(existingCli){
+    const camposPerdidos = clienteCamposQueVaoEsvaziar(existingCli, cliData);
+    if(camposPerdidos.length){
+      const ok = confirm(
+        `Esta edição vai apagar ${camposPerdidos.length} campo(s) que já estavam preenchidos:\n\n` +
+        `• ${camposPerdidos.join('\n• ')}\n\n` +
+        `Confirma mesmo assim?`
+      );
+      if(!ok) return;
+    }
+    await registrarHistoricoCliente(existingCli);
   }
 
   if(!DB.clientes) DB.clientes = [];
