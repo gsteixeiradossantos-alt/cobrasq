@@ -4799,6 +4799,14 @@ body.viewas-readonly select {
           <span style="flex:1;font-size:13px;font-weight:500;">Declaração de cessão</span>
           <button type="button" class="btn btn-ghost btn-sm" onclick="gerarDocCliente('declaracao')" style="flex-shrink:0;">Conferir ↗</button>
         </label>
+        <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);">
+          <input type="checkbox" id="dlote-anexo" style="width:15px;height:15px;flex-shrink:0;" onchange="_loteAnexoToggle(this)">
+          <span style="flex:1;min-width:0;">
+            <span style="display:block;font-size:13px;font-weight:500;">Anexo I <span style="font-weight:400;color:var(--text-3);font-size:11.5px;">— relação de créditos</span></span>
+            <span id="dlote-anexo-info" style="display:block;font-size:10.5px;color:var(--text-3);margin-top:2px;">Selecione os créditos que entram na relação.</span>
+          </span>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="_loteAnexoSelecionar()" style="flex-shrink:0;">Selecionar ↗</button>
+        </label>
       </div>
       <p style="font-size:11px;color:var(--text-3);margin:14px 0 0;">O cliente receberá um único link de assinatura via WhatsApp.</p>
     </div>
@@ -21205,6 +21213,7 @@ async function renderClienteDetalhe(){
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
       <div class="det-panel-tt" style="margin:0;">Documentos &amp; contratos</div>
       <span style="display:flex;gap:6px;flex-wrap:wrap;">
+        ${_zapOn&&docsCli.some(d=>d.zapsign_doc_id&&(d.zapsign_status!=='assinado'||!d.assinado_storage_path))?`<button class="btn btn-ghost btn-sm" onclick="reconciliarDocsClienteZapSign('${cli.id}',this)" title="Consulta o ZapSign documento a documento e atualiza quem já foi assinado (não depende do webhook)">Atualizar status</button>`:''}
         ${_zapOn?`<button class="btn btn-ghost btn-sm" onclick="abrirVincularZapSign('${cli.id}')" title="Ver os documentos do ZapSign e vincular os deste cliente à ficha">Vincular do ZapSign</button>`:''}
         <button class="btn btn-ghost btn-sm" onclick="mcliUploadDocFolder()">${ico('plus',12)||'+'} Anexar arquivo</button>
       </span>
@@ -36949,6 +36958,70 @@ async function _vincZapAttach(token, btn){
     if(typeof _detCliId!=='undefined' && _detCliId===clienteId && typeof renderClienteDetalhe==='function') renderClienteDetalhe();
   }catch(e){ showToast('Falha ao vincular: '+(e&&e.message||e),'danger'); if(btn){ btn.disabled=false; btn.textContent=orig; } }
 }
+
+// ── Reconciliação de status dos documentos do cliente ────────────────────────
+// O status de `cliente_documentos` só saía de 'enviado' quando o webhook do ZapSign
+// chegava. Se o webhook falha — e em 30/07/2026 ele estava devolvendo 401 em TODAS
+// as chamadas, por divergência entre o token da URL cadastrada no ZapSign e o
+// ZAPSIGN_WEBHOOK_SECRET — o documento fica "Enviado" para sempre, mesmo assinado.
+// Aqui a ficha vai PERGUNTAR ao ZapSign, em vez de esperar ser avisada: para cada
+// documento pendente com token, consulta o doc e, se assinado, baixa o PDF assinado
+// e atualiza a linha. Mesma lógica de _vincZapAttach, mas UPDATE em vez de INSERT
+// (não duplica a linha, que é o que aconteceria usando "Vincular do ZapSign").
+async function reconciliarDocsClienteZapSign(clienteId, btn){
+  const supa=getSupabase(); if(!supa){ showToast('Sem conexão com o banco.','danger'); return; }
+  if(!DB.config?.zapsignToken){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
+  const orig=btn?btn.textContent:''; if(btn){ btn.disabled=true; btn.textContent='Consultando…'; }
+  let assinados=0, atualizados=0, falhas=0;
+  try{
+    const { data:docs, error }=await supa.from('cliente_documentos')
+      .select('id, nome, zapsign_doc_id, zapsign_status, assinado_storage_path')
+      .eq('cliente_id',clienteId).eq('ativo',true)
+      .not('zapsign_doc_id','is',null);
+    if(error) throw error;
+    const pend=(docs||[]).filter(d=>d.zapsign_status!=='assinado' || !d.assinado_storage_path);
+    if(!pend.length){ showToast('Todos os documentos já estão com o status em dia.','info'); return; }
+    const u=(await supa.auth.getUser()).data?.user;
+    for(const d of pend){
+      try{
+        const det=await ZapSignAPI.getDoc(d.zapsign_doc_id);
+        const st=String(det?.status||'').toLowerCase();
+        const novo = st==='signed' ? 'assinado'
+                   : st==='refused' ? 'recusado'
+                   : st==='expired' ? 'expirado'
+                   : st==='cancelled'||st==='canceled' ? 'cancelado'
+                   : 'enviado';
+        const update={ zapsign_status:novo };
+        if(novo==='assinado'){
+          update.zapsign_signed_at=new Date().toISOString();
+          const fileUrl=det?.signed_file||det?.original_file||null;
+          if(fileUrl && !d.assinado_storage_path){
+            const fr=await fetch('/api/zapsign?fileUrl='+encodeURIComponent(fileUrl), { headers:{ ...(await authHeaders()) } });
+            if(fr.ok){
+              const blob=await fr.blob();
+              const path=(u?.id?u.id+'/':'')+'clientes/'+clienteId+'/zapsign_assinado_'+Date.now()+'.pdf';
+              const { error:eUp }=await supa.storage.from('peticao-assets').upload(path, blob, { contentType:'application/pdf' });
+              if(!eUp) update.assinado_storage_path=path;
+              else console.warn('[reconciliar] upload do assinado falhou:', eUp.message||eUp);
+            } else console.warn('[reconciliar] download do assinado HTTP '+fr.status);
+          }
+          assinados++;
+        }
+        const { error:eUpd }=await supa.from('cliente_documentos').update(update).eq('id', d.id);
+        if(eUpd) throw eUpd;
+        if(novo!==d.zapsign_status || update.assinado_storage_path) atualizados++;
+      }catch(e){ falhas++; console.warn('[reconciliar] '+(d.nome||d.zapsign_doc_id)+': '+(e&&e.message||e)); }
+    }
+    if(typeof logAtividade==='function') logAtividade('Reconciliou status no ZapSign', `${pend.length} consultado(s) · ${assinados} assinado(s)`, clienteId);
+    const msg = assinados ? `${assinados} documento${assinados>1?'s':''} confirmado${assinados>1?'s':''} como assinado${assinados>1?'s':''}.`
+              : atualizados ? `${atualizados} status atualizado${atualizados>1?'s':''}.`
+              : 'Nenhuma assinatura nova no ZapSign.';
+    showToast(msg + (falhas?` (${falhas} falha${falhas>1?'s':''} — ver console)`:''), falhas?'warning':(assinados?'success':'info'));
+    _detDocSync(clienteId);
+  }catch(e){ showToast('Falha ao consultar o ZapSign: '+(e&&e.message||e),'danger'); }
+  finally{ if(btn){ btn.disabled=false; btn.textContent=orig; } }
+}
+
 async function testarZapSign(){
   const token = document.getElementById('cfg-zapsign-token')?.value;
   const res = document.getElementById('zapsign-test-result');
@@ -38160,7 +38233,9 @@ function _mascararDocLgpd(doc){
 }
 let _anexo1Ctx=null;
 function _anexo1Fechar(){ document.getElementById('anexo1-overlay')?.remove(); _anexo1Ctx=null; }
-async function abrirAnexoICliente(clienteId){
+// modo: undefined = gera o PDF na hora (botão do card);
+//       'lote'    = só devolve a seleção para o envio em lote (_anexo1UsarNoLote).
+async function abrirAnexoICliente(clienteId, modo){
   if(!clienteId){ showToast('Salve o cliente antes de gerar o Anexo I.','warning'); return; }
   const supa=getSupabase();
   if(!supa){ showToast('Sem conexão com o banco.','danger'); return; }
@@ -38210,7 +38285,7 @@ async function abrirAnexoICliente(clienteId){
       <span id="anexo1-resumo" style="font-size:12px;color:var(--text-2,#444);"></span>
       <span style="display:flex;gap:8px;">
         <button class="cob-btn-ghost" onclick="_anexo1Fechar()">Cancelar</button>
-        <button class="cob-btn-primary" onclick="gerarAnexoICliente()">Gerar Anexo I</button>
+        <button class="cob-btn-primary" onclick="${modo==='lote'?'_anexo1UsarNoLote()':'gerarAnexoICliente()'}">${modo==='lote'?'Usar no envio':'Gerar Anexo I'}</button>
       </span>
     </div>
   </div>`;
@@ -38501,16 +38576,59 @@ async function enviarDocClienteZapSign(tipo){
 function abrirModalDocLote(){
   if(!DB.config?.zapsignToken){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
   ['cessao','procuracao','declaracao'].forEach(t=>{ const el=document.getElementById('dlote-'+t); if(el) el.checked=true; });
+  // Anexo I entra desmarcado: só faz sentido depois de escolher os créditos.
+  _loteAnexoSel=null;
+  const cbA=document.getElementById('dlote-anexo'); if(cbA) cbA.checked=false;
+  _loteAnexoInfo();
   openModal('modal-doc-lote');
+}
+
+// ── Anexo I dentro do envio em lote ─────────────────────────────────────────
+// Os outros três documentos do lote são template puro (`_docClienteHtml(tipo)`).
+// O Anexo I não: depende de QUAIS créditos e de QUAL data, e por isso ficava de
+// fora do lote — só existia o botão "Selecionar créditos" do card, que gerava o
+// PDF e salvava na pasta, sem caminho nenhum para assinatura. Aqui a seleção é
+// feita pela MESMA modal de créditos já existente (abrirAnexoICliente em modo
+// 'lote'), fica guardada em _loteAnexoSel e o HTML é montado na hora do envio.
+let _loteAnexoSel=null;   // { cli, creditos:[], dataDoc }
+
+function _loteAnexoInfo(){
+  const el=document.getElementById('dlote-anexo-info'); if(!el) return;
+  if(!_loteAnexoSel){ el.textContent='Selecione os créditos que entram na relação.'; el.style.color='var(--text-3)'; return; }
+  const n=_loteAnexoSel.creditos.length, tot=_loteAnexoSel.creditos.reduce((s,k)=>s+k.nominal,0);
+  const [aa,mm,dd]=String(_loteAnexoSel.dataDoc).slice(0,10).split('-');
+  el.textContent=`${n} crédito${n!==1?'s':''} · ${fmtR(tot)} · ${dd}/${mm}/${aa}`;
+  el.style.color='var(--success)';
+}
+function _loteAnexoToggle(cb){
+  if(cb.checked && !_loteAnexoSel){ cb.checked=false; _loteAnexoSelecionar(); }
+}
+function _loteAnexoSelecionar(){
+  const cli=(typeof _docSrcCli!=='undefined'&&_docSrcCli)||_detCliObj;
+  if(!cli?.id){ showToast('Cliente não carregado.','warning'); return; }
+  abrirAnexoICliente(cli.id,'lote');
+}
+// Chamada pelo botão da modal de créditos quando ela foi aberta em modo 'lote'.
+function _anexo1UsarNoLote(){
+  if(!_anexo1Ctx) return;
+  const { cli, creditos }=_anexo1Ctx;
+  const sel=[...document.querySelectorAll('.anexo1-chk:checked')].map(c=>creditos[+c.dataset.i]);
+  if(!sel.length){ showToast('Marque ao menos um crédito.','warning'); return; }
+  const dataDoc=document.getElementById('anexo1-data')?.value||hoje();
+  _anexo1Fechar();
+  _loteAnexoSel={ cli, creditos:sel, dataDoc };
+  const cb=document.getElementById('dlote-anexo'); if(cb) cb.checked=true;
+  _loteAnexoInfo();
 }
 async function enviarLoteDocClienteZapSign(){
   const d=_docClienteDados();
   if(!d.nome){ showToast('Informe a razão social do cliente.','warning'); return; }
-  const tipos=['cessao','procuracao','declaracao'].filter(t=>document.getElementById('dlote-'+t)?.checked);
+  const tipos=['cessao','procuracao','declaracao','anexo'].filter(t=>document.getElementById('dlote-'+t)?.checked);
   if(!tipos.length){ showToast('Selecione ao menos um documento.','warning'); return; }
+  if(tipos.includes('anexo') && !_loteAnexoSel?.creditos?.length){ showToast('Selecione os créditos do Anexo I.','warning'); return; }
   if(!d.tel) d.tel=await _telClienteRelacional(_docClienteId());
   const telSel=await promptTelefoneEnvio(d.tel); if(telSel===null) return;
-  const titulos={cessao:'Contrato de cessão',procuracao:'Procuração',declaracao:'Declaração de cessão'};
+  const titulos={cessao:'Contrato de cessão',procuracao:'Procuração',declaracao:'Declaração de cessão',anexo:'Anexo I'};
   closeModal('modal-doc-lote');
   document.getElementById('mzs-body').innerHTML=
     `<div class="mv2-step-loading" style="height:140px;"><div class="mv2-spinner"></div><p>Gerando PDF (${tipos.length} documento${tipos.length>1?'s':''}) e enviando para ZapSign…</p></div>`;
@@ -38524,7 +38642,11 @@ async function enviarLoteDocClienteZapSign(){
     const dataBR=new Date().toLocaleDateString('pt-BR');
     const pdfs=[];
     for(const t of tipos){
-      const b64=await _htmlParaPdfBase64(_docClienteHtml(t,d),{filename:t+'.pdf'});
+      // Anexo I é o único que não é template puro: precisa dos créditos escolhidos.
+      const html = t==='anexo'
+        ? _anexoIHtml(_loteAnexoSel.cli, _loteAnexoSel.creditos, _loteAnexoSel.dataDoc)
+        : _docClienteHtml(t,d);
+      const b64=await _htmlParaPdfBase64(html,{filename:t+'.pdf'});
       pdfs.push({tipo:t, nome:titulos[t], base64:b64});
     }
     const nomesDoc=tipos.map(t=>titulos[t]).join(' + ');
