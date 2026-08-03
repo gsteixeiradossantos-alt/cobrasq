@@ -2337,6 +2337,12 @@ body.viewas-readonly select {
       <div class="nav-item active" data-page="painel" id="nav-painel">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></span><span>Painel</span>
       </div>
+      <!-- Fila de decisões: a mesma fila do card do Painel, inteira, em tela cheia,
+           com ordenação por nome, valor e cliente. Rota própria (#/fila) para poder
+           abrir em outra aba do navegador ao lado do Painel. -->
+      <div class="nav-item" data-page="fila" id="nav-fila">
+        <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="14" y2="18"/><circle cx="4.5" cy="6" r="1.5"/><circle cx="4.5" cy="12" r="1.5"/><circle cx="4.5" cy="18" r="1.5"/></svg></span><span>Fila de decisões</span><span class="nav-badge act" id="nav-fila-count" style="display:none;">0</span>
+      </div>
       <div class="nav-item" data-page="tarefas" id="nav-tarefas">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><span>Tarefas</span><span class="nav-badge act" id="nav-tarefas-count" style="display:none;">0</span>
       </div>
@@ -2587,6 +2593,8 @@ body.viewas-readonly select {
     </div>
 
     <!-- PAGE: DOCUMENTOS -->
+    <!-- PAGE: FILA DE DECISÕES (#/fila) — renderFilaDecisoes() -->
+    <div id="page-fila" class="page-content"></div>
     <div id="page-tarefas" class="page-content"></div>
     <div id="page-audiencias" class="page-content"></div>
     <div id="page-docs" class="page-content">
@@ -7420,7 +7428,7 @@ async function doLogout(){
 
 // ── NAVIGATION ───────────────────────────────────────────────
 const PAGE_TITLES = {
-  painel:'Painel', cobr:'Cobranças', devedores:'Devedores', processos:'Processos',
+  painel:'Painel', fila:'Fila de decisões', cobr:'Cobranças', devedores:'Devedores', processos:'Processos',
   pipeline:'Pipeline', crm:'CRM', clientes:'Clientes', docs:'Documentos', pecas:'Peças & Ações Judiciais', fin:'Financeiro',
   relat:'Relatórios', wa:'WhatsApp', intimacoes:'Intimações', config:'Configurações', calc:'Calculadora Jurídica',
   aprovacoes:'Aprovações', tarefas:'Tarefas', audiencias:'Audiências', delegacao:'Delegação', assinaturas:'Assinaturas', 'consultas-premium':'Consultas Premium',
@@ -7433,6 +7441,7 @@ const PAGE_TITLES = {
 // Dinheiro · Canais · Sistema) e, nas telas fundidas, também a ABA aberta.
 const PAGE_BREADCRUMBS = {
   painel:    ['Hoje','Painel'],
+  fila:      ['Hoje','Fila de decisões'],
   tarefas:   ['Hoje','Tarefas'],
   delegacao: ['Hoje','Delegação'],
   audiencias:['Hoje','Audiências'],
@@ -7466,6 +7475,7 @@ const PAGE_BREADCRUMBS = {
 
 const PAGE_RENDERERS = {
   painel: ()=>renderPainel(),
+  fila: ()=>renderFilaDecisoes(),
   cobr: ()=>renderCobrancas(),
   devedores: ()=>renderDevedores(),
   processos: ()=>renderProcessos(),
@@ -9835,6 +9845,226 @@ function painelToggleDia(iso){
   renderPainel();
 }
 
+// ── Fila "Precisa de decisão hoje" — montagem única ──────────────────────────
+// Consumida por DOIS lugares: o card do Painel (mostra os 7 primeiros) e a página
+// dedicada #/fila (lista inteira, com ordenação por nome, valor e cliente). A
+// montagem fica aqui, e só aqui: se cada tela remontasse a régua por conta
+// própria, o card e a página passariam a mostrar totais diferentes do mesmo dado.
+// Cada item carrega `credor` e `devedor` separados (além do `nome` já concatenado
+// que o card desenha) — é o que permite ordenar/agrupar por cliente.
+async function _montarFilaDecisoes(cobrAtivas){
+  if(!_cobrSinais){ try{ _cobrSinais = await _carregarSinaisPendencia(cobrAtivas); }catch(_){ _cobrSinais = _cobrSinais || {}; } }
+  const fila = [];
+  cobrAtivas.forEach(c=>{
+    const pend = cobPendencia(c, _cobrSinais);
+    if(pend.estado !== 'agir') return;
+    const parte = (c.cobranca_partes||[]).find(p=>p.principal) || (c.cobranca_partes||[])[0] || {};
+    const devId = parte.devedor_id || '';
+    const grupo = pend.proximaAcao==='boleto' ? 'Dinheiro' : ['peticao','judicial'].includes(pend.proximaAcao) ? 'Jurídico' : 'Cobrança';
+    const tag = pend.proximaAcao==='boleto' ? 'ACORDO' : ['peticao','judicial'].includes(pend.proximaAcao) ? 'JUDICIAL' : pend.proximaAcao==='whatsapp' ? 'RESPOSTA' : (pend.urgencia==='alta'?'URGENTE':pend.urgencia==='media'?'ATENÇÃO':'NOVO');
+    const peso = (pend.urgencia==='alta' || pend.proximaAcao==='boleto') ? 3 : pend.urgencia==='media' ? 2 : 1;
+    const acaoLabel = pend.proximaAcao==='boleto'?'Gerar boleto':pend.proximaAcao==='peticao'?'Abrir peça':pend.proximaAcao==='judicial'?'Ver processo':'Abrir caso';
+    const credor = _cobrCredorNome(c);
+    const devedor = parte?.devedores?.nome || '';
+    fila.push({
+      grupo, tag, peso, devId, credor, devedor,
+      nome: credor + (devedor ? (' · '+devedor) : ''),
+      meta: pend.motivo || '—',
+      valor: (+c.valor_atual||+c.valor_orig||0),
+      acaoLabel,
+      onAcao: pend.proximaAcao==='peticao' ? `showPage('pecas')` : (devId?`openDrawer('${devId}')`:`showPage('cobr')`)
+    });
+  });
+  // Prescrição perto (mesmo se a pendência-base não for 'agir' — risco de perder o caso).
+  cobrAtivas.forEach(c=>{
+    if(!cobPrescricaoPerto(c)) return;
+    const parte = (c.cobranca_partes||[]).find(p=>p.principal) || (c.cobranca_partes||[])[0] || {};
+    if(fila.some(f=>f.devId && parte.devedor_id && f.devId===parte.devedor_id)) return;
+    const dias = cobDiasAtePrescricao(c);
+    const credor = _cobrCredorNome(c);
+    const devedor = parte?.devedores?.nome || '';
+    fila.push({
+      grupo:'Jurídico', tag:'PRESCRIÇÃO', peso:3, devId: parte.devedor_id||'', credor, devedor,
+      nome: credor + (devedor ? (' · '+devedor) : ''),
+      meta: (dias!=null && dias<0) ? 'Prazo de prescrição já vencido' : `Prescreve em ${Math.max(0,Math.round((dias||0)/30))} meses`,
+      valor: (+c.valor_atual||+c.valor_orig||0),
+      acaoLabel:'Priorizar',
+      onAcao: `try{cobrFilter.prescrever=true;cobrFilter.etapa='todos';}catch(_){}; showPage('cobr')`
+    });
+  });
+  // Repasses ao cedente pendentes (mesmo dado do módulo #/repasses — fin_operacao).
+  // Só gestor: `fin_operacao` é dado agregado de toda a carteira (ADMIN_ONLY_PAGES).
+  if(currentUser?.tipo === 'gestor'){
+    try{
+      if(!_repState.loaded) await _repLoad();
+      const _aggRep = _repAgg();
+      _aggRep.cedentes.filter(x=>x.temPend && x.oldestPend).forEach(x=>{
+        const diasP = _repDaysSince(x.oldestPend);
+        if(diasP==null || diasP<3) return;
+        fila.push({
+          grupo:'Dinheiro', tag:'REPASSE', peso: diasP>=10?3:2, devId:'',
+          credor: x.nome, devedor:'',
+          nome: x.nome, meta:`Repasse ao cedente pendente há ${diasP} dias`,
+          valor: x.aRepassar, acaoLabel:'Repassar', onAcao:`showPage('repasses')`
+        });
+      });
+    }catch(_){}
+  }
+  fila.sort((a,b)=> b.peso-a.peso || b.valor-a.valor);
+  return fila;
+}
+
+// Cores das etiquetas da fila — mesmas no card do Painel e na página #/fila.
+const FILA_TAG_CORES = {
+  'URGENTE':   { bg:'#FBEAE7', fg:'#A65A4A' }, 'ATENÇÃO': { bg:'#FBF3E1', fg:'#9C7F40' },
+  'NOVO':      { bg:'#E4EAF5', fg:'#3A5288' }, 'PRESCRIÇÃO': { bg:'#FBF3E1', fg:'#9C7F40' },
+  'ACORDO':    { bg:'#E4EAF5', fg:'#3A5288' }, 'JUDICIAL': { bg:'#FBEAE7', fg:'#A65A4A' },
+  'RESPOSTA':  { bg:'#E4EAF5', fg:'#3A5288' }, 'REPASSE':  { bg:'#FBF3E1', fg:'#9C7F40' },
+};
+
+// ── Página "Fila de decisões" (#/fila) ───────────────────────────────────────
+// A mesma fila do card do Painel, INTEIRA (o card mostra só os 7 primeiros) e em
+// tela cheia. Ordenação por risco (padrão), nome do devedor, valor e cliente —
+// clicar no campo já escolhido inverte a ordem. Em "Cliente" a lista sai agrupada
+// por credor com subtotal, que é como se trabalha na prática: um credor por vez.
+window._filaOrdem = window._filaOrdem || { campo:'risco', dir:1 };
+
+function filaSetOrdem(campo){
+  const o = window._filaOrdem;
+  if(o.campo === campo) o.dir = -o.dir; else { o.campo = campo; o.dir = 1; }
+  renderFilaDecisoes();
+}
+function filaSetGrupo(g){ window._painelFilaGrupo = g; renderFilaDecisoes(); }
+// Abrir em outra aba é um <a href="#/fila" target="_blank">, não window.open:
+// link real não apanha de bloqueador de pop-up e ainda aceita clique do meio /
+// Ctrl+clique. A aba nova sobe o app e cai direto em #/fila — a sessão do
+// Supabase vem do localStorage (mesma origem), então não pede login de novo.
+const FILA_LINK_NOVA_ABA = `<a class="fila-chip" href="#/fila" target="_blank" rel="noopener" title="Abrir a fila em outra aba do navegador">↗ Nova aba</a>`;
+
+// Ordem "natural" de cada campo (dir = 1). dir = -1 inverte.
+const _FILA_CMP = {
+  risco:   (a,b)=> b.peso-a.peso || b.valor-a.valor,
+  nome:    (a,b)=> (a.devedor||a.nome||'').localeCompare(b.devedor||b.nome||'', 'pt-BR'),
+  valor:   (a,b)=> b.valor-a.valor,
+  cliente: (a,b)=> (a.credor||'').localeCompare(b.credor||'', 'pt-BR') || b.valor-a.valor,
+};
+
+async function renderFilaDecisoes(){
+  const el = document.getElementById('page-fila');
+  if(!el) return;
+  el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando fila…</div>`;
+
+  // Mesma fonte e mesmo recorte do Painel (inclusive os filtros Cliente/Operador):
+  // se divergisse, a página mostraria um total diferente do card do Painel.
+  const cobrRows = await loadCobrancasFromSupabase();
+  if(Array.isArray(cobrRows)) DB_cobrancas = cobrRows;
+  const _pf = window._painelFiltro || (window._painelFiltro = { cliente:'', operador:'' });
+  const cobrAtivas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft
+    && !/quitad|pago|liquidad/i.test(c.status||'')
+    && (!_pf.cliente  || String(c.cliente_id||'')===_pf.cliente)
+    && (!_pf.operador || String(c.assigned_to||'')===_pf.operador));
+
+  const fila  = await _montarFilaDecisoes(cobrAtivas);
+  try{ navBadge('nav-fila-count', fila.length); }catch(_){}
+  const grupo = window._painelFilaGrupo || 'Tudo';
+  const ord   = window._filaOrdem;
+  const cmp   = _FILA_CMP[ord.campo] || _FILA_CMP.risco;
+  const itens = (grupo==='Tudo' ? fila.slice() : fila.filter(f=>f.grupo===grupo))
+    .sort((a,b)=> cmp(a,b) * ord.dir);
+  const total     = itens.reduce((s,f)=>s+(+f.valor||0), 0);
+  const atrasados = itens.filter(f=>f.peso===3).length;
+  const agrupado  = (ord.campo === 'cliente');
+
+  // Subtotais por credor — só usados no modo agrupado.
+  const subtotal = {};
+  itens.forEach(f=>{ const k=f.credor||'—'; subtotal[k]=(subtotal[k]||0)+(+f.valor||0); });
+
+  const seta = c => ord.campo===c ? `<span class="fila-seta">${ord.dir===1?'▼':'▲'}</span>` : '';
+  const ordBtn = (campo, rot, extra='') =>
+    `<button class="fila-ord ${ord.campo===campo?'on':''}" ${extra} onclick="filaSetOrdem('${campo}')">${rot}${seta(campo)}</button>`;
+
+  let credorAtual = null;
+  const linhas = itens.map(f=>{
+    const tc = FILA_TAG_CORES[f.tag] || { bg:'var(--card-2)', fg:'var(--text-2)' };
+    let cab = '';
+    if(agrupado && f.credor !== credorAtual){
+      credorAtual = f.credor;
+      cab = `<div class="fila-grupo-cab"><span>${escHtml(f.credor||'—')}</span><span class="fila-grupo-sub">${fmtR(subtotal[f.credor||'—']||0)}</span></div>`;
+    }
+    return cab + `<div class="fila-row">
+      <div class="fila-bar" style="background:${f.peso===3?'var(--danger)':f.peso===2?'var(--accent)':'var(--info)'};"></div>
+      <div class="fila-cli">${escHtml(f.credor||'—')}</div>
+      <div class="fila-txt"><div class="fila-nome">${escHtml(f.devedor || f.nome || '—')}</div><div class="fila-meta">${escHtml(f.meta)}</div></div>
+      <div class="fila-grupo-tag">${escHtml(f.grupo)}</div>
+      <div class="fila-valor">${fmtR(f.valor)}</div>
+      <div class="fila-tag" style="background:${tc.bg};color:${tc.fg};">${f.tag}</div>
+      <button class="fila-acao" onclick="${f.onAcao}">${escHtml(f.acaoLabel)}</button>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = `
+    <style>
+      #page-fila .fila-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:16px;}
+      #page-fila .fila-eyebrow{font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent-2);}
+      #page-fila .fila-h1{font-family:var(--font-display);font-size:26px;font-weight:400;letter-spacing:-.01em;color:var(--text);margin-top:4px;}
+      #page-fila .fila-sub{font-size:13.5px;color:var(--text-2);margin-top:3px;}
+      #page-fila .fila-head-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+      #page-fila .fila-chips{display:flex;gap:6px;flex-wrap:wrap;}
+      #page-fila .fila-chip{padding:5px 11px;border-radius:20px;font-size:12px;cursor:pointer;border:1px solid var(--border);background:var(--card);color:var(--text-2);text-decoration:none;display:inline-block;}
+      #page-fila .fila-chip.on{background:var(--side-bg);color:#fff;border-color:var(--side-bg);}
+      #page-fila .fila-ordbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:11px 16px;border-bottom:1px solid var(--border);}
+      #page-fila .fila-ordbar-lb{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-3);}
+      #page-fila .fila-ord{font-family:inherit;font-size:12.5px;color:var(--text-2);background:var(--card);border:1px solid var(--border);border-radius:7px;padding:6px 12px;cursor:pointer;}
+      #page-fila .fila-ord.on{background:var(--side-bg);color:#fff;border-color:var(--side-bg);}
+      #page-fila .fila-seta{margin-left:5px;font-size:9px;}
+      #page-fila .fila-row{display:flex;align-items:center;gap:14px;padding:12px 16px;border-bottom:1px solid var(--border-2);}
+      #page-fila .fila-row:last-child{border-bottom:0;}
+      #page-fila .fila-bar{width:3px;height:32px;border-radius:2px;flex-shrink:0;}
+      #page-fila .fila-cli{font-size:12.5px;color:var(--text-2);width:170px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      #page-fila .fila-txt{display:flex;flex-direction:column;gap:2px;min-width:200px;flex:1;}
+      #page-fila .fila-nome{font-size:13.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      #page-fila .fila-meta{font-size:12px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      #page-fila .fila-grupo-tag{font-size:11.5px;color:var(--text-3);width:84px;flex-shrink:0;}
+      #page-fila .fila-valor{font-family:var(--font-mono);font-size:13px;font-weight:500;text-align:right;width:110px;flex-shrink:0;color:var(--text);}
+      #page-fila .fila-tag{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.1em;padding:3px 8px;border-radius:4px;width:94px;text-align:center;flex-shrink:0;}
+      #page-fila .fila-acao{font-size:12.5px;font-weight:600;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;white-space:nowrap;flex-shrink:0;background:var(--card);}
+      #page-fila .fila-grupo-cab{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 16px;background:var(--card-2);border-bottom:1px solid var(--border-2);font-size:12.5px;font-weight:600;color:var(--text);}
+      #page-fila .fila-grupo-sub{font-family:var(--font-mono);font-size:12px;font-weight:500;color:var(--text-3);}
+      /* Agrupado por cliente: o credor já está no cabeçalho do grupo — repetir em
+         cada linha só rouba largura do nome do devedor. */
+      #page-fila .fila-agrupado .fila-cli{display:none;}
+      #page-fila .fila-foot{padding:11px 16px;display:flex;align-items:center;gap:12px;font-size:12.5px;color:var(--text-3);}
+      @media(max-width:980px){ #page-fila .fila-cli,#page-fila .fila-grupo-tag{display:none;} }
+    </style>
+
+    <div class="fila-head">
+      <div>
+        <div class="fila-eyebrow">Precisa de decisão hoje</div>
+        <h1 class="fila-h1">Fila de decisões</h1>
+        <div class="fila-sub">${itens.length>0
+          ? `<b>${itens.length}</b> ${itens.length===1?'item':'itens'} · ${fmtR(total)}${atrasados>0?` — <b>${atrasados}</b> ${atrasados===1?'atrasado':'atrasados'}`:''}`
+          : 'Nenhum item pendente de decisão.'}</div>
+      </div>
+      <div class="fila-head-actions">
+        <div class="fila-chips">${['Tudo','Cobrança','Dinheiro','Jurídico'].map(g=>`<span class="fila-chip ${grupo===g?'on':''}" onclick="filaSetGrupo('${g}')">${g}</span>`).join('')}${FILA_LINK_NOVA_ABA}</div>
+        <button class="fila-ord" onclick="showPage('painel')">← Painel</button>
+      </div>
+    </div>
+
+    <div class="cob-panel ${agrupado?'fila-agrupado':''}">
+      <div class="fila-ordbar">
+        <span class="fila-ordbar-lb">Organizar por</span>
+        ${ordBtn('risco','Risco')}
+        ${ordBtn('nome','Nome')}
+        ${ordBtn('valor','Valor')}
+        ${ordBtn('cliente','Cliente')}
+        <span style="margin-left:auto;font-size:12px;color:var(--text-3);">${agrupado?'agrupado por cliente':'clique de novo no campo para inverter'}</span>
+      </div>
+      <div>${itens.length ? linhas : `<div class="cob-empty"><span class="cob-empty-dot"></span> Nenhum item pendente${grupo!=='Tudo'?` em ${grupo}`:''}.</div>`}</div>
+      <div class="fila-foot"><span>${itens.length} ${itens.length===1?'item':'itens'} · ${fmtR(total)}</span><a class="cob-link" style="margin-left:auto;" onclick="showPage('cobr')">Abrir a carteira →</a></div>
+    </div>`;
+}
+
 async function renderPainel(){
   const el = document.getElementById('page-painel');
   if(!el) return;
@@ -10040,67 +10270,15 @@ async function renderPainel(){
     .sort((a,b)=>a.nome.localeCompare(b.nome));
 
   // ── Precisa de decisão hoje — mesma régua de pendência da tela Cobranças ──────
-  if(!_cobrSinais){ try{ _cobrSinais = await _carregarSinaisPendencia(cobrAtivas); }catch(_){ _cobrSinais = _cobrSinais || {}; } }
-  const _fila = [];
-  cobrAtivas.forEach(c=>{
-    const pend = cobPendencia(c, _cobrSinais);
-    if(pend.estado !== 'agir') return;
-    const parte = (c.cobranca_partes||[]).find(p=>p.principal) || (c.cobranca_partes||[])[0] || {};
-    const devId = parte.devedor_id || '';
-    const grupo = pend.proximaAcao==='boleto' ? 'Dinheiro' : ['peticao','judicial'].includes(pend.proximaAcao) ? 'Jurídico' : 'Cobrança';
-    const tag = pend.proximaAcao==='boleto' ? 'ACORDO' : ['peticao','judicial'].includes(pend.proximaAcao) ? 'JUDICIAL' : pend.proximaAcao==='whatsapp' ? 'RESPOSTA' : (pend.urgencia==='alta'?'URGENTE':pend.urgencia==='media'?'ATENÇÃO':'NOVO');
-    const peso = (pend.urgencia==='alta' || pend.proximaAcao==='boleto') ? 3 : pend.urgencia==='media' ? 2 : 1;
-    const acaoLabel = pend.proximaAcao==='boleto'?'Gerar boleto':pend.proximaAcao==='peticao'?'Abrir peça':pend.proximaAcao==='judicial'?'Ver processo':'Abrir caso';
-    _fila.push({
-      grupo, tag, peso, devId,
-      nome: _cobrCredorNome(c) + (parte?.devedores?.nome ? (' · '+parte.devedores.nome) : ''),
-      meta: pend.motivo || '—',
-      valor: (+c.valor_atual||+c.valor_orig||0),
-      acaoLabel,
-      onAcao: pend.proximaAcao==='peticao' ? `showPage('pecas')` : (devId?`openDrawer('${devId}')`:`showPage('cobr')`)
-    });
-  });
-  // Prescrição perto (mesmo se a pendência-base não for 'agir' — risco de perder o caso).
-  cobrAtivas.forEach(c=>{
-    if(!cobPrescricaoPerto(c)) return;
-    const parte = (c.cobranca_partes||[]).find(p=>p.principal) || (c.cobranca_partes||[])[0] || {};
-    if(_fila.some(f=>f.devId && parte.devedor_id && f.devId===parte.devedor_id)) return;
-    const dias = cobDiasAtePrescricao(c);
-    _fila.push({
-      grupo:'Jurídico', tag:'PRESCRIÇÃO', peso:3, devId: parte.devedor_id||'',
-      nome: _cobrCredorNome(c) + (parte?.devedores?.nome ? (' · '+parte.devedores.nome) : ''),
-      meta: (dias!=null && dias<0) ? 'Prazo de prescrição já vencido' : `Prescreve em ${Math.max(0,Math.round((dias||0)/30))} meses`,
-      valor: (+c.valor_atual||+c.valor_orig||0),
-      acaoLabel:'Priorizar',
-      onAcao: `try{cobrFilter.prescrever=true;cobrFilter.etapa='todos';}catch(_){}; showPage('cobr')`
-    });
-  });
-  // Repasses ao cedente pendentes (mesmo dado do módulo #/repasses — fin_operacao).
-  try{
-    if(!_repState.loaded) await _repLoad();
-    const _aggRep = _repAgg();
-    _aggRep.cedentes.filter(x=>x.temPend && x.oldestPend).forEach(x=>{
-      const diasP = _repDaysSince(x.oldestPend);
-      if(diasP==null || diasP<3) return;
-      _fila.push({
-        grupo:'Dinheiro', tag:'REPASSE', peso: diasP>=10?3:2, devId:'',
-        nome: x.nome, meta:`Repasse ao cedente pendente há ${diasP} dias`,
-        valor: x.aRepassar, acaoLabel:'Repassar', onAcao:`showPage('repasses')`
-      });
-    });
-  }catch(_){}
-  _fila.sort((a,b)=> b.peso-a.peso || b.valor-a.valor);
+  // A montagem vive em _montarFilaDecisoes() (fonte única com a página #/fila).
+  const _fila = await _montarFilaDecisoes(cobrAtivas);
   const filaGrupo = window._painelFilaGrupo || 'Tudo';
   const filaFiltrada = filaGrupo==='Tudo' ? _fila : _fila.filter(f=>f.grupo===filaGrupo);
   const FILA_MOSTRAR = 7;
   const filaVisivel = filaFiltrada.slice(0, FILA_MOSTRAR);
   const filaAtrasados = _fila.filter(f=>f.peso===3).length;
-  const tagCores = {
-    'URGENTE':   { bg:'#FBEAE7', fg:'#A65A4A' }, 'ATENÇÃO': { bg:'#FBF3E1', fg:'#9C7F40' },
-    'NOVO':      { bg:'#E4EAF5', fg:'#3A5288' }, 'PRESCRIÇÃO': { bg:'#FBF3E1', fg:'#9C7F40' },
-    'ACORDO':    { bg:'#E4EAF5', fg:'#3A5288' }, 'JUDICIAL': { bg:'#FBEAE7', fg:'#A65A4A' },
-    'RESPOSTA':  { bg:'#E4EAF5', fg:'#3A5288' }, 'REPASSE':  { bg:'#FBF3E1', fg:'#9C7F40' },
-  };
+  try{ navBadge('nav-fila-count', _fila.length); }catch(_){}
+  const tagCores = FILA_TAG_CORES;
 
   // ── Acordos do mês ──────────────────────────────────────────────────────────
   let acordosMesRows = [];
@@ -10301,7 +10479,7 @@ async function renderPainel(){
       <div class="pnl-col">
         <div class="cob-panel">
           <div class="cob-panel-head"><span class="cob-panel-title">Precisa de decisão hoje</span><span class="cob-panel-sub">${_fila.length} ite${_fila.length!==1?'ns':'m'} · ordenados por risco</span>
-            <div class="pnl-chips">${['Tudo','Cobrança','Dinheiro','Jurídico'].map(g=>`<span class="pnl-chip ${filaGrupo===g?'on':''}" onclick="window._painelFilaGrupo='${g}';renderPainel();">${g}</span>`).join('')}</div>
+            <div class="pnl-chips">${['Tudo','Cobrança','Dinheiro','Jurídico'].map(g=>`<span class="pnl-chip ${filaGrupo===g?'on':''}" onclick="window._painelFilaGrupo='${g}';renderPainel();">${g}</span>`).join('')}<a class="pnl-chip" href="#/fila" target="_blank" rel="noopener" style="text-decoration:none;" title="Abrir a fila inteira em outra aba do navegador">↗ Nova aba</a></div>
           </div>
           <div>${filaVisivel.length? filaVisivel.map(f=>{ const tc=tagCores[f.tag]||{bg:'var(--card-2)',fg:'var(--text-2)'}; return `<div class="pnl-fila-row">
               <div class="pnl-fila-bar" style="background:${f.peso===3?'var(--danger)':f.peso===2?'var(--accent)':'var(--info)'};"></div>
@@ -10310,7 +10488,7 @@ async function renderPainel(){
               <div class="pnl-fila-tag" style="background:${tc.bg};color:${tc.fg};">${f.tag}</div>
               <button class="pnl-fila-acao" onclick="${f.onAcao}">${escHtml(f.acaoLabel)}</button>
             </div>`; }).join('') : `<div class="cob-empty"><span class="cob-empty-dot"></span> Nenhum item pendente${filaGrupo!=='Tudo'?` em ${filaGrupo}`:''}.</div>`}</div>
-          <div class="pnl-fila-foot"><span style="font-size:12.5px;color:var(--text-3);">Mostrando ${filaVisivel.length} de ${filaFiltrada.length}</span><a class="cob-link" style="margin-left:auto;" onclick="showPage('cobr')">Ver todos os itens →</a></div>
+          <div class="pnl-fila-foot"><span style="font-size:12.5px;color:var(--text-3);">Mostrando ${filaVisivel.length} de ${filaFiltrada.length}</span><a class="cob-link" style="margin-left:auto;" onclick="showPage('fila')">Ver a fila inteira →</a></div>
         </div>
 
         <div class="cob-panel">
