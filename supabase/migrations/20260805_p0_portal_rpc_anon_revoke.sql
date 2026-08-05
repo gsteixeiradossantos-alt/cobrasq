@@ -67,6 +67,23 @@
 -- Não havendo nenhum uso client-side legítimo de nenhuma das três, o revoke
 -- é de `anon` E `authenticated` nas três, sem reescrever o corpo de nenhuma.
 -- `service_role` e `postgres` seguem intactos.
+--
+-- ── CORREÇÃO PÓS-REVISÃO ADVERSARIAL (mesmo dia, antes de qualquer aplicação) ──
+-- `buscar_empresas_por_socio`, diferente das outras duas, também tem um
+-- GRANT EXECUTE explícito para `PUBLIC` (aparece no ACL como a entrada `=X/
+-- postgres`, sem nome de role antes do `=`). Confirmado ao vivo por três
+-- métodos: `proacl` textual, `aclexplode(proacl)` e
+-- `has_function_privilege('public', oid, 'EXECUTE')` (só ela retorna `true`
+-- entre as três). Em Postgres um grant a `PUBLIC` vale automaticamente para
+-- QUALQUER role, inclusive `anon` — revogar só de `anon`/`authenticated`
+-- SEM revogar de `PUBLIC` não fecha nada: `anon` continuaria conseguindo
+-- chamar `/rest/v1/rpc/buscar_empresas_por_socio` mesmo depois deste revoke,
+-- porque herdaria o EXECUTE via `PUBLIC`. É o mesmo padrão de erro já
+-- corrigido antes neste repo para `portal_emitir_token` (migração
+-- `20260704c_p0_portal_emitir_token_server_only.sql`) — replicado aqui.
+-- `_portal_emitir_sessao` e `portal_mint_magic` NÃO têm grant a `PUBLIC`
+-- (confirmado), então para essas duas o revoke de anon/authenticated já
+-- fecha o acesso sozinho.
 -- ============================================================================
 
 begin;
@@ -79,6 +96,7 @@ revoke execute on function public.portal_mint_magic(uuid, uuid, integer) from au
 
 revoke execute on function public.buscar_empresas_por_socio(text, text) from anon;
 revoke execute on function public.buscar_empresas_por_socio(text, text) from authenticated;
+revoke execute on function public.buscar_empresas_por_socio(text, text) from public;
 
 commit;
 
@@ -93,13 +111,18 @@ commit;
 -- denied for function), em vez do HTTP 200 confirmado antes do fix.
 --
 -- Query SQL de verificação pós-aplicação (rodar via Supabase MCP / SQL editor):
---   select proname, proacl
+--   select proname, proacl,
+--          has_function_privilege('anon', oid, 'EXECUTE') as anon_pode,
+--          has_function_privilege('authenticated', oid, 'EXECUTE') as authenticated_pode,
+--          has_function_privilege('public', oid, 'EXECUTE') as public_daria_acesso
 --   from pg_proc
 --   where pronamespace = 'public'::regnamespace
 --     and proname in ('_portal_emitir_sessao','portal_mint_magic','buscar_empresas_por_socio');
--- Esperado: nenhuma das três deve ter mais `anon=X/postgres` nem
--- `authenticated=X/postgres` no array proacl (deve restar só
--- `postgres=X/postgres` e `service_role=X/postgres`).
+-- Esperado: as três colunas anon_pode/authenticated_pode/public_daria_acesso
+-- devem ser `false` nas três funções (checar `public_daria_acesso` é
+-- obrigatório — checar só ausência de `anon=X/postgres` no proacl não
+-- detecta um grant a `PUBLIC`, que aparece como entrada separada `=X/
+-- postgres` e concede acesso a `anon` por tabela indireta).
 --
 -- Depois de aplicar, também confirmar que NADA quebrou nos dois fluxos que
 -- dependem dessas funções por baixo dos panos:
@@ -115,4 +138,4 @@ commit;
 -- ── ROLLBACK ────────────────────────────────────────────────────────────────
 -- grant execute on function public._portal_emitir_sessao(uuid, text) to anon, authenticated;
 -- grant execute on function public.portal_mint_magic(uuid, uuid, integer) to anon, authenticated;
--- grant execute on function public.buscar_empresas_por_socio(text, text) to anon, authenticated;
+-- grant execute on function public.buscar_empresas_por_socio(text, text) to anon, authenticated, public;
