@@ -102,8 +102,16 @@ module.exports = async function handler(req, res) {
     // Processos cadastrados (fonte única = cobrancas, Fase C). Só os com
     // monitoramento ativo (flag monitorar_datajud, migration 2026-06-24a) — o
     // usuário pode pausar um processo específico mesmo com o número CNJ cadastrado.
+    //
+    // Defesa contra desperdício de chamada de API (auditoria 2026-08-05): o
+    // formulário de cobrança (index.html) liga monitorar_datajud=true por padrão
+    // já na criação, ANTES de o processo existir — a própria UI documenta isso
+    // ("consulta diária se houver nº de processo"), então não dá pra confiar
+    // cegamente na flag. `not.is.null` já barra numero_processo NULL; `neq.`
+    // (string vazia) barra o caso de ter sido salvo como '' em vez de NULL.
+    // Malformado/whitespace ainda é pego a jusante por digitosCNJ()+ehTJPR().
     const cobrancas = await sbFetch(
-      `cobrancas?numero_processo=not.is.null&monitorar_datajud=is.true&select=id,numero_processo&limit=${limit}`
+      `cobrancas?numero_processo=not.is.null&numero_processo=neq.&monitorar_datajud=is.true&select=id,numero_processo&limit=${limit}`
     );
 
     // Filtra os que têm CNJ válido do TJPR.
