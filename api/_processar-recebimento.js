@@ -14,7 +14,8 @@
 const crypto = require('crypto');
 const { sbFetch } = require('./_sb.js');
 const { asaasReq } = require('./_asaas.js');
-const { zapiSendText } = require('./_zapi.js');
+const { zapiSendText, zapiSendDocumentPdf } = require('./_zapi.js');
+const { gerarReciboPdfBase64, formaPagamento } = require('./_recibo.js');
 
 function timingSafeEq(a, b) {
   const ab = Buffer.from(String(a || '')); const bb = Buffer.from(String(b || ''));
@@ -23,8 +24,6 @@ function timingSafeEq(a, b) {
 }
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
-function firstName(n) { return String(n || '').trim().split(/\s+/)[0] || ''; }
-function fmtR(v) { return 'R$ ' + (Number(v) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -226,16 +225,36 @@ module.exports = async function handler(req, res) {
       } catch (e) { nf = { error: e.message }; }
     }
 
-    // Recibo automático ao devedor (R4) — best-effort. Fala como a Bia e envia o
-    // COMPROVANTE oficial do Asaas (transactionReceiptUrl) quando disponível.
-    let zap = null;
+    // Recibo automático ao devedor (R4) — best-effort. Formato "Financeiro COBRASQ"
+    // (pedido do Gustavo 2026-08-06): PDF do recibo em anexo (mesmo timbrado que a Bia
+    // já usa quando o devedor pede o comprovante manualmente — ver _recibo.js) + a
+    // mensagem confirmando a parcela. Nunca deixa a mensagem dizer "em anexo" se o PDF
+    // não saiu (Chrome cold start etc.) — nesse caso cai no link oficial do Asaas.
+    let zap = null, pdfEnviado = false;
     const tel = String((devedor && devedor.telefone) || '').replace(/\D/g, '');
     if (tel) {
-      const parc = row.parcela && row.total_parcelas ? ` (parcela ${row.parcela}/${row.total_parcelas})` : '';
-      const ola = firstName(devedor && devedor.nome);
+      const nomeCompleto = (devedor && devedor.nome) || 'Cliente';
+      const meioTxt = { PIX: 'do Pix', BOLETO: 'do boleto', CREDIT_CARD: 'do cartão', DEBIT_CARD: 'do cartão' }[String(payment.billingType || '').toUpperCase()] || 'do pagamento';
+      const linhaParcela = row.parcela && row.total_parcelas ? ` referente a parcela n. ${row.parcela} de ${row.total_parcelas} do acordo realizado` : '';
+
+      const dadosRec = {
+        nome: nomeCompleto,
+        valorNum: valorRecebido,
+        valorFmt: valorRecebido.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        dataISO: row.recebido_em,
+        forma: formaPagamento(payment.billingType),
+        num: 'Nº ' + String(paymentId).slice(-6).toUpperCase(),
+      };
+      let b64 = '';
+      try { b64 = await gerarReciboPdfBase64(dadosRec); } catch (e) { console.warn('[processar-recebimento] gerar recibo PDF:', e.message); }
+      if (b64) { try { pdfEnviado = await zapiSendDocumentPdf(tel, b64, 'Recibo COBRASQ.pdf'); } catch (e) { pdfEnviado = false; } }
+
       const recibo = String((payment && payment.transactionReceiptUrl) || '').trim();
-      const linhaRecibo = recibo ? `\n\nSegue o comprovante:\n${recibo}` : '';
-      const msg = `*Bia • COBRASQ*\n${ola ? 'Olá, ' + ola + '! ' : ''}Recebemos seu pagamento${parc} no valor de ${fmtR(valorRecebido)}. Muito obrigada!${linhaRecibo}`;
+      const linhaAnexo = pdfEnviado
+        ? 'Em anexo, seu recibo de pagamento.'
+        : (recibo ? `Segue o comprovante:\n${recibo}` : '');
+
+      const msg = `*Financeiro COBRASQ*\n${nomeCompleto}, o pagamento ${meioTxt}${linhaParcela} foi confirmado. ✅${linhaAnexo ? '\n\n' + linhaAnexo : ''}\n_Agradecemos!_`;
       try { zap = await zapiSendText(tel, msg); } catch (e) { zap = { error: e.message }; }
     }
 
@@ -246,6 +265,7 @@ module.exports = async function handler(req, res) {
       valor_capital: valorCapital,
       valor_honorario: valorHonorario,
       repasse_status: row.repasse_status,
+      recibo_pdf_enviado: pdfEnviado,
       recibo_enviado: !!(zap && zap.messageId),
       nf,
     });
