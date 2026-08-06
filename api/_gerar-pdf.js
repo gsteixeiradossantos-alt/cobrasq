@@ -12,12 +12,16 @@
 // Dependências (package.json): puppeteer-core + @sparticuz/chromium (binário do
 // Chromium empacotado, compatível com o limite de tamanho das funções Vercel).
 //
-// ⚠️ RUNTIME: o app roda em Node 20 (package.json engines). No Node 22 da Vercel
-// (base Amazon Linux 2023) o Chromium do @sparticuz/chromium-min@131 falha ao
-// carregar libnss3.so ("error while loading shared libraries: libnss3.so"). O Node
-// 20 (base anterior) traz as libs que o binário precisa. NÃO voltar engines p/ 22
-// sem revalidar o /api/gerar-pdf, ou o "Gerar PDF" do servidor quebra (o cliente
-// cai no Imprimir como rede de segurança, mas perde o 1-clique).
+// ⚠️ RUNTIME (2026-08-06): a Vercel passou a rodar as functions sobre Amazon Linux
+// 2023, que não traz libnss3.so no SO — o @sparticuz/chromium-min@131 (compilado pra
+// AL2, a imagem antiga) quebrava com "error while loading shared libraries:
+// libnss3.so". Fix: subiu pra @sparticuz/chromium-min@140 (bundla um pack AL2023 —
+// ver release notes/al2023.tar.br do pacote), que já resolve sozinho, sem depender
+// da imagem/engines do host. A partir da v137 o pacote também ficou "sem opinião"
+// (parou de exportar args/headless/viewport prontos) — daí o args/headless/viewport
+// explícitos abaixo, no formato que o próprio README do pacote recomenda agora.
+// NÃO trocar a versão do pacote sem também trocar CHROMIUM_PACK (a URL do pack
+// remoto — arch-specific desde a v137 — tem que bater com a versão instalada).
 
 const crypto = require('crypto');
 const { requireUser, applyCors } = require('./_auth.js');
@@ -36,7 +40,8 @@ function timingSafeEq(a, b) {
 // chromium-min NÃO empacota o binário (mantém a função pequena → build confiável
 // na Vercel). O binário é baixado da release oficial (versão casada com o pacote)
 // no cold start e fica em cache no /tmp. URL precisa bater com a versão instalada.
-const CHROMIUM_PACK = 'https://github.com/Sparticuz/chromium/releases/download/v131.0.1/chromium-v131.0.1-pack.tar';
+// Desde a v137 o pack é por arquitetura — Vercel usa x64, daí o sufixo .x64.tar.
+const CHROMIUM_PACK = 'https://github.com/Sparticuz/chromium/releases/download/v140.0.0/chromium-v140.0.0-pack.x64.tar';
 
 module.exports = async function handler(req, res) {
   applyCors(req, res);
@@ -66,11 +71,15 @@ module.exports = async function handler(req, res) {
 
   let browser = null;
   try {
+    // args/headless/viewport explícitos: a partir da v137 o pacote parou de exportar
+    // defaults prontos (ver comentário no topo do arquivo) — este é o shape que o
+    // README do @sparticuz/chromium recomenda para Puppeteer.
+    const viewport = { deviceScaleFactor: 1, hasTouch: false, height: 1080, isLandscape: true, isMobile: false, width: 1920 };
     browser = await puppeteer.launch({
-      args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
+      args: await puppeteer.defaultArgs({ args: chromium.args, headless: 'shell' }),
+      defaultViewport: viewport,
       executablePath: await chromium.executablePath(CHROMIUM_PACK),
-      headless: chromium.headless,
+      headless: 'shell',
     });
 
     const page = await browser.newPage();
