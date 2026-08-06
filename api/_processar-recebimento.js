@@ -164,17 +164,26 @@ module.exports = async function handler(req, res) {
         const devNome = (devedor && devedor.nome) || 'devedor';
         const parcTxt = row.parcela && row.total_parcelas ? ` ${row.parcela}/${row.total_parcelas}` : '';
 
-        // Casa com o lançamento já existente pra este devedor via cobranca_id (FK real —
-        // ver migração 20260806_fin_lancamento_cobranca_id.sql; antes disso a casada era
-        // por raw_payload->>'devedor_id', texto solto só nas linhas do import). Considera
-        // tanto PENDENTE quanto já PAGO (idempotente) — se já tiver sido baixado por outro
-        // caminho (ex.: manual, antes do webhook chegar), só reconfirma em vez de duplicar.
-        // Duplicidade real (auditoria 2026-08-06, R$1.867 contados 2x): a versão antiga só
-        // olhava status=0, então uma linha já paga manualmente virava candidata inexistente
-        // e o webhook criava uma segunda linha do zero pro mesmo pagamento.
+        // Casa com o lançamento já existente. Duas camadas:
+        // 1) EXATA — por raw_payload->>'asaas_payment_id' (gravado desde 06/08 quando o
+        //    lançamento nasce junto com o boleto, em /emitir-acordo ou no importador em
+        //    lote /boletos-para-lancamentos). Sem ambiguidade nenhuma — é o MESMO pagamento.
+        // 2) FALLBACK — por cobranca_id (FK real — migração 20260806_fin_lancamento_cobranca_id;
+        //    antes disso a casada era por raw_payload->>'devedor_id', texto solto só nas
+        //    linhas do import) + valor aproximado. Só usada pra lançamentos antigos que
+        //    nunca gravaram o asaas_payment_id da própria parcela.
+        // Considera tanto PENDENTE quanto já PAGO (idempotente) — se já tiver sido baixado
+        // por outro caminho (ex.: manual, antes do webhook chegar), só reconfirma em vez de
+        // duplicar. Duplicidade real (auditoria 2026-08-06, R$1.867 contados 2x): a versão
+        // antiga só olhava status=0, então uma linha já paga manualmente virava candidata
+        // inexistente e o webhook criava uma segunda linha do zero pro mesmo pagamento.
         let lancReceitaId = null;
         let existente = null;
-        if (devedor && devedor.id) {
+        const porAsaasId = await sbFetch(
+          `fin_lancamento?tipo_movimento=eq.1&status=in.(0,1)&raw_payload->>asaas_payment_id=eq.${encodeURIComponent(paymentId)}&select=id,valor,status,observacoes&limit=1`
+        ).catch(() => []);
+        existente = (porAsaasId || [])[0] || null;
+        if (!existente && devedor && devedor.id) {
           const candidatos = await sbFetch(
             `fin_lancamento?tipo_movimento=eq.1&status=in.(0,1)&cobranca_id=eq.${devedor.id}&select=id,valor,status,observacoes&order=criada_em.desc&limit=20`
           ).catch(() => []);
@@ -206,6 +215,7 @@ module.exports = async function handler(req, res) {
             data_competencia: row.recebido_em, data_pagamento: row.recebido_em,
             numero_parcela: row.parcela, total_parcelas: row.total_parcelas,
             cobranca_id: devedor ? devedor.id : null,
+            raw_payload: { source: 'processar-recebimento', asaas_payment_id: paymentId },
           }) }).catch(() => null);
           lancReceitaId = (rec && rec[0] && rec[0].id) || null;
         }

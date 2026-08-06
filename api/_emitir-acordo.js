@@ -182,6 +182,38 @@ module.exports = async function handler(req, res) {
     };
     await sbFetch(`acordos?id=eq.${acordo.id}`, { method: 'PATCH', body: JSON.stringify({ status: 'ativo', metadata: newMeta }) });
 
+    // Cria o(s) lançamento(s) de RECEITA/PENDENTE — um por parcela — assim que o boleto
+    // sai do Asaas, não só quando o pagamento confirmar. Achado 2026-08-06: acordos com
+    // boleto emitido no Asaas sem NENHUM lançamento no sistema (Janaina Da Silva, Cátia
+    // Cichelero e outros — 11 casos até essa data). Busca as parcelas reais criadas pelo
+    // Asaas (valor/vencimento já rateados por ele, não recalculado aqui) e grava
+    // raw_payload.asaas_payment_id em cada linha — casada EXATA no /processar-recebimento,
+    // sem depender de valor aproximado (planos de parcela fixa geram falso positivo).
+    try {
+      let installments = [charge];
+      if (nParc > 1 && charge.installment) {
+        const list = await asaasReq('GET', `/payments?installment=${encodeURIComponent(charge.installment)}&limit=100`);
+        if (Array.isArray(list.data) && list.data.length) {
+          installments = list.data.slice().sort((a, b) => (Number(a.installmentNumber) || 0) - (Number(b.installmentNumber) || 0));
+        }
+      }
+      const rows = installments.map((p, i) => ({
+        descricao: `Acordo ${dev.nome}${nParc > 1 ? ` ${p.installmentNumber || (i + 1)}/${nParc}` : ' — à vista'}`,
+        valor: p.value,
+        tipo_movimento: 1,
+        status: 0,
+        conta_id: 13,
+        cobranca_id: dev.id,
+        data_vencimento: p.dueDate,
+        data_competencia: p.dueDate,
+        numero_parcela: nParc > 1 ? (p.installmentNumber || (i + 1)) : null,
+        total_parcelas: nParc > 1 ? nParc : null,
+        uuid: 'asaas:' + p.id,
+        raw_payload: { source: 'emitir-acordo', asaas_payment_id: p.id, acordo_id: acordo.id, devedor_id: dev.id },
+      }));
+      await sbFetch('fin_lancamento', { method: 'POST', body: JSON.stringify(rows) });
+    } catch (e) { console.warn('[emitir-acordo] criação de lançamento(s) financeiro(s):', e && e.message); }
+
     // WhatsApp com o link do boleto/PIX (best-effort, não derruba a emissão).
     let zap = null;
     const tel = String(dev.telefone || '').replace(/\D/g, '');
