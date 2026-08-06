@@ -28015,6 +28015,17 @@ window.finApi = (function(){
     const { data } = await sb.from('fin_lancamento_categoria').select('lancamento_id,fin_categoria(descricao)').limit(5000);
     return (data||[]).filter(r=>/repasse/i.test((r.fin_categoria&&r.fin_categoria.descricao)||'')).map(r=>r.lancamento_id);
   }
+  // IDs de lançamento de origem judicial (usado pelo filtro TIPO=Judicial): Acordos
+  // Judiciais, Sisbajud e Penhora de remuneração — nunca Acordos Extrajudiciais, por
+  // isso o "judicia" de "Extrajudiciais" é explicitamente descartado.
+  async function _idsCategoriaJudicial(){
+    const sb = _sb();
+    const { data } = await sb.from('fin_lancamento_categoria').select('lancamento_id,fin_categoria(descricao)').limit(5000);
+    return (data||[]).filter(r=>{
+      const d = (r.fin_categoria && r.fin_categoria.descricao) || '';
+      return (/judicia/i.test(d) && !/extrajudicia/i.test(d)) || /sisbajud/i.test(d) || /penhora/i.test(d);
+    }).map(r=>r.lancamento_id);
+  }
   // IDs de lançamento cuja categoria bate com categoriaId (usado pelo filtro "Categoria").
   async function _idsPorCategoria(categoriaId){
     const sb = _sb();
@@ -28028,6 +28039,7 @@ window.finApi = (function(){
     if(f.tipoView === 'entradas') q = q.eq('tipo_movimento', 1);
     else if(f.tipoView === 'saidas') q = q.eq('tipo_movimento', 0);
     else if(f.tipoView === 'repasses') q = q.in('id', (ids.repasse&&ids.repasse.length)?ids.repasse:['00000000-0000-0000-0000-000000000000']);
+    else if(f.tipoView === 'judicial') q = q.in('id', (ids.judicial&&ids.judicial.length)?ids.judicial:['00000000-0000-0000-0000-000000000000']);
     if(f.situacao === 'pendentes') q = q.eq('status', 0);
     else if(f.situacao === 'atraso') q = q.eq('status', 0).lt('data_vencimento', hoje());
     else if(f.situacao === 'conciliados') q = q.eq('conciliado', true);
@@ -28041,11 +28053,12 @@ window.finApi = (function(){
   }
   async function _resolverIdsFiltro(filtros){
     const f = filtros||{};
-    const [repasse, categoria] = await Promise.all([
+    const [repasse, categoria, judicial] = await Promise.all([
       f.tipoView==='repasses' ? _idsCategoriaRepasse() : Promise.resolve(null),
       f.categoriaId ? _idsPorCategoria(f.categoriaId) : Promise.resolve(null),
+      f.tipoView==='judicial' ? _idsCategoriaJudicial() : Promise.resolve(null),
     ]);
-    return { repasse, categoria };
+    return { repasse, categoria, judicial };
   }
 
   async function listLancamentos({ page=1, perPage=50, filtros={} } = {}){
@@ -28753,7 +28766,8 @@ function finMovMudarMes(delta){
   st.filtros = Object.assign({}, st.filtros, _finMesDe(d.getFullYear(), d.getMonth()));
   st.page = 1;
   st.sel.clear();
-  if(typeof renderFinTab === 'function') renderFinTab('lancamentos');
+  // Recarrega a aba atual (Movimentações ou Judicial — ambas usam esta navegação de mês).
+  if(typeof renderFinTab === 'function') renderFinTab(window._finTab || 'lancamentos');
 }
 
 // State da paginação/filtros da aba Movimentações (default de período: mês corrente).
@@ -28772,6 +28786,12 @@ const FIN_SECTIONS = {
                      {id:'lancamentos', label:'Movimentações'} ] },
   cobrancas:     { label:'Recebíveis', sub:'o dinheiro do cedente', subtabs:[
                      {id:'cobrancas', label:'Recebíveis'} ] },
+  // Receitas de origem judicial (Acordos Judiciais + Sisbajud + Penhora de remuneração),
+  // separadas das extrajudiciais a pedido do Gustavo (2026-08-06). NÃO confundir com a
+  // aba legada "judicial"/"Custódias judiciais" abaixo — aquela acompanha o status de
+  // bloqueio/alvará de uma custódia; esta é a mesma tela de Movimentações, só filtrada.
+  receitasjudiciais: { label:'Judicial', sub:'receitas de origem judicial', subtabs:[
+                     {id:'receitasjudiciais', label:'Judicial'} ] },
   // Legado — sem pill própria no topo (ver FIN_SECTIONS_VISIVEIS), mas as sub-abas
   // continuam roteáveis via setFinTab(...) a partir de Configurações/Relatórios.
   cadastros:     { label:'Cadastros', subtabs:[
@@ -28796,10 +28816,11 @@ const FIN_SECTIONS = {
                      {id:'judicial', label:'Custódias judiciais'} ] },
   // Importação Asaas movida p/ o menu lateral "Importação" (renderImportacao, aba Asaas).
 };
-// Só estas 3 aparecem como pill no topo do Financeiro (ordem = handoff: Caixa,
-// Movimentações, Recebíveis). As demais chaves de FIN_SECTIONS continuam existindo
-// só para _finSectionOf resolver o breadcrumb de telas acessadas por link direto.
-const FIN_SECTIONS_VISIVEIS = ['visao','movimentacoes','cobrancas'];
+// Estas 4 aparecem como pill no topo do Financeiro (ordem = handoff: Caixa,
+// Movimentações, Recebíveis, Judicial — a última acrescentada 2026-08-06). As demais
+// chaves de FIN_SECTIONS continuam existindo só para _finSectionOf resolver o
+// breadcrumb de telas acessadas por link direto.
+const FIN_SECTIONS_VISIVEIS = ['visao','movimentacoes','cobrancas','receitasjudiciais'];
 function _finSectionOf(tab){
   for(const [key,s] of Object.entries(FIN_SECTIONS)){
     if(s.subtabs.some(t=>t.id===tab)) return key;
@@ -29080,7 +29101,14 @@ function renderFinTab(tab){
 
   if(tab==='visao') renderFinVisao(el);
   else if(tab==='cobrancas') renderFinRecebiveis(el);
-  else if(tab==='lancamentos') renderFinLancamentos(el);
+  else if(tab==='lancamentos'){
+    // Chegar aqui vindo da aba Judicial não deve manter o filtro travado em 'judicial'.
+    if(window._finLancState && window._finLancState.filtros && window._finLancState.filtros.tipoView==='judicial'){
+      window._finLancState.filtros.tipoView = 'tudo';
+    }
+    renderFinLancamentos(el);
+  }
+  else if(tab==='receitasjudiciais') renderFinReceitasJudiciais(el);
   else if(tab==='contas') renderFinContas(el);
   else if(tab==='categorias') renderFinCategorias(el);
   else if(tab==='contatos') renderFinContatos(el);
@@ -31011,6 +31039,19 @@ async function _asaasGetBalance(){
   }
 }
 
+// Aba "Judicial" (pill própria) — reaproveita a tela inteira de Movimentações,
+// só travando o filtro TIPO em 'judicial'. Só reinicia o estado (mês corrente, sem
+// busca/página) na PRIMEIRA entrada nesta aba — reprocessar em toda renderização
+// quebraria a navegação de mês (finMovMudarMes recarrega via renderFinTab, que cai
+// aqui de novo, e voltaria sempre pro mês atual em vez de ir pro mês navegado).
+async function renderFinReceitasJudiciais(el){
+  const st = window._finLancState;
+  if(!st || !st.filtros || st.filtros.tipoView !== 'judicial'){
+    window._finLancState = { page:1, filtros:Object.assign({tipoView:'judicial',situacao:'todos'},_finMesCorrente()), totalPages:1, total:0, loading:false, sel:new Set(), totais:{entradas:0,saidas:0} };
+  }
+  await renderFinLancamentos(el);
+}
+
 async function renderFinLancamentos(el){
   // Carrega dimensões pra popular os filtros (cache de 1 min)
   let dim = { contas:[], categorias:[], contatos:[] };
@@ -31081,8 +31122,8 @@ async function renderFinLancamentos(el){
           <div class="mov-eyebrow">${escHtml(mesLabel.toUpperCase())} · TODAS AS CONTAS</div>
           <button class="mov-mesnav-btn" onclick="finMovMudarMes(1)" title="Próximo mês">${ico('chevron-right',12)}</button>
         </div>
-        <div class="mov-h1">Movimentações</div>
-        <div class="mov-sub">Selecione linhas para confirmar pagamento, conciliar ou reclassificar em lote.</div>
+        <div class="mov-h1">${f.tipoView==='judicial' ? 'Judicial' : 'Movimentações'}</div>
+        <div class="mov-sub">${f.tipoView==='judicial' ? 'Receitas de origem judicial: acordos judiciais, Sisbajud e penhora de remuneração.' : 'Selecione linhas para confirmar pagamento, conciliar ou reclassificar em lote.'}</div>
       </div>
       <div class="mov-toolbar-r">
         <div class="mov-search">${ico('search',14)}<input type="search" id="filtLancBusca" value="${escHtml(f.busca||'')}" placeholder="Buscar descrição, valor, contato…" oninput="_filtrarLancsDebounced()"></div>
@@ -31094,7 +31135,7 @@ async function renderFinLancamentos(el){
 
     <div class="mov-filtros">
       <div class="mov-filtros-grupo"><span class="mov-filtros-lb">TIPO</span>
-        ${[['tudo','Tudo'],['entradas','Entradas'],['saidas','Saídas'],['repasses','Repasses']].map(([k,lb])=>`<span class="mov-chip ${f.tipoView===k?'on':''}" onclick="setFiltroMovTipo('${k}')">${lb}</span>`).join('')}
+        ${[['tudo','Tudo'],['entradas','Entradas'],['saidas','Saídas'],['repasses','Repasses'],['judicial','Judicial']].map(([k,lb])=>`<span class="mov-chip ${f.tipoView===k?'on':''}" onclick="setFiltroMovTipo('${k}')">${lb}</span>`).join('')}
       </div>
       <div class="mov-sep"></div>
       <div class="mov-filtros-grupo"><span class="mov-filtros-lb">SITUAÇÃO</span>
