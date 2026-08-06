@@ -16,6 +16,7 @@ const NODE_GLOBALS = {
   setTimeout: 'readonly',
   clearTimeout: 'readonly',
   AbortController: 'readonly',
+  AbortSignal: 'readonly',
   __dirname: 'readonly',
   __filename: 'readonly',
 };
