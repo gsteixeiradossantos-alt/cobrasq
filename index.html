@@ -28000,15 +28000,18 @@ window.finApi = (function(){
     const { data } = await sb.from('fin_lancamento_categoria').select('lancamento_id,fin_categoria(descricao)').limit(5000);
     return (data||[]).filter(r=>/repasse/i.test((r.fin_categoria&&r.fin_categoria.descricao)||'')).map(r=>r.lancamento_id);
   }
-  // IDs de lançamento de origem judicial (usado pelo filtro TIPO=Judicial): Acordos
-  // Judiciais, Sisbajud e Penhora de remuneração — nunca Acordos Extrajudiciais, por
-  // isso o "judicia" de "Extrajudiciais" é explicitamente descartado.
+  // IDs de lançamento de origem judicial (usado pelo filtro TIPO=Judicial e pra
+  // EXCLUIR da view padrão de Movimentações — 2026-08-06, pedido do Gustavo).
+  // Só Sisbajud e Penhora de remuneração (bloqueio/penhora bancária ou de salário
+  // via sistema judicial). "Acordos Judiciais" (acordo cujo processo é judicial,
+  // mas cobrado por boleto/Pix normal) fica de fora de propósito — mora em
+  // Movimentações, não aqui.
   async function _idsCategoriaJudicial(){
     const sb = _sb();
     const { data } = await sb.from('fin_lancamento_categoria').select('lancamento_id,fin_categoria(descricao)').limit(5000);
     return (data||[]).filter(r=>{
       const d = (r.fin_categoria && r.fin_categoria.descricao) || '';
-      return (/judicia/i.test(d) && !/extrajudicia/i.test(d)) || /sisbajud/i.test(d) || /penhora/i.test(d);
+      return /sisbajud/i.test(d) || /penhora/i.test(d);
     }).map(r=>r.lancamento_id);
   }
   // IDs de lançamento cuja categoria bate com categoriaId (usado pelo filtro "Categoria").
@@ -28024,7 +28027,12 @@ window.finApi = (function(){
     if(f.tipoView === 'entradas') q = q.eq('tipo_movimento', 1);
     else if(f.tipoView === 'saidas') q = q.eq('tipo_movimento', 0);
     else if(f.tipoView === 'repasses') q = q.in('id', (ids.repasse&&ids.repasse.length)?ids.repasse:['00000000-0000-0000-0000-000000000000']);
-    else if(f.tipoView === 'judicial') q = q.in('id', (ids.judicial&&ids.judicial.length)?ids.judicial:['00000000-0000-0000-0000-000000000000']);
+    if(f.tipoView === 'judicial') {
+      q = q.in('id', (ids.judicial&&ids.judicial.length)?ids.judicial:['00000000-0000-0000-0000-000000000000']);
+    } else if(ids.judicial && ids.judicial.length) {
+      // Fora da aba Judicial, Sisbajud/Penhora nunca aparecem — moram só lá.
+      q = q.not('id', 'in', `(${ids.judicial.join(',')})`);
+    }
     if(f.situacao === 'pendentes') q = q.eq('status', 0);
     else if(f.situacao === 'atraso') q = q.eq('status', 0).lt('data_vencimento', hoje());
     else if(f.situacao === 'conciliados') q = q.eq('conciliado', true);
@@ -28038,10 +28046,12 @@ window.finApi = (function(){
   }
   async function _resolverIdsFiltro(filtros){
     const f = filtros||{};
+    // judicial é resolvido sempre (não só no tipoView='judicial'): fora dessa aba
+    // ele é usado pra EXCLUIR Sisbajud/Penhora da lista, não só pra incluir.
     const [repasse, categoria, judicial] = await Promise.all([
       f.tipoView==='repasses' ? _idsCategoriaRepasse() : Promise.resolve(null),
       f.categoriaId ? _idsPorCategoria(f.categoriaId) : Promise.resolve(null),
-      f.tipoView==='judicial' ? _idsCategoriaJudicial() : Promise.resolve(null),
+      _idsCategoriaJudicial(),
     ]);
     return { repasse, categoria, judicial };
   }
@@ -28771,11 +28781,13 @@ const FIN_SECTIONS = {
                      {id:'lancamentos', label:'Movimentações'} ] },
   cobrancas:     { label:'Recebíveis', sub:'o dinheiro do cedente', subtabs:[
                      {id:'cobrancas', label:'Recebíveis'} ] },
-  // Receitas de origem judicial (Acordos Judiciais + Sisbajud + Penhora de remuneração),
-  // separadas das extrajudiciais a pedido do Gustavo (2026-08-06). NÃO confundir com a
-  // aba legada "judicial"/"Custódias judiciais" abaixo — aquela acompanha o status de
-  // bloqueio/alvará de uma custódia; esta é a mesma tela de Movimentações, só filtrada.
-  receitasjudiciais: { label:'Judicial', sub:'receitas de origem judicial', subtabs:[
+  // Receitas de bloqueio/penhora judicial (Sisbajud + Penhora de remuneração), tiradas
+  // de Movimentações e isoladas aqui a pedido do Gustavo (2026-08-06). Acordos Judiciais
+  // (acordo com processo judicial, mas cobrado por boleto/Pix normal) fica de FORA desta
+  // aba de propósito — mora em Movimentações junto com os extrajudiciais. NÃO confundir
+  // com a aba legada "judicial"/"Custódias judiciais" abaixo — aquela acompanha o status
+  // de bloqueio/alvará de uma custódia; esta é a mesma tela de Movimentações, só filtrada.
+  receitasjudiciais: { label:'Judicial', sub:'Sisbajud e penhora de remuneração', subtabs:[
                      {id:'receitasjudiciais', label:'Judicial'} ] },
   // Legado — sem pill própria no topo (ver FIN_SECTIONS_VISIVEIS), mas as sub-abas
   // continuam roteáveis via setFinTab(...) a partir de Configurações/Relatórios.
@@ -30819,7 +30831,7 @@ async function renderFinLancamentos(el){
           <button class="mov-mesnav-btn" onclick="finMovMudarMes(1)" title="Próximo mês">${ico('chevron-right',12)}</button>
         </div>
         <div class="mov-h1">${f.tipoView==='judicial' ? 'Judicial' : 'Movimentações'}</div>
-        <div class="mov-sub">${f.tipoView==='judicial' ? 'Receitas de origem judicial: acordos judiciais, Sisbajud e penhora de remuneração.' : 'Selecione linhas para confirmar pagamento, conciliar ou reclassificar em lote.'}</div>
+        <div class="mov-sub">${f.tipoView==='judicial' ? 'Sisbajud e penhora de remuneração — bloqueios e descontos judiciais.' : 'Selecione linhas para confirmar pagamento, conciliar ou reclassificar em lote.'}</div>
       </div>
       <div class="mov-toolbar-r">
         <div class="mov-search">${ico('search',14)}<input type="search" id="filtLancBusca" value="${escHtml(f.busca||'')}" placeholder="Buscar descrição, valor, contato…" oninput="_filtrarLancsDebounced()"></div>
