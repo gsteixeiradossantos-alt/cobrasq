@@ -28000,18 +28000,26 @@ window.finApi = (function(){
     const { data } = await sb.from('fin_lancamento_categoria').select('lancamento_id,fin_categoria(descricao)').limit(5000);
     return (data||[]).filter(r=>/repasse/i.test((r.fin_categoria&&r.fin_categoria.descricao)||'')).map(r=>r.lancamento_id);
   }
-  // IDs de lançamento de origem judicial (usado pelo filtro TIPO=Judicial e pra
-  // EXCLUIR da view padrão de Movimentações — 2026-08-06, pedido do Gustavo).
-  // Só Sisbajud e Penhora de remuneração (bloqueio/penhora bancária ou de salário
-  // via sistema judicial). "Acordos Judiciais" (acordo cujo processo é judicial,
-  // mas cobrado por boleto/Pix normal) fica de fora de propósito — mora em
-  // Movimentações, não aqui.
+  // IDs de lançamento de origem judicial AINDA NÃO LIBERADA (usado pelo filtro
+  // TIPO=Judicial, pra EXCLUIR da view padrão de Movimentações, e pra excluir do KPI
+  // mensal da aba Caixa — 2026-08-06, pedido do Gustavo). Só Sisbajud e Penhora de
+  // remuneração (bloqueio/penhora bancária ou de salário via sistema judicial).
+  // "Acordos Judiciais" (acordo cujo processo é judicial, mas cobrado por boleto/Pix
+  // normal) fica de fora de propósito — mora em Movimentações, não aqui.
+  //
+  // judicial_liberado_em NULL = ainda é só expectativa de bloqueio, não é caixa de
+  // verdade (fica só na aba Judicial). Uma vez confirmado o recebimento (botão
+  // "Confirmar recebimento" na aba Judicial seta essa data), o lançamento passa a se
+  // comportar como qualquer outro — sai daqui, aparece em Movimentações e no KPI da
+  // Caixa. A categoria Sisbajud/Penhora continua no lançamento (rastro de origem).
   async function _idsCategoriaJudicial(){
     const sb = _sb();
-    const { data } = await sb.from('fin_lancamento_categoria').select('lancamento_id,fin_categoria(descricao)').limit(5000);
+    const { data } = await sb.from('fin_lancamento_categoria').select('lancamento_id,fin_categoria(descricao),fin_lancamento(judicial_liberado_em)').limit(5000);
     return (data||[]).filter(r=>{
       const d = (r.fin_categoria && r.fin_categoria.descricao) || '';
-      return /sisbajud/i.test(d) || /penhora/i.test(d);
+      const eJudicial = /sisbajud/i.test(d) || /penhora/i.test(d);
+      const jaLiberado = !!(r.fin_lancamento && r.fin_lancamento.judicial_liberado_em);
+      return eJudicial && !jaLiberado;
     }).map(r=>r.lancamento_id);
   }
   // IDs de lançamento cuja categoria bate com categoriaId (usado pelo filtro "Categoria").
@@ -28132,6 +28140,13 @@ window.finApi = (function(){
     const futureLimit = new Date(Date.now()+30*86400000).toISOString().slice(0,10);
     const hojeLimit   = new Date().toISOString().slice(0,10); // piso: só vencimentos a partir de hoje
 
+    // Judicial (Sisbajud/Penhora) ainda não liberado é expectativa de bloqueio, não
+    // caixa de verdade — não deve inflar entradas/saídas do mês (pedido do Gustavo
+    // 2026-08-06; mesma exclusão que Movimentações já aplica — ver _idsCategoriaJudicial
+    // e a coluna fin_lancamento.judicial_liberado_em).
+    const idsJudicial = await _idsCategoriaJudicial();
+    const excluirJudicial = q => idsJudicial.length ? q.not('id','in',`(${idsJudicial.join(',')})`) : q;
+
     // Server-side aggregate via RPC seria ideal, mas pra evitar criar função usamos
     // queries leves (somente coluna valor) — ainda assim PostgREST limita 1000 por padrão.
     // Workaround: fazer paginação até esgotar
@@ -28152,8 +28167,8 @@ window.finApi = (function(){
     }
 
     const [rec, des, pend] = await Promise.all([
-      sumValor(q=>q.eq('tipo_movimento',1).gte('data_competencia',ini).lte('data_competencia',fim)),
-      sumValor(q=>q.eq('tipo_movimento',0).gte('data_competencia',ini).lte('data_competencia',fim)),
+      sumValor(q=>excluirJudicial(q.eq('tipo_movimento',1).gte('data_competencia',ini).lte('data_competencia',fim))),
+      sumValor(q=>excluirJudicial(q.eq('tipo_movimento',0).gte('data_competencia',ini).lte('data_competencia',fim))),
       sumValor(q=>q.eq('tipo_movimento',1).eq('status',0).gte('data_vencimento', hojeLimit).lte('data_vencimento', futureLimit)),
     ]);
     return {
@@ -28247,13 +28262,36 @@ window.finApi = (function(){
     const vPago = (opts.valorPago!=null) ? Math.abs(+opts.valorPago) : vTotal;
     const status = vPago + 0.005 >= vTotal ? 1 : 2;
     const sign = lanc.tipo_movimento === 0 ? -1 : 1;
+    const dataPg = opts.dataPagamento || new Date().toISOString().slice(0,10);
     const payload = {
-      data_pagamento: opts.dataPagamento || new Date().toISOString().slice(0,10),
+      data_pagamento: dataPg,
+      // A lista/agrupamento por dia usa data_competencia — sem isto o lançamento
+      // continua aparecendo no dia do vencimento original mesmo depois de pago
+      // numa data diferente (pedido do Gustavo 2026-08-06).
+      data_competencia: dataPg,
       valor_pago: sign * vPago,
       status,
     };
     if(opts.contaId) payload.conta_id = opts.contaId;
     const { error } = await sb.from('fin_lancamento').update(payload).eq('id', id);
+    if(error) throw error;
+  }
+
+  // Interliga a aba Judicial com Movimentações (pedido do Gustavo 2026-08-06): um
+  // lançamento Sisbajud/Penhora é só expectativa de bloqueio até o valor cair de
+  // verdade numa conta. Ao confirmar, sai da aba Judicial (judicial_liberado_em
+  // deixa de ser NULL — ver _idsCategoriaJudicial) e passa a aparecer normalmente em
+  // Movimentações e no KPI da Caixa, na data em que foi realmente recebido. A
+  // categoria Sisbajud/Penhora não é removida — mantém o rastro de origem.
+  async function confirmarRecebimentoJudicial(id, dataRecebimento, contaId){
+    const sb = _sb();
+    const { error } = await sb.from('fin_lancamento').update({
+      judicial_liberado_em: dataRecebimento,
+      status: 1,
+      data_pagamento: dataRecebimento,
+      data_competencia: dataRecebimento,
+      conta_id: contaId,
+    }).eq('id', id);
     if(error) throw error;
   }
 
@@ -28714,6 +28752,7 @@ window.finApi = (function(){
     getLancamento,
     saveLancamento,
     pagarLancamento,
+    confirmarRecebimentoJudicial,
     deleteLancamento,
     confirmarPagamentoLote,
     conciliarLote,
@@ -31039,11 +31078,18 @@ async function carregarPaginaLancs(){
     if(tbody){
       const catLabel=(l)=>{ const cats=(l._categorias||[]).map(c=>c.fin_categoria&&c.fin_categoria.descricao).filter(Boolean); return cats.length ? (cats.length>1?`${cats[0]} +${cats.length-1}`:cats[0]) : '—'; };
       const contaLabel=(l)=> (l.fin_conta&&l.fin_conta.descricao) || '—';
+      const ehJudicial = st.filtros.tipoView === 'judicial';
       const rowHtml = (l) => {
         const isRec = l.tipo_movimento===1;
         const st2 = _movSituacaoPill(l);
         const sel = st.sel.has(l.id);
         const dt = (l.data_competencia||'').slice(5,10).split('-').reverse().join('/');
+        const acao = ehJudicial
+          ? `<span class="mov-c-acao" style="width:auto;display:flex;flex-direction:column;align-items:flex-end;gap:2px;">
+              <span onclick="confirmarRecebimentoJudicial('${l.id}')" style="color:#5E7C58;font-weight:600;white-space:nowrap;">Confirmar receb.</span>
+              <span onclick="verLancamentoDrawer('${l.id}')" style="white-space:nowrap;">Abrir</span>
+            </span>`
+          : `<span class="mov-c-acao" onclick="verLancamentoDrawer('${l.id}')">Abrir</span>`;
         return `<div class="mov-row ${sel?'sel':''}" data-lanc-id="${l.id}">
           <div class="mov-box ${sel?'on':''}" onclick="toggleSelLanc('${l.id}')">${sel?'✓':''}</div>
           <span class="mov-c-data">${dt||'—'}</span>
@@ -31052,7 +31098,7 @@ async function carregarPaginaLancs(){
           <span class="mov-c-conta" title="${escHtml(contaLabel(l))}">${escHtml(contaLabel(l))}</span>
           <span class="mov-c-valor" style="color:${isRec?'#5E7C58':'#A65A4A'};">${isRec?'+':'−'} ${fmtR(Math.abs(+l.valor||0))}</span>
           <span class="mov-c-sit" style="background:${st2.bg};color:${st2.fg};">${st2.txt}</span>
-          <span class="mov-c-acao" onclick="verLancamentoDrawer('${l.id}')">Abrir</span>
+          ${acao}
         </div>`;
       };
       // Extrato bancário: agrupado por dia (cabeçalho com entradas/saídas/saldo do dia),
@@ -31120,6 +31166,27 @@ async function excluirLancamentoSrv(id){
       showToast('Erro: '+e.message, 'danger');
     }
   });
+}
+
+// Aba Judicial → Movimentações: confirma que um bloqueio Sisbajud/Penhora virou
+// dinheiro de verdade numa conta. Pede a data do recebimento e a conta (mesmo padrão
+// de loteAlterarConta — digitar o nome cadastrado), então move o lançamento pra fora
+// da aba Judicial (ver finApi.confirmarRecebimentoJudicial).
+async function confirmarRecebimentoJudicial(id){
+  const dataRec = prompt('Data em que o valor caiu na conta (AAAA-MM-DD):', hoje());
+  if(!dataRec) return;
+  const dim = window._finLancDim||{contas:[]};
+  const escolha = prompt(`Em qual conta caiu?\nDigite o nome exatamente como cadastrado:\n\n${(dim.contas||[]).map(c=>c.descricao).join(', ')}`);
+  if(!escolha) return;
+  const conta = (dim.contas||[]).find(c=>c.descricao.trim().toLowerCase()===escolha.trim().toLowerCase());
+  if(!conta){ showToast('Conta não encontrada.','danger'); return; }
+  if(!confirm(`Confirmar recebimento em ${dataRec.split('-').reverse().join('/')} na conta ${conta.descricao}?\n\nO lançamento sai da aba Judicial e passa a valer como entrada normal em Movimentações.`)) return;
+  try{
+    await finApi.confirmarRecebimentoJudicial(id, dataRec, conta.id);
+    showToast('Recebimento confirmado — lançamento movido para Movimentações.','success');
+    await carregarPaginaLancs();
+    _loadFinHeader();
+  }catch(e){ showToast('Erro: '+e.message,'danger'); }
 }
 
 // Tela 11 — drawer lateral de detalhe do lançamento (read-only + ações).
