@@ -25,4 +25,28 @@ async function zapiSendText(phone, message) {
   return data;
 }
 
-module.exports = { zapiSendText };
+// Envia um PDF (base64) como DOCUMENTO no WhatsApp (Z-API send-document/pdf) — mesmo
+// endpoint que supabase/functions/bia-atendimento/index.ts (enviarDocumentoPdf) usa no
+// runtime Deno; esta é a versão Node/Vercel. Devolve true/false (best-effort).
+async function zapiSendDocumentPdf(phone, base64, fileName) {
+  const token = process.env.ZAPI_TOKEN || '';
+  const instance = process.env.ZAPI_INSTANCE_ID || '';
+  const clientTk = process.env.ZAPI_CLIENT_TOKEN || '';
+  if (!token || !instance || !base64) return false;
+  const url = `https://api.z-api.io/instances/${encodeURIComponent(instance)}/token/${encodeURIComponent(token)}/send-document/pdf`;
+  const headers = { 'Content-Type': 'application/json' };
+  if (clientTk) headers['Client-Token'] = clientTk;
+  let fone = String(phone).replace(/\D/g, '');
+  if (fone && fone.length <= 11 && !fone.startsWith('55')) fone = '55' + fone;
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ phone: fone, document: `data:application/pdf;base64,${base64}`, fileName }),
+    });
+    const j = await r.json().catch(() => null);
+    return !!(r.ok && j && !j.error && (j.messageId || j.id || j.zaapId));
+  } catch { return false; }
+}
+
+module.exports = { zapiSendText, zapiSendDocumentPdf };
