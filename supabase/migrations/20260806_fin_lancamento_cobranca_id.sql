@@ -27,4 +27,5 @@ set cobranca_id = fo.devedor_id
 from public.fin_operacao fo
 where fo.lancamento_receita_id = fl.id
   and fl.cobranca_id is null
-  and fo.devedor_id is not null;
+  and fo.devedor_id is not null
+  and exists (select 1 from public.cobrancas c where c.id = fo.devedor_id);
