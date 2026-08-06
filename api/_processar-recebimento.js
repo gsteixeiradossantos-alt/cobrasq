@@ -25,6 +25,11 @@ function timingSafeEq(a, b) {
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 
+// Cópia de monitoramento: o Gustavo recebe o PDF do recibo de TODO recebimento confirmado
+// (pedido 2026-08-06), independente do devedor ter telefone cadastrado ou não. Só o PDF,
+// sem a mensagem de texto que vai pro devedor.
+const NUMERO_MONITORAMENTO = '46999223332';
+
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   if (!timingSafeEq(req.headers['x-emit-secret'] || '', process.env.EMIT_ACORDO_SECRET || '')) {
@@ -228,30 +233,33 @@ module.exports = async function handler(req, res) {
       } catch (e) { nf = { error: e.message }; }
     }
 
-    // Recibo automático ao devedor (R4) — best-effort. Formato "Financeiro COBRASQ"
-    // (pedido do Gustavo 2026-08-06): PDF do recibo em anexo (mesmo timbrado que a Bia
-    // já usa quando o devedor pede o comprovante manualmente — ver _recibo.js) + a
-    // mensagem confirmando a parcela. Nunca deixa a mensagem dizer "em anexo" se o PDF
-    // não saiu (Chrome cold start etc.) — nesse caso cai no link oficial do Asaas.
+    // Recibo automático (R4) — best-effort. Formato "Financeiro COBRASQ" (pedido do
+    // Gustavo 2026-08-06): PDF do recibo (mesmo timbrado que a Bia já usa quando o
+    // devedor pede o comprovante manualmente — ver _recibo.js), gerado UMA vez e usado
+    // em dois envios independentes:
+    //   1. ao devedor (se tiver telefone cadastrado) — PDF anexo + mensagem confirmando
+    //      a parcela; sem PDF, cai no link oficial do Asaas em vez de mentir "em anexo".
+    //   2. cópia de monitoramento pro número do Gustavo — SÓ o PDF, sem mensagem, em
+    //      TODO recebimento (mesmo sem devedor casado/telefone).
+    const nomeCompleto = (devedor && devedor.nome) || 'Cliente';
+    const dadosRec = {
+      nome: nomeCompleto,
+      valorNum: valorRecebido,
+      valorFmt: valorRecebido.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+      dataISO: row.recebido_em,
+      forma: formaPagamento(payment.billingType),
+      num: 'Nº ' + String(paymentId).slice(-6).toUpperCase(),
+    };
+    let b64 = '';
+    try { b64 = await gerarReciboPdfBase64(dadosRec); } catch (e) { console.warn('[processar-recebimento] gerar recibo PDF:', e.message); }
+
     let zap = null, pdfEnviado = false;
     const tel = String((devedor && devedor.telefone) || '').replace(/\D/g, '');
     if (tel) {
-      const nomeCompleto = (devedor && devedor.nome) || 'Cliente';
-      const meioTxt = { PIX: 'do Pix', BOLETO: 'do boleto', CREDIT_CARD: 'do cartão', DEBIT_CARD: 'do cartão' }[String(payment.billingType || '').toUpperCase()] || 'do pagamento';
-      const linhaParcela = row.parcela && row.total_parcelas ? ` referente a parcela n. ${row.parcela} de ${row.total_parcelas} do acordo realizado` : '';
-
-      const dadosRec = {
-        nome: nomeCompleto,
-        valorNum: valorRecebido,
-        valorFmt: valorRecebido.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-        dataISO: row.recebido_em,
-        forma: formaPagamento(payment.billingType),
-        num: 'Nº ' + String(paymentId).slice(-6).toUpperCase(),
-      };
-      let b64 = '';
-      try { b64 = await gerarReciboPdfBase64(dadosRec); } catch (e) { console.warn('[processar-recebimento] gerar recibo PDF:', e.message); }
       if (b64) { try { pdfEnviado = await zapiSendDocumentPdf(tel, b64, 'Recibo COBRASQ.pdf'); } catch (e) { pdfEnviado = false; } }
 
+      const meioTxt = { PIX: 'do Pix', BOLETO: 'do boleto', CREDIT_CARD: 'do cartão', DEBIT_CARD: 'do cartão' }[String(payment.billingType || '').toUpperCase()] || 'do pagamento';
+      const linhaParcela = row.parcela && row.total_parcelas ? ` referente a parcela n. ${row.parcela} de ${row.total_parcelas} do acordo realizado` : '';
       const recibo = String((payment && payment.transactionReceiptUrl) || '').trim();
       const linhaAnexo = pdfEnviado
         ? 'Em anexo, seu recibo de pagamento.'
@@ -259,6 +267,11 @@ module.exports = async function handler(req, res) {
 
       const msg = `*Financeiro COBRASQ*\n${nomeCompleto}, o pagamento ${meioTxt}${linhaParcela} foi confirmado. ✅${linhaAnexo ? '\n\n' + linhaAnexo : ''}\n_Agradecemos!_`;
       try { zap = await zapiSendText(tel, msg); } catch (e) { zap = { error: e.message }; }
+    }
+
+    let monitorEnviado = false;
+    if (b64) {
+      try { monitorEnviado = await zapiSendDocumentPdf(NUMERO_MONITORAMENTO, b64, `Recibo COBRASQ - ${nomeCompleto}.pdf`); } catch (e) { monitorEnviado = false; }
     }
 
     return res.status(200).json({
@@ -270,6 +283,7 @@ module.exports = async function handler(req, res) {
       repasse_status: row.repasse_status,
       recibo_pdf_enviado: pdfEnviado,
       recibo_enviado: !!(zap && zap.messageId),
+      recibo_monitoramento_enviado: monitorEnviado,
       nf,
     });
   } catch (e) {
