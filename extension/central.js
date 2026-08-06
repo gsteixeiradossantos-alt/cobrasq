@@ -85,6 +85,10 @@ const state = {
   primeiroValidado: false,
   autoConcluir: false,  // Projudi: modo automático (pula revisão; 1º caso você confere,
                         // demais concluem sozinhos SE os arquivos já forem .p7s assinados)
+  // Projudi: 'varios' = lote (agrupa pelo nº do processo no nome do arquivo);
+  // 'um' = TODOS os documentos escolhidos vão para UM único processo (1 juntada).
+  alvoProjudi: 'varios',
+  numeroUnico: '',      // nº digitado no modo "um processo apenas" (opcional)
   rodando: false,
 };
 
@@ -117,9 +121,16 @@ async function escolherPasta() {
   state.pastaNome = root.name;
   state.casos = [];
   if (state.sistema === 'projudi') {
+    const raiz = await lerPdfsDaPasta(root);
+    if (state.alvoProjudi === 'um') {
+      // UM PROCESSO APENAS: todos os PDFs da pasta (inclusive das subpastas) formam
+      // UMA petição só. Não entra em lote nem agrupa por número.
+      const todos = [...raiz];
+      for await (const [, h] of root.entries()) if (h.kind === 'directory') todos.push(...await lerPdfsDaPasta(h));
+      if (todos.length) state.casos.push(casoProjudiUnico(root.name, todos));
+    } else {
     // Intercorrentes: PDFs soltos AGRUPADOS pelo nº do processo no nome (mesmo processo
     // = 1 juntada com todos os anexos); cada subpasta = 1 caso com vários anexos.
-    const raiz = await lerPdfsDaPasta(root);
     state.casos.push(...agruparCasosProjudi(raiz));
     const subs = [];
     for await (const [nome, h] of root.entries()) if (h.kind === 'directory') subs.push([nome, h]);
@@ -127,6 +138,7 @@ async function escolherPasta() {
     for (const [nome, h] of subs) {
       const docs = await lerPdfsDaPasta(h);
       if (docs.length) state.casos.push(novoCasoProjudi(nome, docs));
+    }
     }
     if (!state.casos.length) { renderFase1('Nenhum PDF encontrado (nem na pasta, nem em subpastas).'); return; }
     state.casos.forEach(c => { c.extracao = 'ok'; }); // sem IA no modo Projudi (v1)
@@ -201,6 +213,17 @@ function agruparCasosProjudi(docs) {
   for (const d of semNumero) casos.push(novoCasoProjudi(d.nome, [d]));
   return casos;
 }
+// "Um processo apenas": TODOS os documentos numa juntada só. O número vem do campo
+// digitado na fase 1 (se houver) ou do nome de algum arquivo; sem número, o caso pausa
+// na revisão pedindo o nº — a extensão nunca chuta processo.
+function casoProjudiUnico(nomeBase, docs) {
+  const caso = novoCasoProjudi(nomeBase, docs);
+  const digitado = acharCnj(state.numeroUnico || '');
+  if (digitado) caso.numero_processo = digitado;
+  const n = caso.numero_processo;
+  caso.nome = (n || 'sem número') + ' — ' + docs.length + (docs.length === 1 ? ' documento' : ' documentos');
+  return caso;
+}
 function novoCasoProjudi(nome, docs) {
   docs.forEach((d, i) => d.principal = (i === 0));
   const numero = acharCnj(nome) || acharCnj(docs.map(d => d.nome).join(' '));
@@ -245,10 +268,22 @@ function renderFase1(msgErro) {
     • <b>Lote:</b> uma pasta-mãe com <b>uma subpasta por caso</b>.<br>
     Pode ser a pasta do OneDrive sincronizada no computador. Só leitura, nada sai da sua máquina além do envio ao tribunal e da peça principal à IA do sistema.<br>
     ⚠️ A leitura por IA usa o servidor do app Cobrasq — deixe o <b>painel aberto e logado</b> em outra aba (a extensão conecta sozinha).</p>`
-    : `<p class="muted">• O <b>número do processo vem do nome do arquivo</b> (ex.: <code>0001234-56.2024.8.16.0079 - pedido de penhora.pdf</code>).<br>
-    • PDFs com o <b>MESMO número</b> viram <b>1 petição só</b> — todos anexados na mesma juntada.<br>
-    • Números diferentes = petições separadas (lote). <b>Subpasta</b> = 1 petição com vários anexos.<br>
-    Sem IA nesta versão: o PDF vai como anexo e você confere tipo/número na revisão. A assinatura/senha no protocolo é <b>sempre sua</b>.</p>`}
+    : `<div style="display:flex;gap:8px;margin-bottom:10px;">
+      <button class="btn ${state.alvoProjudi === 'varios' ? '' : 'ghost'}" id="alvo-varios" style="flex:1;">📚 Vários processos (lote)</button>
+      <button class="btn ${state.alvoProjudi === 'um' ? '' : 'ghost'}" id="alvo-um" style="flex:1;">📌 Um processo apenas</button>
+    </div>
+    ${state.alvoProjudi === 'varios'
+      ? `<p class="muted">• O <b>número do processo vem do nome do arquivo</b> (ex.: <code>0001234-56.2024.8.16.0079 - pedido de penhora.pdf</code>).<br>
+        • PDFs com o <b>MESMO número</b> viram <b>1 petição só</b> — todos anexados na mesma juntada.<br>
+        • Números diferentes = petições separadas (lote). <b>Subpasta</b> = 1 petição com vários anexos.</p>`
+      : `<p class="muted">• <b>TODOS</b> os documentos escolhidos vão para <b>UM único processo</b>, numa <b>só juntada</b>.<br>
+        • O número pode vir do nome de um dos arquivos — ou informe abaixo (você confere na revisão).</p>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+          <label for="num-unico" style="font-weight:600;white-space:nowrap;">Nº do processo:</label>
+          <input id="num-unico" value="${esc(state.numeroUnico || '')}" placeholder="0001234-56.2024.8.16.0079 (opcional)"
+            style="flex:1;padding:7px 9px;border:1px solid #ccc;border-radius:6px;">
+        </div>`}
+    <p class="muted">Sem IA nesta versão: o PDF vai como anexo e você confere tipo/número na revisão. A assinatura/senha no protocolo é <b>sempre sua</b>.</p>`}
     ${msgErro ? `<div class="erro">${esc(msgErro)}</div>` : ''}
     <label style="display:flex;align-items:center;gap:8px;margin:8px 0;padding:8px 10px;border:1px solid ${state.autoConcluir ? '#1a7f37' : '#ccc'};border-radius:8px;cursor:pointer;">
       <input type="checkbox" id="auto-concluir" ${state.autoConcluir ? 'checked' : ''} style="width:16px;height:16px;">
@@ -260,7 +295,9 @@ function renderFase1(msgErro) {
     </div>
     <p class="muted" style="margin-top:6px;">${ehEproc
       ? '📄 <b>Arquivos</b>: os PDFs escolhidos formam <b>1 caso</b> (a inicial + documentos). Para lote de vários casos, use a <b>pasta</b> (uma subpasta por caso).'
-      : '📄 <b>Arquivos</b>: selecione vários PDFs de uma vez — PDFs do <b>mesmo processo</b> (mesmo número no nome) viram <b>1 petição</b> com todos os anexos; números diferentes viram petições separadas (lote).'}</p>
+      : (state.alvoProjudi === 'um'
+        ? '📄 Escolha os documentos desta petição — todos entram <b>juntos, no mesmo processo</b>.'
+        : '📄 <b>Arquivos</b>: selecione vários PDFs de uma vez — PDFs do <b>mesmo processo</b> (mesmo número no nome) viram <b>1 petição</b> com todos os anexos; números diferentes viram petições separadas (lote).')}</p>
   </div>`;
   document.getElementById('modo-eproc').onclick = () => { state.sistema = 'eproc'; renderFase1(); };
   document.getElementById('modo-projudi').onclick = () => { state.sistema = 'projudi'; renderFase1(); };
@@ -268,6 +305,12 @@ function renderFase1(msgErro) {
   if (selTrib) selTrib.onchange = () => { state.tribunal = selTrib.value; try { chrome.storage.local.set({ cobrasq_tribunal: state.tribunal }); } catch (_) {} };
   const auto = document.getElementById('auto-concluir');
   if (auto) auto.onclick = () => { state.autoConcluir = auto.checked; try { chrome.storage.local.set({ cobrasq_auto_concluir: state.autoConcluir }); } catch (_) {} renderFase1(); };
+  const bVarios = document.getElementById('alvo-varios');
+  if (bVarios) bVarios.onclick = () => { state.alvoProjudi = 'varios'; renderFase1(); };
+  const bUm = document.getElementById('alvo-um');
+  if (bUm) bUm.onclick = () => { state.alvoProjudi = 'um'; renderFase1(); };
+  const inpNum = document.getElementById('num-unico');
+  if (inpNum) inpNum.oninput = () => { state.numeroUnico = inpNum.value; };
   document.getElementById('pick').onclick = () => escolherPasta().catch(e => renderFase1(String(e.message || e)));
   document.getElementById('pick-arqs').onclick = () => escolherArquivos().catch(e => renderFase1(String(e.message || e)));
 }
@@ -294,8 +337,12 @@ async function escolherArquivos() {
   state.pastaNome = docs.length === 1 ? docs[0].nome : (docs.length + ' arquivos');
   state.casos = [];
   if (state.sistema === 'projudi') {
-    // Agrupa pelo nº do processo no nome: vários PDFs do MESMO processo = 1 juntada só.
-    state.casos.push(...agruparCasosProjudi(docs));
+    if (state.alvoProjudi === 'um') {
+      state.casos.push(casoProjudiUnico(state.pastaNome, docs)); // tudo num processo só
+    } else {
+      // Agrupa pelo nº do processo no nome: vários PDFs do MESMO processo = 1 juntada só.
+      state.casos.push(...agruparCasosProjudi(docs));
+    }
     state.casos.forEach(c => { c.extracao = 'ok'; }); // sem IA no modo Projudi (v1)
     renderFase3();
     return;

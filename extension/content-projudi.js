@@ -675,9 +675,25 @@
       // Lista já "cheia" SEM termos enviado nada nesta passada: confere se são MESMO os
       // nossos arquivos (auditoria: staging abandonado de outra tentativa passava batido
       // e o Confirmar Inclusão validava arquivos alheios). Nome não bate → humano decide.
-      const txtTabela = norm(Array.from(document.querySelectorAll(
+      //
+      // ATENÇÃO: o Projudi RENOMEIA o arquivo ao subir — remove pontuação/underscores e
+      // DESEMBRULHA o .p7s (vira .pdf com "Assinado: Sim"). Ex.: enviado
+      // "0001044-19.2025.8.16.0079_Manifestacao_v1.pdf.p7s" aparece como
+      // "000104419.2025.8.16.0079Manifestacaov1.pdf". Por isso a comparação é por
+      // ALFANUMÉRICOS, sem extensão — a comparação textual crua dava falso positivo e
+      // TRAVAVA o caminho normal (bug relatado na v0.10.20).
+      const alnum = (s) => norm(s).replace(/[^a-z0-9]/g, '');
+      const semExt = (s) => String(s || '').replace(/\.(pdf\.p7s|p7s|pdf)$/i, '');
+      const txtTabela = alnum(Array.from(document.querySelectorAll(
         '#fileUploadForm .resultTable, form[name="fileUploadForm"] .resultTable')).map(t => t.textContent || '').join(' '));
-      const nossos = (c.docs || []).filter(d => txtTabela.includes(norm(d.nome)));
+      const bate = (d) => {
+        const k = alnum(semExt(d.nome));
+        if (!k) return false;
+        if (txtTabela.includes(k)) return true;
+        // Projudi pode TRUNCAR nomes longos: aceita casar por um prefixo robusto.
+        return k.length > 24 && txtTabela.includes(k.slice(0, 24));
+      };
+      const nossos = (c.docs || []).filter(bate);
       if (txtTabela && nossos.length < c.docs.length) {
         return pausar(c, 'a lista de envio já tem ' + jaSubiu + ' arquivo(s), mas só reconheci ' + nossos.length + '/' + c.docs.length +
           ' pelo nome — pode haver arquivo de outra tentativa. Confira a lista (remova o que não for deste caso), complete se faltar e clique <b>Continuar</b>.');
