@@ -125,6 +125,13 @@ module.exports = async function handler(req, res) {
       } catch (e) { console.warn('[emitir-acordo] fallback acordo_final:', e && e.message); }
     }
 
+    // R-19 (caso Edilaine, 05/08/2026): acordo.valor_total é o valor CHEIO do
+    // acordo (entrada incluída, ex. PIX pago à parte). Sem subtrair a entrada
+    // aqui, o Asaas parcelava o total cheio em nParc boletos e cobrava a
+    // entrada de novo, embutida em cada parcela.
+    const entrada = Number(acordo.valor_entrada) || 0;
+    if (entrada > 0) total = round2(total - entrada);
+
     if (!(total > 0)) return res.status(400).json({ error: 'acordo sem valor_total' });
     const firstDue = acordo.data_primeiro_venc || (parcelas[0] && (parcelas[0].venc || parcelas[0].vencimento)) || addDaysISO(3);
 
@@ -163,6 +170,8 @@ module.exports = async function handler(req, res) {
       boletos_emitidos: true,
       emitido_em: new Date().toISOString(),
       emitido_via: manual ? 'manual' : 'auto',
+      valor_entrada_excluida: entrada > 0 ? entrada : undefined,
+      valor_boletos: total,
       asaas_installment_id: charge.installment || null,
       asaas_first_payment_id: charge.id || null,
       asaas_invoice_url: invoiceUrl,

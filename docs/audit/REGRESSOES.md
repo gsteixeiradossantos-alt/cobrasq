@@ -295,6 +295,36 @@ nela (senão é `permission denied`, não linha filtrada); e a função precisa 
 
 ---
 
+## R-19 · Corrente acordo → boleto cobrava a entrada de novo (n8n/ZapSign)
+
+**O que acontece.** `acordos.valor_total` guarda o valor CHEIO do acordo
+(entrada incluída) — é assim que o fluxo manual de "criar acordo" em
+`index.html` sempre gravou, junto com `acordos.valor_entrada` à parte. Mas o
+fluxo ZapSign/n8n (`gerar-acordo-termo` → RPC `vincular_zapsign_acordo`) nunca
+preenchia `valor_entrada`, e `api/_emitir-acordo.js` soma `valor_total` inteiro
+e divide por `num_parcelas` sem descontar nada. Resultado: uma entrada paga à
+parte (ex. PIX) era cobrada de novo, embutida nas parcelas do boleto.
+
+Aconteceu em 05/08/2026 com Edilaine Aparecida Dutra da Silva: acordo de
+R$5.054,00 com entrada de R$500,00 (PIX) + 9x deveria gerar 9 boletos de
+R$506,00; sem o desconto da entrada, o Asaas gerou 9 boletos de ~R$561/554
+(total cheio ÷ 9). Corrigido manualmente no Asaas por Gustavo antes do fix de
+código.
+
+**Teste:** criar/editar um acordo com "Tem entrada?" marcado pela
+`peticao-teixeira-azzolin` (modo acordo), assinar no ZapSign (ou simular a
+chamada a `gerar-acordo-termo`) e conferir `acordos.valor_entrada` preenchido
+e o `totalValue` enviado ao Asaas (`api/_emitir-acordo.js` → `pay.totalValue`)
+já descontando a entrada.
+
+**Corrigido:** `20260806_vincular_zapsign_acordo_entrada.sql` (RPC ganha
+`p_valor_entrada`) + `supabase/functions/gerar-acordo-termo/index.ts` (passa
+`ac.entrada.valor`) + `api/_emitir-acordo.js` (subtrai `valor_entrada` de
+`total` antes de montar o installment). **Migração e deploy da edge function
+pendentes de aplicação manual em produção** — ver PR.
+
+---
+
 ### Invariantes guardadas (não quebrar)
 - **F-04** view `casos`/`view_casos` SEMPRE `WITH (security_invoker = true)`.
 - **F-20** trigger anti-encolhimento do blob + rebase do baseline no cliente.
