@@ -72,11 +72,15 @@ module.exports = async function handler(req, res) {
     };
     await sbFetch(`fin_operacao?id=eq.${op.id}`, { method: 'PATCH', body: JSON.stringify(update) });
 
-    // Ponte fin_lancamento: ao concluir, marca a despesa de repasse como PAGA.
+    // Ponte fin_lancamento: ao concluir, marca a despesa de repasse como PAGA. Move
+    // data_competencia junto — senão a linha some do dia/mês em que o repasse saiu de
+    // verdade e fica presa no dia em que foi cadastrada (mesmo bug do lado da receita,
+    // pedido do Gustavo 2026-08-06).
     if (concluido && op.lancamento_despesa_id) {
+      const hoje = new Date().toISOString().slice(0, 10);
       await sbFetch(`fin_lancamento?id=eq.${op.lancamento_despesa_id}`, {
         method: 'PATCH',
-        body: JSON.stringify({ status: 1, data_pagamento: new Date().toISOString().slice(0, 10), valor_pago: -(Number(op.valor_capital) || 0) }),
+        body: JSON.stringify({ status: 1, data_pagamento: hoje, data_competencia: hoje, valor_pago: -(Number(op.valor_capital) || 0) }),
       }).catch(() => {});
     }
 

@@ -175,7 +175,10 @@ module.exports = async function handler(req, res) {
 
         if (pendenteExistente) {
           await sbFetch(`fin_lancamento?id=eq.${pendenteExistente.id}`, { method: 'PATCH', body: JSON.stringify({
-            status: 1, valor_pago: valorRecebido, data_pagamento: row.recebido_em,
+            // data_competencia também move pra data real do pagamento — senão a linha
+            // continua aparecendo/agrupada no dia do vencimento original (pedido do
+            // Gustavo 2026-08-06), mesmo já tendo sido baixada em outra data.
+            status: 1, valor_pago: valorRecebido, data_pagamento: row.recebido_em, data_competencia: row.recebido_em,
             observacoes: `${pendenteExistente.observacoes || ''} | confirmado via Asaas payment ${paymentId} em ${row.recebido_em}.`,
           }) }).catch(() => null);
           lancReceitaId = pendenteExistente.id;
