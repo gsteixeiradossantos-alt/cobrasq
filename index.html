@@ -28771,16 +28771,20 @@ window._finLancState = window._finLancState || { page:1, filtros:Object.assign({
 
 // Agrupamento das antigas 14 abas em 5 seções (navegação de topo estilo CRM).
 // Cada sub-aba reaproveita as funções renderFin* existentes via renderFinTab().
-// Reformulação do handoff: só 3 abas visíveis no topo (Caixa/Movimentações/Recebíveis —
+// Reformulação do handoff: só 3 abas visíveis no topo (Caixa/Movimentações/Judicial —
 // ver FIN_SECTIONS_VISIVEIS abaixo). "Cadastros" e "Relatórios" saem do topo do Financeiro
 // (entram como atalhos em Configurações/Relatórios — ver _finSectionOf), mas os próprios
 // subtabs/renderFin* continuam aqui, intactos, para não duplicar nenhuma tela já pronta.
+// A aba "Recebíveis" (cobrancas) existiu aqui até 2026-08-06: fazia a mesma coisa que a
+// página própria "Repasses a clientes" (#/repasses, renderRepassesClientes) — as duas
+// liam fin_operacao e mostravam repasse pendente/feito. A pedido do Gustavo, fundidas em
+// uma só: o conteúdo exclusivo de Recebíveis (KPIs de cobrança Asaas, acordos assinados
+// pendentes de providência, composição dos recebíveis, inadimplência) foi para dentro do
+// Painel de "Repasses a clientes" — ver _repRenderPainel.
 const FIN_SECTIONS = {
   visao:         { label:'Caixa', sub:'o dinheiro da COBRASQ', subtabs:[{id:'visao', label:'Caixa'}] },
   movimentacoes: { label:'Movimentações', sub:'analisar e confirmar', subtabs:[
                      {id:'lancamentos', label:'Movimentações'} ] },
-  cobrancas:     { label:'Recebíveis', sub:'o dinheiro do cedente', subtabs:[
-                     {id:'cobrancas', label:'Recebíveis'} ] },
   // Receitas de bloqueio/penhora judicial (Sisbajud + Penhora de remuneração), tiradas
   // de Movimentações e isoladas aqui a pedido do Gustavo (2026-08-06). Acordos Judiciais
   // (acordo com processo judicial, mas cobrado por boleto/Pix normal) fica de FORA desta
@@ -28802,7 +28806,7 @@ const FIN_SECTIONS = {
                      {id:'diagnostico', label:'Diagnóstico'} ] },
   // Sub-telas antigas de Movimentações/Inadimplência, dobradas em filtros/ações
   // (Transferências e Recorrências → tipo de lançamento; Conciliação → ação em lote;
-  // Repasses → fila "Repasses ao cedente" dentro de Recebíveis; Todas as cobranças/
+  // Repasses → fila "Repasses ao cedente" legada dentro do Financeiro; Todas as cobranças/
   // Custódias judiciais → sem pill própria, ainda roteáveis por link direto).
   _legado:       { label:'', subtabs:[
                      {id:'transferencias', label:'Transferências'},
@@ -28813,11 +28817,10 @@ const FIN_SECTIONS = {
                      {id:'judicial', label:'Custódias judiciais'} ] },
   // Importação Asaas movida p/ o menu lateral "Importação" (renderImportacao, aba Asaas).
 };
-// Estas 4 aparecem como pill no topo do Financeiro (ordem = handoff: Caixa,
-// Movimentações, Recebíveis, Judicial — a última acrescentada 2026-08-06). As demais
-// chaves de FIN_SECTIONS continuam existindo só para _finSectionOf resolver o
-// breadcrumb de telas acessadas por link direto.
-const FIN_SECTIONS_VISIVEIS = ['visao','movimentacoes','cobrancas','receitasjudiciais'];
+// Estas 3 aparecem como pill no topo do Financeiro (ordem = handoff: Caixa,
+// Movimentações, Judicial). As demais chaves de FIN_SECTIONS continuam existindo só
+// para _finSectionOf resolver o breadcrumb de telas acessadas por link direto.
+const FIN_SECTIONS_VISIVEIS = ['visao','movimentacoes','receitasjudiciais'];
 function _finSectionOf(tab){
   for(const [key,s] of Object.entries(FIN_SECTIONS)){
     if(s.subtabs.some(t=>t.id===tab)) return key;
@@ -29097,7 +29100,6 @@ function renderFinTab(tab){
   const pf = document.getElementById('page-fin'); if(pf) pf.classList.toggle('fin-on-visao', tab==='visao');
 
   if(tab==='visao') renderFinVisao(el);
-  else if(tab==='cobrancas') renderFinRecebiveis(el);
   else if(tab==='lancamentos'){
     // Chegar aqui vindo da aba Judicial não deve manter o filtro travado em 'judicial'.
     if(window._finLancState && window._finLancState.filtros && window._finLancState.filtros.tipoView==='judicial'){
@@ -29158,6 +29160,23 @@ async function _repLoad(){
   }
   const dIds=[...new Set(_repState.ops.map(o=>o.devedor_id).filter(Boolean))];
   if(dIds.length){ const {data}=await sb.from('devedores').select('id,nome').in('id',dIds); (data||[]).forEach(d=>_repState.devMap[d.id]=d.nome); }
+
+  // Dados do antigo painel "Recebíveis" (fundido aqui 2026-08-06): cobrança Asaas em
+  // aberto, acordos assinados pendentes de lançar/repassar, inadimplência. Cada um é
+  // best-effort — falha isolada não derruba o carregamento dos repasses.
+  _repState.inad = { devList:[], charges:[], oldestAll:null };
+  _repState.acordosPend = [];
+  _repState.pendenteAsaas = [];
+  try{ _repState.inad = await _loadInadimplentes(); }catch(_){}
+  try{ _repState.acordosPend = await _carregarAcordosPendProvidencia(); }catch(_){}
+  if(DB.config.asaasKey){
+    try{
+      const fim30 = new Date(Date.now()+30*86400000).toISOString().slice(0,10);
+      const rr = await AsaasAPI.req('GET','/payments?limit=100&sort=dueDate&order=asc&status=PENDING').catch(()=>({data:[]}));
+      _repState.pendenteAsaas = (rr?.data||[]).filter(cc=>cc.dueDate && cc.dueDate<=fim30);
+    }catch(_){}
+  }
+
   _repState.loaded = true;
 }
 
@@ -29228,12 +29247,85 @@ function _repShell(innerHtml, agg){
 
 function _repRenderPainel(agg){
   const c=agg;
+  const inad = _repState.inad || {devList:[],charges:[],oldestAll:null};
+  const pendenteAsaas = _repState.pendenteAsaas || [];
+  const acordosPend = _repState.acordosPend || [];
+  const kpiAReceber30 = pendenteAsaas.reduce((s,cc)=>s+(+cc.value||0),0);
+  const kpiVencido = (inad.charges||[]).reduce((s,cc)=>s+(+cc.value||0),0);
+  const in7 = new Date(Date.now()+7*86400000).toISOString().slice(0,10);
+  const venceEm7 = pendenteAsaas.filter(cc=>cc.dueDate<=in7).reduce((s,cc)=>s+(+cc.value||0),0);
+  const aVencer30 = pendenteAsaas.filter(cc=>cc.dueDate>in7).reduce((s,cc)=>s+(+cc.value||0),0);
+  const composTotal = kpiVencido + venceEm7 + aVencer30 || 1;
+
   // alerta de repasse atrasado: cedente pendente com recebimento mais antigo.
   let alerta='';
   const pend=c.cedentes.filter(x=>x.temPend&&x.oldestPend).sort((a,b)=>(a.oldestPend||'').localeCompare(b.oldestPend||''));
   if(pend.length){ const top=pend[0]; const dias=_repDaysSince(top.oldestPend); if(dias!=null&&dias>=3){
     alerta=`<div style="display:flex;align-items:center;gap:10px;background:#F7ECE8;border:1px solid #E7CFC7;border-radius:9px;padding:10px 15px;margin-bottom:16px;"><span style="width:20px;height:20px;border-radius:50%;background:#A65A4A;color:#EFEAD9;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;">!</span><span style="font-size:12.5px;color:#7d3f33;">Repasse a <b>${escHtml(top.nome)}</b> pendente há ${dias} dias — <b>${fmtR(top.aRepassar)}</b>.</span><span onclick="_repGoTab('arepassar')" style="font-size:12.5px;font-weight:700;color:#A65A4A;margin-left:auto;cursor:pointer;">Repassar agora →</span></div>`;
   }}
+
+  // "Assinado → lançar → repassar" — acordos assinados sem as duas providências feitas
+  // (ex-aba "Recebíveis", fundida aqui 2026-08-06).
+  const acordosHtml = acordosPend.length ? acordosPend.slice(0,6).map(a=>{
+    const statusMap = { a_lancar:['A LANÇAR','#FBF3E1','#9C7F40'], falta_repasse:['FALTA REPASSE','#FBF3E1','#9C7F40'], completo:['COMPLETO','#E9F0E7','#4C6647'] };
+    const [stLabel,stBg,stFg] = statusMap[a.status]||statusMap.a_lancar;
+    const lancBtn = a.lancado
+      ? `<span style="font-size:12px;font-weight:600;padding:6px 11px;border-radius:6px;background:#E9F0E7;color:#4C6647;border:1px solid #CFE0CB;white-space:nowrap;">Parcelas lançadas</span>`
+      : `<span style="font-size:12px;font-weight:600;padding:6px 11px;border-radius:6px;background:#0A1530;color:#fff;cursor:pointer;white-space:nowrap;" onclick="finLancarParcelasAcordo('${a.id}')">Lançar parcelas</span>`;
+    const repBtn = a.repassado
+      ? `<span style="font-size:12px;font-weight:600;padding:6px 11px;border-radius:6px;background:#E9F0E7;color:#4C6647;border:1px solid #CFE0CB;white-space:nowrap;">Repasse cadastrado</span>`
+      : `<span style="font-size:12px;font-weight:600;padding:6px 11px;border-radius:6px;background:#fff;color:#9C7F40;border:1px solid #DFC992;cursor:pointer;white-space:nowrap;" onclick="finCadastrarRepasseAcordo('${a.id}')">Cadastrar repasse</span>`;
+    return `<div style="display:flex;align-items:center;gap:12px;padding:11px 18px;border-bottom:1px solid #F2EFE6;">
+      <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:200px;">
+        <div style="display:flex;align-items:center;gap:8px;"><span style="font-size:13px;font-weight:600;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(a.devedorNome)}</span><span style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.08em;padding:2px 6px;border-radius:3px;background:${stBg};color:${stFg};white-space:nowrap;">${stLabel}</span></div>
+        <span style="font-size:11.5px;color:#A6AEBD;">${a.parcelas.length}x · repasse ao credor ${fmtR(a.repasseEstimado)} · ${escHtml(a.credorNome)}</span>
+      </div>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;width:96px;text-align:right;flex-shrink:0;">${fmtR(a.valorTotal)}</span>
+      ${lancBtn}${repBtn}
+    </div>`;
+  }).join('') : `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">Nenhum acordo pendente de providência</div></div>`;
+  const acordosBloco = `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;margin-bottom:16px;">
+    <div style="padding:14px 18px 11px;border-bottom:1px solid #EFEBE0;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
+      <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Assinado → lançar → repassar</div>
+      <div style="font-size:12.5px;color:#8A94A6;">${acordosPend.length} acordo${acordosPend.length!==1?'s':''} sem providência</div>
+      <a class="cob-link" style="margin-left:auto;" onclick="showPage('cobr')">Ver todos os acordos →</a>
+    </div>
+    ${acordosHtml}
+    <div style="padding:11px 18px;background:#FBFAF6;font-size:11.5px;color:#8A94A6;line-height:1.4;">Lançar parcelas cria as entradas previstas em Movimentações; cadastrar repasse abre a pendência na fila abaixo.</div>
+  </div>`;
+
+  const inadHtml = !DB.config.asaasKey ? `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">Asaas não configurado</div></div>`
+    : (!inad.devList.length ? `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">Nenhuma parcela em atraso</div></div>`
+    : inad.devList.slice(0,6).map(g=>{
+        const dev=g.dev; const dias = g.agg.oldest ? Math.max(0,Math.round((Date.now()-new Date(g.agg.oldest.slice(0,10)+'T00:00:00'))/86400000)) : 0;
+        const nome = dev?escHtml(dev.nome):`Cliente Asaas ${escHtml(g.custId)}`;
+        return `<div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #F2EFE6;">
+          <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:0;">
+            <span style="font-size:13px;font-weight:500;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${nome}</span>
+            <span style="font-size:11.5px;color:#A6AEBD;">vencido há ${dias} dia${dias!==1?'s':''} · ${g.agg.count} parcela${g.agg.count!==1?'s':''}</span>
+          </div>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:#A65A4A;">${fmtR(g.agg.total)}</span>
+          ${dev?`<span style="font-size:12px;color:#3A5288;font-weight:500;cursor:pointer;white-space:nowrap;" onclick="openDrawer('${dev.id}')">Cobrar →</span>`:'<span style="font-size:11px;color:#A6AEBD;">sem vínculo</span>'}
+        </div>`;
+      }).join(''));
+  const composicaoBloco = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start;margin-top:16px;">
+    <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;">
+      <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:14px;"><div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Composição dos recebíveis</div><span style="font-size:12px;color:#8A94A6;margin-left:auto;">Asaas · tempo real</span></div>
+      <div style="display:flex;height:10px;border-radius:5px;overflow:hidden;margin-bottom:12px;">
+        <div style="width:${Math.round(kpiVencido/composTotal*100)}%;background:#A65A4A;"></div><div style="width:${Math.round(venceEm7/composTotal*100)}%;background:#C9A961;"></div><div style="width:${Math.round(aVencer30/composTotal*100)}%;background:#5E7C58;"></div>
+      </div>
+      ${[['Vencido',kpiVencido,'#A65A4A'],['Vence em 7 dias',venceEm7,'#C9A961'],['A vencer (30 dias)',aVencer30,'#5E7C58']].map(([lb,v,cor])=>`<div style="display:flex;align-items:center;gap:9px;padding:7px 0;"><div style="width:7px;height:7px;border-radius:2px;background:${cor};"></div><span style="font-size:12.5px;color:#5A5F66;">${lb}</span><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:600;margin-left:auto;">${fmtR(v)}</span></div>`).join('')}
+    </div>
+    <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;">
+      <div style="padding:14px 16px 12px;border-bottom:1px solid #EFEBE0;display:flex;align-items:baseline;gap:10px;">
+        <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Inadimplência</div>
+        <div style="font-size:12.5px;color:#8A94A6;">boletos Asaas vencidos</div>
+        <a class="cob-link" style="margin-left:auto;" onclick="showPage('fin');setFinTab('judicial')">Custódias judiciais →</a>
+      </div>
+      ${inadHtml}
+    </div>
+  </div>`;
+
   const gridCols='1.4fr 150px 140px 140px 130px 110px';
   const rows=c.cedentes.map((x,i)=>{
     const bg=x.temPend&&i>0&&x.ultimoAtraso?'':'';
@@ -29262,8 +29354,14 @@ function _repRenderPainel(agg){
       <div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:16px 18px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#8892A6;margin-bottom:8px;">Honorários no mês</div><div style="font-family:'JetBrains Mono',monospace;font-size:23px;font-weight:700;color:#5E7C58;">${fmtR(c.kpiHonorMes)}</div><div style="font-size:11px;color:#8892A6;margin-top:3px;">sua receita líquida</div></div>
       <div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:16px 18px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#8892A6;margin-bottom:8px;">Clientes com saldo</div><div style="font-family:'JetBrains Mono',monospace;font-size:23px;font-weight:700;color:#0A1530;">${c.nComSaldo}</div><div style="font-size:11px;color:#8892A6;margin-top:3px;">de ${c.cedentes.length} cedente${c.cedentes.length!==1?'s':''} com movimento</div></div>
     </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;">
+      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:16px 18px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#8892A6;margin-bottom:8px;">A receber · 30 dias (Asaas)</div><div style="font-family:'JetBrains Mono',monospace;font-size:23px;font-weight:700;color:#0A1530;">${fmtR(kpiAReceber30)}</div><div style="font-size:11px;color:#8892A6;margin-top:3px;">${pendenteAsaas.length} boleto${pendenteAsaas.length!==1?'s':''} ativo${pendenteAsaas.length!==1?'s':''}</div></div>
+      <div style="background:#fff;border:1px solid #E7CFC7;border-radius:10px;padding:16px 18px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#A65A4A;margin-bottom:8px;">Vencido</div><div style="font-family:'JetBrains Mono',monospace;font-size:23px;font-weight:700;color:#A65A4A;">${fmtR(kpiVencido)}</div><div style="font-size:11px;color:#8892A6;margin-top:3px;">${inad.devList.length} devedor${inad.devList.length!==1?'es':''} inadimplente${inad.devList.length!==1?'s':''}</div></div>
+    </div>
     ${alerta}
-    ${tabela}`;
+    ${acordosBloco}
+    ${tabela}
+    ${composicaoBloco}`;
 }
 
 // Tela 04 — A revisar: fila de sugestões (fin_operacao pendentes). Cada card mostra a
@@ -29919,14 +30017,14 @@ async function finLancarParcelasAcordo(acordoId){
   const novaMeta = Object.assign({}, a.metadata||{}, { parcelasLancadas:true });
   await sb.from('acordos').update({ metadata: novaMeta }).eq('id', acordoId);
   showToast('Parcelas lançadas em Movimentações.','success');
-  renderFinTab('cobrancas');
+  _repState.loaded = false; renderRepassesClientes();
 }
 
 // "Cadastrar repasse": abre pendência em fin_operacao com o valor já líquido do
 // honorário do contrato do cedente. Idempotente via acordos.metadata.repasseCadastrado.
 async function finCadastrarRepasseAcordo(acordoId){
   const sb = getSupabase(); if(!sb) return;
-  const pend = (window._recebiveisAcordosPend||[]).find(a=>a.id===acordoId);
+  const pend = (_repState.acordosPend||[]).find(a=>a.id===acordoId);
   if(!pend){ showToast('Acordo não encontrado.','danger'); return; }
   const { data:a } = await sb.from('acordos').select('metadata').eq('id',acordoId).maybeSingle();
   if(a && a.metadata && a.metadata.repasseCadastrado){ showToast('Repasse já cadastrado para este acordo.','info'); return; }
@@ -29942,181 +30040,7 @@ async function finCadastrarRepasseAcordo(acordoId){
   const novaMeta = Object.assign({}, (a&&a.metadata)||{}, { repasseCadastrado:true });
   await sb.from('acordos').update({ metadata: novaMeta }).eq('id', acordoId);
   showToast('Repasse cadastrado — aparece em "Repasses ao cedente".','success');
-  renderFinTab('cobrancas');
-}
-
-async function renderFinRecebiveis(el){
-  el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--text-3);"><div class="mv2-spinner" style="margin:0 auto 8px;width:26px;height:26px;border-width:3px;"></div>Carregando recebíveis…</div>`;
-
-  let ops=[], credMap={}, inad={devList:[],charges:[],oldestAll:null}, acordosPend=[], pendenteAsaas=[];
-  try{
-    const sb = getSupabase();
-    const r = await sb.from('fin_operacao')
-      .select('id,credor_id,devedor_id,parcela,total_parcelas,valor_recebido,valor_capital,valor_honorario,recebido_em,repasse_status,repasse_efetuado_em')
-      .order('recebido_em',{ascending:false}).limit(1000);
-    ops = r.data||[];
-    const cIds=[...new Set(ops.map(o=>o.credor_id).filter(Boolean))];
-    if(cIds.length){ const {data}=await sb.from('clientes').select('id,nome').in('id',cIds); (data||[]).forEach(c=>credMap[c.id]=c.nome); }
-  }catch(e){ el.innerHTML = `<div class="panel" style="padding:20px;color:var(--danger);">Erro ao carregar repasses: ${escHtml(e.message||String(e))}</div>`; return; }
-
-  try{ inad = await _loadInadimplentes(); }catch(_){}
-  try{ acordosPend = await _carregarAcordosPendProvidencia(); window._recebiveisAcordosPend = acordosPend; }catch(_){}
-  // "A receber (30d)": boletos Asaas PENDING com vencimento nos próximos 30 dias.
-  if(DB.config.asaasKey){
-    try{
-      const fim30 = new Date(Date.now()+30*86400000).toISOString().slice(0,10);
-      const r = await AsaasAPI.req('GET','/payments?limit=100&sort=dueDate&order=asc&status=PENDING').catch(()=>({data:[]}));
-      pendenteAsaas = (r?.data||[]).filter(c=>c.dueDate && c.dueDate<=fim30);
-    }catch(_){}
-  }
-
-  const isPend = o => o.repasse_status==='pendente' || o.repasse_status==='preparado';
-  const _mesKey = (new Date()).toISOString().slice(0,7);
-  const inMes = d => (d||'').slice(0,7)===_mesKey;
-  const byCred = {};
-  for(const o of ops){
-    const k=o.credor_id||'?';
-    if(!byCred[k]) byCred[k]={credId:o.credor_id, nome:credMap[o.credor_id]||'—', recebido:0, honorario:0, aRepassar:0, temPend:false, oldestPend:null};
-    const g=byCred[k];
-    g.recebido += +o.valor_recebido||0;
-    g.honorario += +o.valor_honorario||0;
-    if(isPend(o)){ g.aRepassar += +o.valor_capital||0; g.temPend=true; if(!g.oldestPend || (o.recebido_em||'')<g.oldestPend) g.oldestPend=o.recebido_em||''; }
-  }
-  const cedentes = Object.values(byCred).sort((a,b)=>b.aRepassar-a.aRepassar);
-
-  const kpiAReceber30 = pendenteAsaas.reduce((s,c)=>s+(+c.value||0),0);
-  const kpiVencido = (inad.charges||[]).reduce((s,c)=>s+(+c.value||0),0);
-  const honorMes = ops.filter(o=>inMes(o.recebido_em)).reduce((s,o)=>s+(+o.valor_honorario||0),0);
-  const recebidoMes = ops.filter(o=>inMes(o.recebido_em)).reduce((s,o)=>s+(+o.valor_recebido||0),0);
-  const honorPct = recebidoMes>0 ? Math.round((honorMes/recebidoMes)*100) : 0;
-  const kpiARepassar = ops.filter(isPend).reduce((s,o)=>s+(+o.valor_capital||0),0);
-  const repassarPend = cedentes.filter(c=>c.temPend).sort((a,b)=>(a.oldestPend||'').localeCompare(b.oldestPend||''));
-  const piorAtraso = repassarPend[0] ? _repDaysSince(repassarPend[0].oldestPend) : null;
-  const repMesOps = ops.filter(o=>o.repasse_status==='efetuado'&&inMes(o.repasse_efetuado_em));
-  const repassadoMes = repMesOps.reduce((s,o)=>s+(+o.valor_capital||0),0);
-  const devidoCedentes = kpiARepassar;
-
-  // Composição dos recebíveis (Asaas): vencido / vence em 7 dias / a vencer (30 dias).
-  const in7 = new Date(Date.now()+7*86400000).toISOString().slice(0,10);
-  const venceEm7 = pendenteAsaas.filter(c=>c.dueDate<=in7).reduce((s,c)=>s+(+c.value||0),0);
-  const aVencer30 = pendenteAsaas.filter(c=>c.dueDate>in7).reduce((s,c)=>s+(+c.value||0),0);
-  const composTotal = kpiVencido + venceEm7 + aVencer30 || 1;
-
-  const acordosHtml = acordosPend.length ? acordosPend.slice(0,6).map(a=>{
-    const statusMap = { a_lancar:['A LANÇAR','#FBF3E1','#9C7F40'], falta_repasse:['FALTA REPASSE','#FBF3E1','#9C7F40'], completo:['COMPLETO','#E9F0E7','#4C6647'] };
-    const [stLabel,stBg,stFg] = statusMap[a.status]||statusMap.a_lancar;
-    const lancBtn = a.lancado
-      ? `<span style="font-size:12px;font-weight:600;padding:6px 11px;border-radius:6px;background:#E9F0E7;color:#4C6647;border:1px solid #CFE0CB;white-space:nowrap;">Parcelas lançadas</span>`
-      : `<span style="font-size:12px;font-weight:600;padding:6px 11px;border-radius:6px;background:#0A1530;color:#fff;cursor:pointer;white-space:nowrap;" onclick="finLancarParcelasAcordo('${a.id}')">Lançar parcelas</span>`;
-    const repBtn = a.repassado
-      ? `<span style="font-size:12px;font-weight:600;padding:6px 11px;border-radius:6px;background:#E9F0E7;color:#4C6647;border:1px solid #CFE0CB;white-space:nowrap;">Repasse cadastrado</span>`
-      : `<span style="font-size:12px;font-weight:600;padding:6px 11px;border-radius:6px;background:#fff;color:#9C7F40;border:1px solid #DFC992;cursor:pointer;white-space:nowrap;" onclick="finCadastrarRepasseAcordo('${a.id}')">Cadastrar repasse</span>`;
-    return `<div style="display:flex;align-items:center;gap:12px;padding:11px 18px;border-bottom:1px solid #F2EFE6;">
-      <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:200px;">
-        <div style="display:flex;align-items:center;gap:8px;"><span style="font-size:13px;font-weight:600;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(a.devedorNome)}</span><span style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.08em;padding:2px 6px;border-radius:3px;background:${stBg};color:${stFg};white-space:nowrap;">${stLabel}</span></div>
-        <span style="font-size:11.5px;color:#A6AEBD;">${a.parcelas.length}x · repasse ao credor ${fmtR(a.repasseEstimado)} · ${escHtml(a.credorNome)}</span>
-      </div>
-      <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;width:96px;text-align:right;flex-shrink:0;">${fmtR(a.valorTotal)}</span>
-      ${lancBtn}${repBtn}
-    </div>`;
-  }).join('') : `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">Nenhum acordo pendente de providência</div></div>`;
-
-  const repassesHtml = repassarPend.length ? repassarPend.slice(0,6).map(c=>{
-    const dias = c.oldestPend ? _repDaysSince(c.oldestPend) : null;
-    const atrasado = dias!=null && dias>=5;
-    return `<div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #F2EFE6;">
-      <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:0;">
-        <span style="font-size:13px;font-weight:500;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(c.nome)}</span>
-        <span style="font-size:11.5px;color:#A6AEBD;">${dias!=null?`recebido há ${dias} dia${dias!==1?'s':''}`:'—'}</span>
-      </div>
-      <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;">${fmtR(c.aRepassar)}</span>
-      <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.08em;padding:3px 8px;border-radius:4px;background:${atrasado?'#FBEAE7':'#FBF3E1'};color:${atrasado?'#A65A4A':'#9C7F40'};">${atrasado?'ATRASADO':'A FAZER'}</span>
-    </div>`;
-  }).join('') : `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">Nenhum repasse pendente</div></div>`;
-
-  const inadHtml = !DB.config.asaasKey ? `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">Asaas não configurado</div></div>`
-    : (!inad.devList.length ? `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">Nenhuma parcela em atraso</div></div>`
-    : inad.devList.slice(0,6).map(g=>{
-        const dev=g.dev; const dias = g.agg.oldest ? Math.max(0,Math.round((Date.now()-new Date(g.agg.oldest.slice(0,10)+'T00:00:00'))/86400000)) : 0;
-        const nome = dev?escHtml(dev.nome):`Cliente Asaas ${escHtml(g.custId)}`;
-        return `<div style="display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #F2EFE6;">
-          <div style="display:flex;flex-direction:column;gap:2px;flex:1;min-width:0;">
-            <span style="font-size:13px;font-weight:500;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${nome}</span>
-            <span style="font-size:11.5px;color:#A6AEBD;">vencido há ${dias} dia${dias!==1?'s':''} · ${g.agg.count} parcela${g.agg.count!==1?'s':''}</span>
-          </div>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:#A65A4A;">${fmtR(g.agg.total)}</span>
-          ${dev?`<span style="font-size:12px;color:#3A5288;font-weight:500;cursor:pointer;white-space:nowrap;" onclick="openDrawer('${dev.id}')">Cobrar →</span>`:'<span style="font-size:11px;color:#A6AEBD;">sem vínculo</span>'}
-        </div>`;
-      }).join(''));
-
-  el.innerHTML = `
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:16px;">
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:4px;">
-        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">A RECEBER · 30 DIAS</span>
-        <span style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;">${fmtR(kpiAReceber30)}</span>
-        <span style="font-size:11.5px;color:#A6AEBD;">${pendenteAsaas.length} boleto${pendenteAsaas.length!==1?'s':''} ativo${pendenteAsaas.length!==1?'s':''}</span>
-      </div>
-      <div style="background:#fff;border:1px solid #E7CFC7;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:4px;">
-        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#A65A4A;">VENCIDO</span>
-        <span style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;color:#A65A4A;">${fmtR(kpiVencido)}</span>
-        <span style="font-size:11.5px;color:#A6AEBD;">${inad.devList.length} devedor${inad.devList.length!==1?'es':''} inadimplente${inad.devList.length!==1?'s':''}</span>
-      </div>
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:4px;">
-        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">HONORÁRIOS COBRASQ</span>
-        <span style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;color:#9C7F40;">${fmtR(honorMes)}</span>
-        <span style="font-size:11.5px;color:#A6AEBD;">${honorPct}% sobre o recuperado</span>
-      </div>
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:4px;">
-        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">A REPASSAR</span>
-        <span style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;">${fmtR(kpiARepassar)}</span>
-        <span style="font-size:11.5px;color:${piorAtraso!=null&&piorAtraso>=5?'#A65A4A':'#A6AEBD'};">${piorAtraso!=null?`1 atrasado há ${piorAtraso} dias`:'em dia'}</span>
-      </div>
-    </div>
-
-    <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;margin-bottom:16px;">
-      <div style="padding:14px 18px 11px;border-bottom:1px solid #EFEBE0;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
-        <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Assinado → lançar → repassar</div>
-        <div style="font-size:12.5px;color:#8A94A6;">${acordosPend.length} acordo${acordosPend.length!==1?'s':''} sem providência</div>
-        <a class="cob-link" style="margin-left:auto;" onclick="showPage('cobr')">Ver todos os acordos →</a>
-      </div>
-      ${acordosHtml}
-      <div style="padding:11px 18px;background:#FBFAF6;font-size:11.5px;color:#8A94A6;line-height:1.4;">Lançar parcelas cria as entradas previstas em Movimentações; cadastrar repasse abre a pendência na fila abaixo.</div>
-    </div>
-
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start;margin-bottom:16px;">
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;">
-        <div style="padding:14px 16px 12px;border-bottom:1px solid #EFEBE0;display:flex;align-items:baseline;gap:10px;">
-          <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Repasses ao cedente</div>
-          <div style="font-size:12.5px;color:#8A94A6;">${repassarPend.length} na fila</div>
-          <a class="cob-link" style="margin-left:auto;" onclick="renderFinTab('repasses')">Repassar em lote →</a>
-        </div>
-        ${repassesHtml}
-      </div>
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;">
-        <div style="padding:14px 16px 12px;border-bottom:1px solid #EFEBE0;display:flex;align-items:baseline;gap:10px;">
-          <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Inadimplência</div>
-          <div style="font-size:12.5px;color:#8A94A6;">boletos Asaas vencidos</div>
-          <a class="cob-link" style="margin-left:auto;" onclick="setFinTab('judicial')">Custódias judiciais →</a>
-        </div>
-        ${inadHtml}
-      </div>
-    </div>
-
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start;">
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;">
-        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:14px;"><div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Composição dos recebíveis</div><span style="font-size:12px;color:#8A94A6;margin-left:auto;">Asaas · tempo real</span></div>
-        <div style="display:flex;height:10px;border-radius:5px;overflow:hidden;margin-bottom:12px;">
-          <div style="width:${Math.round(kpiVencido/composTotal*100)}%;background:#A65A4A;"></div><div style="width:${Math.round(venceEm7/composTotal*100)}%;background:#C9A961;"></div><div style="width:${Math.round(aVencer30/composTotal*100)}%;background:#5E7C58;"></div>
-        </div>
-        ${[['Vencido',kpiVencido,'#A65A4A'],['Vence em 7 dias',venceEm7,'#C9A961'],['A vencer (30 dias)',aVencer30,'#5E7C58']].map(([lb,v,cor])=>`<div style="display:flex;align-items:center;gap:9px;padding:7px 0;"><div style="width:7px;height:7px;border-radius:2px;background:${cor};"></div><span style="font-size:12.5px;color:#5A5F66;">${lb}</span><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:600;margin-left:auto;">${fmtR(v)}</span></div>`).join('')}
-      </div>
-      <div style="background:#0A1530;border-radius:9px;padding:18px;color:#fff;display:flex;flex-direction:column;gap:12px;">
-        <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;color:#fff;">Divisão do recuperado · ${['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'][new Date().getMonth()]}</div>
-        ${[['Recuperado no mês',recebidoMes,'#C9CEDC',400],['Honorários COBRASQ',honorMes,'#E2CE9E',400],['Devido aos cedentes',devidoCedentes,'#C9CEDC',400],['Já repassado',repassadoMes,'#A8C6A0',600]].map(([lb,v,cor,w])=>`<div style="display:flex;align-items:center;gap:10px;"><span style="font-size:12.5px;color:${cor};font-weight:${w};">${lb}</span><div style="flex:1;border-bottom:1px dotted rgba(255,255,255,.18);"></div><span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:${w};color:${cor};">${fmtR(v)}</span></div>`).join('')}
-        <div style="font-size:11.5px;color:#8E98B0;line-height:1.45;padding-top:4px;">O que entra no Asaas não é caixa da COBRASQ até o repasse ser feito. Esta aba existe para separar as duas coisas.</div>
-      </div>
-    </div>
-  `;
+  _repState.loaded = false; renderRepassesClientes();
 }
 
 async function renderFinDiagnostico(el){
@@ -30722,7 +30646,7 @@ async function _carregarResumoAsaasVisao(){
           <div style="font-size:16px;font-weight:800;color:#b91c1c;margin-top:2px;">${fmtR(overdue)}</div>
         </div>
       </div>
-      <button class="btn btn-ghost btn-sm" style="width:100%;margin-top:10px;font-size:11.5px;" onclick="window._finTab='cobrancas';renderFinanceiro()">Ver cobranças completas →</button>
+      <button class="btn btn-ghost btn-sm" style="width:100%;margin-top:10px;font-size:11.5px;" onclick="showPage('repasses')">Ver repasses completos →</button>
     `;
   } catch(e){
     el.innerHTML = `<span style="color:var(--danger);font-size:12px;">Erro: ${escHtml(traduzirErro(e.message))}</span>
@@ -35819,7 +35743,7 @@ function renderCfgSection(section){
   if(section==='fin-cadastros'){
     // Cadastros do Financeiro (Contas/Cartões/Categorias/Contatos/Centros de custo) saíram
     // do topo do Financeiro na reformulação do handoff (só 3 abas: Caixa/Movimentações/
-    // Recebíveis) — o CRUD continua morando lá (renderFin*), aqui é só o atalho de entrada.
+    // Judicial) — o CRUD continua morando lá (renderFin*), aqui é só o atalho de entrada.
     const atalhos = [
       {id:'contas', label:'Contas', desc:'Contas bancárias e caixas físicos usados nos lançamentos.'},
       {id:'cartoes', label:'Cartões', desc:'Cartões de crédito/débito vinculados às contas.'},
