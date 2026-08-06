@@ -323,6 +323,13 @@ já descontando a entrada.
 `total` antes de montar o installment). **Migração e deploy da edge function
 pendentes de aplicação manual em produção** — ver PR.
 
+**Achado junto (mesmo PR):** `api/_emitir-acordo.js` também tinha `fine: { value: 2 }`
+hardcoded — 2% de multa no boleto Asaas, enquanto o termo assinado
+(`peticao-teixeira-azzolin`, campo "Multa boleto (%)") usa 10% como padrão.
+Corrigido para 10%. **Retroativo:** os 20 acordos já emitidos por este fluxo
+(`metadata.boletos_emitidos=true`) saíram com multa 2% — correção nos boletos
+já existentes no Asaas é manual, fora desta migração (ver conversa/PR #483).
+
 ---
 
 ### Invariantes guardadas (não quebrar)

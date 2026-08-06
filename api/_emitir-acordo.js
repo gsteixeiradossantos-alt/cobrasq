@@ -156,7 +156,10 @@ module.exports = async function handler(req, res) {
       dueDate: firstDue,
       description: `Acordo ${dev.nome}${nParc > 1 ? ` — ${nParc}x` : ' — à vista'}`,
       externalReference: acordo.id,
-      fine: { value: 2 },
+      // Multa 10% é o padrão declarado no termo de acordo (campo "Multa boleto (%)",
+      // peticao-teixeira-azzolin) — estava hardcoded em 2%, descasado do que o
+      // devedor assina. Achado junto com o R-19 (caso Edilaine, 05/08/2026).
+      fine: { value: 10 },
       interest: { value: 1 },
     };
     if (nParc > 1) { pay.installmentCount = nParc; pay.totalValue = round2(total); }
