@@ -164,29 +164,40 @@ module.exports = async function handler(req, res) {
         const devNome = (devedor && devedor.nome) || 'devedor';
         const parcTxt = row.parcela && row.total_parcelas ? ` ${row.parcela}/${row.total_parcelas}` : '';
 
-        // Evita duplicar quando já existe uma linha PENDENTE pré-cadastrada pra este
-        // devedor sem asaas_payment_id (ex.: import manual de PDF/planilha — caso real
-        // 2026-07-26: 50 lançamentos de agosto importados do extrato Asaas antes do
-        // webhook confirmar o pagamento de verdade). Casa por devedor_id (raw_payload)
-        // + valor aproximado; se achar, BAIXA a linha existente em vez de criar outra.
+        // Casa com o lançamento já existente pra este devedor via cobranca_id (FK real —
+        // ver migração 20260806_fin_lancamento_cobranca_id.sql; antes disso a casada era
+        // por raw_payload->>'devedor_id', texto solto só nas linhas do import). Considera
+        // tanto PENDENTE quanto já PAGO (idempotente) — se já tiver sido baixado por outro
+        // caminho (ex.: manual, antes do webhook chegar), só reconfirma em vez de duplicar.
+        // Duplicidade real (auditoria 2026-08-06, R$1.867 contados 2x): a versão antiga só
+        // olhava status=0, então uma linha já paga manualmente virava candidata inexistente
+        // e o webhook criava uma segunda linha do zero pro mesmo pagamento.
         let lancReceitaId = null;
-        let pendenteExistente = null;
+        let existente = null;
         if (devedor && devedor.id) {
           const candidatos = await sbFetch(
-            `fin_lancamento?tipo_movimento=eq.1&status=eq.0&raw_payload->>devedor_id=eq.${devedor.id}&select=id,valor,observacoes&order=criada_em.desc&limit=20`
+            `fin_lancamento?tipo_movimento=eq.1&status=in.(0,1)&cobranca_id=eq.${devedor.id}&select=id,valor,status,observacoes&order=criada_em.desc&limit=20`
           ).catch(() => []);
-          pendenteExistente = (candidatos || []).find(c => Math.abs(Number(c.valor) - valorRecebido) < 0.05) || null;
+          existente = (candidatos || []).find(c => Math.abs(Number(c.valor) - valorRecebido) < 0.05) || null;
         }
 
-        if (pendenteExistente) {
-          await sbFetch(`fin_lancamento?id=eq.${pendenteExistente.id}`, { method: 'PATCH', body: JSON.stringify({
+        const ehBoleto = String(payment.billingType || '').toUpperCase() === 'BOLETO';
+
+        if (existente) {
+          await sbFetch(`fin_lancamento?id=eq.${existente.id}`, { method: 'PATCH', body: JSON.stringify({
             // data_competencia também move pra data real do pagamento — senão a linha
             // continua aparecendo/agrupada no dia do vencimento original (pedido do
             // Gustavo 2026-08-06), mesmo já tendo sido baixada em outra data.
             status: 1, valor_pago: valorRecebido, data_pagamento: row.recebido_em, data_competencia: row.recebido_em,
-            observacoes: `${pendenteExistente.observacoes || ''} | confirmado via Asaas payment ${paymentId} em ${row.recebido_em}.`,
+            observacoes: `${existente.observacoes || ''} | confirmado via Asaas payment ${paymentId} em ${row.recebido_em}.`,
           }) }).catch(() => null);
-          lancReceitaId = pendenteExistente.id;
+          lancReceitaId = existente.id;
+        } else if (ehBoleto) {
+          // Boleto sempre nasce de uma parcela já importada/cadastrada no sistema — se não
+          // achou candidato, é sinal de parcela faltando no cadastro, não de recebimento
+          // avulso. NÃO cria lançamento novo (pedido do Gustavo 2026-08-06): criar mascarava
+          // o problema real (cadastro incompleto) atrás de uma linha sem categoria/conta.
+          console.warn(`[processar-recebimento] boleto sem lançamento correspondente — devedor=${devedor && devedor.id} valor=${valorRecebido} payment=${paymentId}`);
         } else {
           const rec = await sbFetch('fin_lancamento', { method: 'POST', body: JSON.stringify({
             descricao: `Recebimento — ${devNome}${parcTxt}`,
@@ -194,6 +205,7 @@ module.exports = async function handler(req, res) {
             tipo_movimento: 1, status: 1,
             data_competencia: row.recebido_em, data_pagamento: row.recebido_em,
             numero_parcela: row.parcela, total_parcelas: row.total_parcelas,
+            cobranca_id: devedor ? devedor.id : null,
           }) }).catch(() => null);
           lancReceitaId = (rec && rec[0] && rec[0].id) || null;
         }
