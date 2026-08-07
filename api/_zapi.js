@@ -3,6 +3,19 @@
 // a edge function enviar-whatsapp usa ZAPI_INSTANCE (sem _ID) no runtime do Supabase
 // — são secrets de runtimes diferentes.
 
+// Normaliza telefone pro formato que a Z-API espera (DDI 55 + DDD + 9 dígitos,
+// 13 dígitos). Achado 2026-08-07 (caso Débora Aparecida Simioni): 17 devedores
+// tinham telefone salvo como "0" + "55" + 11 dígitos (14 chars) — um zero de
+// discagem sobrando na frente do DDI, que nem replace(/\D/g,'') nem o antigo
+// "prefixa 55 se <=11 dígitos" pegavam (14 > 11, não entrava na regra). A Z-API
+// rejeitava/ignorava silenciosamente — recibo nunca chegava, sem erro visível.
+function normalizePhoneBR(phone) {
+  let d = String(phone || '').replace(/\D/g, '');
+  if (/^0(55)\d{11}$/.test(d)) d = d.slice(1);
+  if (d && d.length <= 11 && !d.startsWith('55')) d = '55' + d;
+  return d;
+}
+
 async function zapiSendText(phone, message) {
   const token = process.env.ZAPI_TOKEN || '';
   const instance = process.env.ZAPI_INSTANCE_ID || '';
@@ -11,9 +24,7 @@ async function zapiSendText(phone, message) {
   const url = `https://api.z-api.io/instances/${encodeURIComponent(instance)}/token/${encodeURIComponent(token)}/send-text`;
   const headers = { 'Content-Type': 'application/json' };
   if (clientTk) headers['Client-Token'] = clientTk;
-  // Normaliza p/ o formato que a Z-API espera (DDI 55), igual ao waTel55 do front.
-  let fone = String(phone).replace(/\D/g, '');
-  if (fone && fone.length <= 11 && !fone.startsWith('55')) fone = '55' + fone;
+  const fone = normalizePhoneBR(phone);
   const r = await fetch(url, {
     method: 'POST',
     headers,
@@ -36,8 +47,7 @@ async function zapiSendDocumentPdf(phone, base64, fileName) {
   const url = `https://api.z-api.io/instances/${encodeURIComponent(instance)}/token/${encodeURIComponent(token)}/send-document/pdf`;
   const headers = { 'Content-Type': 'application/json' };
   if (clientTk) headers['Client-Token'] = clientTk;
-  let fone = String(phone).replace(/\D/g, '');
-  if (fone && fone.length <= 11 && !fone.startsWith('55')) fone = '55' + fone;
+  const fone = normalizePhoneBR(phone);
   try {
     const r = await fetch(url, {
       method: 'POST',
@@ -49,4 +59,4 @@ async function zapiSendDocumentPdf(phone, base64, fileName) {
   } catch { return false; }
 }
 
-module.exports = { zapiSendText, zapiSendDocumentPdf };
+module.exports = { zapiSendText, zapiSendDocumentPdf, normalizePhoneBR };
