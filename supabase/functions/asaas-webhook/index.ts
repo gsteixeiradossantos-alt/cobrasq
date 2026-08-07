@@ -267,30 +267,36 @@ Deno.serve(async (req) => {
     } catch {/* ignore — status/regra de baixa real refinada na PR3 */}
   }
 
-  // Sem devedor casado não há onde registrar o evento (devedor_eventos.devedor_id é
-  // NOT NULL). Confirmamos 200 para o Asaas parar de reenviar e logamos o motivo.
-  if (!devedorId) {
-    return json({ ok: true, unmatched: true, reason: 'customer sem devedor', customer: payment.customer || null, payment_id: paymentId });
+  // BUG CRÍTICO até 2026-08-07: sem devedor casado, a function parava AQUI — devolvia
+  // 200 pro Asaas (que então parava de reenviar) e NUNCA chamava /api/processar-recebimento.
+  // Dinheiro recebido de verdade (ex.: Cecília Aparecida Federle, PIX de R$252 em
+  // 07/08, sem devedor cadastrado) ficava com ZERO registro no sistema — nem
+  // fin_operacao, nem lançamento, nem recibo. Isso também explica boa parte do gap
+  // achado na auditoria de 06/08 (webhook só tinha processado 19 de 52 recebimentos
+  // de julho). `devedor_eventos.devedor_id` é NOT NULL, então só pulamos ESSE insert
+  // quando não há devedor — mas o fluxo de recebimento (PR3) segue adiante igual,
+  // porque /api/processar-recebimento já lida com devedor nulo (cria a operação e o
+  // lançamento sem vínculo, em vez de descartar o pagamento).
+  if (devedorId) {
+    await sb.from('devedor_eventos').insert({
+      devedor_id: devedorId,
+      cobranca_id: cobrancaId,
+      tipo: 'asaas_pagamento_recebido',
+      payload: {
+        payment_id: paymentId,
+        event,
+        asaas_customer: payment.customer || null,
+        installment: payment.installment || null,
+        external_reference: extRef || null,
+        value: payment.value ?? null,
+        net_value: payment.netValue ?? null,
+        billing_type: payment.billingType || null,
+        payment_date: payment.paymentDate || payment.clientPaymentDate || null,
+        status: payment.status || null
+      },
+      autor_nome: 'Asaas (webhook)'
+    });
   }
-
-  await sb.from('devedor_eventos').insert({
-    devedor_id: devedorId,
-    cobranca_id: cobrancaId,
-    tipo: 'asaas_pagamento_recebido',
-    payload: {
-      payment_id: paymentId,
-      event,
-      asaas_customer: payment.customer || null,
-      installment: payment.installment || null,
-      external_reference: extRef || null,
-      value: payment.value ?? null,
-      net_value: payment.netValue ?? null,
-      billing_type: payment.billingType || null,
-      payment_date: payment.paymentDate || payment.clientPaymentDate || null,
-      status: payment.status || null
-    },
-    autor_nome: 'Asaas (webhook)'
-  });
 
   // PR3: cria a "operação única" (recebimento + split capital/honorário) e envia o
   // recibo ao devedor. Delega ao endpoint Vercel (lá moram a chave Asaas e a lógica
