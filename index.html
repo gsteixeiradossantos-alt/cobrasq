@@ -28829,7 +28829,50 @@ window._finLancState = window._finLancState || { page:1, filtros:Object.assign({
 // uma só: o conteúdo exclusivo de Recebíveis (KPIs de cobrança Asaas, acordos assinados
 // pendentes de providência, composição dos recebíveis, inadimplência) foi para dentro do
 // Painel de "Repasses a clientes" — ver _repRenderPainel.
+
+// ===== Motor da cascata de repasse (handoff "Financeiro COBRASQ" 2026-08-07) =====
+// Ordem de amortização: primeiro o que é da COBRASQ (excedente sobre o título),
+// depois o capital do cedente. Nada se perde: rep + exc === valorRecebido sempre.
+// Ver design_handoff_financeiro/README.md — não alterar as fórmulas sem atualizar
+// as duas pontas (aceite do handoff exige rep+exc===valorRecebido em todos os casos).
+//
+// lancamento: { capital, meu_total, amortizado }
+// valorRecebido: número
+// contrato (opcional): { modo:'cascata'|'percentual', pct }
+// retorna { repasseAoCedente, ficaComVoce, meuSaldoAntes, capSaldoAntes }
+function finDivideCascata(lancamento, valorRecebido, contrato){
+  const capital    = +((lancamento && lancamento.capital) || 0);
+  const meu_total   = +((lancamento && lancamento.meu_total) || 0);
+  const amortizado = +((lancamento && lancamento.amortizado) || 0);
+  const v = Math.max(0, +valorRecebido || 0);
+
+  if(contrato && contrato.modo === 'percentual'){
+    const pct = +contrato.pct || 0;
+    const exc = +(v * pct / 100).toFixed(2);
+    const rep = +(v - exc).toFixed(2);
+    return { repasseAoCedente: rep, ficaComVoce: exc, meuSaldoAntes: null, capSaldoAntes: null };
+  }
+
+  const meuSaldo = Math.max(0, meu_total - Math.min(amortizado, meu_total));
+  const capSaldo = Math.max(0, capital - Math.max(0, amortizado - meu_total));
+
+  const exc1  = Math.min(v, meuSaldo);          // amortiza o excedente do título
+  const resto = v - exc1;
+  const rep   = Math.min(resto, capSaldo);       // devolve capital ao cedente
+  const exc   = exc1 + (resto - rep);            // sobra pós-capital também é da COBRASQ
+
+  return {
+    repasseAoCedente: +rep.toFixed(2),
+    ficaComVoce: +exc.toFixed(2),
+    meuSaldoAntes: +meuSaldo.toFixed(2),
+    capSaldoAntes: +capSaldo.toFixed(2)
+  };
+}
+
 const FIN_SECTIONS = {
+  // Nova (handoff "Financeiro COBRASQ" 07/08): fila de decisão, primeira coisa que se vê
+  // ao abrir o Financeiro. Sob shell própria (faixa escura) — ver FIN_CASCATA_TABS.
+  fila:          { label:'Fila', sub:'precisa de você', subtabs:[{id:'fila', label:'Fila'}] },
   visao:         { label:'Caixa', sub:'o dinheiro da COBRASQ', subtabs:[{id:'visao', label:'Caixa'}] },
   movimentacoes: { label:'Movimentações', sub:'analisar e confirmar', subtabs:[
                      {id:'lancamentos', label:'Movimentações'} ] },
@@ -28865,10 +28908,17 @@ const FIN_SECTIONS = {
                      {id:'judicial', label:'Custódias judiciais'} ] },
   // Importação Asaas movida p/ o menu lateral "Importação" (renderImportacao, aba Asaas).
 };
-// Estas 3 aparecem como pill no topo do Financeiro (ordem = handoff: Caixa,
-// Movimentações, Judicial). As demais chaves de FIN_SECTIONS continuam existindo só
-// para _finSectionOf resolver o breadcrumb de telas acessadas por link direto.
-const FIN_SECTIONS_VISIVEIS = ['visao','movimentacoes','receitasjudiciais'];
+// Pills no topo do Financeiro: Fila primeiro (handoff 07/08), depois Caixa,
+// Movimentações, Judicial (esse trio já era o handoff anterior, 09/07). As demais chaves
+// de FIN_SECTIONS continuam existindo só para _finSectionOf resolver o breadcrumb de
+// telas acessadas por link direto.
+const FIN_SECTIONS_VISIVEIS = ['fila','visao','movimentacoes','receitasjudiciais'];
+// Abas que já rodam sob a shell nova (faixa escura + barra de 5 seções) do handoff
+// 07/08, em vez da shell antiga (fin-hero + fin-kpis + pills). Cresce a cada PR do
+// redesenho (PR2: fila+lancamentos; PR3: +repasses; PR4: +conciliacao+fechamento) —
+// só então 'repasses'/'conciliacao' saem do dispatch antigo (renderFinRepasses/
+// renderFinConciliacao, ainda linkados de Caixa/Contas/Extrato — não quebrar).
+const FIN_CASCATA_TABS = ['fila','lancamentos'];
 function _finSectionOf(tab){
   for(const [key,s] of Object.entries(FIN_SECTIONS)){
     if(s.subtabs.some(t=>t.id===tab)) return key;
@@ -28901,11 +28951,19 @@ function renderFinanceiro(){
   const el = document.getElementById('page-fin');
   if(!el) return;
 
-  const asaasOk = !!DB.config.asaasKey;
   const activeTab = window._finTab || 'visao';
   window._finTab = activeTab;
-  window._finSection = _finSectionOf(activeTab);
   el.classList.add('fin-v2');
+
+  if(FIN_CASCATA_TABS.includes(activeTab)){
+    el.classList.add('fin-cascata-on');
+    renderFinanceiroCascata(el, activeTab);
+    return;
+  }
+  el.classList.remove('fin-cascata-on');
+
+  const asaasOk = !!DB.config.asaasKey;
+  window._finSection = _finSectionOf(activeTab);
 
   const _bankColor = (nome) => {
     const n = (nome||'').toLowerCase();
@@ -29133,11 +29191,611 @@ async function _loadFinHeader(){
 function setFinTab(tab, el){
   // Router de sub-aba (compatível com chamadas internas legadas). Atualiza a seção
   // de topo + a sub-nav de acordo com a aba e renderiza o conteúdo.
+  // Fila/Lançamentos (FIN_CASCATA_TABS) rodam sob uma shell diferente (faixa escura,
+  // sem fin-hero/fin-kpis/pills) — cruzar a fronteira exige reconstruir a página
+  // inteira via renderFinanceiro(), não só repintar #fin-content.
+  const wasCascata = FIN_CASCATA_TABS.includes(window._finTab);
+  const willCascata = FIN_CASCATA_TABS.includes(tab);
   window._finTab = tab;
   window._finSection = _finSectionOf(tab);
+  if(wasCascata || willCascata){
+    renderFinanceiro();
+    return;
+  }
   _renderFinSecNavActive();
   _renderFinSubNav(window._finSection);
   renderFinTab(tab);
+}
+
+// ══════════════════════════════════════════════════════════════
+// FINANCEIRO — shell "cascata" (handoff design_handoff_financeiro, recebido 07/08/2026)
+// ──────────────────────────────────────────────────────────────
+// Faixa escura + barra de 5 seções (Fila · Lançamentos · Repasses · Conciliação ·
+// Fechamento). Só Fila e Lançamentos são reais nesta PR (2/4) — ver FIN_CASCATA_TABS.
+// Clicar em Repasses/Conciliação leva às telas ANTIGAS (renderFinRepasses/
+// renderFinConciliacao, sob a shell antiga) — de propósito: são reais e usadas por
+// links existentes (Caixa, Contas, Extrato); nada de mostrar placeholder no lugar
+// delas. Fechamento ainda não existe em lugar nenhum — mostra aviso, não navega.
+//
+// Fonte dos dados de repasse: por decisão do Gustavo (07/08), esta UI LÊ fin_operacao
+// (o pipeline automático do webhook Asaas — api/_processar-recebimento.js), sem tocar
+// nele. fin_operacao já faz um split capital/honorário, mas PROPORCIONAL por parcela —
+// não é a ordem "excedente primeiro" que o handoff pede (isso é finDivideCascata, PR1).
+// As colunas novas de fin_lancamento (capital/meu_total/amortizado/cedente_id/
+// repasse_status) servem lançamentos MANUAIS, sem fin_operacao por trás; hoje não há
+// nenhum (a tela que os cria — o drawer — é o PR3), então esse caminho aparece vazio.
+// ══════════════════════════════════════════════════════════════
+
+let _finCascataCache = { at:0, m:null };
+async function _finCascataMetricas(force){
+  if(!force && _finCascataCache.m && (Date.now()-_finCascataCache.at)<30000) return _finCascataCache.m;
+  const sb = getSupabase();
+  const dim = await finApi.loadDimensoes();
+  const saldosByConta = {};
+  try{ const { data } = await sb.rpc('fin_saldos_realizados'); for(const r of (data||[])) saldosByConta[r.conta_id]=r; }catch(_){}
+  const _saldoConta = c => c.bank_balance!=null ? +c.bank_balance : (saldosByConta[c.id]!=null ? (+saldosByConta[c.id].saldo_atual||0) : (+c.saldo_inicial||0));
+  const contasNoGeral = (dim.contas||[]).filter(c=>c.incluir_no_saldo_geral!==false);
+  const saldoGeral = contasNoGeral.reduce((s,c)=>s+_saldoConta(c),0);
+
+  let aRepassarOp=0, pendCount=0, revisarCount=0;
+  try{
+    const { data } = await sb.from('fin_operacao').select('valor_capital,repasse_status').limit(5000);
+    for(const o of (data||[])){
+      if(o.repasse_status==='pendente'||o.repasse_status==='preparado'){ aRepassarOp += (+o.valor_capital||0); pendCount++; }
+      else if(o.repasse_status==='revisar') revisarCount++;
+    }
+  }catch(_){}
+  let aRepassarManual=0, manualCount=0;
+  try{
+    const { data } = await sb.from('fin_lancamento').select('capital,meu_total,amortizado,valor')
+      .not('cedente_id','is',null).in('repasse_status',['pendente','atrasado']).limit(5000);
+    for(const l of (data||[])){ aRepassarManual += finDivideCascata(l, +l.valor||0).repasseAoCedente; manualCount++; }
+  }catch(_){ /* colunas do PR1 podem não existir ainda — migração não aplicada */ }
+
+  const aRepassar = aRepassarOp + aRepassarManual;
+  const m = {
+    saldoGeral, aRepassar, caixaLivre: saldoGeral - aRepassar,
+    contasCount: contasNoGeral.length,
+    filaCount: pendCount + revisarCount + manualCount,
+    repassesCount: pendCount + revisarCount,
+  };
+  _finCascataCache = { at: Date.now(), m };
+  return m;
+}
+
+const FIN_CASCATA_UI_TABS = [
+  {id:'fila', label:'Fila'},
+  {id:'lancamentos', label:'Lançamentos'},
+  {id:'repasses', label:'Repasses'},
+  {id:'conciliacao', label:'Conciliação'},
+  {id:'fechamento', label:'Fechamento'},
+];
+function _finCascataIrPara(tabId){
+  if(tabId==='fechamento'){ showToast('Fechamento chega no PR 4 do redesenho do Financeiro.', 'info'); return; }
+  setFinTab(tabId);
+}
+function _finCascataMudarPeriodo(v){
+  window._finCascataPeriodo = v;
+  if(window._finTab==='lancamentos') renderFinTab('lancamentos');
+}
+
+async function renderFinanceiroCascata(el, activeTab){
+  const hojeStr = new Date().toLocaleDateString('pt-BR', {weekday:'long', day:'2-digit', month:'long', year:'numeric'});
+  el.innerHTML = `
+    <style>
+      #page-fin.fin-cascata-on{padding:0;}
+      .fincx-faixa{margin:-26px -28px 0;padding:24px 32px 0;background:#0A1530;color:#fff;}
+      .fincx-l1{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;}
+      .fincx-eyebrow{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:#8E98B0;}
+      .fincx-l1-r{display:flex;align-items:center;gap:12px;}
+      .fincx-syncdot{width:7px;height:7px;border-radius:50%;background:#7FA877;flex-shrink:0;}
+      .fincx-select{background:transparent;color:#fff;border:1px solid rgba(255,255,255,.22);border-radius:8px;padding:7px 10px;font-size:12px;font-family:inherit;}
+      .fincx-select option{color:#0A1530;}
+      .fincx-btn-novo{background:#fff;color:#0A1530;border:none;padding:10px 18px;border-radius:8px;font-weight:600;font-size:12.5px;cursor:pointer;font-family:inherit;}
+      .fincx-l2{display:flex;align-items:flex-end;gap:44px;padding:18px 0 22px;flex-wrap:wrap;}
+      .fincx-metric .lb{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8E98B0;margin-bottom:6px;}
+      .fincx-metric .lb.gold{color:#C9A961;}
+      .fincx-metric .v{font-family:'Fraunces',Georgia,serif;font-weight:300;}
+      .fincx-metric .v.hero{font-size:44px;}
+      .fincx-metric .v.gold{font-size:32px;color:#C9A961;}
+      .fincx-metric .v.mono{font-family:'JetBrains Mono',monospace;font-weight:500;font-size:21px;color:#8E98B0;}
+      .fincx-l3{display:flex;gap:26px;flex-wrap:wrap;border-top:1px solid rgba(255,255,255,.08);padding-top:2px;}
+      .fincx-tab{display:flex;align-items:center;gap:8px;padding:12px 0 14px;border-bottom:2px solid transparent;cursor:pointer;font-size:15.5px;color:#8E98B0;font-weight:400;}
+      .fincx-tab.active{color:#fff;font-weight:600;border-bottom-color:#C9A961;}
+      .fincx-cnt{font-family:'JetBrains Mono',monospace;font-size:11px;padding:1px 7px;border-radius:20px;background:rgba(255,255,255,.10);color:#9AA4BC;}
+      .fincx-tab.active .fincx-cnt, .fincx-tab[data-acao="1"] .fincx-cnt{background:rgba(166,90,74,.30);color:#E8A99C;}
+      .fincx-body{margin:0 -28px;padding:26px 32px 60px;background:#FBFAF6;min-height:60vh;}
+    </style>
+    <div class="fincx-faixa">
+      <div class="fincx-l1">
+        <span class="fincx-eyebrow">FINANCEIRO · ${escHtml(hojeStr.toUpperCase())}</span>
+        <div class="fincx-l1-r">
+          <span class="fincx-syncdot" title="Lendo direto do Supabase"></span>
+          <select class="fincx-select" id="fincx-periodo" onchange="_finCascataMudarPeriodo(this.value)">
+            <option value="mes" ${((window._finCascataPeriodo||'mes')==='mes')?'selected':''}>Este mês</option>
+            <option value="mes_anterior" ${window._finCascataPeriodo==='mes_anterior'?'selected':''}>Mês anterior</option>
+          </select>
+          <button class="fincx-btn-novo" onclick="abrirNovoLancamento()">${ico('plus',13)} Novo lançamento</button>
+        </div>
+      </div>
+      <div class="fincx-l2">
+        <div class="fincx-metric"><div class="lb">CAIXA LIVRE DA COBRASQ</div><div class="v hero" id="fincx-caixalivre">···</div></div>
+        <div class="fincx-metric"><div class="lb gold">DE TERCEIROS · A REPASSAR</div><div class="v gold" id="fincx-arepassar">···</div></div>
+        <div class="fincx-metric"><div class="lb">SALDO GERAL · <span id="fincx-contascount">—</span> CONTA(S)</div><div class="v mono" id="fincx-saldogeral">···</div></div>
+      </div>
+      <div class="fincx-l3">
+        ${FIN_CASCATA_UI_TABS.map(t=>`<div class="fincx-tab ${t.id===activeTab?'active':''}" onclick="_finCascataIrPara('${t.id}')">
+          <span>${t.label}</span><span class="fincx-cnt" id="fincx-cnt-${t.id}">—</span>
+        </div>`).join('')}
+      </div>
+    </div>
+    <div class="fincx-body"><div id="fin-content"></div></div>
+  `;
+  renderFinTab(activeTab);
+  _finCascataMetricas().then(m=>{
+    const set=(id,txt)=>{ const e=document.getElementById(id); if(e) e.textContent=txt; };
+    set('fincx-caixalivre', fmtR(m.caixaLivre));
+    set('fincx-arepassar', fmtR(m.aRepassar));
+    set('fincx-saldogeral', fmtR(m.saldoGeral));
+    set('fincx-contascount', m.contasCount);
+    set('fincx-cnt-fila', m.filaCount);
+    set('fincx-cnt-repasses', m.repassesCount);
+    set('fincx-cnt-conciliacao', '—');
+    set('fincx-cnt-fechamento', '—');
+  }).catch(e=>console.warn('métricas Financeiro cascata:', e));
+}
+
+// ── Seção "Fila" — lista de decisão. Fontes reais: fin_operacao (repasse_status
+// pendente/preparado/revisar — pipeline Asaas) + fin_lancamento manual (cedente_id
+// setado, cascata do PR1 ainda sem divisão — hoje sempre vazio, sem UI que grave isso
+// até o drawer do PR3). Sem itens fabricados: chip só aparece se tiver ≥1 item real. ──
+let _finFilaState = { itens:[], foco:0, aberto:null, chip:'tudo', resolvidosHoje:0 };
+
+async function _finFilaCarregar(){
+  const sb = getSupabase();
+  let ops = [];
+  try{
+    const { data, error } = await sb.from('fin_operacao')
+      .select('id,valor_recebido,valor_capital,valor_honorario,repasse_status,recebido_em,credor_id,devedor_id,parcela,total_parcelas,metadata')
+      .in('repasse_status', ['pendente','preparado','revisar'])
+      .order('recebido_em', {ascending:true}).limit(500);
+    if(error) throw error;
+    ops = data||[];
+  }catch(e){ console.warn('Fila: fin_operacao', e); }
+
+  const credIds=[...new Set(ops.map(o=>o.credor_id).filter(Boolean))];
+  const devIds=[...new Set(ops.map(o=>o.devedor_id).filter(Boolean))];
+  let credMap={}, devMap={};
+  if(credIds.length){ const {data}=await sb.from('clientes').select('id,nome').in('id',credIds); (data||[]).forEach(c=>credMap[c.id]=c.nome); }
+  if(devIds.length){ const {data}=await sb.from('devedores').select('id,nome').in('id',devIds); (data||[]).forEach(d=>devMap[d.id]=d.nome); }
+
+  let manual = [];
+  try{
+    const { data } = await sb.from('fin_lancamento')
+      .select('id,descricao,valor,data_competencia,cedente_id')
+      .not('cedente_id','is',null).is('capital', null).limit(200);
+    manual = data||[];
+  }catch(_){ /* colunas do PR1 podem não existir ainda — migração não aplicada */ }
+  const mCedIds=[...new Set(manual.map(m=>m.cedente_id).filter(Boolean))];
+  if(mCedIds.length){ const {data}=await sb.from('clientes').select('id,nome').in('id',mCedIds); (data||[]).forEach(c=>credMap[c.id]=c.nome); }
+
+  const diasDesde = s => { if(!s) return null; const d=new Date(s+'T00:00:00'); return Math.max(0, Math.floor((Date.now()-d)/86400000)); };
+  const itens = [];
+  for(const o of ops){
+    const dias = diasDesde(o.recebido_em);
+    if(o.repasse_status==='revisar'){
+      itens.push({ tipo:'divergencia', cor:'#9C7F40', op:o, foraPrazo:false,
+        eyebrow:'DIVERGÊNCIA · FIN_OPERACAO',
+        titulo:`${devMap[o.devedor_id]||'Devedor não identificado'}${o.parcela?` · parcela ${o.parcela}/${o.total_parcelas}`:''}`,
+        subtitulo: o.credor_id ? `Recebido ${fmtR(o.valor_recebido)} sem base de capital confiável — decidir manualmente.` : `Recebido ${fmtR(o.valor_recebido)} — devedor sem cliente/credor vinculado.`,
+        valor:o.valor_recebido, automatizavel:false });
+    } else {
+      itens.push({ tipo:'repasse', cor:'#C9A961', op:o, foraPrazo: dias!=null && dias>5,
+        eyebrow:'REPASSE · FIN_OPERACAO',
+        titulo:`${credMap[o.credor_id]||'Cedente'} · ${devMap[o.devedor_id]||'—'}`,
+        subtitulo:`Recebido ${fmtR(o.valor_recebido)} há ${dias==null?'—':dias+' dia'+(dias!==1?'s':'')} · seu ${fmtR(o.valor_honorario)}`,
+        valor:o.valor_capital, automatizavel:true });
+    }
+  }
+  for(const m of manual){
+    itens.push({ tipo:'recebimento', cor:'#5E7C58', lanc:m, foraPrazo:false,
+      eyebrow:'RECEBIMENTO · FIN_LANCAMENTO', titulo: m.descricao||'Lançamento sem descrição',
+      subtitulo:`Cedente vinculado (${credMap[m.cedente_id]||'—'}) · divisão da cascata ainda não calculada.`,
+      valor:m.valor, automatizavel:false });
+  }
+  const ordem = {divergencia:0, repasse:1, recebimento:2};
+  itens.sort((a,b)=>ordem[a.tipo]-ordem[b.tipo]);
+  return itens;
+}
+
+async function renderFinFila(el){
+  el.innerHTML = `<div style="padding:50px;text-align:center;color:#8A94A6;"><div class="mv2-spinner" style="margin:0 auto 10px;width:24px;height:24px;border-width:3px;"></div>Carregando a fila…</div>`;
+  let itens;
+  try{ itens = await _finFilaCarregar(); }
+  catch(e){ el.innerHTML = `<div class="panel" style="padding:20px;color:var(--danger);">Erro ao carregar a fila: ${escHtml(e.message||String(e))}</div>`; return; }
+  _finFilaState.itens = itens; _finFilaState.foco = 0; _finFilaState.aberto = null;
+  _finFilaRender();
+  _finFilaKeyboardOn();
+}
+function _finFilaItensFiltrados(){
+  const { itens, chip } = _finFilaState;
+  return chip==='tudo' ? itens : itens.filter(i=>i.tipo===chip);
+}
+function _finFilaRender(){
+  const el = document.getElementById('fin-content'); if(!el) return;
+  const todos = _finFilaState.itens;
+  const counts = { tudo:todos.length, repasse:0, divergencia:0, recebimento:0 };
+  todos.forEach(i=>counts[i.tipo]++);
+  const CHIPS = [['tudo','Tudo'],['repasse','Repasses'],['divergencia','Divergências'],['recebimento','Recebimentos']].filter(([k])=>k==='tudo'||counts[k]>0);
+  const filtrados = _finFilaItensFiltrados();
+
+  el.innerHTML = `
+    <style>
+      .fila-head{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:16px;}
+      .fila-h1{font-family:'Fraunces',Georgia,serif;font-size:30px;font-weight:400;color:#0A1530;}
+      .fila-sub{font-size:13.5px;color:#6B7683;margin-top:4px;}
+      .fila-kbd{font-family:'JetBrains Mono',monospace;font-size:11px;color:#A6AEBD;white-space:nowrap;}
+      .fila-chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;}
+      .fila-chip{padding:9px 17px;border-radius:24px;font-size:14px;font-weight:500;cursor:pointer;background:#fff;border:1px solid #E6E1D2;color:#5A5F66;}
+      .fila-chip .cnt{font-family:'JetBrains Mono',monospace;font-size:12px;margin-left:4px;}
+      .fila-chip.on{background:#0A1530;border-color:#0A1530;color:#fff;}
+      .fila-card{background:#fff;border:1px solid #E6E1D2;border-radius:12px;overflow:hidden;}
+      .fila-empty{padding:40px;text-align:center;color:#8A94A6;font-family:'Fraunces',Georgia,serif;font-size:20px;}
+      .fila-row{display:flex;align-items:center;gap:16px;padding:20px 22px;border-bottom:1px solid #F2EFE6;cursor:pointer;}
+      .fila-row:last-child{border-bottom:none;}
+      .fila-row.foco{background:#FBFAF6;}
+      .fila-bar{width:4px;height:52px;border-radius:2px;flex-shrink:0;}
+      .fila-txt{flex:1;min-width:190px;}
+      .fila-txt .ey{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;}
+      .fila-txt .ey2{color:#A65A4A;margin-left:10px;}
+      .fila-txt .tt{font-size:16px;font-weight:500;color:#0A1530;margin-top:3px;}
+      .fila-txt .sb{font-size:13.5px;color:#8A94A6;margin-top:2px;}
+      .fila-val{font-family:'JetBrains Mono',monospace;font-size:17px;font-weight:600;min-width:150px;text-align:right;white-space:nowrap;color:#0A1530;}
+      .fila-acts{display:flex;gap:8px;flex-shrink:0;}
+      .fila-btn{border:1px solid #E6E1D2;background:#fff;color:#0A1530;font-size:12.5px;font-weight:500;padding:8px 14px;border-radius:7px;cursor:pointer;font-family:inherit;}
+      .fila-btn.dark{background:#0A1530;color:#fff;border-color:#0A1530;}
+      .fila-esteira{display:grid;grid-template-columns:1fr 320px;gap:20px;padding:18px 22px 22px 42px;background:#FBFAF6;border-bottom:1px solid #F2EFE6;}
+      .fe-passo{display:flex;align-items:center;gap:10px;padding:7px 0;font-size:13px;color:#0A1530;}
+      .fe-box{font-size:16px;color:#0A1530;flex-shrink:0;}
+      .fe-origem{margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#A6AEBD;}
+      .fe-rateio{background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:14px 16px;}
+      .fe-r-row{display:flex;justify-content:space-between;font-size:13px;padding:5px 0;color:#5A5F66;}
+      .fe-r-row b{font-family:'JetBrains Mono',monospace;color:#0A1530;}
+      .fe-note{font-size:12px;color:#8A94A6;margin-top:8px;line-height:1.5;}
+      .fila-divform label{display:block;font-size:12px;color:#6B7683;margin-top:8px;}
+      .fila-divform input{width:100%;margin-top:4px;padding:9px 11px;border:1px solid #E6E1D2;border-radius:7px;font-size:14px;font-family:'JetBrains Mono',monospace;}
+      .fila-foot{margin-top:14px;padding:14px 18px;background:#fff;border:1px solid #E6E1D2;border-radius:10px;font-size:13px;color:#6B7683;}
+      .fila-foot a{color:#9C7F40;font-weight:600;cursor:pointer;}
+    </style>
+    <div class="fila-head">
+      <div>
+        <div class="fila-h1">Precisa de você</div>
+        <div class="fila-sub">${filtrados.length} ite${filtrados.length!==1?'ns':'m'} esperando decisão · ${_finFilaState.resolvidosHoje} resolvido${_finFilaState.resolvidosHoje!==1?'s':''} nesta sessão</div>
+      </div>
+      <div class="fila-kbd">J K · ⏎ RESOLVER · ESPAÇO</div>
+    </div>
+    <div class="fila-chips">${CHIPS.map(([k,lb])=>`<div class="fila-chip ${_finFilaState.chip===k?'on':''}" onclick="_finFilaSetChip('${k}')">${lb} <span class="cnt">${counts[k]}</span></div>`).join('')}</div>
+    <div class="fila-card">
+      ${filtrados.length ? filtrados.map((it,i)=>_finFilaRowHtml(it,i)).join('') : `<div class="fila-empty">Nenhum item nessa categoria — tudo em dia.</div>`}
+    </div>
+    ${!filtrados.length && _finFilaState.chip!=='tudo' ? `<div class="fila-foot"><a onclick="_finFilaSetChip('tudo')">← Ver todos os tipos</a></div>` : ''}
+  `;
+  const row = document.querySelector(`.fila-row[data-i="${_finFilaState.foco}"]`);
+  if(row) row.scrollIntoView({block:'nearest'});
+}
+function _finFilaRowHtml(it, i){
+  const focado = i===_finFilaState.foco;
+  const aberto = _finFilaState.aberto===i;
+  return `<div class="fila-row ${focado?'foco':''}" data-i="${i}" onclick="_finFilaFocar(${i})">
+      <div class="fila-bar" style="background:${it.cor};"></div>
+      <div class="fila-txt">
+        <div class="ey" style="color:${it.cor};">${it.eyebrow}${it.foraPrazo?'<span class="ey2">FORA DO PRAZO</span>':''}</div>
+        <div class="tt">${escHtml(it.titulo)}</div>
+        <div class="sb">${escHtml(it.subtitulo)}</div>
+      </div>
+      <div class="fila-val">${fmtR(it.valor)}</div>
+      <div class="fila-acts">
+        <button class="fila-btn" onclick="event.stopPropagation();_finFilaToggleEsteira(${i})">Passos</button>
+        ${it.automatizavel ? `<button class="fila-btn dark" onclick="event.stopPropagation();_finFilaResolver(${i})">Resolver ⏎</button>` : ''}
+      </div>
+    </div>${aberto ? _finFilaEsteiraHtml(it) : ''}`;
+}
+function _finFilaEsteiraHtml(it){
+  if(it.tipo==='repasse'){
+    const o = it.op;
+    return `<div class="fila-esteira">
+      <div><div class="fe-passo"><span class="fe-box">☐</span><span>Repassar ${fmtR(o.valor_capital)} ao cedente via Pix</span><span class="fe-origem">fin_operacao</span></div>
+      <div class="fe-passo"><span class="fe-box">☐</span><span>Registrar comprovante e concluir o repasse</span><span class="fe-origem">/api/repassar</span></div></div>
+      <div class="fe-rateio">
+        <div class="fe-r-row"><span>Recebido</span><b>${fmtR(o.valor_recebido)}</b></div>
+        <div class="fe-r-row"><span>Fica com você</span><b style="color:#5E7C58;">${fmtR(o.valor_honorario)}</b></div>
+        <div class="fe-r-row"><span>Cedente recebe</span><b style="color:#9C7F40;">${fmtR(o.valor_capital)}</b></div>
+        <div class="fe-note">Split calculado pelo webhook Asaas (proporcional por parcela) — ainda não é a ordem "seu excedente primeiro" do handoff (isso vem quando o lançamento nasce manual, com a cascata do PR1).</div>
+      </div>
+    </div>`;
+  }
+  if(it.tipo==='divergencia'){
+    const o = it.op;
+    const bloqueado = !o.credor_id;
+    const capSugerido = +((o.metadata&&o.metadata.capital_base)||0) || 0;
+    const honSugerido = Math.max(0, (+o.valor_recebido||0) - capSugerido);
+    return `<div class="fila-esteira">
+      <div><div class="fe-passo"><span class="fe-box">☐</span><span>Webhook Asaas não achou base de capital confiável (sem acordo.valor_total ou capital_credor)</span><span class="fe-origem">fin_operacao</span></div>
+      ${bloqueado ? `<div class="fe-passo"><span class="fe-box">☐</span><span style="color:#A65A4A;">Devedor sem cliente/credor vinculado — resolver o cadastro antes</span><span class="fe-origem">devedores</span></div>` : ''}</div>
+      <div class="fe-rateio">${bloqueado ? `<div class="fe-note" style="color:#7D3F33;">Sem credor vinculado — não dá para dividir por aqui. Verifique o cadastro do devedor (cliente_id).</div>` : `
+        <div class="fila-divform">
+          <label>Capital do cedente<input type="text" inputmode="decimal" id="filadiv-cap-${o.id}" value="${capSugerido.toFixed(2)}" oninput="_finFilaDivRecalc('${o.id}',${+o.valor_recebido||0})"></label>
+          <label>Fica com a COBRASQ<input type="text" inputmode="decimal" id="filadiv-hon-${o.id}" value="${honSugerido.toFixed(2)}"></label>
+          <div class="fe-note">Recebido ${fmtR(o.valor_recebido)} — os dois campos precisam somar esse valor.${capSugerido?' Capital sugerido a partir do acordo/cobrança vinculado.':''}</div>
+          <button class="fila-btn dark" style="margin-top:8px;" onclick="_finFilaSalvarDivisao('${o.id}')">Salvar divisão</button>
+        </div>`}
+      </div>
+    </div>`;
+  }
+  return `<div class="fila-esteira">
+    <div><div class="fe-passo"><span class="fe-box">☐</span><span>Abrir o lançamento em Lançamentos e preencher capital/excedente do título</span><span class="fe-origem">fin_lancamento</span></div></div>
+    <div class="fe-rateio"><div class="fe-note">O painel do lançamento (drawer com a divisão calculada) chega no PR 3.</div>
+      <button class="fila-btn" style="margin-top:8px;" onclick="setFinTab('lancamentos')">Abrir Lançamentos →</button>
+    </div>
+  </div>`;
+}
+function _finFilaDivRecalc(opId, recebido){
+  const capEl = document.getElementById('filadiv-cap-'+opId);
+  const honEl = document.getElementById('filadiv-hon-'+opId);
+  const cap = +((capEl&&capEl.value)||'0').toString().replace(',','.') || 0;
+  if(honEl) honEl.value = Math.max(0, recebido - cap).toFixed(2);
+}
+async function _finFilaSalvarDivisao(operacaoId){
+  const capEl = document.getElementById('filadiv-cap-'+operacaoId);
+  const honEl = document.getElementById('filadiv-hon-'+operacaoId);
+  const cap = Math.max(0, +((capEl&&capEl.value)||'0').toString().replace(',','.') || 0);
+  const hon = Math.max(0, +((honEl&&honEl.value)||'0').toString().replace(',','.') || 0);
+  try{
+    const sb = getSupabase();
+    const { error } = await sb.from('fin_operacao').update({
+      valor_capital: cap, valor_honorario: hon,
+      repasse_status: cap>0 ? 'pendente' : 'nao_aplica',
+    }).eq('id', operacaoId);
+    if(error) throw error;
+    showToast('Divisão salva.', 'success');
+    _finFilaState.resolvidosHoje++;
+    _finCascataMetricas(true);
+    renderFinTab('fila');
+  }catch(e){ showToast('Erro ao salvar: '+(e.message||e), 'danger'); }
+}
+function _finFilaSetChip(k){ _finFilaState.chip=k; _finFilaState.aberto=null; _finFilaState.foco=0; _finFilaRender(); }
+function _finFilaFocar(i){ _finFilaState.foco=i; _finFilaRender(); }
+function _finFilaToggleEsteira(i){ _finFilaState.aberto = _finFilaState.aberto===i ? null : i; _finFilaState.foco=i; _finFilaRender(); }
+async function _finFilaResolver(i){
+  const it = _finFilaItensFiltrados()[i]; if(!it) return;
+  if(it.tipo==='repasse') await confirmarRepasse(it.op.id);
+}
+let _finFilaKeyHandler = null;
+function _finFilaKeyboardOn(){
+  _finFilaKeyboardOff();
+  _finFilaKeyHandler = (e)=>{
+    if(window._finTab!=='fila'){ _finFilaKeyboardOff(); return; }
+    const ae = document.activeElement;
+    if(ae && /INPUT|TEXTAREA|SELECT/.test(ae.tagName)) return;
+    const n = _finFilaItensFiltrados().length; if(!n) return;
+    if(e.key==='j'||e.key==='J'||e.key==='ArrowDown'){ e.preventDefault(); _finFilaState.foco=Math.min(n-1,_finFilaState.foco+1); _finFilaRender(); }
+    else if(e.key==='k'||e.key==='K'||e.key==='ArrowUp'){ e.preventDefault(); _finFilaState.foco=Math.max(0,_finFilaState.foco-1); _finFilaRender(); }
+    else if(e.key==='Enter'){ e.preventDefault(); const it=_finFilaItensFiltrados()[_finFilaState.foco]; if(it&&it.automatizavel) _finFilaResolver(_finFilaState.foco); else _finFilaToggleEsteira(_finFilaState.foco); }
+    else if(e.key===' '){ e.preventDefault(); _finFilaToggleEsteira(_finFilaState.foco); }
+  };
+  document.addEventListener('keydown', _finFilaKeyHandler);
+}
+function _finFilaKeyboardOff(){ if(_finFilaKeyHandler){ document.removeEventListener('keydown', _finFilaKeyHandler); _finFilaKeyHandler=null; } }
+
+// ── Seção "Lançamentos" — dia a dia, com a sublinha de repasse quando o lançamento
+// tem cedente (real: junta fin_operacao pelo período; ver nota de fonte de dados no
+// topo do arquivo). Substitui a antiga renderFinLancamentos SÓ para o tab 'lancamentos'
+// — a aba Judicial continua chamando a antiga direto (renderFinReceitasJudiciais). ──
+function _finCascataPeriodoBounds(){
+  const p = window._finCascataPeriodo || 'mes';
+  const now = new Date();
+  const base = p==='mes_anterior' ? new Date(now.getFullYear(), now.getMonth()-1, 1) : new Date(now.getFullYear(), now.getMonth(), 1);
+  const fimD = new Date(base.getFullYear(), base.getMonth()+1, 0);
+  return { ini: base.toISOString().slice(0,10), fim: fimD.toISOString().slice(0,10), label: base.toLocaleDateString('pt-BR',{month:'long',year:'numeric'}) };
+}
+let _finLancCascataState = { chip:'tudo', busca:'', sel:new Set() };
+async function _finLancCascataCarregar(){
+  const sb = getSupabase();
+  const { ini, fim } = _finCascataPeriodoBounds();
+  const dim = await finApi.loadDimensoes();
+  const baseSel = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,tipo_movimento,status,conciliado,conta_id,fin_conta(descricao,banco_nome)';
+  let rows = [];
+  try{
+    const { data, error } = await sb.from('fin_lancamento').select(baseSel+',cedente_id,capital,meu_total,amortizado,repasse_status')
+      .gte('data_competencia', ini).lte('data_competencia', fim).order('data_competencia',{ascending:false}).limit(800);
+    if(error) throw error;
+    rows = data||[];
+  }catch(e){
+    const { data } = await sb.from('fin_lancamento').select(baseSel)
+      .gte('data_competencia', ini).lte('data_competencia', fim).order('data_competencia',{ascending:false}).limit(800);
+    rows = data||[]; // colunas do PR1 podem não existir ainda — migração não aplicada
+  }
+  const cedIds=[...new Set(rows.map(r=>r.cedente_id).filter(Boolean))];
+  let cedMap={};
+  if(cedIds.length){ const {data}=await sb.from('clientes').select('id,nome').in('id',cedIds); (data||[]).forEach(c=>cedMap[c.id]=c.nome); }
+
+  let opsByLanc = {};
+  try{
+    const { data } = await sb.from('fin_operacao')
+      .select('id,valor_recebido,valor_capital,valor_honorario,repasse_status,credor_id,recebido_em,lancamento_receita_id,lancamento_despesa_id')
+      .gte('recebido_em', ini).lte('recebido_em', fim).limit(2000);
+    const credIds=[...new Set((data||[]).map(o=>o.credor_id).filter(Boolean))];
+    let credMap={};
+    if(credIds.length){ const {data:cs}=await sb.from('clientes').select('id,nome').in('id',credIds); (cs||[]).forEach(c=>credMap[c.id]=c.nome); }
+    (data||[]).forEach(o=>{ o._credorNome=credMap[o.credor_id]||null; if(o.lancamento_receita_id) opsByLanc[o.lancamento_receita_id]=o; if(o.lancamento_despesa_id) opsByLanc[o.lancamento_despesa_id]=o; });
+  }catch(_){}
+  return { rows, dim, cedMap, opsByLanc, periodoLabel: _finCascataPeriodoBounds().label };
+}
+async function renderFinLancamentosCascata(el){
+  el.innerHTML = `<div style="padding:50px;text-align:center;color:#8A94A6;"><div class="mv2-spinner" style="margin:0 auto 10px;width:24px;height:24px;border-width:3px;"></div>Carregando lançamentos…</div>`;
+  let ctx;
+  try{ ctx = await _finLancCascataCarregar(); }
+  catch(e){ el.innerHTML = `<div class="panel" style="padding:20px;color:var(--danger);">Erro: ${escHtml(e.message||String(e))}</div>`; return; }
+  window._finLancCascataCtx = ctx;
+  _finLancCascataState.sel = new Set();
+  _finLancCascataRender();
+  const cEl = document.getElementById('fincx-cnt-lancamentos'); if(cEl) cEl.textContent = ctx.rows.length;
+}
+function _finLancCascataFiltrados(){
+  const ctx = window._finLancCascataCtx; if(!ctx) return [];
+  const { chip, busca } = _finLancCascataState;
+  return ctx.rows.filter(l=>{
+    if(chip==='entradas' && l.tipo_movimento!==1) return false;
+    if(chip==='saidas' && l.tipo_movimento!==0) return false;
+    if(chip==='repasse' && !(l.cedente_id || ctx.opsByLanc[l.id])) return false;
+    if(busca && !(l.descricao||'').toLowerCase().includes(busca.toLowerCase())) return false;
+    return true;
+  });
+}
+function _finLancCascataRender(){
+  const el = document.getElementById('fin-content'); if(!el) return;
+  const ctx = window._finLancCascataCtx;
+  const todos = ctx.rows;
+  const counts = { tudo:todos.length, entradas:0, saidas:0, repasse:0 };
+  todos.forEach(l=>{ if(l.tipo_movimento===1) counts.entradas++; else counts.saidas++; if(l.cedente_id||ctx.opsByLanc[l.id]) counts.repasse++; });
+  const filtrados = _finLancCascataFiltrados();
+
+  // Agrupa por dia (já vem ordenado desc por data_competencia).
+  const porDia = [];
+  let atual = null;
+  for(const l of filtrados){
+    const d = (l.data_competencia||'').slice(0,10);
+    if(!atual || atual.data!==d){ atual = { data:d, itens:[] }; porDia.push(atual); }
+    atual.itens.push(l);
+  }
+  const DOW = ['domingo','segunda','terça','quarta','quinta','sexta','sábado'];
+  const fmtDia = d => { if(!d) return {dd:'—',dow:''}; const dt=new Date(d+'T00:00:00'); return { dd:d.slice(8,10)+'/'+d.slice(5,7), dow:DOW[dt.getDay()] }; };
+
+  el.innerHTML = `
+    <style>
+      .finlc-toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:14px;}
+      .finlc-h1{font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:400;color:#0A1530;}
+      .finlc-sub{font-size:12.5px;color:#8A94A6;margin-top:3px;}
+      .finlc-search{display:flex;align-items:center;gap:8px;border:1px solid #E6E1D2;border-radius:10px;padding:10px 14px;background:#fff;min-width:240px;}
+      .finlc-search input{border:0;outline:0;flex:1;font-size:13px;background:transparent;color:#0A1530;}
+      .finlc-chips{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;}
+      .finlc-chip{padding:7px 14px;border-radius:20px;font-size:12.5px;cursor:pointer;background:#fff;border:1px solid #E6E1D2;color:#5A5F66;}
+      .finlc-chip.on{background:#0A1530;border-color:#0A1530;color:#fff;}
+      .finlc-card{background:#fff;border:1px solid #E6E1D2;border-radius:12px;overflow:hidden;}
+      .finlc-thead{display:flex;align-items:center;gap:14px;padding:10px 16px;background:#F7F4EC;border-bottom:1px solid #E6E1D2;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;}
+      .finlc-diahead{display:flex;align-items:baseline;gap:12px;padding:12px 22px 8px;background:#FBFAF6;border-top:1px solid #E6E1D2;}
+      .finlc-diahead:first-child{border-top:none;}
+      .finlc-diahead .dd{font-family:'Fraunces',Georgia,serif;font-size:19px;color:#0A1530;}
+      .finlc-diahead .dow{font-family:'JetBrains Mono',monospace;font-size:10px;color:#A6AEBD;text-transform:uppercase;}
+      .finlc-row{display:flex;align-items:center;gap:14px;padding:13px 22px;border-bottom:1px solid #F2EFE6;}
+      .finlc-row:hover{background:#FBFAF6;}
+      .finlc-row.sel{background:#F6F3EA;}
+      .finlc-box{width:16px;height:16px;border-radius:4px;border:1px solid #CFC8B6;flex-shrink:0;cursor:pointer;background:#fff;}
+      .finlc-box.on{background:#0A1530;border-color:#0A1530;}
+      .finlc-ic{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:14px;font-weight:700;}
+      .finlc-desc{flex:1;min-width:180px;}
+      .finlc-desc .tx{font-size:15px;font-weight:500;color:#0A1530;}
+      .finlc-desc .meta{font-size:12px;color:#A6AEBD;margin-top:2px;}
+      .finlc-cat{width:130px;flex-shrink:0;font-size:12px;color:#8A94A6;}
+      .finlc-valor{font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:600;width:120px;text-align:right;flex-shrink:0;}
+      .finlc-sit{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.06em;padding:3px 9px;border-radius:5px;flex-shrink:0;white-space:nowrap;}
+      .finlc-sub-row{display:flex;align-items:center;gap:10px;padding:6px 22px 10px 62px;border-bottom:1px solid #F2EFE6;font-size:12px;color:#6B7683;border-left:2px solid #E6E1D2;margin-left:22px;}
+      .finlc-sub-chip{margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.06em;padding:2px 8px;border-radius:4px;white-space:nowrap;}
+      .finlc-fechodia{display:flex;gap:20px;padding:9px 22px;background:#F4F1E7;border-top:1px solid #E6E1D2;border-bottom:1px solid #E6E1D2;font-family:'JetBrains Mono',monospace;font-size:11px;color:#9C7F40;}
+      .finlc-fechodia b{color:#0A1530;}
+      .finlc-foot{display:flex;gap:24px;padding:13px 16px;background:#FBFAF6;font-size:12.5px;color:#6B7683;}
+      .finlc-bulkbar{position:sticky;bottom:16px;display:flex;align-items:center;gap:12px;background:#0A1530;border-radius:12px;padding:12px 16px;box-shadow:0 12px 32px rgba(10,21,48,.30);margin-top:14px;flex-wrap:wrap;}
+      .finlc-bulkbtn{border:1px solid rgba(255,255,255,.24);color:#E6E9F0;font-size:12.5px;padding:7px 13px;border-radius:6px;cursor:pointer;background:transparent;font-family:inherit;}
+      .finlc-bulkbtn.primary{background:#5E7C58;color:#fff;border-color:#5E7C58;}
+      .finlc-bulkbtn.danger{border-color:rgba(214,150,138,.5);color:#E8A99C;}
+    </style>
+    <div class="finlc-toolbar">
+      <div>
+        <div class="finlc-h1">Lançamentos</div>
+        <div class="finlc-sub">${escHtml((ctx.periodoLabel||'').replace(/^./,c=>c.toUpperCase()))} · ${filtrados.length} de ${todos.length} lançamento${todos.length!==1?'s':''}</div>
+      </div>
+      <div class="finlc-search">${ico('search',15)}<input type="search" placeholder="Buscar descrição…" value="${escHtml(_finLancCascataState.busca)}" oninput="_finLancCascataBusca(this.value)"></div>
+    </div>
+    <div class="finlc-chips">
+      ${[['tudo','Tudo'],['entradas','Entradas'],['saidas','Saídas'],['repasse','Com repasse']].map(([k,lb])=>`<div class="finlc-chip ${_finLancCascataState.chip===k?'on':''}" onclick="_finLancCascataChip('${k}')">${lb} · ${counts[k]}</div>`).join('')}
+    </div>
+    <div class="finlc-card">
+      <div class="finlc-thead"><span style="width:16px;"></span><span style="width:32px;"></span><span style="flex:1;">DESCRIÇÃO</span><span style="width:130px;">CONTA</span><span style="width:120px;text-align:right;">VALOR</span><span style="width:96px;text-align:center;">SITUAÇÃO</span></div>
+      ${porDia.length ? porDia.map(g=>_finLancCascataDiaHtml(g, ctx)).join('') : `<div style="padding:40px;text-align:center;color:#8A94A6;font-family:'Fraunces',Georgia,serif;font-size:20px;">Nenhum lançamento neste período.</div>`}
+      <div class="finlc-foot">${filtrados.length} lançamento${filtrados.length!==1?'s':''} no filtro · repasse não entra no resultado (não é receita/despesa da COBRASQ)</div>
+    </div>
+    <div id="finlc-bulkbar"></div>
+  `;
+  _finLancCascataRenderBulkbar();
+}
+function _finLancCascataDiaHtml(g, ctx){
+  const { dd, dow } = (()=>{ const d=g.data; if(!d) return {dd:'—',dow:''}; const dt=new Date(d+'T00:00:00'); const DOW=['domingo','segunda','terça','quarta','quinta','sexta','sábado']; return { dd:d.slice(8,10)+'/'+d.slice(5,7), dow:DOW[dt.getDay()] }; })();
+  const entradas = g.itens.filter(l=>l.tipo_movimento===1).reduce((s,l)=>s+Math.abs(+l.valor||0),0);
+  const saidas = g.itens.filter(l=>l.tipo_movimento===0).reduce((s,l)=>s+Math.abs(+l.valor||0),0);
+  return `<div class="finlc-diahead"><span class="dd">${dd}</span><span class="dow">${dow}</span></div>
+    ${g.itens.map(l=>_finLancCascataRowHtml(l, ctx)).join('')}
+    <div class="finlc-fechodia"><span>FECHAMENTO DO DIA</span><span>${g.itens.length} lançamento${g.itens.length!==1?'s':''}</span><span>entradas <b>${fmtR(entradas)}</b></span><span>saídas <b>${fmtR(saidas)}</b></span><span>saldo <b>${fmtR(entradas-saidas)}</b></span></div>`;
+}
+function _finLancCascataRowHtml(l, ctx){
+  const isEnt = l.tipo_movimento===1;
+  const sel = _finLancCascataState.sel.has(l.id);
+  const st = l.conciliado ? {t:'CONCILIADO',bg:'#E9F0E7',fg:'#4C6647'}
+    : (l.status===1||l.data_pagamento) ? {t:'PAGO',bg:'#5E7C58',fg:'#fff'}
+    : (l.data_vencimento && l.data_vencimento<hoje()) ? {t:'ATRASADO',bg:'#FBEAE7',fg:'#A65A4A'}
+    : {t: isEnt?'A RECEBER':'A PAGAR', bg:'#FBF3E1', fg:'#9C7F40'};
+  const op = ctx.opsByLanc[l.id];
+  let sub = '';
+  if(op){
+    const chip = op.repasse_status==='efetuado' ? {t:'REPASSADO',bg:'#E9F0E7',fg:'#4C6647'}
+      : op.repasse_status==='revisar' ? {t:'DIVERGÊNCIA',bg:'#FBF3E1',fg:'#7A6428'}
+      : {t:'A REPASSAR',bg:'#FBF3E1',fg:'#7A6428'};
+    sub = `<div class="finlc-sub-row">seu ${fmtR(op.valor_honorario)} · ${escHtml(op._credorNome||'cedente')} recebe ${fmtR(op.valor_capital)}<span class="finlc-sub-chip" style="background:${chip.bg};color:${chip.fg};">${chip.t}</span></div>`;
+  } else if(l.cedente_id && l.capital!=null){
+    const r = finDivideCascata(l, Math.abs(+l.valor||0));
+    sub = `<div class="finlc-sub-row">seu ${fmtR(r.ficaComVoce)} · ${escHtml(ctx.cedMap[l.cedente_id]||'cedente')} recebe ${fmtR(r.repasseAoCedente)}<span class="finlc-sub-chip" style="background:#F5F2EA;color:#6B7683;">${(l.repasse_status||'AGUARDA').toUpperCase()}</span></div>`;
+  } else if(l.cedente_id){
+    sub = `<div class="finlc-sub-row">cedente vinculado · divisão pendente<span class="finlc-sub-chip" style="background:#FBEAE7;color:#7D3F33;">SEM DIVISÃO</span></div>`;
+  }
+  return `<div class="finlc-row ${sel?'sel':''}">
+      <div class="finlc-box ${sel?'on':''}" onclick="_finLancCascataToggleSel('${l.id}')"></div>
+      <div class="finlc-ic" style="background:${isEnt?'#E9F0E7':'#FBEAE7'};color:${isEnt?'#4C6647':'#A65A4A'};">${isEnt?'↓':'↑'}</div>
+      <div class="finlc-desc"><div class="tx">${escHtml(l.descricao||'—')}</div><div class="meta">${l.fin_conta&&l.fin_conta.descricao?escHtml(l.fin_conta.descricao):''}</div></div>
+      <div class="finlc-cat">${escHtml((l.fin_conta&&l.fin_conta.banco_nome)||'')}</div>
+      <div class="finlc-valor" style="color:${isEnt?'#5E7C58':'#A65A4A'};">${isEnt?'+':'−'} ${fmtR(Math.abs(+l.valor||0))}</div>
+      <div class="finlc-sit" style="background:${st.bg};color:${st.fg};">${st.t}</div>
+    </div>${sub}`;
+}
+function _finLancCascataChip(k){ _finLancCascataState.chip=k; _finLancCascataRender(); }
+let _finLancCascataBuscaTimer=null;
+function _finLancCascataBusca(v){ clearTimeout(_finLancCascataBuscaTimer); _finLancCascataBuscaTimer=setTimeout(()=>{ _finLancCascataState.busca=v; _finLancCascataRender(); }, 300); }
+function _finLancCascataToggleSel(id){
+  const sel = _finLancCascataState.sel;
+  if(sel.has(id)) sel.delete(id); else sel.add(id);
+  _finLancCascataRender();
+}
+function _finLancCascataRenderBulkbar(){
+  const bar = document.getElementById('finlc-bulkbar'); if(!bar) return;
+  const n = _finLancCascataState.sel.size;
+  if(!n){ bar.innerHTML=''; return; }
+  bar.innerHTML = `<div class="finlc-bulkbar">
+    <span style="color:#fff;font-size:12.5px;">${n} selecionado${n!==1?'s':''}</span>
+    <button class="finlc-bulkbtn primary" onclick="_finLancCascataLote('pagar')">Confirmar pagamento</button>
+    <button class="finlc-bulkbtn" onclick="_finLancCascataLote('conciliar')">Conciliar</button>
+    <button class="finlc-bulkbtn danger" onclick="_finLancCascataLote('excluir')">Excluir</button>
+    <button class="finlc-bulkbtn" style="margin-left:auto;" onclick="_finLancCascataState.sel.clear();_finLancCascataRender();">Limpar ✕</button>
+  </div>`;
+}
+async function _finLancCascataLote(acao){
+  const ids = [..._finLancCascataState.sel];
+  if(!ids.length) return;
+  if(acao==='excluir' && !confirm(`Excluir ${ids.length} lançamento(s)? Não dá para desfazer.`)) return;
+  try{
+    if(acao==='pagar') await finApi.confirmarPagamentoLote(ids);
+    else if(acao==='conciliar') await finApi.conciliarLote(ids);
+    else if(acao==='excluir') await finApi.excluirLote(ids);
+    showToast('Feito.', 'success');
+    renderFinTab('lancamentos');
+  }catch(e){ showToast('Erro: '+(e.message||e), 'danger'); }
 }
 
 function renderFinTab(tab){
@@ -29146,15 +29804,14 @@ function renderFinTab(tab){
   // Na Visão geral, a Dashboard já traz saldo geral + KPIs próprios — esconde o
   // strip de KPIs e a barra de contas do frame p/ não duplicar (fica como o mockup).
   const pf = document.getElementById('page-fin'); if(pf) pf.classList.toggle('fin-on-visao', tab==='visao');
+  if(tab!=='fila') _finFilaKeyboardOff();
 
   if(tab==='visao') renderFinVisao(el);
-  else if(tab==='lancamentos'){
-    // Chegar aqui vindo da aba Judicial não deve manter o filtro travado em 'judicial'.
-    if(window._finLancState && window._finLancState.filtros && window._finLancState.filtros.tipoView==='judicial'){
-      window._finLancState.filtros.tipoView = 'tudo';
-    }
-    renderFinLancamentos(el);
-  }
+  else if(tab==='fila') renderFinFila(el);
+  // 'lancamentos' agora é a tela nova (handoff 07/08) — ver FIN_CASCATA_TABS. A aba
+  // Judicial (renderFinReceitasJudiciais) NÃO passa por aqui: chama renderFinLancamentos
+  // (a implementação antiga, intacta) diretamente, então continua funcionando igual.
+  else if(tab==='lancamentos') renderFinLancamentosCascata(el);
   else if(tab==='receitasjudiciais') renderFinReceitasJudiciais(el);
   else if(tab==='contas') renderFinContas(el);
   else if(tab==='categorias') renderFinCategorias(el);
