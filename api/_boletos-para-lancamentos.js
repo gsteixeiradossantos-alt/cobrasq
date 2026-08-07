@@ -56,12 +56,12 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // 2) customer -> devedor (nome, doc_digits) via devedores.asaas_customer_id.
+    // 2) customer -> devedor (id, nome, doc_digits) via devedores.asaas_customer_id.
     const custIds = [...new Set(charges.map(c => c.customer).filter(Boolean))];
     const devByCust = {};
     for (let i = 0; i < custIds.length; i += 50) {
       const chunk = custIds.slice(i, i + 50).map(encodeURIComponent).join(',');
-      const devs = await sbFetch(`devedores?select=asaas_customer_id,nome,doc_digits&asaas_customer_id=in.(${chunk})`).catch(() => []);
+      const devs = await sbFetch(`devedores?select=id,asaas_customer_id,nome,doc_digits&asaas_customer_id=in.(${chunk})`).catch(() => []);
       for (const d of devs) if (d.asaas_customer_id) devByCust[d.asaas_customer_id] = d;
     }
 
@@ -109,6 +109,7 @@ module.exports = async function handler(req, res) {
           total_parcelas: total > 1 ? total : null,
           conta_id: CONTA_ASAAS,
           contato_id,
+          cobranca_id: dev ? dev.id : null,
           billingType: p.billingType,
           status_asaas: p.status,
           customer: cust,
@@ -146,6 +147,7 @@ module.exports = async function handler(req, res) {
         status: 0,                   // pendente
         conta_id: it.conta_id,
         contato_id: it.contato_id,
+        cobranca_id: it.cobranca_id,
         data_vencimento: it.data_vencimento,
         data_competencia: it.data_competencia,
         numero_parcela: it.numero_parcela,
