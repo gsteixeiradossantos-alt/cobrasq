@@ -98,7 +98,9 @@
     const segs = segmentarPorMes(params.dataCorrecao, params.dataFim);
     const eventosOrd = [...(params.eventos || [])]
       .filter(e => e.data && e.valor && parseDataLocal(e.data) >= params.dataCorrecao && parseDataLocal(e.data) <= params.dataFim)
-      .map(e => ({ ...e, dataObj: parseDataLocal(e.data) }))
+      // Sem `tipo` o evento caía fora dos dois ramos abaixo e era descartado calado,
+      // cobrando do devedor um valor que ele já havia pago. PAGAMENTO é o default.
+      .map(e => ({ ...e, tipo: e.tipo || 'PAGAMENTO', dataObj: parseDataLocal(e.data) }))
       .sort((a, b) => a.dataObj - b.dataObj);
 
     const faltantes = []; let primeiroFalt = null;
@@ -199,6 +201,15 @@
     return { valorNominal, correcao: 0, juros: 0, total: valorNominal, grupo: g };
   }
 
+  // Sobra de um pagamento que o item não conseguiu absorver (item já quitado, ou pago
+  // valor maior que o saldo dele). Vira evento de pagamento para o item seguinte, na
+  // mesma data, em vez de se perder — imputação em cascata (art. 355 do CC).
+  function creditosRemanescentes(res) {
+    return (res.linhas || [])
+      .filter(l => l.tipo === 'evento' && l.subtipo === 'pagamento' && l.credito > 0.005)
+      .map(l => ({ tipo: 'PAGAMENTO', valor: l.credito, data: l.dataObj, obs: 'excedente imputado do item anterior' }));
+  }
+
   // ── orquestrador judicial (principal + parcelas extras + multa/honorários sobre a soma) ──
   function calcularJudicial(params, TAB) {
     TAB = TAB || TABELAS;
@@ -207,16 +218,21 @@
     const principal = calcularPrincipal(pPrinc, TAB);
 
     let parcelasResultados = [], saldoExtras = 0, jurosExtras = 0;
+    let creditoCascata = temExtras ? creditosRemanescentes(principal) : [];
     if (temExtras) {
       for (const ex of params.parcelasExtras) {
         const valorEx = parseValor(ex.valor); if (!valorEx || valorEx <= 0) continue;
         const dCorr = parseDataLocal(ex.dataCorr); if (!dCorr) continue;
         const dJur = ex.dataJuros ? parseDataLocal(ex.dataJuros) : dCorr;
-        const sub = calcularPrincipal({ ...params, valorOriginal: valorEx, dataCorrecao: dCorr, dataJuros: dJur, aplicarMulta: false, eventos: [] }, TAB);
+        const sub = calcularPrincipal({ ...params, valorOriginal: valorEx, dataCorrecao: dCorr, dataJuros: dJur, aplicarMulta: false, eventos: creditoCascata }, TAB);
+        creditoCascata = creditosRemanescentes(sub);
         parcelasResultados.push({ valor: valorEx, dataCorr: dCorr, dataJuros: dJur, resultado: sub });
         saldoExtras += sub.saldoCorrigido; jurosExtras += sub.jurosAcumulados;
       }
     }
+    // Sobra após o último item: o devedor pagou mais do que devia. Fica exposta no
+    // retorno em vez de sumir — quem consome decide se devolve, compensa ou ignora.
+    const creditoNaoImputado = creditoCascata.reduce((s, c) => s + c.valor, 0);
     const saldoCorrigidoTotal = principal.saldoCorrigido + saldoExtras;
     const jurosAcumuladosTotal = principal.jurosAcumulados + jurosExtras;
     let multaAgregada;
@@ -242,7 +258,8 @@
     const totalHonC = honContratual ? honContratual.total : 0;
     const totalGeral = totalPrincipal + totalHonC + totalCustas;
     return { params, principal, parcelasResultados, saldoCorrigidoTotal, jurosAcumuladosTotal, multaAgregada,
-      honContratual, custasResultados, totalCustas, totalPrincipal, totalHonC, totalGeral, aplicouGarantia: principal.aplicouGarantia };
+      honContratual, custasResultados, totalCustas, totalPrincipal, totalHonC, totalGeral, creditoNaoImputado,
+      aplicouGarantia: principal.aplicouGarantia };
   }
 
   // ── cobrança extrajudicial (8% a.a. + 1% a.m. + 2% + taxa 30% + parcelamento) ──

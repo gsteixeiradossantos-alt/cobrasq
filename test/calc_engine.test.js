@@ -120,5 +120,39 @@ LOG('8) Multa unica: pagamento que zera a multa nao a reaplica em mes posterior'
   near(totalMulta, 1000, 'multa total = 10% de 10000, aplicada uma unica vez');
 })();
 
+// 9) Evento sem `tipo` tem de valer como pagamento — nao pode ser descartado calado
+LOG('9) Evento sem tipo explicito e tratado como PAGAMENTO');
+(function () {
+  var base = { valorOriginal: 10000, dataCorrecao: D(2024, 0, 10), dataFim: D(2024, 11, 10),
+    dataJuros: D(2024, 0, 10), indice: 'INPC', taxaJurosMensal: 1, aplicarMulta: false };
+  var semTipo = E.calcularPrincipal(Object.assign({}, base, { eventos: [{ data: '2024-03-05', valor: 3000 }] }));
+  var comTipo = E.calcularPrincipal(Object.assign({}, base, { eventos: [{ tipo: 'PAGAMENTO', data: '2024-03-05', valor: 3000 }] }));
+  var semEv = E.calcularPrincipal(Object.assign({}, base, { eventos: [] }));
+  near(semTipo.saldoCorrigido + semTipo.jurosAcumulados, comTipo.saldoCorrigido + comTipo.jurosAcumulados,
+    'evento sem tipo produz o mesmo saldo que evento com tipo', 0.005);
+  ok(semTipo.saldoCorrigido + semTipo.jurosAcumulados < semEv.saldoCorrigido + semEv.jurosAcumulados,
+    'pagamento sem tipo efetivamente abate o saldo');
+})();
+
+// 10) Excedente de pagamento desce para os itens seguintes (art. 355 CC), nao evapora
+LOG('10) Pagamento maior que o item 1 cascateia para os itens seguintes');
+(function () {
+  var p = { valorOriginal: 334, dataCorrecao: D(2023, 5, 17), dataJuros: D(2023, 5, 17),
+    dataFim: D(2026, 7, 7), indice: 'TJPR', taxaJurosMensal: 1, aplicarMulta: false,
+    parcelasExtras: [{ valor: '230', dataCorr: '2023-06-21' }], honC: { ativo: false } };
+  var semPgto = E.calcularJudicial(Object.assign({}, p, { eventos: [] }));
+  var comPgto = E.calcularJudicial(Object.assign({}, p, { eventos: [{ tipo: 'PAGAMENTO', data: '2025-04-24', valor: 564 }] }));
+  var item2Sem = semPgto.parcelasResultados[0].resultado;
+  var item2Com = comPgto.parcelasResultados[0].resultado;
+  near(comPgto.principal.saldoCorrigido + comPgto.principal.jurosAcumulados, 0, 'item 1 zerado pelo pagamento', 0.005);
+  ok(item2Com.saldoCorrigido + item2Com.jurosAcumulados < item2Sem.saldoCorrigido + item2Sem.jurosAcumulados,
+    'item 2 recebeu o excedente em vez de correr integral');
+  ok(comPgto.totalGeral < semPgto.totalGeral - 100, 'total geral cai alem do valor do item 1');
+  // pagamento que supera TODOS os itens deixa credito visivel, nao sumido
+  var demais = E.calcularJudicial(Object.assign({}, p, { eventos: [{ tipo: 'PAGAMENTO', data: '2025-04-24', valor: 5000 }] }));
+  near(demais.totalGeral, 0, 'pagamento acima do devido zera o total', 0.005);
+  ok(demais.creditoNaoImputado > 0, 'sobra apos o ultimo item fica exposta em creditoNaoImputado');
+})();
+
 LOG(FAIL === 0 ? '\nOK -- ' + RAN + ' assercoes passaram (motor canonico v3).' : '\nFALHOU -- ' + FAIL + '/' + RAN + ' assercao(oes).');
 if (FAIL > 0) { if (typeof process !== 'undefined' && process.exit) process.exit(1); else throw new Error('calc-engine: ' + FAIL + ' falhas'); }
