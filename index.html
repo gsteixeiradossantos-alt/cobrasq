@@ -6009,6 +6009,7 @@ async function loadRelationalData(){
   // grupo_economico_id de — credores que o usuário nem tocou (bug do "grupo que some" quando o
   // vínculo foi setado por fora, ex.: SQL/outra aba). Espelha _syncSnapshot do blob.
   if(Array.isArray(clientesRel)) _clientesRelSnapshot = _snapClientes();
+  if(Array.isArray(devedoresRel)) _devedoresRelSnapshot = _snapDevedores();
   if(Array.isArray(cobrancasRel)) DB_cobrancas = cobrancasRel;
   // FASE C2 (tempo-2): leitores do cliente passam a ver a dívida de cobrancas.
   _mergeDividaFromCobrancas();
@@ -6041,6 +6042,16 @@ let _clientesRelSnapshot = null;
 function _snapClientes(){
   const m = new Map();
   (DB.clientes||[]).forEach(c=>{ if(c && c.id!=null){ try{ m.set(c.id, JSON.stringify(clienteToRow(c))); }catch(_){} } });
+  return m;
+}
+// Mesmo baseline, para devedores — flushRelational (abaixo) reescrevia TODOS os devedores da
+// memória a cada save, sem diff (ao contrário de clientes, já corrigido). Uma aba com dado velho
+// (nome, doc, telefone, endereço — qualquer campo) sobrescrevia o servidor no primeiro save/fechar
+// de aba dela, mesmo sem tocar naquele devedor. Espelha _snapClientes.
+let _devedoresRelSnapshot = null;
+function _snapDevedores(){
+  const m = new Map();
+  (DB.devedores||[]).forEach(d=>{ if(d && d.id!=null){ try{ m.set(d.id, JSON.stringify(devedorToRow(d))); }catch(_){} } });
   return m;
 }
 
@@ -6093,7 +6104,20 @@ async function flushRelational(){
       }
     }
     if(Array.isArray(DB.devedores) && DB.devedores.length){
-      const rows = DB.devedores.filter(d=>!_tombstones.has(_tombKey('devedor', d.id))).map(devedorToRow);
+      // Mesmo diff-por-registro de clientes (ver flush acima): só envia quem mudou nesta sessão
+      // contra o baseline carregado no load. Sem isso, QUALQUER save (ou fechar a aba —
+      // beforeunload chama flushRelational) reescrevia TODOS os devedores a partir da memória
+      // daquela aba — uma aba aberta há horas com dado velho (nome, telefone, doc, endereço...)
+      // sobrescrevia o servidor de volta, mesmo sem o usuário tocar naquele devedor.
+      const baseDev = _devedoresRelSnapshot;
+      const rows = []; const sentDev = [];
+      for(const d of DB.devedores){
+        if(!d || d.id==null) continue;
+        if(_tombstones.has(_tombKey('devedor', d.id))) continue;
+        const row = devedorToRow(d); const json = JSON.stringify(row);
+        if(baseDev && baseDev.get(d.id) === json) continue; // inalterado → não toca no servidor
+        rows.push(row); sentDev.push([d.id, json]);
+      }
       const { error } = rows.length ? await supa.from('devedores').upsert(rows, { onConflict:'id' }) : { error:null };
       if(error){
         console.warn('[rel] syncDevedores:', error.message);
@@ -6103,6 +6127,10 @@ async function flushRelational(){
           ? 'Já existe um cadastro com esse CPF/CNPJ. Pode estar com outro responsável (que não aparece na sua lista) — peça ao gestor para localizar/transferir, ou use "Dívidas adicionais" no cadastro existente.'
           : 'Não foi possível sincronizar Devedores: '+error.message;
         try { showToast(msg, 'danger'); } catch(_){}
+      } else if(sentDev.length){
+        // Baseline avança só no sucesso — os enviados viram a nova referência da sessão.
+        if(!_devedoresRelSnapshot) _devedoresRelSnapshot = new Map();
+        for(const [id,json] of sentDev) _devedoresRelSnapshot.set(id, json);
       }
     }
   }catch(e){
