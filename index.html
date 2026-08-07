@@ -28918,7 +28918,7 @@ const FIN_SECTIONS_VISIVEIS = ['fila','visao','movimentacoes','receitasjudiciais
 // redesenho (PR2: fila+lancamentos; PR3: +repasses; PR4: +conciliacao+fechamento) —
 // só então 'repasses'/'conciliacao' saem do dispatch antigo (renderFinRepasses/
 // renderFinConciliacao, ainda linkados de Caixa/Contas/Extrato — não quebrar).
-const FIN_CASCATA_TABS = ['fila','lancamentos'];
+const FIN_CASCATA_TABS = ['fila','lancamentos','repasses'];
 function _finSectionOf(tab){
   for(const [key,s] of Object.entries(FIN_SECTIONS)){
     if(s.subtabs.some(t=>t.id===tab)) return key;
@@ -29687,7 +29687,7 @@ function _finLancCascataRender(){
       .finlc-diahead:first-child{border-top:none;}
       .finlc-diahead .dd{font-family:'Fraunces',Georgia,serif;font-size:19px;color:#0A1530;}
       .finlc-diahead .dow{font-family:'JetBrains Mono',monospace;font-size:10px;color:#A6AEBD;text-transform:uppercase;}
-      .finlc-row{display:flex;align-items:center;gap:14px;padding:13px 22px;border-bottom:1px solid #F2EFE6;}
+      .finlc-row{display:flex;align-items:center;gap:14px;padding:13px 22px;border-bottom:1px solid #F2EFE6;cursor:pointer;}
       .finlc-row:hover{background:#FBFAF6;}
       .finlc-row.sel{background:#F6F3EA;}
       .finlc-box{width:16px;height:16px;border-radius:4px;border:1px solid #CFC8B6;flex-shrink:0;cursor:pointer;background:#fff;}
@@ -29756,8 +29756,8 @@ function _finLancCascataRowHtml(l, ctx){
   } else if(l.cedente_id){
     sub = `<div class="finlc-sub-row">cedente vinculado · divisão pendente<span class="finlc-sub-chip" style="background:#FBEAE7;color:#7D3F33;">SEM DIVISÃO</span></div>`;
   }
-  return `<div class="finlc-row ${sel?'sel':''}">
-      <div class="finlc-box ${sel?'on':''}" onclick="_finLancCascataToggleSel('${l.id}')"></div>
+  return `<div class="finlc-row ${sel?'sel':''}" onclick="_finLancAbrirDrawer(${l.id})">
+      <div class="finlc-box ${sel?'on':''}" onclick="event.stopPropagation();_finLancCascataToggleSel('${l.id}')"></div>
       <div class="finlc-ic" style="background:${isEnt?'#E9F0E7':'#FBEAE7'};color:${isEnt?'#4C6647':'#A65A4A'};">${isEnt?'↓':'↑'}</div>
       <div class="finlc-desc"><div class="tx">${escHtml(l.descricao||'—')}</div><div class="meta">${l.fin_conta&&l.fin_conta.descricao?escHtml(l.fin_conta.descricao):''}</div></div>
       <div class="finlc-cat">${escHtml((l.fin_conta&&l.fin_conta.banco_nome)||'')}</div>
@@ -29798,6 +29798,560 @@ async function _finLancCascataLote(acao){
   }catch(e){ showToast('Erro: '+(e.message||e), 'danger'); }
 }
 
+// ══════════════════════════════════════════════════════════════
+// FINANCEIRO — Drawer do lançamento + Repasses + modais (PR 3/4 do redesenho)
+// ──────────────────────────────────────────────────────────────
+// Drawer: dois caminhos, sem fingir que são a mesma coisa —
+//  (a) lançamento nasceu de fin_operacao (pipeline Asaas) → bloco DIVISÃO é SÓ LEITURA
+//      (split já calculado pelo webhook); REPASSE reusa confirmarRepasse() (real, já
+//      existia); NOTA FISCAL usa /api/emitir-nf (endpoint já existia, sem botão até
+//      agora — é o primeiro caller dele).
+//  (b) lançamento manual (sem fin_operacao) → bloco DIVISÃO é EDITÁVEL, grava direto
+//      nas colunas da cascata (fin_lancamento, PR1) e recalcula com finDivideCascata().
+//
+// Repasses: cartão por cedente com recebimento pendente (fin_operacao), substituindo
+// renderFinRepasses/renderFinRepasseCedente (removidas — sem outro caller). Mesma
+// decisão do PR2: sem botão de repasse em lote (Pix real não dispara sem confirmação
+// por operação — cada linha some 1x confirmarRepasse(), nunca um loop automático).
+// ══════════════════════════════════════════════════════════════
+
+// ── Drawer do lançamento ──
+async function _finLancAbrirDrawer(lancId){
+  const sb = getSupabase();
+  let l;
+  try{
+    let r = await sb.from('fin_lancamento')
+      .select('id,descricao,data_competencia,valor,tipo_movimento,status,conciliado,conta_id,fin_conta(descricao),cedente_id,capital,meu_total,amortizado,repasse_status,cobranca_id')
+      .eq('id', lancId).single();
+    if(r.error) throw r.error;
+    l = r.data;
+  }catch(e){
+    // Colunas do PR1 podem não existir ainda — tenta de novo sem elas.
+    try{
+      const r2 = await sb.from('fin_lancamento').select('id,descricao,data_competencia,valor,tipo_movimento,status,conciliado,conta_id,fin_conta(descricao),cobranca_id').eq('id', lancId).single();
+      if(r2.error) throw r2.error;
+      l = r2.data;
+    }catch(e2){ showToast('Erro ao abrir lançamento: '+(e2.message||e2), 'danger'); return; }
+  }
+
+  let op = null;
+  try{ const { data } = await sb.from('fin_operacao')
+    .select('id,valor_recebido,valor_capital,valor_honorario,repasse_status,repasse_comprovante_url,repasse_efetuado_em,nf_status,nf_url,credor_id,devedor_id,parcela,total_parcelas')
+    .or(`lancamento_receita_id.eq.${lancId},lancamento_despesa_id.eq.${lancId}`).maybeSingle();
+    op = data;
+  }catch(_){}
+
+  let cedentes = [];
+  try{ const { data } = await sb.from('clientes').select('id,nome').order('nome').limit(500); cedentes = data||[]; }catch(_){}
+  let credorNome = null, devedorNome = null;
+  const credorId = (op && op.credor_id) || null;
+  if(credorId){ const c = cedentes.find(x=>x.id===credorId); credorNome = c ? c.nome : null; }
+  if(op && op.devedor_id){ try{ const {data}=await sb.from('devedores').select('nome').eq('id',op.devedor_id).maybeSingle(); devedorNome = data && data.nome; }catch(_){} }
+
+  window._finDrawerCtx = { l, op, cedentes, credorNome, devedorNome };
+  let ov = document.getElementById('findrw-overlay');
+  if(!ov){ ov = document.createElement('div'); ov.id='findrw-overlay'; ov.className='overlay findrw-ov'; document.body.appendChild(ov); }
+  _finLancDrawerRender();
+  openModal('findrw-overlay');
+}
+function _finLancDrawerRender(){
+  const ov = document.getElementById('findrw-overlay'); if(!ov) return;
+  const { l, op, cedentes, credorNome } = window._finDrawerCtx;
+  const isEnt = l.tipo_movimento===1;
+  const valor = Math.abs(+l.valor||0);
+  ov.innerHTML = `
+    <style>
+      .findrw-ov{justify-content:flex-end;align-items:stretch;padding:0;background:rgba(10,21,48,.34);}
+      .findrw-panel{width:600px;max-width:100vw;height:100%;background:#fff;overflow-y:auto;box-shadow:-20px 0 60px rgba(10,21,48,.22);}
+      .findrw-head{display:flex;align-items:center;gap:14px;padding:22px 26px;border-bottom:1px solid #E6E1D2;}
+      .findrw-ic{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;flex-shrink:0;}
+      .findrw-eyebrow{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#9C7F40;}
+      .findrw-title{font-family:'Fraunces',Georgia,serif;font-size:23px;font-weight:400;color:#0A1530;margin-top:2px;}
+      .findrw-x{border:none;background:transparent;font-size:18px;color:#8A94A6;cursor:pointer;}
+      .findrw-body{padding:22px 26px;}
+      .findrw-block{border:1px solid #E6E1D2;border-radius:10px;padding:16px 18px;margin-bottom:16px;}
+      .findrw-bt{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#8A94A6;margin-bottom:10px;}
+      .findrw-kv{display:flex;justify-content:space-between;font-size:13.5px;color:#5A5F66;padding:5px 0;}
+      .findrw-kv b{font-family:'JetBrains Mono',monospace;color:#0A1530;}
+      .findrw-link{display:inline-block;margin-top:8px;font-size:12.5px;color:#3A5288;font-weight:600;cursor:pointer;}
+      .findrw-note{font-size:12px;color:#8A94A6;margin-top:6px;line-height:1.5;}
+      .findrw-barra{margin-bottom:10px;}
+      .findrw-barra-lb{font-size:11.5px;color:#6B7683;margin-bottom:4px;}
+      .findrw-barra-trilho{height:9px;border-radius:5px;background:#EFEBE0;overflow:hidden;}
+      .findrw-barra-trilho div{height:100%;border-radius:5px;}
+      .findrw-btn{border:1px solid #E6E1D2;background:#fff;color:#0A1530;font-size:13px;font-weight:500;padding:10px 16px;border-radius:8px;cursor:pointer;font-family:inherit;}
+      .findrw-btn.dark{background:#0A1530;color:#fff;border-color:#0A1530;}
+      .findrw-foot{display:flex;justify-content:space-between;padding:16px 26px;border-top:1px solid #E6E1D2;}
+    </style>
+    <div class="findrw-panel">
+      <div class="findrw-head">
+        <div class="findrw-ic" style="background:${isEnt?'#E9F0E7':'#FBEAE7'};color:${isEnt?'#4C6647':'#A65A4A'};">${isEnt?'↓':'↑'}</div>
+        <div style="flex:1;min-width:0;">
+          <div class="findrw-eyebrow">${isEnt?'ENTRADA':'SAÍDA'}${op?' · ASAAS':''}</div>
+          <div class="findrw-title">${escHtml(l.descricao||'—')}</div>
+        </div>
+        <button class="findrw-x" onclick="closeModal('findrw-overlay')">✕</button>
+      </div>
+      <div class="findrw-body">
+        <div class="findrw-block">
+          <div class="findrw-bt">LANÇAMENTO</div>
+          <div class="findrw-kv"><span>Valor bruto</span><b>${fmtR(valor)}</b></div>
+          <div class="findrw-kv"><span>Data</span><b>${(l.data_competencia||'').split('-').reverse().join('/')||'—'}</b></div>
+          <div class="findrw-kv"><span>Conta</span><b>${escHtml((l.fin_conta&&l.fin_conta.descricao)||'—')}</b></div>
+          <a class="findrw-link" onclick="closeModal('findrw-overlay');editarLancamento(${l.id});">Editar dados básicos →</a>
+        </div>
+        ${_finDrawerDivisaoHtml(l, op, cedentes, credorNome, valor)}
+        ${op ? _finDrawerRepasseHtml(op, credorNome) : ''}
+        ${op ? _finDrawerNfHtml(op) : ''}
+        ${l.cobranca_id ? `<div class="findrw-block"><div class="findrw-bt">VÍNCULO</div><a class="findrw-link" onclick="closeModal('findrw-overlay');location.hash='#/cobranca/${l.cobranca_id}';">Abrir cobrança →</a></div>` : ''}
+      </div>
+    </div>`;
+  if(!op && l.cedente_id) setTimeout(()=>_finDrawerRecalc(valor), 0);
+}
+function _finDrawerDivisaoHtml(l, op, cedentes, credorNome, valor){
+  if(op){
+    const meuSaldo = +op.valor_honorario||0, capSaldo = +op.valor_capital||0;
+    const pctExc = valor>0 ? Math.min(100, Math.round(meuSaldo/valor*100)) : 0;
+    const pctCap = valor>0 ? Math.min(100, Math.round(capSaldo/valor*100)) : 0;
+    return `<div class="findrw-block" style="border-color:#DFC992;background:#FDFAF2;">
+      <div class="findrw-bt" style="color:#9C7F40;">DIVISÃO DO RECEBIMENTO — ${escHtml(credorNome||'cedente')}</div>
+      <div class="findrw-barra"><div class="findrw-barra-lb">1º · Seu excedente · ${fmtR(meuSaldo)} de ${fmtR(valor)}</div><div class="findrw-barra-trilho"><div style="width:${pctExc}%;background:#C9A961;"></div></div></div>
+      <div class="findrw-barra"><div class="findrw-barra-lb">2º · Capital do cedente · ${fmtR(capSaldo)} de ${fmtR(valor)}</div><div class="findrw-barra-trilho"><div style="width:${pctCap}%;background:#5E7C58;"></div></div></div>
+      <div class="findrw-kv"><span>Vai para o cedente · capital</span><b style="color:#5E7C58;">${fmtR(capSaldo)}</b></div>
+      <div class="findrw-kv"><span>Fica com você · excedente e base da NF</span><b style="color:#9C7F40;">${fmtR(meuSaldo)}</b></div>
+      <div class="findrw-note">Calculado pelo webhook Asaas (proporcional por parcela) — não editável por aqui. Split errado (repasse_status="revisar") se resolve pela Fila.</div>
+    </div>`;
+  }
+  const optsCed = cedentes.map(c=>`<option value="${c.id}" ${l.cedente_id===c.id?'selected':''}>${escHtml(c.nome)}</option>`).join('');
+  const temCed = !!l.cedente_id;
+  const capital = l.capital!=null ? l.capital : '';
+  const meuTotal = l.meu_total!=null ? l.meu_total : '';
+  const amortizado = l.amortizado!=null ? l.amortizado : 0;
+  return `<div class="findrw-block">
+    <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:500;cursor:pointer;"><input type="checkbox" id="findrw-temced" ${temCed?'checked':''} onchange="_finDrawerToggleCed()"> Esta entrada tem parte de um cedente</label>
+    <div id="findrw-divwrap" style="display:${temCed?'block':'none'};margin-top:12px;padding-top:12px;border-top:1px solid #DFC992;">
+      <label style="font-size:12px;color:#6B7683;">Cedente<select id="findrw-cedente" style="width:100%;padding:9px 11px;border:1px solid #E6E1D2;border-radius:7px;margin-top:4px;" onchange="_finDrawerRecalc(${valor})"><option value="">Selecione...</option>${optsCed}</select></label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">
+        <label style="font-size:12px;color:#6B7683;">Capital do cedente<input type="text" inputmode="decimal" id="findrw-capital" value="${capital}" style="width:100%;padding:9px 11px;border:1px solid #E6E1D2;border-radius:7px;margin-top:4px;" oninput="_finDrawerRecalc(${valor})"></label>
+        <label style="font-size:12px;color:#6B7683;">Seu excedente no título<input type="text" inputmode="decimal" id="findrw-meutotal" value="${meuTotal}" style="width:100%;padding:9px 11px;border:1px solid #E6E1D2;border-radius:7px;margin-top:4px;" oninput="_finDrawerRecalc(${valor})"></label>
+      </div>
+      <label style="font-size:12px;color:#6B7683;display:block;margin-top:10px;">Já recebido antes deste<input type="text" inputmode="decimal" id="findrw-amortizado" value="${amortizado}" style="width:100%;padding:9px 11px;border:1px solid #E6E1D2;border-radius:7px;margin-top:4px;" oninput="_finDrawerRecalc(${valor})"></label>
+      <div id="findrw-barras" style="margin-top:12px;"></div>
+      <div id="findrw-resultado" style="margin-top:10px;"></div>
+      <button class="findrw-btn dark" style="margin-top:10px;" onclick="_finDrawerSalvarDivisao(${l.id})">Salvar divisão</button>
+    </div>
+  </div>`;
+}
+function _finDrawerToggleCed(){
+  const on = document.getElementById('findrw-temced').checked;
+  document.getElementById('findrw-divwrap').style.display = on ? 'block' : 'none';
+}
+function _finDrawerRecalc(valorBruto){
+  const num = id => +((document.getElementById(id)||{}).value||'0').toString().replace(',','.') || 0;
+  const capital = num('findrw-capital'), meuTotal = num('findrw-meutotal'), amortizado = num('findrw-amortizado');
+  const r = finDivideCascata({capital, meu_total:meuTotal, amortizado}, valorBruto);
+  const meuSaldo = r.meuSaldoAntes||0, capSaldo = r.capSaldoAntes||0;
+  const pctExc = meuSaldo>0 ? Math.min(100, Math.round(Math.min(r.ficaComVoce,meuSaldo)/meuSaldo*100)) : (r.ficaComVoce>0?100:0);
+  const pctCap = capSaldo>0 ? Math.min(100, Math.round(r.repasseAoCedente/capSaldo*100)) : (r.repasseAoCedente>0?100:0);
+  const barras = document.getElementById('findrw-barras');
+  if(barras) barras.innerHTML = `
+    <div class="findrw-barra"><div class="findrw-barra-lb">1º · Seu excedente · ${fmtR(Math.min(r.ficaComVoce,meuSaldo))} de ${fmtR(meuSaldo)} <span style="color:#A6AEBD;">faltava ${fmtR(meuSaldo)}</span></div><div class="findrw-barra-trilho"><div style="width:${pctExc}%;background:#C9A961;"></div></div></div>
+    <div class="findrw-barra"><div class="findrw-barra-lb">2º · Capital do cedente · ${fmtR(r.repasseAoCedente)} de ${fmtR(capSaldo)} <span style="color:#A6AEBD;">faltava ${fmtR(capSaldo)}</span></div><div class="findrw-barra-trilho"><div style="width:${pctCap}%;background:#5E7C58;"></div></div></div>`;
+  const res = document.getElementById('findrw-resultado');
+  if(res) res.innerHTML = `
+    <div class="findrw-kv"><span>Bruto recebido</span><b>${fmtR(valorBruto)}</b></div>
+    <div class="findrw-kv"><span>Vai para o cedente · capital</span><b style="color:#5E7C58;">${fmtR(r.repasseAoCedente)}</b></div>
+    <div class="findrw-kv"><span>Fica com você · excedente e base da NF</span><b style="color:#9C7F40;">${fmtR(r.ficaComVoce)}</b></div>`;
+}
+async function _finDrawerSalvarDivisao(lancId){
+  const cedente = (document.getElementById('findrw-cedente')||{}).value;
+  if(!cedente){ showToast('Selecione o cedente.', 'warning'); return; }
+  const num = id => +((document.getElementById(id)||{}).value||'0').toString().replace(',','.') || 0;
+  try{
+    const sb = getSupabase();
+    const { error } = await sb.from('fin_lancamento').update({
+      cedente_id: cedente, capital: num('findrw-capital'), meu_total: num('findrw-meutotal'), amortizado: num('findrw-amortizado'),
+      repasse_status: 'pendente',
+    }).eq('id', lancId);
+    if(error) throw error;
+    showToast('Divisão salva.', 'success');
+    closeModal('findrw-overlay');
+    renderFinTab('lancamentos');
+  }catch(e){ showToast('Erro ao salvar: '+(e.message||e), 'danger'); }
+}
+function _finDrawerRepasseHtml(op, credorNome){
+  if(op.repasse_status==='efetuado'){
+    return `<div class="findrw-block">
+      <div class="findrw-bt">REPASSE</div>
+      <div style="background:#E9F0E7;border:1px solid #CFE0CB;border-radius:9px;padding:12px 14px;">
+        <div style="font-size:13px;color:#4C6647;font-weight:600;">Repassado em ${(op.repasse_efetuado_em||'').slice(0,10).split('-').reverse().join('/')}</div>
+        ${op.repasse_comprovante_url ? `<a href="${op.repasse_comprovante_url}" target="_blank" class="findrw-link">Abrir comprovante →</a>` : ''}
+      </div>
+    </div>`;
+  }
+  if(op.repasse_status==='revisar'){
+    return `<div class="findrw-block"><div class="findrw-bt">REPASSE</div><div class="findrw-note">Split em revisão manual — resolva pela Fila (chip Divergências) antes de repassar.</div></div>`;
+  }
+  return `<div class="findrw-block">
+    <div class="findrw-bt">REPASSE</div>
+    <div class="findrw-note" style="margin-bottom:10px;">Pendente — ${fmtR(op.valor_capital)} para ${escHtml(credorNome||'o cedente')}.</div>
+    <button class="findrw-btn dark" onclick="closeModal('findrw-overlay');confirmarRepasse('${op.id}');">Gerar Pix de ${fmtR(op.valor_capital)} ao cedente</button>
+  </div>`;
+}
+function _finDrawerNfHtml(op){
+  if(op.nf_status==='emitida'){
+    return `<div class="findrw-block"><div class="findrw-bt">NOTA FISCAL</div>
+      <div style="font-size:13px;color:#4C6647;font-weight:600;">EMITIDA</div>
+      ${op.nf_url?`<a href="${op.nf_url}" target="_blank" class="findrw-link">Abrir NF →</a>`:''}
+    </div>`;
+  }
+  const podeEmitir = op.repasse_status!=='revisar';
+  return `<div class="findrw-block"><div class="findrw-bt">NOTA FISCAL</div>
+    <div style="font-size:12.5px;color:#6B7683;margin-bottom:8px;">${podeEmitir?'A EMITIR':'AGUARDA DIVISÃO'} · base de cálculo ${fmtR(+op.valor_honorario||0)} (bruto − capital do cedente)</div>
+    ${podeEmitir
+      ? `<button class="findrw-btn" onclick="_finDrawerEmitirNf('${op.id}')" id="findrw-nfbtn">Emitir agora</button>`
+      : `<div class="findrw-note">Split em revisão — emitir depois de resolver na Fila.</div>`}
+  </div>`;
+}
+async function _finDrawerEmitirNf(opId){
+  const btn = document.getElementById('findrw-nfbtn'); if(btn){ btn.disabled=true; btn.textContent='Emitindo…'; }
+  try{
+    const res = await fetch('/api/emitir-nf', { method:'POST', headers: Object.assign({ 'Content-Type':'application/json' }, await authHeaders()), body: JSON.stringify({ operacao_id: opId }) });
+    const j = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(j.error||('HTTP '+res.status));
+    showToast(j.skipped ? ('Não emitida: '+j.skipped) : 'NF emitida.', j.skipped?'info':'success');
+    _finLancAbrirDrawer(window._finDrawerCtx.l.id);
+  }catch(e){ showToast('Erro ao emitir NF: '+(e.message||e), 'danger'); if(btn){ btn.disabled=false; btn.textContent='Emitir agora'; } }
+}
+
+// ── Seção "Repasses" — substitui renderFinRepasses/renderFinRepasseCedente (sem outro
+// caller). Um cartão por cedente com recebimento pendente; "já feitos" no rodapé. ──
+async function _finRepassesCascataCarregar(){
+  const sb = getSupabase();
+  const { data: opsData } = await sb.from('fin_operacao')
+    .select('id,credor_id,devedor_id,parcela,total_parcelas,valor_recebido,valor_capital,valor_honorario,recebido_em,repasse_status,repasse_efetuado_em,repasse_comprovante_url,lancamento_receita_id')
+    .order('recebido_em',{ascending:false}).limit(2000);
+  const ops = opsData||[];
+  const credIds=[...new Set(ops.map(o=>o.credor_id).filter(Boolean))];
+  let credMap={};
+  if(credIds.length){ const {data}=await sb.from('clientes').select('id,nome,chave_pix').in('id',credIds); (data||[]).forEach(c=>credMap[c.id]={nome:c.nome,pix:c.chave_pix}); }
+  const devIds=[...new Set(ops.map(o=>o.devedor_id).filter(Boolean))];
+  let devMap={};
+  if(devIds.length){ const {data}=await sb.from('devedores').select('id,nome').in('id',devIds); (data||[]).forEach(d=>devMap[d.id]=d.nome); }
+  let contratos={};
+  if(credIds.length){ try{ const {data}=await sb.from('fin_contrato_cedente').select('*').in('cliente_id',credIds); (data||[]).forEach(c=>contratos[c.cliente_id]=c); }catch(_){} }
+  let planos=[];
+  if(credIds.length){ try{ const {data}=await sb.from('fin_repasse_plano').select('*, fin_repasse_parcela(*)').in('cliente_id',credIds); planos=data||[]; }catch(_){} }
+  return { ops, credMap, devMap, contratos, planos };
+}
+function _finRepassesAgrupar(ctx){
+  const byCred = {};
+  for(const o of ctx.ops){
+    if(!o.credor_id) continue; // sem credor vinculado é caso da Fila (divergência), não some aqui
+    if(!byCred[o.credor_id]) byCred[o.credor_id] = { credId:o.credor_id, nome:(ctx.credMap[o.credor_id]||{}).nome||'—', pendentes:[], feitos:[], recebido:0, honorario:0, aRepassar:0 };
+    const g = byCred[o.credor_id];
+    g.recebido += +o.valor_recebido||0;
+    g.honorario += +o.valor_honorario||0;
+    if(o.repasse_status==='pendente'||o.repasse_status==='preparado'){ g.pendentes.push(o); g.aRepassar += +o.valor_capital||0; }
+    else if(o.repasse_status==='efetuado') g.feitos.push(o);
+  }
+  return Object.values(byCred).sort((a,b)=>b.aRepassar-a.aRepassar || b.recebido-a.recebido);
+}
+async function renderFinRepassesCascata(el){
+  el.innerHTML = `<div style="padding:50px;text-align:center;color:#8A94A6;"><div class="mv2-spinner" style="margin:0 auto 10px;width:24px;height:24px;border-width:3px;"></div>Carregando repasses…</div>`;
+  let ctx;
+  try{ ctx = await _finRepassesCascataCarregar(); }
+  catch(e){ el.innerHTML = `<div class="panel" style="padding:20px;color:var(--danger);">Erro: ${escHtml(e.message||String(e))}</div>`; return; }
+  window._finRepassesCtx = ctx;
+  _finRepassesCascataRender();
+  const cEl = document.getElementById('fincx-cnt-repasses'); if(cEl) cEl.textContent = ctx.ops.filter(o=>o.repasse_status==='pendente'||o.repasse_status==='preparado').length;
+}
+function _diasDesdeFin(s){ if(!s) return null; const d=new Date(s+'T00:00:00'); return Math.max(0, Math.floor((Date.now()-d)/86400000)); }
+function _finRepassesCascataRender(){
+  const el = document.getElementById('fin-content'); if(!el) return;
+  const ctx = window._finRepassesCtx;
+  const grupos = _finRepassesAgrupar(ctx).filter(g=>g.pendentes.length>0);
+  const feitos = ctx.ops.filter(o=>o.repasse_status==='efetuado').sort((a,b)=>(b.repasse_efetuado_em||'').localeCompare(a.repasse_efetuado_em||'')).slice(0,30);
+
+  el.innerHTML = `
+    <style>
+      .finrp-hint{display:flex;align-items:center;gap:10px;background:#FDFAF2;border:1px solid #DFC992;border-radius:9px;padding:12px 16px;margin-bottom:18px;font-size:13px;color:#7A6428;}
+      .finrp-card{background:#fff;border:1px solid #E6E1D2;border-radius:12px;margin-bottom:16px;overflow:hidden;}
+      .finrp-card.atraso{border-color:#E7CFC7;}
+      .finrp-cabec{display:flex;align-items:center;gap:14px;padding:18px 20px;background:#FBFAF6;}
+      .finrp-card.atraso .finrp-cabec{background:#FDF6F4;}
+      .finrp-ini{width:44px;height:44px;border-radius:10px;background:#0A1530;color:#EFEAD9;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;flex-shrink:0;}
+      .finrp-nome{font-size:17px;font-weight:600;color:#0A1530;}
+      .finrp-chip-atraso{margin-left:8px;font-family:'JetBrains Mono',monospace;font-size:9.5px;padding:2px 8px;border-radius:4px;background:#FBEAE7;color:#A65A4A;}
+      .finrp-meta{font-size:12px;color:#8A94A6;margin-top:2px;}
+      .finrp-arep-lb{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#8A94A6;text-align:right;}
+      .finrp-arep-v{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:600;color:#0A1530;}
+      .finrp-acts{display:flex;gap:8px;}
+      .finrp-btn{border:1px solid #E6E1D2;background:#fff;color:#0A1530;font-size:12.5px;font-weight:500;padding:9px 14px;border-radius:8px;cursor:pointer;font-family:inherit;white-space:nowrap;}
+      .finrp-btn.dark{background:#0A1530;color:#fff;border-color:#0A1530;}
+      .finrp-btn.sm{padding:5px 10px;font-size:11.5px;}
+      .finrp-btn.on{background:#0A1530;color:#fff;border-color:#0A1530;}
+      .finrp-linha{display:grid;grid-template-columns:1fr 110px 110px 110px 60px;gap:10px;align-items:center;padding:11px 20px;border-top:1px solid #F2EFE6;font-size:13px;}
+      .finrp-c-bruto{text-align:right;color:#0A1530;}
+      .finrp-c-cap{text-align:right;color:#9C7F40;font-weight:600;font-family:'JetBrains Mono',monospace;}
+      .finrp-c-exc{text-align:right;color:#5E7C58;font-family:'JetBrains Mono',monospace;}
+      .finrp-abrir{text-align:right;color:#3A5288;font-weight:600;cursor:pointer;font-size:12px;}
+      .finrp-abrir.off{color:#C8CEDA;cursor:default;}
+      .finrp-plano{background:#FDFAF2;border-top:2px solid #DFC992;padding:12px 20px;}
+      .finrp-plano-tt{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.1em;color:#9C7F40;margin-bottom:8px;}
+      .finrp-parc{display:grid;grid-template-columns:1fr 90px 100px 100px auto;gap:10px;align-items:center;padding:6px 0;font-size:12.5px;}
+      .finrp-parc-chip{font-family:'JetBrains Mono',monospace;font-size:9px;padding:2px 8px;border-radius:4px;background:#F5F2EA;color:#6B7683;text-align:center;}
+      .finrp-parc-chip.paga{background:#E9F0E7;color:#4C6647;}
+      .finrp-rodape{padding:10px 20px;font-size:11.5px;color:#8A94A6;border-top:1px solid #F2EFE6;}
+      .finrp-feitos{background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:6px 0;}
+      .finrp-feito-row{display:flex;align-items:center;gap:12px;padding:11px 20px;border-bottom:1px solid #F2EFE6;font-size:13px;}
+      .finrp-feito-row:last-child{border-bottom:none;}
+    </style>
+    <div style="font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:400;color:#0A1530;margin-bottom:4px;">Repasses</div>
+    <div class="finrp-hint">Repasse não se cadastra — ele nasce do recebimento (fin_operacao, pipeline Asaas).</div>
+    ${grupos.length ? grupos.map(g=>_finRepasseCardHtml(g, ctx)).join('') : `<div style="padding:40px;text-align:center;color:#8A94A6;font-family:'Fraunces',Georgia,serif;font-size:20px;background:#fff;border:1px solid #E6E1D2;border-radius:12px;">Nenhum repasse pendente.</div>`}
+    <div style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#8A94A6;margin:22px 0 10px;">Repasses já feitos</div>
+    <div class="finrp-feitos">
+      ${feitos.length ? feitos.map(o=>`<div class="finrp-feito-row">
+          <span style="width:28px;">${ico('file',16)}</span>
+          <span style="flex:1;">${escHtml((ctx.credMap[o.credor_id]||{}).nome||'—')} <span style="color:#A6AEBD;">· ${escHtml(ctx.devMap[o.devedor_id]||'—')}</span></span>
+          <span style="color:#8A94A6;font-size:12px;">${(o.repasse_efetuado_em||'').slice(0,10).split('-').reverse().join('/')}</span>
+          <b style="font-family:'JetBrains Mono',monospace;">${fmtR(o.valor_capital)}</b>
+          ${o.repasse_comprovante_url?`<a href="${o.repasse_comprovante_url}" target="_blank" style="color:#3A5288;font-size:12px;font-weight:600;">Ver comprovante</a>`:''}
+        </div>`).join('') : `<div style="padding:20px;text-align:center;color:#A6AEBD;font-size:13px;">Nenhum repasse concluído ainda.</div>`}
+    </div>`;
+}
+function _finRepasseCardHtml(g, ctx){
+  const contrato = ctx.contratos[g.credId];
+  const plano = ctx.planos.find(p=>p.cliente_id===g.credId && (p.fin_repasse_parcela||[]).some(pc=>!pc.pago_em));
+  const parcelas = plano ? (plano.fin_repasse_parcela||[]).slice().sort((a,b)=>a.numero-b.numero) : [];
+  const proxParcela = parcelas.find(pc=>!pc.pago_em);
+  const iniciais = (g.nome||'?').split(' ').filter(Boolean).slice(0,2).map(w=>w[0]).join('').toUpperCase()||'?';
+  const foraPrazo = g.pendentes.some(o=>{ const d=_diasDesdeFin(o.recebido_em); return d!=null && d > ((contrato&&contrato.prazo_dias)||5); });
+  const acaoPrincipal = proxParcela
+    ? `<button class="finrp-btn dark" onclick="_finRepassePagarParcela('${proxParcela.id}')">Pagar parcela ${proxParcela.numero} · ${fmtR(proxParcela.valor)}</button>`
+    : (g.pendentes.length===1 ? `<button class="finrp-btn dark" onclick="confirmarRepasse('${g.pendentes[0].id}')">Repassar ${fmtR(g.aRepassar)}</button>` : '');
+  const nomeSeguro = escHtml(g.nome).replace(/'/g,"\\'");
+  return `<div class="finrp-card ${foraPrazo?'atraso':''}">
+    <div class="finrp-cabec">
+      <div class="finrp-ini">${escHtml(iniciais)}</div>
+      <div style="flex:1;min-width:0;">
+        <div class="finrp-nome">${escHtml(g.nome)}${foraPrazo?'<span class="finrp-chip-atraso">FORA DO PRAZO</span>':''}</div>
+        <div class="finrp-meta">${contrato ? `${contrato.modo==='percentual'?`${contrato.pct||0}% sobre recebido`:'Cascata · seu excedente primeiro'} · prazo ${contrato.prazo_dias||5}d${contrato.pix_chave?` · Pix ${escHtml(contrato.pix_chave)}`:''}` : 'Sem contrato configurado · prazo padrão 5d'}</div>
+      </div>
+      <div><div class="finrp-arep-lb">A REPASSAR</div><div class="finrp-arep-v">${fmtR(g.aRepassar)}</div></div>
+      <div class="finrp-acts">
+        <button class="finrp-btn" onclick="_finContratoAbrirModal('${g.credId}','${nomeSeguro}')">Contrato</button>
+        <button class="finrp-btn" onclick="_finProgramarAbrirModal('${g.credId}',${g.aRepassar})">Programar</button>
+        ${acaoPrincipal}
+      </div>
+    </div>
+    ${g.pendentes.map(o=>{
+      const d = _diasDesdeFin(o.recebido_em);
+      return `<div class="finrp-linha">
+        <span>${escHtml(ctx.devMap[o.devedor_id]||'—')}${o.parcela?` · ${o.parcela}/${o.total_parcelas}`:''} <span style="color:#A6AEBD;font-size:11.5px;">${d==null?'':`· há ${d} dia${d!==1?'s':''}`}</span></span>
+        <span class="finrp-c-bruto">${fmtR(o.valor_recebido)}</span>
+        <span class="finrp-c-cap">${fmtR(o.valor_capital)}</span>
+        <span class="finrp-c-exc">${fmtR(o.valor_honorario)}</span>
+        ${o.lancamento_receita_id ? `<a class="finrp-abrir" onclick="_finLancAbrirDrawer(${o.lancamento_receita_id})">Abrir</a>` : `<span class="finrp-abrir off">Abrir</span>`}
+        ${g.pendentes.length>1 && !proxParcela ? `<div style="grid-column:1/-1;text-align:right;margin-top:-4px;"><a class="finrp-abrir" onclick="confirmarRepasse('${o.id}')">Repassar esta →</a></div>` : ''}
+      </div>`;
+    }).join('')}
+    ${parcelas.length ? `<div class="finrp-plano">
+      <div class="finrp-plano-tt">REPASSE PROGRAMADO — ${parcelas.filter(p=>p.pago_em).length}/${parcelas.length} pagas</div>
+      ${parcelas.map(pc=>`<div class="finrp-parc"><span>Parcela ${pc.numero} de ${parcelas.length}</span><span>${(pc.vence_em||'').split('-').reverse().join('/')}</span><span class="finrp-parc-chip ${pc.pago_em?'paga':''}">${pc.pago_em?'PAGA':'PROGRAMADA'}</span><b style="font-family:'JetBrains Mono',monospace;">${fmtR(pc.valor)}</b>${!pc.pago_em?`<button class="finrp-btn dark sm" onclick="_finRepassePagarParcela('${pc.id}')">Pagar</button>`:'<span></span>'}</div>`).join('')}
+    </div>` : ''}
+    <div class="finrp-rodape">O Pix sai pela chave cadastrada no contrato — cada envio pede confirmação, mesmo com plano programado.</div>
+  </div>`;
+}
+
+// ── Modal "Contrato do cedente" ──
+async function _finContratoAbrirModal(credId, nome){
+  const sb = getSupabase();
+  let c = null;
+  try{ const {data} = await sb.from('fin_contrato_cedente').select('*').eq('cliente_id', credId).maybeSingle(); c = data; }catch(_){}
+  const modo = (c&&c.modo)||'cascata';
+  const pct = c&&c.pct!=null ? c.pct : '';
+  const prazo = c&&c.prazo_dias!=null ? c.prazo_dias : 5;
+  const pix = (c&&c.pix_chave) || '';
+  const forma = (c&&c.forma_envio) || 'pix_manual';
+  let pend = 0;
+  try{ const {data} = await sb.from('fin_operacao').select('id').eq('credor_id',credId).in('repasse_status',['pendente','preparado']); pend=(data||[]).length; }catch(_){}
+
+  const html = `
+    <style>
+      .findct-radio{border:1px solid #E6E1D2;border-radius:9px;padding:12px 14px;cursor:pointer;font-size:12.5px;color:#5A5F66;display:block;}
+      .findct-radio.on{border-color:#0A1530;background:#F7F4EC;}
+      .findct-radio b{color:#0A1530;font-size:13.5px;}
+      .findct-fld{font-size:12px;color:#6B7683;display:block;}
+      .findct-fld input,.findct-fld select{width:100%;padding:9px 11px;border:1px solid #E6E1D2;border-radius:7px;margin-top:4px;font-family:inherit;font-size:13px;}
+    </style>
+    <div class="modal" style="width:660px;border-radius:14px;">
+      <div class="modal-header"><h3>Contrato do cedente — ${escHtml(nome)}</h3><button class="modal-close" onclick="closeModal('findct-overlay')">✕</button></div>
+      <div class="modal-body">
+        <p style="font-size:12.5px;color:var(--text-2);margin-bottom:14px;">Regra de divisão salva uma vez, vale para todos os recebimentos deste cliente.</p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">
+          <label class="findct-radio ${modo==='cascata'?'on':''}" data-modo="cascata" onclick="_finCtSetModo('cascata')"><b>Seu excedente primeiro</b><br>depois o capital do cedente</label>
+          <label class="findct-radio ${modo==='percentual'?'on':''}" data-modo="percentual" onclick="_finCtSetModo('percentual')"><b>Percentual sobre o recebido</b><br>fica com você um % fixo</label>
+        </div>
+        <div id="findct-pctwrap" style="display:${modo==='percentual'?'block':'none'};margin-bottom:12px;">
+          <label class="findct-fld">Percentual que fica com a COBRASQ (%)<input type="text" inputmode="decimal" id="findct-pct" value="${pct}" oninput="_finCtSimular()"></label>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px;"><input type="checkbox" id="findct-custas" ${(c&&c.descontar_custas)?'checked':''}> Descontar custas reembolsáveis do repasse</label>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;">
+          <label class="findct-fld">Prazo (dias úteis)<input type="number" id="findct-prazo" value="${prazo}"></label>
+          <label class="findct-fld">Chave Pix<input type="text" id="findct-pix" value="${escHtml(pix)}"></label>
+        </div>
+        <label class="findct-fld">Forma de envio<select id="findct-forma">
+          <option value="pix_manual" ${forma==='pix_manual'?'selected':''}>Pix manual (confirma cada envio)</option>
+          <option value="pix_auto_asaas" ${forma==='pix_auto_asaas'?'selected':''}>Pix automático via Asaas</option>
+          <option value="ted_btg" ${forma==='ted_btg'?'selected':''}>TED via BTG</option>
+        </select></label>
+        <div id="findct-sim" style="background:#FDFAF2;border:1px solid #DFC992;border-radius:9px;padding:12px 14px;margin-top:14px;font-size:13px;color:#0A1530;"></div>
+        <div style="font-size:11.5px;color:#8A94A6;margin-top:8px;">${pend} repasse${pend!==1?'s':''} pendente${pend!==1?'s':''} deste cliente ${pend?'será recalculado no valor exibido (a fórmula muda, os dados de fin_operacao não são reescritos por aqui)':'—'} ao salvar.</div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal('findct-overlay')">Cancelar</button>
+        <button class="btn btn-primary" onclick="_finContratoSalvar('${credId}')">Salvar</button>
+      </div>
+    </div>`;
+  let root = document.getElementById('findct-overlay');
+  if(!root){ root = document.createElement('div'); root.id='findct-overlay'; root.className='overlay'; document.body.appendChild(root); }
+  root.innerHTML = html;
+  window._finCtState = { modo };
+  openModal('findct-overlay');
+  _finCtSimular();
+}
+function _finCtSetModo(m){
+  window._finCtState.modo = m;
+  document.querySelectorAll('.findct-radio').forEach(r=>r.classList.toggle('on', r.dataset.modo===m));
+  document.getElementById('findct-pctwrap').style.display = m==='percentual' ? 'block' : 'none';
+  _finCtSimular();
+}
+function _finCtSimular(){
+  const el = document.getElementById('findct-sim'); if(!el) return;
+  const v = 1000;
+  if(window._finCtState.modo==='percentual'){
+    const pct = +((document.getElementById('findct-pct')||{}).value||'0').toString().replace(',','.') || 0;
+    const exc = v*pct/100, rep = v-exc;
+    el.textContent = `Num recebimento de ${fmtR(v)}, fica com você ${fmtR(exc)} e o cedente recebe ${fmtR(rep)}.`;
+  } else {
+    el.textContent = 'Modo cascata: primeiro cobre seu excedente sobre o título, só depois devolve o capital do cedente — o valor exato depende do capital/excedente de cada título, não dá pra simular sem um recebimento real.';
+  }
+}
+async function _finContratoSalvar(credId){
+  const modo = window._finCtState.modo;
+  const pct = modo==='percentual' ? (+((document.getElementById('findct-pct')||{}).value||'0').toString().replace(',','.')||0) : null;
+  const payload = {
+    cliente_id: credId, modo, pct,
+    descontar_custas: !!document.getElementById('findct-custas').checked,
+    prazo_dias: +document.getElementById('findct-prazo').value || 5,
+    pix_chave: (document.getElementById('findct-pix').value||'').trim()||null,
+    forma_envio: document.getElementById('findct-forma').value,
+  };
+  try{
+    const sb = getSupabase();
+    const { error } = await sb.from('fin_contrato_cedente').upsert(payload, { onConflict:'cliente_id' });
+    if(error) throw error;
+    showToast('Contrato salvo.', 'success');
+    closeModal('findct-overlay');
+    renderFinTab('repasses');
+  }catch(e){ showToast('Erro ao salvar contrato: '+(e.message||e), 'danger'); }
+}
+
+// ── Modal "Programar repasse" ──
+function _finProgramarAbrirModal(credId, saldoSugerido){
+  const html = `
+    <div class="modal" style="width:620px;border-radius:14px;">
+      <div class="modal-header"><h3>Programar repasse</h3><button class="modal-close" onclick="closeModal('findpg-overlay')">✕</button></div>
+      <div class="modal-body">
+        <label style="font-size:12px;color:#6B7683;display:block;">Valor a repassar<input type="text" inputmode="decimal" id="findpg-valor" value="${(+saldoSugerido||0).toFixed(2)}" style="width:100%;padding:9px 11px;border:1px solid #E6E1D2;border-radius:7px;margin-top:4px;" oninput="_finPgPreview()"></label>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px;">
+          <label style="font-size:12px;color:#6B7683;display:block;">Parcelas<input type="number" id="findpg-parc" min="1" max="24" value="3" style="width:100%;padding:9px 11px;border:1px solid #E6E1D2;border-radius:7px;margin-top:4px;" oninput="_finPgPreview()"></label>
+          <label style="font-size:12px;color:#6B7683;display:block;">Primeira em<input type="date" id="findpg-primeira" value="${new Date(Date.now()+7*86400000).toISOString().slice(0,10)}" style="width:100%;padding:9px 11px;border:1px solid #E6E1D2;border-radius:7px;margin-top:4px;" oninput="_finPgPreview()"></label>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+          ${['semanal','quinzenal','mensal'].map((v,i)=>`<button type="button" class="finrp-btn ${i===2?'on':''}" data-intervalo="${v}" onclick="_finPgSetIntervalo('${v}')" style="flex:1;">${v[0].toUpperCase()+v.slice(1)}</button>`).join('')}
+        </div>
+        <div style="margin-top:16px;">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;color:#9C7F40;margin-bottom:8px;">COMO VAI SAIR</div>
+          <div id="findpg-preview"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal('findpg-overlay')">Cancelar</button>
+        <button class="btn btn-primary" onclick="_finProgramarSalvar('${credId}')">Confirmar</button>
+      </div>
+    </div>`;
+  let root = document.getElementById('findpg-overlay');
+  if(!root){ root = document.createElement('div'); root.id='findpg-overlay'; root.className='overlay'; document.body.appendChild(root); }
+  root.innerHTML = html;
+  window._finPgIntervalo = 'mensal';
+  openModal('findpg-overlay');
+  _finPgPreview();
+}
+function _finPgSetIntervalo(v){ window._finPgIntervalo=v; document.querySelectorAll('#findpg-overlay [data-intervalo]').forEach(b=>b.classList.toggle('on', b.dataset.intervalo===v)); _finPgPreview(); }
+function _finPgPreview(){
+  const el = document.getElementById('findpg-preview'); if(!el) return;
+  const valor = +((document.getElementById('findpg-valor')||{}).value||'0').toString().replace(',','.') || 0;
+  const n = Math.max(1, Math.min(24, +((document.getElementById('findpg-parc')||{}).value||'1')));
+  const primeira = (document.getElementById('findpg-primeira')||{}).value || hoje();
+  const passoDias = window._finPgIntervalo==='semanal'?7:window._finPgIntervalo==='quinzenal'?15:30;
+  const base = Math.floor((valor/n)*100)/100;
+  let acumulado = 0;
+  const parcelas = [];
+  for(let i=1;i<=n;i++){
+    const v = i<n ? base : +(valor-acumulado).toFixed(2);
+    acumulado += v;
+    const d = new Date(primeira+'T00:00:00'); d.setDate(d.getDate() + passoDias*(i-1));
+    parcelas.push({ numero:i, vence_em:d.toISOString().slice(0,10), valor:v });
+  }
+  window._finPgParcelas = parcelas;
+  el.innerHTML = parcelas.map(p=>`<div style="display:flex;justify-content:space-between;font-size:13px;padding:5px 0;border-bottom:1px solid #F2EFE6;"><span>Parcela ${p.numero}</span><span>${p.vence_em.split('-').reverse().join('/')}</span><b style="font-family:'JetBrains Mono',monospace;">${fmtR(p.valor)}</b></div>`).join('')
+    + `<div style="margin-top:8px;font-size:12px;color:#8A94A6;">${n} parcela${n!==1?'s':''} · total ${fmtR(valor)} · última em ${parcelas.length?parcelas[parcelas.length-1].vence_em.split('-').reverse().join('/'):'—'}</div>`;
+}
+async function _finProgramarSalvar(credId){
+  const valor = +((document.getElementById('findpg-valor')||{}).value||'0').toString().replace(',','.') || 0;
+  const parcelas = window._finPgParcelas||[];
+  if(!valor || !parcelas.length){ showToast('Preencha o valor.', 'warning'); return; }
+  try{
+    const sb = getSupabase();
+    const { data: plano, error: e1 } = await sb.from('fin_repasse_plano').insert({
+      cliente_id: credId, valor_total: valor, intervalo: window._finPgIntervalo||'mensal',
+      primeira_em: (document.getElementById('findpg-primeira')||{}).value,
+    }).select().single();
+    if(e1) throw e1;
+    const rows = parcelas.map(p=>({ plano_id: plano.id, numero:p.numero, vence_em:p.vence_em, valor:p.valor }));
+    const { error: e2 } = await sb.from('fin_repasse_parcela').insert(rows);
+    if(e2) throw e2;
+    showToast('Repasse programado.', 'success');
+    closeModal('findpg-overlay');
+    renderFinTab('repasses');
+  }catch(e){ showToast('Erro ao programar: '+(e.message||e), 'danger'); }
+}
+async function _finRepassePagarParcela(parcelaId){
+  if(!confirm('Marcar esta parcela como paga? Isto só registra o controle interno — dispare o Pix de verdade antes de confirmar.')) return;
+  try{
+    const sb = getSupabase();
+    const { data: parcela, error: e0 } = await sb.from('fin_repasse_parcela').select('*, fin_repasse_plano(cliente_id)').eq('id', parcelaId).single();
+    if(e0) throw e0;
+    const { error } = await sb.from('fin_repasse_parcela').update({ pago_em: new Date().toISOString() }).eq('id', parcelaId).is('pago_em', null);
+    if(error) throw error;
+    const { data: restantes } = await sb.from('fin_repasse_parcela').select('id').eq('plano_id', parcela.plano_id).is('pago_em', null);
+    if(!restantes || !restantes.length){
+      // Regra de ouro do handoff: plano concluído → apaga o plano E marca os
+      // recebimentos do cedente como pagos, nunca conta os dois ao mesmo tempo.
+      await sb.from('fin_operacao').update({ repasse_status:'efetuado', repasse_efetuado_em:new Date().toISOString().slice(0,10) })
+        .eq('credor_id', parcela.fin_repasse_plano.cliente_id).in('repasse_status',['pendente','preparado']);
+      await sb.from('fin_repasse_plano').delete().eq('id', parcela.plano_id);
+      showToast('Parcela paga — plano concluído, recebimentos baixados.', 'success');
+    } else {
+      showToast('Parcela paga.', 'success');
+    }
+    renderFinTab('repasses');
+  }catch(e){ showToast('Erro: '+(e.message||e), 'danger'); }
+}
+
 function renderFinTab(tab){
   const el = document.getElementById('fin-content');
   if(!el) return;
@@ -29824,7 +30378,7 @@ function renderFinTab(tab){
   else if(tab==='relatorios') renderFinRelatorios(el);
   else if(tab==='cartoes') renderFinCartoes(el);
   else if(tab==='asaas') renderFinAsaas(el);
-  else if(tab==='repasses') renderFinRepasses(el);
+  else if(tab==='repasses') renderFinRepassesCascata(el);
   else if(tab==='diagnostico') renderFinDiagnostico(el);
 }
 
@@ -30420,138 +30974,6 @@ async function _repSalvarNovaReceita(){
     if(btn){ btn.style.pointerEvents=''; btn.style.opacity=''; }
     if(st){ st.style.color='#A65A4A'; st.textContent='Erro: '+(e.message||e); }
   }
-}
-
-// Screen 13 — "A repassar ao cedente": agrega fin_operacao por cedente (modelo por
-// capital: valor_recebido = recebido do devedor; valor_capital = repasse ao cedente;
-// valor_honorario = fee da COBRASQ). Clique na linha → extrato do cedente (screen 14).
-async function renderFinRepasses(el){
-  el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--text-3);"><div class="mv2-spinner" style="margin:0 auto 8px;width:26px;height:26px;border-width:3px;"></div>Carregando repasses…</div>`;
-  let ops = [];
-  try{
-    const sb = getSupabase();
-    const r = await sb.from('fin_operacao')
-      .select('id,credor_id,devedor_id,parcela,total_parcelas,valor_recebido,valor_capital,valor_honorario,recebido_em,repasse_status,repasse_efetuado_em,repasse_comprovante_url')
-      .order('recebido_em',{ascending:false}).limit(1000);
-    if(r.error) throw r.error;
-    ops = r.data||[];
-  }catch(e){ el.innerHTML = `<div class="panel" style="padding:20px;color:var(--danger);">Erro ao carregar repasses: ${escHtml(e.message||String(e))}</div>`; return; }
-
-  const credMap = {};
-  try{ const sb=getSupabase(); const cIds=[...new Set(ops.map(o=>o.credor_id).filter(Boolean))];
-    if(cIds.length){ const {data}=await sb.from('clientes').select('id,nome').in('id',cIds); (data||[]).forEach(c=>credMap[c.id]=c.nome); } }catch(_){}
-
-  const isPend = o => o.repasse_status==='pendente' || o.repasse_status==='preparado';
-  const _mesKey = (new Date()).toISOString().slice(0,7);
-  const inMes = d => (d||'').slice(0,7)===_mesKey;
-
-  const byCred = {};
-  for(const o of ops){
-    const k=o.credor_id||'?';
-    if(!byCred[k]) byCred[k]={credId:o.credor_id, nome:credMap[o.credor_id]||'—', recebido:0, honorario:0, aRepassar:0, temPend:false};
-    const g=byCred[k];
-    g.recebido += +o.valor_recebido||0;
-    g.honorario += +o.valor_honorario||0;
-    if(isPend(o)){ g.aRepassar += +o.valor_capital||0; g.temPend=true; }
-  }
-  const cedentes = Object.values(byCred).sort((a,b)=>b.recebido-a.recebido);
-
-  const cardARepassar = ops.filter(isPend).reduce((s,o)=>s+(+o.valor_capital||0),0);
-  const cardHonorMes = ops.filter(o=>inMes(o.recebido_em)).reduce((s,o)=>s+(+o.valor_honorario||0),0);
-  const repMesOps = ops.filter(o=>o.repasse_status==='efetuado'&&inMes(o.repasse_efetuado_em));
-  const cardRepassadoMes = repMesOps.reduce((s,o)=>s+(+o.valor_capital||0),0);
-  const nCedPend = cedentes.filter(c=>c.temPend).length;
-
-  const totRecebido = cedentes.reduce((s,c)=>s+c.recebido,0);
-  const totHonor = cedentes.reduce((s,c)=>s+c.honorario,0);
-  const totRepassar = cedentes.reduce((s,c)=>s+c.aRepassar,0);
-
-  const rows = cedentes.map(c=>{
-    const st = c.temPend ? `<span style="font-size:10.5px;font-weight:700;color:#9C7F40;background:#FBF8EF;border:1px solid #EFE7D2;padding:4px 9px;border-radius:20px;">A repassar</span>` : `<span style="font-size:10.5px;font-weight:700;color:#5E7C58;background:#E9EDE2;padding:4px 9px;border-radius:20px;">Repassado</span>`;
-    const acao = c.temPend ? `<span style="font-size:12px;font-weight:700;color:#0A1530;background:#C9A961;padding:6px 10px;border-radius:8px;cursor:pointer;" onclick="event.stopPropagation();renderFinRepasseCedente('${c.credId}')">Repassar</span>` : `<span style="font-size:11.5px;color:#9C7F40;cursor:pointer;" onclick="event.stopPropagation();renderFinRepasseCedente('${c.credId}')">Comprovante</span>`;
-    return `<div style="display:grid;grid-template-columns:1fr 130px 130px 130px 120px 100px;align-items:center;gap:10px;padding:13px 18px;border-bottom:1px solid #F3EFE3;font-size:13px;cursor:pointer;" onclick="renderFinRepasseCedente('${c.credId}')"><span style="color:#0A1530;font-weight:600;">${escHtml(c.nome)}</span><span style="text-align:right;color:#0A1530;">${fmtR(c.recebido)}</span><span style="text-align:right;color:#5E7C58;font-weight:600;">${fmtR(c.honorario)}</span><span style="text-align:right;color:${c.aRepassar>0?'#9C7F40':'rgba(10,21,48,.6)'};font-weight:700;">${fmtR(c.aRepassar)}</span><span style="text-align:center;">${st}</span><span style="text-align:right;">${acao}</span></div>`;
-  }).join('');
-
-  const repCard=(lbl,val,col,sub)=>`<div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,.04);"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#8892A6;margin-bottom:8px;">${lbl}</div><div style="font-family:'Fraunces',Georgia,serif;font-size:28px;font-weight:400;color:${col};">${val}</div><div style="font-size:11.5px;color:rgba(10,21,48,.5);margin-top:4px;">${sub}</div></div>`;
-
-  el.innerHTML = `
-    <div style="display:flex;align-items:center;gap:14px;margin-bottom:6px;"><span style="font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:400;color:#0A1530;">A repassar ao cedente</span></div>
-    <div style="font-size:12.5px;color:rgba(10,21,48,.55);margin-bottom:20px;max-width:760px;">Do total recebido dos devedores no mês, esta visão separa o que é <b style="color:#5E7C58;">honorário da COBRASQ</b> do que precisa ser <b style="color:#9C7F40;">repassado a cada cedente</b> (modelo por capital).</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:20px;">
-      ${repCard('A repassar (pendente)', fmtR(cardARepassar), '#9C7F40', `${nCedPend} cedente${nCedPend!==1?'s':''} aguardando`)}
-      ${repCard('Honorários do mês', fmtR(cardHonorMes), '#5E7C58', 'sua receita líquida')}
-      ${repCard('Já repassado no mês', fmtR(cardRepassadoMes), '#0A1530', `${repMesOps.length} repasse${repMesOps.length!==1?'s':''} concluído${repMesOps.length!==1?'s':''}`)}
-    </div>
-    ${cedentes.length ? `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;overflow:hidden;box-shadow:0 1px 2px rgba(16,24,40,.04);">
-      <div style="display:grid;grid-template-columns:1fr 130px 130px 130px 120px 100px;align-items:center;gap:10px;padding:11px 18px;background:#FBF8EF;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:#8892A6;text-transform:uppercase;letter-spacing:.1em;"><span>Cedente</span><span style="text-align:right;">Recebido</span><span style="text-align:right;">Honorário</span><span style="text-align:right;">A repassar</span><span style="text-align:center;">Status</span><span style="text-align:right;">Ação</span></div>
-      ${rows}
-      <div style="display:grid;grid-template-columns:1fr 130px 130px 130px 120px 100px;align-items:center;gap:10px;padding:13px 18px;background:#0A1530;color:#EFEAD9;font-family:'JetBrains Mono',monospace;"><span style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#C9A961;">Total do mês</span><span style="text-align:right;font-size:11px;font-weight:600;">${fmtR(totRecebido)}</span><span style="text-align:right;font-size:11px;font-weight:600;color:#9BB893;">${fmtR(totHonor)}</span><span style="text-align:right;font-size:11px;font-weight:600;color:#E0C575;">${fmtR(totRepassar)}</span><span></span><span></span></div>
-    </div>` : `<div class="empty-state" style="padding:30px;"><div class="empty-state-title">Nenhum recebimento processado</div><p>Os repasses aparecem aqui quando um acordo é recebido via Asaas.</p></div>`}
-    <details style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:14px;margin-top:16px;">
-      <summary style="cursor:pointer;font-weight:600;color:#0A1530;">🧮 Simulador capital × honorário</summary>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:12px;">
-        <label style="font-size:12px;color:#6B7683;">Valor do acordo<br><input id="sim-total" type="text" placeholder="3.000,00" style="padding:6px;width:130px;"></label>
-        <label style="font-size:12px;color:#6B7683;">Capital do credor (principal)<br><input id="sim-capital" type="text" placeholder="1.000,00" style="padding:6px;width:130px;"></label>
-        <label style="font-size:12px;color:#6B7683;">Nº de parcelas<br><input id="sim-parc" type="number" min="1" value="1" style="padding:6px;width:90px;"></label>
-        <button class="btn btn-sm btn-primary" onclick="calcSimuladorRepasse()">Calcular</button>
-      </div>
-      <div id="sim-result" style="margin-top:12px;font-size:13px;"></div>
-    </details>`;
-}
-
-// Screen 14 — Extrato de repasses de um cedente (drill-down da screen 13).
-async function renderFinRepasseCedente(credId){
-  const el = document.getElementById('fin-content'); if(!el) return;
-  el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--text-3);"><div class="mv2-spinner" style="margin:0 auto 8px;width:26px;height:26px;border-width:3px;"></div>Carregando extrato…</div>`;
-  let ops=[], nome='Cedente', devMap={};
-  try{
-    const sb=getSupabase();
-    const r=await sb.from('fin_operacao')
-      .select('id,credor_id,devedor_id,parcela,total_parcelas,valor_recebido,valor_capital,valor_honorario,recebido_em,repasse_status,repasse_efetuado_em,repasse_comprovante_url')
-      .eq('credor_id',credId).order('recebido_em',{ascending:false}).limit(500);
-    if(r.error) throw r.error;
-    ops=r.data||[];
-    const {data:c}=await sb.from('clientes').select('nome').eq('id',credId).maybeSingle(); if(c&&c.nome) nome=c.nome;
-    const dIds=[...new Set(ops.map(o=>o.devedor_id).filter(Boolean))];
-    if(dIds.length){ const {data}=await sb.from('devedores').select('id,nome').in('id',dIds); (data||[]).forEach(d=>devMap[d.id]=d.nome); }
-  }catch(e){ el.innerHTML=`<div class="panel" style="padding:20px;color:var(--danger);">Erro: ${escHtml(e.message||String(e))}</div>`; return; }
-
-  // registra ops p/ confirmarRepasse / cobrasqComprovantePDF / cobrasqReciboPDF
-  window._repasseOpsById = window._repasseOpsById||{};
-  ops.forEach(o=>{ window._repasseOpsById[o.id]={op:o, dev:devMap[o.devedor_id]||'—', cred:nome}; });
-
-  const isPend=o=>o.repasse_status==='pendente'||o.repasse_status==='preparado';
-  const recuperado=ops.reduce((s,o)=>s+(+o.valor_recebido||0),0);
-  const repassado=ops.filter(o=>o.repasse_status==='efetuado').reduce((s,o)=>s+(+o.valor_capital||0),0);
-  const aRepassar=ops.filter(isPend).reduce((s,o)=>s+(+o.valor_capital||0),0);
-  const parcOf=o=>(o.parcela&&o.total_parcelas)?`${o.parcela}/${o.total_parcelas}`:'—';
-  const fmtD=s=>{s=(s||'').slice(0,10);return s?s.split('-').reverse().join('/'):'—';};
-
-  const rows=ops.map(o=>{
-    const pend=isPend(o); const done=o.repasse_status==='efetuado';
-    const sit = pend
-      ? `<span onclick="confirmarRepasse('${o.id}')" title="Repassar" style="font-size:10.5px;font-weight:700;color:#9C7F40;background:#FBF8EF;border:1px solid #EFE7D2;padding:4px 9px;border-radius:20px;cursor:pointer;">A repassar</span>`
-      : (done ? `<span onclick="cobrasqComprovantePDF('${o.id}')" title="Comprovante" style="font-size:10.5px;font-weight:700;color:#5E7C58;background:#E9EDE2;padding:4px 9px;border-radius:20px;cursor:pointer;">Repassado</span>` : `<span style="font-size:10.5px;color:rgba(10,21,48,.5);">—</span>`);
-    return `<div style="display:grid;grid-template-columns:110px 1fr 130px 130px 130px 120px;align-items:center;gap:10px;padding:13px 18px;border-bottom:1px solid #F3EFE3;font-size:13px;"><span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:rgba(10,21,48,.6);">${fmtD(o.recebido_em)}</span><span style="color:#0A1530;">${escHtml(devMap[o.devedor_id]||'—')} · ${parcOf(o)}</span><span style="text-align:right;color:#0A1530;">${fmtR(o.valor_recebido)}</span><span style="text-align:right;color:#5E7C58;">${fmtR(o.valor_honorario)}</span><span style="text-align:right;color:${done?'rgba(10,21,48,.6)':'#9C7F40'};font-weight:700;">${fmtR(o.valor_capital)}</span><span style="text-align:center;">${sit}</span></div>`;
-  }).join('');
-
-  el.innerHTML = `
-    <div style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#9C7F40;margin-bottom:6px;cursor:pointer;" onclick="renderFinTab('repasses')">A repassar ao cedente › Extrato</div>
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
-      <div>
-        <div style="font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:400;color:#0A1530;">${escHtml(nome)}</div>
-        <div style="font-size:12.5px;color:rgba(10,21,48,.55);">${ops.length} operação${ops.length!==1?'ões':''} · cedente</div>
-      </div>
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:20px;">
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,.04);"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#8892A6;margin-bottom:8px;">Recuperado (total)</div><div style="font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:400;color:#0A1530;">${fmtR(recuperado)}</div></div>
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,.04);"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#8892A6;margin-bottom:8px;">Já repassado</div><div style="font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:400;color:#5E7C58;">${fmtR(repassado)}</div></div>
-      <div style="border:1px solid #E0D3A8;border-radius:12px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,.04);background:#FBF8EF;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#9C7F40;margin-bottom:8px;">Saldo a repassar</div><div style="font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:400;color:#9C7F40;">${fmtR(aRepassar)}</div></div>
-    </div>
-    <div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;overflow:hidden;box-shadow:0 1px 2px rgba(16,24,40,.04);">
-      <div style="display:grid;grid-template-columns:110px 1fr 130px 130px 130px 120px;align-items:center;gap:10px;padding:11px 18px;background:#FBF8EF;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:#8892A6;text-transform:uppercase;letter-spacing:.1em;"><span>Data</span><span>Referente a</span><span style="text-align:right;">Recebido</span><span style="text-align:right;">Honorário</span><span style="text-align:right;">Repassado</span><span style="text-align:center;">Situação</span></div>
-      ${rows||'<div style="padding:24px;text-align:center;color:#8A94A6;">Sem operações para este cedente.</div>'}
-    </div>`;
 }
 
 async function confirmarRepasse(operacaoId){
