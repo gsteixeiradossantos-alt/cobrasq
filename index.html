@@ -28918,7 +28918,7 @@ const FIN_SECTIONS_VISIVEIS = ['fila','visao','movimentacoes','receitasjudiciais
 // redesenho (PR2: fila+lancamentos; PR3: +repasses; PR4: +conciliacao+fechamento) —
 // só então 'repasses'/'conciliacao' saem do dispatch antigo (renderFinRepasses/
 // renderFinConciliacao, ainda linkados de Caixa/Contas/Extrato — não quebrar).
-const FIN_CASCATA_TABS = ['fila','lancamentos','repasses'];
+const FIN_CASCATA_TABS = ['fila','lancamentos','repasses','conciliacao','fechamento'];
 function _finSectionOf(tab){
   for(const [key,s] of Object.entries(FIN_SECTIONS)){
     if(s.subtabs.some(t=>t.id===tab)) return key;
@@ -29271,7 +29271,6 @@ const FIN_CASCATA_UI_TABS = [
   {id:'fechamento', label:'Fechamento'},
 ];
 function _finCascataIrPara(tabId){
-  if(tabId==='fechamento'){ showToast('Fechamento chega no PR 4 do redesenho do Financeiro.', 'info'); return; }
   setFinTab(tabId);
 }
 function _finCascataMudarPeriodo(v){
@@ -30374,6 +30373,7 @@ function renderFinTab(tab){
   else if(tab==='transferencias') renderFinTransferencias(el);
   else if(tab==='recorrencias') renderFinRecorrencias(el);
   else if(tab==='conciliacao') renderFinConciliacao(el);
+  else if(tab==='fechamento') renderFinFechamento(el);
   else if(tab==='judicial') renderFinJudicial(el);
   else if(tab==='relatorios') renderFinRelatorios(el);
   else if(tab==='cartoes') renderFinCartoes(el);
@@ -33461,25 +33461,25 @@ async function gerarRecorrenciasMesAtual(){
 // ============================================================
 window._ofxState = window._ofxState || { lines:[], conta:null, fileName:null };
 
+// Reskin do handoff 07/08 (pares extrato×lançamento com score) — o MOTOR de match
+// (finApi.findCandidatesForOfxLine/reconcileLancamento) e o parser de arquivo (funções
+// abaixo) são os mesmos de antes, só a apresentação mudou. Sem outro caller das funções
+// substituídas (renderFinConciliacao antiga/_renderOfxList/conciliarLinhaOfx/
+// conciliarTodosOfx) — removidas, não deixadas como código morto.
 async function renderFinConciliacao(el){
   const dim = await finApi.loadDimensoes();
   el.innerHTML = `
-    <div class="panel panel-body" style="margin-bottom:14px;">
-      <div style="font-size:14px;font-weight:600;margin-bottom:10px;">1. Selecione o arquivo OFX e a conta</div>
-      <div class="fg-row">
-        <div class="fg" style="flex:2;">
-          <label>Arquivo OFX (.ofx ou .csv)</label>
-          <input type="file" id="ofx-file" accept=".ofx,.qfx,.csv,text/plain">
-        </div>
-        <div class="fg">
-          <label>Conta</label>
-          <select id="ofx-conta">
-            <option value="">Selecione…</option>
-            ${dim.contas.map(c=>`<option value="${c.id}">${escHtml(c.descricao)}</option>`).join('')}
-          </select>
-        </div>
-      </div>
-      <button class="btn btn-primary btn-sm" onclick="processarArquivoOfx()" style="margin-top:6px;">${ico('upload',13)} Processar arquivo</button>
+    <style>
+      .finconc-h1{font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:400;color:#0A1530;margin-bottom:4px;}
+      .finconc-upload{background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:18px 20px;margin-bottom:18px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;}
+      .finconc-fld{font-size:12px;color:#6B7683;}
+      .finconc-fld select,.finconc-fld input{padding:9px 11px;border:1px solid #E6E1D2;border-radius:7px;margin-top:4px;font-family:inherit;font-size:13px;}
+    </style>
+    <div class="finconc-h1">Conciliação</div>
+    <div class="finconc-upload">
+      <label class="finconc-fld">Arquivo do extrato (.ofx ou .csv)<br><input type="file" id="ofx-file" accept=".ofx,.qfx,.csv,text/plain"></label>
+      <label class="finconc-fld">Conta<br><select id="ofx-conta"><option value="">Selecione…</option>${dim.contas.map(c=>`<option value="${c.id}">${escHtml(c.descricao)}</option>`).join('')}</select></label>
+      <button class="btn btn-primary btn-sm" onclick="_finConcProcessarArquivo()">${ico('upload',13)} Processar arquivo</button>
     </div>
     <div id="ofx-result"></div>
   `;
@@ -33549,7 +33549,7 @@ function _parseCSV(text){
   return out;
 }
 
-async function processarArquivoOfx(){
+async function _finConcProcessarArquivo(){
   const file = document.getElementById('ofx-file')?.files?.[0];
   const contaId = document.getElementById('ofx-conta').value || null;
   if(!file){ showToast('Escolha um arquivo','warning'); return; }
@@ -33565,7 +33565,6 @@ async function processarArquivoOfx(){
     if(!lines.length && !ledger){ result.innerHTML = `<div style="color:var(--danger);padding:20px;">Nenhuma transação ou saldo reconhecido no arquivo.</div>`; return; }
     window._ofxState = { lines, conta: contaId, fileName: file.name, ledger };
 
-    // Atualizar saldo bancário automaticamente se o OFX tiver LEDGERBAL
     if(ledger){
       try {
         const sb = getSupabase();
@@ -33586,111 +33585,309 @@ async function processarArquivoOfx(){
       return;
     }
 
-    // Para cada linha, busca candidatos
     result.innerHTML = `<div style="text-align:center;padding:20px;color:var(--text-3);"><div class="mv2-spinner" style="margin:0 auto 8px;width:24px;height:24px;border-width:3px;"></div>Buscando matches em ${lines.length} linhas…</div>`;
     const enriched = [];
     for(let i=0; i<lines.length; i++){
       const candidates = await finApi.findCandidatesForOfxLine(lines[i], contaId);
-      enriched.push({ ...lines[i], idx:i, candidates });
+      enriched.push({ ...lines[i], idx:i, candidates, ignorado:false });
     }
-    _renderOfxList(enriched);
+    window._ofxState.enriched = enriched;
+    _finConcRenderLista();
   } catch(e){
     result.innerHTML = `<div style="color:var(--danger);padding:20px;">Erro: ${escHtml(e.message)}</div>`;
   }
 }
-
-function _renderOfxList(items){
+function _finConcRenderLista(){
   const result = document.getElementById('ofx-result');
   if(!result) return;
-  const totalMatched = items.filter(l=>l.candidates.length === 1).length;
-  const totalAmbiguous = items.filter(l=>l.candidates.length > 1).length;
-  const totalUnmatched = items.filter(l=>l.candidates.length === 0).length;
+  const all = window._ofxState.enriched || [];
+  const items = all.filter(l=>!l.ignorado);
+  const exatos = items.filter(l=>l.candidates.length===1).length;
+  const decisao = items.length - exatos;
   const ledger = window._ofxState?.ledger;
   result.innerHTML = `
-    ${ledger ? `<div style="margin-bottom:10px;padding:10px 14px;background:#dcfce7;border:1px solid #86efac;border-radius:8px;font-size:12.5px;color:#166534;">
-      ✓ Saldo bancário da conta atualizado para <strong>${fmtR(ledger.amount)}</strong>${ledger.asof?` (em ${ledger.asof.split('-').reverse().join('/')})`:''}
-    </div>`:''}
-    ${totalMatched>0 ? `<div class="fin-massrec">
-      <span style="font-size:18px;color:var(--gold-dark);">⇄</span>
-      <div class="tx"><b>${totalMatched} candidato${totalMatched!==1?'s':''} com correspondência exata</b> (mesmo valor e lançamento) pronto${totalMatched!==1?'s':''} para conciliar automaticamente.</div>
-      <button class="btn btn-gold btn-sm" onclick="conciliarTodosOfx()">Conciliar candidatos exatos</button>
-    </div>`:''}
-    <div class="panel" style="display:flex;gap:18px;margin-bottom:14px;padding:12px 16px;flex-wrap:wrap;">
-      <span style="font-size:12.5px;color:var(--text);"><strong>${items.length}</strong> linhas no extrato</span>
-      <span style="color:var(--border-2);">|</span>
-      <span style="font-size:12.5px;color:var(--success);">${totalMatched} match único</span>
-      <span style="color:var(--border-2);">|</span>
-      <span style="font-size:12.5px;color:var(--warning);">${totalAmbiguous} ambíguo</span>
-      <span style="color:var(--border-2);">|</span>
-      <span style="font-size:12.5px;color:var(--text-3);">${totalUnmatched} sem match</span>
+    <style>
+      .finconc-sub{font-size:13px;color:#6B7683;margin-bottom:16px;}
+      .finconc-list{background:#fff;border:1px solid #E6E1D2;border-radius:12px;overflow:hidden;}
+      .finconc-row{display:grid;grid-template-columns:1fr 100px 1fr auto;gap:16px;align-items:center;padding:14px 20px;border-bottom:1px solid #F2EFE6;}
+      .finconc-row:last-child{border-bottom:none;}
+      .finconc-row.ok{opacity:.45;}
+      .finconc-extrato-ic{width:38px;height:38px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff;flex-shrink:0;}
+      .finconc-extrato{display:flex;align-items:center;gap:10px;}
+      .finconc-extrato .tx{font-size:13.5px;color:#0A1530;}
+      .finconc-extrato .mt{font-size:11.5px;color:#A6AEBD;}
+      .finconc-score{text-align:center;}
+      .finconc-score b{font-family:'JetBrains Mono',monospace;font-size:16px;font-weight:600;display:block;}
+      .finconc-score span{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.1em;color:#A6AEBD;}
+      .finconc-sugestao select{width:100%;padding:6px 8px;border:1px solid #E6E1D2;border-radius:6px;font-size:12px;}
+      .finconc-acts{display:flex;gap:6px;white-space:nowrap;}
+      .finconc-btn{border:1px solid #E6E1D2;background:#fff;color:#0A1530;font-size:12px;padding:7px 12px;border-radius:7px;cursor:pointer;font-family:inherit;}
+      .finconc-btn.primary{background:#5E7C58;color:#fff;border-color:#5E7C58;}
+      .finconc-btn.done{background:#E9F0E7;color:#4C6647;border-color:#CFE0CB;}
+      .finconc-rodape{padding:12px 20px;font-size:11.5px;color:#8A94A6;}
+    </style>
+    ${ledger ? `<div style="margin-bottom:14px;padding:10px 14px;background:#E9F0E7;border:1px solid #CFE0CB;border-radius:8px;font-size:12.5px;color:#4C6647;">✓ Saldo bancário atualizado para ${fmtR(ledger.amount)}${ledger.asof?` (em ${ledger.asof.split('-').reverse().join('/')})`:''}</div>` : ''}
+    <div class="finconc-sub">${items.length} linhas de extrato · ${exatos} bat${exatos===1?'e':'em'} sozinha${exatos===1?'':'s'}, ${decisao} pede${decisao===1?'':'m'} decisão</div>
+    ${exatos>0 ? `<div style="margin-bottom:14px;"><button class="finconc-btn primary" onclick="_finConcTodosExatos()">Conciliar os ${exatos} exatos</button></div>` : ''}
+    <div class="finconc-list">
+      ${items.length ? items.map(l=>_finConcRowHtml(l)).join('') : `<div style="padding:30px;text-align:center;color:#8A94A6;">Nenhuma linha pendente.</div>`}
     </div>
-    <div class="panel"><div class="tbl-wrap">
-      <table class="tbl"><thead><tr>
-        <th>Data</th>
-        <th>Descrição (extrato)</th>
-        <th style="text-align:right;">Valor</th>
-        <th>Lançamento sugerido</th>
-        <th style="width:90px;"></th>
-      </tr></thead><tbody>
-      ${items.map(l => {
-        const value = (l.amount).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
-        const datePt = (l.date||'').split('-').reverse().join('/');
-        let rightCol;
-        if(l.candidates.length === 1){
-          const c = l.candidates[0];
-          rightCol = `<div style="font-size:11.5px;">${escHtml(c.descricao)}</div><div style="font-size:10.5px;color:var(--text-3);">${(c.data_competencia||'').split('-').reverse().join('/')} · ${fmtR(Math.abs(+c.valor))}</div>`;
-        } else if(l.candidates.length > 1){
-          rightCol = `<select id="ofx-pick-${l.idx}" style="font-size:12px;padding:4px;width:100%;">${l.candidates.map(c=>`<option value="${c.id}">${escHtml((c.data_competencia||'').slice(5))} · ${fmtR(Math.abs(+c.valor))} · ${escHtml(c.descricao.slice(0,40))}</option>`).join('')}</select>`;
-        } else {
-          rightCol = `<span style="font-size:11.5px;color:var(--text-3);">Nenhum match — pode criar manual</span>`;
-        }
-        const action = l.candidates.length >= 1
-          ? `<button class="btn btn-primary btn-xs" onclick="conciliarLinhaOfx(${l.idx})">Conciliar</button>`
-          : '';
-        return `<tr id="ofx-row-${l.idx}" style="border-bottom:1px solid var(--border);">
-          <td style="padding:9px 14px;font-family:var(--font-mono);font-size:11px;color:var(--text-3);">${datePt}</td>
-          <td style="padding:9px 14px;font-size:12px;">${escHtml(l.memo||'—')}</td>
-          <td style="padding:9px 14px;text-align:right;font-family:var(--font-mono);font-weight:600;color:${l.amount>=0?'var(--success)':'var(--danger)'};">${value}</td>
-          <td style="padding:9px 14px;">${rightCol}</td>
-          <td style="padding:9px 14px;">${action}</td>
-        </tr>`;
-      }).join('')}
-      </tbody></table>
-    </div></div>
-    <div style="margin-top:12px;display:flex;justify-content:space-between;">
-      <span style="font-size:11.5px;color:var(--text-3);">Arquivo: ${escHtml(window._ofxState.fileName||'')}</span>
-      <button class="btn btn-ghost btn-sm" onclick="conciliarTodosOfx()">${ico('check',13)} Conciliar todos com match único</button>
-    </div>
+    <div class="finconc-rodape">Pareamento por valor exato, janela de 3 dias e CPF/CNPJ do pagador (quando disponível na descrição).</div>
   `;
-  // Guarda enriched no state pra ações
-  window._ofxState.enriched = items;
 }
-
-async function conciliarLinhaOfx(idx){
-  const l = window._ofxState.enriched?.[idx];
-  if(!l) return;
+function _finConcRowHtml(l){
+  const value = fmtR(Math.abs(l.amount));
+  const datePt = (l.date||'').split('-').reverse().join('/');
+  const origem = /asaas/i.test(l.memo||'') ? {t:'ASAAS',bg:'#0066FF'} : {t:(window._ofxState.fileName||'EXT').slice(0,3).toUpperCase(),bg:'#0A1530'};
+  const jaConciliado = l.candidates.length===0 && l._conciliadoAgora;
+  let scoreHtml, sugestaoHtml, acoes;
+  if(l.candidates.length===1){
+    const c = l.candidates[0];
+    scoreHtml = `<b style="color:#9C7F40;">provável</b><span>MATCH</span>`;
+    sugestaoHtml = `<div style="font-size:12.5px;color:#0A1530;">${escHtml(c.descricao)}</div><div style="font-size:11px;color:#A6AEBD;">${(c.data_competencia||'').split('-').reverse().join('/')} · ${fmtR(Math.abs(+c.valor))}</div>`;
+    acoes = `<button class="finconc-btn" onclick="_finConcIgnorar(${l.idx})">Ignorar</button><button class="finconc-btn primary" onclick="_finConcLinha(${l.idx})">Conciliar</button>`;
+  } else if(l.candidates.length>1){
+    scoreHtml = `<b style="color:#A65A4A;">dúvida</b><span>MATCH</span>`;
+    sugestaoHtml = `<select id="ofx-pick-${l.idx}" onchange="">${l.candidates.map(c=>`<option value="${c.id}">${escHtml((c.data_competencia||'').slice(5))} · ${fmtR(Math.abs(+c.valor))} · ${escHtml((c.descricao||'').slice(0,32))}</option>`).join('')}</select>`;
+    acoes = `<button class="finconc-btn" onclick="_finConcIgnorar(${l.idx})">Ignorar</button><button class="finconc-btn" onclick="_finConcTrocar(${l.idx})">Trocar</button><button class="finconc-btn primary" onclick="_finConcLinha(${l.idx})">Conciliar</button>`;
+  } else {
+    scoreHtml = `<b style="color:#A6AEBD;">sem par</b><span>MATCH</span>`;
+    sugestaoHtml = `<div style="font-size:12px;color:#A6AEBD;">Nenhum lançamento parecido</div>`;
+    acoes = `<button class="finconc-btn" onclick="_finConcIgnorar(${l.idx})">Ignorar</button><button class="finconc-btn primary" onclick="_finConcCriar(${l.idx})">Criar</button>`;
+  }
+  return `<div class="finconc-row" id="ofx-row-${l.idx}">
+    <div class="finconc-extrato"><div class="finconc-extrato-ic" style="background:${origem.bg};">${origem.t}</div><div><div class="tx">${escHtml(l.memo||'—')}</div><div class="mt">${datePt} · ${value}</div></div></div>
+    <div class="finconc-score">${scoreHtml}</div>
+    <div class="finconc-sugestao">${sugestaoHtml}</div>
+    <div class="finconc-acts">${acoes}</div>
+  </div>`;
+}
+function _finConcIgnorar(idx){
+  const l = (window._ofxState.enriched||[]).find(x=>x.idx===idx); if(!l) return;
+  l.ignorado = true;
+  _finConcRenderLista();
+}
+function _finConcTrocar(idx){
+  // "Trocar" é o próprio <select> de candidatos — só dá foco nele (já é a UI de escolha).
+  document.getElementById(`ofx-pick-${idx}`)?.focus();
+}
+async function _finConcLinha(idx){
+  const l = (window._ofxState.enriched||[]).find(x=>x.idx===idx); if(!l) return;
   let lancId;
   if(l.candidates.length === 1) lancId = l.candidates[0].id;
   else lancId = +document.getElementById(`ofx-pick-${idx}`).value;
   try {
     await finApi.reconcileLancamento(lancId, `${l.fitid||''} ${l.date} ${l.memo||''}`.trim());
-    const row = document.getElementById('ofx-row-'+idx);
-    if(row){ row.style.opacity='.4'; row.querySelector('button')?.remove(); }
+    l.ignorado = true; // sai da lista de pendentes (conciliada)
     showToast('Linha conciliada','success');
+    _finConcRenderLista();
   } catch(e){ showToast('Erro: '+e.message,'danger'); }
 }
-
-async function conciliarTodosOfx(){
-  const items = window._ofxState.enriched || [];
+async function _finConcTodosExatos(){
+  const items = (window._ofxState.enriched||[]).filter(l=>!l.ignorado);
   const auto = items.filter(l => l.candidates.length === 1);
   if(!auto.length){ showToast('Nenhuma linha com match único','info'); return; }
   let ok = 0;
   for(const l of auto){
-    try { await finApi.reconcileLancamento(l.candidates[0].id, `${l.fitid||''} ${l.date} ${l.memo||''}`.trim()); ok++; }
+    try { await finApi.reconcileLancamento(l.candidates[0].id, `${l.fitid||''} ${l.date} ${l.memo||''}`.trim()); l.ignorado=true; ok++; }
     catch(e){ console.warn(e); }
   }
-  showToast(`${ok}/${auto.length} conciliados`,'success');
-  _renderOfxList(items.map(l => l.candidates.length===1 ? {...l, candidates:[]} : l));
+  showToast(`✓ ${ok} conciliados`,'success');
+  _finConcRenderLista();
+}
+function _finConcCriar(idx){
+  const l = (window._ofxState.enriched||[]).find(x=>x.idx===idx); if(!l) return;
+  abrirNovoLancamento().then(()=>{
+    document.getElementById('mlanc-desc').value = l.memo || '';
+    document.getElementById('mlanc-valor').value = Math.abs(l.amount).toFixed(2).replace('.',',');
+    document.getElementById('mlanc-data').value = l.date || hoje();
+    mlancSetTipo(l.amount>=0 ? 'receita' : 'despesa');
+    const contaSel = document.getElementById('mlanc-conta'); if(contaSel) contaSel.value = window._ofxState.conta||'';
+  });
+}
+
+// ── Seção "Fechamento" — DRE gerencial + fluxo 30d + checklist + contas + divisão do
+// recuperado, tudo derivado (nenhum número digitado). Fonte: fin_operacao (excedente
+// extrajudicial já líquido, por construção) + fin_lancamento judicial (liberado no mês,
+// mesma regra de reconhecimento que a aba Judicial já usa) + despesas do mês EXCLUINDO
+// o lançamento de repasse-passthrough (fin_operacao.lancamento_despesa_id — senão o
+// capital do cedente entraria como "despesa da COBRASQ", inflando o resultado pra baixo
+// tanto quanto a receita cheia infla pra cima). ──
+async function _finFechCarregar(){
+  const sb = getSupabase();
+  const now = new Date();
+  const ini = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0,10);
+  const fim = new Date(now.getFullYear(), now.getMonth()+1, 0).toISOString().slice(0,10);
+  const inMes = d => !!d && d>=ini && d<=fim;
+
+  let ops = [];
+  try{ const { data } = await sb.from('fin_operacao').select('valor_recebido,valor_capital,valor_honorario,repasse_status,recebido_em,repasse_efetuado_em,nf_status,lancamento_despesa_id').limit(5000); ops = data||[]; }catch(_){}
+  let excedenteExtra=0, capitalDevolvidoMes=0, capitalAindaDevido=0, repassesPendentes=0, notasPendentes=0;
+  for(const o of ops){
+    if(inMes(o.recebido_em)) excedenteExtra += +o.valor_honorario||0;
+    if(o.repasse_status==='pendente'||o.repasse_status==='preparado'||o.repasse_status==='revisar') capitalAindaDevido += +o.valor_capital||0;
+    if(o.repasse_status==='pendente'||o.repasse_status==='preparado') repassesPendentes++;
+    if(o.repasse_status==='efetuado' && inMes(o.repasse_efetuado_em)) capitalDevolvidoMes += +o.valor_capital||0;
+    if(o.nf_status==='pendente' && o.repasse_status!=='revisar') notasPendentes++;
+  }
+  const despesaIdsRepasse = new Set(ops.map(o=>o.lancamento_despesa_id).filter(Boolean));
+
+  let excedenteManual = 0;
+  try{
+    const { data } = await sb.from('fin_lancamento').select('capital,meu_total,amortizado,valor,cedente_id')
+      .not('cedente_id','is',null).not('capital','is',null).gte('data_competencia',ini).lte('data_competencia',fim).limit(2000);
+    for(const l of (data||[])) excedenteManual += finDivideCascata(l, Math.abs(+l.valor||0)).ficaComVoce;
+  }catch(_){}
+
+  let honorariosJudiciais = 0;
+  try{
+    const { data } = await sb.from('fin_lancamento_categoria')
+      .select('valor,fin_categoria(descricao),fin_lancamento!inner(judicial_liberado_em)')
+      .gte('fin_lancamento.judicial_liberado_em', ini).lte('fin_lancamento.judicial_liberado_em', fim).limit(2000);
+    for(const r of (data||[])){
+      const d=(r.fin_categoria&&r.fin_categoria.descricao)||'';
+      if(/sisbajud/i.test(d)||/penhora/i.test(d)) honorariosJudiciais += Math.abs(+r.valor||0);
+    }
+  }catch(_){}
+
+  let despesasMes=0, despesasPorCategoria=[];
+  try{
+    const { data } = await sb.from('fin_lancamento_categoria')
+      .select('lancamento_id,valor,fin_categoria(descricao),fin_lancamento!inner(data_competencia,tipo_movimento)')
+      .eq('fin_lancamento.tipo_movimento',0).gte('fin_lancamento.data_competencia',ini).lte('fin_lancamento.data_competencia',fim).limit(2000);
+    const map = {};
+    for(const r of (data||[])){
+      if(despesaIdsRepasse.has(r.lancamento_id)) continue;
+      const nm=(r.fin_categoria&&r.fin_categoria.descricao)||'(sem categoria)';
+      const v=Math.abs(+r.valor||0);
+      map[nm]=(map[nm]||0)+v; despesasMes+=v;
+    }
+    despesasPorCategoria = Object.entries(map).map(([nome,valor])=>({nome,valor})).sort((a,b)=>b.valor-a.valor);
+  }catch(_){}
+
+  const excedenteTotal = excedenteExtra + excedenteManual;
+  const receitaBruta = excedenteTotal + honorariosJudiciais;
+  const resultadoMes = receitaBruta - despesasMes;
+
+  let fluxoDias = [];
+  try{
+    const N=30, fimF=new Date(now.getTime()+N*86400000).toISOString().slice(0,10), hojeS=now.toISOString().slice(0,10);
+    const { data } = await sb.from('fin_lancamento').select('data_vencimento,valor,tipo_movimento').eq('status',0).gte('data_vencimento',hojeS).lte('data_vencimento',fimF).limit(3000);
+    const byDay = {};
+    for(let i=0;i<N;i++){ const d=new Date(now.getTime()+i*86400000).toISOString().slice(0,10); byDay[d]={in:0,out:0,label:d.slice(8,10)+'/'+d.slice(5,7)}; }
+    for(const r of (data||[])){ const d=(r.data_vencimento||'').slice(0,10); if(!byDay[d]) continue; if(r.tipo_movimento===1) byDay[d].in+=Math.abs(+r.valor||0); else byDay[d].out+=Math.abs(+r.valor||0); }
+    fluxoDias = Object.values(byDay);
+  }catch(_){}
+
+  const dim = await finApi.loadDimensoes().catch(()=>({contas:[]}));
+  const saldosByConta = {};
+  try{ const { data } = await sb.rpc('fin_saldos_realizados'); for(const r of (data||[])) saldosByConta[r.conta_id]=r; }catch(_){}
+  const _saldoConta = c => c.bank_balance!=null ? +c.bank_balance : (saldosByConta[c.id]!=null?(+saldosByConta[c.id].saldo_atual||0):(+c.saldo_inicial||0));
+  const contasNoGeral = (dim.contas||[]).filter(c=>c.incluir_no_saldo_geral!==false);
+
+  return {
+    mesLabel: now.toLocaleDateString('pt-BR',{month:'long',year:'numeric'}),
+    excedenteTotal, honorariosJudiciais, receitaBruta, despesasMes, despesasPorCategoria, resultadoMes,
+    fluxoDias, repassesPendentes, notasPendentes,
+    capitalRecuperadoMes: ops.filter(o=>inMes(o.recebido_em)).reduce((s,o)=>s+(+o.valor_recebido||0),0),
+    capitalDevolvidoMes, capitalAindaDevido,
+    contas: (dim.contas||[]).map(c=>({...c, saldo:_saldoConta(c)})),
+    contasNoGeral: contasNoGeral.length,
+  };
+}
+async function renderFinFechamento(el){
+  el.innerHTML = `<div style="padding:50px;text-align:center;color:#8A94A6;"><div class="mv2-spinner" style="margin:0 auto 10px;width:24px;height:24px;border-width:3px;"></div>Fechando as contas do mês…</div>`;
+  let f;
+  try{ f = await _finFechCarregar(); }
+  catch(e){ el.innerHTML = `<div class="panel" style="padding:20px;color:var(--danger);">Erro: ${escHtml(e.message||String(e))}</div>`; return; }
+  window._finFechCtx = f;
+  const cEl = document.getElementById('fincx-cnt-fechamento'); if(cEl) cEl.textContent = '';
+
+  const fluxoMax = Math.max(1, ...f.fluxoDias.map(d=>Math.max(d.in,d.out)));
+  const linhaDre = (lb, v, pct, forte) => `<div style="display:flex;align-items:baseline;gap:10px;padding:${forte?'10px':'6px'} 0;${forte?'border-top:1px solid #DDD7C7;margin-top:4px;':''}">
+    <span style="font-size:${forte?'14px':'13px'};color:${forte?'#0A1530':'#5A5F66'};font-weight:${forte?'600':'400'};">${lb}</span>
+    <div style="flex:1;border-bottom:1px dotted #DDD7C7;"></div>
+    <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#A6AEBD;width:40px;text-align:right;">${pct!=null?Math.round(pct)+'%':''}</span>
+    <span style="font-family:'JetBrains Mono',monospace;font-size:${forte?'15px':'13.5px'};font-weight:${forte?'600':'500'};color:${v<0?'#A65A4A':(forte?'#5E7C58':'#0A1530')};width:110px;text-align:right;">${v<0?'−':''}${fmtR(Math.abs(v))}</span>
+  </div>`;
+  const pct = v => f.receitaBruta>0 ? (v/f.receitaBruta*100) : 0;
+
+  el.innerHTML = `
+    <style>
+      .finfc-h1{font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:400;color:#0A1530;margin-bottom:4px;}
+      .finfc-sub{font-size:13px;color:#6B7683;margin-bottom:18px;}
+      .finfc-grid{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(300px,1fr);gap:20px;}
+      .finfc-card{background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:20px 22px;margin-bottom:20px;}
+      .finfc-tt{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#8A94A6;margin-bottom:12px;}
+      .finfc-check{display:flex;align-items:center;gap:10px;padding:8px 0;font-size:13px;color:#0A1530;border-bottom:1px solid #F2EFE6;}
+      .finfc-check:last-child{border-bottom:none;}
+      .finfc-check .n{width:22px;height:22px;border-radius:50%;background:#F5F2EA;color:#6B7683;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+      .finfc-check.ok .n{background:#E9F0E7;color:#4C6647;}
+      .finfc-conta{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #F2EFE6;font-size:12.5px;}
+      .finfc-conta:last-child{border-bottom:none;}
+      .finfc-conta .sq{width:26px;height:26px;border-radius:6px;background:#0A1530;flex-shrink:0;}
+      .finfc-dark{background:#0A1530;border-radius:12px;padding:20px 22px;color:#fff;}
+      .finfc-dark .row{display:flex;justify-content:space-between;padding:7px 0;font-size:13px;border-bottom:1px solid rgba(255,255,255,.08);}
+      .finfc-dark .row:last-child{border-bottom:none;}
+      .finfc-dark .row b{font-family:'JetBrains Mono',monospace;}
+    </style>
+    <div class="finfc-h1">Fechamento de ${escHtml(f.mesLabel)}</div>
+    <div class="finfc-sub">Só o dinheiro da COBRASQ — o que é do cedente fica de fora do resultado.</div>
+    <div class="finfc-grid">
+      <div>
+        <div class="finfc-card">
+          <div class="finfc-tt">DRE gerencial</div>
+          ${linhaDre('Excedente sobre recebimentos', f.excedenteTotal, pct(f.excedenteTotal))}
+          ${linhaDre('Honorários judiciais', f.honorariosJudiciais, pct(f.honorariosJudiciais))}
+          ${linhaDre('Receita bruta', f.receitaBruta, 100, true)}
+          ${f.despesasPorCategoria.length ? f.despesasPorCategoria.map(d=>linhaDre(escHtml(d.nome), -d.valor, pct(-d.valor))).join('') : linhaDre('Despesas', -f.despesasMes, pct(-f.despesasMes))}
+          ${linhaDre('Resultado do mês', f.resultadoMes, null, true)}
+        </div>
+        <div class="finfc-card">
+          <div class="finfc-tt">Fluxo dos próximos 30 dias</div>
+          ${f.fluxoDias.length ? `
+          <div style="display:flex;align-items:flex-end;gap:3px;height:168px;padding-bottom:22px;position:relative;border-bottom:1px solid #E6E1D2;">
+            ${f.fluxoDias.map((d,i)=>{ const hIn=Math.max(d.in>0?3:0,Math.round(d.in/fluxoMax*100)); const hOut=Math.max(d.out>0?3:0,Math.round(d.out/fluxoMax*100)); return `<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;position:relative;" title="${d.label}: entrada ${fmtR(d.in)} · saída ${fmtR(d.out)}"><div style="width:100%;max-width:14px;height:${hIn}%;background:#5E7C58;border-radius:2px 2px 0 0;"></div><div style="width:100%;max-width:14px;height:${hOut}%;background:#D8B7AF;border-radius:0 0 2px 2px;"></div>${i%5===0?`<span style="position:absolute;bottom:-20px;font-family:'JetBrains Mono',monospace;font-size:9px;color:#A6AEBD;">${d.label}</span>`:''}</div>`; }).join('')}
+          </div>
+          <div style="display:flex;gap:16px;margin-top:14px;font-size:11.5px;color:#6B7683;">
+            <span style="display:flex;align-items:center;gap:6px;"><i style="width:8px;height:8px;background:#5E7C58;border-radius:2px;display:inline-block;"></i>Entradas previstas</span>
+            <span style="display:flex;align-items:center;gap:6px;"><i style="width:8px;height:8px;background:#D8B7AF;border-radius:2px;display:inline-block;"></i>Saídas previstas</span>
+          </div>` : `<div style="padding:20px;text-align:center;color:#A6AEBD;font-size:13px;">Sem lançamentos previstos nos próximos 30 dias.</div>`}
+        </div>
+      </div>
+      <div>
+        <div class="finfc-card">
+          <div class="finfc-tt">Checklist de fechamento</div>
+          <div class="finfc-check ${f.repassesPendentes===0?'ok':''}"><span class="n">${f.repassesPendentes===0?'✓':f.repassesPendentes}</span><span>${f.repassesPendentes===0?'Todos os repasses pagos':`${f.repassesPendentes} repasse${f.repassesPendentes!==1?'s':''} pendente${f.repassesPendentes!==1?'s':''}`}</span></div>
+          <div class="finfc-check ok"><span class="n">✓</span><span>Excedente do mês apurado: ${fmtR(f.excedenteTotal)}</span></div>
+          <div class="finfc-check ${f.notasPendentes===0?'ok':''}"><span class="n">${f.notasPendentes===0?'✓':f.notasPendentes}</span><span>${f.notasPendentes===0?'Notas fiscais em dia':`${f.notasPendentes} nota${f.notasPendentes!==1?'s':''} a emitir`}</span></div>
+          <button class="finrp-btn dark" style="margin-top:14px;width:100%;" onclick="showToast('Fechamento registrado (controle interno — não altera nenhum lançamento).','success')">Fechar o mês</button>
+        </div>
+        <div class="finfc-card">
+          <div class="finfc-tt">Contas · ${f.contasNoGeral}</div>
+          ${f.contas.length ? f.contas.map(c=>`<div class="finfc-conta"><div class="sq" style="background:${_bankColorFallback(c.banco_nome)};"></div><div style="flex:1;">${escHtml(c.descricao)}</div><b style="font-family:'JetBrains Mono',monospace;">${fmtR(c.saldo)}</b>${c.bank_balance==null?'<span style="color:#A65A4A;font-size:10.5px;margin-left:6px;">pendente</span>':''}</div>`).join('') : `<div style="padding:12px 0;color:#A6AEBD;font-size:12.5px;">Nenhuma conta cadastrada.</div>`}
+        </div>
+        <div class="finfc-dark">
+          <div class="finfc-tt" style="color:#8E98B0;">Divisão do recuperado</div>
+          <div class="row"><span>Recuperado no mês</span><b>${fmtR(f.capitalRecuperadoMes)}</b></div>
+          <div class="row"><span style="color:#C9A961;">Excedente da COBRASQ</span><b style="color:#C9A961;">${fmtR(f.excedenteTotal)}</b></div>
+          <div class="row"><span>Capital já devolvido</span><b>${fmtR(f.capitalDevolvidoMes)}</b></div>
+          <div class="row"><span>Capital ainda devido</span><b>${fmtR(f.capitalAindaDevido)}</b></div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+function _bankColorFallback(nome){
+  const n=(nome||'').toLowerCase();
+  if(n.includes('itaú')||n.includes('itau')) return '#E0731D';
+  if(n.includes('bradesco')) return '#CC092F';
+  if(n.includes('caixa')) return '#0070AF';
+  if(n.includes('santander')) return '#EC0000';
+  if(n.includes('inter')) return '#FF7A00';
+  if(n.includes('nubank')) return '#8A05BE';
+  if(n.includes('sicoob')) return '#006B3F';
+  return '#0A1530';
 }
 
 // ============================================================
