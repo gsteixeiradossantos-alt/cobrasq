@@ -44972,6 +44972,24 @@ function abrirModalRelatorio(devIds, forceClienteId){
   openModal('modal-relatorio');
 }
 
+// Espera as webfonts do relatório carregarem antes de imprimir. O template usa Fraunces /
+// Instrument Serif / Inter Tight / JetBrains Mono; disparar print() num timer fixo imprimia
+// com fonte de fallback quando a rede demorava.
+function _imprimirQuandoPronto(w){
+  const disparar = () => { try{ w.focus(); w.print(); }catch(e){} };
+  try{
+    const fontes = w.document && w.document.fonts;
+    if(fontes && fontes.ready){
+      let disparado = false;
+      const once = () => { if(!disparado){ disparado = true; disparar(); } };
+      fontes.ready.then(once);
+      setTimeout(once, 4000);
+      return;
+    }
+  }catch(e){}
+  setTimeout(disparar, 900);
+}
+
 function gerarRelatorio(){
   const periodo = (document.getElementById('rel-periodo').value||'').trim() || 'Período atual';
   const fmt = document.querySelector('input[name="rel-fmt"]:checked').value;
@@ -44981,7 +44999,7 @@ function gerarRelatorio(){
     const htmlG = buildReportHtmlGrupo(gid, periodo);
     closeModal('modal-relatorio');
     if(fmt==='pdf'){
-      const w = window.open('','_blank'); w.document.write(htmlG); w.document.close(); setTimeout(()=>w.print(), 900);
+      const w = window.open('','_blank'); w.document.write(htmlG); w.document.close(); _imprimirQuandoPronto(w);
     } else {
       const wrapperG = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset="UTF-8"></head><body>${htmlG}</body></html>`;
       const blobG = new Blob([wrapperG],{type:'application/msword'});
@@ -45011,7 +45029,7 @@ function gerarRelatorio(){
     const w = window.open('','_blank');
     w.document.write(html);
     w.document.close();
-    setTimeout(()=>w.print(), 900);
+    _imprimirQuandoPronto(w);
   } else {
     const wrapper = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset="UTF-8"></head><body>${html}</body></html>`;
     const blob = new Blob([wrapper],{type:'application/msword'});
@@ -45041,7 +45059,11 @@ function _faseLabel(d){
     '2.1. Acordo Judicial':'Acordo Judicial',
     '2. Acordo Extrajudicial':'Acordo Extrajudicial',
     '6. Baixados':'Baixado',
-    '7. Reajuizar':'A Reajuizar'
+    '7. Reajuizar':'A Reajuizar',
+    '4. Ação de Execução de Título Extrajudicial':'Execução de Título',
+    '5. Quitado':'Quitado',
+    '8. Devolvida':'Devolvida ao Credor',
+    '9. Encerrada':'Encerrada'
   };
   if(map[etq]) return map[etq];
   if(etq) return d.etapa ? `${etq} — ${d.etapa}` : etq;
@@ -45110,8 +45132,9 @@ function buildReportHtml(devIds, periodo, clienteId){
     distMap[lbl].count++; distMap[lbl].valor+=parseValorBR(d.valorOrig)||0;
   });
   const topDist=Object.entries(distMap).sort((a,b)=>b[1].valor-a[1].valor).slice(0,2);
+  const devsAtivos=devs.filter(d=>!_faseEncerrada(d));
   const indicHtml=`<div class="indicadores">
-    <div class="indicador"><div class="rotulo">Casos Ativos</div><div class="valor">${devs.length}</div><div class="detalhe">cobranças em andamento</div></div>
+    <div class="indicador"><div class="rotulo">Casos Ativos</div><div class="valor">${devsAtivos.length}</div><div class="detalhe">de ${devs.length} na carteira</div></div>
     <div class="indicador"><div class="rotulo">Valor Nominal Total</div><div class="valor" style="font-size:13pt;">${fmtR(valorTotal)}</div><div class="detalhe">soma dos valores das causas</div></div>
     ${topDist.map(([lbl,d])=>`<div class="indicador"><div class="rotulo">${escHtml(lbl)}</div><div class="valor">${d.count}</div><div class="detalhe">${fmtR(d.valor)} (${valorTotal>0?((d.valor/valorTotal)*100).toFixed(1)+'%':'—'})</div></div>`).join('')}
   </div>`;
@@ -45165,122 +45188,212 @@ function _reportProxHtml(devs){
 }
 
 function _reportTemplate(o){
+  const tipo = /Carteira/.test(o.kicker||'') ? 'Carteira de crédito'
+             : /Grupo/.test(o.kicker||'')    ? 'Grupo econômico'
+             : 'Caso individual';
   return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
 <title>Relatório de Andamento — ${escHtml(o.credorNome)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600&family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500&family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-/* COBRASQ v3 · Marinho & Champagne (skill identidade-visual-cobrasq) — timbrado branco+azul */
-:root{--ink:#0A1530;--graphite:#15224A;--accent:#C9A961;--accent-2:#9C7F40;--paper:#EFEAD9;--br:#FFFFFF;--ct:#26241F;--mute:rgba(10,21,48,.55);--line:rgba(10,21,48,.12);--va:#2E7D4F;--ci:#6B6B6B;
-  --serif:"Fraunces","Times New Roman",serif;--serif-edit:"Instrument Serif",serif;--sans:"Inter Tight",-apple-system,system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace}
-*{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-body{font-family:var(--sans);color:var(--ct);background:#E8E8E8;line-height:1.62;font-size:10.5pt}
-.pagina{width:210mm;min-height:297mm;margin:20px auto;background:var(--br);box-shadow:0 4px 20px rgba(0,0,0,.1);overflow:hidden}
-.cab{padding:0}
-.cab-band{background:var(--ink);color:var(--paper);position:relative;display:flex;justify-content:space-between;align-items:center;gap:18px;padding:16px 40px 15px}
-.cab-band::after{content:'';position:absolute;left:0;right:0;bottom:0;height:1.4px;background:var(--accent)}
-.lockup{display:flex;align-items:center;gap:13px}
-.lockup .dot{width:24px;height:24px;border-radius:50%;background:var(--accent);flex-shrink:0}
-.lockup .wm{font-family:var(--serif);font-weight:300;font-size:26px;line-height:1;letter-spacing:.01em;text-transform:lowercase;color:var(--paper)}
+:root{--ink:#0A1530;--graphite:#15224A;--paper:#EFEAD9;--paper-2:#E2DBC6;--accent:#C9A961;
+--mute:rgba(10,21,48,.5);--line:rgba(10,21,48,.12);
+--serif:"Fraunces","Times New Roman",serif;--serif-edit:"Instrument Serif","Times New Roman",serif;
+--sans:"Inter Tight",-apple-system,Arial,sans-serif;--mono:"JetBrains Mono","Courier New",monospace}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{background:var(--paper);color:var(--ink);-webkit-font-smoothing:antialiased}
+body{font-family:var(--sans);font-size:10.5pt;line-height:1.62}
+
+.capa{height:297mm;background:var(--ink);color:var(--paper);padding:24mm 22mm;
+  display:flex;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden;
+  page-break-after:always;break-after:page}
+.capa-grade{position:absolute;inset:0;pointer-events:none;
+  background-image:linear-gradient(0deg,transparent calc(100% - 1px),rgba(201,169,97,.07) 100%),
+                   linear-gradient(90deg,transparent calc(100% - 1px),rgba(201,169,97,.07) 100%);
+  background-size:56px 56px}
+.capa-fio{position:absolute;top:0;left:22mm;right:22mm;height:2px;background:var(--accent);opacity:.85}
+.capa-bloco{position:relative;z-index:2}
+.capa-topo{display:flex;justify-content:space-between;align-items:flex-start}
+.lockup{display:flex;align-items:center;gap:12px}
+.lockup-ponto{width:30px;height:30px;border-radius:50%;background:var(--accent);flex-shrink:0}
+.lockup-fio{width:.5px;height:34px;background:rgba(239,234,217,.30)}
+.lockup .wm{font-family:var(--serif);font-weight:300;font-size:26px;line-height:1;color:var(--paper)}
 .lockup .wm .p{color:var(--accent)}
-.band-meta{text-align:right;font-family:var(--mono);font-size:6.6pt;line-height:1.6;letter-spacing:.08em;text-transform:uppercase;color:rgba(239,234,217,.72)}
-.band-meta strong{font-weight:500;color:rgba(239,234,217,.94)}
-.tit{padding:30px 45px 0}
-.tit .kk{font-family:var(--mono);font-size:7.6pt;letter-spacing:.24em;text-transform:uppercase;color:var(--accent-2);margin-bottom:10px}
-.tit h1{font-family:var(--serif);font-weight:400;font-size:26pt;line-height:1.1;letter-spacing:-.012em;color:var(--ink);margin-bottom:6px}
-.tit .sub{font-family:var(--serif-edit);font-style:italic;font-size:12.5pt;color:var(--graphite)}
-.tit .info-row{display:flex;gap:34px;margin-top:16px;font-family:var(--mono);font-size:7pt;letter-spacing:.06em;text-transform:uppercase;color:var(--mute)}
-.tit .info-row b{display:block;color:var(--ink);font-weight:500;font-size:8.4pt;margin-top:2px;letter-spacing:.02em}
-.corpo{padding:32px 45px 30px}
-.sec{margin-bottom:30px}
-.sec h2{font-family:var(--serif);color:var(--ink);font-size:15pt;font-weight:500;margin-bottom:14px;padding-bottom:7px;border-bottom:.8px solid var(--line);position:relative}
-.sec h2::after{content:'';position:absolute;left:0;bottom:-.8px;width:46px;height:1.6px;background:var(--accent)}
-.sec h3{color:var(--ink);font-size:9.5pt;font-weight:600;margin-top:18px;margin-bottom:8px;text-transform:uppercase;letter-spacing:.08em;font-family:var(--mono)}
-.sec p{margin-bottom:11px;text-align:justify}
-.sec p strong{color:var(--ink);font-weight:600}
-.ficha-caso{background:#FAF8F4;border-left:2.5px solid var(--accent);padding:18px 22px;margin-bottom:20px;display:grid;grid-template-columns:1fr 1fr;gap:10px 30px;font-size:10pt}
-.ficha-caso .item{display:flex;flex-direction:column}
-.ficha-caso .rotulo{font-family:var(--mono);font-size:7pt;text-transform:uppercase;letter-spacing:.1em;color:var(--accent-2);margin-bottom:3px}
-.ficha-caso .valor{color:var(--ink);font-weight:600}
-.indicadores{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
-.indicador{background:#FAF8F4;border-top:2px solid var(--accent);padding:14px 16px}
-.indicador .rotulo{font-family:var(--mono);font-size:7pt;text-transform:uppercase;letter-spacing:.1em;color:var(--accent-2);margin-bottom:5px}
-.indicador .valor{color:var(--ink);font-weight:500;font-family:var(--serif);font-size:18pt;line-height:1.05}
-.indicador .detalhe{font-size:8pt;color:var(--mute);margin-top:3px}
-.linha-tempo{list-style:none;padding-left:0;margin-top:10px;border-left:1.5px solid var(--line);margin-left:8px}
-.linha-tempo li{padding:9px 0 9px 24px;position:relative}
-.linha-tempo li::before{content:'';position:absolute;left:-6px;top:14px;width:10px;height:10px;background:var(--accent);border:2px solid var(--br);border-radius:50%}
-.linha-tempo li.destacado::before{background:var(--ink)}
-.linha-tempo .data{font-family:var(--mono);font-weight:500;color:var(--accent-2);font-size:8.5pt;letter-spacing:.04em;display:block}
-.linha-tempo .acao{font-size:10pt;margin-top:2px}
-.tabela-consolidada{width:100%;border-collapse:collapse;margin-top:14px;font-size:9.5pt}
-.tabela-consolidada thead{background:var(--ink);color:var(--paper)}
-.tabela-consolidada th{padding:10px 12px;text-align:left;font-family:var(--mono);font-weight:500;letter-spacing:.08em;text-transform:uppercase;font-size:7.5pt}
-.tabela-consolidada td{padding:10px 12px;border-bottom:.6px solid var(--line);vertical-align:top}
-.tabela-consolidada .devedor{font-weight:600;color:var(--ink)}
-.tabela-consolidada .valor-num{font-weight:600;white-space:nowrap;font-family:var(--mono)}
-.tabela-consolidada .processo{font-family:var(--mono);font-size:8pt;color:var(--mute)}
-.etiqueta{display:inline-block;padding:3px 8px;border-radius:2px;font-family:var(--mono);font-size:7pt;font-weight:500;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
-.etiqueta-execucao{background:rgba(46,125,79,.1);color:var(--va);border:1px solid rgba(46,125,79,.5)}
-.etiqueta-encerrada{background:rgba(107,107,107,.1);color:var(--ci);border:1px solid rgba(107,107,107,.45)}
-.tabela-consolidada tfoot tr{background:#FAF8F4;font-weight:700}
-.tabela-consolidada tfoot td{padding:12px;border-top:1.4px solid var(--ink);border-bottom:1.4px solid var(--ink);color:var(--ink)}
-.bloco-fecho{break-inside:avoid;page-break-inside:avoid}
-.assin{margin-top:46px;padding-top:28px}
-.assin-linha{width:280px;border-top:.9px solid var(--ink);margin-bottom:6px}
-.bloco-fecho .assin-linha{margin-top:34px}
-.assin-nome{font-family:var(--serif);font-weight:500;color:var(--ink);font-size:12pt}
-.assin-cargo{font-family:var(--mono);font-size:7.5pt;letter-spacing:.06em;text-transform:uppercase;color:var(--accent-2)}
-.rod{background:var(--ink);color:var(--paper);padding:22px 45px;margin:30px -45px 0;font-size:8.5pt;position:relative}
-.rod::before{content:'';position:absolute;top:0;left:0;right:0;height:1.4px;background:var(--accent)}
-.rod-grid{display:grid;grid-template-columns:2fr 1fr;gap:30px;margin-bottom:14px}
-.rod-bloco .rotulo{font-family:var(--mono);text-transform:uppercase;letter-spacing:.12em;font-size:6.6pt;color:rgba(239,234,217,.6);margin-bottom:6px}
-.rod-bloco .conteudo{line-height:1.7;color:rgba(239,234,217,.9)}
-.rod-bloco a{color:var(--accent);text-decoration:none}
-.conf{border-top:1px solid rgba(239,234,217,.16);padding-top:13px;font-family:var(--mono);font-size:6.8pt;letter-spacing:.06em;color:rgba(239,234,217,.6);text-align:center}
-@media print{body{background:#fff}.pagina{box-shadow:none;margin:0;width:100%;min-height:0}}
-@page{size:A4;margin:14mm 0 12mm}
-@page:first{margin-top:0}
+.lockup .tag{font-family:var(--mono);font-size:7.5px;letter-spacing:.2em;text-transform:uppercase;
+  color:rgba(239,234,217,.42);margin-top:6px}
+.capa-simbolo{width:34px;height:34px;border-radius:50%;background:var(--accent);flex-shrink:0}
+.capa-olho{font-family:var(--mono);font-size:9.5px;letter-spacing:.26em;text-transform:uppercase;
+  color:var(--accent);margin-bottom:26px}
+.capa-titulo{font-family:var(--serif);font-weight:300;font-size:62px;line-height:1.03;
+  letter-spacing:-.02em;color:var(--paper)}
+.capa-tipo{font-family:var(--mono);font-size:11px;letter-spacing:.2em;text-transform:uppercase;
+  color:rgba(239,234,217,.55);margin-top:20px}
+.capa-regua{height:.5px;background:rgba(239,234,217,.18);margin:30px 0}
+.capa-rot{font-family:var(--mono);font-size:8px;letter-spacing:.22em;text-transform:uppercase;
+  color:rgba(239,234,217,.45);margin-bottom:11px}
+.capa-credor{font-family:var(--serif);font-weight:300;font-size:30px;line-height:1.15;color:var(--paper)}
+.capa-meta{display:flex;border-top:.5px solid rgba(239,234,217,.16);padding-top:20px}
+.capa-meta .mi{flex:1}
+.capa-meta .ml{font-family:var(--mono);font-size:7.5px;letter-spacing:.2em;text-transform:uppercase;
+  color:rgba(239,234,217,.4);margin-bottom:8px}
+.capa-meta .mv{font-family:var(--mono);font-size:10px;letter-spacing:.06em;color:var(--paper)}
+.capa-inst{display:flex;justify-content:space-between;margin-top:22px;font-family:var(--mono);
+  font-size:8px;letter-spacing:.14em;text-transform:uppercase;color:rgba(239,234,217,.35)}
+
+.run-head{display:flex;justify-content:space-between;align-items:center;
+  padding:0 18mm 10px;border-bottom:.5px solid var(--accent);margin:0 0 22px}
+.run-wm{font-family:var(--serif);font-weight:300;font-size:16px;color:var(--ink)}
+.run-wm .p{color:var(--accent)}
+.run-ref{font-family:var(--mono);font-size:8px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
+
+.sec{margin-bottom:26px}
+.sec-num{font-family:var(--mono);font-size:9px;letter-spacing:.22em;text-transform:uppercase;
+  color:var(--accent);margin-bottom:9px}
+.sec h2{font-family:var(--serif);font-weight:300;font-size:23px;line-height:1.12;color:var(--ink);
+  margin-bottom:15px}
+.sec h3{font-family:var(--mono);font-size:9px;font-weight:500;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--ink);margin:20px 0 9px}
+.sec p{font-family:var(--serif-edit);font-size:13pt;line-height:1.72;color:var(--ink);margin-bottom:.8em}
+.sec p:last-child{margin-bottom:0}
+.sec p strong{font-weight:400;font-style:italic}
+.sec em{font-style:italic}
+
+.indicadores{display:flex;gap:9px;margin-bottom:18px}
+.indicador{flex:1 1 0;min-width:0;background:var(--paper-2);border-top:2px solid var(--accent);
+  padding:13px 14px 15px}
+.indicador .rotulo{font-family:var(--mono);font-size:7px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--mute);line-height:1.5;margin-bottom:10px;min-height:21px}
+.indicador .valor{font-family:var(--serif);font-weight:300;font-size:24px;line-height:1.05;color:var(--ink)}
+.indicador .detalhe{font-family:var(--sans);font-size:8.5px;color:var(--mute);margin-top:6px}
+
+.ficha-caso{border-top:1px solid var(--accent);margin-bottom:16px}
+.ficha-caso .item{display:flex;justify-content:space-between;align-items:baseline;gap:24px;
+  padding:9px 0;border-bottom:.5px solid var(--line)}
+.ficha-caso .rotulo{font-family:var(--mono);font-size:8px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--mute);flex-shrink:0}
+.ficha-caso .valor{font-family:var(--sans);font-size:12.5px;font-weight:500;color:var(--ink);text-align:right}
+
+.linha-tempo{list-style:none;border-left:1px solid var(--accent);margin:4px 0 0 3px;padding-left:22px}
+.linha-tempo li{position:relative;padding-bottom:15px}
+.linha-tempo li:last-child{padding-bottom:0}
+.linha-tempo li::before{content:"";position:absolute;left:-25.5px;top:3px;width:7px;height:7px;
+  border-radius:50%;background:var(--accent)}
+.linha-tempo .data{font-family:var(--mono);font-size:8px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--accent);display:block}
+.linha-tempo .acao{font-family:var(--serif-edit);font-size:12.5px;line-height:1.55;color:var(--ink);
+  margin-top:4px;display:block}
+
+.tabela-consolidada{width:100%;border-collapse:collapse;margin-top:8px;table-layout:fixed}
+.tabela-consolidada th{font-family:var(--mono);font-size:7.5px;font-weight:500;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--mute);text-align:left;padding:7px 8px;
+  border-bottom:1px solid var(--accent)}
+.tabela-consolidada td{font-family:var(--sans);font-size:10.5px;line-height:1.3;color:var(--ink);
+  padding:7px 8px;border-bottom:.5px solid var(--line);vertical-align:top}
+.tabela-consolidada tr{page-break-inside:avoid;break-inside:avoid}
+.tabela-consolidada th:nth-child(1),.tabela-consolidada td:nth-child(1){width:28%}
+.tabela-consolidada th:nth-child(2),.tabela-consolidada td:nth-child(2){width:21%}
+.tabela-consolidada th:nth-child(3),.tabela-consolidada td:nth-child(3){width:16%}
+.tabela-consolidada th:nth-child(4),.tabela-consolidada td:nth-child(4){width:22%}
+.tabela-consolidada th:nth-child(5),.tabela-consolidada td:nth-child(5){width:13%}
+.tabela-consolidada .devedor{font-weight:600}
+.tabela-consolidada .processo{font-family:var(--mono);font-size:8px;color:var(--mute);white-space:nowrap}
+.tabela-consolidada .valor-num{font-family:var(--sans);font-weight:600;text-align:right;white-space:nowrap}
+.tabela-consolidada .fase{font-weight:400}
+.tabela-consolidada tfoot td{font-family:var(--serif);font-weight:400;font-size:12.5px;color:var(--ink);
+  border-top:1.5px solid var(--ink);border-bottom:none;padding-top:11px}
+.etiqueta{display:inline-block;font-family:var(--mono);font-size:7px;letter-spacing:.12em;
+  text-transform:uppercase;padding:3px 7px;border:.5px solid;white-space:normal;background:none}
+.etiqueta-execucao{color:var(--accent);border-color:var(--accent)}
+.etiqueta-encerrada{color:var(--mute);border-color:var(--line)}
+
+.assin{margin-top:34px;padding-top:8px;page-break-inside:avoid;break-inside:avoid}
+.assin-linha{width:230px;border-bottom:.5px solid var(--ink);height:30px;margin-bottom:9px}
+.assin-nome{font-family:var(--serif);font-weight:400;font-size:17px;color:var(--ink)}
+.assin-cargo{font-family:var(--mono);font-size:8.5px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--mute);margin-top:4px}
+
+.rod{margin-top:30px;border-top:1px solid var(--accent);padding-top:16px;
+  page-break-inside:avoid;break-inside:avoid}
+.rod-grid{display:flex;gap:30px}
+.rod-bloco{flex:1}
+.rod-bloco .rotulo{font-family:var(--mono);font-size:7px;letter-spacing:.2em;text-transform:uppercase;
+  color:var(--accent);margin-bottom:8px}
+.rod-bloco .conteudo{font-family:var(--mono);font-size:8px;letter-spacing:.05em;color:var(--mute);
+  line-height:1.95}
+.rod-bloco a{color:var(--mute);text-decoration:none}
+.conf{text-align:center;margin-top:16px;padding-top:12px;border-top:.5px solid var(--line);
+  font-family:var(--serif-edit);font-style:italic;font-size:10px;color:var(--mute)}
+
+@page{size:A4 portrait;margin:0}
+.corrida{width:100%;border-collapse:collapse}
+.corrida>thead>tr>td,.corrida>tfoot>tr>td{padding:0;border:0}
+.corrida>tbody>tr>td{padding:0 18mm;border:0;vertical-align:top}
+.faixa-topo{height:13mm}
+.faixa-base{height:11mm}
+@media print{*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}}
 </style></head><body>
-<div class="pagina">
-  <header class="cab">
-    <div class="cab-band">
-      <div class="lockup"><span class="dot"></span><span class="wm">cobrasq<span class="p">.</span></span></div>
-      <div class="band-meta"><strong>COBRASQ Recuperadora de Crédito e Cobrança Ltda.</strong><br>CNPJ 34.626.848/0001-42 · Dois Vizinhos · PR</div>
+
+<section class="capa">
+  <div class="capa-fio"></div><div class="capa-grade"></div>
+  <div class="capa-bloco capa-topo">
+    <div class="lockup">
+      <div class="lockup-ponto"></div><div class="lockup-fio"></div>
+      <div><div class="wm">cobrasq<span class="p">.</span></div>
+        <div class="tag">Recuperação de Crédito</div></div>
     </div>
-    <div class="tit">
-      <div class="kk">${escHtml(o.kicker)}</div>
-      <h1>${escHtml(o.credorNome)}</h1>
-      <div class="sub">Relatório de andamento da recuperação de crédito</div>
-      <div class="info-row">
-        <div>Emitido em<b>${escHtml(o.dataEmissao)}</b></div>
-        <div>Período de referência<b>${escHtml(o.periodo)}</b></div>
-        <div>Responsável<b>${escHtml(o.resp)} · ${escHtml(o.cargo)}</b></div>
-      </div>
+    <div class="capa-simbolo"></div>
+  </div>
+  <div class="capa-bloco">
+    <div class="capa-olho">Recuperação de Crédito · Documento Confidencial</div>
+    <div class="capa-titulo">Relatório de<br>Andamento</div>
+    <div class="capa-tipo">${escHtml(tipo)}</div>
+    <div class="capa-regua"></div>
+    <div class="capa-rot">Preparado para</div>
+    <div class="capa-credor">${escHtml(o.credorNome)}</div>
+  </div>
+  <div class="capa-bloco">
+    <div class="capa-meta">
+      <div class="mi"><div class="ml">Data de emissão</div><div class="mv">${escHtml(o.dataEmissao)}</div></div>
+      <div class="mi"><div class="ml">Período de referência</div><div class="mv">${escHtml(o.periodo)}</div></div>
+      <div class="mi"><div class="ml">Responsável</div><div class="mv">${escHtml(o.resp)}</div></div>
     </div>
-  </header>
-  <main class="corpo">
-    <section class="sec"><h2>Sumário Executivo</h2>${o.fichaHtml}${o.sumario.map(p=>`<p>${p}</p>`).join('')}</section>
-    <section class="sec"><h2>Andamento Detalhado</h2>${o.detalheHtml}${o.tabelaHtml}</section>
-    ${o.notasHtml?`<section class="sec"><h2>Notas Processuais</h2><p>${o.notasHtml}</p></section>`:''}
-    ${o.proxHtml?`<section class="sec"><h2>Próximos Passos</h2><p>${o.proxHtml}</p></section>`:''}
-    <div class="bloco-fecho">
-      <div class="assin">
-        <div class="assin-linha"></div>
-        <div class="assin-nome">${escHtml(o.resp)}</div>
-        <div class="assin-cargo">${escHtml(o.cargo)} — COBRASQ Recuperadora de Crédito e Cobrança Ltda.</div>
-      </div>
-      <footer class="rod">
-        <div class="rod-grid">
-          <div class="rod-bloco"><div class="rotulo">COBRASQ — Sede</div><div class="conteudo">${escHtml(o.instEnd)}<br>CNPJ: ${escHtml(o.instCnpj)}</div></div>
-          <div class="rod-bloco"><div class="rotulo">Atendimento</div><div class="conteudo">WhatsApp: ${escHtml(o.instW)}<br>E-mail: <a href="mailto:${escHtml(o.instE)}">${escHtml(o.instE)}</a><br>Site: <a href="https://${escHtml(o.instS)}">${escHtml(o.instS)}</a></div></div>
-        </div>
-        <div class="conf">Documento confidencial, destinado exclusivamente ao credor identificado no cabeçalho.</div>
-      </footer>
+    <div class="capa-inst"><span>COBRASQ Recuperadora de Crédito</span><span>cobrasq.com.br</span></div>
+  </div>
+</section>
+
+<table class="corrida"><thead><tr><td>
+  <div class="faixa-topo"></div>
+  <div class="run-head">
+    <div class="run-wm">cobrasq<span class="p">.</span></div>
+    <div class="run-ref">Relatório de Andamento · ${escHtml(o.periodo)}</div>
+  </div>
+</td></tr></thead>
+<tfoot><tr><td><div class="faixa-base"></div></td></tr></tfoot>
+<tbody><tr><td>
+  <section class="sec"><div class="sec-num">01 · Sumário Executivo</div>
+    <h2>${/Carteira|Grupo/.test(o.kicker||'')?'Panorama da carteira':'Panorama do período'}</h2>
+    ${o.fichaHtml}${o.sumario.map(p=>`<p>${p}</p>`).join('')}</section>
+  <section class="sec"><div class="sec-num">02 · Andamento Detalhado</div>
+    <h2>Atuação no período</h2>${o.detalheHtml}${o.tabelaHtml}</section>
+  ${o.notasHtml?`<section class="sec"><div class="sec-num">03 · Notas Processuais</div>
+    <h2>Contexto dos ritos em curso</h2><p>${o.notasHtml}</p></section>`:''}
+  ${o.proxHtml?`<section class="sec"><div class="sec-num">0${o.notasHtml?'4':'3'} · Próximos Passos</div>
+    <h2>Diligências previstas</h2><p>${o.proxHtml}</p></section>`:''}
+  <div class="assin">
+    <div class="assin-linha"></div>
+    <div class="assin-nome">${escHtml(o.resp)}</div>
+    <div class="assin-cargo">${escHtml(o.cargo)} · COBRASQ Recuperadora de Crédito</div>
+  </div>
+  <div class="rod">
+    <div class="rod-grid">
+      <div class="rod-bloco"><div class="rotulo">Sede</div><div class="conteudo">${escHtml(o.instEnd)}<br>CNPJ ${escHtml(o.instCnpj)}</div></div>
+      <div class="rod-bloco"><div class="rotulo">Atendimento</div><div class="conteudo">WhatsApp ${escHtml(o.instW)}<br><a href="mailto:${escHtml(o.instE)}">${escHtml(o.instE)}</a><br><a href="https://${escHtml(o.instS)}">${escHtml(o.instS)}</a><br>Atuação nacional</div></div>
     </div>
-  </main>
-</div></body></html>`;
+    <div class="conf">Documento confidencial, destinado exclusivamente ao credor identificado. Vedada a reprodução ou o compartilhamento sem autorização da COBRASQ.</div>
+  </div>
+</td></tr></tbody></table>
+</body></html>`;
 }
 
 function downloadImportTemplate(){
