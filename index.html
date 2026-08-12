@@ -29844,6 +29844,7 @@ function _finLancCascataRenderBulkbar(){
     <button class="finlc-bulkbtn primary" onclick="_finLancCascataLote('pagar')">Confirmar pagamento</button>
     <button class="finlc-bulkbtn" onclick="_finLancCascataLote('conciliar')">Conciliar</button>
     <button class="finlc-bulkbtn danger" onclick="_finLancCascataLote('excluir')">Excluir</button>
+    <button class="finlc-bulkbtn danger" onclick="_finLancSerieAbrirModal()">Excluir esta e as próximas</button>
     <button class="finlc-bulkbtn" style="margin-left:auto;" onclick="_finLancCascataState.sel.clear();_finLancCascataRender();">Limpar ✕</button>
   </div>`;
 }
@@ -29858,6 +29859,150 @@ async function _finLancCascataLote(acao){
     showToast('Feito.', 'success');
     renderFinTab('lancamentos');
   }catch(e){ showToast('Erro: '+(e.message||e), 'danger'); }
+}
+
+// ══════════════════════════════════════════════════════════════
+// FINANCEIRO — "Excluir esta e as próximas parcelas"
+// ──────────────────────────────────────────────────────────────
+// Caso de uso: acordo descumprido vira execução judicial, e as parcelas que
+// ainda estavam previstas no financeiro deixam de existir. Hoje só dá para
+// excluir uma a uma, e as futuras nem aparecem na tela para serem marcadas.
+//
+// A SÉRIE NÃO ESTÁ NORMALIZADA NO BANCO. Auditoria de 12/08/2026 em
+// fin_lancamento: 886 linhas, 864 com "N/M" no texto de `descricao` e apenas
+// 154 com `numero_parcela` preenchido — 717 têm o texto e não a coluna. Ler a
+// série pelas colunas deixaria a função sem efeito em 83% dos parcelamentos
+// reais, incluindo o lançamento que motivou o pedido (id 123822, "Valdir
+// Germano de Souza - Executar se descumprir 2/22", com numero_parcela NULL
+// enquanto a parcela 3/22 ao lado tem 3/22 preenchido). Por isso a série sai
+// do TEXTO; a coluna entra só como conferência.
+//
+// O corte é ancorado na DATA, não no número da parcela: é o que o usuário vê
+// na tela e o que sobrevive aos casos em que texto e coluna divergem (3 linhas
+// hoje — reparcelamentos em que o texto numera o acordo inteiro e a coluna
+// numera o parcelamento vigente).
+//
+// A busca vai ao BANCO e sem filtro de período, ao contrário do resto da aba:
+// _finLancCascataCarregar() só traz o intervalo selecionado, e as parcelas
+// futuras — exatamente o alvo desta ação — estão fora dele.
+//
+// Parcela paga ou conciliada NUNCA é excluída: apagá-la deixaria dinheiro que
+// entrou de verdade sem contrapartida no extrato. Elas são contadas e
+// mostradas como preservadas na confirmação.
+// ══════════════════════════════════════════════════════════════
+
+const _FIN_RE_PARCELA = / (\d+)\/(\d+)$/;
+const _finSerieBase = d => String(d||'').replace(_FIN_RE_PARCELA,'');
+function _finSerieNum(d){ const m = String(d||'').match(_FIN_RE_PARCELA); return m ? { n:+m[1], total:+m[2] } : null; }
+const _finLancQuitado = l => l.status===1 || !!l.data_pagamento || !!l.conciliado;
+const _finLancData = l => l.data_vencimento || l.data_competencia || '';
+// % e _ são curingas no LIKE do Postgres; nome de contato pode conter os dois.
+const _finEscLike = s => String(s||'').replace(/([\\%_])/g,'\\$1');
+
+function _finLancSerieCmp(a,b){
+  const da=_finLancData(a), db=_finLancData(b);
+  if(da!==db) return da<db ? -1 : 1;
+  const na=_finSerieNum(a.descricao), nb=_finSerieNum(b.descricao);
+  if(na&&nb&&na.n!==nb.n) return na.n-nb.n;
+  return (a.id||0)-(b.id||0);
+}
+
+// Devolve { alvos, preservadas, series } — alvos = o que será excluído.
+async function _finLancSerieResolver(ids){
+  const sb = getSupabase();
+  const col = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,tipo_movimento,status,conciliado,contato_id,numero_parcela,total_parcelas';
+  const { data: ancoras, error } = await sb.from('fin_lancamento').select(col).in('id', ids);
+  if(error) throw error;
+
+  const alvos = new Map(), preservadas = new Map(), series = [];
+  for(const a of (ancoras||[])){
+    const base = _finSerieBase(a.descricao);
+    let q = sb.from('fin_lancamento').select(col).eq('tipo_movimento', a.tipo_movimento);
+    // contato_id estreita no servidor quando existe (119 parceladas não têm);
+    // o casamento exato da base é refeito abaixo, em JS, nos dois caminhos.
+    q = a.contato_id ? q.eq('contato_id', a.contato_id) : q.like('descricao', _finEscLike(base)+'%');
+    const { data, error: e2 } = await q.limit(500);
+    if(e2) throw e2;
+
+    const serie = (data||[]).filter(l => _finSerieBase(l.descricao) === base);
+    if(!serie.some(l => l.id === a.id)) serie.push(a);   // âncora sempre entra
+    serie.sort(_finLancSerieCmp);
+
+    const i = serie.findIndex(l => l.id === a.id);
+    const daqui = serie.slice(i < 0 ? 0 : i);
+    for(const l of daqui){ (_finLancQuitado(l) ? preservadas : alvos).set(l.id, l); }
+    series.push({ base, ancora:a, total:serie.length, daqui:daqui.length });
+  }
+  // Um alvo nunca fica também em preservadas (duas séries podem se cruzar).
+  for(const id of preservadas.keys()) alvos.delete(id);
+  return { alvos:[...alvos.values()].sort(_finLancSerieCmp), preservadas:[...preservadas.values()], series };
+}
+
+async function _finLancSerieAbrirModal(){
+  const ids = [..._finLancCascataState.sel];
+  if(!ids.length) return;
+  let ov = document.getElementById('finserie-overlay');
+  if(!ov){ ov = document.createElement('div'); ov.id='finserie-overlay'; ov.className='overlay'; document.body.appendChild(ov); }
+  ov.innerHTML = `<div class="modal" style="max-width:620px;"><div style="padding:40px;text-align:center;color:#8A94A6;"><div class="mv2-spinner" style="margin:0 auto 10px;width:24px;height:24px;border-width:3px;"></div>Levantando as parcelas da série…</div></div>`;
+  openModal('finserie-overlay');
+  try{
+    const r = await _finLancSerieResolver(ids);
+    window._finSerieCtx = r;
+    _finLancSerieRenderModal(r);
+  }catch(e){
+    closeModal('finserie-overlay');
+    showToast('Erro ao levantar a série: '+(e.message||e), 'danger');
+  }
+}
+
+function _finLancSerieRenderModal(r){
+  const ov = document.getElementById('finserie-overlay'); if(!ov) return;
+  const { alvos, preservadas } = r;
+  const soma = alvos.reduce((s,l)=>s+Math.abs(+l.valor||0), 0);
+  const linha = l => {
+    const num = _finSerieNum(l.descricao);
+    return `<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid #F2EFE6;font-size:13px;">
+      <span style="color:#6B7683;min-width:52px;">${num?escHtml(num.n+'/'+num.total):'—'}</span>
+      <span style="color:#6B7683;min-width:82px;">${escHtml(_finLancData(l)||'sem data')}</span>
+      <span style="flex:1;">${escHtml(l.descricao||'—')}</span>
+      <span style="font-variant-numeric:tabular-nums;">${fmtR(Math.abs(+l.valor||0))}</span>
+    </div>`;
+  };
+  ov.innerHTML = `<div class="modal modal-md">
+    <div class="modal-header">
+      <span class="modal-title">Excluir esta e as próximas parcelas</span>
+      <button class="modal-close" onclick="closeModal('finserie-overlay')">&#10005;</button>
+    </div>
+    <div class="modal-body" style="max-height:60vh;overflow:auto;">
+      ${alvos.length ? `
+        <p style="margin-bottom:6px;">Serão excluídas <strong>${alvos.length}</strong> parcela${alvos.length!==1?'s':''}, somando <strong>${fmtR(soma)}</strong>. A busca cobre toda a série, inclusive fora do período que está na tela.</p>
+        <div style="margin:12px 0 4px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#8A94A6;">Vão sair</div>
+        ${alvos.map(linha).join('')}
+      ` : `<p>Nenhuma parcela em aberto a partir da selecionada. Nada será excluído.</p>`}
+      ${preservadas.length ? `
+        <div style="margin:18px 0 4px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#8A94A6;">Preservadas — já pagas ou conciliadas (${preservadas.length})</div>
+        ${preservadas.sort(_finLancSerieCmp).map(linha).join('')}
+        <p style="margin-top:10px;color:#6B7683;font-size:12.5px;">Parcela paga não é excluída: apagá-la deixaria dinheiro que entrou sem contrapartida no extrato.</p>
+      ` : ''}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('finserie-overlay')">Cancelar</button>
+      ${alvos.length ? `<button class="btn btn-danger" onclick="_finLancSerieConfirmar()">Excluir ${alvos.length} parcela${alvos.length!==1?'s':''}</button>` : ''}
+    </div>
+  </div>`;
+}
+
+async function _finLancSerieConfirmar(){
+  const ctx = window._finSerieCtx;
+  if(!ctx || !ctx.alvos.length) return;
+  const ids = ctx.alvos.map(l=>l.id);
+  try{
+    await finApi.excluirLote(ids);
+    closeModal('finserie-overlay');
+    _finLancCascataState.sel.clear();
+    showToast(`${ids.length} parcela${ids.length!==1?'s':''} excluída${ids.length!==1?'s':''}.`, 'success');
+    renderFinTab('lancamentos');
+  }catch(e){ showToast('Erro ao excluir: '+(e.message||e), 'danger'); }
 }
 
 // ══════════════════════════════════════════════════════════════
