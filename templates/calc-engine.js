@@ -93,8 +93,28 @@
   }
 
   // ── motor principal ─────────────────────────────────────────────────────────
+  // Datas de entrada podem chegar como Date OU como 'AAAA-MM-DD' — a string é o
+  // formato usado em `eventos[].data` e nos configs JSON que alimentam o motor.
+  // Sem normalizar, uma string cai direto nas comparações com Date (`<=`, `>`) e
+  // o JS compara TEXTO com a representação longa do Date: o resultado é
+  // silenciosamente errado, sem exceção nem aviso. Era o caso de `multaData`,
+  // que zerava a multa inteira — num cumprimento real de R$ 5.278,00, saldo de
+  // R$ 7.311,60 em vez de R$ 9.959,09, ou seja, R$ 2.647,49 a MENOS contra o
+  // próprio credor. Mesmo risco valia para dataCorrecao, dataFim e dataJuros.
+  //
+  // `_dt` preserva null/undefined e devolve o valor original quando a conversão
+  // falha, para não trocar um bug silencioso por outro: `null <= Date` é true
+  // (null vira 0), então transformar undefined em null aqui LIGARIA juros que
+  // hoje ficam desligados.
+  const _dt = v => (v == null || v === '') ? v : (parseDataLocal(v) || v);
+
   function calcularPrincipal(params, TAB) {
     TAB = TAB || TABELAS;
+    params = { ...params,
+      dataCorrecao: _dt(params.dataCorrecao),
+      dataFim:      _dt(params.dataFim),
+      dataJuros:    _dt(params.dataJuros),
+      multaData:    _dt(params.multaData) };
     const segs = segmentarPorMes(params.dataCorrecao, params.dataFim);
     const eventosOrd = [...(params.eventos || [])]
       .filter(e => e.data && e.valor && parseDataLocal(e.data) >= params.dataCorrecao && parseDataLocal(e.data) <= params.dataFim)
@@ -324,6 +344,10 @@
 
   function juridica(valorNominal, dataIni, dataFim, indice, multaPct, honPct, jurosMensalPct, opts) {
     opts = opts || {};
+    // `mesesPRO` chama diffDias() fora do motor, então a normalização de
+    // calcularPrincipal não alcança estes dois: sem isto, dataIni/dataFim em
+    // string estouram em `d2.getTime is not a function`.
+    dataIni = _dt(dataIni); dataFim = _dt(dataFim);
     const taxa = (jurosMensalPct == null || jurosMensalPct === '') ? 1.00 : _num(jurosMensalPct);
     const r = calcularPrincipal({
       valorOriginal: _num(valorNominal), dataCorrecao: dataIni, dataFim: dataFim, dataJuros: opts.dataJuros || dataIni,
