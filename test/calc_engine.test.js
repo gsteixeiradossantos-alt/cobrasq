@@ -154,5 +154,39 @@ LOG('10) Pagamento maior que o item 1 cascateia para os itens seguintes');
   ok(demais.creditoNaoImputado > 0, 'sobra apos o ultimo item fica exposta em creditoNaoImputado');
 })();
 
+// 11) Datas em string produzem o MESMO numero que datas em Date
+// Regressao real: `multaData` como 'AAAA-MM-DD' caia na comparacao string x Date
+// e a multa inteira era descartada sem erro nenhum -- num caso de R$ 5.278,00 o
+// saldo saia R$ 2.647,49 menor, contra o proprio credor. O mesmo risco valia
+// para dataCorrecao, dataFim e dataJuros.
+LOG('11) Datas como string equivalem a datas como Date');
+(function () {
+  var di = '2024-05-17', df = '2026-08-12';
+  var dID = D(2024, 4, 17), dFD = D(2026, 7, 12);
+
+  // multaData nos dois formatos
+  var mStr = E.juridica('5278.00', dID, dFD, 'TJPR', 50, 0, 1, { multaData: di });
+  var mDat = E.juridica('5278.00', dID, dFD, 'TJPR', 50, 0, 1, { multaData: dID });
+  near(mStr.multa, mDat.multa, 'multaData string x Date: mesma multa');
+  near(mStr.total, mDat.total, 'multaData string x Date: mesmo total');
+  ok(mStr.multa > 0, 'multaData em string NAO zera a multa');
+
+  // dataIni/dataFim nos dois formatos (juridica usa diffDias fora do motor)
+  var jStr = E.juridica('9612.00', di, df, 'TJPR', 50, 0, 1);
+  var jDat = E.juridica('9612.00', dID, dFD, 'TJPR', 50, 0, 1);
+  near(jStr.total, jDat.total, 'dataIni/dataFim string x Date: mesmo total');
+  near(jStr.mesesPRO, jDat.mesesPRO, 'dataIni/dataFim string x Date: mesmo mesesPRO');
+
+  // correcaoMensal tambem aceita string
+  var cStr = E.correcaoMensal(1000, di, df, 'INPC');
+  var cDat = E.correcaoMensal(1000, dID, dFD, 'INPC');
+  near(cStr.valorCorrigido, cDat.valorCorrigido, 'correcaoMensal string x Date');
+
+  // dataJuros AUSENTE nao pode virar "juros desde o inicio" por conta da normalizacao
+  var semJ = E.calcularPrincipal({ valorOriginal: 1000, dataCorrecao: dID, dataFim: dFD,
+    indice: 'INPC', taxaJurosMensal: 1, aplicarMulta: false, eventos: [] });
+  near(semJ.jurosAcumulados, 0, 'sem dataJuros continua sem juros');
+})();
+
 LOG(FAIL === 0 ? '\nOK -- ' + RAN + ' assercoes passaram (motor canonico v3).' : '\nFALHOU -- ' + FAIL + '/' + RAN + ' assercao(oes).');
 if (FAIL > 0) { if (typeof process !== 'undefined' && process.exit) process.exit(1); else throw new Error('calc-engine: ' + FAIL + ' falhas'); }
