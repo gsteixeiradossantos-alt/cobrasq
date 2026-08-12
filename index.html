@@ -29336,9 +29336,137 @@ const FIN_CASCATA_UI_TABS = [
 function _finCascataIrPara(tabId){
   setFinTab(tabId);
 }
-function _finCascataMudarPeriodo(v){
-  window._finCascataPeriodo = v;
+// ══════════════════════════════════════════════════════════════
+// FINANCEIRO — navegador de período (setas + mês/intervalo livre)
+// ──────────────────────────────────────────────────────────────
+// Antes existiam só "Este mês" e "Mês anterior": não havia como olhar
+// para frente. E há muito o que olhar — em 12/08/2026 o banco tinha 30
+// meses de recebíveis já lançados, até nov/2029 (set/26 = R$ 30.315,68,
+// out/26 = R$ 28.054,68 …), todos inalcançáveis pela tela.
+//
+// Datas são montadas com formatação LOCAL, nunca toISOString(): o offset
+// de UTC empurra o dia para trás e a janela sairia deslocada.
+// ══════════════════════════════════════════════════════════════
+
+const _FIN_MESES = ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+const _finISO = d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+const _finDeISO = s => { const p = String(s).split('-').map(Number); return new Date(p[0], (p[1]||1)-1, p[2]||1); };
+const _finBR = s => { const p = String(s).split('-'); return p[2]+'/'+p[1]+'/'+p[0]; };
+
+function _finPeriodoEstado(){
+  if(!window._finPeriodo){
+    const h = new Date();
+    window._finPeriodo = { modo:'mes', ref:_finISO(new Date(h.getFullYear(), h.getMonth(), 1)), ini:null, fim:null };
+  }
+  return window._finPeriodo;
+}
+
+// { ini, fim, label } — ini/fim em 'AAAA-MM-DD'.
+function _finCascataPeriodoBounds(){
+  const p = _finPeriodoEstado();
+  if(p.modo==='custom' && p.ini && p.fim){
+    return { ini:p.ini, fim:p.fim, label:_finBR(p.ini)+' — '+_finBR(p.fim) };
+  }
+  const r = _finDeISO(p.ref);
+  if(p.modo==='dia'){
+    return { ini:_finISO(r), fim:_finISO(r), label:r.getDate()+' de '+_FIN_MESES[r.getMonth()]+' de '+r.getFullYear() };
+  }
+  if(p.modo==='semana'){
+    const ini = new Date(r); ini.setDate(r.getDate()-r.getDay());          // domingo
+    const fim = new Date(ini); fim.setDate(ini.getDate()+6);               // sábado
+    return { ini:_finISO(ini), fim:_finISO(fim), label:'Semana de '+_finBR(_finISO(ini)) };
+  }
+  const ini = new Date(r.getFullYear(), r.getMonth(), 1);
+  const fim = new Date(r.getFullYear(), r.getMonth()+1, 0);
+  const nome = _FIN_MESES[ini.getMonth()];
+  return { ini:_finISO(ini), fim:_finISO(fim), label: nome.charAt(0).toUpperCase()+nome.slice(1)+' de '+ini.getFullYear() };
+}
+
+function _finPeriodoRotulo(){ return _finCascataPeriodoBounds().label; }
+
+function _finPeriodoAplicar(){
+  const lbl = document.getElementById('fincx-periodo-lbl');
+  if(lbl) lbl.textContent = _finPeriodoRotulo();
   if(window._finTab==='lancamentos') renderFinTab('lancamentos');
+}
+
+function _finPeriodoPasso(n){
+  const p = _finPeriodoEstado();
+  if(p.modo==='custom' && p.ini && p.fim){
+    // desloca a janela inteira pela própria duração, preservando o tamanho
+    const a=_finDeISO(p.ini), b=_finDeISO(p.fim);
+    const dias = Math.round((b-a)/86400000)+1;
+    a.setDate(a.getDate()+n*dias); b.setDate(b.getDate()+n*dias);
+    p.ini=_finISO(a); p.fim=_finISO(b);
+  } else {
+    const r = _finDeISO(p.ref);
+    if(p.modo==='dia') r.setDate(r.getDate()+n);
+    else if(p.modo==='semana') r.setDate(r.getDate()+7*n);
+    else r.setMonth(r.getMonth()+n, 1);   // dia 1 evita o salto de 31/01 -> 03/03
+    p.ref = _finISO(r);
+  }
+  _finPeriodoAplicar();
+}
+
+function _finPeriodoSetModo(modo){
+  const p = _finPeriodoEstado(), h = new Date();
+  p.modo = modo; p.ini = null; p.fim = null;
+  p.ref = modo==='mes' ? _finISO(new Date(h.getFullYear(), h.getMonth(), 1)) : _finISO(h);
+  _finPeriodoFecharMenu(); _finPeriodoAplicar();
+}
+
+function _finPeriodoSetMes(v){                     // v = 'AAAA-MM' do <input type=month>
+  if(!/^\d{4}-\d{2}$/.test(v||'')) { showToast('Escolha um mês.','danger'); return; }
+  const p = _finPeriodoEstado();
+  p.modo='mes'; p.ini=null; p.fim=null; p.ref = v+'-01';
+  _finPeriodoFecharMenu(); _finPeriodoAplicar();
+}
+
+function _finPeriodoSetIntervalo(a, b){
+  if(!a || !b){ showToast('Preencha as duas datas.','danger'); return; }
+  if(a > b){ const t=a; a=b; b=t; }               // inverteu? corrige em vez de reclamar
+  const p = _finPeriodoEstado();
+  p.modo='custom'; p.ini=a; p.fim=b;
+  _finPeriodoFecharMenu(); _finPeriodoAplicar();
+}
+
+function _finPeriodoFecharMenu(){
+  const el = document.getElementById('fincx-pop'); if(el) el.remove();
+  document.removeEventListener('mousedown', _finPeriodoClickFora, true);
+}
+function _finPeriodoClickFora(e){
+  const pop = document.getElementById('fincx-pop');
+  if(pop && !pop.contains(e.target) && !e.target.closest('.fincx-nav')) _finPeriodoFecharMenu();
+}
+
+function _finPeriodoAbrirMenu(ev){
+  if(document.getElementById('fincx-pop')){ _finPeriodoFecharMenu(); return; }
+  const p = _finPeriodoEstado(), b = _finCascataPeriodoBounds();
+  const mesRef = (p.modo==='mes' ? p.ref : _finISO(new Date())).slice(0,7);
+  const pop = document.createElement('div');
+  pop.id='fincx-pop'; pop.className='fincx-pop';
+  pop.innerHTML = `
+    <button class="fincx-pop-it ${p.modo==='dia'?'on':''}" onclick="_finPeriodoSetModo('dia')">Hoje</button>
+    <button class="fincx-pop-it ${p.modo==='semana'?'on':''}" onclick="_finPeriodoSetModo('semana')">Esta semana</button>
+    <button class="fincx-pop-it ${(p.modo==='mes'&&mesRef===_finISO(new Date()).slice(0,7))?'on':''}" onclick="_finPeriodoSetModo('mes')">Este mês</button>
+    <div class="fincx-pop-sep"></div>
+    <div class="fincx-pop-lb">Ir para um mês</div>
+    <div class="fincx-pop-row">
+      <input type="month" id="fincx-pop-mes" value="${escHtml(mesRef)}" min="2000-01" max="2099-12">
+      <button class="fincx-pop-ok" onclick="_finPeriodoSetMes(document.getElementById('fincx-pop-mes').value)">Ir</button>
+    </div>
+    <div class="fincx-pop-sep"></div>
+    <div class="fincx-pop-lb">Período personalizado</div>
+    <div class="fincx-pop-row"><input type="date" id="fincx-pop-de" value="${escHtml(b.ini)}" title="De"></div>
+    <div class="fincx-pop-row"><input type="date" id="fincx-pop-ate" value="${escHtml(b.fim)}" title="Até"></div>
+    <div class="fincx-pop-row">
+      <button class="fincx-pop-ok" style="width:100%;" onclick="_finPeriodoSetIntervalo(document.getElementById('fincx-pop-de').value, document.getElementById('fincx-pop-ate').value)">Selecionar</button>
+    </div>`;
+  document.body.appendChild(pop);
+  const r = (ev.currentTarget||ev.target).getBoundingClientRect();
+  pop.style.top = (r.bottom+6)+'px';
+  pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - pop.offsetWidth - 8))+'px';
+  setTimeout(()=>document.addEventListener('mousedown', _finPeriodoClickFora, true), 0);
 }
 
 async function renderFinanceiroCascata(el, activeTab){
@@ -29352,6 +29480,20 @@ async function renderFinanceiroCascata(el, activeTab){
       .fincx-l1-r{display:flex;align-items:center;gap:12px;}
       .fincx-syncdot{width:7px;height:7px;border-radius:50%;background:#7FA877;flex-shrink:0;}
       .fincx-select{background:transparent;color:#fff;border:1px solid rgba(255,255,255,.22);border-radius:8px;padding:7px 10px;font-size:12px;font-family:inherit;}
+      .fincx-nav{display:flex;align-items:center;gap:2px;border:1px solid rgba(255,255,255,.22);border-radius:8px;overflow:hidden;}
+      .fincx-nav-seta{background:transparent;border:none;color:#fff;font-size:17px;line-height:1;padding:5px 11px;cursor:pointer;opacity:.72;font-family:inherit;}
+      .fincx-nav-seta:hover{opacity:1;background:rgba(255,255,255,.10);}
+      .fincx-nav-lbl{background:transparent;border:none;color:#fff;font-size:12.5px;font-weight:600;font-family:inherit;padding:6px 8px;cursor:pointer;min-width:150px;text-align:center;white-space:nowrap;}
+      .fincx-nav-lbl:hover{background:rgba(255,255,255,.10);}
+      .fincx-pop{position:fixed;z-index:1300;background:#fff;border:1px solid #E6E1D5;border-radius:10px;box-shadow:0 10px 34px rgba(31,45,66,.22);padding:6px;min-width:212px;font-family:'Inter Tight',Inter,system-ui,sans-serif;}
+      .fincx-pop-it{display:block;width:100%;text-align:left;background:transparent;border:none;font-family:inherit;font-size:13px;color:#0A1530;padding:8px 11px;border-radius:7px;cursor:pointer;}
+      .fincx-pop-it:hover{background:#F5F2EA;}
+      .fincx-pop-it.on{background:#0A1530;color:#fff;}
+      .fincx-pop-sep{height:1px;background:#EFEBE0;margin:5px 4px;}
+      .fincx-pop-lb{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#8A94A6;padding:7px 11px 3px;}
+      .fincx-pop-row{display:flex;gap:7px;align-items:center;padding:3px 11px 7px;}
+      .fincx-pop-row input{flex:1;min-width:0;border:1px solid #DDD7C8;border-radius:6px;padding:6px 8px;font-family:inherit;font-size:12.5px;color:#0A1530;background:#fff;}
+      .fincx-pop-ok{background:#0A1530;color:#fff;border:none;border-radius:6px;padding:7px 13px;font-family:inherit;font-size:12.5px;font-weight:600;cursor:pointer;}
       .fincx-select option{color:#0A1530;}
       .fincx-btn-novo{background:#fff;color:#0A1530;border:none;padding:10px 18px;border-radius:8px;font-weight:600;font-size:12.5px;cursor:pointer;font-family:inherit;}
       .fincx-l2{display:flex;align-items:flex-end;gap:44px;padding:18px 0 22px;flex-wrap:wrap;}
@@ -29373,10 +29515,11 @@ async function renderFinanceiroCascata(el, activeTab){
         <span class="fincx-eyebrow">FINANCEIRO · ${escHtml(hojeStr.toUpperCase())}</span>
         <div class="fincx-l1-r">
           <span class="fincx-syncdot" title="Lendo direto do Supabase"></span>
-          <select class="fincx-select" id="fincx-periodo" onchange="_finCascataMudarPeriodo(this.value)">
-            <option value="mes" ${((window._finCascataPeriodo||'mes')==='mes')?'selected':''}>Este mês</option>
-            <option value="mes_anterior" ${window._finCascataPeriodo==='mes_anterior'?'selected':''}>Mês anterior</option>
-          </select>
+          <div class="fincx-nav">
+            <button class="fincx-nav-seta" title="Anterior" onclick="_finPeriodoPasso(-1)">&lsaquo;</button>
+            <button class="fincx-nav-lbl" id="fincx-periodo-lbl" onclick="_finPeriodoAbrirMenu(event)">${escHtml(_finPeriodoRotulo())}</button>
+            <button class="fincx-nav-seta" title="Próximo" onclick="_finPeriodoPasso(1)">&rsaquo;</button>
+          </div>
           <button class="fincx-btn-novo" onclick="abrirNovoLancamento()">${ico('plus',13)} Novo lançamento</button>
         </div>
       </div>
@@ -29653,13 +29796,10 @@ function _finFilaKeyboardOff(){ if(_finFilaKeyHandler){ document.removeEventList
 // tem cedente (real: junta fin_operacao pelo período; ver nota de fonte de dados no
 // topo do arquivo). Substitui a antiga renderFinLancamentos SÓ para o tab 'lancamentos'
 // — a aba Judicial continua chamando a antiga direto (renderFinReceitasJudiciais). ──
-function _finCascataPeriodoBounds(){
-  const p = window._finCascataPeriodo || 'mes';
-  const now = new Date();
-  const base = p==='mes_anterior' ? new Date(now.getFullYear(), now.getMonth()-1, 1) : new Date(now.getFullYear(), now.getMonth(), 1);
-  const fimD = new Date(base.getFullYear(), base.getMonth()+1, 0);
-  return { ini: base.toISOString().slice(0,10), fim: fimD.toISOString().slice(0,10), label: base.toLocaleDateString('pt-BR',{month:'long',year:'numeric'}) };
-}
+// Teto de linhas por carregamento. Com o período livre dá para pedir anos de
+// uma vez, e um corte silencioso faria a tela mentir sobre o total — por isso
+// `truncado` sobe até o cabeçalho e vira aviso visível.
+const FIN_LANC_LIMITE = 800;
 let _finLancCascataState = { chip:'tudo', busca:'', sel:new Set() };
 async function _finLancCascataCarregar(){
   const sb = getSupabase();
@@ -29669,12 +29809,12 @@ async function _finLancCascataCarregar(){
   let rows = [];
   try{
     const { data, error } = await sb.from('fin_lancamento').select(baseSel+',cedente_id,capital,meu_total,amortizado,repasse_status')
-      .gte('data_competencia', ini).lte('data_competencia', fim).order('data_competencia',{ascending:false}).limit(800);
+      .gte('data_competencia', ini).lte('data_competencia', fim).order('data_competencia',{ascending:false}).limit(FIN_LANC_LIMITE);
     if(error) throw error;
     rows = data||[];
   }catch(e){
     const { data } = await sb.from('fin_lancamento').select(baseSel)
-      .gte('data_competencia', ini).lte('data_competencia', fim).order('data_competencia',{ascending:false}).limit(800);
+      .gte('data_competencia', ini).lte('data_competencia', fim).order('data_competencia',{ascending:false}).limit(FIN_LANC_LIMITE);
     rows = data||[]; // colunas do PR1 podem não existir ainda — migração não aplicada
   }
   const cedIds=[...new Set(rows.map(r=>r.cedente_id).filter(Boolean))];
@@ -29691,7 +29831,8 @@ async function _finLancCascataCarregar(){
     if(credIds.length){ const {data:cs}=await sb.from('clientes').select('id,nome').in('id',credIds); (cs||[]).forEach(c=>credMap[c.id]=c.nome); }
     (data||[]).forEach(o=>{ o._credorNome=credMap[o.credor_id]||null; if(o.lancamento_receita_id) opsByLanc[o.lancamento_receita_id]=o; if(o.lancamento_despesa_id) opsByLanc[o.lancamento_despesa_id]=o; });
   }catch(_){}
-  return { rows, dim, cedMap, opsByLanc, periodoLabel: _finCascataPeriodoBounds().label };
+  return { rows, dim, cedMap, opsByLanc, periodoLabel: _finCascataPeriodoBounds().label,
+           truncado: rows.length >= FIN_LANC_LIMITE };
 }
 async function renderFinLancamentosCascata(el){
   el.innerHTML = `<div style="padding:50px;text-align:center;color:#8A94A6;"><div class="mv2-spinner" style="margin:0 auto 10px;width:24px;height:24px;border-width:3px;"></div>Carregando lançamentos…</div>`;
@@ -29774,7 +29915,7 @@ function _finLancCascataRender(){
     <div class="finlc-toolbar">
       <div>
         <div class="finlc-h1">Lançamentos</div>
-        <div class="finlc-sub">${escHtml((ctx.periodoLabel||'').replace(/^./,c=>c.toUpperCase()))} · ${filtrados.length} de ${todos.length} lançamento${todos.length!==1?'s':''}</div>
+        <div class="finlc-sub">${escHtml((ctx.periodoLabel||'').replace(/^./,c=>c.toUpperCase()))} · ${filtrados.length} de ${todos.length} lançamento${todos.length!==1?'s':''}${ctx.truncado?` · <span style="color:#A65A4A;font-weight:600;">lista cortada em ${FIN_LANC_LIMITE} — estreite o período</span>`:''}</div>
       </div>
       <div class="finlc-search">${ico('search',15)}<input type="search" placeholder="Buscar descrição…" value="${escHtml(_finLancCascataState.busca)}" oninput="_finLancCascataBusca(this.value)"></div>
     </div>
