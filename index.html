@@ -29310,6 +29310,7 @@ async function _finCascataMetricas(force){
   }catch(_){}
   let aRepassarManual=0, manualCount=0;
   try{
+    if(!(await _finTemColunasCascata())) throw new Error('colunas da cascata ausentes');
     const { data } = await sb.from('fin_lancamento').select('capital,meu_total,amortizado,valor')
       .not('cedente_id','is',null).in('repasse_status',['pendente','atrasado']).limit(5000);
     for(const l of (data||[])){ aRepassarManual += finDivideCascata(l, +l.valor||0).repasseAoCedente; manualCount++; }
@@ -29576,6 +29577,7 @@ async function _finFilaCarregar(){
 
   let manual = [];
   try{
+    if(!(await _finTemColunasCascata())) throw new Error('colunas da cascata ausentes');
     const { data } = await sb.from('fin_lancamento')
       .select('id,descricao,valor,data_competencia,cedente_id')
       .not('cedente_id','is',null).is('capital', null).limit(200);
@@ -29800,23 +29802,41 @@ function _finFilaKeyboardOff(){ if(_finFilaKeyHandler){ document.removeEventList
 // uma vez, e um corte silencioso faria a tela mentir sobre o total — por isso
 // `truncado` sobe até o cabeçalho e vira aviso visível.
 const FIN_LANC_LIMITE = 800;
+
+// ── Colunas da cascata (cedente_id, capital, meu_total, amortizado,
+//    repasse_status): a migração que as cria NUNCA foi aplicada em produção —
+//    conferido em 12/08/2026, nenhuma das cinco existe em fin_lancamento.
+//
+// O código pedia as colunas em toda consulta, tomava erro do PostgREST e refazia
+// a query num catch. Custo: DUAS viagens ao servidor em cada carregamento da
+// lista e em cada abertura de lançamento, uma delas só para receber 400. Era a
+// maior parte da lentidão relatada na aba.
+//
+// Agora a pergunta é feita UMA vez por sessão e o resultado fica em cache. Se a
+// migração for aplicada um dia, o código volta a pedir as colunas sozinho, sem
+// precisar de deploy — por isso a checagem continua existindo em vez de as
+// colunas simplesmente saírem do select.
+let _finColsCascata = null;            // null = ainda não perguntado
+async function _finTemColunasCascata(){
+  if(_finColsCascata !== null) return _finColsCascata;
+  try{
+    const sb = getSupabase();
+    const { error } = await sb.from('fin_lancamento').select('cedente_id').limit(1);
+    _finColsCascata = !error;
+  }catch(_){ _finColsCascata = false; }
+  return _finColsCascata;
+}
+
 let _finLancCascataState = { chip:'tudo', busca:'', sel:new Set() };
 async function _finLancCascataCarregar(){
   const sb = getSupabase();
   const { ini, fim } = _finCascataPeriodoBounds();
   const dim = await finApi.loadDimensoes();
   const baseSel = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,tipo_movimento,status,conciliado,conta_id,fin_conta(descricao,banco_nome)';
-  let rows = [];
-  try{
-    const { data, error } = await sb.from('fin_lancamento').select(baseSel+',cedente_id,capital,meu_total,amortizado,repasse_status')
-      .gte('data_competencia', ini).lte('data_competencia', fim).order('data_competencia',{ascending:false}).limit(FIN_LANC_LIMITE);
-    if(error) throw error;
-    rows = data||[];
-  }catch(e){
-    const { data } = await sb.from('fin_lancamento').select(baseSel)
-      .gte('data_competencia', ini).lte('data_competencia', fim).order('data_competencia',{ascending:false}).limit(FIN_LANC_LIMITE);
-    rows = data||[]; // colunas do PR1 podem não existir ainda — migração não aplicada
-  }
+  const extra = (await _finTemColunasCascata()) ? ',cedente_id,capital,meu_total,amortizado,repasse_status' : '';
+  const { data } = await sb.from('fin_lancamento').select(baseSel+extra)
+    .gte('data_competencia', ini).lte('data_competencia', fim).order('data_competencia',{ascending:false}).limit(FIN_LANC_LIMITE);
+  const rows = data||[];
   const cedIds=[...new Set(rows.map(r=>r.cedente_id).filter(Boolean))];
   let cedMap={};
   if(cedIds.length){ const {data}=await sb.from('clientes').select('id,nome').in('id',cedIds); (data||[]).forEach(c=>cedMap[c.id]=c.nome); }
@@ -29959,8 +29979,8 @@ function _finLancCascataRowHtml(l, ctx){
   } else if(l.cedente_id){
     sub = `<div class="finlc-sub-row">cedente vinculado · divisão pendente<span class="finlc-sub-chip" style="background:#FBEAE7;color:#7D3F33;">SEM DIVISÃO</span></div>`;
   }
-  return `<div class="finlc-row ${sel?'sel':''}" onclick="_finLancAbrirDrawer(${l.id})">
-      <div class="finlc-box ${sel?'on':''}" onclick="event.stopPropagation();_finLancCascataToggleSel('${l.id}')"></div>
+  return `<div class="finlc-row ${sel?'sel':''}" data-lanc="${l.id}" onclick="_finLancAbrirDrawer(${l.id})">
+      <div class="finlc-box ${sel?'on':''}" onclick="event.stopPropagation();_finLancCascataToggleSel(${l.id})"></div>
       <div class="finlc-ic" style="background:${isEnt?'#E9F0E7':'#FBEAE7'};color:${isEnt?'#4C6647':'#A65A4A'};">${isEnt?'↓':'↑'}</div>
       <div class="finlc-desc"><div class="tx">${escHtml(l.descricao||'—')}</div><div class="meta">${l.fin_conta&&l.fin_conta.descricao?escHtml(l.fin_conta.descricao):''}</div></div>
       <div class="finlc-cat">${escHtml((l.fin_conta&&l.fin_conta.banco_nome)||'')}</div>
@@ -29971,10 +29991,30 @@ function _finLancCascataRowHtml(l, ctx){
 function _finLancCascataChip(k){ _finLancCascataState.chip=k; _finLancCascataRender(); }
 let _finLancCascataBuscaTimer=null;
 function _finLancCascataBusca(v){ clearTimeout(_finLancCascataBuscaTimer); _finLancCascataBuscaTimer=setTimeout(()=>{ _finLancCascataState.busca=v; _finLancCascataRender(); }, 300); }
+// Marcar um checkbox chamava _finLancCascataRender(), que refaz o innerHTML da
+// aba INTEIRA — todas as linhas mais o bloco <style> completo, reparseado pelo
+// navegador a cada clique. Com ~110 lançamentos num mês, era o que engasgava.
+// Agora o clique mexe só na linha tocada e na barra de ações.
+//
+// O id vinha do onclick como STRING ('123822') e era guardado assim no Set,
+// enquanto o render comparava com l.id, que é NUMBER. `has()` dava sempre false:
+// o clique pagava o re-render caro e o checkbox nem ficava marcado. O onclick
+// agora passa número, e o Number() aqui protege quem chamar com string.
 function _finLancCascataToggleSel(id){
+  id = Number(id);
   const sel = _finLancCascataState.sel;
-  if(sel.has(id)) sel.delete(id); else sel.add(id);
-  _finLancCascataRender();
+  const marcando = !sel.has(id);
+  if(marcando) sel.add(id); else sel.delete(id);
+
+  const row = document.querySelector('.finlc-row[data-lanc="'+id+'"]');
+  if(row){
+    row.classList.toggle('sel', marcando);
+    const box = row.querySelector('.finlc-box');
+    if(box) box.classList.toggle('on', marcando);
+  } else {
+    _finLancCascataRender();   // linha fora do DOM (filtro mudou): redesenha
+  }
+  _finLancCascataRenderBulkbar();
 }
 function _finLancCascataRenderBulkbar(){
   const bar = document.getElementById('finlc-bulkbar'); if(!bar) return;
@@ -30167,19 +30207,15 @@ async function _finLancSerieConfirmar(){
 async function _finLancAbrirDrawer(lancId){
   const sb = getSupabase();
   let l;
-  try{
-    let r = await sb.from('fin_lancamento')
-      .select('id,descricao,data_competencia,valor,tipo_movimento,status,conciliado,conta_id,fin_conta(descricao),cedente_id,capital,meu_total,amortizado,repasse_status,cobranca_id')
+  {
+    // Mesmo motivo do carregador da lista: sem a checagem em cache, abrir um
+    // lançamento custava duas viagens ao servidor, a primeira sempre com erro.
+    const extra = (await _finTemColunasCascata()) ? ',cedente_id,capital,meu_total,amortizado,repasse_status' : '';
+    const r = await sb.from('fin_lancamento')
+      .select('id,descricao,data_competencia,valor,tipo_movimento,status,conciliado,conta_id,fin_conta(descricao),cobranca_id'+extra)
       .eq('id', lancId).single();
-    if(r.error) throw r.error;
+    if(r.error){ showToast('Erro ao abrir lançamento: '+(r.error.message||r.error), 'danger'); return; }
     l = r.data;
-  }catch(e){
-    // Colunas do PR1 podem não existir ainda — tenta de novo sem elas.
-    try{
-      const r2 = await sb.from('fin_lancamento').select('id,descricao,data_competencia,valor,tipo_movimento,status,conciliado,conta_id,fin_conta(descricao),cobranca_id').eq('id', lancId).single();
-      if(r2.error) throw r2.error;
-      l = r2.data;
-    }catch(e2){ showToast('Erro ao abrir lançamento: '+(e2.message||e2), 'danger'); return; }
   }
 
   let op = null;
@@ -34104,6 +34140,7 @@ async function _finFechCarregar(){
 
   let excedenteManual = 0;
   try{
+    if(!(await _finTemColunasCascata())) throw new Error('colunas da cascata ausentes');
     const { data } = await sb.from('fin_lancamento').select('capital,meu_total,amortizado,valor,cedente_id')
       .not('cedente_id','is',null).not('capital','is',null).gte('data_competencia',ini).lte('data_competencia',fim).limit(2000);
     for(const l of (data||[])) excedenteManual += finDivideCascata(l, Math.abs(+l.valor||0)).ficaComVoce;
