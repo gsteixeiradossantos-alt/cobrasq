@@ -28569,6 +28569,11 @@ window.finApi = (function(){
 
     const sign = base.tipo_movimento === 0 ? -1 : 1;
     const dataIni = new Date(base.data_competencia + 'T12:00:00');
+    // Chave de grupo de verdade, em coluna própria (migração 20260814). A etiqueta
+    // de texto em `observacoes` continua sendo escrita porque lançamentos antigos
+    // dependem dela para se reconhecerem — mas quem o banco checa é a coluna, via
+    // UNIQUE (grupo_parcelamento, numero_parcela). Texto não trancava nada.
+    const grupoId = (crypto && crypto.randomUUID) ? crypto.randomUUID() : null;
     const grupo = 'PARC-' + Date.now() + '-' + Math.random().toString(36).slice(2,6);
 
     const rows = [];
@@ -28593,11 +28598,18 @@ window.finApi = (function(){
         contato_id: base.contato_id || null,
         numero_parcela: i + 1,
         total_parcelas: totalParcelas,
+        grupo_parcelamento: grupoId,
         observacoes: 'Grupo: ' + grupo + (base.observacoes ? ' · ' + base.observacoes : ''),
       });
     }
 
-    const { data, error } = await sb.from('fin_lancamento').insert(rows).select();
+    let { data, error } = await sb.from('fin_lancamento').insert(rows).select();
+    // Enquanto a migração 20260814 não estiver aplicada, a coluna não existe: repete
+    // sem ela em vez de falhar na cara do usuário (mesmo padrão de finLancarParcelasAcordo).
+    if(error && /grupo_parcelamento/i.test(error.message||'')){
+      const semCol = rows.map(({grupo_parcelamento, ...r}) => r);
+      ({ data, error } = await sb.from('fin_lancamento').insert(semCol).select());
+    }
     if(error) throw error;
 
     // Aplica categoria a todas as parcelas
@@ -31523,7 +31535,20 @@ async function finLancarParcelasAcordo(acordoId){
   if(error || !a){ showToast('Acordo não encontrado.','danger'); return; }
   if(a.metadata && a.metadata.parcelasLancadas){ showToast('Parcelas já lançadas para este acordo.','info'); return; }
   const parcelas = Array.isArray(a.parcelas) ? a.parcelas : [];
-  if(!parcelas.length){ showToast('Acordo sem parcelas.','warning'); return; }
+  if(!parcelas.length){
+    // Beco sem saída até 14/08/2026: `acordos.parcelas` está vazio em 43 dos 44
+    // acordos — o carnê é gerado no Asaas, não aqui —, então este botão respondia
+    // "Acordo sem parcelas" e o operador ia digitar tudo à mão. Foi daí que vieram
+    // as 69 parcelas duplicadas. Agora o aviso aponta para o caminho que funciona:
+    // Financeiro › Importar boletos do Asaas, que é idempotente por `uuid` e, desde
+    // este PR, também carimba `acordo_id` (armando a UNIQUE do banco).
+    const temAsaas = !!(a.metadata && a.metadata.asaas_installment_id);
+    showToast(temAsaas
+      ? 'Este acordo tem carnê no Asaas — use Financeiro › Importar boletos do Asaas. Evita digitar à mão e não duplica.'
+      : 'Acordo sem parcelas e sem carnê no Asaas. Emita os boletos antes de lançar.',
+      'warning');
+    return;
+  }
   const { data:dev } = await sb.from('devedores').select('nome').eq('id',a.devedor_id).maybeSingle();
   const devNome = dev?.nome || '—';
   let contaId = null;
