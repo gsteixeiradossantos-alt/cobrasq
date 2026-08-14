@@ -28316,6 +28316,35 @@ window.finApi = (function(){
     return saved;
   }
 
+  // Procura lançamento provavelmente repetido: mesmo tipo, mesmo valor assinado e
+  // mesmo vencimento, ignorando o próprio registro em edição.
+  //
+  // Por que existe: a conciliação de 14/08/2026 contra o Controlle achou 69 parcelas
+  // duplicadas (R$ 59 mil de receita que não existia) e as 69 tinham a mesma origem —
+  // digitação manual. Os 91 lançamentos que entram pelo Asaas carregam
+  // `uuid = 'asaas:<payment_id>'`, que é UNIQUE, e não duplicaram nenhuma vez.
+  // O caso típico é acordo com dois devedores lançado uma vez por devedor.
+  //
+  // Só avisa: nunca impede de salvar, e erro na consulta é engolido de propósito —
+  // um aviso auxiliar não pode derrubar o salvamento.
+  async function buscarPossiveisDuplicatas(lanc){
+    if(lanc.valor==null || isNaN(+lanc.valor) || !lanc.data_vencimento) return [];
+    try{
+      const sb = _sb();
+      const sign = lanc.tipo_movimento === 0 ? -1 : 1;
+      let q = sb.from('fin_lancamento')
+        .select('id,descricao,data_vencimento,valor')
+        .eq('tipo_movimento', lanc.tipo_movimento)
+        .eq('data_vencimento', lanc.data_vencimento)
+        .eq('valor', sign * Math.abs(+lanc.valor))
+        .order('id')
+        .limit(5);
+      if(lanc.id) q = q.neq('id', lanc.id);
+      const { data, error } = await q;
+      return error ? [] : (data || []);
+    }catch(_){ return []; }
+  }
+
   async function pagarLancamento(id, opts){
     const sb = _sb();
     opts = opts || {};
@@ -28815,6 +28844,7 @@ window.finApi = (function(){
     getRecentes,
     getLancamento,
     saveLancamento,
+    buscarPossiveisDuplicatas,
     pagarLancamento,
     confirmarRecebimentoJudicial,
     deleteLancamento,
@@ -35205,6 +35235,19 @@ async function salvarLancamento(){
   const parcelar = !id && document.getElementById('mlanc-parcelar')?.checked;
   const numParcelas = +(document.getElementById('mlanc-num-parcelas')?.value || 0);
   if(parcelar && numParcelas < 2){ showToast('Total de parcelas deve ser >= 2','warning'); return; }
+
+  // Aviso de duplicata: mesmo valor e mesmo vencimento já existentes. Pergunta, não
+  // bloqueia — pode ser legítimo (dois devedores distintos pagando o mesmo valor no
+  // mesmo dia). No parcelamento a checagem é sobre a 1ª parcela, que é a que herda
+  // o vencimento digitado; as demais nascem dela.
+  const _dups = await finApi.buscarPossiveisDuplicatas(payload);
+  if(_dups.length){
+    const _lista = _dups.map(d => '• ' + d.descricao + ' — ' + fmtDataBR(d.data_vencimento)
+                                 + ' — ' + fmtR(Math.abs(+d.valor))).join('\n');
+    if(!confirm('Já existe lançamento com este valor e este vencimento:\n\n' + _lista
+                + '\n\nIsso costuma ser acordo com mais de um devedor lançado uma vez por devedor.'
+                + '\n\nSalvar mesmo assim?')) return;
+  }
 
   if(btn){ btn.disabled = true; btn.dataset._txt = btn.innerHTML; btn.innerHTML = 'Salvando…'; }
   try {
