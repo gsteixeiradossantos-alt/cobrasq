@@ -76,6 +76,26 @@ module.exports = async function handler(req, res) {
     const byCust = {};
     for (const p of charges) { const k = p.customer || '(sem-customer)'; (byCust[k] = byCust[k] || []).push(p); }
 
+    // 4b) installment do Asaas -> acordos.id, para carimbar acordo_id no lançamento.
+    //
+    // Sem esse vínculo o lançamento fica órfão e a UNIQUE (acordo_id, numero_parcela)
+    // — que existe em fin_lancamento — nunca é avaliada, porque é índice parcial
+    // (WHERE acordo_id IS NOT NULL). Foi assim que 69 parcelas duplicadas passaram
+    // até a conciliação de 14/08/2026. Carimbando aqui, o banco recusa a segunda
+    // cópia sozinho, sem depender de ninguém lembrar.
+    //
+    // Casamos SÓ pelo installment (metadata.asaas_installment_id do acordo). Cair
+    // para "acordo ativo do devedor" seria adivinhação: há devedor com 2 e 3 acordos
+    // ativos (Elizandra, Bruna), e errar o vínculo é pior que não ter vínculo.
+    const acordoByInstallment = {};
+    try {
+      const acs = await sbFetch(`acordos?select=id,metadata&status=eq.ativo&limit=2000`);
+      for (const a of (acs || [])) {
+        const inst = a && a.metadata && a.metadata.asaas_installment_id;
+        if (inst) acordoByInstallment[String(inst)] = a.id;
+      }
+    } catch (_) { /* segue sem vínculo: pior caso é o comportamento antigo */ }
+
     // 5) Idempotência: uuids já existentes p/ os payment ids deste lote.
     const uuids = charges.map(p => 'asaas:' + p.id);
     const existentes = new Set();
@@ -83,6 +103,17 @@ module.exports = async function handler(req, res) {
       const chunk = uuids.slice(i, i + 80).map(encodeURIComponent).join(',');
       const ex = await sbFetch(`fin_lancamento?select=uuid&uuid=in.(${chunk})`).catch(() => []);
       for (const r of ex) if (r.uuid) existentes.add(r.uuid);
+    }
+
+    // 5b) Parcelas do acordo já lançadas por outro caminho (tipicamente digitação
+    // manual). Sem esta checagem o INSERT em lote inteiro morreria no primeiro
+    // conflito da UNIQUE, derrubando boletos que não têm problema nenhum.
+    const parcelaJaLancada = new Set();
+    const acordoIds = [...new Set(Object.values(acordoByInstallment))];
+    for (let i = 0; i < acordoIds.length; i += 50) {
+      const chunk = acordoIds.slice(i, i + 50).map(encodeURIComponent).join(',');
+      const rows = await sbFetch(`fin_lancamento?select=acordo_id,numero_parcela&acordo_id=in.(${chunk})`).catch(() => []);
+      for (const r of rows) if (r.acordo_id && r.numero_parcela != null) parcelaJaLancada.add(r.acordo_id + '#' + r.numero_parcela);
     }
 
     // 6) Monta o plano. Matched (com devedor) primeiro; cus_ (sem cadastro) por último.
@@ -96,10 +127,16 @@ module.exports = async function handler(req, res) {
         const parcela = total > 1 ? (idx + 1) : null;
         const desc = nome + (parcela ? ` · ${parcela}/${total}` : '');
         const contato_id = dev ? (contatoByDoc[digits(dev.doc_digits)] || null) : null;
+        const acordo_id = p.installment ? (acordoByInstallment[String(p.installment)] || null) : null;
+        const chaveParcela = (acordo_id && parcela) ? (acordo_id + '#' + parcela) : null;
         plano.push({
           payment_id: p.id,
           uuid: 'asaas:' + p.id,
-          ja_existe: existentes.has('asaas:' + p.id),
+          acordo_id,
+          ja_existe: existentes.has('asaas:' + p.id)
+                     || (!!chaveParcela && parcelaJaLancada.has(chaveParcela)),
+          ja_lancada_a_mao: !!chaveParcela && parcelaJaLancada.has(chaveParcela)
+                            && !existentes.has('asaas:' + p.id),
           matched: !!dev,
           descricao: desc,
           valor: p.value,
@@ -127,6 +164,8 @@ module.exports = async function handler(req, res) {
       com_contato: pendentes.filter(x => x.contato_id).length,
       sem_cadastro_cus: pendentes.filter(x => !x.matched).length,
       parcelamentos: Object.values(byCust).filter(l => l.length > 1).length,
+      com_acordo: pendentes.filter(x => x.acordo_id).length,
+      ja_lancadas_a_mao: plano.filter(x => x.ja_lancada_a_mao).length,
       conta_id: CONTA_ASAAS, categoria_id: CATEGORIA_ACORDOS,
     };
 
@@ -150,6 +189,7 @@ module.exports = async function handler(req, res) {
         data_competencia: it.data_competencia,
         numero_parcela: it.numero_parcela,
         total_parcelas: it.total_parcelas,
+        acordo_id: it.acordo_id,
         uuid: it.uuid,
         raw_payload: { source: 'asaas-boletos', asaas_payment_id: it.payment_id, customer: it.customer, billingType: it.billingType, status: it.status_asaas },
       }));
