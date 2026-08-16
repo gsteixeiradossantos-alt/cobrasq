@@ -28316,6 +28316,101 @@ window.finApi = (function(){
     return saved;
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // Cartão de crédito e fatura (migração 20260814)
+  // ─────────────────────────────────────────────────────────────
+  // O cartão é uma fin_conta com tipo = 2 (mesmo que o Nubank já usa). A fatura
+  // agrupa as compras; o total dela é SEMPRE somado das compras, nunca guardado
+  // em coluna — coluna derivada sem trigger é como a tela passa a mentir sobre o
+  // banco (regressão R-17).
+
+  async function listCartoes(){
+    const sb = _sb();
+    const { data, error } = await sb.from('fin_conta')
+      .select('id,descricao,banco_nome,ativa,metadata')
+      .eq('tipo', 2).order('descricao');
+    if(error) throw error;
+    return data || [];
+  }
+
+  // Faturas de um cartão, já com o total somado das compras e a contagem delas.
+  async function listFaturas(contaId){
+    const sb = _sb();
+    const { data: fats, error } = await sb.from('fin_fatura')
+      .select('*').eq('conta_id', contaId).order('competencia', { ascending:false });
+    if(error) throw error;
+    if(!fats || !fats.length) return [];
+    const { data: compras } = await sb.from('fin_lancamento')
+      .select('fatura_id,valor')
+      .in('fatura_id', fats.map(f=>f.id));
+    const agg = {};
+    for(const c of (compras||[])){
+      const a = agg[c.fatura_id] || (agg[c.fatura_id] = { total:0, qtd:0 });
+      a.total += Math.abs(+c.valor||0); a.qtd++;
+    }
+    return fats.map(f => Object.assign({}, f, {
+      total: (agg[f.id]||{}).total || 0,
+      qtd_compras: (agg[f.id]||{}).qtd || 0,
+    }));
+  }
+
+  // Compras de uma fatura, na ordem em que aconteceram.
+  async function listComprasFatura(faturaId){
+    const sb = _sb();
+    const { data, error } = await sb.from('fin_lancamento')
+      .select('id,descricao,data_competencia,valor,status')
+      .eq('fatura_id', faturaId).order('data_competencia');
+    if(error) throw error;
+    return data || [];
+  }
+
+  // Em qual fatura cai uma compra: se a data já passou do fechamento do mês, ela
+  // vai para a fatura do mês seguinte — que é como cartão funciona. Cria a fatura
+  // se ainda não existir; a UNIQUE (conta_id, competencia) impede duas iguais mesmo
+  // com dois cliques ao mesmo tempo, então o conflito é tratado relendo.
+  async function faturaParaCompra(contaId, dataCompra, diaFechamento, diaVencimento){
+    const sb = _sb();
+    const d = new Date(String(dataCompra).slice(0,10) + 'T12:00:00');
+    if(isNaN(d)) throw new Error('Data da compra inválida');
+    const fech = +diaFechamento || 1, venc = +diaVencimento || 10;
+    // depois do fechamento → a compra pertence ao mês seguinte
+    const alvo = new Date(d.getFullYear(), d.getMonth() + (d.getDate() > fech ? 1 : 0), 1);
+    const ult  = (y,m) => new Date(y, m+1, 0).getDate();
+    const comp = alvo.toISOString().slice(0,10);
+    const dFech = new Date(alvo.getFullYear(), alvo.getMonth(), Math.min(fech, ult(alvo.getFullYear(), alvo.getMonth())));
+    // vencimento no mês seguinte ao fechamento quando o dia de vencer é menor
+    const mv = alvo.getMonth() + (venc <= fech ? 1 : 0);
+    const dVenc = new Date(alvo.getFullYear(), mv, Math.min(venc, ult(alvo.getFullYear(), mv)));
+
+    const achar = async () => {
+      const { data } = await sb.from('fin_fatura').select('*')
+        .eq('conta_id', contaId).eq('competencia', comp).maybeSingle();
+      return data || null;
+    };
+    const existente = await achar();
+    if(existente) return existente;
+
+    const { data, error } = await sb.from('fin_fatura').insert({
+      conta_id: contaId, competencia: comp, status: 0,
+      data_fechamento: dFech.toISOString().slice(0,10),
+      data_vencimento: dVenc.toISOString().slice(0,10),
+    }).select().single();
+    if(error){
+      const jaExiste = await achar();   // corrida: outro clique criou primeiro
+      if(jaExiste) return jaExiste;
+      throw error;
+    }
+    return data;
+  }
+
+  async function fecharFatura(faturaId){
+    const sb = _sb();
+    const { error } = await sb.from('fin_fatura')
+      .update({ status: 1, atualizada_em: new Date().toISOString() }).eq('id', faturaId);
+    if(error) throw error;
+    _invalidate();
+  }
+
   // Procura lançamento provavelmente repetido: mesmo tipo, mesmo valor assinado e
   // mesmo vencimento, ignorando o próprio registro em edição.
   //
@@ -28857,6 +28952,11 @@ window.finApi = (function(){
     getLancamento,
     saveLancamento,
     buscarPossiveisDuplicatas,
+    listCartoes,
+    listFaturas,
+    listComprasFatura,
+    faturaParaCompra,
+    fecharFatura,
     pagarLancamento,
     confirmarRecebimentoJudicial,
     deleteLancamento,
@@ -34489,12 +34589,93 @@ async function _carregarDadosRelat(ano){
 
 // Legacy salvarConta removed — agora usa async salvarConta de finApi (linha ~8826)
 
-function renderFinCartoes(el){
+// Cartões — lê fin_conta (tipo=2) + fin_fatura, com o total de cada fatura somado
+// das compras. Substitui a versão anterior, que era maquete: lia `DB.cartoes`
+// (vazio em produção), a "fatura atual" era número digitado e o gráfico de barras
+// era fixo no código. Numa tela de dinheiro, número inventado é pior que tela vazia.
+async function renderFinCartoes(el){
   el.innerHTML = `
-    <div style="display:flex;align-items:center;gap:16px;margin-bottom:18px;"><span style="font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:400;color:#0A1530;">Cartões de crédito</span><span style="font-size:13px;font-weight:700;color:#0A1530;background:#C9A961;padding:8px 14px;border-radius:9px;cursor:pointer;" onclick="abrirNovoCartao()">+ adicionar</span></div>
-    <div id="cartoesGrid"></div>
-  `;
-  renderCartoesGrid();
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:18px;">
+      <span style="font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:400;color:#0A1530;">Cartões de crédito</span>
+    </div>
+    <div id="cartoesGrid"><div style="color:#8A94A6;font-size:13px;">Carregando…</div></div>`;
+  const g = document.getElementById('cartoesGrid');
+  try{
+    const cartoes = await finApi.listCartoes();
+    if(!cartoes.length){
+      g.innerHTML = `<div class="empty-state" style="padding:40px">
+        <div class="empty-state-icon">${ico('card',36)}</div>
+        <div class="empty-state-title">Nenhum cartão cadastrado</div>
+        <div class="empty-state-sub">Cadastre em Contas, marcando o tipo como cartão de crédito.</div></div>`;
+      return;
+    }
+    const blocos = [];
+    for(const c of cartoes){
+      const fats = await finApi.listFaturas(c.id);
+      const aberta = fats.find(f=>f.status===0);
+      const meta = c.metadata || {};
+      blocos.push(`
+        <div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:22px;margin-bottom:16px;">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <div style="width:36px;height:24px;border-radius:5px;background:linear-gradient(135deg,#0A1530,#2c426f);"></div>
+              <span style="font-size:16px;font-weight:700;color:#0A1530;">${escHtml(c.descricao)}</span>
+              ${c.ativa===false?'<span style="font-size:11px;color:#8A94A6;">(inativo)</span>':''}
+            </div>
+            <div style="text-align:right;">
+              <div style="font-size:11px;color:#8A94A6;">Fatura aberta</div>
+              <div style="font-size:22px;font-family:'Fraunces',Georgia,serif;color:#0A1530;">${aberta?fmtR(aberta.total):'—'}</div>
+              ${aberta?`<div style="font-size:11px;color:#8A94A6;">${aberta.qtd_compras} compra(s) · vence ${fmtDataBR(aberta.data_vencimento)}</div>`:''}
+            </div>
+          </div>
+          ${meta.dia_fechamento?`<div style="font-size:11.5px;color:#8A94A6;margin-top:8px;">Fecha dia ${meta.dia_fechamento} · vence dia ${meta.dia_vencimento||'—'}</div>`:
+            `<div style="font-size:11.5px;color:#A65A4A;margin-top:8px;">Sem dia de fechamento configurado — as compras não têm como ser distribuídas nas faturas.</div>`}
+          ${fats.length?`
+          <table style="width:100%;border-collapse:collapse;margin-top:16px;font-size:13px;">
+            <thead><tr>
+              <th style="text-align:left;padding:6px 4px;border-bottom:1px solid #EFEAD9;font-size:11px;color:#8A94A6;text-transform:uppercase;">Competência</th>
+              <th style="text-align:left;padding:6px 4px;border-bottom:1px solid #EFEAD9;font-size:11px;color:#8A94A6;text-transform:uppercase;">Vencimento</th>
+              <th style="text-align:right;padding:6px 4px;border-bottom:1px solid #EFEAD9;font-size:11px;color:#8A94A6;text-transform:uppercase;">Compras</th>
+              <th style="text-align:right;padding:6px 4px;border-bottom:1px solid #EFEAD9;font-size:11px;color:#8A94A6;text-transform:uppercase;">Total</th>
+              <th style="text-align:right;padding:6px 4px;border-bottom:1px solid #EFEAD9;font-size:11px;color:#8A94A6;text-transform:uppercase;">Situação</th>
+            </tr></thead>
+            <tbody>${fats.map(f=>`<tr style="cursor:pointer;" onclick="verComprasFatura(${f.id})">
+              <td style="padding:8px 4px;border-bottom:1px solid #F5F2E8;">${escHtml(String(f.competencia).slice(0,7).split('-').reverse().join('/'))}</td>
+              <td style="padding:8px 4px;border-bottom:1px solid #F5F2E8;">${fmtDataBR(f.data_vencimento)}</td>
+              <td style="padding:8px 4px;border-bottom:1px solid #F5F2E8;text-align:right;">${f.qtd_compras}</td>
+              <td style="padding:8px 4px;border-bottom:1px solid #F5F2E8;text-align:right;font-family:'JetBrains Mono',monospace;">${fmtR(f.total)}</td>
+              <td style="padding:8px 4px;border-bottom:1px solid #F5F2E8;text-align:right;">${['Aberta','Fechada','Paga'][f.status]||'—'}</td>
+            </tr>`).join('')}</tbody>
+          </table>
+          <div id="fatura-compras" style="margin-top:12px;"></div>`
+          :`<div style="font-size:13px;color:#8A94A6;margin-top:14px;">Nenhuma fatura ainda. Lance uma compra na conta deste cartão e a fatura do mês é criada sozinha.</div>`}
+        </div>`);
+    }
+    g.innerHTML = blocos.join('');
+  }catch(e){
+    g.innerHTML = `<div style="color:#A65A4A;font-size:13px;">Erro ao carregar cartões: ${escHtml(e.message||String(e))}</div>`;
+  }
+}
+
+async function verComprasFatura(faturaId){
+  const box = document.getElementById('fatura-compras');
+  if(!box) return;
+  box.innerHTML = '<div style="color:#8A94A6;font-size:12px;">Carregando compras…</div>';
+  try{
+    const compras = await finApi.listComprasFatura(faturaId);
+    if(!compras.length){ box.innerHTML = '<div style="color:#8A94A6;font-size:12px;">Fatura sem compras lançadas.</div>'; return; }
+    const soma = compras.reduce((s,c)=>s+Math.abs(+c.valor||0),0);
+    box.innerHTML = `<div style="background:#FBFAF7;border:1px solid #EFEAD9;border-radius:8px;padding:12px;">
+      <div style="font-size:11px;color:#8A94A6;text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px;">Compras da fatura</div>
+      ${compras.map(c=>`<div style="display:flex;justify-content:space-between;gap:12px;padding:4px 0;font-size:13px;">
+        <span>${fmtDataBR(c.data_competencia)} · ${escHtml(c.descricao)}</span>
+        <span style="font-family:'JetBrains Mono',monospace;white-space:nowrap;">${fmtR(Math.abs(+c.valor||0))}</span></div>`).join('')}
+      <div style="display:flex;justify-content:space-between;border-top:1px solid #E6E1D2;margin-top:8px;padding-top:8px;font-weight:700;font-size:13px;">
+        <span>Total</span><span style="font-family:'JetBrains Mono',monospace;">${fmtR(soma)}</span></div>
+    </div>`;
+  }catch(e){
+    box.innerHTML = `<div style="color:#A65A4A;font-size:12px;">Erro: ${escHtml(e.message||String(e))}</div>`;
+  }
 }
 
 function renderCartoesGrid(){
