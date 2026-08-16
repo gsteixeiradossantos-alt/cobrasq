@@ -17,6 +17,24 @@ const { asaasReq } = require('./_asaas.js');
 const { zapiSendText, zapiSendDocumentPdf } = require('./_zapi.js');
 const { gerarReciboPdfBase64, formaPagamento } = require('./_recibo.js');
 
+// Conta e categorias da ponte fin_lancamento. Sem elas o lançamento nasce órfão:
+// some dos relatórios por categoria e não entra em conta nenhuma. A revisão de
+// 14/08/2026 achou 19 assim (R$ 1.970,86) — 11 "Recebimento" e 8 "Repasse ao
+// credor", todos criados por este arquivo.
+const CONTA_ASAAS = 13;
+const CATEGORIA_ACORDOS = 167;  // receita do recebimento
+const CATEGORIA_REPASSE = 156;  // "Aquisição de dívidas de terceiros" = repasse ao credor
+
+// Vincula a categoria ao lançamento. Best-effort: categoria é secundária e não pode
+// derrubar o processamento do recebimento, que é o que de fato move dinheiro.
+async function _categorizar(lancId, categoriaId, valor){
+  if(!lancId) return;
+  try{
+    await sbFetch('fin_lancamento_categoria', { method:'POST', prefer:'return=minimal',
+      body: JSON.stringify({ lancamento_id: lancId, categoria_id: categoriaId, valor: Math.abs(+valor||0) }) });
+  }catch(e){ console.warn('[processar-recebimento] categoria:', e.message); }
+}
+
 function timingSafeEq(a, b) {
   const ab = Buffer.from(String(a || '')); const bb = Buffer.from(String(b || ''));
   if (ab.length !== bb.length || ab.length === 0) return false;
@@ -203,11 +221,16 @@ module.exports = async function handler(req, res) {
             descricao: `Recebimento — ${devNome}${parcTxt}`,
             valor: valorRecebido, valor_pago: valorRecebido,
             tipo_movimento: 1, status: 1,
+            conta_id: CONTA_ASAAS,
             data_competencia: row.recebido_em, data_pagamento: row.recebido_em,
+            // recebimento consumado: vencimento = o dia em que o dinheiro entrou.
+            // Sem isto o lançamento some de qualquer relatório por vencimento.
+            data_vencimento: row.recebido_em,
             numero_parcela: row.parcela, total_parcelas: row.total_parcelas,
             cobranca_id: devedor ? devedor.id : null,
           }) }).catch(() => null);
           lancReceitaId = (rec && rec[0] && rec[0].id) || null;
+          await _categorizar(lancReceitaId, CATEGORIA_ACORDOS, valorRecebido);
         }
         let lancDespesaId = null;
         if (valorCapital > 0) {
@@ -215,10 +238,12 @@ module.exports = async function handler(req, res) {
             descricao: `Repasse ao credor — ${credorNome || '—'}${parcTxt}`,
             valor: -valorCapital,
             tipo_movimento: 0, status: 0,
+            conta_id: CONTA_ASAAS,
             data_competencia: row.recebido_em, data_vencimento: row.recebido_em,
             numero_parcela: row.parcela, total_parcelas: row.total_parcelas,
           }) }).catch(() => null);
           lancDespesaId = (desp && desp[0] && desp[0].id) || null;
+          await _categorizar(lancDespesaId, CATEGORIA_REPASSE, valorCapital);
         }
         if (lancReceitaId || lancDespesaId) {
           await sbFetch(`fin_operacao?id=eq.${operacao.id}`, { method: 'PATCH', body: JSON.stringify({ lancamento_receita_id: lancReceitaId, lancamento_despesa_id: lancDespesaId }) }).catch(() => {});
