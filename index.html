@@ -28403,6 +28403,45 @@ window.finApi = (function(){
     return data;
   }
 
+  // ─────────────────────────────────────────────────────────────
+  // Repasses a pagar
+  // ─────────────────────────────────────────────────────────────
+  // Lista as saídas de repasse ainda em aberto, com o credor resolvido pela
+  // cobrança. Sem credor não há para quem transferir — a tela mostra quem está
+  // sem, em vez de deixar o pagamento falhar só no clique.
+  async function listRepassesAPagar(){
+    const sb = _sb();
+    const { data: cats, error: e1 } = await sb.from('fin_lancamento_categoria')
+      .select('lancamento_id').eq('categoria_id', 156);
+    if(e1) throw e1;
+    const ids = [...new Set((cats||[]).map(c=>c.lancamento_id))];
+    if(!ids.length) return [];
+    const lancs = [];
+    for(let i=0;i<ids.length;i+=300){
+      const { data, error } = await sb.from('fin_lancamento')
+        .select('id,descricao,data_vencimento,valor,cobranca_id')
+        .in('id', ids.slice(i,i+300))
+        .eq('tipo_movimento', 0).eq('status', 0);
+      if(error) throw error;
+      lancs.push(...(data||[]));
+    }
+    const cobIds = [...new Set(lancs.map(l=>l.cobranca_id).filter(Boolean))];
+    const credPorCob = {};
+    if(cobIds.length){
+      const { data: cobs } = await sb.from('cobrancas').select('id,cliente_id').in('id', cobIds);
+      const cliIds = [...new Set((cobs||[]).map(c=>c.cliente_id).filter(Boolean))];
+      const nomes = {};
+      if(cliIds.length){
+        const { data: cls } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', cliIds);
+        (cls||[]).forEach(c=>{ nomes[c.id] = c.nome_fantasia || c.nome; });
+      }
+      (cobs||[]).forEach(c=>{ credPorCob[c.id] = { id:c.cliente_id, nome: nomes[c.cliente_id] || null }; });
+    }
+    return lancs
+      .map(l => Object.assign({}, l, { credor: l.cobranca_id ? (credPorCob[l.cobranca_id] || null) : null }))
+      .sort((a,b)=> String(a.data_vencimento||'').localeCompare(String(b.data_vencimento||'')));
+  }
+
   async function fecharFatura(faturaId){
     const sb = _sb();
     const { error } = await sb.from('fin_fatura')
@@ -28953,6 +28992,7 @@ window.finApi = (function(){
     saveLancamento,
     buscarPossiveisDuplicatas,
     listCartoes,
+    listRepassesAPagar,
     listFaturas,
     listComprasFatura,
     faturaParaCompra,
@@ -29080,7 +29120,8 @@ const FIN_SECTIONS = {
   fila:          { label:'Fila', sub:'precisa de você', subtabs:[{id:'fila', label:'Fila'}] },
   visao:         { label:'Caixa', sub:'o dinheiro da COBRASQ', subtabs:[{id:'visao', label:'Caixa'}] },
   movimentacoes: { label:'Movimentações', sub:'analisar e confirmar', subtabs:[
-                     {id:'lancamentos', label:'Movimentações'} ] },
+                     {id:'lancamentos', label:'Movimentações'},
+                     {id:'repassesapagar', label:'Pagar repasses'} ] },
   // Receitas de bloqueio/penhora judicial (Sisbajud + Penhora de remuneração), tiradas
   // de Movimentações e isoladas aqui a pedido do Gustavo (2026-08-06). Acordos Judiciais
   // (acordo com processo judicial, mas cobrado por boleto/Pix normal) fica de FORA desta
@@ -30904,6 +30945,7 @@ function renderFinTab(tab){
   else if(tab==='judicial') renderFinJudicial(el);
   else if(tab==='relatorios') renderFinRelatorios(el);
   else if(tab==='cartoes') renderFinCartoes(el);
+  else if(tab==='repassesapagar') renderFinRepassesAPagar(el);
   else if(tab==='asaas') renderFinAsaas(el);
   else if(tab==='repasses') renderFinRepassesCascata(el);
   else if(tab==='diagnostico') renderFinDiagnostico(el);
@@ -34657,6 +34699,116 @@ async function renderFinCartoes(el){
   }catch(e){
     g.innerHTML = `<div style="color:#A65A4A;font-size:13px;">Erro ao carregar cartões: ${escHtml(e.message||String(e))}</div>`;
   }
+}
+
+// ══════════════════════════════════════════════════════════════
+// PAGAR REPASSES — seleciona vários e confirma em bloco (Asaas /transfers)
+// ──────────────────────────────────────────────────────────────
+// Quem aperta o botão é o proprietário: o disparo NUNCA é automático. A cada PIX
+// o backend (/api/repassar) cria/reusa a fin_operacao do lançamento, herdando a
+// trava anti-duplo-repasse, dá baixa no lançamento e manda o comprovante ao credor.
+window._rapState = { itens: [], sel: new Set(), carregando: false };
+
+async function renderFinRepassesAPagar(el){
+  el.innerHTML = `<div style="color:#8A94A6;font-size:13px;">Carregando repasses em aberto…</div>`;
+  try{
+    window._rapState.itens = await finApi.listRepassesAPagar();
+    window._rapState.sel = new Set();
+  }catch(e){
+    el.innerHTML = `<div style="color:#A65A4A;font-size:13px;">Erro ao carregar: ${escHtml(e.message||String(e))}</div>`;
+    return;
+  }
+  _rapPintar(el);
+}
+
+function _rapPintar(el){
+  const st = window._rapState;
+  const itens = st.itens;
+  const semCredor = itens.filter(i=>!(i.credor && i.credor.id)).length;
+  const totalGeral = itens.reduce((s,i)=>s+Math.abs(+i.valor||0),0);
+  const selTotal = itens.filter(i=>st.sel.has(i.id)).reduce((s,i)=>s+Math.abs(+i.valor||0),0);
+  el.innerHTML = `
+    <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:6px;">
+      <span style="font-family:'Fraunces',Georgia,serif;font-size:26px;color:#0A1530;">Pagar repasses</span>
+      <span style="font-size:12.5px;color:#8A94A6;">${itens.length} em aberto · ${fmtR(totalGeral)}</span>
+    </div>
+    <div style="font-size:12.5px;color:#8A94A6;margin-bottom:14px;max-width:80ch;">
+      Cada item vira um PIX próprio pelo Asaas — nunca somados. Ao concluir, o lançamento
+      recebe baixa e o comprovante vai ao credor por WhatsApp.
+      ${semCredor?`<br><span style="color:#A65A4A;">${semCredor} sem credor vinculado — esses não podem ser pagos até a cobrança apontar um cliente.</span>`:''}
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#FBFAF7;border:1px solid #E6E1D2;border-radius:9px;padding:11px 14px;margin-bottom:12px;">
+      <span style="font-size:12.5px;cursor:pointer;color:#9C7F40;font-weight:700;" onclick="_rapSelTodos(true)">Selecionar pagáveis</span>
+      <span style="font-size:12.5px;cursor:pointer;color:#8A94A6;" onclick="_rapSelTodos(false)">Limpar</span>
+      <span style="flex:1"></span>
+      <span style="font-size:12.5px;color:#0A1530;">Selecionados: <b>${st.sel.size}</b> · <b style="font-family:'JetBrains Mono',monospace;">${fmtR(selTotal)}</b></span>
+      <button ${st.sel.size?'':'disabled'} onclick="_rapConfirmar()"
+        style="border:0;border-radius:8px;padding:9px 16px;font-size:13px;font-weight:700;cursor:${st.sel.size?'pointer':'not-allowed'};background:${st.sel.size?'#C9A961':'#E6E1D2'};color:#0A1530;">
+        Pagar selecionados</button>
+    </div>
+    <div id="rap-status" style="font-size:12.5px;color:#9C7F40;margin-bottom:10px;"></div>
+    <div class="scrollx" style="overflow-x:auto;background:#fff;border:1px solid #E6E1D2;border-radius:10px;">
+    <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:44rem;">
+      <thead><tr style="background:#F5F2EA;">
+        <th style="width:38px;padding:9px 10px;"></th>
+        <th style="text-align:left;padding:9px 10px;font-size:10px;color:#8892A6;text-transform:uppercase;letter-spacing:.08em;">Vencimento</th>
+        <th style="text-align:left;padding:9px 10px;font-size:10px;color:#8892A6;text-transform:uppercase;letter-spacing:.08em;">Devedor / parcela</th>
+        <th style="text-align:left;padding:9px 10px;font-size:10px;color:#8892A6;text-transform:uppercase;letter-spacing:.08em;">Credor</th>
+        <th style="text-align:right;padding:9px 10px;font-size:10px;color:#8892A6;text-transform:uppercase;letter-spacing:.08em;">Valor</th>
+      </tr></thead>
+      <tbody>${itens.map(i=>{
+        const pagavel = !!(i.credor && i.credor.id);
+        return `<tr style="border-top:1px solid #F1ECE0;${pagavel?'':'opacity:.55;'}">
+          <td style="padding:8px 10px;">${pagavel?`<input type="checkbox" ${st.sel.has(i.id)?'checked':''} onchange="_rapToggle(${i.id})">`:'—'}</td>
+          <td style="padding:8px 10px;font-family:'JetBrains Mono',monospace;white-space:nowrap;">${fmtDataBR(i.data_vencimento)}</td>
+          <td style="padding:8px 10px;">${escHtml(i.descricao)}</td>
+          <td style="padding:8px 10px;">${pagavel?escHtml(i.credor.nome||'(sem nome)'):'<span style="color:#A65A4A;">sem credor</span>'}</td>
+          <td style="padding:8px 10px;text-align:right;font-family:'JetBrains Mono',monospace;white-space:nowrap;">${fmtR(Math.abs(+i.valor||0))}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>`;
+}
+
+function _rapToggle(id){
+  const s = window._rapState.sel;
+  if(s.has(id)) s.delete(id); else s.add(id);
+  const el = document.getElementById('fin-content'); if(el) _rapPintar(el);
+}
+function _rapSelTodos(marcar){
+  const st = window._rapState;
+  st.sel = new Set(marcar ? st.itens.filter(i=>i.credor&&i.credor.id).map(i=>i.id) : []);
+  const el = document.getElementById('fin-content'); if(el) _rapPintar(el);
+}
+
+// Confirmação em bloco: mostra o total, pede um "sim" e dispara UM PIX por item.
+// Falha de um não interrompe os outros — o resultado sai discriminado no fim.
+async function _rapConfirmar(){
+  const st = window._rapState;
+  const alvos = st.itens.filter(i=>st.sel.has(i.id) && i.credor && i.credor.id);
+  if(!alvos.length) return;
+  const total = alvos.reduce((s,i)=>s+Math.abs(+i.valor||0),0);
+  if(!confirm(`Enviar ${alvos.length} PIX pelo Asaas, somando ${fmtR(total)}?\n\n`
+    + `Cada um é uma transferência separada ao credor. Esta ação move dinheiro de verdade.`)) return;
+
+  const stEl = document.getElementById('rap-status');
+  let ok=0, falha=0; const erros=[];
+  for(let i=0;i<alvos.length;i++){
+    const it = alvos[i];
+    if(stEl) stEl.textContent = `Enviando ${i+1} de ${alvos.length}…`;
+    try{
+      const r = await fetch('/api/repassar', { method:'POST',
+        headers:{ ...(await authHeaders()), 'Content-Type':'application/json' },
+        body: JSON.stringify({ lancamento_id: it.id, descricao: it.descricao.slice(0,120) }) });
+      const j = await r.json().catch(()=>({}));
+      if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
+      ok++;
+    }catch(e){ falha++; erros.push(`${it.descricao}: ${e.message||e}`); }
+  }
+  if(stEl) stEl.textContent = '';
+  showToast(`${ok} PIX enviado${ok!==1?'s':''}${falha?`, ${falha} com erro`:''}.`, falha?'danger':'success');
+  if(erros.length) console.warn('[pagar repasses]', erros);
+  const el = document.getElementById('fin-content');
+  if(el) await renderFinRepassesAPagar(el);
 }
 
 async function verComprasFatura(faturaId){

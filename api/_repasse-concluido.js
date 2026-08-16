@@ -9,6 +9,7 @@
 const { sbFetch } = require('./_sb.js');
 const { zapiSendText } = require('./_zapi.js');
 const { msgComprovante } = require('./_repassar.js');
+const { guardarComprovante } = require('./_comprovante.js');
 const crypto = require('crypto');
 
 function timingSafeEq(a, b) {
@@ -57,6 +58,9 @@ module.exports = async function handler(req, res) {
     // QUALQUER transfer_id existente e devolve "repasse já disparado (sem reenvio)",
     // deixando o capital do credor preso em 'pendente' sem saída pelo app. Guarda o id
     // que falhou no metadata (auditoria).
+    // Guarda o ARQUIVO do comprovante (ver _comprovante.js). Aqui é a conclusão
+    // ASSÍNCRONA — a maioria dos repasses passa por este caminho, não pelo disparo.
+    const arqCompr = concluido ? await guardarComprovante(comprovanteUrl, transferId || op.repasse_asaas_transfer_id) : null;
     const transferIdFalho = falhou ? (transferId || op.repasse_asaas_transfer_id || null) : null;
     const update = {
       repasse_status: falhou ? 'pendente' : (concluido ? 'efetuado' : 'preparado'),
@@ -68,6 +72,7 @@ module.exports = async function handler(req, res) {
         repasse_asaas_status: st,
         repasse_falhou: falhou || undefined,
         ...(transferIdFalho ? { repasse_asaas_transfer_id_falho: transferIdFalho } : {}),
+        ...(arqCompr ? { comprovante_storage_path: arqCompr.storage_path, comprovante_bytes: arqCompr.bytes } : {}),
       },
     };
     await sbFetch(`fin_operacao?id=eq.${op.id}`, { method: 'PATCH', body: JSON.stringify(update) });

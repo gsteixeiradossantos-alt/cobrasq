@@ -14,6 +14,7 @@ const { requireUser, applyCors } = require('./_auth.js');
 const { sbFetch } = require('./_sb.js');
 const { asaasReq } = require('./_asaas.js');
 const { zapiSendText } = require('./_zapi.js');
+const { guardarComprovante } = require('./_comprovante.js');
 
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
@@ -36,8 +37,64 @@ module.exports = async function handler(req, res) {
   if (!user) return;
 
   const body = typeof req.body === 'string' ? safeJson(req.body) : (req.body || {});
-  const operacaoId = body.operacao_id;
-  if (!operacaoId) return res.status(400).json({ error: 'operacao_id ausente' });
+  let operacaoId = body.operacao_id;
+
+  // Pagar direto de um lançamento de saída (repasse importado do Controlle).
+  //
+  // Em 14/08/2026 havia 323 repasses em aberto no Financeiro (R$ 123.448,19) e só 8
+  // tinham fin_operacao — os outros vieram da importação e ficavam fora do alcance
+  // deste endpoint. Em vez de duplicar o fluxo, resolvemos/criamos a fin_operacao a
+  // partir do lançamento e seguimos pelo caminho de sempre: assim o repasse herda a
+  // trava anti-duplo-repasse, a reconciliação do transfer e a conclusão pelo webhook,
+  // sem nenhuma cópia de lógica de pagamento.
+  //
+  // A operação é criada SÓ na hora de pagar, não em backfill: aqui já se conhece o
+  // valor, o credor e o lançamento, então ela nasce completa em vez de pela metade.
+  if (!operacaoId && body.lancamento_id) {
+    try {
+      const lancId = String(body.lancamento_id).replace(/\D/g, '');
+      if (!lancId) return res.status(400).json({ error: 'lancamento_id inválido' });
+      const lancs = await sbFetch(`fin_lancamento?id=eq.${lancId}&select=id,descricao,valor,tipo_movimento,status,cobranca_id,numero_parcela,total_parcelas&limit=1`);
+      const lanc = lancs[0];
+      if (!lanc) return res.status(404).json({ error: 'lançamento não encontrado' });
+      if (lanc.tipo_movimento !== 0) return res.status(400).json({ error: 'lançamento não é uma saída' });
+      if (lanc.status !== 0) return res.status(200).json({ ok: true, skipped: 'lançamento já baixado', lancamento_id: lanc.id });
+
+      // Já existe operação para este lançamento? Então é retry — reaproveita.
+      const jaTem = await sbFetch(`fin_operacao?lancamento_despesa_id=eq.${lanc.id}&select=id&limit=1`).catch(() => []);
+      if (Array.isArray(jaTem) && jaTem[0]) {
+        operacaoId = jaTem[0].id;
+      } else {
+        // Credor: cobrança → cliente. Sem credor não há para quem transferir.
+        let credorId = null, devedorId = lanc.cobranca_id || null;
+        if (lanc.cobranca_id) {
+          const cobs = await sbFetch(`cobrancas?id=eq.${lanc.cobranca_id}&select=cliente_id&limit=1`).catch(() => []);
+          credorId = (cobs[0] && cobs[0].cliente_id) || null;
+        }
+        if (!credorId && !body.credor_id) {
+          return res.status(400).json({ error: 'lançamento sem credor vinculado — informe credor_id ou vincule a cobrança' });
+        }
+        const nova = await sbFetch('fin_operacao', {
+          method: 'POST', prefer: 'return=representation',
+          body: JSON.stringify({
+            credor_id: body.credor_id || credorId,
+            devedor_id: devedorId,
+            valor_capital: round2(Math.abs(Number(lanc.valor) || 0)),
+            parcela: lanc.numero_parcela, total_parcelas: lanc.total_parcelas,
+            lancamento_despesa_id: lanc.id,
+            recebimento_status: 'recebido', repasse_status: 'pendente',
+            metadata: { origem: 'lancamento', lancamento_descricao: lanc.descricao, criada_em: new Date().toISOString() },
+          }),
+        });
+        operacaoId = Array.isArray(nova) ? (nova[0] && nova[0].id) : (nova && nova.id);
+        if (!operacaoId) return res.status(500).json({ error: 'não foi possível preparar o repasse' });
+      }
+    } catch (e) {
+      return res.status(500).json({ error: 'falha ao preparar repasse do lançamento: ' + e.message });
+    }
+  }
+
+  if (!operacaoId) return res.status(400).json({ error: 'operacao_id ou lancamento_id ausente' });
 
   try {
     const ops = await sbFetch(`fin_operacao?id=eq.${encodeURIComponent(operacaoId)}&select=*&limit=1`);
@@ -132,12 +189,19 @@ module.exports = async function handler(req, res) {
     const concluido = st === 'DONE' || st === 'CONFIRMED';
     const comprovanteUrl = transfer.transactionReceiptUrl || transfer.receiptUrl || '';
 
+    // Guarda o ARQUIVO do comprovante, não só o link do Asaas (ver _comprovante.js).
+    // Best-effort: o PIX já saiu, então falhar aqui não pode derrubar o repasse.
+    const arq = concluido ? await guardarComprovante(comprovanteUrl, transfer.id) : null;
+
     const update = {
       repasse_status: concluido ? 'efetuado' : 'preparado',
       repasse_asaas_transfer_id: transfer.id || null,
       repasse_comprovante_url: comprovanteUrl || null,
       repasse_efetuado_em: concluido ? new Date().toISOString() : null,
-      metadata: { ...(op.metadata || {}), repasse_pix_key: pixKey, repasse_asaas_status: st },
+      metadata: {
+        ...(op.metadata || {}), repasse_pix_key: pixKey, repasse_asaas_status: st,
+        ...(arq ? { comprovante_storage_path: arq.storage_path, comprovante_bytes: arq.bytes } : {}),
+      },
     };
     await sbFetch(`fin_operacao?id=eq.${op.id}`, { method: 'PATCH', body: JSON.stringify(update) });
 
