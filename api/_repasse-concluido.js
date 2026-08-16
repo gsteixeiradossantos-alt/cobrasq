@@ -7,8 +7,7 @@
 // Idempotente: se já está 'efetuado', não reenvia.
 
 const { sbFetch } = require('./_sb.js');
-const { zapiSendText } = require('./_zapi.js');
-const { msgComprovante } = require('./_repassar.js');
+const { lerDescricaoRepasse, enviarComprovanteCredor } = require('./_repasse-msg.js');
 const { guardarComprovante } = require('./_comprovante.js');
 const crypto = require('crypto');
 
@@ -89,26 +88,31 @@ module.exports = async function handler(req, res) {
       }).catch(() => {});
     }
 
-    // Comprovante ao credor quando concluído (best-effort).
-    let zap = null;
+    // Comprovante ao credor quando concluído (best-effort). Uma mensagem por PIX, com
+    // o PDF em anexo. Parcela e devedor saem do que /api/repassar gravou na operação;
+    // aqui a descrição do lançamento não chega no payload do Asaas.
+    let envio = null;
     if (concluido && op.credor_id) {
       const cls = await sbFetch(`clientes?id=eq.${op.credor_id}&select=nome,telefone&limit=1`).catch(() => []);
-      const credor = cls[0];
-      const tel = String((credor && credor.telefone) || '').replace(/\D/g, '');
-      let devNome = '';
-      if (op.devedor_id) {
+      const credor = cls[0] || {};
+      let devNome = (op.metadata && op.metadata.repasse_devedor_nome) || '';
+      if (!devNome && op.devedor_id) {
         const dvs = await sbFetch(`devedores?id=eq.${op.devedor_id}&select=nome&limit=1`).catch(() => []);
         devNome = (dvs[0] && dvs[0].nome) || '';
       }
-      if (tel) {
-        try { zap = await zapiSendText(tel, msgComprovante({ ...op, ...update }, credor.nome, devNome, comprovanteUrl)); }
-        catch (e) { zap = { error: e.message }; }
+      if (!devNome && op.metadata && op.metadata.lancamento_descricao) {
+        devNome = lerDescricaoRepasse(op.metadata.lancamento_descricao).devedor;
       }
+      envio = await enviarComprovanteCredor({
+        telefone: credor.telefone, parcela: op.parcela, devedor: devNome,
+        base64: arqCompr && arqCompr.base64, ext: arqCompr && arqCompr.ext, comprovanteUrl,
+      });
     }
 
     return res.status(200).json({
       ok: true, operacao_id: op.id, repasse_status: update.repasse_status,
-      comprovante_enviado: !!(zap && zap.messageId),
+      comprovante_enviado: !!(envio && envio.enviado),
+      comprovante_via: (envio && envio.via) || null,
     });
   } catch (e) {
     console.error('[repasse-concluido]', e.message);
