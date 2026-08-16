@@ -28409,6 +28409,15 @@ window.finApi = (function(){
   // Lista as saídas de repasse ainda em aberto, com o credor resolvido pela
   // cobrança. Sem credor não há para quem transferir — a tela mostra quem está
   // sem, em vez de deixar o pagamento falhar só no clique.
+  // Clientes ativos, para escolher o credor de um repasse que a cobrança não resolve.
+  async function listClientesParaCredor(){
+    const sb = _sb();
+    const { data, error } = await sb.from('clientes')
+      .select('id,nome,nome_fantasia').order('nome').limit(500);
+    if(error) throw error;
+    return (data||[]).map(c=>({ id:c.id, nome: c.nome_fantasia || c.nome }));
+  }
+
   async function listRepassesAPagar(){
     const sb = _sb();
     const { data: cats, error: e1 } = await sb.from('fin_lancamento_categoria')
@@ -28419,7 +28428,7 @@ window.finApi = (function(){
     const lancs = [];
     for(let i=0;i<ids.length;i+=300){
       const { data, error } = await sb.from('fin_lancamento')
-        .select('id,descricao,data_vencimento,valor,cobranca_id')
+        .select('id,descricao,data_vencimento,valor,cobranca_id,credor_id')
         .in('id', ids.slice(i,i+300))
         .eq('tipo_movimento', 0).eq('status', 0);
       if(error) throw error;
@@ -28437,8 +28446,19 @@ window.finApi = (function(){
       }
       (cobs||[]).forEach(c=>{ credPorCob[c.id] = { id:c.cliente_id, nome: nomes[c.cliente_id] || null }; });
     }
+    // Precedência: credor_id gravado no lançamento > cliente da cobrança. A coluna
+    // existe porque a cadeia devedor→cobrança→cliente não resolve a maioria dos
+    // repasses importados (239 de 323 em 16/08/2026).
+    const nomesDiretos = {};
+    const diretos = [...new Set(lancs.map(l=>l.credor_id).filter(Boolean))];
+    if(diretos.length){
+      const { data: cls2 } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', diretos);
+      (cls2||[]).forEach(c=>{ nomesDiretos[c.id] = c.nome_fantasia || c.nome; });
+    }
     return lancs
-      .map(l => Object.assign({}, l, { credor: l.cobranca_id ? (credPorCob[l.cobranca_id] || null) : null }))
+      .map(l => Object.assign({}, l, {
+        credor: l.credor_id ? { id:l.credor_id, nome: nomesDiretos[l.credor_id] || null }
+              : (l.cobranca_id ? (credPorCob[l.cobranca_id] || null) : null) }))
       .sort((a,b)=> String(a.data_vencimento||'').localeCompare(String(b.data_vencimento||'')));
   }
 
@@ -28993,6 +29013,7 @@ window.finApi = (function(){
     buscarPossiveisDuplicatas,
     listCartoes,
     listRepassesAPagar,
+    listClientesParaCredor,
     listFaturas,
     listComprasFatura,
     faturaParaCompra,
@@ -30015,7 +30036,7 @@ async function _finLancCascataCarregar(){
   const sb = getSupabase();
   const { ini, fim } = _finCascataPeriodoBounds();
   const dim = await finApi.loadDimensoes();
-  const baseSel = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,tipo_movimento,status,conciliado,conta_id,fin_conta(descricao,banco_nome)';
+  const baseSel = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,tipo_movimento,status,conciliado,conta_id,cobranca_id,credor_id,fin_conta(descricao,banco_nome)';
   const extra = (await _finTemColunasCascata()) ? ',cedente_id,capital,meu_total,amortizado,repasse_status' : '';
   const { data } = await sb.from('fin_lancamento').select(baseSel+extra)
     .gte('data_competencia', ini).lte('data_competencia', fim).order('data_competencia',{ascending:false}).limit(FIN_LANC_LIMITE);
@@ -30034,7 +30055,33 @@ async function _finLancCascataCarregar(){
     if(credIds.length){ const {data:cs}=await sb.from('clientes').select('id,nome').in('id',credIds); (cs||[]).forEach(c=>credMap[c.id]=c.nome); }
     (data||[]).forEach(o=>{ o._credorNome=credMap[o.credor_id]||null; if(o.lancamento_receita_id) opsByLanc[o.lancamento_receita_id]=o; if(o.lancamento_despesa_id) opsByLanc[o.lancamento_despesa_id]=o; });
   }catch(_){}
-  return { rows, dim, cedMap, opsByLanc, periodoLabel: _finCascataPeriodoBounds().label,
+  // Credor das SAÍDAS que não têm fin_operacao — sem isto a linha não diz para quem
+  // o dinheiro vai, que era o caso de 315 dos 323 repasses até 16/08/2026.
+  // Precedência: credor_id do lançamento, depois cliente da cobrança.
+  const credorPorLanc = {};
+  try{
+    const saidas = rows.filter(r=>r.tipo_movimento===0 && !opsByLanc[r.id] && (r.credor_id || r.cobranca_id));
+    if(saidas.length){
+      const porCob = {};
+      const cobIds = [...new Set(saidas.map(r=>r.cobranca_id).filter(Boolean))];
+      if(cobIds.length){
+        const { data:cbs } = await sb.from('cobrancas').select('id,cliente_id').in('id', cobIds);
+        (cbs||[]).forEach(c=>{ if(c.cliente_id) porCob[c.id]=c.cliente_id; });
+      }
+      const todos = [...new Set([...saidas.map(r=>r.credor_id).filter(Boolean), ...Object.values(porCob)])];
+      const nomes = {};
+      if(todos.length){
+        const { data:cls } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', todos);
+        (cls||[]).forEach(c=>{ nomes[c.id] = c.nome_fantasia || c.nome; });
+      }
+      saidas.forEach(r=>{
+        const cid = r.credor_id || porCob[r.cobranca_id];
+        if(cid && nomes[cid]) credorPorLanc[r.id] = nomes[cid];
+      });
+    }
+  }catch(_){ /* auxiliar: não pode derrubar a tela */ }
+
+  return { rows, dim, cedMap, opsByLanc, credorPorLanc, periodoLabel: _finCascataPeriodoBounds().label,
            truncado: rows.length >= FIN_LANC_LIMITE };
 }
 async function renderFinLancamentosCascata(el){
@@ -30156,6 +30203,11 @@ function _finLancCascataRowHtml(l, ctx){
       : op.repasse_status==='revisar' ? {t:'DIVERGÊNCIA',bg:'#FBF3E1',fg:'#7A6428'}
       : {t:'A REPASSAR',bg:'#FBF3E1',fg:'#7A6428'};
     sub = `<div class="finlc-sub-row">seu ${fmtR(op.valor_honorario)} · ${escHtml(op._credorNome||'cedente')} recebe ${fmtR(op.valor_capital)}<span class="finlc-sub-chip" style="background:${chip.bg};color:${chip.fg};">${chip.t}</span></div>`;
+  } else if(!isEnt && (l.credor_id || l.cobranca_id) && ctx.credorPorLanc && ctx.credorPorLanc[l.id]){
+    // Sem fin_operacao: resolve o credor pelo lançamento (credor_id) ou pela cobrança.
+    // Até 16/08/2026 esta linha só aparecia para os 8 lançamentos que tinham operação;
+    // os outros 315 repasses ficavam sem indicar para quem o dinheiro vai.
+    sub = `<div class="finlc-sub-row">${escHtml(ctx.credorPorLanc[l.id])} recebe ${fmtR(Math.abs(+l.valor||0))}<span class="finlc-sub-chip" style="background:#FBF3E1;color:#7A6428;">A REPASSAR</span></div>`;
   } else if(l.cedente_id && l.capital!=null){
     const r = finDivideCascata(l, Math.abs(+l.valor||0));
     sub = `<div class="finlc-sub-row">seu ${fmtR(r.ficaComVoce)} · ${escHtml(ctx.cedMap[l.cedente_id]||'cedente')} recebe ${fmtR(r.repasseAoCedente)}<span class="finlc-sub-chip" style="background:#F5F2EA;color:#6B7683;">${(l.repasse_status||'AGUARDA').toUpperCase()}</span></div>`;
@@ -34712,7 +34764,12 @@ window._rapState = { itens: [], sel: new Set(), carregando: false };
 async function renderFinRepassesAPagar(el){
   el.innerHTML = `<div style="color:#8A94A6;font-size:13px;">Carregando repasses em aberto…</div>`;
   try{
-    window._rapState.itens = await finApi.listRepassesAPagar();
+    const [itens, clientes] = await Promise.all([
+      finApi.listRepassesAPagar(),
+      finApi.listClientesParaCredor().catch(()=>[]),
+    ]);
+    window._rapState.itens = itens;
+    window._rapState.clientes = clientes;
     window._rapState.sel = new Set();
   }catch(e){
     el.innerHTML = `<div style="color:#A65A4A;font-size:13px;">Erro ao carregar: ${escHtml(e.message||String(e))}</div>`;
@@ -34762,11 +34819,28 @@ function _rapPintar(el){
           <td style="padding:8px 10px;">${pagavel?`<input type="checkbox" ${st.sel.has(i.id)?'checked':''} onchange="_rapToggle(${i.id})">`:'—'}</td>
           <td style="padding:8px 10px;font-family:'JetBrains Mono',monospace;white-space:nowrap;">${fmtDataBR(i.data_vencimento)}</td>
           <td style="padding:8px 10px;">${escHtml(i.descricao)}</td>
-          <td style="padding:8px 10px;">${pagavel?escHtml(i.credor.nome||'(sem nome)'):'<span style="color:#A65A4A;">sem credor</span>'}</td>
+          <td style="padding:8px 10px;">${pagavel
+            ? escHtml(i.credor.nome||'(sem nome)')
+            : `<select onchange="_rapSetCredor(${i.id}, this.value)" style="max-width:210px;font-size:12px;padding:4px 6px;border:1px solid #E6E1D2;border-radius:6px;background:#fff;">
+                 <option value="">escolher credor…</option>
+                 ${(st.clientes||[]).map(c=>`<option value="${escHtml(c.id)}">${escHtml(c.nome||'(sem nome)')}</option>`).join('')}
+               </select>`}</td>
           <td style="padding:8px 10px;text-align:right;font-family:'JetBrains Mono',monospace;white-space:nowrap;">${fmtR(Math.abs(+i.valor||0))}</td>
         </tr>`;
       }).join('')}</tbody>
     </table></div>`;
+}
+
+// Escolha manual do credor. Só marca na memória da tela — quem grava é o backend,
+// ao pagar, junto com as outras parcelas em aberto do mesmo devedor. Assim nada é
+// escrito no banco por um clique acidental num seletor.
+function _rapSetCredor(id, clienteId){
+  const st = window._rapState;
+  const it = st.itens.find(x=>x.id===id); if(!it) return;
+  const cli = (st.clientes||[]).find(c=>c.id===clienteId);
+  it.credor = cli ? { id: cli.id, nome: cli.nome, escolhido: true } : null;
+  if(!cli) st.sel.delete(id);
+  const el = document.getElementById('fin-content'); if(el) _rapPintar(el);
 }
 
 function _rapToggle(id){
@@ -34798,7 +34872,8 @@ async function _rapConfirmar(){
     try{
       const r = await fetch('/api/repassar', { method:'POST',
         headers:{ ...(await authHeaders()), 'Content-Type':'application/json' },
-        body: JSON.stringify({ lancamento_id: it.id, descricao: it.descricao.slice(0,120) }) });
+        body: JSON.stringify({ lancamento_id: it.id, descricao: it.descricao.slice(0,120),
+          credor_id: (it.credor && it.credor.escolhido) ? it.credor.id : undefined }) });
       const j = await r.json().catch(()=>({}));
       if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
       ok++;

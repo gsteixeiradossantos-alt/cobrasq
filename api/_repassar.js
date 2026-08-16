@@ -54,7 +54,7 @@ module.exports = async function handler(req, res) {
     try {
       const lancId = String(body.lancamento_id).replace(/\D/g, '');
       if (!lancId) return res.status(400).json({ error: 'lancamento_id inválido' });
-      const lancs = await sbFetch(`fin_lancamento?id=eq.${lancId}&select=id,descricao,valor,tipo_movimento,status,cobranca_id,numero_parcela,total_parcelas&limit=1`);
+      const lancs = await sbFetch(`fin_lancamento?id=eq.${lancId}&select=id,descricao,valor,tipo_movimento,status,cobranca_id,credor_id,numero_parcela,total_parcelas&limit=1`);
       const lanc = lancs[0];
       if (!lanc) return res.status(404).json({ error: 'lançamento não encontrado' });
       if (lanc.tipo_movimento !== 0) return res.status(400).json({ error: 'lançamento não é uma saída' });
@@ -65,19 +65,48 @@ module.exports = async function handler(req, res) {
       if (Array.isArray(jaTem) && jaTem[0]) {
         operacaoId = jaTem[0].id;
       } else {
-        // Credor: cobrança → cliente. Sem credor não há para quem transferir.
-        let credorId = null, devedorId = lanc.cobranca_id || null;
-        if (lanc.cobranca_id) {
+        // Credor, em ordem de precedência: o que o usuário escolheu agora → o já
+        // gravado no lançamento → a cobrança.
+        //
+        // Em 16/08/2026, 239 dos 323 repasses em aberto (R$ 79.941,69) não chegavam a
+        // um cliente: a cadeia devedor → cobrança → cliente está quebrada na origem —
+        // dos devedores testados, a maioria existe em `devedores` mas sem cobrança que
+        // aponte cliente, e alguns não existem nem como devedor. Depender só da cobrança
+        // deixaria esse dinheiro sem caminho de pagamento por tempo indeterminado.
+        let devedorId = lanc.cobranca_id || null;
+        let credorId = lanc.credor_id || null;
+        if (!credorId && lanc.cobranca_id) {
           const cobs = await sbFetch(`cobrancas?id=eq.${lanc.cobranca_id}&select=cliente_id&limit=1`).catch(() => []);
           credorId = (cobs[0] && cobs[0].cliente_id) || null;
         }
         if (!credorId && !body.credor_id) {
           return res.status(400).json({ error: 'lançamento sem credor vinculado — informe credor_id ou vincule a cobrança' });
         }
+        const credorEscolhido = body.credor_id || credorId;
+
+        // Grava a escolha no lançamento e nas OUTRAS parcelas em aberto do mesmo
+        // devedor, para não repetir a escolha a cada parcela. Casa pelo texto sem a
+        // numeração de parcela — é o único elo entre elas enquanto o cadastro não liga
+        // a cobrança. Best-effort: não pode impedir o pagamento.
+        if (body.credor_id) {
+          try {
+            const base = String(lanc.descricao || '').replace(/\s*\d+\/\d+\s*$/, '').trim();
+            await sbFetch(`fin_lancamento?id=eq.${lanc.id}`, {
+              method: 'PATCH', prefer: 'return=minimal',
+              body: JSON.stringify({ credor_id: credorEscolhido }),
+            });
+            if (base.length >= 8) {
+              await sbFetch(`fin_lancamento?tipo_movimento=eq.0&status=eq.0&credor_id=is.null&descricao=like.${encodeURIComponent(base + '*')}`, {
+                method: 'PATCH', prefer: 'return=minimal',
+                body: JSON.stringify({ credor_id: credorEscolhido }),
+              });
+            }
+          } catch (e) { console.warn('[repassar] gravar credor no lançamento:', e.message); }
+        }
         const nova = await sbFetch('fin_operacao', {
           method: 'POST', prefer: 'return=representation',
           body: JSON.stringify({
-            credor_id: body.credor_id || credorId,
+            credor_id: credorEscolhido,
             devedor_id: devedorId,
             valor_capital: round2(Math.abs(Number(lanc.valor) || 0)),
             parcela: lanc.numero_parcela, total_parcelas: lanc.total_parcelas,
