@@ -21,10 +21,12 @@ const { asaasReq } = require('./_asaas.js');
 const { guardarComprovante } = require('./_comprovante.js');
 const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_comprovante-pdf.js');
 const { lerDescricaoRepasse, descricaoPix, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
+const { saldoDeCapital } = require('./_repasse-ficha.js');
 const { registrarRepasseNaFicha, resolverCobrancaId } = require('./_repasse-ficha.js');
 
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+function fmtBRL(v) { return 'R$ ' + (Number(v) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 
 module.exports = async function handler(req, res) {
   applyCors(req, res);
@@ -130,6 +132,27 @@ module.exports = async function handler(req, res) {
     if (!(Number(op.valor_capital) > 0)) return res.status(400).json({ error: 'operação sem capital a repassar' });
     if (op.repasse_status === 'efetuado') return res.status(200).json({ ok: true, skipped: 'repasse já efetuado', operacao_id: op.id });
     if (op.repasse_status === 'nao_aplica') return res.status(400).json({ error: 'operação não tem repasse' });
+
+    // TETO DO CASO: nenhuma trava olhava o caso inteiro (ver saldoDeCapital). Recusa antes
+    // de tocar no dinheiro quando esta parcela passaria do capital que o credor tem a
+    // receber. Só vale quando o lançamento tem cobrança e a cobrança tem capital definido;
+    // sem isso não há teto conhecido e o fluxo segue como antes.
+    if (!body.ignorar_teto) {
+      const cobId = op.metadata && op.metadata.cobranca_id;
+      const alvoCob = cobId || await (async () => {
+        if (!op.lancamento_despesa_id) return null;
+        const l = await sbFetch(`fin_lancamento?id=eq.${op.lancamento_despesa_id}&select=cobranca_id&limit=1`).catch(() => []);
+        return (l[0] && l[0].cobranca_id) || null;
+      })();
+      const sc = await saldoDeCapital(alvoCob).catch(() => null);
+      if (sc && round2(op.valor_capital) > sc.saldo + 0.005) {
+        return res.status(409).json({
+          error: `Este repasse passa do capital do caso. Capital ${fmtBRL(sc.capital)}, já repassado ${fmtBRL(sc.enviado)}, resta ${fmtBRL(sc.saldo)} — e esta parcela é ${fmtBRL(op.valor_capital)}.`,
+          teto_capital: true, capital: sc.capital, ja_repassado: sc.enviado, saldo: sc.saldo,
+          valor_parcela: round2(op.valor_capital),
+        });
+      }
+    }
 
     // P1 (auditoria 2026-06) — anti-duplo-repasse: se já existe um /transfers
     // disparado (status 'preparado' aguardando o assíncrono do Asaas), NÃO cria
