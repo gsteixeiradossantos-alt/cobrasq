@@ -9,6 +9,7 @@
 const { sbFetch } = require('./_sb.js');
 const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
 const { guardarComprovante } = require('./_comprovante.js');
+const { registrarRepasseNaFicha, resolverCobrancaId } = require('./_repasse-ficha.js');
 const crypto = require('crypto');
 
 function timingSafeEq(a, b) {
@@ -91,9 +92,9 @@ module.exports = async function handler(req, res) {
     // Comprovante ao credor quando concluído (best-effort). Uma mensagem por PIX, com
     // o PDF em anexo. Parcela e devedor saem do que /api/repassar gravou na operação;
     // aqui a descrição do lançamento não chega no payload do Asaas.
-    let envio = null;
+    let envio = null; let ficha = null;
     if (concluido && op.credor_id) {
-      const cls = await sbFetch(`clientes?id=eq.${op.credor_id}&select=nome,telefone,metadata&limit=1`).catch(() => []);
+      const cls = await sbFetch(`clientes?id=eq.${op.credor_id}&select=id,nome,doc,telefone,metadata&limit=1`).catch(() => []);
       const credor = cls[0] || {};
       let devNome = (op.metadata && op.metadata.repasse_devedor_nome) || '';
       if (!devNome && op.devedor_id) {
@@ -107,12 +108,20 @@ module.exports = async function handler(req, res) {
         telefone: destinoWhatsapp(credor), parcela: op.parcela, devedor: devNome,
         base64: arqCompr && arqCompr.base64, ext: arqCompr && arqCompr.ext, comprovanteUrl,
       });
+      // Ficha do caso — idempotente pelo transacao_id, então não duplica se /api/repassar
+      // já tiver registrado ao concluir na hora.
+      ficha = await registrarRepasseNaFicha({
+        cobrancaId: await resolverCobrancaId(op),
+        credor, valor: op.valor_capital, transferId: transferId || op.repasse_asaas_transfer_id,
+        dataPix: new Date().toISOString().slice(0, 10), comprovante: arqCompr,
+      });
     }
 
     return res.status(200).json({
       ok: true, operacao_id: op.id, repasse_status: update.repasse_status,
       comprovante_enviado: !!(envio && envio.enviado),
       comprovante_via: (envio && envio.via) || null,
+      ficha_caso: ficha ? { repasse_id: ficha.repasse_id, status_caso: ficha.status_caso || null } : null,
     });
   } catch (e) {
     console.error('[repasse-concluido]', e.message);

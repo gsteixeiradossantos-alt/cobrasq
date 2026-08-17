@@ -20,6 +20,7 @@ const { sbFetch } = require('./_sb.js');
 const { asaasReq } = require('./_asaas.js');
 const { guardarComprovante } = require('./_comprovante.js');
 const { lerDescricaoRepasse, descricaoPix, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
+const { registrarRepasseNaFicha, resolverCobrancaId } = require('./_repasse-ficha.js');
 
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
@@ -108,7 +109,7 @@ module.exports = async function handler(req, res) {
             parcela: lanc.numero_parcela, total_parcelas: lanc.total_parcelas,
             lancamento_despesa_id: lanc.id,
             recebimento_status: 'recebido', repasse_status: 'pendente',
-            metadata: { origem: 'lancamento', lancamento_descricao: lanc.descricao, criada_em: new Date().toISOString() },
+            metadata: { origem: 'lancamento', lancamento_descricao: lanc.descricao, cobranca_id: lanc.cobranca_id || null, criada_em: new Date().toISOString() },
           }),
         });
         operacaoId = Array.isArray(nova) ? (nova[0] && nova[0].id) : (nova && nova.id);
@@ -267,6 +268,18 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    // Ficha do caso: aba "Repasses ao cliente" da cobrança, com o comprovante anexado.
+    // Só quando o lançamento tem cobrança vinculada — o repasse importado do Controlle
+    // em geral não tem, e aí o registro fica só no Financeiro.
+    let ficha = null;
+    if (concluido) {
+      ficha = await registrarRepasseNaFicha({
+        cobrancaId: await resolverCobrancaId(op),
+        credor, valor: op.valor_capital, transferId: transfer.id,
+        dataPix: new Date().toISOString().slice(0, 10), comprovante: arq,
+      });
+    }
+
     return res.status(200).json({
       ok: true,
       operacao_id: op.id,
@@ -276,6 +289,7 @@ module.exports = async function handler(req, res) {
       comprovante_url: comprovanteUrl || null,
       comprovante_enviado: !!(envio && envio.enviado),
       comprovante_via: (envio && envio.via) || null,
+      ficha_caso: ficha ? { repasse_id: ficha.repasse_id, status_caso: ficha.status_caso || null } : null,
     });
   } catch (e) {
     console.error('[repassar]', e.message);
