@@ -5718,6 +5718,12 @@ function clienteToRow(c){
     is_draft: !!c.isDraft,
     draft_expires_at: c.draftExpiresAt || null,
     metadata: {
+      // PRESERVA o que o painel não conhece. Antes, o metadata era remontado do zero
+      // com estas 7 chaves e QUALQUER outra era destruída no primeiro save — foi assim
+      // que em 17/08/2026 os 135 clientes perderam de uma vez `pix_key`,
+      // `whatsapp_repasse` e `razao_social`, gravados por fora para pagar os repasses.
+      // `_meta` vem do rowToCliente, que carrega o metadata do servidor intacto.
+      ...(c._meta && typeof c._meta === 'object' ? c._meta : {}),
       endereco: c.endereco || '',
       honorarios: c.honorarios || '',
       obs: c.obs || '',
@@ -5766,6 +5772,9 @@ function rowToCliente(r){
     // Premium (gerador de documentos do cedente) + logo white-label — vivem no metadata.
     premium: !!meta.premium,
     logoBase64: meta.logoBase64 || '',
+    // Metadata do servidor INTEIRO, para clienteToRow devolvê-lo sem perder as chaves
+    // que esta tela não edita (pix_key, whatsapp_repasse, razao_social, …).
+    _meta: meta,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     isDraft: !!r.is_draft,
@@ -6080,7 +6089,14 @@ async function flushRelational(){
       // grupo_economico_id) tivesse sido setado por fora depois do load, o save o zerava.
       // Agora, credor intocado tem JSON idêntico ao baseline → não é enviado → preservado.
       // Não reenviar cadastros já excluídos (lápide) — evita ressuscitar linhas apagadas.
-      const base = _clientesRelSnapshot; // null só se o load ainda não populou → fallback = envia
+      // Sem baseline (o load relacional ainda não populou), NÃO grava. O fallback antigo
+      // era "envia tudo", e é isso que transforma um save qualquer numa reescrita da
+      // tabela inteira a partir da memória — em 17/08/2026 os 135 clientes foram
+      // sobrescritos de uma vez assim. Mesmo espírito do modo seguro de _relReadFailed
+      // logo acima: na dúvida, não escrever por cima do servidor.
+      const base = _clientesRelSnapshot;
+      if(!base){ console.warn('[rel] syncClientes: sem baseline do servidor — gravação adiada'); }
+      else{
       const rows = []; const sent = [];
       for(const c of DB.clientes){
         if(!c || c.id==null) continue;
@@ -6099,8 +6115,8 @@ async function flushRelational(){
         try { showToast(msg,'danger'); } catch(_){}
       } else if(sent.length){
         // Baseline avança só no sucesso — os enviados viram a nova referência da sessão.
-        if(!_clientesRelSnapshot) _clientesRelSnapshot = new Map();
         for(const [id,json] of sent) _clientesRelSnapshot.set(id, json);
+      }
       }
     }
     if(Array.isArray(DB.devedores) && DB.devedores.length){
