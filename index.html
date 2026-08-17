@@ -31040,13 +31040,25 @@ const _repIsPend = o => o.repasse_status==='pendente' || o.repasse_status==='pre
 const _repDM = s => { s=(s||'').slice(0,10); return s ? s.split('-').slice(1).reverse().join('/') : '—'; }; // dd/MM
 function _repDaysSince(s){ s=(s||'').slice(0,10); if(!s) return null; const d=new Date(s+'T00:00:00'); const now=new Date(); return Math.floor((now-d)/86400000); }
 
+// Guarda de concorrência: duas chamadas simultâneas (a tela renderiza e o menu carrega
+// o badge ao mesmo tempo) compartilham a MESMA carga em vez de rodar duas vezes.
+let _repLoadEmVoo = null;
 async function _repLoad(){
+  if(_repLoadEmVoo) return _repLoadEmVoo;
+  _repLoadEmVoo = _repLoadReal().finally(()=>{ _repLoadEmVoo = null; });
+  return _repLoadEmVoo;
+}
+async function _repLoadReal(){
   const sb = getSupabase();
   const r = await sb.from('fin_operacao')
     .select('id,credor_id,devedor_id,parcela,total_parcelas,valor_recebido,valor_capital,valor_honorario,recebido_em,repasse_status,repasse_efetuado_em,repasse_comprovante_url,lancamento_despesa_id')
     .order('recebido_em',{ascending:false}).limit(2000);
   if(r.error) throw r.error;
-  _repState.ops = r.data || [];
+  // Monta a lista numa variável LOCAL e só publica em _repState.ops no fim. Publicar
+  // antes do await abaixo abria uma janela em que duas cargas concorrentes zeravam e
+  // empurravam alternadamente, e cada repasse importado aparecia DUAS vezes no modal
+  // (Kelly e Elen duplicadas na Vetclin, 17/08/2026).
+  const ops = r.data || [];
 
   // Repasses IMPORTADOS do Controlle entram na MESMA fila. Eles não têm fin_operacao —
   // eram invisíveis aqui e por isso ganharam uma segunda tela no Financeiro, que agora
@@ -31056,7 +31068,7 @@ async function _repLoad(){
   // funcionarem sem saber a diferença. Quem já tem operação fica de fora, senão o valor
   // seria contado duas vezes.
   try{
-    const jaTemOp = new Set(_repState.ops.map(o=>o.lancamento_despesa_id).filter(Boolean));
+    const jaTemOp = new Set(ops.map(o=>o.lancamento_despesa_id).filter(Boolean));
     const pend = await finApi.listRepassesAPagar();
     const hojeISO = new Date().toISOString().slice(0,10);
     const elegiveis = (pend||[]).filter(l => l.credor && l.credor.id && !jaTemOp.has(l.id));
@@ -31069,7 +31081,7 @@ async function _repLoad(){
     _repState.lancsFuturos = elegiveis.filter(l => l.data_vencimento && l.data_vencimento > hojeISO);
     for(const l of _repState.lancs){
       const d = _rapLerDescricao(l.descricao);
-      _repState.ops.push({
+      ops.push({
         id: 'L'+l.id, _lancId: l.id, _devNome: d.devedor, _origem: 'lancamento',
         credor_id: l.credor.id, devedor_id: null,
         parcela: d.parcela, total_parcelas: d.total,
@@ -31082,6 +31094,9 @@ async function _repLoad(){
       });
     }
   }catch(e){ console.warn('[repasses] lançamentos importados:', e.message||e); _repState.lancs=[]; _repState.lancsFuturos=[]; }
+  // Rede de segurança: id repetido nunca chega à tela, venha de onde vier.
+  const vistos=new Set();
+  _repState.ops = ops.filter(o=>{ const k=String(o.id); if(vistos.has(k)) return false; vistos.add(k); return true; });
   _repState.credMap = {}; _repState.devMap = {};
   const cIds=[...new Set(_repState.ops.map(o=>o.credor_id).filter(Boolean))];
   if(cIds.length){
