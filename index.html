@@ -31038,6 +31038,9 @@ try { window._repState = _repState; } catch(_){} // mesma referência (debug/tes
 const _REP_MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 const _repIsPend = o => o.repasse_status==='pendente' || o.repasse_status==='preparado';
 const _repDM = s => { s=(s||'').slice(0,10); return s ? s.split('-').slice(1).reverse().join('/') : '—'; }; // dd/MM
+// Data a mostrar: a do recebimento; na falta (repasse importado, que não tem receita de
+// origem), a data em que a operação foi criada — melhor que um traço.
+const _repData = o => _repDM(o.recebido_em || (o.criada_em||'').slice(0,10));
 function _repDaysSince(s){ s=(s||'').slice(0,10); if(!s) return null; const d=new Date(s+'T00:00:00'); const now=new Date(); return Math.floor((now-d)/86400000); }
 
 // Guarda de concorrência: duas chamadas simultâneas (a tela renderiza e o menu carrega
@@ -31051,7 +31054,7 @@ async function _repLoad(){
 async function _repLoadReal(){
   const sb = getSupabase();
   const r = await sb.from('fin_operacao')
-    .select('id,credor_id,devedor_id,parcela,total_parcelas,valor_recebido,valor_capital,valor_honorario,recebido_em,repasse_status,repasse_efetuado_em,repasse_comprovante_url,lancamento_despesa_id')
+    .select('id,credor_id,devedor_id,parcela,total_parcelas,valor_recebido,valor_capital,valor_honorario,recebido_em,repasse_status,repasse_efetuado_em,repasse_comprovante_url,lancamento_despesa_id,metadata,criada_em')
     .order('recebido_em',{ascending:false}).limit(2000);
   if(r.error) throw r.error;
   // Monta a lista numa variável LOCAL e só publica em _repState.ops no fim. Publicar
@@ -31458,8 +31461,13 @@ function _repModalFazer(credId, manterSel){
   const somaCap=escolhidos.reduce((s,o)=>s+(+o.valor_capital||0),0);
   const hoje=new Date().toLocaleDateString('pt-BR');
   const parcOf=o=>(o.parcela&&o.total_parcelas)?`${o.parcela}/${o.total_parcelas}`:(o.parcela?String(o.parcela):'acordo');
-  const nomeDev=o=>o._devNome||dm[o.devedor_id]||'—';
-  const recRows=ops.map(o=>`<div style="display:grid;grid-template-columns:26px 1fr 100px 100px 100px;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid #F3EFE3;font-size:12.5px;"><input type="checkbox" ${marcado(o)?'checked':''} onchange="_repSelToggle('${credId}','${o.id}')" style="width:16px;height:16px;cursor:pointer;accent-color:#5E7C58;"><span style="color:#0A1530;${marcado(o)?'':'opacity:.45;text-decoration:line-through;'}">${escHtml(nomeDev(o))} <span style="color:#8892A6;">· ${parcOf(o)} · ${_repDM(o.recebido_em)}</span></span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#0A1530;">${_repN(o.valor_recebido)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#5E7C58;">${_repN(o.valor_honorario)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;font-weight:600;color:#9C7F40;">${_repN(o.valor_capital)}</span></div>`).join('');
+  // Nome do devedor, em ordem: o que veio da descrição do lançamento (repasse importado)
+  // → o devedor cadastrado → o que /api/repassar gravou na operação ao disparar o PIX.
+  // Sem o último, todo repasse já disparado aparecia como "—": assim que a operação nasce,
+  // a tela passa a mostrar ELA no lugar do lançamento, e ela não tem devedor_id.
+  const nomeDev=o=>o._devNome||dm[o.devedor_id]||(o.metadata&&(o.metadata.repasse_devedor_nome
+      || (o.metadata.lancamento_descricao ? _rapLerDescricao(o.metadata.lancamento_descricao).devedor : '')))||'—';
+  const recRows=ops.map(o=>`<div style="display:grid;grid-template-columns:26px 1fr 100px 100px 100px;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid #F3EFE3;font-size:12.5px;"><input type="checkbox" ${marcado(o)?'checked':''} onchange="_repSelToggle('${credId}','${o.id}')" style="width:16px;height:16px;cursor:pointer;accent-color:#5E7C58;"><span style="color:#0A1530;${marcado(o)?'':'opacity:.45;text-decoration:line-through;'}">${escHtml(nomeDev(o))} <span style="color:#8892A6;">· ${parcOf(o)} · ${_repData(o)}</span></span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#0A1530;">${_repN(o.valor_recebido)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#5E7C58;">${_repN(o.valor_honorario)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;font-weight:600;color:#9C7F40;">${_repN(o.valor_capital)}</span></div>`).join('');
   const pixRows=escolhidos.map(o=>`<div style="display:flex;align-items:center;gap:8px;margin-bottom:7px;"><input id="reppix-parc-${o.id}" value="${((_repState._parc||{})[o.id]!==undefined?(_repState._parc||{})[o.id]:(o.parcela||''))}" style="width:44px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;color:#0A1530;background:#fff;border:1px solid #D9CFB6;border-radius:6px;padding:7px 0;"><span style="font-size:13px;color:#8892A6;">-</span><div style="flex:1;font-size:13px;color:#0A1530;background:#fff;border:1px solid #E6E1D2;border-radius:6px;padding:7px 11px;">${escHtml(nomeDev(o))}</div><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:600;color:#9C7F40;width:90px;text-align:right;">${fmtR(o.valor_capital)}</span></div>`).join('');
   const n=escolhidos.length;
   const html=`
@@ -31607,7 +31615,7 @@ function _repRenderExtrato(credId){
     const pill=pago
       ? `<span style="font-size:10.5px;font-weight:700;color:#5E7C58;background:#E9EDE2;padding:4px 10px;border-radius:20px;">✓ Pago ${_repDM(o.repasse_efetuado_em||o.recebido_em)}</span>`
       : `<span style="font-size:10.5px;font-weight:700;color:#9C7F40;background:#FBF8EF;border:1px solid #E0D3A8;padding:4px 10px;border-radius:20px;">Exigível · a repassar</span>`;
-    return `<div style="display:grid;grid-template-columns:1.5fr 1.1fr 130px 130px 150px;align-items:center;gap:10px;padding:13px 18px;border-bottom:1px solid #F1ECE0;font-size:13px;"><span style="color:#0A1530;font-weight:600;">${parcOf(o)} - ${escHtml(o._devNome||dm[o.devedor_id]||'—')}</span><span style="font-size:12px;color:#5E7C58;">${_repDM(o.recebido_em)} · <b>recebida</b></span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#0A1530;">${fmtR(o.valor_recebido)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;font-weight:700;color:${pago?'#0A1530':'#9C7F40'};">${fmtR(cap)}</span><span style="text-align:center;">${pill}${pago&&!String(o.id).startsWith('L')?`<div style="margin-top:5px;"><span onclick="_repReenviarComprovante('${o.id}', this)" style="font-size:11px;font-weight:600;color:#9C7F40;cursor:pointer;">Reenviar comprovante</span></div>`:''}</span></div>`;
+    return `<div style="display:grid;grid-template-columns:1.5fr 1.1fr 130px 130px 150px;align-items:center;gap:10px;padding:13px 18px;border-bottom:1px solid #F1ECE0;font-size:13px;"><span style="color:#0A1530;font-weight:600;">${parcOf(o)} - ${escHtml(o._devNome||dm[o.devedor_id]||(o.metadata&&o.metadata.repasse_devedor_nome)||'—')}</span><span style="font-size:12px;color:#5E7C58;">${_repDM(o.recebido_em)} · <b>recebida</b></span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#0A1530;">${fmtR(o.valor_recebido)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;font-weight:700;color:${pago?'#0A1530':'#9C7F40'};">${fmtR(cap)}</span><span style="text-align:center;">${pill}${pago&&!String(o.id).startsWith('L')?`<div style="margin-top:5px;"><span onclick="_repReenviarComprovante('${o.id}', this)" style="font-size:11px;font-weight:600;color:#9C7F40;cursor:pointer;">Reenviar comprovante</span></div>`:''}</span></div>`;
   }).join('');
   const kpi=(bg,brd,lblCol,lbl,valCol,val)=>`<div style="background:${bg};border:1px solid ${brd};border-radius:10px;padding:15px 17px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:${lblCol};margin-bottom:7px;">${lbl}</div><div style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:700;color:${valCol};">${val}</div></div>`;
   return `
