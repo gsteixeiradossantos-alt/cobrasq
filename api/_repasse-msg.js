@@ -35,7 +35,22 @@ function lerDescricaoRepasse(descricao) {
   // Descrição de lançamento: o nome é o que vem ANTES do primeiro " - "; o resto são
   // anotações de trabalho ("pagar", "conferido", "Avisar", "depende do Sisbajud"), que
   // não devem aparecer nem no extrato do credor nem na mensagem.
-  const devedor = s.replace(/\s*\d+\s*\/\s*\d+\s*$/, '').split(/\s+-\s+/)[0].trim();
+  let corpo = s.replace(/\s*\d+\s*\/\s*\d+\s*$/, '').trim();
+
+  // Anotação NO COMEÇO, marcada com "#": "# Executar - Valdair Tavares dos Santos 1/5".
+  // Sem descartar, o devedor virava "# Executar" e o credor receberia um PIX descrito
+  // assim, com a mensagem dizendo "pagamento realizado por # Executar".
+  const anotacao = corpo.match(/^#[^-]*-\s*(\S.*)$/);
+  if (anotacao) corpo = anotacao[1].trim();
+
+  // Despesa criada pela ponte de recebimento: a descrição traz o nome do CREDOR, não do
+  // devedor ("Repasse ao credor — Cecato Clinica Veterinaria Ltda 2/3"). Não há devedor
+  // aqui; devolver o credor faria a mensagem dizer ao credor que ele pagou a si mesmo.
+  if (/^repasse ao credor\s*[—-]/i.test(corpo)) {
+    return { parcela: Number(m[1]), total: Number(m[2]), devedor: '' };
+  }
+
+  const devedor = corpo.split(/\s+-\s+/)[0].trim();
   return { parcela: Number(m[1]), total: Number(m[2]), devedor };
 }
 
@@ -43,16 +58,23 @@ function lerDescricaoRepasse(descricao) {
 // Limite do Asaas é 500 caracteres.
 function descricaoPix(d) {
   const nome = (d && d.devedor) || '';
-  const txt = d && d.parcela ? `${d.parcela} - ${nome}` : nome;
+  // Sem devedor, "7 - " sozinho não diz nada a quem lê o extrato.
+  const txt = nome
+    ? (d && d.parcela ? `${d.parcela} - ${nome}` : nome)
+    : (d && d.parcela ? `Repasse Cobrasq - parcela ${d.parcela}` : 'Repasse Cobrasq');
   return txt.slice(0, 500);
 }
 
 // Mensagem que acompanha o comprovante. Uma por PIX — cada parcela é uma transferência
 // e um comprovante distintos, então agrupar credor confundiria a conferência.
 function msgComprovanteCredor({ parcela, devedor }) {
-  const ref = parcela
-    ? `do pagamento referente a *parcela n. ${parcela}* do pagamento realizado por *${devedor}.*`
-    : `do pagamento realizado por *${devedor}.*`;
+  // Sem devedor identificado (descrição da ponte de recebimento), a frase omite o
+  // "realizado por" em vez de inventar um nome.
+  const ref = devedor
+    ? (parcela
+        ? `do pagamento referente a *parcela n. ${parcela}* do pagamento realizado por *${devedor}.*`
+        : `do pagamento realizado por *${devedor}.*`)
+    : (parcela ? `referente a *parcela n. ${parcela}*.` : `.`);
   return `*Setor financeiro | COBRASQ:*\n`
     + `Encaminhamos, em anexo, o comprovante de repasse ${ref}\n\n`
     + `Ficamos à disposição para quaisquer esclarecimentos.\n\n`
