@@ -19,6 +19,7 @@ const { requireUser, applyCors } = require('./_auth.js');
 const { sbFetch } = require('./_sb.js');
 const { asaasReq } = require('./_asaas.js');
 const { guardarComprovante } = require('./_comprovante.js');
+const { gerarComprovanteRepassePdf } = require('./_comprovante-pdf.js');
 const { lerDescricaoRepasse, descricaoPix, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
 const { registrarRepasseNaFicha, resolverCobrancaId } = require('./_repasse-ficha.js');
 
@@ -262,9 +263,21 @@ module.exports = async function handler(req, res) {
     // Um PIX = uma mensagem, com o PDF em anexo.
     let envio = null;
     if (concluido) {
+      // Ordem de preferência: o comprovante do BANCO primeiro. Ele é prova de
+      // terceiro, com o identificador oficial do PIX e as instituições das duas partes —
+      // documento que a COBRASQ emite sobre si mesma não tem a mesma força. O nosso PDF
+      // entra só se o Asaas não entregar o dele.
+      let pdf = (arq && arq.base64) || '';
+      if (!pdf) {
+        pdf = await gerarComprovanteRepassePdf({
+          credorNome: credor.nome, devedor: ref.devedor, parcela: ref.parcela,
+          valor: op.valor_capital, dataISO: new Date().toISOString().slice(0, 10),
+          transferId: transfer.id, chavePix: pixKey, urlAsaas: comprovanteUrl,
+        });
+      }
       envio = await enviarComprovanteCredor({
         telefone: destinoWhatsapp(credor), parcela: ref.parcela, devedor: ref.devedor,
-        base64: arq && arq.base64, ext: arq && arq.ext, comprovanteUrl,
+        base64: pdf, ext: 'pdf', comprovanteUrl,
       });
     }
 

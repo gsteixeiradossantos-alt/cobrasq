@@ -84,9 +84,21 @@ async function enviarComprovanteCredor({ telefone, parcela, devedor, base64, ext
   if (digitos.length < 10) return { enviado: false, motivo: 'credor sem telefone válido' };
 
   const msg = msgComprovanteCredor({ parcela, devedor });
-  const nomeArquivo = `Comprovante de repasse${parcela ? ` - parcela ${parcela}` : ''} - COBRASQ.${ext || 'pdf'}`;
+  // Nome do arquivo = a mesma identificação do extrato do PIX: "1 - Elen Demgenski".
+  // O credor arquiva vários comprovantes; assim ele acha pelo nome sem abrir um a um.
+  //
+  // SEM extensão: a Z-API acrescenta a dela a partir do endpoint /send-document/{ext}.
+  // Mandando "....pdf" o credor recebia "Comprovante ... .pdf.pdf" (visto em 17/08/2026).
+  // Também tira o que atrapalha nome de arquivo em Windows/Android.
+  const nomeArquivo = (descricaoPix({ parcela, devedor }) || 'Comprovante de repasse')
+    .replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim()
+    .replace(/\.(pdf|html?)$/i, '').slice(0, 90);
 
-  if (base64) {
+  // Última barreira: só anexa se for PDF de verdade. Um "%PDF" ausente aqui significa
+  // que alguém passou HTML adiante — foi o que chegou à Vetclin em 17/08/2026.
+  const pdfValido = !!base64 && Buffer.from(String(base64).slice(0, 16), 'base64').slice(0, 4).toString('latin1') === '%PDF';
+  if (base64 && !pdfValido) console.warn('[repasse-msg] anexo descartado: não é PDF');
+  if (pdfValido) {
     try {
       const r = await zapiSendDocument(tel, { document: base64, fileName: nomeArquivo, caption: msg, extension: ext || 'pdf' });
       return { enviado: !!(r && r.messageId), via: 'documento', resposta: r };

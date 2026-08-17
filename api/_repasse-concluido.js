@@ -9,6 +9,7 @@
 const { sbFetch } = require('./_sb.js');
 const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
 const { guardarComprovante } = require('./_comprovante.js');
+const { gerarComprovanteRepassePdf } = require('./_comprovante-pdf.js');
 const { registrarRepasseNaFicha, resolverCobrancaId } = require('./_repasse-ficha.js');
 const crypto = require('crypto');
 
@@ -104,9 +105,19 @@ module.exports = async function handler(req, res) {
       if (!devNome && op.metadata && op.metadata.lancamento_descricao) {
         devNome = lerDescricaoRepasse(op.metadata.lancamento_descricao).devedor;
       }
+      // Comprovante do BANCO primeiro; o nosso só se o Asaas não entregar (ver _repassar.js).
+      let pdf = (arqCompr && arqCompr.base64) || '';
+      if (!pdf) {
+        pdf = await gerarComprovanteRepassePdf({
+          credorNome: credor.nome, devedor: devNome, parcela: op.parcela,
+          valor: op.valor_capital, dataISO: new Date().toISOString().slice(0, 10),
+          transferId: transferId || op.repasse_asaas_transfer_id,
+          chavePix: (op.metadata && op.metadata.repasse_pix_key) || '', urlAsaas: comprovanteUrl,
+        });
+      }
       envio = await enviarComprovanteCredor({
         telefone: destinoWhatsapp(credor), parcela: op.parcela, devedor: devNome,
-        base64: arqCompr && arqCompr.base64, ext: arqCompr && arqCompr.ext, comprovanteUrl,
+        base64: pdf, ext: 'pdf', comprovanteUrl,
       });
       // Ficha do caso — idempotente pelo transacao_id, então não duplica se /api/repassar
       // já tiver registrado ao concluir na hora.

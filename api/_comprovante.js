@@ -33,19 +33,49 @@ function extDe(contentType, url) {
 }
 
 // Retorna { storage_path, bytes, content_type } ou null. Nunca lança.
+// O `transactionReceiptUrl` aponta para uma PÁGINA. Dentro dela existe o link do
+// comprovante de verdade — o mesmo do botão "Baixar pdf":
+//     <a href="/transactionReceipt/pdf/4869009874700064">
+// Este é o comprovante do BANCO, com o identificador oficial do PIX (E2E), as
+// instituições e os CNPJs das duas partes. Vale muito mais que qualquer documento que a
+// COBRASQ produza sobre si mesma — por isso é o que se busca primeiro.
+async function baixarPdfDaPagina(html, origem) {
+  const m = String(html || '').match(/\/transactionReceipt\/pdf\/\d+/);
+  if (!m) return null;
+  try {
+    const base = new URL(origem);
+    const r = await fetch(`${base.origin}${m[0]}`, { redirect: 'follow' });
+    if (!r.ok) { console.warn('[comprovante] pdf do Asaas:', r.status); return null; }
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.slice(0, 4).toString('latin1') !== '%PDF') { console.warn('[comprovante] link "Baixar pdf" não devolveu PDF'); return null; }
+    return buf;
+  } catch (e) { console.warn('[comprovante] pdf do Asaas:', e.message); return null; }
+}
+
 async function guardarComprovante(comprovanteUrl, transferId) {
   if (!comprovanteUrl || !SB_URL || !SB_KEY) return null;
   try {
     const r = await fetch(comprovanteUrl);
     if (!r.ok) { console.warn('[comprovante] download falhou:', r.status); return null; }
-    const ct = r.headers.get('content-type') || 'application/pdf';
-    const buf = Buffer.from(await r.arrayBuffer());
+    let ct = r.headers.get('content-type') || 'application/pdf';
+    let buf = Buffer.from(await r.arrayBuffer());
+    // Veio a página: segue o link "Baixar pdf" e fica com o PDF do banco.
+    if (buf.slice(0, 4).toString('latin1') !== '%PDF') {
+      const pdf = await baixarPdfDaPagina(buf.toString('utf8'), comprovanteUrl);
+      if (pdf) { buf = pdf; ct = 'application/pdf'; }
+    }
+    // O `transactionReceiptUrl` do Asaas devolve uma PÁGINA (text/html), não um arquivo.
+    // Em 17/08/2026 essa página foi anexada no WhatsApp com nome ".pdf" e o credor
+    // recebeu algo que não abre. Só tratamos como documento o que É documento: PDF
+    // começa com "%PDF". Fora disso, guarda como .html (registro) e NÃO devolve base64
+    // para envio — quem manda o comprovante é _comprovante-pdf.js.
+    const ehPdf = buf.slice(0, 4).toString('latin1') === '%PDF';
     // Comprovante do Asaas é um PDF pequeno. Acima de 10 MB é sinal de que veio
     // uma página de erro ou HTML, não o documento — não guarda.
     if (!buf.length || buf.length > 10 * 1024 * 1024) {
       console.warn('[comprovante] tamanho suspeito:', buf.length); return null;
     }
-    const path = caminho(transferId, extDe(ct, comprovanteUrl));
+    const path = caminho(transferId, ehPdf ? 'pdf' : (ct.includes('html') ? 'html' : extDe(ct, comprovanteUrl)));
     const up = await fetch(`${SB_URL}/storage/v1/object/${BUCKET}/${path}`, {
       method: 'POST',
       headers: {
@@ -60,8 +90,9 @@ async function guardarComprovante(comprovanteUrl, transferId) {
     // o arquivamento falhou — o envio ao credor não depende dele.
     return {
       storage_path: up.ok ? path : null,
-      bytes: buf.length, content_type: ct,
-      base64: buf.toString('base64'), ext: extDe(ct, comprovanteUrl),
+      bytes: buf.length, content_type: ct, eh_pdf: ehPdf,
+      base64: ehPdf ? buf.toString('base64') : null,
+      ext: ehPdf ? 'pdf' : null,
     };
   } catch (e) {
     console.warn('[comprovante] erro:', e.message);
