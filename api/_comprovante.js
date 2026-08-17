@@ -40,12 +40,18 @@ async function guardarComprovante(comprovanteUrl, transferId) {
     if (!r.ok) { console.warn('[comprovante] download falhou:', r.status); return null; }
     const ct = r.headers.get('content-type') || 'application/pdf';
     const buf = Buffer.from(await r.arrayBuffer());
+    // O `transactionReceiptUrl` do Asaas devolve uma PÁGINA (text/html), não um arquivo.
+    // Em 17/08/2026 essa página foi anexada no WhatsApp com nome ".pdf" e o credor
+    // recebeu algo que não abre. Só tratamos como documento o que É documento: PDF
+    // começa com "%PDF". Fora disso, guarda como .html (registro) e NÃO devolve base64
+    // para envio — quem manda o comprovante é _comprovante-pdf.js.
+    const ehPdf = buf.slice(0, 4).toString('latin1') === '%PDF';
     // Comprovante do Asaas é um PDF pequeno. Acima de 10 MB é sinal de que veio
     // uma página de erro ou HTML, não o documento — não guarda.
     if (!buf.length || buf.length > 10 * 1024 * 1024) {
       console.warn('[comprovante] tamanho suspeito:', buf.length); return null;
     }
-    const path = caminho(transferId, extDe(ct, comprovanteUrl));
+    const path = caminho(transferId, ehPdf ? 'pdf' : (ct.includes('html') ? 'html' : extDe(ct, comprovanteUrl)));
     const up = await fetch(`${SB_URL}/storage/v1/object/${BUCKET}/${path}`, {
       method: 'POST',
       headers: {
@@ -60,8 +66,9 @@ async function guardarComprovante(comprovanteUrl, transferId) {
     // o arquivamento falhou — o envio ao credor não depende dele.
     return {
       storage_path: up.ok ? path : null,
-      bytes: buf.length, content_type: ct,
-      base64: buf.toString('base64'), ext: extDe(ct, comprovanteUrl),
+      bytes: buf.length, content_type: ct, eh_pdf: ehPdf,
+      base64: ehPdf ? buf.toString('base64') : null,
+      ext: ehPdf ? 'pdf' : null,
     };
   } catch (e) {
     console.warn('[comprovante] erro:', e.message);

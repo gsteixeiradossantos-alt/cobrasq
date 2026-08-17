@@ -86,7 +86,11 @@ async function enviarComprovanteCredor({ telefone, parcela, devedor, base64, ext
   const msg = msgComprovanteCredor({ parcela, devedor });
   const nomeArquivo = `Comprovante de repasse${parcela ? ` - parcela ${parcela}` : ''} - COBRASQ.${ext || 'pdf'}`;
 
-  if (base64) {
+  // Última barreira: só anexa se for PDF de verdade. Um "%PDF" ausente aqui significa
+  // que alguém passou HTML adiante — foi o que chegou à Vetclin em 17/08/2026.
+  const pdfValido = !!base64 && Buffer.from(String(base64).slice(0, 16), 'base64').slice(0, 4).toString('latin1') === '%PDF';
+  if (base64 && !pdfValido) console.warn('[repasse-msg] anexo descartado: não é PDF');
+  if (pdfValido) {
     try {
       const r = await zapiSendDocument(tel, { document: base64, fileName: nomeArquivo, caption: msg, extension: ext || 'pdf' });
       return { enviado: !!(r && r.messageId), via: 'documento', resposta: r };
