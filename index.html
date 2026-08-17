@@ -29156,9 +29156,12 @@ const FIN_SECTIONS = {
   // ao abrir o Financeiro. Sob shell própria (faixa escura) — ver FIN_CASCATA_TABS.
   fila:          { label:'Fila', sub:'precisa de você', subtabs:[{id:'fila', label:'Fila'}] },
   visao:         { label:'Caixa', sub:'o dinheiro da COBRASQ', subtabs:[{id:'visao', label:'Caixa'}] },
+  // "Pagar repasses" saiu daqui em 17/08/2026: o pagamento de repasse mora em
+  // "Repasses a clientes", que já tinha a fila, o modal de PIX por devedor e o
+  // comprovante. Esta aba existia só porque os repasses importados do Controlle não
+  // apareciam lá — agora aparecem.
   movimentacoes: { label:'Movimentações', sub:'analisar e confirmar', subtabs:[
-                     {id:'lancamentos', label:'Movimentações'},
-                     {id:'repassesapagar', label:'Pagar repasses'} ] },
+                     {id:'lancamentos', label:'Movimentações'} ] },
   // Receitas de bloqueio/penhora judicial (Sisbajud + Penhora de remuneração), tiradas
   // de Movimentações e isoladas aqui a pedido do Gustavo (2026-08-06). Acordos Judiciais
   // (acordo com processo judicial, mas cobrado por boleto/Pix normal) fica de FORA desta
@@ -31013,7 +31016,6 @@ function renderFinTab(tab){
   else if(tab==='judicial') renderFinJudicial(el);
   else if(tab==='relatorios') renderFinRelatorios(el);
   else if(tab==='cartoes') renderFinCartoes(el);
-  else if(tab==='repassesapagar') renderFinRepassesAPagar(el);
   else if(tab==='asaas') renderFinAsaas(el);
   else if(tab==='repasses') renderFinRepassesCascata(el);
   else if(tab==='diagnostico') renderFinDiagnostico(el);
@@ -31041,10 +31043,37 @@ function _repDaysSince(s){ s=(s||'').slice(0,10); if(!s) return null; const d=ne
 async function _repLoad(){
   const sb = getSupabase();
   const r = await sb.from('fin_operacao')
-    .select('id,credor_id,devedor_id,parcela,total_parcelas,valor_recebido,valor_capital,valor_honorario,recebido_em,repasse_status,repasse_efetuado_em,repasse_comprovante_url')
+    .select('id,credor_id,devedor_id,parcela,total_parcelas,valor_recebido,valor_capital,valor_honorario,recebido_em,repasse_status,repasse_efetuado_em,repasse_comprovante_url,lancamento_despesa_id')
     .order('recebido_em',{ascending:false}).limit(2000);
   if(r.error) throw r.error;
   _repState.ops = r.data || [];
+
+  // Repasses IMPORTADOS do Controlle entram na MESMA fila. Eles não têm fin_operacao —
+  // eram invisíveis aqui e por isso ganharam uma segunda tela no Financeiro, que agora
+  // deixa de existir. Duas telas para pagar repasse é uma tela a mais.
+  //
+  // Viram "operações de mentira" com o mesmo formato, para _repAgg, o modal e o confirmar
+  // funcionarem sem saber a diferença. Quem já tem operação fica de fora, senão o valor
+  // seria contado duas vezes.
+  try{
+    const jaTemOp = new Set(_repState.ops.map(o=>o.lancamento_despesa_id).filter(Boolean));
+    const pend = await finApi.listRepassesAPagar();
+    _repState.lancs = (pend||[]).filter(l => l.credor && l.credor.id && !jaTemOp.has(l.id));
+    for(const l of _repState.lancs){
+      const d = _rapLerDescricao(l.descricao);
+      _repState.ops.push({
+        id: 'L'+l.id, _lancId: l.id, _devNome: d.devedor, _origem: 'lancamento',
+        credor_id: l.credor.id, devedor_id: null,
+        parcela: d.parcela, total_parcelas: d.total,
+        // Não sabemos a receita que originou o repasse importado: `recebido` e
+        // `honorário` ficam em zero em vez de um número inventado.
+        valor_recebido: 0, valor_honorario: 0,
+        valor_capital: Math.abs(+l.valor||0),
+        recebido_em: l.data_vencimento, repasse_status: 'pendente',
+        repasse_efetuado_em: null, repasse_comprovante_url: null,
+      });
+    }
+  }catch(e){ console.warn('[repasses] lançamentos importados:', e.message||e); _repState.lancs=[]; }
   _repState.credMap = {}; _repState.devMap = {};
   const cIds=[...new Set(_repState.ops.map(o=>o.credor_id).filter(Boolean))];
   if(cIds.length){
@@ -31108,7 +31137,7 @@ function _repShell(innerHtml, agg){
   const now=new Date();
   const mesLabel=_REP_MESES[now.getMonth()]+' de '+now.getFullYear();
   const nSaldo=agg.nComSaldo;
-  const nRevisar=_repState.ops.filter(_repIsPend).length;
+  const nRevisar=_repState.ops.filter(o=>_repIsPend(o) && !o._origem).length;
   const tab=_repState.tab;
   const pill=(id,label,badge)=>{
     const active=tab===id;
@@ -31266,7 +31295,10 @@ function _repRenderPainel(agg){
 // (best-effort sobre o relacional; sem depender de totais de acordo não cadastrados).
 function _repRenderRevisar(){
   const ops=_repState.ops, cm=_repState.credMap, dm=_repState.devMap;
-  const pend=ops.filter(_repIsPend).slice().sort((a,b)=>(b.recebido_em||'').localeCompare(a.recebido_em||''));
+  // Só as sugestões automáticas. Repasse importado do Controlle já foi conferido lá e
+  // não tem receita de origem para revisar — vai direto para "A repassar", senão esta
+  // aba viraria 300 cartões com "R$ 0,00 recebido".
+  const pend=ops.filter(o=>_repIsPend(o) && !o._origem).slice().sort((a,b)=>(b.recebido_em||'').localeCompare(a.recebido_em||''));
   const totalCap=pend.reduce((s,o)=>s+(+o.valor_capital||0),0);
   // capital pendente por devedor (para "aberto antes/após").
   const pendByDev={};
@@ -31374,9 +31406,10 @@ function _repModalFazer(credId){
   const somaHon=ops.reduce((s,o)=>s+(+o.valor_honorario||0),0);
   const somaCap=ops.reduce((s,o)=>s+(+o.valor_capital||0),0);
   const hoje=new Date().toLocaleDateString('pt-BR');
-  const parcOf=o=>(o.parcela&&o.total_parcelas)?`${o.parcela}/${o.total_parcelas}`:'acordo';
-  const recRows=ops.map(o=>`<div style="display:grid;grid-template-columns:26px 1fr 100px 100px 100px;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid #F3EFE3;font-size:12.5px;"><span style="width:16px;height:16px;border-radius:4px;background:#5E7C58;color:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;">✓</span><span style="color:#0A1530;">${escHtml(dm[o.devedor_id]||'—')} <span style="color:#8892A6;">· ${parcOf(o)} · ${_repDM(o.recebido_em)}</span></span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#0A1530;">${_repN(o.valor_recebido)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#5E7C58;">${_repN(o.valor_honorario)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;font-weight:600;color:#9C7F40;">${_repN(o.valor_capital)}</span></div>`).join('');
-  const pixRows=ops.map(o=>`<div style="display:flex;align-items:center;gap:8px;margin-bottom:7px;"><input id="reppix-parc-${o.id}" value="${o.parcela||''}" style="width:44px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;color:#0A1530;background:#fff;border:1px solid #D9CFB6;border-radius:6px;padding:7px 0;"><span style="font-size:13px;color:#8892A6;">-</span><div style="flex:1;font-size:13px;color:#0A1530;background:#fff;border:1px solid #E6E1D2;border-radius:6px;padding:7px 11px;">${escHtml(dm[o.devedor_id]||'—')}</div><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:600;color:#9C7F40;width:90px;text-align:right;">${fmtR(o.valor_capital)}</span></div>`).join('');
+  const parcOf=o=>(o.parcela&&o.total_parcelas)?`${o.parcela}/${o.total_parcelas}`:(o.parcela?String(o.parcela):'acordo');
+  const nomeDev=o=>o._devNome||dm[o.devedor_id]||'—';
+  const recRows=ops.map(o=>`<div style="display:grid;grid-template-columns:26px 1fr 100px 100px 100px;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid #F3EFE3;font-size:12.5px;"><span style="width:16px;height:16px;border-radius:4px;background:#5E7C58;color:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;">✓</span><span style="color:#0A1530;">${escHtml(nomeDev(o))} <span style="color:#8892A6;">· ${parcOf(o)} · ${_repDM(o.recebido_em)}</span></span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#0A1530;">${_repN(o.valor_recebido)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#5E7C58;">${_repN(o.valor_honorario)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;font-weight:600;color:#9C7F40;">${_repN(o.valor_capital)}</span></div>`).join('');
+  const pixRows=ops.map(o=>`<div style="display:flex;align-items:center;gap:8px;margin-bottom:7px;"><input id="reppix-parc-${o.id}" value="${o.parcela||''}" style="width:44px;text-align:center;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;color:#0A1530;background:#fff;border:1px solid #D9CFB6;border-radius:6px;padding:7px 0;"><span style="font-size:13px;color:#8892A6;">-</span><div style="flex:1;font-size:13px;color:#0A1530;background:#fff;border:1px solid #E6E1D2;border-radius:6px;padding:7px 11px;">${escHtml(nomeDev(o))}</div><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:600;color:#9C7F40;width:90px;text-align:right;">${fmtR(o.valor_capital)}</span></div>`).join('');
   const n=ops.length;
   const html=`
   <div onclick="_repCloseModal(event)" style="position:fixed;inset:0;z-index:100000;background:rgba(10,21,48,.42);display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:34px 16px;">
@@ -31438,10 +31471,12 @@ async function _repConfirmarLote(credId){
     const o=ops[i];
     if(st) st.textContent=`Enviando PIX ${i+1}/${ops.length}…`;
     const parc=(document.getElementById('reppix-parc-'+o.id)?.value||o.parcela||'').toString().trim();
-    const dev=dm[o.devedor_id]||'';
+    const dev=o._devNome||dm[o.devedor_id]||'';
     const descricao=(parc?parc+' - ':'')+dev;
     try{
-      const res=await fetch('/api/repassar',{ method:'POST', headers:{ ...(await authHeaders()), 'Content-Type':'application/json' }, body: JSON.stringify({ operacao_id:o.id, pix_key:pixKey||undefined, descricao }) });
+      const res=await fetch('/api/repassar',{ method:'POST', headers:{ ...(await authHeaders()), 'Content-Type':'application/json' }, body: JSON.stringify(o._lancId
+        ? { lancamento_id:o._lancId, credor_id:o.credor_id, pix_key:pixKey||undefined, descricao }
+        : { operacao_id:o.id, pix_key:pixKey||undefined, descricao }) });
       const j=await res.json().catch(()=>({}));
       if(!res.ok) throw new Error(j.error||('HTTP '+res.status));
       if(j.skipped) { /* já em andamento/efetuado — conta como ok */ }
@@ -34769,149 +34804,23 @@ async function renderFinCartoes(el){
   }
 }
 
-// ══════════════════════════════════════════════════════════════
-// PAGAR REPASSES — seleciona vários e confirma em bloco (Asaas /transfers)
-// ──────────────────────────────────────────────────────────────
-// Quem aperta o botão é o proprietário: o disparo NUNCA é automático. A cada PIX
-// o backend (/api/repassar) cria/reusa a fin_operacao do lançamento, herdando a
-// trava anti-duplo-repasse, dá baixa no lançamento e manda o comprovante ao credor.
-window._rapState = { itens: [], sel: new Set(), carregando: false };
-
-async function renderFinRepassesAPagar(el){
-  el.innerHTML = `<div style="color:#8A94A6;font-size:13px;">Carregando repasses em aberto…</div>`;
-  try{
-    const [itens, clientes] = await Promise.all([
-      finApi.listRepassesAPagar(),
-      finApi.listClientesParaCredor().catch(()=>[]),
-    ]);
-    window._rapState.itens = itens;
-    window._rapState.clientes = clientes;
-    window._rapState.sel = new Set();
-  }catch(e){
-    el.innerHTML = `<div style="color:#A65A4A;font-size:13px;">Erro ao carregar: ${escHtml(e.message||String(e))}</div>`;
-    return;
-  }
-  _rapPintar(el);
-}
-
-function _rapPintar(el){
-  const st = window._rapState;
-  const itens = st.itens;
-  const semCredor = itens.filter(i=>!(i.credor && i.credor.id)).length;
-  const totalGeral = itens.reduce((s,i)=>s+Math.abs(+i.valor||0),0);
-  const selTotal = itens.filter(i=>st.sel.has(i.id)).reduce((s,i)=>s+Math.abs(+i.valor||0),0);
-  el.innerHTML = `
-    <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:6px;">
-      <span style="font-family:'Fraunces',Georgia,serif;font-size:26px;color:#0A1530;">Pagar repasses</span>
-      <span style="font-size:12.5px;color:#8A94A6;">${itens.length} em aberto · ${fmtR(totalGeral)}</span>
-    </div>
-    <div style="font-size:12.5px;color:#8A94A6;margin-bottom:14px;max-width:80ch;">
-      Cada item vira um PIX próprio pelo Asaas — nunca somados. Ao concluir, o lançamento
-      recebe baixa e o comprovante vai ao credor por WhatsApp.
-      ${semCredor?`<br><span style="color:#A65A4A;">${semCredor} sem credor vinculado — esses não podem ser pagos até a cobrança apontar um cliente.</span>`:''}
-    </div>
-    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:#FBFAF7;border:1px solid #E6E1D2;border-radius:9px;padding:11px 14px;margin-bottom:12px;">
-      <span style="font-size:12.5px;cursor:pointer;color:#9C7F40;font-weight:700;" onclick="_rapSelTodos(true)">Selecionar pagáveis</span>
-      <span style="font-size:12.5px;cursor:pointer;color:#8A94A6;" onclick="_rapSelTodos(false)">Limpar</span>
-      <span style="flex:1"></span>
-      <span style="font-size:12.5px;color:#0A1530;">Selecionados: <b>${st.sel.size}</b> · <b style="font-family:'JetBrains Mono',monospace;">${fmtR(selTotal)}</b></span>
-      <button ${st.sel.size?'':'disabled'} onclick="_rapConfirmar()"
-        style="border:0;border-radius:8px;padding:9px 16px;font-size:13px;font-weight:700;cursor:${st.sel.size?'pointer':'not-allowed'};background:${st.sel.size?'#C9A961':'#E6E1D2'};color:#0A1530;">
-        Pagar selecionados</button>
-    </div>
-    <div id="rap-status" style="font-size:12.5px;color:#9C7F40;margin-bottom:10px;"></div>
-    <div class="scrollx" style="overflow-x:auto;background:#fff;border:1px solid #E6E1D2;border-radius:10px;">
-    <table style="width:100%;border-collapse:collapse;font-size:13px;min-width:44rem;">
-      <thead><tr style="background:#F5F2EA;">
-        <th style="width:38px;padding:9px 10px;"></th>
-        <th style="text-align:left;padding:9px 10px;font-size:10px;color:#8892A6;text-transform:uppercase;letter-spacing:.08em;">Vencimento</th>
-        <th style="text-align:left;padding:9px 10px;font-size:10px;color:#8892A6;text-transform:uppercase;letter-spacing:.08em;">Devedor / parcela</th>
-        <th style="text-align:left;padding:9px 10px;font-size:10px;color:#8892A6;text-transform:uppercase;letter-spacing:.08em;">Credor</th>
-        <th style="text-align:right;padding:9px 10px;font-size:10px;color:#8892A6;text-transform:uppercase;letter-spacing:.08em;">Valor</th>
-      </tr></thead>
-      <tbody>${itens.map(i=>{
-        const pagavel = !!(i.credor && i.credor.id);
-        return `<tr style="border-top:1px solid #F1ECE0;${pagavel?'':'opacity:.55;'}">
-          <td style="padding:8px 10px;">${pagavel?`<input type="checkbox" ${st.sel.has(i.id)?'checked':''} onchange="_rapToggle(${i.id})">`:'—'}</td>
-          <td style="padding:8px 10px;font-family:'JetBrains Mono',monospace;white-space:nowrap;">${fmtDataBR(i.data_vencimento)}</td>
-          <td style="padding:8px 10px;">${escHtml(i.descricao)}
-            <div style="font-size:11px;color:#8A94A6;margin-top:2px;">no extrato do credor: <b>${escHtml(_rapDescricaoPix(i.descricao))}</b></div></td>
-          <td style="padding:8px 10px;">${pagavel
-            ? escHtml(i.credor.nome||'(sem nome)')
-            : `<select onchange="_rapSetCredor(${i.id}, this.value)" style="max-width:210px;font-size:12px;padding:4px 6px;border:1px solid #E6E1D2;border-radius:6px;background:#fff;">
-                 <option value="">escolher credor…</option>
-                 ${(st.clientes||[]).map(c=>`<option value="${escHtml(c.id)}">${escHtml(c.nome||'(sem nome)')}</option>`).join('')}
-               </select>`}</td>
-          <td style="padding:8px 10px;text-align:right;font-family:'JetBrains Mono',monospace;white-space:nowrap;">${fmtR(Math.abs(+i.valor||0))}</td>
-        </tr>`;
-      }).join('')}</tbody>
-    </table></div>`;
-}
-
-// Prévia do que o credor vai ler no extrato do PIX: "<nº parcela> - <devedor>", sem as
-// anotações internas ("pagar", "conferido", "depende do Sisbajud"). Espelha
-// descricaoPix() de api/_repasse-msg.js — o servidor é quem manda; isto é só para o
-// Gustavo conferir antes de confirmar o pagamento.
-function _rapDescricaoPix(descricao){
+// Lê a descrição de um lançamento de repasse: "Fulano - pagar - conferido 7/11" vira
+// { parcela:7, total:11, devedor:'Fulano' }. As anotações internas ("pagar", "conferido",
+// "Avisar", "depende do Sisbajud") ficam de fora do que o credor lê.
+//
+// Só desmonta quando o texto termina em N/M — a assinatura da descrição importada do
+// Controlle. Texto já no formato "<nº> - <devedor>" passa intacto, e nome de devedor que
+// contenha " - " não é cortado. Espelha lerDescricaoRepasse() de api/_repasse-msg.js.
+function _rapLerDescricao(descricao){
   const s = String(descricao||'').trim();
   const m = s.match(/(\d+)\s*\/\s*(\d+)\s*$/);
-  const devedor = s.replace(/\s*\d+\s*\/\s*\d+\s*$/,'').split(/\s+-\s+/)[0].trim();
-  return m ? `${+m[1]} - ${devedor}` : devedor;
-}
-
-// Escolha manual do credor. Só marca na memória da tela — quem grava é o backend,
-// ao pagar, junto com as outras parcelas em aberto do mesmo devedor. Assim nada é
-// escrito no banco por um clique acidental num seletor.
-function _rapSetCredor(id, clienteId){
-  const st = window._rapState;
-  const it = st.itens.find(x=>x.id===id); if(!it) return;
-  const cli = (st.clientes||[]).find(c=>c.id===clienteId);
-  it.credor = cli ? { id: cli.id, nome: cli.nome, escolhido: true } : null;
-  if(!cli) st.sel.delete(id);
-  const el = document.getElementById('fin-content'); if(el) _rapPintar(el);
-}
-
-function _rapToggle(id){
-  const s = window._rapState.sel;
-  if(s.has(id)) s.delete(id); else s.add(id);
-  const el = document.getElementById('fin-content'); if(el) _rapPintar(el);
-}
-function _rapSelTodos(marcar){
-  const st = window._rapState;
-  st.sel = new Set(marcar ? st.itens.filter(i=>i.credor&&i.credor.id).map(i=>i.id) : []);
-  const el = document.getElementById('fin-content'); if(el) _rapPintar(el);
-}
-
-// Confirmação em bloco: mostra o total, pede um "sim" e dispara UM PIX por item.
-// Falha de um não interrompe os outros — o resultado sai discriminado no fim.
-async function _rapConfirmar(){
-  const st = window._rapState;
-  const alvos = st.itens.filter(i=>st.sel.has(i.id) && i.credor && i.credor.id);
-  if(!alvos.length) return;
-  const total = alvos.reduce((s,i)=>s+Math.abs(+i.valor||0),0);
-  if(!confirm(`Enviar ${alvos.length} PIX pelo Asaas, somando ${fmtR(total)}?\n\n`
-    + `Cada um é uma transferência separada ao credor. Esta ação move dinheiro de verdade.`)) return;
-
-  const stEl = document.getElementById('rap-status');
-  let ok=0, falha=0; const erros=[];
-  for(let i=0;i<alvos.length;i++){
-    const it = alvos[i];
-    if(stEl) stEl.textContent = `Enviando ${i+1} de ${alvos.length}…`;
-    try{
-      const r = await fetch('/api/repassar', { method:'POST',
-        headers:{ ...(await authHeaders()), 'Content-Type':'application/json' },
-        body: JSON.stringify({ lancamento_id: it.id, descricao: it.descricao.slice(0,120),
-          credor_id: (it.credor && it.credor.escolhido) ? it.credor.id : undefined }) });
-      const j = await r.json().catch(()=>({}));
-      if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
-      ok++;
-    }catch(e){ falha++; erros.push(`${it.descricao}: ${e.message||e}`); }
+  if(!m){
+    const pronto = s.match(/^(\d+)\s*-\s*(\S.*)$/);
+    return pronto ? { parcela:+pronto[1], total:null, devedor:pronto[2].trim() }
+                  : { parcela:null, total:null, devedor:s };
   }
-  if(stEl) stEl.textContent = '';
-  showToast(`${ok} PIX enviado${ok!==1?'s':''}${falha?`, ${falha} com erro`:''}.`, falha?'danger':'success');
-  if(erros.length) console.warn('[pagar repasses]', erros);
-  const el = document.getElementById('fin-content');
-  if(el) await renderFinRepassesAPagar(el);
+  const devedor = s.replace(/\s*\d+\s*\/\s*\d+\s*$/,'').split(/\s+-\s+/)[0].trim();
+  return { parcela:+m[1], total:+m[2], devedor };
 }
 
 async function verComprasFatura(faturaId){
