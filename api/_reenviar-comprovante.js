@@ -13,6 +13,7 @@ const { sbFetch } = require('./_sb.js');
 const { guardarComprovante } = require('./_comprovante.js');
 const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_comprovante-pdf.js');
 const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
+const { registrarRepasseNaFicha, resolverCobrancaId } = require('./_repasse-ficha.js');
 
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 
@@ -70,6 +71,22 @@ module.exports = async function handler(req, res) {
       base64: pdf, ext: 'pdf', comprovanteUrl: url,
     });
 
+    // Registra na ficha do caso, se houver. Não é só reenvio de mensagem: quando o
+    // repasse foi pago ANTES de o devedor ter cobrança (caso do Silvano Mezzalira em
+    // 17/08/2026), a ficha ficou sem o comprovante e não havia como preencher depois —
+    // o registro só acontecia no instante do pagamento. Agora este botão também remedia
+    // isso. É idempotente: mesma transferência não vira duas linhas.
+    let ficha = null;
+    const cobrancaId = await resolverCobrancaId(op);
+    if (cobrancaId && pdf) {
+      ficha = await registrarRepasseNaFicha({
+        cobrancaId, credor, valor: op.valor_capital,
+        transferId: op.repasse_asaas_transfer_id,
+        dataPix: String(op.repasse_efetuado_em || '').slice(0, 10),
+        comprovante: { base64: pdf, ext: 'pdf' },
+      });
+    }
+
     if (arq && arq.storage_path) {
       await sbFetch(`fin_operacao?id=eq.${op.id}`, {
         method: 'PATCH', prefer: 'return=minimal',
@@ -80,6 +97,7 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({
       ok: true, operacao_id: op.id, credor: credor.nome, devedor: devNome, parcela: op.parcela,
       enviado: !!envio.enviado, via: envio.via || null, motivo: envio.motivo || null,
+      ficha: cobrancaId ? (ficha && ficha.duplicado ? 'já estava na ficha' : (ficha ? 'registrado na ficha' : 'falhou ao registrar')) : 'lançamento sem cobrança vinculada',
       origem_pdf: (arq && arq.base64) ? 'asaas' : (pdf ? 'cobrasq' : 'nenhum'),
       arquivo_guardado: (arq && arq.storage_path) || null,
     });
