@@ -113,4 +113,29 @@ async function gerarComprovanteRepassePdf(d) {
   }
 }
 
-module.exports = { gerarComprovanteRepassePdf, comprovanteHtml };
+// Imprime a PÁGINA do comprovante do Asaas em PDF (Chrome headless, JS executado).
+// Sai no layout que o Asaas mostra no navegador — melhor que o PDF estático que eles
+// servem em /transactionReceipt/pdf, que é uma versão simplificada.
+// Best-effort: '' em qualquer falha, e quem chama cai no PDF estático.
+async function imprimirPaginaAsaasPdf(comprovanteUrl) {
+  const base = (process.env.APP_BASE_URL || '').replace(/\/+$/, '');
+  const secret = process.env.EMIT_ACORDO_SECRET;
+  if (!base || !secret || !comprovanteUrl) return '';
+  // A URL vem do Asaas com um %0A no fim (quebra de linha) que atrapalha o goto.
+  const limpa = String(comprovanteUrl).trim().replace(/%0A$/i, '');
+  try {
+    const r = await fetch(base + '/api/gerar-pdf', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-emit-secret': secret },
+      body: JSON.stringify({ url: limpa }),
+      signal: AbortSignal.timeout(28000),
+    });
+    const j = await r.json().catch(() => null);
+    return (r.ok && j && typeof j.base64 === 'string') ? j.base64 : '';
+  } catch (e) {
+    console.warn('[comprovante-pdf] imprimir página:', e.message);
+    return '';
+  }
+}
+
+module.exports = { gerarComprovanteRepassePdf, comprovanteHtml, imprimirPaginaAsaasPdf };

@@ -57,13 +57,32 @@ module.exports = async function handler(req, res) {
   }
 
   let html = '';
+  let url = '';
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
     html = body.html || '';
+    url = body.url || '';
   } catch { /* corpo inválido cai na validação abaixo */ }
 
-  if (!html || typeof html !== 'string') {
-    return res.status(400).json({ error: 'campo "html" ausente ou inválido' });
+  // Modo URL: abre a PÁGINA e imprime, em vez de renderizar HTML recebido. Existe para o
+  // comprovante de repasse — a página do Asaas monta o conteúdo por JavaScript e sai num
+  // layout melhor que o PDF estático que eles servem; com setContent o JS não roda (a
+  // origem seria about:blank e as chamadas dele seriam cross-origin).
+  //
+  // ALLOWLIST FECHADA. Aceitar URL arbitrária aqui seria SSRF: este endpoint roda no
+  // servidor, com acesso à rede interna da Vercel e a metadata endpoints. Só entra host
+  // que a COBRASQ precisa imprimir.
+  const HOSTS_PERMITIDOS = ['www.asaas.com', 'asaas.com'];
+  if (url) {
+    let u = null;
+    try { u = new URL(url); } catch { return res.status(400).json({ error: 'url inválida' }); }
+    if (u.protocol !== 'https:' || !HOSTS_PERMITIDOS.includes(u.hostname)) {
+      return res.status(400).json({ error: 'url não permitida' });
+    }
+  }
+
+  if (!url && (!html || typeof html !== 'string')) {
+    return res.status(400).json({ error: 'informe "html" ou "url"' });
   }
   if (html.length > 6 * 1024 * 1024) {
     return res.status(413).json({ error: 'HTML acima do limite (6 MB)' });
@@ -85,18 +104,28 @@ module.exports = async function handler(req, res) {
     const page = await browser.newPage();
     // networkidle0 já aguarda o download das fontes (Google Fonts via <link>),
     // então o page.pdf renderiza com a tipografia correta (validado: a fonte sai certa).
-    await page.setContent(html, { waitUntil: 'networkidle0', timeout: 25000 });
+    if (url) {
+      await page.goto(url, { waitUntil: 'networkidle0', timeout: 25000 });
+      // A página do Asaas mostra "Aguarde" enquanto busca os dados. Sem esperar o
+      // conteúdo real aparecer, o PDF sai com a tela de carregamento.
+      await page.waitForFunction(
+        () => !/Aguarde/i.test(document.body.innerText) && document.body.innerText.length > 300,
+        { timeout: 15000 },
+      ).catch(() => { /* segue e imprime o que houver */ });
+    } else {
+      await page.setContent(html, { waitUntil: 'networkidle0', timeout: 25000 });
+    }
 
     // Rodapé DE PÁGINA (footerTemplate) só p/ os documentos do cliente, que sinalizam via
     // <meta name="pdf-footer-band">. Renderiza a faixa escura na BASE de TODA página (o
     // @page do documento reserva a margem inferior). Gotchas do Chromium tratados:
     // font-size explícito no root (o default é ~0) e print-color-adjust p/ o fundo escuro.
-    const comRodape = /name=["']pdf-footer-band["']/.test(html);
+    const comRodape = !url && /name=["']pdf-footer-band["']/.test(html);
     // Rodapé RICO (endereço/CNPJ/atendimento em 2 colunas) — só para o Relatório de
     // Andamento (sinalizado via <meta name="pdf-footer-band-rel">). Mantido separado do
     // rodapé genérico acima para não alterar a aparência dos documentos já em produção
     // que usam o pdf-footer-band simples (cessão/procuração/declaração etc.).
-    const comRodapeRel = /name=["']pdf-footer-band-rel["']/.test(html);
+    const comRodapeRel = !url && /name=["']pdf-footer-band-rel["']/.test(html);
     const pdfOpts = {
       format: 'A4',
       printBackground: true,      // mantém o timbrado escuro/cores do documento
