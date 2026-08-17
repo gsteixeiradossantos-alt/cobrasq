@@ -11,7 +11,7 @@
 const { requireUser, applyCors } = require('./_auth.js');
 const { sbFetch } = require('./_sb.js');
 const { guardarComprovante } = require('./_comprovante.js');
-const { gerarComprovanteRepassePdf } = require('./_comprovante-pdf.js');
+const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_comprovante-pdf.js');
 const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
 
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
@@ -53,7 +53,8 @@ module.exports = async function handler(req, res) {
 
     const url = op.repasse_comprovante_url || '';
     const arq = await guardarComprovante(url, op.repasse_asaas_transfer_id);
-    let pdf = (arq && arq.base64) || '';
+    let pdf = await imprimirPaginaAsaasPdf(url);
+    if (!pdf) pdf = (arq && arq.base64) || '';
     if (!pdf) {
       pdf = await gerarComprovanteRepassePdf({
         credorNome: credor.nome, devedor: devNome, parcela: op.parcela,

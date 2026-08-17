@@ -19,7 +19,7 @@ const { requireUser, applyCors } = require('./_auth.js');
 const { sbFetch } = require('./_sb.js');
 const { asaasReq } = require('./_asaas.js');
 const { guardarComprovante } = require('./_comprovante.js');
-const { gerarComprovanteRepassePdf } = require('./_comprovante-pdf.js');
+const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_comprovante-pdf.js');
 const { lerDescricaoRepasse, descricaoPix, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
 const { registrarRepasseNaFicha, resolverCobrancaId } = require('./_repasse-ficha.js');
 
@@ -267,7 +267,10 @@ module.exports = async function handler(req, res) {
       // terceiro, com o identificador oficial do PIX e as instituições das duas partes —
       // documento que a COBRASQ emite sobre si mesma não tem a mesma força. O nosso PDF
       // entra só se o Asaas não entregar o dele.
-      let pdf = (arq && arq.base64) || '';
+      // Ordem: página do Asaas impressa (layout completo) → PDF estático do Asaas →
+      // comprovante da COBRASQ. Os dois primeiros são do banco; o terceiro é nosso.
+      let pdf = await imprimirPaginaAsaasPdf(comprovanteUrl);
+      if (!pdf) pdf = (arq && arq.base64) || '';
       if (!pdf) {
         pdf = await gerarComprovanteRepassePdf({
           credorNome: credor.nome, devedor: ref.devedor, parcela: ref.parcela,

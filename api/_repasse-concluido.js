@@ -9,7 +9,7 @@
 const { sbFetch } = require('./_sb.js');
 const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
 const { guardarComprovante } = require('./_comprovante.js');
-const { gerarComprovanteRepassePdf } = require('./_comprovante-pdf.js');
+const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_comprovante-pdf.js');
 const { registrarRepasseNaFicha, resolverCobrancaId } = require('./_repasse-ficha.js');
 const crypto = require('crypto');
 
@@ -106,7 +106,8 @@ module.exports = async function handler(req, res) {
         devNome = lerDescricaoRepasse(op.metadata.lancamento_descricao).devedor;
       }
       // Comprovante do BANCO primeiro; o nosso só se o Asaas não entregar (ver _repassar.js).
-      let pdf = (arqCompr && arqCompr.base64) || '';
+      let pdf = await imprimirPaginaAsaasPdf(comprovanteUrl);
+      if (!pdf) pdf = (arqCompr && arqCompr.base64) || '';
       if (!pdf) {
         pdf = await gerarComprovanteRepassePdf({
           credorNome: credor.nome, devedor: devNome, parcela: op.parcela,
