@@ -21,8 +21,7 @@ const { asaasReq } = require('./_asaas.js');
 const { guardarComprovante } = require('./_comprovante.js');
 const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_comprovante-pdf.js');
 const { lerDescricaoRepasse, descricaoPix, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
-const { saldoDeCapital } = require('./_repasse-ficha.js');
-const { registrarRepasseNaFicha, resolverCobrancaId } = require('./_repasse-ficha.js');
+const { saldoDeCapital, devedorPrincipal, resolverCobrancaId, registrarRepasseNaFicha } = require('./_repasse-ficha.js');
 
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
@@ -301,8 +300,12 @@ module.exports = async function handler(req, res) {
           transferId: transfer.id, chavePix: pixKey, urlAsaas: comprovanteUrl,
         });
       }
+      // Documento do devedor na mensagem (pedido do Gustavo, 17/08/2026). Best-effort:
+      // devedor sem cadastro não tem doc, e a frase sai sem ele.
+      const dp = await devedorPrincipal(await resolverCobrancaId(op).catch(() => null)).catch(() => null);
       envio = await enviarComprovanteCredor({
         telefone: destinoWhatsapp(credor), parcela: ref.parcela, devedor: ref.devedor,
+        doc: dp && dp.doc,
         base64: pdf, ext: 'pdf', comprovanteUrl,
       });
     }
