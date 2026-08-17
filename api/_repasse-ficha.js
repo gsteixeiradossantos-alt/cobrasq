@@ -146,4 +146,32 @@ async function registrarRepasseNaFicha({ cobrancaId, credor, valor, transferId, 
   }
 }
 
-module.exports = { registrarRepasseNaFicha, resolverCobrancaId };
+// Quanto ainda cabe repassar neste caso. Devolve null quando não dá para saber (sem
+// cobrança ou sem capital definido) — nesse caso não há teto a aplicar.
+//
+// Existe porque TODAS as travas de repasse eram por parcela: lançamento já baixado,
+// operação sem capital, repasse já efetuado, transfer já disparado. Nenhuma olhava o
+// caso inteiro. Em 17/08/2026 a Veronilda tinha R$ 450,00 de capital, R$ 312,00 já
+// repassados e R$ 1.230,00 ainda pendentes no financeiro: pagar tudo mandaria R$ 1.092,00
+// a mais ao credor, sem um único aviso. Repasse feito não volta.
+async function saldoDeCapital(cobrancaId) {
+  if (!cobrancaId) return null;
+  const cobs = await sbFetch(`cobrancas?id=eq.${cobrancaId}&select=valor_capital,divida&limit=1`).catch(() => []);
+  const cob = cobs[0];
+  if (!cob) return null;
+  const cap = cob.valor_capital != null ? Number(cob.valor_capital)
+    : (cob.divida && cob.divida.valorCapital != null ? Number(cob.divida.valorCapital) : null);
+  if (cap == null || !(cap > 0)) return null;
+
+  // O que já saiu, por dois caminhos que podem não coincidir: as linhas da ficha e as
+  // saídas baixadas no financeiro. Vale o MAIOR — subestimar aqui deixaria passar.
+  const rps = await sbFetch(`repasses_cliente?cobranca_id=eq.${cobrancaId}&select=valor`).catch(() => []);
+  const naFicha = (rps || []).reduce((s, r) => s + (Number(r.valor) || 0), 0);
+  const lancs = await sbFetch(`fin_lancamento?cobranca_id=eq.${cobrancaId}&tipo_movimento=eq.0&status=eq.1&select=valor`).catch(() => []);
+  const noFinanceiro = (lancs || []).reduce((s, l) => s + Math.abs(Number(l.valor) || 0), 0);
+
+  const enviado = Math.max(naFicha, noFinanceiro);
+  return { capital: cap, enviado, saldo: Math.round((cap - enviado) * 100) / 100 };
+}
+
+module.exports = { registrarRepasseNaFicha, resolverCobrancaId, saldoDeCapital };
