@@ -50,6 +50,16 @@ function msgComprovanteCredor({ parcela, devedor }) {
     + `*COBRASQ Recuperadora de Crédito e Cobrança*`;
 }
 
+// Para onde vai o comprovante deste credor. `metadata.whatsapp_repasse` tem
+// precedência sobre `telefone` porque alguns credores são atendidos num GRUPO do
+// WhatsApp (Arte Estofados, Odontomundi, S.O.S Animal — confirmado pelo Gustavo em
+// 16/08/2026), e o id do grupo não é um telefone: guardá-lo na coluna `telefone`
+// quebraria qualquer outro fluxo que espere um número ali.
+function destinoWhatsapp(credor) {
+  const meta = (credor && credor.metadata) || {};
+  return meta.whatsapp_repasse || (credor && credor.telefone) || '';
+}
+
 // Envia o comprovante ao credor. Preferimos o PDF em anexo (base64, não URL: o link do
 // Asaas é público e o comprovante tem dados bancários das duas partes). Sem o arquivo,
 // cai para texto com o link — melhor um aviso com link do que credor sem comprovante.
@@ -85,4 +95,4 @@ async function enviarComprovanteCredor({ telefone, parcela, devedor, base64, ext
   }
 }
 
-module.exports = { lerDescricaoRepasse, descricaoPix, msgComprovanteCredor, enviarComprovanteCredor };
+module.exports = { lerDescricaoRepasse, descricaoPix, msgComprovanteCredor, enviarComprovanteCredor, destinoWhatsapp };

@@ -7,7 +7,7 @@
 // Idempotente: se já está 'efetuado', não reenvia.
 
 const { sbFetch } = require('./_sb.js');
-const { lerDescricaoRepasse, enviarComprovanteCredor } = require('./_repasse-msg.js');
+const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
 const { guardarComprovante } = require('./_comprovante.js');
 const crypto = require('crypto');
 
@@ -93,7 +93,7 @@ module.exports = async function handler(req, res) {
     // aqui a descrição do lançamento não chega no payload do Asaas.
     let envio = null;
     if (concluido && op.credor_id) {
-      const cls = await sbFetch(`clientes?id=eq.${op.credor_id}&select=nome,telefone&limit=1`).catch(() => []);
+      const cls = await sbFetch(`clientes?id=eq.${op.credor_id}&select=nome,telefone,metadata&limit=1`).catch(() => []);
       const credor = cls[0] || {};
       let devNome = (op.metadata && op.metadata.repasse_devedor_nome) || '';
       if (!devNome && op.devedor_id) {
@@ -104,7 +104,7 @@ module.exports = async function handler(req, res) {
         devNome = lerDescricaoRepasse(op.metadata.lancamento_descricao).devedor;
       }
       envio = await enviarComprovanteCredor({
-        telefone: credor.telefone, parcela: op.parcela, devedor: devNome,
+        telefone: destinoWhatsapp(credor), parcela: op.parcela, devedor: devNome,
         base64: arqCompr && arqCompr.base64, ext: arqCompr && arqCompr.ext, comprovanteUrl,
       });
     }

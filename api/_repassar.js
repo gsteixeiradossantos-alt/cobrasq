@@ -14,7 +14,7 @@ const { requireUser, applyCors } = require('./_auth.js');
 const { sbFetch } = require('./_sb.js');
 const { asaasReq } = require('./_asaas.js');
 const { guardarComprovante } = require('./_comprovante.js');
-const { lerDescricaoRepasse, descricaoPix, enviarComprovanteCredor } = require('./_repasse-msg.js');
+const { lerDescricaoRepasse, descricaoPix, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
 
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
@@ -255,7 +255,7 @@ module.exports = async function handler(req, res) {
     let envio = null;
     if (concluido) {
       envio = await enviarComprovanteCredor({
-        telefone: credor.telefone, parcela: ref.parcela, devedor: ref.devedor,
+        telefone: destinoWhatsapp(credor), parcela: ref.parcela, devedor: ref.devedor,
         base64: arq && arq.base64, ext: arq && arq.ext, comprovanteUrl,
       });
     }
