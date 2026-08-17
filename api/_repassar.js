@@ -3,8 +3,13 @@
 //
 // Auth: usuário Supabase logado (a confirmação é manual, por design). Body:
 //   { operacao_id, pix_key?, pix_key_type? }
-// Se pix_key não vier, usa clientes.metadata.pix_key; senão cai no CPF/CNPJ do credor.
-// A chave informada é persistida em clientes.metadata.pix_key para reuso.
+// Se pix_key não vier, usa a COLUNA clientes.chave_pix — que é o campo "Chave PIX" da
+// tela de cadastro de cliente. Depois tenta metadata.pix_key (legado) e, por último, o
+// CPF/CNPJ do credor. A chave informada é persistida na coluna para reuso.
+//
+// Até 17/08/2026 este endpoint lia SÓ metadata.pix_key: a chave digitada no painel nunca
+// era usada para pagar, e o que se gravava no metadata por fora era destruído no primeiro
+// save de cliente (o painel remontava o metadata do zero). A coluna é a fonte.
 //
 // O Asaas pode concluir o PIX de forma assíncrona: se o transfer voltar DONE marcamos
 // 'efetuado' e mandamos o comprovante ao credor na hora; senão fica 'preparado' e o
@@ -156,13 +161,13 @@ module.exports = async function handler(req, res) {
     // Credor + chave PIX.
     let credor = null;
     if (op.credor_id) {
-      const cls = await sbFetch(`clientes?id=eq.${op.credor_id}&select=id,nome,telefone,doc,metadata&limit=1`);
+      const cls = await sbFetch(`clientes?id=eq.${op.credor_id}&select=id,nome,telefone,doc,chave_pix,metadata&limit=1`);
       credor = cls[0] || null;
     }
     if (!credor) return res.status(400).json({ error: 'credor não vinculado à operação' });
 
     const credMeta = credor.metadata || {};
-    const pixKey = (body.pix_key || credMeta.pix_key || (credor.doc || '').replace(/\D/g, '') || '').trim();
+    const pixKey = (body.pix_key || credor.chave_pix || credMeta.pix_key || (credor.doc || '').replace(/\D/g, '') || '').trim();
     if (!pixKey) return res.status(400).json({ error: 'informe a chave PIX do credor (pix_key)' });
 
     // Parcela e devedor — o que o credor vê no extrato do PIX e na mensagem.
@@ -244,9 +249,11 @@ module.exports = async function handler(req, res) {
     }
 
     // Persiste a chave PIX no credor para reuso (best-effort).
-    if (body.pix_key && body.pix_key !== credMeta.pix_key) {
+    // Persiste na COLUNA, não no metadata: é o campo que a tela de cliente edita e o
+    // único que sobrevive ao save do painel.
+    if (body.pix_key && body.pix_key !== credor.chave_pix) {
       await sbFetch(`clientes?id=eq.${credor.id}`, {
-        method: 'PATCH', body: JSON.stringify({ metadata: { ...credMeta, pix_key: pixKey } }),
+        method: 'PATCH', body: JSON.stringify({ chave_pix: pixKey }),
       }).catch(() => {});
     }
 
