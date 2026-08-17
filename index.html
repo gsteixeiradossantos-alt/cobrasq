@@ -5072,7 +5072,7 @@ const STATUS_CFG = {
   '6. Baixados':{dot:'#8A96B8',badge:'b-gray',cls:'s-devolvida'},
   '8. Devolvida':{dot:'#8A96B8',badge:'b-gray',cls:'s-devolvida'},
   '9. Encerrada':{dot:'#8A96B8',badge:'b-gray',cls:'s-semexito'},
-  'Análise':{dot:'#C83A1E',badge:'b-red',cls:'s-cobrar'},
+  'Análise':{dot:'#C47A00',badge:'b-yellow',cls:'s-emcontato'},
   'Baixar':{dot:'#8A96B8',badge:'b-gray',cls:'s-devolvida'},
   'Em andamento':{dot:'#C47A00',badge:'b-yellow',cls:'s-emcontato'}
 };
@@ -20169,9 +20169,14 @@ function buildCaseTimeline(eventos, repasses, legacyHist){
     let texto = p.acao_completa||p.acao||p.texto||p.descricao||p.mensagem||e.tipo||'';
     let tipoLabel = e.tipo==='andamento_judicial' ? 'Andamento judicial'
                   : e.tipo==='repasse' ? 'Repasse'
-                  : e.tipo==='nota_manual' ? 'Nota' : (e.tipo||'Evento');
+                  : e.tipo==='nota_manual' ? 'Nota'
+                  : e.tipo==='mudanca_status' ? statusLabel(p.status_novo||'')
+                  : (e.tipo||'Evento');
+    // mudança de situação com motivo obrigatório (Análise/Reajuizar/Devolvida) leva
+    // a mesma cor da etiqueta do status, pra destacar no histórico do caso.
+    const cor = (e.tipo==='mudanca_status' && p.status_novo) ? _etiquetaCor(p.status_novo) : null;
     const iso = String(p.data || e.criado_em || '').slice(0,10);
-    out.push({ iso, dataTxt:_detData(p.data||e.criado_em), tipo:tipoLabel, texto });
+    out.push({ iso, dataTxt:_detData(p.data||e.criado_em), tipo:tipoLabel, texto, cor });
   });
   (repasses||[]).forEach(r=>{
     const iso=String(r.data_pix||'').slice(0,10);
@@ -20504,7 +20509,7 @@ async function renderCobrancaDetalhe(){
       <div class="det2-panel-tt" style="margin:0;">Timeline do caso</div>
       <button class="btn btn-ghost btn-sm" onclick="adicionarNotaHistorico('${cob.id}')">+ Nota</button>
     </div>
-    ${(()=>{ const tl=buildCaseTimeline(hist, repasses, []); return tl.length? `<div class="det2-timeline">${tl.map(it=>{ const cor=_histTagColor(it.tipo);
+    ${(()=>{ const tl=buildCaseTimeline(hist, repasses, []); return tl.length? `<div class="det2-timeline">${tl.map(it=>{ const cor=it.cor||_histTagColor(it.tipo);
       return `<div class="det2-tl-item"><span class="det2-tl-dot" style="background:${cor};"></span>
         <span class="det2-tl-tag" style="color:${cor};">${escHtml((it.tipo||'').toUpperCase())}</span>
         <div class="det2-tl-desc">${escHtml(it.texto||'')}</div>
@@ -20873,14 +20878,43 @@ function _syncStatusBlob(ids, novo){
   return n;
 }
 
+// Situações que exigem motivo obrigatório, registrado no histórico do caso
+// (pedido do Gustavo, 03/08): sem o motivo, o caso fica marcado como "em
+// análise/reajuizar/devolvida" sem ninguém saber por quê.
+function _statusExigeMotivo(novo){
+  const s = statusLabel(novo||'').trim();
+  return /^an[aá]lise$/i.test(s) || /reajuizar/i.test(s) || /devolvid/i.test(s);
+}
 async function _setStatusCobrancaReal(cobId, novo){
   _fecharTrocaStatus();
   if(!novo) return;
+  if(_statusExigeMotivo(novo)){
+    promptModal(`Motivo — ${statusLabel(novo)}`, 'Descreva o motivo desta mudança de situação (obrigatório):', (motivo)=>{
+      const m = (motivo||'').trim();
+      if(!m){ showToast('Motivo obrigatório: a situação não foi alterada.','warning'); return; }
+      _aplicarStatusCobranca(cobId, novo, m);
+    }, { textarea:true, hint:`Fica registrado no histórico do caso — obrigatório para "Análise", "Reajuizar" e "Devolvida".` });
+    return;
+  }
+  await _aplicarStatusCobranca(cobId, novo, null);
+}
+async function _aplicarStatusCobranca(cobId, novo, motivo){
   const supa = getSupabase(); if(!supa) return;
   const { error } = await supa.from('cobrancas').update({ status: novo }).eq('id', cobId);
   if(error){ showToast('Erro ao alterar situação: '+error.message,'danger'); return; }
   const c = (DB_cobrancas||[]).find(x=>x.id===cobId); if(c) c.status = novo;
   _syncStatusBlob(cobId, novo);   // sem isto o portal do cedente fica no status velho
+  if(motivo){
+    try{
+      await supa.from('devedor_eventos').insert({
+        cobranca_id: cobId, devedor_id: cobId, tipo: 'mudanca_status',
+        payload: {
+          acao_completa: `Situação alterada para "${statusLabel(novo)}" — ${motivo}`,
+          status_novo: novo, motivo, registrado_por: currentUser?.nome||'', origem:'manual'
+        }
+      });
+    }catch(e){ console.warn('[status] motivo não gravou no histórico:', e && e.message); }
+  }
   const nome = c ? (typeof _cobrPrincipalNome==='function' ? _cobrPrincipalNome(c) : '') : '';
   showToast((nome && nome!=='—' ? nome+' → ' : 'Situação → ')+statusLabel(novo),'success');
   if(document.getElementById('page-cobranca-detalhe')?.classList.contains('active')) renderCobrancaDetalhe();
@@ -21351,7 +21385,7 @@ async function renderDevedorDetalhe(){
   const panelHist=`<div class="cob-panel" style="padding:18px;">
     <div class="det-panel-tt">Histórico de contato</div>
     ${(()=>{ const tl=buildCaseTimeline(hist, [], []); return tl.length? tl.map(it=>
-      `<div style="padding:9px 0;border-top:1px solid var(--border-2);font-size:12.5px;"><div style="color:var(--text-3);font-size:10px;font-family:var(--font-mono);margin-bottom:2px;">${escHtml(it.dataTxt)} · ${escHtml(it.tipo)}</div>${escHtml(it.texto||'')}</div>`).join('')
+      `<div style="padding:9px 0;border-top:1px solid var(--border-2);font-size:12.5px;"><div style="color:${it.cor||'var(--text-3)'};font-size:10px;font-family:var(--font-mono);margin-bottom:2px;font-weight:${it.cor?'700':'400'};">${escHtml(it.dataTxt)} · ${escHtml(it.tipo)}</div>${escHtml(it.texto||'')}</div>`).join('')
       : _detEmpty('Sem histórico de contato.'); })()}
   </div>`;
 
