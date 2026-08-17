@@ -7,7 +7,14 @@
 // (ZApiAPI._tel em index.html). Sem isso, número local (DDD+9+8 díg.) vai sem DDI
 // e a Z-API não entrega.
 function normalizarTelefone(phone) {
-  let fone = String(phone || '').replace(/\D/g, '');
+  const bruto = String(phone || '').trim();
+  // Grupo do WhatsApp ("120363417597227442-group"): a Z-API aceita o id do grupo no
+  // mesmo campo `phone`. Só que ele tem 18 dígitos e sufixo — passar pelo tratamento
+  // de número o deixaria irreconhecível. Vai como está.
+  if (/-group$/i.test(bruto) || /^\d{15,}$/.test(bruto.replace(/\D/g, ''))) {
+    return bruto.replace(/[^0-9A-Za-z-]/g, '');
+  }
+  let fone = bruto.replace(/\D/g, '');
   if (fone && fone.length <= 11 && !fone.startsWith('55')) fone = '55' + fone;
   return fone;
 }

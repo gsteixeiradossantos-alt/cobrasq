@@ -54,11 +54,15 @@ async function guardarComprovante(comprovanteUrl, transferId) {
       },
       body: buf,
     });
-    if (!up.ok) {
-      console.warn('[comprovante] upload falhou:', up.status, await up.text().catch(() => ''));
-      return null;
-    }
-    return { storage_path: path, bytes: buf.length, content_type: ct };
+    if (!up.ok) console.warn('[comprovante] upload falhou:', up.status, await up.text().catch(() => ''));
+    // Devolve o conteúdo junto: quem chama manda esse mesmo PDF por WhatsApp logo em
+    // seguida e não faz sentido baixar duas vezes do Asaas. `storage_path` vem null se
+    // o arquivamento falhou — o envio ao credor não depende dele.
+    return {
+      storage_path: up.ok ? path : null,
+      bytes: buf.length, content_type: ct,
+      base64: buf.toString('base64'), ext: extDe(ct, comprovanteUrl),
+    };
   } catch (e) {
     console.warn('[comprovante] erro:', e.message);
     return null;

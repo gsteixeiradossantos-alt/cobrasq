@@ -13,20 +13,11 @@
 const { requireUser, applyCors } = require('./_auth.js');
 const { sbFetch } = require('./_sb.js');
 const { asaasReq } = require('./_asaas.js');
-const { zapiSendText } = require('./_zapi.js');
 const { guardarComprovante } = require('./_comprovante.js');
+const { lerDescricaoRepasse, descricaoPix, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
 
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
-function fmtR(v) { return 'R$ ' + (Number(v) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
-
-// Monta a mensagem de comprovante ao credor (reutilizada aqui e no webhook).
-function msgComprovante(op, credorNome, devNome, comprovanteUrl) {
-  const parc = op.parcela && op.total_parcelas ? `, parcela ${op.parcela}/${op.total_parcelas}` : '';
-  const ref = devNome ? ` referente ao pagamento de ${devNome}${parc}` : '';
-  return `${credorNome ? credorNome + ', ' : ''}repasse efetuado${ref}: ${fmtR(op.valor_capital)}. ✅\n\n` +
-    (comprovanteUrl ? `Comprovante: ${comprovanteUrl}\n\n` : '') + `— Cobrasq`;
-}
 
 module.exports = async function handler(req, res) {
   applyCors(req, res);
@@ -174,12 +165,14 @@ module.exports = async function handler(req, res) {
     const pixKey = (body.pix_key || credMeta.pix_key || (credor.doc || '').replace(/\D/g, '') || '').trim();
     if (!pixKey) return res.status(400).json({ error: 'informe a chave PIX do credor (pix_key)' });
 
-    // Devedor (para o texto do comprovante).
-    let devNome = '';
+    // Parcela e devedor — o que o credor vê no extrato do PIX e na mensagem.
+    // Vêm da descrição do lançamento; devedor cadastrado, quando existe, prevalece.
+    const ref = lerDescricaoRepasse(body.descricao || (op.metadata && op.metadata.lancamento_descricao) || '');
     if (op.devedor_id) {
       const dvs = await sbFetch(`devedores?id=eq.${op.devedor_id}&select=nome&limit=1`).catch(() => []);
-      devNome = (dvs[0] && dvs[0].nome) || '';
+      if (dvs[0] && dvs[0].nome) ref.devedor = dvs[0].nome;
     }
+    if (!ref.parcela && op.parcela) { ref.parcela = op.parcela; ref.total = op.total_parcelas; }
 
     // Trava atômica anti-duplo-repasse: só prossegue quem conseguir transicionar
     // pendente→preparado. Em duplo-clique concorrente, o 2º não obtém o claim e sai
@@ -197,9 +190,11 @@ module.exports = async function handler(req, res) {
       value: round2(op.valor_capital),
       pixAddressKey: pixKey,
       operationType: 'PIX',
-      // Descrição editável (regra "Repasses a clientes": "<nº parcela> - <devedor>").
-      // Se o front não mandar, cai no texto padrão. Trunca em 500 (limite Asaas).
-      description: (body.descricao && String(body.descricao).trim().slice(0, 500)) || `Repasse Cobrasq — ${credor.nome || 'credor'}${op.parcela ? ' — parcela ' + op.parcela + '/' + op.total_parcelas : ''}`,
+      // Descrição no extrato do credor: "<nº parcela> - <devedor>" (pedido do Gustavo,
+      // 16/08/2026). O que o front manda é a descrição CRUA do lançamento, com as
+      // anotações internas ("pagar", "conferido", "depende do Sisbajud") — normalizamos
+      // aqui, no servidor, para que o webhook e a mensagem falem a mesma língua.
+      description: descricaoPix(ref) || `Repasse Cobrasq — ${credor.nome || 'credor'}`,
       externalReference: op.id,
     };
     if (body.pix_key_type) transferPayload.pixAddressKeyType = body.pix_key_type;
@@ -227,8 +222,12 @@ module.exports = async function handler(req, res) {
       repasse_asaas_transfer_id: transfer.id || null,
       repasse_comprovante_url: comprovanteUrl || null,
       repasse_efetuado_em: concluido ? new Date().toISOString() : null,
+      // Parcela e devedor ficam gravados: quando o Asaas conclui depois, é o webhook
+      // que manda o comprovante, e lá a descrição do lançamento não está mais em mão.
+      ...(ref.parcela && !op.parcela ? { parcela: ref.parcela, total_parcelas: ref.total } : {}),
       metadata: {
         ...(op.metadata || {}), repasse_pix_key: pixKey, repasse_asaas_status: st,
+        repasse_devedor_nome: ref.devedor || undefined,
         ...(arq ? { comprovante_storage_path: arq.storage_path, comprovante_bytes: arq.bytes } : {}),
       },
     };
@@ -252,11 +251,13 @@ module.exports = async function handler(req, res) {
     }
 
     // Se já concluiu, manda o comprovante ao credor agora (senão, vai no webhook).
-    let zap = null;
-    const telCred = String(credor.telefone || '').replace(/\D/g, '');
-    if (concluido && telCred) {
-      try { zap = await zapiSendText(telCred, msgComprovante({ ...op, ...update }, credor.nome, devNome, comprovanteUrl)); }
-      catch (e) { zap = { error: e.message }; }
+    // Um PIX = uma mensagem, com o PDF em anexo.
+    let envio = null;
+    if (concluido) {
+      envio = await enviarComprovanteCredor({
+        telefone: destinoWhatsapp(credor), parcela: ref.parcela, devedor: ref.devedor,
+        base64: arq && arq.base64, ext: arq && arq.ext, comprovanteUrl,
+      });
     }
 
     return res.status(200).json({
@@ -266,12 +267,11 @@ module.exports = async function handler(req, res) {
       asaas_status: st,
       repasse_status: update.repasse_status,
       comprovante_url: comprovanteUrl || null,
-      comprovante_enviado: !!(zap && zap.messageId),
+      comprovante_enviado: !!(envio && envio.enviado),
+      comprovante_via: (envio && envio.via) || null,
     });
   } catch (e) {
     console.error('[repassar]', e.message);
     return res.status(500).json({ error: e.message });
   }
 };
-
-module.exports.msgComprovante = msgComprovante;
