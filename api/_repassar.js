@@ -263,17 +263,21 @@ module.exports = async function handler(req, res) {
     // Um PIX = uma mensagem, com o PDF em anexo.
     let envio = null;
     if (concluido) {
-      // O comprovante é NOSSO: o do Asaas é uma página HTML, não um arquivo (ver
-      // _comprovante-pdf.js). Se a geração falhar, cai no arquivo do Asaas — mas só
-      // quando ele for PDF de verdade — e, em último caso, em texto com o link.
-      const nossoPdf = await gerarComprovanteRepassePdf({
-        credorNome: credor.nome, devedor: ref.devedor, parcela: ref.parcela,
-        valor: op.valor_capital, dataISO: new Date().toISOString().slice(0, 10),
-        transferId: transfer.id, chavePix: pixKey, urlAsaas: comprovanteUrl,
-      });
+      // Ordem de preferência: o comprovante do BANCO primeiro. Ele é prova de
+      // terceiro, com o identificador oficial do PIX e as instituições das duas partes —
+      // documento que a COBRASQ emite sobre si mesma não tem a mesma força. O nosso PDF
+      // entra só se o Asaas não entregar o dele.
+      let pdf = (arq && arq.base64) || '';
+      if (!pdf) {
+        pdf = await gerarComprovanteRepassePdf({
+          credorNome: credor.nome, devedor: ref.devedor, parcela: ref.parcela,
+          valor: op.valor_capital, dataISO: new Date().toISOString().slice(0, 10),
+          transferId: transfer.id, chavePix: pixKey, urlAsaas: comprovanteUrl,
+        });
+      }
       envio = await enviarComprovanteCredor({
         telefone: destinoWhatsapp(credor), parcela: ref.parcela, devedor: ref.devedor,
-        base64: nossoPdf || (arq && arq.base64), ext: 'pdf', comprovanteUrl,
+        base64: pdf, ext: 'pdf', comprovanteUrl,
       });
     }
 

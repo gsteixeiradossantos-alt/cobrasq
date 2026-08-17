@@ -33,13 +33,37 @@ function extDe(contentType, url) {
 }
 
 // Retorna { storage_path, bytes, content_type } ou null. Nunca lança.
+// O `transactionReceiptUrl` aponta para uma PÁGINA. Dentro dela existe o link do
+// comprovante de verdade — o mesmo do botão "Baixar pdf":
+//     <a href="/transactionReceipt/pdf/4869009874700064">
+// Este é o comprovante do BANCO, com o identificador oficial do PIX (E2E), as
+// instituições e os CNPJs das duas partes. Vale muito mais que qualquer documento que a
+// COBRASQ produza sobre si mesma — por isso é o que se busca primeiro.
+async function baixarPdfDaPagina(html, origem) {
+  const m = String(html || '').match(/\/transactionReceipt\/pdf\/\d+/);
+  if (!m) return null;
+  try {
+    const base = new URL(origem);
+    const r = await fetch(`${base.origin}${m[0]}`, { redirect: 'follow' });
+    if (!r.ok) { console.warn('[comprovante] pdf do Asaas:', r.status); return null; }
+    const buf = Buffer.from(await r.arrayBuffer());
+    if (buf.slice(0, 4).toString('latin1') !== '%PDF') { console.warn('[comprovante] link "Baixar pdf" não devolveu PDF'); return null; }
+    return buf;
+  } catch (e) { console.warn('[comprovante] pdf do Asaas:', e.message); return null; }
+}
+
 async function guardarComprovante(comprovanteUrl, transferId) {
   if (!comprovanteUrl || !SB_URL || !SB_KEY) return null;
   try {
     const r = await fetch(comprovanteUrl);
     if (!r.ok) { console.warn('[comprovante] download falhou:', r.status); return null; }
-    const ct = r.headers.get('content-type') || 'application/pdf';
-    const buf = Buffer.from(await r.arrayBuffer());
+    let ct = r.headers.get('content-type') || 'application/pdf';
+    let buf = Buffer.from(await r.arrayBuffer());
+    // Veio a página: segue o link "Baixar pdf" e fica com o PDF do banco.
+    if (buf.slice(0, 4).toString('latin1') !== '%PDF') {
+      const pdf = await baixarPdfDaPagina(buf.toString('utf8'), comprovanteUrl);
+      if (pdf) { buf = pdf; ct = 'application/pdf'; }
+    }
     // O `transactionReceiptUrl` do Asaas devolve uma PÁGINA (text/html), não um arquivo.
     // Em 17/08/2026 essa página foi anexada no WhatsApp com nome ".pdf" e o credor
     // recebeu algo que não abre. Só tratamos como documento o que É documento: PDF
