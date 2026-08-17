@@ -101,20 +101,36 @@ body{width:210mm;height:297mm;background:#fff;font-family:'Inter Tight',sans-ser
 // Gera o PDF (base64) chamando /api/gerar-pdf (server-to-server, x-emit-secret) — mesmo
 // endpoint/segredo usado pela Bia. Best-effort: devolve '' em qualquer falha (cold start
 // do Chrome, timeout etc.) — quem chama decide o que fazer sem attachment.
+// Timeout de 50s, não 28s: /api/gerar-pdf é servido por api/automacao.js, que tem
+// maxDuration 60 no vercel.json. Cortar em 28s abortava do lado de cá enquanto o
+// endpoint ainda tinha 32s de orçamento — e o cold start sozinho já come boa parte
+// disso (baixa o pack do Chromium, ~69 MB, extrai e sobe o browser). Foi o que
+// aconteceu no recebimento do Jean Carlos em 17/08/2026: o recibo não saiu e o
+// devedor recebeu o link público do Asaas no lugar.
+//
+// Uma segunda tentativa cobre justamente o cold start: na primeira o binário fica
+// em cache no /tmp da função, e a repetição costuma responder em poucos segundos.
 async function gerarReciboPdfBase64(d) {
   const base = (process.env.APP_BASE_URL || '').replace(/\/+$/, '');
   const secret = process.env.EMIT_ACORDO_SECRET;
-  if (!base || !secret) return '';
-  try {
-    const r = await fetch(base + '/api/gerar-pdf', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-emit-secret': secret },
-      body: JSON.stringify({ html: gerarReciboHtml(d) }),
-      signal: AbortSignal.timeout(28000),
-    });
-    const j = await r.json().catch(() => null);
-    return (r.ok && j && typeof j.base64 === 'string') ? j.base64 : '';
-  } catch { return ''; }
+  if (!base || !secret) { console.warn('[recibo] APP_BASE_URL/EMIT_ACORDO_SECRET ausentes'); return ''; }
+  const html = gerarReciboHtml(d);
+  for (let tentativa = 1; tentativa <= 2; tentativa++) {
+    try {
+      const r = await fetch(base + '/api/gerar-pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-emit-secret': secret },
+        body: JSON.stringify({ html }),
+        signal: AbortSignal.timeout(50000),
+      });
+      const j = await r.json().catch(() => null);
+      if (r.ok && j && typeof j.base64 === 'string' && j.base64) return j.base64;
+      console.warn(`[recibo] gerar-pdf tentativa ${tentativa}: HTTP ${r.status}`, j && j.error);
+    } catch (e) {
+      console.warn(`[recibo] gerar-pdf tentativa ${tentativa}:`, e.message);
+    }
+  }
+  return '';
 }
 
 function formaPagamento(billingType) {

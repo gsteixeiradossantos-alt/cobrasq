@@ -297,10 +297,12 @@ module.exports = async function handler(req, res) {
 
       const meioTxt = { PIX: 'do Pix', BOLETO: 'do boleto', CREDIT_CARD: 'do cartão', DEBIT_CARD: 'do cartão' }[String(payment.billingType || '').toUpperCase()] || 'do pagamento';
       const linhaParcela = row.parcela && row.total_parcelas ? ` referente a parcela n. ${row.parcela} de ${row.total_parcelas} do acordo realizado` : '';
-      const recibo = String((payment && payment.transactionReceiptUrl) || '').trim();
-      const linhaAnexo = pdfEnviado
-        ? 'Em anexo, seu recibo de pagamento.'
-        : (recibo ? `Segue o comprovante:\n${recibo}` : '');
+      // Sem PDF, a mensagem vai SEM anexo e SEM link. O `transactionReceiptUrl` do Asaas
+      // é uma página PÚBLICA, que expõe dados das duas partes a quem tiver o endereço —
+      // a mesma razão pela qual o comprovante de repasse ao credor vai em base64 e nunca
+      // por URL. Em 17/08/2026 esse fallback mandou o link ao Jean Carlos porque a
+      // geração do PDF estourou o tempo limite.
+      const linhaAnexo = pdfEnviado ? 'Em anexo, seu recibo de pagamento.' : '';
 
       const msg = `*Financeiro COBRASQ*\n${nomeCompleto}, o pagamento ${meioTxt}${linhaParcela} foi confirmado. ✅${linhaAnexo ? '\n\n' + linhaAnexo : ''}\n_Agradecemos!_`;
       try { zap = await zapiSendText(tel, msg); } catch (e) { zap = { error: e.message }; }
@@ -309,6 +311,26 @@ module.exports = async function handler(req, res) {
     let monitorEnviado = false;
     if (b64) {
       try { monitorEnviado = await zapiSendDocumentPdf(NUMERO_MONITORAMENTO, b64, `Recibo COBRASQ - ${nomeCompleto}.pdf`); } catch (e) { monitorEnviado = false; }
+    }
+
+    // Falha do recibo vira evento na ficha do devedor. Antes era silenciosa: o retorno
+    // trazia `recibo_pdf_enviado: false` e ninguém lia — o devedor simplesmente ficava
+    // sem o comprovante, ou recebia o link público no lugar. Best-effort.
+    if (devedor && devedor.id && !pdfEnviado) {
+      await sbFetch('devedor_eventos', {
+        method: 'POST',
+        body: JSON.stringify({
+          devedor_id: devedor.id,
+          tipo: 'recibo_pdf_falhou',
+          payload: {
+            payment_id: paymentId,
+            valor: valorRecebido,
+            motivo: b64 ? 'PDF gerado, mas o envio pela Z-API falhou' : 'geração do PDF falhou (duas tentativas)',
+            tinha_telefone: !!tel,
+          },
+          autor_nome: 'Financeiro (webhook Asaas)',
+        }),
+      }).catch(() => { /* best-effort */ });
     }
 
     return res.status(200).json({
