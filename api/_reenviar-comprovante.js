@@ -13,7 +13,7 @@ const { sbFetch } = require('./_sb.js');
 const { guardarComprovante } = require('./_comprovante.js');
 const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_comprovante-pdf.js');
 const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
-const { registrarRepasseNaFicha, resolverCobrancaId } = require('./_repasse-ficha.js');
+const { registrarRepasseNaFicha, resolverCobrancaId, devedorPrincipal } = require('./_repasse-ficha.js');
 
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 
@@ -66,8 +66,10 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    const dp = await devedorPrincipal(cobrancaId).catch(() => null);
     const envio = await enviarComprovanteCredor({
       telefone: destinoWhatsapp(credor), parcela: op.parcela, devedor: devNome,
+      doc: dp && dp.doc,
       base64: pdf, ext: 'pdf', comprovanteUrl: url,
     });
 

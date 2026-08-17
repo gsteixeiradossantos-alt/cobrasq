@@ -67,13 +67,32 @@ function descricaoPix(d) {
 
 // Mensagem que acompanha o comprovante. Uma por PIX — cada parcela é uma transferência
 // e um comprovante distintos, então agrupar credor confundiria a conferência.
-function msgComprovanteCredor({ parcela, devedor }) {
+// "039.693.609-19" -> "CPF n. 039.693.609-19" · "22.730.701/0001-19" -> "CNPJ n. …".
+// Decide pelo NÚMERO DE DÍGITOS, não pelo que estiver escrito: no Astrea aparece CPF
+// rotulado como CNPJ e vice-versa. Formata mesmo se vier sem pontuação.
+function docPorExtenso(doc) {
+  const d = String(doc || '').replace(/\D/g, '');
+  if (d.length === 11) {
+    return `CPF n. ${d.slice(0, 3)}.${d.slice(3, 6)}.${d.slice(6, 9)}-${d.slice(9)}`;
+  }
+  if (d.length === 14) {
+    return `CNPJ n. ${d.slice(0, 2)}.${d.slice(2, 5)}.${d.slice(5, 8)}/${d.slice(8, 12)}-${d.slice(12)}`;
+  }
+  return '';
+}
+
+function msgComprovanteCredor({ parcela, devedor, doc }) {
+  // Documento entre parênteses quando conhecido — pedido do Gustavo em 17/08/2026, para o
+  // credor identificar o devedor sem depender do nome. Devedor sem cadastro não tem doc:
+  // a frase sai sem, em vez de com um campo vazio.
+  const docTxt = docPorExtenso(doc);
+  const quem = docTxt ? `${devedor} (${docTxt})` : devedor;
   // Sem devedor identificado (descrição da ponte de recebimento), a frase omite o
   // "realizado por" em vez de inventar um nome.
   const ref = devedor
     ? (parcela
-        ? `do pagamento referente a *parcela n. ${parcela}* do pagamento realizado por *${devedor}.*`
-        : `do pagamento realizado por *${devedor}.*`)
+        ? `do pagamento referente a *parcela n. ${parcela}* do pagamento realizado por *${quem}.*`
+        : `do pagamento realizado por *${quem}.*`)
     : (parcela ? `referente a *parcela n. ${parcela}*.` : `.`);
   return `*Setor financeiro | COBRASQ:*\n`
     + `Encaminhamos, em anexo, o comprovante de repasse ${ref}\n\n`
@@ -98,14 +117,14 @@ function destinoWhatsapp(credor) {
 //
 // Best-effort por design: o PIX já saiu quando isto roda. Falha aqui vira log, nunca
 // erro do repasse.
-async function enviarComprovanteCredor({ telefone, parcela, devedor, base64, ext, comprovanteUrl }) {
+async function enviarComprovanteCredor({ telefone, parcela, devedor, doc, base64, ext, comprovanteUrl }) {
   // Não limpar aqui: o destino pode ser um GRUPO do WhatsApp ("1203634…-group"), que a
   // Z-API trata no mesmo campo. Quem normaliza é o _zapi.js, que sabe distinguir os dois.
   const tel = String(telefone || '').trim();
   const digitos = tel.replace(/\D/g, '');
   if (digitos.length < 10) return { enviado: false, motivo: 'credor sem telefone válido' };
 
-  const msg = msgComprovanteCredor({ parcela, devedor });
+  const msg = msgComprovanteCredor({ parcela, devedor, doc });
   // Nome do arquivo = a mesma identificação do extrato do PIX: "1 - Elen Demgenski".
   // O credor arquiva vários comprovantes; assim ele acha pelo nome sem abrir um a um.
   //
@@ -139,4 +158,4 @@ async function enviarComprovanteCredor({ telefone, parcela, devedor, base64, ext
   }
 }
 
-module.exports = { lerDescricaoRepasse, descricaoPix, msgComprovanteCredor, enviarComprovanteCredor, destinoWhatsapp };
+module.exports = { lerDescricaoRepasse, descricaoPix, msgComprovanteCredor, enviarComprovanteCredor, destinoWhatsapp, docPorExtenso };

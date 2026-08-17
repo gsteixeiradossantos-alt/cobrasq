@@ -174,4 +174,18 @@ async function saldoDeCapital(cobrancaId) {
   return { capital: cap, enviado, saldo: Math.round((cap - enviado) * 100) / 100 };
 }
 
-module.exports = { registrarRepasseNaFicha, resolverCobrancaId, saldoDeCapital };
+// Nome e documento do devedor PRINCIPAL do caso. Usa cobranca_partes (o vínculo real)
+// em vez de supor que o id da cobrança é o do devedor — vale em 504 dos 538 casos, e o
+// palpite pegaria o doc de outra pessoa. Cai para o devedor de mesmo id só se não houver
+// parte marcada como principal.
+async function devedorPrincipal(cobrancaId) {
+  if (!cobrancaId) return null;
+  try {
+    const partes = await sbFetch(`cobranca_partes?cobranca_id=eq.${cobrancaId}&principal=is.true&select=devedor_id&limit=1`).catch(() => []);
+    const devId = (partes[0] && partes[0].devedor_id) || cobrancaId;
+    const devs = await sbFetch(`devedores?id=eq.${devId}&select=nome,doc&limit=1`).catch(() => []);
+    return devs[0] || null;
+  } catch (e) { console.warn('[repasse-ficha] devedorPrincipal:', e.message); return null; }
+}
+
+module.exports = { registrarRepasseNaFicha, resolverCobrancaId, saldoDeCapital, devedorPrincipal };
