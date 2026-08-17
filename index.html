@@ -28916,19 +28916,77 @@ window.finApi = (function(){
   // -----------------------------
   // Conciliação OFX
   // -----------------------------
+  // Nome do pagador/favorecido que vem no MEMO do extrato. Cada banco escreve de um
+  // jeito; sem isso duas parcelas de mesmo valor no mesmo dia são indistinguíveis.
+  const _OFX_NOME_PADROES = [
+    /fatura nr\.?\s*\d+\s+(.+)$/i,            // Asaas: cobrança recebida e tarifa
+    /pix com chave para\s+(.+)$/i,            // Asaas: Pix enviado
+    /pix com qr code para\s+(.+)$/i,
+    /pix recebido de\s+([^|]+)/i,             // BTG
+    /ted recebida de\s+([^|]+)/i,
+    /boleto enviado para\s+(.+)$/i,
+    /enviada para\s+(.+)$/i,
+    /cob\d+\s+\d+\s+(.+)$/i,                  // Sicredi: liquidação de cobrança
+  ];
+  const _OFX_STOP = new Set(['de','da','do','dos','das','ltda','epp','eireli','mei','ltd','cdl','sa']);
+  function _ofxTokensNome(texto){
+    const limpo = txtNorm(texto).replace(/[^a-z0-9 ]/g,' ');
+    return new Set(limpo.split(/\s+/).filter(t => t.length > 2 && !_OFX_STOP.has(t)));
+  }
+  function _ofxNomeDoMemo(memo){
+    for(const re of _OFX_NOME_PADROES){
+      const m = re.exec(memo || '');
+      if(m) return m[1].trim();
+    }
+    return '';
+  }
+  // 0 a 1: fração dos tokens do nome menor que aparece no outro.
+  function _ofxScoreNome(memo, descricao){
+    const a = _ofxTokensNome(_ofxNomeDoMemo(memo));
+    const b = _ofxTokensNome(descricao);
+    if(!a.size || !b.size) return 0;
+    let comuns = 0;
+    a.forEach(t => { if(b.has(t)) comuns++; });
+    return comuns / Math.min(a.size, b.size);
+  }
+  const _OFX_SCORE_MIN = 0.5;
+
   async function findCandidatesForOfxLine(line, contaId){
     const sb = _sb();
-    const valor = Math.abs(+line.amount || 0);
-    const dataIni = new Date(line.date); dataIni.setDate(dataIni.getDate()-3);
-    const dataFim = new Date(line.date); dataFim.setDate(dataFim.getDate()+3);
+    const bruto = +line.amount || 0;
+    const valor = Math.abs(bruto);
+    // Janela de 7 dias: pagamento antecipado é comum (o devedor paga o boleto assim que
+    // recebe) e com ±3 dias esses nunca apareciam como candidatos.
+    const dataIni = new Date(line.date); dataIni.setDate(dataIni.getDate()-7);
+    const dataFim = new Date(line.date); dataFim.setDate(dataFim.getDate()+7);
+    // Valor e sinal entram na QUERY, não só no filtro de saída: com .limit(20) sobre uma
+    // janela sem filtro de valor, um dia movimentado devolvia 20 linhas que não batiam e a
+    // linha aparecia como "sem par" mesmo tendo par. Saída é sempre negativa em
+    // fin_lancamento e entrada sempre positiva, então o sinal do extrato basta.
+    const [vMin, vMax] = bruto < 0 ? [-valor - 0.02, -valor + 0.02] : [valor - 0.02, valor + 0.02];
     let q = sb.from('fin_lancamento').select('id,descricao,data_competencia,data_vencimento,data_pagamento,valor,status,conciliado')
       .gte('data_competencia', dataIni.toISOString().slice(0,10))
       .lte('data_competencia', dataFim.toISOString().slice(0,10))
+      .gte('valor', vMin).lte('valor', vMax)
       .eq('conciliado', false);
     if(contaId) q = q.eq('conta_id', contaId);
     const { data } = await q.limit(20);
-    // Filtra por valor próximo (±0.01)
-    return (data||[]).filter(l => Math.abs(Math.abs(+l.valor)-valor) < 0.02);
+    const candidatos = (data||[]).filter(l => Math.abs(Math.abs(+l.valor)-valor) < 0.02);
+
+    // O nome só DESEMPATA: quando algum candidato bate com o pagador do extrato, os
+    // outros saem. Quando nenhum bate, devolve todos — o comportamento antigo. Não bater
+    // é normal em SAÍDA de repasse: o extrato traz o nome do CREDOR que recebeu o Pix e o
+    // lançamento traz o do DEVEDOR de quem veio o dinheiro. São entidades diferentes de
+    // propósito; não "consertar" isso casando credor com devedor.
+    const dias = (d) => Math.abs((new Date(d) - new Date(line.date)) / 86400000);
+    const ordenar = (a, b) => (b.score - a.score) || (dias(a.l.data_competencia) - dias(b.l.data_competencia));
+    const pontuados = candidatos
+      .map(l => ({ l, score: _ofxScoreNome(line.memo, l.descricao) }))
+      .sort(ordenar);
+    const comNome = pontuados.filter(x => x.score >= _OFX_SCORE_MIN);
+    // Empate de nome (duas parcelas do mesmo devedor) fica ambíguo mesmo — a tela pergunta
+    // qual. O que muda é a ORDEM: a competência mais próxima da data do extrato vem antes.
+    return (comNome.length ? comNome : pontuados).map(x => x.l);
   }
 
   // -----------------------------
