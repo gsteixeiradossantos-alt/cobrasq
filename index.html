@@ -31058,7 +31058,15 @@ async function _repLoad(){
   try{
     const jaTemOp = new Set(_repState.ops.map(o=>o.lancamento_despesa_id).filter(Boolean));
     const pend = await finApi.listRepassesAPagar();
-    _repState.lancs = (pend||[]).filter(l => l.credor && l.credor.id && !jaTemOp.has(l.id));
+    const hojeISO = new Date().toISOString().slice(0,10);
+    const elegiveis = (pend||[]).filter(l => l.credor && l.credor.id && !jaTemOp.has(l.id));
+    // Só o que JÁ VENCEU. Dos 315 repasses importados, 265 (R$ 108.873,05) vencem depois
+    // de hoje — o último em 30/12/2029. Somá-los aqui punha parcela de 2029 dentro de um
+    // KPI chamado "a repassar AGORA" e dentro do alerta de atraso: em 17/08/2026 o painel
+    // marcou R$ 123.179,89 a repassar e acusou o Cecato como devendo R$ 14.080,84 há 38
+    // dias, quando o vencido de verdade era R$ 14.054,89 no total.
+    _repState.lancs = elegiveis.filter(l => !l.data_vencimento || l.data_vencimento <= hojeISO);
+    _repState.lancsFuturos = elegiveis.filter(l => l.data_vencimento && l.data_vencimento > hojeISO);
     for(const l of _repState.lancs){
       const d = _rapLerDescricao(l.descricao);
       _repState.ops.push({
@@ -31073,7 +31081,7 @@ async function _repLoad(){
         repasse_efetuado_em: null, repasse_comprovante_url: null,
       });
     }
-  }catch(e){ console.warn('[repasses] lançamentos importados:', e.message||e); _repState.lancs=[]; }
+  }catch(e){ console.warn('[repasses] lançamentos importados:', e.message||e); _repState.lancs=[]; _repState.lancsFuturos=[]; }
   _repState.credMap = {}; _repState.devMap = {};
   const cIds=[...new Set(_repState.ops.map(o=>o.credor_id).filter(Boolean))];
   if(cIds.length){
@@ -31386,9 +31394,13 @@ function _repRenderARepassar(){
   const c=_repAgg();
   const pend=c.cedentes.filter(x=>x.temPend);
   const banner=`<div style="display:flex;align-items:center;gap:11px;background:#0A1530;border-radius:10px;padding:12px 16px;margin-bottom:18px;"><span style="width:24px;height:24px;border-radius:7px;background:#C9A961;color:#0A1530;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;">⚡</span><span style="font-size:12.5px;color:#EFEAD9;">Confirme o repasse por cliente. Sai <b style="color:#E8C877;">1 PIX por devedor</b> (nunca somado) para a chave PIX do cliente, cada um identificado pela parcela e pelo devedor.</span></div>`;
-  if(!pend.length) return banner+`<div style="background:#fff;border:1px solid #E6E1D2;border-radius:11px;padding:34px;text-align:center;color:#8892A6;font-size:13px;">Nenhum repasse pendente. Tudo em dia. 🎉</div>`;
+  // Diz em voz alta o que NÃO está nesta lista. Sem isto, "cadê o resto dos repasses?"
+  // vira suspeita de dado sumido — quando na verdade é parcela que ainda não venceu.
+  const fut=_repState.lancsFuturos||[];
+  const avisoFut = fut.length ? `<div style="display:flex;align-items:center;gap:9px;background:#FBFAF6;border:1px solid #EFEAD9;border-radius:9px;padding:9px 14px;margin-bottom:14px;font-size:12.5px;color:#6B7683;">Esta lista traz só o que <b style="color:#0A1530;">já venceu</b>. Outros <b style="color:#0A1530;">${fut.length} repasses</b> somando <b style="color:#0A1530;">${fmtR(fut.reduce((s,l)=>s+Math.abs(+l.valor||0),0))}</b> vencem depois de hoje (o último em ${fmtDataBR(fut.map(l=>l.data_vencimento).sort().slice(-1)[0])}) e aparecem aqui quando vencerem.</div>` : '';
+  if(!pend.length) return banner+avisoFut+`<div style="background:#fff;border:1px solid #E6E1D2;border-radius:11px;padding:34px;text-align:center;color:#8892A6;font-size:13px;">Nenhum repasse vencido. Tudo em dia. 🎉</div>`;
   const rows=pend.map(x=>`<div style="display:grid;grid-template-columns:1.4fr 150px 140px 140px 120px;align-items:center;gap:10px;padding:13px 18px;border-bottom:1px solid #F1ECE0;font-size:13px;"><span style="font-weight:600;color:#0A1530;">${escHtml(x.nome)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#0A1530;">${fmtR(x.recebido)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;color:#5E7C58;">${fmtR(x.honorario)}</span><span style="text-align:right;font-family:'JetBrains Mono',monospace;font-weight:700;color:#9C7F40;">${fmtR(x.aRepassar)}</span><span style="text-align:right;"><span onclick="_repModalFazer('${x.credId}')" style="font-size:11.5px;font-weight:700;color:#0A1530;background:#C9A961;padding:5px 13px;border-radius:7px;cursor:pointer;">Repassar</span></span></div>`).join('');
-  return banner+`<div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;overflow:hidden;">
+  return banner+avisoFut+`<div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;overflow:hidden;">
     <div style="display:grid;grid-template-columns:1.4fr 150px 140px 140px 120px;align-items:center;gap:10px;padding:10px 18px;background:#F5F2EA;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#8892A6;text-transform:uppercase;letter-spacing:.08em;"><span>Cliente / cedente</span><span style="text-align:right;">Recebido</span><span style="text-align:right;">Honorário</span><span style="text-align:right;">A repassar</span><span style="text-align:right;">Ação</span></div>
     ${rows}
   </div>`;
