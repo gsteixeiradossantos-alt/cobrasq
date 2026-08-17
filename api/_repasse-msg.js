@@ -20,13 +20,23 @@ const { zapiSendText, zapiSendDocument } = require('./_zapi.js');
 // não devem aparecer nem no extrato do credor nem na mensagem.
 function lerDescricaoRepasse(descricao) {
   const s = String(descricao || '').trim();
+  // Só desmonta o texto quando ele termina em "N/M" — a assinatura da descrição de
+  // lançamento vinda do Controlle. Fora disso, o texto já é o que deve sair no extrato:
+  // é o caso da tela "Repasses a clientes", que manda "<nº editado> - <devedor>" pronto.
+  // Cortar sempre no primeiro " - " fazia o PIX sair descrito só com o número, e
+  // estragaria nome de devedor que legitimamente contenha " - ".
   const m = s.match(/(\d+)\s*\/\s*(\d+)\s*$/);
+  if (!m) {
+    const pronto = s.match(/^(\d+)\s*-\s*(\S.*)$/);
+    return pronto
+      ? { parcela: Number(pronto[1]), total: null, devedor: pronto[2].trim() }
+      : { parcela: null, total: null, devedor: s };
+  }
+  // Descrição de lançamento: o nome é o que vem ANTES do primeiro " - "; o resto são
+  // anotações de trabalho ("pagar", "conferido", "Avisar", "depende do Sisbajud"), que
+  // não devem aparecer nem no extrato do credor nem na mensagem.
   const devedor = s.replace(/\s*\d+\s*\/\s*\d+\s*$/, '').split(/\s+-\s+/)[0].trim();
-  return {
-    parcela: m ? Number(m[1]) : null,
-    total: m ? Number(m[2]) : null,
-    devedor,
-  };
+  return { parcela: Number(m[1]), total: Number(m[2]), devedor };
 }
 
 // Descrição que o credor lê no extrato do PIX: "<nº parcela> - <devedor>".
