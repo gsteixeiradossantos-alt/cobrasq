@@ -290,10 +290,10 @@ module.exports = async function handler(req, res) {
     let b64 = '';
     try { b64 = await gerarReciboPdfBase64(dadosRec); } catch (e) { console.warn('[processar-recebimento] gerar recibo PDF:', e.message); }
 
-    let zap = null, pdfEnviado = false;
+    let zap = null, pdfEnviado = false, erroPdf = null;
     const tel = String((devedor && devedor.telefone) || '').replace(/\D/g, '');
     if (tel) {
-      if (b64) { try { pdfEnviado = await zapiSendDocumentPdf(tel, b64, 'Recibo COBRASQ.pdf'); } catch (e) { pdfEnviado = false; } }
+      if (b64) { try { pdfEnviado = await zapiSendDocumentPdf(tel, b64, 'Recibo COBRASQ.pdf'); } catch (e) { pdfEnviado = false; erroPdf = e.message; } }
 
       const meioTxt = { PIX: 'do Pix', BOLETO: 'do boleto', CREDIT_CARD: 'do cartão', DEBIT_CARD: 'do cartão' }[String(payment.billingType || '').toUpperCase()] || 'do pagamento';
       const linhaParcela = row.parcela && row.total_parcelas ? ` referente a parcela n. ${row.parcela} de ${row.total_parcelas} do acordo realizado` : '';
@@ -326,7 +326,29 @@ module.exports = async function handler(req, res) {
             payment_id: paymentId,
             valor: valorRecebido,
             motivo: b64 ? 'PDF gerado, mas o envio pela Z-API falhou' : 'geração do PDF falhou (duas tentativas)',
+            erro: erroPdf,
             tinha_telefone: !!tel,
+          },
+          autor_nome: 'Financeiro (webhook Asaas)',
+        }),
+      }).catch(() => { /* best-effort */ });
+    }
+
+    // Falha do TEXTO também vira evento. Até 20/08/2026 o erro do `zapiSendText` morria
+    // dentro de `zap = { error }` e não era gravado em lugar nenhum — no caso da
+    // Cristiane (18/08) não deu para saber, depois do fato, se a confirmação chegou a
+    // sair. `crm_mensagens_enviadas` não cobre este caminho: só registra CRM/Bia.
+    if (devedor && devedor.id && tel && !(zap && zap.messageId)) {
+      await sbFetch('devedor_eventos', {
+        method: 'POST',
+        body: JSON.stringify({
+          devedor_id: devedor.id,
+          tipo: 'recibo_texto_falhou',
+          payload: {
+            payment_id: paymentId,
+            valor: valorRecebido,
+            telefone: tel,
+            erro: (zap && zap.error) || 'a Z-API não devolveu messageId',
           },
           autor_nome: 'Financeiro (webhook Asaas)',
         }),

@@ -85,4 +85,22 @@ async function zapiSendDocument(phone, { document, fileName, caption, extension 
   });
 }
 
-module.exports = { zapiSendText, zapiSendDocument, normalizarTelefone };
+// Atalho para o caso mais comum: mandar um PDF já em base64. Existe porque
+// _processar-recebimento.js e _reenviar-recibo.js sempre chamaram um
+// `zapiSendDocumentPdf(tel, base64, nome)` que NUNCA foi exportado daqui — o #488
+// escreveu os chamadores, o #515 criou o sender com outro nome e outra assinatura, e
+// ninguém casou os dois. Resultado: `undefined(...)` estourava TypeError, o catch do
+// chamador engolia, e o recibo do devedor nunca era anexado (três falhas registradas
+// em `recibo_pdf_falhou` entre 18 e 20/08/2026 — Aline, Cristiane e Marinalva).
+// Devolve boolean: só é verdadeiro quando a Z-API confirma com um messageId.
+async function zapiSendDocumentPdf(phone, base64, fileName, caption) {
+  const r = await zapiSendDocument(phone, {
+    document: base64,
+    fileName: fileName || 'Documento.pdf',
+    extension: 'pdf',
+    caption: caption || '',
+  });
+  return !!(r && (r.messageId || r.id || r.zaapId));
+}
+
+module.exports = { zapiSendText, zapiSendDocument, zapiSendDocumentPdf, normalizarTelefone };

@@ -109,6 +109,7 @@ module.exports = async function handler(req, res) {
       // A página do Asaas mostra "Aguarde" enquanto busca os dados. Sem esperar o
       // conteúdo real aparecer, o PDF sai com a tela de carregamento.
       await page.waitForFunction(
+        // eslint-disable-next-line no-undef -- roda no contexto do browser, não no Node
         () => !/Aguarde/i.test(document.body.innerText) && document.body.innerText.length > 300,
         { timeout: 15000 },
       ).catch(() => { /* segue e imprime o que houver */ });
