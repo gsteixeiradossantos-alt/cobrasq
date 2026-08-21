@@ -340,6 +340,58 @@ já existentes no Asaas é manual, fora desta migração (ver conversa/PR #483).
 - Higiene git: **fetch+rebase antes de afirmar/pushar**; editar em worktree isolado (sessões concorrentes).
 - Posicionamento público COBRASQ = **extrajudicial** (o judicial é do escritório Teixeira & Azzolin).
 
+## R-20 · Pagamento do Asaas que não vira baixa no financeiro
+
+**O que acontece.** O `/api/_processar-recebimento.js` precisa decidir QUAL lançamento um
+pagamento quitou. Até 21/08/2026 essa decisão era inferida por **valor exato** dentro dos
+**20 lançamentos mais recentes por data de criação** — e falhava de dois jeitos medidos em
+produção:
+
+- a janela de 20 escondia a parcela certa quando o caso ganhava um lote de parcelas futuras
+  (Marinalva: a parcela a baixar ficou na posição 21) ou quando já tinha muitas parcelas pagas
+  ocupando as vagas (Fatima Cordova: UMA parcela aberta com o valor exato, e mesmo assim não casou);
+- valor exato nunca casa com quem paga atrasado, porque entra juros e multa (Sidimar: pagou
+  R$343,82 numa parcela de R$312,00).
+
+O desfecho dependia da forma de pagamento: **boleto** não criava lançamento e o pagamento
+sumia do financeiro com vestígio só num `console.warn`; **PIX** criava lançamento novo e
+deixava a parcela aberta — o mesmo dinheiro contado duas vezes.
+
+**Por que é classe, não caso.** A inferência por valor/data também contamina o
+DIAGNÓSTICO: em 21/08 ela produziu falso positivo (Nely apontada como "sem baixa" tendo a
+parcela quitada 8 dias antes) e cinco falsas "duplicidades" que eram importação correta.
+Toda conclusão sobre "o que foi pago" tem que vir do extrato do Asaas, nunca do banco local.
+
+**Onde:** `api/_processar-recebimento.js` (escolha do lançamento e gravação do vínculo);
+`api/_conciliacao-asaas.js` (mesma precedência, para o passado); `fin_lancamento.asaas_payment_id`
+(migração `20260821_fin_lancamento_asaas_payment_id.sql`); `public.asaas_pagamento_orfao`.
+
+**Estado-correto.** Todo pagamento recebido no Asaas a partir de **01/08/2026** (data de corte
+acordada com o Gustavo) tem lançamento vinculado OU está na fila de órfãos. A precedência é
+vínculo gravado → mesmo vencimento → mesmo valor → valor + acréscimo plausível; **ambíguo
+nunca é aplicado sozinho**.
+
+**Teste (SQL).** Pendências que ninguém está vendo — tem que ser 0:
+
+```sql
+select count(*) from public.asaas_pagamento_orfao where resolvido_em is null;
+```
+
+**Teste (conciliação).** `GET /api/conciliacao-asaas?de=2026-08-01&ate=<hoje>` — no resumo,
+`sem_candidato` e os inequívocos não aplicados têm que estar em 0; o que sobra é ambíguo
+esperando decisão humana em Financeiro › Conciliação › Asaas.
+
+**Teste (código).** `npm test` inclui `test/f05_conciliacao_asaas.test.js`, que trava os cinco
+casos reais (Marinalva, Fatima, Ivone, Sidimar, webhook reenviado) mais alocação exclusiva.
+
+**Atenção ao comparar valor.** O financeiro é MAIOR que o Asaas por natureza — inclui alvarás,
+reembolsos e cumprimento de sentença, que não passam por boleto. Em ago/2026: Asaas R$ 11.248,
+sistema R$ 17.104, ambos corretos. **Só o conjunto "pagamento Asaas" pode ser exigido 1:1**;
+comparar totais gera alarme falso.
+
+**Última checagem 21/08/2026:** migração aplicada, casada por vínculo no ar, alocação exclusiva
+no ar, fila de órfãos criada. Devedores com `asaas_customer_id`: 77 → 123.
+
 ---
 
 ### Pendências de evolução (não-regressão — rever a cada vistoria)
