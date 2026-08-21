@@ -5371,11 +5371,35 @@ async function syncToSupabase(force){
         // (decisão do gestor: ninguém pode "confirmar sem querer") — recarrega
         // os dados do servidor e avisa.
         if(_lastKnownDevCount != null && localDevs < _lastKnownDevCount - 2){
-          const perda = _lastKnownDevCount - localDevs;
-          console.warn('F-20: save bloqueado — removeria ' + perda + ' devedores do servidor.');
-          if(typeof showToast === 'function') showToast('🛡️ Salvamento BLOQUEADO: esta aba está desatualizada (faltam ' + perda + ' devedores). Dados do servidor recarregados — reaplique sua alteração.','danger');
-          try{ await loadFromSupabase(); }catch(e){ console.warn('F-20: reload pós-bloqueio falhou:', e?.message||e); }
-          return;
+          // CONFERE CONTRA O SERVIDOR ANTES DE BLOQUEAR. `_lastKnownDevCount` é uma
+          // referência de SESSÃO e derrapa por caminhos que não têm nada a ver com aba
+          // velha: o blob (cobrasq_data) está congelado com 74 devedores enquanto o
+          // relacional tem ~769, tombstones removem registros da lista depois do
+          // rebase, e arquivamentos feitos por fora (SQL, outra aba) encolhem a visão.
+          // Quando ela derrapa, a trava passa a bloquear TODO save, em toda aba, e o
+          // reload não resolve — porque a referência volta a derrapar do mesmo jeito
+          // (achado real 21/08/2026: "faltam 5 devedores" travou o painel inteiro).
+          // O que a trava quer impedir é uma aba velha ENCOLHER O SERVIDOR; então a
+          // comparação certa é contra o servidor, não contra o contador local.
+          let serverDevs = null;
+          try{
+            const { count, error: cntErr } = await supa.from('devedores').select('id', { count:'exact', head:true });
+            if(!cntErr && typeof count === 'number') serverDevs = count;
+          }catch(e){ console.warn('F-20: contagem do servidor falhou:', e?.message||e); }
+
+          if(serverDevs == null || localDevs < serverDevs - 2){
+            // Sem contagem do servidor, mantém o bloqueio (fail-safe): é melhor barrar
+            // um save legítimo do que deixar uma aba velha apagar dados.
+            const perda = (serverDevs == null ? _lastKnownDevCount : serverDevs) - localDevs;
+            console.warn('F-20: save bloqueado — removeria ' + perda + ' devedores do servidor.');
+            if(typeof showToast === 'function') showToast('🛡️ Salvamento BLOQUEADO: esta aba está desatualizada (faltam ' + perda + ' devedores). Dados do servidor recarregados — reaplique sua alteração.','danger');
+            try{ await loadFromSupabase(); }catch(e){ console.warn('F-20: reload pós-bloqueio falhou:', e?.message||e); }
+            return;
+          }
+          // O servidor confirma que esta aba NÃO está encolhendo nada: quem estava
+          // velho era o contador. Rebaseia e deixa o save seguir.
+          console.info('F-20: referência de sessão estava defasada (' + _lastKnownDevCount + ' vs ' + serverDevs + ' no servidor); rebaseando para ' + localDevs + '.');
+          _lastKnownDevCount = localDevs;
         }
 
         // ── GRAVAÇÃO POR REGISTRO: envia só o que mudou; servidor mescla ──
