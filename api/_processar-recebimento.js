@@ -48,6 +48,37 @@ function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 // sem a mensagem de texto que vai pro devedor.
 const NUMERO_MONITORAMENTO = '46999223332';
 
+// Escolhe qual fin_lancamento do devedor corresponde ao pagamento do Asaas.
+// Valor SOZINHO não identifica a linha: num acordo de parcela fixa as 24 linhas têm o
+// mesmo valor e o mesmo `criada_em` (nascem no mesmo INSERT), então a versão antiga
+// ("primeira do order=criada_em.desc com valor igual") era empate puro e o Postgres
+// devolvia qualquer uma — foi o que baixou a 11/24 da Cristiane (pay_30shj4m6rmv4qtb8,
+// "Parcela 1 de 24") e a 4/7 da Aline (pay_jniooq9iodcn7g2b, "Parcela 2 de 7") em
+// 08/2026. Desempata pelo que o Asaas já informa: vencimento e número da parcela.
+// Devolve null quando há mais de uma candidata e nenhuma chave decide — melhor deixar
+// para baixa manual do que baixar a parcela errada.
+function escolherLancamento(candidatos, valorRecebido, payment) {
+  const mesmoValor = (candidatos || []).filter(c => Math.abs(Number(c.valor) - valorRecebido) < 0.05);
+  if (!mesmoValor.length) return null;
+  const nParc = payment && payment.installmentNumber != null ? Number(payment.installmentNumber) : null;
+  const venc = (payment && payment.dueDate) || null;
+  const dias = (a, b) => Math.abs((new Date(a) - new Date(b)) / 86400000);
+
+  return (
+    // 1) vencimento idêntico ao do boleto: a chave mais forte que o Asaas dá.
+    (venc && mesmoValor.find(c => c.data_vencimento === venc)) ||
+    // 2) número da parcela (presente quando o boleto nasceu de uma série).
+    (nParc != null && mesmoValor.find(c => Number(c.numero_parcela) === nParc)) ||
+    // 3) sem chave exata (avulsa, vencimento reemitido): parcela EM ABERTO de vencimento
+    //    mais próximo do boleto — nunca uma linha arbitrária.
+    (venc && mesmoValor
+      .filter(c => Number(c.status) === 0 && c.data_vencimento)
+      .sort((a, b) => dias(a.data_vencimento, venc) - dias(b.data_vencimento, venc))[0]) ||
+    // 4) candidata única no acordo inteiro: não há o que desempatar.
+    (mesmoValor.length === 1 ? mesmoValor[0] : null)
+  );
+}
+
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
   if (!timingSafeEq(req.headers['x-emit-secret'] || '', process.env.EMIT_ACORDO_SECRET || '')) {
@@ -152,13 +183,25 @@ module.exports = async function handler(req, res) {
         if (payment.installmentNumber != null) {
           idx = parcelas.findIndex(p => Number(p.numero) === Number(payment.installmentNumber) && !p.pago);
         }
+        if (idx < 0 && payment.dueDate) {
+          // Sem installmentNumber (cobrança avulsa) — o vencimento do boleto identifica a
+          // parcela; valor não, porque num acordo de parcela fixa todas são iguais.
+          idx = parcelas.findIndex(p => !p.pago && p.vencimento === payment.dueDate);
+        }
         if (idx < 0) {
-          // Sem installmentNumber (cobrança avulsa) — casa pela parcela em aberto de valor mais próximo.
+          // Último recurso: parcela em aberto de vencimento mais próximo do boleto (ou, sem
+          // vencimento nenhum, a de valor mais próximo).
+          const dias = (a, b) => Math.abs((new Date(a) - new Date(b)) / 86400000);
           idx = parcelas.reduce((best, p, i) => {
             if (p.pago) return best;
-            const diff = Math.abs((+p.valor || 0) - valorRecebido);
-            const bestDiff = best < 0 ? Infinity : Math.abs((+parcelas[best].valor || 0) - valorRecebido);
-            return diff < bestDiff ? i : best;
+            const score = payment.dueDate && p.vencimento
+              ? dias(p.vencimento, payment.dueDate)
+              : Math.abs((+p.valor || 0) - valorRecebido);
+            const bp = best < 0 ? null : parcelas[best];
+            const bestScore = !bp ? Infinity
+              : (payment.dueDate && bp.vencimento ? dias(bp.vencimento, payment.dueDate)
+                                                  : Math.abs((+bp.valor || 0) - valorRecebido));
+            return score < bestScore ? i : best;
           }, -1);
         }
         if (idx >= 0) {
@@ -190,13 +233,26 @@ module.exports = async function handler(req, res) {
         // Duplicidade real (auditoria 2026-08-06, R$1.867 contados 2x): a versão antiga só
         // olhava status=0, então uma linha já paga manualmente virava candidata inexistente
         // e o webhook criava uma segunda linha do zero pro mesmo pagamento.
+        // Casada da parcela: valor SOZINHO não identifica a linha. Num acordo de parcela
+        // fixa as 24 linhas têm o mesmo valor e o mesmo `criada_em` (nascem no mesmo
+        // INSERT), então "primeira do order=criada_em.desc com valor igual" era empate
+        // puro — o Postgres devolvia qualquer uma. Foi o que baixou a 11/24 da Cristiane
+        // (pay_30shj4m6rmv4qtb8, Parcela 1 de 24) e a 4/7 da Aline (pay_jniooq9iodcn7g2b,
+        // Parcela 2 de 7) em 08/2026. Agora desempata pelo que o Asaas já diz: número da
+        // parcela e, principalmente, vencimento. O limit=20 também saiu: com 24 parcelas
+        // ele cortava as 4 últimas.
         let lancReceitaId = null;
         let existente = null;
         if (devedor && devedor.id) {
+          // limit alto e sem order por criada_em: com 24 parcelas o limit=20 antigo cortava
+          // as 4 últimas, e criada_em é idêntico dentro do mesmo acordo.
           const candidatos = await sbFetch(
-            `fin_lancamento?tipo_movimento=eq.1&status=in.(0,1)&cobranca_id=eq.${devedor.id}&select=id,valor,status,observacoes&order=criada_em.desc&limit=20`
+            `fin_lancamento?tipo_movimento=eq.1&status=in.(0,1)&cobranca_id=eq.${devedor.id}&select=id,valor,status,observacoes,numero_parcela,total_parcelas,data_vencimento&order=data_vencimento.asc&limit=200`
           ).catch(() => []);
-          existente = (candidatos || []).find(c => Math.abs(Number(c.valor) - valorRecebido) < 0.05) || null;
+          existente = escolherLancamento(candidatos, valorRecebido, payment);
+          if (!existente && (candidatos || []).some(c => Math.abs(Number(c.valor) - valorRecebido) < 0.05)) {
+            console.warn(`[processar-recebimento] parcelas de mesmo valor e nenhuma casa por vencimento/numero — devedor=${devedor.id} payment=${paymentId}; baixa manual necessaria.`);
+          }
         }
 
         const ehBoleto = String(payment.billingType || '').toUpperCase() === 'BOLETO';
@@ -372,3 +428,7 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: e.message });
   }
 };
+
+// Exposto para teste (test/f05_asaas_casada_parcela.test.js). O handler continua sendo
+// o export principal do módulo.
+module.exports.escolherLancamento = escolherLancamento;
