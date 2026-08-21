@@ -23751,12 +23751,38 @@ function nomeResponsavel(dev){
   return '—';
 }
 
-function editCliente(id){
+async function editCliente(id){
   window._docSrcCli=null;
   if(ehColaborador()){ showToast('Apenas o gestor pode editar credores.','danger'); return; }
   window._editandoPedidoCredor = null; // edição de credor já existente, não de pedido pendente
   const c = (DB.clientes||[]).find(x=>x.id===id);
   if(!c) return;
+  // A cópia em memória pode estar DESATUALIZADA: ou é o esqueleto do blob congelado
+  // (cliente importado só no relacional — caso Multifer), ou o cadastro mudou por fora
+  // depois do load (SQL, import, API — caso da matriz Arte Estofados em 20/08/2026).
+  // Nos dois casos, abrir o modal a partir dela e salvar mandaria campo vazio por cima.
+  // Aqui completamos as lacunas com o registro relacional ANTES de popular o modal —
+  // só o que está vazio, nunca sobrepondo o que a cópia local já tem.
+  //
+  // Isto ataca a CAUSA. As redes de segurança a jusante continuam valendo e são outras:
+  //   • clienteCamposQueVaoEsvaziar (#472) avisa no save e grava clientes_historico;
+  //   • o trigger clientes_preserva_contato restaura o valor no banco, cobrindo também
+  //     os caminhos que NÃO passam por salvarCliente — como o upsert em massa de
+  //     syncClientes, que foi o que apagou o nome_fantasia da matriz sem deixar
+  //     registro em clientes_historico.
+  if(!c.tel || !c.doc || !c.email || !c.chavePix){
+    try{
+      const supa=getSupabase();
+      if(supa){
+        const { data:row } = await supa.from('clientes').select('*').eq('id',id).maybeSingle();
+        if(row){
+          const rel=rowToCliente(row);
+          ['nome','doc','tel','email','chavePix','nomeFantasia','endereco','honorarios','obs','loginEmail','loginSenha']
+            .forEach(k=>{ if(!c[k] && rel[k]) c[k]=rel[k]; });
+        }
+      }
+    }catch(_){ /* sem servidor: segue com a cópia local; a trava do salvarCliente cobre o resto */ }
+  }
   document.getElementById('mcli-id').value = c.id;
   document.getElementById('mcli-nome').value = c.nome||'';
   document.getElementById('mcli-doc').value = c.doc||'';
