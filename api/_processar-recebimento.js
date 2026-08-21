@@ -190,32 +190,110 @@ module.exports = async function handler(req, res) {
         // Duplicidade real (auditoria 2026-08-06, R$1.867 contados 2x): a versão antiga só
         // olhava status=0, então uma linha já paga manualmente virava candidata inexistente
         // e o webhook criava uma segunda linha do zero pro mesmo pagamento.
+        // 21/08/2026 — a casada por VALOR + janela de 20 falhava de dois jeitos medidos
+        // em produção (ver 20260821_fin_lancamento_asaas_payment_id.sql):
+        //   • LIMIT 20 por criada_em desc: a parcela certa saía da janela quando o caso
+        //     ganhava um lote de parcelas futuras (Marinalva: a parcela a baixar ficou na
+        //     posição 21) ou quando já tinha muitas parcelas pagas ocupando as 20 vagas
+        //     (Fatima Cordova: UMA parcela aberta, valor exato, e mesmo assim não casou);
+        //   • valor exato: juros e multa de quem paga atrasado quebram a igualdade
+        //     (Sidimar: pagou 343,82 numa parcela de 312,00).
+        // Precedência agora: (1) vínculo gravado pelo id do pagamento; (2) parcela EM
+        // ABERTO de mesmo vencimento; (3) mesmo valor, a mais antiga; (4) valor coberto
+        // pelo pago (principal + acréscimo). Sem janela — cobranca_id já limita ao caso.
         let lancReceitaId = null;
         let existente = null;
+        let comoCasou = null;
         if (devedor && devedor.id) {
           const candidatos = await sbFetch(
-            `fin_lancamento?tipo_movimento=eq.1&status=in.(0,1)&cobranca_id=eq.${devedor.id}&select=id,valor,status,observacoes&order=criada_em.desc&limit=20`
+            `fin_lancamento?tipo_movimento=eq.1&status=in.(0,1)&cobranca_id=eq.${devedor.id}` +
+            `&select=id,valor,status,observacoes,data_vencimento,asaas_payment_id&order=data_vencimento.asc`
           ).catch(() => []);
-          existente = (candidatos || []).find(c => Math.abs(Number(c.valor) - valorRecebido) < 0.05) || null;
+          const lista = candidatos || [];
+          const vencPago = payment.dueDate ? String(payment.dueDate) : null;
+          const abertos = lista.filter(c => Number(c.status) === 0);
+
+          // (1) já vinculado a ESTE pagamento — webhook reenviado. Reconfirma, não duplica.
+          existente = lista.find(c => c.asaas_payment_id && c.asaas_payment_id === paymentId) || null;
+          if (existente) comoCasou = 'payment_id';
+
+          // (2) mesma data de vencimento do boleto pago. Critério mais confiável quando o
+          // caso tem várias parcelas de valor idêntico (Ivone Klinzer: 26 de R$506 — só o
+          // vencimento distingue qual foi paga).
+          if (!existente && vencPago) {
+            existente = abertos.find(c => String(c.data_vencimento) === vencPago) || null;
+            if (existente) comoCasou = 'vencimento';
+          }
+
+          // (3) valor exato, a mais antiga em aberto (regra do Gustavo, 21/08).
+          if (!existente) {
+            existente = abertos.find(c => Math.abs(Number(c.valor) - valorRecebido) < 0.05) || null;
+            if (existente) comoCasou = 'valor';
+          }
+
+          // (4) pagou MAIS que a parcela: principal + juros/multa. Só aceita excedente
+          // plausível (até 30% ou R$150) — acima disso é provável que o pagamento seja de
+          // outra parcela, e chutar aqui suja o financeiro.
+          if (!existente) {
+            const teto = Math.max(valorRecebido * 0.3, 150);
+            existente = abertos.find(c => {
+              const v = Number(c.valor) || 0;
+              const excedente = valorRecebido - v;
+              return excedente > 0 && excedente <= teto;
+            }) || null;
+            if (existente) comoCasou = 'valor+acrescimo';
+          }
+
+          // Nunca reaproveita linha já vinculada a OUTRO pagamento.
+          if (existente && existente.asaas_payment_id && existente.asaas_payment_id !== paymentId) {
+            existente = null; comoCasou = null;
+          }
         }
 
         const ehBoleto = String(payment.billingType || '').toUpperCase() === 'BOLETO';
 
         if (existente) {
-          await sbFetch(`fin_lancamento?id=eq.${existente.id}`, { method: 'PATCH', body: JSON.stringify({
+          // Acréscimo (juros/multa de quem pagou atrasado) fica identificado nos campos
+          // próprios em vez de sumir dentro do valor_pago — assim o relatório separa
+          // principal de acréscimo (decisão do Gustavo, 21/08). A parcela mantém o valor
+          // dela; só valor_pago reflete o que entrou de fato.
+          const acrescimo = Math.max(0, valorRecebido - (Number(existente.valor) || 0));
+          const patchBaixa = {
             // data_competencia também move pra data real do pagamento — senão a linha
             // continua aparecendo/agrupada no dia do vencimento original (pedido do
             // Gustavo 2026-08-06), mesmo já tendo sido baixada em outra data.
             status: 1, valor_pago: valorRecebido, data_pagamento: row.recebido_em, data_competencia: row.recebido_em,
-            observacoes: `${existente.observacoes || ''} | confirmado via Asaas payment ${paymentId} em ${row.recebido_em}.`,
-          }) }).catch(() => null);
+            // O vínculo: a partir daqui "qual parcela este pagamento quitou" é dado
+            // gravado, não inferência por valor/data.
+            asaas_payment_id: paymentId,
+            observacoes: `${existente.observacoes || ''} | confirmado via Asaas payment ${paymentId} em ${row.recebido_em} (casada por ${comoCasou || 'n/d'}).`,
+          };
+          if (acrescimo >= 0.01) patchBaixa.juros = acrescimo;
+          await sbFetch(`fin_lancamento?id=eq.${existente.id}`, { method: 'PATCH', body: JSON.stringify(patchBaixa) }).catch(() => null);
           lancReceitaId = existente.id;
         } else if (ehBoleto) {
           // Boleto sempre nasce de uma parcela já importada/cadastrada no sistema — se não
           // achou candidato, é sinal de parcela faltando no cadastro, não de recebimento
           // avulso. NÃO cria lançamento novo (pedido do Gustavo 2026-08-06): criar mascarava
           // o problema real (cadastro incompleto) atrás de uma linha sem categoria/conta.
+          //
+          // 21/08/2026: mas SUMIR também mascarava. Este ramo engoliu pagamentos reais por
+          // semanas — o único vestígio era um console.warn que ninguém lê (Fatima Cordova,
+          // R$106 pagos em 17/08, invisíveis no financeiro). Agora vira evento no histórico
+          // do devedor, que aparece na ficha e é consultável.
           console.warn(`[processar-recebimento] boleto sem lançamento correspondente — devedor=${devedor && devedor.id} valor=${valorRecebido} payment=${paymentId}`);
+          if (devedor && devedor.id) {
+            await sbFetch('devedor_eventos', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({
+              devedor_id: devedor.id,
+              tipo: 'asaas_pagamento_sem_lancamento',
+              payload: {
+                payment_id: paymentId, valor: valorRecebido,
+                pago_em: row.recebido_em, vencimento: payment.dueDate || null,
+                motivo: 'boleto pago sem parcela correspondente no financeiro — conferir cadastro',
+              },
+              autor_nome: 'Asaas (recebimento)',
+            }) }).catch(() => null);
+          }
         } else {
           const rec = await sbFetch('fin_lancamento', { method: 'POST', body: JSON.stringify({
             descricao: `Recebimento — ${devNome}${parcTxt}`,
@@ -228,6 +306,7 @@ module.exports = async function handler(req, res) {
             data_vencimento: row.recebido_em,
             numero_parcela: row.parcela, total_parcelas: row.total_parcelas,
             cobranca_id: devedor ? devedor.id : null,
+            asaas_payment_id: paymentId,
           }) }).catch(() => null);
           lancReceitaId = (rec && rec[0] && rec[0].id) || null;
           await _categorizar(lancReceitaId, CATEGORIA_ACORDOS, valorRecebido);
