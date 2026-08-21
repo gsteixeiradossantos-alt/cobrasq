@@ -99,4 +99,29 @@ caso('Excedente grande demais — sem candidato',
   [{ id: 'x1', valor: 100, status: 0, data_vencimento: '2026-08-01', asaas_payment_id: null }],
   { id: 'pay_G', value: 900, dueDate: null }, 'sem_candidato', null);
 
+// 7. Alocação exclusiva: dois pagamentos do mesmo devedor NÃO podem reivindicar a
+// mesma parcela. Foi o defeito que o dry de 21/08 expôs (Fatima Cordova aparecendo
+// duas vezes na mesma linha 21/21). O segundo pagamento tem que enxergar a parcela
+// como indisponível e procurar outra — ou se declarar sem candidato.
+const duasParcelas = [
+  { id: 'a1', valor: 106, status: 0, data_vencimento: '2026-07-15', asaas_payment_id: null },
+  { id: 'a2', valor: 106, status: 0, data_vencimento: '2026-08-15', asaas_payment_id: null },
+];
+const tomados = new Set();
+const p1 = escolherLancamento(duasParcelas, { id: 'pay_H', value: 106, dueDate: '2026-07-15' }, tomados);
+assert.strictEqual(p1.alvo.id, 'a1');
+tomados.add(p1.alvo.id);
+const p2 = escolherLancamento(duasParcelas, { id: 'pay_I', value: 106, dueDate: '2026-08-15' }, tomados);
+assert.strictEqual(p2.alvo.id, 'a2', 'o segundo pagamento tem que pegar a OUTRA parcela');
+console.log('  ok  Alocação exclusiva — dois pagamentos, duas parcelas distintas');
+
+// 7b. E quando só existe UMA parcela para dois pagamentos, o segundo fica sem
+// candidato em vez de duplicar em cima da mesma linha.
+const umaSo = [{ id: 'u1', valor: 106, status: 0, data_vencimento: '2026-08-15', asaas_payment_id: null }];
+const t2 = new Set(['u1']);
+const sobra = escolherLancamento(umaSo, { id: 'pay_J', value: 106, dueDate: '2026-08-15' }, t2);
+assert.strictEqual(sobra.alvo, null, 'parcela já reservada não pode ser oferecida de novo');
+assert.strictEqual(sobra.criterio, 'sem_candidato');
+console.log('  ok  Parcela já reservada não é oferecida duas vezes');
+
 console.log('F-05: todos passaram.');

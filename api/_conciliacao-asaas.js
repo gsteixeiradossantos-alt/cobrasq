@@ -40,10 +40,16 @@ async function pagarTudo(query) {
 // Mesma precedência do /api/processar-recebimento — de propósito: o que este endpoint
 // propõe para o passado é exatamente o que o fluxo novo fará no futuro.
 //   (1) vínculo já gravado  (2) mesmo vencimento  (3) mesmo valor  (4) valor + acréscimo
-function escolherLancamento(lancamentos, pagamento) {
+function escolherLancamento(lancamentos, pagamento, tomados) {
   const valor = round2(pagamento.value);
   const venc = pagamento.dueDate ? String(pagamento.dueDate) : null;
-  const abertos = lancamentos.filter(l => Number(l.status) === 0);
+  // `tomados` = lançamentos já reservados por OUTRO pagamento nesta mesma rodada.
+  // Sem isso, dois pagamentos do mesmo devedor apontam para a mesma parcela: no dry
+  // de 21/08 a Fatima Cordova apareceu duas vezes (R$116,63 de 16/07 e R$106,00 de
+  // 17/08) reivindicando a parcela 21/21. Aplicar aquilo quitaria uma parcela só e
+  // daria o outro pagamento por baixado.
+  const reservados = tomados || new Set();
+  const abertos = lancamentos.filter(l => Number(l.status) === 0 && !reservados.has(l.id));
 
   const jaVinculado = lancamentos.find(l => l.asaas_payment_id === pagamento.id);
   if (jaVinculado) return { alvo: jaVinculado, criterio: 'ja_vinculado', confianca: 'alta' };
@@ -136,6 +142,15 @@ module.exports = async function handler(req, res) {
     const itens = [];
     const resumo = { pagamentos: 0, ja_vinculados: 0, propostos: 0, sem_candidato: 0, sem_devedor: 0, aplicados: 0, falhas: 0 };
 
+    // ── Alocação exclusiva ────────────────────────────────────────────────
+    // Uma parcela só pode ser quitada por UM pagamento. Sem esta passada, dois
+    // pagamentos do mesmo devedor reivindicam a mesma linha (Fatima Cordova no dry de
+    // 21/08). Ordem de atendimento: quem tem o casamento mais confiável escolhe
+    // primeiro — senão um palpite ambíguo rouba a parcela de um casamento por
+    // vencimento, que é certo. Empate se resolve pela data do pagamento (mais antigo
+    // primeiro), que é a ordem em que as parcelas foram de fato quitadas.
+    const PRIORIDADE = { alta: 0, media: 1, baixa: 2, nenhuma: 3 };
+    const comDevedor = [];
     for (const p of porId.values()) {
       resumo.pagamentos++;
       const dev = devPorCustomer.get(p.customer);
@@ -144,7 +159,20 @@ module.exports = async function handler(req, res) {
         itens.push({ payment_id: p.id, valor: round2(p.value), vencimento: p.dueDate, pago_em: p.paymentDate, situacao: 'sem devedor cadastrado' });
         continue;
       }
-      const escolha = escolherLancamento(lancPorDevedor.get(dev.id) || [], p);
+      const previa = escolherLancamento(lancPorDevedor.get(dev.id) || [], p);
+      comDevedor.push({ p, dev, previa });
+    }
+    comDevedor.sort((a, b) => {
+      const d = PRIORIDADE[a.previa.confianca] - PRIORIDADE[b.previa.confianca];
+      if (d !== 0) return d;
+      return String(a.p.paymentDate || '').localeCompare(String(b.p.paymentDate || ''));
+    });
+
+    const tomados = new Set();
+    for (const { p, dev } of comDevedor) {
+      // Recalcula já descontando o que outro pagamento reservou.
+      const escolha = escolherLancamento(lancPorDevedor.get(dev.id) || [], p, tomados);
+      if (escolha.alvo) tomados.add(escolha.alvo.id);
       const item = {
         payment_id: p.id, devedor: dev.nome,
         valor: round2(p.value), vencimento: p.dueDate, pago_em: p.paymentDate,
