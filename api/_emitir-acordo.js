@@ -25,6 +25,9 @@ function timingSafeEq(a, b) {
 }
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+// Conta "Asaas" no Financeiro — é nela que as parcelas de acordo entram, igual ao
+// que já era feito à mão. Env var permite mudar sem deploy de código.
+const CONTA_ASAAS = Number(process.env.FIN_CONTA_ASAAS_ID || 13);
 function addDaysISO(d) { const x = new Date(); x.setDate(x.getDate() + d); return x.toISOString().slice(0, 10); }
 function firstName(n) { return String(n || '').trim().split(/\s+/)[0] || 'tudo bem'; }
 // Mensagem padrão do boleto no WhatsApp (emissão e reenvio).
@@ -182,6 +185,55 @@ module.exports = async function handler(req, res) {
     };
     await sbFetch(`acordos?id=eq.${acordo.id}`, { method: 'PATCH', body: JSON.stringify({ status: 'ativo', metadata: newMeta }) });
 
+    // PARCELAS PREVISTAS NO FINANCEIRO. Até 21/08/2026 a emissão criava os boletos
+    // no Asaas e não escrevia nada em `fin_lancamento` — o Financeiro só passava a
+    // conhecer a parcela quando ela era PAGA (asaas-webhook → processar-recebimento).
+    // Resultado: acordo assinado não aparecia como recebível, e a tela de Movimentações
+    // mostrava o futuro vazio (caso Michele Garipuna, 18x R$ 280 emitidos e zero
+    // lançamentos). Aqui gravamos as parcelas como previstas (status 0), lendo os
+    // vencimentos REAIS do Asaas — que ajusta data por fim de semana/feriado, então
+    // calcular mês a mês aqui divergiria do boleto. Best-effort: falha não derruba a
+    // emissão, que já está feita e é o que importa para o devedor.
+    let previstas = 0;
+    try {
+      let pagamentos = [];
+      if (charge.installment) {
+        const lista = await asaasReq('GET', `/payments?installment=${encodeURIComponent(charge.installment)}&limit=100`);
+        pagamentos = (lista && lista.data) || [];
+      } else if (charge.id) {
+        pagamentos = [charge];
+      }
+      if (pagamentos.length) {
+        const linhas = pagamentos
+          .slice()
+          .sort((a, b) => (a.installmentNumber || 1) - (b.installmentNumber || 1))
+          .map((p) => ({
+            descricao: `${dev.nome} ${p.installmentNumber || 1}/${nParc}`,
+            tipo_movimento: 1,
+            status: 0,
+            valor: round2(p.value),
+            data_competencia: p.dueDate,
+            data_vencimento: p.dueDate,
+            conta_id: CONTA_ASAAS,
+            cobranca_id: acordo.devedor_id,   // invariante 1:1 cobranca.id == devedor.id
+            acordo_id: acordo.id,
+            asaas_payment_id: p.id,
+            numero_parcela: p.installmentNumber || 1,
+            total_parcelas: nParc,
+            grupo_parcelamento: charge.installment || null,
+          }));
+        // ignoreDuplicates no asaas_payment_id: reemissão/retry não duplica a previsão.
+        await sbFetch('fin_lancamento', {
+          method: 'POST',
+          prefer: 'resolution=ignore-duplicates,return=minimal',
+          body: JSON.stringify(linhas),
+        });
+        previstas = linhas.length;
+      }
+    } catch (e) {
+      console.warn('[emitir-acordo] parcelas previstas no financeiro:', e && e.message);
+    }
+
     // WhatsApp com o link do boleto/PIX (best-effort, não derruba a emissão).
     let zap = null;
     const tel = String(dev.telefone || '').replace(/\D/g, '');
@@ -204,6 +256,7 @@ module.exports = async function handler(req, res) {
           parcelas: nParc,
           total,
           invoice_url: invoiceUrl,
+          parcelas_previstas: previstas,
           whatsapp: zap && zap.messageId ? 'enviado' : 'falha/sem-tel',
           via: manual ? 'manual' : 'auto',
         },
