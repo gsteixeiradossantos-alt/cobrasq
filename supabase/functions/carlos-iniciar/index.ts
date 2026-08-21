@@ -90,14 +90,14 @@ Deno.serve(async (req: Request) => {
   const primeiroNome = String(devedor.nome || '').trim().split(' ')[0] || 'tudo bem';
   const partes: string[] = [];
   if (ehLembrete) {
-    partes.push(`Oi ${primeiroNome}, é o Carlos de novo, só retomando aqui.`);
+    partes.push(`Oi ${primeiroNome}, é o Dr. Gustavo de novo, só retomando aqui.`);
     partes.push(`Sua pendência de R$ ${fmtBRL(calc.totalAvista)} com ${credorNome} continua em aberto. Vamos conversar sobre como resolver?`);
   } else if (faseJudicial) {
-    partes.push(`Oi ${primeiroNome}, aqui é o Carlos, da COBRASQ.`);
+    partes.push(`Oi ${primeiroNome}, aqui é o Dr. Gustavo, da COBRASQ.`);
     partes.push(`Você tem uma pendência de R$ ${fmtBRL(calc.totalAvista)} com ${credorNome}, e a gente ficou responsável por resolver isso.`);
     partes.push('Quer conversar sobre como quitar isso?');
   } else {
-    partes.push(`Oi ${primeiroNome}, aqui é o Carlos, da COBRASQ.`);
+    partes.push(`Oi ${primeiroNome}, aqui é o Dr. Gustavo, da COBRASQ.`);
     partes.push(`Você tem uma pendência de R$ ${fmtBRL(valorOriginal)} com ${credorNome}, e a gente ficou responsável por resolver isso.`);
     let opcoes = `Você pode pagar à vista por R$ ${fmtBRL(calc.totalAvista)}`;
     if (calc.boleto12) opcoes += `, ou parcelar em até ${calc.boleto12.n}x de R$ ${fmtBRL(calc.boleto12.parcela)} no boleto`;
@@ -114,7 +114,7 @@ Deno.serve(async (req: Request) => {
   // Envia em BLOCOS (uma mensagem de WhatsApp por parte, como um humano digita),
   // assinatura só no TOPO do 1º bloco — mesmo padrão do enviarBlocos em bia-atendimento.
   const blocos = partes.slice();
-  blocos[0] = `*Carlos • COBRASQ*\n${blocos[0]}`;
+  blocos[0] = `*Dr. Gustavo • COBRASQ*\n${blocos[0]}`;
   const loteId = crypto.randomUUID();
   let envioOk = false;
   let outId = '';
