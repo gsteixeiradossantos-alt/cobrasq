@@ -3043,7 +3043,7 @@ body.viewas-readonly select {
       <div class="cp-search"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><input placeholder="Buscar devedor, CPF, processo…"></div>
       <div class="cp-bell"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg></div>
     </div>
-    <div class="cp-body"><div class="cp-wrap" id="portalCedenteBody"><!-- JS popula --></div></div>
+    <div class="cp-body"><div class="cp-wrap"><div id="cpAviso"></div><div id="portalCedenteBody"><!-- JS popula --></div></div></div>
   </div>
   <!-- Drawer Beatriz IA -->
   <div class="cp-drawer-ov" id="cpBeatrizOv" onclick="if(event.target===this)cpBeatrizClose()">
@@ -23648,7 +23648,7 @@ async function carregarAppUser(supa, userId){
   if(!supa || !userId) return { status:'error', user:null };
   try {
     const { data, error } = await supa.from('app_users')
-      .select('papel, nome, cargo, ativo, ref_id, pode_ver_grupo, cliente_grupo_id, grupo_economico_id, avatar_url, avatar_cor')
+      .select('papel, nome, cargo, ativo, ref_id, pode_ver_grupo, cliente_grupo_id, grupo_economico_id, avatar_url, avatar_cor, aviso_portal')
       .eq('id', userId)
       .maybeSingle();
     if(error){ console.warn('carregarAppUser:', error.message); return { status:'error', user:null }; }
@@ -23682,7 +23682,8 @@ function montarCurrentUserDeAppUser(appUser, authUser){
       role: 'Cedente',
       supaId: authUser.id,
       clienteId: appUser.ref_id || '',
-      grupoEconomicoId: appUser.grupo_economico_id || null
+      grupoEconomicoId: appUser.grupo_economico_id || null,
+      avisoPortal: appUser.aviso_portal || ''
     };
   }
   const tipo  = papel === 'proprietario' ? 'gestor' : 'funcionario';
@@ -24159,6 +24160,7 @@ function renderPortalCedente(){
   if(nameEl) nameEl.textContent = currentUser.nome;
   if(avatEl) avatEl.textContent = initials(currentUser.nome);
   cpAplicarPremiumUI();
+  cpRenderAviso();   // banner fixo por usuário (app_users.aviso_portal); vazio = nada
   cpNavigate(cpPage);
   cpCarregarClienteInfo(); // async: busca premium/logo/qualificação e re-aplica o menu
 }
@@ -24586,7 +24588,55 @@ function cpClienteIds(){
   if(cpEhGrupo()) return (DB.clientes||[]).filter(c=>c.grupoEconomicoId===currentUser.grupoEconomicoId).map(c=>c.id);
   return currentUser && currentUser.clienteId ? [currentUser.clienteId] : [];
 }
-function cpNomeEmpresa(cid){ const c=(DB.clientes||[]).find(x=>x.id===cid); return c ? (c.nome||c.nomeFantasia||c.nome_fantasia||'—') : '—'; }
+// Rótulo da empresa no portal do cedente: RAZÃO SOCIAL — CIDADE.
+// A razão social sozinha não distingue nada num grupo com matriz e filiais: as 4 unidades
+// da Arte Estofados Decor Ltda (0001-56, 0002-37, 0003-18, 0004-07) têm o MESMO nome, e a
+// carteira do cedente aparecia fundida numa seção só. A cidade é o que o credor reconhece.
+// Duas unidades na mesma cidade (matriz 0001-56 e filial 0002-37 são ambas de Laranjeiras
+// do Sul) são desempatadas pelo final do CNPJ.
+function cpCidadeCliente(c){
+  if(!c) return '';
+  const direta = String(c.cidade||'').trim();
+  if(direta) return direta;
+  // fallback 1: sufixo do nome fantasia, que costuma ser "Marca - Cidade"
+  const fant = String(c.nomeFantasia||c.nome_fantasia||'');
+  const i = fant.indexOf(' - ');
+  if(i>0) return fant.slice(i+3).trim();
+  // fallback 2: penúltimo trecho do endereço livre ("..., Cidade/UF, CEP ...")
+  const m = String(c.endereco||'').match(/,\s*([^,\/]+)\s*\/\s*[A-Z]{2}/);
+  return m ? m[1].trim() : '';
+}
+// Aviso do portal do cedente: texto vem de app_users.aviso_portal, POR USUÁRIO.
+// Vazio/NULL = nenhum banner. Editável no banco, sem deploy:
+//   update app_users set aviso_portal = '...' where email = '...';
+function cpRenderAviso(){
+  const el = document.getElementById('cpAviso');
+  if(!el) return;
+  const txt = String((currentUser && currentUser.avisoPortal) || '').trim();
+  if(!txt){ el.innerHTML=''; return; }
+  el.innerHTML = `<div role="status" style="display:flex;gap:11px;align-items:flex-start;background:#FBEAE7;border:1px solid #C0392B;border-left:4px solid #C0392B;border-radius:8px;padding:13px 16px;margin-bottom:18px;">
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#C0392B" stroke-width="1.9" style="flex-shrink:0;margin-top:1px;"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+    <div style="font-size:13px;line-height:1.55;color:#7B241C;">${escHtml(txt).replace(/\n/g,'<br>')}</div>
+  </div>`;
+}
+function cpNomeEmpresa(cid){
+  const lista = DB.clientes||[];
+  const c = lista.find(x=>x.id===cid);
+  if(!c) return '—';
+  const razao = c.nome || c.nomeFantasia || c.nome_fantasia || '—';
+  const cidade = cpCidadeCliente(c);
+  if(!cidade) return razao;
+  const base = razao + ' — ' + cidade;
+  // Mesma razão social + mesma cidade em mais de uma unidade → mostra o final do CNPJ.
+  const colide = lista.some(o => o && o.id!==c.id
+    && (o.nome||o.nomeFantasia||o.nome_fantasia||'') === razao
+    && cpCidadeCliente(o) === cidade);
+  if(!colide) return base;
+  // Ordem do CNPJ diz quem é matriz: /0001 é sempre a matriz, o resto é filial.
+  const ordem = String(c.doc||'').replace(/\D/g,'').slice(8,12);
+  if(ordem==='0001') return base + ' (Matriz)';
+  return ordem ? base + ' (Loja)' : base;
+}
 function cpDevs(){
   // Item 8: rascunho nunca aparece no portal do cedente (não é cobrança ainda).
   const ids = cpClienteIds();
