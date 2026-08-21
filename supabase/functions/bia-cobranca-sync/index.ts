@@ -49,10 +49,19 @@ Deno.serve(async (req) => {
   }
 
   const hoje = hojeSP();
-  // 1) vencidas + 2) a vencer HOJE (ainda PENDING)
+  // Janela do AVISO PRÉVIO. Até 21/08/2026 o sync só puxava vencidas e as que venciam
+  // HOJE — então o devedor nunca era avisado ANTES de vencer, e as notificações
+  // nativas do Asaas estão desligadas de propósito (api/_asaas.js cria todo customer
+  // com notificationDisabled: true). Resultado: zero canal de aviso prévio.
+  // Agora puxamos também as PENDING que vencem nos próximos N dias.
+  const avisoDias = Math.max(0, Number(Deno.env.get('AVISO_PREVIO_DIAS') ?? 3));
+  const ateAviso = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' })
+    .format(new Date(Date.now() + avisoDias * 864e5));
+
+  // 1) vencidas + 2) a vencer de hoje até hoje+N (ainda PENDING)
   const overdue = await pagina('status=OVERDUE');
   if (!overdue) return json({ error: 'falha payments OVERDUE' }, 502);
-  const pendHoje = await pagina(`status=PENDING&dueDate%5Bge%5D=${hoje}&dueDate%5Ble%5D=${hoje}`);
+  const pendHoje = await pagina(`status=PENDING&dueDate%5Bge%5D=${hoje}&dueDate%5Ble%5D=${ateAviso}`);
   if (!pendHoje) return json({ error: 'falha payments PENDING-hoje' }, 502);
 
   // dedup por id; separa deletados (Asaas retorna OVERDUE mesmo com deleted=true)
@@ -95,10 +104,17 @@ Deno.serve(async (req) => {
         valor: p.value, invoice_url: p.invoiceUrl || null, synced_em: agora, updated_at: agora,
       }).eq('asaas_payment_id', p.id));
     } else {
+      // Boleto que ainda não venceu entra agendado para o dia do AVISO (D-N às 9h BRT),
+      // não para agora — senão o devedor receberia o aviso no instante em que o boleto
+      // é emitido. Vencido/vencendo hoje segue imediato, como antes.
+      const aVencer = String(p.dueDate || '') > hoje;
+      const diaAviso = aVencer
+        ? new Date(Date.parse(p.dueDate + 'T12:00:00Z') - avisoDias * 864e5).toISOString()
+        : agora;
       novas.push({
         asaas_payment_id: p.id, asaas_customer_id: p.customer, telefone: c.tel || null, nome: c.nome || null,
         valor: p.value, venc_original: p.dueDate, venc_atual: p.dueDate, invoice_url: p.invoiceUrl || null,
-        status: 'ativa', proximo_lembrete_em: agora, synced_em: agora,
+        status: 'ativa', proximo_lembrete_em: diaAviso, synced_em: agora,
       });
     }
   }

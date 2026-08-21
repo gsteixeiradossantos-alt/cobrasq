@@ -373,6 +373,41 @@ Deno.serve(async (req) => {
       followups++; continue;
     }
 
+    // ===== AVISO PRÉ-VENCIMENTO =====
+    // Até 21/08/2026 ninguém era avisado ANTES do boleto vencer: o sync só trazia
+    // vencidos e os que venciam no dia, e as notificações nativas do Asaas estão
+    // desligadas de propósito (todo customer é criado com notificationDisabled).
+    // Este ramo trata o boleto que AINDA NÃO VENCEU: manda um lembrete gentil, uma
+    // vez só, e reagenda para o dia do vencimento — a partir daí a régua de cobrança
+    // normal assume. Não conta como lembrete de cobrança e nunca escala: quem ainda
+    // está no prazo não é inadimplente e não pode ser tratado como tal.
+    const vencIso = String(venc || c.venc_atual || '').slice(0, 10);
+    if (vencIso && vencIso > hojeSP()) {
+      if (!(await whatsappExiste(tel))) {
+        await sb.from('bia_cobranca').update({ status: 'pausada', observacao: 'numero sem WhatsApp', updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
+        puladas++; continue;
+      }
+      const diasFalta = Math.round((Date.parse(vencIso) - Date.parse(hojeSP())) / 864e5);
+      const quando = diasFalta === 1 ? 'amanhã' : `em ${diasFalta} dias`;
+      const blocosAviso = [
+        `${SIG}\n${ola}`,
+        `Passando só pra lembrar: sua parcela de R$ ${brMoney(c.valor)} vence ${quando}, dia ${brDate(vencIso)}.`,
+        `Se quiser adiantar, o boleto está aqui:\n${url}`,
+        `Se já pagou, pode desconsiderar.`,
+      ];
+      const { ok: okAviso } = await enviarBlocos(tel, blocosAviso);
+      if (!okAviso) { puladas++; continue; }
+      // Reagenda para o dia do vencimento: um aviso por boleto, e a régua normal
+      // retoma quando (e se) ele vencer.
+      await sb.from('bia_cobranca').update({
+        proximo_lembrete_em: new Date(Date.parse(vencIso + 'T12:00:00Z')).toISOString(),
+        observacao: `aviso pré-vencimento enviado em ${hojeSP()} (D-${diasFalta})`,
+        updated_at: agoraIso,
+      }).eq('asaas_payment_id', c.asaas_payment_id);
+      await sb.from('bia_cobranca_log').insert({ asaas_payment_id: c.asaas_payment_id, telefone: tel, lembrete_num: 0, texto: 'AVISO PRE-VENCIMENTO: ' + blocosAviso.join('\n\n') });
+      enviadas++; continue;
+    }
+
     // marcar para ação: >= diaMax dias vencido sem NENHUMA resposta, ou 2+ promessas quebradas
     const diasVencido = Math.floor((Date.now() - new Date(c.venc_original).getTime()) / 864e5);
     const respondeuAlguemDia = ultimaRecv > 0;
