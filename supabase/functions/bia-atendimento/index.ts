@@ -33,7 +33,7 @@ const JANELA_HORAS = 48;
 // Assinatura fixa no INÍCIO de TODA mensagem que a Bia envia ao cliente,
 // em negrito (negrito do WhatsApp = *texto*).
 const ASSINATURA = '*Bia • COBRASQ*';
-const ASSINATURA_CARLOS = '*Carlos • COBRASQ*';
+const ASSINATURA_CARLOS = '*Dr. Gustavo • COBRASQ*';
 const assinar = (msg: string) => `${ASSINATURA}\n${String(msg || '').trimStart()}`;
 
 // Envia em BLOCOS: quebra o texto na LINHA EM BRANCO (\n\n) e manda cada parte como uma
@@ -870,6 +870,16 @@ Deno.serve(async (req) => {
         await sb.from('whatsapp_bia_log').update({ resposta: parsedC.resposta || null, acao: acaoC }).eq('id', logId);
         await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, estado: acaoC === 'resolvido' ? 'resolvido' : 'bot', turnos: novosTurnosC, ultima_resposta_em: nowIsoC, updated_at: nowIsoC }, { onConflict: 'telefone' });
         respondidas++; continue;
+      }
+
+      // MODO SÓ CARLOS: o caso não está com carlos_ativo e a config manda rodar
+      // apenas o Carlos — a Bia não responde nada. Existe porque o gate global é
+      // o `auto_ativo`, e ele liga os dois de uma vez: sem isto, ligar o Carlos
+      // devolveria a Bia ao ar junto. A conversa fica sem resposta automática,
+      // igual ao que acontecia com tudo desligado.
+      if (cfg.somente_carlos === true) {
+        await sb.from('whatsapp_bia_log').update({ resposta: null, acao: 'skip_somente_carlos' }).eq('id', logId);
+        puladas++; continue;
       }
 
       const hoje = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
