@@ -13,6 +13,36 @@
 
 const crypto = require('crypto');
 const { sbFetch } = require('./_sb.js');
+
+// Fila de pagamentos que não encaixaram sozinhos (ver migração
+// 20260821_asaas_pagamento_orfao.sql). Antes destes dois ramos terminarem em
+// console.warn / lançamento sem dono, o dinheiro sumia do controle: o pagamento de
+// R$106,00 da Fatima Cordova (17/08) ficou semanas invisível, e 11 pagamentos sem
+// devedor casado somaram R$ 4.050,36 sem ninguém saber de quem eram. Registrar aqui é
+// o que faz esse caso aparecer na tela em vez de num log.
+// Idempotente pelo índice único em asaas_payment_id — o Asaas reenvia o webhook até
+// receber 200, e a fila do gestor não pode encher de repetição.
+async function registrarOrfao({ paymentId, payment, motivo, detalhe, devedorId }) {
+  if (!paymentId) return;
+  try {
+    await sbFetch('asaas_pagamento_orfao', {
+      method: 'POST',
+      prefer: 'resolution=ignore-duplicates,return=minimal',
+      body: JSON.stringify({
+        asaas_payment_id: paymentId,
+        asaas_customer_id: payment?.customer || null,
+        valor: payment?.value ?? null,
+        due_date: payment?.dueDate || null,
+        payment_date: payment?.paymentDate || payment?.clientPaymentDate || null,
+        billing_type: payment?.billingType || null,
+        motivo, detalhe: detalhe || null,
+        devedor_id: devedorId || null,
+      }),
+    });
+  } catch (e) {
+    console.warn('[processar-recebimento] registrar órfão falhou:', e.message);
+  }
+}
 const { asaasReq } = require('./_asaas.js');
 const { zapiSendText, zapiSendDocumentPdf } = require('./_zapi.js');
 const { gerarReciboPdfBase64, formaPagamento } = require('./_recibo.js');
@@ -81,6 +111,16 @@ module.exports = async function handler(req, res) {
     if (!devedor && payment.customer) {
       const devs = await sbFetch(`devedores?asaas_customer_id=eq.${encodeURIComponent(payment.customer)}&select=id,nome,telefone,cliente_id&limit=1`).catch(() => []);
       devedor = devs[0] || null;
+    }
+    // Sem devedor casado, o recebimento SEGUE (fix de 07/08: antes o webhook parava aqui
+    // e o pagamento sumia por inteiro) — mas vira lançamento sem dono, "Recebimento —
+    // devedor", e ninguém sabe de quem é o dinheiro. Entra na fila para o gestor
+    // identificar; o processamento continua normalmente logo abaixo.
+    if (!devedor) {
+      await registrarOrfao({
+        paymentId, payment, motivo: 'sem_devedor',
+        detalhe: 'pagamento sem devedor casado — customer do Asaas não vinculado a nenhum cadastro',
+      });
     }
     if (devedor && devedor.cliente_id) {
       const cls = await sbFetch(`clientes?id=eq.${devedor.cliente_id}&select=id,nome&limit=1`).catch(() => []);
@@ -294,6 +334,11 @@ module.exports = async function handler(req, res) {
               autor_nome: 'Asaas (recebimento)',
             }) }).catch(() => null);
           }
+          await registrarOrfao({
+            paymentId, payment, motivo: 'sem_lancamento',
+            detalhe: 'boleto pago sem parcela correspondente no financeiro',
+            devedorId: devedor && devedor.id,
+          });
         } else {
           const rec = await sbFetch('fin_lancamento', { method: 'POST', body: JSON.stringify({
             descricao: `Recebimento — ${devNome}${parcTxt}`,
