@@ -6,9 +6,8 @@
 // bia-cobranca, pra não arriscar a IA inventando número na 1ª mensagem),
 // marca cobrancas.carlos_ativo=true e registra no histórico do caso.
 //
-// IMPORTANTE: isto só cobre o INÍCIO (mensagem de abertura). As RESPOSTAS
-// do devedor ainda não são roteadas automaticamente pro Carlos — isso é o
-// próximo passo (roteirização em bia-atendimento), ainda não conectado.
+// Isto cobre o INÍCIO (mensagem de abertura). As RESPOSTAS do devedor são
+// roteadas em bia-atendimento (índex.ts:771), governadas por `auto_ativo`.
 //
 // Auth: JWT do Supabase (deploy padrão, SEM --no-verify-jwt) — só usuário
 // logado no CRM pode chamar. Escritas usam service role internamente.
@@ -17,8 +16,19 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { calcularCobranca, valorFixo } from '../_shared/calc-cobranca.ts';
 
+// CORS: esta function é chamada pelo BOTÃO do painel, ou seja, de um browser em
+// outra origem. Sem responder o preflight, o navegador nunca chega a mandar o
+// POST — o `Deno.serve` abaixo devolvia 405 no OPTIONS, sem cabeçalho de CORS, e
+// o painel só via "Failed to send a request to the Edge Function". Mesmo padrão
+// já usado em gerar-acordo-termo e beatriz-msg.
+const cors = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+};
+
 function json(obj: unknown, status = 200) {
-  return new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json' } });
+  return new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
 }
 
 function fmtBRL(v: number): string {
@@ -26,6 +36,7 @@ function fmtBRL(v: number): string {
 }
 
 Deno.serve(async (req: Request) => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
 
   const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
