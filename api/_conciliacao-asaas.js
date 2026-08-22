@@ -101,13 +101,58 @@ module.exports = async function handler(req, res) {
     return res.status(400).json({ error: 'Informe o período: ?de=AAAA-MM-DD&ate=AAAA-MM-DD' });
   }
 
-  // Escrever exige as DUAS coisas: a intenção explícita e o segredo de serviço.
+  // Escrever em LOTE exige as DUAS coisas: a intenção explícita e o segredo de serviço.
+  // A decisão PONTUAL (abaixo) é diferente: quem escolheu foi um humano logado na tela,
+  // então basta a sessão de proprietário — o risco que o segredo protege (varrer o
+  // período inteiro aplicando heurística) não existe quando o alvo é um par único.
   const segredo = process.env.EMIT_ACORDO_SECRET || '';
   const pediuAplicar = String(q.aplicar || '') === '1';
   const temSegredo = segredo && (req.headers['x-emit-secret'] === segredo);
   const aplicar = pediuAplicar && temSegredo;
   if (pediuAplicar && !temSegredo) {
     return res.status(403).json({ error: 'aplicar=1 exige o header x-emit-secret.' });
+  }
+
+  // ── Decisão humana pontual: "este pagamento quitou ESTE lançamento" ──────────
+  // É o que a fila de ambíguos da tela usa. Nunca sobrescreve vínculo existente.
+  if (q.payment_id && q.lancamento_id) {
+    try {
+      const pay = await asaasReq('GET', `/payments/${encodeURIComponent(String(q.payment_id))}`);
+      if (!pay || !pay.id) return res.status(404).json({ error: 'pagamento não encontrado no Asaas.' });
+      const st = String(pay.status || '');
+      if (!['RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH'].includes(st)) {
+        return res.status(400).json({ error: `pagamento não está recebido no Asaas (status ${st}).` });
+      }
+      const alvos = await sbFetch(
+        `fin_lancamento?id=eq.${encodeURIComponent(String(q.lancamento_id))}` +
+        `&select=id,descricao,valor,status,asaas_payment_id&limit=1`
+      );
+      const alvo = Array.isArray(alvos) ? alvos[0] : null;
+      if (!alvo) return res.status(404).json({ error: 'lançamento não encontrado.' });
+      if (alvo.asaas_payment_id && alvo.asaas_payment_id !== pay.id) {
+        return res.status(409).json({ error: 'este lançamento já está vinculado a outro pagamento.' });
+      }
+      const valorPago = round2(pay.value);
+      const acrescimo = round2(Math.max(0, valorPago - Number(alvo.valor)));
+      const patch = {
+        status: 1, valor_pago: valorPago,
+        data_pagamento: pay.paymentDate, data_competencia: pay.paymentDate,
+        asaas_payment_id: pay.id,
+        observacoes: `conciliado manualmente com Asaas payment ${pay.id} em ${pay.paymentDate}.`,
+      };
+      if (acrescimo >= 0.01) patch.juros = acrescimo;
+      await sbFetch(`fin_lancamento?id=eq.${encodeURIComponent(alvo.id)}`, {
+        method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch),
+      });
+      // resolve o órfão correspondente, se houver
+      await sbFetch(`asaas_pagamento_orfao?asaas_payment_id=eq.${encodeURIComponent(pay.id)}`, {
+        method: 'PATCH', prefer: 'return=minimal',
+        body: JSON.stringify({ resolvido_em: new Date().toISOString(), lancamento_id: alvo.id }),
+      }).catch(() => null);
+      return res.status(200).json({ ok: true, conciliado: { payment_id: pay.id, lancamento_id: alvo.id, valor_pago: valorPago, acrescimo } });
+    } catch (e) {
+      return res.status(500).json({ error: String((e && e.message) || e) });
+    }
   }
 
   try {
@@ -220,7 +265,21 @@ module.exports = async function handler(req, res) {
     }
 
     itens.sort((a, b) => String(a.pago_em || '').localeCompare(String(b.pago_em || '')));
-    return res.status(200).json({ ok: true, periodo: { de, ate }, aplicado: aplicar, resumo, itens });
+
+    // Fila de órfãos: pagamento que nem chegou a ter candidato (boleto sem parcela ou
+    // sem devedor casado). Vive em asaas_pagamento_orfao desde 21/08 — antes disso
+    // sumia num console.warn.
+    let orfaos = [];
+    try {
+      orfaos = await sbFetch(
+        'asaas_pagamento_orfao?resolvido_em=is.null' +
+        '&select=asaas_payment_id,asaas_customer_id,valor,due_date,payment_date,billing_type,motivo,detalhe' +
+        '&order=payment_date.desc&limit=200'
+      );
+    } catch { orfaos = []; }
+    resumo.orfaos = Array.isArray(orfaos) ? orfaos.length : 0;
+
+    return res.status(200).json({ ok: true, periodo: { de, ate }, aplicado: aplicar, resumo, itens, orfaos });
   } catch (e) {
     return res.status(500).json({ error: String((e && e.message) || e) });
   }
