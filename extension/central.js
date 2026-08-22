@@ -41,20 +41,54 @@ const TIPOS_DOC = [
   [/comprovante/i, 'COMPROVANTES', '176', false],
   [/contrato/i, 'CONTRATO', '40', false],
 ];
+// Documentos aceitos: PDF ou PDF assinado (.pdf.p7s / .p7s — envelope PKCS#7).
+const EH_DOC = /\.(pdf|p7s)$/i;
+// Nome do documento SEM o número de ordem da frente (ex.: "01 - Petição.pdf" →
+// "Petição", "05. Declaração.pdf" → "Declaração") — é o que vai em Observação no OUTROS.
+function nomeSemNumero(nome) {
+  return String(nome || '')
+    .replace(/\.(pdf\.p7s|p7s|pdf)$/i, '')
+    .replace(/^\s*\d{1,3}\s*[-._)\]]*\s*/, '') // tira "01 - ", "1.", "02_", "3) " etc.
+    .trim();
+}
 function classificarDoc(nome) {
   for (const [re, tipoTxt, selVal] of TIPOS_DOC) if (re.test(nome)) return { tipoTxt, selVal, obs: null };
-  return { tipoTxt: 'OUTROS', selVal: '11', obs: nome.replace(/\.pdf$/i, '').slice(0, 90) };
+  return { tipoTxt: 'OUTROS', selVal: '11', obs: nomeSemNumero(nome).slice(0, 90) };
 }
 
 // ── estado ─────────────────────────────────────────────────────────────────────
+// O eproc é o MESMO sistema em vários tribunais — só muda o domínio
+// (eprocNg.tj<UF>.jus.br). Para somar um estado, inclua a sigla da UF em UFS_EPROC.
+const UFS_EPROC = ['pr', 'rs', 'sc', 'mg', 'ms', 'rn', 'to', 'se', 'am', 'rr', 'ac', 'ap'];
+const NOME_UF = { pr: 'Paraná', rs: 'Rio Grande do Sul', sc: 'Santa Catarina', mg: 'Minas Gerais', ms: 'Mato Grosso do Sul', rn: 'Rio Grande do Norte', to: 'Tocantins', se: 'Sergipe', am: 'Amazonas', rr: 'Roraima', ac: 'Acre', ap: 'Amapá' };
+const TRIBUNAIS_EPROC = {};
+for (const uf of UFS_EPROC) TRIBUNAIS_EPROC['tj' + uf] = {
+  nome: 'TJ' + uf.toUpperCase() + (NOME_UF[uf] ? ' — ' + NOME_UF[uf] : ''),
+  host: 'tj' + uf + '.jus.br',                         // domínio-base (cobre 1º e 2º grau)
+  url: 'https://eproc1g.tj' + uf + '.jus.br/eproc/',   // 1º grau (padrão do eproc)
+};
+// Justiça Federal da 4ª Região (mesmo eproc, no caminho /eprocV2/ — confirmado pela
+// URL real da JFPR): JFPR/JFSC/JFRS 1º grau; TRF4 2º grau.
+TRIBUNAIS_EPROC.jfpr = { nome: 'JFPR — Justiça Federal do Paraná', host: 'jfpr.jus.br', url: 'https://eproc.jfpr.jus.br/eprocV2/' };
+TRIBUNAIS_EPROC.jfsc = { nome: 'JFSC — Justiça Federal de Santa Catarina', host: 'jfsc.jus.br', url: 'https://eproc.jfsc.jus.br/eprocV2/' };
+TRIBUNAIS_EPROC.jfrs = { nome: 'JFRS — Justiça Federal do Rio Grande do Sul', host: 'jfrs.jus.br', url: 'https://eproc.jfrs.jus.br/eprocV2/' };
+TRIBUNAIS_EPROC.trf4 = { nome: 'TRF4 — Tribunal Regional Federal 4ª Região', host: 'trf4.jus.br', url: 'https://eproc.trf4.jus.br/eprocV2/' };
+
 const state = {
   fase: 1,              // 1 pasta · 2 extração · 3 revisão · 4 execução
   sistema: 'eproc',     // 'eproc' (iniciais) | 'projudi' (intercorrentes)
+  tribunal: 'tjpr',     // tribunal do eproc (multi-estado) — ver TRIBUNAIS_EPROC
   pastaNome: '',
   casos: [],            // {id, nome, docs:[{nome,handle,tipoTxt,selVal,obs,principal,size}], dados, extracao:'pendente|ok|erro', erroExtracao, status:'aguardando|rodando|pausado|protocolado|pulado|erro', numero, statusTexto}
   atual: -1,
   tabId: null,
   primeiroValidado: false,
+  autoConcluir: false,  // Projudi: modo automático (pula revisão; 1º caso você confere,
+                        // demais concluem sozinhos SE os arquivos já forem .p7s assinados)
+  // Projudi: 'varios' = lote (agrupa pelo nº do processo no nome do arquivo);
+  // 'um' = TODOS os documentos escolhidos vão para UM único processo (1 juntada).
+  alvoProjudi: 'varios',
+  numeroUnico: '',      // nº digitado no modo "um processo apenas" (opcional)
   rodando: false,
 };
 
@@ -72,12 +106,12 @@ function setPasso(n) {
 async function lerPdfsDaPasta(dirHandle) {
   const docs = [];
   for await (const [nome, h] of dirHandle.entries()) {
-    if (h.kind === 'file' && /\.pdf$/i.test(nome)) {
+    if (h.kind === 'file' && EH_DOC.test(nome)) {           // .pdf ou .pdf.p7s (assinado)
       const f = await h.getFile();
       docs.push({ nome, handle: h, size: f.size, ...classificarDoc(nome) });
     }
   }
-  docs.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  docs.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR', { numeric: true, sensitivity: 'base' }));
   return docs;
 }
 async function escolherPasta() {
@@ -87,32 +121,45 @@ async function escolherPasta() {
   state.pastaNome = root.name;
   state.casos = [];
   if (state.sistema === 'projudi') {
-    // Intercorrentes: cada PDF solto = 1 caso; cada subpasta = 1 caso com vários anexos.
     const raiz = await lerPdfsDaPasta(root);
-    for (const d of raiz) state.casos.push(novoCasoProjudi(d.nome, [d]));
+    if (state.alvoProjudi === 'um') {
+      // UM PROCESSO APENAS: todos os PDFs da pasta (inclusive das subpastas) formam
+      // UMA petição só. Não entra em lote nem agrupa por número.
+      const todos = [...raiz];
+      for await (const [, h] of root.entries()) if (h.kind === 'directory') todos.push(...await lerPdfsDaPasta(h));
+      if (todos.length) state.casos.push(casoProjudiUnico(root.name, todos));
+    } else {
+    // Intercorrentes: PDFs soltos AGRUPADOS pelo nº do processo no nome (mesmo processo
+    // = 1 juntada com todos os anexos); cada subpasta = 1 caso com vários anexos.
+    state.casos.push(...agruparCasosProjudi(raiz));
     const subs = [];
     for await (const [nome, h] of root.entries()) if (h.kind === 'directory') subs.push([nome, h]);
-    subs.sort((a, b) => a[0].localeCompare(b[0], 'pt-BR'));
+    subs.sort((a, b) => a[0].localeCompare(b[0], 'pt-BR', { numeric: true, sensitivity: 'base' }));
     for (const [nome, h] of subs) {
       const docs = await lerPdfsDaPasta(h);
       if (docs.length) state.casos.push(novoCasoProjudi(nome, docs));
+    }
     }
     if (!state.casos.length) { renderFase1('Nenhum PDF encontrado (nem na pasta, nem em subpastas).'); return; }
     state.casos.forEach(c => { c.extracao = 'ok'; }); // sem IA no modo Projudi (v1)
     renderFase3();
     return;
   }
-  // Subpastas com PDFs → lote (1 caso por subpasta). Senão, a própria pasta é 1 caso.
-  const subs = [];
-  for await (const [nome, h] of root.entries()) if (h.kind === 'directory') subs.push([nome, h]);
-  subs.sort((a, b) => a[0].localeCompare(b[0], 'pt-BR'));
-  for (const [nome, h] of subs) {
-    const docs = await lerPdfsDaPasta(h);
-    if (docs.length) state.casos.push(novoCaso(nome, docs));
-  }
-  if (!state.casos.length) {
-    const docs = await lerPdfsDaPasta(root);
-    if (docs.length) state.casos.push(novoCaso(root.name, docs));
+  // eproc: se a pasta escolhida tem PDFs SOLTOS, ELA é o caso — usa só os PDFs dela e
+  // NÃO entra nas subpastas. Só quando NÃO há PDF solto é que a tratamos como pasta-mãe
+  // de LOTE (1 caso por subpasta). Antes, qualquer subpasta virava lote e os PDFs da
+  // própria pasta eram ignorados — daí "puxava das subpastas" sem querer.
+  const raizDocs = await lerPdfsDaPasta(root);
+  if (raizDocs.length) {
+    state.casos.push(novoCaso(root.name, raizDocs));
+  } else {
+    const subs = [];
+    for await (const [nome, h] of root.entries()) if (h.kind === 'directory') subs.push([nome, h]);
+    subs.sort((a, b) => a[0].localeCompare(b[0], 'pt-BR', { numeric: true, sensitivity: 'base' }));
+    for (const [nome, h] of subs) {
+      const docs = await lerPdfsDaPasta(h);
+      if (docs.length) state.casos.push(novoCaso(nome, docs));
+    }
   }
   if (!state.casos.length) { renderFase1('Nenhum PDF encontrado (nem na pasta, nem em subpastas).'); return; }
   await extrairTodos();
@@ -122,6 +169,141 @@ function acharCnj(texto) {
   const m = String(texto || '').match(/(\d{7})[-. ]?(\d{2})[. ]?(\d{4})[. ]?8[. ]?16[. ]?(\d{4})/);
   return m ? `${m[1]}-${m[2]}.${m[3]}.8.16.${m[4]}` : null;
 }
+// Tipo do MOVIMENTO no Projudi, derivado do NOME do arquivo. Padrão do lote:
+// "<processo>_<Tipo>_vN.pdf.p7s" (ex.: ..._Manifestacao_v1 → "Manifestação";
+// ..._ReqDiligencia_v1 → "Requerimento de Diligência"). MAPA_EVENTO cobre as
+// abreviações/acentos; o resto é "humanizado" e casado pela lupa do Projudi.
+// >>> Complete MAPA_EVENTO com a lista da skill "petição em lote". <<<
+const MAPA_EVENTO = {
+  manifestacao: 'Manifestação',
+  reqdiligencia: 'Requerimento de Diligência',
+  requerimentodediligencia: 'Requerimento de Diligência',
+  // Alvará e afins (o nome do arquivo vem sem acento; o Projudi busca COM acento)
+  alvara: 'Alvará',
+  alvaradelevantamento: 'Alvará de Levantamento',
+  pedidodealvara: 'Pedido de Alvará',
+  // Peças e requerimentos comuns
+  peticao: 'Petição',
+  peticaoinicial: 'Petição Inicial',
+  inicial: 'Petição Inicial',
+  emendaainicial: 'Emenda à Inicial',
+  emenda: 'Emenda à Inicial',
+  contestacao: 'Contestação',
+  impugnacao: 'Impugnação',
+  replica: 'Réplica',
+  alegacoesfinais: 'Alegações Finais',
+  razoesfinais: 'Razões Finais',
+  memoriais: 'Memoriais',
+  // Recursos
+  embargosdedeclaracao: 'Embargos de Declaração',
+  embargosdeclaratorios: 'Embargos de Declaração',
+  embargos: 'Embargos',
+  apelacao: 'Apelação',
+  recursoinominado: 'Recurso Inominado',
+  recurso: 'Recurso',
+  agravodeinstrumento: 'Agravo de Instrumento',
+  agravo: 'Agravo',
+  contrarrazoes: 'Contrarrazões',
+  // Execução / cumprimento
+  cumprimentodesentenca: 'Cumprimento de Sentença',
+  execucao: 'Execução',
+  penhora: 'Penhora',
+  pedidodepenhora: 'Pedido de Penhora',
+  calculo: 'Cálculo',
+  planilha: 'Planilha de Cálculo',
+  // Atos e documentos
+  procuracao: 'Procuração',
+  substabelecimento: 'Substabelecimento',
+  acordo: 'Acordo',
+  desistencia: 'Desistência',
+  renuncia: 'Renúncia',
+  renunciadeprazo: 'Renúncia de Prazo',
+  ciencia: 'Ciência',
+  certidao: 'Certidão',
+  comprovante: 'Comprovante',
+  comprovantedepagamento: 'Comprovante de Pagamento',
+  documento: 'Documento',
+  documentos: 'Documentos',
+  habilitacao: 'Habilitação',
+  informacao: 'Informação',
+  oficio: 'Ofício',
+  guiadecustas: 'Guia de Custas',
+  custas: 'Custas',
+  tutela: 'Tutela',
+  liminar: 'Liminar',
+  audiencia: 'Audiência',
+  conciliacao: 'Conciliação',
+  intimacao: 'Intimação',
+  citacao: 'Citação',
+};
+// Recupera acentos comuns do português jurídico quando o tipo NÃO está no mapa (o
+// nome do arquivo nunca tem acento, mas a busca da lupa do Projudi espera com).
+function acentuar(palavra) {
+  const p = String(palavra || '');
+  const baixa = p.toLowerCase();
+  if (/[áàâãéêíóôõúç]/i.test(p)) return p;   // já veio acentuada: não mexe
+  const regras = [
+    [/coes$/, 'ções'], [/cao$/, 'ção'],       // manifestacao → manifestação
+    [/encias$/, 'ências'], [/encia$/, 'ência'], // diligencia → diligência
+    [/ancias$/, 'âncias'], [/ancia$/, 'ância'],
+    [/orios$/, 'órios'], [/orio$/, 'ório'],   // declaratorio → declaratório
+    [/arios$/, 'ários'], [/ario$/, 'ário'],   // inventario → inventário
+  ];
+  for (const [re, rep] of regras) {
+    if (re.test(baixa)) {
+      const acent = baixa.replace(re, rep);
+      return p[0] === p[0].toUpperCase() ? acent.charAt(0).toUpperCase() + acent.slice(1) : acent;
+    }
+  }
+  return p;
+}
+function chaveTipo(s) {
+  return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z]/g, '');
+}
+function tipoEventoDoNome(nome) {
+  let base = String(nome || '').replace(/\.(pdf\.p7s|p7s|pdf)$/i, '');
+  base = base.replace(/[ _.-]+v?\d+$/i, '');          // tira "_v1", "-v2", " 1"
+  const seg = (base.split('_').pop() || base).trim(); // último trecho separado por "_"
+  const k = chaveTipo(seg);
+  if (!k) return null;
+  if (MAPA_EVENTO[k]) return MAPA_EVENTO[k];
+  // sem mapa: separa CamelCase, recupera acentos comuns e deixa a lupa do Projudi
+  // casar (ex.: "PedidoPenhora" → "Pedido Penhora"; "Retificacao" → "Retificação").
+  // Se ainda assim não achar, o Projudi pausa pra você escolher na lista.
+  const humano = seg.replace(/([a-zà-ÿ])([A-ZÀ-Ý])/g, '$1 $2').replace(/[_.-]+/g, ' ').trim()
+    .split(/\s+/).map(acentuar).join(' ');
+  return humano || null;
+}
+// Agrupa documentos pelo Nº CNJ no nome do arquivo: vários PDFs do MESMO processo
+// viram UM caso só (uma juntada com todos os anexos), em vez de N protocolos
+// separados no mesmo processo. Sem CNJ no nome → caso individual (pausa na revisão).
+function agruparCasosProjudi(docs) {
+  const grupos = new Map(); // cnj → docs[]
+  const semNumero = [];
+  for (const d of docs) {
+    const cnj = acharCnj(d.nome);
+    if (cnj) { if (!grupos.has(cnj)) grupos.set(cnj, []); grupos.get(cnj).push(d); }
+    else semNumero.push(d);
+  }
+  const casos = [];
+  for (const [cnj, ds] of grupos) {
+    const nome = ds.length === 1 ? ds[0].nome : cnj + ' — ' + ds.length + ' documentos';
+    casos.push(novoCasoProjudi(nome, ds));
+  }
+  for (const d of semNumero) casos.push(novoCasoProjudi(d.nome, [d]));
+  return casos;
+}
+// "Um processo apenas": TODOS os documentos numa juntada só. O número vem do campo
+// digitado na fase 1 (se houver) ou do nome de algum arquivo; sem número, o caso pausa
+// na revisão pedindo o nº — a extensão nunca chuta processo.
+function casoProjudiUnico(nomeBase, docs) {
+  const caso = novoCasoProjudi(nomeBase, docs);
+  const digitado = acharCnj(state.numeroUnico || '');
+  if (digitado) caso.numero_processo = digitado;
+  const n = caso.numero_processo;
+  caso.nome = (n || 'sem número') + ' — ' + docs.length + (docs.length === 1 ? ' documento' : ' documentos');
+  return caso;
+}
 function novoCasoProjudi(nome, docs) {
   docs.forEach((d, i) => d.principal = (i === 0));
   const numero = acharCnj(nome) || acharCnj(docs.map(d => d.nome).join(' '));
@@ -129,7 +311,9 @@ function novoCasoProjudi(nome, docs) {
     id: 'caso-' + Math.random().toString(36).slice(2, 9), nome, docs,
     sistema: 'projudi',
     numero_processo: numero,
-    tipo_peticao: 'Manifestação da Parte',
+    // Tipo do evento: do nome do caso; num grupo ("cnj — N documentos") o nome não
+    // carrega o tipo — cai no nome do 1º arquivo (a peça principal do grupo).
+    tipo_peticao: tipoEventoDoNome(nome) || tipoEventoDoNome(docs[0] && docs[0].nome) || 'Manifestação da Parte',
     dados: {},
     extracao: 'ok', status: 'aguardando', numero: null, statusTexto: '',
   };
@@ -154,20 +338,97 @@ function renderFase1(msgErro) {
       <button class="btn ${ehEproc ? '' : 'ghost'}" id="modo-eproc">⚖️ eproc — iniciais</button>
       <button class="btn ${ehEproc ? 'ghost' : ''}" id="modo-projudi">🌳 Projudi — intercorrentes</button>
     </div>
+    ${ehEproc ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+      <label for="sel-tribunal" style="font-weight:600;">Tribunal:</label>
+      <select id="sel-tribunal" style="padding:6px 8px;border-radius:6px;border:1px solid #ccc;flex:1;">
+        ${Object.keys(TRIBUNAIS_EPROC).map(k => `<option value="${k}"${k === state.tribunal ? ' selected' : ''}>${esc(TRIBUNAIS_EPROC[k].nome)}</option>`).join('')}
+      </select>
+    </div>` : ''}
     ${ehEproc ? `<p class="muted">• <b>1 caso:</b> uma pasta com os PDFs (petição inicial + procuração + documentos).<br>
     • <b>Lote:</b> uma pasta-mãe com <b>uma subpasta por caso</b>.<br>
     Pode ser a pasta do OneDrive sincronizada no computador. Só leitura, nada sai da sua máquina além do envio ao tribunal e da peça principal à IA do sistema.<br>
     ⚠️ A leitura por IA usa o servidor do app Cobrasq — deixe o <b>painel aberto e logado</b> em outra aba (a extensão conecta sozinha).</p>`
-    : `<p class="muted">• Cada <b>PDF solto</b> na pasta = 1 petição intercorrente; o <b>número do processo vem do nome do arquivo</b><br>
-    &nbsp;&nbsp;(ex.: <code>0001234-56.2024.8.16.0079 - pedido de penhora.pdf</code>).<br>
-    • <b>Subpasta</b> = 1 petição com vários anexos (número no nome da subpasta ou de um PDF).<br>
-    Sem IA nesta versão: o PDF vai como anexo e você confere tipo/número na revisão. A assinatura/senha no protocolo é <b>sempre sua</b>.</p>`}
+    : `<div style="display:flex;gap:8px;margin-bottom:10px;">
+      <button class="btn ${state.alvoProjudi === 'varios' ? '' : 'ghost'}" id="alvo-varios" style="flex:1;">📚 Vários processos (lote)</button>
+      <button class="btn ${state.alvoProjudi === 'um' ? '' : 'ghost'}" id="alvo-um" style="flex:1;">📌 Um processo apenas</button>
+    </div>
+    ${state.alvoProjudi === 'varios'
+      ? `<p class="muted">• O <b>número do processo vem do nome do arquivo</b> (ex.: <code>0001234-56.2024.8.16.0079 - pedido de penhora.pdf</code>).<br>
+        • PDFs com o <b>MESMO número</b> viram <b>1 petição só</b> — todos anexados na mesma juntada.<br>
+        • Números diferentes = petições separadas (lote). <b>Subpasta</b> = 1 petição com vários anexos.</p>`
+      : `<p class="muted">• <b>TODOS</b> os documentos escolhidos vão para <b>UM único processo</b>, numa <b>só juntada</b>.<br>
+        • O número pode vir do nome de um dos arquivos — ou informe abaixo (você confere na revisão).</p>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+          <label for="num-unico" style="font-weight:600;white-space:nowrap;">Nº do processo:</label>
+          <input id="num-unico" value="${esc(state.numeroUnico || '')}" placeholder="0001234-56.2024.8.16.0079 (opcional)"
+            style="flex:1;padding:7px 9px;border:1px solid #ccc;border-radius:6px;">
+        </div>`}
+    <p class="muted">Sem IA nesta versão: o PDF vai como anexo e você confere tipo/número na revisão. A assinatura/senha no protocolo é <b>sempre sua</b>.</p>`}
     ${msgErro ? `<div class="erro">${esc(msgErro)}</div>` : ''}
-    <button class="btn" id="pick">📁 Escolher pasta…</button>
+    <label style="display:flex;align-items:center;gap:8px;margin:8px 0;padding:8px 10px;border:1px solid ${state.autoConcluir ? '#1a7f37' : '#ccc'};border-radius:8px;cursor:pointer;">
+      <input type="checkbox" id="auto-concluir" ${state.autoConcluir ? 'checked' : ''} style="width:16px;height:16px;">
+      <span><b>Modo automático</b> — o <b>1º caso você confere</b> (rede de segurança); os demais ${ehEproc ? '<b>finalizam/protocolam</b>' : '<b>concluem</b>'} sozinhos${ehEproc ? '' : ' <u>se os arquivos já forem <code>.p7s</code> assinados</u>'}. ⚠️ Protocolo é irreversível.</span>
+    </label>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      <button class="btn" id="pick">📁 Escolher pasta…</button>
+      <button class="btn ghost" id="pick-arqs">📄 Escolher arquivos…</button>
+    </div>
+    <p class="muted" style="margin-top:6px;">${ehEproc
+      ? '📄 <b>Arquivos</b>: os PDFs escolhidos formam <b>1 caso</b> (a inicial + documentos). Para lote de vários casos, use a <b>pasta</b> (uma subpasta por caso).'
+      : (state.alvoProjudi === 'um'
+        ? '📄 Escolha os documentos desta petição — todos entram <b>juntos, no mesmo processo</b>.'
+        : '📄 <b>Arquivos</b>: selecione vários PDFs de uma vez — PDFs do <b>mesmo processo</b> (mesmo número no nome) viram <b>1 petição</b> com todos os anexos; números diferentes viram petições separadas (lote).')}</p>
   </div>`;
   document.getElementById('modo-eproc').onclick = () => { state.sistema = 'eproc'; renderFase1(); };
   document.getElementById('modo-projudi').onclick = () => { state.sistema = 'projudi'; renderFase1(); };
+  const selTrib = document.getElementById('sel-tribunal');
+  if (selTrib) selTrib.onchange = () => { state.tribunal = selTrib.value; try { chrome.storage.local.set({ cobrasq_tribunal: state.tribunal }); } catch (_) {} };
+  const auto = document.getElementById('auto-concluir');
+  if (auto) auto.onclick = () => { state.autoConcluir = auto.checked; try { chrome.storage.local.set({ cobrasq_auto_concluir: state.autoConcluir }); } catch (_) {} renderFase1(); };
+  const bVarios = document.getElementById('alvo-varios');
+  if (bVarios) bVarios.onclick = () => { state.alvoProjudi = 'varios'; renderFase1(); };
+  const bUm = document.getElementById('alvo-um');
+  if (bUm) bUm.onclick = () => { state.alvoProjudi = 'um'; renderFase1(); };
+  const inpNum = document.getElementById('num-unico');
+  if (inpNum) inpNum.oninput = () => { state.numeroUnico = inpNum.value; };
   document.getElementById('pick').onclick = () => escolherPasta().catch(e => renderFase1(String(e.message || e)));
+  document.getElementById('pick-arqs').onclick = () => escolherArquivos().catch(e => renderFase1(String(e.message || e)));
+}
+
+// Alternativa à pasta: o usuário seleciona os PDFs direto (multi-seleção). No Projudi,
+// cada PDF vira 1 caso (lote de intercorrentes); no eproc, todos formam 1 caso.
+async function escolherArquivos() {
+  let handles;
+  try {
+    handles = await window.showOpenFilePicker({
+      multiple: true,
+      types: [{ description: 'PDF ou PDF assinado', accept: { 'application/pdf': ['.pdf'], 'application/pkcs7-signature': ['.p7s', '.pdf.p7s'] } }],
+    });
+  } catch (e) { if (e && e.name === 'AbortError') return; throw e; }
+  const docs = [];
+  for (const h of (handles || [])) {
+    if (h.kind !== 'file') continue;
+    const f = await h.getFile();
+    if (!EH_DOC.test(f.name)) continue;
+    docs.push({ nome: f.name, handle: h, size: f.size, ...classificarDoc(f.name) });
+  }
+  if (!docs.length) { renderFase1('Nenhum PDF selecionado.'); return; }
+  docs.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR', { numeric: true, sensitivity: 'base' }));
+  state.pastaNome = docs.length === 1 ? docs[0].nome : (docs.length + ' arquivos');
+  state.casos = [];
+  if (state.sistema === 'projudi') {
+    if (state.alvoProjudi === 'um') {
+      state.casos.push(casoProjudiUnico(state.pastaNome, docs)); // tudo num processo só
+    } else {
+      // Agrupa pelo nº do processo no nome: vários PDFs do MESMO processo = 1 juntada só.
+      state.casos.push(...agruparCasosProjudi(docs));
+    }
+    state.casos.forEach(c => { c.extracao = 'ok'; }); // sem IA no modo Projudi (v1)
+    renderFase3();
+    return;
+  }
+  state.casos.push(novoCaso(state.pastaNome, docs));
+  await extrairTodos();
 }
 
 // ── fase 2: extração por IA ───────────────────────────────────────────────────
@@ -186,6 +447,9 @@ async function puxarTokenDoApp() {
         const [r] = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           func: () => {
+            // Sessão MAIS NOVA (maior expires_at): mais de uma chave sb-*-auth-token
+            // (sessão antiga) faria escolher um token velho → 401.
+            let best = null, bestExp = -1;
             for (let i = 0; i < localStorage.length; i++) {
               const k = localStorage.key(i);
               if (!k || !/^sb-.*-auth-token$/.test(k)) continue;
@@ -196,11 +460,14 @@ async function puxarTokenDoApp() {
               }
               try {
                 const o = JSON.parse(raw);
-                const t = (o && o.access_token) || (o && o.currentSession && o.currentSession.access_token);
-                if (t) return t;
+                const sess = (o && o.access_token) ? o : (o && o.currentSession) ? o.currentSession : null;
+                const t = sess && sess.access_token;
+                if (!t) continue;
+                const exp = Number(sess.expires_at || 0);
+                if (exp >= bestExp) { bestExp = exp; best = t; }
               } catch (_) {}
             }
-            return null;
+            return best;
           },
         });
         if (r && r.result) { await chrome.runtime.sendMessage({ type: 'SET_TOKEN', token: r.result }); return true; }
@@ -370,9 +637,16 @@ function renderFase3() {
 }
 
 // ── fase 4: execução ──────────────────────────────────────────────────────────
-const URL_SISTEMA = { eproc: 'https://eproc1g.tjpr.jus.br/eproc/', projudi: 'https://projudi.tjpr.jus.br/projudi/' };
 const SCRIPT_SISTEMA = { eproc: 'content-eproc.js', projudi: 'content-projudi.js' };
-function hostDoSistema() { return state.sistema === 'projudi' ? 'projudi.tjpr.jus.br' : 'tjpr.jus.br'; }
+function tribunalAtual() { return TRIBUNAIS_EPROC[state.tribunal] || TRIBUNAIS_EPROC.tjpr; }
+function urlDoSistema() { return state.sistema === 'projudi' ? 'https://projudi.tjpr.jus.br/projudi/' : tribunalAtual().url; }
+function hostDoSistema() { return state.sistema === 'projudi' ? 'projudi.tjpr.jus.br' : tribunalAtual().host; }
+// Compara pelo HOSTNAME de verdade (não substring da URL inteira — "?x=tjpr.jus.br"
+// na query de outra página passava; e o pause-guard CC1 deixava de pausar).
+function urlNoSistema(url) {
+  try { const h = new URL(url).hostname; const alvo = hostDoSistema(); return h === alvo || h.endsWith('.' + alvo); }
+  catch (_) { return false; }
+}
 async function esperarAbaPronta(tabId, timeoutMs) {
   const fim = Date.now() + (timeoutMs || 20000);
   while (Date.now() < fim) {
@@ -387,11 +661,11 @@ async function garantirAba() {
       const t = await chrome.tabs.get(state.tabId);
       // CM3: só reusa se a aba ainda está no tribunal certo; senão abre nova
       // (evita injetar o content script numa página alheia).
-      if (t && (t.url || t.pendingUrl || '').includes(hostDoSistema())) { await esperarAbaPronta(state.tabId, 20000); return state.tabId; }
+      if (t && urlNoSistema(t.url || t.pendingUrl || '')) { await esperarAbaPronta(state.tabId, 20000); return state.tabId; }
     } catch (_) {}
     state.tabId = null;
   }
-  const tab = await chrome.tabs.create({ url: URL_SISTEMA[state.sistema] || URL_SISTEMA.eproc, active: true });
+  const tab = await chrome.tabs.create({ url: urlDoSistema(), active: true });
   state.tabId = tab.id;
   await esperarAbaPronta(tab.id, 25000); // espera carregar (login pode pausar depois)
   return tab.id;
@@ -405,6 +679,7 @@ function payloadDoCaso(caso) {
     dados: caso.dados,
     docs: caso.docs.map((d, i) => ({ idx: i, nome: d.nome, tipoTxt: d.tipoTxt, selVal: d.selVal, obs: d.obs, principal: !!d.principal })),
     primeiro: !state.primeiroValidado,
+    autoConcluir: !!state.autoConcluir, // Projudi: concluir sozinho (após o 1º caso)
   };
 }
 async function mandarParaAba(tipo, extra) {
@@ -424,7 +699,7 @@ async function iniciarLote() {
   if (state.rodando) return; // CA3: barra duplo clique em Protocolar
   if (state.sistema === 'projudi') {
     const semNum = state.casos.filter(c => !acharCnj(c.numero_processo || ''));
-    if (semNum.length) { alert('Caso(s) sem número de processo válido: ' + semNum.map(c => c.nome).join(', ') + '. Corrija na revisão.'); return; }
+    if (semNum.length) { alert('Caso(s) sem número de processo válido: ' + semNum.map(c => c.nome).join(', ') + '. Corrija na revisão.'); renderFase3(); return; }
     state.casos.forEach(c => { c.numero_processo = acharCnj(c.numero_processo); });
   } else {
     // O eproc rejeita a mesma pessoa nos dois polos (hdnSinValidarPoloOposto=S):
@@ -433,15 +708,20 @@ async function iniciarLote() {
       const digs = (l) => (caso.dados[l] || []).map(p => String(p && p.doc || '').replace(/\D/g, '')).filter(Boolean);
       const reus = new Set(digs('requeridos'));
       const dup = digs('requerentes').find(d => reus.has(d));
-      if (dup) { alert('Caso "' + caso.nome + '": o CPF/CNPJ ' + dup + ' aparece como autor E réu — o eproc rejeita isso. Corrija na revisão.'); return; }
+      // renderFase3() nos early-returns: sem isso o botão Protocolar (desabilitado no
+      // clique, CA3) ficava MORTO para sempre após corrigir o dado (auditoria).
+      if (dup) { alert('Caso "' + caso.nome + '": o CPF/CNPJ ' + dup + ' aparece como autor E réu — o eproc rejeita isso. Corrija na revisão.'); renderFase3(); return; }
     }
     const semReu = state.casos.filter(c => !(c.dados.requeridos || []).some(p => p && digitos(p.doc).length >= 11));
-    if (semReu.length && !confirm('Caso(s) sem réu com CPF/CNPJ: ' + semReu.map(c => c.nome).join(', ') + '.\nEles vão PAUSAR na etapa de réus para você incluir manualmente. Continuar mesmo assim?')) return;
+    if (semReu.length && !confirm('Caso(s) sem réu com CPF/CNPJ: ' + semReu.map(c => c.nome).join(', ') + '.\nEles vão PAUSAR na etapa de réus para você incluir manualmente. Continuar mesmo assim?')) { renderFase3(); return; }
   }
   state.rodando = true;
   state.atual = state.casos.findIndex(c => c.status === 'aguardando');
   if (state.atual < 0) { renderFase4(); return; }
-  await rodarCasoAtual();
+  // Sem .catch aqui, uma falha de abrir/injetar na aba (tabs.create/executeScript)
+  // deixaria o lote travado sem botões (o Protocolar já foi desabilitado). Trata igual
+  // ao próximo caso: mostra o erro com os controles de recuperação.
+  await rodarCasoAtual().catch(mostraErroGeral);
 }
 async function rodarCasoAtual() {
   if (!state.rodando) return; // CC2: não ressuscitar caso após Cancelar
@@ -467,8 +747,10 @@ function proximoCaso() {
   }, 1200);
 }
 function mostraErroGeral(e) {
+  // Marca como PAUSADO (não 'erro' mudo): assim a UI mostra Continuar/Pular/Cancelar e
+  // o lote não fica congelado sem saída.
   const caso = state.casos[state.atual];
-  if (caso) { caso.status = 'erro'; caso.statusTexto = String((e && e.message) || e); }
+  if (caso) { caso.status = 'pausado'; caso.statusTexto = '⚠ erro ao rodar: ' + String((e && e.message) || e) + ' — tente Continuar, Pular o caso ou Cancelar o lote.'; }
   renderFase4();
 }
 function renderFase4() {
@@ -492,24 +774,35 @@ function renderFase4() {
     <div class="card" style="display:flex;gap:10px;justify-content:flex-end;">
       ${!state.rodando ? '<button class="btn ghost" id="denovo">↩ Nova pasta</button>' : ''}
     </div>`;
+  // Os botões agem sobre o caso PAUSADO exibido no banner — não sobre state.atual às
+  // cegas (auditoria: se divergirem, Pular marcava o caso ERRADO; e state.atual = -1
+  // após o fim do lote estourava TypeError silencioso dentro do onclick async).
+  // Todos com .catch: uma falha de aba (tribunal fora do ar) não pode engolir o clique
+  // e deixar a fila congelada sem botões.
   const btnC = document.getElementById('continuar');
-  if (btnC) btnC.onclick = async () => {
-    const caso = state.casos[state.atual];
+  if (btnC) btnC.onclick = () => {
+    const caso = pausado;
+    if (!caso) return;
     caso.status = 'rodando'; caso.statusTexto = 'retomando…'; renderFase4();
-    await mandarParaAba('CONTINUAR_CENTRAL', {});
+    mandarParaAba('CONTINUAR_CENTRAL', {}).catch(mostraErroGeral);
   };
   const btnP = document.getElementById('pular');
-  if (btnP) btnP.onclick = async () => {
-    state.casos[state.atual].status = 'pulado';
-    await mandarParaAba('CANCELAR_CENTRAL', {});
-    proximoCaso();
+  if (btnP) btnP.onclick = () => {
+    const caso = pausado;
+    if (!caso) return;
+    caso.status = 'pulado';
+    if (state.casos[state.atual] === caso || state.atual < 0) {
+      mandarParaAba('CANCELAR_CENTRAL', {}).catch(() => {}).then(() => proximoCaso());
+    } else {
+      renderFase4(); // caso fora da vez: só marca; a fila corrente segue intocada
+    }
   };
   const btnX = document.getElementById('cancelar');
-  if (btnX) btnX.onclick = async () => {
+  if (btnX) btnX.onclick = () => {
     if (_proximoTimer) { clearTimeout(_proximoTimer); _proximoTimer = null; } // CC2
     state.casos.forEach(c => { if (c.status === 'rodando' || c.status === 'pausado' || c.status === 'aguardando') c.status = 'pulado'; });
     state.rodando = false;
-    await mandarParaAba('CANCELAR_CENTRAL', {});
+    mandarParaAba('CANCELAR_CENTRAL', {}).catch(() => {}).then(() => { try { renderFase4(); } catch (_) {} });
     renderFase4();
   };
   const btnN = document.getElementById('denovo');
@@ -525,28 +818,39 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
   const casoExato = m.casoId ? state.casos.find(c => c.id === m.casoId) : null;
   const caso = casoExato; // usado por PROGRESS/PAUSA/CASO_OK
   if (m.type === 'PEDIR_DOC') {
+    const c = state.casos.find(x => x.id === m.casoId);
+    const d = c && c.docs[m.idx];
+    // Caso DESCONHECIDO: NÃO responder (auditoria: uma 2ª aba da Central aberta
+    // respondia "doc não encontrado" ANTES da aba certa terminar de ler o arquivo —
+    // o primeiro sendResponse vence e o lote falhava em série). Sem resposta desta
+    // aba, a aba que conhece o caso responde.
+    if (!d) return false;
     (async () => {
       try {
-        const c = state.casos.find(x => x.id === m.casoId);
-        const d = c && c.docs[m.idx];
-        if (!d) { sendResponse({ error: 'doc não encontrado' }); return; }
         const f = await d.handle.getFile();
         sendResponse({ ok: true, nome: d.nome, base64: b64DeBuffer(await f.arrayBuffer()) });
       } catch (e) { sendResponse({ error: String((e && e.message) || e) }); }
     })();
     return true;
   }
+  // Status TERMINAL não regride (auditoria): um PAUSA/PROGRESS atrasado ou duplicado
+  // (Projudi roda em vários frames) devolvia caso protocolado/pulado para "pausado",
+  // e os botões Continuar/Pular passavam a agir sobre o caso errado.
+  const terminal = caso && (caso.status === 'protocolado' || caso.status === 'pulado' || caso.status === 'erro');
   if (m.type === 'CENTRAL_PROGRESS') {
-    if (caso) { caso.statusTexto = m.texto || ''; renderFase4(); }
+    if (caso && !terminal) { caso.statusTexto = m.texto || ''; renderFase4(); }
     return false;
   }
   if (m.type === 'CENTRAL_PAUSA') {
-    if (caso) { caso.status = 'pausado'; caso.statusTexto = m.motivo || 'anomalia'; renderFase4(); }
+    if (caso && !terminal) { caso.status = 'pausado'; caso.statusTexto = m.motivo || 'anomalia'; renderFase4(); }
     return false;
   }
   if (m.type === 'CENTRAL_CASO_OK') {
-    // CA4: ignora conclusão de casoId desconhecido (não avança a fila indevidamente).
-    if (!caso || caso.status === 'protocolado') return false;
+    // CA4 + auditoria: ignora casoId desconhecido E caso em status terminal (um OK
+    // tardio de caso PULADO marcava-o protocolado e avançava a fila em DOBRO — dois
+    // casos rodando ao mesmo tempo na mesma aba).
+    if (!caso || terminal) return false;
+    const eraAtual = state.casos[state.atual] === caso;
     (async () => {
       caso.status = 'protocolado'; caso.numero = m.numero || null; caso.statusTexto = 'registrando no Cobrasq…';
       state.primeiroValidado = true;
@@ -557,7 +861,9 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
       }).catch(() => null);
       caso.statusTexto = r && r.ok ? ('registrado no Cobrasq' + (r.cobrancaVinculada ? ' + cobrança vinculada' : ' (sem cobrança correspondente)')) : 'protocolado (registro no Cobrasq falhou: ' + ((r && r.error) || '?') + ')';
       renderFase4();
-      proximoCaso();
+      // Só o caso ATUAL avança a fila — um OK de caso antigo não pode disparar o
+      // próximo enquanto outro já roda.
+      if (eraAtual) proximoCaso();
     })();
     return false;
   }
@@ -583,7 +889,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (tabId !== state.tabId || !info.url) return;
-  if (!(info.url || '').includes(hostDoSistema())) {
+  if (!urlNoSistema(info.url)) {
     pausarPorAba('a aba saiu do site do tribunal — clique Continuar que eu reabro e retomo.');
   }
 });
@@ -593,4 +899,8 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
 // anterior, pra ele não tentar retomar sozinho na aba do eproc.
 chrome.storage.local.remove('cobrasq_central_caso');
 
-renderFase1();
+// Carrega o tribunal preferido e o modo automático (persistidos) antes do 1º render.
+chrome.storage.local.get(['cobrasq_tribunal', 'cobrasq_auto_concluir']).then(o => {
+  if (o && o.cobrasq_tribunal && TRIBUNAIS_EPROC[o.cobrasq_tribunal]) state.tribunal = o.cobrasq_tribunal;
+  if (o && typeof o.cobrasq_auto_concluir === 'boolean') state.autoConcluir = o.cobrasq_auto_concluir;
+}).catch(() => {}).finally(() => renderFase1());
