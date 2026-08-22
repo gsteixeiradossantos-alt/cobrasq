@@ -192,9 +192,21 @@ Deno.serve(async (req) => {
       continue;
     }
 
-    // Conversa pendente: devedor tem mensagem sem resposta → não envia
-    // lembrete por cima; devolve pra fila e tenta no próximo run.
-    if (pendentes.has(dk(m.telefone))) {
+    // Conversa pendente: devedor tem mensagem sem resposta → não envia LEMBRETE
+    // AUTOMÁTICO por cima; devolve pra fila e tenta no próximo run.
+    //
+    // 21/08/2026 — a trava valia para TUDO, inclusive para a resposta que um humano
+    // acabou de escrever justamente àquela pessoa. O caso: o devedor perguntou sobre a
+    // multa às 15h41, ficou sem resposta, e por isso mesmo entrou em
+    // vw_conversas_pendentes; quando a resposta foi enfileirada, a fila se recusou a
+    // enviá-la — e adiava a cada minuto, indefinidamente. A trava passou a impedir
+    // exatamente o que existe para proteger.
+    //
+    // Mensagem escrita por humano tem origem 'manual_*' (convenção já em uso no
+    // painel); régua e lembretes automáticos usam 'auto_*', 'audiencia_*', 'bia_*'.
+    // Só os automáticos cedem a vez.
+    const escritaPorHumano = String(m.origem || '').startsWith('manual');
+    if (pendentes.has(dk(m.telefone)) && !escritaPorHumano) {
       await sb.from('crm_mensagens_agendadas')
         .update({ status: 'pendente', processando_desde: null })
         .eq('id', m.id);
