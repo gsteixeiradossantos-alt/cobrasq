@@ -34433,23 +34433,176 @@ window._ofxState = window._ofxState || { lines:[], conta:null, fileName:null };
 // abaixo) são os mesmos de antes, só a apresentação mudou. Sem outro caller das funções
 // substituídas (renderFinConciliacao antiga/_renderOfxList/conciliarLinhaOfx/
 // conciliarTodosOfx) — removidas, não deixadas como código morto.
+// A aba Conciliação tem duas frentes que não se misturam: o extrato do BANCO (OFX/CSV,
+// conferência de caixa) e o ASAAS (que pagamento quitou qual parcela). A segunda nasceu
+// em 21/08/2026 — até então a única forma de saber se o financeiro batia com o Asaas era
+// alguém rodar consulta à mão, e foi assim que pagamentos ficaram semanas invisíveis.
 async function renderFinConciliacao(el){
+  const aba = window._finConcAba || 'banco';
   const dim = await finApi.loadDimensoes();
+  const tab = (id,label)=>`<div style="font-size:13.5px;font-weight:${aba===id?'700':'500'};color:${aba===id?'#0A1530':'#6B7683'};padding-bottom:11px;cursor:pointer;${aba===id?'box-shadow:inset 0 -2.5px 0 #9C7F40;':''}" onclick="window._finConcAba='${id}';renderFinanceiro()">${label}</div>`;
   el.innerHTML = `
     <style>
       .finconc-h1{font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:400;color:#0A1530;margin-bottom:4px;}
       .finconc-upload{background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:18px 20px;margin-bottom:18px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;}
       .finconc-fld{font-size:12px;color:#6B7683;}
       .finconc-fld select,.finconc-fld input{padding:9px 11px;border:1px solid #E6E1D2;border-radius:7px;margin-top:4px;font-family:inherit;font-size:13px;}
+      .fca-placar{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px;}
+      .fca-card{background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:14px 16px;border-top:3px solid #9C7F40;}
+      .fca-card.alerta{border-top-color:#A65A4A;}
+      .fca-card.ok{border-top-color:#3F7A57;}
+      .fca-k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#6B7683;font-weight:600;}
+      .fca-v{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:22px;font-weight:600;color:#0A1530;font-variant-numeric:tabular-nums;}
+      .fca-s{font-size:12px;color:#6B7683;}
+      .fca-sec{font-size:14px;font-weight:700;color:#0A1530;margin:22px 0 10px;}
+      .fca-tab{width:100%;border-collapse:collapse;font-size:13px;background:#fff;border:1px solid #E6E1D2;border-radius:10px;overflow:hidden;}
+      .fca-tab th{text-align:left;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#6B7683;font-weight:600;padding:9px 12px;border-bottom:1px solid #E6E1D2;white-space:nowrap;}
+      .fca-tab td{padding:9px 12px;border-bottom:1px solid #F0ECE2;vertical-align:middle;}
+      .fca-num{font-family:'JetBrains Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap;}
+      .fca-pill{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;}
+      .fca-alta{background:#E7F0EA;color:#3F7A57;}
+      .fca-media{background:#F7EBD2;color:#8A6212;}
+      .fca-baixa{background:#F6E3E1;color:#A65A4A;}
+      .fca-vazio{background:#fff;border:1px dashed #E6E1D2;border-radius:10px;padding:22px;text-align:center;color:#6B7683;font-size:13px;}
+      .fca-scroll{overflow-x:auto;}
     </style>
     <div class="finconc-h1">Conciliação</div>
-    <div class="finconc-upload">
-      <label class="finconc-fld">Arquivo do extrato (.ofx ou .csv)<br><input type="file" id="ofx-file" accept=".ofx,.qfx,.csv,text/plain"></label>
-      <label class="finconc-fld">Conta<br><select id="ofx-conta"><option value="">Selecione…</option>${dim.contas.map(c=>`<option value="${c.id}">${escHtml(c.descricao)}</option>`).join('')}</select></label>
-      <button class="btn btn-primary btn-sm" onclick="_finConcProcessarArquivo()">${ico('upload',13)} Processar arquivo</button>
+    <div style="display:flex;gap:26px;border-bottom:1px solid #E1E7F0;margin-bottom:18px;">
+      ${tab('banco','Extrato bancário')}${tab('asaas','Asaas')}
     </div>
-    <div id="ofx-result"></div>
+    ${aba==='banco' ? `
+      <div class="finconc-upload">
+        <label class="finconc-fld">Arquivo do extrato (.ofx ou .csv)<br><input type="file" id="ofx-file" accept=".ofx,.qfx,.csv,text/plain"></label>
+        <label class="finconc-fld">Conta<br><select id="ofx-conta"><option value="">Selecione…</option>${dim.contas.map(c=>`<option value="${c.id}">${escHtml(c.descricao)}</option>`).join('')}</select></label>
+        <button class="btn btn-primary btn-sm" onclick="_finConcProcessarArquivo()">${ico('upload',13)} Processar arquivo</button>
+      </div>
+      <div id="ofx-result"></div>
+    ` : `<div id="fca-box"><div class="fca-vazio">Consultando o Asaas…</div></div>`}
   `;
+  if(aba==='asaas') _fcaCarregar();
+}
+
+// Período padrão: da data de corte (01/08/2026, acordada com o Gustavo) até hoje. Antes
+// disso o sistema não tinha como bater com o Asaas — comparar puxaria histórico que
+// nunca foi migrado e encheria a tela de falso alarme.
+const FCA_CORTE = '2026-08-01';
+
+async function _fcaCarregar(){
+  const box = document.getElementById('fca-box');
+  if(!box) return;
+  try{
+    const headers = Object.assign({ 'Content-Type':'application/json' }, await authHeaders());
+    const hoje = new Date().toISOString().slice(0,10);
+    const de = window._fcaDe || FCA_CORTE;
+    const r = await fetch(`/api/conciliacao-asaas?de=${de}&ate=${hoje}`, { headers });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
+    window._fcaDados = j;
+    _fcaPintar(j);
+  }catch(e){
+    box.innerHTML = `<div class="fca-vazio">Não foi possível consultar: ${escHtml(String(e.message||e))}</div>`;
+  }
+}
+
+function _fcaMoeda(v){ return 'R$ ' + (Number(v)||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function _fcaData(d){ return d ? String(d).split('-').reverse().join('/') : '—'; }
+
+function _fcaPintar(j){
+  const box = document.getElementById('fca-box');
+  if(!box) return;
+  const r = j.resumo || {};
+  const itens = j.itens || [];
+  const orfaos = j.orfaos || [];
+  // "Resolvido" = o pagamento já sabe qual parcela quitou. É a única métrica que não
+  // depende de inferência; as outras duas são trabalho pendente.
+  const resolvidos = r.ja_vinculados || 0;
+  const ambiguos = itens.filter(i=>i.confianca==='baixa' && i.lancamento_id);
+  const inequivocos = itens.filter(i=>i.lancamento_id && (i.criterio==='vencimento'||i.criterio==='valor_unico'||i.criterio==='valor_mais_acrescimo'));
+  const semCand = itens.filter(i=>i.criterio==='sem_candidato');
+
+  const linhaAmb = (i)=>`
+    <tr>
+      <td>${escHtml(i.devedor||'—')}</td>
+      <td>${_fcaData(i.pago_em)}</td>
+      <td class="fca-num">${_fcaMoeda(i.valor)}</td>
+      <td>${escHtml((i.lancamento||'').slice(0,38))}<div style="font-size:11px;color:#6B7683;">vence ${_fcaData(i.lancamento_vencimento)}${i.empatados?` · ${i.empatados} parcelas iguais`:''}</div></td>
+      <td><span class="fca-pill fca-baixa">decidir</span></td>
+      <td><button class="btn btn-ghost btn-sm" onclick="_fcaConciliar('${escHtml(i.payment_id)}',${i.lancamento_id})">Confirmar esta</button></td>
+    </tr>`;
+
+  box.innerHTML = `
+    <div class="fca-placar">
+      <div class="fca-card"><div class="fca-k">Pagamentos no Asaas</div><div class="fca-v">${r.pagamentos||0}</div><div class="fca-s">desde ${_fcaData(j.periodo&&j.periodo.de)}</div></div>
+      <div class="fca-card ok"><div class="fca-k">Já conciliados</div><div class="fca-v">${resolvidos}</div><div class="fca-s">sabem qual parcela quitaram</div></div>
+      <div class="fca-card ${inequivocos.length?'alerta':'ok'}"><div class="fca-k">Prontos para baixar</div><div class="fca-v">${inequivocos.length}</div><div class="fca-s">sem dúvida de qual parcela</div></div>
+      <div class="fca-card ${ambiguos.length?'alerta':'ok'}"><div class="fca-k">Esperando você</div><div class="fca-v">${ambiguos.length}</div><div class="fca-s">parcelas idênticas</div></div>
+      <div class="fca-card ${orfaos.length?'alerta':'ok'}"><div class="fca-k">Sem encaixe</div><div class="fca-v">${orfaos.length}</div><div class="fca-s">falta cadastro</div></div>
+    </div>
+
+    ${inequivocos.length ? `
+      <div class="fca-sec">Prontos para baixar — ${inequivocos.length}</div>
+      <div style="margin-bottom:10px;font-size:12.5px;color:#6B7683;">O vencimento do boleto bate com o da parcela, ou existe uma só candidata. Confira e baixe de uma vez.</div>
+      <div class="fca-scroll"><table class="fca-tab">
+        <thead><tr><th>Devedor</th><th>Pago em</th><th class="fca-num">Valor</th><th>Parcela</th><th>Critério</th><th></th></tr></thead>
+        <tbody>${inequivocos.map(i=>`
+          <tr>
+            <td>${escHtml(i.devedor||'—')}</td>
+            <td>${_fcaData(i.pago_em)}</td>
+            <td class="fca-num">${_fcaMoeda(i.valor)}</td>
+            <td>${escHtml((i.lancamento||'').slice(0,38))}</td>
+            <td><span class="fca-pill ${i.confianca==='alta'?'fca-alta':'fca-media'}">${escHtml(i.criterio)}</span></td>
+            <td><button class="btn btn-ghost btn-sm" onclick="_fcaConciliar('${escHtml(i.payment_id)}',${i.lancamento_id})">Baixar</button></td>
+          </tr>`).join('')}</tbody>
+      </table></div>
+    ` : ''}
+
+    ${ambiguos.length ? `
+      <div class="fca-sec">Esperando sua decisão — ${ambiguos.length}</div>
+      <div style="margin-bottom:10px;font-size:12.5px;color:#6B7683;">O caso tem várias parcelas do mesmo valor e o vencimento não desempata. A sugestão abaixo é a mais antiga em aberto — confirme só se for essa.</div>
+      <div class="fca-scroll"><table class="fca-tab">
+        <thead><tr><th>Devedor</th><th>Pago em</th><th class="fca-num">Valor</th><th>Sugestão</th><th></th><th></th></tr></thead>
+        <tbody>${ambiguos.map(linhaAmb).join('')}</tbody>
+      </table></div>
+    ` : ''}
+
+    ${semCand.length ? `
+      <div class="fca-sec">Sem parcela correspondente — ${semCand.length}</div>
+      <div class="fca-scroll"><table class="fca-tab">
+        <thead><tr><th>Devedor</th><th>Pago em</th><th class="fca-num">Valor</th><th>Vencimento do boleto</th></tr></thead>
+        <tbody>${semCand.map(i=>`<tr><td>${escHtml(i.devedor||'—')}</td><td>${_fcaData(i.pago_em)}</td><td class="fca-num">${_fcaMoeda(i.valor)}</td><td>${_fcaData(i.vencimento)}</td></tr>`).join('')}</tbody>
+      </table></div>
+    ` : ''}
+
+    ${orfaos.length ? `
+      <div class="fca-sec">Sem encaixe — ${orfaos.length}</div>
+      <div style="margin-bottom:10px;font-size:12.5px;color:#6B7683;">Pagamento que entrou no Asaas e não achou onde encostar: ou o pagador não tem cadastro, ou o boleto não tem parcela no financeiro.</div>
+      <div class="fca-scroll"><table class="fca-tab">
+        <thead><tr><th>Pagamento</th><th>Pago em</th><th class="fca-num">Valor</th><th>Motivo</th></tr></thead>
+        <tbody>${orfaos.map(o=>`<tr><td style="font-family:ui-monospace,monospace;font-size:11.5px;">${escHtml(o.asaas_payment_id)}</td><td>${_fcaData(o.payment_date)}</td><td class="fca-num">${_fcaMoeda(o.valor)}</td><td>${o.motivo==='sem_devedor'?'pagador sem cadastro':'boleto sem parcela'}</td></tr>`).join('')}</tbody>
+      </table></div>
+    ` : ''}
+
+    ${(!inequivocos.length && !ambiguos.length && !semCand.length && !orfaos.length) ? `
+      <div class="fca-vazio">Tudo conciliado. Os ${r.pagamentos||0} pagamentos do período sabem qual parcela quitaram.</div>
+    ` : ''}
+  `;
+}
+
+// Conciliação de UM par, decidida por humano. O endpoint recusa lançamento já vinculado
+// a outro pagamento, então clicar duas vezes não duplica baixa.
+async function _fcaConciliar(paymentId, lancamentoId){
+  if(!paymentId || !lancamentoId) return;
+  try{
+    const headers = Object.assign({ 'Content-Type':'application/json' }, await authHeaders());
+    const r = await fetch(`/api/conciliacao-asaas?de=${FCA_CORTE}&ate=${new Date().toISOString().slice(0,10)}&payment_id=${encodeURIComponent(paymentId)}&lancamento_id=${encodeURIComponent(lancamentoId)}`, { headers });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
+    const c = j.conciliado || {};
+    if(typeof showToast==='function') showToast(`Baixado: ${_fcaMoeda(c.valor_pago)}${c.acrescimo?` (+${_fcaMoeda(c.acrescimo)} de acréscimo)`:''}`,'success');
+    _fcaCarregar();
+  }catch(e){
+    if(typeof showToast==='function') showToast('Não deu: '+(e.message||e),'error');
+  }
 }
 
 function _parseOFX(text){
