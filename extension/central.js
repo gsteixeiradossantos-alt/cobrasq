@@ -178,7 +178,85 @@ const MAPA_EVENTO = {
   manifestacao: 'Manifestação',
   reqdiligencia: 'Requerimento de Diligência',
   requerimentodediligencia: 'Requerimento de Diligência',
+  // Alvará e afins (o nome do arquivo vem sem acento; o Projudi busca COM acento)
+  alvara: 'Alvará',
+  alvaradelevantamento: 'Alvará de Levantamento',
+  pedidodealvara: 'Pedido de Alvará',
+  // Peças e requerimentos comuns
+  peticao: 'Petição',
+  peticaoinicial: 'Petição Inicial',
+  inicial: 'Petição Inicial',
+  emendaainicial: 'Emenda à Inicial',
+  emenda: 'Emenda à Inicial',
+  contestacao: 'Contestação',
+  impugnacao: 'Impugnação',
+  replica: 'Réplica',
+  alegacoesfinais: 'Alegações Finais',
+  razoesfinais: 'Razões Finais',
+  memoriais: 'Memoriais',
+  // Recursos
+  embargosdedeclaracao: 'Embargos de Declaração',
+  embargosdeclaratorios: 'Embargos de Declaração',
+  embargos: 'Embargos',
+  apelacao: 'Apelação',
+  recursoinominado: 'Recurso Inominado',
+  recurso: 'Recurso',
+  agravodeinstrumento: 'Agravo de Instrumento',
+  agravo: 'Agravo',
+  contrarrazoes: 'Contrarrazões',
+  // Execução / cumprimento
+  cumprimentodesentenca: 'Cumprimento de Sentença',
+  execucao: 'Execução',
+  penhora: 'Penhora',
+  pedidodepenhora: 'Pedido de Penhora',
+  calculo: 'Cálculo',
+  planilha: 'Planilha de Cálculo',
+  // Atos e documentos
+  procuracao: 'Procuração',
+  substabelecimento: 'Substabelecimento',
+  acordo: 'Acordo',
+  desistencia: 'Desistência',
+  renuncia: 'Renúncia',
+  renunciadeprazo: 'Renúncia de Prazo',
+  ciencia: 'Ciência',
+  certidao: 'Certidão',
+  comprovante: 'Comprovante',
+  comprovantedepagamento: 'Comprovante de Pagamento',
+  documento: 'Documento',
+  documentos: 'Documentos',
+  habilitacao: 'Habilitação',
+  informacao: 'Informação',
+  oficio: 'Ofício',
+  guiadecustas: 'Guia de Custas',
+  custas: 'Custas',
+  tutela: 'Tutela',
+  liminar: 'Liminar',
+  audiencia: 'Audiência',
+  conciliacao: 'Conciliação',
+  intimacao: 'Intimação',
+  citacao: 'Citação',
 };
+// Recupera acentos comuns do português jurídico quando o tipo NÃO está no mapa (o
+// nome do arquivo nunca tem acento, mas a busca da lupa do Projudi espera com).
+function acentuar(palavra) {
+  const p = String(palavra || '');
+  const baixa = p.toLowerCase();
+  if (/[áàâãéêíóôõúç]/i.test(p)) return p;   // já veio acentuada: não mexe
+  const regras = [
+    [/coes$/, 'ções'], [/cao$/, 'ção'],       // manifestacao → manifestação
+    [/encias$/, 'ências'], [/encia$/, 'ência'], // diligencia → diligência
+    [/ancias$/, 'âncias'], [/ancia$/, 'ância'],
+    [/orios$/, 'órios'], [/orio$/, 'ório'],   // declaratorio → declaratório
+    [/arios$/, 'ários'], [/ario$/, 'ário'],   // inventario → inventário
+  ];
+  for (const [re, rep] of regras) {
+    if (re.test(baixa)) {
+      const acent = baixa.replace(re, rep);
+      return p[0] === p[0].toUpperCase() ? acent.charAt(0).toUpperCase() + acent.slice(1) : acent;
+    }
+  }
+  return p;
+}
 function chaveTipo(s) {
   return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z]/g, '');
 }
@@ -189,9 +267,11 @@ function tipoEventoDoNome(nome) {
   const k = chaveTipo(seg);
   if (!k) return null;
   if (MAPA_EVENTO[k]) return MAPA_EVENTO[k];
-  // sem mapa: separa CamelCase e deixa a lupa do Projudi casar (ex.: "PedidoPenhora"
-  // → "Pedido Penhora"). Se ainda assim não achar, o Projudi pausa pra você escolher.
-  const humano = seg.replace(/([a-zà-ÿ])([A-ZÀ-Ý])/g, '$1 $2').replace(/[_.-]+/g, ' ').trim();
+  // sem mapa: separa CamelCase, recupera acentos comuns e deixa a lupa do Projudi
+  // casar (ex.: "PedidoPenhora" → "Pedido Penhora"; "Retificacao" → "Retificação").
+  // Se ainda assim não achar, o Projudi pausa pra você escolher na lista.
+  const humano = seg.replace(/([a-zà-ÿ])([A-ZÀ-Ý])/g, '$1 $2').replace(/[_.-]+/g, ' ').trim()
+    .split(/\s+/).map(acentuar).join(' ');
   return humano || null;
 }
 // Agrupa documentos pelo Nº CNJ no nome do arquivo: vários PDFs do MESMO processo
