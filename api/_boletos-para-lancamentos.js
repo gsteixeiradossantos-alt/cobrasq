@@ -116,6 +116,32 @@ module.exports = async function handler(req, res) {
       for (const r of rows) if (r.acordo_id && r.numero_parcela != null) parcelaJaLancada.add(r.acordo_id + '#' + r.numero_parcela);
     }
 
+    // 5c) Lançamento equivalente que NÃO tem acordo_id (21/08/2026).
+    // A checagem 5b acima só enxerga parcela atrelada a um acordo do Asaas. Mas o
+    // financeiro foi povoado por import de PDF e digitação manual, onde a esmagadora
+    // maioria das linhas não tem acordo_id nenhum — e aí o dry propunha recriar tudo.
+    // Medido em 21/08: 505 lançamentos "a criar", entre eles séries inteiras que já
+    // existiam sob outra descrição (Matheus Eduardo dos Santos tinha três linhas de
+    // R$1.110,00 gravadas como "Andrelina Marca Lembeck e Matheus Eduardo dos Santos",
+    // sem acordo_id). Aplicar teria duplicado dívida real.
+    //
+    // A identidade que sobrevive à diferença de descrição é CONTATO + VALOR +
+    // VENCIMENTO: é o mesmo dinheiro, do mesmo devedor, no mesmo dia. Descrição não
+    // serve (muda com o nome do caso) e valor sozinho não serve (parcelas iguais).
+    const equivalenteJaLancado = new Set();
+    const chaveEquiv = (contatoId, valor, venc) =>
+      `${contatoId || 0}|${Number(valor || 0).toFixed(2)}|${String(venc || '').slice(0, 10)}`;
+    {
+      const contatoIds = [...new Set(Object.values(contatoByDoc).filter(Boolean))];
+      for (let i = 0; i < contatoIds.length; i += 50) {
+        const chunk = contatoIds.slice(i, i + 50).map(encodeURIComponent).join(',');
+        const rows = await sbFetch(
+          `fin_lancamento?select=contato_id,valor,data_vencimento&tipo_movimento=eq.1&contato_id=in.(${chunk})&limit=5000`
+        ).catch(() => []);
+        for (const r of rows) equivalenteJaLancado.add(chaveEquiv(r.contato_id, r.valor, r.data_vencimento));
+      }
+    }
+
     // 6) Monta o plano. Matched (com devedor) primeiro; cus_ (sem cadastro) por último.
     const plano = [];
     for (const [cust, listRaw] of Object.entries(byCust)) {
@@ -134,8 +160,10 @@ module.exports = async function handler(req, res) {
           uuid: 'asaas:' + p.id,
           acordo_id,
           ja_existe: existentes.has('asaas:' + p.id)
-                     || (!!chaveParcela && parcelaJaLancada.has(chaveParcela)),
-          ja_lancada_a_mao: !!chaveParcela && parcelaJaLancada.has(chaveParcela)
+                     || (!!chaveParcela && parcelaJaLancada.has(chaveParcela))
+                     || equivalenteJaLancado.has(chaveEquiv(contato_id, p.value, p.dueDate)),
+          ja_lancada_a_mao: (!!chaveParcela && parcelaJaLancada.has(chaveParcela))
+                     || equivalenteJaLancado.has(chaveEquiv(contato_id, p.value, p.dueDate))
                             && !existentes.has('asaas:' + p.id),
           matched: !!dev,
           descricao: desc,
