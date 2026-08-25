@@ -1,6 +1,12 @@
-// api/cron-datajud.js — Cron Vercel diário (ver vercel.json) que consulta a API
-// pública do DataJud (CNJ) para cada processo cadastrado e grava ANDAMENTOS novos
-// em proc_intimacoes (fonte='datajud'), alimentando os alertas de movimentação.
+// api/cron-datajud.js — consulta a API pública do DataJud (CNJ) para cada
+// processo cadastrado e grava ANDAMENTOS novos em proc_intimacoes
+// (fonte='datajud'), alimentando os alertas de movimentação.
+//
+// DESATIVADO em 2026-08-25: o disparo diário (vercel.json) estava estourando o
+// timeout de 300s (loop sequencial sobre até 200 processos, 20s por chamada ao
+// DataJud) e o job deveria estar inativo. Removido de "crons" em vercel.json;
+// o endpoint continua existindo para teste manual (?dry=1) e para religar
+// depois, se necessário.
 //
 // Fonte gratuita e oficial do CNJ (latência ~24-48h). Complementa o Escavador
 // (intimações em tempo real via DJEN). Ver docs/setup/escavador.md e
