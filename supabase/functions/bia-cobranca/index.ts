@@ -247,15 +247,21 @@ Deno.serve(async (req) => {
   if (!testeTel && !horarioComercial()) return json({ ok: true, skipped: 'fora do horario comercial' });
 
   // candidatas: cobranças que ainda cobram e cujo próximo lembrete venceu.
-  // Em modo teste, escopar JÁ na query (senão as reais ocupam o limite e a de teste nunca entra).
-  let q = sb.from('bia_cobranca').select('*')
-    .in('status', ['ativa', 'adiada'])
-    .not('telefone', 'is', null)
-    .lte('proximo_lembrete_em', new Date().toISOString());
-  if (testeTel) q = q.like('telefone', '%' + testeTel.slice(-8));
-  q = q.order('proximo_lembrete_em', { ascending: true }).limit(MAX_POR_RUN);
-  const { data: rows, error } = await q;
-  if (error) return json({ error: 'select bia_cobranca: ' + error.message }, 500);
+  // RESERVA ANTES DE ENVIAR. O cron dispara de 2 em 2 minutos e NÃO espera a run
+  // anterior; um envio leva ~26s e uma run travada represa invocações que depois
+  // disparam juntas. Se apenas lêssemos aqui e gravássemos o proximo_lembrete_em
+  // no fim (como era até 25/08/2026), toda run concorrente veria a mesma linha
+  // vencida e mandaria a mesma mensagem — foi assim que Matheus, Marcielle e
+  // Valery levaram o lembrete 3x no mesmo segundo. O claim empurra a data sob
+  // lock, então só UMA run leva cada cobrança. O dedup por telefone abaixo
+  // continua valendo para o caso de vários boletos do mesmo devedor na run.
+  // Em modo teste, escopar JÁ no claim (senão as reais ocupam o limite e a de teste nunca entra).
+  const { data: rows, error } = await sb.rpc('bia_claim_cobrancas', {
+    p_limite: MAX_POR_RUN,
+    p_lease_secs: 300,
+    p_telefone: testeTel || null,
+  });
+  if (error) return json({ error: 'claim bia_cobranca: ' + error.message }, 500);
 
   let enviadas = 0, pagas = 0, paraAcao = 0, puladas = 0, followups = 0;
   const agoraIso = new Date().toISOString();
