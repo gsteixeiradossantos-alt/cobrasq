@@ -394,6 +394,35 @@ no ar, fila de órfãos criada. Devedores com `asaas_customer_id`: 77 → 123.
 
 ---
 
+## R-21 · Filtro aplicado DEPOIS do teto de linhas (a lista esconde e não avisa)
+
+**O que acontece.** A tela carrega N linhas com `.limit(N)` e só então filtra o
+resultado **no navegador**. Quem busca acha só o que sobreviveu ao corte, e o
+aviso de truncamento fala do período — não da busca. O usuário lê "3 de 800",
+conclui que existem 3 e segue com o número errado.
+
+Aconteceu em 26/08/2026 em Financeiro › Lançamentos: buscar "juliana pinto" no
+período 01/08/2026—31/08/2030 devolvia **3 das 6 parcelas** de repasse. As 6
+estavam no banco; o período tinha 1.397 lançamentos, o teto era 800 e havia
+exatamente 799 com competência ≥ 10/01/2027 — o corte caía entre a 4/6 e a 3/6.
+
+**Teste (SQL).** Para qualquer tela com teto, o filtro tem que bater com o banco:
+```sql
+select count(*) from public.fin_lancamento
+ where descricao ilike '%juliana pinto%' and tipo_movimento = 0;
+```
+Se a tela mostra menos que isto com o período aberto, o filtro está do lado errado.
+
+**A regra.** Busca e filtro que definem o CONJUNTO vão na consulta (`.ilike`,
+`.eq`) — antes do `.limit`. Filtro client-side só vale para recortar o que já é
+o conjunto certo (os chips Entradas/Saídas, que operam sobre as linhas
+carregadas de propósito). E o aviso de corte tem que dizer sobre o que ele caiu.
+
+**Corrigido:** `_finLancCascataCarregar` manda a busca ao servidor e recarrega a
+cada digitação; o aviso passa a sugerir refinar a busca quando há termo.
+
+---
+
 ### Pendências de evolução (não-regressão — rever a cada vistoria)
 Itens de roadmap acordados mas ainda **não construídos**. Não são bugs; servem para a auditoria
 lembrar o Gustavo e, se já tiverem virado código, conferir a migração/RLS correspondente.
