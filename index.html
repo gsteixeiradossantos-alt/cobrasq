@@ -29369,7 +29369,7 @@ const FIN_SECTIONS_VISIVEIS = ['fila','visao','movimentacoes','receitasjudiciais
 // redesenho (PR2: fila+lancamentos; PR3: +repasses; PR4: +conciliacao+fechamento) —
 // só então 'repasses'/'conciliacao' saem do dispatch antigo (renderFinRepasses/
 // renderFinConciliacao, ainda linkados de Caixa/Contas/Extrato — não quebrar).
-const FIN_CASCATA_TABS = ['fila','lancamentos','repasses','conciliacao','fechamento'];
+const FIN_CASCATA_TABS = ['fila','lancamentos','repasses','previsaocredor','conciliacao','fechamento'];
 function _finSectionOf(tab){
   for(const [key,s] of Object.entries(FIN_SECTIONS)){
     if(s.subtabs.some(t=>t.id===tab)) return key;
@@ -29719,6 +29719,7 @@ const FIN_CASCATA_UI_TABS = [
   {id:'fila', label:'Fila'},
   {id:'lancamentos', label:'Lançamentos'},
   {id:'repasses', label:'Repasses'},
+  {id:'previsaocredor', label:'Ao credor'},
   {id:'conciliacao', label:'Conciliação'},
   {id:'fechamento', label:'Fechamento'},
 ];
@@ -30216,14 +30217,24 @@ async function _finTemColunasCascata(){
 }
 
 let _finLancCascataState = { chip:'tudo', busca:'', sel:new Set() };
+// A busca vai ao SERVIDOR, não ao array já carregado. Motivo concreto: em
+// 26/08/2026 o período 01/08/2026—31/08/2030 tinha 1.397 lançamentos; o teto de
+// 800 cortava a lista e a busca filtrava só o pedaço carregado. Buscar "juliana
+// pinto" devolvia 3 das 6 parcelas de repasse — as 3 mais antigas ficavam além
+// do corte e a tela não dizia que faltava nada além do aviso genérico. Com o
+// filtro no banco, a busca varre o período inteiro e o teto passa a valer sobre
+// o resultado dela.
 async function _finLancCascataCarregar(){
   const sb = getSupabase();
   const { ini, fim } = _finCascataPeriodoBounds();
   const dim = await finApi.loadDimensoes();
   const baseSel = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,tipo_movimento,status,conciliado,conta_id,cobranca_id,credor_id,fin_conta(descricao,banco_nome)';
   const extra = (await _finTemColunasCascata()) ? ',cedente_id,capital,meu_total,amortizado,repasse_status' : '';
-  const { data } = await sb.from('fin_lancamento').select(baseSel+extra)
-    .gte('data_competencia', ini).lte('data_competencia', fim).order('data_competencia',{ascending:false}).limit(FIN_LANC_LIMITE);
+  const termo = (_finLancCascataState.busca||'').trim();
+  let q = sb.from('fin_lancamento').select(baseSel+extra)
+    .gte('data_competencia', ini).lte('data_competencia', fim);
+  if(termo) q = q.ilike('descricao', '%'+termo+'%');
+  const { data } = await q.order('data_competencia',{ascending:false}).limit(FIN_LANC_LIMITE);
   const rows = data||[];
   const cedIds=[...new Set(rows.map(r=>r.cedente_id).filter(Boolean))];
   let cedMap={};
@@ -30266,7 +30277,7 @@ async function _finLancCascataCarregar(){
   }catch(_){ /* auxiliar: não pode derrubar a tela */ }
 
   return { rows, dim, cedMap, opsByLanc, credorPorLanc, periodoLabel: _finCascataPeriodoBounds().label,
-           truncado: rows.length >= FIN_LANC_LIMITE };
+           busca: termo, truncado: rows.length >= FIN_LANC_LIMITE };
 }
 async function renderFinLancamentosCascata(el){
   el.innerHTML = `<div style="padding:50px;text-align:center;color:#8A94A6;"><div class="mv2-spinner" style="margin:0 auto 10px;width:24px;height:24px;border-width:3px;"></div>Carregando lançamentos…</div>`;
@@ -30349,7 +30360,7 @@ function _finLancCascataRender(){
     <div class="finlc-toolbar">
       <div>
         <div class="finlc-h1">Lançamentos</div>
-        <div class="finlc-sub">${escHtml((ctx.periodoLabel||'').replace(/^./,c=>c.toUpperCase()))} · ${filtrados.length} de ${todos.length} lançamento${todos.length!==1?'s':''}${ctx.truncado?` · <span style="color:#A65A4A;font-weight:600;">lista cortada em ${FIN_LANC_LIMITE} — estreite o período</span>`:''}</div>
+        <div class="finlc-sub">${escHtml((ctx.periodoLabel||'').replace(/^./,c=>c.toUpperCase()))} · ${filtrados.length} de ${todos.length} lançamento${todos.length!==1?'s':''}${ctx.truncado?` · <span style="color:#A65A4A;font-weight:600;">lista cortada em ${FIN_LANC_LIMITE} — ${ctx.busca?'refine a busca ou estreite o período':'estreite o período'}</span>`:''}</div>
       </div>
       <div class="finlc-search">${ico('search',15)}<input type="search" placeholder="Buscar descrição…" value="${escHtml(_finLancCascataState.busca)}" oninput="_finLancCascataBusca(this.value)"></div>
     </div>
@@ -30409,7 +30420,25 @@ function _finLancCascataRowHtml(l, ctx){
 }
 function _finLancCascataChip(k){ _finLancCascataState.chip=k; _finLancCascataRender(); }
 let _finLancCascataBuscaTimer=null;
-function _finLancCascataBusca(v){ clearTimeout(_finLancCascataBuscaTimer); _finLancCascataBuscaTimer=setTimeout(()=>{ _finLancCascataState.busca=v; _finLancCascataRender(); }, 300); }
+let _finLancCascataBuscaSeq=0;
+function _finLancCascataBusca(v){
+  clearTimeout(_finLancCascataBuscaTimer);
+  _finLancCascataBuscaTimer=setTimeout(async ()=>{
+    _finLancCascataState.busca=v;
+    const seq = ++_finLancCascataBuscaSeq;
+    try{
+      const ctx = await _finLancCascataCarregar();
+      if(seq !== _finLancCascataBuscaSeq) return;   // resposta atrasada de uma tecla anterior
+      window._finLancCascataCtx = ctx;
+      _finLancCascataState.sel = new Set();         // ids selecionados podem não estar mais na lista
+      const cEl = document.getElementById('fincx-cnt-lancamentos'); if(cEl) cEl.textContent = ctx.rows.length;
+    }catch(_){ /* mantém a lista anterior; o filtro local ainda vale */ }
+    _finLancCascataRender();
+    // o render troca o innerHTML inteiro: sem isto o cursor sai do campo a cada busca
+    const inp = document.querySelector('.finlc-search input');
+    if(inp){ inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+  }, 300);
+}
 // Marcar um checkbox chamava _finLancCascataRender(), que refaz o innerHTML da
 // aba INTEIRA — todas as linhas mais o bloco <style> completo, reparseado pelo
 // navegador a cada clique. Com ~110 lançamentos num mês, era o que engasgava.
@@ -30968,6 +30997,277 @@ function _finRepasseCardHtml(g, ctx){
   </div>`;
 }
 
+// ══════════════════════════════════════════════════════════════
+// FINANCEIRO · aba "Ao credor" — previsão de repasse
+// ──────────────────────────────────────────────────────────────
+// Responde a uma pergunta que o credor faz toda semana ("quando e quanto eu
+// recebo?") e que até 26/08/2026 só dava para responder garimpando a aba
+// Lançamentos, que é por período e tem teto de 800 linhas.
+//
+// Fonte: fin_lancamento das SAÍDAS com credor_id — é onde o repasse previsto
+// realmente mora. NÃO usa fin_operacao: aquilo é o recebimento já ocorrido
+// (pipeline do webhook Asaas) e cobre só uma fração das séries — em 26/08/2026
+// eram 390 parcelas previstas em fin_lancamento, R$ 139 mil, contra uma
+// fin_operacao praticamente vazia. Por isso esta tela não substitui a aba
+// Repasses (que executa o pagamento); ela projeta o que ainda vai sair.
+//
+// Série = uma negociação. A chave é cobranca_id quando existe e, quando não
+// existe (72 das 101 parcelas do Arte Estofados em 26/08/2026), a descrição sem
+// o sufixo "N/M" — que é o que a série tem de estável nesses registros.
+// ══════════════════════════════════════════════════════════════
+const _FINCR_MESES = ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+const _fincrBR = s => { s=(s||'').slice(0,10); return s ? s.split('-').reverse().join('/') : '—'; };
+const _fincrSerieChave = l => l.cobranca_id || ('d:'+(l.descricao||'').replace(/\s+\d+\s*\/\s*\d+\s*$/,'').trim().toLowerCase());
+const _fincrSerieNome  = l => (l.descricao||'—').replace(/\s+\d+\s*\/\s*\d+\s*$/,'').replace(/^Repasse ao credor\s+—\s+/i,'').trim() || '—';
+
+let _finPrevState = { credId:'', serie:'', incluirPagas:false };
+
+async function _finPrevisaoCarregar(){
+  const sb = getSupabase();
+  const { data } = await sb.from('fin_lancamento')
+    .select('id,descricao,data_vencimento,data_competencia,valor,status,cobranca_id,credor_id')
+    .eq('tipo_movimento', 0).not('credor_id','is',null)
+    .order('data_vencimento',{ascending:true}).limit(5000);
+  const rows = (data||[]).map(l=>({ ...l, _venc: (l.data_vencimento||l.data_competencia||'').slice(0,10), _v: Math.abs(+l.valor||0) }));
+  const ids = [...new Set(rows.map(r=>r.credor_id))];
+  const cred = {};
+  if(ids.length){
+    const { data:cs } = await sb.from('clientes').select('id,nome,nome_fantasia,chave_pix').in('id', ids);
+    (cs||[]).forEach(c=>cred[c.id] = { nome: c.nome_fantasia || c.nome || '—', pix: c.chave_pix||'' });
+  }
+  return { rows, cred };
+}
+
+async function renderFinPrevisaoCredor(el){
+  el.innerHTML = `<div style="padding:50px;text-align:center;color:#8A94A6;"><div class="mv2-spinner" style="margin:0 auto 10px;width:24px;height:24px;border-width:3px;"></div>Carregando previsão…</div>`;
+  let ctx;
+  try{ ctx = await _finPrevisaoCarregar(); }
+  catch(e){ el.innerHTML = `<div class="panel" style="padding:20px;color:var(--danger);">Erro: ${escHtml(e.message||String(e))}</div>`; return; }
+  window._finPrevCtx = ctx;
+  if(!_finPrevState.credId){
+    // abre no credor com mais dinheiro a repassar — quem mais precisa do relatório
+    const tot = {};
+    ctx.rows.forEach(r=>{ if(r.status!==1) tot[r.credor_id]=(tot[r.credor_id]||0)+r._v; });
+    _finPrevState.credId = Object.keys(tot).sort((a,b)=>tot[b]-tot[a])[0] || (ctx.rows[0]||{}).credor_id || '';
+  }
+  _finPrevisaoRender();
+  const cEl = document.getElementById('fincx-cnt-previsaocredor');
+  if(cEl) cEl.textContent = new Set(ctx.rows.filter(r=>r.status!==1).map(r=>r.credor_id)).size;
+}
+
+function _finPrevisaoDados(){
+  const ctx = window._finPrevCtx; if(!ctx) return null;
+  const { credId, serie, incluirPagas } = _finPrevState;
+  const doCredor = ctx.rows.filter(r=>r.credor_id===credId);
+  const series = [];
+  const vistas = {};
+  doCredor.forEach(r=>{
+    const k = _fincrSerieChave(r);
+    if(!vistas[k]){ vistas[k] = { chave:k, nome:_fincrSerieNome(r), n:0, total:0 }; series.push(vistas[k]); }
+    vistas[k].n++; vistas[k].total += r._v;
+  });
+  series.sort((a,b)=>b.total-a.total);
+  let linhas = doCredor.filter(r=>(!serie || _fincrSerieChave(r)===serie) && (incluirPagas || r.status!==1));
+  linhas.sort((a,b)=>(a._venc||'').localeCompare(b._venc||'') || (a.descricao||'').localeCompare(b.descricao||''));
+  const meses = [];
+  let atual = null;
+  for(const l of linhas){
+    const mk = (l._venc||'').slice(0,7);
+    if(!atual || atual.mk!==mk){
+      const [ano,m] = mk.split('-');
+      const nomeMes = _FINCR_MESES[(+m||1)-1]||'';
+      atual = { mk, label: mk ? `${nomeMes.charAt(0).toUpperCase()+nomeMes.slice(1)} de ${ano}` : 'Sem data', itens:[], total:0 };
+      meses.push(atual);
+    }
+    atual.itens.push(l); atual.total += l._v;
+  }
+  const hojeISO = _finISO(new Date());
+  const previstas = linhas.filter(l=>l.status!==1);
+  const proxima = previstas.find(l=>(l._venc||'')>=hojeISO) || previstas[0] || null;
+  const atrasadas = previstas.filter(l=>(l._venc||'') < hojeISO);
+  return {
+    cred: ctx.cred[credId] || {nome:'—',pix:''}, series, linhas, meses,
+    total: linhas.reduce((s,l)=>s+l._v,0),
+    totalPrevisto: previstas.reduce((s,l)=>s+l._v,0),
+    proxima, atrasadas,
+    de: (linhas[0]||{})._venc, ate: (linhas[linhas.length-1]||{})._venc,
+  };
+}
+
+function _finPrevisaoRender(){
+  const el = document.getElementById('fin-content'); if(!el) return;
+  const ctx = window._finPrevCtx;
+  const d = _finPrevisaoDados(); if(!d) return;
+  const credores = Object.entries(ctx.cred).map(([id,c])=>({id, nome:c.nome})).sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR'));
+
+  el.innerHTML = `
+    <style>
+      .fincr-top{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:16px;}
+      .fincr-h1{font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:400;color:#0A1530;}
+      .fincr-sub{font-size:12.5px;color:#8A94A6;margin-top:3px;}
+      .fincr-sel{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:18px;}
+      .fincr-sel select{border:1px solid #E6E1D2;border-radius:9px;padding:10px 12px;font-family:inherit;font-size:13px;color:#0A1530;background:#fff;max-width:360px;}
+      .fincr-sel label{font-size:12.5px;color:#6B7683;display:flex;align-items:center;gap:7px;}
+      .fincr-btn{border:1px solid #E6E1D2;background:#fff;color:#0A1530;font-size:12.5px;font-weight:500;padding:10px 15px;border-radius:8px;cursor:pointer;font-family:inherit;}
+      .fincr-btn.dark{background:#0A1530;color:#fff;border-color:#0A1530;}
+      .fincr-cards{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:18px;}
+      .fincr-card{background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:16px 20px;min-width:180px;flex:1;}
+      .fincr-card .lb{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;margin-bottom:7px;}
+      .fincr-card .v{font-family:'Fraunces',Georgia,serif;font-size:28px;font-weight:300;color:#0A1530;}
+      .fincr-card .v.gold{color:#9C7F40;}
+      .fincr-card .v.sm{font-size:19px;}
+      .fincr-card .hint{font-size:11.5px;color:#A6AEBD;margin-top:5px;}
+      .fincr-doc{background:#fff;border:1px solid #E6E1D2;border-radius:12px;overflow:hidden;}
+      .fincr-mes{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:12px 22px 9px;background:#FBFAF6;border-top:1px solid #E6E1D2;}
+      .fincr-mes:first-child{border-top:none;}
+      .fincr-mes .m{font-family:'Fraunces',Georgia,serif;font-size:17px;color:#0A1530;}
+      .fincr-mes .t{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#9C7F40;font-weight:600;}
+      .fincr-linha{display:grid;grid-template-columns:96px 1fr 120px 104px;gap:12px;align-items:center;padding:11px 22px;border-top:1px solid #F2EFE6;font-size:13.5px;}
+      .fincr-linha .dt{font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#6B7683;}
+      .fincr-linha .vl{font-family:'JetBrains Mono',monospace;font-weight:600;text-align:right;color:#0A1530;}
+      .fincr-sit{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.06em;padding:3px 9px;border-radius:5px;text-align:center;white-space:nowrap;}
+      .fincr-sit.prev{background:#FBF3E1;color:#9C7F40;}
+      .fincr-sit.paga{background:#E9F0E7;color:#4C6647;}
+      .fincr-sit.atras{background:#FBEAE7;color:#A65A4A;}
+      .fincr-foot{padding:14px 22px;background:#F4F1E7;border-top:1px solid #E6E1D2;display:flex;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:13px;color:#0A1530;}
+      .fincr-vazio{padding:40px;text-align:center;color:#8A94A6;font-family:'Fraunces',Georgia,serif;font-size:19px;}
+    </style>
+    <div class="fincr-top">
+      <div>
+        <div class="fincr-h1">Previsão de repasse ao credor</div>
+        <div class="fincr-sub">O que ainda vai sair para este credor, com data e valor — a lista inteira, sem depender do período da faixa.</div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="fincr-btn" onclick="_finPrevisaoCopiar()">Copiar resumo</button>
+        <button class="fincr-btn dark" onclick="_finPrevisaoImprimir()">Imprimir · PDF</button>
+      </div>
+    </div>
+    <div class="fincr-sel">
+      <select onchange="_finPrevisaoSetCredor(this.value)">
+        ${credores.map(c=>`<option value="${c.id}" ${c.id===_finPrevState.credId?'selected':''}>${escHtml(c.nome)}</option>`).join('')}
+      </select>
+      <select onchange="_finPrevisaoSetSerie(this.value)">
+        <option value="">Todos os devedores · ${d.series.length} série${d.series.length!==1?'s':''}</option>
+        ${d.series.map(sr=>`<option value="${escHtml(sr.chave)}" ${sr.chave===_finPrevState.serie?'selected':''}>${escHtml(sr.nome)} · ${sr.n}× · ${fmtR(sr.total)}</option>`).join('')}
+      </select>
+      <label><input type="checkbox" ${_finPrevState.incluirPagas?'checked':''} onchange="_finPrevisaoSetPagas(this.checked)"> Incluir parcelas já repassadas</label>
+    </div>
+    <div class="fincr-cards">
+      <div class="fincr-card"><div class="lb">A REPASSAR · TOTAL</div><div class="v gold">${fmtR(d.totalPrevisto)}</div><div class="hint">${d.linhas.filter(l=>l.status!==1).length} parcela(s)${d.de?` · ${_fincrBR(d.de)} a ${_fincrBR(d.ate)}`:''}</div></div>
+      <div class="fincr-card"><div class="lb">PRÓXIMO REPASSE</div><div class="v sm">${d.proxima?`${_fincrBR(d.proxima._venc)} · ${fmtR(d.proxima._v)}`:'—'}</div><div class="hint">${d.proxima?escHtml(_fincrSerieNome(d.proxima)):'nenhum previsto'}</div></div>
+      <div class="fincr-card"><div class="lb">VENCIDAS SEM REPASSE</div><div class="v sm" style="color:${d.atrasadas.length?'#A65A4A':'#0A1530'};">${d.atrasadas.length?fmtR(d.atrasadas.reduce((s,l)=>s+l._v,0)):'R$ 0,00'}</div><div class="hint">${d.atrasadas.length} parcela(s) com data já passada</div></div>
+    </div>
+    <div class="fincr-doc" id="fincr-doc">
+      ${d.meses.length ? d.meses.map(m=>`
+        <div class="fincr-mes"><span class="m">${escHtml(m.label)}</span><span class="t">${fmtR(m.total)}</span></div>
+        ${m.itens.map(l=>{
+          const hoje = _finISO(new Date());
+          const cls = l.status===1 ? 'paga' : ((l._venc||'')<hoje ? 'atras' : 'prev');
+          const txt = l.status===1 ? 'REPASSADA' : ((l._venc||'')<hoje ? 'VENCIDA' : 'PREVISTA');
+          return `<div class="fincr-linha">
+            <span class="dt">${_fincrBR(l._venc)}</span>
+            <span>${escHtml(l.descricao||'—')}</span>
+            <span class="vl">${fmtR(l._v)}</span>
+            <span class="fincr-sit ${cls}">${txt}</span>
+          </div>`;
+        }).join('')}
+      `).join('') : `<div class="fincr-vazio">Nada previsto para este credor${_finPrevState.serie?' nesta série':''}.</div>`}
+      ${d.meses.length ? `<div class="fincr-foot"><span>TOTAL${_finPrevState.incluirPagas?' (com as já repassadas)':''}</span><b>${fmtR(d.total)}</b></div>` : ''}
+    </div>
+    <div style="font-size:11.5px;color:#A6AEBD;margin-top:12px;">Datas previstas: o repasse sai depois que a parcela do devedor cai. Atraso do devedor empurra a data.</div>`;
+}
+function _finPrevisaoSetCredor(v){ _finPrevState.credId=v; _finPrevState.serie=''; _finPrevisaoRender(); }
+function _finPrevisaoSetSerie(v){ _finPrevState.serie=v; _finPrevisaoRender(); }
+function _finPrevisaoSetPagas(v){ _finPrevState.incluirPagas=!!v; _finPrevisaoRender(); }
+
+// Resumo curto para colar no WhatsApp do credor.
+function _finPrevisaoCopiar(){
+  const d = _finPrevisaoDados(); if(!d) return;
+  const l = [];
+  l.push(`Previsão de repasse — ${d.cred.nome}`);
+  if(_finPrevState.serie) l.push(`Devedor: ${(d.series.find(s=>s.chave===_finPrevState.serie)||{}).nome||'—'}`);
+  l.push(`Total a repassar: ${fmtR(d.totalPrevisto)} em ${d.linhas.filter(x=>x.status!==1).length} parcela(s)`);
+  l.push('');
+  d.meses.forEach(m=>{ m.itens.forEach(it=>{ l.push(`${_fincrBR(it._venc)} — ${fmtR(it._v)} — ${it.descricao||''}${it.status===1?' (já repassada)':''}`); }); });
+  l.push('');
+  l.push('Datas previstas: o repasse sai após a compensação da parcela do devedor.');
+  const txt = l.join('\n');
+  const ok = ()=>showToast('Resumo copiado.', 'success');
+  if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(ok).catch(()=>prompt('Copie:', txt));
+  else prompt('Copie:', txt);
+}
+
+// Documento imprimível em janela própria — não dá para usar @media print sobre a
+// SPA sem esconder o app inteiro, e o credor recebe este PDF como está.
+function _finPrevisaoImprimir(){
+  const d = _finPrevisaoDados(); if(!d) return;
+  const hoje = _finISO(new Date());
+  const emissao = _fincrBR(hoje);
+  const serieNome = _finPrevState.serie ? ((d.series.find(s=>s.chave===_finPrevState.serie)||{}).nome||'') : '';
+  const linhas = d.meses.map(m=>`
+    <tr class="mes"><td colspan="3">${escHtml(m.label)}</td><td class="v">${fmtR(m.total)}</td></tr>
+    ${m.itens.map(l=>{
+      const st = l.status===1 ? 'Repassada' : ((l._venc||'')<hoje ? 'Vencida' : 'Prevista');
+      return `<tr><td class="dt">${_fincrBR(l._venc)}</td><td>${escHtml(l.descricao||'—')}</td><td class="st">${st}</td><td class="v">${fmtR(l._v)}</td></tr>`;
+    }).join('')}`).join('');
+  const doc = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<title>Previsão de repasse — ${escHtml(d.cred.nome)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,600&family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  @page{size:A4;margin:18mm 16mm;}
+  @media screen{body{max-width:210mm;margin:0 auto;padding:18mm 16mm;}}
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:'Inter Tight',Inter,system-ui,sans-serif;color:#0A1530;font-size:11pt;}
+  .marca{font-family:'Fraunces',Georgia,serif;font-size:19pt;font-weight:600;letter-spacing:-.01em;}
+  .marca i{color:#C9A961;font-style:normal;}
+  .eyebrow{font-family:'JetBrains Mono',monospace;font-size:7.5pt;letter-spacing:.2em;text-transform:uppercase;color:#8A94A6;margin-top:3px;}
+  header{border-bottom:2px solid #0A1530;padding-bottom:10px;margin-bottom:18px;display:flex;justify-content:space-between;align-items:flex-end;}
+  h1{font-family:'Fraunces',Georgia,serif;font-size:16pt;font-weight:400;margin-bottom:2px;}
+  .credor{font-size:12pt;font-weight:600;}
+  .meta{font-size:9pt;color:#6B7683;margin-top:2px;}
+  .resumo{display:flex;gap:22px;background:#FBFAF6;border:1px solid #E6E1D2;border-radius:8px;padding:12px 16px;margin:14px 0 18px;}
+  .resumo .lb{font-family:'JetBrains Mono',monospace;font-size:7pt;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;}
+  .resumo .vl{font-family:'Fraunces',Georgia,serif;font-size:15pt;font-weight:400;margin-top:3px;}
+  .resumo .vl.gold{color:#9C7F40;}
+  table{width:100%;border-collapse:collapse;}
+  th{font-family:'JetBrains Mono',monospace;font-size:7.5pt;letter-spacing:.12em;text-transform:uppercase;color:#8A94A6;text-align:left;border-bottom:1px solid #0A1530;padding:6px 6px;}
+  td{padding:6px;border-bottom:1px solid #F0EDE4;font-size:10pt;vertical-align:top;}
+  tr.mes td{background:#F4F1E7;font-family:'Fraunces',Georgia,serif;font-size:11pt;border-bottom:1px solid #E6E1D2;}
+  td.dt,td.v{font-family:'JetBrains Mono',monospace;white-space:nowrap;}
+  td.v{text-align:right;font-weight:600;}
+  td.st{font-size:8.5pt;color:#6B7683;white-space:nowrap;}
+  tfoot td{border-top:2px solid #0A1530;border-bottom:none;font-weight:600;font-size:11pt;padding-top:9px;}
+  tr{break-inside:avoid;}
+  footer{margin-top:18px;font-size:8.5pt;color:#8A94A6;line-height:1.5;border-top:1px solid #E6E1D2;padding-top:9px;}
+</style></head><body>
+<header>
+  <div><div class="marca">cobrasq<i>.</i></div><div class="eyebrow">Recuperadora de Crédito</div></div>
+  <div style="text-align:right;"><h1>Previsão de repasse</h1><div class="meta">Emitido em ${emissao}</div></div>
+</header>
+<div class="credor">${escHtml(d.cred.nome)}</div>
+<div class="meta">${serieNome?escHtml(serieNome)+' · ':''}${d.linhas.length} parcela(s)${d.de?` · ${_fincrBR(d.de)} a ${_fincrBR(d.ate)}`:''}</div>
+<div class="resumo">
+  <div><div class="lb">A repassar</div><div class="vl gold">${fmtR(d.totalPrevisto)}</div></div>
+  <div><div class="lb">Próximo repasse</div><div class="vl">${d.proxima?`${_fincrBR(d.proxima._venc)} · ${fmtR(d.proxima._v)}`:'—'}</div></div>
+  <div><div class="lb">Parcelas previstas</div><div class="vl">${d.linhas.filter(l=>l.status!==1).length}</div></div>
+</div>
+<table>
+  <thead><tr><th style="width:80px;">Data</th><th>Devedor · parcela</th><th style="width:78px;">Situação</th><th style="width:96px;text-align:right;">Valor</th></tr></thead>
+  <tbody>${linhas || '<tr><td colspan="4">Nada previsto.</td></tr>'}</tbody>
+  <tfoot><tr><td colspan="3">Total${_finPrevState.incluirPagas?' (inclui já repassadas)':''}</td><td class="v">${fmtR(d.total)}</td></tr></tfoot>
+</table>
+<footer>
+  As datas são previsões: cada repasse é enviado após a compensação da parcela paga pelo devedor. Atraso do devedor desloca a data, e o valor da parcela não muda por isso.<br>
+  Documento gerado pelo sistema da COBRASQ — Recuperadora de Crédito. Dúvidas sobre qualquer linha, é só chamar.
+</footer>
+<script>window.onload=function(){setTimeout(function(){window.print();},350);};<\/script>
+</body></html>`;
+  const w = window.open('', '_blank');
+  if(!w){ showToast('O navegador bloqueou a janela de impressão — libere o pop-up e tente de novo.', 'error'); return; }
+  w.document.write(doc); w.document.close();
+}
+
 // ── Modal "Contrato do cedente" ──
 async function _finContratoAbrirModal(credId, nome){
   const sb = getSupabase();
@@ -31183,6 +31483,7 @@ function renderFinTab(tab){
   else if(tab==='cartoes') renderFinCartoes(el);
   else if(tab==='asaas') renderFinAsaas(el);
   else if(tab==='repasses') renderFinRepassesCascata(el);
+  else if(tab==='previsaocredor') renderFinPrevisaoCredor(el);
   else if(tab==='diagnostico') renderFinDiagnostico(el);
 }
 
