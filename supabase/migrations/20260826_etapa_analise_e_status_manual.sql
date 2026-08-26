@@ -18,6 +18,14 @@
 --     'Análise', '8. Devolvida', '7. Reajuizar', 'Orto suspensa', '1. Ação de Cobrança' etc.
 --     Hoje são 206 cobranças em '8. Devolvida' e 16 em '7. Reajuizar' expostas ao clobber.
 --
+-- (3) "AGUARDANDO 1ª ABORDAGEM" ERA LIDO COMO "EM CONTATO". O ramo `passo_atual ILIKE
+--     '%aguardando%'` de fn_casos_update() casa com 'Aguardando 1ª abordagem' — que quer
+--     dizer o contrário: ninguém abordou o devedor ainda. Resultado: status 'Em contato'
+--     e etapa 'negociando', tirando o caso da fila de cobrança. Reproduzido em 26/08/2026
+--     ao gravar o telefone de Gelcenoir Ferreira da Silva (4ed2dde3, R$ 24.613,03), que
+--     nunca foi abordado. Há 57 casos com esse passo_atual — 56 ainda corretos só porque
+--     não passaram pelo trigger desde então.
+--
 -- Idempotente. Não altera dado, só constraint e as duas funções.
 
 BEGIN;
@@ -119,6 +127,12 @@ BEGIN
     WHEN NEW.passo_atual ILIKE '%acordo aceito%'     THEN 'Acordo'
     WHEN NEW.passo_atual ILIKE '%negociação%'        THEN 'Em negociação'
     WHEN NEW.passo_atual ILIKE '%sem contato%'       THEN 'Em contato'
+    -- "Aguardando 1ª abordagem" significa que NINGUEM falou com o devedor ainda:
+    -- tem que sair antes do ramo generico '%aguardando%', que o classificava como
+    -- 'Em contato' -> etapa 'negociando' e o tirava da fila de cobranca.
+    WHEN NEW.passo_atual ILIKE '%1ª abordagem%'
+      OR NEW.passo_atual ILIKE '%1a abordagem%'
+      OR NEW.passo_atual ILIKE '%primeira abordagem%'                THEN 'Cobrar'
     WHEN NEW.passo_atual ILIKE '%aguardando%'        THEN 'Em contato'
     WHEN NEW.passo_atual ILIKE '%mensagem enviada%'  THEN 'Em contato'
     ELSE 'Cobrar'
