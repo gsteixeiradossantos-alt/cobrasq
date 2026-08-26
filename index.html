@@ -29287,6 +29287,24 @@ const FIN_MAIS_IDS = FIN_CASCATA_MAIS.flatMap(g=>g.itens.map(x=>x.id));
 // seletor não faz nada, então nem é desenhado — antes ele aparecia em todas e ficava
 // inerte, e na Judicial chegava a mostrar um mês diferente do da lista logo abaixo.
 const FIN_TABS_COM_PERIODO = ['lancamentos','receitasjudiciais'];
+// Idade do saldo bancário DECLARADO (fin_conta.bank_balance + bank_balance_at). Toda
+// tela de saldo prefere esse número ao razão, porque ele é o conferido contra o extrato
+// — mas nada o atualiza sozinho desde que a sync do Controlle foi desligada. Um valor
+// velho envenena em silêncio o "caixa livre", que é saldo geral menos o a repassar.
+// Não corrigimos o número (só o extrato sabe): mostramos a idade dele.
+const FIN_SALDO_STALE_DIAS = 7;
+function _finSaldoIdadeDias(conta){
+  if(!conta || conta.bank_balance == null || !conta.bank_balance_at) return null;
+  const t = new Date(conta.bank_balance_at).getTime();
+  if(!isFinite(t)) return null;
+  return Math.max(0, Math.floor((Date.now() - t) / 86400000));
+}
+function _finSaldoIdadeTexto(dias){
+  if(dias == null) return '';
+  if(dias <= 0) return 'hoje';
+  if(dias === 1) return 'ontem';
+  return 'há ' + dias + ' dias';
+}
 function renderFinanceiro(){
   const el = document.getElementById('page-fin');
   if(!el) return;
@@ -29535,8 +29553,14 @@ async function _finCascataMetricas(force){
   }catch(_){ /* colunas do PR1 podem não existir ainda — migração não aplicada */ }
 
   const aRepassar = aRepassarOp + aRepassarManual;
+  // Contas que entram no saldo geral com saldo declarado vencido — o "caixa livre" é
+  // calculado em cima delas, então a idade precisa aparecer junto com o número.
+  const stale = contasNoGeral
+    .map(c => ({ nome: c.descricao, dias: _finSaldoIdadeDias(c) }))
+    .filter(x => x.dias != null && x.dias >= FIN_SALDO_STALE_DIAS)
+    .sort((a,b) => b.dias - a.dias);
   const m = {
-    saldoGeral, aRepassar, caixaLivre: saldoGeral - aRepassar,
+    saldoGeral, aRepassar, caixaLivre: saldoGeral - aRepassar, stale,
     contasCount: contasNoGeral.length,
     filaCount: pendCount + revisarCount + manualCount,
     repassesCount: pendCount + revisarCount,
@@ -29754,6 +29778,8 @@ async function renderFinanceiroCascata(el, activeTab){
       .fincx-metric .v.hero{font-size:44px;}
       .fincx-metric .v.gold{font-size:32px;color:#C9A961;}
       .fincx-metric .v.mono{font-family:'JetBrains Mono',monospace;font-weight:500;font-size:21px;color:#8E98B0;}
+      .fincx-stale{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.06em;color:#E2C98A;margin-top:3px;}
+      .fincx-stale:empty{display:none;}
       .fincx-l3{display:flex;gap:26px;flex-wrap:wrap;border-top:1px solid rgba(255,255,255,.08);padding-top:2px;}
       .fincx-tab{display:flex;align-items:center;gap:8px;padding:12px 0 14px;border-bottom:2px solid transparent;cursor:pointer;font-size:15.5px;color:#8E98B0;font-weight:400;}
       .fincx-tab.active{color:#fff;font-weight:600;border-bottom-color:#C9A961;}
@@ -29781,7 +29807,7 @@ async function renderFinanceiroCascata(el, activeTab){
       <div class="fincx-l2">
         <div class="fincx-metric"><div class="lb">CAIXA LIVRE DA COBRASQ</div><div class="v hero" id="fincx-caixalivre">···</div></div>
         <div class="fincx-metric"><div class="lb gold">DE TERCEIROS · A REPASSAR</div><div class="v gold" id="fincx-arepassar">···</div></div>
-        <div class="fincx-metric"><div class="lb">SALDO GERAL · <span id="fincx-contascount">—</span> CONTA(S)</div><div class="v mono" id="fincx-saldogeral">···</div></div>
+        <div class="fincx-metric"><div class="lb">SALDO GERAL · <span id="fincx-contascount">—</span> CONTA(S)</div><div class="v mono" id="fincx-saldogeral">···</div><div class="fincx-stale" id="fincx-saldostale"></div></div>
       </div>
       <div class="fincx-l3">
         ${FIN_CASCATA_UI_TABS.map(t=>`<div class="fincx-tab ${t.id===activeTab?'active':''}" onclick="_finCascataIrPara('${t.id}')">
@@ -29800,6 +29826,16 @@ async function renderFinanceiroCascata(el, activeTab){
     set('fincx-caixalivre', fmtR(m.caixaLivre));
     set('fincx-arepassar', fmtR(m.aRepassar));
     set('fincx-saldogeral', fmtR(m.saldoGeral));
+    // O caixa livre sai daqui; se a base é um saldo velho, dizer isso na cara.
+    const stEl = document.getElementById('fincx-saldostale');
+    if(stEl){
+      const s = m.stale || [];
+      stEl.textContent = !s.length ? ''
+        : (s.length === 1
+            ? `SALDO DE ${s[0].nome.toUpperCase()} ${_finSaldoIdadeTexto(s[0].dias).toUpperCase()} — CONFERIR NO BANCO`
+            : `${s.length} CONTAS COM SALDO DESATUALIZADO (ATÉ ${_finSaldoIdadeTexto(s[0].dias).toUpperCase()}) — CONFERIR NO BANCO`);
+      stEl.title = s.length ? s.map(x=>`${x.nome}: ${_finSaldoIdadeTexto(x.dias)}`).join(' · ') : '';
+    }
     set('fincx-contascount', m.contasCount);
     set('fincx-cnt-fila', m.filaCount);
     set('fincx-cnt-repasses', m.repassesCount);
@@ -33587,7 +33623,13 @@ async function renderContasGridSrv(){
     const sub = (bankBal!=null && Math.abs(diff||0)>0.01)
       ? `<div style="font-size:11px;color:#9C7F40;font-weight:600;">Conciliação pendente</div>`
       : `<div style="font-size:11px;color:#8A94A6;">${escHtml(tipoLabels[c.tipo]||c.banco_nome||'—')}</div>`;
-    const noBanco = bankBal!=null ? `R$ ${fmtR(bankBal).replace(/^R\$\s*/,'')} no banco` : (updatedAgo?`Última atualização: ${updatedAgo}`:'&nbsp;');
+    // A idade era calculada e descartada justamente quando havia saldo declarado — que
+    // é o caso em que ela importa, porque esse é o número que as telas de saldo usam.
+    const idadeDias = _finSaldoIdadeDias(c);
+    const velho = idadeDias != null && idadeDias >= FIN_SALDO_STALE_DIAS;
+    const noBanco = bankBal!=null
+      ? `R$ ${fmtR(bankBal).replace(/^R\$\s*/,'')} no banco${updatedAgo?` · <span style="color:${velho?'#9C7F40':'#8A94A6'};font-weight:${velho?'700':'400'};">${escHtml(updatedAgo)}</span>`:''}`
+      : (updatedAgo?`Última atualização: ${updatedAgo}`:'&nbsp;');
     const spark = [55,68,60,80,88].map((h,i)=>`<div style="flex:1;height:${h}%;background:${i>=3?'#3A5288':'#DCE6F2'};border-radius:2px;"></div>`).join('');
     return `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:12px;padding:18px 20px;box-shadow:0 1px 2px rgba(16,24,40,.04);">
       <div style="font-size:14px;font-weight:700;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(c.descricao)}</div>
