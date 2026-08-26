@@ -29196,35 +29196,6 @@ function _finMesCorrente(){
   const fmt = (x)=> x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0');
   return { dataIni: fmt(ini), dataFim: fmt(fim) };
 }
-// Mesmo formato de _finMesCorrente(), mas pra um ano/mês (0-based) arbitrário —
-// base da navegação de mês em Movimentações (finMovMudarMes).
-function _finMesDe(ano, mes){
-  const ini = new Date(ano, mes, 1);
-  const fim = new Date(ano, mes+1, 0);
-  const fmt = (x)=> x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0');
-  return { dataIni: fmt(ini), dataFim: fmt(fim) };
-}
-const _FIN_MESES_NOME = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
-// Label "Mês de AAAA" a partir de filtros.dataIni (fallback: mês corrente real).
-function _finMovMesLabel(filtros){
-  const iniStr = (filtros && filtros.dataIni) || _finMesCorrente().dataIni;
-  const [y, m] = iniStr.split('-').map(Number);
-  return _FIN_MESES_NOME[m-1] + ' de ' + y;
-}
-// Anda N meses (delta pode ser negativo) a partir do mês hoje selecionado em
-// Movimentações e recarrega a lista + KPIs daquele período.
-function finMovMudarMes(delta){
-  const st = window._finLancState;
-  const iniStr = st.filtros.dataIni || _finMesCorrente().dataIni;
-  const [y, m] = iniStr.split('-').map(Number);
-  const d = new Date(y, (m - 1) + delta, 1);
-  st.filtros = Object.assign({}, st.filtros, _finMesDe(d.getFullYear(), d.getMonth()));
-  st.page = 1;
-  st.sel.clear();
-  // Recarrega a aba atual (Movimentações ou Judicial — ambas usam esta navegação de mês).
-  if(typeof renderFinTab === 'function') renderFinTab(window._finTab || 'lancamentos');
-}
-
 // State da paginação/filtros da aba Movimentações (default de período: mês corrente).
 // tipoView: 'tudo'|'entradas'|'saidas'|'repasses' · situacao: 'todos'|'pendentes'|'atraso'|'conciliados'
 window._finLancState = window._finLancState || { page:1, filtros:Object.assign({tipoView:'tudo',situacao:'todos'},_finMesCorrente()), totalPages:1, total:0, loading:false, sel:new Set(), totais:{entradas:0,saidas:0} };
@@ -29312,6 +29283,10 @@ const FIN_CASCATA_MAIS = [
   ]},
 ];
 const FIN_MAIS_IDS = FIN_CASCATA_MAIS.flatMap(g=>g.itens.map(x=>x.id));
+// Abas cujo conteúdo é recortado pelo seletor de período da faixa escura. Nas demais o
+// seletor não faz nada, então nem é desenhado — antes ele aparecia em todas e ficava
+// inerte, e na Judicial chegava a mostrar um mês diferente do da lista logo abaixo.
+const FIN_TABS_COM_PERIODO = ['lancamentos','receitasjudiciais'];
 function renderFinanceiro(){
   const el = document.getElementById('page-fin');
   if(!el) return;
@@ -29634,7 +29609,7 @@ function _finPeriodoRotulo(){ return _finCascataPeriodoBounds().label; }
 function _finPeriodoAplicar(){
   const lbl = document.getElementById('fincx-periodo-lbl');
   if(lbl) lbl.textContent = _finPeriodoRotulo();
-  if(window._finTab==='lancamentos') renderFinTab('lancamentos');
+  if(FIN_TABS_COM_PERIODO.includes(window._finTab)) renderFinTab(window._finTab);
 }
 
 function _finPeriodoPasso(n){
@@ -29793,11 +29768,11 @@ async function renderFinanceiroCascata(el, activeTab){
         <span class="fincx-eyebrow">FINANCEIRO · ${escHtml(hojeStr.toUpperCase())}</span>
         <div class="fincx-l1-r">
           <span class="fincx-syncdot" title="Lendo direto do Supabase"></span>
-          <div class="fincx-nav">
+          ${FIN_TABS_COM_PERIODO.includes(activeTab) ? `<div class="fincx-nav">
             <button class="fincx-nav-seta" title="Anterior" onclick="_finPeriodoPasso(-1)">&lsaquo;</button>
             <button class="fincx-nav-lbl" id="fincx-periodo-lbl" onclick="_finPeriodoAbrirMenu(event)">${escHtml(_finPeriodoRotulo())}</button>
             <button class="fincx-nav-seta" title="Próximo" onclick="_finPeriodoPasso(1)">&rsaquo;</button>
-          </div>
+          </div>` : ''}
           <button class="fincx-btn-novo ghost" onclick="importarBoletosAsaas('dry')" title="Cadastra os boletos ativos do Asaas como lançamentos (prévia → cria 1 → cria todos)">${ico('sync',13)} Importar boletos Asaas</button>
           <button class="fincx-btn-novo ghost" onclick="abrirNovaCobrancaAsaasGlobal()">${ico('plus',13)} Nova cobrança</button>
           <button class="fincx-btn-novo" onclick="abrirNovoLancamento()">${ico('plus',13)} Novo lançamento</button>
@@ -32935,15 +32910,24 @@ async function _asaasGetBalance(){
   }
 }
 
-// Aba "Judicial" (pill própria) — reaproveita a tela inteira de Movimentações,
-// só travando o filtro TIPO em 'judicial'. Só reinicia o estado (mês corrente, sem
-// busca/página) na PRIMEIRA entrada nesta aba — reprocessar em toda renderização
-// quebraria a navegação de mês (finMovMudarMes recarrega via renderFinTab, que cai
-// aqui de novo, e voltaria sempre pro mês atual em vez de ir pro mês navegado).
+// Aba "Judicial" — reaproveita a tela inteira de Movimentações (renderFinLancamentos,
+// hoje só usada por aqui), travando o filtro TIPO em 'judicial'.
+// O período vem do seletor da faixa escura, que é a fonte única desde 26/08.
+// Antes ela tinha navegador de mês próprio; ao migrar para a faixa (PR #567) ficavam dois
+// controles empilhados, e o de cima era inerte — dava para o topo dizer "outubro" e a
+// lista, que é quem manda, dizer "agosto".
 async function renderFinReceitasJudiciais(el){
-  const st = window._finLancState;
+  const b = _finCascataPeriodoBounds();
+  let st = window._finLancState;
   if(!st || !st.filtros || st.filtros.tipoView !== 'judicial'){
-    window._finLancState = { page:1, filtros:Object.assign({tipoView:'judicial',situacao:'todos'},_finMesCorrente()), totalPages:1, total:0, loading:false, sel:new Set(), totais:{entradas:0,saidas:0} };
+    st = window._finLancState = { page:1, filtros:{tipoView:'judicial',situacao:'todos'}, totalPages:1, total:0, loading:false, sel:new Set(), totais:{entradas:0,saidas:0} };
+  }
+  // Só zera paginação/seleção quando o período de fato mudou — este render também é o
+  // caminho de recarga de filtros e de lote.
+  if(st.filtros.dataIni !== b.ini || st.filtros.dataFim !== b.fim){
+    st.filtros = Object.assign({}, st.filtros, { dataIni:b.ini, dataFim:b.fim });
+    st.page = 1;
+    if(st.sel) st.sel.clear();
   }
   await renderFinLancamentos(el);
 }
@@ -32965,15 +32949,9 @@ async function renderFinLancamentos(el){
     (dim.categorias||[]).map(c=>`<option value="${c.id}" ${f.categoriaId==c.id?'selected':''}>${escHtml(c.descricao)}</option>`)
   ).join('');
 
-  const mesLabel = _finMovMesLabel(f);
-
   el.innerHTML = `
     <style>
       #page-fin .mov-eyebrow{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:#9C7F40;}
-      #page-fin .mov-mesnav{display:flex;align-items:center;gap:8px;}
-      #page-fin .mov-mesnav-btn{width:20px;height:20px;border-radius:50%;border:1px solid #E6E1D2;background:#fff;color:#6B7683;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;padding:0;}
-      #page-fin .mov-mesnav-btn:hover{background:#F7F4EC;color:#0A1530;}
-      #page-fin .mov-mesnav-btn svg{width:12px;height:12px;}
       #page-fin .mov-h1{font-family:'Fraunces',Georgia,serif;font-size:22px;margin-top:4px;}
       #page-fin .mov-sub{font-size:13px;color:#6B7683;margin-top:3px;}
       #page-fin .mov-toolbar{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:16px;}
@@ -33021,11 +32999,7 @@ async function renderFinLancamentos(el){
 
     <div class="mov-toolbar">
       <div>
-        <div class="mov-mesnav">
-          <button class="mov-mesnav-btn" onclick="finMovMudarMes(-1)" title="Mês anterior">${ico('chevron-left',12)}</button>
-          <div class="mov-eyebrow">${escHtml(mesLabel.toUpperCase())} · TODAS AS CONTAS</div>
-          <button class="mov-mesnav-btn" onclick="finMovMudarMes(1)" title="Próximo mês">${ico('chevron-right',12)}</button>
-        </div>
+        <div class="mov-eyebrow">TODAS AS CONTAS</div>
         <div class="mov-h1">${f.tipoView==='judicial' ? 'Judicial' : 'Movimentações'}</div>
         <div class="mov-sub">${f.tipoView==='judicial' ? 'Sisbajud e penhora de remuneração — bloqueios e descontos judiciais.' : 'Selecione linhas para confirmar pagamento, conciliar ou reclassificar em lote.'}</div>
       </div>
