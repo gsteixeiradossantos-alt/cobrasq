@@ -9366,6 +9366,10 @@ let _recRealCache = { ano:null, itens:null, carregando:false, falhou:false };
 function _recRealPronto(ano){ return _recRealCache.ano === ano && Array.isArray(_recRealCache.itens); }
 async function _recRealCarregar(ano){
   if(_recRealCache.carregando || _recRealPronto(ano)) return;
+  // Depois de falhar, não tentar de novo a cada render — o Painel chama isto duas vezes
+  // por desenho, e uma falha persistente viraria uma consulta por interação.
+  // `force` (o botão de recarregar) limpa o flag.
+  if(_recRealCache.falhou && _recRealCache.falhouAno === ano) return;
   const sb = (typeof getSupabase === 'function') ? getSupabase() : null;
   if(!sb) return;
   _recRealCache.carregando = true;
@@ -9408,6 +9412,7 @@ async function _recRealCarregar(ano){
   }catch(e){
     console.warn('recuperado real:', e && e.message || e);
     _recRealCache.falhou = true;
+    _recRealCache.falhouAno = ano;
   }finally{
     _recRealCache.carregando = false;
   }
@@ -9416,7 +9421,15 @@ async function _recRealCarregar(ano){
     try{ if(document.querySelector('#page-painel.active') && typeof renderPainel === 'function') renderPainel(); }catch(_){}
   }
 }
-// Soma do blob — só serve de ponte enquanto a consulta real não volta.
+// Verdade sobre este "fallback": ele devolve ZERO, sempre. Auditoria de 27/08/2026 nos
+// 787 devedores: NENHUM tem a chave `acordos` no metadata, e há 0 parcelas no blob
+// inteiro. A estrutura foi abandonada; a função antiga retornava R$ 0,00 para todo mês
+// desde sempre, não só para agosto.
+//
+// Ou seja: se a consulta real falhar, a tela mostra R$ 0,00 sem dizer que falhou — que é
+// exatamente o defeito que este arquivo acabou de corrigir. Por isso existe
+// recuperadoIndisponivel(): quem desenha o número pergunta antes se ele é confiável, e
+// mostra "—" em vez de um zero que parece dado.
 function _recBlobEntre(deYmd, ateYmd){
   let total = 0;
   for(const d of (DB.devedores||[])){
@@ -9429,6 +9442,12 @@ function _recBlobEntre(deYmd, ateYmd){
     }
   }
   return total;
+}
+// O número é confiável? Falso enquanto carrega ou depois de falhar. Sem isto, os dois
+// estados viram "R$ 0,00" e ninguém distingue "não recuperei nada" de "não consegui ler".
+function recuperadoIndisponivel(ymOuData){
+  const ano = +String(ymOuData || new Date().getFullYear()).slice(0,4);
+  return !_recRealPronto(ano);
 }
 function recuperadoEntre(deYmd, ateYmd){
   const ano = +String(deYmd).slice(0,4);
@@ -10490,6 +10509,9 @@ async function renderPainel(){
   const pctRecComprometido  = metaMensal>0 ? Math.min(100, (totalRecuperado/metaMensal)*100) : 0;
   const pctAcordComprometido = metaMensal>0 ? Math.min(100-pctRecComprometido, (acordadoNoMes/metaMensal)*100) : 0;
   const pctMetaComprometido = Math.round(pctRecComprometido+pctAcordComprometido);
+  // Recuperado ainda carregando ou falhou: os cards que dependem dele mostram "—" em vez
+  // de R$ 0,00. Zero e "não sei" são coisas diferentes e não podem ter a mesma cara.
+  const _recIndisp = (typeof recuperadoIndisponivel==='function') && recuperadoIndisponivel(ymAtual);
   const _mesAnoDiff = mesRef.getFullYear()!==now.getFullYear();
 
   // ── Riscos silenciosos ────────────────────────────────────────────────────
@@ -10615,9 +10637,9 @@ async function renderPainel(){
         <div class="pnl-acordos-grid">
           <div><div class="pnl-acordos-lb">ACORDADO NO MÊS</div><div class="pnl-acordos-v">${fmtR(acordadoNoMes)}</div><div class="pnl-acordos-sub">${acordosMesRows.length} acordo${acordosMesRows.length!==1?'s':''} assinado${acordosMesRows.length!==1?'s':''}</div></div>
           <div><div class="pnl-acordos-lb">A RECEBER EM ${mesAtual.toUpperCase()}</div><div class="pnl-acordos-v green">${fmtR(aReceberMes)}</div><div class="pnl-acordos-sub">${aReceberQtd} lançamento${aReceberQtd!==1?'s':''} pendente${aReceberQtd!==1?'s':''}${aReceberVencidoQtd?` · <span style="color:var(--danger);font-weight:600;">${fmtR(aReceberVencido)} já venceu</span>`:''}</div></div>
-          <div><div class="pnl-acordos-lb">META DO MÊS</div><div class="pnl-acordos-v">${fmtR(metaMensal)}</div><div class="pnl-acordos-sub">recuperado ${fmtR(totalRecuperado)}${metaProg!=null?` · ${metaProg}%`:''}</div></div>
+          <div><div class="pnl-acordos-lb">META DO MÊS</div><div class="pnl-acordos-v">${fmtR(metaMensal)}</div><div class="pnl-acordos-sub">${_recIndisp?'recuperado — <span style="color:var(--danger);">não foi possível ler</span>':`recuperado ${fmtR(totalRecuperado)}${metaProg!=null?` · ${metaProg}%`:''}`}</div></div>
           ${_mesOffset===0
-            ? `<div><div class="pnl-acordos-lb hl">FECHAR POR DIA ÚTIL</div><div class="pnl-acordos-v hl">${fmtR(fecharPorDiaUtil)}</div><div class="pnl-acordos-sub">${faltamMeta>0?`faltam ${fmtR(faltamMeta)} em ${diasUteisRest} dia${diasUteisRest!==1?'s':''}`:'meta atingida'}</div></div>`
+            ? `<div><div class="pnl-acordos-lb hl">FECHAR POR DIA ÚTIL</div><div class="pnl-acordos-v hl">${fmtR(fecharPorDiaUtil)}</div><div class="pnl-acordos-sub">${_recIndisp?`${diasUteisRest} dia${diasUteisRest!==1?'s':''} úteis restantes`:(faltamMeta>0?`faltam ${fmtR(faltamMeta)} em ${diasUteisRest} dia${diasUteisRest!==1?'s':''}`:'meta atingida')}</div></div>`
             : `<div><div class="pnl-acordos-lb hl">MÉDIA POR DIA ÚTIL</div><div class="pnl-acordos-v hl">${fmtR(fecharPorDiaUtil)}</div><div class="pnl-acordos-sub">${diasUteisRest} dia${diasUteisRest!==1?'s ':' '}${diasUteisRest!==1?'úteis':'útil'} no mês</div></div>`}
         </div>
         <div class="pnl-barwrap">
@@ -10659,7 +10681,7 @@ async function renderPainel(){
           <div><div class="pnl-dark-lb">CARTEIRA ATIVA</div><div class="pnl-dark-v">${fmtR(totalCarteira)}</div><div class="pnl-dark-sub">${totalCasos} caso${totalCasos!==1?'s':''} em aberto · ${totalContatos} cliente${totalContatos!==1?'s':''}</div></div>
           <div class="pnl-dark-hr"></div>
           <div class="pnl-dark-2col">
-            <div><div class="pnl-dark-lb">RECUPERADO ${escHtml(_pnlJan.label.toUpperCase())}</div><div class="pnl-dark-v" style="font-size:17px;color:#A8C6A0;">${fmtR(recuperadoPeriodo)}</div></div>
+            <div><div class="pnl-dark-lb">RECUPERADO ${escHtml(_pnlJan.label.toUpperCase())}</div><div class="pnl-dark-v" style="font-size:17px;color:${_recIndisp?'#8E98B0':'#A8C6A0'};" title="${_recIndisp?'não foi possível ler os pagamentos — o valor não é zero, é desconhecido':''}">${_recIndisp?'—':fmtR(recuperadoPeriodo)}</div></div>
             <div><div class="pnl-dark-lb">A COBRAR</div><div class="pnl-dark-v" style="font-size:17px;color:#E2CE9E;">${fmtR(emNegociacao)}</div><div class="pnl-dark-sub">${emNegRows.length} cobrança${emNegRows.length!==1?'s':''}</div></div>
           </div>
           <div>
