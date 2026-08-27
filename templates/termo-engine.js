@@ -205,9 +205,73 @@
     return _tpl;
   }
 
+  /* ------------------------------------------------------------------------
+   * TIMBRE: COBRASQ x Teixeira & Azzolin
+   * O template do extrajudicial nasce com o timbre da COBRASQ. Ele só pode sair
+   * assim quando a COBRASQ É A CREDORA (crédito cedido). Quando a credora é um
+   * cliente, a COBRASQ não é parte do instrumento e estampar a marca dela no
+   * documento é erro — inclusive perante a OAB. Nesse caso o termo veste o
+   * papel timbrado do escritório, o mesmo do acordo judicial.
+   *
+   * `dados.timbre` ("cobrasq" | "ta") força a escolha; sem ele, decide o credor.
+   * ---------------------------------------------------------------------- */
+  const CNPJ_COBRASQ = "34626848000142";
+
+  function credorEhCobrasq(dados) {
+    const cr = (dados && dados.credor) || {};
+    if (/cobrasq/i.test(String(cr.nome || ""))) return true;
+    const docs = [cr.documento, cr.assDoc, cr.qualificacao].map(function (v) {
+      return String(v == null ? "" : v).replace(/\D/g, "");
+    });
+    return docs.some(function (d) { return d.indexOf(CNPJ_COBRASQ) !== -1; });
+  }
+
+  function timbreDe(dados) {
+    const forcado = String((dados && dados.timbre) || "").toLowerCase();
+    if (forcado === "cobrasq" || forcado === "ta") return forcado;
+    return credorEhCobrasq(dados) ? "cobrasq" : "ta";
+  }
+
+  // Busca + memoiza a camada de timbre do escritório (fontes + estilos + masthead).
+  let _tplTimbreTA = null;
+  async function carregarTimbreTA() {
+    if (_tplTimbreTA) return _tplTimbreTA;
+    const r = await fetch("/templates/timbre-ta.html", { cache: "force-cache" });
+    if (!r.ok) throw new Error("Falha ao carregar o timbre do escritório (HTTP " + r.status + ")");
+    const txt = await r.text();
+    const corte = txt.indexOf("</style>");
+    if (corte === -1) throw new Error("timbre-ta.html malformado: bloco <style> não encontrado.");
+    _tplTimbreTA = {
+      style: txt.slice(0, corte + "</style>".length),
+      masthead: txt.slice(corte + "</style>".length).trim()
+    };
+    return _tplTimbreTA;
+  }
+
+  /**
+   * Troca o timbre COBRASQ pelo do escritório no HTML JÁ PREENCHIDO.
+   * Remove o bloco de fontes da COBRASQ (~1,5 MB que ficariam sem uso e
+   * engordariam o PDF enviado ao Gotenberg/ZapSign), injeta o estilo T&A no fim
+   * do <head> — para vencer no cascateamento — e troca o <header class="masthead">.
+   * O texto das cláusulas não é tocado: continua vindo do template único.
+   */
+  function aplicarTimbreTA(html, timbre) {
+    let out = html.replace(/<style id="brand-fonts">[\s\S]*?<\/style>/, "");
+    out = out.replace(/<title>[\s\S]*?<\/title>/,
+      "<title>Instrumento Particular de Confissão de Dívida — Teixeira &amp; Azzolin</title>");
+    if (out.indexOf("</head>") === -1) throw new Error("Template do termo sem </head> — timbre não aplicado.");
+    // Replacers como função: o conteúdo injetado é literal, sem interpretação de "$&".
+    out = out.replace("</head>", function () { return timbre.style + "\n</head>"; });
+    const mh = /<header class="masthead">[\s\S]*?<\/header>/;
+    if (!mh.test(out)) throw new Error("Template do termo sem <header class=\"masthead\"> — timbre não aplicado.");
+    return out.replace(mh, function () { return timbre.masthead; });
+  }
+
   async function montarTermoExtrajudicial(dados) {
     const tpl = await carregarTemplate();
-    return preencher(tpl, dados);
+    const html = preencher(tpl, dados);
+    if (timbreDe(dados) === "cobrasq") return html;
+    return aplicarTimbreTA(html, await carregarTimbreTA());
   }
 
   /* ==========================================================================
@@ -369,6 +433,7 @@
     qualifDevedor, qualifCredor, frasePagamento, placeholders,
     preambuloDevedores, assinaturasDevedores, generoDevedorLabel,
     preencher, carregarTemplate, montarTermoExtrajudicial,
+    credorEhCobrasq, timbreDe, carregarTimbreTA, aplicarTimbreTA,
     enderecamentoJudicial, clausula4Judicial, contatoReJudicial, contaFrase, assinaturaAdvExec,
     placeholdersJudicial, preencherJudicial, carregarTemplateJudicial, montarTermoJudicial
   };
