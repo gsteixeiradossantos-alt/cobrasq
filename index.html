@@ -29594,10 +29594,16 @@ async function _finCascataMetricas(force){
   return m;
 }
 
+// Handoff "Redesenho de painel e lançamentos" (27/08): o módulo passa a ser lido como
+// três perguntas, não como nove telas. Os ids continuam os mesmos — hash salvo, link
+// antigo e setFinTab() de outras telas seguem funcionando; muda só o que a barra diz.
+//   visao       → Caixa                  (quanto sobra de livre e se o mês bate a meta)
+//   lancamentos → Movimentações          (triagem dos lançamentos do mês)
+//   credores    → Recebíveis e repasses  (honrar a custódia do cedente)
 const FIN_CASCATA_UI_TABS = [
-  {id:'visao', label:'Painel'},
-  {id:'lancamentos', label:'Lançamentos'},
-  {id:'credores', label:'Credores'},
+  {id:'visao', label:'Caixa'},
+  {id:'lancamentos', label:'Movimentações'},
+  {id:'credores', label:'Recebíveis e repasses'},
 ];
 function _finCascataIrPara(tabId){
   setFinTab(tabId);
@@ -29765,6 +29771,106 @@ function _finPeriodoAbrirMenu(ev){
   setTimeout(()=>document.addEventListener('mousedown', _finPeriodoClickFora, true), 0);
 }
 
+
+// ══════════════════════════════════════════════════════════════
+// BUSCA GLOBAL DO FINANCEIRO (⌘K / Ctrl+K)
+// ──────────────────────────────────────────────────────────────
+// Varre os lançamentos JÁ CARREGADOS do período — descrição, contato, categoria, conta,
+// situação e valor formatado —, que é o mesmo conjunto que a aba Movimentações mostra.
+// Não vai ao servidor de propósito: o campo da barra de filtros já faz a busca ampla no
+// banco (ver nota em _finLancCascataCarregar); esta é a navegação rápida do que está à
+// mão. Sem consulta digitada, mostra os últimos lançamentos.
+let _finBuscaSel = 0;
+function _finBuscaAtiva(){ return !!document.getElementById('finbg-ov'); }
+function _finBuscaAbrir(){
+  if(_finBuscaAtiva()) return;
+  const ov = document.createElement('div');
+  ov.id = 'finbg-ov';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:90;background:rgba(10,21,48,.34);display:flex;justify-content:center;align-items:flex-start;padding-top:96px;';
+  ov.onclick = e => { if(e.target === ov) _finBuscaFechar(); };
+  ov.innerHTML = `<div style="width:560px;max-width:calc(100vw - 32px);background:#fff;border-radius:12px;box-shadow:0 32px 80px rgba(10,21,48,.25);overflow:hidden;font-family:'Inter Tight',Inter,system-ui,sans-serif;">
+      <input id="finbg-inp" type="search" placeholder="Buscar contato, valor, parcela, categoria…" autocomplete="off"
+             style="width:100%;border:none;border-bottom:1px solid #F2EFE6;padding:16px 18px;font-size:15px;font-family:inherit;color:#0A1530;outline:none;">
+      <div id="finbg-res" style="max-height:340px;overflow:auto;"></div>
+      <div style="background:#FBFAF6;padding:10px 18px;display:flex;gap:14px;align-items:center;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#8A94A6;">
+        <span>Enter abre</span><span>Esc fecha</span><span id="finbg-n" style="margin-left:auto;"></span>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  _finBuscaSel = 0;
+  const inp = document.getElementById('finbg-inp');
+  inp.addEventListener('input', ()=>{ _finBuscaSel = 0; _finBuscaRender(); });
+  inp.addEventListener('keydown', e=>{
+    const n = _finBuscaResultados(inp.value).length;
+    if(e.key === 'ArrowDown'){ e.preventDefault(); _finBuscaSel = n ? (_finBuscaSel+1) % n : 0; _finBuscaRender(); }
+    else if(e.key === 'ArrowUp'){ e.preventDefault(); _finBuscaSel = n ? (_finBuscaSel-1+n) % n : 0; _finBuscaRender(); }
+    else if(e.key === 'Enter'){ const r = _finBuscaResultados(inp.value)[_finBuscaSel]; if(r) _finBuscaIr(r.id); }
+  });
+  inp.focus();
+  _finBuscaRender();
+}
+function _finBuscaFechar(){ const ov = document.getElementById('finbg-ov'); if(ov) ov.remove(); }
+function _finBuscaIr(id){
+  _finBuscaFechar();
+  if(window._finTab !== 'lancamentos') setFinTab('lancamentos');
+  _finLancAbrirDrawer(Number(id));
+}
+function _finBuscaResultados(termo){
+  const ctx = window._finLancCascataCtx;
+  if(!ctx) return [];
+  const q = (termo||'').trim().toLowerCase();
+  const texto = l => {
+    const cat = (ctx.catPorLanc && ctx.catPorLanc[l.id] && ctx.catPorLanc[l.id].nome) || '';
+    const conta = (l.fin_conta && l.fin_conta.descricao) || '';
+    const contato = (l.fin_contato && l.fin_contato.nome) || '';
+    const parc = l.numero_parcela && l.total_parcelas ? `${l.numero_parcela}/${l.total_parcelas}` : '';
+    return [l.descricao, contato, cat, conta, _finLancSit(l).t, parc, fmtR(Math.abs(+l.valor||0))].join(' ').toLowerCase();
+  };
+  const base = q ? ctx.rows.filter(l => texto(l).includes(q)) : ctx.rows.slice();
+  return base.slice(0, 40);
+}
+function _finBuscaRender(){
+  const inp = document.getElementById('finbg-inp'); if(!inp) return;
+  const ctx = window._finLancCascataCtx || { rows: [] };
+  const res = _finBuscaResultados(inp.value);
+  const box = document.getElementById('finbg-res');
+  const cnt = document.getElementById('finbg-n');
+  if(cnt) cnt.textContent = `${res.length} ${res.length===1?'resultado':'resultados'}`;
+  if(!box) return;
+  box.innerHTML = res.length ? res.map((l,i)=>{
+    const isEnt = l.tipo_movimento === 1;
+    const cat = (ctx.catPorLanc && ctx.catPorLanc[l.id] && ctx.catPorLanc[l.id].nome) || 'sem categoria';
+    const conta = (l.fin_conta && l.fin_conta.descricao) || 'sem conta';
+    return `<div onclick="_finBuscaIr(${l.id})" style="display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid #F7F4EC;cursor:pointer;background:${i===_finBuscaSel?'#FBFAF6':'#fff'};">
+      <span style="min-width:0;flex:1;">
+        <span style="display:block;font-size:13px;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(l.descricao||'—')}</span>
+        <span style="display:block;font-size:10.5px;color:#8A94A6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(conta)} · ${escHtml(cat)}</span>
+      </span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;white-space:nowrap;color:${isEnt?'#4C6647':'#0A1530'};">${isEnt?'+':'−'} ${fmtR(Math.abs(+l.valor||0))}</span>
+    </div>`;
+  }).join('') : `<div style="padding:28px 18px;font-size:12.5px;color:#8A94A6;">Nada encontrado.</div>`;
+}
+// Um listener só, no documento, instalado na primeira vez que o Financeiro renderiza.
+// ⌘K/Ctrl+K só age com a tela do Financeiro aberta — fora dela o atalho continua livre
+// para o resto do app. Esc fecha a busca, o drawer e a conciliação, nessa ordem.
+function _finAtalhosInstalar(){
+  if(window._finAtalhosOn) return;
+  window._finAtalhosOn = true;
+  document.addEventListener('keydown', e=>{
+    // A tela ativa é marcada com .active pelo roteador do app — mesma convenção que
+    // renderFinanceiro() usa. offsetParent não serve: é null também para elementos
+    // position:fixed e para qualquer ancestral oculto, o que dava falso negativo.
+    const visivel = !!document.querySelector('#page-fin.active');
+    if((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')){
+      if(!visivel) return;
+      e.preventDefault();
+      _finBuscaAtiva() ? _finBuscaFechar() : _finBuscaAbrir();
+      return;
+    }
+    if(e.key === 'Escape' && _finBuscaAtiva()){ e.preventDefault(); _finBuscaFechar(); }
+  });
+}
+
 async function renderFinanceiroCascata(el, activeTab){
   const hojeStr = new Date().toLocaleDateString('pt-BR', {weekday:'long', day:'2-digit', month:'long', year:'numeric'});
   el.innerHTML = `
@@ -29828,6 +29934,7 @@ async function renderFinanceiroCascata(el, activeTab){
             <button class="fincx-nav-lbl" id="fincx-periodo-lbl" onclick="_finPeriodoAbrirMenu(event)">${escHtml(_finPeriodoRotulo())}</button>
             <button class="fincx-nav-seta" title="Próximo" onclick="_finPeriodoPasso(1)">&rsaquo;</button>
           </div>` : ''}
+          <button class="fincx-btn-novo ghost" onclick="_finBuscaAbrir()" title="Buscar contato, valor, parcela, categoria (⌘K)">${ico('search',13)} Buscar <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;opacity:.7;margin-left:4px;">⌘K</span></button>
           <button class="fincx-btn-novo ghost" onclick="importarBoletosAsaas('dry')" title="Cadastra os boletos ativos do Asaas como lançamentos (prévia → cria 1 → cria todos)">${ico('sync',13)} Importar boletos Asaas</button>
           <button class="fincx-btn-novo ghost" onclick="abrirNovaCobrancaAsaasGlobal()">${ico('plus',13)} Nova cobrança</button>
           <button class="fincx-btn-novo" onclick="abrirNovoLancamento()">${ico('plus',13)} Novo lançamento</button>
@@ -29852,6 +29959,7 @@ async function renderFinanceiroCascata(el, activeTab){
     </div>
     <div class="fincx-body"><div id="fin-content"></div></div>
   `;
+  _finAtalhosInstalar();
   renderFinTab(activeTab);
   _finCascataMetricas().then(m=>{
     const set=(id,txt)=>{ const e=document.getElementById(id); if(e) e.textContent=txt; };
@@ -30232,7 +30340,84 @@ async function _finTemColunasCascata(){
   return _finColsCascata;
 }
 
-let _finLancCascataState = { chip:'tudo', busca:'', sel:new Set(), ord:{ col:'data', dir:'asc' } };
+// `visao` é a visão salva ativa (chips do topo), `conta`/`categoria` são os dois selects
+// da barra de filtros. Os três recortam LOCALMENTE o que a consulta trouxe; só `busca`
+// vai ao servidor (ver nota em _finLancCascataCarregar).
+let _finLancCascataState = { visao:'tudo', chip:'tudo', busca:'', conta:'', categoria:'', sel:new Set(), ord:{ col:'data', dir:'asc' } };
+
+// ── Visões salvas ────────────────────────────────────────────────────────────────
+// Seis recortes que respondem às perguntas do dia; o contador de cada chip é o número de
+// linhas que o filtro realmente devolve (invariante 10 do handoff), por isso o predicado
+// mora aqui e é usado tanto para contar quanto para filtrar — não há duas listas.
+const FIN_MOV_VISOES = [
+  { id:'tudo',         label:'Tudo',            ok:()=>true },
+  { id:'atrasados',    label:'Atrasados',       ok:(l)=>_finLancSit(l).t === 'ATRASADO' },
+  { id:'repassar',     label:'A repassar',      ok:(l,ctx)=>_finLancEhRepasse(l,ctx) },
+  { id:'divergencias', label:'Divergências',    ok:(l,ctx)=>_finLancEhDivergencia(l,ctx) },
+  { id:'naoconc',      label:'Não conciliados', ok:(l)=>!l.conciliado },
+  { id:'saidas',       label:'Só saídas',       ok:(l)=>l.tipo_movimento === 0 },
+];
+// Dinheiro que ainda é do cedente. Três origens, na ordem em que o banco as tem hoje:
+// a operação de repasse (fin_operacao), o vínculo direto do lançamento (cedente_id) e,
+// para as saídas antigas importadas sem operação, o credor resolvido pela cobrança.
+function _finLancEhRepasse(l, ctx){
+  const op = ctx.opsByLanc[l.id];
+  if(op) return op.repasse_status === 'pendente' || op.repasse_status === 'preparado' || op.repasse_status === 'revisar';
+  if(l.cedente_id) return true;
+  return !!(ctx.credorPorLanc && ctx.credorPorLanc[l.id]);
+}
+// Parcela recebida cuja divisão COBRASQ × cedente não foi calculada — nada pode ser
+// repassado até resolver. Sem cedente não há divisão a calcular (invariante 8).
+function _finLancEhDivergencia(l, ctx){
+  const op = ctx.opsByLanc[l.id];
+  if(op && op.repasse_status === 'revisar') return true;
+  return !!(l.cedente_id && l.capital == null);
+}
+// Visões que o próprio usuário salvou (combinação de visão + busca + conta + categoria).
+// Ficam no localStorage, não no blob DB: são preferência de quem usa a tela, não dado da
+// empresa, e o blob é compartilhado entre todos os perfis.
+const FIN_MOV_VISOES_KEY = 'cobrasq_fin_visoes_v1';
+function _finMovVisoesSalvas(){
+  try{ return JSON.parse(localStorage.getItem(FIN_MOV_VISOES_KEY) || '[]'); }catch(_){ return []; }
+}
+function _finMovSalvarVisao(){
+  const s = _finLancCascataState;
+  const nome = prompt('Nome da visão:', '');
+  if(!nome || !nome.trim()) return;
+  const lista = _finMovVisoesSalvas().filter(v => v.nome !== nome.trim());
+  lista.push({ nome: nome.trim(), visao: s.visao, busca: s.busca, conta: s.conta, categoria: s.categoria });
+  try{ localStorage.setItem(FIN_MOV_VISOES_KEY, JSON.stringify(lista)); }catch(_){}
+  _finLancCascataRender();
+}
+async function _finMovAplicarVisaoSalva(nome){
+  const v = _finMovVisoesSalvas().find(x => x.nome === nome);
+  if(!v) return;
+  const s = _finLancCascataState;
+  Object.assign(s, { visao: v.visao||'tudo', conta: v.conta||'', categoria: v.categoria||'', sel: new Set() });
+  if((v.busca||'') !== s.busca){ s.busca = v.busca||''; _finLancCascataBusca(s.busca); return; }
+  _finLancCascataRender();
+}
+function _finMovApagarVisaoSalva(nome){
+  if(!confirm(`Apagar a visão "${nome}"?`)) return;
+  try{ localStorage.setItem(FIN_MOV_VISOES_KEY, JSON.stringify(_finMovVisoesSalvas().filter(v => v.nome !== nome))); }catch(_){}
+  _finLancCascataRender();
+}
+function _finMovSetVisao(id){ _finLancCascataState.visao = id; _finLancCascataState.sel = new Set(); _finLancCascataRender(); }
+function _finMovSetFiltro(campo, v){ _finLancCascataState[campo] = v; _finLancCascataState.sel = new Set(); _finLancCascataRender(); }
+function _finMovLimparFiltros(){
+  Object.assign(_finLancCascataState, { visao:'tudo', conta:'', categoria:'', sel:new Set() });
+  if(_finLancCascataState.busca){ _finLancCascataBusca(''); const i = document.getElementById('finmv-busca'); if(i) i.value=''; return; }
+  _finLancCascataRender();
+}
+// Avatar circular da instituição. O handoff pede <img> real de institutions_financials/
+// com o monograma como fallback; enquanto os arquivos não estão no repo, fica só o
+// monograma — mesma cor de marca que o resto do módulo usa.
+function _finContaAvatar(conta, size){
+  size = size || 22;
+  const b = (window.BANK_CATALOG||{})[(conta && conta.logo_key) || 'outros'] || (window.BANK_CATALOG||{}).outros || { cor:'#A6AEBD', iniciais:'—' };
+  const nome = (conta && conta.descricao) || 'sem conta';
+  return `<div title="${escHtml(nome)}" style="width:${size}px;height:${size}px;border-radius:50%;background:${b.cor};color:${b.cor_texto||'#fff'};display:grid;place-items:center;font-family:'JetBrains Mono',monospace;font-weight:600;font-size:${Math.max(8, Math.round(size*0.39))}px;flex-shrink:0;">${b.iniciais}</div>`;
+}
 
 // ── Ordenação da lista ──────────────────────────────────────────────────────
 // Padrão: data crescente (o mais antigo primeiro), que é a ordem de quem
@@ -30251,7 +30436,6 @@ let _finLancCascataState = { chip:'tudo', busca:'', sel:new Set(), ord:{ col:'da
 const FIN_LANC_ORD_COLS = {
   data:      { label:'DATA',      val:(l)=>(l.data_competencia||'') },
   descricao: { label:'DESCRIÇÃO', val:(l)=>(l.descricao||'').toLowerCase() },
-  contato:   { label:'CONTATO',   val:(l)=>((l.fin_contato&&l.fin_contato.nome)||'').toLowerCase() },
   categoria: { label:'CATEGORIA', val:(l,ctx)=>{ const c=ctx&&ctx.catPorLanc&&ctx.catPorLanc[l.id]; return c?c.nome.toLowerCase():'\uffff'; } },
   valor:     { label:'VALOR',     val:(l)=>(l.tipo_movimento===1?1:-1)*Math.abs(+l.valor||0) },
   situacao:  { label:'SITUAÇÃO',  val:(l)=>_finLancSit(l).ordem },
@@ -30302,10 +30486,13 @@ async function _finLancCascataOrd(col){
 // daqui, para não divergirem.
 function _finLancSit(l){
   const isEnt = l.tipo_movimento===1;
-  if(l.conciliado)                       return {t:'CONCILIADO', bg:'#E9F0E7', fg:'#4C6647', ordem:3};
-  if(l.status===1 || l.data_pagamento)   return {t:'PAGO',       bg:'#5E7C58', fg:'#fff',    ordem:2};
-  if(l.data_vencimento && l.data_vencimento<hoje()) return {t:'ATRASADO', bg:'#FBEAE7', fg:'#A65A4A', ordem:0};
-  return { t: isEnt?'A RECEBER':'A PAGAR', bg:'#FBF3E1', fg:'#9C7F40', ordem:1 };
+  // Paleta das pílulas vem do handoff (fundo/texto/borda). CONCILIADO fica neutro de
+  // propósito: conciliar não move dinheiro, só confirma a correspondência com o extrato.
+  if(l.conciliado)                       return {t:'CONCILIADO', bg:'#F5F2EA', fg:'#6B7683', bd:'#E6E1D2', ordem:3};
+  if(l.status===1 || l.data_pagamento)   return {t:'PAGO',       bg:'#E9F0E7', fg:'#4C6647', bd:'#CFE0CB', ordem:2};
+  if(l.data_vencimento && l.data_vencimento<hoje()) return {t:'ATRASADO', bg:'#FBEAE7', fg:'#7D3F33', bd:'#E7CFC7', ordem:0};
+  return isEnt ? { t:'A RECEBER', bg:'#E4EAF5', fg:'#3A5288', bd:'#C8D6F0', ordem:1 }
+               : { t:'A PAGAR',   bg:'#FBF3E1', fg:'#7A6428', bd:'#DFC992', ordem:1 };
 }
 // A busca vai ao SERVIDOR, não ao array já carregado. Motivo concreto: em
 // 26/08/2026 o período 01/08/2026—31/08/2030 tinha 1.397 lançamentos; o teto de
@@ -30404,205 +30591,238 @@ async function renderFinLancamentosCascata(el){
 }
 function _finLancCascataFiltrados(){
   const ctx = window._finLancCascataCtx; if(!ctx) return [];
-  const { chip, busca } = _finLancCascataState;
+  const s = _finLancCascataState;
+  const vis = FIN_MOV_VISOES.find(v => v.id === s.visao) || FIN_MOV_VISOES[0];
   return ctx.rows.filter(l=>{
-    if(chip==='entradas' && l.tipo_movimento!==1) return false;
-    if(chip==='saidas' && l.tipo_movimento!==0) return false;
-    if(chip==='repasse' && !(l.cedente_id || ctx.opsByLanc[l.id])) return false;
-    if(busca && !(l.descricao||'').toLowerCase().includes(busca.toLowerCase())) return false;
+    if(!vis.ok(l, ctx)) return false;
+    if(s.conta && String(l.conta_id) !== String(s.conta)) return false;
+    if(s.categoria){ const c = ctx.catPorLanc && ctx.catPorLanc[l.id]; if(!c || c.nome !== s.categoria) return false; }
     return true;
   });
 }
 function _finLancCascataRender(){
   const el = document.getElementById('fin-content'); if(!el) return;
   const ctx = window._finLancCascataCtx;
+  const s = _finLancCascataState;
   const todos = ctx.rows;
-  const counts = { tudo:todos.length, entradas:0, saidas:0, repasse:0 };
-  const somas  = { tudo:0, entradas:0, saidas:0, repasse:0 };
-  todos.forEach(l=>{
-    const v = Math.abs(+l.valor||0);
-    if(l.tipo_movimento===1){ counts.entradas++; somas.entradas+=v; somas.tudo+=v; }
-    else { counts.saidas++; somas.saidas+=v; somas.tudo-=v; }
-    if(l.cedente_id||ctx.opsByLanc[l.id]){ counts.repasse++; somas.repasse+=v; }
-  });
   const filtrados = _finLancCascataFiltrados();
-  // Totais do rodapé: separa o que já liquidou do que ainda é previsão. Sem consulta nova.
-  const tot = { entRea:0, entPre:0, saiRea:0, saiPre:0 };
-  filtrados.forEach(l=>{
-    const v = Math.abs(+l.valor||0), pago = (l.status===1||l.data_pagamento);
-    if(l.tipo_movimento===1){ tot.entPre+=v; if(pago) tot.entRea+=v; }
-    else { tot.saiPre+=v; if(pago) tot.saiRea+=v; }
-  });
 
-  // Ordenado por DATA: cascata de dias. Por qualquer outra coluna: lista corrida
-  // (ver nota em FIN_LANC_ORD_COLS).
+  // Totais do RODAPÉ refletem o filtro aplicado, não o mês inteiro (handoff).
+  let ent = 0, sai = 0;
+  filtrados.forEach(l => { const v = Math.abs(+l.valor||0); if(l.tipo_movimento===1) ent += v; else sai += v; });
+
   const ordenados = _finLancCascataOrdenados();
-  const agrupado = _finLancCascataState.ord.col==='data';
+  const agrupado = s.ord.col === 'data';
   const porDia = [];
   let atual = null;
   for(const l of (agrupado ? ordenados : [])){
     const d = (l.data_competencia||'').slice(0,10);
-    if(!atual || atual.data!==d){ atual = { data:d, itens:[] }; porDia.push(atual); }
+    if(!atual || atual.data !== d){ atual = { data:d, itens:[] }; porDia.push(atual); }
     atual.itens.push(l);
   }
-  const DOW = ['domingo','segunda','terça','quarta','quinta','sexta','sábado'];
-  const fmtDia = d => { if(!d) return {dd:'—',dow:''}; const dt=new Date(d+'T00:00:00'); return { dd:d.slice(8,10)+'/'+d.slice(5,7), dow:DOW[dt.getDay()] }; };
+
+  const contas = (ctx.dim && ctx.dim.contas) || [];
+  const cats = [...new Set(Object.values(ctx.catPorLanc||{}).map(c => c.nome))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
+  const salvas = _finMovVisoesSalvas();
 
   el.innerHTML = `
     <style>
-      .finlc-toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:14px;}
-      .finlc-h1{font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:400;color:#0A1530;}
-      .finlc-sub{font-size:12.5px;color:#8A94A6;margin-top:3px;}
-      .finlc-search{display:flex;align-items:center;gap:8px;border:1px solid #E6E1D2;border-radius:10px;padding:10px 14px;background:#fff;min-width:240px;}
-      .finlc-search input{border:0;outline:0;flex:1;font-size:13px;background:transparent;color:#0A1530;}
-      .finlc-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:14px;}
-      .finlc-kc{background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:11px 14px;cursor:pointer;transition:border-color .15s,box-shadow .15s;}
-      .finlc-kc:hover{border-color:#CFC8B6;}
-      .finlc-kc.on{border-color:#0A1530;box-shadow:0 0 0 1px #0A1530 inset;}
-      .finlc-kc .lb{font-size:11.5px;color:#8A94A6;}
-      .finlc-kc .vl{font-family:'JetBrains Mono',monospace;font-size:17px;font-weight:600;margin-top:2px;}
-      .finlc-kc .qt{font-size:10.5px;color:#A6AEBD;margin-top:1px;}
-      .finlc-parc{font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#6B7683;background:#F2EFE6;padding:2px 7px;border-radius:9px;flex-shrink:0;white-space:nowrap;}
-      .finlc-contato{width:150px;flex-shrink:0;font-size:12px;color:#6B7683;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-      .finlc-chips{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;}
-      .finlc-chip{padding:7px 14px;border-radius:20px;font-size:12.5px;cursor:pointer;background:#fff;border:1px solid #E6E1D2;color:#5A5F66;}
-      .finlc-chip.on{background:#0A1530;border-color:#0A1530;color:#fff;}
-      .finlc-card{background:#fff;border:1px solid #E6E1D2;border-radius:12px;overflow:hidden;}
-      .finlc-thead{display:flex;align-items:center;gap:14px;padding:10px 16px;background:#F7F4EC;border-bottom:1px solid #E6E1D2;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;}
-      .finlc-th{display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;border-radius:4px;padding:3px 5px;margin:-3px -5px;transition:background .12s,color .12s;}
-      .finlc-th:hover{background:#EDE8DA;color:#0A1530;}
-      .finlc-th.on{color:#0A1530;}
-      .finlc-th .seta{font-size:8px;letter-spacing:0;opacity:.85;}
-      .finlc-th.num{justify-content:flex-end;}
-      .finlc-th.mid{justify-content:center;}
-      .finlc-datacol{font-family:'JetBrains Mono',monospace;font-size:10px;color:#A6AEBD;letter-spacing:.06em;}
-      .finlc-diahead{display:flex;align-items:baseline;gap:12px;padding:12px 22px 8px;background:#FBFAF6;border-top:1px solid #E6E1D2;}
-      .finlc-diahead:first-child{border-top:none;}
-      .finlc-diahead .dd{font-family:'Fraunces',Georgia,serif;font-size:19px;color:#0A1530;}
-      .finlc-diahead .dow{font-family:'JetBrains Mono',monospace;font-size:10px;color:#A6AEBD;text-transform:uppercase;}
-      .finlc-row{display:flex;align-items:center;gap:14px;padding:13px 22px;border-bottom:1px solid #F2EFE6;cursor:pointer;}
-      .finlc-row:hover{background:#FBFAF6;}
-      .finlc-row.sel{background:#F6F3EA;}
-      .finlc-box{width:16px;height:16px;border-radius:4px;border:1px solid #CFC8B6;flex-shrink:0;cursor:pointer;background:#fff;}
-      .finlc-box.on{background:#0A1530;border-color:#0A1530;}
-      .finlc-ic{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:14px;font-weight:700;}
-      .finlc-desc{flex:1;min-width:180px;}
-      .finlc-desc .tx{font-size:15px;font-weight:500;color:#0A1530;}
-      .finlc-desc .meta{font-size:12px;color:#A6AEBD;margin-top:2px;}
-      .finlc-cat{width:130px;flex-shrink:0;font-size:12px;color:#8A94A6;}
-      .finlc-valor{font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:600;width:120px;text-align:right;flex-shrink:0;}
-      .finlc-sit{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.06em;padding:3px 9px;border-radius:5px;flex-shrink:0;white-space:nowrap;}
-      .finlc-sub-row{display:flex;align-items:center;gap:10px;padding:6px 22px 10px 62px;border-bottom:1px solid #F2EFE6;font-size:12px;color:#6B7683;border-left:2px solid #E6E1D2;margin-left:22px;}
-      .finlc-sub-chip{margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.06em;padding:2px 8px;border-radius:4px;white-space:nowrap;}
-      .finlc-fechodia{display:flex;gap:20px;padding:9px 22px;background:#F4F1E7;border-top:1px solid #E6E1D2;border-bottom:1px solid #E6E1D2;font-family:'JetBrains Mono',monospace;font-size:11px;color:#9C7F40;}
-      .finlc-fechodia b{color:#0A1530;}
-      .finlc-foot{display:flex;gap:24px;padding:13px 16px;background:#FBFAF6;font-size:12.5px;color:#6B7683;}
-      .finlc-totais{position:sticky;bottom:0;z-index:5;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));background:rgba(251,250,246,.96);backdrop-filter:blur(6px);border-top:1px solid #E6E1D2;}
-      .finlc-totais > div{padding:12px 16px;text-align:center;border-left:1px solid #EFEBE0;}
-      .finlc-totais > div:first-child{border-left:0;}
-      .finlc-totais .lb{font-size:11px;color:#8A94A6;}
-      .finlc-totais .vl{font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;margin-top:2px;}
-      .finlc-totais .pv{font-size:10px;color:#A6AEBD;margin-top:2px;}
-      .finlc-bulkbar{position:sticky;bottom:16px;display:flex;align-items:center;gap:12px;background:#0A1530;border-radius:12px;padding:12px 16px;box-shadow:0 12px 32px rgba(10,21,48,.30);margin-top:14px;flex-wrap:wrap;}
-      .finlc-bulkbtn{border:1px solid rgba(255,255,255,.24);color:#E6E9F0;font-size:12.5px;padding:7px 13px;border-radius:6px;cursor:pointer;background:transparent;font-family:inherit;}
-      .finlc-bulkbtn.primary{background:#5E7C58;color:#fff;border-color:#5E7C58;}
-      .finlc-bulkbtn.danger{border-color:rgba(214,150,138,.5);color:#E8A99C;}
+      .finmv-h1{font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:500;letter-spacing:-.02em;color:#0A1530;}
+      .finmv-sub{font-size:13px;color:#5A5F66;margin-top:3px;}
+      .finmv-chips{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0 0;}
+      .finmv-chip{display:flex;align-items:center;gap:7px;border-radius:20px;padding:6px 13px;font-size:12.5px;font-weight:500;background:#fff;border:1px solid #E6E1D2;color:#5A5F66;cursor:pointer;font-family:inherit;}
+      .finmv-chip .n{font-family:'JetBrains Mono',monospace;font-size:10px;color:#8A94A6;}
+      .finmv-chip.on{background:#0A1530;border-color:#0A1530;color:#fff;font-weight:600;}
+      .finmv-chip.on .n{color:#C9A961;}
+      .finmv-chip.add{border:1px dashed #D8D2C5;color:#6B7683;}
+      .finmv-chip.add:hover{border-color:#9C7F40;color:#9C7F40;}
+      .finmv-chip .x{color:#A6AEBD;font-size:11px;}
+      .finmv-chip .x:hover{color:#A65A4A;}
+      .finmv-filtros{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:12px 0 14px;}
+      .finmv-inp{width:320px;max-width:100%;background:#fff;border:1px solid #E6E1D2;border-radius:7px;padding:8px 11px;font-size:12.5px;font-family:inherit;color:#0A1530;}
+      .finmv-sel{background:#fff;border:1px solid #E6E1D2;border-radius:7px;padding:8px 10px;font-size:12.5px;font-family:inherit;color:#5A5F66;max-width:230px;}
+      .finmv-cont{margin-left:auto;font-size:12px;color:#6B7683;}
+      .finmv-sec{background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;}
+      /* As 8 colunas somam 1.008px com os gaps e o padding. Abaixo disso a tabela ROLA
+         DENTRO do cartão — antes o overflow:hidden do .finmv-sec cortava a coluna
+         SITUAÇÃO em silêncio (69px sumiam num viewport de 1280 com a barra lateral
+         aberta), e deixar a linha crescer empurraria a página inteira para scroll
+         horizontal, que é a regressão que #mainArea{min-width:0} existe para evitar. */
+      .finmv-scroll{overflow-x:auto;}
+      .finmv-grid{display:grid;grid-template-columns:34px 46px 60px minmax(280px,1fr) 190px 128px 50px 118px;gap:10px;align-items:center;padding:0 16px;min-width:1008px;box-sizing:border-box;}
+      .finmv-thead{background:#F7F4EC;border-bottom:1px solid #E6E1D2;padding-top:9px;padding-bottom:9px;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:#6B7683;}
+      .finmv-th{display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;border-radius:4px;padding:3px 4px;margin:-3px -4px;}
+      .finmv-th:hover{background:#EDE8DA;color:#0A1530;}
+      .finmv-th.on{color:#0A1530;}
+      .finmv-th.num{justify-content:flex-end;} .finmv-th.mid{justify-content:center;}
+      .finmv-th .seta{font-size:8px;letter-spacing:0;}
+      .finmv-dia{display:flex;align-items:center;gap:10px;background:#FBFAF6;border-bottom:1px solid #F2EFE6;padding:8px 16px;min-width:1008px;box-sizing:border-box;}
+      .finmv-dia .dd{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;color:#0A1530;}
+      .finmv-dia .dow{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:#8A94A6;}
+      .finmv-dia .ent{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4C6647;margin-left:auto;}
+      .finmv-dia .sai{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#7D3F33;}
+      .finmv-dia .sld{font-family:'JetBrains Mono',monospace;font-size:10.5px;font-weight:600;min-width:96px;text-align:right;}
+      .finmv-row{border-bottom:1px solid #F7F4EC;cursor:pointer;padding-top:11px;padding-bottom:11px;}
+      .finmv-row:hover{background:#FBFAF6;}
+      .finmv-row.sel{background:#F6F3EA;}
+      .finmv-row input[type=checkbox]{width:15px;height:15px;accent-color:#0A1530;cursor:pointer;}
+      .finmv-tipo{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;margin:0 auto;}
+      .finmv-data{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#5A5F66;}
+      .finmv-d1{display:flex;align-items:center;gap:7px;min-width:0;}
+      .finmv-d1 .tx{font-size:12.5px;font-weight:500;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      .finmv-parc{font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#6B7683;background:#F2EFE6;border-radius:9px;padding:2px 7px;flex-shrink:0;white-space:nowrap;}
+      .finmv-d2{font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;}
+      .finmv-cat{font-size:11.5px;color:#6B7683;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      .finmv-val{font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:500;text-align:right;white-space:nowrap;}
+      .finmv-sit{display:flex;flex-direction:column;align-items:flex-end;gap:4px;}
+      .finmv-pill{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.08em;border-radius:4px;padding:2px 7px;white-space:nowrap;}
+      .finmv-tag{font-family:'JetBrains Mono',monospace;font-size:9px;border-radius:4px;padding:1px 6px;white-space:nowrap;}
+      .finmv-foot{background:#F7F4EC;border-top:1px solid #E6E1D2;padding:11px 16px;display:flex;gap:18px;align-items:center;flex-wrap:wrap;font-size:12px;color:#5A5F66;}
+      .finmv-foot .lb{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:#6B7683;}
+      .finmv-foot b{font-family:'JetBrains Mono',monospace;font-weight:600;}
+      .finmv-lote{position:fixed;left:252px;right:24px;bottom:18px;z-index:60;background:#0A1530;border-radius:9px;box-shadow:0 8px 24px rgba(10,21,48,.28);padding:11px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+      .finmv-lote .qt{font-family:'JetBrains Mono',monospace;font-size:11.5px;font-weight:600;color:#fff;}
+      .finmv-lote .tt{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9A961;}
+      .finmv-lb{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.10);color:#fff;font-family:inherit;font-size:12px;font-weight:500;padding:6px 12px;border-radius:6px;cursor:pointer;}
+      .finmv-lb:hover{background:rgba(255,255,255,.16);}
+      .finmv-lb.go{background:#5E7C58;border-color:#5E7C58;font-weight:600;} .finmv-lb.go:hover{background:#4F6A4A;}
+      .finmv-lb.gh{background:transparent;border:none;color:#B4BCCC;margin-left:auto;} .finmv-lb.gh:hover{color:#fff;background:transparent;}
     </style>
-    <div class="finlc-toolbar">
-      <div>
-        <div class="finlc-h1">Lançamentos</div>
-        <div class="finlc-sub">${escHtml((ctx.periodoLabel||'').replace(/^./,c=>c.toUpperCase()))} · ${filtrados.length} de ${todos.length} lançamento${todos.length!==1?'s':''}${ctx.truncado?` · <span style="color:#A65A4A;font-weight:600;">lista cortada em ${FIN_LANC_LIMITE} — ${ctx.busca?'refine a busca ou estreite o período':'estreite o período'}</span>`:''}</div>
+    <div>
+      <div class="finmv-h1">Movimentações</div>
+      <div class="finmv-sub">${escHtml((ctx.periodoLabel||'').replace(/^./,c=>c.toUpperCase()))}${ctx.truncado?` · <span style="color:#A65A4A;font-weight:600;">lista cortada em ${FIN_LANC_LIMITE} — ${ctx.busca?'refine a busca ou estreite o período':'estreite o período'}</span>`:''}</div>
+    </div>
+
+    <div class="finmv-chips">
+      ${FIN_MOV_VISOES.map(v=>{
+        const n = ctx.rows.filter(l => v.ok(l, ctx)).length;
+        return `<button class="finmv-chip ${s.visao===v.id?'on':''}" onclick="_finMovSetVisao('${v.id}')">${v.label}<span class="n">${n}</span></button>`;
+      }).join('')}
+      ${salvas.map(v=>`<button class="finmv-chip" onclick="_finMovAplicarVisaoSalva(${JSON.stringify(v.nome).replace(/"/g,'&quot;')})">${escHtml(v.nome)}<span class="x" onclick="event.stopPropagation();_finMovApagarVisaoSalva(${JSON.stringify(v.nome).replace(/"/g,'&quot;')})" title="apagar">✕</span></button>`).join('')}
+      <button class="finmv-chip add" onclick="_finMovSalvarVisao()">+ Salvar visão</button>
+    </div>
+
+    <div class="finmv-filtros">
+      <input class="finmv-inp" id="finmv-busca" type="search" value="${escHtml(s.busca)}" placeholder="Filtrar por descrição, cliente, categoria ou valor…" oninput="_finLancCascataBusca(this.value)">
+      <select class="finmv-sel" onchange="_finMovSetFiltro('conta', this.value)">
+        <option value="">Todas as contas</option>
+        ${contas.map(c=>`<option value="${c.id}" ${String(s.conta)===String(c.id)?'selected':''}>${escHtml(c.descricao||'—')}</option>`).join('')}
+      </select>
+      <select class="finmv-sel" onchange="_finMovSetFiltro('categoria', this.value)">
+        <option value="">Todas as categorias</option>
+        ${cats.map(c=>`<option value="${escHtml(c)}" ${s.categoria===c?'selected':''}>${escHtml(c)}</option>`).join('')}
+      </select>
+      <span class="finmv-cont">${filtrados.length} de ${todos.length} ${todos.length===1?'lançamento exibido':'lançamentos exibidos'}</span>
+    </div>
+
+    <section class="finmv-sec">
+      <div class="finmv-scroll">
+        <div class="finmv-grid finmv-thead">${_finLancTheadHtml(filtrados)}</div>
+        ${ordenados.length
+          ? (agrupado ? porDia.map(g=>_finLancCascataDiaHtml(g, ctx)).join('') : ordenados.map(l=>_finLancCascataRowHtml(l, ctx)).join(''))
+          : `<div style="padding:38px 16px;text-align:center;font-size:12.5px;color:#8A94A6;">Nenhum lançamento nesta visão com o filtro aplicado.
+               <span class="cx-link" style="margin-left:6px;" onclick="_finMovLimparFiltros()">Limpar filtros</span></div>`}
       </div>
-      <div class="finlc-search">${ico('search',15)}<input type="search" placeholder="Buscar descrição…" value="${escHtml(_finLancCascataState.busca)}" oninput="_finLancCascataBusca(this.value)"></div>
-    </div>
-    <div class="finlc-cards">
-      ${[['tudo','Tudo','#0A1530'],['entradas','Entradas','#5E7C58'],['saidas','Saídas','#A65A4A'],['repasse','Com repasse','#9C7F40']].map(([k,lb,cor])=>`
-        <div class="finlc-kc ${_finLancCascataState.chip===k?'on':''}" onclick="_finLancCascataChip('${k}')">
-          <div class="lb">${lb}</div>
-          <div class="vl" style="color:${cor};">${k==='saidas'?'−':''}${fmtR(somas[k])}</div>
-          <div class="qt">${counts[k]} lançamento${counts[k]!==1?'s':''}</div>
-        </div>`).join('')}
-    </div>
-    <div class="finlc-card">
-      <div class="finlc-thead">${_finLancTheadHtml()}</div>
-      ${ordenados.length ? (agrupado ? porDia.map(g=>_finLancCascataDiaHtml(g, ctx)).join('') : ordenados.map(l=>_finLancCascataRowHtml(l, ctx, true)).join(''))
-        : `<div style="padding:40px;text-align:center;color:#8A94A6;font-family:'Fraunces',Georgia,serif;font-size:20px;">Nenhum lançamento neste período.</div>`}
-      <div class="finlc-totais">
-        <div><div class="lb">Entradas</div><div class="vl" style="color:#5E7C58;">${fmtR(tot.entRea)}</div><div class="pv">previsto ${fmtR(tot.entPre)}</div></div>
-        <div><div class="lb">Saídas</div><div class="vl" style="color:#A65A4A;">${fmtR(tot.saiRea)}</div><div class="pv">previsto ${fmtR(tot.saiPre)}</div></div>
-        <div><div class="lb">Resultado do período</div><div class="vl" style="color:${(tot.entRea-tot.saiRea)>=0?'#4F6B49':'#A65A4A'};">${fmtR(tot.entRea-tot.saiRea)}</div><div class="pv">previsto ${fmtR(tot.entPre-tot.saiPre)}</div></div>
+      <div class="finmv-foot">
+        <span class="lb">Totais do filtro</span>
+        <span>entradas <b style="color:#4C6647;">${fmtR(ent)}</b></span>
+        <span>saídas <b style="color:#7D3F33;">${fmtR(sai)}</b></span>
+        <span style="margin-left:auto;">líquido <b style="color:${(ent-sai)>=0?'#4C6647':'#7D3F33'};">${fmtRs(ent-sai)}</b></span>
       </div>
-      <div class="finlc-foot">${filtrados.length} lançamento${filtrados.length!==1?'s':''} no filtro · repasse não entra no resultado (não é receita/despesa da COBRASQ)</div>
-    </div>
+    </section>
     <div id="finlc-bulkbar"></div>
   `;
   _finLancCascataRenderBulkbar();
 }
-// O cabeçalho não tinha coluna de data porque a data era o cabeçalho do grupo.
-// Com a ordenação, ela vira a primeira coluna e ocupa o espaço que era dos dois
-// vazios (checkbox 16 + ícone 32 + o gap entre eles).
-function _finLancTheadHtml(){
+// Cabeçalho: as 8 colunas do handoff. Checkbox do cabeçalho marca/desmarca todas as
+// linhas VISÍVEIS do filtro atual — não a lista inteira.
+function _finLancTheadHtml(filtrados){
   const { col, dir } = _finLancCascataState.ord;
-  const th = (k, estilo, cls) => {
+  const th = (k, cls) => {
     const on = col===k;
-    return `<span class="finlc-th ${cls||''} ${on?'on':''}" style="${estilo}" onclick="_finLancCascataOrd('${k}')" title="Ordenar por ${FIN_LANC_ORD_COLS[k].label.toLowerCase()}">${FIN_LANC_ORD_COLS[k].label}<span class="seta">${on?(dir==='asc'?'▲':'▼'):''}</span></span>`;
+    return `<span class="finmv-th ${cls||''} ${on?'on':''}" onclick="_finLancCascataOrd('${k}')" title="Ordenar por ${FIN_LANC_ORD_COLS[k].label.toLowerCase()}">${FIN_LANC_ORD_COLS[k].label}<span class="seta">${on?(dir==='asc'?'▲':'▼'):''}</span></span>`;
   };
-  return th('data','width:62px;')
-       + th('descricao','flex:1;min-width:180px;')
-       + th('contato','width:150px;')
-       + th('categoria','width:130px;')
-       + th('valor','width:120px;','num')
-       + th('situacao','width:78px;','mid');
+  const vis = filtrados||[];
+  const todas = vis.length > 0 && vis.every(l => _finLancCascataState.sel.has(l.id));
+  return `<span><input type="checkbox" style="width:15px;height:15px;accent-color:#0A1530;cursor:pointer;" ${todas?'checked':''} onclick="_finMovToggleTodos(this.checked)" title="Marcar todas as linhas visíveis"></span>`
+       + `<span class="finmv-th mid">TIPO</span>`
+       + th('data')
+       + th('descricao')
+       + th('categoria')
+       + th('valor','num')
+       + `<span class="finmv-th mid">CONTA</span>`
+       + th('situacao','num');
+}
+function _finMovToggleTodos(marcar){
+  const sel = _finLancCascataState.sel;
+  const vis = _finLancCascataFiltrados();
+  if(marcar) vis.forEach(l => sel.add(l.id)); else vis.forEach(l => sel.delete(l.id));
+  _finLancCascataRender();
 }
 function _finLancCascataDiaHtml(g, ctx){
-  const { dd, dow } = (()=>{ const d=g.data; if(!d) return {dd:'—',dow:''}; const dt=new Date(d+'T00:00:00'); const DOW=['domingo','segunda','terça','quarta','quinta','sexta','sábado']; return { dd:d.slice(8,10)+'/'+d.slice(5,7), dow:DOW[dt.getDay()] }; })();
-  const entradas = g.itens.filter(l=>l.tipo_movimento===1).reduce((s,l)=>s+Math.abs(+l.valor||0),0);
-  const saidas = g.itens.filter(l=>l.tipo_movimento===0).reduce((s,l)=>s+Math.abs(+l.valor||0),0);
-  return `<div class="finlc-diahead"><span class="dd">${dd}</span><span class="dow">${dow}</span></div>
-    ${g.itens.map(l=>_finLancCascataRowHtml(l, ctx)).join('')}
-    <div class="finlc-fechodia"><span>FECHAMENTO DO DIA</span><span>${g.itens.length} lançamento${g.itens.length!==1?'s':''}</span><span>entradas <b>${fmtR(entradas)}</b></span><span>saídas <b>${fmtR(saidas)}</b></span><span>saldo <b>${fmtR(entradas-saidas)}</b></span></div>`;
+  const DOW = ['domingo','segunda','terça','quarta','quinta','sexta','sábado'];
+  const d = g.data;
+  const dd = d ? d.slice(8,10)+'/'+d.slice(5,7) : '—';
+  const dow = d ? DOW[new Date(d+'T00:00:00').getDay()] : '';
+  let e = 0, sa = 0;
+  g.itens.forEach(l => { const v = Math.abs(+l.valor||0); if(l.tipo_movimento===1) e += v; else sa += v; });
+  return `<div class="finmv-dia">
+      <span class="dd">${dd}</span><span class="dow">${dow}</span>
+      <span class="ent">+${fmtR(e)}</span><span class="sai">−${fmtR(sa)}</span>
+      <span class="sld" style="color:${(e-sa)>=0?'#4C6647':'#7D3F33'};">saldo ${fmtRs(e-sa)}</span>
+    </div>${g.itens.map(l=>_finLancCascataRowHtml(l, ctx)).join('')}`;
 }
-function _finLancCascataRowHtml(l, ctx, mostrarData){
-  const isEnt = l.tipo_movimento===1;
+function _finLancCascataRowHtml(l, ctx){
+  const isEnt = l.tipo_movimento === 1;
   const sel = _finLancCascataState.sel.has(l.id);
   const st = _finLancSit(l);
-  const op = ctx.opsByLanc[l.id];
+  const conta = ((ctx.dim && ctx.dim.contas) || []).find(c => String(c.id) === String(l.conta_id));
+  const cat = ctx.catPorLanc && ctx.catPorLanc[l.id];
+
+  // Linha 2 da descrição: quem está do outro lado, sem repetir o que a linha 1 já diz.
+  // Receita própria e despesa operacional não têm segunda linha (handoff).
   let sub = '';
-  if(op){
-    const chip = op.repasse_status==='efetuado' ? {t:'REPASSADO',bg:'#E9F0E7',fg:'#4C6647'}
-      : op.repasse_status==='revisar' ? {t:'DIVERGÊNCIA',bg:'#FBF3E1',fg:'#7A6428'}
-      : {t:'A REPASSAR',bg:'#FBF3E1',fg:'#7A6428'};
-    sub = `<div class="finlc-sub-row">seu ${fmtR(op.valor_honorario)} · ${escHtml(op._credorNome||'cedente')} recebe ${fmtR(op.valor_capital)}<span class="finlc-sub-chip" style="background:${chip.bg};color:${chip.fg};">${chip.t}</span></div>`;
-  } else if(!isEnt && (l.credor_id || l.cobranca_id) && ctx.credorPorLanc && ctx.credorPorLanc[l.id]){
-    // Sem fin_operacao: resolve o credor pelo lançamento (credor_id) ou pela cobrança.
-    // Até 16/08/2026 esta linha só aparecia para os 8 lançamentos que tinham operação;
-    // os outros 315 repasses ficavam sem indicar para quem o dinheiro vai.
-    sub = `<div class="finlc-sub-row">${escHtml(ctx.credorPorLanc[l.id])} recebe ${fmtR(Math.abs(+l.valor||0))}<span class="finlc-sub-chip" style="background:#FBF3E1;color:#7A6428;">A REPASSAR</span></div>`;
-  } else if(l.cedente_id && l.capital!=null){
-    const r = finDivideCascata(l, Math.abs(+l.valor||0));
-    sub = `<div class="finlc-sub-row">seu ${fmtR(r.ficaComVoce)} · ${escHtml(ctx.cedMap[l.cedente_id]||'cedente')} recebe ${fmtR(r.repasseAoCedente)}<span class="finlc-sub-chip" style="background:#F5F2EA;color:#6B7683;">${(l.repasse_status||'AGUARDA').toUpperCase()}</span></div>`;
-  } else if(l.cedente_id){
-    sub = `<div class="finlc-sub-row">cedente vinculado · divisão pendente<span class="finlc-sub-chip" style="background:#FBEAE7;color:#7D3F33;">SEM DIVISÃO</span></div>`;
-  }
-  return `<div class="finlc-row ${sel?'sel':''}" data-lanc="${l.id}" onclick="_finLancAbrirDrawer(${l.id})">
-      <div class="finlc-box ${sel?'on':''}" onclick="event.stopPropagation();_finLancCascataToggleSel(${l.id})"></div>
-      ${mostrarData ? `<div class="finlc-datacol" style="width:32px;flex-shrink:0;">${(l.data_competencia||'').slice(8,10)}/${(l.data_competencia||'').slice(5,7)}</div>`
-        : `<div class="finlc-ic" style="background:${isEnt?'#E9F0E7':'#FBEAE7'};color:${isEnt?'#4C6647':'#A65A4A'};">${isEnt?'↓':'↑'}</div>`}
-      <div class="finlc-desc">
-        <div class="tx" style="display:flex;align-items:center;gap:7px;min-width:0;">
-          <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(l.descricao||'—')}</span>
-          ${l.numero_parcela&&l.total_parcelas?`<span class="finlc-parc">${l.numero_parcela}/${l.total_parcelas}</span>`:''}
-        </div>
-        <div class="meta">${l.fin_conta&&l.fin_conta.descricao?escHtml(l.fin_conta.descricao):''}${l.data_vencimento?` · vence ${l.data_vencimento.slice(8,10)}/${l.data_vencimento.slice(5,7)}`:''}</div>
-      </div>
-      <div class="finlc-contato">${l.fin_contato&&l.fin_contato.nome?escHtml(l.fin_contato.nome):'<span style="color:#C9C3B4;">—</span>'}</div>
-      <div class="finlc-cat">${(()=>{ const c=ctx.catPorLanc&&ctx.catPorLanc[l.id]; if(!c) return '<span style="color:#C9C3B4;">sem categoria</span>';
-        return escHtml(c.nome)+(c.extras?`<span style="color:#A6AEBD;"> +${c.extras}</span>`:''); })()}</div>
-      <div class="finlc-valor" style="color:${isEnt?'#5E7C58':'#A65A4A'};">${isEnt?'+':'−'} ${fmtR(Math.abs(+l.valor||0))}</div>
-      <div class="finlc-sit" style="background:${st.bg};color:${st.fg};">${st.t}</div>
-    </div>${sub}`;
+  const op = ctx.opsByLanc[l.id];
+  const cedente = op ? op._credorNome : (l.cedente_id ? ctx.cedMap[l.cedente_id] : (ctx.credorPorLanc && ctx.credorPorLanc[l.id]));
+  if(cedente) sub = isEnt ? `carteira de ${escHtml(cedente)}` : `repasse a ${escHtml(cedente)}`;
+
+  // Tag abaixo da pílula de situação. Divergência tem precedência: é a que trava o repasse.
+  let tag = '';
+  if(_finLancEhDivergencia(l, ctx)) tag = `<span class="finmv-tag" style="background:#FBEAE7;color:#7D3F33;border:1px solid #E7CFC7;">DIVERGÊNCIA</span>`;
+  else if(_finLancEhRepasse(l, ctx) && !(op && op.repasse_status === 'efetuado')) tag = `<span class="finmv-tag" style="background:#FBF3E1;color:#7A6428;border:1px solid #DFC992;">A REPASSAR</span>`;
+
+  const seta = isEnt
+    ? `<span class="finmv-tipo" style="box-shadow:inset 0 0 0 2px #D3E3CF;color:#5E7C58;" title="Receita"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10M7 17 17 7"/></svg></span>`
+    : `<span class="finmv-tipo" style="background:#FBEAE7;color:#A65A4A;" title="Despesa"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M17 7 7 17M17 17H7V7"/></svg></span>`;
+
+  return `<div class="finmv-grid finmv-row ${sel?'sel':''}" data-lanc="${l.id}" onclick="_finLancAbrirDrawer(${l.id})">
+      <span><input type="checkbox" ${sel?'checked':''} onclick="event.stopPropagation();_finLancCascataToggleSel(${l.id})"></span>
+      ${seta}
+      <span class="finmv-data">${(l.data_competencia||'').slice(8,10)}/${(l.data_competencia||'').slice(5,7)}</span>
+      <span style="min-width:0;">
+        <span class="finmv-d1">
+          <span class="tx" title="${escHtml(l.descricao||'')}">${escHtml(_finMovDescSemParcela(l))}</span>
+          ${l.numero_parcela && l.total_parcelas ? `<span class="finmv-parc" title="parcela ${l.numero_parcela}/${l.total_parcelas} deste acordo">${l.numero_parcela}/${l.total_parcelas}</span>` : ''}
+        </span>
+        ${sub ? `<span class="finmv-d2" style="color:#9C7F40;display:block;">${sub}</span>` : ''}
+      </span>
+      <span class="finmv-cat" title="${cat?escHtml(cat.nome):''}">${cat ? escHtml(cat.nome)+(cat.extras?` <span style="color:#A6AEBD;">+${cat.extras}</span>`:'') : '<span style="color:#C9C3B4;">sem categoria</span>'}</span>
+      <span class="finmv-val" style="color:${isEnt?'#4C6647':'#0A1530'};">${isEnt?'+':'−'} ${fmtR(Math.abs(+l.valor||0))}</span>
+      <span style="display:flex;justify-content:center;">${_finContaAvatar(conta, 22)}</span>
+      <span class="finmv-sit">
+        <span class="finmv-pill" style="background:${st.bg};color:${st.fg};border:1px solid ${st.bd};">${st.t}</span>
+        ${tag}
+      </span>
+    </div>`;
 }
-function _finLancCascataChip(k){ _finLancCascataState.chip=k; _finLancCascataRender(); }
+// A numeração de parcela vira badge próprio; repeti-la no texto polui a coluna. O badge
+// vem das COLUNAS numero_parcela/total_parcelas — este corte é só cosmético, sobre o
+// texto, e só acontece quando as colunas confirmam a parcela.
+function _finMovDescSemParcela(l){
+  const d = l.descricao || '—';
+  if(!l.numero_parcela || !l.total_parcelas) return d;
+  return d.replace(new RegExp('\\s*[-–—]?\\s*\\b'+l.numero_parcela+'\\s*/\\s*'+l.total_parcelas+'\\b\\s*$'), '').trim() || d;
+}
 let _finLancCascataBuscaTimer=null;
 let _finLancCascataBuscaSeq=0;
 function _finLancCascataBusca(v){
@@ -30619,7 +30839,7 @@ function _finLancCascataBusca(v){
     }catch(_){ /* mantém a lista anterior; o filtro local ainda vale */ }
     _finLancCascataRender();
     // o render troca o innerHTML inteiro: sem isto o cursor sai do campo a cada busca
-    const inp = document.querySelector('.finlc-search input');
+    const inp = document.getElementById('finmv-busca');
     if(inp){ inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
   }, 300);
 }
@@ -30638,11 +30858,11 @@ function _finLancCascataToggleSel(id){
   const marcando = !sel.has(id);
   if(marcando) sel.add(id); else sel.delete(id);
 
-  const row = document.querySelector('.finlc-row[data-lanc="'+id+'"]');
+  const row = document.querySelector('.finmv-row[data-lanc="'+id+'"]');
   if(row){
     row.classList.toggle('sel', marcando);
-    const box = row.querySelector('.finlc-box');
-    if(box) box.classList.toggle('on', marcando);
+    const box = row.querySelector('input[type=checkbox]');
+    if(box) box.checked = marcando;
   } else {
     _finLancCascataRender();   // linha fora do DOM (filtro mudou): redesenha
   }
@@ -30650,15 +30870,21 @@ function _finLancCascataToggleSel(id){
 }
 function _finLancCascataRenderBulkbar(){
   const bar = document.getElementById('finlc-bulkbar'); if(!bar) return;
-  const n = _finLancCascataState.sel.size;
+  const sel = _finLancCascataState.sel;
+  const n = sel.size;
   if(!n){ bar.innerHTML=''; return; }
-  bar.innerHTML = `<div class="finlc-bulkbar">
-    <span style="color:#fff;font-size:12.5px;">${n} selecionado${n!==1?'s':''}</span>
-    <button class="finlc-bulkbtn primary" onclick="_finLancCascataLote('pagar')">Confirmar pagamento</button>
-    <button class="finlc-bulkbtn" onclick="_finLancCascataLote('conciliar')">Conciliar</button>
-    <button class="finlc-bulkbtn danger" onclick="_finLancCascataLote('excluir')">Excluir</button>
-    <button class="finlc-bulkbtn danger" onclick="_finLancSerieAbrirModal()">Excluir esta e as próximas</button>
-    <button class="finlc-bulkbtn" style="margin-left:auto;" onclick="_finLancCascataState.sel.clear();_finLancCascataRender();">Limpar ✕</button>
+  // Total assinado da seleção: entrada soma, saída subtrai — é o que o lote vai mexer.
+  const ctx = window._finLancCascataCtx || { rows: [] };
+  const total = ctx.rows.filter(l => sel.has(l.id))
+    .reduce((a,l) => a + (l.tipo_movimento===1 ? 1 : -1) * Math.abs(+l.valor||0), 0);
+  bar.innerHTML = `<div class="finmv-lote">
+    <span class="qt">${n} ${n===1?'lançamento selecionado':'lançamentos selecionados'}</span>
+    <span class="tt">${fmtRs(total)}</span>
+    <button class="finmv-lb go" onclick="_finLancCascataLote('pagar')">Confirmar pagamento</button>
+    <button class="finmv-lb" onclick="_finLancCascataLote('conciliar')">Conciliar</button>
+    <button class="finmv-lb" onclick="_finLancSerieAbrirModal()">Excluir esta e as próximas</button>
+    <button class="finmv-lb" onclick="_finLancCascataLote('excluir')">Excluir</button>
+    <button class="finmv-lb gh" onclick="_finLancCascataState.sel.clear();_finLancCascataRender();">Limpar seleção ✕</button>
   </div>`;
 }
 async function _finLancCascataLote(acao){
@@ -30920,9 +31146,59 @@ function _finLancDrawerRender(){
         ${op ? _finDrawerRepasseHtml(op, credorNome) : ''}
         ${op ? _finDrawerNfHtml(op) : ''}
         ${l.cobranca_id ? `<div class="findrw-block"><div class="findrw-bt">VÍNCULO</div><a class="findrw-link" onclick="closeModal('findrw-overlay');location.hash='#/cobranca/${l.cobranca_id}';">Abrir cobrança →</a></div>` : ''}
+        ${_finDrawerHistoricoHtml(l, op, credorNome)}
       </div>
     </div>`;
   if(!op && l.cedente_id) setTimeout(()=>_finDrawerRecalc(valor), 0);
+}
+// Histórico do lançamento — o handoff pede TRÊS narrativas distintas, não um texto
+// genérico: o que aconteceu com um repasse não é o que aconteceu com uma receita nem
+// com uma despesa. Cada passo é derivado do estado real da linha (status, conciliado,
+// vencimento, repasse_status); nenhum é escrito à mão nem inventado quando o dado não
+// existe — passo sem lastro simplesmente não aparece.
+function _finDrawerHistoricoHtml(l, op, credorNome){
+  const dt = v => { v=(v||'').slice(0,10); return v ? v.split('-').reverse().join('/') : ''; };
+  const isEnt = l.tipo_movimento === 1;
+  const liquidado = l.status === 1 || !!l.data_pagamento || !!l.conciliado;
+  const vencido = l.data_vencimento && l.data_vencimento < hoje() && !liquidado;
+  const passos = [];
+
+  if(op){
+    // Repasse: a parcela caiu, a divisão foi (ou não) calculada, o dinheiro saiu (ou não).
+    passos.push(['Parcela do devedor creditada na conta', dt(op.recebido_em)]);
+    if(op.repasse_status === 'revisar') passos.push(['Divisão em revisão — nada pode ser repassado até resolver', '']);
+    else if(op.valor_capital != null){
+      const pct = op.valor_recebido ? Math.round(Math.abs(+op.valor_capital||0) / Math.abs(+op.valor_recebido||1) * 100) : null;
+      passos.push([`Divisão calculada${pct != null ? ` — ${pct}% cedente / ${100-pct}% honorário` : ''}`, '']);
+    }
+    if(op.repasse_status === 'efetuado') passos.push([`Repasse enviado${credorNome ? ' a '+credorNome : ''}${op.repasse_comprovante_url ? ' e comprovante anexado' : ''}`, dt(op.repasse_efetuado_em)]);
+    else passos.push(['Repasse aguardando envio', '']);
+  } else if(isEnt){
+    // Receita: emissão, aviso da régua, confirmação.
+    if(l.cobranca_id) passos.push(['Boleto emitido no Asaas pela automação do acordo', '']);
+    if(l.data_vencimento) passos.push(['Vencimento previsto', dt(l.data_vencimento)]);
+    if(l.conciliado) passos.push(['Pagamento confirmado e conciliado', dt(l.data_pagamento)]);
+    else if(liquidado) passos.push(['Pagamento confirmado · falta conciliar', dt(l.data_pagamento)]);
+    else if(vencido) passos.push(['Vencido sem pagamento — régua de cobrança ativa', '']);
+    else passos.push(['Aguardando o vencimento', '']);
+  } else {
+    // Despesa: cadastro, agendamento, pagamento.
+    passos.push(['Despesa cadastrada no plano de contas', dt(l.data_competencia)]);
+    if(l.data_vencimento) passos.push(['Agendada para', dt(l.data_vencimento)]);
+    if(liquidado) passos.push(['Pagamento efetuado', dt(l.data_pagamento)]);
+    else if(vencido) passos.push(['Vencida sem pagamento', '']);
+    else passos.push(['Aguardando data de pagamento', '']);
+  }
+
+  return `<div class="findrw-block">
+    <div class="findrw-bt">HISTÓRICO</div>
+    <div style="border-left:1px solid #F2EFE6;padding-left:14px;display:flex;flex-direction:column;gap:10px;">
+      ${passos.map(([txt, carimbo])=>`<div>
+        <div style="font-size:12.5px;color:#0A1530;">${escHtml(txt)}</div>
+        ${carimbo ? `<div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#8A94A6;margin-top:2px;">${escHtml(carimbo)}</div>` : ''}
+      </div>`).join('')}
+    </div>
+  </div>`;
 }
 function _finDrawerDivisaoHtml(l, op, cedentes, credorNome, valor){
   if(op){
@@ -32785,47 +33061,255 @@ function _finSpark(values, color){
     +`<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="3" fill="${color}"/></svg>`;
 }
 
+// ══════════════════════════════════════════════════════════════
+// ABA CAIXA — o derivador único
+// ──────────────────────────────────────────────────────────────
+// Regra de ouro do handoff "Redesenho de painel e lançamentos" (27/08): TODO número da
+// aba — faixas de alerta, caixa livre, meta, os 5 KPIs, resultado por categoria,
+// inadimplência — sai DESTA função. Antes cada bloco chamava a sua própria consulta
+// (getKpisMes, _dreMes, _atrasoAgg, _semanaAgg, _automacaoStats) com regras diferentes,
+// e os cards divergiam entre si na mesma tela.
+//
+// A divergência que mais custava caro: getKpisMes e _dreMes somam o mês INTEIRO, pago ou
+// não. O "Resultado do mês" contava como receita a parcela VENCIDA E NÃO PAGA — o mesmo
+// dinheiro aparecia como inadimplência num card e como receita no outro. Aqui, resultado
+// realizado conta só pago/conciliado (invariante 2 do handoff).
+//
+// Duas fontes continuam fora daqui de propósito:
+//  • saldo geral / a repassar / caixa livre vêm de _finCascataMetricas(), que já alimenta
+//    a faixa escura. Recalcular aqui abriria a porta para a faixa e o card discordarem.
+//  • inadimplência do Asaas vem de _loadInadimplentes() (é o Asaas, não o razão).
+//
+// Datas montadas com formatação LOCAL, nunca toISOString(): o offset de UTC empurra o dia
+// para trás e a janela sairia deslocada (mesma nota do navegador de período).
+// Valor monetário com sinal, no menos tipográfico (−) que o handoff pede — fmtR() usa o
+// hífen ASCII do toLocaleString e deixava "R$ -300,00" no meio de uma tela em que todo o
+// resto usa "−". Só para os números que podem ficar negativos (saldo, resultado, líquido).
+function fmtRs(v){ v = +v || 0; return (v < 0 ? '−' : '') + fmtR(Math.abs(v)); }
+function _finCaixaHoje(){
+  const d = new Date(), p2 = n => String(n).padStart(2,'0');
+  return { y:d.getFullYear(), m:d.getMonth()+1, d:d.getDate(), p2,
+           iso: `${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())}` };
+}
+// Dias úteis que ainda restam no mês, contando hoje. Sem tabela de feriados no banco,
+// conta só seg–sex — o handoff previa isto ("em produção vem do calendário de dias
+// úteis"); feriado nacional em agosto não existe, mas o número pode superestimar em
+// meses que têm.
+function _finDiasUteisRestantes(){
+  const t = _finCaixaHoje();
+  const fim = new Date(t.y, t.m, 0).getDate();
+  let n = 0;
+  for(let dia = t.d; dia <= fim; dia++){
+    const dow = new Date(t.y, t.m-1, dia).getDay();
+    if(dow !== 0 && dow !== 6) n++;
+  }
+  return n;
+}
+async function _finCaixaAgg(){
+  const sb = getSupabase();
+  const t = _finCaixaHoje(), p2 = t.p2;
+  const mesIni = `${t.y}-${p2(t.m)}-01`;
+  const mesFim = `${t.y}-${p2(t.m)}-${p2(new Date(t.y, t.m, 0).getDate())}`;
+  const hoje = t.iso;
+  const s7 = new Date(Date.now()+7*86400000);
+  const sem7 = `${s7.getFullYear()}-${p2(s7.getMonth()+1)}-${p2(s7.getDate())}`;
+  const SEL = 'id,descricao,valor,tipo_movimento,status,data_pagamento,data_vencimento,data_competencia,conciliado,numero_parcela,total_parcelas,credor_id,judicial_liberado_em';
+
+  // PostgREST devolve 1000 por página; sem paginar, um mês cheio some pela metade.
+  async function paginado(build){
+    const out = []; let from = 0;
+    for(;;){
+      const { data, error } = await build(sb.from('fin_lancamento').select(SEL)).order('id',{ascending:true}).range(from, from+999);
+      if(error) throw error;
+      out.push(...(data||[]));
+      if(!data || data.length < 1000 || from >= 20000) break;
+      from += 1000;
+    }
+    return out;
+  }
+
+  const limitePend = sem7 > mesFim ? sem7 : mesFim;
+  const [mesRows, pendRows, metricas, ops] = await Promise.all([
+    // Realizado do mês: competência dentro do mês.
+    paginado(q => q.gte('data_competencia', mesIni).lte('data_competencia', mesFim)),
+    // Tudo o que ainda não liquidou e vence até o fim do mês (ou até 7 dias, o que for
+    // mais longe). Cobre de uma vez os atrasados (vencimento < hoje, de qualquer época),
+    // o "a entrar até o fim do mês" e a semana.
+    paginado(q => q.eq('status', 0).lte('data_vencimento', limitePend).not('data_vencimento','is',null)),
+    _finCascataMetricas(),
+    (async ()=>{ try{
+      const { data } = await sb.from('fin_operacao')
+        .select('id,credor_id,valor_recebido,valor_capital,valor_honorario,repasse_status,recebido_em,criada_em,lancamento_despesa_id')
+        .limit(5000);
+      return data || [];
+    }catch(_){ return []; } })(),
+  ]);
+
+  // ── Categorias: o rateio mora em fin_lancamento_categoria, não na linha ───────────
+  // Serve a dois propósitos numa consulta só: montar o resultado por categoria e
+  // identificar o que é judicial (Sisbajud/penhora ainda não liberado não é caixa —
+  // é expectativa de bloqueio; mesma exclusão que Movimentações e getKpisMes aplicam).
+  const idsMes = mesRows.map(r => r.id);
+  const catPorLanc = {}, judicial = new Set();
+  if(idsMes.length){
+    try{
+      const cats = [];
+      for(let i = 0; i < idsMes.length; i += 300){
+        const { data } = await sb.from('fin_lancamento_categoria')
+          .select('lancamento_id,valor,fin_categoria(descricao)').in('lancamento_id', idsMes.slice(i, i+300)).limit(4000);
+        cats.push(...(data||[]));
+      }
+      const porId = Object.fromEntries(mesRows.map(r => [r.id, r]));
+      for(const c of cats){
+        const nm = (c.fin_categoria && c.fin_categoria.descricao) || null;
+        if(!nm) continue;
+        const l = porId[c.lancamento_id];
+        if((/sisbajud/i.test(nm) || /penhora/i.test(nm)) && l && !l.judicial_liberado_em) judicial.add(c.lancamento_id);
+        (catPorLanc[c.lancamento_id] = catPorLanc[c.lancamento_id] || []).push({ nome: nm, valor: Math.abs(+c.valor||0) });
+      }
+    }catch(_){ /* auxiliar: a aba funciona sem o resultado por categoria */ }
+  }
+
+  // Espelho de despesa do repasse: o capital do cedente voltando para ele. Fica FORA do
+  // resultado — é dinheiro de terceiro, não custo da COBRASQ, e já está descontado do
+  // caixa livre pela linha "− dinheiro de terceiros". Contá-lo aqui seria cobrá-lo duas
+  // vezes. (O handoff pedia o contrário na nota do card; ver DESVIOS no PR.)
+  const espelhos = new Set(ops.map(o => o.lancamento_despesa_id).filter(Boolean));
+  const foraDoResultado = l => judicial.has(l.id) || espelhos.has(l.id);
+  const liquidado = l => l.status === 1 || !!l.data_pagamento || !!l.conciliado;
+  const val = l => Math.abs(+l.valor||0);
+
+  // ── Realizado do mês (invariante 2: só o que entrou e saiu de fato) ───────────────
+  let receita = 0, despesa = 0;
+  const realizados = mesRows.filter(l => liquidado(l) && !foraDoResultado(l));
+  for(const l of realizados){ if(l.tipo_movimento === 1) receita += val(l); else despesa += val(l); }
+  const resultado = +(receita - despesa).toFixed(2);
+
+  // Resultado por categoria, sobre os MESMOS lançamentos do resultado acima — é o que
+  // garante o invariante 4 (o rodapé do card bate com o KPI).
+  const catAgg = {};
+  for(const l of realizados){
+    const sinal = l.tipo_movimento === 1 ? 1 : -1;
+    const partes = catPorLanc[l.id];
+    if(partes && partes.length){
+      const somaPartes = partes.reduce((s,p) => s+p.valor, 0) || 1;
+      // Rateio proporcional: o lançamento pode estar dividido em várias categorias, e o
+      // total delas nem sempre fecha com o valor da linha.
+      for(const p of partes) catAgg[p.nome] = (catAgg[p.nome]||0) + sinal * val(l) * (p.valor/somaPartes);
+    } else {
+      catAgg['(sem categoria)'] = (catAgg['(sem categoria)']||0) + sinal * val(l);
+    }
+  }
+  const cats = Object.entries(catAgg).map(([nome, valor]) => ({ nome, valor: +valor.toFixed(2) }))
+    .filter(c => Math.abs(c.valor) >= 0.005).sort((a,b) => Math.abs(b.valor) - Math.abs(a.valor));
+
+  // ── Pendentes: atraso, a entrar, semana ──────────────────────────────────────────
+  const pend = pendRows.filter(l => !judicial.has(l.id) && !espelhos.has(l.id));
+  const atrasados = pend.filter(l => l.data_vencimento < hoje);
+  const atrasoIn = atrasados.filter(l => l.tipo_movimento === 1);
+  const atrasoOut = atrasados.filter(l => l.tipo_movimento === 0);
+  const soma = arr => +arr.reduce((s,l) => s+val(l), 0).toFixed(2);
+  const aEntrar = pend.filter(l => l.tipo_movimento === 1 && l.data_vencimento >= hoje && l.data_vencimento <= mesFim);
+  const semanaRec = pend.filter(l => l.tipo_movimento === 1 && l.data_vencimento >= hoje && l.data_vencimento <= sem7);
+  const semanaPag = pend.filter(l => l.tipo_movimento === 0 && l.data_vencimento >= hoje && l.data_vencimento <= sem7);
+
+  // ── Acordos do mês: parcelas lançadas e ticket ────────────────────────────────────
+  const parcelasMes = mesRows.filter(l => l.tipo_movimento === 1 && l.total_parcelas > 1 && !foraDoResultado(l));
+  const ticket = parcelasMes.length ? +(soma(parcelasMes)/parcelasMes.length).toFixed(2) : 0;
+
+  // ── Fila de repasses, agrupada por cedente (o mais antigo primeiro) ───────────────
+  const pendOps = ops.filter(o => o.repasse_status === 'pendente' || o.repasse_status === 'preparado');
+  const porCred = {};
+  for(const o of pendOps){
+    const k = o.credor_id || '?';
+    const g = porCred[k] || (porCred[k] = { credorId: o.credor_id, nome: null, n: 0, recebido: 0, capital: 0, honorario: 0, desde: null });
+    g.n++;
+    g.recebido += Math.abs(+o.valor_recebido||0);
+    g.capital += Math.abs(+o.valor_capital||0);
+    g.honorario += Math.abs(+o.valor_honorario||0);
+    const quando = (o.recebido_em || o.criada_em || '').slice(0,10);
+    if(quando && (!g.desde || quando < g.desde)) g.desde = quando;
+  }
+  const fila = Object.values(porCred).map(g => {
+    g.recebido = +g.recebido.toFixed(2); g.capital = +g.capital.toFixed(2); g.honorario = +g.honorario.toFixed(2);
+    g.dias = g.desde ? Math.max(0, Math.floor((new Date(hoje+'T00:00:00') - new Date(g.desde+'T00:00:00'))/86400000)) : 0;
+    return g;
+  }).sort((a,b) => b.dias - a.dias);
+  if(fila.length){
+    try{
+      const ids = fila.map(g => g.credorId).filter(Boolean);
+      if(ids.length){
+        const { data } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', ids);
+        const nm = Object.fromEntries((data||[]).map(c => [c.id, c.nome_fantasia || c.nome]));
+        fila.forEach(g => { g.nome = nm[g.credorId] || 'cedente sem cadastro'; });
+      }
+    }catch(_){ fila.forEach(g => { g.nome = g.nome || 'cedente'; }); }
+  }
+  const divergencias = ops.filter(o => o.repasse_status === 'revisar');
+  const repassados = ops.filter(o => o.repasse_status === 'efetuado');
+
+  const meta = +(DB.config && DB.config.metaMensal) || 0;
+  const diasUteis = _finDiasUteisRestantes();
+  const falta = Math.max(0, +(meta - receita).toFixed(2));
+
+  return {
+    mesIni, mesFim, hoje, mesLabel: new Date(t.y, t.m-1, 1).toLocaleDateString('pt-BR', { month:'long' }),
+    // caixa (fonte: _finCascataMetricas, a mesma da faixa escura)
+    saldoGeral: metricas.saldoGeral, terceiros: metricas.aRepassar,
+    caixaLivre: metricas.caixaLivre, contasCount: metricas.contasCount, stale: metricas.stale,
+    // realizado
+    receita: +receita.toFixed(2), despesa: +despesa.toFixed(2), resultado, cats,
+    // meta
+    meta, diasUteis, falta, porDiaUtil: diasUteis > 0 ? +(falta/diasUteis).toFixed(2) : falta,
+    // pendentes
+    atrasoN: atrasados.length, atrasoT: soma(atrasados),
+    atrasoInN: atrasoIn.length, atrasoInT: soma(atrasoIn),
+    atrasoOutN: atrasoOut.length, atrasoOutT: soma(atrasoOut),
+    aEntrarN: aEntrar.length, aEntrarT: soma(aEntrar),
+    semanaRecN: semanaRec.length, semanaRecT: soma(semanaRec),
+    semanaPagN: semanaPag.length, semanaPagT: soma(semanaPag),
+    // acordos
+    parcelasN: parcelasMes.length, ticket,
+    // repasses
+    fila, repasseN: fila.length, repasseT: +fila.reduce((s,g) => s+g.capital, 0).toFixed(2),
+    repasseMaisAntigo: fila.length ? fila[0].dias : 0,
+    divergenciasN: divergencias.length,
+    divergenciasT: +divergencias.reduce((s,o) => s+Math.abs(+o.valor_recebido||0), 0).toFixed(2),
+    repassadosN: repassados.length,
+    repassadosT: +repassados.reduce((s,o) => s+Math.abs(+o.valor_capital||0), 0).toFixed(2),
+  };
+}
+
+// ══════════════════════════════════════════════════════════════
+// ABA CAIXA  (id 'visao' — era "Painel")
+// ──────────────────────────────────────────────────────────────
+// Handoff "Redesenho de painel e lançamentos" (27/08). A pergunta que a aba responde em
+// 3 segundos: quanto sobra de livre, o mês bate a meta, e o que exige ação hoje.
+//
+// A grade de 14 cartões que existia aqui saiu inteira. O que ela mostrava e não voltou:
+// fluxo de caixa de 30 dias (gráfico decorativo — o handoff pede a remoção), top
+// clientes e top despesas do mês, últimas movimentações (a aba Movimentações é a lista)
+// e o funil de automação. O que sobrou está reorganizado em torno de um número que manda
+// na tela — caixa livre — com a derivação visível ao lado.
+//
+// TODO número vem de _finCaixaAgg(). Nada aqui recalcula nada.
 async function renderFinVisao(el){
-  el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--text-3);">
-    <div class="mv2-spinner" style="margin:0 auto 8px;width:28px;height:28px;border-width:3px;"></div>
-    Carregando dados financeiros…
+  el.innerHTML = `<div style="text-align:center;padding:40px;color:#8A94A6;">
+    <div class="mv2-spinner" style="margin:0 auto 10px;width:26px;height:26px;border-width:3px;"></div>
+    Carregando o caixa do mês…
   </div>`;
 
-  // Janelas: mês corrente + próximos 7 dias (para "na semana").
   const _sb = getSupabase();
   const _now = new Date();
   const _y = _now.getFullYear(), _m = _now.getMonth()+1;
-  const _mesIni = `${_y}-${String(_m).padStart(2,'0')}-01`;
-  const _mesFim = new Date(_y, _m, 0).toISOString().slice(0,10);
-  const _hoje = _now.toISOString().slice(0,10);
-  const _sem7 = new Date(_now.getTime()+7*86400000).toISOString().slice(0,10);
-  // Contas pendentes (a receber/pagar) com vencimento nos próximos 7 dias.
-  async function _semanaAgg(tipo){
-    if(!_sb) return { count:0, total:0 };
-    const { data, count } = await _sb.from('fin_lancamento').select('valor',{count:'exact'})
-      .eq('tipo_movimento',tipo).eq('status',0)
-      .gte('data_vencimento',_hoje).lte('data_vencimento',_sem7).limit(1000);
-    return { count: count||0, total: (data||[]).reduce((s,r)=>s+Math.abs(+r.valor||0),0) };
-  }
-  // Top do mês: clientes (receitas por contato) ou despesas (rateios por categoria).
-  async function _topAgg(fonte){
-    if(!_sb) return { itens:[], total:0 };
-    const q = fonte==='clientes'
-      ? _sb.from('fin_lancamento').select('valor,fin_contato(nome)')
-          .eq('tipo_movimento',1).gte('data_competencia',_mesIni).lte('data_competencia',_mesFim).limit(1000)
-      : _sb.from('fin_lancamento_categoria').select('valor,fin_categoria(descricao),fin_lancamento!inner(data_competencia,tipo_movimento)')
-          .eq('fin_lancamento.tipo_movimento',0).gte('fin_lancamento.data_competencia',_mesIni).lte('fin_lancamento.data_competencia',_mesFim).limit(1000);
-    const { data } = await q;
-    const map = {};
-    for(const r of (data||[])){
-      const nm = fonte==='clientes' ? ((r.fin_contato&&r.fin_contato.nome)||'(sem contato)') : ((r.fin_categoria&&r.fin_categoria.descricao)||'(sem categoria)');
-      map[nm] = (map[nm]||0) + Math.abs(+r.valor||0);
-    }
-    const itens = Object.entries(map).map(([nome,valor])=>({nome,valor})).sort((a,b)=>b.valor-a.valor);
-    return { itens, total: itens.reduce((s,i)=>s+i.valor,0) };
-  }
+  // _serie12m() abaixo depende destes três. Sem eles a função lança ReferenceError, que o
+  // `.catch(()=>null)` do chamador engole — e "Últimos 12 meses" some da tela sem erro
+  // nenhum no console. Foi exatamente o que aconteceu na primeira versão desta função.
+  const _p2 = n => String(n).padStart(2,'0');
+  const _mesIni = `${_y}-${_p2(_m)}-01`;
+  const _mesFim = `${_y}-${_p2(_m)}-${_p2(new Date(_y, _m, 0).getDate())}`;
+  const _hoje = `${_y}-${_p2(_m)}-${_p2(_now.getDate())}`;
 
-  // Séries de 12 meses (faturamento, despesa→EBITDA, juros/multas, ticket médio por cliente).
   async function _serie12m(){
     if(!_sb) return null;
     const ini12 = new Date(_y, _m-12, 1).toISOString().slice(0,10);
@@ -32848,451 +33332,291 @@ async function renderFinVisao(el){
     }
     return { meses, mesesLabel, fat, ebitda:fat.map((f,i)=>f-desp[i]), jm, ticket:fat.map((f,i)=>cli[i].size?f/cli[i].size:0) };
   }
-  // Fluxo de caixa projetado — entradas/saídas previstas (lançamentos pendentes) nos
-  // próximos 30 dias, separadas (não só o delta líquido) para o gráfico de barras duplas.
-  async function _fluxoDiario(){
-    if(!_sb) return null;
-    const N=30, fim=new Date(_now.getTime()+N*86400000).toISOString().slice(0,10);
-    const { data } = await _sb.from('fin_lancamento').select('data_vencimento,valor,tipo_movimento')
-      .eq('status',0).gte('data_vencimento',_hoje).lte('data_vencimento',fim).limit(3000);
-    const byDay={};
-    for(const r of (data||[])){
-      const d=(r.data_vencimento||'').slice(0,10); if(!d) continue;
-      if(!byDay[d]) byDay[d]={ in:0, out:0 };
-      const v=Math.abs(+r.valor||0);
-      if(r.tipo_movimento===1) byDay[d].in+=v; else byDay[d].out+=v;
-    }
-    const dias=[];
-    for(let k=0;k<N;k++){
-      const dt=new Date(_now.getTime()+k*86400000); const key=dt.toISOString().slice(0,10);
-      const g=byDay[key]||{in:0,out:0};
-      dias.push({ key, label: String(dt.getDate()).padStart(2,'0'), in:g.in, out:g.out, delta:g.in-g.out });
-    }
-    return { dias };
-  }
-  // DRE simplificado do mês (receitas e despesas por categoria, sinal preservado) — base
-  // para o card "Resultado por categoria". Resultado final usa kpis.saldoMes (mesma fonte
-  // do KPI "Resultado do mês", evita divergência entre os dois números).
-  async function _dreMes(){
-    if(!_sb) return [];
-    // O espelho de despesa do repasse fica FORA do DRE: é o capital do cedente voltando
-    // para ele, não custo da COBRASQ. 32 das 33 despesas de repasse estão categorizadas
-    // como "Aquisição de dívidas de terceiros" — sem este filtro, dinheiro de terceiro
-    // vira prejuízo nosso (em ago/2026 eram R$ 6.508,25 dentro dos R$ 19.650,18 da
-    // categoria). É a mesma exclusão que a tela de Fechamento já fazia.
-    const espelhos = new Set();
-    try {
-      const { data: ops } = await _sb.from('fin_operacao').select('lancamento_despesa_id').not('lancamento_despesa_id','is',null).limit(5000);
-      for(const o of (ops||[])) espelhos.add(o.lancamento_despesa_id);
-    } catch(_){ /* sem a lista, o DRE volta ao comportamento antigo em vez de quebrar */ }
-    const { data } = await _sb.from('fin_lancamento_categoria')
-      .select('lancamento_id,valor,fin_categoria(descricao),fin_lancamento!inner(data_competencia,tipo_movimento)')
-      .gte('fin_lancamento.data_competencia',_mesIni).lte('fin_lancamento.data_competencia',_mesFim).limit(2000);
-    const map = {};
-    for(const r of (data||[])){
-      if(espelhos.has(r.lancamento_id)) continue;
-      const nm = (r.fin_categoria&&r.fin_categoria.descricao) || '(sem categoria)';
-      const sinal = (r.fin_lancamento&&r.fin_lancamento.tipo_movimento===1) ? 1 : -1;
-      map[nm] = (map[nm]||0) + sinal*Math.abs(+r.valor||0);
-    }
-    return Object.entries(map).map(([nome,valor])=>({nome,valor})).sort((a,b)=>b.valor-a.valor);
-  }
 
-  // Painel de automação: funil de acordos (funil_automacao) + repasses (fin_operacao).
-  async function _automacaoStats(){
-    if(!_sb) return null;
-    let funilRows=null, opRows=null;
-    try { const r = await _sb.from('funil_automacao').select('etapa_funil'); funilRows = r.data; } catch(_){ }
-    try { const r = await _sb.from('fin_operacao').select('repasse_status,valor_capital'); opRows = r.data; } catch(_){ }
-    if(!funilRows && !opRows) return null;
-    const funil={}; for(const r of (funilRows||[])){ funil[r.etapa_funil]=(funil[r.etapa_funil]||0)+1; }
-    const rep={}; for(const r of (opRows||[])){ const k=r.repasse_status||'?'; if(!rep[k]) rep[k]={n:0,valor:0}; rep[k].n++; rep[k].valor+=Math.abs(+r.valor_capital||0); }
-    return { funil, rep };
-  }
-
-  // Lançamentos em atraso: pendentes (status 0) com vencimento anterior a hoje.
-  async function _atrasoAgg(){
-    if(!_sb) return { count:0, total:0 };
-    const { data, count } = await _sb.from('fin_lancamento').select('valor',{count:'exact'})
-      .eq('status',0).lt('data_vencimento',_hoje).limit(2000);
-    return { count: count||0, total: (data||[]).reduce((s,r)=>s+Math.abs(+r.valor||0),0) };
-  }
-  // Repasse ao cedente atrasado: agrupa fin_operacao pendentes por credor, acha o mais
-  // antigo além do prazo (PRAZO_REPASSE_DIAS). Modelo por capital (valor_capital = repasse).
-  const PRAZO_REPASSE_DIAS = 5;
-  async function _repasseAtrasado(){
-    if(!_sb) return null;
-    let data;
-    try { const r = await _sb.from('fin_operacao').select('valor_capital,credor_id,criada_em').eq('repasse_status','pendente').order('criada_em',{ascending:true}).limit(300); data = r.data; }
-    catch(_){ return null; }
-    if(!data || !data.length) return null;
-    const byCred = {};
-    for(const o of data){
-      const k = o.credor_id||'?';
-      if(!byCred[k]) byCred[k] = { credId:o.credor_id, total:0, oldest:o.criada_em };
-      byCred[k].total += Math.abs(+o.valor_capital||0);
-      if(o.criada_em && (!byCred[k].oldest || o.criada_em < byCred[k].oldest)) byCred[k].oldest = o.criada_em;
-    }
-    let worst=null;
-    for(const k in byCred){
-      const g=byCred[k];
-      g.dias = g.oldest ? Math.floor((Date.now()-new Date(g.oldest).getTime())/86400000) : 0;
-      if(g.dias>=PRAZO_REPASSE_DIAS && (!worst || g.dias>worst.dias)) worst=g;
-    }
-    if(!worst) return null;
-    let nome='cedente';
-    try{ const {data:c}=await _sb.from('clientes').select('nome').eq('id',worst.credId).maybeSingle(); if(c&&c.nome) nome=c.nome; }catch(_){}
-    return { nome, total:worst.total, dias:worst.dias };
-  }
-  // Carteira ativa em aberto = soma de valor_atual das cobranças ativas
-  // (não arquivadas, não rascunho, sem encerramento). Denominador da "Recuperação do mês".
-  async function _carteiraAtiva(){
-    if(!_sb) return 0;
-    try{
-      const { data } = await _sb.from('cobrancas').select('valor_atual,arquivado,is_draft,encerramento').limit(5000);
-      return (data||[]).filter(c=>!c.arquivado && !c.is_draft && !c.encerramento).reduce((s,c)=>s+(+c.valor_atual||0),0);
-    }catch(_){ return 0; }
-  }
-
-  let kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas, serie, fluxo, automacao, atraso, repAtraso, carteira, dre;
-  try {
-    [kpis, recentes, dim, inad, aReceber, aPagar, topClientes, topDespesas, serie, fluxo, automacao, atraso, repAtraso, carteira, dre] = await Promise.all([
-      finApi.getKpisMes().catch(()=>({ receitaMes:0, despesaMes:0, saldoMes:0, aReceber30d:0, qtdMes:0 })),
-      finApi.getRecentes(8),
+  let A, dim, inad, serie;
+  try{
+    [A, dim, inad, serie] = await Promise.all([
+      _finCaixaAgg(),
       finApi.loadDimensoes(),
       _loadInadimplentes().catch(()=>({ devList: [], charges: [], oldestAll: null })),
-      _semanaAgg(1).catch(()=>({ count:0, total:0 })),
-      _semanaAgg(0).catch(()=>({ count:0, total:0 })),
-      _topAgg('clientes').catch(()=>({ itens:[], total:0 })),
-      _topAgg('despesas').catch(()=>({ itens:[], total:0 })),
       _serie12m().catch(()=>null),
-      _fluxoDiario().catch(()=>null),
-      _automacaoStats().catch(()=>null),
-      _atrasoAgg().catch(()=>({ count:0, total:0 })),
-      _repasseAtrasado().catch(()=>null),
-      _carteiraAtiva().catch(()=>0),
-      _dreMes().catch(()=>[]),
     ]);
-  } catch(e){
+  }catch(e){
     el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--danger);">
-      Erro ao carregar: ${escHtml(e.message)}
+      Erro ao carregar o caixa: ${escHtml(e.message||String(e))}
       <div style="margin-top:12px;"><button class="btn btn-ghost btn-sm" onclick="renderFinTab('visao')">↻ Tentar novamente</button></div>
     </div>`;
     return;
   }
 
-  // Buscar saldo realizado por conta via RPC (server-side)
+  // Saldo por conta para a lista "Contas" — mesma precedência do resto do módulo:
+  // saldo bancário declarado > saldo realizado do razão > saldo inicial.
   const saldosByConta = {};
-  try {
-    const sb = getSupabase();
-    const { data } = await sb.rpc('fin_saldos_realizados');
-    for(const r of (data||[])) saldosByConta[r.conta_id] = r;
-  } catch(e){ /* mantém saldo_inicial como fallback */ }
-  const _saldoConta = (c) => {
-    // Prefere saldo bancário se preenchido; senão usa saldo realizado calculado
-    if(c.bank_balance != null) return +c.bank_balance;
-    const r = saldosByConta[c.id];
-    return r != null ? (+r.saldo_atual || 0) : (+c.saldo_inicial || 0);
+  try{ const { data } = await _sb.rpc('fin_saldos_realizados'); for(const r of (data||[])) saldosByConta[r.conta_id] = r; }catch(_){}
+  const _saldoConta = c => c.bank_balance != null ? +c.bank_balance
+    : (saldosByConta[c.id] != null ? (+saldosByConta[c.id].saldo_atual||0) : (+c.saldo_inicial||0));
+
+  const plural = (n, s, p) => n === 1 ? s : (p || s+'s');
+  const pct1 = v => v.toFixed(1).replace('.', ',');
+  const mesTitulo = A.mesLabel.charAt(0).toUpperCase() + A.mesLabel.slice(1);
+
+  // ── 1. Faixas de alerta — cada uma só existe se houver o que ela anuncia ──────────
+  const faixas = [];
+  if(A.atrasoN > 0) faixas.push(`<div class="fxa fxa-red">
+    <span class="fxa-ic" style="background:#A65A4A;">!</span>
+    <span><strong>${A.atrasoN} ${plural(A.atrasoN,'lançamento')} em atraso</strong> ${plural(A.atrasoN,'soma','somam')} ${fmtR(A.atrasoT)}${A.atrasoInN?` — ${A.atrasoInN} ${A.atrasoInN===1?'é uma entrada que já deveria ter caído':'são entradas que já deveriam ter caído'}.`:'.'}</span>
+    <button class="fxa-btn" style="background:#A65A4A;" onclick="_finIrMovimentacoes('atrasados')">Ver os atrasados →</button>
+  </div>`);
+  if(A.fila.length && A.fila[0].dias >= 1) faixas.push(`<div class="fxa fxa-gold">
+    <span class="fxa-ic" style="background:#9C7F40;">!</span>
+    <span>Repasse ao cedente <strong>${escHtml(A.fila[0].nome||'—')}</strong> pendente há ${A.fila[0].dias} ${plural(A.fila[0].dias,'dia')} — ${fmtR(A.fila[0].capital)} em ${A.fila[0].n} ${plural(A.fila[0].n,'parcela')} ${plural(A.fila[0].n,'recebida')}.</span>
+    <button class="fxa-btn" style="background:#9C7F40;" onclick="setFinTab('credores')">Repassar agora →</button>
+  </div>`);
+
+  // ── 2. Meta: barra empilhada recuperado + acordado a receber ──────────────────────
+  const pctRec = A.meta > 0 ? Math.min(100, A.receita/A.meta*100) : 0;
+  const pctEnt = A.meta > 0 ? Math.max(0, Math.min(100-pctRec, A.aEntrarT/A.meta*100)) : 0;
+  const semCob = Math.max(0, +(A.meta - A.receita - A.aEntrarT).toFixed(2));
+
+  // ── 3. Resultado por categoria ────────────────────────────────────────────────────
+  const todasCats = !!window._finCaixaTodasCats;
+  const catsVis = todasCats ? A.cats : A.cats.slice(0, 8);
+  const maxCat = Math.max(1, ...A.cats.map(c => Math.abs(c.valor)));
+
+  // ── 4. Contas ─────────────────────────────────────────────────────────────────────
+  const contasGeral = (dim.contas||[]).filter(c => c.incluir_no_saldo_geral !== false);
+
+  const _m12 = (rot, vals) => {
+    const v = (vals||[]).map(x => +x||0);
+    const cur = v.length ? v[v.length-1] : 0, prev = v.length > 1 ? v[v.length-2] : null;
+    let varTxt = '', varCor = '#8A94A6';
+    if(prev != null && Math.abs(prev) > 0.005){
+      const p = (cur-prev)/Math.abs(prev)*100;
+      varTxt = `${p >= 0 ? '+' : '−'}${Math.abs(p).toFixed(0)}% vs mês anterior`;
+      varCor = p >= 0 ? '#4C6647' : '#8A94A6';
+    }
+    return `<div><div class="cx-m12-lb">${rot}</div><div class="cx-m12-v">${fmtRs(cur)}</div><div class="cx-m12-var" style="color:${varCor};">${varTxt}</div></div>`;
   };
-  // Saldo geral exclui contas marcadas com incluir_no_saldo_geral=false
-  const saldoContas = (dim.contas||[])
-    .filter(c => c.incluir_no_saldo_geral !== false)
-    .reduce((s,c)=>s+_saldoConta(c),0);
-
-  const fmtData = (s) => { s=(s||'').slice(0,10); return s ? s.split('-').reverse().join('/') : '—'; };
-
-  // ---- Coluna esquerda: card de inadimplência (top devedores) ----
-  let inadCardHtml;
-  if(!DB.config.asaasKey){
-    inadCardHtml = `<div class="empty-state" style="padding:36px 20px;">
-      <div class="empty-state-icon">${ico('key',32)}</div>
-      <h3>Asaas não configurado</h3>
-      <p>Configure a chave API em Configurações → Integrações para acompanhar a inadimplência.</p>
-    </div>`;
-  } else if(!inad.devList.length){
-    inadCardHtml = `<div class="empty-state" style="padding:36px 20px;">
-      <div class="empty-state-icon">${ico('success',32)}</div>
-      <h3>Nenhuma parcela em atraso</h3>
-      <p>Não há cobranças vencidas no Asaas no momento.</p>
-    </div>`;
-  } else {
-    inadCardHtml = inad.devList.slice(0,5).map(g=>{
-      const dev = g.dev;
-      const dias = g.agg.oldest ? Math.max(0, Math.round((Date.now()-new Date(g.agg.oldest.slice(0,10)+'T00:00:00'))/86400000)) : 0;
-      const emExec = !!(dev && (dev.execucoes||[]).length);
-      const tagCls = emExec ? 'exec' : (dias>30 ? 'red' : 'gold');
-      const tagTxt = emExec ? 'Em execução' : (dias>30 ? 'Inadimplente' : 'Atenção');
-      const sideCls = emExec ? 'exec' : (dias>30 ? 'red' : 'gold');
-      const nome = dev ? escHtml(dev.nome) : `Cliente Asaas ${escHtml(g.custId)}`;
-      return `<div class="fin-case ${sideCls}">
-        <div>
-          <div class="nm">${nome}</div>
-          <div class="mt">${g.agg.count} parcela${g.agg.count!==1?'s':''} vencida${g.agg.count!==1?'s':''} · mais antiga ${fmtData(g.agg.oldest)} · atualizado ${fmtR(g.agg.total)}</div>
-        </div>
-        <span class="fin-tag ${tagCls}">${tagTxt}</span>
-        <div style="text-align:right;">
-          <div class="val">${fmtR(g.agg.total)}</div>
-          ${dev ? `<div style="margin-top:6px;"><button class="fin-btn-xs primary" onclick="abrirExecucaoDeParcelas('${dev.id}')">${ico('scale',12)} Iniciar execução</button></div>`
-                : `<div style="margin-top:6px;font-size:11px;color:var(--text-3);">sem vínculo</div>`}
-        </div>
-      </div>`;
-    }).join('');
-  }
-
-  // ---- Coluna esquerda: últimas movimentações (chip de status + link p/ Movimentações) ----
-  const _statusPill = (l) => {
-    const isReceita = l.tipo_movimento === 1;
-    if(l.conciliado) return { txt:'CONCILIADO', bg:'#E9F0E7', fg:'#4C6647' };
-    if(l.status===1 || l.data_pagamento) return { txt:'PAGO', bg:'#5E7C58', fg:'#fff' };
-    if(l.data_vencimento && l.data_vencimento < _hoje) return { txt:'ATRASADO', bg:'#FBEAE7', fg:'#A65A4A' };
-    return { txt: isReceita?'A RECEBER':'A PAGAR', bg:'#FBF3E1', fg:'#9C7F40' };
-  };
-  const recentesHtml = recentes.length
-    ? recentes.map(l=>{
-        const isReceita = l.tipo_movimento === 1;
-        const st = _statusPill(l);
-        const dt = (l.data_competencia||'').slice(5,10).split('-').reverse().join('/');
-        return `<div class="fin-row" style="align-items:center;gap:12px;">
-          <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#8A94A6;width:42px;flex-shrink:0;">${dt||'—'}</span>
-          <span style="min-width:0;flex:1;" title="${escHtml(l.descricao||'')}">${escHtml(l.descricao||'—')}${l.fin_conta&&l.fin_conta.descricao?`<span style="display:block;font-size:11px;color:#A6AEBD;">${escHtml(l.fin_conta.descricao)}</span>`:''}</span>
-          <span class="v ${isReceita?'pos':'neg'}" style="flex-shrink:0;">${isReceita?'+':'−'} ${fmtR(Math.abs(+l.valor||0))}</span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.06em;padding:3px 8px;border-radius:4px;background:${st.bg};color:${st.fg};flex-shrink:0;white-space:nowrap;">${st.txt}</span>
-        </div>`;
-      }).join('')
-    : `<div class="note">Nenhum lançamento recente.</div>`;
-
-  // ---- Coluna direita: minhas contas ----
-  const contasHtml = (dim.contas||[]).length
-    ? (dim.contas||[]).map(c=>{
-        const naoNoGeral = c.incluir_no_saldo_geral === false;
-        const tipoLabel = (window.TIPO_CONTA_LABEL||{})[c.tipo] || '';
-        const saldo = _saldoConta(c);
-        return `<div class="fin-acct">
-          ${window.bankLogoHtml(c.logo_key||'outros', 34)}
-          <div style="min-width:0;">
-            <div class="nm">${escHtml(c.descricao)} ${naoNoGeral?'<span style="font-size:9.5px;color:var(--text-3);font-weight:400;">(fora do saldo geral)</span>':''}</div>
-            <div class="bk">${escHtml(c.banco_nome || tipoLabel || '—')}</div>
-          </div>
-          <div class="bal" style="color:${saldo>=0?'var(--success)':'var(--danger)'};">${fmtR(saldo)}</div>
-        </div>`;
-      }).join('')
-    : `<div class="note">Nenhuma conta cadastrada.</div>`;
-
-  // Lista "top N" (rank + nome + valor + %) reutilizada em Top despesas/clientes.
-  const _topList = (itens, total, cor) => (!itens || !itens.length)
-    ? `<div class="note">Sem dados no mês.</div>`
-    : itens.slice(0,5).map((it,i)=>{
-        const pct = total>0 ? Math.round(it.valor/total*100) : 0;
-        return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;${i?'border-top:1px solid var(--border);':''}">
-          <span style="width:18px;height:18px;border-radius:50%;background:var(--surface2);color:var(--text-3);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;">${i+1}</span>
-          <span style="flex:1;min-width:0;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escHtml(it.nome)}">${escHtml(it.nome)}</span>
-          <span style="font-size:13px;font-weight:700;color:${cor};">${fmtR(it.valor)}</span>
-          <span style="font-size:11.5px;font-weight:700;color:var(--text-3);width:36px;text-align:right;">${pct}%</span>
-        </div>`;
-      }).join('');
-  // Chips por conta para o card "Saldo geral" (layout Controlle).
-  const saldoChipsHtml = (dim.contas||[]).filter(c=>c.incluir_no_saldo_geral!==false).slice(0,8).map(c=>{
-    const saldo=_saldoConta(c);
-    const tipoLabel=(window.TIPO_CONTA_LABEL||{})[c.tipo]||c.banco_nome||'—';
-    return `<div class="fin-chip"><div class="cn" title="${escHtml(c.descricao)}">${escHtml(c.descricao)}</div><div class="ct">${escHtml(tipoLabel)}</div><div class="cv ${saldo<0?'neg':''}">${fmtR(saldo)}</div></div>`;
-  }).join('') || '<div class="note" style="padding:0;">Nenhuma conta no saldo geral.</div>';
-  // Card "Resultado por categoria" (DRE simplificado do mês) — última linha em negrito
-  // com o mesmo total do KPI "Resultado do mês" (fonte única: kpis.saldoMes).
-  const dreHtml = (dre&&dre.length) ? dre.map(d=>`<div style="display:flex;align-items:center;gap:10px;padding:7px 0;"><span style="font-size:12.5px;color:#5A5F66;">${escHtml(d.nome)}</span><div style="flex:1;border-bottom:1px dotted #DDD7C7;"></div><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:500;color:${d.valor<0?'#A65A4A':'#5A5F66'};">${d.valor<0?'−':''}${fmtR(Math.abs(d.valor))}</span></div>`).join('') : '<div class="note">Sem lançamentos categorizados no mês.</div>';
-
-  // Fluxo de caixa · 30 dias (barras duplas entrada/saída) — amostra rótulo a cada ~5 dias.
-  const fluxoDias = (fluxo&&fluxo.dias) ? fluxo.dias : [];
-  const fluxoMax = Math.max(1, ...fluxoDias.map(d=>Math.max(d.in,d.out)));
-  const fluxoSaldoProj = saldoContas + fluxoDias.reduce((s,d)=>s+d.in-d.out,0);
-  const fluxoHtml = fluxoDias.length ? `
-    <div style="display:flex;align-items:flex-end;gap:3px;height:150px;padding-bottom:22px;position:relative;border-bottom:1px solid #E6E1D2;">
-      ${fluxoDias.map((d,i)=>{ const hIn=Math.max(d.in>0?3:0,Math.round(d.in/fluxoMax*100)); const hOut=Math.max(d.out>0?3:0,Math.round(d.out/fluxoMax*100)); return `<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;position:relative;" title="${d.label}: entrada ${fmtR(d.in)} · saída ${fmtR(d.out)}"><div style="width:100%;max-width:14px;height:${hIn}%;background:#5E7C58;border-radius:2px 2px 0 0;"></div><div style="width:100%;max-width:14px;height:${hOut}%;background:#D8B7AF;border-radius:0 0 2px 2px;"></div>${i%5===0?`<span style="position:absolute;bottom:-20px;font-family:'JetBrains Mono',monospace;font-size:9px;color:#A6AEBD;">${d.label}</span>`:''}</div>`; }).join('')}
-    </div>
-    <div style="display:flex;gap:16px;margin-top:14px;font-size:11.5px;color:#6B7683;">
-      <span style="display:flex;align-items:center;gap:6px;"><i style="width:8px;height:8px;background:#5E7C58;border-radius:2px;display:inline-block;"></i>Entradas previstas</span>
-      <span style="display:flex;align-items:center;gap:6px;"><i style="width:8px;height:8px;background:#D8B7AF;border-radius:2px;display:inline-block;"></i>Saídas previstas</span>
-    </div>` : `<div class="note">Sem lançamentos previstos nos próximos 30 dias.</div>`;
-
-  // ── Painel (reorganizado 27/08 no modelo do handoff): grade de cartões. Os dados já
-  //    eram todos calculados aqui; serie/aPagar/aReceber/topClientes/automacao vinham do
-  //    Promise.all e eram DESCARTADOS — _serie12m chega a varrer 12 meses de lançamento
-  //    em páginas de 1000 para nada. Agora aparecem.
-  const _pnCard = (titulo, corpo, span) => `<div style="grid-column:span ${span||1};background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:15px 16px;display:flex;flex-direction:column;min-width:0;">
-      <div style="font-family:'Inter Tight',sans-serif;font-size:13.5px;font-weight:600;color:#0A1530;margin-bottom:10px;">${titulo}</div>
-      <div style="flex:1;min-height:0;display:flex;flex-direction:column;">${corpo}</div>
-    </div>`;
-
-  // Sparkline de 12 meses: área + linha. Escala pelo próprio conjunto, com zero visível.
-  const _pnSpark = (vals, cor) => {
-    const v = (vals||[]).map(x=>+x||0);
-    if(v.length<2) return `<div style="height:52px;"></div>`;
-    const mx = Math.max(...v, 0), mn = Math.min(...v, 0), amp = (mx-mn)||1;
-    const W=100, H=34;
-    const pt = (x,i)=>[ (i/(v.length-1))*W, H - ((x-mn)/amp)*H ];
-    const pts = v.map(pt);
-    const linha = pts.map(([x,y],i)=>`${i?'L':'M'}${x.toFixed(2)},${y.toFixed(2)}`).join(' ');
-    const area = `${linha} L${W},${H} L0,${H} Z`;
-    const zeroY = H - ((0-mn)/amp)*H;
-    return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:52px;display:block;overflow:visible;">
-      ${(mn<0&&mx>0)?`<line x1="0" y1="${zeroY.toFixed(2)}" x2="${W}" y2="${zeroY.toFixed(2)}" stroke="#E6E1D2" stroke-width=".6" stroke-dasharray="2 2"/>`:''}
-      <path d="${area}" fill="${cor}" opacity=".10"/>
-      <path d="${linha}" fill="none" stroke="${cor}" stroke-width="1.4" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
-    </svg>`;
-  };
-  // Variação do último mês contra o anterior, no formato do handoff (chip percentual).
-  const _pnDelta = (vals) => {
-    const v=(vals||[]).map(x=>+x||0);
-    if(v.length<2) return '';
-    const a=v[v.length-2], b=v[v.length-1];
-    if(!a) return '';
-    const p=((b-a)/Math.abs(a))*100;
-    const bom = p>=0;
-    return `<span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:500;padding:1px 5px;border-radius:4px;white-space:nowrap;background:${bom?'#E9F0E7':'#FBEAE7'};color:${bom?'#4F6B49':'#A65A4A'};">${p>=0?'+':''}${p.toFixed(0)}%</span>`;
-  };
-  // Cartão de métrica com série (EBITDA, faturamento, ticket, juros).
-  const _pnMetrica = (titulo, valor, vals, cor) => _pnCard(titulo, `
-      <div style="display:flex;align-items:center;gap:7px;margin-bottom:2px;flex-wrap:wrap;">
-        <span style="font-family:'Fraunces',Georgia,serif;font-size:22px;font-weight:400;color:#0A1530;line-height:1;">${valor}</span>
-        ${_pnDelta(vals)}
-      </div>
-      <div style="flex:1;display:flex;align-items:flex-end;">${_pnSpark(vals, cor)}</div>`);
-  // Donut do handoff: contagem no miolo, valor embaixo, ação ao lado.
-  const _pnDonut = (n, total, cor, acao) => {
-    const r=30, C=2*Math.PI*r, frac=Math.min(1, n?Math.max(.06, n/Math.max(n,10)):0);
-    return `<div style="display:flex;align-items:center;gap:14px;flex:1;">
-      <div style="position:relative;width:74px;height:74px;flex-shrink:0;">
-        <svg viewBox="0 0 74 74" style="width:100%;height:100%;transform:rotate(-90deg);">
-          <circle cx="37" cy="37" r="${r}" fill="none" stroke="#EFEBE0" stroke-width="6"/>
-          <circle cx="37" cy="37" r="${r}" fill="none" stroke="${cor}" stroke-width="6" stroke-linecap="round" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${(C*(1-frac)).toFixed(1)}"/>
-        </svg>
-        <div style="position:absolute;inset:0;display:grid;place-items:center;font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:600;color:#0A1530;">${n}</div>
-      </div>
-      <div style="min-width:0;">
-        <div style="font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:600;color:#0A1530;">${fmtR(total)}</div>
-        ${acao}
-      </div>
-    </div>`;
-  };
-  const _pnLink = (txt, on) => `<div style="font-size:12.5px;color:#3A5288;font-weight:600;cursor:pointer;margin-top:6px;" onclick="${on}">${txt}</div>`;
-
-  // A repassar: dinheiro de terceiro. Sai do mesmo fin_operacao que a aba Credores lê.
-  const _repAg = (automacao && automacao.rep) || {};
-  const _repValor = (+((_repAg.pendente||{}).valor)||0) + (+((_repAg.preparado||{}).valor)||0);
-  const _repN = (+((_repAg.pendente||{}).n)||0) + (+((_repAg.preparado||{}).n)||0);
-  const _revN = +((_repAg.revisar||{}).n)||0;
-
-  const _entMes = +kpis.receitaMes||0, _saiMes = +kpis.despesaMes||0;
-  const _maxMes = Math.max(_entMes, _saiMes) || 1;
-  const _contasGeral = (dim.contas||[]).filter(c=>c.incluir_no_saldo_geral!==false);
 
   el.innerHTML = `
-    ${atraso.count>0 ? `<div style="border:1px solid #E7CFC7;background:#FBEAE7;border-radius:10px;padding:11px 16px;display:flex;align-items:center;gap:14px;margin-bottom:14px;">
-      <span style="width:22px;height:22px;border-radius:50%;background:#A65A4A;color:#fff;display:grid;place-items:center;font-size:12px;font-weight:700;flex-shrink:0;">!</span>
-      <span style="font-size:13.5px;color:#7D3F33;"><strong style="font-weight:600;">${atraso.count} lançamento${atraso.count!==1?'s':''} em atraso · ${fmtR(atraso.total)}.</strong></span>
-      <span style="margin-left:auto;background:#A65A4A;color:#fff;font-size:12.5px;font-weight:600;padding:6px 13px;border-radius:6px;cursor:pointer;white-space:nowrap;" onclick="setFinTab('lancamentos')">Resolver →</span>
-    </div>` : ''}
-    ${repAtraso ? `<div style="display:flex;align-items:center;gap:10px;background:#F7ECE8;border:1px solid #E7CFC7;border-radius:10px;padding:10px 16px;margin-bottom:14px;">
-      <span style="width:20px;height:20px;border-radius:50%;background:#A65A4A;color:#EFEAD9;display:grid;place-items:center;font-size:12px;font-weight:700;flex-shrink:0;">!</span>
-      <span style="font-size:13px;color:#7d3f33;font-weight:500;">Repasse ao cedente <b>${escHtml(repAtraso.nome||'')}</b> pendente há ${repAtraso.dias} dia${repAtraso.dias!==1?'s':''} — <b>${fmtR(repAtraso.valor)}</b>.</span>
-      <span style="font-size:13px;font-weight:700;color:#A65A4A;margin-left:auto;cursor:pointer;" onclick="setFinTab('repasses')">Repassar agora →</span>
-    </div>` : ''}
+    <style>
+      .cx-wrap{display:flex;flex-direction:column;gap:16px;}
+      .fxa{display:flex;align-items:center;gap:12px;border-radius:9px;padding:12px 14px;font-size:13px;}
+      .fxa-red{background:#FBEAE7;border:1px solid #E7CFC7;color:#7D3F33;}
+      .fxa-gold{background:#FBF3E1;border:1px solid #DFC992;color:#7A6428;}
+      .fxa strong{font-weight:600;}
+      .fxa-ic{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;color:#fff;font-size:13px;font-weight:700;flex-shrink:0;}
+      .fxa-btn{margin-left:auto;white-space:nowrap;border:none;color:#fff;font-family:inherit;font-size:12.5px;font-weight:600;padding:7px 13px;border-radius:6px;cursor:pointer;}
+      .fxa-red .fxa-btn:hover{background:#94503F !important;}
+      .fxa-gold .fxa-btn:hover{background:#8A6F36 !important;}
+      .cx-par{display:grid;grid-template-columns:minmax(0,1.02fr) minmax(0,1.98fr);gap:12px;align-items:stretch;}
+      .cx-livre{background:#0A1530;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:10px;color:#fff;min-width:0;}
+      .cx-lb{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;}
+      .cx-livre-v{font-family:'JetBrains Mono',monospace;font-size:27px;font-weight:600;letter-spacing:-.02em;white-space:nowrap;}
+      .cx-deriv{border-top:1px solid rgba(255,255,255,.10);padding-top:9px;font-size:11.5px;color:#B4BCCC;display:flex;flex-direction:column;gap:4px;}
+      .cx-deriv > div{display:flex;justify-content:space-between;gap:10px;}
+      .cx-deriv b{font-family:'JetBrains Mono',monospace;font-weight:500;white-space:nowrap;}
+      .cx-frase{margin-top:auto;font-size:11px;color:#8A94A6;line-height:1.45;}
+      .cx-meta{background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:13px;min-width:0;}
+      .cx-meta-h{display:flex;align-items:center;gap:9px;flex-wrap:wrap;}
+      .cx-pill-gold{background:#FBF3E1;border:1px solid #DFC992;color:#7A6428;font-family:'JetBrains Mono',monospace;font-size:9.5px;border-radius:4px;padding:2px 6px;white-space:nowrap;}
+      .cx-link{font-size:12px;font-weight:600;color:#15224A;cursor:pointer;}
+      .cx-link:hover{color:#9C7F40;}
+      .cx-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}
+      .cx-metrics .lb{font-size:11px;color:#8A94A6;}
+      .cx-metrics .vl{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:600;white-space:nowrap;margin-top:2px;}
+      .cx-metrics .nt{font-size:10.5px;color:#6B7683;margin-top:2px;}
+      .cx-trilho{margin-top:auto;height:12px;background:#F2EFE6;border-radius:6px;overflow:hidden;display:flex;}
+      .cx-leg{display:flex;align-items:center;gap:14px;font-size:11px;color:#5A5F66;flex-wrap:wrap;}
+      .cx-leg i{width:9px;height:9px;border-radius:2px;display:inline-block;margin-right:5px;}
+      .cx-kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;align-items:stretch;}
+      .cx-kpi{background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:15px;display:flex;flex-direction:column;gap:8px;text-align:left;min-width:0;}
+      .cx-kpi.click{cursor:pointer;}
+      .cx-kpi.click:hover{background:#FBFAF6;}
+      .cx-kpi.red{border-color:#E7CFC7;} .cx-kpi.red:hover{background:#FEF8F7;}
+      .cx-kpi.gold{border-color:#DFC992;} .cx-kpi.gold:hover{background:#FEFBF3;}
+      .cx-kpi .vl{font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;white-space:nowrap;}
+      .cx-kpi .dt{font-size:11px;color:#5A5F66;margin-top:auto;display:flex;flex-direction:column;gap:2px;}
+      .cx-kpi .dt .sb{display:flex;justify-content:space-between;gap:8px;}
+      .cx-cols{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(300px,1fr);gap:16px;align-items:start;}
+      .cx-col{display:flex;flex-direction:column;gap:16px;min-width:0;}
+      .cx-sec{background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;}
+      .cx-sec-h{padding:14px 16px 12px;border-bottom:1px solid #F2EFE6;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
+      .cx-h2{font-family:'Fraunces',Georgia,serif;font-size:16px;font-weight:500;color:#0A1530;}
+      .cx-nota{font-size:11.5px;color:#8A94A6;}
+      .cx-catrow{display:flex;align-items:center;gap:9px;}
+      .cx-catnome{width:210px;flex-shrink:0;font-size:12.5px;color:#5A5F66;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      .cx-cattrilho{flex:1;min-width:0;height:8px;background:#F2EFE6;border-radius:4px;display:flex;}
+      .cx-catval{width:104px;flex-shrink:0;text-align:right;font-family:'JetBrains Mono',monospace;font-size:12px;white-space:nowrap;}
+      .cx-conta{display:flex;align-items:center;gap:9px;padding:10px 16px;border-bottom:1px solid #F7F4EC;}
+      .cx-conta:hover{background:#FBFAF6;}
+      .cx-conta .nm{flex:1;min-width:0;font-size:12.5px;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      .cx-conta .sd{font-family:'JetBrains Mono',monospace;font-size:12px;white-space:nowrap;}
+      .cx-staled{background:#FBF3E1;border:1px solid #DFC992;color:#7A6428;font-family:'JetBrains Mono',monospace;font-size:9px;border-radius:4px;padding:1px 5px;white-space:nowrap;flex-shrink:0;}
+      .cx-m12{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:14px 16px 16px;}
+      .cx-m12-lb{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:#8A94A6;}
+      .cx-m12-v{font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:600;color:#0A1530;margin-top:3px;white-space:nowrap;}
+      .cx-m12-var{font-size:10.5px;margin-top:1px;}
+      .cx-btn2{border:1px solid #D8D2C5;background:#fff;color:#0A1530;font-family:inherit;font-size:12px;font-weight:500;padding:7px 12px;border-radius:6px;cursor:pointer;align-self:flex-start;}
+      .cx-btn2:hover{background:#FBFAF6;}
+    </style>
+    <div class="cx-wrap">
+      ${faixas.length ? `<div style="display:flex;flex-direction:column;gap:8px;">${faixas.join('')}</div>` : ''}
 
-    <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;">
-
-      <div style="grid-column:span 1;background:#0A1530;border-radius:10px;padding:15px 16px;color:#fff;display:flex;flex-direction:column;min-width:0;">
-        <div style="font-size:13.5px;font-weight:600;margin-bottom:8px;">Saldo de hoje</div>
-        <div style="font-family:'JetBrains Mono',monospace;font-size:23px;font-weight:600;margin-bottom:10px;">${fmtR(saldoContas)}</div>
-        <div style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:6px;min-height:0;">
-          ${_contasGeral.length ? _contasGeral.map(c=>{
-            const b=_saldoConta(c);
-            const dias = (c.bank_balance!=null && c.bank_balance_at) ? Math.max(0,Math.floor((Date.now()-new Date(c.bank_balance_at).getTime())/86400000)) : null;
-            return `<div style="display:flex;align-items:baseline;gap:8px;">
-              <span style="font-size:12px;color:#C6CEDF;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;">${escHtml(c.descricao||'—')}</span>
-              ${dias!=null&&dias>=7?`<span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#E2C98A;white-space:nowrap;" title="saldo declarado há ${dias} dias">${dias}d</span>`:''}
-              <span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:500;color:${b<0?'#E8A99C':'#fff'};white-space:nowrap;">${fmtR(b)}</span>
-            </div>`; }).join('') : `<div style="font-size:12px;color:#8E98B0;">Nenhuma conta no saldo geral.</div>`}
+      <div class="cx-par">
+        <div class="cx-livre">
+          <div class="cx-lb">Caixa livre da COBRASQ</div>
+          <div class="cx-livre-v" style="color:${A.caixaLivre < 0 ? '#E8A79A' : '#fff'};">${fmtRs(A.caixaLivre)}</div>
+          <div class="cx-deriv">
+            <div><span>saldo geral · ${A.contasCount} ${plural(A.contasCount,'conta')}</span><b style="color:#fff;">${fmtR(A.saldoGeral)}</b></div>
+            <div><span>− dinheiro de terceiros</span><b style="color:#E8A79A;">${fmtR(A.terceiros)}</b></div>
+          </div>
+          <div class="cx-frase">${A.caixaLivre < 0
+            ? `Você está usando ${fmtR(Math.abs(A.caixaLivre))} de dinheiro que é de cedente. ${A.repasseN === 1 ? 'Priorize o repasse pendente.' : `Priorize os ${A.repasseN} repasses.`}`
+            : (A.repasseN === 0
+                ? `Não há repasse pendente — o caixa livre é o saldo geral.`
+                : `Sobram ${fmtR(A.caixaLivre)} depois de honrar ${A.repasseN === 1 ? 'o repasse pendente' : `os ${A.repasseN} repasses pendentes`}.`)}${
+            (A.stale||[]).length ? `<br><span style="color:#E2C98A;">Base com saldo declarado vencido em ${A.stale.length} ${plural(A.stale.length,'conta')} — conferir no banco.</span>` : ''}</div>
         </div>
-        <div style="font-size:11.5px;color:#8E98B0;margin-top:8px;">${fluxoDias.length?`projetado ${fmtR(fluxoSaldoProj)} em 30 dias`:'sem projeção'}</div>
+
+        <div class="cx-meta">
+          <div class="cx-meta-h">
+            <span class="cx-lb" style="color:#8A94A6;">Meta de ${escHtml(A.mesLabel)}</span>
+            <span class="cx-pill-gold">${A.diasUteis} ${plural(A.diasUteis,'DIA ÚTIL RESTANTE','DIAS ÚTEIS RESTANTES')}</span>
+            <span class="cx-link" style="margin-left:auto;" onclick="_finCaixaAjustarMeta()">Ajustar meta</span>
+          </div>
+          <div class="cx-metrics">
+            <div><div class="lb">Recuperado no mês</div><div class="vl" style="color:#4C6647;">${fmtR(A.receita)}</div><div class="nt">${A.meta > 0 ? pct1(A.receita/A.meta*100)+'% da meta' : 'sem meta definida'}</div></div>
+            <div><div class="lb">A entrar até ${A.mesFim.slice(8,10)}/${A.mesFim.slice(5,7)}</div><div class="vl" style="color:#9C7F40;">${fmtR(A.aEntrarT)}</div><div class="nt">${A.aEntrarN} ${plural(A.aEntrarN,'parcela')} de acordos ativos</div></div>
+            <div><div class="lb">Meta do mês</div><div class="vl" style="color:#0A1530;">${fmtR(A.meta)}</div><div class="nt">falta ${fmtR(A.falta)}</div></div>
+            <div><div class="lb">Fechar por dia útil</div><div class="vl" style="color:#9C7F40;">${fmtR(A.porDiaUtil)}</div><div class="nt">para bater a meta</div></div>
+          </div>
+          <div class="cx-trilho">
+            <div style="width:${pctRec.toFixed(1)}%;background:#5E7C58;"></div>
+            <div style="width:${pctEnt.toFixed(1)}%;background:#C9A961;"></div>
+          </div>
+          <div class="cx-leg">
+            <span><i style="background:#5E7C58;"></i>recuperado</span>
+            <span><i style="background:#C9A961;"></i>acordado a receber</span>
+            <span style="margin-left:auto;text-align:right;"><strong style="font-weight:600;">${pct1(pctRec+pctEnt)}% da meta comprometido</strong> · ${semCob > 0 ? fmtR(semCob)+' ainda sem cobertura' : 'meta coberta pelos acordos ativos'}</span>
+          </div>
+        </div>
       </div>
 
-      <div style="grid-column:span 1;background:#fff;border:1px solid #E6E1D2;border-left:3px solid #C9A961;border-radius:10px;padding:15px 16px;display:flex;flex-direction:column;min-width:0;">
-        <div style="font-size:13.5px;font-weight:600;color:#0A1530;margin-bottom:8px;">De terceiros · a repassar</div>
-        <div style="font-family:'Fraunces',Georgia,serif;font-size:26px;color:#9C7F40;line-height:1;">${fmtR(_repValor)}</div>
-        <div style="font-size:12px;color:#8A94A6;margin-top:6px;">${_repN} repasse${_repN!==1?'s':''} pendente${_repN!==1?'s':''}${_revN?` · ${_revN} a revisar`:''}</div>
-        <div style="flex:1;"></div>
-        <div style="font-size:11.5px;color:#A6AEBD;line-height:1.45;">Não entra no resultado da COBRASQ.</div>
-        ${_pnLink('Ver credores →', "setFinTab('repasses')")}
+      <div class="cx-kpis">
+        <div class="cx-kpi red click" onclick="_finIrMovimentacoes('atrasados')">
+          <div class="cx-lb" style="color:#7D3F33;">Em atraso</div>
+          <div class="vl" style="color:#A65A4A;">${fmtR(A.atrasoT)}</div>
+          <div class="dt"><span class="sb"><span>a receber · ${A.atrasoInN}</span><span>${fmtR(A.atrasoInT)}</span></span><span class="sb"><span>a pagar · ${A.atrasoOutN}</span><span>${fmtR(A.atrasoOutT)}</span></span></div>
+        </div>
+        <div class="cx-kpi click" onclick="_finIrMovimentacoes('tudo')">
+          <div class="cx-lb">Receita a entrar</div>
+          <div class="vl" style="color:#4C6647;">${fmtR(A.aEntrarT)}</div>
+          <div class="dt"><span>${A.aEntrarN} ${plural(A.aEntrarN,'parcela')} até ${A.mesFim.slice(8,10)}/${A.mesFim.slice(5,7)}</span><span style="color:#8A94A6;">${fmtR(A.semanaRecT)} ${A.semanaRecN===1?'vence':'vencem'} esta semana</span></div>
+        </div>
+        <div class="cx-kpi">
+          <div class="cx-lb">Resultado realizado · ${escHtml(mesTitulo)}</div>
+          <div class="vl" style="color:${A.resultado >= 0 ? '#4C6647' : '#A65A4A'};">${fmtRs(A.resultado)}</div>
+          <div class="dt"><span class="sb"><span>recebido</span><span style="color:#4C6647;">${fmtR(A.receita)}</span></span><span class="sb"><span>pago</span><span style="color:#7D3F33;">${fmtR(A.despesa)}</span></span></div>
+        </div>
+        <div class="cx-kpi gold click" onclick="setFinTab('credores')">
+          <div class="cx-lb" style="color:#7A6428;">A repassar ao cedente</div>
+          <div class="vl" style="color:#9C7F40;">${fmtR(A.terceiros)}</div>
+          <div class="dt"><span>${A.repasseN} ${plural(A.repasseN,'repasse')}${A.repasseN?` · o mais antigo há ${A.repasseMaisAntigo} ${plural(A.repasseMaisAntigo,'dia')}`:''}</span><span style="color:#8A94A6;">custódia · sai do caixa quando você repassar</span></div>
+        </div>
+        <div class="cx-kpi">
+          <div class="cx-lb">Acordos do mês</div>
+          <div class="vl" style="color:#0A1530;">${fmtR(A.ticket ? A.ticket*A.parcelasN : 0)}</div>
+          <div class="dt"><span>${A.parcelasN} ${plural(A.parcelasN,'parcela')} ${plural(A.parcelasN,'lançada')} · ticket ${fmtR(A.ticket)}</span></div>
+        </div>
       </div>
 
-      <div style="grid-column:span 2;background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:15px 16px;min-width:0;display:flex;flex-direction:column;">
-        <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
-          <div style="font-size:13.5px;font-weight:600;color:#0A1530;">Fluxo de caixa · próximos 30 dias</div>
-          <div style="font-size:12px;color:#8A94A6;">projeção com lançamentos pendentes</div>
+      <div class="cx-cols">
+        <div class="cx-col">
+          <section class="cx-sec">
+            <div class="cx-sec-h">
+              <h2 class="cx-h2">Resultado por categoria</h2>
+              <span class="cx-nota">só o que entrou e saiu de fato · repasse ao cedente fica de fora (é dinheiro de terceiro)</span>
+              ${A.cats.length > 8 ? `<span class="cx-link" style="margin-left:auto;" onclick="window._finCaixaTodasCats=${todasCats?'false':'true'};renderFinTab('visao')">${todasCats ? 'ver só as principais' : 'ver todas as '+A.cats.length}</span>` : ''}
+            </div>
+            <div style="padding:14px 16px 16px;display:flex;flex-direction:column;gap:9px;">
+              ${catsVis.length ? catsVis.map(c=>{
+                const rec = c.valor >= 0, w = Math.max(2, Math.round(Math.abs(c.valor)/maxCat*100));
+                return `<div class="cx-catrow">
+                  <span class="cx-catnome" title="${escHtml(c.nome)}">${escHtml(c.nome)}</span>
+                  <span class="cx-cattrilho" style="justify-content:${rec?'flex-start':'flex-end'};"><i style="width:${w}%;background:${rec?'#5E7C58':'#D8B7AF'};border-radius:4px;"></i></span>
+                  <span class="cx-catval" style="color:${rec?'#4C6647':'#7D3F33'};">${rec?'':'−'}${fmtR(Math.abs(c.valor))}</span>
+                </div>`; }).join('')
+                : `<div style="font-size:12.5px;color:#8A94A6;">Nada liquidado neste mês ainda.</div>`}
+              <div style="border-top:1px solid #F2EFE6;padding-top:11px;display:flex;align-items:baseline;">
+                <span style="font-size:12.5px;font-weight:600;color:#0A1530;">Resultado realizado</span>
+                <span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:${A.resultado >= 0 ? '#4C6647' : '#7D3F33'};">${fmtRs(A.resultado)}</span>
+              </div>
+            </div>
+          </section>
+
+          <section style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:11px;">
+            <div style="display:flex;align-items:baseline;gap:9px;">
+              <h2 class="cx-h2">Inadimplência</h2>
+              <span style="background:#FBEAE7;border:1px solid #E7CFC7;color:#7D3F33;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;border-radius:4px;padding:2px 6px;">ASAAS</span>
+            </div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:600;color:#A65A4A;white-space:nowrap;">${fmtR((inad.charges||[]).reduce((s,c)=>s+Math.abs(+c.value||0),0))}</div>
+            <div style="font-size:12px;color:#5A5F66;">${(inad.devList||[]).length} ${plural((inad.devList||[]).length,'devedor','devedores')} com parcela vencida · ${fmtR(A.atrasoInT)} em entradas atrasadas no razão</div>
+            <button class="cx-btn2" onclick="setFinTab('asaas')">Disparar régua de cobrança</button>
+          </section>
         </div>
-        ${fluxoHtml}
+
+        <div class="cx-col">
+          <section class="cx-sec">
+            <div class="cx-sec-h">
+              <h2 class="cx-h2">Contas</h2>
+              <span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:#0A1530;">${fmtR(A.saldoGeral)}</span>
+            </div>
+            ${contasGeral.length ? contasGeral.map(c=>{
+              const sd = _saldoConta(c), dias = _finSaldoIdadeDias(c);
+              return `<div class="cx-conta">
+                ${window.bankLogoHtml(c.logo_key||'outros', 22)}
+                <span class="nm" title="${escHtml(c.descricao||'')}">${escHtml(c.descricao||'—')}</span>
+                ${dias != null && dias >= FIN_SALDO_STALE_DIAS ? `<span class="cx-staled" title="saldo declarado ${_finSaldoIdadeTexto(dias)} — conferir no extrato" onclick="setFinTab('conciliacao')" style="cursor:pointer;">${dias}D</span>` : ''}
+                <span class="sd" style="color:${sd > 0 ? '#0A1530' : (sd < 0 ? '#A65A4A' : '#A6AEBD')};">${fmtRs(sd)}</span>
+              </div>`; }).join('')
+              : `<div style="padding:16px;font-size:12.5px;color:#8A94A6;">Nenhuma conta no saldo geral.</div>`}
+          </section>
+
+          ${serie ? `<section class="cx-sec">
+            <div class="cx-sec-h"><h2 class="cx-h2">Últimos 12 meses</h2></div>
+            <div class="cx-m12">
+              ${_m12('EBITDA', serie.ebitda)}
+              ${_m12('Faturamento', serie.fat)}
+              ${_m12('Ticket médio', serie.ticket)}
+              ${_m12('Juros e multas', serie.jm)}
+            </div>
+          </section>` : ''}
+        </div>
       </div>
-
-      ${_pnCard('Resultado do mês', `
-        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:5px;"><span style="font-size:12.5px;color:#5E7C58;font-weight:600;">Entradas</span><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;margin-left:auto;">${fmtR(_entMes)}</span></div>
-        <div style="height:15px;background:#F2EFE6;border-radius:3px;overflow:hidden;margin-bottom:10px;"><div style="height:100%;width:${(_entMes/_maxMes*100).toFixed(1)}%;background:#5E7C58;"></div></div>
-        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:5px;"><span style="font-size:12.5px;color:#A65A4A;font-weight:600;">Saídas</span><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;margin-left:auto;">${fmtR(_saiMes)}</span></div>
-        <div style="height:15px;background:#F2EFE6;border-radius:3px;overflow:hidden;"><div style="height:100%;width:${(_saiMes/_maxMes*100).toFixed(1)}%;background:#A65A4A;"></div></div>
-        <div style="flex:1;"></div>
-        <div style="display:flex;align-items:baseline;padding-top:9px;border-top:1px solid #EFEBE0;margin-top:9px;">
-          <span style="font-size:12.5px;color:#5A5F66;">Resultado</span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;margin-left:auto;color:${(+kpis.saldoMes)>=0?'#4F6B49':'#A65A4A'};">${fmtR(kpis.saldoMes)}</span>
-        </div>`)}
-
-      ${_pnCard('A pagar na semana', _pnDonut(aPagar.count, aPagar.total, '#A65A4A', _pnLink('Resolver →', "setFinTab('lancamentos')")))}
-      ${_pnCard('A receber na semana', _pnDonut(aReceber.count, aReceber.total, '#5E7C58', _pnLink('Resolver →', "setFinTab('lancamentos')")))}
-      ${_pnCard('Inadimplência (Asaas)', `
-        <div style="font-family:'Fraunces',Georgia,serif;font-size:24px;color:#A65A4A;line-height:1;">${fmtR(inad.charges ? inad.charges.reduce((s,c)=>s+Math.abs(+c.value||0),0) : 0)}</div>
-        <div style="font-size:12px;color:#8A94A6;margin-top:6px;">${(inad.devList||[]).length} devedor${(inad.devList||[]).length!==1?'es':''} com parcela vencida</div>
-        <div style="flex:1;"></div>
-        ${_pnLink('Ver cobranças →', "setFinTab('asaas')")}`)}
-
-      ${serie ? `
-        ${_pnMetrica('EBITDA · 12 meses', fmtR(serie.ebitda[serie.ebitda.length-1]), serie.ebitda, '#3A5288')}
-        ${_pnMetrica('Faturamento · 12 meses', fmtR(serie.fat[serie.fat.length-1]), serie.fat, '#5E7C58')}
-        ${_pnMetrica('Ticket médio · 12 meses', fmtR(serie.ticket[serie.ticket.length-1]), serie.ticket, '#9C7F40')}
-        ${_pnMetrica('Juros e multas · 12 meses', fmtR(serie.jm[serie.jm.length-1]), serie.jm, '#A65A4A')}
-      ` : ''}
-
-      ${_pnCard('Resultado por categoria', `
-        <div style="flex:1;overflow-y:auto;min-height:0;">
-          ${dre.length ? dre.map(d=>`<div style="display:flex;align-items:center;gap:8px;padding:5px 0;">
-            <span style="font-size:12.5px;color:#5A5F66;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(d.nome)}</span>
-            <div style="flex:1;border-bottom:1px dotted #DDD7C7;min-width:12px;"></div>
-            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:500;white-space:nowrap;color:${d.valor<0?'#A65A4A':'#5A5F66'};">${fmtR(d.valor)}</span>
-          </div>`).join('') : `<div style="font-size:12.5px;color:#8A94A6;">Sem lançamentos categorizados no mês.</div>`}
-        </div>
-        <div style="display:flex;align-items:center;padding-top:9px;border-top:1px solid #E6E1D2;margin-top:6px;">
-          <span style="font-size:12.5px;font-weight:700;color:#0A1530;">Resultado (EBITDA)</span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:700;margin-left:auto;color:${(+kpis.saldoMes)>=0?'#4F6B49':'#A65A4A'};">${fmtR(kpis.saldoMes)}</span>
-        </div>
-        <div style="font-size:10.5px;color:#A6AEBD;margin-top:6px;line-height:1.45;">Exclui o repasse ao cedente: é dinheiro de terceiro, não custo da COBRASQ.</div>`, 2)}
-
-      ${_pnCard('Top clientes do mês', (topClientes.itens||[]).length
-        ? (topClientes.itens||[]).slice(0,4).map(it=>{ const pct=topClientes.total>0?Math.round(it.valor/topClientes.total*100):0;
-            return `<div style="padding:5px 0;"><div style="display:flex;align-items:baseline;gap:8px;"><span style="font-size:12.5px;color:#5A5F66;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(it.nome)}</span><span style="font-family:'JetBrains Mono',monospace;font-size:12px;margin-left:auto;white-space:nowrap;">${fmtR(it.valor)}</span></div><div style="height:4px;background:#F2EFE6;border-radius:2px;overflow:hidden;margin-top:4px;"><div style="height:100%;width:${pct}%;background:#8FA98A;"></div></div></div>`; }).join('')
-        : `<div style="font-size:12.5px;color:#8A94A6;">Sem recebimentos no mês.</div>`)}
-
-      ${_pnCard('Top despesas do mês', (topDespesas.itens||[]).length
-        ? (topDespesas.itens||[]).slice(0,4).map(it=>{ const pct=topDespesas.total>0?Math.round(it.valor/topDespesas.total*100):0;
-            return `<div style="padding:5px 0;"><div style="display:flex;align-items:baseline;gap:8px;"><span style="font-size:12.5px;color:#5A5F66;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(it.nome)}</span><span style="font-family:'JetBrains Mono',monospace;font-size:12px;margin-left:auto;white-space:nowrap;">${fmtR(it.valor)}</span></div><div style="height:4px;background:#F2EFE6;border-radius:2px;overflow:hidden;margin-top:4px;"><div style="height:100%;width:${pct}%;background:#D8B7AF;"></div></div></div>`; }).join('')
-        : `<div style="font-size:12.5px;color:#8A94A6;">Sem despesas no mês.</div>`)}
-
-      <div style="grid-column:span 4;background:#fff;border:1px solid #E6E1D2;border-radius:10px;overflow:hidden;">
-        <div style="padding:13px 16px 11px;border-bottom:1px solid #EFEBE0;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">
-          <div style="font-size:13.5px;font-weight:600;color:#0A1530;">Últimas movimentações</div>
-          <div style="font-size:12px;color:#8A94A6;">${recentes.length} lançamento${recentes.length!==1?'s':''}</div>
-          <div style="font-size:12.5px;color:#3A5288;font-weight:600;cursor:pointer;margin-left:auto;" onclick="setFinTab('lancamentos')">Abrir Lançamentos →</div>
-        </div>
-        ${recentesHtml}
-      </div>
-
     </div>
   `;
+}
+
+// Atalho "Ajustar meta" do card de meta — a meta mora no blob (DB.config.metaMensal),
+// a mesma que o Painel e o relatório de comissão leem.
+function _finCaixaAjustarMeta(){
+  const atual = +(DB.config && DB.config.metaMensal) || 0;
+  const v = prompt('Meta mensal de recuperação (R$):', String(atual));
+  if(v == null) return;
+  const n = (typeof parseValorBR === 'function' ? parseValorBR(v) : parseFloat(String(v).replace(/\./g,'').replace(',','.'))) || 0;
+  if(!(n >= 0)) return;
+  DB.config.metaMensal = n;
+  try{ save(); }catch(_){}
+  renderFinTab('visao');
+}
+// Ir para Movimentações já numa visão salva, limpando busca e seleção (handoff:
+// "Ver os atrasados →" e os KPIs clicáveis levam para a lista já filtrada).
+function _finIrMovimentacoes(visao){
+  _finLancCascataState.visao = visao || 'tudo';
+  _finLancCascataState.busca = '';
+  _finLancCascataState.sel = new Set();
+  setFinTab('lancamentos');
 }
 
 async function _carregarResumoAsaasVisao(){
