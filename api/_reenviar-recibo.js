@@ -57,11 +57,27 @@ module.exports = async function handler(req, res) {
     }
     if (!devedorId) return res.status(400).json({ error: 'lançamento sem devedor vinculado — não há telefone pra mandar' });
 
-    const devs = await sbFetch(`devedores?id=eq.${encodeURIComponent(devedorId)}&select=id,nome,telefone&limit=1`);
+    const devs = await sbFetch(`devedores?id=eq.${encodeURIComponent(devedorId)}&select=id,nome,telefone,asaas_customer_id&limit=1`);
     const dev = devs && devs[0];
     if (!dev) return res.status(404).json({ error: 'devedor não encontrado' });
-    const tel = String(dev.telefone || '').trim();
-    if (!tel) return res.status(400).json({ error: 'devedor sem telefone cadastrado' });
+    // Mesmo fallback do envio automático: `devedores.telefone` vazio não significa
+    // que não há telefone — a fila da Bia costuma ter o número certo (8 devedores
+    // nessa situação em 27/08/2026). Sem isto, o reenvio manual — que existe
+    // justamente para salvar o recibo que não saiu — também desiste.
+    let tel = String(dev.telefone || '').trim();
+    let telOrigem = tel ? 'devedores' : '';
+    if (!tel) {
+      const pid = asaasPaymentId || lanc.asaas_payment_id || '';
+      const filtros = [];
+      if (pid) filtros.push(`asaas_payment_id=eq.${encodeURIComponent(pid)}`);
+      if (dev.asaas_customer_id) filtros.push(`asaas_customer_id=eq.${encodeURIComponent(dev.asaas_customer_id)}`);
+      for (const f of filtros) {
+        const bia = await sbFetch(`bia_cobranca?${f}&select=telefone&limit=1`).catch(() => []);
+        const t = String((bia && bia[0] && bia[0].telefone) || '').trim();
+        if (t) { tel = t; telOrigem = 'bia_cobranca'; break; }
+      }
+    }
+    if (!tel) return res.status(400).json({ error: 'devedor sem telefone — nem no cadastro, nem na fila da Bia' });
 
     let billingType = null;
     if (asaasPaymentId) {
@@ -96,6 +112,7 @@ module.exports = async function handler(req, res) {
       lancamento_id: lancamentoId,
       devedor: dev.nome,
       telefone_usado: tel,
+      telefone_origem: telOrigem,
       pdf_enviado: pdfEnviado,
       texto_enviado: !!(zap && zap.messageId),
       erro_texto: zap && zap.error,
