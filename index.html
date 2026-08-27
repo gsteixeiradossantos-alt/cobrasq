@@ -10331,17 +10331,18 @@ async function renderPainel(){
 
   // Em negociação: cobranças ativas em status de negociação que se MEXERAM na
   // janela — "em negociação hoje" é o que andou hoje, não o estoque inteiro.
-  // O filtro era /negocia/i — e nenhum status real contém "negocia". Os status são
-  // "2. Acordo Extrajudicial", "2.1. Acordo Judicial", "Acordo", "Acordo enviado",
-  // "Quita Fácil"… Resultado: o card mostrava R$ 0,00 · 0 cobranças desde sempre, sem
-  // erro nenhum — mesma armadilha da lista branca de etiquetas da view casos.
-  // Agora casa com a taxonomia de verdade: acordo em vigor ou proposta em aberto, e
-  // fora o que já quitou.
-  const emNegTodas   = cobrAtivas.filter(c=>{
-    const st = c.status || '';
-    if(/quitad/i.test(st)) return false;
-    return /acordo/i.test(st) || /quita\s*f[áa]cil/i.test(st) || /negocia/i.test(st);
-  });
+  // O card procurava /negocia/i, e "negocia" não aparece em NENHUM dos 24 status reais
+  // — "Em negociação" existe em _SITUACOES_EXTRA como situação planejada, mas nunca foi
+  // usada nos dados. O card mostrava R$ 0,00 · 0 cobranças desde sempre, sem erro
+  // nenhum (mesma armadilha da lista branca de etiquetas da view casos).
+  //
+  // Vira "A COBRAR" (definição do Gustavo, 27/08): a carteira que ainda depende de
+  // cobrança — tudo que NÃO é ação judicial em andamento e NÃO é acordo.
+  //
+  // A regra é uma LISTA NEGRA de propósito. Com lista branca, um status novo sumiria
+  // do card em silêncio; excluindo, ele cai em "A cobrar" e fica visível — que é o
+  // lado certo para errar.
+  const emNegTodas   = cobrAtivas.filter(c=>_pnlEhACobrar(c.status));
   const emNegRows    = (_pnlJan.per==='mes')
     ? emNegTodas
     : emNegTodas.filter(c=>{
@@ -10659,7 +10660,7 @@ async function renderPainel(){
           <div class="pnl-dark-hr"></div>
           <div class="pnl-dark-2col">
             <div><div class="pnl-dark-lb">RECUPERADO ${escHtml(_pnlJan.label.toUpperCase())}</div><div class="pnl-dark-v" style="font-size:17px;color:#A8C6A0;">${fmtR(recuperadoPeriodo)}</div></div>
-            <div><div class="pnl-dark-lb">ACORDOS EM VIGOR</div><div class="pnl-dark-v" style="font-size:17px;color:#E2CE9E;">${fmtR(emNegociacao)}</div><div class="pnl-dark-sub">${emNegRows.length} cobrança${emNegRows.length!==1?'s':''}</div></div>
+            <div><div class="pnl-dark-lb">A COBRAR</div><div class="pnl-dark-v" style="font-size:17px;color:#E2CE9E;">${fmtR(emNegociacao)}</div><div class="pnl-dark-sub">${emNegRows.length} cobrança${emNegRows.length!==1?'s':''}</div></div>
           </div>
           <div>
             <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--side-fg-mute);margin-bottom:6px;"><span>Meta ${escHtml(_pnlJan.label)}</span><span style="font-family:var(--font-mono);">${metaProgPeriodo!=null?metaProgPeriodo+'%':'—'} de ${fmtR(metaPeriodo)}</span></div>
@@ -15684,6 +15685,38 @@ function etapaCanon(status){ return _STATUS_TO_ETAPA_EXTRA[(status||'').trim()] 
 // macro grupo "acordos", e a tela passa a mostrar como fechado o que ninguém assinou.
 function ehAcordo(status){ const s=String(status||''); return /acordo/i.test(s) && !/acordo\s+enviado/i.test(s); }
 
+// "A cobrar": a carteira que ainda depende de cobrança. Tudo que NÃO é ação judicial
+// em andamento, NÃO é acordo e NÃO está encerrado. Alimenta o card do Painel.
+//
+// Por que lista negra e não branca: status novo entra automaticamente em "a cobrar" e
+// aparece na tela. Com lista branca ele sumiria calado — foi o que aconteceu com a
+// view casos, e é o que fazia o card antigo mostrar R$ 0,00.
+//
+// "Fazer ação", "7. Reajuizar" e "Reajuizar de bens" CONTAM como a cobrar: ainda não há
+// processo em curso, o caso está parado esperando decisão nossa.
+// "Acordo enviado" também conta — é termo no ZapSign sem assinatura, seguindo a mesma
+// regra que ehAcordo() já aplica.
+const _STATUS_JUD_EM_CURSO = new Set([
+  'Ação judicial', '1. Ação de Cobrança', '1.1 Ação de locupletamento ilícito',
+  '1.2. Ação Monitória', '3. Cumprimento de Sentença',
+  '4. Ação de Execução de Título Extrajudicial', '4. Ação Monitória',
+]);
+// Encerrados. ehForaRegua() cobre quase tudo, menos "Quitado ao cliente" — que é
+// quitado E já repassado, ainda mais encerrado que os outros (ver a distinção entre
+// "Quitado" e "Quitado ao cliente" no módulo de repasses).
+function _pnlEncerrado(status){
+  const st = String(status||'').trim();
+  return ehForaRegua(st) || /quitad/i.test(st) || /sem\s*[êe]xito/i.test(st);
+}
+function _pnlEhACobrar(status){
+  const st = String(status||'').trim();
+  if(!st) return true;                                   // sem status = ninguém cuidou; é a cobrar
+  if(_pnlEncerrado(st)) return false;
+  if(_STATUS_JUD_EM_CURSO.has(st)) return false;
+  if(ehAcordo(st)) return false;                         // "Acordo enviado" fica de fora daqui
+  if(/quita\s*f[áa]cil/i.test(st)) return false;         // acordo por outro nome
+  return true;
+}
 const _SITUACOES_EXTRA = [
   'Cobrar', 'Notificação enviada', 'Automatizar', 'Em contato', 'Em negociação',
   'Proposta enviada', 'Acordo firmado', 'Em pagamento',
