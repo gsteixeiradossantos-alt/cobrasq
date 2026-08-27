@@ -30155,7 +30155,7 @@ async function _finLancCascataCarregar(){
   const sb = getSupabase();
   const { ini, fim } = _finCascataPeriodoBounds();
   const dim = await finApi.loadDimensoes();
-  const baseSel = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,tipo_movimento,status,conciliado,conta_id,cobranca_id,credor_id,fin_conta(descricao,banco_nome)';
+  const baseSel = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,tipo_movimento,status,conciliado,conta_id,cobranca_id,credor_id,contato_id,numero_parcela,total_parcelas,fin_conta(descricao,banco_nome),fin_contato(nome)';
   const extra = (await _finTemColunasCascata()) ? ',cedente_id,capital,meu_total,amortizado,repasse_status' : '';
   const termo = (_finLancCascataState.busca||'').trim();
   let q = sb.from('fin_lancamento').select(baseSel+extra)
@@ -30203,7 +30203,30 @@ async function _finLancCascataCarregar(){
     }
   }catch(_){ /* auxiliar: não pode derrubar a tela */ }
 
-  return { rows, dim, cedMap, opsByLanc, credorPorLanc, periodoLabel: _finCascataPeriodoBounds().label,
+  // Categoria de cada lançamento visível. Mora no rateio (fin_lancamento_categoria), não
+  // na linha — um lançamento pode ter mais de uma; a lista mostra a de maior valor e
+  // avisa quando há outras.
+  const catPorLanc = {};
+  try{
+    const ids = rows.map(r=>r.id);
+    if(ids.length){
+      const { data:cats } = await sb.from('fin_lancamento_categoria')
+        .select('lancamento_id,valor,fin_categoria(descricao)').in('lancamento_id', ids).limit(4000);
+      const agg = {};
+      for(const c of (cats||[])){
+        const nm = (c.fin_categoria&&c.fin_categoria.descricao)||null; if(!nm) continue;
+        const k = c.lancamento_id;
+        if(!agg[k]) agg[k] = { itens:{}, n:0 };
+        agg[k].itens[nm] = (agg[k].itens[nm]||0) + Math.abs(+c.valor||0);
+      }
+      for(const [k,v] of Object.entries(agg)){
+        const ord = Object.entries(v.itens).sort((a,b)=>b[1]-a[1]);
+        catPorLanc[k] = { nome: ord[0][0], extras: ord.length-1 };
+      }
+    }
+  }catch(_){ /* auxiliar: a lista funciona sem categoria */ }
+
+  return { rows, dim, cedMap, opsByLanc, credorPorLanc, catPorLanc, periodoLabel: _finCascataPeriodoBounds().label,
            busca: termo, truncado: rows.length >= FIN_LANC_LIMITE };
 }
 async function renderFinLancamentosCascata(el){
@@ -30232,8 +30255,21 @@ function _finLancCascataRender(){
   const ctx = window._finLancCascataCtx;
   const todos = ctx.rows;
   const counts = { tudo:todos.length, entradas:0, saidas:0, repasse:0 };
-  todos.forEach(l=>{ if(l.tipo_movimento===1) counts.entradas++; else counts.saidas++; if(l.cedente_id||ctx.opsByLanc[l.id]) counts.repasse++; });
+  const somas  = { tudo:0, entradas:0, saidas:0, repasse:0 };
+  todos.forEach(l=>{
+    const v = Math.abs(+l.valor||0);
+    if(l.tipo_movimento===1){ counts.entradas++; somas.entradas+=v; somas.tudo+=v; }
+    else { counts.saidas++; somas.saidas+=v; somas.tudo-=v; }
+    if(l.cedente_id||ctx.opsByLanc[l.id]){ counts.repasse++; somas.repasse+=v; }
+  });
   const filtrados = _finLancCascataFiltrados();
+  // Totais do rodapé: separa o que já liquidou do que ainda é previsão. Sem consulta nova.
+  const tot = { entRea:0, entPre:0, saiRea:0, saiPre:0 };
+  filtrados.forEach(l=>{
+    const v = Math.abs(+l.valor||0), pago = (l.status===1||l.data_pagamento);
+    if(l.tipo_movimento===1){ tot.entPre+=v; if(pago) tot.entRea+=v; }
+    else { tot.saiPre+=v; if(pago) tot.saiRea+=v; }
+  });
 
   // Agrupa por dia (já vem ordenado desc por data_competencia).
   const porDia = [];
@@ -30253,6 +30289,15 @@ function _finLancCascataRender(){
       .finlc-sub{font-size:12.5px;color:#8A94A6;margin-top:3px;}
       .finlc-search{display:flex;align-items:center;gap:8px;border:1px solid #E6E1D2;border-radius:10px;padding:10px 14px;background:#fff;min-width:240px;}
       .finlc-search input{border:0;outline:0;flex:1;font-size:13px;background:transparent;color:#0A1530;}
+      .finlc-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:14px;}
+      .finlc-kc{background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:11px 14px;cursor:pointer;transition:border-color .15s,box-shadow .15s;}
+      .finlc-kc:hover{border-color:#CFC8B6;}
+      .finlc-kc.on{border-color:#0A1530;box-shadow:0 0 0 1px #0A1530 inset;}
+      .finlc-kc .lb{font-size:11.5px;color:#8A94A6;}
+      .finlc-kc .vl{font-family:'JetBrains Mono',monospace;font-size:17px;font-weight:600;margin-top:2px;}
+      .finlc-kc .qt{font-size:10.5px;color:#A6AEBD;margin-top:1px;}
+      .finlc-parc{font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#6B7683;background:#F2EFE6;padding:2px 7px;border-radius:9px;flex-shrink:0;white-space:nowrap;}
+      .finlc-contato{width:150px;flex-shrink:0;font-size:12px;color:#6B7683;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
       .finlc-chips{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;}
       .finlc-chip{padding:7px 14px;border-radius:20px;font-size:12.5px;cursor:pointer;background:#fff;border:1px solid #E6E1D2;color:#5A5F66;}
       .finlc-chip.on{background:#0A1530;border-color:#0A1530;color:#fff;}
@@ -30279,6 +30324,12 @@ function _finLancCascataRender(){
       .finlc-fechodia{display:flex;gap:20px;padding:9px 22px;background:#F4F1E7;border-top:1px solid #E6E1D2;border-bottom:1px solid #E6E1D2;font-family:'JetBrains Mono',monospace;font-size:11px;color:#9C7F40;}
       .finlc-fechodia b{color:#0A1530;}
       .finlc-foot{display:flex;gap:24px;padding:13px 16px;background:#FBFAF6;font-size:12.5px;color:#6B7683;}
+      .finlc-totais{position:sticky;bottom:0;z-index:5;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));background:rgba(251,250,246,.96);backdrop-filter:blur(6px);border-top:1px solid #E6E1D2;}
+      .finlc-totais > div{padding:12px 16px;text-align:center;border-left:1px solid #EFEBE0;}
+      .finlc-totais > div:first-child{border-left:0;}
+      .finlc-totais .lb{font-size:11px;color:#8A94A6;}
+      .finlc-totais .vl{font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;margin-top:2px;}
+      .finlc-totais .pv{font-size:10px;color:#A6AEBD;margin-top:2px;}
       .finlc-bulkbar{position:sticky;bottom:16px;display:flex;align-items:center;gap:12px;background:#0A1530;border-radius:12px;padding:12px 16px;box-shadow:0 12px 32px rgba(10,21,48,.30);margin-top:14px;flex-wrap:wrap;}
       .finlc-bulkbtn{border:1px solid rgba(255,255,255,.24);color:#E6E9F0;font-size:12.5px;padding:7px 13px;border-radius:6px;cursor:pointer;background:transparent;font-family:inherit;}
       .finlc-bulkbtn.primary{background:#5E7C58;color:#fff;border-color:#5E7C58;}
@@ -30291,12 +30342,22 @@ function _finLancCascataRender(){
       </div>
       <div class="finlc-search">${ico('search',15)}<input type="search" placeholder="Buscar descrição…" value="${escHtml(_finLancCascataState.busca)}" oninput="_finLancCascataBusca(this.value)"></div>
     </div>
-    <div class="finlc-chips">
-      ${[['tudo','Tudo'],['entradas','Entradas'],['saidas','Saídas'],['repasse','Com repasse']].map(([k,lb])=>`<div class="finlc-chip ${_finLancCascataState.chip===k?'on':''}" onclick="_finLancCascataChip('${k}')">${lb} · ${counts[k]}</div>`).join('')}
+    <div class="finlc-cards">
+      ${[['tudo','Tudo','#0A1530'],['entradas','Entradas','#5E7C58'],['saidas','Saídas','#A65A4A'],['repasse','Com repasse','#9C7F40']].map(([k,lb,cor])=>`
+        <div class="finlc-kc ${_finLancCascataState.chip===k?'on':''}" onclick="_finLancCascataChip('${k}')">
+          <div class="lb">${lb}</div>
+          <div class="vl" style="color:${cor};">${k==='saidas'?'−':''}${fmtR(somas[k])}</div>
+          <div class="qt">${counts[k]} lançamento${counts[k]!==1?'s':''}</div>
+        </div>`).join('')}
     </div>
     <div class="finlc-card">
-      <div class="finlc-thead"><span style="width:16px;"></span><span style="width:32px;"></span><span style="flex:1;">DESCRIÇÃO</span><span style="width:130px;">CONTA</span><span style="width:120px;text-align:right;">VALOR</span><span style="width:96px;text-align:center;">SITUAÇÃO</span></div>
+      <div class="finlc-thead"><span style="width:16px;"></span><span style="width:32px;"></span><span style="flex:1;min-width:180px;">DESCRIÇÃO</span><span style="width:150px;">CONTATO</span><span style="width:130px;">CATEGORIA</span><span style="width:120px;text-align:right;">VALOR</span><span style="width:78px;text-align:center;">SITUAÇÃO</span></div>
       ${porDia.length ? porDia.map(g=>_finLancCascataDiaHtml(g, ctx)).join('') : `<div style="padding:40px;text-align:center;color:#8A94A6;font-family:'Fraunces',Georgia,serif;font-size:20px;">Nenhum lançamento neste período.</div>`}
+      <div class="finlc-totais">
+        <div><div class="lb">Entradas</div><div class="vl" style="color:#5E7C58;">${fmtR(tot.entRea)}</div><div class="pv">previsto ${fmtR(tot.entPre)}</div></div>
+        <div><div class="lb">Saídas</div><div class="vl" style="color:#A65A4A;">${fmtR(tot.saiRea)}</div><div class="pv">previsto ${fmtR(tot.saiPre)}</div></div>
+        <div><div class="lb">Resultado do período</div><div class="vl" style="color:${(tot.entRea-tot.saiRea)>=0?'#4F6B49':'#A65A4A'};">${fmtR(tot.entRea-tot.saiRea)}</div><div class="pv">previsto ${fmtR(tot.entPre-tot.saiPre)}</div></div>
+      </div>
       <div class="finlc-foot">${filtrados.length} lançamento${filtrados.length!==1?'s':''} no filtro · repasse não entra no resultado (não é receita/despesa da COBRASQ)</div>
     </div>
     <div id="finlc-bulkbar"></div>
@@ -30339,8 +30400,16 @@ function _finLancCascataRowHtml(l, ctx){
   return `<div class="finlc-row ${sel?'sel':''}" data-lanc="${l.id}" onclick="_finLancAbrirDrawer(${l.id})">
       <div class="finlc-box ${sel?'on':''}" onclick="event.stopPropagation();_finLancCascataToggleSel(${l.id})"></div>
       <div class="finlc-ic" style="background:${isEnt?'#E9F0E7':'#FBEAE7'};color:${isEnt?'#4C6647':'#A65A4A'};">${isEnt?'↓':'↑'}</div>
-      <div class="finlc-desc"><div class="tx">${escHtml(l.descricao||'—')}</div><div class="meta">${l.fin_conta&&l.fin_conta.descricao?escHtml(l.fin_conta.descricao):''}</div></div>
-      <div class="finlc-cat">${escHtml((l.fin_conta&&l.fin_conta.banco_nome)||'')}</div>
+      <div class="finlc-desc">
+        <div class="tx" style="display:flex;align-items:center;gap:7px;min-width:0;">
+          <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(l.descricao||'—')}</span>
+          ${l.numero_parcela&&l.total_parcelas?`<span class="finlc-parc">${l.numero_parcela}/${l.total_parcelas}</span>`:''}
+        </div>
+        <div class="meta">${l.fin_conta&&l.fin_conta.descricao?escHtml(l.fin_conta.descricao):''}${l.data_vencimento?` · vence ${l.data_vencimento.slice(8,10)}/${l.data_vencimento.slice(5,7)}`:''}</div>
+      </div>
+      <div class="finlc-contato">${l.fin_contato&&l.fin_contato.nome?escHtml(l.fin_contato.nome):'<span style="color:#C9C3B4;">—</span>'}</div>
+      <div class="finlc-cat">${(()=>{ const c=ctx.catPorLanc&&ctx.catPorLanc[l.id]; if(!c) return '<span style="color:#C9C3B4;">sem categoria</span>';
+        return escHtml(c.nome)+(c.extras?`<span style="color:#A6AEBD;"> +${c.extras}</span>`:''); })()}</div>
       <div class="finlc-valor" style="color:${isEnt?'#5E7C58':'#A65A4A'};">${isEnt?'+':'−'} ${fmtR(Math.abs(+l.valor||0))}</div>
       <div class="finlc-sit" style="background:${st.bg};color:${st.fg};">${st.t}</div>
     </div>${sub}`;
