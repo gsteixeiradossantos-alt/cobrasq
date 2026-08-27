@@ -29551,6 +29551,62 @@ function setFinTab(tab, el){
 // ══════════════════════════════════════════════════════════════
 
 let _finCascataCache = { at:0, m:null };
+// ══════════════════════════════════════════════════════════════
+// "A REPASSAR" — fonte única
+// ──────────────────────────────────────────────────────────────
+// O mesmo número era calculado em dois lugares com regras diferentes:
+// _finCascataMetricas() somava fin_operacao MAIS a divisão manual da cascata
+// (fin_lancamento com cedente_id), e _finCredoresResumo() somava só fin_operacao.
+// Hoje os dois batem porque a parte manual está vazia — não há UI que grave essa
+// divisão ainda. No dia em que a primeira for gravada, a faixa escura, o card de
+// caixa livre e o card "A repassar" de Credores passariam a mostrar números
+// diferentes para a mesma coisa, sem erro nenhum no console. É o invariante 1/6 do
+// handoff, e a mesma classe de divergência que a aba Caixa já corrigiu.
+//
+// Agora existe UM derivador; os dois chamadores leem daqui.
+let _finRepasseAggCache = { at:0, v:null };
+async function _finRepasseAgg(force){
+  if(!force && _finRepasseAggCache.v && (Date.now()-_finRepasseAggCache.at) < 30000) return _finRepasseAggCache.v;
+  const sb = getSupabase();
+  const iniMes = (()=>{ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`; })();
+
+  const r = {
+    aRepassarOp:0, pendCount:0, revisarCount:0,           // fin_operacao
+    aRepassarManual:0, manualCount:0,                     // divisão manual (cascata)
+    aRepassar:0, filaCount:0,
+    credores:new Set(), maisAntigo:null, repassadoMes:0,
+  };
+  try{
+    const { data } = await sb.from('fin_operacao')
+      .select('valor_capital,repasse_status,repasse_efetuado_em,recebido_em,credor_id').limit(5000);
+    for(const o of (data||[])){
+      const v = Math.abs(+o.valor_capital||0);
+      if(o.repasse_status==='pendente' || o.repasse_status==='preparado'){
+        r.aRepassarOp += v; r.pendCount++;
+        if(o.credor_id) r.credores.add(o.credor_id);
+        // O que está parado há mais tempo é o que dói: o cedente já podia ter recebido.
+        const d = (o.recebido_em||'').slice(0,10);
+        if(d && (!r.maisAntigo || d < r.maisAntigo)) r.maisAntigo = d;
+      } else if(o.repasse_status==='revisar'){ r.revisarCount++; }
+      else if(o.repasse_status==='efetuado' && (o.repasse_efetuado_em||'') >= iniMes){ r.repassadoMes += v; }
+    }
+  }catch(e){ console.warn('_finRepasseAgg: fin_operacao', e); }
+
+  try{
+    if(!(await _finTemColunasCascata())) throw new Error('colunas da cascata ausentes');
+    const { data } = await sb.from('fin_lancamento').select('capital,meu_total,amortizado,valor')
+      .not('cedente_id','is',null).in('repasse_status',['pendente','atrasado']).limit(5000);
+    for(const l of (data||[])){ r.aRepassarManual += finDivideCascata(l, +l.valor||0).repasseAoCedente; r.manualCount++; }
+  }catch(_){ /* colunas do PR1 podem não existir ainda — migração não aplicada */ }
+
+  r.aRepassar = +(r.aRepassarOp + r.aRepassarManual).toFixed(2);
+  r.aRevisar = r.revisarCount;
+  r.nRepassar = r.pendCount + r.manualCount;
+  r.filaCount = r.pendCount + r.revisarCount + r.manualCount;
+  _finRepasseAggCache = { at: Date.now(), v: r };
+  return r;
+}
+
 async function _finCascataMetricas(force){
   if(!force && _finCascataCache.m && (Date.now()-_finCascataCache.at)<30000) return _finCascataCache.m;
   const sb = getSupabase();
@@ -29561,23 +29617,8 @@ async function _finCascataMetricas(force){
   const contasNoGeral = (dim.contas||[]).filter(c=>c.incluir_no_saldo_geral!==false);
   const saldoGeral = contasNoGeral.reduce((s,c)=>s+_saldoConta(c),0);
 
-  let aRepassarOp=0, pendCount=0, revisarCount=0;
-  try{
-    const { data } = await sb.from('fin_operacao').select('valor_capital,repasse_status').limit(5000);
-    for(const o of (data||[])){
-      if(o.repasse_status==='pendente'||o.repasse_status==='preparado'){ aRepassarOp += (+o.valor_capital||0); pendCount++; }
-      else if(o.repasse_status==='revisar') revisarCount++;
-    }
-  }catch(_){}
-  let aRepassarManual=0, manualCount=0;
-  try{
-    if(!(await _finTemColunasCascata())) throw new Error('colunas da cascata ausentes');
-    const { data } = await sb.from('fin_lancamento').select('capital,meu_total,amortizado,valor')
-      .not('cedente_id','is',null).in('repasse_status',['pendente','atrasado']).limit(5000);
-    for(const l of (data||[])){ aRepassarManual += finDivideCascata(l, +l.valor||0).repasseAoCedente; manualCount++; }
-  }catch(_){ /* colunas do PR1 podem não existir ainda — migração não aplicada */ }
-
-  const aRepassar = aRepassarOp + aRepassarManual;
+  const rep = await _finRepasseAgg(force);
+  const aRepassar = rep.aRepassar;
   // Contas que entram no saldo geral com saldo declarado vencido — o "caixa livre" é
   // calculado em cima delas, então a idade precisa aparecer junto com o número.
   const stale = contasNoGeral
@@ -29587,8 +29628,8 @@ async function _finCascataMetricas(force){
   const m = {
     saldoGeral, aRepassar, caixaLivre: saldoGeral - aRepassar, stale,
     contasCount: contasNoGeral.length,
-    filaCount: pendCount + revisarCount + manualCount,
-    repassesCount: pendCount + revisarCount,
+    filaCount: rep.filaCount,
+    repassesCount: rep.pendCount + rep.revisarCount,
   };
   _finCascataCache = { at: Date.now(), m };
   return m;
@@ -30066,25 +30107,11 @@ const FIN_CREDORES_ABAS = [
   {id:'previsao', label:'Previsão',        render:(el)=>renderFinPrevisaoCredor(el)},
 ];
 async function _finCredoresResumo(){
-  const sb = getSupabase(); if(!sb) return null;
-  const ini = new Date(); ini.setDate(1);
-  const iniISO = ini.toISOString().slice(0,10);
-  try{
-    const { data } = await sb.from('fin_operacao')
-      .select('valor_capital,repasse_status,repasse_efetuado_em,recebido_em,credor_id').limit(5000);
-    const r = { aRepassar:0, nRepassar:0, aRevisar:0, repassadoMes:0, credores:new Set(), maisAntigo:null };
-    for(const o of (data||[])){
-      const v = Math.abs(+o.valor_capital||0);
-      if(o.repasse_status==='pendente' || o.repasse_status==='preparado'){
-        r.aRepassar += v; r.nRepassar++; if(o.credor_id) r.credores.add(o.credor_id);
-        // O que está parado há mais tempo é o que dói: o cedente já podia ter recebido.
-        const d = (o.recebido_em||'').slice(0,10);
-        if(d && (!r.maisAntigo || d < r.maisAntigo)) r.maisAntigo = d;
-      } else if(o.repasse_status==='revisar'){ r.aRevisar++; }
-      else if(o.repasse_status==='efetuado' && (o.repasse_efetuado_em||'') >= iniISO){ r.repassadoMes += v; }
-    }
-    return r;
-  }catch(_){ return null; }
+  // Adaptador do derivador único — ver a nota em _finRepasseAgg(). Antes esta função
+  // tinha a sua própria consulta e somava só fin_operacao, enquanto a faixa escura
+  // somava também a divisão manual.
+  if(!getSupabase()) return null;
+  try{ return await _finRepasseAgg(); }catch(_){ return null; }
 }
 async function renderFinCredores(el, aba){
   if(aba) _finCredoresState.aba = aba;
@@ -30094,16 +30121,27 @@ async function renderFinCredores(el, aba){
       <div style="font-size:11.5px;color:#8A94A6;">${lb}</div>
       <div style="font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:600;margin-top:2px;color:${cor||'#0A1530'};">${valor}</div>
       <div style="font-size:10.5px;color:#A6AEBD;margin-top:1px;">${sub}</div>
-    </div>`;
+    </div>`;   // `sub` aceita HTML (o card Divergências passa um link) — nunca receber texto de usuário aqui
   el.innerHTML = `
     <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px;">
-      <div style="font-family:'Fraunces',Georgia,serif;font-size:26px;color:#0A1530;">Credores</div>
+      <div style="font-family:'Fraunces',Georgia,serif;font-size:26px;color:#0A1530;">Recebíveis e repasses</div>
       <div style="font-size:12.5px;color:#8A94A6;">o dinheiro que entrou e é do cedente</div>
     </div>
-    ${r ? `<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:14px 0;">
-      ${card('A repassar', fmtR(r.aRepassar), `${r.nRepassar} operação${r.nRepassar!==1?'ões':''} · ${r.credores.size} credor${r.credores.size!==1?'es':''}`, '#9C7F40')}
-      ${card('A revisar', String(r.aRevisar), 'recebimento sem divisão de capital', r.aRevisar?'#A65A4A':'#0A1530')}
-      ${card('Repassado no mês', fmtR(r.repassadoMes), 'já pago ao cedente', '#4F6B49')}
+    ${r ? `<div style="display:grid;grid-template-columns:1.18fr 1fr 1fr 1fr;gap:12px;margin:14px 0;align-items:stretch;">
+      <div style="background:#0A1530;border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;min-width:0;">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">A repassar agora</div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:26px;font-weight:600;color:#C9A961;white-space:nowrap;margin-top:6px;">${fmtR(r.aRepassar)}</div>
+        <div style="font-size:11.5px;color:#B4BCCC;margin-top:auto;padding-top:6px;">${r.credores.size} cedente${r.credores.size!==1?'s':''}${(()=>{
+          if(!r.maisAntigo) return '';
+          const d = Math.max(0, Math.floor((Date.now()-new Date(r.maisAntigo+'T00:00:00').getTime())/86400000));
+          return ` · o mais antigo há ${d} dia${d!==1?'s':''}`;
+        })()}</div>
+        ${r.aRepassarManual > 0 ? `<div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#E2C98A;margin-top:5px;line-height:1.4;">INCLUI ${fmtR(r.aRepassarManual)} DE DIVISÃO MANUAL — NÃO APARECE NA LISTA ABAIXO</div>` : ''}
+      </div>
+      ${card('Divergências', String(r.aRevisar), r.aRevisar
+          ? `parcela recebida sem divisão calculada<div style="color:#A65A4A;font-size:12px;font-weight:600;cursor:pointer;margin-top:5px;" onclick="_finIrMovimentacoes('divergencias')">Ver na tabela →</div>`
+          : 'nenhuma parcela sem divisão', r.aRevisar?'#A65A4A':'#0A1530')}
+      ${card('Recebido e já repassado', fmtR(r.repassadoMes), 'no mês · já pago ao cedente', '#4F6B49')}
       ${(()=>{ if(!r.maisAntigo) return card('Parado há mais tempo', '—', 'nada pendente', '#5A5F66');
         const dias = Math.max(0, Math.floor((Date.now()-new Date(r.maisAntigo+'T00:00:00').getTime())/86400000));
         return card('Parado há mais tempo', dias+(dias===1?' dia':' dias'), `recebido em ${r.maisAntigo.slice(8,10)}/${r.maisAntigo.slice(5,7)} e não repassado`, dias>=15?'#A65A4A':(dias>=7?'#9C7F40':'#5A5F66'));
