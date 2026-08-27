@@ -4997,6 +4997,9 @@ const STATUS_CFG = {
   'Em contato':{dot:'#C47A00',badge:'b-yellow',cls:'s-emcontato'},
   'Em negociação':{dot:'#D47A00',badge:'b-orange',cls:'s-negociacao'},
   'Acordo':{dot:'#6C3FFF',badge:'b-purple',cls:'s-acordo'},
+  // Termo enviado ao ZapSign, ainda sem assinatura — roxo mais claro que 'Acordo',
+  // para separar a olho o que está fechado do que está só aguardando assinatura.
+  'Acordo enviado':{dot:'#9B7BFF',badge:'b-purple',cls:'s-acordo'},
   'Recebido':{dot:'#0F8A5F',badge:'b-green',cls:'s-recebido'},
   'Fazer ação':{dot:'#C47A00',badge:'b-yellow',cls:'s-facao'},
   'Ação judicial':{dot:'#1A5FB4',badge:'b-blue',cls:'s-judicial'},
@@ -5051,6 +5054,7 @@ const _STATUS_TO_ETAPA_EXTRA = {
   'Em contato':'Em contato', 'Em negociação':'Em contato',
   'Proposta enviada':'Proposta enviada',
   'Acordo firmado':'Acordo', 'Em pagamento':'Acordo', 'Acordo':'Acordo',
+  'Acordo enviado':'Proposta enviada',
   'Quitado':'Quitado', 'Devolvida':'Devolvida', 'Sem êxito':'Sem êxito',
   // Etiquetas unificadas (2026) de natureza extrajudicial → etapa do funil
   '2. Acordo Extrajudicial':'Acordo', '10. Automatizar Micro':'Automatizar',
@@ -6663,7 +6667,10 @@ function onCepInput(input, prefix){
   if(input.value.length === 9) viaCepLookup(input.value, prefix);
 }
 
-async function viaCepLookup(cepStr, prefix, force){
+// `alvo` é o prefixo dos ids no padrão do app ("<alvo>-rua", "<alvo>-bairro"…)
+// OU um objeto {rua,bairro,cidade,uf} com os ids, para telas que fogem do padrão
+// (o formulário do termo de acordo usa tajRua/tajBairro/tajCidade/tajUf).
+async function viaCepLookup(cepStr, alvo, force){
   const cep = String(cepStr||'').replace(/\D/g,'');
   if(cep.length !== 8){
     if(force && typeof toast==='function') toast('CEP inválido. Digite 8 dígitos.', 'error');
@@ -6682,10 +6689,12 @@ async function viaCepLookup(cepStr, prefix, force){
     }
     // Sempre preenche se valor vazio; se force=true, sobrescreve
     const set = (id, val) => { const el = document.getElementById(id); if(el && val && (force || !el.value)) el.value = val; };
-    set(`${prefix}-rua`,         j.logradouro);
-    set(`${prefix}-bairro`,      j.bairro);
-    set(`${prefix}-cidade`,      j.localidade);
-    const ufEl = document.getElementById(`${prefix}-uf`);
+    const ids = (alvo && typeof alvo === 'object') ? alvo
+      : { rua:`${alvo}-rua`, bairro:`${alvo}-bairro`, cidade:`${alvo}-cidade`, uf:`${alvo}-uf` };
+    set(ids.rua,    j.logradouro);
+    set(ids.bairro, j.bairro);
+    set(ids.cidade, j.localidade);
+    const ufEl = document.getElementById(ids.uf);
     if(ufEl && j.uf && (force || !ufEl.value)) ufEl.value = j.uf;
     if(force && typeof toast==='function') toast('Endereço preenchido.', 'success');
   } catch(e){
@@ -15524,7 +15533,7 @@ const _ETIQUETAS_DEFAULT = [
   '4. Ação de Execução de Título Extrajudicial', '10. Automatizar Micro',
   '5. Quitado', '6. Baixados', '7. Reajuizar', '8. Devolvida', '9. Encerrada',
   'Análise', 'Cobrar', 'Baixar', 'Em andamento', 'Para protocolar', 'Fazer ação',
-  'Quita Fácil', 'Orto suspensa'
+  'Quita Fácil', 'Orto suspensa', 'Acordo enviado'
 ];
 // Editável em Configurações → Etiquetas (DB.config.etiquetas). Fallback: lista padrão.
 function _etiquetas(){
@@ -15563,7 +15572,10 @@ function ehRecuperado(status){ return _STATUS_RECUPERADO.has((status||'').trim()
 // Bucket canônico do funil extrajudicial (status → etapa). '' se não mapeado.
 function etapaCanon(status){ return _STATUS_TO_ETAPA_EXTRA[(status||'').trim()] || ''; }
 // Caso "em acordo" (qualquer etiqueta de acordo, nova ou legada).
-function ehAcordo(status){ return /acordo/i.test(status||''); }
+// "Acordo enviado" é termo no ZapSign SEM assinatura — não é acordo fechado.
+// Fica de fora daqui de propósito: senão entra nos contadores de "em acordo" e no
+// macro grupo "acordos", e a tela passa a mostrar como fechado o que ninguém assinou.
+function ehAcordo(status){ const s=String(status||''); return /acordo/i.test(s) && !/acordo\s+enviado/i.test(s); }
 
 const _SITUACOES_EXTRA = [
   'Cobrar', 'Notificação enviada', 'Automatizar', 'Em contato', 'Em negociação',
@@ -18894,6 +18906,9 @@ function cobEtapa(c, sinais){
   // Em análise, a régua para: o valor ou o documento está sob conferência e cobrar
   // agora é cobrar número não confirmado. Vence 'tem processo' pelo mesmo motivo.
   if(/an[áa]lise/i.test(s)) return 'analise';
+  // Termo enviado e não assinado é negociação em aberto, não acordo ativo — a ação
+  // pendente é cobrar a assinatura, não acompanhar parcela (que ainda não existe).
+  if(/acordo\s+enviado/i.test(s)) return 'negociando';
   if(ehAcordo(s)) return 'acordo';
   // Com processo distribuído (e sem acordo) a bola é do juízo, mesmo que a
   // etiqueta tenha ficado para trás (ex.: "Fazer ação" num caso já protocolado).
@@ -18921,7 +18936,7 @@ function cobProximaAcao(c, etapa){
     return 'Redigir inicial';
   }
   if(etapa === 'analise')    return 'Conferir valor com a credora';
-  if(etapa === 'negociando') return 'Aprovar proposta';
+  if(etapa === 'negociando') return /acordo\s+enviado/i.test(c.status||'') ? 'Cobrar assinatura do termo' : 'Aprovar proposta';
   if(etapa === 'acordo')     return (pend && pend.proximaAcao==='cobrar') ? 'Cobrar parcela' : 'Acompanhar parcelas';
   if(etapa === 'em_acao')    return 'Aguardar juízo';
   if(etapa === 'execucao')   return 'Pedir BacenJud';
@@ -26073,7 +26088,7 @@ function _petHeaderHtml(){
     + '<span class="hdr-nome">Dr. Gustavo Souza Teixeira dos Santos <span class="hdr-oab">| OAB/PR 112.743</span></span>'
     + '<span class="hdr-nome">Dra. Ana Clara Azzolin O. Teixeira dos Santos <span class="hdr-oab">| OAB/PR 119.424</span></span>'
     + '<span class="hdr-linha">46 999 22-3332</span>'
-    + '<span class="hdr-linha">contato@teixeiraadvogadosdv.com.br</span></div></div>';
+    + '<span class="hdr-linha">adv.teixeiraeazzolin@gmail.com</span></div></div>';
 }
 // Data por extenso no padrão da skill (dia e ano em algarismo, mês por extenso).
 function _petDataExtenso(){
@@ -40383,6 +40398,21 @@ let _mv2SoCredor = false;
 const _TAJ_COBRASQ_NOME = 'COBRASQ Recuperadora de Crédito e Cobrança Ltda.';
 const _TAJ_QUALIF_COBRASQ = 'sociedade empresária limitada, inscrita no CNPJ sob n. 34.626.848/0001-42, com endereço na Av. Rio Grande do Sul, n. 380, sala 201, centro, CEP 85660-000, município de Dois Vizinhos, Estado do Paraná.';
 let _tajState = { devId:null, html:'', editando:false, seq:0 };
+// O CEP do formulário do termo não preenchia nada: o campo era um input cru, sem
+// máscara e sem ViaCEP. Os ids daqui (tajRua/tajBairro/…) não seguem o padrão
+// "<prefixo>-rua" do resto do app, por isso o mapa explícito.
+const _TAJ_CEP_ALVO = { rua:'tajRua', bairro:'tajBairro', cidade:'tajCidade', uf:'tajUf' };
+function _tajCepInput(el){
+  maskCEP(el);
+  // force=false: preenche só campo vazio — não sobrescreve o endereço que veio do
+  // cadastro do devedor nem o que o usuário já digitou.
+  if(el.value.length === 9) viaCepLookup(el.value, _TAJ_CEP_ALVO);
+}
+// Situação aplicada ao caso quando o termo vai para assinatura (botão "Enviar pro
+// ZapSign"). Fica entre "Proposta enviada" e "Acordo": o termo saiu, mas ninguém
+// assinou ainda. NÃO entra em _STATUS_FORA_REGUA — decisão do Gustavo em 27/08:
+// quem recebeu o termo e não assina continua na régua da Bia.
+const _TAJ_STATUS_ENVIADO = 'Acordo enviado';
 function _tajTipoDoc(doc){ return String(doc||'').replace(/\D/g,'').length>11 ? 'PJ' : 'PF'; }
 function _tajHojeISO(){ return new Date().toISOString().slice(0,10); }
 function _tajMaisDias(d){ const x=new Date(); x.setDate(x.getDate()+d); return x.toISOString().slice(0,10); }
@@ -40437,7 +40467,7 @@ function abrirTermoAcordoJ(devId){
   <div style="grid-column:1/3;font-size:11px;font-weight:700;color:var(--text-3);border-top:1px solid var(--border);padding-top:8px;">ENDEREÇO DO DEVEDOR</div>
   ${F('tajRua','Rua',end.rua)}${F('tajNumero','Nº',end.numero)}
   ${F('tajBairro','Bairro',end.bairro)}${F('tajCidade','Cidade',end.cidade)}
-  ${F('tajUf','UF',end.uf)}${F('tajCep','CEP',end.cep)}
+  ${F('tajUf','UF',end.uf)}${F('tajCep','CEP',end.cep,'placeholder="00000-000" oninput="_tajCepInput(this)"')}
   <div style="grid-column:1/3;border-top:1px solid var(--border);padding-top:8px;display:flex;justify-content:space-between;align-items:center;">
     <strong style="font-size:12px;">Outros devedores que assinam</strong>
     <button type="button" class="btn btn-ghost btn-sm" onclick="_tajAddDevedor()">+ Adicionar</button></div>
@@ -40750,6 +40780,13 @@ async function tajEnviarZapSign(){
       else{ const motivo=r?.error||'falha Z-API'; nota+=` · ${s.nome||'?'}: falha (${motivo})`; waFalhas.push({ nome:s.nome||'?', link:s.link, tel, motivo }); }
     }
     if(typeof logAtividade==='function') logAtividade('Termo de acordo enviado ao ZapSign', `${dados.tipo} — ${dev.nome||''}${nota}`, dev.id);
+    // Situação do caso: o termo foi para assinatura. Vai por _setStatusCobrancaReal,
+    // que grava direto em `cobrancas` (a view `casos` recalcula status no trigger e
+    // derrubaria o valor) e replica no blob, que é o que o portal do cedente lê.
+    try{
+      const cAtual=(DB_cobrancas||[]).find(x=>x.id===_tajState.devId);
+      if(!cAtual || cAtual.status!==_TAJ_STATUS_ENVIADO) await _setStatusCobrancaReal(_tajState.devId, _TAJ_STATUS_ENVIADO);
+    }catch(e){ console.warn('[taj] status não gravado:', e && e.message); }
     document.getElementById('taj-prev').style.display='none';
     if(!waFalhas.length){
       showToast('Termo enviado ao ZapSign. Link de assinatura enviado por WhatsApp.','success');
