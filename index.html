@@ -29258,7 +29258,7 @@ function finDivideCascata(lancamento, valorRecebido, contrato){
 // FIN_CASCATA_UI_TABS; o resto vive nos menus suspensos (FIN_MENUS). Id fora desta
 // lista fica inalcançável — ao acrescentar uma tela, entrar aqui E num dos dois.
 // O corpo de toda aba continua sendo montado por renderFinTab, que não mudou.
-const FIN_CASCATA_TABS = ['fila','visao','lancamentos','repasses','previsaocredor','receitasjudiciais',
+const FIN_CASCATA_TABS = ['credores','fila','visao','lancamentos','repasses','previsaocredor','receitasjudiciais',
   'conciliacao','fechamento','contas','cartoes','categorias','contatos','centroscusto',
   'transferencias','recorrencias','asaas','judicial','relatorios','diagnostico'];
 // Menus suspensos da barra. Só Painel e Lançamentos ficam como aba fixa; o resto vive
@@ -29266,13 +29266,6 @@ const FIN_CASCATA_TABS = ['fila','visao','lancamentos','repasses','previsaocredo
 // que ainda não têm destino decidido — nada foi removido, só saiu da barra para poder
 // ser avaliado uma a uma antes de fundir, mover ou aposentar.
 const FIN_MENUS = [
-  {id:'credores', label:'Credores', grupos:[
-    {grupo:'Dinheiro de terceiro', itens:[
-      {id:'fila', label:'Fila · precisa de você'},
-      {id:'repasses', label:'Repasses a fazer'},
-      {id:'previsaocredor', label:'Previsão por credor'},
-    ]},
-  ]},
   {id:'outros', label:'Outros', grupos:[
     {grupo:'Sem destino decidido', itens:[
       {id:'receitasjudiciais', label:'Judicial (Sisbajud e penhora)'},
@@ -29589,6 +29582,7 @@ async function _finCascataMetricas(force){
 const FIN_CASCATA_UI_TABS = [
   {id:'visao', label:'Painel'},
   {id:'lancamentos', label:'Lançamentos'},
+  {id:'credores', label:'Credores'},
 ];
 function _finCascataIrPara(tabId){
   setFinTab(tabId);
@@ -29860,6 +29854,7 @@ async function renderFinanceiroCascata(el, activeTab){
       stEl.title = s.length ? s.map(x=>`${x.nome}: ${_finSaldoIdadeTexto(x.dias)}`).join(' · ') : '';
     }
     set('fincx-contascount', m.contasCount);
+    set('fincx-cnt-credores', m.filaCount);
     set('fincx-cnt-fila', m.filaCount);
     set('fincx-cnt-repasses', m.repassesCount);
     set('fincx-cnt-conciliacao', '—');
@@ -29929,6 +29924,79 @@ async function _finFilaCarregar(){
   const ordem = {divergencia:0, repasse:1, recebimento:2};
   itens.sort((a,b)=>ordem[a.tipo]-ordem[b.tipo]);
   return itens;
+}
+
+// ══════════════════════════════════════════════════════════════
+// CREDORES — o dinheiro de terceiro num lugar só
+// ──────────────────────────────────────────────────────────────
+// Junta as três telas que tratavam do capital do cedente e viviam separadas na barra:
+// a Fila (o que precisa de decisão), Repasses (a fazer e feitos) e Previsão por credor.
+// NENHUMA delas foi reescrita — cada sub-aba delega para o render original, que já
+// recebia um elemento e escrevia nele. O que muda é a porta de entrada: uma só, com o
+// dinheiro somado no topo, em vez de três abas que mostravam recortes do mesmo
+// fin_operacao. Os ids antigos ('fila', 'repasses', 'previsaocredor') continuam válidos
+// e caem aqui na sub-aba certa, para não quebrar link de dentro de outra tela.
+let _finCredoresState = { aba:'fila' };
+const FIN_CREDORES_ABAS = [
+  {id:'fila',     label:'Precisa de você', render:(el)=>renderFinFila(el)},
+  {id:'repasses', label:'Repasses',        render:(el)=>renderFinRepassesCascata(el)},
+  {id:'previsao', label:'Previsão',        render:(el)=>renderFinPrevisaoCredor(el)},
+];
+async function _finCredoresResumo(){
+  const sb = getSupabase(); if(!sb) return null;
+  const ini = new Date(); ini.setDate(1);
+  const iniISO = ini.toISOString().slice(0,10);
+  try{
+    const { data } = await sb.from('fin_operacao')
+      .select('valor_capital,repasse_status,repasse_efetuado_em,recebido_em,credor_id').limit(5000);
+    const r = { aRepassar:0, nRepassar:0, aRevisar:0, repassadoMes:0, credores:new Set(), maisAntigo:null };
+    for(const o of (data||[])){
+      const v = Math.abs(+o.valor_capital||0);
+      if(o.repasse_status==='pendente' || o.repasse_status==='preparado'){
+        r.aRepassar += v; r.nRepassar++; if(o.credor_id) r.credores.add(o.credor_id);
+        // O que está parado há mais tempo é o que dói: o cedente já podia ter recebido.
+        const d = (o.recebido_em||'').slice(0,10);
+        if(d && (!r.maisAntigo || d < r.maisAntigo)) r.maisAntigo = d;
+      } else if(o.repasse_status==='revisar'){ r.aRevisar++; }
+      else if(o.repasse_status==='efetuado' && (o.repasse_efetuado_em||'') >= iniISO){ r.repassadoMes += v; }
+    }
+    return r;
+  }catch(_){ return null; }
+}
+async function renderFinCredores(el, aba){
+  if(aba) _finCredoresState.aba = aba;
+  const atual = FIN_CREDORES_ABAS.find(a=>a.id===_finCredoresState.aba) || FIN_CREDORES_ABAS[0];
+  const r = await _finCredoresResumo();
+  const card = (lb, valor, sub, cor) => `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:12px 15px;min-width:0;">
+      <div style="font-size:11.5px;color:#8A94A6;">${lb}</div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:600;margin-top:2px;color:${cor||'#0A1530'};">${valor}</div>
+      <div style="font-size:10.5px;color:#A6AEBD;margin-top:1px;">${sub}</div>
+    </div>`;
+  el.innerHTML = `
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px;">
+      <div style="font-family:'Fraunces',Georgia,serif;font-size:26px;color:#0A1530;">Credores</div>
+      <div style="font-size:12.5px;color:#8A94A6;">o dinheiro que entrou e é do cedente</div>
+    </div>
+    ${r ? `<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:14px 0;">
+      ${card('A repassar', fmtR(r.aRepassar), `${r.nRepassar} operação${r.nRepassar!==1?'ões':''} · ${r.credores.size} credor${r.credores.size!==1?'es':''}`, '#9C7F40')}
+      ${card('A revisar', String(r.aRevisar), 'recebimento sem divisão de capital', r.aRevisar?'#A65A4A':'#0A1530')}
+      ${card('Repassado no mês', fmtR(r.repassadoMes), 'já pago ao cedente', '#4F6B49')}
+      ${(()=>{ if(!r.maisAntigo) return card('Parado há mais tempo', '—', 'nada pendente', '#5A5F66');
+        const dias = Math.max(0, Math.floor((Date.now()-new Date(r.maisAntigo+'T00:00:00').getTime())/86400000));
+        return card('Parado há mais tempo', dias+(dias===1?' dia':' dias'), `recebido em ${r.maisAntigo.slice(8,10)}/${r.maisAntigo.slice(5,7)} e não repassado`, dias>=15?'#A65A4A':(dias>=7?'#9C7F40':'#5A5F66'));
+      })()}
+    </div>` : '<div style="height:14px;"></div>'}
+    <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+      ${FIN_CREDORES_ABAS.map(a=>`<div onclick="_finCredoresIr('${a.id}')" style="padding:7px 15px;border-radius:20px;font-size:12.5px;cursor:pointer;white-space:nowrap;${a.id===atual.id?'background:#0A1530;border:1px solid #0A1530;color:#fff;':'background:#fff;border:1px solid #E6E1D2;color:#5A5F66;'}">${escHtml(a.label)}</div>`).join('')}
+    </div>
+    <div id="fin-credores-corpo"></div>`;
+  const corpo = document.getElementById('fin-credores-corpo');
+  if(corpo) await atual.render(corpo);
+}
+function _finCredoresIr(id){
+  _finCredoresState.aba = id;
+  const el = document.getElementById('fin-content');
+  if(el) renderFinCredores(el);
 }
 
 async function renderFinFila(el){
@@ -30097,7 +30165,7 @@ let _finFilaKeyHandler = null;
 function _finFilaKeyboardOn(){
   _finFilaKeyboardOff();
   _finFilaKeyHandler = (e)=>{
-    if(window._finTab!=='fila'){ _finFilaKeyboardOff(); return; }
+    if(!_finFilaEstaNaTela()){ _finFilaKeyboardOff(); return; }
     const ae = document.activeElement;
     if(ae && /INPUT|TEXTAREA|SELECT/.test(ae.tagName)) return;
     const n = _finFilaItensFiltrados().length; if(!n) return;
@@ -30107,6 +30175,12 @@ function _finFilaKeyboardOn(){
     else if(e.key===' '){ e.preventDefault(); _finFilaToggleEsteira(_finFilaState.foco); }
   };
   document.addEventListener('keydown', _finFilaKeyHandler);
+}
+// A Fila deixou de ser aba própria: virou sub-aba de Credores. O teclado (J/K/Enter/
+// Espaço) vale nos dois caminhos — pelo id antigo, que ainda funciona por link direto,
+// e pela sub-aba.
+function _finFilaEstaNaTela(){
+  return window._finTab==='fila' || (window._finTab==='credores' && _finCredoresState.aba==='fila');
 }
 function _finFilaKeyboardOff(){ if(_finFilaKeyHandler){ document.removeEventListener('keydown', _finFilaKeyHandler); _finFilaKeyHandler=null; } }
 
@@ -31454,10 +31528,11 @@ async function _finRepassePagarParcela(parcelaId){
 function renderFinTab(tab){
   const el = document.getElementById('fin-content');
   if(!el) return;
-  if(tab!=='fila') _finFilaKeyboardOff();
+  if(tab!=='fila' && tab!=='credores') _finFilaKeyboardOff();
 
   if(tab==='visao') renderFinVisao(el);
-  else if(tab==='fila') renderFinFila(el);
+  else if(tab==='credores') renderFinCredores(el);
+  else if(tab==='fila') renderFinCredores(el, 'fila');
   // 'lancamentos' agora é a tela nova (handoff 07/08) — ver FIN_CASCATA_TABS. A aba
   // Judicial (renderFinReceitasJudiciais) NÃO passa por aqui: chama renderFinLancamentos
   // (a implementação antiga, intacta) diretamente, então continua funcionando igual.
@@ -31475,8 +31550,8 @@ function renderFinTab(tab){
   else if(tab==='relatorios') renderFinRelatorios(el);
   else if(tab==='cartoes') renderFinCartoes(el);
   else if(tab==='asaas') renderFinAsaas(el);
-  else if(tab==='repasses') renderFinRepassesCascata(el);
-  else if(tab==='previsaocredor') renderFinPrevisaoCredor(el);
+  else if(tab==='repasses') renderFinCredores(el, 'repasses');
+  else if(tab==='previsaocredor') renderFinCredores(el, 'previsao');
   else if(tab==='diagnostico') renderFinDiagnostico(el);
 }
 
