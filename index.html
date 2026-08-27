@@ -30204,6 +30204,51 @@ async function renderFinanceiroCascata(el, activeTab){
 // até o drawer do PR3). Sem itens fabricados: chip só aparece se tiver ≥1 item real. ──
 let _finFilaState = { itens:[], foco:0, aberto:null, chip:'tudo', resolvidosHoje:0 };
 
+// ══════════════════════════════════════════════════════════════
+// FILA "PRECISA DE VOCÊ" — o diagnóstico em português
+// ──────────────────────────────────────────────────────────────
+// A fila dizia "DIVERGÊNCIA · FIN_OPERACAO", "sem base de capital confiável",
+// "Webhook Asaas não achou base (sem acordo.valor_total ou capital_credor)" e
+// "parcela 2/null". Nome de tabela, nome de coluna e um null cru na cara de quem usa.
+// Não dava para saber o que houve nem o que fazer — só dois campos para digitar no escuro.
+//
+// Pior: a tela escondia o que resolve o caso. Levantamento de 27/08/2026 nas 43
+// operações em revisão: 35 JÁ TINHAM o repasse lançado pelo Gustavo, como série de
+// despesas futuras nomeadas pelo devedor. A fila não olhava para lá, então pedia
+// decisão sobre algo que já estava decidido.
+//
+// Agora cada linha carrega o diagnóstico, a prova (o repasse que já existe) e a ação
+// que corresponde ao caso. Os seis casos abaixo cobrem as 43.
+const FIN_FILA_CASOS = {
+  propria:       { lb:'CARTEIRA PRÓPRIA',        cor:'#6B7683' },
+  sem_devedor:   { lb:'PAGAMENTO NÃO IDENTIFICADO', cor:'#A65A4A' },
+  conflito:      { lb:'CEDENTES EM CONFLITO',    cor:'#A65A4A' },
+  falta_cedente: { lb:'FALTA O CEDENTE',         cor:'#3A5288' },
+  ja_lancado:    { lb:'REPASSE JÁ LANÇADO',      cor:'#4C6647' },
+  sem_repasse:   { lb:'SEM REPASSE LANÇADO',     cor:'#9C7F40' },
+};
+// Casa o repasse pelo NOME do devedor, porque a despesa não guarda referência à
+// operação — só o nome na descrição, no padrão "Fulano de Tal 3/12". Heurística
+// assumida: dois homônimos casariam errado, por isso a tela mostra a evidência
+// (quantas parcelas, que valor, para quem) em vez de decidir sozinha.
+function _finFilaCasaRepasse(nomeDevedor, despesas){
+  if(!nomeDevedor) return null;
+  const partes = String(nomeDevedor).trim().split(/\s+/);
+  if(partes.length < 2) return null;
+  const pri = partes[0].toLowerCase(), ult = partes[partes.length-1].toLowerCase();
+  const achadas = despesas.filter(l=>{
+    const d = (l.descricao||'').toLowerCase();
+    return d.includes(pri) && d.includes(ult);
+  });
+  if(!achadas.length) return null;
+  const credores = [...new Set(achadas.map(l => l._credorNome).filter(Boolean))];
+  return {
+    n: achadas.length,
+    total: +achadas.reduce((s,l) => s + Math.abs(+l.valor||0), 0).toFixed(2),
+    credores,
+    credorNome: credores.length === 1 ? credores[0] : null,
+  };
+}
 async function _finFilaCarregar(){
   const sb = getSupabase();
   let ops = [];
@@ -30218,47 +30263,102 @@ async function _finFilaCarregar(){
 
   const credIds=[...new Set(ops.map(o=>o.credor_id).filter(Boolean))];
   const devIds=[...new Set(ops.map(o=>o.devedor_id).filter(Boolean))];
-  let credMap={}, devMap={};
-  if(credIds.length){ const {data}=await sb.from('clientes').select('id,nome').in('id',credIds); (data||[]).forEach(c=>credMap[c.id]=c.nome); }
+  let credMap={}, devMap={}, cobMap={};
+  if(credIds.length){ const {data}=await sb.from('clientes').select('id,nome,nome_fantasia').in('id',credIds); (data||[]).forEach(c=>credMap[c.id]=c.nome_fantasia||c.nome); }
   if(devIds.length){ const {data}=await sb.from('devedores').select('id,nome').in('id',devIds); (data||[]).forEach(d=>devMap[d.id]=d.nome); }
-
-  let manual = [];
+  // A cobrança dá a dívida original e a de hoje — é o que permite dizer na tela
+  // "R$ 271,00 de uma dívida de R$ 1.208,00" em vez de só o valor solto.
+  if(devIds.length){
+    try{ const {data}=await sb.from('cobrancas').select('id,valor_orig,valor_atual,status').in('id',devIds);
+      (data||[]).forEach(c=>cobMap[c.id]=c); }catch(_){}
+  }
+  // Todas as despesas de repasse de uma vez (520 no total em 27/08/2026, então cabe).
+  // Tarifa do Asaas fica de fora: ela também carrega o nome do devedor na descrição e
+  // seria contada como se fosse repasse — R$ 1,99 virando "repasse lançado".
+  let despesas = [];
   try{
-    if(!(await _finTemColunasCascata())) throw new Error('colunas da cascata ausentes');
     const { data } = await sb.from('fin_lancamento')
-      .select('id,descricao,valor,data_competencia,cedente_id')
-      .not('cedente_id','is',null).is('capital', null).limit(200);
-    manual = data||[];
-  }catch(_){ /* colunas do PR1 podem não existir ainda — migração não aplicada */ }
-  const mCedIds=[...new Set(manual.map(m=>m.cedente_id).filter(Boolean))];
-  if(mCedIds.length){ const {data}=await sb.from('clientes').select('id,nome').in('id',mCedIds); (data||[]).forEach(c=>credMap[c.id]=c.nome); }
+      .select('id,descricao,valor,credor_id,data_competencia')
+      .eq('tipo_movimento',0).not('descricao','ilike','%tarifa%').limit(2000);
+    despesas = data||[];
+    const ids = [...new Set(despesas.map(l=>l.credor_id).filter(Boolean))];
+    if(ids.length){
+      const { data:cs } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', ids);
+      const m = {}; (cs||[]).forEach(c=>m[c.id]=c.nome_fantasia||c.nome);
+      despesas.forEach(l=>{ l._credorNome = l.credor_id ? (m[l.credor_id]||null) : null; });
+    }
+  }catch(e){ console.warn('Fila: despesas de repasse', e); }
 
-  const diasDesde = s => { if(!s) return null; const d=new Date(s+'T00:00:00'); return Math.max(0, Math.floor((Date.now()-d)/86400000)); };
+  const diasDesde = s => { if(!s) return null; const d=new Date(String(s).slice(0,10)+'T00:00:00'); return Math.max(0, Math.floor((Date.now()-d)/86400000)); };
+  const dm = s => { s=String(s||'').slice(0,10); return s ? s.slice(8,10)+'/'+s.slice(5,7) : '—'; };
   const itens = [];
+
   for(const o of ops){
     const dias = diasDesde(o.recebido_em);
-    if(o.repasse_status==='revisar'){
-      itens.push({ tipo:'divergencia', cor:'#9C7F40', op:o, foraPrazo:false,
-        eyebrow:'DIVERGÊNCIA · FIN_OPERACAO',
-        titulo:`${devMap[o.devedor_id]||'Devedor não identificado'}${o.parcela?` · parcela ${o.parcela}/${o.total_parcelas}`:''}`,
-        subtitulo: o.credor_id ? `Recebido ${fmtR(o.valor_recebido)} sem base de capital confiável — decidir manualmente.` : `Recebido ${fmtR(o.valor_recebido)} — devedor sem cliente/credor vinculado.`,
-        valor:o.valor_recebido, automatizavel:false });
-    } else {
+    const devedor = devMap[o.devedor_id] || null;
+    const credor = o.credor_id ? (credMap[o.credor_id] || null) : null;
+
+    if(o.repasse_status !== 'revisar'){
       itens.push({ tipo:'repasse', cor:'#C9A961', op:o, foraPrazo: dias!=null && dias>5,
-        eyebrow:'REPASSE · FIN_OPERACAO',
-        titulo:`${credMap[o.credor_id]||'Cedente'} · ${devMap[o.devedor_id]||'—'}`,
+        eyebrow:'A REPASSAR',
+        titulo:`${credor||'Cedente'} · ${devedor||'—'}`,
         subtitulo:`Recebido ${fmtR(o.valor_recebido)} há ${dias==null?'—':dias+' dia'+(dias!==1?'s':'')} · seu ${fmtR(o.valor_honorario)}`,
         valor:o.valor_capital, automatizavel:true });
+      continue;
     }
+
+    // ── Diagnóstico das que travaram ────────────────────────────────────────────
+    const rep = _finFilaCasaRepasse(devedor, despesas);
+    const cob = cobMap[o.devedor_id] || null;
+    const ehPropria = /cobrasq/i.test(credor||'');
+    let caso, diag, acao = null;
+
+    if(ehPropria){
+      caso = 'propria';
+      diag = 'O crédito é da própria COBRASQ — não há cedente para receber. Este pagamento não gera repasse.';
+      acao = { label:'Marcar como sem repasse', fn:`_finFilaSemRepasse('${o.id}')` };
+    } else if(!devedor){
+      caso = 'sem_devedor';
+      diag = 'O pagamento caiu na conta mas não foi possível saber de quem é — o cliente do Asaas não bate com nenhum cadastro. Identifique o devedor antes de dividir.';
+    } else if(rep && rep.credorNome && credor && !rep.credorNome.toLowerCase().includes(credor.toLowerCase()) && !credor.toLowerCase().includes(rep.credorNome.toLowerCase())){
+      caso = 'conflito';
+      diag = `O recebimento está em ${credor}, mas o repasse lançado é para ${rep.credorNome}. Um dos dois está errado — confira antes de repassar, senão o dinheiro sai para a empresa errada.`;
+    } else if(rep && !credor){
+      caso = 'falta_cedente';
+      diag = `Você já lançou o repasse deste caso, para ${rep.credorNome || 'um cedente'}. Falta só dizer que o recebimento é desse mesmo cedente.`;
+      if(rep.credorNome) acao = { label:`Usar ${rep.credorNome}`, fn:`_finFilaAdotarCedenteDoRepasse('${o.id}')` };
+    } else if(rep){
+      caso = 'ja_lancado';
+      diag = 'Você já lançou o repasse deste caso. Não há nada a decidir aqui — é só confirmar para sair da fila.';
+      acao = { label:'Confirmar e tirar da fila', fn:`_finFilaConfirmarRepasseExistente('${o.id}')` };
+    } else {
+      caso = 'sem_repasse';
+      diag = 'Este pagamento entrou sem acordo vinculado, então o sistema não soube quanto é capital do cedente e quanto é seu. Não há repasse lançado para este devedor.';
+    }
+
+    const cfg = FIN_FILA_CASOS[caso];
+    const ctx = [];
+    if(o.recebido_em) ctx.push(`recebido em ${dm(o.recebido_em)}`);
+    if(cob && +cob.valor_orig) ctx.push(`dívida de ${fmtR(cob.valor_orig)}${+cob.valor_atual && +cob.valor_atual !== +cob.valor_orig ? ` · hoje ${fmtR(cob.valor_atual)}` : ''}`);
+    if(credor) ctx.push(`cedente ${credor}`);
+
+    itens.push({
+      tipo:'divergencia', caso, cor:cfg.cor, op:o, foraPrazo:false, automatizavel:false,
+      eyebrow: cfg.lb,
+      // "parcela 2/null" saía quando total_parcelas era nulo — o null ia cru para a tela.
+      titulo: `${devedor || 'Pagamento sem devedor identificado'}${o.parcela && o.total_parcelas ? ` · parcela ${o.parcela}/${o.total_parcelas}` : ''}`,
+      subtitulo: ctx.join(' · '),
+      diag, acao, rep, cob, credor, devedor,
+      valor: o.valor_recebido,
+    });
   }
-  for(const m of manual){
-    itens.push({ tipo:'recebimento', cor:'#5E7C58', lanc:m, foraPrazo:false,
-      eyebrow:'RECEBIMENTO · FIN_LANCAMENTO', titulo: m.descricao||'Lançamento sem descrição',
-      subtitulo:`Cedente vinculado (${credMap[m.cedente_id]||'—'}) · divisão da cascata ainda não calculada.`,
-      valor:m.valor, automatizavel:false });
-  }
-  const ordem = {divergencia:0, repasse:1, recebimento:2};
-  itens.sort((a,b)=>ordem[a.tipo]-ordem[b.tipo]);
+
+  // Ordem: o que exige decisão primeiro; o que só precisa de confirmação por último.
+  const ordem = { sem_devedor:0, conflito:1, sem_repasse:2, falta_cedente:3, ja_lancado:4, propria:5 };
+  itens.sort((a,b)=>{
+    if(a.tipo !== b.tipo) return (a.tipo==='divergencia'?0:1) - (b.tipo==='divergencia'?0:1);
+    return (ordem[a.caso] ?? 9) - (ordem[b.caso] ?? 9);
+  });
   return itens;
 }
 
@@ -30702,6 +30802,12 @@ function _finFilaRender(){
       .fe-r-row{display:flex;justify-content:space-between;font-size:13px;padding:5px 0;color:#5A5F66;}
       .fe-r-row b{font-family:'JetBrains Mono',monospace;color:#0A1530;}
       .fe-note{font-size:12px;color:#8A94A6;margin-top:8px;line-height:1.5;}
+      .fe-diag{font-size:13.5px;color:#0A1530;line-height:1.55;max-width:66ch;}
+      .fe-prova{margin-top:12px;background:#fff;border:1px solid #CFE0CB;border-left:3px solid #5E7C58;border-radius:8px;padding:11px 13px;display:inline-block;}
+      .fe-prova-lb{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:#4C6647;}
+      .fe-prova-v{font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:600;color:#0A1530;margin-top:3px;}
+      .fe-prova-sub{font-size:12px;color:#6B7683;margin-top:1px;}
+      .fe-alerta{margin-top:12px;background:#FBEAE7;border:1px solid #E7CFC7;border-radius:8px;padding:10px 13px;font-size:12.5px;color:#7D3F33;}
       .fila-divform label{display:block;font-size:12px;color:#6B7683;margin-top:8px;}
       .fila-divform input{width:100%;margin-top:4px;padding:9px 11px;border:1px solid #E6E1D2;border-radius:7px;font-size:14px;font-family:'JetBrains Mono',monospace;}
       .fila-foot{margin-top:14px;padding:14px 18px;background:#fff;border:1px solid #E6E1D2;border-radius:10px;font-size:13px;color:#6B7683;}
@@ -30740,45 +30846,107 @@ function _finFilaRowHtml(it, i){
       </div>
     </div>${aberto ? _finFilaEsteiraHtml(it) : ''}`;
 }
+// Painel "Passos". Antes ele repetia a mensagem interna do webhook — nome de coluna e
+// tudo — e oferecia dois campos vazios. Agora mostra o diagnóstico, a PROVA (o repasse
+// que já existe, com quantas parcelas e para quem) e só pede divisão quando é isso
+// mesmo que falta.
 function _finFilaEsteiraHtml(it){
   if(it.tipo==='repasse'){
     const o = it.op;
     return `<div class="fila-esteira">
-      <div><div class="fe-passo"><span class="fe-box">☐</span><span>Repassar ${fmtR(o.valor_capital)} ao cedente via Pix</span><span class="fe-origem">fin_operacao</span></div>
-      <div class="fe-passo"><span class="fe-box">☐</span><span>Registrar comprovante e concluir o repasse</span><span class="fe-origem">/api/repassar</span></div></div>
+      <div><div class="fe-passo"><span class="fe-box">☐</span><span>Repassar ${fmtR(o.valor_capital)} ao cedente via Pix</span></div>
+      <div class="fe-passo"><span class="fe-box">☐</span><span>Registrar o comprovante e concluir o repasse</span></div></div>
       <div class="fe-rateio">
         <div class="fe-r-row"><span>Recebido</span><b>${fmtR(o.valor_recebido)}</b></div>
         <div class="fe-r-row"><span>Fica com você</span><b style="color:#5E7C58;">${fmtR(o.valor_honorario)}</b></div>
         <div class="fe-r-row"><span>Cedente recebe</span><b style="color:#9C7F40;">${fmtR(o.valor_capital)}</b></div>
-        <div class="fe-note">Split calculado pelo webhook Asaas (proporcional por parcela) — ainda não é a ordem "seu excedente primeiro" do handoff (isso vem quando o lançamento nasce manual, com a cascata do PR1).</div>
       </div>
     </div>`;
   }
-  if(it.tipo==='divergencia'){
+  if(it.tipo === 'divergencia'){
     const o = it.op;
-    const bloqueado = !o.credor_id;
-    const capSugerido = +((o.metadata&&o.metadata.capital_base)||0) || 0;
-    const honSugerido = Math.max(0, (+o.valor_recebido||0) - capSugerido);
+    const prova = it.rep ? `<div class="fe-prova">
+        <div class="fe-prova-lb">Repasse que você já lançou</div>
+        <div class="fe-prova-v">${it.rep.n} ${it.rep.n===1?'parcela':'parcelas'} · ${fmtR(it.rep.total)}</div>
+        <div class="fe-prova-sub">${it.rep.credorNome ? 'para '+escHtml(it.rep.credorNome) : (it.rep.credores.length>1 ? 'para '+escHtml(it.rep.credores.join(' e ')) : 'sem cedente no lançamento')}</div>
+      </div>` : '';
+
+    // Só o caso "sem repasse" pede números. Nos outros, pedir divisão seria pedir de
+    // novo uma decisão que já foi tomada.
+    const pedeDivisao = it.caso === 'sem_repasse';
+    const cap = (it.cob && +it.cob.valor_orig && +it.cob.valor_atual)
+      ? Math.min(+o.valor_recebido, +(( +o.valor_recebido * (+it.cob.valor_orig / +it.cob.valor_atual) ).toFixed(2)))
+      : 0;
+    const hon = Math.max(0, +((+o.valor_recebido - cap).toFixed(2)));
+
     return `<div class="fila-esteira">
-      <div><div class="fe-passo"><span class="fe-box">☐</span><span>Webhook Asaas não achou base de capital confiável (sem acordo.valor_total ou capital_credor)</span><span class="fe-origem">fin_operacao</span></div>
-      ${bloqueado ? `<div class="fe-passo"><span class="fe-box">☐</span><span style="color:#A65A4A;">Devedor sem cliente/credor vinculado — resolver o cadastro antes</span><span class="fe-origem">devedores</span></div>` : ''}</div>
-      <div class="fe-rateio">${bloqueado ? `<div class="fe-note" style="color:#7D3F33;">Sem credor vinculado — não dá para dividir por aqui. Verifique o cadastro do devedor (cliente_id).</div>` : `
+      <div>
+        <div class="fe-diag">${escHtml(it.diag)}</div>
+        ${prova}
+        ${it.acao ? `<button class="fila-btn dark" style="margin-top:12px;" onclick="event.stopPropagation();${it.acao.fn}">${escHtml(it.acao.label)}</button>` : ''}
+        ${it.caso==='sem_devedor' ? `<button class="fila-btn" style="margin-top:12px;" onclick="event.stopPropagation();setFinTab('lancamentos')">Procurar em Movimentações →</button>` : ''}
+        ${it.caso==='conflito' ? `<div class="fe-alerta">Não vincule enquanto não souber qual dos dois cedentes é o certo.</div>` : ''}
+      </div>
+      <div class="fe-rateio">${pedeDivisao ? `
         <div class="fila-divform">
-          <label>Capital do cedente<input type="text" inputmode="decimal" id="filadiv-cap-${o.id}" value="${capSugerido.toFixed(2)}" oninput="_finFilaDivRecalc('${o.id}',${+o.valor_recebido||0})"></label>
-          <label>Fica com a COBRASQ<input type="text" inputmode="decimal" id="filadiv-hon-${o.id}" value="${honSugerido.toFixed(2)}"></label>
-          <div class="fe-note">Recebido ${fmtR(o.valor_recebido)} — os dois campos precisam somar esse valor.${capSugerido?' Capital sugerido a partir do acordo/cobrança vinculado.':''}</div>
-          <button class="fila-btn dark" style="margin-top:8px;" onclick="_finFilaSalvarDivisao('${o.id}')">Salvar divisão</button>
-        </div>`}
+          <label>Capital do cedente<input type="text" inputmode="decimal" id="filadiv-cap-${o.id}" value="${cap.toFixed(2)}" oninput="_finFilaDivRecalc('${o.id}',${+o.valor_recebido||0})"></label>
+          <label>Fica com a COBRASQ<input type="text" inputmode="decimal" id="filadiv-hon-${o.id}" value="${hon.toFixed(2)}"></label>
+          <div class="fe-note">Os dois campos precisam somar ${fmtR(o.valor_recebido)}.${cap ? ` Sugestão pela proporção da dívida (${fmtR(it.cob.valor_orig)} de ${fmtR(it.cob.valor_atual)}).` : ' Sem dívida registrada para sugerir a proporção.'}</div>
+          <button class="fila-btn dark" style="margin-top:8px;" onclick="event.stopPropagation();_finFilaSalvarDivisao('${o.id}')">Salvar divisão</button>
+        </div>`
+        : `<div class="fe-r-row"><span>Recebido</span><b>${fmtR(o.valor_recebido)}</b></div>
+           ${it.cob && +it.cob.valor_orig ? `<div class="fe-r-row"><span>Dívida original</span><b>${fmtR(it.cob.valor_orig)}</b></div>` : ''}
+           ${it.cob && +it.cob.valor_atual && +it.cob.valor_atual !== +it.cob.valor_orig ? `<div class="fe-r-row"><span>Dívida hoje</span><b>${fmtR(it.cob.valor_atual)}</b></div>` : ''}
+           ${it.credor ? `<div class="fe-r-row"><span>Cedente</span><b style="font-family:inherit;">${escHtml(it.credor)}</b></div>` : ''}`}
       </div>
     </div>`;
   }
   return `<div class="fila-esteira">
-    <div><div class="fe-passo"><span class="fe-box">☐</span><span>Abrir o lançamento em Lançamentos e preencher capital/excedente do título</span><span class="fe-origem">fin_lancamento</span></div></div>
-    <div class="fe-rateio"><div class="fe-note">O painel do lançamento (drawer com a divisão calculada) chega no PR 3.</div>
-      <button class="fila-btn" style="margin-top:8px;" onclick="setFinTab('lancamentos')">Abrir Lançamentos →</button>
-    </div>
+    <div><div class="fe-diag">Este lançamento tem cedente vinculado mas a divisão ainda não foi calculada. Abra em Movimentações para preencher.</div></div>
+    <div class="fe-rateio"><button class="fila-btn" onclick="event.stopPropagation();setFinTab('lancamentos')">Abrir Movimentações →</button></div>
   </div>`;
 }
+
+// ── Ações da fila ───────────────────────────────────────────────────────────────
+// As três gravam em fin_operacao e tiram o item da fila. Nenhuma mexe em dinheiro:
+// o repasse em si já foi lançado como despesa por fora.
+async function _finFilaSemRepasse(opId){
+  if(!confirm('Marcar como sem repasse? Use quando o crédito é da própria COBRASQ e não há cedente a receber.')) return;
+  await _finFilaResolver(opId, { repasse_status:'nao_aplica', valor_capital:0 }, 'Marcado como sem repasse.');
+}
+async function _finFilaConfirmarRepasseExistente(opId){
+  const it = (_finFilaState.itens||[]).find(x => x.op && x.op.id === opId);
+  const n = it && it.rep ? it.rep.n : 0;
+  if(!confirm(`Confirmar que o repasse deste caso já foi lançado${n?` (${n} parcela${n!==1?'s':''})`:''}?\n\nA operação sai da fila. O dinheiro não é movimentado — o repasse já está nas despesas.`)) return;
+  await _finFilaResolver(opId, { repasse_status:'efetuado' }, 'Repasse confirmado — saiu da fila.');
+}
+async function _finFilaAdotarCedenteDoRepasse(opId){
+  const it = (_finFilaState.itens||[]).find(x => x.op && x.op.id === opId);
+  if(!it || !it.rep || !it.rep.credorNome){ showToast('Não foi possível identificar o cedente do repasse.', 'danger'); return; }
+  const sb = getSupabase();
+  let credId = null;
+  try{
+    const { data } = await sb.from('clientes').select('id,nome,nome_fantasia').limit(2000);
+    const alvo = it.rep.credorNome.toLowerCase();
+    const achado = (data||[]).find(c => (c.nome_fantasia||c.nome||'').toLowerCase() === alvo);
+    credId = achado ? achado.id : null;
+  }catch(_){}
+  if(!credId){ showToast('Cedente do repasse não encontrado no cadastro de clientes.', 'danger'); return; }
+  if(!confirm(`Vincular este recebimento a ${it.rep.credorNome} e confirmar o repasse já lançado?`)) return;
+  await _finFilaResolver(opId, { credor_id: credId, repasse_status:'efetuado' }, `Vinculado a ${it.rep.credorNome}.`);
+}
+async function _finFilaResolver(opId, patch, msg){
+  try{
+    const sb = getSupabase();
+    const { error } = await sb.from('fin_operacao').update(patch).eq('id', opId);
+    if(error) throw error;
+    showToast(msg, 'success');
+    _finFilaState.resolvidosHoje = (_finFilaState.resolvidosHoje||0) + 1;
+    _finCascataCache = { at:0, m:null }; _finRepasseAggCache = { at:0, v:null };
+    renderFinTab('fila');
+  }catch(e){ showToast('Não deu para gravar: '+(e.message||e), 'danger'); }
+}
+
 function _finFilaDivRecalc(opId, recebido){
   const capEl = document.getElementById('filadiv-cap-'+opId);
   const honEl = document.getElementById('filadiv-hon-'+opId);
