@@ -415,7 +415,22 @@ module.exports = async function handler(req, res) {
     try { b64 = await gerarReciboPdfBase64(dadosRec); } catch (e) { console.warn('[processar-recebimento] gerar recibo PDF:', e.message); }
 
     let zap = null, pdfEnviado = false, erroPdf = null;
-    const tel = String((devedor && devedor.telefone) || '').replace(/\D/g, '');
+    // O telefone do devedor tem DUAS moradas e elas divergem: `devedores.telefone` e
+    // `bia_cobranca.telefone`. Em 27/08/2026 eram 8 devedores com o campo relacional
+    // vazio e o número certo na fila da Bia — a Nely Therezinha Schaefer recebia o
+    // lembrete de vencimento (que lê a bia_cobranca) mas nenhum recibo (que lia só o
+    // relacional), e a única cópia do PDF ia para o número de monitoramento. Antes de
+    // desistir do envio, busca na bia_cobranca pelo pagamento e pelo customer Asaas.
+    let tel = String((devedor && devedor.telefone) || '').replace(/\D/g, '');
+    let telOrigem = tel ? 'devedores' : '';
+    if (!tel) {
+      const filtro = payment.customer
+        ? `or=(asaas_payment_id.eq.${encodeURIComponent(paymentId)},asaas_customer_id.eq.${encodeURIComponent(payment.customer)})`
+        : `asaas_payment_id=eq.${encodeURIComponent(paymentId)}`;
+      const bia = await sbFetch(`bia_cobranca?${filtro}&select=telefone&limit=1`).catch(() => []);
+      const t = String((bia && bia[0] && bia[0].telefone) || '').replace(/\D/g, '');
+      if (t) { tel = t; telOrigem = 'bia_cobranca'; }
+    }
     if (tel) {
       if (b64) { try { pdfEnviado = await zapiSendDocumentPdf(tel, b64, 'Recibo COBRASQ.pdf'); } catch (e) { pdfEnviado = false; erroPdf = e.message; } }
 
@@ -449,9 +464,13 @@ module.exports = async function handler(req, res) {
           payload: {
             payment_id: paymentId,
             valor: valorRecebido,
-            motivo: b64 ? 'PDF gerado, mas o envio pela Z-API falhou' : 'geração do PDF falhou (duas tentativas)',
+            // Sem telefone a Z-API nunca chega a ser chamada — dizer que ela falhou
+            // manda quem lê a ficha caçar problema de integração que não existe.
+            motivo: !tel ? 'devedor sem telefone (nem em devedores, nem na fila da Bia)'
+              : (b64 ? 'PDF gerado, mas o envio pela Z-API falhou' : 'geração do PDF falhou (duas tentativas)'),
             erro: erroPdf,
             tinha_telefone: !!tel,
+            telefone_origem: telOrigem || null,
           },
           autor_nome: 'Financeiro (webhook Asaas)',
         }),
