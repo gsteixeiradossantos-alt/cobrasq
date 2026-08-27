@@ -162,6 +162,32 @@
     }).join("");
   }
 
+  /* Foro de eleição = comarca da CREDORA (não mais "Dois Vizinhos/PR" fixo no
+   * template). Ordem: dados.foroComarca explícito → cidade/UF do cadastro do
+   * credor → cidade/UF extraída da qualificação (que é texto livre, no formato
+   * "…, Francisco Beltrão/PR, CEP …") → Dois Vizinhos/PR, que é a comarca da
+   * COBRASQ e do escritório. */
+  const FORO_PADRAO = "Dois Vizinhos/PR";
+
+  function comarcaDaQualificacao(txt) {
+    // "Cidade/UF" — pega a ÚLTIMA ocorrência: o endereço vem no fim da frase.
+    const m = String(txt || "").match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'.\- ]{1,60}?)\s*\/\s*([A-Za-z]{2})\b/g);
+    if (!m || !m.length) return "";
+    const ult = m[m.length - 1].split("/");
+    const cidade = ult[0].replace(/^[\s,;]+/, "").trim();
+    const uf = ult[1].trim().toUpperCase();
+    return cidade ? cidade + "/" + uf : "";
+  }
+
+  function foroDe(dados) {
+    const cr = (dados && dados.credor) || {};
+    const direto = String((dados && dados.foroComarca) || cr.comarca || "").trim();
+    if (direto) return direto;
+    const cid = String(cr.cidade || "").trim(), uf = String(cr.uf || "").trim().toUpperCase();
+    if (cid && uf) return cid + "/" + uf;
+    return comarcaDaQualificacao(cr.qualificacao) || FORO_PADRAO;
+  }
+
   // Mapa placeholder → valor
   function placeholders(dados) {
     const cr = dados.credor || {}, ac = dados.acordo || {};
@@ -178,6 +204,7 @@
       multaBoleto: pctExt(ac.multa != null ? ac.multa : 10),
       clausulaPenal: pctExt(ac.penal != null ? ac.penal : 50),
       dataAcordo: dataExtenso(dados.dataAcordo),
+      foroComarca: foroDe(dados),
       credorAssNome: cr.assNome || cr.nome || "",
       credorAssDoc: cr.assDoc || "",
       // compat (template single-devedor antigo)
@@ -431,6 +458,7 @@
   global.TermoEngine = {
     extInt, reaisExt, valorCompleto, pctExt, dataExtenso, estadoFrase,
     qualifDevedor, qualifCredor, frasePagamento, placeholders,
+    foroDe, comarcaDaQualificacao,
     preambuloDevedores, assinaturasDevedores, generoDevedorLabel,
     preencher, carregarTemplate, montarTermoExtrajudicial,
     credorEhCobrasq, timbreDe, carregarTimbreTA, aplicarTimbreTA,
