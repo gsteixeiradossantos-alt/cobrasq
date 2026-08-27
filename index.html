@@ -29547,7 +29547,7 @@ async function _finCascataMetricas(force){
 
 const FIN_CASCATA_UI_TABS = [
   {id:'fila', label:'Fila'},
-  {id:'visao', label:'Caixa'},
+  {id:'visao', label:'Painel'},
   {id:'lancamentos', label:'Lançamentos'},
   {id:'repasses', label:'Repasses'},
   {id:'previsaocredor', label:'Ao credor'},
@@ -32558,11 +32558,22 @@ async function renderFinVisao(el){
   // do KPI "Resultado do mês", evita divergência entre os dois números).
   async function _dreMes(){
     if(!_sb) return [];
+    // O espelho de despesa do repasse fica FORA do DRE: é o capital do cedente voltando
+    // para ele, não custo da COBRASQ. 32 das 33 despesas de repasse estão categorizadas
+    // como "Aquisição de dívidas de terceiros" — sem este filtro, dinheiro de terceiro
+    // vira prejuízo nosso (em ago/2026 eram R$ 6.508,25 dentro dos R$ 19.650,18 da
+    // categoria). É a mesma exclusão que a tela de Fechamento já fazia.
+    const espelhos = new Set();
+    try {
+      const { data: ops } = await _sb.from('fin_operacao').select('lancamento_despesa_id').not('lancamento_despesa_id','is',null).limit(5000);
+      for(const o of (ops||[])) espelhos.add(o.lancamento_despesa_id);
+    } catch(_){ /* sem a lista, o DRE volta ao comportamento antigo em vez de quebrar */ }
     const { data } = await _sb.from('fin_lancamento_categoria')
-      .select('valor,fin_categoria(descricao),fin_lancamento!inner(data_competencia,tipo_movimento)')
+      .select('lancamento_id,valor,fin_categoria(descricao),fin_lancamento!inner(data_competencia,tipo_movimento)')
       .gte('fin_lancamento.data_competencia',_mesIni).lte('fin_lancamento.data_competencia',_mesFim).limit(2000);
     const map = {};
     for(const r of (data||[])){
+      if(espelhos.has(r.lancamento_id)) continue;
       const nm = (r.fin_categoria&&r.fin_categoria.descricao) || '(sem categoria)';
       const sinal = (r.fin_lancamento&&r.fin_lancamento.tipo_movimento===1) ? 1 : -1;
       map[nm] = (map[nm]||0) + sinal*Math.abs(+r.valor||0);
@@ -32785,70 +32796,184 @@ async function renderFinVisao(el){
       <span style="display:flex;align-items:center;gap:6px;"><i style="width:8px;height:8px;background:#D8B7AF;border-radius:2px;display:inline-block;"></i>Saídas previstas</span>
     </div>` : `<div class="note">Sem lançamentos previstos nos próximos 30 dias.</div>`;
 
+  // ── Painel (reorganizado 27/08 no modelo do handoff): grade de cartões. Os dados já
+  //    eram todos calculados aqui; serie/aPagar/aReceber/topClientes/automacao vinham do
+  //    Promise.all e eram DESCARTADOS — _serie12m chega a varrer 12 meses de lançamento
+  //    em páginas de 1000 para nada. Agora aparecem.
+  const _pnCard = (titulo, corpo, span) => `<div style="grid-column:span ${span||1};background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:15px 16px;display:flex;flex-direction:column;min-width:0;">
+      <div style="font-family:'Inter Tight',sans-serif;font-size:13.5px;font-weight:600;color:#0A1530;margin-bottom:10px;">${titulo}</div>
+      <div style="flex:1;min-height:0;display:flex;flex-direction:column;">${corpo}</div>
+    </div>`;
+
+  // Sparkline de 12 meses: área + linha. Escala pelo próprio conjunto, com zero visível.
+  const _pnSpark = (vals, cor) => {
+    const v = (vals||[]).map(x=>+x||0);
+    if(v.length<2) return `<div style="height:52px;"></div>`;
+    const mx = Math.max(...v, 0), mn = Math.min(...v, 0), amp = (mx-mn)||1;
+    const W=100, H=34;
+    const pt = (x,i)=>[ (i/(v.length-1))*W, H - ((x-mn)/amp)*H ];
+    const pts = v.map(pt);
+    const linha = pts.map(([x,y],i)=>`${i?'L':'M'}${x.toFixed(2)},${y.toFixed(2)}`).join(' ');
+    const area = `${linha} L${W},${H} L0,${H} Z`;
+    const zeroY = H - ((0-mn)/amp)*H;
+    return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:52px;display:block;overflow:visible;">
+      ${(mn<0&&mx>0)?`<line x1="0" y1="${zeroY.toFixed(2)}" x2="${W}" y2="${zeroY.toFixed(2)}" stroke="#E6E1D2" stroke-width=".6" stroke-dasharray="2 2"/>`:''}
+      <path d="${area}" fill="${cor}" opacity=".10"/>
+      <path d="${linha}" fill="none" stroke="${cor}" stroke-width="1.4" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>
+    </svg>`;
+  };
+  // Variação do último mês contra o anterior, no formato do handoff (chip percentual).
+  const _pnDelta = (vals) => {
+    const v=(vals||[]).map(x=>+x||0);
+    if(v.length<2) return '';
+    const a=v[v.length-2], b=v[v.length-1];
+    if(!a) return '';
+    const p=((b-a)/Math.abs(a))*100;
+    const bom = p>=0;
+    return `<span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:500;padding:1px 5px;border-radius:4px;white-space:nowrap;background:${bom?'#E9F0E7':'#FBEAE7'};color:${bom?'#4F6B49':'#A65A4A'};">${p>=0?'+':''}${p.toFixed(0)}%</span>`;
+  };
+  // Cartão de métrica com série (EBITDA, faturamento, ticket, juros).
+  const _pnMetrica = (titulo, valor, vals, cor) => _pnCard(titulo, `
+      <div style="display:flex;align-items:center;gap:7px;margin-bottom:2px;flex-wrap:wrap;">
+        <span style="font-family:'Fraunces',Georgia,serif;font-size:22px;font-weight:400;color:#0A1530;line-height:1;">${valor}</span>
+        ${_pnDelta(vals)}
+      </div>
+      <div style="flex:1;display:flex;align-items:flex-end;">${_pnSpark(vals, cor)}</div>`);
+  // Donut do handoff: contagem no miolo, valor embaixo, ação ao lado.
+  const _pnDonut = (n, total, cor, acao) => {
+    const r=30, C=2*Math.PI*r, frac=Math.min(1, n?Math.max(.06, n/Math.max(n,10)):0);
+    return `<div style="display:flex;align-items:center;gap:14px;flex:1;">
+      <div style="position:relative;width:74px;height:74px;flex-shrink:0;">
+        <svg viewBox="0 0 74 74" style="width:100%;height:100%;transform:rotate(-90deg);">
+          <circle cx="37" cy="37" r="${r}" fill="none" stroke="#EFEBE0" stroke-width="6"/>
+          <circle cx="37" cy="37" r="${r}" fill="none" stroke="${cor}" stroke-width="6" stroke-linecap="round" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${(C*(1-frac)).toFixed(1)}"/>
+        </svg>
+        <div style="position:absolute;inset:0;display:grid;place-items:center;font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:600;color:#0A1530;">${n}</div>
+      </div>
+      <div style="min-width:0;">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:600;color:#0A1530;">${fmtR(total)}</div>
+        ${acao}
+      </div>
+    </div>`;
+  };
+  const _pnLink = (txt, on) => `<div style="font-size:12.5px;color:#3A5288;font-weight:600;cursor:pointer;margin-top:6px;" onclick="${on}">${txt}</div>`;
+
+  // A repassar: dinheiro de terceiro. Sai do mesmo fin_operacao que a aba Credores lê.
+  const _repAg = (automacao && automacao.rep) || {};
+  const _repValor = (+((_repAg.pendente||{}).valor)||0) + (+((_repAg.preparado||{}).valor)||0);
+  const _repN = (+((_repAg.pendente||{}).n)||0) + (+((_repAg.preparado||{}).n)||0);
+  const _revN = +((_repAg.revisar||{}).n)||0;
+
+  const _entMes = +kpis.receitaMes||0, _saiMes = +kpis.despesaMes||0;
+  const _maxMes = Math.max(_entMes, _saiMes) || 1;
+  const _contasGeral = (dim.contas||[]).filter(c=>c.incluir_no_saldo_geral!==false);
+
   el.innerHTML = `
-    <div style="display:grid;grid-template-columns:1.15fr 1fr 1fr 1fr;gap:14px;margin-bottom:16px;">
-      <div style="background:#0A1530;border-radius:9px;padding:16px;color:#fff;display:flex;flex-direction:column;gap:4px;">
-        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8E98B0;">SALDO GERAL · ${(dim.contas||[]).filter(c=>c.incluir_no_saldo_geral!==false).length} CONTA${(dim.contas||[]).filter(c=>c.incluir_no_saldo_geral!==false).length!==1?'S':''}</span>
-        <span style="font-family:'JetBrains Mono',monospace;font-size:24px;font-weight:600;">${fmtR(saldoContas)}</span>
-        <span style="font-size:11.5px;color:#8E98B0;">${fluxoDias.length?`projetado ${fmtR(fluxoSaldoProj)} em 30 dias`:'sem projeção'}</span>
-      </div>
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:4px;">
-        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">ENTRADAS · MÊS</span>
-        <span style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;color:#5E7C58;">+${fmtR(kpis.receitaMes)}</span>
-        <span style="font-size:11.5px;color:#A6AEBD;">${kpis.qtdMes||0} lançamento${kpis.qtdMes!==1?'s':''}</span>
-      </div>
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:4px;">
-        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">SAÍDAS · MÊS</span>
-        <span style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;color:#A65A4A;">−${fmtR(kpis.despesaMes)}</span>
-      </div>
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:4px;">
-        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">RESULTADO DO MÊS</span>
-        <span style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;color:${kpis.saldoMes>=0?'#0A1530':'#A65A4A'};">${fmtR(kpis.saldoMes)}</span>
-        <span style="font-size:11.5px;color:#A6AEBD;">${(+kpis.receitaMes)>0?`margem ${((+kpis.saldoMes/(+kpis.receitaMes))*100).toFixed(1).replace('.',',')}%`:'—'}</span>
-      </div>
-    </div>
-
-    ${atraso.count>0 ? `<div style="border:1px solid #E7CFC7;background:#FBEAE7;border-radius:9px;padding:12px 16px;display:flex;align-items:center;gap:14px;margin-bottom:16px;">
-      <span style="width:24px;height:24px;border-radius:50%;background:#A65A4A;color:#fff;display:grid;place-items:center;font-size:13px;font-weight:700;flex-shrink:0;">!</span>
+    ${atraso.count>0 ? `<div style="border:1px solid #E7CFC7;background:#FBEAE7;border-radius:10px;padding:11px 16px;display:flex;align-items:center;gap:14px;margin-bottom:14px;">
+      <span style="width:22px;height:22px;border-radius:50%;background:#A65A4A;color:#fff;display:grid;place-items:center;font-size:12px;font-weight:700;flex-shrink:0;">!</span>
       <span style="font-size:13.5px;color:#7D3F33;"><strong style="font-weight:600;">${atraso.count} lançamento${atraso.count!==1?'s':''} em atraso · ${fmtR(atraso.total)}.</strong></span>
-      <span style="margin-left:auto;background:#A65A4A;color:#fff;font-size:12.5px;font-weight:600;padding:7px 13px;border-radius:6px;cursor:pointer;white-space:nowrap;" onclick="window._finTab='lancamentos';renderFinanceiro()">Resolver →</span>
+      <span style="margin-left:auto;background:#A65A4A;color:#fff;font-size:12.5px;font-weight:600;padding:6px 13px;border-radius:6px;cursor:pointer;white-space:nowrap;" onclick="setFinTab('lancamentos')">Resolver →</span>
     </div>` : ''}
-    ${repAtraso ? `<div style="display:flex;align-items:center;gap:10px;background:#F7ECE8;border:1px solid #E7CFC7;border-radius:9px;padding:11px 16px;margin-bottom:16px;"><span style="width:22px;height:22px;border-radius:50%;background:#A65A4A;color:#EFEAD9;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;">!</span><span style="font-size:13px;color:#7d3f33;font-weight:500;">Repasse ao cedente <b>${escHtml(repAtraso.nome)}</b> pendente há ${repAtraso.dias} dia${repAtraso.dias!==1?'s':''} — <b>${fmtR(repAtraso.total)}</b>.</span><span style="font-size:13px;font-weight:700;color:#A65A4A;margin-left:auto;cursor:pointer;" onclick="setFinTab('repasses')">Repassar agora →</span></div>` : ''}
+    ${repAtraso ? `<div style="display:flex;align-items:center;gap:10px;background:#F7ECE8;border:1px solid #E7CFC7;border-radius:10px;padding:10px 16px;margin-bottom:14px;">
+      <span style="width:20px;height:20px;border-radius:50%;background:#A65A4A;color:#EFEAD9;display:grid;place-items:center;font-size:12px;font-weight:700;flex-shrink:0;">!</span>
+      <span style="font-size:13px;color:#7d3f33;font-weight:500;">Repasse ao cedente <b>${escHtml(repAtraso.nome||'')}</b> pendente há ${repAtraso.dias} dia${repAtraso.dias!==1?'s':''} — <b>${fmtR(repAtraso.valor)}</b>.</span>
+      <span style="font-size:13px;font-weight:700;color:#A65A4A;margin-left:auto;cursor:pointer;" onclick="setFinTab('repasses')">Repassar agora →</span>
+    </div>` : ''}
 
-    <div style="display:grid;grid-template-columns:minmax(0,1.6fr) minmax(300px,1fr);gap:16px;align-items:start;">
-      <div style="display:flex;flex-direction:column;gap:16px;min-width:0;">
-        <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;">
-          <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
-            <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Fluxo de caixa · próximos 30 dias</div>
-            <div style="font-size:12.5px;color:#8A94A6;">projeção com lançamentos pendentes</div>
-          </div>
-          ${fluxoHtml}
+    <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;">
+
+      <div style="grid-column:span 1;background:#0A1530;border-radius:10px;padding:15px 16px;color:#fff;display:flex;flex-direction:column;min-width:0;">
+        <div style="font-size:13.5px;font-weight:600;margin-bottom:8px;">Saldo de hoje</div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:23px;font-weight:600;margin-bottom:10px;">${fmtR(saldoContas)}</div>
+        <div style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:6px;min-height:0;">
+          ${_contasGeral.length ? _contasGeral.map(c=>{
+            const b=_saldoConta(c);
+            const dias = (c.bank_balance!=null && c.bank_balance_at) ? Math.max(0,Math.floor((Date.now()-new Date(c.bank_balance_at).getTime())/86400000)) : null;
+            return `<div style="display:flex;align-items:baseline;gap:8px;">
+              <span style="font-size:12px;color:#C6CEDF;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;">${escHtml(c.descricao||'—')}</span>
+              ${dias!=null&&dias>=7?`<span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#E2C98A;white-space:nowrap;" title="saldo declarado há ${dias} dias">${dias}d</span>`:''}
+              <span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:500;color:${b<0?'#E8A99C':'#fff'};white-space:nowrap;">${fmtR(b)}</span>
+            </div>`; }).join('') : `<div style="font-size:12px;color:#8E98B0;">Nenhuma conta no saldo geral.</div>`}
         </div>
-        <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;">
-          <div style="padding:14px 16px 12px;border-bottom:1px solid #EFEBE0;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">
-            <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Últimas movimentações</div>
-            <div style="font-size:12.5px;color:#8A94A6;">${recentes.length} lançamento${recentes.length!==1?'s':''}</div>
-            <div style="font-size:12.5px;color:#3A5288;font-weight:500;cursor:pointer;margin-left:auto;" onclick="window._finTab='lancamentos';renderFinanceiro()">Abrir aba completa →</div>
-          </div>
-          ${recentesHtml}
-        </div>
+        <div style="font-size:11.5px;color:#8E98B0;margin-top:8px;">${fluxoDias.length?`projetado ${fmtR(fluxoSaldoProj)} em 30 dias`:'sem projeção'}</div>
       </div>
-      <div style="display:flex;flex-direction:column;gap:16px;min-width:0;">
-        <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;">
-          <div style="display:flex;align-items:baseline;margin-bottom:10px;"><div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Contas</div><span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:10px;color:#A6AEBD;">${(dim.contas||[]).length} ATIVAS</span></div>
-          ${contasHtml}
-          <div style="padding-top:11px;font-size:12.5px;color:#3A5288;font-weight:500;cursor:pointer;" onclick="window._finTab='lancamentos';renderFinanceiro()">Conciliar extrato →</div>
-        </div>
-        <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;">
-          <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:10px;"><div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Resultado por categoria</div><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#A6AEBD;margin-left:auto;">DRE · MÊS</span></div>
-          ${dreHtml}
-          <div style="display:flex;align-items:center;gap:10px;padding:9px 0 0;border-top:1px solid #E6E1D2;margin-top:4px;"><span style="font-size:12.5px;font-weight:700;color:#0A1530;">Resultado (EBITDA)</span><div style="flex:1;"></div><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:700;color:${kpis.saldoMes>=0?'#0A1530':'#A65A4A'};">${fmtR(kpis.saldoMes)}</span></div>
-        </div>
-        <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;">
-          <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;margin-bottom:11px;">Top despesas do mês</div>
-          ${(topDespesas.itens||[]).length ? (topDespesas.itens||[]).slice(0,3).map(it=>{ const pct=topDespesas.total>0?Math.round(it.valor/topDespesas.total*100):0; return `<div style="display:flex;flex-direction:column;gap:5px;padding:7px 0;"><div style="display:flex;align-items:baseline;"><span style="font-size:12.5px;color:#5A5F66;">${escHtml(it.nome)}</span><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:500;margin-left:auto;">${fmtR(it.valor)}</span></div><div style="height:5px;background:#F2EFE6;border-radius:3px;overflow:hidden;"><div style="height:100%;width:${pct}%;background:#D8B7AF;"></div></div></div>`; }).join('') : '<div class="note">Sem despesas no mês.</div>'}
-        </div>
+
+      <div style="grid-column:span 1;background:#fff;border:1px solid #E6E1D2;border-left:3px solid #C9A961;border-radius:10px;padding:15px 16px;display:flex;flex-direction:column;min-width:0;">
+        <div style="font-size:13.5px;font-weight:600;color:#0A1530;margin-bottom:8px;">De terceiros · a repassar</div>
+        <div style="font-family:'Fraunces',Georgia,serif;font-size:26px;color:#9C7F40;line-height:1;">${fmtR(_repValor)}</div>
+        <div style="font-size:12px;color:#8A94A6;margin-top:6px;">${_repN} repasse${_repN!==1?'s':''} pendente${_repN!==1?'s':''}${_revN?` · ${_revN} a revisar`:''}</div>
+        <div style="flex:1;"></div>
+        <div style="font-size:11.5px;color:#A6AEBD;line-height:1.45;">Não entra no resultado da COBRASQ.</div>
+        ${_pnLink('Ver credores →', "setFinTab('repasses')")}
       </div>
+
+      <div style="grid-column:span 2;background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:15px 16px;min-width:0;display:flex;flex-direction:column;">
+        <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
+          <div style="font-size:13.5px;font-weight:600;color:#0A1530;">Fluxo de caixa · próximos 30 dias</div>
+          <div style="font-size:12px;color:#8A94A6;">projeção com lançamentos pendentes</div>
+        </div>
+        ${fluxoHtml}
+      </div>
+
+      ${_pnCard('Resultado do mês', `
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:5px;"><span style="font-size:12.5px;color:#5E7C58;font-weight:600;">Entradas</span><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;margin-left:auto;">${fmtR(_entMes)}</span></div>
+        <div style="height:15px;background:#F2EFE6;border-radius:3px;overflow:hidden;margin-bottom:10px;"><div style="height:100%;width:${(_entMes/_maxMes*100).toFixed(1)}%;background:#5E7C58;"></div></div>
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:5px;"><span style="font-size:12.5px;color:#A65A4A;font-weight:600;">Saídas</span><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;margin-left:auto;">${fmtR(_saiMes)}</span></div>
+        <div style="height:15px;background:#F2EFE6;border-radius:3px;overflow:hidden;"><div style="height:100%;width:${(_saiMes/_maxMes*100).toFixed(1)}%;background:#A65A4A;"></div></div>
+        <div style="flex:1;"></div>
+        <div style="display:flex;align-items:baseline;padding-top:9px;border-top:1px solid #EFEBE0;margin-top:9px;">
+          <span style="font-size:12.5px;color:#5A5F66;">Resultado</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;margin-left:auto;color:${(+kpis.saldoMes)>=0?'#4F6B49':'#A65A4A'};">${fmtR(kpis.saldoMes)}</span>
+        </div>`)}
+
+      ${_pnCard('A pagar na semana', _pnDonut(aPagar.count, aPagar.total, '#A65A4A', _pnLink('Resolver →', "setFinTab('lancamentos')")))}
+      ${_pnCard('A receber na semana', _pnDonut(aReceber.count, aReceber.total, '#5E7C58', _pnLink('Resolver →', "setFinTab('lancamentos')")))}
+      ${_pnCard('Inadimplência (Asaas)', `
+        <div style="font-family:'Fraunces',Georgia,serif;font-size:24px;color:#A65A4A;line-height:1;">${fmtR(inad.charges ? inad.charges.reduce((s,c)=>s+Math.abs(+c.value||0),0) : 0)}</div>
+        <div style="font-size:12px;color:#8A94A6;margin-top:6px;">${(inad.devList||[]).length} devedor${(inad.devList||[]).length!==1?'es':''} com parcela vencida</div>
+        <div style="flex:1;"></div>
+        ${_pnLink('Ver cobranças →', "setFinTab('asaas')")}`)}
+
+      ${serie ? `
+        ${_pnMetrica('EBITDA · 12 meses', fmtR(serie.ebitda[serie.ebitda.length-1]), serie.ebitda, '#3A5288')}
+        ${_pnMetrica('Faturamento · 12 meses', fmtR(serie.fat[serie.fat.length-1]), serie.fat, '#5E7C58')}
+        ${_pnMetrica('Ticket médio · 12 meses', fmtR(serie.ticket[serie.ticket.length-1]), serie.ticket, '#9C7F40')}
+        ${_pnMetrica('Juros e multas · 12 meses', fmtR(serie.jm[serie.jm.length-1]), serie.jm, '#A65A4A')}
+      ` : ''}
+
+      ${_pnCard('Resultado por categoria', `
+        <div style="flex:1;overflow-y:auto;min-height:0;">
+          ${dre.length ? dre.map(d=>`<div style="display:flex;align-items:center;gap:8px;padding:5px 0;">
+            <span style="font-size:12.5px;color:#5A5F66;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(d.nome)}</span>
+            <div style="flex:1;border-bottom:1px dotted #DDD7C7;min-width:12px;"></div>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:500;white-space:nowrap;color:${d.valor<0?'#A65A4A':'#5A5F66'};">${fmtR(d.valor)}</span>
+          </div>`).join('') : `<div style="font-size:12.5px;color:#8A94A6;">Sem lançamentos categorizados no mês.</div>`}
+        </div>
+        <div style="display:flex;align-items:center;padding-top:9px;border-top:1px solid #E6E1D2;margin-top:6px;">
+          <span style="font-size:12.5px;font-weight:700;color:#0A1530;">Resultado (EBITDA)</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:700;margin-left:auto;color:${(+kpis.saldoMes)>=0?'#4F6B49':'#A65A4A'};">${fmtR(kpis.saldoMes)}</span>
+        </div>
+        <div style="font-size:10.5px;color:#A6AEBD;margin-top:6px;line-height:1.45;">Exclui o repasse ao cedente: é dinheiro de terceiro, não custo da COBRASQ.</div>`, 2)}
+
+      ${_pnCard('Top clientes do mês', (topClientes.itens||[]).length
+        ? (topClientes.itens||[]).slice(0,4).map(it=>{ const pct=topClientes.total>0?Math.round(it.valor/topClientes.total*100):0;
+            return `<div style="padding:5px 0;"><div style="display:flex;align-items:baseline;gap:8px;"><span style="font-size:12.5px;color:#5A5F66;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(it.nome)}</span><span style="font-family:'JetBrains Mono',monospace;font-size:12px;margin-left:auto;white-space:nowrap;">${fmtR(it.valor)}</span></div><div style="height:4px;background:#F2EFE6;border-radius:2px;overflow:hidden;margin-top:4px;"><div style="height:100%;width:${pct}%;background:#8FA98A;"></div></div></div>`; }).join('')
+        : `<div style="font-size:12.5px;color:#8A94A6;">Sem recebimentos no mês.</div>`)}
+
+      ${_pnCard('Top despesas do mês', (topDespesas.itens||[]).length
+        ? (topDespesas.itens||[]).slice(0,4).map(it=>{ const pct=topDespesas.total>0?Math.round(it.valor/topDespesas.total*100):0;
+            return `<div style="padding:5px 0;"><div style="display:flex;align-items:baseline;gap:8px;"><span style="font-size:12.5px;color:#5A5F66;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(it.nome)}</span><span style="font-family:'JetBrains Mono',monospace;font-size:12px;margin-left:auto;white-space:nowrap;">${fmtR(it.valor)}</span></div><div style="height:4px;background:#F2EFE6;border-radius:2px;overflow:hidden;margin-top:4px;"><div style="height:100%;width:${pct}%;background:#D8B7AF;"></div></div></div>`; }).join('')
+        : `<div style="font-size:12.5px;color:#8A94A6;">Sem despesas no mês.</div>`)}
+
+      <div style="grid-column:span 4;background:#fff;border:1px solid #E6E1D2;border-radius:10px;overflow:hidden;">
+        <div style="padding:13px 16px 11px;border-bottom:1px solid #EFEBE0;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;">
+          <div style="font-size:13.5px;font-weight:600;color:#0A1530;">Últimas movimentações</div>
+          <div style="font-size:12px;color:#8A94A6;">${recentes.length} lançamento${recentes.length!==1?'s':''}</div>
+          <div style="font-size:12.5px;color:#3A5288;font-weight:600;cursor:pointer;margin-left:auto;" onclick="setFinTab('lancamentos')">Abrir Lançamentos →</div>
+        </div>
+        ${recentesHtml}
+      </div>
+
     </div>
   `;
 }
