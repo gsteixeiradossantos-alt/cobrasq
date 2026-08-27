@@ -30217,7 +30217,81 @@ async function _finTemColunasCascata(){
   return _finColsCascata;
 }
 
-let _finLancCascataState = { chip:'tudo', busca:'', sel:new Set() };
+let _finLancCascataState = { chip:'tudo', busca:'', sel:new Set(), ord:{ col:'data', dir:'asc' } };
+
+// ── Ordenação da lista ──────────────────────────────────────────────────────
+// Padrão: data crescente (o mais antigo primeiro), que é a ordem de quem
+// confere extrato. Clicar no cabeçalho troca a coluna; clicar de novo inverte.
+//
+// Duas regras que valem a pena guardar:
+//  1. Ordenar por DATA mantém a cascata de dias (com o fechamento diário).
+//     Ordenar por qualquer outra coluna DESFAZ a cascata e vira lista corrida —
+//     agrupar por dia e ordenar por valor ao mesmo tempo faria o maior valor
+//     não aparecer no topo, e a tela pareceria quebrada.
+//  2. A direção da DATA vai ao servidor, porque o teto de FIN_LANC_LIMITE
+//     corta pelo lado oposto ao da ordem: em crescente o corte tira os mais
+//     novos, em decrescente tira os mais antigos. As outras colunas ordenam só
+//     o que já foi carregado — o aviso de "lista cortada" no cabeçalho continua
+//     sendo o que denuncia que existe coisa fora da janela.
+const FIN_LANC_ORD_COLS = {
+  data:      { label:'DATA',      val:(l)=>(l.data_competencia||'') },
+  descricao: { label:'DESCRIÇÃO', val:(l)=>(l.descricao||'').toLowerCase() },
+  contato:   { label:'CONTATO',   val:(l)=>((l.fin_contato&&l.fin_contato.nome)||'').toLowerCase() },
+  categoria: { label:'CATEGORIA', val:(l,ctx)=>{ const c=ctx&&ctx.catPorLanc&&ctx.catPorLanc[l.id]; return c?c.nome.toLowerCase():'\uffff'; } },
+  valor:     { label:'VALOR',     val:(l)=>(l.tipo_movimento===1?1:-1)*Math.abs(+l.valor||0) },
+  situacao:  { label:'SITUAÇÃO',  val:(l)=>_finLancSit(l).ordem },
+};
+// Colunas em que "crescente" quer dizer o mais útil primeiro (A→Z, mais antigo).
+// Valor e situação começam decrescente: o maior valor e o mais urgente no topo.
+const FIN_LANC_ORD_DESC_PRIMEIRO = new Set(['valor','situacao']);
+
+// O teto corta pelo lado oposto ao da ordem — ver nota acima.
+function _finLancOrdServidorAsc(){
+  const o = _finLancCascataState.ord;
+  return o.col==='data' && o.dir==='asc';
+}
+function _finLancCascataOrdenados(){
+  const ctx = window._finLancCascataCtx;
+  const { col, dir } = _finLancCascataState.ord;
+  const c = FIN_LANC_ORD_COLS[col] || FIN_LANC_ORD_COLS.data;
+  const s = dir==='asc' ? 1 : -1;
+  return _finLancCascataFiltrados().slice().sort((a,b)=>{
+    const va = c.val(a,ctx), vb = c.val(b,ctx);
+    if(va < vb) return -s;
+    if(va > vb) return  s;
+    // Desempate fixo: sem isto a ordem de iguais muda a cada render.
+    const da = a.data_competencia||'', db = b.data_competencia||'';
+    if(da !== db) return da < db ? -1 : 1;
+    return (a.id||0) - (b.id||0);
+  });
+}
+async function _finLancCascataOrd(col){
+  if(!FIN_LANC_ORD_COLS[col]) return;
+  const o = _finLancCascataState.ord;
+  const antes = _finLancOrdServidorAsc();
+  if(o.col===col) o.dir = o.dir==='asc' ? 'desc' : 'asc';
+  else { o.col = col; o.dir = FIN_LANC_ORD_DESC_PRIMEIRO.has(col) ? 'desc' : 'asc'; }
+  if(_finLancOrdServidorAsc() !== antes){
+    // Trocou o lado do corte: a consulta precisa ser refeita, senão a lista
+    // mostraria a ponta errada do período.
+    try{
+      const ctx = await _finLancCascataCarregar();
+      window._finLancCascataCtx = ctx;
+      _finLancCascataState.sel = new Set();
+      const cEl = document.getElementById('fincx-cnt-lancamentos'); if(cEl) cEl.textContent = ctx.rows.length;
+    }catch(_){ /* mantém a lista anterior; a ordem local ainda se aplica */ }
+  }
+  _finLancCascataRender();
+}
+// Situação da linha num lugar só: a etiqueta e a posição na ordenação saem
+// daqui, para não divergirem.
+function _finLancSit(l){
+  const isEnt = l.tipo_movimento===1;
+  if(l.conciliado)                       return {t:'CONCILIADO', bg:'#E9F0E7', fg:'#4C6647', ordem:3};
+  if(l.status===1 || l.data_pagamento)   return {t:'PAGO',       bg:'#5E7C58', fg:'#fff',    ordem:2};
+  if(l.data_vencimento && l.data_vencimento<hoje()) return {t:'ATRASADO', bg:'#FBEAE7', fg:'#A65A4A', ordem:0};
+  return { t: isEnt?'A RECEBER':'A PAGAR', bg:'#FBF3E1', fg:'#9C7F40', ordem:1 };
+}
 // A busca vai ao SERVIDOR, não ao array já carregado. Motivo concreto: em
 // 26/08/2026 o período 01/08/2026—31/08/2030 tinha 1.397 lançamentos; o teto de
 // 800 cortava a lista e a busca filtrava só o pedaço carregado. Buscar "juliana
@@ -30235,7 +30309,7 @@ async function _finLancCascataCarregar(){
   let q = sb.from('fin_lancamento').select(baseSel+extra)
     .gte('data_competencia', ini).lte('data_competencia', fim);
   if(termo) q = q.ilike('descricao', '%'+termo+'%');
-  const { data } = await q.order('data_competencia',{ascending:false}).limit(FIN_LANC_LIMITE);
+  const { data } = await q.order('data_competencia',{ascending:_finLancOrdServidorAsc()}).limit(FIN_LANC_LIMITE);
   const rows = data||[];
   const cedIds=[...new Set(rows.map(r=>r.cedente_id).filter(Boolean))];
   let cedMap={};
@@ -30345,10 +30419,13 @@ function _finLancCascataRender(){
     else { tot.saiPre+=v; if(pago) tot.saiRea+=v; }
   });
 
-  // Agrupa por dia (já vem ordenado desc por data_competencia).
+  // Ordenado por DATA: cascata de dias. Por qualquer outra coluna: lista corrida
+  // (ver nota em FIN_LANC_ORD_COLS).
+  const ordenados = _finLancCascataOrdenados();
+  const agrupado = _finLancCascataState.ord.col==='data';
   const porDia = [];
   let atual = null;
-  for(const l of filtrados){
+  for(const l of (agrupado ? ordenados : [])){
     const d = (l.data_competencia||'').slice(0,10);
     if(!atual || atual.data!==d){ atual = { data:d, itens:[] }; porDia.push(atual); }
     atual.itens.push(l);
@@ -30377,6 +30454,13 @@ function _finLancCascataRender(){
       .finlc-chip.on{background:#0A1530;border-color:#0A1530;color:#fff;}
       .finlc-card{background:#fff;border:1px solid #E6E1D2;border-radius:12px;overflow:hidden;}
       .finlc-thead{display:flex;align-items:center;gap:14px;padding:10px 16px;background:#F7F4EC;border-bottom:1px solid #E6E1D2;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;}
+      .finlc-th{display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;border-radius:4px;padding:3px 5px;margin:-3px -5px;transition:background .12s,color .12s;}
+      .finlc-th:hover{background:#EDE8DA;color:#0A1530;}
+      .finlc-th.on{color:#0A1530;}
+      .finlc-th .seta{font-size:8px;letter-spacing:0;opacity:.85;}
+      .finlc-th.num{justify-content:flex-end;}
+      .finlc-th.mid{justify-content:center;}
+      .finlc-datacol{font-family:'JetBrains Mono',monospace;font-size:10px;color:#A6AEBD;letter-spacing:.06em;}
       .finlc-diahead{display:flex;align-items:baseline;gap:12px;padding:12px 22px 8px;background:#FBFAF6;border-top:1px solid #E6E1D2;}
       .finlc-diahead:first-child{border-top:none;}
       .finlc-diahead .dd{font-family:'Fraunces',Georgia,serif;font-size:19px;color:#0A1530;}
@@ -30425,8 +30509,9 @@ function _finLancCascataRender(){
         </div>`).join('')}
     </div>
     <div class="finlc-card">
-      <div class="finlc-thead"><span style="width:16px;"></span><span style="width:32px;"></span><span style="flex:1;min-width:180px;">DESCRIÇÃO</span><span style="width:150px;">CONTATO</span><span style="width:130px;">CATEGORIA</span><span style="width:120px;text-align:right;">VALOR</span><span style="width:78px;text-align:center;">SITUAÇÃO</span></div>
-      ${porDia.length ? porDia.map(g=>_finLancCascataDiaHtml(g, ctx)).join('') : `<div style="padding:40px;text-align:center;color:#8A94A6;font-family:'Fraunces',Georgia,serif;font-size:20px;">Nenhum lançamento neste período.</div>`}
+      <div class="finlc-thead">${_finLancTheadHtml()}</div>
+      ${ordenados.length ? (agrupado ? porDia.map(g=>_finLancCascataDiaHtml(g, ctx)).join('') : ordenados.map(l=>_finLancCascataRowHtml(l, ctx, true)).join(''))
+        : `<div style="padding:40px;text-align:center;color:#8A94A6;font-family:'Fraunces',Georgia,serif;font-size:20px;">Nenhum lançamento neste período.</div>`}
       <div class="finlc-totais">
         <div><div class="lb">Entradas</div><div class="vl" style="color:#5E7C58;">${fmtR(tot.entRea)}</div><div class="pv">previsto ${fmtR(tot.entPre)}</div></div>
         <div><div class="lb">Saídas</div><div class="vl" style="color:#A65A4A;">${fmtR(tot.saiRea)}</div><div class="pv">previsto ${fmtR(tot.saiPre)}</div></div>
@@ -30438,6 +30523,22 @@ function _finLancCascataRender(){
   `;
   _finLancCascataRenderBulkbar();
 }
+// O cabeçalho não tinha coluna de data porque a data era o cabeçalho do grupo.
+// Com a ordenação, ela vira a primeira coluna e ocupa o espaço que era dos dois
+// vazios (checkbox 16 + ícone 32 + o gap entre eles).
+function _finLancTheadHtml(){
+  const { col, dir } = _finLancCascataState.ord;
+  const th = (k, estilo, cls) => {
+    const on = col===k;
+    return `<span class="finlc-th ${cls||''} ${on?'on':''}" style="${estilo}" onclick="_finLancCascataOrd('${k}')" title="Ordenar por ${FIN_LANC_ORD_COLS[k].label.toLowerCase()}">${FIN_LANC_ORD_COLS[k].label}<span class="seta">${on?(dir==='asc'?'▲':'▼'):''}</span></span>`;
+  };
+  return th('data','width:62px;')
+       + th('descricao','flex:1;min-width:180px;')
+       + th('contato','width:150px;')
+       + th('categoria','width:130px;')
+       + th('valor','width:120px;','num')
+       + th('situacao','width:78px;','mid');
+}
 function _finLancCascataDiaHtml(g, ctx){
   const { dd, dow } = (()=>{ const d=g.data; if(!d) return {dd:'—',dow:''}; const dt=new Date(d+'T00:00:00'); const DOW=['domingo','segunda','terça','quarta','quinta','sexta','sábado']; return { dd:d.slice(8,10)+'/'+d.slice(5,7), dow:DOW[dt.getDay()] }; })();
   const entradas = g.itens.filter(l=>l.tipo_movimento===1).reduce((s,l)=>s+Math.abs(+l.valor||0),0);
@@ -30446,13 +30547,10 @@ function _finLancCascataDiaHtml(g, ctx){
     ${g.itens.map(l=>_finLancCascataRowHtml(l, ctx)).join('')}
     <div class="finlc-fechodia"><span>FECHAMENTO DO DIA</span><span>${g.itens.length} lançamento${g.itens.length!==1?'s':''}</span><span>entradas <b>${fmtR(entradas)}</b></span><span>saídas <b>${fmtR(saidas)}</b></span><span>saldo <b>${fmtR(entradas-saidas)}</b></span></div>`;
 }
-function _finLancCascataRowHtml(l, ctx){
+function _finLancCascataRowHtml(l, ctx, mostrarData){
   const isEnt = l.tipo_movimento===1;
   const sel = _finLancCascataState.sel.has(l.id);
-  const st = l.conciliado ? {t:'CONCILIADO',bg:'#E9F0E7',fg:'#4C6647'}
-    : (l.status===1||l.data_pagamento) ? {t:'PAGO',bg:'#5E7C58',fg:'#fff'}
-    : (l.data_vencimento && l.data_vencimento<hoje()) ? {t:'ATRASADO',bg:'#FBEAE7',fg:'#A65A4A'}
-    : {t: isEnt?'A RECEBER':'A PAGAR', bg:'#FBF3E1', fg:'#9C7F40'};
+  const st = _finLancSit(l);
   const op = ctx.opsByLanc[l.id];
   let sub = '';
   if(op){
@@ -30473,7 +30571,8 @@ function _finLancCascataRowHtml(l, ctx){
   }
   return `<div class="finlc-row ${sel?'sel':''}" data-lanc="${l.id}" onclick="_finLancAbrirDrawer(${l.id})">
       <div class="finlc-box ${sel?'on':''}" onclick="event.stopPropagation();_finLancCascataToggleSel(${l.id})"></div>
-      <div class="finlc-ic" style="background:${isEnt?'#E9F0E7':'#FBEAE7'};color:${isEnt?'#4C6647':'#A65A4A'};">${isEnt?'↓':'↑'}</div>
+      ${mostrarData ? `<div class="finlc-datacol" style="width:32px;flex-shrink:0;">${(l.data_competencia||'').slice(8,10)}/${(l.data_competencia||'').slice(5,7)}</div>`
+        : `<div class="finlc-ic" style="background:${isEnt?'#E9F0E7':'#FBEAE7'};color:${isEnt?'#4C6647':'#A65A4A'};">${isEnt?'↓':'↑'}</div>`}
       <div class="finlc-desc">
         <div class="tx" style="display:flex;align-items:center;gap:7px;min-width:0;">
           <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(l.descricao||'—')}</span>
