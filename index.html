@@ -9342,13 +9342,82 @@ function renderPainelColaborador(){
 }
 
 // ── Recuperado de fato no mês (ym = "YYYY-MM") ──────────────────────────────
-// Soma as parcelas de acordo efetivamente pagas na competência — fonte real de
-// "dinheiro que entrou" (canal principal de recuperação). Usa pagoEm (data da
-// baixa) e cai para vencimento em parcelas antigas sem data. Asaas RECEIVED e
-// baixas avulsas: follow-up (sem carga em massa hoje).
-// Recuperado numa JANELA de datas (usado pelo segmented Hoje/Semana/Mês/Trim do
-// Painel). Mesma fonte de recuperadoNoMes: parcela de acordo efetivamente paga.
-function recuperadoEntre(deYmd, ateYmd){
+// ══════════════════════════════════════════════════════════════
+// RECUPERADO — de onde o número sai de verdade
+// ──────────────────────────────────────────────────────────────
+// recuperadoNoMes() e recuperadoEntre() liam o blob DB.devedores[].acordos[].parcelas[]
+// e o campo `pago` de cada parcela. Essa estrutura não é mais alimentada: os pagamentos
+// vivem em fin_lancamento (Asaas, baixa manual, conciliação). O próprio comentário
+// antigo já admitia o buraco — "Asaas RECEIVED e baixas avulsas: follow-up".
+//
+// Efeito medido em 27/08/2026: o Painel mostrava RECUPERADO R$ 0,00 num mês com
+// R$ 32.420,08 em 53 lançamentos pagos. E como o card da meta, o "fechar por dia útil"
+// e a barra derivam desse mesmo número, os três mentiam junto — "faltam R$ 40.000,00"
+// quando faltavam ~R$ 7.580. O relatório de comissão lia daqui também.
+//
+// Agora a fonte é fin_lancamento, com a MESMA regra da aba Caixa do Financeiro
+// (pago/conciliado, e judicial não liberado fora — bloqueio de Sisbajud/penhora é
+// expectativa, não caixa). Os dois números têm de fechar entre as duas telas.
+//
+// As funções continuam SÍNCRONAS porque três telas as chamam assim. A carga é
+// assíncrona e cacheada por ano; enquanto não chega, devolvem o valor do blob (que é
+// baixo, não errado por excesso) e disparam um re-render quando os dados reais chegam.
+let _recRealCache = { ano:null, itens:null, carregando:false, falhou:false };
+function _recRealPronto(ano){ return _recRealCache.ano === ano && Array.isArray(_recRealCache.itens); }
+async function _recRealCarregar(ano){
+  if(_recRealCache.carregando || _recRealPronto(ano)) return;
+  const sb = (typeof getSupabase === 'function') ? getSupabase() : null;
+  if(!sb) return;
+  _recRealCache.carregando = true;
+  try{
+    const de = `${ano}-01-01`, ate = `${ano}-12-31`;
+    const linhas = [];
+    let from = 0;
+    for(;;){
+      const { data, error } = await sb.from('fin_lancamento')
+        .select('id,valor,data_competencia')
+        .eq('tipo_movimento', 1)
+        .or('status.eq.1,data_pagamento.not.is.null,conciliado.eq.true')
+        .gte('data_competencia', de).lte('data_competencia', ate)
+        .order('id', { ascending:true }).range(from, from+999);
+      if(error) throw error;
+      linhas.push(...(data||[]));
+      if(!data || data.length < 1000 || from >= 20000) break;
+      from += 1000;
+    }
+    // Judicial ainda não liberado sai da conta — mesma exclusão da aba Caixa.
+    const travados = new Set();
+    try{
+      const ids = linhas.map(l => l.id);
+      for(let i = 0; i < ids.length; i += 300){
+        const { data:cats } = await sb.from('fin_lancamento_categoria')
+          .select('lancamento_id,fin_categoria(descricao),fin_lancamento(judicial_liberado_em)')
+          .in('lancamento_id', ids.slice(i, i+300)).limit(4000);
+        for(const c of (cats||[])){
+          const d = (c.fin_categoria && c.fin_categoria.descricao) || '';
+          const liberado = !!(c.fin_lancamento && c.fin_lancamento.judicial_liberado_em);
+          if((/sisbajud/i.test(d) || /penhora/i.test(d)) && !liberado) travados.add(c.lancamento_id);
+        }
+      }
+    }catch(_){ /* sem a lista, conta tudo — melhor que zerar a tela */ }
+
+    _recRealCache.itens = linhas.filter(l => !travados.has(l.id))
+      .map(l => ({ d: (l.data_competencia||'').slice(0,10), v: Math.abs(+l.valor||0) }));
+    _recRealCache.ano = ano;
+    _recRealCache.falhou = false;
+  }catch(e){
+    console.warn('recuperado real:', e && e.message || e);
+    _recRealCache.falhou = true;
+  }finally{
+    _recRealCache.carregando = false;
+  }
+  // Os números já foram desenhados com o fallback do blob: redesenha com o real.
+  if(_recRealPronto(ano)){
+    try{ if(document.querySelector('#page-painel.active') && typeof renderPainel === 'function') renderPainel(); }catch(_){}
+  }
+}
+// Soma do blob — só serve de ponte enquanto a consulta real não volta.
+function _recBlobEntre(deYmd, ateYmd){
   let total = 0;
   for(const d of (DB.devedores||[])){
     for(const ac of (d.acordos||[])){
@@ -9361,6 +9430,21 @@ function recuperadoEntre(deYmd, ateYmd){
   }
   return total;
 }
+function recuperadoEntre(deYmd, ateYmd){
+  const ano = +String(deYmd).slice(0,4);
+  if(_recRealPronto(ano)){
+    return +_recRealCache.itens.filter(x => x.d >= deYmd && x.d <= ateYmd)
+      .reduce((s,x) => s + x.v, 0).toFixed(2);
+  }
+  _recRealCarregar(ano);
+  return _recBlobEntre(deYmd, ateYmd);
+}
+function recuperadoNoMes(ym){
+  const ano = +String(ym).slice(0,4), mes = +String(ym).slice(5,7);
+  const p2 = n => String(n).padStart(2,'0');
+  return recuperadoEntre(`${ym}-01`, `${ym}-${p2(new Date(ano, mes, 0).getDate())}`);
+}
+
 // Janela do segmented. `metaFator` converte a meta MENSAL na meta do período,
 // proporcional a dias ÚTEIS — meta de um dia não é meta do mês dividida por 30.
 const _PNL_PERIODOS = ['hoje','semana','mes','trim'];
@@ -9393,19 +9477,6 @@ function painelJanela(){
   return { per, de, ate, label, metaFator };
 }
 
-function recuperadoNoMes(ym){
-  let total = 0;
-  for(const d of (DB.devedores||[])){
-    for(const ac of (d.acordos||[])){
-      for(const p of (ac.parcelas||[])){
-        if(!p.pago) continue;
-        const ref = String(p.pagoEm || p.vencimento || '').slice(0,7);
-        if(ref === ym) total += (typeof p.valor==='number') ? p.valor : (parseValorBR(p.valor)||0);
-      }
-    }
-  }
-  return total;
-}
 
 // ════════════════════════════════════════════════════════════════════════════
 // METAS DE TAREFAS (diária/semanal/mensal) + DELEGAÇÃO COM A BIA
@@ -10260,7 +10331,17 @@ async function renderPainel(){
 
   // Em negociação: cobranças ativas em status de negociação que se MEXERAM na
   // janela — "em negociação hoje" é o que andou hoje, não o estoque inteiro.
-  const emNegTodas   = cobrAtivas.filter(c=>/negocia/i.test(c.status||''));
+  // O filtro era /negocia/i — e nenhum status real contém "negocia". Os status são
+  // "2. Acordo Extrajudicial", "2.1. Acordo Judicial", "Acordo", "Acordo enviado",
+  // "Quita Fácil"… Resultado: o card mostrava R$ 0,00 · 0 cobranças desde sempre, sem
+  // erro nenhum — mesma armadilha da lista branca de etiquetas da view casos.
+  // Agora casa com a taxonomia de verdade: acordo em vigor ou proposta em aberto, e
+  // fora o que já quitou.
+  const emNegTodas   = cobrAtivas.filter(c=>{
+    const st = c.status || '';
+    if(/quitad/i.test(st)) return false;
+    return /acordo/i.test(st) || /quita\s*f[áa]cil/i.test(st) || /negocia/i.test(st);
+  });
   const emNegRows    = (_pnlJan.per==='mes')
     ? emNegTodas
     : emNegTodas.filter(c=>{
@@ -10331,13 +10412,28 @@ async function renderPainel(){
     if(supa){
       const ymIni = ymAtual+'-01';
       const dNext = new Date(mesRef.getFullYear(), mesRef.getMonth()+1, 1).toISOString().slice(0,10);
-      const r = await supa.from('acordos').select('id,valor_total,parcelas,created_at,status_zapsign')
-        .eq('status_zapsign','assinado').gte('created_at', ymIni).lt('created_at', dNext);
+      // Por DATA DE ASSINATURA, não por created_at. O card diz "assinados no mês" e
+      // contava os CRIADOS no mês que por acaso estavam assinados: um acordo criado em
+      // julho e assinado em agosto ficava de fora. Em ago/2026 dava 9 (R$ 30.680,85)
+      // quando os assinados no mês eram 10 (R$ 41.270,85).
+      const r = await supa.from('acordos').select('id,valor_total,parcelas,data_assinatura,status_zapsign')
+        .not('data_assinatura','is',null).gte('data_assinatura', ymIni).lt('data_assinatura', dNext);
       if(!r.error) acordosMesRows = r.data||[];
     }
   }catch(_){}
   const acordadoNoMes   = acordosMesRows.reduce((s,a)=>s+(+a.valor_total||0),0);
-  const parcelasGeradas = acordosMesRows.reduce((s,a)=>s+(Array.isArray(a.parcelas)?a.parcelas.length:0),0);
+  // Parcelas geradas saem de fin_lancamento, não de acordos.parcelas: o jsonb está
+  // praticamente vazio (7 no total em ago/2026) enquanto as parcelas reais desses
+  // mesmos acordos eram 120. O número antigo era resíduo, não informação.
+  let parcelasGeradas = 0;
+  try{
+    const supaP = getSupabase();
+    const ids = acordosMesRows.map(a=>a.id);
+    if(supaP && ids.length){
+      const rp = await supaP.from('fin_lancamento').select('id',{count:'exact',head:true}).in('acordo_id', ids);
+      if(!rp.error) parcelasGeradas = rp.count||0;
+    }
+  }catch(_){}
 
   // (removido) "Ações judiciais no mês" não faz parte do card: o handoff v3 §3
   // fecha em 4 métricas — ACORDADO NO MÊS · A RECEBER · META DO MÊS · FECHAR POR
@@ -10350,16 +10446,24 @@ async function renderPainel(){
   // sessão do navegador — número incompleto e enganoso, achado em 27/07/2026).
   const inicioMes = ymAtual+'-01';
   const fimMes    = new Date(mesRef.getFullYear(), mesRef.getMonth()+1, 0).toISOString().slice(0,10);
-  let aReceberMes = 0, aReceberQtd = 0;
+  let aReceberMes = 0, aReceberQtd = 0, aReceberVencido = 0, aReceberVencidoQtd = 0;
   try{
     const supaFin = getSupabase();
     if(supaFin){
-      const rFin = await supaFin.from('fin_lancamento').select('valor', { count:'exact' })
+      const rFin = await supaFin.from('fin_lancamento').select('valor,data_vencimento', { count:'exact' })
         .eq('tipo_movimento', 1).eq('status', 0)
-        .gte('data_vencimento', inicioMes).lte('data_vencimento', fimMes);
+        .gte('data_vencimento', inicioMes).lte('data_vencimento', fimMes).limit(1000);
       if(!rFin.error){
         aReceberQtd = rFin.count || 0;
         aReceberMes = (rFin.data||[]).reduce((s,l)=>s+(+l.valor||0), 0);
+        // "A receber" incluía o que JÁ VENCEU e não foi pago — em ago/2026, 36 das 55
+        // parcelas (R$ 15.227,08 dos R$ 29.938,53). Metade do card era inadimplência
+        // vestida de expectativa. O total continua o mesmo; o card agora diz quanto
+        // dele já venceu.
+        const _hj = _metaYmd(new Date());
+        const venc = (rFin.data||[]).filter(l => (l.data_vencimento||'') < _hj);
+        aReceberVencidoQtd = venc.length;
+        aReceberVencido = venc.reduce((s,l)=>s+(+l.valor||0), 0);
       }
     }
   }catch(_){}
@@ -10369,7 +10473,10 @@ async function renderPainel(){
   // outro mês (navegado via ‹ ›), conta o mês inteiro — é só uma média informativa.
   let diasUteisRest=0;
   if(_mesOffset===0){
-    const d=new Date(now); d.setDate(d.getDate()+1);
+    // Conta a partir de HOJE, não de amanhã: hoje ainda é dia de trabalho e ainda dá
+    // para fechar acordo. Contando de amanhã, esta tela dizia "2 dias" enquanto a aba
+    // Caixa do Financeiro dizia "3" para o mesmo 27/08 — duas telas, dois números.
+    const d=new Date(now);
     while(d.getMonth()===now.getMonth()){ const dow=d.getDay(); if(dow!==0&&dow!==6) diasUteisRest++; d.setDate(d.getDate()+1); }
   } else {
     const d=new Date(mesRef.getFullYear(), mesRef.getMonth(), 1);
@@ -10500,13 +10607,13 @@ async function renderPainel(){
         <span class="cob-panel-title">Acordos de ${mesAtual.toLowerCase()}${_mesAnoDiff?` de ${mesRef.getFullYear()}`:''}</span>
         <span class="pnl-mes-nav" onclick="painelSetMes(1)" title="Próximo mês">›</span>
         ${_mesOffset!==0?`<a class="cob-link" style="margin-left:8px;" onclick="painelResetMes()">Hoje</a>`:''}
-        <span class="cob-panel-sub">${acordosMesRows.length} fechado${acordosMesRows.length!==1?'s':''} · ${parcelasGeradas} parcela${parcelasGeradas!==1?'s':''} gerada${parcelasGeradas!==1?'s':''}</span>
+        <span class="cob-panel-sub">${acordosMesRows.length} assinado${acordosMesRows.length!==1?'s':''} · ${parcelasGeradas} parcela${parcelasGeradas!==1?'s':''} lançada${parcelasGeradas!==1?'s':''}</span>
         <a class="cob-link" style="margin-left:auto;" onclick="showPage('cobr')">Ver acordos →</a>
       </div>
       <div class="cob-panel-body">
         <div class="pnl-acordos-grid">
           <div><div class="pnl-acordos-lb">ACORDADO NO MÊS</div><div class="pnl-acordos-v">${fmtR(acordadoNoMes)}</div><div class="pnl-acordos-sub">${acordosMesRows.length} acordo${acordosMesRows.length!==1?'s':''} assinado${acordosMesRows.length!==1?'s':''}</div></div>
-          <div><div class="pnl-acordos-lb">A RECEBER EM ${mesAtual.toUpperCase()}</div><div class="pnl-acordos-v green">${fmtR(aReceberMes)}</div><div class="pnl-acordos-sub">${aReceberQtd} lançamento${aReceberQtd!==1?'s':''} pendente${aReceberQtd!==1?'s':''}</div></div>
+          <div><div class="pnl-acordos-lb">A RECEBER EM ${mesAtual.toUpperCase()}</div><div class="pnl-acordos-v green">${fmtR(aReceberMes)}</div><div class="pnl-acordos-sub">${aReceberQtd} lançamento${aReceberQtd!==1?'s':''} pendente${aReceberQtd!==1?'s':''}${aReceberVencidoQtd?` · <span style="color:var(--danger);font-weight:600;">${fmtR(aReceberVencido)} já venceu</span>`:''}</div></div>
           <div><div class="pnl-acordos-lb">META DO MÊS</div><div class="pnl-acordos-v">${fmtR(metaMensal)}</div><div class="pnl-acordos-sub">recuperado ${fmtR(totalRecuperado)}${metaProg!=null?` · ${metaProg}%`:''}</div></div>
           ${_mesOffset===0
             ? `<div><div class="pnl-acordos-lb hl">FECHAR POR DIA ÚTIL</div><div class="pnl-acordos-v hl">${fmtR(fecharPorDiaUtil)}</div><div class="pnl-acordos-sub">${faltamMeta>0?`faltam ${fmtR(faltamMeta)} em ${diasUteisRest} dia${diasUteisRest!==1?'s':''}`:'meta atingida'}</div></div>`
@@ -10552,7 +10659,7 @@ async function renderPainel(){
           <div class="pnl-dark-hr"></div>
           <div class="pnl-dark-2col">
             <div><div class="pnl-dark-lb">RECUPERADO ${escHtml(_pnlJan.label.toUpperCase())}</div><div class="pnl-dark-v" style="font-size:17px;color:#A8C6A0;">${fmtR(recuperadoPeriodo)}</div></div>
-            <div><div class="pnl-dark-lb">EM NEGOCIAÇÃO</div><div class="pnl-dark-v" style="font-size:17px;color:#E2CE9E;">${fmtR(emNegociacao)}</div><div class="pnl-dark-sub">${emNegRows.length} cobrança${emNegRows.length!==1?'s':''}</div></div>
+            <div><div class="pnl-dark-lb">ACORDOS EM VIGOR</div><div class="pnl-dark-v" style="font-size:17px;color:#E2CE9E;">${fmtR(emNegociacao)}</div><div class="pnl-dark-sub">${emNegRows.length} cobrança${emNegRows.length!==1?'s':''}</div></div>
           </div>
           <div>
             <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--side-fg-mute);margin-bottom:6px;"><span>Meta ${escHtml(_pnlJan.label)}</span><span style="font-family:var(--font-mono);">${metaProgPeriodo!=null?metaProgPeriodo+'%':'—'} de ${fmtR(metaPeriodo)}</span></div>
