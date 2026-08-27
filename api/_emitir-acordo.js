@@ -7,7 +7,10 @@
 //     duplicar com o fluxo n8n legado enquanto ele não é desligado.
 //   - app (botão manual no Faturamento) — usuário Supabase logado; sempre emite.
 //
-// Idempotência: pula se o acordo já tem cobranca_id OU metadata.boletos_emitidos.
+// Idempotência: pula se metadata.boletos_emitidos.
+// NÃO usar acordos.cobranca_id como flag de "já emitido" — desde 20260827 ele é o vínculo
+// real com a dívida e é preenchido no INSERT de todo acordo. Usá-lo aqui faria a emissão
+// pular sempre (nenhum boleto sairia). A flag de emissão é só metadata.
 // externalReference do pagamento = acordo.id (a baixa por parcela e a "operação
 // única" recebimento↔repasse são fechadas na PR3, que consome o asaas-webhook).
 
@@ -73,7 +76,7 @@ module.exports = async function handler(req, res) {
 
     // Modo REENVIO: acordo já emitido → só reenvia o link do boleto por WhatsApp (não
     // cria boleto novo). Grava metadata.whatsapp_ok com o resultado (alimenta o Painel).
-    if ((body.resend === true || req.query.resend) && (acordo.cobranca_id || meta.boletos_emitidos)) {
+    if ((body.resend === true || req.query.resend) && meta.boletos_emitidos) {
       const url = meta.asaas_invoice_url || '';
       const dvs = await sbFetch(`devedores?id=eq.${acordo.devedor_id}&select=nome,telefone&limit=1`);
       const dev = dvs[0];
@@ -88,7 +91,7 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, acordo_id: acordoId, reenviado: enviado, erro: enviado ? undefined : (zap && zap.error) });
     }
 
-    if (acordo.cobranca_id || meta.boletos_emitidos) {
+    if (meta.boletos_emitidos) {
       return res.status(200).json({ ok: true, skipped: 'já emitido', acordo_id: acordoId });
     }
     acordoRef = acordo.id; prevMeta = meta; devedorRef = acordo.devedor_id;
@@ -115,10 +118,12 @@ module.exports = async function handler(req, res) {
     // Blindagem (caso Francieli, 25/06/2026): acordos criados pelo n8n vinham só com
     // valor_total — num_parcelas=null e parcelas=[] — e a emissão caía p/ 1x (boleto
     // único) mesmo num acordo parcelado. Os termos reais ficam no acordo_final da
-    // cobrança (id == devedor_id). Se o acordo não declara parcelamento, puxa de lá.
+    // cobrança vinculada (acordo.cobranca_id; devedor_id só como último recurso — o
+    // invariante 1:1 morre na 2ª cobrança do mesmo devedor). Se o acordo não declara
+    // parcelamento, puxa de lá.
     if (nParc <= 1) {
       try {
-        const cob = await sbFetch(`cobrancas?id=eq.${encodeURIComponent(acordo.devedor_id)}&select=acordo_final&limit=1`);
+        const cob = await sbFetch(`cobrancas?id=eq.${encodeURIComponent(acordo.cobranca_id || acordo.devedor_id)}&select=acordo_final&limit=1`);
         const af = cob && cob[0] && cob[0].acordo_final;
         const afParc = af && Number(af.parcelas);
         if (afParc && afParc > 1) {
@@ -143,7 +148,7 @@ module.exports = async function handler(req, res) {
     // é serializado pelo lock de linha do Postgres: só uma chamada concorrente passa;
     // a outra sai sem emitir uma 2ª série de boletos. O catch reverte em caso de erro.
     const claim = await sbFetch(
-      `acordos?id=eq.${acordo.id}&cobranca_id=is.null&metadata->>boletos_emitidos=is.null&metadata->>emitindo=is.null`,
+      `acordos?id=eq.${acordo.id}&metadata->>boletos_emitidos=is.null&metadata->>emitindo=is.null`,
       { method: 'PATCH', body: JSON.stringify({ metadata: { ...meta, emitindo: new Date().toISOString() } }) }
     ).catch(() => []);
     if (!Array.isArray(claim) || !claim[0]) {
@@ -215,7 +220,7 @@ module.exports = async function handler(req, res) {
             data_competencia: p.dueDate,
             data_vencimento: p.dueDate,
             conta_id: CONTA_ASAAS,
-            cobranca_id: acordo.devedor_id,   // invariante 1:1 cobranca.id == devedor.id
+            cobranca_id: acordo.cobranca_id || acordo.devedor_id,   // vínculo real; devedor_id é fallback legado
             acordo_id: acordo.id,
             asaas_payment_id: p.id,
             numero_parcela: p.installmentNumber || 1,

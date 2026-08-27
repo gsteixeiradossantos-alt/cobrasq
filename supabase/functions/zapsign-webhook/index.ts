@@ -190,7 +190,37 @@ async function tratarDocClienteAssinado(
 // === Pós-assinatura no CRM (cobrancas é a fonte do CRM, não acordos) ===========
 // O CRM lê o caso de `cobrancas` (view `casos`); o webhook tocava só `acordos`, então
 // a assinatura não refletia no caso (ficava "Acordo abandonado"). Estas duas funções
-// fecham isso. Best-effort: nunca derrubam o webhook. Invariante: cobranca.id == devedor.id.
+// fecham isso. Best-effort: nunca derrubam o webhook.
+//
+// ATENÇÃO: NÃO usar acordo.devedor_id como id de cobrança. O invariante 1:1
+// (cobranca.id == devedor.id) morre na 2ª cobrança do mesmo devedor, e o UPDATE passa a
+// acertar a dívida de OUTRO credor em silêncio (incidente 27/08/2026). Resolver sempre
+// por resolverCobrancaId(); quando devolver null, NÃO agir.
+
+// Resolve a cobrança do acordo: usa acordos.cobranca_id e, na falta dele, só aceita o
+// vínculo quando é inequívoco (devedor com uma única cobrança ativa). Devolve null quando
+// não dá para saber — e null significa "não faça nada", nunca "use o devedor".
+async function resolverCobrancaId(
+  sb: ReturnType<typeof createClient>,
+  acordo: { id?: string; devedor_id?: string | null; cobranca_id?: string | null }
+): Promise<string | null> {
+  if (acordo?.cobranca_id) return String(acordo.cobranca_id);
+  if (!acordo?.devedor_id) return null;
+  try {
+    const { data, error } = await sb.rpc('fn_cobranca_inequivoca_do_devedor', {
+      p_devedor_id: String(acordo.devedor_id)
+    });
+    if (error || !data) {
+      console.warn('[zapsign-webhook] cobrança ambígua/ausente para o acordo ' + acordo.id +
+                   ' (devedor ' + acordo.devedor_id + ') — CRM não atualizado de propósito');
+      return null;
+    }
+    return String(data);
+  } catch (e) {
+    console.warn('[zapsign-webhook] resolverCobrancaId: ' + String((e as Error)?.message || e));
+    return null;
+  }
+}
 
 // Tira o caso de "abandonado" e marca a assinatura assim que o ZapSign confirma.
 async function refletirAssinaturaNoCRM(
@@ -216,6 +246,7 @@ async function refletirAssinaturaNoCRM(
 async function concluirCasoNoCRM(
   sb: ReturnType<typeof createClient>,
   cobrancaId: string,
+  devedorId: string,
   emissao: { parcelas?: number; total?: number } | null,
   dataAssinatura: string
 ): Promise<{ concluido: boolean; detalhe: string }> {
@@ -235,7 +266,7 @@ async function concluirCasoNoCRM(
       passo_atual: 'Acordo assinado', updated_at: quando
     }).eq('id', cobrancaId);
     await sb.from('devedor_eventos').insert({
-      devedor_id: cobrancaId, cobranca_id: cobrancaId, tipo: 'acordo_concluido_auto',
+      devedor_id: devedorId, cobranca_id: cobrancaId, tipo: 'acordo_concluido_auto',
       autor_nome: 'Automação (ZapSign → Asaas)',
       payload: { acao: '✅ Caso concluído automaticamente: acordo assinado e boletos emitidos (' + formaLegivel + ').' }
     });
@@ -295,7 +326,7 @@ Deno.serve(async (req) => {
   // ERRADO (atualizar a assinatura de outra dívida). Agora é igualdade estrita.
   const { data: acordos, error: errSel } = await sb
     .from('acordos')
-    .select('id, devedor_id, status_zapsign')
+    .select('id, devedor_id, cobranca_id, status_zapsign')
     .eq('zapsign_doc_id', docId)
     .limit(1);
 
@@ -350,8 +381,9 @@ Deno.serve(async (req) => {
 
   // Reflete a assinatura no caso do CRM já (independe da emissão dos boletos): sai de
   // "Acordo abandonado" e marca acordo_final.assinado.
-  if (novoStatus === 'assinado') {
-    await refletirAssinaturaNoCRM(sb, acordo.devedor_id, dataAssinatura || new Date().toISOString());
+  const cobrancaIdCRM = novoStatus === 'assinado' ? await resolverCobrancaId(sb, acordo) : null;
+  if (novoStatus === 'assinado' && cobrancaIdCRM) {
+    await refletirAssinaturaNoCRM(sb, cobrancaIdCRM, dataAssinatura || new Date().toISOString());
   }
 
   // PR2: emissão automática dos boletos pós-assinatura. Delega ao endpoint Vercel
@@ -388,13 +420,18 @@ Deno.serve(async (req) => {
     const em = emissao as { ok?: boolean; skipped?: string; parcelas?: number; total?: number; invoice_url?: string } | null;
     const boletosOk = !!em && em.ok === true && (!!em.invoice_url || em.skipped === 'já emitido');
     if (boletosOk) {
-      conclusao = await concluirCasoNoCRM(sb, acordo.devedor_id, em, dataAssinatura || new Date().toISOString());
+      if (cobrancaIdCRM) {
+        conclusao = await concluirCasoNoCRM(sb, cobrancaIdCRM, String(acordo.devedor_id), em,
+                                            dataAssinatura || new Date().toISOString());
+      } else {
+        conclusao = { concluido: false, detalhe: 'cobrança ambígua — encerramento não aplicado' };
+      }
     }
   }
 
   await sb.from('devedor_eventos').insert({
     devedor_id: acordo.devedor_id,
-    cobranca_id: acordo.devedor_id,
+    cobranca_id: acordo.cobranca_id || cobrancaIdCRM || null,
     tipo: 'zapsign_' + novoStatus,
     payload: {
       acao: novoStatus === 'assinado'
