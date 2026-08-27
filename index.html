@@ -29551,6 +29551,62 @@ function setFinTab(tab, el){
 // ══════════════════════════════════════════════════════════════
 
 let _finCascataCache = { at:0, m:null };
+// ══════════════════════════════════════════════════════════════
+// "A REPASSAR" — fonte única
+// ──────────────────────────────────────────────────────────────
+// O mesmo número era calculado em dois lugares com regras diferentes:
+// _finCascataMetricas() somava fin_operacao MAIS a divisão manual da cascata
+// (fin_lancamento com cedente_id), e _finCredoresResumo() somava só fin_operacao.
+// Hoje os dois batem porque a parte manual está vazia — não há UI que grave essa
+// divisão ainda. No dia em que a primeira for gravada, a faixa escura, o card de
+// caixa livre e o card "A repassar" de Credores passariam a mostrar números
+// diferentes para a mesma coisa, sem erro nenhum no console. É o invariante 1/6 do
+// handoff, e a mesma classe de divergência que a aba Caixa já corrigiu.
+//
+// Agora existe UM derivador; os dois chamadores leem daqui.
+let _finRepasseAggCache = { at:0, v:null };
+async function _finRepasseAgg(force){
+  if(!force && _finRepasseAggCache.v && (Date.now()-_finRepasseAggCache.at) < 30000) return _finRepasseAggCache.v;
+  const sb = getSupabase();
+  const iniMes = (()=>{ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`; })();
+
+  const r = {
+    aRepassarOp:0, pendCount:0, revisarCount:0,           // fin_operacao
+    aRepassarManual:0, manualCount:0,                     // divisão manual (cascata)
+    aRepassar:0, filaCount:0,
+    credores:new Set(), maisAntigo:null, repassadoMes:0,
+  };
+  try{
+    const { data } = await sb.from('fin_operacao')
+      .select('valor_capital,repasse_status,repasse_efetuado_em,recebido_em,credor_id').limit(5000);
+    for(const o of (data||[])){
+      const v = Math.abs(+o.valor_capital||0);
+      if(o.repasse_status==='pendente' || o.repasse_status==='preparado'){
+        r.aRepassarOp += v; r.pendCount++;
+        if(o.credor_id) r.credores.add(o.credor_id);
+        // O que está parado há mais tempo é o que dói: o cedente já podia ter recebido.
+        const d = (o.recebido_em||'').slice(0,10);
+        if(d && (!r.maisAntigo || d < r.maisAntigo)) r.maisAntigo = d;
+      } else if(o.repasse_status==='revisar'){ r.revisarCount++; }
+      else if(o.repasse_status==='efetuado' && (o.repasse_efetuado_em||'') >= iniMes){ r.repassadoMes += v; }
+    }
+  }catch(e){ console.warn('_finRepasseAgg: fin_operacao', e); }
+
+  try{
+    if(!(await _finTemColunasCascata())) throw new Error('colunas da cascata ausentes');
+    const { data } = await sb.from('fin_lancamento').select('capital,meu_total,amortizado,valor')
+      .not('cedente_id','is',null).in('repasse_status',['pendente','atrasado']).limit(5000);
+    for(const l of (data||[])){ r.aRepassarManual += finDivideCascata(l, +l.valor||0).repasseAoCedente; r.manualCount++; }
+  }catch(_){ /* colunas do PR1 podem não existir ainda — migração não aplicada */ }
+
+  r.aRepassar = +(r.aRepassarOp + r.aRepassarManual).toFixed(2);
+  r.aRevisar = r.revisarCount;
+  r.nRepassar = r.pendCount + r.manualCount;
+  r.filaCount = r.pendCount + r.revisarCount + r.manualCount;
+  _finRepasseAggCache = { at: Date.now(), v: r };
+  return r;
+}
+
 async function _finCascataMetricas(force){
   if(!force && _finCascataCache.m && (Date.now()-_finCascataCache.at)<30000) return _finCascataCache.m;
   const sb = getSupabase();
@@ -29561,23 +29617,8 @@ async function _finCascataMetricas(force){
   const contasNoGeral = (dim.contas||[]).filter(c=>c.incluir_no_saldo_geral!==false);
   const saldoGeral = contasNoGeral.reduce((s,c)=>s+_saldoConta(c),0);
 
-  let aRepassarOp=0, pendCount=0, revisarCount=0;
-  try{
-    const { data } = await sb.from('fin_operacao').select('valor_capital,repasse_status').limit(5000);
-    for(const o of (data||[])){
-      if(o.repasse_status==='pendente'||o.repasse_status==='preparado'){ aRepassarOp += (+o.valor_capital||0); pendCount++; }
-      else if(o.repasse_status==='revisar') revisarCount++;
-    }
-  }catch(_){}
-  let aRepassarManual=0, manualCount=0;
-  try{
-    if(!(await _finTemColunasCascata())) throw new Error('colunas da cascata ausentes');
-    const { data } = await sb.from('fin_lancamento').select('capital,meu_total,amortizado,valor')
-      .not('cedente_id','is',null).in('repasse_status',['pendente','atrasado']).limit(5000);
-    for(const l of (data||[])){ aRepassarManual += finDivideCascata(l, +l.valor||0).repasseAoCedente; manualCount++; }
-  }catch(_){ /* colunas do PR1 podem não existir ainda — migração não aplicada */ }
-
-  const aRepassar = aRepassarOp + aRepassarManual;
+  const rep = await _finRepasseAgg(force);
+  const aRepassar = rep.aRepassar;
   // Contas que entram no saldo geral com saldo declarado vencido — o "caixa livre" é
   // calculado em cima delas, então a idade precisa aparecer junto com o número.
   const stale = contasNoGeral
@@ -29587,8 +29628,8 @@ async function _finCascataMetricas(force){
   const m = {
     saldoGeral, aRepassar, caixaLivre: saldoGeral - aRepassar, stale,
     contasCount: contasNoGeral.length,
-    filaCount: pendCount + revisarCount + manualCount,
-    repassesCount: pendCount + revisarCount,
+    filaCount: rep.filaCount,
+    repassesCount: rep.pendCount + rep.revisarCount,
   };
   _finCascataCache = { at: Date.now(), m };
   return m;
@@ -30064,27 +30105,323 @@ const FIN_CREDORES_ABAS = [
   {id:'fila',     label:'Precisa de você', render:(el)=>renderFinFila(el)},
   {id:'repasses', label:'Repasses',        render:(el)=>renderFinRepassesCascata(el)},
   {id:'previsao', label:'Previsão',        render:(el)=>renderFinPrevisaoCredor(el)},
+  {id:'posassin', label:'Pós-assinatura',  render:(el)=>renderFinPosAssinatura(el)},
 ];
-async function _finCredoresResumo(){
-  const sb = getSupabase(); if(!sb) return null;
-  const ini = new Date(); ini.setDate(1);
-  const iniISO = ini.toISOString().slice(0,10);
+
+// ══════════════════════════════════════════════════════════════
+// PÓS-ASSINATURA — o que falta depois que o devedor assinou
+// ──────────────────────────────────────────────────────────────
+// O ZapSign assina, o webhook chama emitir-acordo e as parcelas nascem no Asaas e em
+// fin_lancamento. O que NÃO existia era o pedaço humano: conferir se as parcelas saíram
+// certas, decidir a divisão com o cedente e mandar o relatório ao cliente. Nada disso
+// aparecia em lugar nenhum — o acordo assinado simplesmente sumia da tela.
+//
+// Levantamento em 27/08/2026 que motivou a fila: dos 29 acordos assinados, só 9 tinham
+// parcelas lançadas. A maioria dos zeros é anterior a ~29/07, quando o emitir-acordo
+// passou a funcionar (passivo histórico, não fila) — mas sobram casos vivos, incluindo
+// um acordo assinado no mesmo dia com 0 de 6 parcelas, e um com 38 parcelas lançadas
+// para 37 contratadas.
+//
+// SEM PRAZO, por decisão do Gustavo (27/08): a trilha mostra em que passo cada acordo
+// parou e há quantos dias, e NÃO marca nada como fora do prazo. O SLA se calibra depois,
+// olhando os números reais — nascer toda vermelha não ajudaria ninguém.
+//
+// O estado dos passos mora em acordos.metadata.posAssinatura (jsonb que já existe), o
+// que dispensa migração — e migração em produção é gated.
+const FIN_POS_PASSOS = [
+  { id:'conferir',  n:1, nome:'Conferir parcelas', unidade:'acordos', hint:'parcelas emitidas pelo Asaas · validar valor e vencimento', acao:'Conferir parcelas', campo:'conferidoEm' },
+  { id:'repasse',   n:2, nome:'Definir repasse',   unidade:'acordos', hint:'escolher quais parcelas são do cedente e o honorário',      acao:'Definir repasse',   campo:'repasseEm' },
+  { id:'relatorio', n:3, nome:'Enviar relatório',  unidade:'acordos', hint:'relatório de acordo firmado para o cliente',                acao:'Enviar relatório',  campo:'relatorioEm' },
+  { id:'ok',        n:4, nome:'Concluídos',        unidade:'na janela', hint:'nada a fazer — fica no histórico do caso' },
+];
+let _finPosState = { passo:'conferir', janelaDias:60, itens:null, carregando:false };
+
+async function _finPosCarregar(){
+  const sb = getSupabase();
+  const janela = _finPosState.janelaDias;
+  let q = sb.from('acordos')
+    .select('id,devedor_id,cobranca_id,valor_total,num_parcelas,data_assinatura,status_zapsign,metadata')
+    .not('data_assinatura','is',null);
+  if(janela > 0){
+    const d = new Date(Date.now() - janela*86400000);
+    q = q.gte('data_assinatura', `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`);
+  }
+  const { data, error } = await q.order('data_assinatura', { ascending:false }).limit(500);
+  if(error) throw error;
+  const acordos = data || [];
+  if(!acordos.length) return [];
+
+  const ids = acordos.map(a => a.id);
+  // Parcelas efetivamente lançadas por acordo — é o que o passo 1 confere contra
+  // num_parcelas. Sem isto o passo seria só um checkbox sem lastro.
+  const parcPorAcordo = {};
   try{
-    const { data } = await sb.from('fin_operacao')
-      .select('valor_capital,repasse_status,repasse_efetuado_em,recebido_em,credor_id').limit(5000);
-    const r = { aRepassar:0, nRepassar:0, aRevisar:0, repassadoMes:0, credores:new Set(), maisAntigo:null };
-    for(const o of (data||[])){
-      const v = Math.abs(+o.valor_capital||0);
-      if(o.repasse_status==='pendente' || o.repasse_status==='preparado'){
-        r.aRepassar += v; r.nRepassar++; if(o.credor_id) r.credores.add(o.credor_id);
-        // O que está parado há mais tempo é o que dói: o cedente já podia ter recebido.
-        const d = (o.recebido_em||'').slice(0,10);
-        if(d && (!r.maisAntigo || d < r.maisAntigo)) r.maisAntigo = d;
-      } else if(o.repasse_status==='revisar'){ r.aRevisar++; }
-      else if(o.repasse_status==='efetuado' && (o.repasse_efetuado_em||'') >= iniISO){ r.repassadoMes += v; }
+    for(let i = 0; i < ids.length; i += 100){
+      const { data:ls } = await sb.from('fin_lancamento').select('acordo_id,valor').in('acordo_id', ids.slice(i, i+100)).limit(4000);
+      for(const l of (ls||[])){
+        const g = parcPorAcordo[l.acordo_id] || (parcPorAcordo[l.acordo_id] = { n:0, total:0 });
+        g.n++; g.total += Math.abs(+l.valor||0);
+      }
     }
-    return r;
-  }catch(_){ return null; }
+  }catch(e){ console.warn('pós-assinatura: parcelas', e); }
+
+  const devIds = [...new Set(acordos.map(a => a.devedor_id).filter(Boolean))];
+  const cobIds = [...new Set(acordos.map(a => a.cobranca_id).filter(Boolean))];
+  const devMap = {}, cedPorCob = {};
+  try{ if(devIds.length){ const { data:ds } = await sb.from('devedores').select('id,nome').in('id', devIds); (ds||[]).forEach(d => devMap[d.id] = d.nome); } }catch(_){}
+  try{
+    if(cobIds.length){
+      const { data:cs } = await sb.from('cobrancas').select('id,cliente_id').in('id', cobIds);
+      const cliIds = [...new Set((cs||[]).map(c => c.cliente_id).filter(Boolean))];
+      const cliMap = {};
+      if(cliIds.length){ const { data:cl } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', cliIds); (cl||[]).forEach(c => cliMap[c.id] = c.nome_fantasia || c.nome); }
+      (cs||[]).forEach(c => { if(c.cliente_id) cedPorCob[c.id] = cliMap[c.cliente_id] || null; });
+    }
+  }catch(_){}
+
+  const hojeMs = Date.now();
+  return acordos.map(a => {
+    const pa = (a.metadata && a.metadata.posAssinatura) || {};
+    const parc = parcPorAcordo[a.id] || { n:0, total:0 };
+    const feitos = { conferir: !!pa.conferidoEm, repasse: !!pa.repasseEm, relatorio: !!pa.relatorioEm };
+    const passo = !feitos.conferir ? 'conferir' : (!feitos.repasse ? 'repasse' : (!feitos.relatorio ? 'relatorio' : 'ok'));
+    const dias = a.data_assinatura ? Math.max(0, Math.floor((hojeMs - new Date(a.data_assinatura).getTime())/86400000)) : null;
+    return {
+      id: a.id, cobrancaId: a.cobranca_id || null,
+      devedor: devMap[a.devedor_id] || 'devedor sem cadastro',
+      cedente: cedPorCob[a.cobranca_id] || null,
+      valor: +a.valor_total || 0,
+      numParcelas: +a.num_parcelas || 0,
+      parcelasLancadas: parc.n,
+      // O passo 1 existe por causa disto: a contagem lançada divergir da contratada.
+      divergeParcelas: (+a.num_parcelas || 0) !== parc.n,
+      assinadoEm: a.data_assinatura,
+      dias, passo, feitos, pa,
+    };
+  });
+}
+
+async function renderFinPosAssinatura(el){
+  el.innerHTML = `<div style="padding:50px;text-align:center;color:#8A94A6;"><div class="mv2-spinner" style="margin:0 auto 10px;width:24px;height:24px;border-width:3px;"></div>Carregando acordos assinados…</div>`;
+  try{ _finPosState.itens = await _finPosCarregar(); }
+  catch(e){ el.innerHTML = `<div class="panel" style="padding:20px;color:var(--danger);">Erro ao carregar a pós-assinatura: ${escHtml(e.message||String(e))}</div>`; return; }
+  _finPosRender();
+}
+function _finPosRender(){
+  const el = document.getElementById('fin-pos-corpo') || document.getElementById('fin-credores-corpo');
+  if(!el) return;
+  const itens = _finPosState.itens || [];
+  const cont = Object.fromEntries(FIN_POS_PASSOS.map(p => [p.id, itens.filter(i => i.passo === p.id).length]));
+  const lista = itens.filter(i => i.passo === _finPosState.passo);
+  const nPendentes = itens.filter(i => i.passo !== 'ok').length;
+  const nDiverge = itens.filter(i => i.passo !== 'ok' && i.divergeParcelas).length;
+
+  el.innerHTML = `
+    <style>
+      .finpa-sec{background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;}
+      .finpa-h{padding:14px 16px 12px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
+      .finpa-trilha{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:#E6E1D2;border-top:1px solid #E6E1D2;border-bottom:1px solid #E6E1D2;}
+      .finpa-passo{display:flex;flex-direction:column;gap:7px;align-items:flex-start;text-align:left;padding:13px 15px;background:#fff;border:none;border-top:2px solid transparent;cursor:pointer;font-family:inherit;}
+      .finpa-passo.on{background:#FBFAF6;border-top-color:#C9A961;}
+      .finpa-num{width:17px;height:17px;border-radius:50%;display:grid;place-items:center;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;background:#F2EFE6;color:#6B7683;flex-shrink:0;}
+      .finpa-passo.on .finpa-num{background:#0A1530;color:#fff;}
+      .finpa-nome{font-size:12px;font-weight:600;color:#0A1530;}
+      .finpa-cnt{font-family:'JetBrains Mono',monospace;font-size:19px;font-weight:600;}
+      .finpa-un{font-size:10.5px;color:#8A94A6;}
+      .finpa-hint{font-size:10.5px;color:#8A94A6;line-height:1.4;}
+      /* Mesma regra da tabela de Movimentações: as colunas somam ~984px, então abaixo
+         disso a lista ROLA DENTRO do cartão. Sem isto o overflow:hidden da seção comia a
+         coluna de ações — o botão que executa o passo era justamente o que sumia. */
+      .finpa-scroll{overflow-x:auto;}
+      .finpa-row{display:grid;grid-template-columns:minmax(200px,1fr) 128px minmax(150px,190px) 54px 118px 232px;gap:14px;align-items:center;padding:13px 16px;border-bottom:1px solid #F7F4EC;min-width:984px;box-sizing:border-box;}
+      .finpa-row:hover{background:#FBFAF6;}
+      .finpa-dev{font-size:13px;font-weight:600;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      .finpa-org{font-size:10.5px;color:#8A94A6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      .finpa-lb{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:#8A94A6;}
+      .finpa-val{font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:600;color:#0A1530;white-space:nowrap;}
+      .finpa-bolas{display:flex;gap:5px;}
+      .finpa-bola{width:7px;height:7px;border-radius:50%;}
+      .finpa-pill{font-family:'JetBrains Mono',monospace;font-size:10px;border-radius:4px;padding:3px 7px;white-space:nowrap;background:#F5F2EA;color:#6B7683;border:1px solid #E6E1D2;display:inline-block;}
+      .finpa-acts{display:flex;gap:7px;justify-content:flex-end;flex-wrap:wrap;}
+      .finpa-btn{border:1px solid #D8D2C5;background:#fff;color:#0A1530;font-family:inherit;font-size:12px;font-weight:500;padding:6px 11px;border-radius:6px;cursor:pointer;white-space:nowrap;}
+      .finpa-btn:hover{background:#FBFAF6;}
+      .finpa-btn.go{background:#0A1530;border-color:#0A1530;color:#fff;font-weight:600;}
+      .finpa-btn.go:hover{background:#15224A;}
+      .finpa-foot{background:#F7F4EC;border-top:1px solid #E6E1D2;padding:11px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:11.5px;color:#8A94A6;}
+      .finpa-alerta{font-family:'JetBrains Mono',monospace;font-size:9px;border-radius:4px;padding:1px 6px;background:#FBEAE7;color:#7D3F33;border:1px solid #E7CFC7;white-space:nowrap;}
+    </style>
+    <section class="finpa-sec">
+      <div class="finpa-h">
+        <h2 style="font-family:'Fraunces',Georgia,serif;font-size:16px;font-weight:500;color:#0A1530;">Pós-assinatura</h2>
+        <span style="font-size:11.5px;color:#8A94A6;">o ZapSign já emitiu as parcelas · o que falta é humano</span>
+        <span style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          ${nDiverge ? `<span class="finpa-alerta">${nDiverge} COM PARCELAS DIVERGENTES</span>` : ''}
+          <select style="border:1px solid #E6E1D2;border-radius:7px;padding:6px 9px;font-size:12px;font-family:inherit;color:#5A5F66;background:#fff;" onchange="_finPosJanela(this.value)">
+            <option value="60" ${_finPosState.janelaDias===60?'selected':''}>Assinados nos últimos 60 dias</option>
+            <option value="120" ${_finPosState.janelaDias===120?'selected':''}>Últimos 120 dias</option>
+            <option value="0" ${_finPosState.janelaDias===0?'selected':''}>Todos os assinados</option>
+          </select>
+        </span>
+      </div>
+      <div class="finpa-trilha">
+        ${FIN_POS_PASSOS.map(p=>`<button class="finpa-passo ${_finPosState.passo===p.id?'on':''}" onclick="_finPosIrPasso('${p.id}')">
+          <span class="finpa-num">${p.n}</span>
+          <span class="finpa-nome">${p.nome}</span>
+          <span><span class="finpa-cnt" style="color:${p.id==='ok'?'#4C6647':'#0A1530'};">${cont[p.id]||0}</span> <span class="finpa-un">${p.unidade}</span></span>
+          <span class="finpa-hint">${p.hint}</span>
+        </button>`).join('')}
+      </div>
+      <div class="finpa-scroll">
+        ${lista.length ? lista.map(i=>_finPosRowHtml(i)).join('')
+          : `<div style="padding:34px 16px;text-align:center;font-size:12.5px;color:#8A94A6;">Nada pendente neste passo.</div>`}
+      </div>
+      <div class="finpa-foot">
+        <span>Cada passo concluído fica gravado no acordo e libera o próximo. Sem prazo: a trilha mostra há quantos dias parou, não marca atraso.</span>
+        <button class="finpa-btn go" style="margin-left:auto;" onclick="_finPosGerarTarefas()" ${nPendentes?'':'disabled style="margin-left:auto;opacity:.5;cursor:default;"'}>Gerar tarefas do dia (${nPendentes})</button>
+      </div>
+    </section>`;
+}
+function _finPosRowHtml(i){
+  const ORDEM = ['conferir','repasse','relatorio','ok'];
+  const idx = ORDEM.indexOf(i.passo);
+  const passo = FIN_POS_PASSOS.find(p => p.id === i.passo) || FIN_POS_PASSOS[3];
+  const bolas = ORDEM.slice(0,3).map((k,n)=>{
+    const cor = n < idx ? '#5E7C58' : (n === idx ? '#C9A961' : '#E6E1D2');
+    return `<span class="finpa-bola" style="background:${cor};" title="${escHtml(FIN_POS_PASSOS[n].nome)}"></span>`;
+  }).join('');
+  const quando = i.dias == null ? '—' : (i.dias === 0 ? 'assinado hoje' : `há ${i.dias} dia${i.dias!==1?'s':''}`);
+  return `<div class="finpa-row">
+    <span style="min-width:0;">
+      <span class="finpa-dev" title="${escHtml(i.devedor)}">${escHtml(i.devedor)}</span>
+      <span class="finpa-org" style="display:block;">${quando}${i.assinadoEm?` · assinado em ${i.assinadoEm.slice(8,10)}/${i.assinadoEm.slice(5,7)}`:''}</span>
+    </span>
+    <span>
+      <span class="finpa-lb">Acordo</span>
+      <span class="finpa-val" style="display:block;">${fmtR(i.valor)}</span>
+      <span class="finpa-org">${i.numParcelas}× · ${i.parcelasLancadas} ${i.parcelasLancadas===1?'lançada':'lançadas'}${i.divergeParcelas?' <span class="finpa-alerta">DIVERGE</span>':''}</span>
+    </span>
+    <span style="min-width:0;">
+      <span class="finpa-lb">Cedente</span>
+      <span style="display:block;font-size:12px;font-weight:600;color:#9C7F40;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escHtml(i.cedente||'')}">${i.cedente ? escHtml(i.cedente) : '<span style="font-weight:400;color:#8A94A6;">carteira própria</span>'}</span>
+    </span>
+    <span class="finpa-bolas" title="passo ${idx+1} de 3">${bolas}</span>
+    <span><span class="finpa-pill">${quando}</span></span>
+    <span class="finpa-acts">
+      ${i.passo === 'ok'
+        ? `<button class="finpa-btn" onclick="_finPosReabrir('${i.id}')">Reabrir</button>`
+        : `<button class="finpa-btn go" onclick="_finPosConcluir('${i.id}','${i.passo}')">${passo.acao}</button>`}
+      <button class="finpa-btn" onclick="_finPosAbrirCaso('${i.id}')">Abrir caso</button>
+    </span>
+  </div>`;
+}
+function _finPosIrPasso(id){ _finPosState.passo = id; _finPosRender(); }
+function _finPosJanela(v){ _finPosState.janelaDias = +v||0; const el=document.getElementById('fin-credores-corpo'); if(el) renderFinPosAssinatura(el); }
+
+// Concluir um passo grava o carimbo em acordos.metadata.posAssinatura. O metadata é lido
+// e reescrito inteiro (jsonb), então preserva o que já estava lá — outras partes do
+// sistema guardam coisas nesse mesmo campo.
+async function _finPosConcluir(acordoId, passoId){
+  const passo = FIN_POS_PASSOS.find(p => p.id === passoId); if(!passo) return;
+  const it = (_finPosState.itens||[]).find(x => x.id === acordoId); if(!it) return;
+  if(passoId === 'conferir' && it.divergeParcelas){
+    if(!confirm(`Este acordo tem ${it.numParcelas} parcelas contratadas e ${it.parcelasLancadas} lançadas.\n\nConferir mesmo assim?`)) return;
+  }
+  const sb = getSupabase();
+  try{
+    const { data:atual, error:e1 } = await sb.from('acordos').select('metadata').eq('id', acordoId).single();
+    if(e1) throw e1;
+    const md = Object.assign({}, atual && atual.metadata);
+    md.posAssinatura = Object.assign({}, md.posAssinatura, {
+      [passo.campo]: new Date().toISOString(),
+      por: (typeof currentUser !== 'undefined' && currentUser && currentUser.nome) || 'Gestor',
+    });
+    const { error:e2 } = await sb.from('acordos').update({ metadata: md }).eq('id', acordoId);
+    if(e2) throw e2;
+    showToast(`${passo.nome}: concluído.`, 'success');
+    const el = document.getElementById('fin-credores-corpo'); if(el) renderFinPosAssinatura(el);
+  }catch(e){ showToast('Não deu para gravar o passo: '+(e.message||e), 'danger'); }
+}
+async function _finPosReabrir(acordoId){
+  if(!confirm('Reabrir este acordo apaga os três carimbos e ele volta para "Conferir parcelas". Confirma?')) return;
+  const sb = getSupabase();
+  try{
+    const { data:atual, error:e1 } = await sb.from('acordos').select('metadata').eq('id', acordoId).single();
+    if(e1) throw e1;
+    const md = Object.assign({}, atual && atual.metadata);
+    delete md.posAssinatura;
+    const { error:e2 } = await sb.from('acordos').update({ metadata: md }).eq('id', acordoId);
+    if(e2) throw e2;
+    showToast('Acordo reaberto.', 'success');
+    const el = document.getElementById('fin-credores-corpo'); if(el) renderFinPosAssinatura(el);
+  }catch(e){ showToast('Não deu para reabrir: '+(e.message||e), 'danger'); }
+}
+function _finPosAbrirCaso(acordoId){
+  const it = (_finPosState.itens||[]).find(x => x.id === acordoId);
+  if(it && it.cobrancaId) location.hash = '#/cobranca/'+it.cobrancaId;
+  else showToast('Este acordo não tem cobrança vinculada.', 'info');
+}
+
+// "Gerar tarefas do dia" — materializa as pendências como tarefas de verdade.
+//
+// Por que aqui e não no zapsign-webhook, como o handoff sugeria: as tarefas moram no
+// BLOB DB.tarefas, não numa tabela. Uma edge function teria de ler o blob inteiro,
+// alterar e regravar, competindo com toda aba aberta do painel — é o dual-write que já
+// causou perda de dado neste repo. Enquanto tarefa for blob, quem cria tarefa é o
+// cliente. O botão em lote do próprio handoff cobre o caso sem essa corrida.
+//
+// Idempotente: a tarefa carrega origem='pos-assinatura:<acordo>:<passo>' e não é
+// recriada se já existir uma aberta com a mesma origem.
+async function _finPosGerarTarefas(){
+  const pend = (_finPosState.itens||[]).filter(i => i.passo !== 'ok');
+  if(!pend.length){ showToast('Nada pendente para virar tarefa.', 'info'); return; }
+  // Sem isto, a primeira geração da sessão não acharia o proprietário no roster e a
+  // tarefa cairia no nome de quem clicou.
+  try{ if(typeof carregarRosterAppUsers === 'function') await carregarRosterAppUsers(); }catch(_){}
+  DB.tarefas = DB.tarefas || [];
+  const cols = (typeof tarefaColunas === 'function' ? tarefaColunas() : []);
+  const colInicial = (cols.find(c => !c.isDone) || cols[0] || {}).id;
+  // Responsável: o PROPRIETÁRIO, não quem clicou (decisão do Gustavo em 27/08 —
+  // "tudo para mim"). Se Ana ou Andreia gerarem a fila, a tarefa continua caindo no
+  // colo dele. Sem roster carregado, cai em quem clicou, que é melhor que sem dono.
+  const dono = (Array.isArray(_rosterAppUsers) ? _rosterAppUsers.find(u => u.papel === 'proprietario') : null);
+  const resp = (dono && dono.nome)
+    || (typeof currentUser !== 'undefined' && currentUser && currentUser.nome) || 'Gestor';
+  let criadas = 0, jaTinha = 0;
+  for(const i of pend){
+    const passo = FIN_POS_PASSOS.find(p => p.id === i.passo);
+    const origem = `pos-assinatura:${i.id}:${i.passo}`;
+    const existe = DB.tarefas.some(t => t.origem === origem && t.status !== 'Concluída');
+    if(existe){ jaTinha++; continue; }
+    DB.tarefas.push({
+      id: uid(), origem,
+      titulo: `${passo.acao} — ${i.devedor}`,
+      desc: `Acordo de ${fmtR(i.valor)} em ${i.numParcelas}×, assinado ${i.dias===0?'hoje':`há ${i.dias} dia${i.dias!==1?'s':''}`}.`
+          + (i.cedente ? ` Cedente: ${i.cedente}.` : ' Carteira própria.')
+          + (i.divergeParcelas ? ` ATENÇÃO: ${i.numParcelas} parcelas contratadas e ${i.parcelasLancadas} lançadas.` : ''),
+      prioridade: 'media',
+      status: 'Pendente', colunaId: colInicial,
+      responsavel: resp,
+      tipo: 'Financeiro',
+      // Sem prazo por decisão do Gustavo (27/08) — a trilha não marca atraso, e uma
+      // tarefa com prazo inventado nasceria vencida.
+      prazo: null, dataInicio: hoje(),
+      checklist: [], comentarios: [], prorrogacoes: [], revisoes: [],
+      concluidaEm: null, concluidaPor: null, pontos: 0, correcaoPendente: false,
+      criadoPor: 'Sistema (pós-assinatura)', criadoEm: new Date().toISOString(),
+      historico: [{ quando: new Date().toISOString(), autor: 'Sistema', acao: 'criada pela fila de pós-assinatura' }],
+    });
+    criadas++;
+  }
+  try{ save(); }catch(e){ showToast('Tarefas criadas mas não salvas: '+(e.message||e), 'danger'); return; }
+  showToast(`${criadas} tarefa${criadas!==1?'s':''} criada${criadas!==1?'s':''}${jaTinha?` · ${jaTinha} já existia${jaTinha!==1?'m':''}`:''}.`, 'success');
+}
+
+async function _finCredoresResumo(){
+  // Adaptador do derivador único — ver a nota em _finRepasseAgg(). Antes esta função
+  // tinha a sua própria consulta e somava só fin_operacao, enquanto a faixa escura
+  // somava também a divisão manual.
+  if(!getSupabase()) return null;
+  try{ return await _finRepasseAgg(); }catch(_){ return null; }
 }
 async function renderFinCredores(el, aba){
   if(aba) _finCredoresState.aba = aba;
@@ -30094,16 +30431,27 @@ async function renderFinCredores(el, aba){
       <div style="font-size:11.5px;color:#8A94A6;">${lb}</div>
       <div style="font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:600;margin-top:2px;color:${cor||'#0A1530'};">${valor}</div>
       <div style="font-size:10.5px;color:#A6AEBD;margin-top:1px;">${sub}</div>
-    </div>`;
+    </div>`;   // `sub` aceita HTML (o card Divergências passa um link) — nunca receber texto de usuário aqui
   el.innerHTML = `
     <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px;">
-      <div style="font-family:'Fraunces',Georgia,serif;font-size:26px;color:#0A1530;">Credores</div>
+      <div style="font-family:'Fraunces',Georgia,serif;font-size:26px;color:#0A1530;">Recebíveis e repasses</div>
       <div style="font-size:12.5px;color:#8A94A6;">o dinheiro que entrou e é do cedente</div>
     </div>
-    ${r ? `<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:14px 0;">
-      ${card('A repassar', fmtR(r.aRepassar), `${r.nRepassar} operação${r.nRepassar!==1?'ões':''} · ${r.credores.size} credor${r.credores.size!==1?'es':''}`, '#9C7F40')}
-      ${card('A revisar', String(r.aRevisar), 'recebimento sem divisão de capital', r.aRevisar?'#A65A4A':'#0A1530')}
-      ${card('Repassado no mês', fmtR(r.repassadoMes), 'já pago ao cedente', '#4F6B49')}
+    ${r ? `<div style="display:grid;grid-template-columns:1.18fr 1fr 1fr 1fr;gap:12px;margin:14px 0;align-items:stretch;">
+      <div style="background:#0A1530;border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;min-width:0;">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">A repassar agora</div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:26px;font-weight:600;color:#C9A961;white-space:nowrap;margin-top:6px;">${fmtR(r.aRepassar)}</div>
+        <div style="font-size:11.5px;color:#B4BCCC;margin-top:auto;padding-top:6px;">${r.credores.size} cedente${r.credores.size!==1?'s':''}${(()=>{
+          if(!r.maisAntigo) return '';
+          const d = Math.max(0, Math.floor((Date.now()-new Date(r.maisAntigo+'T00:00:00').getTime())/86400000));
+          return ` · o mais antigo há ${d} dia${d!==1?'s':''}`;
+        })()}</div>
+        ${r.aRepassarManual > 0 ? `<div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#E2C98A;margin-top:5px;line-height:1.4;">INCLUI ${fmtR(r.aRepassarManual)} DE DIVISÃO MANUAL — NÃO APARECE NA LISTA ABAIXO</div>` : ''}
+      </div>
+      ${card('Divergências', String(r.aRevisar), r.aRevisar
+          ? `parcela recebida sem divisão calculada<div style="color:#A65A4A;font-size:12px;font-weight:600;cursor:pointer;margin-top:5px;" onclick="_finIrMovimentacoes('divergencias')">Ver na tabela →</div>`
+          : 'nenhuma parcela sem divisão', r.aRevisar?'#A65A4A':'#0A1530')}
+      ${card('Recebido e já repassado', fmtR(r.repassadoMes), 'no mês · já pago ao cedente', '#4F6B49')}
       ${(()=>{ if(!r.maisAntigo) return card('Parado há mais tempo', '—', 'nada pendente', '#5A5F66');
         const dias = Math.max(0, Math.floor((Date.now()-new Date(r.maisAntigo+'T00:00:00').getTime())/86400000));
         return card('Parado há mais tempo', dias+(dias===1?' dia':' dias'), `recebido em ${r.maisAntigo.slice(8,10)}/${r.maisAntigo.slice(5,7)} e não repassado`, dias>=15?'#A65A4A':(dias>=7?'#9C7F40':'#5A5F66'));
