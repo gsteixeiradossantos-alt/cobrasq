@@ -30512,14 +30512,25 @@ async function _finFilaCarregar(){
     });
   }
 
+  // O nome do cedente é quem RECEBE o Pix — sem ele a linha diz o valor e a pessoa
+  // que pagou, mas não para quem mandar o dinheiro.
+  const libCredMap = {};
+  try{
+    const ids = [...new Set(liberados.itens.map(i=>i.credorId).filter(Boolean))];
+    if(ids.length){
+      const { data } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', ids);
+      (data||[]).forEach(c => libCredMap[c.id] = c.nome_fantasia || c.nome);
+    }
+  }catch(e){ console.warn('nome do cedente dos repasses:', e); }
+
   // Os repasses que de fato podem sair hoje.
   for(const r of liberados.itens){
     const d = diasDesde(r.vence);
     itens.push({
       tipo:'repasse', cor:'#C9A961', lib:r, foraPrazo: r.vencido && d != null && d > 5,
-      eyebrow:'A REPASSAR',
+      eyebrow:'A REPASSAR', credor: r.credorId ? (libCredMap[r.credorId]||null) : null,
       titulo:`${r.devedor}`,
-      subtitulo:`vence ${r.vence.split('-').reverse().join('/')} · liberado pela entrada de ${r.entradaEm.split('-').reverse().join('/')} (${fmtR(r.entradaValor)})${r.exato?'':' · pareado pelo nome'}`,
+      subtitulo:`${r.credorId && libCredMap[r.credorId] ? `pagar a ${libCredMap[r.credorId]} · ` : ''}vence ${r.vence.split('-').reverse().join('/')} · liberado pela entrada de ${r.entradaEm.split('-').reverse().join('/')} (${fmtR(r.entradaValor)})${r.exato?'':' · pareado pelo nome'}`,
       valor: r.valor, automatizavel:false,
     });
   }
@@ -31442,15 +31453,26 @@ function _finFilaRowHtml(it, i){
 // que já existe, com quantas parcelas e para quem) e só pede divisão quando é isso
 // mesmo que falta.
 function _finFilaEsteiraHtml(it){
+  // Item do cronograma (#595/#596): traz `lib`, uma despesa de repasse já lançada.
+  // Este bloco lia `it.op` — que só existe nos itens vindos de fin_operacao — e por isso
+  // estourava em `o.valor_capital` no clique de "Passos" das 16 linhas da lista.
   if(it.tipo==='repasse'){
-    const o = it.op;
+    const r = it.lib;
+    if(!r) return `<div class="fila-esteira"><div class="fe-diag">Sem dados de repasse nesta linha.</div></div>`;
+    const br = d => d ? d.split('-').reverse().join('/') : '—';
     return `<div class="fila-esteira">
-      <div><div class="fe-passo"><span class="fe-box">☐</span><span>Repassar ${fmtR(o.valor_capital)} ao cedente via Pix</span></div>
-      <div class="fe-passo"><span class="fe-box">☐</span><span>Registrar o comprovante e concluir o repasse</span></div></div>
+      <div>
+        <div class="fe-passo"><span class="fe-box">☐</span><span>Enviar <b>${fmtR(r.valor)}</b> ao cedente por Pix${it.credor?` — ${escHtml(it.credor)}`:''}</span></div>
+        <div class="fe-passo"><span class="fe-box">☐</span><span>Voltar aqui e clicar em "Repasse enviado" para dar baixa na despesa</span></div>
+        ${r.exato ? '' : `<div class="fe-alerta">A entrada foi encontrada pelo nome, não por vínculo gravado. Confira que a de ${br(r.entradaEm)} (${fmtR(r.entradaValor)}) é mesmo desta pessoa antes de enviar.</div>`}
+        <button class="fila-btn dark" style="margin-top:12px;" onclick="event.stopPropagation();_finRepasseEnviado(${r.id})">Repasse enviado</button>
+      </div>
       <div class="fe-rateio">
-        <div class="fe-r-row"><span>Recebido</span><b>${fmtR(o.valor_recebido)}</b></div>
-        <div class="fe-r-row"><span>Fica com você</span><b style="color:#5E7C58;">${fmtR(o.valor_honorario)}</b></div>
-        <div class="fe-r-row"><span>Cedente recebe</span><b style="color:#9C7F40;">${fmtR(o.valor_capital)}</b></div>
+        <div class="fe-r-row"><span>Repasse</span><b style="color:#9C7F40;">${fmtR(r.valor)}</b></div>
+        <div class="fe-r-row"><span>Vence</span><b>${br(r.vence)}</b></div>
+        <div class="fe-r-row"><span>Liberado pela entrada de</span><b>${br(r.entradaEm)}</b></div>
+        <div class="fe-r-row"><span>Valor dessa entrada</span><b>${fmtR(r.entradaValor)}</b></div>
+        <div class="fe-note">O valor do repasse é o que você definiu no cronograma. A entrada aparece só para provar que o dinheiro entrou — a diferença entre as duas não é o seu honorário desta parcela.</div>
       </div>
     </div>`;
   }
@@ -31501,6 +31523,17 @@ function _finFilaEsteiraHtml(it){
 // ── Ações da fila ───────────────────────────────────────────────────────────────
 // As três gravam em fin_operacao e tiram o item da fila. Nenhuma mexe em dinheiro:
 // o repasse em si já foi lançado como despesa por fora.
+// O Pix é feito por fora — o sistema não paga ninguém. Isto só dá baixa na despesa,
+// que é o que tira a linha da fila e faz o dinheiro sair do caixa.
+async function _finRepasseEnviado(lancId){
+  if(!confirm('Confirmar que o Pix do repasse já foi enviado ao cedente?\n\nA despesa é marcada como paga e sai desta lista. O sistema não envia dinheiro.')) return;
+  try{
+    await finApi.confirmarPagamentoLote([lancId]);
+    showToast('Repasse baixado.','success');
+    _finRepasseAggCache = { at:0, v:null };
+    await renderFinTab('credores');
+  }catch(e){ showToast('Não deu para dar baixa: '+(e&&e.message||e),'error'); }
+}
 async function _finFilaSemRepasse(opId){
   if(!confirm('Marcar como sem repasse? Use quando o crédito é da própria COBRASQ e não há cedente a receber.')) return;
   await _finFilaResolver(opId, { repasse_status:'nao_aplica', valor_capital:0 }, 'Marcado como sem repasse.');
