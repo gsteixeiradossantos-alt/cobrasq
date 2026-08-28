@@ -134,26 +134,36 @@ module.exports = async function handler(req, res) {
       cobValorOrig = cobs[0] ? cobs[0].valor_orig : null;
     }
 
-    // Split capital/honorário.
+    // ── O SISTEMA NÃO DIVIDE O RECEBIMENTO ──────────────────────────────────────
+    // Regra do dono (28/08/2026): quanto vai para o cedente é decisão dele, tomada UMA
+    // VEZ POR ACORDO, e materializada como despesas de repasse que ele mesmo lança. Não
+    // sai de conta nenhuma sobre o valor da dívida.
+    //
+    // O acordo da Ivone Klinzer mostra por quê: 27 entradas de R$ 506,00 e 28 saídas de
+    // R$ 250,00, sobre uma dívida registrada de R$ 7.068,00. Nenhuma proporção entre
+    // valor original e valor atual chega nesses números — eles vêm do combinado com o
+    // cedente.
+    //
+    // O que existia aqui tentava adivinhar: rateava capital/honorário pela razão
+    // capital_credor ÷ valor_total do acordo e, quando não conseguia, marcava a operação
+    // como 'revisar'. Os dois lados estavam errados. Quando calculava, inventava um
+    // número; quando não, criava uma pendência POR PAGAMENTO — a Ivone geraria 27
+    // pendências ao longo de dois anos para uma decisão única. Foi assim que a fila
+    // chegou a 46 em sete semanas, com 83% a 100% dos recebimentos travando.
+    //
+    // Agora o recebimento só é REGISTRADO. A pendência de definir o repasse vive no
+    // acordo, no passo "Definir repasse" da Pós-assinatura, que já lista os acordos sem
+    // repasse definido.
     const valorRecebido = round2(payment.value);
+    // Guardados só como referência de quem for conferir depois — não alimentam divisão.
     const acordoTotal = Number(acordo && acordo.valor_total) || 0;
     const capitalBase = Number((acordo && acordo.metadata && acordo.metadata.capital_credor)) ||
                         Number(cobValorOrig) || 0;
-    // P1 (auditoria 2026-06): só rateia quando há base segura (acordo.valor_total > 0).
-    // Sem acordo vinculado, o código antigo forçava capitalRatio=0 → 100% honorário e
-    // NUNCA repassava capital ao credor, silenciosamente. Agora, na falta de base,
-    // marca a operação para REVISÃO MANUAL em vez de classificar errado.
-    const podeRatear = acordoTotal > 0;
-    const capitalRatio = podeRatear ? Math.min(capitalBase / acordoTotal, 1) : null;
-    const valorCapital = podeRatear ? round2(valorRecebido * capitalRatio) : 0;
-    const valorHonorario = podeRatear ? round2(valorRecebido - valorCapital) : 0;
-    // Acordo vinculado mas SEM base de capital (capital_credor/valor_orig ausentes ou 0,
-    // ex.: dado legado não migrado) NÃO é o mesmo que capital genuinamente zero: também
-    // vai para REVISÃO MANUAL, senão o valor cai 100% em honorário e o credor nunca é
-    // repassado, sem alerta.
-    const repasseStatus = (!podeRatear || capitalBase <= 0)
-      ? 'revisar'
-      : (valorCapital > 0 ? 'pendente' : 'nao_aplica');
+    const valorCapital = null;
+    const valorHonorario = null;
+    // 'nao_aplica' = este PAGAMENTO não carrega uma operação de repasse. Não quer dizer
+    // que não há repasse: ele é definido no acordo e lançado como despesa.
+    const repasseStatus = 'nao_aplica';
 
     const row = {
       acordo_id: acordo ? acordo.id : null,
@@ -171,8 +181,10 @@ module.exports = async function handler(req, res) {
       repasse_status: repasseStatus,
       nf_status: 'pendente',
       metadata: {
+        // Referência para quem for definir o repasse; NÃO é uma divisão calculada.
         capital_base: capitalBase,
-        capital_ratio: capitalRatio,
+        acordo_total: acordoTotal || null,
+        divisao_automatica: false,
         billing_type: payment.billingType || null,
         net_value: payment.netValue ?? null,
         credor_nome: credor ? credor.nome : null,
