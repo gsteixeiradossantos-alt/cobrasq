@@ -100,7 +100,7 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, skipped: 'auto-emit desligado (AUTO_EMIT_ACORDO≠on)', acordo_id: acordoId });
     }
 
-    const devs = await sbFetch(`devedores?id=eq.${acordo.devedor_id}&select=id,nome,doc,email,telefone,asaas_customer_id,cep,numero,complemento,bairro,cidade,uf,endereco,endereco_crm&limit=1`);
+    const devs = await sbFetch(`devedores?id=eq.${acordo.devedor_id}&select=id,nome,doc,email,telefone,asaas_customer_id,cep,rua,numero,complemento,bairro,cidade,uf,endereco,endereco_crm,metadata&limit=1`);
     const dev = devs[0];
     if (!dev) return res.status(404).json({ error: 'devedor não encontrado' });
 
