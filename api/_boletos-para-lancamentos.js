@@ -56,12 +56,12 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // 2) customer -> devedor (nome, doc_digits) via devedores.asaas_customer_id.
+    // 2) customer -> devedor (id, nome, doc_digits) via devedores.asaas_customer_id.
     const custIds = [...new Set(charges.map(c => c.customer).filter(Boolean))];
     const devByCust = {};
     for (let i = 0; i < custIds.length; i += 50) {
       const chunk = custIds.slice(i, i + 50).map(encodeURIComponent).join(',');
-      const devs = await sbFetch(`devedores?select=asaas_customer_id,nome,doc_digits&asaas_customer_id=in.(${chunk})`).catch(() => []);
+      const devs = await sbFetch(`devedores?select=id,asaas_customer_id,nome,doc_digits&asaas_customer_id=in.(${chunk})`).catch(() => []);
       for (const d of devs) if (d.asaas_customer_id) devByCust[d.asaas_customer_id] = d;
     }
 
@@ -174,6 +174,14 @@ module.exports = async function handler(req, res) {
           total_parcelas: total > 1 ? total : null,
           conta_id: CONTA_ASAAS,
           contato_id,
+          // Sem estes dois a linha importada nasce órfã para o webhook: ele procura as
+          // candidatas por cobranca_id e desempata pelo asaas_payment_id (a chave mais
+          // forte, tier 1 da casada em _processar-recebimento). Sem eles o pagamento não
+          // encontra a linha e o webhook cria uma SEGUNDA para o mesmo boleto.
+          // Medido em 28/08/2026: das 79 receitas vindas deste importador, 79 estavam sem
+          // asaas_payment_id.
+          cobranca_id: dev ? dev.id : null,
+          asaas_payment_id: p.id,
           billingType: p.billingType,
           status_asaas: p.status,
           customer: cust,
@@ -213,6 +221,8 @@ module.exports = async function handler(req, res) {
         status: 0,                   // pendente
         conta_id: it.conta_id,
         contato_id: it.contato_id,
+        cobranca_id: it.cobranca_id,
+        asaas_payment_id: it.asaas_payment_id,
         data_vencimento: it.data_vencimento,
         data_competencia: it.data_competencia,
         numero_parcela: it.numero_parcela,
