@@ -30523,12 +30523,30 @@ async function _finFilaCarregar(){
     }
   }catch(e){ console.warn('nome do cedente dos repasses:', e); }
 
+  // A operação do Asaas que corresponde a este repasse, quando existe. É ela que dá o
+  // Pix de verdade: confirmarRepasse() → /api/repassar → Asaas /transfers → você
+  // autoriza com o token → o comprovante vai ao cedente e fica no caso do devedor.
+  // A #595 tirou as operações 'pendente' da fila porque elas traziam o rateio automático
+  // do webhook; junto foi o botão que fazia o repasse sair. O rateio continua fora — o
+  // valor mostrado é o do cronograma —, mas a operação volta como CAMINHO de execução.
+  const opPorRepasse = {};
+  for(const o of ops){
+    if(o.repasse_status !== 'pendente' && o.repasse_status !== 'preparado') continue;
+    const nome = (devMap[o.devedor_id] || '').toLowerCase().split(/\s+/)[0];
+    if(!nome) continue;
+    const cent = Math.round((+o.valor_capital||0) * 100);
+    if(cent > 0) opPorRepasse[nome + '|' + cent] = o.id;
+  }
+
   // Os repasses que de fato podem sair hoje.
   for(const r of liberados.itens){
     const d = diasDesde(r.vence);
     itens.push({
       tipo:'repasse', cor:'#C9A961', lib:r, foraPrazo: r.vencido && d != null && d > 5,
       eyebrow:'A REPASSAR', credor: r.credorId ? (libCredMap[r.credorId]||null) : null,
+      // Só casa quando devedor E valor batem: um Pix disparado na operação errada manda
+      // dinheiro para o cedente errado.
+      opId: opPorRepasse[(r.devedor||'').toLowerCase().split(/\s+/)[0] + '|' + Math.round(r.valor*100)] || null,
       titulo:`${r.devedor}`,
       subtitulo:`${r.credorId && libCredMap[r.credorId] ? `pagar a ${libCredMap[r.credorId]} · ` : ''}vence ${r.vence.split('-').reverse().join('/')} · liberado pela entrada de ${r.entradaEm.split('-').reverse().join('/')} (${fmtR(r.entradaValor)})${r.exato?'':' · pareado pelo nome'}`,
       valor: r.valor, automatizavel:false,
@@ -31445,6 +31463,7 @@ function _finFilaRowHtml(it, i){
       <div class="fila-acts">
         <button class="fila-btn" onclick="event.stopPropagation();_finFilaToggleEsteira(${i})">Passos</button>
         ${it.automatizavel ? `<button class="fila-btn dark" onclick="event.stopPropagation();_finFilaResolver(${i})">Resolver ⏎</button>` : ''}
+        ${it.opId ? `<button class="fila-btn dark" onclick="event.stopPropagation();confirmarRepasse('${it.opId}')">Gerar Pix</button>` : ''}
       </div>
     </div>${aberto ? _finFilaEsteiraHtml(it) : ''}`;
 }
@@ -31462,10 +31481,18 @@ function _finFilaEsteiraHtml(it){
     const br = d => d ? d.split('-').reverse().join('/') : '—';
     return `<div class="fila-esteira">
       <div>
+        ${it.opId ? `
+        <div class="fe-passo"><span class="fe-box">☐</span><span>Gerar o Pix de <b>${fmtR(r.valor)}</b> ao cedente${it.credor?` — ${escHtml(it.credor)}`:''}</span></div>
+        <div class="fe-passo"><span class="fe-box">☐</span><span>Autorizar a transferência no Asaas com o seu token</span></div>
+        <div class="fe-passo"><span class="fe-box">☐</span><span>O comprovante vai sozinho ao cedente e fica anexado no caso do devedor</span></div>` : `
         <div class="fe-passo"><span class="fe-box">☐</span><span>Enviar <b>${fmtR(r.valor)}</b> ao cedente por Pix${it.credor?` — ${escHtml(it.credor)}`:''}</span></div>
-        <div class="fe-passo"><span class="fe-box">☐</span><span>Voltar aqui e clicar em "Repasse enviado" para dar baixa na despesa</span></div>
+        <div class="fe-passo"><span class="fe-box">☐</span><span>Voltar aqui e clicar em "Repasse enviado" para dar baixa na despesa</span></div>`}
         ${r.exato ? '' : `<div class="fe-alerta">A entrada foi encontrada pelo nome, não por vínculo gravado. Confira que a de ${br(r.entradaEm)} (${fmtR(r.entradaValor)}) é mesmo desta pessoa antes de enviar.</div>`}
-        <button class="fila-btn dark" style="margin-top:12px;" onclick="event.stopPropagation();_finRepasseEnviado(${r.id})">Repasse enviado</button>
+        ${it.opId
+          ? `<button class="fila-btn dark" style="margin-top:12px;" onclick="event.stopPropagation();confirmarRepasse('${it.opId}')">Gerar Pix de ${fmtR(r.valor)} no Asaas</button>
+             <button class="fila-btn" style="margin-top:12px;margin-left:8px;" onclick="event.stopPropagation();_finRepasseEnviado(${r.id})">Já paguei por fora — só dar baixa</button>`
+          : `<button class="fila-btn dark" style="margin-top:12px;" onclick="event.stopPropagation();_finRepasseEnviado(${r.id})">Repasse enviado</button>
+             <div class="fe-note" style="margin-top:8px;">Sem operação do Asaas para esta parcela, então não dá para gerar o Pix daqui — mande por fora e volte para dar baixa.</div>`}
       </div>
       <div class="fe-rateio">
         <div class="fe-r-row"><span>Repasse</span><b style="color:#9C7F40;">${fmtR(r.valor)}</b></div>
