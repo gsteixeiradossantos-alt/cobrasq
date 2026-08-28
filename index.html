@@ -30702,11 +30702,14 @@ function _finPosRowHtml(i){
         ? (i.caso === 'propria' ? `<button class="finpa-btn go" onclick="_finPosSemRepasse('${i.id}')">Marcar como sem repasse</button>`
           : i.caso === 'falta_cedente' && i.rep && i.rep.credorNome ? `<button class="finpa-btn go" onclick="_finPosAdotarCedente('${i.id}')">Usar ${escHtml(i.rep.credorNome)}</button>`
           : i.caso === 'ja_lancado' ? `<button class="finpa-btn go" onclick="_finPosConfirmarRecebimentos('${i.id}')">Confirmar repasse lançado</button>`
-          : i.caso === 'sem_repasse' ? `<button class="finpa-btn" onclick="abrirNovoLancamento()">Lançar repasse</button><button class="finpa-btn go" onclick="_finPosConfirmarRecebimentos('${i.id}')">Já lancei</button>`
+          : i.caso === 'sem_repasse' ? `<button class="finpa-btn go" onclick="_finPosAbrirRepasse('${i.id}')">Montar repasse</button><button class="finpa-btn" onclick="_finPosConfirmarRecebimentos('${i.id}')">Já lancei</button>`
           : '')
         : (i.passo === 'ok'
             ? `<button class="finpa-btn" onclick="_finPosReabrir('${i.id}')">Reabrir</button>`
-            : `<button class="finpa-btn go" onclick="_finPosConcluir('${i.id}','${i.passo}')">${passo.acao}</button>`)}
+            : i.passo === 'repasse'
+              // O passo 2 agora CRIA as despesas em vez de só carimbar que foram criadas.
+              ? `<button class="finpa-btn go" onclick="_finPosAbrirRepasse('${i.id}')">Montar repasse</button>`
+              : `<button class="finpa-btn go" onclick="_finPosConcluir('${i.id}','${i.passo}')">${passo.acao}</button>`)}
       <button class="finpa-btn" onclick="_finPosAbrirCaso('${i.id}')">Abrir caso</button>
     </span>
   </div>`;
@@ -30717,6 +30720,217 @@ function _finPosJanela(v){ _finPosState.janelaDias = +v||0; const el=document.ge
 // Concluir um passo grava o carimbo em acordos.metadata.posAssinatura. O metadata é lido
 // e reescrito inteiro (jsonb), então preserva o que já estava lá — outras partes do
 // sistema guardam coisas nesse mesmo campo.
+// ══════════════════════════════════════════════════════════════
+// PASSO 2 — GERAR AS DESPESAS DE REPASSE
+// ──────────────────────────────────────────────────────────────
+// Até aqui o passo 2 só carimbava que o repasse fora definido; as despesas o Gustavo
+// lançava por fora, uma a uma. Agora ele informa quanto é do cedente e a tela monta a
+// série.
+//
+// O CRONOGRAMA NÃO É EM PARTES IGUAIS. Regra do dono (17/08/2026): o capital enche as
+// ÚLTIMAS parcelas do acordo, de trás para frente — a última cheia, a penúltima cheia, e
+// a mais antiga do bloco com o que sobrar. Nunca dividir por igual.
+//
+// Exemplo real que gerou a regra (Helen Joice e Silva): capital R$ 500,00 sobre acordo de
+// 15× R$ 206,00 vira R$ 88,00 em 10/08/2027 + R$ 206,00 em 10/09 + R$ 206,00 em 10/10 —
+// as parcelas 13, 14 e 15 do acordo. Uma divisão em 3× R$ 166,67 foi rejeitada.
+//
+// O motivo é de caixa, não de estética: a COBRASQ segura o capital até o fim do acordo
+// (o honorário entra primeiro) e NENHUMA saída pode passar da entrada daquele mês. Um
+// repasse de R$ 294,00 contra uma entrada de R$ 206,00 não fecha.
+//
+// Por isso as datas saem das parcelas de entrada, não de um "vencer todo dia 10": a data
+// do repasse acompanha a do recebimento.
+function _finRepasseCronograma(capital, parcelas){
+  // parcelas: [{data, valor}] das ENTRADAS, em ordem crescente de data.
+  const cap = Math.round((+capital||0) * 100);
+  if(cap <= 0 || !parcelas || !parcelas.length) return [];
+  const linhas = [];
+  let resta = cap;
+  // De trás para frente: a última parcela do acordo é a primeira a ser preenchida.
+  for(let i = parcelas.length - 1; i >= 0 && resta > 0; i--){
+    const teto = Math.round((+parcelas[i].valor||0) * 100);
+    if(teto <= 0) continue;
+    const usa = Math.min(teto, resta);
+    linhas.push({ data: parcelas[i].data, valor: usa/100 });
+    resta -= usa;
+  }
+  // Sobrou capital além do que as parcelas comportam: o excedente vai na parcela mais
+  // antiga do bloco, e a tela avisa — é sinal de que o capital informado é maior que o
+  // acordo inteiro.
+  if(resta > 0 && linhas.length){
+    linhas[linhas.length-1].valor = +(linhas[linhas.length-1].valor + resta/100).toFixed(2);
+    resta = 0;
+  }
+  // Devolve em ordem cronológica e numerado 1..N, como as séries já lançadas.
+  linhas.reverse();
+  return linhas.map((l,i) => ({ ...l, n: i+1, total: linhas.length }));
+}
+
+// Abre o formulário. Só para itens que já têm cedente e parcelas de entrada — sem uma
+// das duas coisas não há como montar cronograma nenhum.
+async function _finPosAbrirRepasse(chave){
+  const it = (_finPosState.itens||[]).find(x => String(x.id) === String(chave));
+  if(!it) return;
+  const sb = getSupabase();
+  const cedenteNome = it.cedente || (it.rep && it.rep.credorNome) || null;
+  if(!cedenteNome){ showToast('Defina o cedente antes de montar o repasse.', 'warning'); return; }
+
+  // Entradas do caso: pelo acordo quando existe, senão pelo devedor (cobranca_id).
+  let parcelas = [];
+  try{
+    let q = sb.from('fin_lancamento')
+      .select('id,valor,data_vencimento,data_competencia,numero_parcela,total_parcelas,conta_id,cobranca_id,descricao')
+      .eq('tipo_movimento', 1);
+    q = it.origem === 'acordo' ? q.eq('acordo_id', it.id) : q.eq('cobranca_id', it.cobrancaId);
+    const { data } = await q.order('data_vencimento', { ascending:true }).limit(200);
+    parcelas = (data||[]).map(l => ({
+      data: (l.data_vencimento || l.data_competencia || '').slice(0,10),
+      valor: Math.abs(+l.valor||0), contaId: l.conta_id, cobrancaId: l.cobranca_id, desc: l.descricao,
+    })).filter(p => p.data && p.valor > 0);
+  }catch(e){ showToast('Não deu para ler as parcelas: '+(e.message||e), 'danger'); return; }
+
+  if(!parcelas.length){
+    showToast('Este caso não tem parcelas de entrada lançadas — confira o passo 1 antes.', 'warning');
+    return;
+  }
+  window._finRepCtx = { it, parcelas, cedenteNome };
+  let ov = document.getElementById('finrep-ov');
+  if(!ov){ ov = document.createElement('div'); ov.id = 'finrep-ov'; ov.className = 'overlay'; document.body.appendChild(ov); }
+  _finPosRepasseRender();
+  openModal('finrep-ov');
+}
+function _finPosRepasseRender(){
+  const ov = document.getElementById('finrep-ov'); if(!ov) return;
+  const { it, parcelas, cedenteNome } = window._finRepCtx;
+  const totalEntradas = +parcelas.reduce((s,p) => s+p.valor, 0).toFixed(2);
+  const capital = window._finRepCapital != null ? window._finRepCapital : '';
+  const linhas = capital !== '' ? _finRepasseCronograma(capital, parcelas) : [];
+  const somaLinhas = +linhas.reduce((s,l) => s+l.valor, 0).toFixed(2);
+  const excede = (+capital||0) > totalEntradas;
+
+  ov.innerHTML = `
+    <style>
+      .finrep-box{width:640px;max-width:100vw;max-height:92vh;overflow:auto;background:#fff;border-radius:12px;box-shadow:0 32px 80px rgba(10,21,48,.25);font-family:'Inter Tight',Inter,system-ui,sans-serif;}
+      .finrep-h{padding:20px 24px 14px;border-bottom:1px solid #F2EFE6;}
+      .finrep-h h2{font-family:'Fraunces',Georgia,serif;font-size:21px;font-weight:500;color:#0A1530;margin:0;}
+      .finrep-h .sub{font-size:12.5px;color:#5A5F66;margin-top:5px;}
+      .finrep-b{padding:18px 24px;}
+      .finrep-campo label{display:block;font-size:12px;color:#6B7683;margin-bottom:5px;}
+      .finrep-campo input{width:100%;padding:11px 13px;border:1px solid #E6E1D2;border-radius:8px;font-size:16px;font-family:'JetBrains Mono',monospace;color:#0A1530;}
+      .finrep-info{background:#FBFAF6;border:1px solid #E6E1D2;border-radius:9px;padding:12px 14px;margin-top:14px;font-size:12.5px;color:#5A5F66;display:flex;flex-direction:column;gap:5px;}
+      .finrep-info div{display:flex;justify-content:space-between;gap:10px;}
+      .finrep-info b{font-family:'JetBrains Mono',monospace;color:#0A1530;}
+      .finrep-prev{margin-top:16px;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;}
+      .finrep-prev-h{background:#F7F4EC;border-bottom:1px solid #E6E1D2;padding:9px 14px;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:#6B7683;display:flex;justify-content:space-between;}
+      .finrep-l{display:flex;justify-content:space-between;padding:9px 14px;border-bottom:1px solid #F7F4EC;font-size:13px;}
+      .finrep-l:last-child{border-bottom:0;}
+      .finrep-l .d{font-family:'JetBrains Mono',monospace;color:#5A5F66;}
+      .finrep-l .v{font-family:'JetBrains Mono',monospace;font-weight:600;color:#0A1530;}
+      .finrep-nota{font-size:11.5px;color:#8A94A6;margin-top:10px;line-height:1.5;}
+      .finrep-warn{background:#FBF3E1;border:1px solid #DFC992;color:#7A6428;border-radius:8px;padding:10px 13px;font-size:12.5px;margin-top:12px;}
+      .finrep-f{padding:14px 24px;background:#FBFAF6;border-top:1px solid #E6E1D2;display:flex;gap:9px;justify-content:flex-end;}
+      .finrep-btn{border:1px solid #D8D2C5;background:#fff;color:#0A1530;font-family:inherit;font-size:13px;font-weight:500;padding:9px 15px;border-radius:7px;cursor:pointer;}
+      .finrep-btn.go{background:#0A1530;border-color:#0A1530;color:#fff;font-weight:600;}
+      .finrep-btn.go:disabled{opacity:.45;cursor:default;}
+    </style>
+    <div class="finrep-box" onclick="event.stopPropagation()">
+      <div class="finrep-h">
+        <h2>Repasse de ${escHtml(it.devedor)}</h2>
+        <div class="sub">Para <b>${escHtml(cedenteNome)}</b> · ${parcelas.length} ${parcelas.length===1?'parcela':'parcelas'} de entrada, somando ${fmtR(totalEntradas)}</div>
+      </div>
+      <div class="finrep-b">
+        <div class="finrep-campo">
+          <label>Quanto é do cedente (capital)</label>
+          <input type="text" inputmode="decimal" id="finrep-cap" value="${capital}" placeholder="0,00"
+                 oninput="window._finRepCapital=this.value.replace(',','.');_finPosRepasseRender();document.getElementById('finrep-cap').focus();">
+        </div>
+        <div class="finrep-info">
+          <div><span>Entra do devedor</span><b>${fmtR(totalEntradas)}</b></div>
+          <div><span>Vai para o cedente</span><b style="color:#9C7F40;">${fmtR(somaLinhas)}</b></div>
+          <div><span>Fica com a COBRASQ</span><b style="color:#4C6647;">${fmtR(Math.max(0, totalEntradas - somaLinhas))}</b></div>
+        </div>
+        ${excede ? `<div class="finrep-warn">O capital informado é maior que tudo o que o devedor vai pagar. Confira o valor.</div>` : ''}
+        ${linhas.length ? `
+          <div class="finrep-prev">
+            <div class="finrep-prev-h"><span>${linhas.length} ${linhas.length===1?'parcela':'parcelas'} de repasse</span><span>${fmtR(somaLinhas)}</span></div>
+            ${linhas.map(l => `<div class="finrep-l"><span class="d">${l.n}/${l.total} · ${l.data.split('-').reverse().join('/')}</span><span class="v">${fmtR(l.valor)}</span></div>`).join('')}
+          </div>
+          <div class="finrep-nota">O capital enche as <b>últimas</b> parcelas do acordo, de trás para frente — a mais antiga do bloco fica com o resto. É a sua regra: a COBRASQ segura o capital até o fim, e nenhuma saída passa da entrada do mês.</div>
+        ` : `<div class="finrep-nota">Informe o capital para ver o cronograma.</div>`}
+      </div>
+      <div class="finrep-f">
+        <button class="finrep-btn" onclick="closeModal('finrep-ov')">Cancelar</button>
+        <button class="finrep-btn go" ${linhas.length?'':'disabled'} onclick="_finPosGerarRepasse()">Criar ${linhas.length||''} ${linhas.length===1?'despesa':'despesas'}</button>
+      </div>
+    </div>`;
+}
+// Cria a série e marca o passo 2 como feito. As despesas nascem no MESMO formato das que
+// o Gustavo lança à mão — descrição "<devedor> N/M", valor negativo, conta e cobrança da
+// parcela de entrada correspondente — para as duas se parecerem no extrato e o
+// cruzamento por nome continuar funcionando.
+async function _finPosGerarRepasse(){
+  const { it, parcelas, cedenteNome } = window._finRepCtx || {};
+  if(!it) return;
+  const linhas = _finRepasseCronograma(window._finRepCapital, parcelas);
+  if(!linhas.length) return;
+  const total = +linhas.reduce((s,l)=>s+l.valor,0).toFixed(2);
+  if(!confirm(`Criar ${linhas.length} ${linhas.length===1?'despesa':'despesas'} de repasse para ${cedenteNome}, somando ${fmtR(total)}?\n\nElas entram como previstas, com as datas das últimas parcelas do acordo.`)) return;
+
+  const sb = getSupabase();
+  try{
+    let credId = null;
+    const { data:cs } = await sb.from('clientes').select('id,nome,nome_fantasia').limit(2000);
+    const alvo = cedenteNome.toLowerCase();
+    const achado = (cs||[]).find(c => (c.nome_fantasia||c.nome||'').toLowerCase() === alvo);
+    credId = achado ? achado.id : null;
+    if(!credId) throw new Error('cedente "'+cedenteNome+'" não encontrado no cadastro');
+
+    const ref = parcelas[parcelas.length-1] || {};
+    const rows = linhas.map(l => ({
+      descricao: `${it.devedor} ${l.n}/${l.total}`,
+      valor: -Math.abs(l.valor),
+      tipo_movimento: 0,
+      status: 0,
+      data_competencia: l.data,
+      data_vencimento: l.data,
+      numero_parcela: l.n,
+      total_parcelas: l.total,
+      credor_id: credId,
+      conta_id: ref.contaId || null,
+      cobranca_id: ref.cobrancaId || it.cobrancaId || null,
+    }));
+    const { error } = await sb.from('fin_lancamento').insert(rows);
+    if(error) throw error;
+
+    // Carimba o passo 2 no acordo, quando o caso vem de um acordo.
+    if(it.origem === 'acordo'){
+      try{
+        const { data:at } = await sb.from('acordos').select('metadata').eq('id', it.id).single();
+        const md = Object.assign({}, at && at.metadata);
+        md.posAssinatura = Object.assign({}, md.posAssinatura, {
+          repasseEm: new Date().toISOString(),
+          repasseTotal: total, repasseParcelas: linhas.length, repasseCedente: cedenteNome,
+          por: (typeof currentUser!=='undefined' && currentUser && currentUser.nome) || 'Gestor',
+        });
+        await sb.from('acordos').update({ metadata: md }).eq('id', it.id);
+      }catch(e){ console.warn('carimbo do passo 2:', e); }
+    }
+    // Recebimento avulso: fecha as operações do caso, que era o que mantinha a pendência.
+    if(it.origem === 'recebimento' && it.opIds && it.opIds.length){
+      try{ await sb.from('fin_operacao').update({ repasse_status:'efetuado', credor_id: credId }).in('id', it.opIds); }
+      catch(e){ console.warn('fechar operações:', e); }
+    }
+
+    closeModal('finrep-ov');
+    window._finRepCapital = null;
+    showToast(`${linhas.length} ${linhas.length===1?'despesa criada':'despesas criadas'} · ${fmtR(total)} para ${cedenteNome}.`, 'success');
+    _finCascataCache = { at:0, m:null };
+    if(typeof _finRepasseAggCache !== 'undefined') _finRepasseAggCache = { at:0, v:null };
+    const el = document.getElementById('fin-pos-corpo'); if(el) renderFinPosAssinatura(el);
+  }catch(e){ showToast('Não deu para criar as despesas: '+(e.message||e), 'danger'); }
+}
+
 async function _finPosConcluir(acordoId, passoId){
   const passo = FIN_POS_PASSOS.find(p => p.id === passoId); if(!passo) return;
   const it = (_finPosState.itens||[]).find(x => x.id === acordoId); if(!it) return;
