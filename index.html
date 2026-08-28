@@ -29729,6 +29729,97 @@ let _finCascataCache = { at:0, m:null };
 //
 // Agora existe UM derivador; os dois chamadores leem daqui.
 let _finRepasseAggCache = { at:0, v:null };
+// ══════════════════════════════════════════════════════════════
+// "A REPASSAR AGORA" — o que de fato pode sair hoje
+// ──────────────────────────────────────────────────────────────
+// Regra do dono (28/08/2026): o repasse acompanha o VENCIMENTO ORIGINAL da entrada, não
+// a data em que o devedor pagou. Entrada de setembro e repasse de setembro são um par.
+//
+//  • devedor paga em 05/08 um boleto que vencia 20/08, e o repasse vence 20/08 →
+//    mesmo mês, o repasse já pode sair;
+//  • devedor ANTECIPA em 10/08 um boleto que vencia 20/09 → libera o repasse de
+//    SETEMBRO, porque os dois tinham vencimento original em setembro;
+//  • devedor paga a parcela de agosto mas o cronograma de repasse só começa em outubro
+//    → não há nada a enviar. Foi o caso da Juliana Pinto Ribeiro, e a tela dizia o
+//    contrário.
+//
+// Por que a tela dizia o contrário: ela media "a repassar" pelo valor_capital que o
+// webhook rateava em cada pagamento — um número que nem existe mais (#589) e que nunca
+// teve relação com o cronograma. Em 28/08 ela cobrava 4 repasses somando R$ 6.762,07;
+// desses, o da Cristiane só vence em 10/07/2028 e o da Juliana em 10/10/2026.
+//
+// O pareamento tem duas vias, nesta ordem:
+//  1. VÍNCULO EXATO — despesas criadas pelo passo 2 gravam em raw_payload o id da
+//     entrada que as libera. Sem ambiguidade.
+//  2. NOME + MÊS — as 370 despesas antigas não têm vínculo. Cai na heurística, que a
+//     tela expõe ("liberado pela entrada de …") para poder ser conferida. Homônimo ou
+//     descrição fora do padrão pareia errado, e por isso o número aparece com a origem
+//     ao lado em vez de sozinho.
+const FIN_REP_PREFIXOS = /^(Repasse ao credor\s*[—-]|#\s*Executar\s*-)\s*/i;
+const FIN_REP_SUFIXOS  = /\s*[-–]?\s*(pagar\s*)?\d+\s*\/\s*\d+\s*$/i;
+function _finRepasseNomeDevedor(desc){
+  return String(desc||'').replace(FIN_REP_PREFIXOS,'').replace(FIN_REP_SUFIXOS,'').trim();
+}
+function _finPago(l){ return l.status === 1 || !!l.data_pagamento || !!l.conciliado; }
+
+// Devolve as despesas de repasse liberadas, cada uma com a entrada que a liberou.
+async function _finRepasseLiberado(force){
+  const sb = getSupabase();
+  const hoje = (()=>{ const d=new Date(), p=n=>String(n).padStart(2,'0');
+                      return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; })();
+  let despesas = [], entradas = [];
+  try{
+    const r1 = await sb.from('fin_lancamento')
+      .select('id,descricao,valor,data_vencimento,credor_id,raw_payload')
+      .eq('tipo_movimento',0).eq('status',0).not('credor_id','is',null)
+      .not('descricao','ilike','%tarifa%').limit(2000);
+    despesas = r1.data || [];
+    const r2 = await sb.from('fin_lancamento')
+      .select('id,descricao,valor,data_vencimento,status,data_pagamento,conciliado')
+      .eq('tipo_movimento',1).limit(4000);
+    entradas = r2.data || [];
+  }catch(e){ console.warn('a repassar agora:', e); return { itens:[], total:0, retidos:0 }; }
+
+  const porId = {};
+  const porNomeMes = {};
+  for(const e of entradas){
+    porId[e.id] = e;
+    const mes = String(e.data_vencimento||'').slice(0,7);
+    if(!mes) continue;
+    const nome = _finRepasseNomeDevedor(e.descricao).toLowerCase();
+    const chave = nome.split(/\s+/)[0] + '|' + mes;   // primeiro nome + mês
+    (porNomeMes[chave] = porNomeMes[chave] || []).push(e);
+  }
+
+  const itens = [];
+  let retidos = 0;
+  for(const d of despesas){
+    const rp = d.raw_payload || {};
+    let entrada = null, exato = false;
+    if(rp.repasse_de_lancamento_id && porId[rp.repasse_de_lancamento_id]){
+      entrada = porId[rp.repasse_de_lancamento_id]; exato = true;
+    } else {
+      const mes = String(d.data_vencimento||'').slice(0,7);
+      const nome = _finRepasseNomeDevedor(d.descricao).toLowerCase();
+      const cand = porNomeMes[nome.split(/\s+/)[0] + '|' + mes] || [];
+      // Entre candidatas do mesmo mês, a que tem o nome mais parecido.
+      entrada = cand.find(e => _finRepasseNomeDevedor(e.descricao).toLowerCase() === nome) || cand[0] || null;
+    }
+    if(!entrada){ continue; }              // sem par: não afirma nada sobre ela
+    if(!_finPago(entrada)){ retidos++; continue; }   // entrada não caiu: segura
+    itens.push({
+      id: d.id, descricao: d.descricao, valor: Math.abs(+d.valor||0),
+      vence: String(d.data_vencimento||'').slice(0,10), credorId: d.credor_id,
+      devedor: _finRepasseNomeDevedor(d.descricao),
+      exato, entradaEm: String(entrada.data_vencimento||'').slice(0,10),
+      entradaValor: Math.abs(+entrada.valor||0),
+      vencido: String(d.data_vencimento||'').slice(0,10) <= hoje,
+    });
+  }
+  itens.sort((a,b)=> a.vence < b.vence ? -1 : (a.vence > b.vence ? 1 : 0));
+  return { itens, total: +itens.reduce((s,i)=>s+i.valor,0).toFixed(2), retidos };
+}
+
 async function _finRepasseAgg(force){
   if(!force && _finRepasseAggCache.v && (Date.now()-_finRepasseAggCache.at) < 30000) return _finRepasseAggCache.v;
   const sb = getSupabase();
@@ -29763,6 +29854,19 @@ async function _finRepasseAgg(force){
     for(const l of (data||[])){ r.aRepassarManual += finDivideCascata(l, +l.valor||0).repasseAoCedente; r.manualCount++; }
   }catch(_){ /* colunas do PR1 podem não existir ainda — migração não aplicada */ }
 
+  // "A repassar" = o que o CRONOGRAMA libera hoje, não o rateio por pagamento.
+  // Ver _finRepasseLiberado(): a despesa só conta quando a entrada do mês dela foi paga.
+  try{
+    const lib = await _finRepasseLiberado();
+    r.aRepassar = lib.total;
+    r.nRepassar = lib.itens.length;
+    r.credores = new Set(lib.itens.map(i => i.credorId).filter(Boolean));
+    r.maisAntigo = lib.itens.length ? lib.itens[0].vence : null;
+    r.retidos = lib.retidos;
+    r.aRepassarOp = r.aRepassarOp;   // preservado para diagnóstico
+    _finRepasseAggCache = { at: Date.now(), v: r };
+    return r;
+  }catch(e){ console.warn('a repassar pelo cronograma:', e); }
   r.aRepassar = +(r.aRepassarOp + r.aRepassarManual).toFixed(2);
   r.aRevisar = r.revisarCount;
   r.nRepassar = r.pendCount + r.manualCount;
@@ -30293,6 +30397,12 @@ async function _finFilaCarregar(){
     }
   }catch(e){ console.warn('Fila: despesas de repasse', e); }
 
+  // Os itens "a repassar" deixam de sair de fin_operacao (valor_capital rateado pelo
+  // webhook, que nem existe mais) e passam a sair das despesas de repasse liberadas —
+  // ver _finRepasseLiberado(). É o que respeita o cronograma que o dono montou.
+  let liberados = { itens:[], total:0, retidos:0 };
+  try{ liberados = await _finRepasseLiberado(); }catch(e){ console.warn('liberados:', e); }
+
   const diasDesde = s => { if(!s) return null; const d=new Date(String(s).slice(0,10)+'T00:00:00'); return Math.max(0, Math.floor((Date.now()-d)/86400000)); };
   const dm = s => { s=String(s||'').slice(0,10); return s ? s.slice(8,10)+'/'+s.slice(5,7) : '—'; };
   const itens = [];
@@ -30302,14 +30412,9 @@ async function _finFilaCarregar(){
     const devedor = devMap[o.devedor_id] || null;
     const credor = o.credor_id ? (credMap[o.credor_id] || null) : null;
 
-    if(o.repasse_status !== 'revisar'){
-      itens.push({ tipo:'repasse', cor:'#C9A961', op:o, foraPrazo: dias!=null && dias>5,
-        eyebrow:'A REPASSAR',
-        titulo:`${credor||'Cedente'} · ${devedor||'—'}`,
-        subtitulo:`Recebido ${fmtR(o.valor_recebido)} há ${dias==null?'—':dias+' dia'+(dias!==1?'s':'')} · seu ${fmtR(o.valor_honorario)}`,
-        valor:o.valor_capital, automatizavel:true });
-      continue;
-    }
+    // Operações 'pendente'/'preparado' não viram mais linha: elas carregam o rateio
+    // automático, que não tem relação com quando o repasse vence.
+    if(o.repasse_status !== 'revisar') continue;
 
     // ── Diagnóstico das que travaram ────────────────────────────────────────────
     const rep = _finFilaCasaRepasse(devedor, despesas);
@@ -30358,6 +30463,21 @@ async function _finFilaCarregar(){
       diag, acao, rep, cob, credor, devedor,
       valor: o.valor_recebido,
     });
+  }
+
+  // Os repasses que de fato podem sair hoje.
+  for(const r of liberados.itens){
+    const d = diasDesde(r.vence);
+    itens.push({
+      tipo:'repasse', cor:'#C9A961', lib:r, foraPrazo: r.vencido && d != null && d > 5,
+      eyebrow:'A REPASSAR',
+      titulo:`${r.devedor}`,
+      subtitulo:`vence ${r.vence.split('-').reverse().join('/')} · liberado pela entrada de ${r.entradaEm.split('-').reverse().join('/')} (${fmtR(r.entradaValor)})${r.exato?'':' · pareado pelo nome'}`,
+      valor: r.valor, automatizavel:false,
+    });
+  }
+  if(liberados.retidos){
+    console.info(`[repasse] ${liberados.retidos} despesa(s) vencida(s) seguram porque a entrada do mês não foi paga.`);
   }
 
   // Ordem: o que exige decisão primeiro; o que só precisa de confirmação por último.
@@ -30785,6 +30905,7 @@ async function _finPosAbrirRepasse(chave){
     q = it.origem === 'acordo' ? q.eq('acordo_id', it.id) : q.eq('cobranca_id', it.cobrancaId);
     const { data } = await q.order('data_vencimento', { ascending:true }).limit(200);
     parcelas = (data||[]).map(l => ({
+      id: l.id,
       data: (l.data_vencimento || l.data_competencia || '').slice(0,10),
       valor: Math.abs(+l.valor||0), contaId: l.conta_id, cobrancaId: l.cobranca_id, desc: l.descricao,
     })).filter(p => p.data && p.valor > 0);
@@ -30887,19 +31008,35 @@ async function _finPosGerarRepasse(){
     if(!credId) throw new Error('cedente "'+cedenteNome+'" não encontrado no cadastro');
 
     const ref = parcelas[parcelas.length-1] || {};
-    const rows = linhas.map(l => ({
-      descricao: `${it.devedor} ${l.n}/${l.total}`,
-      valor: -Math.abs(l.valor),
-      tipo_movimento: 0,
-      status: 0,
-      data_competencia: l.data,
-      data_vencimento: l.data,
-      numero_parcela: l.n,
-      total_parcelas: l.total,
-      credor_id: credId,
-      conta_id: ref.contaId || null,
-      cobranca_id: ref.cobrancaId || it.cobrancaId || null,
-    }));
+    // Cada linha do repasse nasce COLADA na parcela de entrada que a liberou — mesma
+    // data de vencimento, por construção. Guardar o id dessa entrada em raw_payload é o
+    // que permite depois dizer "este repasse já pode sair, porque a entrada dele foi
+    // paga" sem depender de casar nomes. As 370 despesas antigas não têm esse vínculo e
+    // continuam no pareamento por nome + mês (ver _finRepasseLiberado).
+    const porData = {};
+    for(const p of parcelas){ if(!porData[p.data]) porData[p.data] = p; }
+    const rows = linhas.map(l => {
+      const entrada = porData[l.data] || ref;
+      return {
+        descricao: `${it.devedor} ${l.n}/${l.total}`,
+        valor: -Math.abs(l.valor),
+        tipo_movimento: 0,
+        status: 0,
+        data_competencia: l.data,
+        data_vencimento: l.data,
+        numero_parcela: l.n,
+        total_parcelas: l.total,
+        credor_id: credId,
+        conta_id: entrada.contaId || ref.contaId || null,
+        cobranca_id: entrada.cobrancaId || ref.cobrancaId || it.cobrancaId || null,
+        raw_payload: {
+          origem: 'repasse-passo2',
+          repasse_de_lancamento_id: entrada.id || null,   // a entrada que libera este repasse
+          repasse_mes: String(l.data).slice(0,7),
+          devedor: it.devedor,
+        },
+      };
+    });
     const { error } = await sb.from('fin_lancamento').insert(rows);
     if(error) throw error;
 
@@ -31105,11 +31242,11 @@ async function renderFinCredores(el, aba){
       <div style="background:#0A1530;border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;min-width:0;">
         <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">A repassar agora</div>
         <div style="font-family:'JetBrains Mono',monospace;font-size:26px;font-weight:600;color:#C9A961;white-space:nowrap;margin-top:6px;">${fmtR(r.aRepassar)}</div>
-        <div style="font-size:11.5px;color:#B4BCCC;margin-top:auto;padding-top:6px;">${r.credores.size} cedente${r.credores.size!==1?'s':''}${(()=>{
+        <div style="font-size:11.5px;color:#B4BCCC;margin-top:auto;padding-top:6px;">${r.nRepassar||0} parcela${(r.nRepassar||0)!==1?'s':''} · ${r.credores.size} cedente${r.credores.size!==1?'s':''}${(()=>{
           if(!r.maisAntigo) return '';
-          const d = Math.max(0, Math.floor((Date.now()-new Date(r.maisAntigo+'T00:00:00').getTime())/86400000));
-          return ` · o mais antigo há ${d} dia${d!==1?'s':''}`;
-        })()}</div>
+          const d = Math.floor((Date.now()-new Date(r.maisAntigo+'T00:00:00').getTime())/86400000);
+          return d > 0 ? ` · a mais antiga venceu há ${d} dia${d!==1?'s':''}` : '';
+        })()}${r.retidos ? `<br><span style="color:#E2C98A;">${r.retidos} vencida${r.retidos!==1?'s':''} aguardando a entrada do mês</span>` : ''}</div>
         ${r.aRepassarManual > 0 ? `<div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#E2C98A;margin-top:5px;line-height:1.4;">INCLUI ${fmtR(r.aRepassarManual)} DE DIVISÃO MANUAL — NÃO APARECE NA LISTA ABAIXO</div>` : ''}
       </div>
       ${card('Divergências', String(r.aRevisar), r.aRevisar
