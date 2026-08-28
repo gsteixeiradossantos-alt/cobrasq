@@ -30255,7 +30255,11 @@ async function _finFilaCarregar(){
   try{
     const { data, error } = await sb.from('fin_operacao')
       .select('id,valor_recebido,valor_capital,valor_honorario,repasse_status,recebido_em,credor_id,devedor_id,parcela,total_parcelas,metadata')
-      .in('repasse_status', ['pendente','preparado','revisar'])
+      // Só o que já tem divisão definida e espera execução (Pix + comprovante).
+      // 'revisar' saiu daqui: essas dependem de DECISÃO, e decisão mora no passo 2
+      // "Definir repasse". Antes apareciam nos dois lugares — 46 linhas na fila e as
+      // mesmas 46 agrupadas em 39 logo abaixo, o mesmo dinheiro contado duas vezes.
+      .in('repasse_status', ['pendente','preparado'])
       .order('recebido_em', {ascending:true}).limit(500);
     if(error) throw error;
     ops = data||[];
@@ -30533,7 +30537,31 @@ async function _finPosCarregar(){
       for(const g of Object.values(porCaso)){
         const rep = (typeof _finFilaCasaRepasse === 'function')
           ? _finFilaCasaRepasse(g.devedorId ? g.devedor : null, despesas) : null;
+        // Mesmo diagnóstico de seis casos que estava na fila — ele veio para cá junto
+        // com os itens, para não sobrar meia informação em cada tela.
+        const ehPropria = /cobrasq/i.test(g.cedente||'');
+        let caso, diag;
+        if(ehPropria){
+          caso='propria';
+          diag='O crédito é da própria COBRASQ — não há cedente para receber. Este recebimento não gera repasse.';
+        } else if(!g.devedorId){
+          caso='sem_devedor';
+          diag='O pagamento caiu na conta mas não foi possível saber de quem é — o cliente do Asaas não bate com nenhum cadastro. Identifique o devedor antes de definir repasse.';
+        } else if(rep && rep.credorNome && g.cedente && !rep.credorNome.toLowerCase().includes(g.cedente.toLowerCase()) && !g.cedente.toLowerCase().includes(rep.credorNome.toLowerCase())){
+          caso='conflito';
+          diag=`Este recebimento está em ${g.cedente} e o repasse lançado está em ${rep.credorNome}. Pode ser que o devedor deva aos dois — o cruzamento é pelo nome e não separa duas dívidas da mesma pessoa. Confira antes de dar por resolvido.`;
+        } else if(rep && !g.cedente){
+          caso='falta_cedente';
+          diag=`Você já lançou o repasse deste caso, para ${rep.credorNome || 'um cedente'}. Falta só dizer que o recebimento é desse mesmo cedente.`;
+        } else if(rep){
+          caso='ja_lancado';
+          diag='Você já lançou o repasse deste caso. Não há nada a decidir — é só confirmar.';
+        } else {
+          caso='sem_repasse';
+          diag='Nenhum repasse lançado para este devedor. Quanto vai para o cedente é decisão sua: lance as despesas e depois confirme aqui.';
+        }
         itensRecebimento.push({
+          caso, diag,
           origem:'recebimento',
           id: g.chave, opIds: g.opIds, cobrancaId: g.devedorId || null,
           devedor: g.devedor, cedente: g.cedente,
@@ -30583,10 +30611,12 @@ function _finPosRender(){
          disso a lista ROLA DENTRO do cartão. Sem isto o overflow:hidden da seção comia a
          coluna de ações — o botão que executa o passo era justamente o que sumia. */
       .finpa-scroll{overflow-x:auto;}
-      .finpa-row{display:grid;grid-template-columns:minmax(200px,1fr) 128px minmax(150px,190px) 54px 118px 232px;gap:14px;align-items:center;padding:13px 16px;border-bottom:1px solid #F7F4EC;min-width:984px;box-sizing:border-box;}
+      .finpa-row{display:grid;grid-template-columns:minmax(240px,1.3fr) 128px minmax(150px,190px) 54px 118px 232px;gap:14px;align-items:start;padding:13px 16px;border-bottom:1px solid #F7F4EC;min-width:984px;box-sizing:border-box;}
       .finpa-row:hover{background:#FBFAF6;}
       .finpa-dev{font-size:13px;font-weight:600;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
       .finpa-org{font-size:10.5px;color:#8A94A6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      .finpa-caso{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.1em;text-transform:uppercase;display:block;margin-bottom:2px;}
+      .finpa-diag{font-size:11px;color:#6B7683;line-height:1.45;display:block;margin-top:4px;white-space:normal;}
       .finpa-lb{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:#8A94A6;}
       .finpa-val{font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:600;color:#0A1530;white-space:nowrap;}
       .finpa-bolas{display:flex;gap:5px;}
@@ -30643,9 +30673,11 @@ function _finPosRowHtml(i){
   return `<div class="finpa-row">
     <span style="min-width:0;">
       <span class="finpa-dev" title="${escHtml(i.devedor)}">${escHtml(i.devedor)}</span>
+      ${i.origem==='recebimento' && i.caso ? `<span class="finpa-caso" style="color:${(FIN_FILA_CASOS[i.caso]||{}).cor||'#8A94A6'};">${escHtml((FIN_FILA_CASOS[i.caso]||{}).lb||'')}</span>` : ''}
       <span class="finpa-org" style="display:block;">${i.origem==='recebimento'
-        ? `recebimento sem repasse definido${i.assinadoEm?` · desde ${i.assinadoEm.slice(8,10)}/${i.assinadoEm.slice(5,7)}`:''}${i.rep?` · repasse já lançado: ${i.rep.n} ${i.rep.n===1?'parcela':'parcelas'} de ${fmtR(i.rep.total)}`:''}`
+        ? `${i.assinadoEm?`desde ${i.assinadoEm.slice(8,10)}/${i.assinadoEm.slice(5,7)} · `:''}${i.rep?`repasse já lançado: ${i.rep.n} ${i.rep.n===1?'parcela':'parcelas'} de ${fmtR(i.rep.total)}`:'sem repasse lançado'}`
         : `${quando}${i.assinadoEm?` · assinado em ${i.assinadoEm.slice(8,10)}/${i.assinadoEm.slice(5,7)}`:''}`}</span>
+      ${i.origem==='recebimento' && i.diag ? `<span class="finpa-diag">${escHtml(i.diag)}</span>` : ''}
     </span>
     <span>
       <span class="finpa-lb">${i.origem==='recebimento'?'Recebido':'Acordo'}</span>
@@ -30667,9 +30699,11 @@ function _finPosRowHtml(i){
     <span><span class="finpa-pill">${quando}</span></span>
     <span class="finpa-acts">
       ${i.origem === 'recebimento'
-        ? (i.rep
-            ? `<button class="finpa-btn go" onclick="_finPosConfirmarRecebimentos('${i.id}')">Confirmar repasse lançado</button>`
-            : `<button class="finpa-btn go" onclick="setFinTab('fila')">Definir na fila →</button>`)
+        ? (i.caso === 'propria' ? `<button class="finpa-btn go" onclick="_finPosSemRepasse('${i.id}')">Marcar como sem repasse</button>`
+          : i.caso === 'falta_cedente' && i.rep && i.rep.credorNome ? `<button class="finpa-btn go" onclick="_finPosAdotarCedente('${i.id}')">Usar ${escHtml(i.rep.credorNome)}</button>`
+          : i.caso === 'ja_lancado' ? `<button class="finpa-btn go" onclick="_finPosConfirmarRecebimentos('${i.id}')">Confirmar repasse lançado</button>`
+          : i.caso === 'sem_repasse' ? `<button class="finpa-btn" onclick="abrirNovoLancamento()">Lançar repasse</button><button class="finpa-btn go" onclick="_finPosConfirmarRecebimentos('${i.id}')">Já lancei</button>`
+          : '')
         : (i.passo === 'ok'
             ? `<button class="finpa-btn" onclick="_finPosReabrir('${i.id}')">Reabrir</button>`
             : `<button class="finpa-btn go" onclick="_finPosConcluir('${i.id}','${i.passo}')">${passo.acao}</button>`)}
@@ -30707,6 +30741,40 @@ async function _finPosConcluir(acordoId, passoId){
 // Confirma, de uma vez, todos os recebimentos daquele caso que já têm o repasse lançado
 // como despesa. Não movimenta dinheiro — só fecha o ciclo que hoje fica aberto porque a
 // despesa lançada à mão não avisa a operação.
+// Marca todos os recebimentos do caso como sem repasse a fazer (carteira própria).
+async function _finPosSemRepasse(chave){
+  const it = (_finPosState.itens||[]).find(x => x.id === chave && x.origem === 'recebimento');
+  if(!it || !it.opIds || !it.opIds.length) return;
+  if(!confirm(`O crédito de ${it.devedor} é da COBRASQ, sem cedente a receber.\n\n${it.opIds.length} ${it.opIds.length===1?'recebimento sai':'recebimentos saem'} da pendência.`)) return;
+  await _finPosGravarOps(it.opIds, { repasse_status:'nao_aplica' }, 'Marcado como sem repasse.');
+}
+// Adota, para o recebimento, o cedente que consta no repasse já lançado.
+async function _finPosAdotarCedente(chave){
+  const it = (_finPosState.itens||[]).find(x => x.id === chave && x.origem === 'recebimento');
+  if(!it || !it.rep || !it.rep.credorNome){ showToast('Não foi possível identificar o cedente do repasse.', 'danger'); return; }
+  const sb = getSupabase();
+  let credId = null;
+  try{
+    const { data } = await sb.from('clientes').select('id,nome,nome_fantasia').limit(2000);
+    const alvo = it.rep.credorNome.toLowerCase();
+    const achado = (data||[]).find(c => (c.nome_fantasia||c.nome||'').toLowerCase() === alvo);
+    credId = achado ? achado.id : null;
+  }catch(_){}
+  if(!credId){ showToast('Cedente do repasse não encontrado no cadastro.', 'danger'); return; }
+  if(!confirm(`Vincular os recebimentos de ${it.devedor} a ${it.rep.credorNome} e confirmar o repasse já lançado?`)) return;
+  await _finPosGravarOps(it.opIds, { credor_id: credId, repasse_status:'efetuado' }, `Vinculado a ${it.rep.credorNome}.`);
+}
+async function _finPosGravarOps(opIds, patch, msg){
+  try{
+    const sb = getSupabase();
+    const { error } = await sb.from('fin_operacao').update(patch).in('id', opIds);
+    if(error) throw error;
+    showToast(msg, 'success');
+    _finCascataCache = { at:0, m:null };
+    if(typeof _finRepasseAggCache !== 'undefined') _finRepasseAggCache = { at:0, v:null };
+    const el = document.getElementById('fin-pos-corpo'); if(el) renderFinPosAssinatura(el);
+  }catch(e){ showToast('Não deu para gravar: '+(e.message||e), 'danger'); }
+}
 async function _finPosConfirmarRecebimentos(chave){
   const it = (_finPosState.itens||[]).find(x => x.id === chave && x.origem === 'recebimento');
   if(!it || !it.opIds || !it.opIds.length) return;
