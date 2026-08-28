@@ -30404,7 +30404,7 @@ const FIN_CREDORES_ABAS = [
 // que dispensa migração — e migração em produção é gated.
 const FIN_POS_PASSOS = [
   { id:'conferir',  n:1, nome:'Conferir parcelas', unidade:'acordos', hint:'parcelas emitidas pelo Asaas · validar valor e vencimento', acao:'Conferir parcelas', campo:'conferidoEm' },
-  { id:'repasse',   n:2, nome:'Definir repasse',   unidade:'acordos', hint:'escolher quais parcelas são do cedente e o honorário',      acao:'Definir repasse',   campo:'repasseEm' },
+  { id:'repasse',   n:2, nome:'Definir repasse',   unidade:'casos',   hint:'quanto vai para o cedente — decisão sua, o sistema não calcula', acao:'Definir repasse',   campo:'repasseEm' },
   { id:'relatorio', n:3, nome:'Enviar relatório',  unidade:'acordos', hint:'relatório de acordo firmado para o cliente',                acao:'Enviar relatório',  campo:'relatorioEm' },
   { id:'ok',        n:4, nome:'Concluídos',        unidade:'na janela', hint:'nada a fazer — fica no histórico do caso' },
 ];
@@ -30423,7 +30423,8 @@ async function _finPosCarregar(){
   const { data, error } = await q.order('data_assinatura', { ascending:false }).limit(500);
   if(error) throw error;
   const acordos = data || [];
-  if(!acordos.length) return [];
+  // Sem `return []` aqui: mesmo sem acordo na janela, os recebimentos sem repasse
+  // definido precisam aparecer no passo 2.
 
   const ids = acordos.map(a => a.id);
   // Parcelas efetivamente lançadas por acordo — é o que o passo 1 confere contra
@@ -30454,13 +30455,14 @@ async function _finPosCarregar(){
   }catch(_){}
 
   const hojeMs = Date.now();
-  return acordos.map(a => {
+  const itensAcordo = acordos.map(a => {
     const pa = (a.metadata && a.metadata.posAssinatura) || {};
     const parc = parcPorAcordo[a.id] || { n:0, total:0 };
     const feitos = { conferir: !!pa.conferidoEm, repasse: !!pa.repasseEm, relatorio: !!pa.relatorioEm };
     const passo = !feitos.conferir ? 'conferir' : (!feitos.repasse ? 'repasse' : (!feitos.relatorio ? 'relatorio' : 'ok'));
     const dias = a.data_assinatura ? Math.max(0, Math.floor((hojeMs - new Date(a.data_assinatura).getTime())/86400000)) : null;
     return {
+      origem:'acordo',
       id: a.id, cobrancaId: a.cobranca_id || null,
       devedor: devMap[a.devedor_id] || 'devedor sem cadastro',
       cedente: cedPorCob[a.cobranca_id] || null,
@@ -30473,6 +30475,77 @@ async function _finPosCarregar(){
       dias, passo, feitos, pa,
     };
   });
+
+  // ── Recebimentos sem repasse definido, AGRUPADOS POR CASO ────────────────────────
+  // Eles não têm acordo (40 dos 46 em 28/08/2026 são avulsos: boleto importado,
+  // QuitaFácil, cobrança manual), então não entram como acordo — mas o que falta neles
+  // é exatamente a decisão do passo 2. Aparecem aqui para serem resolvidos no mesmo
+  // lugar, em vez de numa fila paralela.
+  //
+  // Agrupados por devedor de propósito: a Ivone tem 27 parcelas de entrada e a decisão
+  // do repasse é UMA. Uma linha por pagamento devolveria a fila de 46 que se está
+  // justamente esvaziando.
+  const itensRecebimento = [];
+  try{
+    const { data:ops } = await sb.from('fin_operacao')
+      .select('id,devedor_id,credor_id,valor_recebido,recebido_em,repasse_status')
+      .eq('repasse_status','revisar').order('recebido_em',{ascending:true}).limit(500);
+    const lista = ops || [];
+    if(lista.length){
+      const dIds = [...new Set(lista.map(o=>o.devedor_id).filter(Boolean))];
+      const cIds = [...new Set(lista.map(o=>o.credor_id).filter(Boolean))];
+      const dNome = {}, cNome = {};
+      if(dIds.length){ const {data}=await sb.from('devedores').select('id,nome').in('id',dIds); (data||[]).forEach(d=>dNome[d.id]=d.nome); }
+      if(cIds.length){ const {data}=await sb.from('clientes').select('id,nome,nome_fantasia').in('id',cIds); (data||[]).forEach(c=>cNome[c.id]=c.nome_fantasia||c.nome); }
+      // Despesas de repasse já lançadas, para a linha dizer o que já foi feito — mesma
+      // fonte e mesma ressalva de casamento por nome da fila.
+      let despesas = [];
+      try{
+        const { data } = await sb.from('fin_lancamento')
+          .select('id,descricao,valor,credor_id').eq('tipo_movimento',0)
+          .not('descricao','ilike','%tarifa%').limit(2000);
+        despesas = data || [];
+        const ids = [...new Set(despesas.map(l=>l.credor_id).filter(Boolean))];
+        if(ids.length){
+          const { data:cs } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', ids);
+          const m={}; (cs||[]).forEach(c=>m[c.id]=c.nome_fantasia||c.nome);
+          despesas.forEach(l=>{ l._credorNome = l.credor_id ? (m[l.credor_id]||null) : null; });
+        }
+      }catch(_){}
+
+      const porCaso = {};
+      for(const o of lista){
+        const chave = o.devedor_id || ('avulso:'+o.id);
+        const g = porCaso[chave] || (porCaso[chave] = {
+          chave, devedorId:o.devedor_id||null, credorId:o.credor_id||null,
+          devedor: o.devedor_id ? (dNome[o.devedor_id] || 'devedor sem cadastro') : 'Pagamento sem devedor identificado',
+          cedente: o.credor_id ? (cNome[o.credor_id] || null) : null,
+          n:0, total:0, desde:null, opIds:[],
+        });
+        g.n++; g.total += Math.abs(+o.valor_recebido||0); g.opIds.push(o.id);
+        if(!g.credorId && o.credor_id){ g.credorId = o.credor_id; g.cedente = cNome[o.credor_id] || g.cedente; }
+        const q = (o.recebido_em||'').slice(0,10);
+        if(q && (!g.desde || q < g.desde)) g.desde = q;
+      }
+      for(const g of Object.values(porCaso)){
+        const rep = (typeof _finFilaCasaRepasse === 'function')
+          ? _finFilaCasaRepasse(g.devedorId ? g.devedor : null, despesas) : null;
+        itensRecebimento.push({
+          origem:'recebimento',
+          id: g.chave, opIds: g.opIds, cobrancaId: g.devedorId || null,
+          devedor: g.devedor, cedente: g.cedente,
+          valor: +g.total.toFixed(2), numParcelas: 0, parcelasLancadas: g.n,
+          divergeParcelas: false,
+          assinadoEm: g.desde ? g.desde+'T00:00:00Z' : null,
+          dias: g.desde ? Math.max(0, Math.floor((hojeMs - new Date(g.desde+'T00:00:00').getTime())/86400000)) : null,
+          // Entram direto no passo 2: o que falta neles é definir o repasse.
+          passo: 'repasse', feitos:{ conferir:true }, pa:{}, rep,
+        });
+      }
+    }
+  }catch(e){ console.warn('pós-assinatura: recebimentos sem repasse', e); }
+
+  return itensAcordo.concat(itensRecebimento);
 }
 
 async function renderFinPosAssinatura(el){
@@ -30567,23 +30640,36 @@ function _finPosRowHtml(i){
   return `<div class="finpa-row">
     <span style="min-width:0;">
       <span class="finpa-dev" title="${escHtml(i.devedor)}">${escHtml(i.devedor)}</span>
-      <span class="finpa-org" style="display:block;">${quando}${i.assinadoEm?` · assinado em ${i.assinadoEm.slice(8,10)}/${i.assinadoEm.slice(5,7)}`:''}</span>
+      <span class="finpa-org" style="display:block;">${i.origem==='recebimento'
+        ? `recebimento sem repasse definido${i.assinadoEm?` · desde ${i.assinadoEm.slice(8,10)}/${i.assinadoEm.slice(5,7)}`:''}${i.rep?` · repasse já lançado: ${i.rep.n} ${i.rep.n===1?'parcela':'parcelas'} de ${fmtR(i.rep.total)}`:''}`
+        : `${quando}${i.assinadoEm?` · assinado em ${i.assinadoEm.slice(8,10)}/${i.assinadoEm.slice(5,7)}`:''}`}</span>
     </span>
     <span>
-      <span class="finpa-lb">Acordo</span>
+      <span class="finpa-lb">${i.origem==='recebimento'?'Recebido':'Acordo'}</span>
       <span class="finpa-val" style="display:block;">${fmtR(i.valor)}</span>
-      <span class="finpa-org">${i.numParcelas}× · ${i.parcelasLancadas} ${i.parcelasLancadas===1?'lançada':'lançadas'}${i.divergeParcelas?' <span class="finpa-alerta">DIVERGE</span>':''}</span>
+      <span class="finpa-org">${i.origem==='recebimento'
+        ? `${i.parcelasLancadas} ${i.parcelasLancadas===1?'pagamento':'pagamentos'}`
+        : `${i.numParcelas}× · ${i.parcelasLancadas} ${i.parcelasLancadas===1?'lançada':'lançadas'}${i.divergeParcelas?' <span class="finpa-alerta">DIVERGE</span>':''}`}</span>
     </span>
     <span style="min-width:0;">
       <span class="finpa-lb">Cedente</span>
-      <span style="display:block;font-size:12px;font-weight:600;color:#9C7F40;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escHtml(i.cedente||'')}">${i.cedente ? escHtml(i.cedente) : '<span style="font-weight:400;color:#8A94A6;">carteira própria</span>'}</span>
+      <span style="display:block;font-size:12px;font-weight:600;color:#9C7F40;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escHtml(i.cedente || (i.rep && i.rep.credorNome) || '')}">${
+        i.cedente ? escHtml(i.cedente)
+        : (i.rep && i.rep.credorNome ? `${escHtml(i.rep.credorNome)}<span style="font-weight:400;color:#8A94A6;"> · pelo repasse</span>`
+        : (i.origem === 'recebimento'
+            ? '<span style="font-weight:400;color:#8A94A6;">não vinculado</span>'
+            : '<span style="font-weight:400;color:#8A94A6;">carteira própria</span>'))}</span>
     </span>
     <span class="finpa-bolas" title="passo ${idx+1} de 3">${bolas}</span>
     <span><span class="finpa-pill">${quando}</span></span>
     <span class="finpa-acts">
-      ${i.passo === 'ok'
-        ? `<button class="finpa-btn" onclick="_finPosReabrir('${i.id}')">Reabrir</button>`
-        : `<button class="finpa-btn go" onclick="_finPosConcluir('${i.id}','${i.passo}')">${passo.acao}</button>`}
+      ${i.origem === 'recebimento'
+        ? (i.rep
+            ? `<button class="finpa-btn go" onclick="_finPosConfirmarRecebimentos('${i.id}')">Confirmar repasse lançado</button>`
+            : `<button class="finpa-btn go" onclick="setFinTab('fila')">Definir na fila →</button>`)
+        : (i.passo === 'ok'
+            ? `<button class="finpa-btn" onclick="_finPosReabrir('${i.id}')">Reabrir</button>`
+            : `<button class="finpa-btn go" onclick="_finPosConcluir('${i.id}','${i.passo}')">${passo.acao}</button>`)}
       <button class="finpa-btn" onclick="_finPosAbrirCaso('${i.id}')">Abrir caso</button>
     </span>
   </div>`;
@@ -30614,6 +30700,25 @@ async function _finPosConcluir(acordoId, passoId){
     showToast(`${passo.nome}: concluído.`, 'success');
     const el = document.getElementById('fin-pos-corpo'); if(el) renderFinPosAssinatura(el);
   }catch(e){ showToast('Não deu para gravar o passo: '+(e.message||e), 'danger'); }
+}
+// Confirma, de uma vez, todos os recebimentos daquele caso que já têm o repasse lançado
+// como despesa. Não movimenta dinheiro — só fecha o ciclo que hoje fica aberto porque a
+// despesa lançada à mão não avisa a operação.
+async function _finPosConfirmarRecebimentos(chave){
+  const it = (_finPosState.itens||[]).find(x => x.id === chave && x.origem === 'recebimento');
+  if(!it || !it.opIds || !it.opIds.length) return;
+  const n = it.opIds.length;
+  const prova = it.rep ? `\n\nRepasse encontrado: ${it.rep.n} ${it.rep.n===1?'parcela':'parcelas'} somando ${fmtR(it.rep.total)}${it.rep.credorNome?` para ${it.rep.credorNome}`:''}.` : '';
+  if(!confirm(`Confirmar que o repasse de ${it.devedor} já foi lançado?${prova}\n\n${n} ${n===1?'recebimento sai':'recebimentos saem'} da pendência. Nenhum dinheiro é movimentado.`)) return;
+  try{
+    const sb = getSupabase();
+    const { error } = await sb.from('fin_operacao').update({ repasse_status:'efetuado' }).in('id', it.opIds);
+    if(error) throw error;
+    showToast(`${n} ${n===1?'recebimento confirmado':'recebimentos confirmados'}.`, 'success');
+    _finCascataCache = { at:0, m:null };
+    if(typeof _finRepasseAggCache !== 'undefined') _finRepasseAggCache = { at:0, v:null };
+    const el = document.getElementById('fin-pos-corpo'); if(el) renderFinPosAssinatura(el);
+  }catch(e){ showToast('Não deu para confirmar: '+(e.message||e), 'danger'); }
 }
 async function _finPosReabrir(acordoId){
   if(!confirm('Reabrir este acordo apaga os três carimbos e ele volta para "Conferir parcelas". Confirma?')) return;
