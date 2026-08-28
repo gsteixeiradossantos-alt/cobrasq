@@ -41450,6 +41450,19 @@ function _tajCepInput(el){
 // assinou ainda. NÃO entra em _STATUS_FORA_REGUA — decisão do Gustavo em 27/08:
 // quem recebeu o termo e não assina continua na régua da Bia.
 const _TAJ_STATUS_ENVIADO = 'Acordo enviado';
+// Quando NÃO mexer na situação do caso: só a trilha extrajudicial ainda "a cobrar"
+// (Cobrar, Reajuizar, Em contato, Em negociação, Fazer ação, Para protocolar…) recebe
+// "Acordo enviado". Caso com AÇÃO EM CURSO — ou termo do modo Judicial, que pressupõe
+// processo ativo — mantém a etiqueta do processo: rebaixar para "Acordo enviado" tira o
+// caso do funil judicial e some com ele das telas de processo (Gustavo, 28/08).
+// Já em acordo, quitado, devolvido ou encerrado também não volta atrás.
+function _tajPodeMarcarEnviado(statusAtual, tipoTermo){
+  if(tipoTermo==='judicial') return false;
+  const st=String(statusAtual||'').trim();
+  if(!st) return true;                                   // sem situação = ninguém cuidou
+  if(st===_TAJ_STATUS_ENVIADO) return false;             // já está lá
+  return (typeof _pnlEhACobrar==='function') ? _pnlEhACobrar(st) : true;
+}
 function _tajTipoDoc(doc){ return String(doc||'').replace(/\D/g,'').length>11 ? 'PJ' : 'PF'; }
 function _tajHojeISO(){ return new Date().toISOString().slice(0,10); }
 function _tajMaisDias(d){ const x=new Date(); x.setDate(x.getDate()+d); return x.toISOString().slice(0,10); }
@@ -41484,7 +41497,10 @@ function abrirTermoAcordoJ(devId){
   const lbl='style="display:block;font-size:11px;color:var(--text-3);margin-bottom:3px;"';
   const F=(id,label,val,attrs,full)=>`<div style="${full?'grid-column:1/3;':''}"><label ${lbl}>${label}</label><input id="${id}" value="${escHtml(val==null?'':String(val))}" ${attrs||''} ${inp}></div>`;
 
-  const credNome = credor.nome || _TAJ_COBRASQ_NOME;
+  // Credor do termo: default SEMPRE a COBRASQ (cessionária). O cedente aparece no
+  // combobox e pode ser escolhido à mão quando o título não foi cedido — decisão
+  // do Gustavo em 28/08. `credor` fica só para referência do cadastro.
+  const credNome = _TAJ_COBRASQ_NOME;
   const html = `
   <div style="grid-column:1/3;font-size:13px;padding:2px 0;"><strong>Devedor principal:</strong> ${escHtml(dev.nome||'')} · <strong>${tipoDoc}</strong></div>
   <div id="tajGeneroWrap" style="grid-column:1/3;${tipoDoc==='PJ'?'display:none;':''}"><label ${lbl}>Gênero do devedor</label>
@@ -41499,7 +41515,7 @@ function abrirTermoAcordoJ(devId){
   </div>
   <div style="grid-column:1/3;"><label ${lbl}>Credor</label><input id="tajCredor" list="tajCredorLista" autocomplete="off" value="${escHtml(credNome)}" oninput="_tajAoTrocarCredor()" ${inp}>
     <datalist id="tajCredorLista">${_tajCredorOptionsHtml()}</datalist>
-    <div style="font-size:11px;color:var(--text-3);margin-top:4px;">Digite para buscar entre os ${_tajCredorLista().length} credores cadastrados (nome ou fantasia) — a qualificação é preenchida sozinha. No acordo judicial a autora é a COBRASQ; ajuste se for o cedente real.</div></div>
+    <div style="font-size:11px;color:var(--text-3);margin-top:4px;">Vem preenchido com a <strong>COBRASQ</strong> (cessionária). Digite para buscar entre os ${_tajCredorLista().length} credores cadastrados (nome ou fantasia) — a qualificação é preenchida sozinha. Troque só se o título não foi cedido e o credor é o cedente.</div></div>
   ${F('tajForo','Foro de eleição (comarca da credora)','','placeholder="Cidade/UF"',true)}
   <div style="grid-column:1/3;"><label ${lbl}>Qualificação do credor</label><textarea id="tajCredorQualif" style="width:100%;min-height:52px;padding:7px;border:1px solid var(--border);border-radius:5px;font-size:12px;background:var(--surface);color:var(--text);"></textarea></div>
   <div style="grid-column:1/3;font-size:11px;font-weight:700;color:var(--text-3);border-top:1px solid var(--border);padding-top:8px;">ENDEREÇO DO DEVEDOR</div>
@@ -41510,6 +41526,7 @@ function abrirTermoAcordoJ(devId){
     <strong style="font-size:12px;">Outros devedores que assinam</strong>
     <button type="button" class="btn btn-ghost btn-sm" onclick="_tajAddDevedor()">+ Adicionar</button></div>
   <div id="tajDevExtras" style="grid-column:1/3;display:flex;flex-direction:column;gap:10px;"></div>
+  <div id="tajDevExtrasHint" style="grid-column:1/3;font-size:11px;color:var(--text-3);display:none;"></div>
   <div style="grid-column:1/3;font-size:11px;font-weight:700;color:var(--text-3);border-top:1px solid var(--border);padding-top:8px;">VALORES DO ACORDO</div>
   <div><label ${lbl}>Valor total (R$) <span style="font-weight:400;">— automático</span></label><input id="tajTotal" value="${escHtml(valorBRParaInput(total))}" type="text" readonly style="width:100%;padding:7px;border:1px solid var(--border);border-radius:5px;font-size:13px;background:var(--surface-2);color:var(--text);cursor:not-allowed;"></div>
   ${F('tajParcelas','Nº de parcelas',nParc,'type="number" min="1" oninput="_tajRecalcTotal()"')}
@@ -41524,7 +41541,9 @@ function abrirTermoAcordoJ(devId){
       <input id="tajEntradaVenc" type="date" ${inp}></div></div>`;
 
   _tajEnsureModals();
+  _tajRenderComarcas();
   document.getElementById('taj-campos').innerHTML = html;
+  _tajPrefillCoobrigados(devId);
   document.getElementById('tajJudProcesso').value = proc;
   document.getElementById('tajJudComarca').value = comarca;
   _tajAoTrocarCredor();
@@ -41532,6 +41551,64 @@ function abrirTermoAcordoJ(devId){
   _tajOnTipoChange();
   _tajRecalcTotal();
   document.getElementById('taj-modal').style.display='flex';
+}
+// Comarcas sugeridas no acordo judicial. Antes o campo tinha placeholder "Dois
+// Vizinhos": parecia preenchido e ia vazio para o termo. Agora é autocomplete de
+// verdade — base fixa da região + as comarcas que já apareceram na pauta de audiências
+// + as que o Gustavo digitou antes (localStorage, aprende sozinho).
+const _TAJ_COMARCAS_BASE = [
+  'Dois Vizinhos','Francisco Beltrão','Pato Branco','Cascavel','Chopinzinho',
+  'Coronel Vivida','São João','Verê','Salto do Lontra','Realeza','Capanema',
+  'Marmeleiro','Ampére','Santo Antônio do Sudoeste','Clevelândia','Palmas',
+  'Mangueirinha','Laranjeiras do Sul','Quedas do Iguaçu','Guarapuava',
+  'Toledo','Foz do Iguaçu','Curitiba'
+];
+const _TAJ_COMARCAS_KEY = 'cobrasq_taj_comarcas';
+function _tajComarcasSalvas(){
+  try{ const a=JSON.parse(localStorage.getItem(_TAJ_COMARCAS_KEY)||'[]'); return Array.isArray(a)?a:[]; }catch(e){ return []; }
+}
+function _tajComarcaAprender(v){
+  const t=String(v||'').trim(); if(t.length<3) return;
+  const list=_tajComarcasSalvas();
+  if(list.some(x=>String(x).trim().toLowerCase()===t.toLowerCase())) return;
+  list.unshift(t);
+  try{ localStorage.setItem(_TAJ_COMARCAS_KEY, JSON.stringify(list.slice(0,40))); }catch(e){}
+}
+function _tajComarcasLista(){
+  const doAud=(typeof _audCache!=='undefined' && Array.isArray(_audCache) ? _audCache : [])
+    .map(a=>String((a&&a.comarca)||'').trim()).filter(Boolean);
+  const out=[], vistos=new Set();
+  [..._tajComarcasSalvas(), ...doAud, ..._TAJ_COMARCAS_BASE].forEach(v=>{
+    const t=String(v||'').trim(); if(!t) return;
+    const k=t.toLowerCase(); if(vistos.has(k)) return; vistos.add(k); out.push(t);
+  });
+  return out;
+}
+function _tajRenderComarcas(){
+  const dl=document.getElementById('tajComarcaLista'); if(!dl) return;
+  dl.innerHTML=_tajComarcasLista().map(v=>`<option value="${escHtml(v)}"></option>`).join('');
+}
+// Coobrigados do CASO (cobranca_partes: avalista, emitente não-principal, devedor
+// solidário, fiador, sucessor) entram sozinhos como signatários extras. Antes o bloco
+// nascia vazio e só era alimentado pela verificação de sócios — num caso com 5 partes
+// o termo saía com o principal assinando sozinho, deixando os solidários fora do
+// título. Vêm marcados para conferência: remova na mão quem não deve assinar.
+function _tajPrefillCoobrigados(cobId){
+  const wrap=document.getElementById('tajDevExtras'); if(!wrap) return 0;
+  const src=(typeof DB_cobrancas!=='undefined' && DB_cobrancas) || [];
+  const c=src.find(x=>x && x.id===cobId);
+  const extras=((c&&c.cobranca_partes)||[])
+    .filter(p=>p && !p.principal && p.devedores && String(p.devedores.nome||'').trim());
+  extras.forEach(p=>_tajAddDevedor({
+    nome:p.devedores.nome, documento:p.devedores.doc,
+    telefone:p.devedores.telefone||'', papel:p.papel||'' }));
+  const hint=document.getElementById('tajDevExtrasHint');
+  if(hint && extras.length){
+    hint.style.display='block';
+    hint.innerHTML=extras.length+' coobrigado(s) do caso ' +
+      (extras.length===1?'entrou':'entraram') + ' automaticamente. Remova quem não deve assinar o termo.';
+  }
+  return extras.length;
 }
 // Lista de credores do combobox: cadastrados ativos + a COBRASQ. Antes o campo era um
 // input solto: quem não soubesse o nome exato não achava ninguém, e a qualificação só
@@ -41645,16 +41722,22 @@ function _tajAddDevedor(prefill){
   const inp='style="width:100%;padding:6px;border:1px solid var(--border);border-radius:5px;font-size:13px;background:var(--surface);color:var(--text);"';
   const lbl='style="display:block;font-size:11px;color:var(--text-3);margin-bottom:3px;"';
   const row=document.createElement('div'); row.className='taj-dev-extra'; row.style.cssText='border:1px solid var(--border);border-radius:6px;padding:8px;';
-  row.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><strong style="font-size:12px;">Devedor adicional ${idx}</strong>
+  const papelLbl=(prefill&&prefill.papel&&typeof PAPEL_LABELS!=='undefined'&&PAPEL_LABELS[prefill.papel])||'';
+  row.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;"><strong style="font-size:12px;">Devedor adicional ${idx}${papelLbl?` <span style="font-weight:500;color:var(--text-3);">· ${escHtml(papelLbl)}</span>`:''}</strong>
     <button type="button" class="btn btn-ghost btn-sm" onclick="this.closest('.taj-dev-extra').remove()">remover</button></div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
       <div style="grid-column:1/3;"><label ${lbl}>Nome</label><input class="tajExNome" ${inp}></div>
       <div><label ${lbl}>CPF/CNPJ</label><input class="tajExDoc" ${inp}></div>
       <div><label ${lbl}>Telefone (WhatsApp)</label><input class="tajExTel" ${inp}></div>
-      <div><label ${lbl}>Gênero</label><select class="tajExGenero" ${inp}><option value="F">Feminino</option><option value="M">Masculino</option></select></div>
+      <div class="tajExGeneroWrap"><label ${lbl}>Gênero</label><select class="tajExGenero" ${inp}><option value="F">Feminino</option><option value="M">Masculino</option></select></div>
     </div>
     <label style="font-size:12px;display:block;margin-top:6px;"><input type="checkbox" class="tajExMesmoEnd" checked> Mesmo endereço do principal</label>`;
   wrap.appendChild(row);
+  // PJ não tem gênero — com os coobrigados vindo do caso, empresa entrando como
+  // "Feminino" era ruído na tela. Esconde o campo e reavalia a cada digitação do doc.
+  const _toggleGen=()=>{ const w=row.querySelector('.tajExGeneroWrap'); const d=row.querySelector('.tajExDoc');
+    if(w) w.style.display = _tajTipoDoc(d?d.value:'')==='PJ' ? 'none' : ''; };
+  const inpDoc=row.querySelector('.tajExDoc'); if(inpDoc) inpDoc.addEventListener('input',_toggleGen);
   // Pré-preenche quando adicionado a partir da verificação de sócios/empresas (avalista).
   if(prefill){
     const set=(sel,v)=>{ const el=row.querySelector(sel); if(el && v!=null) el.value=v; };
@@ -41665,6 +41748,7 @@ function _tajAddDevedor(prefill){
     set('.tajExTel', prefill.telefone||'');
     if(prefill.genero){ const g=row.querySelector('.tajExGenero'); if(g) g.value=prefill.genero; }
   }
+  _toggleGen();
   return row;
 }
 function _tajLerExtras(){
@@ -41798,6 +41882,9 @@ async function tajGerarPreview(){
     if(dados.tipo==='judicial'){
       if(!dados.judicial.numeroProcesso){ showToast('Informe o nº do processo.','danger'); return; }
       if(!dados.judicial.comarca){ showToast('Informe a comarca.','danger'); return; }
+      _tajComarcaAprender(dados.judicial.comarca);
+      _tajComarcaAprender(dados.judicial.clausula4 && dados.judicial.clausula4.comarca2);
+      _tajRenderComarcas();
       if(dados.judicial.clausula4.mode==='desistencia' && !dados.judicial.clausula4.proc2){ showToast('Informe os autos a desistir (cláusula 4).','danger'); return; }
     }
     _tajState.html = dados.tipo==='judicial' ? await TermoEngine.montarTermoJudicial(dados) : await TermoEngine.montarTermoExtrajudicial(dados);
@@ -41847,7 +41934,9 @@ async function tajEnviarZapSign(){
     // derrubaria o valor) e replica no blob, que é o que o portal do cedente lê.
     try{
       const cAtual=(DB_cobrancas||[]).find(x=>x.id===_tajState.devId);
-      if(!cAtual || cAtual.status!==_TAJ_STATUS_ENVIADO) await _setStatusCobrancaReal(_tajState.devId, _TAJ_STATUS_ENVIADO);
+      const stAtual=(cAtual && cAtual.status) || '';
+      if(_tajPodeMarcarEnviado(stAtual, dados.tipo)) await _setStatusCobrancaReal(_tajState.devId, _TAJ_STATUS_ENVIADO);
+      else console.info('[taj] situação mantida ("'+(stAtual||'—')+'", termo '+dados.tipo+') — fora da trilha extrajudicial a cobrar.');
     }catch(e){ console.warn('[taj] status não gravado:', e && e.message); }
     document.getElementById('taj-prev').style.display='none';
     if(!waFalhas.length){
@@ -41897,12 +41986,12 @@ function _tajEnsureModals(){
         <div id="tajJudFields" style="display:none;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;padding:10px;border:1px dashed var(--border);border-radius:6px;">
           <div style="grid-column:1/3;font-size:11px;color:var(--gold-dark,#9C7F40);text-transform:uppercase;letter-spacing:.08em;">⚖ Dados do processo</div>
           <div><label ${lbl}>Nº do processo</label><input id="tajJudProcesso" placeholder="0000000-00.0000.8.16.0000" ${inp}></div>
-          <div><label ${lbl}>Comarca</label><input id="tajJudComarca" placeholder="Dois Vizinhos" ${inp}></div>
+          <div><label ${lbl}>Comarca</label><input id="tajJudComarca" list="tajComarcaLista" autocomplete="off" ${inp}><datalist id="tajComarcaLista"></datalist></div>
           <div><label ${lbl}>Foro</label><select id="tajJudForo" ${inp}><option value="jec">Juizado Especial Cível</option><option value="vara">Vara Cível</option></select></div>
           <div><label ${lbl}>Cláusula 4 (variável)</label><select id="tajJudClausula4" onchange="_tajOnClausula4()" ${inp}><option value="consolidacao">Consolidação neste feito</option><option value="desistencia">Concentração + desistência de outro processo</option><option value="sisbajud">Sisbajud (liberação de bloqueio)</option></select></div>
           <div id="tajJudDesistWrap" style="display:none;grid-column:1/3;grid-template-columns:1fr 1fr;gap:10px;">
             <div><label ${lbl}>Autos a desistir (nº)</label><input id="tajJudProc2" placeholder="0000000-00.0000.8.16.0000" ${inp}></div>
-            <div><label ${lbl}>Comarca do processo a desistir</label><input id="tajJudComarca2" placeholder="Francisco Beltrão" ${inp}></div></div>
+            <div><label ${lbl}>Comarca do processo a desistir</label><input id="tajJudComarca2" list="tajComarcaLista" autocomplete="off" ${inp}></div></div>
           <div id="tajJudSisbajudWrap" style="display:none;grid-column:1/3;grid-template-columns:1fr 1fr;gap:8px;">
             <div style="grid-column:1/3;font-size:10.5px;color:var(--text-3);text-transform:uppercase;letter-spacing:.06em;">Sisbajud — destinação dos valores bloqueados</div>
             <div><label ${lbl}>Total bloqueado (R$)</label><input id="tajJudValorBloq" type="number" step="0.01" placeholder="0,00" ${inp}></div>
