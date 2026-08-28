@@ -158,9 +158,35 @@ module.exports = async function handler(req, res) {
     // outro. Reconcilia o status do transfer existente e retorna; só envia um novo
     // PIX quando ainda não há transfer vinculado à operação.
     if (op.repasse_asaas_transfer_id) {
-      const tr = await asaasReq('GET', `/transfers/${encodeURIComponent(op.repasse_asaas_transfer_id)}`).catch(() => null);
+      // Separar "não deu para perguntar ao Asaas" de "o Asaas respondeu que não existe":
+      // um erro de rede NÃO pode liberar o botão, senão um segundo PIX sai por cima de
+      // um primeiro que estava só demorando.
+      let tr = null, trErr = null;
+      try { tr = await asaasReq('GET', `/transfers/${encodeURIComponent(op.repasse_asaas_transfer_id)}`); }
+      catch (e) { trErr = e; }
+      const sumiu = !!trErr && /\b404\b/.test(String((trErr && trErr.message) || ''));
       const stExist = String((tr && tr.status) || op.metadata?.repasse_asaas_status || '').toUpperCase();
       const doneExist = stExist === 'DONE' || stExist === 'CONFIRMED';
+      // Transferência recusada, cancelada ou apagada dentro do Asaas: o dinheiro não
+      // saiu, então a operação volta a 'pendente' e o botão reaparece. Sem isto ela
+      // ficava 'preparado' para sempre e o repasse simplesmente não acontecia mais.
+      const falhouExist = !doneExist && (sumiu || /FAIL|CANCEL|ERROR|REFUS|REJECT|DENIED/.test(stExist));
+      if (falhouExist && op.repasse_status !== 'efetuado') {
+        await sbFetch(`fin_operacao?id=eq.${op.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            repasse_status: 'pendente',
+            repasse_asaas_transfer_id: null,
+            metadata: { ...(op.metadata || {}), repasse_asaas_status: sumiu ? 'NOT_FOUND' : stExist,
+                        repasse_liberado_em: new Date().toISOString() },
+          }),
+        }).catch(() => {});
+        return res.status(200).json({
+          ok: true, liberado: true, operacao_id: op.id,
+          asaas_status: sumiu ? 'NOT_FOUND' : (stExist || null), repasse_status: 'pendente',
+          motivo: sumiu ? 'transferência não existe mais no Asaas' : `transferência ${stExist} no Asaas`,
+        });
+      }
       if (doneExist && op.repasse_status !== 'efetuado') {
         await sbFetch(`fin_operacao?id=eq.${op.id}`, {
           method: 'PATCH',

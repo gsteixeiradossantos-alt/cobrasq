@@ -30535,7 +30535,7 @@ async function _finFilaCarregar(){
     const nome = (devMap[o.devedor_id] || '').toLowerCase().split(/\s+/)[0];
     if(!nome) continue;
     const cent = Math.round((+o.valor_capital||0) * 100);
-    if(cent > 0) opPorRepasse[nome + '|' + cent] = o.id;
+    if(cent > 0) opPorRepasse[nome + '|' + cent] = o;
   }
 
   // Os repasses que de fato podem sair hoje.
@@ -30546,7 +30546,8 @@ async function _finFilaCarregar(){
       eyebrow:'A REPASSAR', credor: r.credorId ? (libCredMap[r.credorId]||null) : null,
       // Só casa quando devedor E valor batem: um Pix disparado na operação errada manda
       // dinheiro para o cedente errado.
-      opId: opPorRepasse[(r.devedor||'').toLowerCase().split(/\s+/)[0] + '|' + Math.round(r.valor*100)] || null,
+      opId: (opPorRepasse[(r.devedor||'').toLowerCase().split(/\s+/)[0] + '|' + Math.round(r.valor*100)]||{}).id || null,
+      opEnviado: (opPorRepasse[(r.devedor||'').toLowerCase().split(/\s+/)[0] + '|' + Math.round(r.valor*100)]||{}).repasse_status === 'preparado',
       titulo:`${r.devedor}`,
       subtitulo:`${r.credorId && libCredMap[r.credorId] ? `pagar a ${libCredMap[r.credorId]} · ` : ''}vence ${r.vence.split('-').reverse().join('/')} · liberado pela entrada de ${r.entradaEm.split('-').reverse().join('/')} (${fmtR(r.entradaValor)})${r.exato?'':' · pareado pelo nome'}`,
       valor: r.valor, automatizavel:false,
@@ -31463,7 +31464,9 @@ function _finFilaRowHtml(it, i){
       <div class="fila-acts">
         <button class="fila-btn" onclick="event.stopPropagation();_finFilaToggleEsteira(${i})">Passos</button>
         ${it.automatizavel ? `<button class="fila-btn dark" onclick="event.stopPropagation();_finFilaResolver(${i})">Resolver ⏎</button>` : ''}
-        ${it.opId ? `<button class="fila-btn dark" onclick="event.stopPropagation();confirmarRepasse('${it.opId}')">Gerar Pix</button>` : ''}
+        ${it.opId ? (it.opEnviado
+          ? `<button class="fila-btn" onclick="event.stopPropagation();_repConferirTransfer('${it.opId}')">Aguardando o Asaas · conferir</button>`
+          : `<button class="fila-btn dark" onclick="event.stopPropagation();confirmarRepasse('${it.opId}')">Gerar Pix</button>`) : ''}
       </div>
     </div>${aberto ? _finFilaEsteiraHtml(it) : ''}`;
 }
@@ -31488,7 +31491,10 @@ function _finFilaEsteiraHtml(it){
         <div class="fe-passo"><span class="fe-box">☐</span><span>Enviar <b>${fmtR(r.valor)}</b> ao cedente por Pix${it.credor?` — ${escHtml(it.credor)}`:''}</span></div>
         <div class="fe-passo"><span class="fe-box">☐</span><span>Voltar aqui e clicar em "Repasse enviado" para dar baixa na despesa</span></div>`}
         ${r.exato ? '' : `<div class="fe-alerta">A entrada foi encontrada pelo nome, não por vínculo gravado. Confira que a de ${br(r.entradaEm)} (${fmtR(r.entradaValor)}) é mesmo desta pessoa antes de enviar.</div>`}
-        ${it.opId
+        ${it.opId && it.opEnviado
+          ? `<div class="fe-alerta" style="background:#FBF8EF;border-color:#E0D3A8;color:#9C7F40;">O Pix já foi disparado e o Asaas ainda não confirmou. Não mande de novo — se a transferência tiver sido recusada ou apagada lá, "Conferir" devolve o botão.</div>
+             <button class="fila-btn" style="margin-top:12px;" onclick="event.stopPropagation();_repConferirTransfer('${it.opId}')">Conferir no Asaas</button>`
+          : it.opId
           ? `<button class="fila-btn dark" style="margin-top:12px;" onclick="event.stopPropagation();confirmarRepasse('${it.opId}')">Gerar Pix de ${fmtR(r.valor)} no Asaas</button>
              <button class="fila-btn" style="margin-top:12px;margin-left:8px;" onclick="event.stopPropagation();_finRepasseEnviado(${r.id})">Já paguei por fora — só dar baixa</button>`
           : `<button class="fila-btn dark" style="margin-top:12px;" onclick="event.stopPropagation();_finRepasseEnviado(${r.id})">Repasse enviado</button>
@@ -32767,7 +32773,14 @@ function _finRepasseCardHtml(g, ctx){
   const foraPrazo = g.pendentes.some(o=>{ const d=_diasDesdeFin(o.recebido_em); return d!=null && d > ((contrato&&contrato.prazo_dias)||5); });
   const acaoPrincipal = proxParcela
     ? `<button class="finrp-btn dark" onclick="_finRepassePagarParcela('${proxParcela.id}')">Pagar parcela ${proxParcela.numero} · ${fmtR(proxParcela.valor)}</button>`
-    : (g.pendentes.length===1 ? `<button class="finrp-btn dark" onclick="confirmarRepasse('${g.pendentes[0].id}')">Repassar ${fmtR(g.aRepassar)}</button>` : '');
+    : (g.pendentes.length===1
+        ? (_repEnviado(g.pendentes[0])
+            ? `<span style="display:inline-flex;align-items:center;gap:8px;">
+                 <span style="font-size:10.5px;font-weight:700;color:#9C7F40;background:#FBF8EF;border:1px solid #E0D3A8;padding:5px 11px;border-radius:20px;">Enviado · aguardando o Asaas</span>
+                 <button class="finrp-btn" onclick="_repConferirTransfer('${g.pendentes[0].id}')">Conferir no Asaas</button>
+               </span>`
+            : `<button class="finrp-btn dark" onclick="confirmarRepasse('${g.pendentes[0].id}')">Repassar ${fmtR(g.aRepassar)}</button>`)
+        : '');
   const nomeSeguro = escHtml(g.nome).replace(/'/g,"\\'");
   return `<div class="finrp-card ${foraPrazo?'atraso':''}">
     <div class="finrp-cabec">
@@ -33306,6 +33319,28 @@ let _repState = { tab:'painel', ops:[], credMap:{}, devMap:{}, loaded:false };
 try { window._repState = _repState; } catch(_){} // mesma referência (debug/testes); mutações via props
 const _REP_MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 const _repIsPend = o => o.repasse_status==='pendente' || o.repasse_status==='preparado';
+// 'preparado' = o Pix JÁ foi disparado e o Asaas ainda não confirmou. A tela tratava
+// igual a 'pendente' e continuava oferecendo "Repassar", como se o clique não tivesse
+// acontecido — foi o que o dono viu depois de mandar o repasse da LM.
+const _repEnviado = o => o.repasse_status==='preparado';
+// Pergunta ao Asaas em que pé está a transferência. O backend concilia nos dois
+// sentidos: confirmada vira 'efetuado'; recusada, cancelada ou apagada volta a
+// 'pendente' e devolve o botão.
+async function _repConferirTransfer(opId){
+  try{
+    showToast('Consultando o Asaas…','info');
+    const r = await fetch('/api/repassar', { method:'POST',
+      headers:{ ...(await authHeaders()), 'Content-Type':'application/json' },
+      body: JSON.stringify({ operacao_id: opId }) });
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+    if(j.repasse_status==='efetuado') showToast('Confirmado no Asaas — repasse efetuado ✅','success');
+    else if(j.liberado) showToast('A transferência não vingou ('+(j.motivo||j.asaas_status||'—')+'). O botão foi liberado.','warning');
+    else showToast('Ainda em processamento no Asaas'+(j.asaas_status?' ('+j.asaas_status+')':'')+'.','info');
+    _finRepasseAggCache = { at:0, v:null };
+    renderFinTab(window._finTab==='credores' ? 'credores' : 'repasses');
+  }catch(e){ showToast('Erro ao consultar: '+(e.message||e),'danger'); }
+}
 const _repDM = s => { s=(s||'').slice(0,10); return s ? s.split('-').slice(1).reverse().join('/') : '—'; }; // dd/MM
 // Data a mostrar: a do recebimento; na falta (repasse importado, que não tem receita de
 // origem), a data em que a operação foi criada — melhor que um traço.
