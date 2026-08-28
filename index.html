@@ -29838,8 +29838,12 @@ async function _finRepasseLiberado(force){
   let retidos = 0, semPar = 0;
   for(const d of fila){
     const m = par.get(d.id);
-    if(!m){ semPar++; continue; }                     // nenhuma entrada sobrou para ela
-    if(!_finPago(m.e)){ retidos++; continue; }        // a entrada dela não caiu: segura
+    // Só conta como pendência o que já venceu: das 370 despesas abertas, 330 são
+    // parcelas futuras do cronograma. Contá-las fazia a tela anunciar "272 aguardando
+    // a entrada do mês" — número verdadeiro e inútil, porque quase tudo ali é 2027/2028.
+    const jaVenceu = String(d.data_vencimento||'').slice(0,10) <= hoje;
+    if(!m){ if(jaVenceu) semPar++; continue; }                     // nenhuma entrada sobrou
+    if(!_finPago(m.e)){ if(jaVenceu) retidos++; continue; }        // a entrada dela não caiu
     itens.push({
       id: d.id, descricao: d.descricao, valor: Math.abs(+d.valor||0),
       vence: String(d.data_vencimento||'').slice(0,10), credorId: d.credor_id,
@@ -29897,6 +29901,11 @@ async function _finRepasseAgg(force){
     r.maisAntigo = lib.itens.length ? lib.itens[0].vence : null;
     r.retidos = lib.retidos;
     r.semPar = lib.semPar;
+    // Estes dois só eram calculados no caminho de fallback logo abaixo. Como o caminho
+    // do cronograma retorna antes, o card mostrava "Divergências: undefined" e a aba
+    // contava 0 tendo 16 itens na lista.
+    r.aRevisar = r.revisarCount;
+    r.filaCount = lib.itens.length;
     r.aRepassarOp = r.aRepassarOp;   // preservado para diagnóstico
     _finRepasseAggCache = { at: Date.now(), v: r };
     return r;
@@ -30309,13 +30318,17 @@ async function renderFinanceiroCascata(el, activeTab){
   // Subtítulo do cabeçalho: a frase-resumo do handoff. Sai do MESMO _finCaixaAgg() que
   // desenha a aba Caixa (cacheado, então não custa uma segunda rodada de consultas) —
   // se saísse de outra conta, o topo e o corpo poderiam discordar na mesma tela.
-  _finCaixaAgg().then(A=>{
+  // O resumo do topo lê o MESMO número do cronograma que o card "A repassar agora".
+  // Antes ele contava a fila de fin_operacao pelo valor_capital — coluna que o webhook
+  // parou de escrever na #589 — e por isso dizia "4 repasses parados" com 16 na lista.
+  Promise.all([_finCaixaAgg(), _finRepasseAgg().catch(()=>null)]).then(([A,R])=>{
     const el = document.getElementById('fincx-header-sub'); if(!el) return;
     const partes = [];
     if(A.meta > 0 && A.falta > 0) partes.push(`Faltam ${fmtR(A.falta)} para a meta com ${A.diasUteis} ${A.diasUteis===1?'dia útil':'dias úteis'}`);
     else if(A.meta > 0) partes.push('Meta do mês batida');
     if(A.atrasoN) partes.push(`${A.atrasoN} ${A.atrasoN===1?'lançamento em atraso':'lançamentos em atraso'}`);
-    if(A.repasseN) partes.push(`${A.repasseN} ${A.repasseN===1?'repasse parado':'repasses parados'}`);
+    const nRep = R ? (R.nRepassar||0) : A.repasseN;
+    if(nRep) partes.push(`${nRep} ${nRep===1?'repasse a enviar':'repasses a enviar'}`);
     el.textContent = partes.length ? partes.join(' · ') + '.' : 'Nada pendente no mês.';
   }).catch(()=>{
     const el = document.getElementById('fincx-header-sub');
@@ -31279,7 +31292,7 @@ async function renderFinCredores(el, aba){
           if(!r.maisAntigo) return '';
           const d = Math.floor((Date.now()-new Date(r.maisAntigo+'T00:00:00').getTime())/86400000);
           return d > 0 ? ` · a mais antiga venceu há ${d} dia${d!==1?'s':''}` : '';
-        })()}${r.retidos ? `<br><span style="color:#E2C98A;">${r.retidos} aguardando a entrada do mês</span>` : ''}${r.semPar ? `<br><span style="color:#E2A08A;">${r.semPar} sem entrada correspondente</span>` : ''}</div>
+        })()}${r.retidos ? `<br><span style="color:#E2C98A;">${r.retidos} vencida${r.retidos!==1?'s':''} aguardando a entrada do mês</span>` : ''}${r.semPar ? `<br><span style="color:#E2A08A;">${r.semPar} vencida${r.semPar!==1?'s':''} sem entrada correspondente</span>` : ''}</div>
         ${r.aRepassarManual > 0 ? `<div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#E2C98A;margin-top:5px;line-height:1.4;">INCLUI ${fmtR(r.aRepassarManual)} DE DIVISÃO MANUAL — NÃO APARECE NA LISTA ABAIXO</div>` : ''}
       </div>
       ${card('Divergências', String(r.aRevisar), r.aRevisar
@@ -31392,8 +31405,8 @@ function _finFilaRender(){
       <div class="fila-sub">${filtrados.length} ite${filtrados.length!==1?'ns':'m'} esperando decisão · ${_finFilaState.resolvidosHoje} resolvido${_finFilaState.resolvidosHoje!==1?'s':''} nesta sessão
         <span style="display:block;font-size:12px;color:#8A94A6;margin-top:3px;">Cada entrada paga libera um repasse. Recebimento novo não entra mais aqui — o repasse é definido uma vez por acordo, em Definir repasse.</span>
         ${(()=>{ const f=_finFilaState.foraDaFila||{}; const p=[];
-          if(f.retidos) p.push(`${f.retidos} repasse${f.retidos!==1?'s':''} segurado${f.retidos!==1?'s':''}: a entrada do mês ainda não foi paga`);
-          if(f.semPar)  p.push(`${f.semPar} sem entrada correspondente no mês — vale conferir se foi lançado duas vezes`);
+          if(f.retidos) p.push(`${f.retidos} repasse${f.retidos!==1?'s':''} vencido${f.retidos!==1?'s':''} segurado${f.retidos!==1?'s':''}: a entrada do mês ainda não foi paga`);
+          if(f.semPar)  p.push(`${f.semPar} vencido${f.semPar!==1?'s':''} sem entrada correspondente no mês — vale conferir se foi lançado duas vezes`);
           return p.length ? `<span style="display:block;font-size:12px;color:#9C7F40;margin-top:4px;">Fora desta lista: ${p.join(' · ')}.</span>` : '';
         })()}</div>
       <div class="fila-kbd">J K · ⏎ RESOLVER · ESPAÇO</div>
