@@ -187,6 +187,141 @@ async function tratarDocClienteAssinado(
   return { encontrado: true, arquivo };
 }
 
+// === Enriquecimento do cadastro a partir do que o signatário digitou =========
+// Ao assinar, o ZapSign pede ao signatário os dados dele (nome, CPF e, quando o
+// documento não os trouxe, telefone/e-mail). Isso chegava no webhook e era descartado —
+// e como muito coobrigado entra no caso vindo de cessão/planilha, sem telefone, a ficha
+// seguia furada mesmo depois da assinatura. Aqui a gente aproveita.
+//
+// Regras de segurança do preenchimento:
+//  • só preenche campo VAZIO — nunca sobrescreve dado conferido por gente;
+//  • só mexe em devedor que é PARTE DESTA cobrança (nunca em homônimo de outro caso);
+//  • casa por CPF/CNPJ; sem documento, cai para nome normalizado, e nome ambíguo é ignorado;
+//  • telefone entra no formato local (DDD+número, sem o 55), o dominante no cadastro —
+//    as pontas de envio prefixam o 55 sozinhas.
+// Best-effort: qualquer falha aqui é registrada e NÃO derruba o webhook.
+
+function soDigitos(v: unknown): string { return String(v ?? '').replace(/\D/g, ''); }
+
+function normNome(v: unknown): string {
+  return String(v ?? '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Telefone do signatário → dígitos locais (10 ou 11). '' quando não dá para confiar.
+function telLocalDoSigner(s: Record<string, unknown>): string {
+  const num = soDigitos(s.phone_number ?? s.phone ?? s.telefone);
+  if (!num) return '';
+  // Número de fora do Brasil não entra: sem o DDI, viraria um DDD+número brasileiro
+  // plausível e a Z-API mandaria mensagem para o número errado.
+  const pais = soDigitos(s.phone_country ?? '');
+  if (pais && pais !== '55') return '';
+  let d = num;
+  if (d.length > 11 && d.startsWith('55')) d = d.slice(2);
+  d = d.replace(/^0+/, '');
+  return (d.length === 10 || d.length === 11) ? d : '';
+}
+
+function docFormatado(digits: string): string {
+  if (digits.length === 11) return digits.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
+  if (digits.length === 14) return digits.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/, '$1.$2.$3/$4-$5');
+  return digits;
+}
+
+// Data de nascimento em ISO, quando o ZapSign mandar (o campo varia entre contas).
+function nascimentoISO(s: Record<string, unknown>): string | null {
+  const raw = String(s.birthday ?? s.birth_date ?? s.data_nascimento ?? '').trim();
+  if (!raw) return null;
+  let m = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return m[1] + '-' + m[2] + '-' + m[3];
+  m = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+  if (m) return m[3] + '-' + m[2] + '-' + m[1];
+  return null;
+}
+
+type DevParte = {
+  id: string; nome: string | null; doc: string | null; doc_digits: string | null;
+  telefone: string | null; email: string | null; data_nascimento: string | null;
+};
+type ResultadoCadastro = {
+  atualizados: Array<Record<string, unknown>>;
+  ignorados: Array<Record<string, unknown>>;
+};
+
+async function aproveitarDadosDosSignatarios(
+  sb: ReturnType<typeof createClient>,
+  signers: unknown,
+  cobrancaId: string
+): Promise<ResultadoCadastro> {
+  const out: ResultadoCadastro = { atualizados: [], ignorados: [] };
+  try {
+    const lista = Array.isArray(signers) ? signers as Array<Record<string, unknown>> : [];
+    if (!lista.length) return out;
+
+    const { data: partes, error } = await sb.from('cobranca_partes')
+      .select('devedor_id, devedores(id, nome, doc, doc_digits, telefone, email, data_nascimento)')
+      .eq('cobranca_id', cobrancaId);
+    if (error || !partes || !partes.length) return out;
+
+    const devs: DevParte[] = (partes as unknown as Array<{ devedores: DevParte | null }>)
+      .map(p => p.devedores).filter(Boolean) as DevParte[];
+    if (!devs.length) return out;
+
+    for (const s of lista) {
+      const nomeSigner = String(s.name ?? s.nome ?? '').trim();
+      const docSigner = soDigitos(s.cpf ?? s.cnpj ?? s.documento);
+      const tel = telLocalDoSigner(s);
+      const email = String(s.email ?? '').trim().toLowerCase();
+      const nasc = nascimentoISO(s);
+
+      // 1) casa por documento; 2) sem documento, por nome — e nome ambíguo não casa.
+      let dev: DevParte | undefined;
+      if (docSigner.length === 11 || docSigner.length === 14) {
+        dev = devs.find(d => soDigitos(d.doc_digits || d.doc) === docSigner);
+      }
+      if (!dev && nomeSigner) {
+        const alvo = normNome(nomeSigner);
+        const cands = devs.filter(d => normNome(d.nome) === alvo);
+        if (cands.length === 1) dev = cands[0];
+        else if (cands.length > 1) {
+          out.ignorados.push({ signer: nomeSigner, motivo: 'nome ambíguo entre as partes' });
+          continue;
+        }
+      }
+      if (!dev) {
+        out.ignorados.push({ signer: nomeSigner || '(sem nome)', motivo: 'não casou com nenhuma parte da cobrança' });
+        continue;
+      }
+
+      // Só campo vazio. Nada aqui sobrescreve o que já está na ficha.
+      const upd: Record<string, unknown> = {};
+      const preenchidos: string[] = [];
+      if (tel && !soDigitos(dev.telefone)) { upd.telefone = tel; preenchidos.push('telefone'); }
+      if (email && /.+@.+\..+/.test(email) && !String(dev.email ?? '').trim()) { upd.email = email; preenchidos.push('e-mail'); }
+      if (nasc && !dev.data_nascimento) { upd.data_nascimento = nasc; preenchidos.push('nascimento'); }
+      if ((docSigner.length === 11 || docSigner.length === 14) && !soDigitos(dev.doc_digits || dev.doc)) {
+        upd.doc = docFormatado(docSigner); preenchidos.push('CPF/CNPJ');
+      }
+      if (!preenchidos.length) {
+        out.ignorados.push({ signer: nomeSigner, devedor_id: dev.id, motivo: 'nada a preencher (ficha já completa)' });
+        continue;
+      }
+
+      upd.updated_at = new Date().toISOString();
+      const { error: errUpd } = await sb.from('devedores').update(upd).eq('id', dev.id);
+      if (errUpd) {
+        out.ignorados.push({ signer: nomeSigner, devedor_id: dev.id, motivo: 'update falhou: ' + errUpd.message });
+        continue;
+      }
+      out.atualizados.push({ devedor_id: dev.id, nome: dev.nome, campos: preenchidos, telefone: upd.telefone ?? null });
+    }
+  } catch (e) {
+    console.warn('[zapsign-webhook] aproveitarDadosDosSignatarios: ' + String((e as Error)?.message || e));
+  }
+  return out;
+}
+
 // === Pós-assinatura no CRM (cobrancas é a fonte do CRM, não acordos) ===========
 // O CRM lê o caso de `cobrancas` (view `casos`); o webhook tocava só `acordos`, então
 // a assinatura não refletia no caso (ficava "Acordo abandonado"). Estas duas funções
@@ -381,9 +516,25 @@ Deno.serve(async (req) => {
 
   // Reflete a assinatura no caso do CRM já (independe da emissão dos boletos): sai de
   // "Acordo abandonado" e marca acordo_final.assinado.
-  const cobrancaIdCRM = novoStatus === 'assinado' ? await resolverCobrancaId(sb, acordo) : null;
+  // A cobrança é resolvida também no parcialmente assinado — não para mexer no caso
+  // (isso segue só no 'assinado'), mas porque o enriquecimento do cadastro abaixo
+  // precisa saber quais devedores são partes DESTA cobrança.
+  const precisaCobranca = novoStatus === 'assinado' || novoStatus === 'assinado_parcial';
+  const cobrancaIdCRM = precisaCobranca ? await resolverCobrancaId(sb, acordo) : null;
   if (novoStatus === 'assinado' && cobrancaIdCRM) {
     await refletirAssinaturaNoCRM(sb, cobrancaIdCRM, dataAssinatura || new Date().toISOString());
+  }
+
+  // Dados que o signatário digitou no ZapSign entram na ficha (campo vazio só).
+  // Roda também no parcialmente assinado: quem já assinou já entregou os dados dele, e
+  // esperar o documento fechar atrasaria o contato com os demais coobrigados.
+  let cadastro: ResultadoCadastro | null = null;
+  if (precisaCobranca && cobrancaIdCRM) {
+    const signers = (body && body.signers) || (doc && doc.signers) || [];
+    cadastro = await aproveitarDadosDosSignatarios(sb, signers, cobrancaIdCRM);
+    if (cadastro.atualizados.length) {
+      console.log('[zapsign-webhook] cadastro enriquecido: ' + JSON.stringify(cadastro.atualizados));
+    }
   }
 
   // PR2: emissão automática dos boletos pós-assinatura. Delega ao endpoint Vercel
@@ -442,11 +593,29 @@ Deno.serve(async (req) => {
       signed_url: signedUrl,
       arquivo_pasta: arquivoPasta,
       emissao,
-      conclusao
+      conclusao,
+      cadastro
     }
   });
 
-  return new Response(JSON.stringify({ ok: true, status: novoStatus, acordo_id: acordo.id, arquivo_pasta: arquivoPasta, emissao, conclusao }), {
+  // Evento próprio, legível na ficha, quando a assinatura completou o cadastro.
+  if (cadastro && cadastro.atualizados.length) {
+    const resumo = cadastro.atualizados
+      .map(a => String(a.nome || 'parte') + ' (' + (a.campos as string[]).join(', ') + ')')
+      .join('; ');
+    await sb.from('devedor_eventos').insert({
+      devedor_id: acordo.devedor_id,
+      cobranca_id: acordo.cobranca_id || cobrancaIdCRM || null,
+      tipo: 'cadastro_enriquecido_zapsign',
+      autor_nome: 'Automação (ZapSign)',
+      payload: {
+        acao: '📇 Cadastro completado com o que o signatário informou ao assinar: ' + resumo,
+        detalhe: cadastro.atualizados
+      }
+    });
+  }
+
+  return new Response(JSON.stringify({ ok: true, status: novoStatus, acordo_id: acordo.id, arquivo_pasta: arquivoPasta, emissao, conclusao, cadastro }), {
     status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
   });
 });
