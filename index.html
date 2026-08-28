@@ -29755,10 +29755,22 @@ let _finRepasseAggCache = { at:0, v:null };
 //     tela expõe ("liberado pela entrada de …") para poder ser conferida. Homônimo ou
 //     descrição fora do padrão pareia errado, e por isso o número aparece com a origem
 //     ao lado em vez de sozinho.
-const FIN_REP_PREFIXOS = /^(Repasse ao credor\s*[—-]|#\s*Executar\s*-)\s*/i;
+const FIN_REP_PREFIXOS = /^(Repasse ao credor\s*[—-]|#\s*)?\s*(Executar\s*[—-]\s*)?/i;
 const FIN_REP_SUFIXOS  = /\s*[-–]?\s*(pagar\s*)?\d+\s*\/\s*\d+\s*$/i;
+// Anotações que o Gustavo digita no fim da descrição e que NÃO fazem parte do nome:
+// "Fatima Aparecida Cordova - Executar senão pagar 21/21" é a entrada da mesma pessoa
+// que "Fatima Aparecida Cordova - pagar - conferido 18/21". Sem tirar isso, as duas
+// só casavam pelo primeiro nome — e primeiro nome sozinho confunde a Fernanda Dambros
+// com a Fernanda da Silva no mesmo mês.
+const FIN_REP_ANOTA = /\s*[-–]\s*(executar(\s+sen[ãa]o\s+pagar)?|pagar|conferido|conferir|repasse)\s*$/i;
 function _finRepasseNomeDevedor(desc){
-  return String(desc||'').replace(FIN_REP_PREFIXOS,'').replace(FIN_REP_SUFIXOS,'').trim();
+  let t = String(desc||'').replace(FIN_REP_SUFIXOS,'');
+  for(let i=0;i<4 && FIN_REP_ANOTA.test(t);i++) t = t.replace(FIN_REP_ANOTA,'');
+  return t.replace(FIN_REP_PREFIXOS,'').trim();
+}
+function _finRepasseChave(desc){
+  const n = _finRepasseNomeDevedor(desc).toLowerCase();
+  return { nome:n, primeiro:n.split(/\s+/)[0] || '' };
 }
 function _finPago(l){ return l.status === 1 || !!l.data_pagamento || !!l.conciliado; }
 
@@ -29778,46 +29790,67 @@ async function _finRepasseLiberado(force){
       .select('id,descricao,valor,data_vencimento,status,data_pagamento,conciliado')
       .eq('tipo_movimento',1).limit(4000);
     entradas = r2.data || [];
-  }catch(e){ console.warn('a repassar agora:', e); return { itens:[], total:0, retidos:0 }; }
+  }catch(e){ console.warn('a repassar agora:', e); return { itens:[], total:0, retidos:0, semPar:0 }; }
 
+  // Uma entrada libera UM repasse. Foi o que faltava: três despesas do Valdair em agosto
+  // apontavam todas para o mesmo boleto de R$ 214,00 pago em 05/08, e a tela mandava
+  // enviar R$ 561,00 por causa de um pagamento só. Por isso a entrada é consumida.
   const porId = {};
-  const porNomeMes = {};
+  const pool = {};                       // primeiro nome + mês → entradas ainda livres
   for(const e of entradas){
     porId[e.id] = e;
     const mes = String(e.data_vencimento||'').slice(0,7);
     if(!mes) continue;
-    const nome = _finRepasseNomeDevedor(e.descricao).toLowerCase();
-    const chave = nome.split(/\s+/)[0] + '|' + mes;   // primeiro nome + mês
-    (porNomeMes[chave] = porNomeMes[chave] || []).push(e);
+    const k = _finRepasseChave(e.descricao);
+    e._nome = k.nome;
+    (pool[k.primeiro + '|' + mes] = pool[k.primeiro + '|' + mes] || []).push(e);
+  }
+  const usada = new Set();
+
+  // Ordem importa porque a entrada é consumida: a despesa que vence antes escolhe antes.
+  const fila = despesas.slice().sort((a,b)=>{
+    const va = String(a.data_vencimento||''), vb = String(b.data_vencimento||'');
+    return va < vb ? -1 : (va > vb ? 1 : (a.id - b.id));
+  });
+
+  // 1ª passada: quem tem vínculo gravado pelo passo 2 escolhe primeiro, sem disputa.
+  const par = new Map();
+  for(const d of fila){
+    const id = (d.raw_payload||{}).repasse_de_lancamento_id;
+    if(id && porId[id] && !usada.has(id)){ usada.add(id); par.set(d.id, { e:porId[id], exato:true }); }
+  }
+  // 2ª passada: as antigas, pela heurística — nome igual e mesma data primeiro.
+  for(const d of fila){
+    if(par.has(d.id)) continue;
+    const mes = String(d.data_vencimento||'').slice(0,7);
+    const k = _finRepasseChave(d.descricao);
+    const livres = (pool[k.primeiro + '|' + mes] || []).filter(e => !usada.has(e.id));
+    if(!livres.length) continue;
+    const venc = String(d.data_vencimento||'').slice(0,10);
+    const pontua = e => (e._nome === k.nome ? 2 : 0) + (String(e.data_vencimento||'').slice(0,10) === venc ? 1 : 0);
+    let melhor = livres[0];
+    for(const e of livres) if(pontua(e) > pontua(melhor)) melhor = e;
+    usada.add(melhor.id);
+    par.set(d.id, { e:melhor, exato:false });
   }
 
   const itens = [];
-  let retidos = 0;
-  for(const d of despesas){
-    const rp = d.raw_payload || {};
-    let entrada = null, exato = false;
-    if(rp.repasse_de_lancamento_id && porId[rp.repasse_de_lancamento_id]){
-      entrada = porId[rp.repasse_de_lancamento_id]; exato = true;
-    } else {
-      const mes = String(d.data_vencimento||'').slice(0,7);
-      const nome = _finRepasseNomeDevedor(d.descricao).toLowerCase();
-      const cand = porNomeMes[nome.split(/\s+/)[0] + '|' + mes] || [];
-      // Entre candidatas do mesmo mês, a que tem o nome mais parecido.
-      entrada = cand.find(e => _finRepasseNomeDevedor(e.descricao).toLowerCase() === nome) || cand[0] || null;
-    }
-    if(!entrada){ continue; }              // sem par: não afirma nada sobre ela
-    if(!_finPago(entrada)){ retidos++; continue; }   // entrada não caiu: segura
+  let retidos = 0, semPar = 0;
+  for(const d of fila){
+    const m = par.get(d.id);
+    if(!m){ semPar++; continue; }                     // nenhuma entrada sobrou para ela
+    if(!_finPago(m.e)){ retidos++; continue; }        // a entrada dela não caiu: segura
     itens.push({
       id: d.id, descricao: d.descricao, valor: Math.abs(+d.valor||0),
       vence: String(d.data_vencimento||'').slice(0,10), credorId: d.credor_id,
       devedor: _finRepasseNomeDevedor(d.descricao),
-      exato, entradaEm: String(entrada.data_vencimento||'').slice(0,10),
-      entradaValor: Math.abs(+entrada.valor||0),
+      exato: m.exato, entradaEm: String(m.e.data_vencimento||'').slice(0,10),
+      entradaValor: Math.abs(+m.e.valor||0),
       vencido: String(d.data_vencimento||'').slice(0,10) <= hoje,
     });
   }
   itens.sort((a,b)=> a.vence < b.vence ? -1 : (a.vence > b.vence ? 1 : 0));
-  return { itens, total: +itens.reduce((s,i)=>s+i.valor,0).toFixed(2), retidos };
+  return { itens, total: +itens.reduce((s,i)=>s+i.valor,0).toFixed(2), retidos, semPar };
 }
 
 async function _finRepasseAgg(force){
@@ -29863,6 +29896,7 @@ async function _finRepasseAgg(force){
     r.credores = new Set(lib.itens.map(i => i.credorId).filter(Boolean));
     r.maisAntigo = lib.itens.length ? lib.itens[0].vence : null;
     r.retidos = lib.retidos;
+    r.semPar = lib.semPar;
     r.aRepassarOp = r.aRepassarOp;   // preservado para diagnóstico
     _finRepasseAggCache = { at: Date.now(), v: r };
     return r;
@@ -30476,9 +30510,8 @@ async function _finFilaCarregar(){
       valor: r.valor, automatizavel:false,
     });
   }
-  if(liberados.retidos){
-    console.info(`[repasse] ${liberados.retidos} despesa(s) vencida(s) seguram porque a entrada do mês não foi paga.`);
-  }
+  // O que NÃO entrou na fila precisa aparecer em algum lugar, senão o "sumiu" volta.
+  _finFilaState.foraDaFila = { retidos: liberados.retidos||0, semPar: liberados.semPar||0 };
 
   // Ordem: o que exige decisão primeiro; o que só precisa de confirmação por último.
   const ordem = { sem_devedor:0, conflito:1, sem_repasse:2, falta_cedente:3, ja_lancado:4, propria:5 };
@@ -31246,7 +31279,7 @@ async function renderFinCredores(el, aba){
           if(!r.maisAntigo) return '';
           const d = Math.floor((Date.now()-new Date(r.maisAntigo+'T00:00:00').getTime())/86400000);
           return d > 0 ? ` · a mais antiga venceu há ${d} dia${d!==1?'s':''}` : '';
-        })()}${r.retidos ? `<br><span style="color:#E2C98A;">${r.retidos} vencida${r.retidos!==1?'s':''} aguardando a entrada do mês</span>` : ''}</div>
+        })()}${r.retidos ? `<br><span style="color:#E2C98A;">${r.retidos} aguardando a entrada do mês</span>` : ''}${r.semPar ? `<br><span style="color:#E2A08A;">${r.semPar} sem entrada correspondente</span>` : ''}</div>
         ${r.aRepassarManual > 0 ? `<div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#E2C98A;margin-top:5px;line-height:1.4;">INCLUI ${fmtR(r.aRepassarManual)} DE DIVISÃO MANUAL — NÃO APARECE NA LISTA ABAIXO</div>` : ''}
       </div>
       ${card('Divergências', String(r.aRevisar), r.aRevisar
@@ -31357,7 +31390,12 @@ function _finFilaRender(){
          que a tela mostrava enquanto o render apagava o de cima. -->
     <div class="fila-head">
       <div class="fila-sub">${filtrados.length} ite${filtrados.length!==1?'ns':'m'} esperando decisão · ${_finFilaState.resolvidosHoje} resolvido${_finFilaState.resolvidosHoje!==1?'s':''} nesta sessão
-        <span style="display:block;font-size:12px;color:#8A94A6;margin-top:3px;">Recebimento novo não entra mais aqui — o repasse passou a ser definido uma vez por acordo, em Definir repasse. Estes são os que ficaram para trás.</span></div>
+        <span style="display:block;font-size:12px;color:#8A94A6;margin-top:3px;">Cada entrada paga libera um repasse. Recebimento novo não entra mais aqui — o repasse é definido uma vez por acordo, em Definir repasse.</span>
+        ${(()=>{ const f=_finFilaState.foraDaFila||{}; const p=[];
+          if(f.retidos) p.push(`${f.retidos} repasse${f.retidos!==1?'s':''} segurado${f.retidos!==1?'s':''}: a entrada do mês ainda não foi paga`);
+          if(f.semPar)  p.push(`${f.semPar} sem entrada correspondente no mês — vale conferir se foi lançado duas vezes`);
+          return p.length ? `<span style="display:block;font-size:12px;color:#9C7F40;margin-top:4px;">Fora desta lista: ${p.join(' · ')}.</span>` : '';
+        })()}</div>
       <div class="fila-kbd">J K · ⏎ RESOLVER · ESPAÇO</div>
     </div>
     <div class="fila-chips">${CHIPS.map(([k,lb])=>`<div class="fila-chip ${_finFilaState.chip===k?'on':''}" onclick="_finFilaSetChip('${k}')">${lb} <span class="cnt">${counts[k]}</span></div>`).join('')}</div>
