@@ -77,6 +77,7 @@ const { sendEmail, emailDisponivel } = require('./_email.js');
 const { sendSms, smsDisponivel } = require('./_sms.js');
 const { incluirNegativacao, excluirNegativacao } = require('./_serasa.js');
 
+const { hojeBR } = require('./_data.js');
 // Canal disponível? Permite à régua PULAR o passo sem reivindicar envio quando o canal
 // não tem provedor configurado (e-mail sem RESEND_API_KEY, SMS sem gateway).
 function canalDisponivel(canal) {
@@ -357,7 +358,7 @@ async function processarCalendarPendingDeletes() {
 // (ou DB.config.contasPagarTelefone/Email). Roda no cron diário (uma msg-resumo/dia).
 async function processarContasPagarProprias(DB) {
   const out = { vencendo: 0, notificado: false, canais: [] };
-  const hoje = new Date().toISOString().slice(0, 10);
+  const hoje = hojeBR();
   let rows;
   try {
     rows = await sbFetch(
@@ -736,7 +737,7 @@ async function _marcarCandidatoNegativacao(cobId) {
   const rows = await sbFetch(`cobrancas?id=eq.${encodeURIComponent(cobId)}&select=metadata`);
   const meta = (rows && rows[0] && rows[0].metadata) || {};
   if (meta.quitaNegativacao && meta.quitaNegativacao.status) return; // já no fluxo
-  meta.quitaNegativacao = { status: 'candidato', em: new Date().toISOString().slice(0, 10) };
+  meta.quitaNegativacao = { status: 'candidato', em: hojeBR() };
   await sbFetch(`cobrancas?id=eq.${encodeURIComponent(cobId)}`, { method: 'PATCH', body: JSON.stringify({ metadata: meta }) });
 }
 
@@ -985,7 +986,7 @@ async function processarNegativacoes({ dry }) {
     if (res.pendente) { out.pendentes++; out.itens.push({ cob: c.id, acao: 'incluir', pendente: res.pendente }); continue; }
     if (res.ok) {
       const meta = Object.assign({}, c.metadata || {});
-      meta.quitaNegativacao = Object.assign({}, meta.quitaNegativacao || {}, { status: 'negativado', negativado_em: new Date().toISOString().slice(0, 10), transactionId: res.transactionId || null });
+      meta.quitaNegativacao = Object.assign({}, meta.quitaNegativacao || {}, { status: 'negativado', negativado_em: hojeBR(), transactionId: res.transactionId || null });
       await sbFetch(`cobrancas?id=eq.${c.id}`, { method: 'PATCH', body: JSON.stringify({ metadata: meta }) }).catch(() => {});
       out.incluidos++; out.itens.push({ cob: c.id, acao: 'incluir', status: 'negativado', tx: res.transactionId });
     } else { out.falhas++; out.itens.push({ cob: c.id, acao: 'incluir', erro: res.erro }); }
@@ -1009,7 +1010,7 @@ async function processarNegativacoes({ dry }) {
     const res = await excluirNegativacao({ devedorDoc: parte.devedores && parte.devedores.doc, transactionId: nz.transactionId || null });
     if (res.ok) {
       const meta = Object.assign({}, c.metadata || {});
-      meta.quitaNegativacao = Object.assign({}, meta.quitaNegativacao || {}, { status: 'baixado', baixado_em: new Date().toISOString().slice(0, 10) });
+      meta.quitaNegativacao = Object.assign({}, meta.quitaNegativacao || {}, { status: 'baixado', baixado_em: hojeBR() });
       await sbFetch(`cobrancas?id=eq.${c.id}`, { method: 'PATCH', body: JSON.stringify({ metadata: meta }) }).catch(() => {});
       out.baixados++; out.itens.push({ cob: c.id, acao: 'baixar', status: 'baixado' });
     } else if (res.pendente) { out.pendentes++; out.itens.push({ cob: c.id, acao: 'baixar', pendente: res.pendente }); }
@@ -1393,7 +1394,7 @@ module.exports = async function handler(req, res) {
     try { zapsign = await processarLembretesZapSign({ dry: dry || !zapsignLive }); }
     catch (e) { zapsign = { error: e.message }; }
 
-    res.status(200).json({ ok: true, hoje: new Date().toISOString().slice(0,10), ...resultado, calendar, contasPagar, zapsign, zapsign_live: zapsignLive, quita, negativacao, recalculo });
+    res.status(200).json({ ok: true, hoje: hojeBR(), ...resultado, calendar, contasPagar, zapsign, zapsign_live: zapsignLive, quita, negativacao, recalculo });
   } catch (err) {
     console.error('[cron-regua]', err);
     res.status(500).json({ ok: false, error: err.message });

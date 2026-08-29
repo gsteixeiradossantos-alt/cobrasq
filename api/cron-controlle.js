@@ -14,6 +14,7 @@
 
 const { runSync, controlleGet } = require('./_controlle-sync.js');
 
+const { addDiasBR } = require('./_data.js');
 module.exports = async function handler(req, res) {
   // CRON CONTROLLE DESATIVADO (a pedido, 2026-07-09): financeiro do cobrasq virou
   // independente/manual. Reativar: trocar para false (+ recolocar o cron no vercel.json).
@@ -38,8 +39,8 @@ module.exports = async function handler(req, res) {
   const pastDays = Math.min(3650, Math.max(1, parseInt(req.query?.past, 10) || 90));
   const futureDays = Math.min(3650, Math.max(0, parseInt(req.query?.future, 10) || 1095)); // ~3 anos
   const now = new Date();
-  const startDate = new Date(now.getTime() - pastDays * 86400000).toISOString().slice(0, 10);
-  const endDate = new Date(now.getTime() + futureDays * 86400000).toISOString().slice(0, 10);
+  const startDate = addDiasBR(-pastDays, now);
+  const endDate = addDiasBR(futureDays, now);
 
   if (dry) {
     const acc = await controlleGet('/account/v1/accounts/');

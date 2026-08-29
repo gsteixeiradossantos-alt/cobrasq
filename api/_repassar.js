@@ -23,6 +23,7 @@ const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_compr
 const { lerDescricaoRepasse, descricaoPix, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
 const { saldoDeCapital, devedorPrincipal, resolverCobrancaId, registrarRepasseNaFicha } = require('./_repasse-ficha.js');
 
+const { hojeBR } = require('./_data.js');
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 function fmtBRL(v) { return 'R$ ' + (Number(v) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
@@ -291,7 +292,7 @@ module.exports = async function handler(req, res) {
     // Ponte fin_lancamento: ao efetivar, marca a despesa de repasse como PAGA. Move
     // data_competencia junto (mesmo motivo do lado da receita — ver _repasse-concluido.js).
     if (concluido && op.lancamento_despesa_id) {
-      const hoje = new Date().toISOString().slice(0, 10);
+      const hoje = hojeBR();
       await sbFetch(`fin_lancamento?id=eq.${op.lancamento_despesa_id}`, {
         method: 'PATCH',
         body: JSON.stringify({ status: 1, data_pagamento: hoje, data_competencia: hoje, valor_pago: -round2(op.valor_capital) }),
@@ -322,7 +323,7 @@ module.exports = async function handler(req, res) {
       if (!pdf) {
         pdf = await gerarComprovanteRepassePdf({
           credorNome: credor.nome, devedor: ref.devedor, parcela: ref.parcela,
-          valor: op.valor_capital, dataISO: new Date().toISOString().slice(0, 10),
+          valor: op.valor_capital, dataISO: hojeBR(),
           transferId: transfer.id, chavePix: pixKey, urlAsaas: comprovanteUrl,
         });
       }
@@ -344,7 +345,7 @@ module.exports = async function handler(req, res) {
       ficha = await registrarRepasseNaFicha({
         cobrancaId: await resolverCobrancaId(op),
         credor, valor: op.valor_capital, transferId: transfer.id,
-        dataPix: new Date().toISOString().slice(0, 10), comprovante: arq,
+        dataPix: hojeBR(), comprovante: arq,
       });
     }
 

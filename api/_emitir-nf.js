@@ -19,6 +19,7 @@ const { sbFetch } = require('./_sb.js');
 const { asaasReq } = require('./_asaas.js');
 const { zapiSendText } = require('./_zapi.js');
 
+const { hojeBR } = require('./_data.js');
 function timingSafeEq(a, b) {
   const ab = Buffer.from(String(a || '')); const bb = Buffer.from(String(b || ''));
   if (ab.length !== bb.length || ab.length === 0) return false;
@@ -84,7 +85,7 @@ module.exports = async function handler(req, res) {
       observations: `Operação ${op.id}${op.parcela ? ' — parcela ' + op.parcela + '/' + op.total_parcelas : ''}.`,
       value: base,
       deductions: 0,
-      effectiveDate: new Date().toISOString().slice(0, 10),
+      effectiveDate: hojeBR(),
       taxes: {
         retainIss: String(process.env.ASAAS_NF_RETAIN_ISS || '').toLowerCase() === 'true',
         iss, cofins: 0, csll: 0, inss: 0, ir: 0, pis: 0,

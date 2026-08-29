@@ -20,6 +20,7 @@ const { sbFetch } = require('./_sb.js');
 const { asaasReq, ensureAsaasCustomer } = require('./_asaas.js');
 const { zapiSendText } = require('./_zapi.js');
 
+const { addDiasBR } = require('./_data.js');
 function timingSafeEq(a, b) {
   const ab = Buffer.from(String(a || ''));
   const bb = Buffer.from(String(b || ''));
@@ -31,7 +32,7 @@ function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 // Conta "Asaas" no Financeiro — é nela que as parcelas de acordo entram, igual ao
 // que já era feito à mão. Env var permite mudar sem deploy de código.
 const CONTA_ASAAS = Number(process.env.FIN_CONTA_ASAAS_ID || 13);
-function addDaysISO(d) { const x = new Date(); x.setDate(x.getDate() + d); return x.toISOString().slice(0, 10); }
+function addDaysISO(d) { return addDiasBR(d); }
 function firstName(n) { return String(n || '').trim().split(/\s+/)[0] || 'tudo bem'; }
 // Mensagem padrão do boleto no WhatsApp (emissão e reenvio).
 function boletoMsg(nome, link) {

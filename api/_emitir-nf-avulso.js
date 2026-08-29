@@ -18,6 +18,7 @@ const { requireUser, applyCors } = require('./_auth.js');
 const { sbFetch } = require('./_sb.js');
 const { asaasReq, ensureAsaasCustomer } = require('./_asaas.js');
 
+const { hojeBR } = require('./_data.js');
 // Descrição livre do serviço (campo serviceDescription do Asaas). Sobrescrevível por env.
 const DEFAULT_NF_DESC = 'Serviços de cobrança e recuperação de crédito prestados ao tomador, referentes ao acompanhamento e à intermediação do recebimento de valores inadimplidos.';
 
@@ -159,7 +160,7 @@ module.exports = async function handler(req, res) {
       observations: ref ? `Ref ${ref}.` : 'Emissão avulsa.',
       value: valor,
       deductions: 0,
-      effectiveDate: new Date().toISOString().slice(0, 10),
+      effectiveDate: hojeBR(),
       taxes: {
         retainIss: String(process.env.ASAAS_NF_RETAIN_ISS || '').toLowerCase() === 'true',
         iss, cofins: 0, csll: 0, inss: 0, ir: 0, pis: 0,

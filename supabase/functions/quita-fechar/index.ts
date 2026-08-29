@@ -33,7 +33,17 @@ const json = (obj: unknown, status = 200) =>
 
 const onlyDigits = (s: unknown) => String(s ?? "").replace(/\D/g, "");
 const round2 = (n: number) => Math.round((Number(n) || 0) * 100) / 100;
-const addDaysISO = (d: number) => { const x = new Date(); x.setDate(x.getDate() + d); return x.toISOString().slice(0, 10); };
+// Data de calendário em Curitiba. O runtime das Edge Functions roda em UTC, então
+// `toISOString().slice(0,10)` grava a data de UTC: das 21h à meia-noite (BRT) o servidor
+// já virou o dia, e a parcela nascia com vencimento no dia seguinte. Intl com timeZone
+// explícito porque aqui não existe "fuso local". (Espelha api/_data.js, que é CommonJS e
+// não pode ser importado por Deno.)
+const _fmtBR = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" });
+const isoBR = (d: Date | string | number = Date.now()) => {
+  const x = d instanceof Date ? d : new Date(d);
+  return isNaN(x.getTime()) ? "" : _fmtBR.format(x);
+};
+const addDaysISO = (d: number) => isoBR(Date.now() + d * 86400000);
 
 // Divide `valor` em `n` parcelas, jogando o residual de centavos na 1ª.
 function dividirParcelas(valor: number, n: number, firstDue: string): { numero: number; valor: number; vencimento: string; pago: boolean }[] {
@@ -47,7 +57,7 @@ function dividirParcelas(valor: number, n: number, firstDue: string): { numero: 
   const d0 = new Date(firstDue + "T12:00:00");
   return vals.map((v, i) => {
     const dv = new Date(d0); dv.setMonth(dv.getMonth() + i);
-    return { numero: i + 1, valor: v, vencimento: dv.toISOString().slice(0, 10), pago: false };
+    return { numero: i + 1, valor: v, vencimento: isoBR(dv), pago: false };
   });
 }
 

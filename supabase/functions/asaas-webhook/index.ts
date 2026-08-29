@@ -31,6 +31,18 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 
+// Data de calendário em Curitiba. O runtime das Edge Functions roda em UTC, então
+// `toISOString().slice(0,10)` grava a data de UTC: das 21h à meia-noite (BRT) o servidor
+// já virou o dia, e a parcela nascia com vencimento no dia seguinte. Intl com timeZone
+// explícito porque aqui não existe "fuso local". (Espelha api/_data.js, que é CommonJS e
+// não pode ser importado por Deno.)
+const _fmtBR = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" });
+const isoBR = (d: Date | string | number = Date.now()) => {
+  const x = d instanceof Date ? d : new Date(d);
+  return isNaN(x.getTime()) ? "" : _fmtBR.format(x);
+};
+
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, content-type, asaas-access-token',
@@ -159,7 +171,7 @@ Deno.serve(async (req) => {
           const novoValor = payment.value != null ? Number(payment.value) : null;
           const novoVenc = payment.dueDate || null;
           const patch: Record<string, unknown> = {
-            observacoes: `${alvo.observacoes || ''} | Asaas PAYMENT_UPDATED (${paymentId}) em ${new Date().toISOString().slice(0, 10)}: valor ${alvo.valor}→${novoValor ?? alvo.valor}, vencimento ${alvo.data_vencimento}→${novoVenc ?? alvo.data_vencimento}.`,
+            observacoes: `${alvo.observacoes || ''} | Asaas PAYMENT_UPDATED (${paymentId}) em ${isoBR()}: valor ${alvo.valor}→${novoValor ?? alvo.valor}, vencimento ${alvo.data_vencimento}→${novoVenc ?? alvo.data_vencimento}.`,
           };
           if (novoValor != null) patch.valor = novoValor;
           if (novoVenc) { patch.data_vencimento = novoVenc; patch.data_competencia = novoVenc; }
