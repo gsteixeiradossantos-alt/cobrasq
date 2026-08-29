@@ -14,6 +14,7 @@
 const { requireUser, applyCors } = require('./_auth.js');
 const { sbFetch } = require('./_sb.js');
 
+const { hojeBR } = require('./_data.js');
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 
@@ -46,7 +47,7 @@ module.exports = async function handler(req, res) {
   const valorCapital = round2(Math.min(Math.max(Number(body.valor_capital) || 0, 0), valorRecebido));
   const valorHonorario = round2(valorRecebido - valorCapital);
   const repasseStatus = valorCapital > 0 ? 'pendente' : 'nao_aplica';
-  const recebidoEm = (body.recebido_em && String(body.recebido_em).slice(0, 10)) || new Date().toISOString().slice(0, 10);
+  const recebidoEm = (body.recebido_em && String(body.recebido_em).slice(0, 10)) || hojeBR();
   const descricao = String(body.descricao || 'Acordo — parcela recebida').slice(0, 200);
 
   try {

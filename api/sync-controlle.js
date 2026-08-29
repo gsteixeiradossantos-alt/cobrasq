@@ -13,6 +13,7 @@ const { applyCors, requireUser } = require('./_auth.js');
 const { sbFetch } = require('./_sb.js');
 const { runSync } = require('./_controlle-sync.js');
 
+const { addDiasBR } = require('./_data.js');
 module.exports = async function handler(req, res) {
   applyCors(req, res);
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -46,8 +47,8 @@ module.exports = async function handler(req, res) {
   const pastDays = Math.min(3650, Math.max(1, parseInt(req.query?.past, 10) || 90));
   const futureDays = Math.min(3650, Math.max(0, parseInt(req.query?.future, 10) || 540));
   const now = new Date();
-  const startDate = new Date(now.getTime() - pastDays * 86400000).toISOString().slice(0, 10);
-  const endDate = new Date(now.getTime() + futureDays * 86400000).toISOString().slice(0, 10);
+  const startDate = addDiasBR(-pastDays, now);
+  const endDate = addDiasBR(futureDays, now);
 
   try {
     const { totais } = await runSync({ startDate, endDate, notas: `sob-demanda -${pastDays}d..+${futureDays}d` });

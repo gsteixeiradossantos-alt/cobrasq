@@ -8,6 +8,7 @@
 const { requireUser, applyCors } = require('./_auth.js');
 const { sbFetch } = require('./_sb.js');
 
+const { hojeBR } = require('./_data.js');
 function sum(rows, field, abs) {
   return (rows || []).reduce((s, r) => s + (abs ? Math.abs(Number(r[field]) || 0) : (Number(r[field]) || 0)), 0);
 }
@@ -21,7 +22,7 @@ module.exports = async function handler(req, res) {
   const user = await requireUser(req, res);
   if (!user) return;
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = hojeBR();
   const monthStart = today.slice(0, 8) + '01';
 
   try {

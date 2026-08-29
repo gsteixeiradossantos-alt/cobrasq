@@ -11,6 +11,7 @@ const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp } = requir
 const { devedorPrincipal, registrarRepasseNaFicha, resolverCobrancaId } = require('./_repasse-ficha.js');
 const { guardarComprovante } = require('./_comprovante.js');
 const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_comprovante-pdf.js');
+const { hojeBR } = require('./_data.js');
 const crypto = require('crypto');
 
 function timingSafeEq(a, b) {
@@ -83,7 +84,7 @@ module.exports = async function handler(req, res) {
     // verdade e fica presa no dia em que foi cadastrada (mesmo bug do lado da receita,
     // pedido do Gustavo 2026-08-06).
     if (concluido && op.lancamento_despesa_id) {
-      const hoje = new Date().toISOString().slice(0, 10);
+      const hoje = hojeBR();
       await sbFetch(`fin_lancamento?id=eq.${op.lancamento_despesa_id}`, {
         method: 'PATCH',
         body: JSON.stringify({ status: 1, data_pagamento: hoje, data_competencia: hoje, valor_pago: -(Number(op.valor_capital) || 0) }),
@@ -111,7 +112,7 @@ module.exports = async function handler(req, res) {
       if (!pdf) {
         pdf = await gerarComprovanteRepassePdf({
           credorNome: credor.nome, devedor: devNome, parcela: op.parcela,
-          valor: op.valor_capital, dataISO: new Date().toISOString().slice(0, 10),
+          valor: op.valor_capital, dataISO: hojeBR(),
           transferId: transferId || op.repasse_asaas_transfer_id,
           chavePix: (op.metadata && op.metadata.repasse_pix_key) || '', urlAsaas: comprovanteUrl,
         });
@@ -127,7 +128,7 @@ module.exports = async function handler(req, res) {
       ficha = await registrarRepasseNaFicha({
         cobrancaId: await resolverCobrancaId(op),
         credor, valor: op.valor_capital, transferId: transferId || op.repasse_asaas_transfer_id,
-        dataPix: new Date().toISOString().slice(0, 10), comprovante: arqCompr,
+        dataPix: hojeBR(), comprovante: arqCompr,
       });
     }
 

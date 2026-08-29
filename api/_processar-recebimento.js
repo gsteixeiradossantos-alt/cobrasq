@@ -47,6 +47,7 @@ const { asaasReq } = require('./_asaas.js');
 const { zapiSendText, zapiSendDocumentPdf } = require('./_zapi.js');
 const { gerarReciboPdfBase64, formaPagamento } = require('./_recibo.js');
 
+const { hojeBR } = require('./_data.js');
 // Conta e categorias da ponte fin_lancamento. Sem elas o lançamento nasce órfão:
 // some dos relatórios por categoria e não entra em conta nenhuma. A revisão de
 // 14/08/2026 achou 19 assim (R$ 1.970,86) — 11 "Recebimento" e 8 "Repasse ao
@@ -176,7 +177,7 @@ module.exports = async function handler(req, res) {
       valor_recebido: valorRecebido,
       valor_capital: valorCapital,
       valor_honorario: valorHonorario,
-      recebido_em: payment.paymentDate || payment.clientPaymentDate || new Date().toISOString().slice(0, 10),
+      recebido_em: payment.paymentDate || payment.clientPaymentDate || hojeBR(),
       recebimento_status: 'recebido',
       repasse_status: repasseStatus,
       nf_status: 'pendente',
