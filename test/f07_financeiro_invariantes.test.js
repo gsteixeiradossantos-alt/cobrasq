@@ -135,7 +135,7 @@ const LANCAMENTOS = [
   // Despesa paga: 300.
   { id: 3, descricao: 'Aluguel', valor: -300, tipo_movimento: 0, status: 1, data_pagamento: dia(4), data_vencimento: dia(4), data_competencia: dia(4), conciliado: false, numero_parcela: null, total_parcelas: null, credor_id: null, judicial_liberado_em: null, conta_id: 'c1' },
   // Entrada ATRASADA — inadimplência, nunca receita.
-  { id: 4, descricao: 'Acordo Ana 2/3', valor: 900, tipo_movimento: 1, status: 0, data_pagamento: null, data_vencimento: ONTEM, data_competencia: ONTEM, conciliado: false, numero_parcela: 2, total_parcelas: 3, credor_id: 'cli-1', judicial_liberado_em: null, conta_id: 'c1' },
+  { id: 4, descricao: 'Acordo Ana 2/3', valor: 900, tipo_movimento: 1, status: 0, data_pagamento: null, data_vencimento: ONTEM, data_competencia: ONTEM, conciliado: false, numero_parcela: 2, total_parcelas: 3, credor_id: 'cli-1', judicial_liberado_em: null, conta_id: 'c2' },
   // Entrada prevista para o fim do mês.
   { id: 5, descricao: 'Acordo Bruno 2/2', valor: 400, tipo_movimento: 1, status: 0, data_pagamento: null, data_vencimento: dia(28), data_competencia: dia(28), conciliado: false, numero_parcela: 2, total_parcelas: 2, credor_id: null, judicial_liberado_em: null, conta_id: 'c1' },
   // JUDICIAL pendente e VENCIDO: é a armadilha do handoff — não pode contar como atraso
@@ -145,7 +145,7 @@ const LANCAMENTOS = [
   { id: 7, descricao: 'Penhora Denise', valor: 700, tipo_movimento: 1, status: 1, data_pagamento: dia(6), data_vencimento: dia(6), data_competencia: dia(6), conciliado: true, numero_parcela: null, total_parcelas: null, credor_id: null, judicial_liberado_em: dia(6), conta_id: 'c1' },
   // Espelho de despesa do repasse (lancamento_despesa_id da operação): dinheiro de
   // terceiro voltando ao dono, não custo da COBRASQ.
-  { id: 8, descricao: 'Repasse ao credor — Ana', valor: -1600, tipo_movimento: 0, status: 1, data_pagamento: dia(7), data_vencimento: dia(7), data_competencia: dia(7), conciliado: false, numero_parcela: null, total_parcelas: null, credor_id: 'cli-1', judicial_liberado_em: null, conta_id: 'c1' },
+  { id: 8, descricao: 'Repasse ao credor — Ana', valor: -1600, tipo_movimento: 0, status: 1, data_pagamento: dia(7), data_vencimento: dia(7), data_competencia: dia(7), conciliado: false, numero_parcela: null, total_parcelas: null, credor_id: 'cli-1', judicial_liberado_em: null, conta_id: 'c2' },
 ];
 
 const TABELAS = {
@@ -153,7 +153,11 @@ const TABELAS = {
   fin_lancamento_categoria: [
     { lancamento_id: 1, valor: 2000, categoria_id: CAT_ACORDO, fin_categoria: { descricao: 'Acordos Extrajudiciais' } },
     { lancamento_id: 2, valor: 500, categoria_id: CAT_ACORDO, fin_categoria: { descricao: 'Acordos Extrajudiciais' } },
-    { lancamento_id: 3, valor: 300, categoria_id: CAT_ALUGUEL, fin_categoria: { descricao: 'Aluguel' } },
+    // Rateio DESPROPORCIONAL de propósito: 200 + 200 para um lançamento de 300. O rateio
+    // do código é proporcional (p.valor / somaPartes), então cada categoria fica com 150.
+    // Sem isto, trocar o rateio proporcional por `sinal * p.valor` passava no teste.
+    { lancamento_id: 3, valor: 200, categoria_id: CAT_ALUGUEL, fin_categoria: { descricao: 'Aluguel' } },
+    { lancamento_id: 3, valor: 200, categoria_id: CAT_ACORDO,  fin_categoria: { descricao: 'Condomínio' } },
     { lancamento_id: 6, valor: 5000, categoria_id: CAT_SISBAJUD, fin_categoria: { descricao: 'Sisbajud/Penhoras' } },
     { lancamento_id: 7, valor: 700, categoria_id: CAT_SISBAJUD, fin_categoria: { descricao: 'Penhora de remuneração' } },
   ],
@@ -161,13 +165,28 @@ const TABELAS = {
     { id: 'op-1', credor_id: 'cli-1', valor_recebido: 2000, valor_capital: 1600, valor_honorario: 400, repasse_status: 'pendente', recebido_em: dia(3), criada_em: dia(3), lancamento_despesa_id: 8, lancamento_receita_id: 1 },
   ],
   clientes: [{ id: 'cli-1', nome: 'Arte Estofados', nome_fantasia: null }],
-  acordos: [{ id: 'ac-1', metadata: {}, data_assinatura: dia(2) }],
+  acordos: [
+    { id: 'ac-1', metadata: {}, data_assinatura: `${dia(2)}T10:00:00-03:00` },                                  // do mês, sem conferir
+    { id: 'ac-2', metadata: { posAssinatura: { conferidoEm: dia(3) } }, data_assinatura: `${dia(3)}T09:00:00-03:00` }, // do mês, conferido
+    // Borda do fuso: 31/08 às 22h em Brasília é 01/09 01h em UTC. Comparando a janela
+    // como texto, este acordo caía em setembro e sumia do card "Acordos de agosto".
+    { id: 'ac-3', metadata: {}, data_assinatura: `${dia(31)}T22:00:00-03:00` },
+    { id: 'ac-4', metadata: {}, data_assinatura: '2026-09-02T10:00:00-03:00' },                                 // fora: mês seguinte
+  ],
 };
 
 // ── Sandbox ───────────────────────────────────────────────────────────────────────
 const fonte = [
   recorta('function _finCaixaHoje(){'),
   recorta('function _finDiasUteisRestantes(){'),
+  recorta('function _finSaldoIdadeDias(conta){'),
+  'const FIN_SALDO_STALE_DIAS = 7;',
+  // `_finCascataMetricas` entra de VERDADE no recorte. Antes ela era substituída por uma
+  // constante no sandbox, e o invariante 1 ("caixa livre = saldo geral − terceiros")
+  // media o fixture, não o código: trocando a subtração por soma no index.html, o teste
+  // continuava verde. Agora ele quebra.
+  'let _finCascataCache = { at:0, m:null };',
+  recorta('async function _finCascataMetricas(force){'),
   'let _finCaixaAggCache = { at:0, v:null };',
   recorta('async function _finCaixaAgg(force){'),
   recorta('function _finLancSit(l){'),
@@ -175,22 +194,31 @@ const fonte = [
   recorta('function _finLancEhDivergencia(l, ctx){'),
   recorta('function _finLancCedente(l, ctx){'),
   recorta('const FIN_MOV_VISOES = [', '['),
-  recorta('function _finLancCascataFiltrados(){'),
+  recorta('function _finLancCascataFiltrados(visaoId){'),
   recorta('function _finMovVencidos(){'),
+  recorta('function _finMovContadorVisao(visaoId){'),
+  recorta('function _finLancEhJudicialPendente(r, judSet){'),
   recorta('function _finMovZerarFiltros(s){'),
   // `const` num script de vm não vira propriedade do contexto — sem isto o teste não
   // enxerga as visões e o invariante 10 nem chega a rodar.
   'globalThis.FIN_MOV_VISOES = FIN_MOV_VISOES;',
 ].join('\n\n');
 
-const METRICAS = { saldoGeral: 10000, aRepassar: 1600, caixaLivre: 8400, contasCount: 3, stale: [] };
+// Contas do fixture: saldo geral 10.000 = 7.000 + 3.000 (a terceira fica fora do geral).
+const CONTAS = [
+  { id: 'c1', descricao: 'Asaas',   bank_balance: 7000, bank_balance_at: null, saldo_inicial: 0, incluir_no_saldo_geral: true },
+  { id: 'c2', descricao: 'Sicredi', bank_balance: 3000, bank_balance_at: null, saldo_inicial: 0, incluir_no_saldo_geral: true },
+  { id: 'c3', descricao: 'CENSEC',  bank_balance: 999,  bank_balance_at: null, saldo_inicial: 0, incluir_no_saldo_geral: false },
+];
 
 const ctxVm = {
   console,
   Date: DataFixa, Math, JSON, Object, Set, Map, Promise, Number, String, Array, isFinite, parseFloat, parseInt,
   getSupabase: () => fakeSupabase(TABELAS),
   hoje: () => HOJE,
-  _finCascataMetricas: async () => METRICAS,
+  // Só o que é I/O é falso. A aritmética do caixa livre roda de verdade.
+  finApi: { loadDimensoes: async () => ({ contas: CONTAS, categorias: [], contatos: [] }) },
+  _finRepasseAgg: async () => ({ aRepassar: 1600, filaCount: 1, pendCount: 1, revisarCount: 0 }),
   DB: { config: { metaMensal: 40000 } },
   // O recorte de Movimentações lê o estado e o contexto pelo `window` — o mesmo caminho
   // que a tela usa, para o teste exercitar o filtro de verdade e não uma cópia dele.
@@ -229,14 +257,26 @@ const perto = (a, b) => Math.abs(a - b) < 0.005;
   ok('2b · despesa = 300 (o espelho do repasse fica fora: é dinheiro de terceiro)',
     perto(A.despesa, 300), `despesa = ${A.despesa}`);
 
-  // 3. "recuperado no mês" do card de meta é o MESMO número do KPI de resultado.
-  //    Os dois saem de A.receita — o teste trava a fonte única, não a coincidência.
-  ok('3 · recuperado no mês = recebido', perto(A.receita, 3200));
+  // 3. O caixa livre é DERIVADO, não copiado: mexer no saldo de uma conta tem de mover o
+  //    caixa livre na mesma medida. Com _finCascataMetricas real no recorte, esta
+  //    asserção passa a exercitar a subtração de verdade.
+  ok('3 · caixa livre acompanha o saldo das contas (derivação real)',
+    perto(A.saldoGeral, 10000) && perto(A.caixaLivre, 10000 - 1600),
+    `saldoGeral=${A.saldoGeral} caixaLivre=${A.caixaLivre}`);
+  ok('3a · conta fora do saldo geral não entra', A.contasCount === 2, `contasCount=${A.contasCount}`);
 
   // 4. Rodapé do DRE = KPI de resultado: a soma das categorias tem de fechar com ele.
   const somaCats = A.cats.reduce((s, c) => s + c.valor, 0);
   ok('4 · soma do resultado por categoria = resultado realizado',
     perto(somaCats, A.resultado), `${somaCats} ≠ ${A.resultado}`);
+  // 4a. O rateio é PROPORCIONAL: o lançamento 3 vale 300 e está dividido em duas partes
+  //     de 200. Cada categoria fica com 150, não com 200. Esta é a asserção que pega
+  //     alguém trocando o rateio proporcional pelo valor bruto de cada parte.
+  const alug = A.cats.find(c => c.nome === 'Aluguel');
+  const cond = A.cats.find(c => c.nome === 'Condomínio');
+  ok('4a · rateio proporcional quando as partes não somam o valor da linha',
+    !!alug && !!cond && perto(alug.valor, -150) && perto(cond.valor, -150),
+    JSON.stringify([alug, cond]));
 
   // 5. cedente recebe + honorário = recebido, por linha e no total da fila.
   const fila = A.fila || [];
@@ -253,9 +293,9 @@ const perto = (a, b) => Math.abs(a - b) < 0.005;
   ok('6 · repassado/recebido = 1 − honorário',
     fila.every(g => perto(g.capital / g.recebido, 0.8)));
 
-  // 7. Despesa recorrente aparece uma vez no mês.
+  // 7. Despesa recorrente aparece uma VEZ no mês (uma linha por rubrica, não repetida).
   const aluguel = A.cats.filter(c => c.nome === 'Aluguel');
-  ok('7 · despesa recorrente aparece uma vez', aluguel.length === 1 && perto(aluguel[0].valor, -300),
+  ok('7 · despesa recorrente aparece uma vez', aluguel.length === 1 && perto(aluguel[0].valor, -150),
     JSON.stringify(aluguel));
 
   // 8. DIVERGÊNCIA só existe em parcela recebida E com cedente.
@@ -285,8 +325,8 @@ const perto = (a, b) => Math.abs(a - b) < 0.005;
   };
   ctxVm.window._finLancCascataCtx = ctx2;
   for (const v of ctxVm.FIN_MOV_VISOES) {
-    // Contador do chip: o predicado da visão sobre a base.
-    const contados = ctx2.rows.filter(l => v.ok(l, ctx2)).length;
+    // Contador do chip: a MESMA função que o render chama (não uma cópia da expressão).
+    const contados = ctxVm._finMovContadorVisao(v.id);
     // Lista: o caminho real de filtragem da tela, com o painel de filtros limpo.
     ctxVm._finMovZerarFiltros(ctxVm._finLancCascataState);
     ctxVm._finLancCascataState.visao = v.id;
@@ -294,6 +334,26 @@ const perto = (a, b) => Math.abs(a - b) < 0.005;
     ok(`10 · chip "${v.label}": contador = linhas da lista (${contados})`, contados === filtrados,
       `chip ${contados} × lista ${filtrados}`);
   }
+  // 10e. O TESTE QUE FALTAVA. O contador do chip e a lista têm de bater também com o
+  //      painel de filtros ativo. Antes o chip contava só o predicado da visão: com um
+  //      filtro de conta ligado ele dizia 3 e a lista devolvia 1, e nenhuma asserção
+  //      pegava isso porque o teste zerava os filtros antes de comparar.
+  ctxVm._finMovZerarFiltros(ctxVm._finLancCascataState);
+  ctxVm._finLancCascataState.visao = 'tudo';
+  ctxVm._finLancCascataState.fContas = ['c1'];
+  const soC1 = ctx2.rows.filter(l => String(l.conta_id) === 'c1').length;
+  ok('10e-pré · o fixture tem conta variada (senão o filtro não discrimina)',
+    soC1 > 0 && soC1 < ctx2.rows.length, `${soC1} de ${ctx2.rows.length} em c1`);
+  for (const v of ctxVm.FIN_MOV_VISOES) {
+    ctxVm._finLancCascataState.visao = v.id;
+    const chip = ctxVm._finMovContadorVisao(v.id);              // o número que o chip imprime
+    const lista = ctxVm._finLancCascataFiltrados().length;      // o que a lista devolve ao clicar
+    ok(`10e · com filtro de conta, chip "${v.label}" = lista (${chip})`, chip === lista, `chip ${chip} × lista ${lista}`);
+  }
+  ctxVm._finLancCascataState.visao = 'tudo';
+  ok('10f · o filtro de conta realmente recorta', ctxVm._finLancCascataFiltrados().length === soC1);
+  ctxVm._finMovZerarFiltros(ctxVm._finLancCascataState);
+
   // Rodapé: "Efetivar N vencidos" tem de sair do filtro inteiro e só de linhas atrasadas.
   ctxVm._finMovZerarFiltros(ctxVm._finLancCascataState);
   ctxVm._finLancCascataState.visao = 'tudo';
@@ -312,6 +372,40 @@ const perto = (a, b) => Math.abs(a - b) < 0.005;
     && !linhas.some(l => l.id === 6));
   ok('10b · a visão "A repassar" acha o repasse pela operação',
     ctxVm.FIN_MOV_VISOES.find(v => v.id === 'repassar').ok(linhas.find(l => l.id === 8), ctx2) === true);
+
+  // 11. Acordos assinados no mês — inclusive o das 22h do último dia, que a comparação
+  //     de texto em UTC jogava para o mês seguinte.
+  ok('11 · acordos assinados no mês (com a borda do fuso)',
+    A.assinadosN === 3, `assinadosN=${A.assinadosN} (esperado 3: dia 2, dia 3 e o das 22h do dia 31)`);
+  ok('11a · quantos ainda não passaram pelo passo 1',
+    A.semConferirN === 2, `semConferirN=${A.semConferirN}`);
+
+  // 12. O corte do judicial é um predicado próprio e testável: sem `judicial_liberado_em`
+  //     a linha é pendente e não pode chegar a Movimentações; com a data, ela volta.
+  const jud = new Set(['6']);
+  ok('12 · judicial sem liberação é pendente',
+    ctxVm._finLancEhJudicialPendente({ id: 6, judicial_liberado_em: null }, jud) === true);
+  ok('12a · judicial já liberado deixa de ser pendente',
+    ctxVm._finLancEhJudicialPendente({ id: 6, judicial_liberado_em: dia(6) }, jud) === false);
+  ok('12b · linha que não é judicial nunca é cortada',
+    ctxVm._finLancEhJudicialPendente({ id: 1, judicial_liberado_em: null }, jud) === false);
+
+  // 13. GUARDA DE FONTE. As duas regras acima só valem se quem desenha e quem carrega
+  //     REALMENTE as chamarem. Um render que volte a contar por conta própria, ou um
+  //     carregador que pare de aplicar o corte, não é observável num sandbox sem DOM —
+  //     então é travado aqui, no texto do arquivo.
+  const fonteHTML = HTML;
+  ok('13 · o chip usa o contador compartilhado',
+    /const n = _finMovContadorVisao\(v\.id\);/.test(fonteHTML)
+    && !/const n = ctx\.rows\.filter\(l => v\.ok\(l, ctx\)\)\.length;/.test(fonteHTML),
+    'o render voltou a contar o chip por conta própria');
+  ok('13a · o carregador aplica o corte do judicial',
+    /const ehJudPendente = r => _finLancEhJudicialPendente\(r, judSet\);/.test(fonteHTML)
+    && /rows\.filter\(r => !ehJudPendente\(r\)\)/.test(fonteHTML),
+    'o corte do judicial saiu de _finLancCascataCarregar');
+  ok('13b · a janela de acordos usa offset explícito, não texto UTC',
+    !/\.lte\('data_assinatura', mesFim \+ 'T23:59:59'\)/.test(fonteHTML),
+    'a janela de data_assinatura voltou a comparar timestamptz como texto');
 
   // Extra: a situação da linha é derivada num lugar só — a lista, a ordenação e o polegar
   // leem daqui, então errar aqui erra os três de uma vez.

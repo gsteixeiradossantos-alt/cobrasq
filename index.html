@@ -29526,6 +29526,29 @@ const FIN_TABS_COM_PERIODO = ['lancamentos','receitasjudiciais'];
 // velho envenena em silêncio o "caixa livre", que é saldo geral menos o a repassar.
 // Não corrigimos o número (só o extrato sabe): mostramos a idade dele.
 const FIN_SALDO_STALE_DIAS = 7;
+// Data de HOJE em horário local. `hoje()` (global, de 2026) é `toISOString()`, ou seja
+// UTC: das 21h de Curitiba em diante ele devolve o dia seguinte, e a receita ia parar no
+// mês errado na virada. Todo código novo do Financeiro usa esta.
+function _finHojeLocal(){
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+// Invalidação dos caches do módulo, num lugar só. Cada tela invalidava o seu e esquecia
+// o do vizinho: baixar um repasse atualizava a lista e o card, e o chip da aba continuava
+// com o número velho — o defeito nº 1 do handoff. Quem escreve chama esta função.
+function _finFinanceiroInvalidaCaches(){
+  try{ _finRepasseAggCache = { at:0, v:null }; }catch(_){}
+  try{ _finCascataCache = { at:0, m:null }; }catch(_){}
+  try{ _finCaixaAggCache = { at:0, v:null }; }catch(_){}
+  try{ window._finCnt = {}; }catch(_){}
+}
+// A aba em que o usuário está de verdade. `renderFinTab` NÃO mexe em `window._finTab`
+// (só `setFinTab` mexe), então voltar de um salvamento com 'lancamentos' fixo trocava o
+// conteúdo enquanto a barra continuava acesa na Judicial.
+function _finAbaAtualParaRender(){
+  const t = window._finTab;
+  return (t === 'receitasjudiciais' || t === 'credores' || t === 'visao') ? t : 'lancamentos';
+}
 function _finSaldoIdadeDias(conta){
   if(!conta || conta.bank_balance == null || !conta.bank_balance_at) return null;
   const t = new Date(conta.bank_balance_at).getTime();
@@ -29898,9 +29921,13 @@ async function _finRepasseLiberado(force){
     });
   }
   itens.sort((a,b)=> a.vence < b.vence ? -1 : (a.vence > b.vence ? 1 : 0));
-  // `previstas` = repasse já atrelado a uma entrada mas ainda não liberado pelo
-  // cronograma (a parcela do devedor não venceu). É o card "A revisar" da aba.
-  return { itens, total: +itens.reduce((s,i)=>s+i.valor,0).toFixed(2), retidos, semPar, previstas: Math.max(0, fila.length - itens.length) };
+  // `previstas` = repasse JÁ VENCIDO que ainda não liberou porque a entrada dele não
+  // caiu. É o que exige revisão. Antes eram `fila − liberadas`, o que incluía as 330
+  // parcelas futuras do cronograma até 2028 — o card anunciava 353 "a revisar", número
+  // que não correspondia a nada acionável e que ainda contava de novo o que o card
+  // escuro ao lado já mostra.
+  return { itens, total: +itens.reduce((s,i)=>s+i.valor,0).toFixed(2), retidos, semPar,
+           previstas: retidos + semPar };
 }
 
 async function _finRepasseAgg(force){
@@ -30070,6 +30097,9 @@ function _finPeriodoRotulo(){ return _finCascataPeriodoBounds().label; }
 function _finPeriodoAplicar(){
   const lbl = document.getElementById('fincx-periodo-lbl');
   if(lbl) lbl.textContent = _finPeriodoRotulo();
+  // O contador de Movimentações é recortado pelo período. Sem apagá-lo aqui, mudar de mês
+  // estando na aba Judicial deixava o chip exibindo a contagem do mês anterior.
+  try{ FIN_TABS_COM_PERIODO.forEach(t => { delete window._finCnt[t]; const e = document.getElementById('fincx-cnt-'+t); if(e) e.textContent='—'; }); }catch(_){}
   if(FIN_TABS_COM_PERIODO.includes(window._finTab)) renderFinTab(window._finTab);
 }
 
@@ -30223,6 +30253,15 @@ function _finBuscaAbrir(){
 function _finBuscaFechar(){ const ov = document.getElementById('finbg-ov'); if(ov) ov.remove(); }
 function _finBuscaIr(id){
   _finBuscaFechar();
+  const ctx = window._finLancCascataCtx;
+  const l = ctx && (ctx.todasRows || ctx.rows).find(r => String(r.id) === String(id));
+  // Judicial pendente não existe em Movimentações: mandar para lá deixaria a aba vazia
+  // com o drawer aberto por cima. A busca leva para onde a linha realmente mora.
+  if(l && ctx.ehJudPendente && ctx.ehJudPendente(l)){
+    if(window._finTab !== 'receitasjudiciais') setFinTab('receitasjudiciais');
+    _finLancAbrirDrawer(Number(id));
+    return;
+  }
   if(window._finTab !== 'lancamentos') setFinTab('lancamentos');
   _finLancAbrirDrawer(Number(id));
 }
@@ -30237,7 +30276,11 @@ function _finBuscaResultados(termo){
     const parc = l.numero_parcela && l.total_parcelas ? `${l.numero_parcela}/${l.total_parcelas}` : '';
     return [l.descricao, contato, cat, conta, _finLancSit(l).t, parc, fmtR(Math.abs(+l.valor||0))].join(' ').toLowerCase();
   };
-  const base = q ? ctx.rows.filter(l => texto(l).includes(q)) : ctx.rows.slice();
+  // Busca sobre a base COMPLETA (inclui judicial pendente, que não aparece na lista):
+  // não achar o que existe é pior do que achar algo que mora noutra aba — e o resultado
+  // diz de onde ele veio.
+  const todas = ctx.todasRows || ctx.rows;
+  const base = q ? todas.filter(l => texto(l).includes(q)) : todas.slice();
   return base.slice(0, 40);
 }
 function _finBuscaRender(){
@@ -30252,10 +30295,11 @@ function _finBuscaRender(){
     const isEnt = l.tipo_movimento === 1;
     const cat = (ctx.catPorLanc && ctx.catPorLanc[l.id] && ctx.catPorLanc[l.id].nome) || 'sem categoria';
     const conta = (l.fin_conta && l.fin_conta.descricao) || 'sem conta';
+    const jud = ctx.ehJudPendente ? ctx.ehJudPendente(l) : false;
     return `<div onclick="_finBuscaIr(${l.id})" style="display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid #F7F4EC;cursor:pointer;background:${i===_finBuscaSel?'#FBFAF6':'#fff'};">
       <span style="min-width:0;flex:1;">
-        <span style="display:block;font-size:13px;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(l.descricao||'—')}</span>
-        <span style="display:block;font-size:10.5px;color:#8A94A6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(conta)} · ${escHtml(cat)}</span>
+        <span style="display:block;font-size:13px;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(l.descricao||'—')}${jud?' <span style="font-size:9.5px;font-family:\'JetBrains Mono\',monospace;background:#F2EFE6;color:#6B7683;border-radius:4px;padding:1px 5px;">JUDICIAL</span>':''}</span>
+        <span style="display:block;font-size:10.5px;color:#8A94A6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(conta)} · ${escHtml(cat)}${jud?' · aguardando o juízo':''}</span>
       </span>
       <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;white-space:nowrap;color:${isEnt?'#4C6647':'#0A1530'};">${isEnt?'+':'−'} ${fmtR(Math.abs(+l.valor||0))}</span>
     </div>`;
@@ -31218,8 +31262,7 @@ async function _finPosGerarRepasse(){
     closeModal('finrep-ov');
     window._finRepCapital = null;
     showToast(`${linhas.length} ${linhas.length===1?'despesa criada':'despesas criadas'} · ${fmtR(total)} para ${cedenteNome}.`, 'success');
-    _finCascataCache = { at:0, m:null };
-    if(typeof _finRepasseAggCache !== 'undefined') _finRepasseAggCache = { at:0, v:null };
+    _finFinanceiroInvalidaCaches();
     const el = document.getElementById('fin-pos-corpo'); if(el) renderFinPosAssinatura(el);
   }catch(e){ showToast('Não deu para criar as despesas: '+(e.message||e), 'danger'); }
 }
@@ -31277,8 +31320,7 @@ async function _finPosGravarOps(opIds, patch, msg){
     const { error } = await sb.from('fin_operacao').update(patch).in('id', opIds);
     if(error) throw error;
     showToast(msg, 'success');
-    _finCascataCache = { at:0, m:null };
-    if(typeof _finRepasseAggCache !== 'undefined') _finRepasseAggCache = { at:0, v:null };
+    _finFinanceiroInvalidaCaches();
     const el = document.getElementById('fin-pos-corpo'); if(el) renderFinPosAssinatura(el);
   }catch(e){ showToast('Não deu para gravar: '+(e.message||e), 'danger'); }
 }
@@ -31293,8 +31335,7 @@ async function _finPosConfirmarRecebimentos(chave){
     const { error } = await sb.from('fin_operacao').update({ repasse_status:'efetuado' }).in('id', it.opIds);
     if(error) throw error;
     showToast(`${n} ${n===1?'recebimento confirmado':'recebimentos confirmados'}.`, 'success');
-    _finCascataCache = { at:0, m:null };
-    if(typeof _finRepasseAggCache !== 'undefined') _finRepasseAggCache = { at:0, v:null };
+    _finFinanceiroInvalidaCaches();
     const el = document.getElementById('fin-pos-corpo'); if(el) renderFinPosAssinatura(el);
   }catch(e){ showToast('Não deu para confirmar: '+(e.message||e), 'danger'); }
 }
@@ -31412,7 +31453,9 @@ async function renderFinCredores(el, aba){
       ${card('Divergências', String(r.aRevisar||0), r.aRevisar
           ? `parcela recebida sem divisão calculada<div style="color:#A65A4A;font-size:12px;font-weight:600;cursor:pointer;margin-top:5px;" onclick="_finIrMovimentacoes('divergencias')">Ver na tabela →</div>`
           : 'nenhuma parcela sem divisão', r.aRevisar?'#A65A4A':'#0A1530')}
-      ${card('A revisar', String(r.previstas||0), (r.previstas===1?'parcela prevista':'parcelas previstas')+' com repasse atrelado')}
+      ${card('A revisar', String(r.previstas||0), r.previstas
+          ? `${r.retidos||0} aguardando a entrada do mês · ${r.semPar||0} sem entrada correspondente`
+          : 'nenhum repasse vencido pendente de conferência')}
     </div>` : '<div style="height:14px;"></div>'}
     <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
       ${FIN_CREDORES_ABAS.map(a=>`<div onclick="_finCredoresIr('${a.id}')" style="padding:7px 15px;border-radius:20px;font-size:12.5px;cursor:pointer;white-space:nowrap;${a.id===atual.id?'background:#0A1530;border:1px solid #0A1530;color:#fff;':'background:#fff;border:1px solid #E6E1D2;color:#5A5F66;'}">${escHtml(a.label)}</div>`).join('')}
@@ -31643,7 +31686,10 @@ async function _finRepasseEnviado(lancId){
   try{
     await finApi.confirmarPagamentoLote([lancId]);
     showToast('Repasse baixado.','success');
-    _finRepasseAggCache = { at:0, v:null };
+    // Invalida TODOS os caches do módulo, não só o da fila: o chip da aba vem de
+    // _finCascataMetricas, que tem cache próprio de 30s. Zerando só um, a lista caía
+    // para 15 e o chip continuava 16 — inclusive depois de trocar de aba.
+    _finFinanceiroInvalidaCaches();
     await renderFinTab('credores');
   }catch(e){ showToast('Não deu para dar baixa: '+(e&&e.message||e),'error'); }
 }
@@ -31854,7 +31900,8 @@ async function _finMovAplicarVisaoSalva(nome){
   // Visões gravadas antes do painel de filtros guardavam `conta`/`categoria` soltos.
   if(v.conta) s.fContas = [String(v.conta)];
   if(v.categoria) s.fCategoria = v.categoria;
-  s.sel = new Set(); s.limite = FIN_MOV_PAGINA;
+  _finMovReset();
+  s.visaoSalva = nome;
   if((v.busca||'') !== s.busca){ s.busca = v.busca||''; _finLancCascataBusca(s.busca); return; }
   _finLancCascataRender();
 }
@@ -31873,7 +31920,7 @@ function _finMovReset(){
   s.sel = new Set(); s.limite = FIN_MOV_PAGINA;
   s.popEfet = null; s.popConta = null; s.menu = null;
 }
-function _finMovSetVisao(id){ _finLancCascataState.visao = id; _finMovReset(); _finLancCascataRender(); }
+function _finMovSetVisao(id){ _finLancCascataState.visao = id; _finLancCascataState.visaoSalva = null; _finMovReset(); _finLancCascataRender(); }
 function _finMovSetFiltro(campo, v){ _finLancCascataState[campo] = v; _finMovReset(); _finLancCascataRender(); }
 function _finMovToggleChip(campo, v){
   const s = _finLancCascataState;
@@ -31902,6 +31949,7 @@ function _finMovNFiltros(){
 function _finMovLimparFiltros(){
   const s = _finLancCascataState;
   s.visao = 'tudo';
+  s.visaoSalva = null;
   _finMovZerarFiltros(s);
   _finMovReset();
   if(s.busca){ _finLancCascataBusca(''); const i = document.getElementById('finmv-busca'); if(i) i.value=''; return; }
@@ -31993,6 +32041,10 @@ async function _finLancCascataOrd(col){
   const antes = _finLancOrdServidorAsc();
   if(o.col===col) o.dir = o.dir==='asc' ? 'desc' : 'asc';
   else { o.col = col; o.dir = FIN_LANC_ORD_DESC_PRIMEIRO.has(col) ? 'desc' : 'asc'; }
+  // Trocar a ordem muda QUAIS 60 linhas a página mostra. Manter a seleção deixava a
+  // barra de lote anunciando "60 selecionados" sobre linhas que sumiram da tela — e o
+  // botão Excluir agiria sobre elas.
+  _finLancCascataState.sel = new Set();
   if(_finLancOrdServidorAsc() !== antes){
     // Trocou o lado do corte: a consulta precisa ser refeita, senão a lista
     // mostraria a ponta errada do período.
@@ -32111,8 +32163,13 @@ async function _finLancCascataCarregar(){
   // inteiros no dia em que caem (judicial_liberado_em deixa de ser NULL). O corte é aqui,
   // uma vez, e não em cada consumidor: contador que não sai da mesma base da lista já
   // fez o chip dizer 280 e a lista devolver 246.
-  const visiveis = rows.filter(r => !(judSet.has(String(r.id)) && !r.judicial_liberado_em));
-  return { rows: visiveis, dim, cedMap, opsByLanc, credorPorLanc, catPorLanc, judSet,
+  const ehJudPendente = r => _finLancEhJudicialPendente(r, judSet);
+  const visiveis = rows.filter(r => !ehJudPendente(r));
+  // `todasRows` guarda a base ANTES do corte. A lista, os chips e o rodapé usam `rows`
+  // (sem judicial pendente); só a busca global usa `todasRows` — senão o ⌘K deixava de
+  // achar um Sisbajud que existe, e dizia "0 resultados" para um lançamento real.
+  return { rows: visiveis, todasRows: rows, ehJudPendente, dim, cedMap, opsByLanc,
+           credorPorLanc, catPorLanc, judSet,
            periodoLabel: _finCascataPeriodoBounds().label,
            busca: termo, truncado: rows.length >= FIN_LANC_LIMITE };
 }
@@ -32128,10 +32185,14 @@ async function renderFinLancamentosCascata(el){
 }
 // Recorte da lista: visão salva + painel de filtros. Uma função só — os chips, o rodapé,
 // o contador da barra e a página exibida saem todos daqui (invariante 10 do handoff).
-function _finLancCascataFiltrados(){
+// `visaoId` permite contar QUALQUER visão com o painel de filtros vigente — é o que faz
+// o número do chip ser o mesmo que a lista devolve ao clicar nele (invariante 10). Antes
+// o chip contava só o predicado da visão e ignorava o painel: com um filtro de conta
+// ativo o chip dizia 31 e a lista trazia 3.
+function _finLancCascataFiltrados(visaoId){
   const ctx = window._finLancCascataCtx; if(!ctx) return [];
   const s = _finLancCascataState;
-  const vis = FIN_MOV_VISOES.find(v => v.id === s.visao) || FIN_MOV_VISOES[0];
+  const vis = FIN_MOV_VISOES.find(v => v.id === (visaoId || s.visao)) || FIN_MOV_VISOES[0];
   const min = s.fMin ? parseValorBR(s.fMin) : null;
   const max = s.fMax ? parseValorBR(s.fMax) : null;
   return ctx.rows.filter(l=>{
@@ -32154,6 +32215,18 @@ function _finLancCascataFiltrados(){
     if(max != null && v > max) return false;
     return true;
   });
+}
+// Contador de um chip de visão. Mora aqui, e não solto dentro do render, por dois
+// motivos: é o mesmo caminho que a lista usa (invariante 10) e é testável — enquanto a
+// expressão vivia no render, o teste só conseguia reescrevê-la e comparar consigo mesma.
+function _finMovContadorVisao(visaoId){
+  return _finLancCascataFiltrados(visaoId).length;
+}
+// Judicial pendente: Sisbajud/penhora sem `judicial_liberado_em`. Predicado próprio pelo
+// mesmo motivo — é a regra que tira essas linhas de Movimentações, e precisa ser
+// verificável sem montar a consulta inteira.
+function _finLancEhJudicialPendente(r, judSet){
+  return !!judSet && judSet.has(String(r.id)) && !r.judicial_liberado_em;
 }
 // Vencidos do FILTRO INTEIRO (não da página exibida) — é o que o botão do rodapé efetiva.
 function _finMovVencidos(){
@@ -32181,16 +32254,32 @@ function _finLancCascataRender(){
   // Cabeçalho de dia some quando o filtro devolve menos de 8 linhas: com poucas linhas a
   // faixa de dia vira mais ruído do que informação.
   const agrupado = s.ord.col === 'data' && pagina.length >= 8;
+  // Totais do dia saem do DIA INTEIRO do filtro, não da fatia paginada: com o corte dos
+  // 60 caindo no meio de um dia, o saldo daquele cabeçalho ficava errado e ainda mudava
+  // de valor ao clicar em "Mostrar mais".
+  const totalDoDia = {};
+  if(agrupado){
+    for(const l of ordenados){
+      const d = (l.data_competencia||'').slice(0,10);
+      const g = totalDoDia[d] || (totalDoDia[d] = { e:0, s:0, n:0 });
+      const v = Math.abs(+l.valor||0);
+      if(l.tipo_movimento===1) g.e += v; else g.s += v;
+      g.n++;
+    }
+  }
   const porDia = [];
   let atual = null;
   for(const l of (agrupado ? pagina : [])){
     const d = (l.data_competencia||'').slice(0,10);
-    if(!atual || atual.data !== d){ atual = { data:d, itens:[] }; porDia.push(atual); }
+    if(!atual || atual.data !== d){ atual = { data:d, itens:[], tot: totalDoDia[d] || { e:0, s:0, n:0 } }; porDia.push(atual); }
     atual.itens.push(l);
   }
 
   const contas = (ctx.dim && ctx.dim.contas) || [];
-  const cats = [...new Set(Object.values(ctx.catPorLanc||{}).map(c => c.nome))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
+  // Só as categorias das linhas que a aba REALMENTE mostra. `catPorLanc` é montado antes
+  // do corte do judicial, então "Sisbajud" aparecia na lista e escolhê-la devolvia zero.
+  const cats = [...new Set(ctx.rows.map(l => (ctx.catPorLanc||{})[l.id]).filter(Boolean).map(c => c.nome))]
+    .sort((a,b)=>a.localeCompare(b,'pt-BR'));
   const cedentes = [...new Set(todos.map(l => _finLancCedente(l, ctx)).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
   const salvas = _finMovVisoesSalvas();
   const nFiltros = _finMovNFiltros();
@@ -32306,10 +32395,10 @@ function _finLancCascataRender(){
 
       <div class="finmv-chips">
         ${FIN_MOV_VISOES.map(v=>{
-          const n = ctx.rows.filter(l => v.ok(l, ctx)).length;
+          const n = _finMovContadorVisao(v.id);
           return `<button class="finmv-chip ${s.visao===v.id?'on':''}" onclick="_finMovSetVisao('${v.id}')">${v.label}<span class="n">${n}</span></button>`;
         }).join('')}
-        ${salvas.map(v=>`<button class="finmv-chip" onclick="_finMovAplicarVisaoSalva(${JSON.stringify(v.nome).replace(/"/g,'&quot;')})">${escHtml(v.nome)}<span class="x" onclick="event.stopPropagation();_finMovApagarVisaoSalva(${JSON.stringify(v.nome).replace(/"/g,'&quot;')})" title="apagar">✕</span></button>`).join('')}
+        ${salvas.map(v=>`<button class="finmv-chip ${s.visaoSalva===v.nome?'on':''}" onclick="_finMovAplicarVisaoSalva(${JSON.stringify(v.nome).replace(/"/g,'&quot;')})">${escHtml(v.nome)}<span class="x" onclick="event.stopPropagation();_finMovApagarVisaoSalva(${JSON.stringify(v.nome).replace(/"/g,'&quot;')})" title="apagar">✕</span></button>`).join('')}
         <button class="finmv-chip add" onclick="_finMovSalvarVisao()">+ Salvar visão</button>
       </div>
 
@@ -32437,12 +32526,16 @@ function _finLancCascataDiaHtml(g, ctx){
   const dt = d ? new Date(d+'T00:00:00') : null;
   const longa = dt ? `${dt.getDate()} de ${_FIN_MESES[dt.getMonth()]}` : '—';
   const dow = dt ? DOW[dt.getDay()] : '';
-  let e = 0, sa = 0;
-  g.itens.forEach(l => { const v = Math.abs(+l.valor||0); if(l.tipo_movimento===1) e += v; else sa += v; });
+  const tot = g.tot || { e:0, s:0, n:g.itens.length };
+  const saldo = tot.e - tot.s;
+  // Quando a página corta o dia ao meio, o saldo continua sendo o do dia inteiro e a
+  // faixa diz quantas linhas ainda faltam — em vez de mostrar um número parcial mudo.
+  const faltam = Math.max(0, tot.n - g.itens.length);
   return `<div class="finmv-dia">
       <span class="dd">${longa}</span><span class="dow">${dow}</span>
+      ${faltam ? `<span class="dow" title="o saldo é do dia inteiro; o resto aparece em “Mostrar mais”">+${faltam} nesta data</span>` : ''}
       <span class="rule"></span>
-      <span class="sld" style="color:${(e-sa)>=0?'#4C6647':'#A65A4A'};">${(e-sa)>=0?'+':''}${fmtRs(e-sa)}</span>
+      <span class="sld" style="color:${saldo>=0?'#4C6647':'#A65A4A'};">${saldo>=0?'+':''}${fmtRs(saldo)}</span>
     </div>${g.itens.map(l=>_finLancCascataRowHtml(l, ctx)).join('')}`;
 }
 function _finLancCascataRowHtml(l, ctx){
@@ -32537,7 +32630,7 @@ function _finMovClicarPolegar(id){
   s.popConta = null; s.menu = null;
   s.popEfet = s.popEfet === id ? null : id;
   s.efetConta = atual ? String(atual.id) : String((contas[0]||{}).id || '');
-  s.efetData = l.data_vencimento || hoje();
+  s.efetData = l.data_vencimento || _finHojeLocal();
   s.efetJuros = '';
   _finLancCascataRender();
 }
@@ -32586,6 +32679,7 @@ async function _finMovEfetivarConfirmar(id){
     // juros/multa entram como juros: a coluna existe e é o que a ficha do lançamento lê.
     if(extra > 0){ try{ await getSupabase().from('fin_lancamento').update({ juros: extra }).eq('id', id); }catch(_){} }
     s.popEfet = null;
+    _finFinanceiroInvalidaCaches();
     showToast(l.tipo_movimento===1 ? 'Recebimento confirmado.' : 'Pagamento confirmado.', 'success');
     renderFinTab('lancamentos');
   }catch(e){ showToast('Erro: '+(e.message||e), 'danger'); }
@@ -32596,11 +32690,23 @@ async function _finMovEfetivarConfirmar(id){
 async function _finMovReabrir(id){
   const ctx = window._finLancCascataCtx;
   const l = ctx && ctx.rows.find(r => r.id === id); if(!l) return;
+  // Reabrir APAGA a baixa: data de pagamento, valor pago, conciliação e os encargos.
+  // Toda outra ação destrutiva desta tela confirma antes; esta não confirmava, e um
+  // clique errado no polegar desfazia a conciliação com o extrato sem deixar rastro.
+  const perde = [];
+  if(l.data_pagamento) perde.push('a data de pagamento');
+  if(l.valor_pago != null) perde.push('o valor pago ('+fmtR(Math.abs(+l.valor_pago||0))+')');
+  if(l.conciliado) perde.push('a conciliação com o extrato');
+  if(+l.juros || +l.multa) perde.push('os juros e a multa');
+  if(perde.length && !confirm('Reabrir como previsto apaga '+perde.join(', ')+'. Não dá para desfazer. Continuar?')) return;
   try{
-    const payload = { status: 0, data_pagamento: null, valor_pago: null, conciliado: false };
+    // juros/multa acompanham a baixa: deixá-los para trás fazia a ficha mostrar encargo
+    // de uma cobrança que voltou a ser previsão.
+    const payload = { status: 0, data_pagamento: null, valor_pago: null, conciliado: false, juros: null, multa: null };
     if(l.data_vencimento) payload.data_competencia = l.data_vencimento;
     const { error } = await getSupabase().from('fin_lancamento').update(payload).eq('id', id);
     if(error) throw error;
+    _finFinanceiroInvalidaCaches();
     showToast('Reaberto como previsto.', 'success');
     renderFinTab('lancamentos');
   }catch(e){ showToast('Erro ao reabrir: '+(e.message||e), 'danger'); }
@@ -32611,11 +32717,23 @@ async function _finMovEfetivarVencidos(){
   if(!confirm(`Efetivar ${vencidos.length} lançamento(s) vencido(s)? Cada um é baixado na própria data de vencimento.`)) return;
   try{
     // Um a um porque a data de pagamento é a de cada linha — um lote com data única
-    // carimbaria todos no mesmo dia e o extrato deixaria de bater.
-    for(const l of vencidos){
-      await finApi.pagarLancamento(l.id, { dataPagamento: l.data_vencimento || hoje(), contaId: l.conta_id || null });
+    // carimbaria todos no mesmo dia e o extrato deixaria de bater. Por isso a falha no
+    // meio deixa parte baixada: o toast tem de dizer QUANTAS entraram, senão ninguém
+    // sabe onde parou nem se pode repetir a ação.
+    let feitos = 0;
+    try{
+      for(const l of vencidos){
+        await finApi.pagarLancamento(l.id, { dataPagamento: l.data_vencimento || _finHojeLocal(), contaId: l.conta_id || null });
+        feitos++;
+      }
+    }catch(err){
+      _finFinanceiroInvalidaCaches();
+      renderFinTab('lancamentos');
+      showToast(`Parou em ${feitos} de ${vencidos.length}: ${err.message||err}. As ${feitos} já baixadas ficaram; repetir a ação continua de onde parou.`, 'danger');
+      return;
     }
-    showToast(`${vencidos.length} lançamento(s) efetivado(s).`, 'success');
+    _finFinanceiroInvalidaCaches();
+    showToast(`${feitos} lançamento(s) efetivado(s).`, 'success');
     renderFinTab('lancamentos');
   }catch(e){ showToast('Erro: '+(e.message||e), 'danger'); }
 }
@@ -32641,6 +32759,7 @@ async function _finMovMoverConta(id, contaId){
   try{
     await finApi.alterarContaLote([id], contaId);
     _finLancCascataState.popConta = null;
+    _finFinanceiroInvalidaCaches();
     showToast('Conta alterada.', 'success');
     renderFinTab('lancamentos');
   }catch(e){ showToast('Erro: '+(e.message||e), 'danger'); }
@@ -32698,19 +32817,47 @@ async function _finMovMenuAcao(id, acao){
   if(acao === 'duplicar'){
     if(!l) return;
     try{
-      await finApi.saveLancamento({
+      // A cópia herda categoria, cobrança, credor e numeração. Sem isso ela nascia "sem
+      // categoria", sem cedente na sublinha e fora do chip "A repassar" — uma linha
+      // órfã que ninguém reconhecia depois.
+      const sb = getSupabase();
+      let categoriaId = null;
+      try{
+        const { data } = await sb.from('fin_lancamento_categoria')
+          .select('categoria_id,valor').eq('lancamento_id', l.id).order('valor',{ascending:false}).limit(20);
+        categoriaId = (data && data[0]) ? data[0].categoria_id : null;
+        var rateio = data || [];
+      }catch(_){ var rateio = []; }
+      const salvo = await finApi.saveLancamento({
         descricao: (l.descricao||'') + ' (cópia)', data_competencia: l.data_competencia,
         data_vencimento: l.data_vencimento, valor: Math.abs(+l.valor||0),
         tipo_movimento: l.tipo_movimento, status: 0, conta_id: l.conta_id, contato_id: l.contato_id,
       });
-      showToast('Cópia criada como prevista.', 'success');
+      const novoId = salvo && salvo.id;
+      if(novoId){
+        if(rateio.length){
+          const linhas = rateio.map(c => ({ lancamento_id: novoId, categoria_id: c.categoria_id, valor: Math.abs(+c.valor||0) }));
+          const { error } = await sb.from('fin_lancamento_categoria').insert(linhas);
+          if(error) throw error;
+        }
+        const vinc = {};
+        if(l.cobranca_id) vinc.cobranca_id = l.cobranca_id;
+        if(l.credor_id) vinc.credor_id = l.credor_id;
+        if(l.numero_parcela) { vinc.numero_parcela = l.numero_parcela; vinc.total_parcelas = l.total_parcelas; }
+        if(Object.keys(vinc).length){
+          const { error } = await sb.from('fin_lancamento').update(vinc).eq('id', novoId);
+          if(error) throw error;
+        }
+      }
+      _finFinanceiroInvalidaCaches();
+      showToast(rateio.length ? 'Cópia criada como prevista, com a mesma categoria.' : 'Cópia criada como prevista.', 'success');
       renderFinTab('lancamentos');
     }catch(e){ showToast('Erro ao duplicar: '+(e.message||e), 'danger'); }
     return;
   }
   if(acao === 'excluir'){
     if(!confirm('Excluir este lançamento? Não dá para desfazer.')) return;
-    try{ await finApi.deleteLancamento(id); showToast('Lançamento excluído.', 'success'); renderFinTab('lancamentos'); }
+    try{ await finApi.deleteLancamento(id); _finFinanceiroInvalidaCaches(); showToast('Lançamento excluído.', 'success'); renderFinTab('lancamentos'); }
     catch(e){ showToast('Erro ao excluir: '+(e.message||e), 'danger'); }
   }
 }
@@ -33038,7 +33185,7 @@ async function _finLancAbrirDrawer(lancId){
     const r = await sb.from('fin_lancamento')
       .select('id,descricao,data_competencia,data_vencimento,data_pagamento,valor,valor_pago,juros,multa,desconto,tipo_movimento,status,conciliado,conta_id,contato_id,cobranca_id,acordo_id,grupo_parcelamento,numero_parcela,total_parcelas,observacoes,fin_conta(descricao)'+extra)
       .eq('id', lancId).single();
-    if(r.error){ showToast('Erro ao abrir lançamento: '+(r.error.message||r.error), 'danger'); return; }
+    if(r.error){ _finEdFechar(); showToast('Erro ao abrir lançamento: '+(r.error.message||r.error), 'danger'); return; }
     l = r.data;
   }
 
@@ -33051,10 +33198,14 @@ async function _finLancAbrirDrawer(lancId){
 
   let dim = { contas:[], categorias:[], contatos:[] };
   try{ dim = await finApi.loadDimensoes(); }catch(_){}
-  let catAtual = null;
+  // Todas as categorias do lançamento, não `limit(1)` sem `order` — que sorteava uma das
+  // duas num rateio e depois a gravava como se fosse a única.
+  let catAtual = null, catRateio = 0;
   try{
-    const { data } = await sb.from('fin_lancamento_categoria').select('categoria_id').eq('lancamento_id', lancId).limit(1);
-    catAtual = (data && data[0]) ? data[0].categoria_id : null;
+    const { data } = await sb.from('fin_lancamento_categoria')
+      .select('categoria_id,valor').eq('lancamento_id', lancId).order('valor', { ascending:false }).limit(20);
+    catRateio = (data||[]).length;
+    catAtual = catRateio ? data[0].categoria_id : null;
   }catch(_){}
 
   let cedentes = [];
@@ -33064,11 +33215,11 @@ async function _finLancAbrirDrawer(lancId){
 
   const [serie, uso] = await Promise.all([_finEditorSerie(l).catch(()=>[l]), _finCatUso()]);
 
-  window._finDrawerCtx = { l, op, dim, cedentes, credorNome, catAtual, uso, edit: _finEdCampos(l, catAtual) };
+  window._finDrawerCtx = { l, op, dim, cedentes, credorNome, catAtual, catRateio, uso, edit: _finEdCampos(l, catAtual) };
   _finEdState = Object.assign({}, _finEdState, {
     serie, idx: Math.max(0, serie.findIndex(x => x.id === l.id)),
     escopo: 'esta', catBusca: null, catAberto: false, avancado: false, historico: false, salvando: false,
-    compTocada: false,
+    compTocada: false, catTocada: false,
   });
 
   let ov = document.getElementById('findrw-overlay');
@@ -33146,10 +33297,16 @@ function _finLancDrawerRender(){
   const cats = (dim.categorias||[]).filter(x => !x.is_father);
   const catSel = (dim.categorias||[]).find(x => String(x.id) === String(e.categoria_id));
 
-  // Escopo: a contagem real de cada opção sai da série já carregada — número inventado
-  // aqui viraria "aplicado em 8 parcelas" sobre uma série de 3.
-  const nFuturas = Math.max(0, st.serie.length - st.idx - 1);
-  const nTodas = st.serie.length;
+  // Escopo: a contagem sai do que REALMENTE será gravado — as parcelas já quitadas ficam
+  // de fora, então anunciar "8" e escrever em 5 seria mentir no rótulo.
+  const serieOk = _finEdSerieConfiavel(st.serie);
+  const euId = st.serie[st.idx] ? st.serie[st.idx].id : null;
+  const abertas = (arr) => arr.filter(x => x.id === euId || !_finEdQuitado(x)).length;
+  const nTodasAbertas   = serieOk ? abertas(st.serie) : 1;
+  const nFuturasAbertas = serieOk ? abertas(st.serie.slice(st.idx)) : 1;
+  const nQuitadas = serieOk
+    ? (st.escopo === 'futuras' ? st.serie.slice(st.idx) : st.serie).filter(x => x.id !== euId && _finEdQuitado(x)).length
+    : 0;
 
   ov.innerHTML = `
     <style>
@@ -33239,6 +33396,7 @@ function _finLancDrawerRender(){
             onfocus="_finEdCatAbrir()" oninput="_finEdCatBuscar(this.value)">
           ${st.catAberto ? _finEdCatListaHtml(cats, dim.categorias||[], uso, e) : ''}
           ${catSel ? `<div style="font-size:10.5px;color:#A6AEBD;margin-top:4px;">${escHtml(_finCatCaminho(catSel, dim.categorias||[]) || 'sem hierarquia')}</div>` : ''}
+          ${c.catRateio > 1 ? `<div style="font-size:10.5px;color:#7A6428;margin-top:4px;">Este lançamento está rateado em ${c.catRateio} categorias. Trocar aqui substitui o rateio inteiro.</div>` : ''}
         </div>
 
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
@@ -33269,17 +33427,22 @@ function _finLancDrawerRender(){
         ${op ? _finDrawerRepasseHtml(op, credorNome) : ''}
         ${op ? _finDrawerNfHtml(op) : ''}
 
-        ${st.serie.length > 1 ? `<div class="findrw-bloco">
+        ${serieOk ? `<div class="findrw-bloco">
           <span class="findrw-bt">Escopo do parcelamento</span>
           <div class="findrw-rad">
-            <label><input type="radio" name="findrw-escopo" ${st.escopo==='esta'?'checked':''} onchange="_finEdState.escopo='esta'"> Somente esta parcela</label>
-            <label><input type="radio" name="findrw-escopo" ${st.escopo==='futuras'?'checked':''} onchange="_finEdState.escopo='futuras'"> Esta e as próximas (${nFuturas+1})</label>
-            <label><input type="radio" name="findrw-escopo" ${st.escopo==='todas'?'checked':''} onchange="_finEdState.escopo='todas'"> Todas as parcelas do acordo (${nTodas})</label>
+            <label><input type="radio" name="findrw-escopo" ${st.escopo==='esta'?'checked':''} onchange="_finEdState.escopo='esta';_finLancDrawerRender()"> Somente esta parcela</label>
+            <label><input type="radio" name="findrw-escopo" ${st.escopo==='futuras'?'checked':''} onchange="_finEdState.escopo='futuras';_finLancDrawerRender()"> Esta e as próximas (${nFuturasAbertas})</label>
+            <label><input type="radio" name="findrw-escopo" ${st.escopo==='todas'?'checked':''} onchange="_finEdState.escopo='todas';_finLancDrawerRender()"> Todas as parcelas do acordo (${nTodasAbertas})</label>
           </div>
-          <span class="findrw-note">Vale para valor, tipo, categoria, conta e contato. Datas e situação ficam sempre só nesta parcela — carimbar a mesma data em ${nTodas} parcelas desmontaria o parcelamento. Se você mudar o texto da descrição, as outras parcelas recebem o texto novo mantendo o próprio “n/m”.</span>
-        </div>` : ''}
+          <span class="findrw-note">Vale para valor, tipo, conta e contato — e para a categoria, só se você trocá-la aqui. Datas e situação ficam sempre nesta parcela.${
+            nQuitadas ? ` <b style="font-weight:600;">${nQuitadas} parcela${nQuitadas>1?'s':''} já paga${nQuitadas>1?'s':''} ou conciliada${nQuitadas>1?'s':''} não ${nQuitadas>1?'são':'é'} alterada${nQuitadas>1?'s':''}</b> — mexer no valor delas faria o extrato deixar de bater.` : ''
+          } Mudando o texto, cada parcela mantém o próprio “n/m”.</span>
+        </div>` : (st.serie.length > 1 ? `<div class="findrw-bloco">
+          <span class="findrw-bt">Escopo do parcelamento</span>
+          <span class="findrw-note">Achei ${st.serie.length} lançamentos com esta descrição, mas eles não formam um parcelamento reconhecível (sem <code>grupo_parcelamento</code>, sem <code>acordo_id</code> e sem numeração coerente). Editar em lote poderia atingir lançamento de outro caso, então a edição vale só para esta linha.</span>
+        </div>` : '')}
 
-        ${op && op.repasse_comprovante_url ? `<a class="findrw-toggle" href="${op.repasse_comprovante_url}" target="_blank" rel="noopener">Abrir comprovante do repasse →</a>` : ''}
+        ${op && op.repasse_comprovante_url ? `<a class="findrw-toggle" href="${escHtml(op.repasse_comprovante_url)}" target="_blank" rel="noopener">Abrir comprovante do repasse →</a>` : ''}
 
         <button class="findrw-toggle" onclick="_finEdState.avancado=!_finEdState.avancado;_finLancDrawerRender()">${st.avancado?'− dados avançados':'+ dados avançados'}</button>
         ${st.avancado ? `<div class="findrw-bloco">
@@ -33343,39 +33506,105 @@ function _finEdCatListaHtml(cats, todas, uso, e){
 }
 function _finEdCatEscolher(id){
   const c = window._finDrawerCtx; if(!c) return;
+  const mudou = String(c.edit.categoria_id||'') !== String(id||'');
   c.edit.categoria_id = id;
+  // Só marca como tocada quando a categoria REALMENTE muda: reabrir a lista e reescolher
+  // a mesma não pode disparar o delete/insert do rateio.
+  if(mudou) _finEdState.catTocada = true;
   _finEdState.catAberto = false;
   _finEdState.catBusca = null;
   _finLancDrawerRender();
 }
 
+// Numeração de parcela no TEXTO. `_FIN_RE_PARCELA` (usado pela exclusão de série) só
+// enxerga " n/m" no fim; o gerador de parcelamento do próprio sistema escreve "(n/m)" e
+// o de acordo escreve "Parcela n/m · devedor". Reescrever a descrição de uma série sem
+// reconhecer esses formatos carimbava texto idêntico em todas as parcelas e apagava a
+// numeração do acordo. Aqui reconhecemos os três, e — regra de ouro — quando NÃO se
+// consegue localizar a numeração de uma parcela, a descrição dela não é tocada.
+const FIN_ED_FORMATOS_PARCELA = [
+  { re: /\s(\d+)\s*\/\s*(\d+)\s*$/,        monta: (base, n, t) => `${base} ${n}/${t}` },
+  { re: /\s\((\d+)\s*\/\s*(\d+)\)\s*$/,    monta: (base, n, t) => `${base} (${n}/${t})` },
+  { re: /^Parcela\s+(\d+)\s*\/\s*(\d+)\s*(?:·|-)?\s*/i, monta: (base, n, t) => `Parcela ${n}/${t} · ${base}` },
+];
+// Devolve { base, n, total, monta } ou null se o texto não carrega numeração.
+function _finEdNumeracao(desc){
+  const d = String(desc || '');
+  for(const f of FIN_ED_FORMATOS_PARCELA){
+    const m = d.match(f.re);
+    if(m) return { base: d.replace(f.re, '').trim(), n: +m[1], total: +m[2], monta: f.monta };
+  }
+  return null;
+}
+
+// Uma série só é editável em lote quando ela é DE VERDADE uma série. Sem
+// `grupo_parcelamento` nem `acordo_id`, o casamento é por texto e pode juntar coisas que
+// só se parecem — 24 aluguéis mensais do mesmo contato, dois devedores homônimos. Exigir
+// numeração coerente (todo mundo com o mesmo total, sem número repetido) é o que separa
+// um parcelamento real de uma coincidência de nome.
+function _finEdSerieConfiavel(serie){
+  if(!serie || serie.length < 2) return false;
+  if(serie.some(x => x.grupo_parcelamento || x.acordo_id)) return true;
+  const nums = serie.map(x => _finEdNumeracao(x.descricao));
+  if(nums.some(x => !x)) return false;
+  const total = nums[0].total;
+  if(nums.some(x => x.total !== total)) return false;
+  return new Set(nums.map(x => x.n)).size === nums.length;
+}
+// Parcela já quitada não entra no escopo: reescrever `valor` de uma linha conciliada faz
+// o extrato deixar de bater, e a exclusão de série já protege isso explicitamente
+// ("parcela paga NUNCA é excluída"). O editor passa a seguir a mesma regra.
+const _finEdQuitado = l => l.status === 1 || l.status === 2 || !!l.data_pagamento || !!l.conciliado;
+
 // Ids a que o escopo se aplica. 'futuras' conta da parcela aberta para a frente na
 // ORDEM DA SÉRIE (data, depois número) — a mesma que a exclusão de série usa.
+// Devolve { ids, quitadas } — `quitadas` são as que foram deixadas de fora, para a
+// confirmação poder dizer isso em vez de mexer nelas em silêncio.
 function _finEdIdsEscopo(){
   const st = _finEdState;
-  if(st.escopo === 'todas') return st.serie.map(x => x.id);
-  if(st.escopo === 'futuras') return st.serie.slice(st.idx).map(x => x.id);
-  return [st.serie[st.idx] ? st.serie[st.idx].id : null].filter(Boolean);
+  const eu = st.serie[st.idx] ? st.serie[st.idx].id : null;
+  if(st.escopo === 'esta' || !_finEdSerieConfiavel(st.serie)) return { ids: eu ? [eu] : [], quitadas: [] };
+  const alvo = st.escopo === 'todas' ? st.serie : st.serie.slice(st.idx);
+  const ids = [], quitadas = [];
+  for(const x of alvo){
+    if(x.id === eu) continue;                  // a parcela aberta entra sempre, quitada ou não
+    (_finEdQuitado(x) ? quitadas : ids).push(x.id);
+  }
+  return { ids: (eu ? [eu] : []).concat(ids), quitadas };
 }
 async function _finEdSalvar(irProxima){
   const c = window._finDrawerCtx; if(!c) return;
-  const e = c.edit, l = c.l, st = _finEdState;
+  const st = _finEdState;
+  if(st.salvando) return;                      // ⌘↵ repetido intercalava delete/insert de categoria
+  const e = c.edit, l = c.l;
   if(!e.descricao.trim()){ showToast('Descrição obrigatória.', 'warning'); return; }
   const valor = parseValorBR(e.valor);
   if(!(valor > 0)){ showToast('Valor obrigatório.', 'warning'); return; }
+  const { ids, quitadas } = _finEdIdsEscopo();
+  if(!ids.length){ showToast('Nada para salvar.', 'warning'); return; }
+  if(quitadas.length && !confirm(`${quitadas.length} parcela(s) do escopo já foram pagas ou conciliadas e NÃO serão alteradas. Continuar salvando nas outras ${ids.length}?`)) return;
   st.salvando = true; _finLancDrawerRender();
   try{
     const sb = getSupabase();
     const sign = e.tipo === 0 ? -1 : 1;
     const pagoAgora = e.status === 1 || e.status === 2;
-    const dtPagamento = pagoAgora ? (e.data_pagamento || null) : null;
+    // Marcar "Pago" sem informar a data gravava status 1 com data_pagamento NULL — a
+    // linha ficava fora de toda conferência por data. O modal antigo já resolvia assim
+    // (usa a competência como data do pagamento); o editor passa a fazer o mesmo.
+    const dtPagamento = pagoAgora
+      ? (e.data_pagamento || e.data_competencia || e.data_vencimento || _finHojeLocal())
+      : null;
     // A coluna DATA da lista mostra data_competencia: a data em que o dinheiro se move —
-    // a de pagamento no que já foi pago, o vencimento no que está em aberto. Mexer só no
-    // vencimento deixava a linha listada no dia antigo (era o defeito do #600). Só para
-    // de acompanhar quando alguém edita a competência à mão em "dados avançados".
-    const competencia = st.compTocada
-      ? (e.data_competencia || null)
-      : (dtPagamento || e.data_vencimento || e.data_competencia || null);
+    // a de pagamento no que já foi pago, o vencimento no que está em aberto (defeito do
+    // #600). Só recalcula quando alguma dessas três coisas MUDOU; salvar sem tocar em
+    // data nem situação não pode mover a competência de lugar (uma despesa de julho com
+    // vencimento em agosto migrava de mês só por corrigir a descrição).
+    const mexeuNasDatas = e.data_vencimento !== (l.data_vencimento || '')
+                       || e.data_pagamento  !== (l.data_pagamento  || '')
+                       || e.status !== (+l.status || 0);
+    const competencia = st.compTocada ? (e.data_competencia || null)
+      : (mexeuNasDatas ? (dtPagamento || e.data_vencimento || e.data_competencia || null)
+                       : (e.data_competencia || null));
     // Só esta parcela: datas, situação, observação e o texto da descrição.
     const desta = {
       descricao: e.descricao.trim(),
@@ -33385,6 +33614,13 @@ async function _finEdSalvar(irProxima){
       status: e.status,
       observacoes: e.observacoes || null,
     };
+    // Reabrir pelo editor tem de limpar o mesmo que o polegar limpa, senão a linha fica
+    // "prevista" com valor_pago e conciliado ainda de pé — e todo `_finLancQuitado` do
+    // arquivo continua tratando-a como paga.
+    if(!pagoAgora){ desta.valor_pago = null; desta.conciliado = false; desta.juros = null; desta.multa = null; }
+    // `valor_pago` é assinado igual a `valor` (ver pagarLancamento). Inverter Entrada↔
+    // Saída sem reassinar deixava a linha com os dois sinais contrários.
+    else if(l.valor_pago != null) desta.valor_pago = sign * Math.abs(+l.valor_pago || 0);
     // Estes acompanham o escopo escolhido — são os que fazem sentido repetir numa série.
     const daSerie = {
       valor: sign * Math.abs(valor),
@@ -33392,40 +33628,62 @@ async function _finEdSalvar(irProxima){
       conta_id: e.conta_id || null,
       contato_id: e.contato_id || null,
     };
-    const ids = _finEdIdsEscopo();
     let r = await sb.from('fin_lancamento').update(Object.assign({}, daSerie, desta)).eq('id', l.id);
     if(r.error) throw r.error;
     const outros = ids.filter(x => x !== l.id);
+    let semNumeracao = 0;
     if(outros.length){
       r = await sb.from('fin_lancamento').update(daSerie).in('id', outros);
       if(r.error) throw r.error;
-      // A descrição NÃO pode ser carimbada igual em toda a série: é dela que a própria
-      // série é reconhecida (717 de 886 linhas em 12/08/2026 tinham "n/m" no texto e nada
-      // nas colunas). Quando a base muda, cada parcela recebe a base nova mantendo o
-      // próprio "n/m" — texto idêntico em oito linhas apagaria a numeração do acordo.
-      const baseNova = _finSerieBase(desta.descricao);
-      const baseAntiga = _finSerieBase(l.descricao || '');
+      // A descrição não pode ser carimbada igual em toda a série: é dela que a própria
+      // série é reconhecida. Cada parcela recebe a base nova mantendo o PRÓPRIO número,
+      // no formato em que ele já estava; quem não tem numeração legível fica intocado.
+      const numAncora = _finEdNumeracao(desta.descricao);
+      const baseNova  = numAncora ? numAncora.base : desta.descricao;
+      const numAntiga = _finEdNumeracao(l.descricao || '');
+      const baseAntiga = numAntiga ? numAntiga.base : (l.descricao || '');
       if(baseNova && baseNova !== baseAntiga){
         for(const id of outros){
           const item = st.serie.find(x => x.id === id); if(!item) continue;
-          const m = String(item.descricao||'').match(_FIN_RE_PARCELA);
+          const num = _finEdNumeracao(item.descricao);
+          if(!num){ semNumeracao++; continue; }          // sem numeração legível: não toca
           const { error } = await sb.from('fin_lancamento')
-            .update({ descricao: baseNova + (m ? ' ' + m[1] + '/' + m[2] : '') }).eq('id', id);
+            .update({ descricao: num.monta(baseNova, num.n, num.total) }).eq('id', id);
           if(error) throw error;
         }
       }
     }
-    if(e.categoria_id){
-      // O rateio é 1:1 aqui (a tela não divide categoria); trocar significa substituir.
+    // Categoria só é tocada quando o usuário REALMENTE escolheu uma nesta janela. Ela
+    // nasce pré-preenchida ao abrir; salvar qualquer outra coisa apagava a categoria de
+    // toda a série e unificava rubricas que eram diferentes de propósito.
+    if(st.catTocada && e.categoria_id){
+      // Trocar a categoria SUBSTITUI o rateio: quem estava dividido em duas rubricas
+      // perde a divisão. 97 lançamentos em produção têm rateio múltiplo — a janela avisa
+      // antes, em vez de desfazer em silêncio.
+      let comRateio = 0;
+      try{
+        const { data } = await sb.from('fin_lancamento_categoria').select('lancamento_id').in('lancamento_id', ids).limit(2000);
+        const cont = {}; for(const x of (data||[])) cont[x.lancamento_id] = (cont[x.lancamento_id]||0) + 1;
+        comRateio = Object.values(cont).filter(n => n > 1).length;
+      }catch(_){ /* auxiliar: na dúvida, segue e avisa no toast */ }
+      if(comRateio && !confirm(`${comRateio} lançamento(s) do escopo têm rateio em mais de uma categoria. Trocar a categoria substitui o rateio inteiro por "${(((c.dim.categorias||[]).find(x=>String(x.id)===String(e.categoria_id))||{}).descricao)||'a escolhida'}". Continuar?`)){
+        st.salvando = false; _finLancDrawerRender(); return;
+      }
       await sb.from('fin_lancamento_categoria').delete().in('lancamento_id', ids);
       const linhas = ids.map(id => ({ lancamento_id: id, categoria_id: e.categoria_id, valor: Math.abs(valor) }));
       const { error } = await sb.from('fin_lancamento_categoria').insert(linhas);
       if(error) throw error;
     }
-    showToast(ids.length > 1 ? `Salvo em ${ids.length} parcelas.` : 'Salvo.', 'success');
+    const partes = [ids.length > 1 ? `Salvo em ${ids.length} parcelas.` : 'Salvo.'];
+    if(quitadas.length) partes.push(`${quitadas.length} já quitada(s) preservada(s).`);
+    if(semNumeracao) partes.push(`${semNumeracao} sem numeração legível: descrição mantida.`);
+    showToast(partes.join(' '), 'success');
     try{ finApi.invalidateCache && finApi.invalidateCache(); }catch(_){}
+    _finFinanceiroInvalidaCaches();
+    st.salvando = false;   // reabrir já zerava isto, mas deixá-lo preso travava um
+                           // segundo salvamento se a janela seguisse aberta por outro caminho
     if(irProxima && st.idx < st.serie.length-1){ _finEdIr(1); }
-    else { _finEdFechar(); renderFinTab(window._finTab === 'receitasjudiciais' ? 'receitasjudiciais' : 'lancamentos'); }
+    else { _finEdFechar(); renderFinTab(_finAbaAtualParaRender()); }
   }catch(err){
     st.salvando = false; _finLancDrawerRender();
     showToast('Erro ao salvar: '+(err.message||err), 'danger');
@@ -33549,6 +33807,16 @@ function _finDrawerDivisaoHtml(l, op, cedentes, credorNome, valor){
   const bruto = Math.abs(+l.valor||0) || valor;
   const pct = (temCed && l.capital != null && bruto > 0) ? Math.round(Math.abs(+l.capital||0)/bruto*100) : 80;
   const calculada = temCed && l.capital != null;
+  // Título com amortização em curso não cabe num slider de porcentagem: `capital`,
+  // `meu_total` e `amortizado` são saldos do TÍTULO, não desta parcela. Sobrescrevê-los
+  // com o rateio de uma parcela quebraria a cascata. Nesse caso, a Fila é o lugar.
+  if(+l.amortizado > 0){
+    return `<div class="findrw-bloco" style="border-color:#DFC992;background:#FBF3E1;">
+      <span class="findrw-bt" style="color:#7A6428;">Divisão com o cedente</span>
+      <span class="findrw-note" style="color:#7A6428;">Este título já tem ${fmtR(+l.amortizado)} amortizados. A divisão em cascata depende dos saldos do título inteiro, que não cabem numa porcentagem desta parcela — resolva pela Fila para não desmontar o cálculo do repasse.</span>
+      <button class="findrw-btn" style="align-self:flex-start;" onclick="_finEdFechar();setFinTab('fila')">Abrir a fila</button>
+    </div>`;
+  }
   return `<div class="findrw-bloco" id="findrw-div" style="border-color:${calculada?'#DFC992':'#E7CFC7'};background:${calculada?'#FBF3E1':'#FBEAE7'};">
     <span class="findrw-bt" style="color:${calculada?'#7A6428':'#7D3F33'};">Divisão com o cedente</span>
     <label><span class="findrw-lb">Cedente</span>
@@ -33582,13 +33850,16 @@ async function _finDrawerSalvarDivisao(lancId, bruto){
       cedente_id: cedente || null,
       capital: cedente ? cap : null,
       meu_total: cedente ? +(bruto - cap).toFixed(2) : null,
-      amortizado: 0,
+      // `amortizado` NÃO é zerado: ele é o quanto do título já foi recebido, e gravar 0
+      // faria a cascata recomeçar do zero num título já parcialmente amortizado — o
+      // repasse seguinte sairia errado nos dois sentidos. Preserva-se o que havia.
       repasse_status: cedente ? 'pendente' : null,
     }).eq('id', lancId);
     if(error) throw error;
     showToast(cedente ? `Divisão salva — ${fmtR(cap)} ao cedente.` : 'Marcado como carteira própria.', 'success');
+    _finFinanceiroInvalidaCaches();
     _finEdFechar();
-    renderFinTab('lancamentos');
+    renderFinTab(_finAbaAtualParaRender());
   }catch(e){ showToast('Erro ao salvar: '+(e.message||e), 'danger'); }
 }
 function _finDrawerRepasseHtml(op, credorNome){
@@ -33597,7 +33868,7 @@ function _finDrawerRepasseHtml(op, credorNome){
       <div class="findrw-bt">REPASSE</div>
       <div style="background:#E9F0E7;border:1px solid #CFE0CB;border-radius:9px;padding:12px 14px;">
         <div style="font-size:13px;color:#4C6647;font-weight:600;">Repassado em ${(op.repasse_efetuado_em||'').slice(0,10).split('-').reverse().join('/')}</div>
-        ${op.repasse_comprovante_url ? `<a href="${op.repasse_comprovante_url}" target="_blank" class="findrw-link">Abrir comprovante →</a>` : ''}
+        ${op.repasse_comprovante_url ? `<a href="${escHtml(op.repasse_comprovante_url)}" target="_blank" rel="noopener" class="findrw-link">Abrir comprovante →</a>` : ''}
       </div>
     </div>`;
   }
@@ -34317,7 +34588,7 @@ async function _repConferirTransfer(opId){
     if(j.repasse_status==='efetuado') showToast('Confirmado no Asaas — repasse efetuado ✅','success');
     else if(j.liberado) showToast('A transferência não vingou ('+(j.motivo||j.asaas_status||'—')+'). O botão foi liberado.','warning');
     else showToast('Ainda em processamento no Asaas'+(j.asaas_status?' ('+j.asaas_status+')':'')+'.','info');
-    _finRepasseAggCache = { at:0, v:null };
+    _finFinanceiroInvalidaCaches();
     renderFinTab(window._finTab==='credores' ? 'credores' : 'repasses');
   }catch(e){ showToast('Erro ao consultar: '+(e.message||e),'danger'); }
 }
@@ -35620,8 +35891,16 @@ async function _finCaixaAgg(force){
   // de acordos.metadata.posAssinatura que a fila usa, para os dois não discordarem.
   let assinadosN = 0, semConferirN = 0;
   try{
+    // `data_assinatura` é timestamptz e o servidor roda em UTC. Comparar com a data
+    // local como texto puxava a janela 3h: acordo assinado 31/08 às 21h30 (BRT) é
+    // 01/09 00h30 em UTC e caía no mês seguinte. Os limites vão com offset explícito.
+    const off = (() => { const m = -new Date().getTimezoneOffset();
+      const sg = m >= 0 ? '+' : '-', a = Math.abs(m);
+      return `${sg}${String(Math.floor(a/60)).padStart(2,'0')}:${String(a%60).padStart(2,'0')}`; })();
+    const proxMes = new Date(t.y, t.m, 1);
+    const inicioProx = `${proxMes.getFullYear()}-${p2(proxMes.getMonth()+1)}-01T00:00:00${off}`;
     const { data } = await sb.from('acordos').select('id,metadata')
-      .gte('data_assinatura', mesIni).lte('data_assinatura', mesFim + 'T23:59:59').limit(500);
+      .gte('data_assinatura', `${mesIni}T00:00:00${off}`).lt('data_assinatura', inicioProx).limit(500);
     assinadosN = (data||[]).length;
     semConferirN = (data||[]).filter(a => !((a.metadata && a.metadata.posAssinatura) || {}).conferidoEm).length;
   }catch(_){ /* auxiliar: o card mostra 0 em vez de derrubar a aba */ }
@@ -35645,7 +35924,7 @@ async function _finCaixaAgg(force){
     atrasoOutN: atrasoOut.length, atrasoOutT: soma(atrasoOut),
     aEntrarN: aEntrar.length, aEntrarT: soma(aEntrar),
     semanaRecN: semanaRec.length, semanaRecT: soma(semanaRec),
-    semanaPagN: semanaPag.length, semanaPagT: soma(semanaPag),
+    semanaPagN: semanaPag.length, semanaPagT: soma(semanaPag),   // lidos pelo teste F-07
     // acordos
     parcelasN: parcelasMes.length, ticket, assinadosN, semConferirN,
     // repasses
@@ -35682,13 +35961,12 @@ async function renderFinVisao(el){
   const _sb = getSupabase();
   const _now = new Date();
   const _y = _now.getFullYear(), _m = _now.getMonth()+1;
-  // _serie12m() abaixo depende destes três. Sem eles a função lança ReferenceError, que o
-  // `.catch(()=>null)` do chamador engole — e "Últimos 12 meses" some da tela sem erro
-  // nenhum no console. Foi exatamente o que aconteceu na primeira versão desta função.
+  // _serie12m() abaixo depende de _sb, _y, _m e _mesFim. Sem eles a função lança
+  // ReferenceError, que o `.catch(()=>null)` do chamador engole — e "Últimos 12 meses"
+  // some da tela sem erro nenhum no console. Foi o que aconteceu na primeira versão.
+  // (_mesIni e _hoje existiam aqui e não eram usados por ninguém.)
   const _p2 = n => String(n).padStart(2,'0');
-  const _mesIni = `${_y}-${_p2(_m)}-01`;
   const _mesFim = `${_y}-${_p2(_m)}-${_p2(new Date(_y, _m, 0).getDate())}`;
-  const _hoje = `${_y}-${_p2(_m)}-${_p2(_now.getDate())}`;
 
   async function _serie12m(){
     if(!_sb) return null;
@@ -35804,17 +36082,25 @@ async function renderFinVisao(el){
       .cx-meta-h{display:flex;align-items:center;gap:9px;flex-wrap:wrap;}
       .cx-link{font-size:12px;font-weight:600;color:#15224A;cursor:pointer;}
       .cx-link:hover{color:#9C7F40;}
-      /* Piso de 230px: com 4 filhos o auto-fit fecha em 2×2 e não sobra card órfão. */
-      .cx-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;}
+      /* 4 filhos: 2×2 ou 4×1, nunca 3+1. Mesma razão da grade acima — o auto-fit fechava
+         em 3 colunas nas larguras mais comuns (1440 e 1512) e deixava um órfão. */
+      .cx-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;}
+      @media (min-width: 1780px){ .cx-metrics{grid-template-columns:repeat(4,minmax(0,1fr));} }
       .cx-metrics .lb{font-size:11px;color:#8A94A6;}
       .cx-metrics .vl{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:600;white-space:nowrap;margin-top:2px;}
       .cx-metrics .nt{font-size:10.5px;color:#6B7683;margin-top:2px;}
       .cx-trilho{margin-top:auto;height:12px;background:#F2EFE6;border-radius:6px;overflow:hidden;display:flex;}
       .cx-leg{display:flex;align-items:center;gap:14px;font-size:11px;color:#5A5F66;flex-wrap:wrap;}
       .cx-leg i{width:9px;height:9px;border-radius:2px;display:inline-block;margin-right:5px;}
-      /* Piso de 272px: com 5 filhos o auto-fit fecha em 3+2. Piso menor deixaria 4+1,
-         com um card órfão na última linha. */
-      .cx-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(272px,1fr));gap:12px;align-items:stretch;}
+      /* 5 filhos: as únicas quebras sem órfão são 5 e 3+2 (nunca 4+1). O auto-fit não
+         sabe disso, então a quebra é declarada por media query, medida na largura útil
+         real (viewport − 228px de sidebar − 56px de padding). Abaixo de 1408px de área
+         útil não cabem 5 colunas, então cai direto para 3+2 — que é o que o handoff pede. */
+      .cx-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:stretch;}
+      .cx-kpis > *:nth-child(4),.cx-kpis > *:nth-child(5){grid-column:span 1;}
+      @media (max-width: 1131px){ .cx-kpis{grid-template-columns:repeat(2,minmax(0,1fr));} }
+      @media (max-width: 795px){  .cx-kpis{grid-template-columns:minmax(0,1fr);} }
+      @media (min-width: 1692px){ .cx-kpis{grid-template-columns:repeat(5,minmax(0,1fr));} }
       .cx-kpi{background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:15px;display:flex;flex-direction:column;gap:8px;text-align:left;min-width:0;}
       .cx-kpi.click{cursor:pointer;}
       /* Nenhuma borda colorida e nenhum rótulo colorido: verde e vermelho ficam só no
@@ -35954,7 +36240,12 @@ async function renderFinVisao(el){
                  só do Asaas. O selo dizia "ASAAS" ao lado de um número que já somava o
                  razão inteiro. Judicial pendente fica de fora — esperar não é atraso. -->
             <div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:600;color:#A65A4A;white-space:nowrap;">${fmtR(A.atrasoInT)}</div>
-            <div style="font-size:12px;color:#5A5F66;">${(inad.devList||[]).length} ${plural((inad.devList||[]).length,'devedor','devedores')} com parcela vencida · todas as contas, exceto judicial</div>
+            <!-- Valor E contagem saem da MESMA fonte (o razão). Antes o valor era do razão
+                 e o "N devedores" vinha do Asaas: sem chave configurada a tela dizia
+                 "R$ 9.400,00 · 0 devedores", e quem paga fora do Asaas entrava no valor e
+                 sumia da contagem. -->
+            <div style="font-size:12px;color:#5A5F66;">${A.atrasoInN} ${plural(A.atrasoInN,'parcela vencida','parcelas vencidas')} · todas as contas, exceto judicial${
+              (inad.devList||[]).length ? ` · ${(inad.devList||[]).length} ${plural((inad.devList||[]).length,'devedor','devedores')} no Asaas` : ''}</div>
             <button class="cx-btn2" onclick="setFinTab('asaas')">Disparar régua de cobrança</button>
           </section>
         </div>
@@ -36094,9 +36385,14 @@ async function _finTemColunaPedidoJud(){
   if(_finTemPedidoJud !== null) return _finTemPedidoJud;
   try{
     const { error } = await getSupabase().from('fin_lancamento').select('judicial_pedido_em').limit(1);
-    _finTemPedidoJud = !error;
-  }catch(_){ _finTemPedidoJud = false; }
-  return _finTemPedidoJud;
+    // Só a AUSÊNCIA da coluna (42703 do Postgres / "does not exist") vira `false` em
+    // cache. Uma oscilação de rede ou um token expirando gravava `false` para o resto da
+    // sessão, e a tela passava a dizer "migração pendente" sobre uma coluna que existe.
+    if(!error){ _finTemPedidoJud = true; return true; }
+    const msg = (error.message || '') + ' ' + (error.code || '');
+    if(/42703|does not exist|could not find/i.test(msg)){ _finTemPedidoJud = false; return false; }
+    return false;                              // desta vez não; volta a perguntar depois
+  }catch(_){ return false; }
 }
 let _finJudState = { popEfet:null, menu:null, efetConta:'', efetData:'', efetValor:'' };
 
@@ -36104,15 +36400,18 @@ let _finJudState = { popEfet:null, menu:null, efetConta:'', efetData:'', efetVal
 // e o desconto em folha do INSS aparece na descrição. Um lugar só — o cabeçalho do grupo,
 // a chave de agrupamento e o texto de conferência da linha leem daqui.
 function _finJudModalidade(l, catNome){
-  if(/\bINSS\b/i.test(l.descricao||'')) return 'Desconto INSS';
+  // A CATEGORIA manda. Deixar o regex da descrição vencer fazia "Sisbajud — bloqueio
+  // conta INSS de Fulano" virar "Desconto INSS": separava a série do mesmo devedor em
+  // dois grupos e ainda oferecia "+ Próximo mês" para um bloqueio que é evento único.
   if(/sisbajud/i.test(catNome||'')) return 'Sisbajud';
+  if(/\bINSS\b/i.test(l.descricao||'')) return 'Desconto INSS';
   return 'Penhora de salário';
 }
 const _finJudDias = (iso) => {
   if(!iso) return null;
   const t = new Date(String(iso).slice(0,10)+'T00:00:00').getTime();
   if(!isFinite(t)) return null;
-  return Math.max(0, Math.floor((new Date(hoje()+'T00:00:00').getTime() - t)/86400000));
+  return Math.max(0, Math.floor((new Date(_finHojeLocal()+'T00:00:00').getTime() - t)/86400000));
 };
 const _finJudPrevisto = l => l.data_vencimento || l.data_competencia || '';
 
@@ -36148,7 +36447,12 @@ async function _finJudCarregar(){
     if(error) throw error;
     rows.push(...(data||[]));
   }
+  // Só ENTRADA. Uma despesa categorizada "Penhora" (custas, por exemplo) entrava na fila,
+  // somava ao "Aguardando o juízo" pelo valor absoluto e, ao ser marcada como recebida,
+  // virava receita no razão.
   rows.forEach(r => { r._cat = catDoLanc[r.id] || ''; });
+  const soEntradas = rows.filter(r => r.tipo_movimento === 1);
+  rows.length = 0; rows.push(...soEntradas);
 
   // Aguardando NÃO é recortado pelo período: esperar não é competência de mês nenhum, e
   // cortar pelo mês esconderia justamente os mais antigos — que são os que precisam ser
@@ -36365,7 +36669,7 @@ function _finJudAbrirEfetivar(id){
   s.menu = null;
   s.popEfet = s.popEfet === id ? null : id;
   s.efetConta = String((atual || contas[0] || {}).id || '');
-  s.efetData = hoje();
+  s.efetData = _finHojeLocal();
   s.efetValor = Math.abs(+r.valor||0).toFixed(2).replace('.', ',');
   _finJudRender();
 }
@@ -36402,17 +36706,31 @@ async function _finJudConfirmar(id){
   const creditado = parseValorBR(s.efetValor);
   if(!(creditado > 0)){ showToast('Informe o valor creditado.', 'warning'); return; }
   try{
-    await finApi.confirmarRecebimentoJudicial(id, s.efetData, s.efetConta);
+    const sb = getSupabase();
+    // ORDEM IMPORTA. `confirmarRecebimentoJudicial` é a escrita que tira o valor da fila:
+    // depois dela o lançamento não é mais "pendente" e some desta aba. Se ela viesse
+    // primeiro e o ajuste de valor falhasse, o lançamento entraria em Movimentações e no
+    // KPI pelo montante ESPERADO, sem a diferença registrada e sem como refazer por aqui.
+    // Por isso o valor é ajustado ANTES, e a saída da fila é a última coisa a acontecer.
     if(Math.abs(creditado - esperado) >= 0.005){
-      // A diferença não some: o valor do lançamento passa a ser o que caiu de fato e a
-      // observação guarda o que se esperava — senão o extrato deixa de bater e ninguém
-      // sabe por quê.
+      // A observação é relida agora, e não do contexto carregado quando a aba abriu:
+      // outra aba pode ter escrito nela nesse meio-tempo.
+      let obsAtual = r.observacoes || '';
+      try{
+        const { data } = await sb.from('fin_lancamento').select('observacoes').eq('id', id).maybeSingle();
+        if(data) obsAtual = data.observacoes || '';
+      }catch(_){}
       const nota = `Alvará creditado em ${s.efetData.split('-').reverse().join('/')}: ${fmtR(creditado)} (esperado ${fmtR(esperado)}).`;
-      const obs = (r.observacoes ? r.observacoes + '\n' : '') + nota;
-      const { error } = await getSupabase().from('fin_lancamento')
-        .update({ valor: creditado, valor_pago: creditado, observacoes: obs }).eq('id', id);
+      const { error } = await sb.from('fin_lancamento')
+        .update({ valor: creditado, observacoes: (obsAtual ? obsAtual + '\n' : '') + nota }).eq('id', id);
       if(error) throw error;
     }
+    // `valor_pago` é assinado igual a `valor` (ver pagarLancamento) — aqui é sempre
+    // entrada, então positivo.
+    await finApi.confirmarRecebimentoJudicial(id, s.efetData, s.efetConta);
+    { const { error } = await sb.from('fin_lancamento').update({ valor_pago: creditado }).eq('id', id);
+      if(error) console.warn('valor_pago do alvará não gravou:', error.message||error); }
+    _finFinanceiroInvalidaCaches();
     s.popEfet = null;
     showToast(creditado === esperado ? 'Valor creditado — saiu da fila judicial.' : `Creditado ${fmtR(creditado)} — diferença registrada.`, 'success');
     renderFinTab('receitasjudiciais');
@@ -36440,7 +36758,7 @@ async function _finJudMenuAcao(id, acao){
   if(acao === 'duplicar'){ _finJudProximo(id, false); return; }
   if(acao === 'excluir'){
     if(!confirm('Excluir este valor da fila judicial? Não dá para desfazer.')) return;
-    try{ await finApi.deleteLancamento(id); showToast('Valor judicial excluído.', 'success'); renderFinTab('receitasjudiciais'); }
+    try{ await finApi.deleteLancamento(id); _finFinanceiroInvalidaCaches(); showToast('Valor judicial excluído.', 'success'); renderFinTab('receitasjudiciais'); }
     catch(e){ showToast('Erro ao excluir: '+(e.message||e), 'danger'); }
   }
 }
@@ -36474,12 +36792,16 @@ async function _finJudSalvarDatas(id){
   const ctx = window._finJudCtx;
   const prev = (document.getElementById('finjd-prev')||{}).value || null;
   const ped  = (document.getElementById('finjd-ped')||{}).value || null;
+  // Sem data prevista o lançamento sai de toda consulta recortada por competência e passa
+  // a existir só nesta aba, exibido como "sem data" — some do resto do sistema em silêncio.
+  if(!prev){ showToast('Informe a data prevista: sem ela o valor some de todas as outras telas.', 'warning'); return; }
   try{
     const payload = { data_vencimento: prev, data_competencia: prev };
     if(ctx && ctx.temPedido) payload.judicial_pedido_em = ped;
     const { error } = await getSupabase().from('fin_lancamento').update(payload).eq('id', id);
     if(error) throw error;
     closeModal('finjd-datas');
+    _finFinanceiroInvalidaCaches();
     showToast('Datas atualizadas.', 'success');
     renderFinTab('receitasjudiciais');
   }catch(e){ showToast('Erro: '+(e.message||e), 'danger'); }
@@ -36489,6 +36811,7 @@ async function _finJudSalvarDatas(id){
 async function _finJudProximo(idBase, mensal){
   const ctx = window._finJudCtx;
   const r = ctx && ctx.pendentes.find(x => x.id === idBase); if(!r) return;
+  let novoIdCriado = null;
   const prev = _finJudPrevisto(r);
   let nova = prev;
   if(mensal && prev){
@@ -36508,18 +36831,39 @@ async function _finJudProximo(idBase, mensal){
     // Sem a categoria o novo lançamento não é judicial: cairia direto em Movimentações e
     // voltaria a contar como atraso — exatamente o que esta aba existe para evitar.
     const novoId = salvo && (salvo.id || (salvo[0] && salvo[0].id));
-    if(novoId){
-      const sb = getSupabase();
-      const { data: link } = await sb.from('fin_lancamento_categoria').select('categoria_id,valor').eq('lancamento_id', r.id).limit(5);
-      const rows = (link||[]).map(c => ({ lancamento_id: novoId, categoria_id: c.categoria_id, valor: Math.abs(+r.valor||0) }));
-      if(rows.length) await sb.from('fin_lancamento_categoria').insert(rows);
-      if(r.cobranca_id || r.credor_id){
-        await sb.from('fin_lancamento').update({ cobranca_id: r.cobranca_id || null, credor_id: r.credor_id || null }).eq('id', novoId);
-      }
+    if(!novoId) throw new Error('o lançamento novo não retornou id');
+    novoIdCriado = novoId;
+    const sb = getSupabase();
+    // SEM CATEGORIA O LANÇAMENTO NÃO É JUDICIAL: ele cairia em Movimentações e voltaria a
+    // contar como atraso — exatamente o que esta aba existe para impedir. Por isso o erro
+    // aqui não é engolido: se a categoria não for copiada, a cópia é desfeita.
+    const { data: link, error: eSel } = await sb.from('fin_lancamento_categoria')
+      .select('categoria_id,valor').eq('lancamento_id', r.id).limit(20);
+    if(eSel) throw eSel;
+    if(!link || !link.length) throw new Error('o lançamento de origem está sem categoria judicial');
+    // O rateio original é preservado: copiar o valor cheio para cada categoria dobrava o
+    // valor por rubrica em qualquer relatório que some por categoria.
+    const somaOrig = link.reduce((a,c) => a + Math.abs(+c.valor||0), 0) || 1;
+    const bruto = Math.abs(+r.valor||0);
+    const linhas = link.map(c => ({ lancamento_id: novoId, categoria_id: c.categoria_id,
+                                    valor: +(bruto * (Math.abs(+c.valor||0) / somaOrig)).toFixed(2) }));
+    const { error: eIns } = await sb.from('fin_lancamento_categoria').insert(linhas);
+    if(eIns) throw eIns;
+    if(r.cobranca_id || r.credor_id){
+      const { error } = await sb.from('fin_lancamento')
+        .update({ cobranca_id: r.cobranca_id || null, credor_id: r.credor_id || null }).eq('id', novoId);
+      if(error) throw error;
     }
+    _finFinanceiroInvalidaCaches();
     showToast(mensal ? `Depósito previsto para ${nova ? nova.split('-').reverse().join('/') : 'sem data'} criado.` : 'Novo valor criado — ajuste data e montante.', 'success');
     renderFinTab('receitasjudiciais');
-  }catch(e){ showToast('Erro ao criar: '+(e.message||e), 'danger'); }
+  }catch(e){
+    // Desfaz a cópia pela metade: um lançamento sem categoria é pior do que nenhum.
+    if(novoIdCriado){
+      try{ await finApi.deleteLancamento(novoIdCriado); }catch(_){}
+    }
+    showToast('Não criei o valor: '+(e.message||e), 'danger');
+  }
 }
 function _finJudNovoValor(){
   showToast('Cadastre a entrada com a categoria Sisbajud ou Penhora — ela aparece aqui automaticamente.', 'info');
