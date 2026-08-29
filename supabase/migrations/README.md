@@ -51,3 +51,18 @@ Aplicar manualmente via SQL editor ou:
 ```
 supabase db push
 ```
+
+## 20260829 — `fin_lancamento.judicial_pedido_em` (aba Judicial)
+
+**Não aplicada.** Uma coluna, aditiva, sem backfill:
+
+```sql
+alter table public.fin_lancamento add column if not exists judicial_pedido_em date;
+```
+
+É a data do pedido de expedição do alvará/ofício — a origem da espera mostrada na
+aba Judicial. A UI já lê a coluna com fallback (`_finTemColunaPedidoJud()` pergunta
+uma vez por sessão): enquanto a migração não for aplicada, a aba funciona inteira e
+apenas os cards **espera média** e **parados há +60 dias** ficam em "—", com a nota
+dizendo que a migração está pendente. Depois de aplicar, a data se informa pelo
+diálogo "Alterar data prevista" do menu ⋮ de cada linha.
