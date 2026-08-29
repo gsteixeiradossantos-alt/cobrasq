@@ -29491,7 +29491,7 @@ const FIN_CASCATA_TABS = ['credores','fila','visao','lancamentos','repasses','pr
 const FIN_MENUS = [
   {id:'outros', label:'Outros', grupos:[
     {grupo:'Sem destino decidido', itens:[
-      {id:'receitasjudiciais', label:'Judicial (Sisbajud e penhora)'},
+      // 'receitasjudiciais' saiu daqui em 29/08: virou a 4ª aba fixa (FIN_CASCATA_UI_TABS).
       {id:'conciliacao', label:'Conciliação bancária'},
       {id:'fechamento', label:'Fechamento do mês'},
     ]},
@@ -29898,7 +29898,9 @@ async function _finRepasseLiberado(force){
     });
   }
   itens.sort((a,b)=> a.vence < b.vence ? -1 : (a.vence > b.vence ? 1 : 0));
-  return { itens, total: +itens.reduce((s,i)=>s+i.valor,0).toFixed(2), retidos, semPar };
+  // `previstas` = repasse já atrelado a uma entrada mas ainda não liberado pelo
+  // cronograma (a parcela do devedor não venceu). É o card "A revisar" da aba.
+  return { itens, total: +itens.reduce((s,i)=>s+i.valor,0).toFixed(2), retidos, semPar, previstas: Math.max(0, fila.length - itens.length) };
 }
 
 async function _finRepasseAgg(force){
@@ -29945,6 +29947,7 @@ async function _finRepasseAgg(force){
     r.maisAntigo = lib.itens.length ? lib.itens[0].vence : null;
     r.retidos = lib.retidos;
     r.semPar = lib.semPar;
+    r.previstas = lib.previstas;
     // Estes dois só eram calculados no caminho de fallback logo abaixo. Como o caminho
     // do cronograma retorna antes, o card mostrava "Divergências: undefined" e a aba
     // contava 0 tendo 16 itens na lista.
@@ -29996,11 +29999,23 @@ async function _finCascataMetricas(force){
 //   visao       → Caixa                  (quanto sobra de livre e se o mês bate a meta)
 //   lancamentos → Movimentações          (triagem dos lançamentos do mês)
 //   credores    → Recebíveis e repasses  (honrar a custódia do cedente)
+//   receitasjudiciais → Judicial          (o que depende de o juízo liberar)
 const FIN_CASCATA_UI_TABS = [
-  {id:'visao', label:'Caixa'},
-  {id:'lancamentos', label:'Movimentações'},
-  {id:'credores', label:'Recebíveis e repasses'},
+  {id:'visao', label:'Caixa'},                                        // sem contador: a aba É o resumo
+  {id:'lancamentos', label:'Movimentações', cnt:true},
+  {id:'credores', label:'Recebíveis e repasses', cnt:true, acao:true},
+  {id:'receitasjudiciais', label:'Judicial', cnt:true},
 ];
+// Último contador conhecido de cada aba. O cabeçalho é remontado a cada troca de aba;
+// sem esta memória, os contadores voltavam a "—" toda vez e só reapareciam depois de
+// visitar a aba de novo. Cada render escreve aqui o número que ele mesmo mostrou — é a
+// mesma base da lista, nunca uma contagem paralela.
+window._finCnt = window._finCnt || {};
+function _finSetCnt(tabId, n){
+  window._finCnt[tabId] = n;
+  const e = document.getElementById('fincx-cnt-'+tabId);
+  if(e) e.textContent = n;
+}
 function _finCascataIrPara(tabId){
   setFinTab(tabId);
 }
@@ -30311,6 +30326,9 @@ async function renderFinanceiroCascata(el, activeTab){
       .fincx-btn-novo:hover{background:#15224A;}
       .fincx-btn-novo.ghost{background:#fff;color:#0A1530;border:1px solid #D8D2C5;font-weight:500;}
       .fincx-btn-novo.ghost:hover{background:#FBFAF6;}
+      .fincx-sync-btn{display:flex;align-items:center;gap:7px;background:#FBF3E1;border:1px solid #DFC992;color:#7A6428;border-radius:6px;padding:6px 10px;font-size:12px;font-weight:600;white-space:nowrap;cursor:pointer;font-family:inherit;}
+      .fincx-sync-btn:hover{background:#F7EBCF;}
+      .fincx-sync-btn .pt{width:6px;height:6px;border-radius:50%;background:#9C7F40;display:block;flex-shrink:0;}
       .fincx-l2{padding:14px 0 18px;}
       .fincx-h1{font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:500;letter-spacing:-.02em;color:#0A1530;margin:0;}
       .fincx-sub{font-size:13px;color:#5A5F66;margin-top:4px;}
@@ -30323,6 +30341,11 @@ async function renderFinanceiroCascata(el, activeTab){
       .fincx-tab-menu{gap:6px;}
       .fincx-caret{font-size:10px;opacity:.7;}
       .fincx-body{margin:0 -28px;padding:22px 28px 60px;background:#FBFAF6;min-height:60vh;}
+      /* Largura máxima de 1560px, centralizada, no cabeçalho E no corpo. Sem isto, em
+         tela larga a descrição da tabela absorve toda a sobra e as colunas se espalham —
+         a página renderizava a 1932px. Cabeçalho e corpo usam o mesmo container para não
+         desalinharem quando a tela passa de 1560. */
+      .fincx-l1,.fincx-l2,.fincx-l3,.fincx-body > #fin-content{max-width:1560px;margin-left:auto;margin-right:auto;width:100%;}
     </style>
     <div class="fincx-faixa">
       <div class="fincx-l1">
@@ -30333,6 +30356,7 @@ async function renderFinanceiroCascata(el, activeTab){
             <button class="fincx-nav-lbl" id="fincx-periodo-lbl" onclick="_finPeriodoAbrirMenu(event)">${escHtml(_finPeriodoRotulo())}</button>
             <button class="fincx-nav-seta" title="Próximo" onclick="_finPeriodoPasso(1)">&rsaquo;</button>
           </div>` : ''}
+          <span id="fincx-sync"></span>
           <button class="fincx-btn-novo ghost" onclick="_finBuscaAbrir()" title="Buscar contato, valor, parcela, categoria (⌘K)">${ico('search',13)} Buscar <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;opacity:.7;margin-left:4px;">⌘K</span></button>
           <button class="fincx-btn-novo ghost" onclick="importarBoletosAsaas('dry')" title="Cadastra os boletos ativos do Asaas como lançamentos (prévia → cria 1 → cria todos)">${ico('sync',13)} Importar boletos Asaas</button>
           <button class="fincx-btn-novo ghost" onclick="abrirNovaCobrancaAsaasGlobal()">${ico('plus',13)} Nova cobrança</button>
@@ -30344,8 +30368,8 @@ async function renderFinanceiroCascata(el, activeTab){
         <div class="fincx-sub" id="fincx-header-sub">carregando o resumo do mês…</div>
       </div>
       <div class="fincx-l3">
-        ${FIN_CASCATA_UI_TABS.map(t=>`<div class="fincx-tab ${t.id===activeTab?'active':''}" onclick="_finCascataIrPara('${t.id}')">
-          <span>${t.label}</span><span class="fincx-cnt" id="fincx-cnt-${t.id}">—</span>
+        ${FIN_CASCATA_UI_TABS.map(t=>`<div class="fincx-tab ${t.id===activeTab?'active':''}" ${t.acao?'data-acao="1"':''} onclick="_finCascataIrPara('${t.id}')">
+          <span>${t.label}</span>${t.cnt?`<span class="fincx-cnt" id="fincx-cnt-${t.id}">${window._finCnt[t.id] != null ? window._finCnt[t.id] : '—'}</span>`:''}
         </div>`).join('')}
         ${FIN_MENUS.map(m=>{
           const dentro = FIN_MENU_DE[activeTab] && FIN_MENU_DE[activeTab].menu===m.id;
@@ -30385,7 +30409,19 @@ async function renderFinanceiroCascata(el, activeTab){
     // o topo ainda os mostra.
     // O aviso de saldo desatualizado acompanha o caixa livre, que agora está no corpo
     // da aba Caixa (card escuro) — ver a frase final de renderFinVisao.
-    set('fincx-cnt-credores', m.filaCount);
+    // Alerta de sync: "Asaas há N dias · conciliar". Só existe quando há o que anunciar —
+    // o saldo declarado de alguma conta passou de FIN_SALDO_STALE_DIAS. Nada o atualiza
+    // sozinho desde que a sync do Controlle foi desligada, e um saldo velho envenena em
+    // silêncio o caixa livre.
+    const sy = document.getElementById('fincx-sync');
+    if(sy){
+      const pior = (m.stale||[])[0];
+      sy.innerHTML = pior
+        ? `<button class="fincx-sync-btn" onclick="setFinTab('conciliacao')" title="Saldo declarado de ${escHtml(pior.nome||'')} conferido ${escHtml(_finSaldoIdadeTexto(pior.dias))}">`
+          + `<span class="pt"></span>${escHtml((pior.nome||'conta').split(' — ')[0])} há ${pior.dias} ${pior.dias===1?'dia':'dias'} · conciliar</button>`
+        : '';
+    }
+    _finSetCnt('credores', m.filaCount);
     set('fincx-cnt-fila', m.filaCount);
     set('fincx-cnt-repasses', m.repassesCount);
     set('fincx-cnt-conciliacao', '—');
@@ -31348,18 +31384,21 @@ async function renderFinCredores(el, aba){
   if(aba) _finCredoresState.aba = aba;
   const atual = FIN_CREDORES_ABAS.find(a=>a.id===_finCredoresState.aba) || FIN_CREDORES_ABAS[0];
   const r = await _finCredoresResumo();
-  const card = (lb, valor, sub, cor) => `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:12px 15px;min-width:0;">
-      <div style="font-size:11.5px;color:#8A94A6;">${lb}</div>
-      <div style="font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:600;margin-top:2px;color:${cor||'#0A1530'};">${valor}</div>
-      <div style="font-size:10.5px;color:#A6AEBD;margin-top:1px;">${sub}</div>
+  // Tipografia dos KPIs no padrão do módulo: rótulo Mono 9.5px .14em sempre no MESMO
+  // cinza (nenhum rótulo colorido, nenhuma borda colorida), valor Mono 21px/600, nota
+  // 11.5px. Verde e vermelho ficam só no dinheiro.
+  const card = (lb, valor, sub, cor) => `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;min-width:0;display:flex;flex-direction:column;gap:8px;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">${lb}</div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;white-space:nowrap;color:${cor||'#0A1530'};">${valor}</div>
+      <div style="font-size:11.5px;color:#5A5F66;margin-top:auto;">${sub}</div>
     </div>`;   // `sub` aceita HTML (o card Divergências passa um link) — nunca receber texto de usuário aqui
   el.innerHTML = `
     <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px;">
       <div style="font-family:'Fraunces',Georgia,serif;font-size:26px;color:#0A1530;">Recebíveis e repasses</div>
       <div style="font-size:12.5px;color:#8A94A6;">o dinheiro que entrou e é do cedente</div>
     </div>
-    ${r ? `<div style="display:grid;grid-template-columns:1.18fr 1fr 1fr 1fr;gap:12px;margin:14px 0;align-items:stretch;">
-      <div style="background:#0A1530;border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;min-width:0;">
+    ${r ? `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(216px,1fr));gap:12px;margin:14px 0;align-items:stretch;">
+      <div style="background:#0A1530;border-radius:9px;padding:16px;display:flex;flex-direction:column;min-width:0;">
         <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;">A repassar agora</div>
         <div style="font-family:'JetBrains Mono',monospace;font-size:26px;font-weight:600;color:#C9A961;white-space:nowrap;margin-top:6px;">${fmtR(r.aRepassar)}</div>
         <div style="font-size:11.5px;color:#B4BCCC;margin-top:auto;padding-top:6px;">${r.nRepassar||0} parcela${(r.nRepassar||0)!==1?'s':''} · ${r.credores.size} cedente${r.credores.size!==1?'s':''}${(()=>{
@@ -31369,14 +31408,11 @@ async function renderFinCredores(el, aba){
         })()}${r.retidos ? `<br><span style="color:#E2C98A;">${r.retidos} vencida${r.retidos!==1?'s':''} aguardando a entrada do mês</span>` : ''}${r.semPar ? `<br><span style="color:#E2A08A;">${r.semPar} vencida${r.semPar!==1?'s':''} sem entrada correspondente</span>` : ''}</div>
         ${r.aRepassarManual > 0 ? `<div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#E2C98A;margin-top:5px;line-height:1.4;">INCLUI ${fmtR(r.aRepassarManual)} DE DIVISÃO MANUAL — NÃO APARECE NA LISTA ABAIXO</div>` : ''}
       </div>
-      ${card('Divergências', String(r.aRevisar), r.aRevisar
+      ${card('Recebido e já repassado', fmtR(r.repassadoMes), 'no mês · já pago ao cedente', '#4C6647')}
+      ${card('Divergências', String(r.aRevisar||0), r.aRevisar
           ? `parcela recebida sem divisão calculada<div style="color:#A65A4A;font-size:12px;font-weight:600;cursor:pointer;margin-top:5px;" onclick="_finIrMovimentacoes('divergencias')">Ver na tabela →</div>`
           : 'nenhuma parcela sem divisão', r.aRevisar?'#A65A4A':'#0A1530')}
-      ${card('Recebido e já repassado', fmtR(r.repassadoMes), 'no mês · já pago ao cedente', '#4F6B49')}
-      ${(()=>{ if(!r.maisAntigo) return card('Parado há mais tempo', '—', 'nada pendente', '#5A5F66');
-        const dias = Math.max(0, Math.floor((Date.now()-new Date(r.maisAntigo+'T00:00:00').getTime())/86400000));
-        return card('Parado há mais tempo', dias+(dias===1?' dia':' dias'), `recebido em ${r.maisAntigo.slice(8,10)}/${r.maisAntigo.slice(5,7)} e não repassado`, dias>=15?'#A65A4A':(dias>=7?'#9C7F40':'#5A5F66'));
-      })()}
+      ${card('A revisar', String(r.previstas||0), (r.previstas===1?'parcela prevista':'parcelas previstas')+' com repasse atrelado')}
     </div>` : '<div style="height:14px;"></div>'}
     <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
       ${FIN_CREDORES_ABAS.map(a=>`<div onclick="_finCredoresIr('${a.id}')" style="padding:7px 15px;border-radius:20px;font-size:12.5px;cursor:pointer;white-space:nowrap;${a.id===atual.id?'background:#0A1530;border:1px solid #0A1530;color:#fff;':'background:#fff;border:1px solid #E6E1D2;color:#5A5F66;'}">${escHtml(a.label)}</div>`).join('')}
@@ -31735,22 +31771,34 @@ async function _finTemColunasCascata(){
   return _finColsCascata;
 }
 
-// `visao` é a visão salva ativa (chips do topo), `conta`/`categoria` são os dois selects
-// da barra de filtros. Os três recortam LOCALMENTE o que a consulta trouxe; só `busca`
-// vai ao servidor (ver nota em _finLancCascataCarregar).
-let _finLancCascataState = { visao:'tudo', chip:'tudo', busca:'', conta:'', categoria:'', sel:new Set(), ord:{ col:'data', dir:'asc' } };
+// Estado da aba Movimentações. `visao` é a visão salva ativa (chips do topo); os campos
+// f* são o painel de filtros de 452px (handoff 29/08), que substituiu os dois selects
+// soltos da barra. `limite` é a paginação de 60 em 60 — sem ela a página trava montando
+// menu e seletor de conta para centenas de linhas. `popEfet`/`popConta`/`menu` guardam
+// QUAL linha tem popover aberto: só ela constrói esse HTML, nunca as 280.
+// Os recortes são todos LOCAIS sobre o que a consulta trouxe; só `busca` vai ao servidor
+// (ver nota em _finLancCascataCarregar).
+const FIN_MOV_PAGINA = 60;
+let _finLancCascataState = {
+  visao:'tudo', busca:'', sel:new Set(), ord:{ col:'data', dir:'asc' },
+  fTipo:'', fStatus:'', fContas:[], fCategoria:'', fCedente:'', fMin:'', fMax:'',
+  filtrosAbertos:false, maisFiltros:false,
+  limite: FIN_MOV_PAGINA,
+  popEfet:null, popConta:null, menu:null,
+  efetConta:'', efetData:'', efetJuros:'',
+};
 
 // ── Visões salvas ────────────────────────────────────────────────────────────────
-// Seis recortes que respondem às perguntas do dia; o contador de cada chip é o número de
-// linhas que o filtro realmente devolve (invariante 10 do handoff), por isso o predicado
-// mora aqui e é usado tanto para contar quanto para filtrar — não há duas listas.
+// SÓ o que o painel de filtros não resolve num clique (handoff 29/08): "Só saídas"
+// saiu daqui e virou o chip "Saídas" da seção Tipo do painel. O contador de cada chip é
+// o número de linhas que o filtro realmente devolve (invariante 10), por isso o
+// predicado mora aqui e serve tanto para contar quanto para filtrar — não há duas listas.
 const FIN_MOV_VISOES = [
   { id:'tudo',         label:'Tudo',            ok:()=>true },
   { id:'atrasados',    label:'Atrasados',       ok:(l)=>_finLancSit(l).t === 'ATRASADO' },
   { id:'repassar',     label:'A repassar',      ok:(l,ctx)=>_finLancEhRepasse(l,ctx) },
   { id:'divergencias', label:'Divergências',    ok:(l,ctx)=>_finLancEhDivergencia(l,ctx) },
   { id:'naoconc',      label:'Não conciliados', ok:(l)=>!l.conciliado },
-  { id:'saidas',       label:'Só saídas',       ok:(l)=>l.tipo_movimento === 0 },
 ];
 // Dinheiro que ainda é do cedente. Três origens, na ordem em que o banco as tem hoje:
 // a operação de repasse (fin_operacao), o vínculo direto do lançamento (cedente_id) e,
@@ -31768,10 +31816,20 @@ function _finLancEhDivergencia(l, ctx){
   if(op && op.repasse_status === 'revisar') return true;
   return !!(l.cedente_id && l.capital == null);
 }
-// Visões que o próprio usuário salvou (combinação de visão + busca + conta + categoria).
+// Cedente da linha, num lugar só: a sublinha, o filtro por cedente e o marcador de
+// repasse leem daqui. Se cada um derivasse por conta própria, o chip "Cedente" filtraria
+// por um nome que a linha não mostra.
+function _finLancCedente(l, ctx){
+  const op = ctx.opsByLanc[l.id];
+  if(op && op._credorNome) return op._credorNome;
+  if(l.cedente_id && ctx.cedMap[l.cedente_id]) return ctx.cedMap[l.cedente_id];
+  return (ctx.credorPorLanc && ctx.credorPorLanc[l.id]) || '';
+}
+// Visões que o próprio usuário salvou (visão + busca + o painel de filtros inteiro).
 // Ficam no localStorage, não no blob DB: são preferência de quem usa a tela, não dado da
 // empresa, e o blob é compartilhado entre todos os perfis.
 const FIN_MOV_VISOES_KEY = 'cobrasq_fin_visoes_v1';
+const FIN_MOV_CAMPOS_FILTRO = ['fTipo','fStatus','fContas','fCategoria','fCedente','fMin','fMax'];
 function _finMovVisoesSalvas(){
   try{ return JSON.parse(localStorage.getItem(FIN_MOV_VISOES_KEY) || '[]'); }catch(_){ return []; }
 }
@@ -31780,7 +31838,9 @@ function _finMovSalvarVisao(){
   const nome = prompt('Nome da visão:', '');
   if(!nome || !nome.trim()) return;
   const lista = _finMovVisoesSalvas().filter(v => v.nome !== nome.trim());
-  lista.push({ nome: nome.trim(), visao: s.visao, busca: s.busca, conta: s.conta, categoria: s.categoria });
+  const nova = { nome: nome.trim(), visao: s.visao, busca: s.busca };
+  FIN_MOV_CAMPOS_FILTRO.forEach(k => { nova[k] = Array.isArray(s[k]) ? s[k].slice() : s[k]; });
+  lista.push(nova);
   try{ localStorage.setItem(FIN_MOV_VISOES_KEY, JSON.stringify(lista)); }catch(_){}
   _finLancCascataRender();
 }
@@ -31788,7 +31848,13 @@ async function _finMovAplicarVisaoSalva(nome){
   const v = _finMovVisoesSalvas().find(x => x.nome === nome);
   if(!v) return;
   const s = _finLancCascataState;
-  Object.assign(s, { visao: v.visao||'tudo', conta: v.conta||'', categoria: v.categoria||'', sel: new Set() });
+  _finMovZerarFiltros(s);
+  s.visao = v.visao || 'tudo';
+  FIN_MOV_CAMPOS_FILTRO.forEach(k => { if(v[k] != null) s[k] = Array.isArray(v[k]) ? v[k].slice() : v[k]; });
+  // Visões gravadas antes do painel de filtros guardavam `conta`/`categoria` soltos.
+  if(v.conta) s.fContas = [String(v.conta)];
+  if(v.categoria) s.fCategoria = v.categoria;
+  s.sel = new Set(); s.limite = FIN_MOV_PAGINA;
   if((v.busca||'') !== s.busca){ s.busca = v.busca||''; _finLancCascataBusca(s.busca); return; }
   _finLancCascataRender();
 }
@@ -31797,21 +31863,83 @@ function _finMovApagarVisaoSalva(nome){
   try{ localStorage.setItem(FIN_MOV_VISOES_KEY, JSON.stringify(_finMovVisoesSalvas().filter(v => v.nome !== nome))); }catch(_){}
   _finLancCascataRender();
 }
-function _finMovSetVisao(id){ _finLancCascataState.visao = id; _finLancCascataState.sel = new Set(); _finLancCascataRender(); }
-function _finMovSetFiltro(campo, v){ _finLancCascataState[campo] = v; _finLancCascataState.sel = new Set(); _finLancCascataRender(); }
-function _finMovLimparFiltros(){
-  Object.assign(_finLancCascataState, { visao:'tudo', conta:'', categoria:'', sel:new Set() });
-  if(_finLancCascataState.busca){ _finLancCascataBusca(''); const i = document.getElementById('finmv-busca'); if(i) i.value=''; return; }
+function _finMovZerarFiltros(s){
+  s.fTipo=''; s.fStatus=''; s.fContas=[]; s.fCategoria=''; s.fCedente=''; s.fMin=''; s.fMax='';
+}
+// Toda troca de recorte fecha popover, limpa seleção e volta à primeira página: manter a
+// seleção depois de trocar o filtro já fez lote agir sobre linha que sumiu da tela.
+function _finMovReset(){
+  const s = _finLancCascataState;
+  s.sel = new Set(); s.limite = FIN_MOV_PAGINA;
+  s.popEfet = null; s.popConta = null; s.menu = null;
+}
+function _finMovSetVisao(id){ _finLancCascataState.visao = id; _finMovReset(); _finLancCascataRender(); }
+function _finMovSetFiltro(campo, v){ _finLancCascataState[campo] = v; _finMovReset(); _finLancCascataRender(); }
+function _finMovToggleChip(campo, v){
+  const s = _finLancCascataState;
+  s[campo] = s[campo] === v ? '' : v;
+  _finMovReset(); _finLancCascataRender();
+}
+function _finMovToggleConta(id){
+  const s = _finLancCascataState;
+  id = String(id);
+  const i = s.fContas.indexOf(id);
+  if(i >= 0) s.fContas.splice(i,1); else s.fContas.push(id);
+  _finMovReset(); _finLancCascataRender();
+}
+function _finMovTogglePainel(){
+  const s = _finLancCascataState;
+  s.filtrosAbertos = !s.filtrosAbertos;
+  s.popEfet = null; s.popConta = null; s.menu = null;
   _finLancCascataRender();
 }
-// Avatar circular da instituição. O handoff pede <img> real de institutions_financials/
-// com o monograma como fallback; enquanto os arquivos não estão no repo, fica só o
-// monograma — mesma cor de marca que o resto do módulo usa.
+function _finMovToggleMais(){ _finLancCascataState.maisFiltros = !_finLancCascataState.maisFiltros; _finLancCascataRender(); }
+function _finMovVerMais(){ _finLancCascataState.limite += FIN_MOV_PAGINA; _finLancCascataRender(); }
+function _finMovNFiltros(){
+  const s = _finLancCascataState;
+  return s.fContas.length + (s.fTipo?1:0) + (s.fStatus?1:0) + (s.fCategoria?1:0) + (s.fCedente?1:0) + (s.fMin?1:0) + (s.fMax?1:0);
+}
+function _finMovLimparFiltros(){
+  const s = _finLancCascataState;
+  s.visao = 'tudo';
+  _finMovZerarFiltros(s);
+  _finMovReset();
+  if(s.busca){ _finLancCascataBusca(''); const i = document.getElementById('finmv-busca'); if(i) i.value=''; return; }
+  _finLancCascataRender();
+}
+
+// ── Avatar da instituição ────────────────────────────────────────────────────────
+// O handoff pede <img> real com o monograma como FALLBACK: círculo branco com aro
+// rgba(10,21,48,.10) quando há logo. Os arquivos moram em assets/institutions_financials/
+// (mesmo lugar que o Controlle serve) e o slug sai do NOME da conta; logo_key entra como
+// segunda tentativa, porque conta renomeada no cadastro continua com a chave certa.
+// CENSEC e Registro Civil não têm logo e nunca vão ter — ficam no monograma, por isso o
+// fallback não pode ser um círculo branco vazio.
+const FIN_LOGOS = ['asaas','sicredi','banco-btg-pactual-s-a','nubank-conta-corrente','tribunal-de-justica','conta-inicial'];
+const FIN_LOGO_POR_KEY = { asaas:'asaas', sicredi:'sicredi', btg:'banco-btg-pactual-s-a', nubank:'nubank-conta-corrente', tj:'tribunal-de-justica' };
+const _finSlug = s => String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+function _finContaLogoSrc(conta){
+  if(!conta) return null;
+  const slug = _finSlug(conta.descricao);
+  if(FIN_LOGOS.indexOf(slug) >= 0) return 'assets/institutions_financials/'+slug+'.png';
+  const k = FIN_LOGO_POR_KEY[conta.logo_key];
+  return k ? 'assets/institutions_financials/'+k+'.png' : null;
+}
 function _finContaAvatar(conta, size){
   size = size || 22;
   const b = (window.BANK_CATALOG||{})[(conta && conta.logo_key) || 'outros'] || (window.BANK_CATALOG||{}).outros || { cor:'#A6AEBD', iniciais:'—' };
   const nome = (conta && conta.descricao) || 'sem conta';
-  return `<div title="${escHtml(nome)}" style="width:${size}px;height:${size}px;border-radius:50%;background:${b.cor};color:${b.cor_texto||'#fff'};display:grid;place-items:center;font-family:'JetBrains Mono',monospace;font-weight:600;font-size:${Math.max(8, Math.round(size*0.39))}px;flex-shrink:0;">${b.iniciais}</div>`;
+  const src = _finContaLogoSrc(conta);
+  const fonte = Math.max(8, Math.round(size*0.39));
+  const base = `width:${size}px;height:${size}px;border-radius:50%;display:grid;place-items:center;font-family:'JetBrains Mono',monospace;font-weight:600;font-size:${fonte}px;flex-shrink:0;position:relative;overflow:hidden;`;
+  if(src){
+    // onerror devolve o monograma: arquivo faltando não pode virar bolinha branca vazia.
+    const volta = `this.remove();var p=this.parentNode;p.style.background='${b.cor}';p.style.boxShadow='none';p.style.color='${b.cor_texto||'#fff'}';var s=p.querySelector('span');if(s)s.style.opacity=1;`;
+    return `<div title="${escHtml(nome)}" style="${base}background:#fff;box-shadow:inset 0 0 0 1px rgba(10,21,48,.10);color:${b.cor};">`
+      + `<img src="${src}" alt="" loading="lazy" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%;" onerror="${volta}">`
+      + `<span style="opacity:0;">${b.iniciais}</span></div>`;
+  }
+  return `<div title="${escHtml(nome)}" style="${base}background:${b.cor};color:${b.cor_texto||'#fff'};">${b.iniciais}</div>`;
 }
 
 // ── Ordenação da lista ──────────────────────────────────────────────────────
@@ -31872,7 +32000,7 @@ async function _finLancCascataOrd(col){
       const ctx = await _finLancCascataCarregar();
       window._finLancCascataCtx = ctx;
       _finLancCascataState.sel = new Set();
-      const cEl = document.getElementById('fincx-cnt-lancamentos'); if(cEl) cEl.textContent = ctx.rows.length;
+      _finSetCnt('lancamentos', ctx.rows.length);
     }catch(_){ /* mantém a lista anterior; a ordem local ainda se aplica */ }
   }
   _finLancCascataRender();
@@ -31900,7 +32028,7 @@ async function _finLancCascataCarregar(){
   const sb = getSupabase();
   const { ini, fim } = _finCascataPeriodoBounds();
   const dim = await finApi.loadDimensoes();
-  const baseSel = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,tipo_movimento,status,conciliado,conta_id,cobranca_id,credor_id,contato_id,numero_parcela,total_parcelas,fin_conta(descricao,banco_nome),fin_contato(nome)';
+  const baseSel = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,tipo_movimento,status,conciliado,conta_id,cobranca_id,credor_id,contato_id,numero_parcela,total_parcelas,judicial_liberado_em,fin_conta(descricao,banco_nome),fin_contato(nome)';
   const extra = (await _finTemColunasCascata()) ? ',cedente_id,capital,meu_total,amortizado,repasse_status' : '';
   const termo = (_finLancCascataState.busca||'').trim();
   let q = sb.from('fin_lancamento').select(baseSel+extra)
@@ -31951,7 +32079,7 @@ async function _finLancCascataCarregar(){
   // Categoria de cada lançamento visível. Mora no rateio (fin_lancamento_categoria), não
   // na linha — um lançamento pode ter mais de uma; a lista mostra a de maior valor e
   // avisa quando há outras.
-  const catPorLanc = {};
+  const catPorLanc = {}, judSet = new Set();
   try{
     const ids = rows.map(r=>r.id);
     if(ids.length){
@@ -31963,15 +32091,29 @@ async function _finLancCascataCarregar(){
         const k = c.lancamento_id;
         if(!agg[k]) agg[k] = { itens:{}, n:0 };
         agg[k].itens[nm] = (agg[k].itens[nm]||0) + Math.abs(+c.valor||0);
+        // Origem judicial marcada no MESMO passo: uma consulta só resolve categoria e
+        // "isto é Sisbajud/penhora". Só estas duas — "Acordos Judiciais" é acordo comum
+        // cobrado por boleto e mora em Movimentações, como sempre morou.
+        if(/sisbajud/i.test(nm) || /penhora/i.test(nm)) agg[k].jud = true;
       }
       for(const [k,v] of Object.entries(agg)){
         const ord = Object.entries(v.itens).sort((a,b)=>b[1]-a[1]);
         catPorLanc[k] = { nome: ord[0][0], extras: ord.length-1 };
+        if(v.jud) judSet.add(String(k));
       }
     }
   }catch(_){ /* auxiliar: a lista funciona sem categoria */ }
 
-  return { rows, dim, cedMap, opsByLanc, credorPorLanc, catPorLanc, periodoLabel: _finCascataPeriodoBounds().label,
+  // ── Judicial pendente sai de Movimentações (Fase 1 do handoff 29/08) ─────────────
+  // Sisbajud, penhora de salário e desconto INSS não têm vencimento: dependem de o juízo
+  // liberar. Enquanto ficavam nesta lista, contavam como ATRASADO e inflavam a previsão
+  // de entrada. Saem da lista, dos chips, do rodapé e do contador da aba — e voltam
+  // inteiros no dia em que caem (judicial_liberado_em deixa de ser NULL). O corte é aqui,
+  // uma vez, e não em cada consumidor: contador que não sai da mesma base da lista já
+  // fez o chip dizer 280 e a lista devolver 246.
+  const visiveis = rows.filter(r => !(judSet.has(String(r.id)) && !r.judicial_liberado_em));
+  return { rows: visiveis, dim, cedMap, opsByLanc, credorPorLanc, catPorLanc, judSet,
+           periodoLabel: _finCascataPeriodoBounds().label,
            busca: termo, truncado: rows.length >= FIN_LANC_LIMITE };
 }
 async function renderFinLancamentosCascata(el){
@@ -31982,35 +32124,66 @@ async function renderFinLancamentosCascata(el){
   window._finLancCascataCtx = ctx;
   _finLancCascataState.sel = new Set();
   _finLancCascataRender();
-  const cEl = document.getElementById('fincx-cnt-lancamentos'); if(cEl) cEl.textContent = ctx.rows.length;
+  _finSetCnt('lancamentos', ctx.rows.length);
 }
+// Recorte da lista: visão salva + painel de filtros. Uma função só — os chips, o rodapé,
+// o contador da barra e a página exibida saem todos daqui (invariante 10 do handoff).
 function _finLancCascataFiltrados(){
   const ctx = window._finLancCascataCtx; if(!ctx) return [];
   const s = _finLancCascataState;
   const vis = FIN_MOV_VISOES.find(v => v.id === s.visao) || FIN_MOV_VISOES[0];
+  const min = s.fMin ? parseValorBR(s.fMin) : null;
+  const max = s.fMax ? parseValorBR(s.fMax) : null;
   return ctx.rows.filter(l=>{
     if(!vis.ok(l, ctx)) return false;
-    if(s.conta && String(l.conta_id) !== String(s.conta)) return false;
-    if(s.categoria){ const c = ctx.catPorLanc && ctx.catPorLanc[l.id]; if(!c || c.nome !== s.categoria) return false; }
+    if(s.fTipo === 'in'  && l.tipo_movimento !== 1) return false;
+    if(s.fTipo === 'out' && l.tipo_movimento !== 0) return false;
+    if(s.fTipo === 'repasse' && !_finLancEhRepasse(l, ctx)) return false;
+    if(s.fStatus){
+      const t = _finLancSit(l).t;
+      const efetivado = t === 'PAGO' || t === 'CONCILIADO';
+      if(s.fStatus === 'pago' && !efetivado) return false;
+      if(s.fStatus === 'atrasado' && t !== 'ATRASADO') return false;
+      if(s.fStatus === 'pendente' && (efetivado || t === 'ATRASADO')) return false;
+    }
+    if(s.fContas.length && s.fContas.indexOf(String(l.conta_id)) < 0) return false;
+    if(s.fCategoria){ const c = ctx.catPorLanc && ctx.catPorLanc[l.id]; if(!c || c.nome !== s.fCategoria) return false; }
+    if(s.fCedente && _finLancCedente(l, ctx) !== s.fCedente) return false;
+    const v = Math.abs(+l.valor||0);
+    if(min != null && v < min) return false;
+    if(max != null && v > max) return false;
     return true;
   });
 }
+// Vencidos do FILTRO INTEIRO (não da página exibida) — é o que o botão do rodapé efetiva.
+function _finMovVencidos(){
+  return _finLancCascataFiltrados().filter(l => _finLancSit(l).t === 'ATRASADO');
+}
 function _finLancCascataRender(){
   const el = document.getElementById('fin-content'); if(!el) return;
-  const ctx = window._finLancCascataCtx;
+  // Sem contexto carregado não há o que desenhar: um popover ou um chip disparado antes
+  // do primeiro carregamento derrubaria a aba com "rows de undefined".
+  const ctx = window._finLancCascataCtx; if(!ctx) return;
   const s = _finLancCascataState;
   const todos = ctx.rows;
   const filtrados = _finLancCascataFiltrados();
 
-  // Totais do RODAPÉ refletem o filtro aplicado, não o mês inteiro (handoff).
+  // Totais do RODAPÉ refletem o filtro inteiro, não a página exibida (handoff).
   let ent = 0, sai = 0;
   filtrados.forEach(l => { const v = Math.abs(+l.valor||0); if(l.tipo_movimento===1) ent += v; else sai += v; });
+  const nVencidos = _finMovVencidos().length;   // mesma função que o botão executa
 
   const ordenados = _finLancCascataOrdenados();
-  const agrupado = s.ord.col === 'data';
+  // Paginação de 60 em 60. Sem ela a página trava: montar menu, seletor de conta e
+  // popover para centenas de linhas foi o que congelou o protótipo com 280 lançamentos.
+  const pagina = ordenados.slice(0, s.limite);
+  const restantes = Math.max(0, ordenados.length - pagina.length);
+  // Cabeçalho de dia some quando o filtro devolve menos de 8 linhas: com poucas linhas a
+  // faixa de dia vira mais ruído do que informação.
+  const agrupado = s.ord.col === 'data' && pagina.length >= 8;
   const porDia = [];
   let atual = null;
-  for(const l of (agrupado ? ordenados : [])){
+  for(const l of (agrupado ? pagina : [])){
     const d = (l.data_competencia||'').slice(0,10);
     if(!atual || atual.data !== d){ atual = { data:d, itens:[] }; porDia.push(atual); }
     atual.itens.push(l);
@@ -32018,14 +32191,21 @@ function _finLancCascataRender(){
 
   const contas = (ctx.dim && ctx.dim.contas) || [];
   const cats = [...new Set(Object.values(ctx.catPorLanc||{}).map(c => c.nome))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
+  const cedentes = [...new Set(todos.map(l => _finLancCedente(l, ctx)).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
   const salvas = _finMovVisoesSalvas();
+  const nFiltros = _finMovNFiltros();
+  const contador = `${filtrados.length} de ${todos.length} ${todos.length===1?'lançamento':'lançamentos'}`;
+
+  const chipF = (on) => `border-radius:20px;padding:6px 13px;font-size:12.5px;white-space:nowrap;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:7px;`
+    + (on ? 'font-weight:600;background:#0A1530;color:#fff;border:1px solid #0A1530;' : 'font-weight:400;background:#fff;color:#5A5F66;border:1px solid #E6E1D2;');
 
   el.innerHTML = `
     <style>
+      .finmv-wrap{max-width:1560px;margin:0 auto;display:flex;flex-direction:column;gap:12px;}
       .finmv-h1{font-family:'Fraunces',Georgia,serif;font-size:26px;font-weight:500;letter-spacing:-.02em;color:#0A1530;}
       .finmv-sub{font-size:13px;color:#5A5F66;margin-top:3px;}
-      .finmv-chips{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0 0;}
-      .finmv-chip{display:flex;align-items:center;gap:7px;border-radius:20px;padding:6px 13px;font-size:12.5px;font-weight:500;background:#fff;border:1px solid #E6E1D2;color:#5A5F66;cursor:pointer;font-family:inherit;}
+      .finmv-chips{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+      .finmv-chip{display:flex;align-items:center;gap:7px;border-radius:20px;padding:6px 13px;font-size:12.5px;font-weight:500;background:#fff;border:1px solid #E6E1D2;color:#5A5F66;cursor:pointer;font-family:inherit;white-space:nowrap;}
       .finmv-chip .n{font-family:'JetBrains Mono',monospace;font-size:10px;color:#8A94A6;}
       .finmv-chip.on{background:#0A1530;border-color:#0A1530;color:#fff;font-weight:600;}
       .finmv-chip.on .n{color:#C9A961;}
@@ -32033,164 +32213,268 @@ function _finLancCascataRender(){
       .finmv-chip.add:hover{border-color:#9C7F40;color:#9C7F40;}
       .finmv-chip .x{color:#A6AEBD;font-size:11px;}
       .finmv-chip .x:hover{color:#A65A4A;}
-      .finmv-filtros{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:12px 0 14px;}
-      .finmv-inp{width:320px;max-width:100%;background:#fff;border:1px solid #E6E1D2;border-radius:7px;padding:8px 11px;font-size:12.5px;font-family:inherit;color:#0A1530;}
-      .finmv-sel{background:#fff;border:1px solid #E6E1D2;border-radius:7px;padding:8px 10px;font-size:12.5px;font-family:inherit;color:#5A5F66;max-width:230px;}
-      .finmv-cont{margin-left:auto;font-size:12px;color:#6B7683;}
-      .finmv-sec{background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;}
-      /* As 8 colunas somam 1.008px com os gaps e o padding. Abaixo disso a tabela ROLA
-         DENTRO do cartão — antes o overflow:hidden do .finmv-sec cortava a coluna
-         SITUAÇÃO em silêncio (69px sumiam num viewport de 1280 com a barra lateral
-         aberta), e deixar a linha crescer empurraria a página inteira para scroll
+      .finmv-barra{display:flex;gap:9px;flex-wrap:wrap;align-items:center;}
+      .finmv-busca{position:relative;display:flex;align-items:center;}
+      .finmv-busca .lupa{position:absolute;left:11px;font-size:12px;color:#A6AEBD;pointer-events:none;}
+      .finmv-inp{width:280px;max-width:100%;background:#fff;border:1px solid #E6E1D2;border-radius:7px;padding:8px 11px 8px 27px;font-size:12.5px;font-family:inherit;color:#0A1530;outline:none;}
+      .finmv-fbtn{display:flex;align-items:center;gap:7px;border-radius:7px;padding:8px 12px;font-size:12.5px;font-weight:500;color:#0A1530;cursor:pointer;font-family:inherit;white-space:nowrap;}
+      .finmv-fbadge{font-family:'JetBrains Mono',monospace;font-size:9.5px;border-radius:9px;padding:1px 6px;background:#0A1530;color:#fff;}
+      .finmv-painel{position:absolute;top:38px;left:0;z-index:50;width:452px;background:#fff;border:1px solid #E6E1D2;border-radius:11px;box-shadow:0 20px 48px rgba(10,21,48,.18);padding:16px;display:flex;flex-direction:column;gap:14px;text-align:left;}
+      .finmv-painel .sec{display:flex;flex-direction:column;gap:8px;}
+      .finmv-painel .sec .tt{font-size:12px;font-weight:600;color:#0A1530;}
+      .finmv-painel .ops{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+      .finmv-mais{align-self:flex-start;display:flex;align-items:center;gap:5px;background:transparent;border:none;padding:0;font-size:12.5px;font-weight:600;color:#15224A;cursor:pointer;font-family:inherit;}
+      .finmv-mais:hover{color:#9C7F40;}
+      .finmv-avancado{display:grid;grid-template-columns:1fr 1fr;gap:10px;background:#FBFAF6;border:1px solid #E6E1D2;border-radius:8px;padding:11px 12px;}
+      .finmv-avancado label{display:flex;flex-direction:column;gap:5px;font-size:11px;color:#8A94A6;}
+      .finmv-avancado select,.finmv-avancado input{width:100%;background:#fff;border:1px solid #E6E1D2;border-radius:7px;padding:7px 9px;font-size:12px;font-family:inherit;color:#0A1530;}
+      .finmv-avancado input{font-family:'JetBrains Mono',monospace;font-size:11.5px;}
+      .finmv-cont{margin-left:auto;font-size:12px;color:#8A94A6;}
+      .finmv-sec{background:#fff;border:1px solid #E6E1D2;border-radius:10px;overflow:hidden;}
+      /* As 9 colunas somam 852px com gaps e padding. Abaixo disso a tabela ROLA DENTRO
+         do cartão — deixar a linha crescer empurraria a página inteira para scroll
          horizontal, que é a regressão que #mainArea{min-width:0} existe para evitar. */
       .finmv-scroll{overflow-x:auto;}
-      .finmv-grid{display:grid;grid-template-columns:34px 46px 60px minmax(280px,1fr) 190px 128px 50px 118px;gap:10px;align-items:center;padding:0 16px;min-width:1008px;box-sizing:border-box;}
-      .finmv-thead{background:#F7F4EC;border-bottom:1px solid #E6E1D2;padding-top:9px;padding-bottom:9px;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:#6B7683;}
+      .finmv-grid{display:grid;grid-template-columns:30px 38px 48px minmax(230px,2.3fr) minmax(130px,1fr) 132px 38px 44px 30px;gap:12px;align-items:center;padding:0 18px;min-width:852px;box-sizing:border-box;}
+      .finmv-thead{border-bottom:1px solid #E6E1D2;padding-top:8px;padding-bottom:8px;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:#A6AEBD;}
       .finmv-th{display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;border-radius:4px;padding:3px 4px;margin:-3px -4px;}
-      .finmv-th:hover{background:#EDE8DA;color:#0A1530;}
-      .finmv-th.on{color:#0A1530;}
+      .finmv-th svg{opacity:.3;}
+      .finmv-th:hover{color:#0A1530;} .finmv-th:hover svg{opacity:.7;}
+      .finmv-th.on{color:#0A1530;} .finmv-th.on svg{opacity:.7;}
       .finmv-th.num{justify-content:flex-end;} .finmv-th.mid{justify-content:center;}
-      .finmv-th .seta{font-size:8px;letter-spacing:0;}
-      .finmv-dia{display:flex;align-items:center;gap:10px;background:#FBFAF6;border-bottom:1px solid #F2EFE6;padding:8px 16px;min-width:1008px;box-sizing:border-box;}
-      .finmv-dia .dd{font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;color:#0A1530;}
-      .finmv-dia .dow{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:#8A94A6;}
-      .finmv-dia .ent{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4C6647;margin-left:auto;}
-      .finmv-dia .sai{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#7D3F33;}
-      .finmv-dia .sld{font-family:'JetBrains Mono',monospace;font-size:10.5px;font-weight:600;min-width:96px;text-align:right;}
-      .finmv-row{border-bottom:1px solid #F7F4EC;cursor:pointer;padding-top:11px;padding-bottom:11px;}
+      .finmv-dia{display:flex;align-items:baseline;gap:8px;padding:14px 18px 6px;min-width:852px;box-sizing:border-box;}
+      .finmv-dia .dd{font-size:11.5px;font-weight:600;color:#0A1530;white-space:nowrap;}
+      .finmv-dia .dow{font-size:10.5px;color:#A6AEBD;}
+      .finmv-dia .rule{flex:1;height:1px;background:#F2EFE6;}
+      .finmv-dia .sld{font-family:'JetBrains Mono',monospace;font-size:10.5px;white-space:nowrap;}
+      .finmv-row{position:relative;border-top:1px solid #F7F4EC;cursor:pointer;padding-top:10px;padding-bottom:10px;}
       .finmv-row:hover{background:#FBFAF6;}
+      .finmv-row.atraso{background:#FEFBEC;border-top-color:#F5EBCF;}
+      .finmv-row.atraso:hover{background:#FCF6E4;}
       .finmv-row.sel{background:#F6F3EA;}
-      .finmv-row input[type=checkbox]{width:15px;height:15px;accent-color:#0A1530;cursor:pointer;}
-      .finmv-tipo{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;margin:0 auto;}
-      .finmv-data{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#5A5F66;}
-      .finmv-d1{display:flex;align-items:center;gap:7px;min-width:0;}
-      .finmv-d1 .tx{font-size:12.5px;font-weight:500;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-      .finmv-parc{font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#6B7683;background:#F2EFE6;border-radius:9px;padding:2px 7px;flex-shrink:0;white-space:nowrap;}
-      .finmv-d2{font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;}
-      .finmv-cat{font-size:11.5px;color:#6B7683;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-      .finmv-val{font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:500;text-align:right;white-space:nowrap;}
-      .finmv-sit{display:flex;flex-direction:column;align-items:flex-end;gap:4px;}
-      .finmv-pill{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.08em;border-radius:4px;padding:2px 7px;white-space:nowrap;}
-      .finmv-tag{font-family:'JetBrains Mono',monospace;font-size:9px;border-radius:4px;padding:1px 6px;white-space:nowrap;}
-      .finmv-foot{background:#F7F4EC;border-top:1px solid #E6E1D2;padding:11px 16px;display:flex;gap:18px;align-items:center;flex-wrap:wrap;font-size:12px;color:#5A5F66;}
+      .finmv-row input[type=checkbox]{width:14px;height:14px;accent-color:#0A1530;cursor:pointer;}
+      .finmv-tipo{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;margin:0 auto;}
+      .finmv-data{font-family:'JetBrains Mono',monospace;font-size:11px;color:#A6AEBD;}
+      .finmv-d1{display:flex;align-items:baseline;gap:7px;min-width:0;}
+      .finmv-d1 .tx{font-size:13.5px;font-weight:500;letter-spacing:-.005em;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      .finmv-parc{font-family:'JetBrains Mono',monospace;font-size:10px;color:#A6AEBD;flex-shrink:0;white-space:nowrap;}
+      /* Marcador redondo no lugar da tag de texto: a tag dobrava a altura da linha. */
+      .finmv-marca{display:flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;flex-shrink:0;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;cursor:help;align-self:center;}
+      .finmv-d2{font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;display:block;}
+      .finmv-cat{font-size:11.5px;color:#8A94A6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      .finmv-val{font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;letter-spacing:-.01em;}
+      .finmv-cel{position:relative;display:flex;align-items:center;justify-content:center;}
+      .finmv-cbtn{background:transparent;border:none;padding:0;cursor:pointer;display:flex;}
+      /* Polegar: preenchimento claro com traço escuro. Sólido vira mancha na lista. */
+      .finmv-pol{display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:6px;flex-shrink:0;cursor:pointer;border:none;padding:0;background:transparent;}
+      .finmv-kebab{background:transparent;border:none;border-radius:5px;color:#A6AEBD;font-size:14px;line-height:1;padding:3px 5px;cursor:pointer;font-family:inherit;}
+      .finmv-kebab.on{background:#F2EFE6;}
+      .finmv-pop{position:absolute;top:30px;right:-6px;z-index:45;background:#fff;border:1px solid #E6E1D2;border-radius:10px;box-shadow:0 18px 44px rgba(10,21,48,.2);padding:14px;display:flex;flex-direction:column;gap:11px;text-align:left;width:300px;cursor:default;}
+      .finmv-pop label{display:flex;flex-direction:column;gap:5px;font-size:11px;color:#8A94A6;}
+      .finmv-pop select,.finmv-pop input{width:100%;background:#fff;border:1px solid #E6E1D2;border-radius:7px;padding:8px 9px;font-size:12.5px;font-family:inherit;color:#0A1530;}
+      .finmv-pop input[type=date]{font-family:'JetBrains Mono',monospace;font-size:11.5px;padding:7px 9px;}
+      .finmv-menu{position:absolute;top:26px;right:0;z-index:40;width:210px;background:#fff;border:1px solid #E6E1D2;border-radius:9px;box-shadow:0 16px 36px rgba(10,21,48,.18);padding:5px;display:flex;flex-direction:column;cursor:default;}
+      .finmv-mi{display:flex;align-items:center;gap:9px;width:100%;background:transparent;border:none;border-radius:6px;padding:7px 9px;font-size:12.5px;font-family:inherit;text-align:left;color:#0A1530;cursor:pointer;}
+      .finmv-mi:hover{background:#FBFAF6;}
+      .finmv-mi.sep{border-top:1px solid #F2EFE6;margin-top:4px;padding-top:8px;}
+      .finmv-mi.del{color:#A65A4A;}
+      .finmv-conta-pop{position:absolute;top:28px;right:-6px;z-index:45;width:238px;background:#fff;border:1px solid #E6E1D2;border-radius:9px;box-shadow:0 16px 36px rgba(10,21,48,.18);padding:5px;display:flex;flex-direction:column;cursor:default;}
+      .finmv-conta-pop .tt{font-size:10.5px;color:#A6AEBD;padding:6px 9px 4px;}
+      .finmv-conta-it{display:flex;align-items:center;gap:9px;width:100%;min-width:0;background:transparent;border:none;border-radius:6px;padding:7px 9px;font-size:12.5px;font-family:inherit;text-align:left;color:#0A1530;cursor:pointer;}
+      .finmv-conta-it:hover{background:#FBFAF6;}
+      .finmv-conta-it .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;}
+      .finmv-mostrar{width:100%;background:#fff;border:none;border-top:1px solid #F2EFE6;padding:12px;font-size:12.5px;font-weight:600;color:#15224A;cursor:pointer;font-family:inherit;}
+      .finmv-mostrar:hover{background:#FBFAF6;}
+      .finmv-foot{background:#F7F4EC;border-top:1px solid #E6E1D2;padding:11px 16px;display:flex;gap:18px;align-items:center;flex-wrap:wrap;font-size:11.5px;color:#5A5F66;}
       .finmv-foot .lb{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:#6B7683;}
       .finmv-foot b{font-family:'JetBrains Mono',monospace;font-weight:600;}
+      .finmv-efet-lote{display:flex;align-items:center;gap:6px;background:#fff;border:1px solid #D8D2C5;border-radius:6px;padding:5px 10px;font-size:11.5px;font-weight:600;color:#0A1530;white-space:nowrap;cursor:pointer;font-family:inherit;}
+      .finmv-efet-lote:hover{background:#FBFAF6;}
       .finmv-lote{position:fixed;left:252px;right:24px;bottom:18px;z-index:60;background:#0A1530;border-radius:9px;box-shadow:0 8px 24px rgba(10,21,48,.28);padding:11px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
       .finmv-lote .qt{font-family:'JetBrains Mono',monospace;font-size:11.5px;font-weight:600;color:#fff;}
       .finmv-lote .tt{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9A961;}
-      .finmv-lb{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.10);color:#fff;font-family:inherit;font-size:12px;font-weight:500;padding:6px 12px;border-radius:6px;cursor:pointer;}
+      .finmv-lb{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.10);color:#fff;font-family:inherit;font-size:12px;font-weight:500;padding:6px 12px;border-radius:6px;cursor:pointer;white-space:nowrap;}
       .finmv-lb:hover{background:rgba(255,255,255,.16);}
       .finmv-lb.go{background:#5E7C58;border-color:#5E7C58;font-weight:600;} .finmv-lb.go:hover{background:#4F6A4A;}
       .finmv-lb.gh{background:transparent;border:none;color:#B4BCCC;margin-left:auto;} .finmv-lb.gh:hover{color:#fff;background:transparent;}
     </style>
-    <div>
-      <div class="finmv-h1">Movimentações</div>
-      <div class="finmv-sub">${escHtml((ctx.periodoLabel||'').replace(/^./,c=>c.toUpperCase()))}${ctx.truncado?` · <span style="color:#A65A4A;font-weight:600;">lista cortada em ${FIN_LANC_LIMITE} — ${ctx.busca?'refine a busca ou estreite o período':'estreite o período'}</span>`:''}</div>
-    </div>
-
-    <div class="finmv-chips">
-      ${FIN_MOV_VISOES.map(v=>{
-        const n = ctx.rows.filter(l => v.ok(l, ctx)).length;
-        return `<button class="finmv-chip ${s.visao===v.id?'on':''}" onclick="_finMovSetVisao('${v.id}')">${v.label}<span class="n">${n}</span></button>`;
-      }).join('')}
-      ${salvas.map(v=>`<button class="finmv-chip" onclick="_finMovAplicarVisaoSalva(${JSON.stringify(v.nome).replace(/"/g,'&quot;')})">${escHtml(v.nome)}<span class="x" onclick="event.stopPropagation();_finMovApagarVisaoSalva(${JSON.stringify(v.nome).replace(/"/g,'&quot;')})" title="apagar">✕</span></button>`).join('')}
-      <button class="finmv-chip add" onclick="_finMovSalvarVisao()">+ Salvar visão</button>
-    </div>
-
-    <div class="finmv-filtros">
-      <input class="finmv-inp" id="finmv-busca" type="search" value="${escHtml(s.busca)}" placeholder="Filtrar por descrição, cliente, categoria ou valor…" oninput="_finLancCascataBusca(this.value)">
-      <select class="finmv-sel" onchange="_finMovSetFiltro('conta', this.value)">
-        <option value="">Todas as contas</option>
-        ${contas.map(c=>`<option value="${c.id}" ${String(s.conta)===String(c.id)?'selected':''}>${escHtml(c.descricao||'—')}</option>`).join('')}
-      </select>
-      <select class="finmv-sel" onchange="_finMovSetFiltro('categoria', this.value)">
-        <option value="">Todas as categorias</option>
-        ${cats.map(c=>`<option value="${escHtml(c)}" ${s.categoria===c?'selected':''}>${escHtml(c)}</option>`).join('')}
-      </select>
-      <span class="finmv-cont">${filtrados.length} de ${todos.length} ${todos.length===1?'lançamento exibido':'lançamentos exibidos'}</span>
-    </div>
-
-    <section class="finmv-sec">
-      <div class="finmv-scroll">
-        <div class="finmv-grid finmv-thead">${_finLancTheadHtml(filtrados)}</div>
-        ${ordenados.length
-          ? (agrupado ? porDia.map(g=>_finLancCascataDiaHtml(g, ctx)).join('') : ordenados.map(l=>_finLancCascataRowHtml(l, ctx)).join(''))
-          : `<div style="padding:38px 16px;text-align:center;font-size:12.5px;color:#8A94A6;">Nenhum lançamento nesta visão com o filtro aplicado.
-               <span class="cx-link" style="margin-left:6px;" onclick="_finMovLimparFiltros()">Limpar filtros</span></div>`}
+    <div class="finmv-wrap" onclick="_finMovFecharPopovers(event)">
+      <div>
+        <div class="finmv-h1">Movimentações</div>
+        <div class="finmv-sub">${escHtml((ctx.periodoLabel||'').replace(/^./,c=>c.toUpperCase()))}${ctx.truncado?` · <span style="color:#A65A4A;font-weight:600;">lista cortada em ${FIN_LANC_LIMITE} — ${ctx.busca?'refine a busca ou estreite o período':'estreite o período'}</span>`:''}</div>
       </div>
-      <div class="finmv-foot">
-        <span class="lb">Totais do filtro</span>
-        <span>entradas <b style="color:#4C6647;">${fmtR(ent)}</b></span>
-        <span>saídas <b style="color:#7D3F33;">${fmtR(sai)}</b></span>
-        <span style="margin-left:auto;">líquido <b style="color:${(ent-sai)>=0?'#4C6647':'#7D3F33'};">${fmtRs(ent-sai)}</b></span>
+
+      <div class="finmv-chips">
+        ${FIN_MOV_VISOES.map(v=>{
+          const n = ctx.rows.filter(l => v.ok(l, ctx)).length;
+          return `<button class="finmv-chip ${s.visao===v.id?'on':''}" onclick="_finMovSetVisao('${v.id}')">${v.label}<span class="n">${n}</span></button>`;
+        }).join('')}
+        ${salvas.map(v=>`<button class="finmv-chip" onclick="_finMovAplicarVisaoSalva(${JSON.stringify(v.nome).replace(/"/g,'&quot;')})">${escHtml(v.nome)}<span class="x" onclick="event.stopPropagation();_finMovApagarVisaoSalva(${JSON.stringify(v.nome).replace(/"/g,'&quot;')})" title="apagar">✕</span></button>`).join('')}
+        <button class="finmv-chip add" onclick="_finMovSalvarVisao()">+ Salvar visão</button>
       </div>
-    </section>
-    <div id="finlc-bulkbar"></div>
+
+      <div class="finmv-barra">
+        <div class="finmv-busca">
+          <span class="lupa">⌕</span>
+          <input class="finmv-inp" id="finmv-busca" type="search" value="${escHtml(s.busca)}" placeholder="Buscar nesta visão…" oninput="_finLancCascataBusca(this.value)">
+        </div>
+        <div style="position:relative;">
+          <button class="finmv-fbtn" style="background:${s.filtrosAbertos?'#F7F4EC':'#fff'};border:1px solid ${nFiltros?'#0A1530':'#E6E1D2'};" onclick="event.stopPropagation();_finMovTogglePainel()">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h18l-7 8v6l-4 2v-8z"></path></svg>
+            Filtrar${nFiltros?`<span class="finmv-fbadge">${nFiltros}</span>`:''}
+          </button>
+          ${s.filtrosAbertos ? _finMovPainelFiltrosHtml(contas, cats, cedentes, contador, chipF) : ''}
+        </div>
+        <span class="finmv-cont">${contador}</span>
+      </div>
+
+      <section class="finmv-sec">
+        <div class="finmv-scroll">
+          <div class="finmv-grid finmv-thead">${_finLancTheadHtml(pagina)}</div>
+          ${pagina.length
+            ? (agrupado ? porDia.map(g=>_finLancCascataDiaHtml(g, ctx)).join('') : pagina.map(l=>_finLancCascataRowHtml(l, ctx)).join(''))
+            : `<div style="padding:38px 16px;text-align:center;display:flex;flex-direction:column;gap:8px;align-items:center;">
+                 <span style="font-size:13px;color:#5A5F66;">Nenhum lançamento nesta visão com o filtro aplicado.</span>
+                 <span class="cx-link" onclick="_finMovLimparFiltros()">Limpar filtros</span></div>`}
+        </div>
+        ${restantes ? `<button class="finmv-mostrar" onclick="_finMovVerMais()">Mostrar mais ${Math.min(FIN_MOV_PAGINA, restantes)} de ${restantes}</button>` : ''}
+        <div class="finmv-foot">
+          <span class="lb">Totais do filtro</span>
+          <span>entradas <b style="color:#4C6647;">${fmtR(ent)}</b></span>
+          <span>saídas <b style="color:#7D3F33;">${fmtR(sai)}</b></span>
+          ${nVencidos ? `<button class="finmv-efet-lote" onclick="_finMovEfetivarVencidos()">Efetivar ${nVencidos} ${nVencidos===1?'vencido':'vencidos'}</button>` : ''}
+          <span style="margin-left:auto;">líquido <b style="color:${(ent-sai)>=0?'#4C6647':'#7D3F33'};">${fmtRs(ent-sai)}</b></span>
+        </div>
+      </section>
+      <div id="finlc-bulkbar"></div>
+    </div>
   `;
   _finLancCascataRenderBulkbar();
 }
-// Cabeçalho: as 8 colunas do handoff. Checkbox do cabeçalho marca/desmarca todas as
-// linhas VISÍVEIS do filtro atual — não a lista inteira.
-function _finLancTheadHtml(filtrados){
+
+// Painel de filtros de 452px. Só é MONTADO quando está aberto — o mesmo motivo pelo qual
+// menu e seletor de conta só existem na linha aberta.
+function _finMovPainelFiltrosHtml(contas, cats, cedentes, contador, chipF){
+  const s = _finLancCascataState;
+  const secao = (titulo, campo, opcoes) => `
+    <div class="sec">
+      <span class="tt">${titulo}</span>
+      <div class="ops">${opcoes.map(o=>`<button style="${chipF(s[campo]===o[0])}" onclick="event.stopPropagation();_finMovToggleChip('${campo}','${o[0]}')">${escHtml(o[1])}</button>`).join('')}</div>
+    </div>`;
+  return `<div class="finmv-painel" onclick="event.stopPropagation()">
+    ${secao('Tipo','fTipo',[['in','Entradas'],['out','Saídas'],['repasse','Repasses']])}
+    ${secao('Status','fStatus',[['pago','Efetivado'],['pendente','Pendente'],['atrasado','Atrasado']])}
+    <div class="sec">
+      <span class="tt">Contas e carteiras</span>
+      <div class="ops">${contas.map(c=>`<button style="${chipF(s.fContas.indexOf(String(c.id))>=0)}" onclick="event.stopPropagation();_finMovToggleConta('${c.id}')">${_finContaAvatar(c,16)}${escHtml(c.descricao||'—')}</button>`).join('') || '<span style="font-size:11.5px;color:#A6AEBD;">Nenhuma conta cadastrada.</span>'}</div>
+    </div>
+    <div class="sec" style="position:relative;">
+      <button class="finmv-mais" onclick="event.stopPropagation();_finMovToggleMais()">Mais filtros ${s.maisFiltros?'⌃':'⌄'}</button>
+      ${s.maisFiltros ? `<div class="finmv-avancado">
+        <label>Categoria
+          <select onchange="_finMovSetFiltro('fCategoria', this.value)">
+            <option value="">Todas</option>
+            ${cats.map(c=>`<option value="${escHtml(c)}" ${s.fCategoria===c?'selected':''}>${escHtml(c)}</option>`).join('')}
+          </select></label>
+        <label>Cedente
+          <select onchange="_finMovSetFiltro('fCedente', this.value)">
+            <option value="">Todos</option>
+            ${cedentes.map(c=>`<option value="${escHtml(c)}" ${s.fCedente===c?'selected':''}>${escHtml(c)}</option>`).join('')}
+          </select></label>
+        <label>Valor mínimo<input value="${escHtml(s.fMin)}" placeholder="0,00" onchange="_finMovSetFiltro('fMin', this.value)"></label>
+        <label>Valor máximo<input value="${escHtml(s.fMax)}" placeholder="sem limite" onchange="_finMovSetFiltro('fMax', this.value)"></label>
+      </div>` : ''}
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;border-top:1px solid #F2EFE6;padding-top:12px;">
+      <span style="font-size:11.5px;color:#8A94A6;">${contador}</span>
+      <button style="margin-left:auto;background:transparent;border:none;font-size:12px;color:#5A5F66;cursor:pointer;font-family:inherit;" onclick="event.stopPropagation();_finMovLimparFiltros()">Limpar</button>
+      <button style="background:#0A1530;border:none;color:#fff;border-radius:6px;padding:7px 13px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;" onclick="event.stopPropagation();_finMovTogglePainel()">Aplicar</button>
+    </div>
+  </div>`;
+}
+// Clique fora fecha o que estiver aberto. Sem isto o popover de uma linha continuava
+// aberto enquanto o usuário mexia em outra, e dois "Marcar como recebido" conviviam.
+function _finMovFecharPopovers(ev){
+  const s = _finLancCascataState;
+  if(!s.popEfet && !s.popConta && !s.menu && !s.filtrosAbertos) return;
+  if(ev && ev.target && ev.target.closest && ev.target.closest('.finmv-pop,.finmv-menu,.finmv-conta-pop,.finmv-painel')) return;
+  s.popEfet = null; s.popConta = null; s.menu = null; s.filtrosAbertos = false;
+  _finLancCascataRender();
+}
+
+// Cabeçalho: as 9 colunas do handoff. Checkbox do cabeçalho marca/desmarca todas as
+// linhas VISÍVEIS (a página exibida), não a lista inteira.
+function _finLancTheadHtml(pagina){
   const { col, dir } = _finLancCascataState.ord;
+  // Ícone de ordenação no padrão do Controlle: Lucide arrow-up-down, opacity .3 → .7.
+  const setinha = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg>`;
   const th = (k, cls) => {
     const on = col===k;
-    return `<span class="finmv-th ${cls||''} ${on?'on':''}" onclick="_finLancCascataOrd('${k}')" title="Ordenar por ${FIN_LANC_ORD_COLS[k].label.toLowerCase()}">${FIN_LANC_ORD_COLS[k].label}<span class="seta">${on?(dir==='asc'?'▲':'▼'):''}</span></span>`;
+    return `<span class="finmv-th ${cls||''} ${on?'on':''}" onclick="_finLancCascataOrd('${k}')" title="Ordenar por ${FIN_LANC_ORD_COLS[k].label.toLowerCase()}">${FIN_LANC_ORD_COLS[k].label}${on?`<span style="font-size:8px;">${dir==='asc'?'▲':'▼'}</span>`:setinha}</span>`;
   };
-  const vis = filtrados||[];
+  const vis = pagina||[];
   const todas = vis.length > 0 && vis.every(l => _finLancCascataState.sel.has(l.id));
-  return `<span><input type="checkbox" style="width:15px;height:15px;accent-color:#0A1530;cursor:pointer;" ${todas?'checked':''} onclick="_finMovToggleTodos(this.checked)" title="Marcar todas as linhas visíveis"></span>`
-       + `<span class="finmv-th mid">TIPO</span>`
+  return `<span><input type="checkbox" style="width:14px;height:14px;accent-color:#0A1530;cursor:pointer;" ${todas?'checked':''} onclick="_finMovToggleTodos(this.checked)" title="Marcar todas as linhas visíveis"></span>`
+       + `<span style="text-align:center;">Tipo</span>`
        + th('data')
        + th('descricao')
        + th('categoria')
        + th('valor','num')
-       + `<span class="finmv-th mid">CONTA</span>`
-       + th('situacao','num');
+       + `<span style="text-align:center;">Conta</span>`
+       + `<span style="text-align:center;">Pago</span>`
+       + `<span></span>`;
 }
 function _finMovToggleTodos(marcar){
   const sel = _finLancCascataState.sel;
-  const vis = _finLancCascataFiltrados();
+  const vis = _finLancCascataOrdenados().slice(0, _finLancCascataState.limite);
   if(marcar) vis.forEach(l => sel.add(l.id)); else vis.forEach(l => sel.delete(l.id));
   _finLancCascataRender();
 }
+// Cabeçalho de dia sem caixa: "1 de agosto · sáb", linha fina até o saldo do dia.
 function _finLancCascataDiaHtml(g, ctx){
-  const DOW = ['domingo','segunda','terça','quarta','quinta','sexta','sábado'];
+  const DOW = ['dom','seg','ter','qua','qui','sex','sáb'];
   const d = g.data;
-  const dd = d ? d.slice(8,10)+'/'+d.slice(5,7) : '—';
-  const dow = d ? DOW[new Date(d+'T00:00:00').getDay()] : '';
+  const dt = d ? new Date(d+'T00:00:00') : null;
+  const longa = dt ? `${dt.getDate()} de ${_FIN_MESES[dt.getMonth()]}` : '—';
+  const dow = dt ? DOW[dt.getDay()] : '';
   let e = 0, sa = 0;
   g.itens.forEach(l => { const v = Math.abs(+l.valor||0); if(l.tipo_movimento===1) e += v; else sa += v; });
   return `<div class="finmv-dia">
-      <span class="dd">${dd}</span><span class="dow">${dow}</span>
-      <span class="ent">+${fmtR(e)}</span><span class="sai">−${fmtR(sa)}</span>
-      <span class="sld" style="color:${(e-sa)>=0?'#4C6647':'#7D3F33'};">saldo ${fmtRs(e-sa)}</span>
+      <span class="dd">${longa}</span><span class="dow">${dow}</span>
+      <span class="rule"></span>
+      <span class="sld" style="color:${(e-sa)>=0?'#4C6647':'#A65A4A'};">${(e-sa)>=0?'+':''}${fmtRs(e-sa)}</span>
     </div>${g.itens.map(l=>_finLancCascataRowHtml(l, ctx)).join('')}`;
 }
 function _finLancCascataRowHtml(l, ctx){
+  const s = _finLancCascataState;
   const isEnt = l.tipo_movimento === 1;
-  const sel = _finLancCascataState.sel.has(l.id);
+  const sel = s.sel.has(l.id);
   const st = _finLancSit(l);
+  const efetivado = st.t === 'PAGO' || st.t === 'CONCILIADO';
+  const atrasado = st.t === 'ATRASADO';
   const conta = ((ctx.dim && ctx.dim.contas) || []).find(c => String(c.id) === String(l.conta_id));
   const cat = ctx.catPorLanc && ctx.catPorLanc[l.id];
 
   // Linha 2 da descrição: quem está do outro lado, sem repetir o que a linha 1 já diz.
   // Receita própria e despesa operacional não têm segunda linha (handoff).
-  let sub = '';
+  const cedente = _finLancCedente(l, ctx);
+  const sub = cedente ? (isEnt ? `carteira de ${escHtml(cedente)}` : `repasse a ${escHtml(cedente)}`) : '';
+
+  // Marcador circular ao lado do título. Divergência tem precedência: é a que trava o
+  // repasse. Substituem as tags de texto, que dobravam a altura da linha.
   const op = ctx.opsByLanc[l.id];
-  const cedente = op ? op._credorNome : (l.cedente_id ? ctx.cedMap[l.cedente_id] : (ctx.credorPorLanc && ctx.credorPorLanc[l.id]));
-  if(cedente) sub = isEnt ? `carteira de ${escHtml(cedente)}` : `repasse a ${escHtml(cedente)}`;
+  let marca = '';
+  if(_finLancEhDivergencia(l, ctx)) marca = `<span class="finmv-marca" style="background:#FBEAE7;color:#7D3F33;" title="A parcela foi recebida mas a divisão entre COBRASQ e cedente não foi calculada. Nada pode ser repassado até resolver.">!</span>`;
+  else if(_finLancEhRepasse(l, ctx) && !(op && op.repasse_status === 'efetuado')) marca = `<span class="finmv-marca" style="background:#FBF3E1;color:#7A6428;" title="A repassar${cedente?' a '+escHtml(cedente):''}">↗</span>`;
 
-  // Tag abaixo da pílula de situação. Divergência tem precedência: é a que trava o repasse.
-  let tag = '';
-  if(_finLancEhDivergencia(l, ctx)) tag = `<span class="finmv-tag" style="background:#FBEAE7;color:#7D3F33;border:1px solid #E7CFC7;">DIVERGÊNCIA</span>`;
-  else if(_finLancEhRepasse(l, ctx) && !(op && op.repasse_status === 'efetuado')) tag = `<span class="finmv-tag" style="background:#FBF3E1;color:#7A6428;border:1px solid #DFC992;">A REPASSAR</span>`;
+  // Dois estados do badge de tipo (padrão do Controlle): efetivado preenche o círculo,
+  // previsto fica só com o anel.
+  const tom = isEnt ? '#D9F6E3' : '#FBEAE7';
+  const cor = isEnt ? '#4C6647' : '#A65A4A';
+  const path = isEnt ? 'M7 7h10v10M7 17 17 7' : 'M17 7 7 17M17 17H7V7';
+  const seta = `<span class="finmv-tipo" style="${efetivado?`background:${tom};`:`background:transparent;box-shadow:inset 0 0 0 2px ${tom};`}color:${cor};" title="${isEnt?'Receita':'Despesa'} ${efetivado?'efetivada':'prevista'}"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="${path}"/></svg></span>`;
 
-  const seta = isEnt
-    ? `<span class="finmv-tipo" style="box-shadow:inset 0 0 0 2px #D3E3CF;color:#5E7C58;" title="Receita"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10M7 17 17 7"/></svg></span>`
-    : `<span class="finmv-tipo" style="background:#FBEAE7;color:#A65A4A;" title="Despesa"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M17 7 7 17M17 17H7V7"/></svg></span>`;
-
-  return `<div class="finmv-grid finmv-row ${sel?'sel':''}" data-lanc="${l.id}" onclick="_finLancAbrirDrawer(${l.id})">
+  return `<div class="finmv-grid finmv-row ${sel?'sel':''} ${atrasado?'atraso':''}" data-lanc="${l.id}" onclick="_finLancAbrirDrawer(${l.id})">
       <span><input type="checkbox" ${sel?'checked':''} onclick="event.stopPropagation();_finLancCascataToggleSel(${l.id})"></span>
       ${seta}
       <span class="finmv-data">${(l.data_competencia||'').slice(8,10)}/${(l.data_competencia||'').slice(5,7)}</span>
@@ -32198,17 +32482,237 @@ function _finLancCascataRowHtml(l, ctx){
         <span class="finmv-d1">
           <span class="tx" title="${escHtml(l.descricao||'')}">${escHtml(_finMovDescSemParcela(l))}</span>
           ${l.numero_parcela && l.total_parcelas ? `<span class="finmv-parc" title="parcela ${l.numero_parcela}/${l.total_parcelas} deste acordo">${l.numero_parcela}/${l.total_parcelas}</span>` : ''}
+          ${marca}
         </span>
-        ${sub ? `<span class="finmv-d2" style="color:#9C7F40;display:block;">${sub}</span>` : ''}
+        ${sub ? `<span class="finmv-d2" style="color:#9C7F40;">${sub}</span>` : ''}
       </span>
-      <span class="finmv-cat" title="${cat?escHtml(cat.nome):''}">${cat ? escHtml(cat.nome)+(cat.extras?` <span style="color:#A6AEBD;">+${cat.extras}</span>`:'') : '<span style="color:#C9C3B4;">sem categoria</span>'}</span>
+      <span class="finmv-cat" title="${cat?escHtml(cat.nome):''}">${cat ? escHtml(cat.nome)+(cat.extras?` <span style="color:#C3C9D4;">+${cat.extras}</span>`:'') : '<span style="color:#C9C3B4;">sem categoria</span>'}</span>
       <span class="finmv-val" style="color:${isEnt?'#4C6647':'#0A1530'};">${isEnt?'+':'−'} ${fmtR(Math.abs(+l.valor||0))}</span>
-      <span style="display:flex;justify-content:center;">${_finContaAvatar(conta, 22)}</span>
-      <span class="finmv-sit">
-        <span class="finmv-pill" style="background:${st.bg};color:${st.fg};border:1px solid ${st.bd};">${st.t}</span>
-        ${tag}
+      <span class="finmv-cel">
+        <button class="finmv-cbtn" onclick="event.stopPropagation();_finMovAbrirPopConta(${l.id})" title="${escHtml((conta&&conta.descricao)||'sem conta')} — clique para mover">${_finContaAvatar(conta, 20)}</button>
+        ${s.popConta === l.id ? _finMovPopContaHtml(l, ctx) : ''}
+      </span>
+      <span class="finmv-cel">
+        ${_finMovPolegarHtml(l, st, efetivado, atrasado)}
+        ${s.popEfet === l.id ? _finMovPopEfetivarHtml(l, ctx) : ''}
+      </span>
+      <span class="finmv-cel">
+        <button class="finmv-kebab ${s.menu===l.id?'on':''}" onclick="event.stopPropagation();_finMovAbrirMenu(${l.id})" title="Ações rápidas">⋮</button>
+        ${s.menu === l.id ? _finMovMenuHtml(l) : ''}
       </span>
     </div>`;
+}
+// Polegar: substitui a antiga pílula de situação e resolve a falta de ação rápida.
+// Preenchimento claro (#C6E7C9) com traço escuro (#33502E) é intencional — polegar todo
+// sólido vira mancha numa lista de 60 linhas.
+function _finMovPolegarHtml(l, st, efetivado, atrasado, onClick, titulo){
+  const conciliado = st.t === 'CONCILIADO';
+  const cor = efetivado ? '#33502E' : (atrasado ? '#B99A4F' : '#C3C9D4');
+  const fundo = conciliado ? 'background:#E9F0E7;' : '';
+  titulo = titulo || (efetivado
+    ? (conciliado ? 'Conciliado com o extrato — clique para reabrir' : 'Efetivado — clique para reabrir')
+    : (l.tipo_movimento === 1 ? 'Confirmar recebimento' : 'Confirmar pagamento') + ' · ' + fmtR(Math.abs(+l.valor||0)));
+  const paths = efetivado
+    ? ['M7 10v12','M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z']
+    : ['M17 14V2','M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88Z'];
+  const fill = efetivado ? '#C6E7C9' : 'none';
+  // A aba Judicial usa o MESMO componente com outra ação (o popover de lá tem valor
+  // creditado editável). Passar a chamada como parâmetro evita o remendo de trocar o
+  // nome da função por string no HTML já montado.
+  const acao = onClick || `_finMovClicarPolegar(${l.id})`;
+  return `<button class="finmv-pol" style="color:${cor};${fundo}" title="${escHtml(titulo)}" onclick="event.stopPropagation();${acao}">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="${fill}" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${paths.map(d=>`<path d="${d}"/>`).join('')}</svg>
+  </button>`;
+}
+function _finMovClicarPolegar(id){
+  const ctx = window._finLancCascataCtx; if(!ctx) return;
+  const l = ctx.rows.find(r => r.id === id); if(!l) return;
+  const st = _finLancSit(l);
+  const s = _finLancCascataState;
+  if(st.t === 'PAGO' || st.t === 'CONCILIADO'){ _finMovReabrir(id); return; }
+  // Judicial já não aparece aqui, mas o mesmo popover serve a aba Judicial, onde
+  // 'Tribunal de Justiça' é ORIGEM e não conta: o destino tem de ser uma conta real.
+  const contas = (ctx.dim && ctx.dim.contas) || [];
+  const atual = contas.find(c => String(c.id) === String(l.conta_id));
+  s.popConta = null; s.menu = null;
+  s.popEfet = s.popEfet === id ? null : id;
+  s.efetConta = atual ? String(atual.id) : String((contas[0]||{}).id || '');
+  s.efetData = l.data_vencimento || hoje();
+  s.efetJuros = '';
+  _finLancCascataRender();
+}
+function _finMovPopEfetivarHtml(l, ctx){
+  const s = _finLancCascataState;
+  const isEnt = l.tipo_movimento === 1;
+  const contas = (ctx.dim && ctx.dim.contas) || [];
+  const base = Math.abs(+l.valor||0);
+  const extra = s.efetJuros ? (parseValorBR(s.efetJuros)||0) : 0;
+  return `<div class="finmv-pop" onclick="event.stopPropagation()">
+    <span style="font-size:13px;font-weight:600;color:#0A1530;">${isEnt?'Marcar como recebido':'Marcar como pago'}</span>
+    <label>Conta/carteira
+      <select onchange="_finLancCascataState.efetConta=this.value">
+        ${contas.map(c=>`<option value="${c.id}" ${String(s.efetConta)===String(c.id)?'selected':''}>${escHtml(c.descricao||'—')}</option>`).join('')}
+      </select></label>
+    <label>${isEnt?'Data de recebimento':'Data de pagamento'}
+      <input type="date" value="${escHtml(s.efetData||'')}" onchange="_finLancCascataState.efetData=this.value"></label>
+    <div style="display:flex;align-items:center;gap:9px;">
+      <span style="font-size:11px;color:#8A94A6;">Multa e juros</span>
+      <input value="${escHtml(s.efetJuros)}" placeholder="0,00" style="margin-left:auto;width:96px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:11.5px;background:#fff;border:1px solid #E6E1D2;border-radius:7px;padding:7px 9px;color:#0A1530;" oninput="_finLancCascataState.efetJuros=this.value;_finMovAtualizarTotal(${l.id})">
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;border-top:1px solid #F2EFE6;padding-top:11px;">
+      <span style="font-size:11px;color:#8A94A6;">total</span>
+      <span id="finmv-efet-total" style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;white-space:nowrap;color:#0A1530;">${fmtR(base+extra)}</span>
+      <button style="margin-left:auto;background:#5E7C58;border:none;color:#fff;border-radius:6px;padding:8px 12px;font-size:12px;font-weight:600;white-space:nowrap;cursor:pointer;font-family:inherit;" onclick="_finMovEfetivarConfirmar(${l.id})">${isEnt?'Marcar recebido':'Marcar pago'}</button>
+    </div>
+  </div>`;
+}
+// Total recalculado sem re-render: refazer a lista a cada tecla fecharia o popover.
+function _finMovAtualizarTotal(id){
+  const ctx = window._finLancCascataCtx; if(!ctx) return;
+  const l = ctx.rows.find(r => r.id === id); if(!l) return;
+  const el = document.getElementById('finmv-efet-total'); if(!el) return;
+  const extra = _finLancCascataState.efetJuros ? (parseValorBR(_finLancCascataState.efetJuros)||0) : 0;
+  el.textContent = fmtR(Math.abs(+l.valor||0) + extra);
+}
+async function _finMovEfetivarConfirmar(id){
+  const s = _finLancCascataState;
+  const ctx = window._finLancCascataCtx;
+  const l = ctx && ctx.rows.find(r => r.id === id); if(!l) return;
+  const extra = s.efetJuros ? (parseValorBR(s.efetJuros)||0) : 0;
+  const total = Math.abs(+l.valor||0) + extra;
+  if(!s.efetData){ showToast('Informe a data.', 'warning'); return; }
+  try{
+    await finApi.pagarLancamento(id, { dataPagamento: s.efetData, valorPago: total, contaId: s.efetConta || null });
+    // juros/multa entram como juros: a coluna existe e é o que a ficha do lançamento lê.
+    if(extra > 0){ try{ await getSupabase().from('fin_lancamento').update({ juros: extra }).eq('id', id); }catch(_){} }
+    s.popEfet = null;
+    showToast(l.tipo_movimento===1 ? 'Recebimento confirmado.' : 'Pagamento confirmado.', 'success');
+    renderFinTab('lancamentos');
+  }catch(e){ showToast('Erro: '+(e.message||e), 'danger'); }
+}
+// Reabrir devolve a linha ao estado previsto: sem data de pagamento, sem baixa e sem
+// conciliação — previsto conciliado não existe. A competência volta para o vencimento,
+// que é onde a lista mostra o que ainda não aconteceu.
+async function _finMovReabrir(id){
+  const ctx = window._finLancCascataCtx;
+  const l = ctx && ctx.rows.find(r => r.id === id); if(!l) return;
+  try{
+    const payload = { status: 0, data_pagamento: null, valor_pago: null, conciliado: false };
+    if(l.data_vencimento) payload.data_competencia = l.data_vencimento;
+    const { error } = await getSupabase().from('fin_lancamento').update(payload).eq('id', id);
+    if(error) throw error;
+    showToast('Reaberto como previsto.', 'success');
+    renderFinTab('lancamentos');
+  }catch(e){ showToast('Erro ao reabrir: '+(e.message||e), 'danger'); }
+}
+async function _finMovEfetivarVencidos(){
+  const vencidos = _finMovVencidos();
+  if(!vencidos.length) return;
+  if(!confirm(`Efetivar ${vencidos.length} lançamento(s) vencido(s)? Cada um é baixado na própria data de vencimento.`)) return;
+  try{
+    // Um a um porque a data de pagamento é a de cada linha — um lote com data única
+    // carimbaria todos no mesmo dia e o extrato deixaria de bater.
+    for(const l of vencidos){
+      await finApi.pagarLancamento(l.id, { dataPagamento: l.data_vencimento || hoje(), contaId: l.conta_id || null });
+    }
+    showToast(`${vencidos.length} lançamento(s) efetivado(s).`, 'success');
+    renderFinTab('lancamentos');
+  }catch(e){ showToast('Erro: '+(e.message||e), 'danger'); }
+}
+function _finMovAbrirPopConta(id){
+  const s = _finLancCascataState;
+  s.popEfet = null; s.menu = null;
+  s.popConta = s.popConta === id ? null : id;
+  _finLancCascataRender();
+}
+function _finMovPopContaHtml(l, ctx){
+  const contas = (ctx.dim && ctx.dim.contas) || [];
+  return `<div class="finmv-conta-pop" onclick="event.stopPropagation()">
+    <span class="tt">Mover para a conta</span>
+    ${contas.map(c=>{
+      const atual = String(c.id) === String(l.conta_id);
+      return `<button class="finmv-conta-it" style="${atual?'background:#FBFAF6;':''}" onclick="_finMovMoverConta(${l.id},'${c.id}')">
+        ${_finContaAvatar(c,18)}<span class="nm">${escHtml(c.descricao||'—')}</span>
+        <span style="margin-left:auto;font-size:11px;color:#4C6647;opacity:${atual?1:0};">✓</span></button>`;
+    }).join('') || '<span style="font-size:11.5px;color:#A6AEBD;padding:6px 9px;">Nenhuma conta cadastrada.</span>'}
+  </div>`;
+}
+async function _finMovMoverConta(id, contaId){
+  try{
+    await finApi.alterarContaLote([id], contaId);
+    _finLancCascataState.popConta = null;
+    showToast('Conta alterada.', 'success');
+    renderFinTab('lancamentos');
+  }catch(e){ showToast('Erro: '+(e.message||e), 'danger'); }
+}
+function _finMovAbrirMenu(id){
+  const s = _finLancCascataState;
+  s.popEfet = null; s.popConta = null;
+  s.menu = s.menu === id ? null : id;
+  _finLancCascataRender();
+}
+const FIN_MOV_ICONES = {
+  parcial: ['M12 21a9 9 0 100-18 9 9 0 000 18z','M12 3a9 9 0 010 18z'],
+  nota: ['M15 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7z','M14 2v5h6','M8 13h8','M8 17h5'],
+  recibo: ['M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1z','M8 8h8','M8 12h6'],
+  duplicar: ['M9 9h10v10a2 2 0 01-2 2H9a2 2 0 01-2-2V11a2 2 0 012-2z','M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1'],
+  calendario: ['M8 2v4','M16 2v4','M3 10h18','M5 4h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z'],
+  editar: ['M12 20h9','M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z'],
+  excluir: ['M3 6h18','M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2','M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6','M10 11v6','M14 11v6'],
+};
+// Ícones Lucide 14px stroke 1.6 — nunca glifos Unicode (o handoff é explícito).
+function _finMovIcone(paths){
+  return `<span style="display:flex;align-items:center;justify-content:center;width:15px;flex-shrink:0;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths.map(d=>`<path d="${d}"/>`).join('')}</svg></span>`;
+}
+function _finMovMenuHtml(l){
+  const itens = [
+    ['Recebimento parcial', FIN_MOV_ICONES.parcial, `_finMovMenuAcao(${l.id},'parcial')`, ''],
+    ['Emitir nota',         FIN_MOV_ICONES.nota,    `_finMovMenuAcao(${l.id},'nota')`,    ''],
+    ['Gerar recibo',        FIN_MOV_ICONES.recibo,  `_finMovMenuAcao(${l.id},'recibo')`,  ''],
+    ['Duplicar',            FIN_MOV_ICONES.duplicar,`_finMovMenuAcao(${l.id},'duplicar')`,'sep'],
+    ['Editar',              FIN_MOV_ICONES.editar,  `_finMovMenuAcao(${l.id},'editar')`,  ''],
+    ['Excluir',             FIN_MOV_ICONES.excluir, `_finMovMenuAcao(${l.id},'excluir')`, 'del'],
+  ];
+  return `<div class="finmv-menu" onclick="event.stopPropagation()">
+    ${itens.map(([nome, ic, fn, cls])=>`<button class="finmv-mi ${cls}" onclick="event.stopPropagation();${fn}">${_finMovIcone(ic)}<span>${nome}</span></button>`).join('')}
+  </div>`;
+}
+async function _finMovMenuAcao(id, acao){
+  const ctx = window._finLancCascataCtx;
+  const l = ctx && ctx.rows.find(r => r.id === id);
+  _finLancCascataState.menu = null;
+  _finLancCascataRender();
+  if(acao === 'parcial'){ abrirPagarLancamento(id); return; }
+  if(acao === 'editar'){ _finLancAbrirDrawer(id); return; }
+  if(acao === 'recibo'){
+    if(!l || l.tipo_movimento !== 1){ showToast('Recibo só existe para entrada recebida.', 'warning'); return; }
+    reenviarReciboLancamento(id); return;
+  }
+  if(acao === 'nota'){
+    const op = ctx && ctx.opsByLanc[id];
+    // Sem fin_operacao não há base de cálculo do honorário: a NF sai pela tela avulsa.
+    if(op) _finDrawerEmitirNfDireto(op.id);
+    else { showToast('Sem operação vinculada — emitindo pela tela de NF avulsa.', 'info'); location.hash = '#/nf-avulsa'; }
+    return;
+  }
+  if(acao === 'duplicar'){
+    if(!l) return;
+    try{
+      await finApi.saveLancamento({
+        descricao: (l.descricao||'') + ' (cópia)', data_competencia: l.data_competencia,
+        data_vencimento: l.data_vencimento, valor: Math.abs(+l.valor||0),
+        tipo_movimento: l.tipo_movimento, status: 0, conta_id: l.conta_id, contato_id: l.contato_id,
+      });
+      showToast('Cópia criada como prevista.', 'success');
+      renderFinTab('lancamentos');
+    }catch(e){ showToast('Erro ao duplicar: '+(e.message||e), 'danger'); }
+    return;
+  }
+  if(acao === 'excluir'){
+    if(!confirm('Excluir este lançamento? Não dá para desfazer.')) return;
+    try{ await finApi.deleteLancamento(id); showToast('Lançamento excluído.', 'success'); renderFinTab('lancamentos'); }
+    catch(e){ showToast('Erro ao excluir: '+(e.message||e), 'danger'); }
+  }
 }
 // A numeração de parcela vira badge próprio; repeti-la no texto polui a coluna. O badge
 // vem das COLUNAS numero_parcela/total_parcelas — este corte é só cosmético, sobre o
@@ -32224,13 +32728,14 @@ function _finLancCascataBusca(v){
   clearTimeout(_finLancCascataBuscaTimer);
   _finLancCascataBuscaTimer=setTimeout(async ()=>{
     _finLancCascataState.busca=v;
+    _finLancCascataState.limite = FIN_MOV_PAGINA;   // busca nova recomeça na 1ª página
     const seq = ++_finLancCascataBuscaSeq;
     try{
       const ctx = await _finLancCascataCarregar();
       if(seq !== _finLancCascataBuscaSeq) return;   // resposta atrasada de uma tecla anterior
       window._finLancCascataCtx = ctx;
       _finLancCascataState.sel = new Set();         // ids selecionados podem não estar mais na lista
-      const cEl = document.getElementById('fincx-cnt-lancamentos'); if(cEl) cEl.textContent = ctx.rows.length;
+      _finSetCnt('lancamentos', ctx.rows.length);
     }catch(_){ /* mantém a lista anterior; o filtro local ainda vale */ }
     _finLancCascataRender();
     // o render troca o innerHTML inteiro: sem isto o cursor sai do campo a cada busca
@@ -32456,16 +32961,82 @@ async function _finLancSerieConfirmar(){
 // por operação — cada linha some 1x confirmarRepasse(), nunca um loop automático).
 // ══════════════════════════════════════════════════════════════
 
-// ── Drawer do lançamento ──
+// ══════════════════════════════════════════════════════════════
+// EDITOR DO LANÇAMENTO — janela flutuante (Fase 3 do handoff 29/08)
+// ──────────────────────────────────────────────────────────────
+// Antes a edição abria em tela cheia e você perdia o contexto justamente quando precisava
+// comparar com as outras parcelas. Agora é uma janela de 540px ancorada à direita, com
+// backdrop de 6% — a lista continua legível atrás. Três coisas que só existem aqui:
+//   · navegação entre parcelas do mesmo acordo, sem fechar (‹ 5/8 ›);
+//   · categoria como CAMPO DE BUSCA (são ~150 opções indentadas com &nbsp; no <select>);
+//   · escopo do parcelamento, com a contagem real de cada opção.
+//
+// O escopo aplica só o que faz sentido repetir numa série (descrição, categoria, conta,
+// contato, valor e tipo). Vencimento, pagamento e status ficam SEMPRE nesta parcela:
+// carimbar a mesma data em oito parcelas destruiria o parcelamento — e a janela diz isso
+// em uma linha, em vez de deixar a pessoa descobrir depois.
+let _finEdState = {
+  serie: [], idx: 0, escopo: 'esta', catBusca: null, catAberto: false,
+  avancado: false, historico: false, salvando: false,
+};
+// Uso por categoria, para as "8 mais usadas" quando não há busca. Uma vez por sessão:
+// é ranking, não saldo — não precisa estar fresco a cada abertura.
+let _finCatUsoCache = null;
+async function _finCatUso(){
+  if(_finCatUsoCache) return _finCatUsoCache;
+  const uso = {};
+  try{
+    const { data } = await getSupabase().from('fin_lancamento_categoria').select('categoria_id').limit(5000);
+    for(const r of (data||[])) uso[r.categoria_id] = (uso[r.categoria_id]||0) + 1;
+  }catch(_){}
+  _finCatUsoCache = uso;
+  return uso;
+}
+// Caminho da categoria ("Receitas › Acordos"), montado do parent_id. É o que diferencia
+// duas categorias de mesmo nome em ramos diferentes.
+function _finCatCaminho(cat, todas){
+  const partes = [];
+  let p = cat && cat.parent_id;
+  for(let i = 0; i < 6 && p; i++){
+    const pai = todas.find(c => String(c.id) === String(p));
+    if(!pai) break;
+    partes.unshift(pai.descricao);
+    p = pai.parent_id;
+  }
+  return partes.join(' › ');
+}
+// A série do parcelamento. Ordem de precedência: grupo_parcelamento → acordo_id → texto.
+// O texto continua sendo o caminho mais usado porque a série NÃO está normalizada: em
+// 12/08/2026, 717 de 886 linhas tinham "N/M" na descrição e nenhuma coluna preenchida.
+async function _finEditorSerie(l){
+  const sb = getSupabase();
+  const col = 'id,descricao,valor,tipo_movimento,status,conciliado,data_pagamento,data_competencia,data_vencimento,numero_parcela,total_parcelas,contato_id';
+  const tenta = async (fn) => { try{ const { data } = await fn(); return data || []; }catch(_){ return []; } };
+  let serie = [];
+  if(l.grupo_parcelamento) serie = await tenta(()=>sb.from('fin_lancamento').select(col).eq('grupo_parcelamento', l.grupo_parcelamento).limit(500));
+  if(serie.length < 2 && l.acordo_id) serie = await tenta(()=>sb.from('fin_lancamento').select(col).eq('acordo_id', l.acordo_id).limit(500));
+  if(serie.length < 2){
+    const base = _finSerieBase(l.descricao);
+    const bruto = await tenta(()=>{
+      let q = sb.from('fin_lancamento').select(col).eq('tipo_movimento', l.tipo_movimento);
+      return (l.contato_id ? q.eq('contato_id', l.contato_id) : q.like('descricao', _finEscLike(base)+'%')).limit(500);
+    });
+    serie = bruto.filter(x => _finSerieBase(x.descricao) === base);
+  }
+  if(!serie.some(x => x.id === l.id)) serie.push(l);
+  serie.sort(_finLancSerieCmp);
+  return serie;
+}
+
 async function _finLancAbrirDrawer(lancId){
   const sb = getSupabase();
   let l;
   {
-    // Mesmo motivo do carregador da lista: sem a checagem em cache, abrir um
-    // lançamento custava duas viagens ao servidor, a primeira sempre com erro.
+    // Mesmo motivo do carregador da lista: sem a checagem em cache, abrir um lançamento
+    // custava duas viagens ao servidor, a primeira sempre com erro.
     const extra = (await _finTemColunasCascata()) ? ',cedente_id,capital,meu_total,amortizado,repasse_status' : '';
     const r = await sb.from('fin_lancamento')
-      .select('id,descricao,data_competencia,valor,tipo_movimento,status,conciliado,conta_id,fin_conta(descricao),cobranca_id'+extra)
+      .select('id,descricao,data_competencia,data_vencimento,data_pagamento,valor,valor_pago,juros,multa,desconto,tipo_movimento,status,conciliado,conta_id,contato_id,cobranca_id,acordo_id,grupo_parcelamento,numero_parcela,total_parcelas,observacoes,fin_conta(descricao)'+extra)
       .eq('id', lancId).single();
     if(r.error){ showToast('Erro ao abrir lançamento: '+(r.error.message||r.error), 'danger'); return; }
     l = r.data;
@@ -32473,79 +33044,419 @@ async function _finLancAbrirDrawer(lancId){
 
   let op = null;
   try{ const { data } = await sb.from('fin_operacao')
-    .select('id,valor_recebido,valor_capital,valor_honorario,repasse_status,repasse_comprovante_url,repasse_efetuado_em,nf_status,nf_url,credor_id,devedor_id,parcela,total_parcelas')
+    .select('id,valor_recebido,valor_capital,valor_honorario,repasse_status,repasse_comprovante_url,repasse_efetuado_em,recebido_em,nf_status,nf_url,credor_id,devedor_id,parcela,total_parcelas')
     .or(`lancamento_receita_id.eq.${lancId},lancamento_despesa_id.eq.${lancId}`).maybeSingle();
     op = data;
   }catch(_){}
 
+  let dim = { contas:[], categorias:[], contatos:[] };
+  try{ dim = await finApi.loadDimensoes(); }catch(_){}
+  let catAtual = null;
+  try{
+    const { data } = await sb.from('fin_lancamento_categoria').select('categoria_id').eq('lancamento_id', lancId).limit(1);
+    catAtual = (data && data[0]) ? data[0].categoria_id : null;
+  }catch(_){}
+
   let cedentes = [];
   try{ const { data } = await sb.from('clientes').select('id,nome').order('nome').limit(500); cedentes = data||[]; }catch(_){}
-  let credorNome = null, devedorNome = null;
-  const credorId = (op && op.credor_id) || null;
-  if(credorId){ const c = cedentes.find(x=>x.id===credorId); credorNome = c ? c.nome : null; }
-  if(op && op.devedor_id){ try{ const {data}=await sb.from('devedores').select('nome').eq('id',op.devedor_id).maybeSingle(); devedorNome = data && data.nome; }catch(_){} }
+  let credorNome = null;
+  if(op && op.credor_id){ const c = cedentes.find(x=>x.id===op.credor_id); credorNome = c ? c.nome : null; }
 
-  window._finDrawerCtx = { l, op, cedentes, credorNome, devedorNome };
+  const [serie, uso] = await Promise.all([_finEditorSerie(l).catch(()=>[l]), _finCatUso()]);
+
+  window._finDrawerCtx = { l, op, dim, cedentes, credorNome, catAtual, uso, edit: _finEdCampos(l, catAtual) };
+  _finEdState = Object.assign({}, _finEdState, {
+    serie, idx: Math.max(0, serie.findIndex(x => x.id === l.id)),
+    escopo: 'esta', catBusca: null, catAberto: false, avancado: false, historico: false, salvando: false,
+    compTocada: false,
+  });
+
   let ov = document.getElementById('findrw-overlay');
   if(!ov){ ov = document.createElement('div'); ov.id='findrw-overlay'; ov.className='overlay findrw-ov'; document.body.appendChild(ov); }
   _finLancDrawerRender();
   openModal('findrw-overlay');
+  _finEdAtalhosOn();
 }
+// Rascunho do formulário: os campos vivem aqui, não no DOM, para que trocar de parcela,
+// abrir "dados avançados" ou mexer no slider não apague o que já foi digitado.
+function _finEdCampos(l, catAtual){
+  return {
+    descricao: l.descricao || '',
+    valor: Math.abs(+l.valor||0).toFixed(2).replace('.', ','),
+    tipo: l.tipo_movimento === 1 ? 1 : 0,
+    categoria_id: catAtual || '',
+    conta_id: l.conta_id || '',
+    contato_id: l.contato_id || '',
+    data_vencimento: l.data_vencimento || '',
+    data_pagamento: l.data_pagamento || '',
+    data_competencia: l.data_competencia || '',
+    status: +l.status || 0,
+    conciliado: !!l.conciliado,
+    observacoes: l.observacoes || '',
+  };
+}
+function _finEdSet(campo, v){
+  const c = window._finDrawerCtx; if(!c) return;
+  c.edit[campo] = v;
+  // Status e tipo mudam o que a janela mostra (campo de pagamento, cor do valor):
+  // esses redesenham; os demais não, para não roubar o cursor de quem está digitando.
+  if(campo === 'status' || campo === 'tipo') _finLancDrawerRender();
+}
+function _finEdIr(delta){
+  const st = _finEdState;
+  const i = st.idx + delta;
+  if(i < 0 || i >= st.serie.length) return;
+  _finEdFechar(true);
+  _finLancAbrirDrawer(st.serie[i].id);
+}
+function _finEdFechar(silencioso){
+  _finEdAtalhosOff();
+  if(!silencioso) closeModal('findrw-overlay');
+}
+let _finEdKeyHandler = null;
+function _finEdAtalhosOn(){
+  _finEdAtalhosOff();
+  _finEdKeyHandler = (ev) => {
+    const ov = document.getElementById('findrw-overlay');
+    if(!ov || !ov.classList.contains('open')) return;
+    if((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter'){ ev.preventDefault(); _finEdSalvar(false); }
+    else if(ev.key === 'Escape'){ _finEdFechar(); }
+  };
+  document.addEventListener('keydown', _finEdKeyHandler);
+}
+function _finEdAtalhosOff(){ if(_finEdKeyHandler){ document.removeEventListener('keydown', _finEdKeyHandler); _finEdKeyHandler = null; } }
+
+const FIN_ED_STATUS = [
+  { v:0, lb:'Previsto',  bg:'#F5F2EA', fg:'#5A5F66' },
+  { v:1, lb:'Pago',      bg:'#E9F0E7', fg:'#4C6647' },
+  { v:2, lb:'Parcial',   bg:'#FBF3E1', fg:'#7A6428' },
+  { v:3, lb:'Cancelado', bg:'#FBEAE7', fg:'#7D3F33' },
+];
+
 function _finLancDrawerRender(){
   const ov = document.getElementById('findrw-overlay'); if(!ov) return;
-  const { l, op, cedentes, credorNome } = window._finDrawerCtx;
-  const isEnt = l.tipo_movimento===1;
-  const valor = Math.abs(+l.valor||0);
+  const c = window._finDrawerCtx; if(!c) return;
+  const { l, op, dim, credorNome, uso } = c;
+  const e = c.edit;
+  const st = _finEdState;
+  const isEnt = e.tipo === 1;
+  const valorNum = parseValorBR(e.valor);
+  const pago = e.status === 1 || e.status === 2 || e.conciliado;
+  const sit = FIN_ED_STATUS.find(s => s.v === e.status) || FIN_ED_STATUS[0];
+  const cats = (dim.categorias||[]).filter(x => !x.is_father);
+  const catSel = (dim.categorias||[]).find(x => String(x.id) === String(e.categoria_id));
+
+  // Escopo: a contagem real de cada opção sai da série já carregada — número inventado
+  // aqui viraria "aplicado em 8 parcelas" sobre uma série de 3.
+  const nFuturas = Math.max(0, st.serie.length - st.idx - 1);
+  const nTodas = st.serie.length;
+
   ov.innerHTML = `
     <style>
-      .findrw-ov{justify-content:flex-end;align-items:stretch;padding:0;background:rgba(10,21,48,.34);}
-      .findrw-panel{width:600px;max-width:100vw;height:100%;background:#fff;overflow-y:auto;box-shadow:-20px 0 60px rgba(10,21,48,.22);}
-      .findrw-head{display:flex;align-items:center;gap:14px;padding:22px 26px;border-bottom:1px solid #E6E1D2;}
-      .findrw-ic{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;flex-shrink:0;}
-      .findrw-eyebrow{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#9C7F40;}
-      .findrw-title{font-family:'Fraunces',Georgia,serif;font-size:23px;font-weight:400;color:#0A1530;margin-top:2px;}
-      .findrw-x{border:none;background:transparent;font-size:18px;color:#8A94A6;cursor:pointer;}
-      .findrw-body{padding:22px 26px;}
-      .findrw-block{border:1px solid #E6E1D2;border-radius:10px;padding:16px 18px;margin-bottom:16px;}
-      .findrw-bt{font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#8A94A6;margin-bottom:10px;}
-      .findrw-kv{display:flex;justify-content:space-between;font-size:13.5px;color:#5A5F66;padding:5px 0;}
-      .findrw-kv b{font-family:'JetBrains Mono',monospace;color:#0A1530;}
-      .findrw-link{display:inline-block;margin-top:8px;font-size:12.5px;color:#3A5288;font-weight:600;cursor:pointer;}
-      .findrw-note{font-size:12px;color:#8A94A6;margin-top:6px;line-height:1.5;}
-      .findrw-barra{margin-bottom:10px;}
-      .findrw-barra-lb{font-size:11.5px;color:#6B7683;margin-bottom:4px;}
-      .findrw-barra-trilho{height:9px;border-radius:5px;background:#EFEBE0;overflow:hidden;}
-      .findrw-barra-trilho div{height:100%;border-radius:5px;}
-      .findrw-btn{border:1px solid #E6E1D2;background:#fff;color:#0A1530;font-size:13px;font-weight:500;padding:10px 16px;border-radius:8px;cursor:pointer;font-family:inherit;}
-      .findrw-btn.dark{background:#0A1530;color:#fff;border-color:#0A1530;}
-      .findrw-foot{display:flex;justify-content:space-between;padding:16px 26px;border-top:1px solid #E6E1D2;}
+      /* Backdrop de 6%: a lista tem de continuar legível atrás — é para poder comparar
+         com as outras parcelas que a edição saiu da tela cheia. */
+      .findrw-ov{justify-content:flex-end;align-items:flex-start;padding:0;background:rgba(10,21,48,.06);}
+      .findrw-panel{position:fixed;right:20px;top:66px;width:540px;max-width:calc(100vw - 40px);max-height:calc(100vh - 90px);z-index:71;background:#fff;border:1px solid #E6E1D2;border-radius:12px;box-shadow:0 24px 60px rgba(10,21,48,.22);display:flex;flex-direction:column;overflow:hidden;}
+      .findrw-head{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid #F2EFE6;flex-shrink:0;}
+      .findrw-eyebrow{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;white-space:nowrap;}
+      .findrw-nav{display:flex;align-items:center;gap:2px;border:1px solid #E6E1D2;border-radius:6px;overflow:hidden;}
+      .findrw-nav button{background:transparent;border:none;color:#5A5F66;font-size:13px;padding:3px 7px;cursor:pointer;font-family:inherit;}
+      .findrw-nav button:disabled{color:#D8D2C5;cursor:default;}
+      .findrw-nav button:not(:disabled):hover{background:#FBFAF6;}
+      .findrw-nav .n{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5A5F66;padding:0 4px;white-space:nowrap;}
+      .findrw-pill{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.08em;border-radius:4px;padding:2px 7px;white-space:nowrap;text-transform:uppercase;}
+      .findrw-x{border:none;background:transparent;font-size:16px;color:#8A94A6;cursor:pointer;margin-left:auto;}
+      .findrw-x:hover{color:#0A1530;}
+      .findrw-body{padding:14px 18px 18px;overflow-y:auto;display:flex;flex-direction:column;gap:14px;}
+      .findrw-seg{display:flex;border:1px solid #E6E1D2;border-radius:7px;overflow:hidden;flex-shrink:0;}
+      .findrw-seg button{background:#fff;border:none;padding:7px 14px;font-size:12.5px;font-family:inherit;color:#5A5F66;cursor:pointer;}
+      .findrw-seg button.on{background:#0A1530;color:#fff;font-weight:600;}
+      .findrw-vl{font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:600;text-align:right;border:1px solid #E6E1D2;border-radius:7px;padding:7px 10px;width:140px;}
+      .findrw-lb{font-size:11.5px;color:#8A94A6;display:block;margin-bottom:4px;}
+      .findrw-inp{width:100%;background:#fff;border:1px solid #E6E1D2;border-radius:7px;padding:8px 10px;font-size:12.5px;font-family:inherit;color:#0A1530;box-sizing:border-box;}
+      .findrw-inp[type=date]{font-family:'JetBrains Mono',monospace;font-size:11.5px;}
+      .findrw-pg{background:#F6FAF5;border-color:#CFE0CB;}
+      .findrw-catbox{position:relative;}
+      .findrw-catlista{position:absolute;left:0;right:0;top:38px;z-index:5;max-height:220px;overflow:auto;background:#fff;border:1px solid #E6E1D2;border-radius:8px;box-shadow:0 16px 36px rgba(10,21,48,.16);padding:4px;}
+      .findrw-catit{display:flex;align-items:center;gap:8px;width:100%;background:transparent;border:none;border-radius:6px;padding:7px 9px;font-size:12.5px;font-family:inherit;text-align:left;color:#0A1530;cursor:pointer;}
+      .findrw-catit:hover{background:#FBFAF6;}
+      .findrw-catit .cam{margin-left:auto;font-size:10px;color:#A6AEBD;white-space:nowrap;}
+      .findrw-stp{display:flex;gap:7px;flex-wrap:wrap;}
+      .findrw-stp button{border:none;border-radius:4px;padding:4px 10px;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;cursor:pointer;opacity:.5;}
+      .findrw-stp button.on{opacity:1;box-shadow:inset 0 0 0 1px currentColor;}
+      .findrw-bloco,.findrw-block{border:1px solid #E6E1D2;border-radius:9px;padding:13px 14px;display:flex;flex-direction:column;gap:9px;}
+      .findrw-link{font-size:12.5px;font-weight:600;color:#15224A;cursor:pointer;align-self:flex-start;text-decoration:none;}
+      .findrw-link:hover{color:#9C7F40;}
+      .findrw-slider{width:100%;accent-color:#9C7F40;}
+      .findrw-bt{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:#8A94A6;}
+      .findrw-kv{display:flex;justify-content:space-between;gap:10px;font-size:12.5px;color:#5A5F66;}
+      .findrw-kv b{font-family:'JetBrains Mono',monospace;color:#0A1530;font-weight:600;}
+      .findrw-note{font-size:11.5px;color:#8A94A6;line-height:1.45;}
+      .findrw-rad{display:flex;flex-direction:column;gap:6px;}
+      .findrw-rad label{display:flex;align-items:center;gap:8px;font-size:12.5px;color:#0A1530;cursor:pointer;}
+      .findrw-rad input{accent-color:#0A1530;}
+      .findrw-toggle{background:transparent;border:none;padding:0;font-size:12.5px;font-weight:600;color:#15224A;cursor:pointer;font-family:inherit;align-self:flex-start;}
+      .findrw-toggle:hover{color:#9C7F40;}
+      .findrw-foot{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:12px 18px;border-top:1px solid #E6E1D2;background:#FBFAF6;flex-shrink:0;}
+      .findrw-btn{border:1px solid #D8D2C5;background:#fff;color:#0A1530;font-size:12px;font-weight:500;padding:7px 12px;border-radius:6px;cursor:pointer;font-family:inherit;white-space:nowrap;}
+      .findrw-btn:hover{background:#F7F4EC;}
+      .findrw-btn.dark{background:#0A1530;color:#fff;border-color:#0A1530;font-weight:600;}
+      .findrw-btn.dark:hover{background:#15224A;}
+      .findrw-btn.del{color:#A65A4A;border-color:#E7CFC7;}
+      .findrw-btn:disabled{opacity:.55;cursor:default;}
+      .findrw-atalho{font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#A6AEBD;white-space:nowrap;}
     </style>
-    <div class="findrw-panel">
+    <div class="findrw-panel" onclick="event.stopPropagation()">
       <div class="findrw-head">
-        <div class="findrw-ic" style="background:${isEnt?'#E9F0E7':'#FBEAE7'};color:${isEnt?'#4C6647':'#A65A4A'};">${isEnt?'↓':'↑'}</div>
-        <div style="flex:1;min-width:0;">
-          <div class="findrw-eyebrow">${isEnt?'ENTRADA':'SAÍDA'}${op?' · ASAAS':''}</div>
-          <div class="findrw-title">${escHtml(l.descricao||'—')}</div>
-        </div>
-        <button class="findrw-x" onclick="closeModal('findrw-overlay')">✕</button>
+        <span class="findrw-eyebrow">Editar lançamento ${escHtml(String(l.id))}</span>
+        ${st.serie.length > 1 ? `<span class="findrw-nav">
+          <button ${st.idx<=0?'disabled':''} onclick="_finEdIr(-1)" title="Parcela anterior">‹</button>
+          <span class="n">${st.idx+1}/${st.serie.length}</span>
+          <button ${st.idx>=st.serie.length-1?'disabled':''} onclick="_finEdIr(1)" title="Próxima parcela">›</button>
+        </span>` : ''}
+        <span class="findrw-pill" style="background:${sit.bg};color:${sit.fg};">${e.conciliado ? 'conciliado' : sit.lb}</span>
+        <button class="findrw-x" onclick="_finEdFechar()">✕</button>
       </div>
+
       <div class="findrw-body">
-        <div class="findrw-block">
-          <div class="findrw-bt">LANÇAMENTO</div>
-          <div class="findrw-kv"><span>Valor bruto</span><b>${fmtR(valor)}</b></div>
-          <div class="findrw-kv"><span>Data</span><b>${(l.data_competencia||'').split('-').reverse().join('/')||'—'}</b></div>
-          <div class="findrw-kv"><span>Conta</span><b>${escHtml((l.fin_conta&&l.fin_conta.descricao)||'—')}</b></div>
-          <a class="findrw-link" onclick="closeModal('findrw-overlay');editarLancamento(${l.id});">Editar dados básicos →</a>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <span class="findrw-seg">
+            <button class="${isEnt?'on':''}" onclick="_finEdSet('tipo',1)">Entrada</button>
+            <button class="${!isEnt?'on':''}" onclick="_finEdSet('tipo',0)">Saída</button>
+          </span>
+          <input class="findrw-vl" style="color:${isEnt?'#4C6647':'#0A1530'};margin-left:auto;" value="${escHtml(e.valor)}" oninput="_finEdSet('valor',this.value)">
         </div>
-        ${_finDrawerDivisaoHtml(l, op, cedentes, credorNome, valor)}
+        <div style="font-size:11.5px;color:#8A94A6;margin-top:-8px;">${isEnt?'receita':'despesa'}${e.data_vencimento?` · vence ${e.data_vencimento.slice(8,10)}/${e.data_vencimento.slice(5,7)}`:''}</div>
+
+        <label><span class="findrw-lb">Descrição</span>
+          <input class="findrw-inp" value="${escHtml(e.descricao)}" oninput="_finEdSet('descricao',this.value)"></label>
+
+        <div class="findrw-catbox">
+          <span class="findrw-lb">Categoria</span>
+          <input class="findrw-inp" id="findrw-cat" autocomplete="off"
+            value="${escHtml(st.catBusca != null ? st.catBusca : (catSel ? catSel.descricao : ''))}"
+            placeholder="Digite para filtrar — ex.: jud"
+            onfocus="_finEdCatAbrir()" oninput="_finEdCatBuscar(this.value)">
+          ${st.catAberto ? _finEdCatListaHtml(cats, dim.categorias||[], uso, e) : ''}
+          ${catSel ? `<div style="font-size:10.5px;color:#A6AEBD;margin-top:4px;">${escHtml(_finCatCaminho(catSel, dim.categorias||[]) || 'sem hierarquia')}</div>` : ''}
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <label><span class="findrw-lb">Vencimento</span>
+            <input class="findrw-inp" type="date" value="${escHtml(e.data_vencimento||'')}" onchange="_finEdSet('data_vencimento',this.value)"></label>
+          ${pago ? `<label><span class="findrw-lb">Pagamento</span>
+            <input class="findrw-inp findrw-pg" type="date" value="${escHtml(e.data_pagamento||'')}" onchange="_finEdSet('data_pagamento',this.value)"></label>`
+          : `<label><span class="findrw-lb">Conta</span>
+            <select class="findrw-inp" onchange="_finEdSet('conta_id',this.value)">
+              <option value="">sem conta</option>
+              ${(dim.contas||[]).map(x=>`<option value="${x.id}" ${String(e.conta_id)===String(x.id)?'selected':''}>${escHtml(x.descricao||'—')}</option>`).join('')}
+            </select></label>`}
+        </div>
+        ${pago ? `<label><span class="findrw-lb">Conta</span>
+          <select class="findrw-inp" onchange="_finEdSet('conta_id',this.value)">
+            <option value="">sem conta</option>
+            ${(dim.contas||[]).map(x=>`<option value="${x.id}" ${String(e.conta_id)===String(x.id)?'selected':''}>${escHtml(x.descricao||'—')}</option>`).join('')}
+          </select></label>` : ''}
+
+        <div>
+          <span class="findrw-lb">Situação</span>
+          <span class="findrw-stp">
+            ${FIN_ED_STATUS.map(x=>`<button class="${e.status===x.v?'on':''}" style="background:${x.bg};color:${x.fg};" onclick="_finEdSet('status',${x.v})">${x.lb}</button>`).join('')}
+          </span>
+        </div>
+
+        ${_finDrawerDivisaoHtml(l, op, c.cedentes, credorNome, valorNum)}
         ${op ? _finDrawerRepasseHtml(op, credorNome) : ''}
         ${op ? _finDrawerNfHtml(op) : ''}
-        ${l.cobranca_id ? `<div class="findrw-block"><div class="findrw-bt">VÍNCULO</div><a class="findrw-link" onclick="closeModal('findrw-overlay');location.hash='#/cobranca/${l.cobranca_id}';">Abrir cobrança →</a></div>` : ''}
-        ${_finDrawerHistoricoHtml(l, op, credorNome)}
+
+        ${st.serie.length > 1 ? `<div class="findrw-bloco">
+          <span class="findrw-bt">Escopo do parcelamento</span>
+          <div class="findrw-rad">
+            <label><input type="radio" name="findrw-escopo" ${st.escopo==='esta'?'checked':''} onchange="_finEdState.escopo='esta'"> Somente esta parcela</label>
+            <label><input type="radio" name="findrw-escopo" ${st.escopo==='futuras'?'checked':''} onchange="_finEdState.escopo='futuras'"> Esta e as próximas (${nFuturas+1})</label>
+            <label><input type="radio" name="findrw-escopo" ${st.escopo==='todas'?'checked':''} onchange="_finEdState.escopo='todas'"> Todas as parcelas do acordo (${nTodas})</label>
+          </div>
+          <span class="findrw-note">Vale para valor, tipo, categoria, conta e contato. Datas e situação ficam sempre só nesta parcela — carimbar a mesma data em ${nTodas} parcelas desmontaria o parcelamento. Se você mudar o texto da descrição, as outras parcelas recebem o texto novo mantendo o próprio “n/m”.</span>
+        </div>` : ''}
+
+        ${op && op.repasse_comprovante_url ? `<a class="findrw-toggle" href="${op.repasse_comprovante_url}" target="_blank" rel="noopener">Abrir comprovante do repasse →</a>` : ''}
+
+        <button class="findrw-toggle" onclick="_finEdState.avancado=!_finEdState.avancado;_finLancDrawerRender()">${st.avancado?'− dados avançados':'+ dados avançados'}</button>
+        ${st.avancado ? `<div class="findrw-bloco">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+            <label><span class="findrw-lb">Competência</span>
+              <input class="findrw-inp" type="date" value="${escHtml(e.data_competencia||'')}" onchange="_finEdState.compTocada=true;_finEdSet('data_competencia',this.value)"></label>
+            <label><span class="findrw-lb">Contato</span>
+              <select class="findrw-inp" onchange="_finEdSet('contato_id',this.value)">
+                <option value="">sem contato</option>
+                ${(dim.contatos||[]).map(x=>`<option value="${x.id}" ${String(e.contato_id)===String(x.id)?'selected':''}>${escHtml(x.nome||'—')}</option>`).join('')}
+              </select></label>
+          </div>
+          <label><span class="findrw-lb">Observações</span>
+            <textarea class="findrw-inp" rows="2" oninput="_finEdSet('observacoes',this.value)">${escHtml(e.observacoes||'')}</textarea></label>
+          <div class="findrw-kv"><span>Identificador</span><b>${escHtml(String(l.id))}</b></div>
+          ${l.cobranca_id ? `<a class="findrw-toggle" onclick="_finEdFechar();location.hash='#/cobranca/${l.cobranca_id}';">Abrir a cobrança →</a>` : ''}
+        </div>` : ''}
+
+        <button class="findrw-toggle" onclick="_finEdState.historico=!_finEdState.historico;_finLancDrawerRender()">${st.historico?'− histórico':'+ histórico'}</button>
+        ${st.historico ? _finDrawerHistoricoHtml(l, op, credorNome) : ''}
+      </div>
+
+      <div class="findrw-foot">
+        <button class="findrw-btn dark" ${st.salvando?'disabled':''} onclick="_finEdSalvar(false)">${st.salvando?'Salvando…':'Salvar'}</button>
+        ${st.idx < st.serie.length-1 ? `<button class="findrw-btn" ${st.salvando?'disabled':''} onclick="_finEdSalvar(true)">Salvar e próxima</button>` : ''}
+        <span class="findrw-atalho">⌘↵</span>
+        <button class="findrw-btn" style="margin-left:auto;" onclick="_finEdDuplicar()">Duplicar</button>
+        <button class="findrw-btn del" onclick="_finEdExcluir()">Excluir</button>
       </div>
     </div>`;
-  if(!op && l.cedente_id) setTimeout(()=>_finDrawerRecalc(valor), 0);
+  // Clique no backdrop fecha (o painel para a propagação). Precisa ser aqui: trocar o
+  // innerHTML não recoloca handler nenhum no próprio overlay.
+  ov.onclick = () => _finEdFechar();
 }
+
+function _finEdCatAbrir(){ _finEdState.catAberto = true; _finLancDrawerRender(); setTimeout(()=>{ const i=document.getElementById('findrw-cat'); if(i){ i.focus(); i.select(); } },0); }
+function _finEdCatBuscar(v){
+  _finEdState.catBusca = v;
+  _finEdState.catAberto = true;
+  const box = document.querySelector('.findrw-catlista');
+  const c = window._finDrawerCtx; if(!c || !box) { _finLancDrawerRender(); return; }
+  // Só a lista é redesenhada: refazer a janela inteira tiraria o cursor do campo.
+  box.outerHTML = _finEdCatListaHtml((c.dim.categorias||[]).filter(x=>!x.is_father), c.dim.categorias||[], c.uso, c.edit);
+}
+function _finEdCatListaHtml(cats, todas, uso, e){
+  const q = (_finEdState.catBusca || '').trim().toLowerCase();
+  let lista;
+  if(q){
+    // A busca varre nome E caminho: "jud" tem de achar as judiciais em qualquer ramo.
+    lista = cats.filter(c => (c.descricao||'').toLowerCase().includes(q) || _finCatCaminho(c, todas).toLowerCase().includes(q)).slice(0, 40);
+  } else {
+    // Sem busca, as 8 mais usadas do mesmo tipo — é o que resolve 90% das edições.
+    lista = cats.filter(c => c.tipo_movimento == null || c.tipo_movimento === e.tipo)
+                .sort((a,b) => ((uso||{})[b.id]||0) - ((uso||{})[a.id]||0)).slice(0, 8);
+  }
+  if(!lista.length) return `<div class="findrw-catlista"><div style="padding:10px;font-size:12.5px;color:#8A94A6;">Nenhuma categoria com esse termo.</div></div>`;
+  return `<div class="findrw-catlista">
+    ${lista.map(c=>`<button class="findrw-catit" onclick="_finEdCatEscolher('${c.id}')">
+      <span>${escHtml(c.descricao||'—')}</span><span class="cam">${escHtml(_finCatCaminho(c, todas))}</span></button>`).join('')}
+  </div>`;
+}
+function _finEdCatEscolher(id){
+  const c = window._finDrawerCtx; if(!c) return;
+  c.edit.categoria_id = id;
+  _finEdState.catAberto = false;
+  _finEdState.catBusca = null;
+  _finLancDrawerRender();
+}
+
+// Ids a que o escopo se aplica. 'futuras' conta da parcela aberta para a frente na
+// ORDEM DA SÉRIE (data, depois número) — a mesma que a exclusão de série usa.
+function _finEdIdsEscopo(){
+  const st = _finEdState;
+  if(st.escopo === 'todas') return st.serie.map(x => x.id);
+  if(st.escopo === 'futuras') return st.serie.slice(st.idx).map(x => x.id);
+  return [st.serie[st.idx] ? st.serie[st.idx].id : null].filter(Boolean);
+}
+async function _finEdSalvar(irProxima){
+  const c = window._finDrawerCtx; if(!c) return;
+  const e = c.edit, l = c.l, st = _finEdState;
+  if(!e.descricao.trim()){ showToast('Descrição obrigatória.', 'warning'); return; }
+  const valor = parseValorBR(e.valor);
+  if(!(valor > 0)){ showToast('Valor obrigatório.', 'warning'); return; }
+  st.salvando = true; _finLancDrawerRender();
+  try{
+    const sb = getSupabase();
+    const sign = e.tipo === 0 ? -1 : 1;
+    const pagoAgora = e.status === 1 || e.status === 2;
+    const dtPagamento = pagoAgora ? (e.data_pagamento || null) : null;
+    // A coluna DATA da lista mostra data_competencia: a data em que o dinheiro se move —
+    // a de pagamento no que já foi pago, o vencimento no que está em aberto. Mexer só no
+    // vencimento deixava a linha listada no dia antigo (era o defeito do #600). Só para
+    // de acompanhar quando alguém edita a competência à mão em "dados avançados".
+    const competencia = st.compTocada
+      ? (e.data_competencia || null)
+      : (dtPagamento || e.data_vencimento || e.data_competencia || null);
+    // Só esta parcela: datas, situação, observação e o texto da descrição.
+    const desta = {
+      descricao: e.descricao.trim(),
+      data_vencimento: e.data_vencimento || null,
+      data_pagamento: dtPagamento,
+      data_competencia: competencia,
+      status: e.status,
+      observacoes: e.observacoes || null,
+    };
+    // Estes acompanham o escopo escolhido — são os que fazem sentido repetir numa série.
+    const daSerie = {
+      valor: sign * Math.abs(valor),
+      tipo_movimento: e.tipo,
+      conta_id: e.conta_id || null,
+      contato_id: e.contato_id || null,
+    };
+    const ids = _finEdIdsEscopo();
+    let r = await sb.from('fin_lancamento').update(Object.assign({}, daSerie, desta)).eq('id', l.id);
+    if(r.error) throw r.error;
+    const outros = ids.filter(x => x !== l.id);
+    if(outros.length){
+      r = await sb.from('fin_lancamento').update(daSerie).in('id', outros);
+      if(r.error) throw r.error;
+      // A descrição NÃO pode ser carimbada igual em toda a série: é dela que a própria
+      // série é reconhecida (717 de 886 linhas em 12/08/2026 tinham "n/m" no texto e nada
+      // nas colunas). Quando a base muda, cada parcela recebe a base nova mantendo o
+      // próprio "n/m" — texto idêntico em oito linhas apagaria a numeração do acordo.
+      const baseNova = _finSerieBase(desta.descricao);
+      const baseAntiga = _finSerieBase(l.descricao || '');
+      if(baseNova && baseNova !== baseAntiga){
+        for(const id of outros){
+          const item = st.serie.find(x => x.id === id); if(!item) continue;
+          const m = String(item.descricao||'').match(_FIN_RE_PARCELA);
+          const { error } = await sb.from('fin_lancamento')
+            .update({ descricao: baseNova + (m ? ' ' + m[1] + '/' + m[2] : '') }).eq('id', id);
+          if(error) throw error;
+        }
+      }
+    }
+    if(e.categoria_id){
+      // O rateio é 1:1 aqui (a tela não divide categoria); trocar significa substituir.
+      await sb.from('fin_lancamento_categoria').delete().in('lancamento_id', ids);
+      const linhas = ids.map(id => ({ lancamento_id: id, categoria_id: e.categoria_id, valor: Math.abs(valor) }));
+      const { error } = await sb.from('fin_lancamento_categoria').insert(linhas);
+      if(error) throw error;
+    }
+    showToast(ids.length > 1 ? `Salvo em ${ids.length} parcelas.` : 'Salvo.', 'success');
+    try{ finApi.invalidateCache && finApi.invalidateCache(); }catch(_){}
+    if(irProxima && st.idx < st.serie.length-1){ _finEdIr(1); }
+    else { _finEdFechar(); renderFinTab(window._finTab === 'receitasjudiciais' ? 'receitasjudiciais' : 'lancamentos'); }
+  }catch(err){
+    st.salvando = false; _finLancDrawerRender();
+    showToast('Erro ao salvar: '+(err.message||err), 'danger');
+  }
+}
+async function _finEdDuplicar(){
+  const c = window._finDrawerCtx; if(!c) return;
+  const e = c.edit;
+  try{
+    await finApi.saveLancamento({
+      descricao: (e.descricao||'') + ' (cópia)', data_competencia: e.data_competencia || e.data_vencimento,
+      data_vencimento: e.data_vencimento, valor: parseValorBR(e.valor), tipo_movimento: e.tipo,
+      status: 0, conta_id: e.conta_id || null, contato_id: e.contato_id || null,
+      categoria_id: e.categoria_id || null,
+    });
+    showToast('Cópia criada como prevista.', 'success');
+    _finEdFechar();
+    renderFinTab(window._finTab === 'receitasjudiciais' ? 'receitasjudiciais' : 'lancamentos');
+  }catch(err){ showToast('Erro ao duplicar: '+(err.message||err), 'danger'); }
+}
+async function _finEdExcluir(){
+  const c = window._finDrawerCtx; if(!c) return;
+  if(!confirm('Excluir este lançamento? Não dá para desfazer.')) return;
+  try{
+    await finApi.deleteLancamento(c.l.id);
+    showToast('Lançamento excluído.', 'success');
+    _finEdFechar();
+    renderFinTab(window._finTab === 'receitasjudiciais' ? 'receitasjudiciais' : 'lancamentos');
+  }catch(err){ showToast('Erro ao excluir: '+(err.message||err), 'danger'); }
+}
+
 // Histórico do lançamento — o handoff pede TRÊS narrativas distintas, não um texto
 // genérico: o que aconteceu com um repasse não é o que aconteceu com uma receita nem
 // com uma despesa. Cada passo é derivado do estado real da linha (status, conciliado,
@@ -32595,74 +33506,88 @@ function _finDrawerHistoricoHtml(l, op, credorNome){
     </div>
   </div>`;
 }
+// ── Divisão com o cedente (item 7 do handoff) ────────────────────────────────────
+// Dois caminhos, sem fingir que são a mesma coisa:
+//  (a) o lançamento nasceu de fin_operacao (pipeline Asaas) → SÓ LEITURA: o split já foi
+//      calculado pelo webhook, e reescrevê-lo aqui desencontraria do que já foi repassado.
+//  (b) lançamento manual → slider de 0–100%, com "cedente recebe" e "honorário"
+//      recalculados ao vivo. Resolve a DIVERGÊNCIA sem sair da janela.
+// Fundo #FBEAE7 enquanto não há divisão calculada, #FBF3E1 quando já há — a mesma
+// gramática de cor do resto do módulo.
 function _finDrawerDivisaoHtml(l, op, cedentes, credorNome, valor){
   if(op){
-    const meuSaldo = +op.valor_honorario||0, capSaldo = +op.valor_capital||0;
-    const pctExc = valor>0 ? Math.min(100, Math.round(meuSaldo/valor*100)) : 0;
-    const pctCap = valor>0 ? Math.min(100, Math.round(capSaldo/valor*100)) : 0;
-    return `<div class="findrw-block" style="border-color:#DFC992;background:#FDFAF2;">
-      <div class="findrw-bt" style="color:#9C7F40;">DIVISÃO DO RECEBIMENTO — ${escHtml(credorNome||'cedente')}</div>
-      <div class="findrw-barra"><div class="findrw-barra-lb">1º · Seu excedente · ${fmtR(meuSaldo)} de ${fmtR(valor)}</div><div class="findrw-barra-trilho"><div style="width:${pctExc}%;background:#C9A961;"></div></div></div>
-      <div class="findrw-barra"><div class="findrw-barra-lb">2º · Capital do cedente · ${fmtR(capSaldo)} de ${fmtR(valor)}</div><div class="findrw-barra-trilho"><div style="width:${pctCap}%;background:#5E7C58;"></div></div></div>
-      <div class="findrw-kv"><span>Vai para o cedente · capital</span><b style="color:#5E7C58;">${fmtR(capSaldo)}</b></div>
-      <div class="findrw-kv"><span>Fica com você · excedente e base da NF</span><b style="color:#9C7F40;">${fmtR(meuSaldo)}</b></div>
-      <div class="findrw-note">Calculado pelo webhook Asaas (proporcional por parcela) — não editável por aqui. Split errado (repasse_status="revisar") se resolve pela Fila.</div>
+    const honor = Math.abs(+op.valor_honorario||0), cap = Math.abs(+op.valor_capital||0);
+    const bruto = Math.abs(+op.valor_recebido||0) || valor;
+    const pct = bruto > 0 ? Math.round(cap/bruto*100) : 0;
+    const revisar = op.repasse_status === 'revisar';
+    return `<div class="findrw-bloco" style="border-color:${revisar?'#E7CFC7':'#DFC992'};background:${revisar?'#FBEAE7':'#FBF3E1'};">
+      <span class="findrw-bt" style="color:${revisar?'#7D3F33':'#7A6428'};">Divisão com ${escHtml(credorNome||'o cedente')}</span>
+      ${revisar
+        ? `<span class="findrw-note" style="color:#7D3F33;">A parcela foi recebida mas a divisão entre COBRASQ e cedente não foi calculada. Nada pode ser repassado até resolver.</span>
+           <button class="findrw-btn" style="background:#9C7F40;border-color:#9C7F40;color:#fff;font-weight:600;align-self:flex-start;" onclick="_finEdFechar();setFinTab('fila')">Resolver divisão</button>`
+        : `<div style="height:8px;background:#F2EFE6;border-radius:4px;overflow:hidden;display:flex;">
+             <div style="width:${Math.max(0,Math.min(100,pct))}%;background:#9C7F40;"></div>
+             <div style="flex:1;background:#7E9878;"></div>
+           </div>
+           <div class="findrw-kv"><span>cedente recebe · ${pct}%</span><b style="color:#9C7F40;">${fmtR(cap)}</b></div>
+           <div class="findrw-kv"><span>honorário · ${100-pct}%</span><b style="color:#4C6647;">${fmtR(honor)}</b></div>
+           <span class="findrw-note">Calculado no recebimento (fin_operacao). Não é editável por aqui: o repasse já foi montado sobre este número.</span>`}
     </div>`;
   }
-  const optsCed = cedentes.map(c=>`<option value="${c.id}" ${l.cedente_id===c.id?'selected':''}>${escHtml(c.nome)}</option>`).join('');
+  // Sem operação: só dá para gravar se as colunas da cascata existirem no banco. Enquanto
+  // a migração não for aplicada, a janela DIZ isso em vez de oferecer um slider que salva
+  // e devolve erro do PostgREST.
+  if(_finColsCascata !== true){
+    if(!l.cedente_id) return '';
+    return `<div class="findrw-bloco" style="border-color:#E7CFC7;background:#FBEAE7;">
+      <span class="findrw-bt" style="color:#7D3F33;">Divisão com o cedente</span>
+      <span class="findrw-note" style="color:#7D3F33;">Este lançamento tem cedente mas não tem operação de recebimento, e as colunas da cascata (capital, meu_total, amortizado) ainda não existem no banco. A divisão precisa ser resolvida pela Fila.</span>
+      <button class="findrw-btn" style="align-self:flex-start;" onclick="_finEdFechar();setFinTab('fila')">Abrir a fila</button>
+    </div>`;
+  }
   const temCed = !!l.cedente_id;
-  const capital = l.capital!=null ? l.capital : '';
-  const meuTotal = l.meu_total!=null ? l.meu_total : '';
-  const amortizado = l.amortizado!=null ? l.amortizado : 0;
-  return `<div class="findrw-block">
-    <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:500;cursor:pointer;"><input type="checkbox" id="findrw-temced" ${temCed?'checked':''} onchange="_finDrawerToggleCed()"> Esta entrada tem parte de um cedente</label>
-    <div id="findrw-divwrap" style="display:${temCed?'block':'none'};margin-top:12px;padding-top:12px;border-top:1px solid #DFC992;">
-      <label style="font-size:12px;color:#6B7683;">Cedente<select id="findrw-cedente" style="width:100%;padding:9px 11px;border:1px solid #E6E1D2;border-radius:7px;margin-top:4px;" onchange="_finDrawerRecalc(${valor})"><option value="">Selecione...</option>${optsCed}</select></label>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">
-        <label style="font-size:12px;color:#6B7683;">Capital do cedente<input type="text" inputmode="decimal" id="findrw-capital" value="${capital}" style="width:100%;padding:9px 11px;border:1px solid #E6E1D2;border-radius:7px;margin-top:4px;" oninput="_finDrawerRecalc(${valor})"></label>
-        <label style="font-size:12px;color:#6B7683;">Seu excedente no título<input type="text" inputmode="decimal" id="findrw-meutotal" value="${meuTotal}" style="width:100%;padding:9px 11px;border:1px solid #E6E1D2;border-radius:7px;margin-top:4px;" oninput="_finDrawerRecalc(${valor})"></label>
-      </div>
-      <label style="font-size:12px;color:#6B7683;display:block;margin-top:10px;">Já recebido antes deste<input type="text" inputmode="decimal" id="findrw-amortizado" value="${amortizado}" style="width:100%;padding:9px 11px;border:1px solid #E6E1D2;border-radius:7px;margin-top:4px;" oninput="_finDrawerRecalc(${valor})"></label>
-      <div id="findrw-barras" style="margin-top:12px;"></div>
-      <div id="findrw-resultado" style="margin-top:10px;"></div>
-      <button class="findrw-btn dark" style="margin-top:10px;" onclick="_finDrawerSalvarDivisao(${l.id})">Salvar divisão</button>
-    </div>
+  const bruto = Math.abs(+l.valor||0) || valor;
+  const pct = (temCed && l.capital != null && bruto > 0) ? Math.round(Math.abs(+l.capital||0)/bruto*100) : 80;
+  const calculada = temCed && l.capital != null;
+  return `<div class="findrw-bloco" id="findrw-div" style="border-color:${calculada?'#DFC992':'#E7CFC7'};background:${calculada?'#FBF3E1':'#FBEAE7'};">
+    <span class="findrw-bt" style="color:${calculada?'#7A6428':'#7D3F33'};">Divisão com o cedente</span>
+    <label><span class="findrw-lb">Cedente</span>
+      <select class="findrw-inp" id="findrw-cedente" onchange="_finDrawerRecalc(${bruto})">
+        <option value="">sem cedente — carteira própria</option>
+        ${cedentes.map(c=>`<option value="${c.id}" ${String(l.cedente_id)===String(c.id)?'selected':''}>${escHtml(c.nome)}</option>`).join('')}
+      </select></label>
+    <label><span class="findrw-lb">Cedente recebe <b id="findrw-pctlb" style="font-family:'JetBrains Mono',monospace;color:#9C7F40;">${pct}%</b></span>
+      <input class="findrw-slider" type="range" min="0" max="100" step="1" id="findrw-pct" value="${pct}" oninput="_finDrawerRecalc(${bruto})"></label>
+    <div class="findrw-kv"><span>cedente recebe</span><b id="findrw-cap" style="color:#9C7F40;">${fmtR(bruto*pct/100)}</b></div>
+    <div class="findrw-kv"><span>honorário da COBRASQ</span><b id="findrw-hon" style="color:#4C6647;">${fmtR(bruto - bruto*pct/100)}</b></div>
+    <button class="findrw-btn dark" style="align-self:flex-start;" onclick="_finDrawerSalvarDivisao(${l.id}, ${bruto})">Salvar divisão</button>
   </div>`;
 }
-function _finDrawerToggleCed(){
-  const on = document.getElementById('findrw-temced').checked;
-  document.getElementById('findrw-divwrap').style.display = on ? 'block' : 'none';
+// Cálculo ao vivo sem re-render: refazer a janela a cada movimento do slider soltaria o
+// controle do dedo do usuário.
+function _finDrawerRecalc(bruto){
+  const pct = +((document.getElementById('findrw-pct')||{}).value || 0);
+  const cap = +(bruto * pct / 100).toFixed(2);
+  const set = (id, txt) => { const e = document.getElementById(id); if(e) e.textContent = txt; };
+  set('findrw-pctlb', pct+'%');
+  set('findrw-cap', fmtR(cap));
+  set('findrw-hon', fmtR(+(bruto - cap).toFixed(2)));
 }
-function _finDrawerRecalc(valorBruto){
-  const num = id => +((document.getElementById(id)||{}).value||'0').toString().replace(',','.') || 0;
-  const capital = num('findrw-capital'), meuTotal = num('findrw-meutotal'), amortizado = num('findrw-amortizado');
-  const r = finDivideCascata({capital, meu_total:meuTotal, amortizado}, valorBruto);
-  const meuSaldo = r.meuSaldoAntes||0, capSaldo = r.capSaldoAntes||0;
-  const pctExc = meuSaldo>0 ? Math.min(100, Math.round(Math.min(r.ficaComVoce,meuSaldo)/meuSaldo*100)) : (r.ficaComVoce>0?100:0);
-  const pctCap = capSaldo>0 ? Math.min(100, Math.round(r.repasseAoCedente/capSaldo*100)) : (r.repasseAoCedente>0?100:0);
-  const barras = document.getElementById('findrw-barras');
-  if(barras) barras.innerHTML = `
-    <div class="findrw-barra"><div class="findrw-barra-lb">1º · Seu excedente · ${fmtR(Math.min(r.ficaComVoce,meuSaldo))} de ${fmtR(meuSaldo)} <span style="color:#A6AEBD;">faltava ${fmtR(meuSaldo)}</span></div><div class="findrw-barra-trilho"><div style="width:${pctExc}%;background:#C9A961;"></div></div></div>
-    <div class="findrw-barra"><div class="findrw-barra-lb">2º · Capital do cedente · ${fmtR(r.repasseAoCedente)} de ${fmtR(capSaldo)} <span style="color:#A6AEBD;">faltava ${fmtR(capSaldo)}</span></div><div class="findrw-barra-trilho"><div style="width:${pctCap}%;background:#5E7C58;"></div></div></div>`;
-  const res = document.getElementById('findrw-resultado');
-  if(res) res.innerHTML = `
-    <div class="findrw-kv"><span>Bruto recebido</span><b>${fmtR(valorBruto)}</b></div>
-    <div class="findrw-kv"><span>Vai para o cedente · capital</span><b style="color:#5E7C58;">${fmtR(r.repasseAoCedente)}</b></div>
-    <div class="findrw-kv"><span>Fica com você · excedente e base da NF</span><b style="color:#9C7F40;">${fmtR(r.ficaComVoce)}</b></div>`;
-}
-async function _finDrawerSalvarDivisao(lancId){
-  const cedente = (document.getElementById('findrw-cedente')||{}).value;
-  if(!cedente){ showToast('Selecione o cedente.', 'warning'); return; }
-  const num = id => +((document.getElementById(id)||{}).value||'0').toString().replace(',','.') || 0;
+async function _finDrawerSalvarDivisao(lancId, bruto){
+  const cedente = (document.getElementById('findrw-cedente')||{}).value || null;
+  const pct = +((document.getElementById('findrw-pct')||{}).value || 0);
+  const cap = +(bruto * pct / 100).toFixed(2);
   try{
-    const sb = getSupabase();
-    const { error } = await sb.from('fin_lancamento').update({
-      cedente_id: cedente, capital: num('findrw-capital'), meu_total: num('findrw-meutotal'), amortizado: num('findrw-amortizado'),
-      repasse_status: 'pendente',
+    const { error } = await getSupabase().from('fin_lancamento').update({
+      cedente_id: cedente || null,
+      capital: cedente ? cap : null,
+      meu_total: cedente ? +(bruto - cap).toFixed(2) : null,
+      amortizado: 0,
+      repasse_status: cedente ? 'pendente' : null,
     }).eq('id', lancId);
     if(error) throw error;
-    showToast('Divisão salva.', 'success');
-    closeModal('findrw-overlay');
+    showToast(cedente ? `Divisão salva — ${fmtR(cap)} ao cedente.` : 'Marcado como carteira própria.', 'success');
+    _finEdFechar();
     renderFinTab('lancamentos');
   }catch(e){ showToast('Erro ao salvar: '+(e.message||e), 'danger'); }
 }
@@ -32682,7 +33607,7 @@ function _finDrawerRepasseHtml(op, credorNome){
   return `<div class="findrw-block">
     <div class="findrw-bt">REPASSE</div>
     <div class="findrw-note" style="margin-bottom:10px;">Pendente — ${fmtR(op.valor_capital)} para ${escHtml(credorNome||'o cedente')}.</div>
-    <button class="findrw-btn dark" onclick="closeModal('findrw-overlay');confirmarRepasse('${op.id}');">Gerar Pix de ${fmtR(op.valor_capital)} ao cedente</button>
+    <button class="findrw-btn dark" onclick="_finEdFechar();confirmarRepasse('${op.id}');">Gerar Pix de ${fmtR(op.valor_capital)} ao cedente</button>
   </div>`;
 }
 function _finDrawerNfHtml(op){
@@ -32699,6 +33624,17 @@ function _finDrawerNfHtml(op){
       ? `<button class="findrw-btn" onclick="_finDrawerEmitirNf('${op.id}')" id="findrw-nfbtn">Emitir agora</button>`
       : `<div class="findrw-note">Split em revisão — emitir depois de resolver na Fila.</div>`}
   </div>`;
+}
+// Mesma emissão do drawer, mas chamável de qualquer lugar (menu ⋮ da linha): o drawer
+// mexe no botão dele e relê o próprio contexto, que aqui não existe.
+async function _finDrawerEmitirNfDireto(opId){
+  try{
+    showToast('Emitindo nota…', 'info');
+    const res = await fetch('/api/emitir-nf', { method:'POST', headers: Object.assign({ 'Content-Type':'application/json' }, await authHeaders()), body: JSON.stringify({ operacao_id: opId }) });
+    const j = await res.json().catch(()=>({}));
+    if(!res.ok) throw new Error(j.error||('HTTP '+res.status));
+    showToast(j.skipped ? ('Não emitida: '+j.skipped) : 'NF emitida.', j.skipped?'info':'success');
+  }catch(e){ showToast('Erro ao emitir NF: '+(e.message||e), 'danger'); }
 }
 async function _finDrawerEmitirNf(opId){
   const btn = document.getElementById('findrw-nfbtn'); if(btn){ btn.disabled=true; btn.textContent='Emitindo…'; }
@@ -34677,6 +35613,19 @@ async function _finCaixaAgg(force){
   const divergencias = ops.filter(o => o.repasse_status === 'revisar');
   const repassados = ops.filter(o => o.repasse_status === 'efetuado');
 
+  // ── Acordos assinados no mês: é o número que o card mostra (protótipo 29/08) ──────
+  // Antes o card multiplicava ticket por parcelas e devolvia o mesmo valor do somatório
+  // de parcelas com outro nome. O que interessa é quantos acordos foram FECHADOS no mês
+  // e quantos deles ainda não passaram pelo passo 1 da Pós-assinatura — a mesma leitura
+  // de acordos.metadata.posAssinatura que a fila usa, para os dois não discordarem.
+  let assinadosN = 0, semConferirN = 0;
+  try{
+    const { data } = await sb.from('acordos').select('id,metadata')
+      .gte('data_assinatura', mesIni).lte('data_assinatura', mesFim + 'T23:59:59').limit(500);
+    assinadosN = (data||[]).length;
+    semConferirN = (data||[]).filter(a => !((a.metadata && a.metadata.posAssinatura) || {}).conferidoEm).length;
+  }catch(_){ /* auxiliar: o card mostra 0 em vez de derrubar a aba */ }
+
   const meta = +(DB.config && DB.config.metaMensal) || 0;
   const diasUteis = _finDiasUteisRestantes();
   const falta = Math.max(0, +(meta - receita).toFixed(2));
@@ -34698,7 +35647,7 @@ async function _finCaixaAgg(force){
     semanaRecN: semanaRec.length, semanaRecT: soma(semanaRec),
     semanaPagN: semanaPag.length, semanaPagT: soma(semanaPag),
     // acordos
-    parcelasN: parcelasMes.length, ticket,
+    parcelasN: parcelasMes.length, ticket, assinadosN, semConferirN,
     // repasses
     fila, repasseN: fila.length, repasseT: +fila.reduce((s,g) => s+g.capital, 0).toFixed(2),
     repasseMaisAntigo: fila.length ? fila[0].dias : 0,
@@ -34789,19 +35738,21 @@ async function renderFinVisao(el){
 
   const plural = (n, s, p) => n === 1 ? s : (p || s+'s');
   const pct1 = v => v.toFixed(1).replace('.', ',');
-  const mesTitulo = A.mesLabel.charAt(0).toUpperCase() + A.mesLabel.slice(1);
 
   // ── 1. Faixas de alerta — cada uma só existe se houver o que ela anuncia ──────────
+  // Alerta deixou de ser bloco colorido: uma tira branca, com barrinha de 5px indicando a
+  // urgência e a ação em link de texto. Bloco vermelho de largura inteira gritava todo dia
+  // e virou paisagem — é a mesma razão pela qual nenhum card tem borda colorida.
   const faixas = [];
-  if(A.atrasoN > 0) faixas.push(`<div class="fxa fxa-red">
-    <span class="fxa-ic" style="background:#A65A4A;">!</span>
-    <span><strong>${A.atrasoN} ${plural(A.atrasoN,'lançamento')} em atraso</strong> ${plural(A.atrasoN,'soma','somam')} ${fmtR(A.atrasoT)}${A.atrasoInN?` — ${A.atrasoInN} ${A.atrasoInN===1?'é uma entrada que já deveria ter caído':'são entradas que já deveriam ter caído'}.`:'.'}</span>
-    <button class="fxa-btn" style="background:#A65A4A;" onclick="_finIrMovimentacoes('atrasados')">Ver os atrasados →</button>
+  if(A.atrasoN > 0) faixas.push(`<div class="fxa">
+    <span class="fxa-bar" style="background:#A65A4A;"></span>
+    <span class="fxa-tx"><strong>${A.atrasoN} ${plural(A.atrasoN,'lançamento')} em atraso</strong> <span class="fxa-sec">${plural(A.atrasoN,'soma','somam')} ${fmtR(A.atrasoT)}${A.atrasoInN?` — ${A.atrasoInN} ${A.atrasoInN===1?'é uma entrada que já deveria ter caído':'são entradas que já deveriam ter caído'}.`:'.'}</span></span>
+    <button class="fxa-btn" onclick="_finIrMovimentacoes('atrasados')">Ver os atrasados →</button>
   </div>`);
-  if(A.fila.length && A.fila[0].dias >= 1) faixas.push(`<div class="fxa fxa-gold">
-    <span class="fxa-ic" style="background:#9C7F40;">!</span>
-    <span>Repasse ao cedente <strong>${escHtml(A.fila[0].nome||'—')}</strong> pendente há ${A.fila[0].dias} ${plural(A.fila[0].dias,'dia')} — ${fmtR(A.fila[0].capital)} em ${A.fila[0].n} ${plural(A.fila[0].n,'parcela')} ${plural(A.fila[0].n,'recebida')}.</span>
-    <button class="fxa-btn" style="background:#9C7F40;" onclick="setFinTab('credores')">Repassar agora →</button>
+  if(A.fila.length && A.fila[0].dias >= 1) faixas.push(`<div class="fxa">
+    <span class="fxa-bar" style="background:#C9A961;"></span>
+    <span class="fxa-tx">Repasse ao cedente <strong>${escHtml(A.fila[0].nome||'—')}</strong> <span class="fxa-sec">parado há ${A.fila[0].dias} ${plural(A.fila[0].dias,'dia')} — ${fmtR(A.fila[0].capital)} em ${A.fila[0].n} ${plural(A.fila[0].n,'parcela')} ${plural(A.fila[0].n,'recebida')}.</span></span>
+    <button class="fxa-btn" onclick="setFinTab('credores')">Repassar agora →</button>
   </div>`);
 
   // ── 2. Meta: barra empilhada recuperado + acordado a receber ──────────────────────
@@ -34832,15 +35783,16 @@ async function renderFinVisao(el){
   el.innerHTML = `
     <style>
       .cx-wrap{display:flex;flex-direction:column;gap:16px;}
-      .fxa{display:flex;align-items:center;gap:12px;border-radius:9px;padding:12px 14px;font-size:13px;}
-      .fxa-red{background:#FBEAE7;border:1px solid #E7CFC7;color:#7D3F33;}
-      .fxa-gold{background:#FBF3E1;border:1px solid #DFC992;color:#7A6428;}
-      .fxa strong{font-weight:600;}
-      .fxa-ic{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;color:#fff;font-size:13px;font-weight:700;flex-shrink:0;}
-      .fxa-btn{margin-left:auto;white-space:nowrap;border:none;color:#fff;font-family:inherit;font-size:12.5px;font-weight:600;padding:7px 13px;border-radius:6px;cursor:pointer;}
-      .fxa-red .fxa-btn:hover{background:#94503F !important;}
-      .fxa-gold .fxa-btn:hover{background:#8A6F36 !important;}
-      .cx-par{display:grid;grid-template-columns:minmax(0,1.02fr) minmax(0,1.98fr);gap:12px;align-items:stretch;}
+      .cx-alertas{background:#fff;border:1px solid #E6E1D2;border-radius:10px;display:flex;flex-direction:column;}
+      .cx-alertas .fxa + .fxa{border-top:1px solid #F2EFE6;}
+      .fxa{display:flex;align-items:center;gap:10px;padding:11px 16px;}
+      .fxa-bar{width:5px;height:26px;border-radius:3px;flex-shrink:0;}
+      .fxa-tx{font-size:13px;color:#0A1530;}
+      .fxa-tx strong{font-weight:600;}
+      .fxa-sec{color:#6B7683;}
+      .fxa-btn{margin-left:auto;white-space:nowrap;background:transparent;border:none;padding:0;font-family:inherit;font-size:12.5px;font-weight:600;color:#15224A;cursor:pointer;}
+      .fxa-btn:hover{color:#9C7F40;}
+      .cx-par{display:grid;grid-template-columns:minmax(250px,1.02fr) minmax(0,1.98fr);gap:12px;align-items:stretch;}
       .cx-livre{background:#0A1530;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:10px;color:#fff;min-width:0;}
       .cx-lb{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;}
       .cx-livre-v{font-family:'JetBrains Mono',monospace;font-size:27px;font-weight:600;letter-spacing:-.02em;white-space:nowrap;}
@@ -34850,22 +35802,24 @@ async function renderFinVisao(el){
       .cx-frase{margin-top:auto;font-size:11px;color:#8A94A6;line-height:1.45;}
       .cx-meta{background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:13px;min-width:0;}
       .cx-meta-h{display:flex;align-items:center;gap:9px;flex-wrap:wrap;}
-      .cx-pill-gold{background:#FBF3E1;border:1px solid #DFC992;color:#7A6428;font-family:'JetBrains Mono',monospace;font-size:9.5px;border-radius:4px;padding:2px 6px;white-space:nowrap;}
       .cx-link{font-size:12px;font-weight:600;color:#15224A;cursor:pointer;}
       .cx-link:hover{color:#9C7F40;}
-      .cx-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}
+      /* Piso de 230px: com 4 filhos o auto-fit fecha em 2×2 e não sobra card órfão. */
+      .cx-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;}
       .cx-metrics .lb{font-size:11px;color:#8A94A6;}
       .cx-metrics .vl{font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:600;white-space:nowrap;margin-top:2px;}
       .cx-metrics .nt{font-size:10.5px;color:#6B7683;margin-top:2px;}
       .cx-trilho{margin-top:auto;height:12px;background:#F2EFE6;border-radius:6px;overflow:hidden;display:flex;}
       .cx-leg{display:flex;align-items:center;gap:14px;font-size:11px;color:#5A5F66;flex-wrap:wrap;}
       .cx-leg i{width:9px;height:9px;border-radius:2px;display:inline-block;margin-right:5px;}
-      .cx-kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;align-items:stretch;}
+      /* Piso de 272px: com 5 filhos o auto-fit fecha em 3+2. Piso menor deixaria 4+1,
+         com um card órfão na última linha. */
+      .cx-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(272px,1fr));gap:12px;align-items:stretch;}
       .cx-kpi{background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:15px;display:flex;flex-direction:column;gap:8px;text-align:left;min-width:0;}
       .cx-kpi.click{cursor:pointer;}
+      /* Nenhuma borda colorida e nenhum rótulo colorido: verde e vermelho ficam só no
+         dinheiro que já andou. Era a borda vermelha que dava a cara de sistema antigo. */
       .cx-kpi.click:hover{background:#FBFAF6;}
-      .cx-kpi.red{border-color:#E7CFC7;} .cx-kpi.red:hover{background:#FEF8F7;}
-      .cx-kpi.gold{border-color:#DFC992;} .cx-kpi.gold:hover{background:#FEFBF3;}
       .cx-kpi .vl{font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;white-space:nowrap;}
       .cx-kpi .dt{font-size:11px;color:#5A5F66;margin-top:auto;display:flex;flex-direction:column;gap:2px;}
       .cx-kpi .dt .sb{display:flex;justify-content:space-between;gap:8px;}
@@ -34892,7 +35846,7 @@ async function renderFinVisao(el){
       .cx-btn2:hover{background:#FBFAF6;}
     </style>
     <div class="cx-wrap">
-      ${faixas.length ? `<div style="display:flex;flex-direction:column;gap:8px;">${faixas.join('')}</div>` : ''}
+      ${faixas.length ? `<div class="cx-alertas">${faixas.join('')}</div>` : ''}
 
       <div class="cx-par">
         <div class="cx-livre">
@@ -34913,7 +35867,7 @@ async function renderFinVisao(el){
         <div class="cx-meta">
           <div class="cx-meta-h">
             <span class="cx-lb" style="color:#8A94A6;">Meta de ${escHtml(A.mesLabel)}</span>
-            <span class="cx-pill-gold">${A.diasUteis} ${plural(A.diasUteis,'DIA ÚTIL RESTANTE','DIAS ÚTEIS RESTANTES')}</span>
+            <span style="font-size:11px;color:#8A94A6;white-space:nowrap;">${A.diasUteis} ${plural(A.diasUteis,'dia útil restante','dias úteis restantes')}</span>
             <span class="cx-link" style="margin-left:auto;" onclick="_finCaixaAjustarMeta()">Ajustar meta</span>
           </div>
           <div class="cx-metrics">
@@ -34924,41 +35878,47 @@ async function renderFinVisao(el){
           </div>
           <div class="cx-trilho">
             <div style="width:${pctRec.toFixed(1)}%;background:#5E7C58;"></div>
-            <div style="width:${pctEnt.toFixed(1)}%;background:#C9A961;"></div>
+            <div style="width:${pctEnt.toFixed(1)}%;background:#C3CFBF;"></div>
           </div>
           <div class="cx-leg">
             <span><i style="background:#5E7C58;"></i>recuperado</span>
-            <span><i style="background:#C9A961;"></i>acordado a receber</span>
+            <span><i style="background:#C3CFBF;"></i>acordado a receber</span>
             <span style="margin-left:auto;text-align:right;"><strong style="font-weight:600;">${pct1(pctRec+pctEnt)}% da meta comprometido</strong> · ${semCob > 0 ? fmtR(semCob)+' ainda sem cobertura' : 'meta coberta pelos acordos ativos'}</span>
           </div>
         </div>
       </div>
 
       <div class="cx-kpis">
-        <div class="cx-kpi red click" onclick="_finIrMovimentacoes('atrasados')">
-          <div class="cx-lb" style="color:#7D3F33;">Em atraso</div>
+        <div class="cx-kpi click" onclick="_finIrMovimentacoes('atrasados')">
+          <div class="cx-lb">Em atraso</div>
           <div class="vl" style="color:#A65A4A;">${fmtR(A.atrasoT)}</div>
           <div class="dt"><span class="sb"><span>a receber · ${A.atrasoInN}</span><span>${fmtR(A.atrasoInT)}</span></span><span class="sb"><span>a pagar · ${A.atrasoOutN}</span><span>${fmtR(A.atrasoOutT)}</span></span></div>
         </div>
         <div class="cx-kpi click" onclick="_finIrMovimentacoes('tudo')">
           <div class="cx-lb">Receita a entrar</div>
-          <div class="vl" style="color:#4C6647;">${fmtR(A.aEntrarT)}</div>
+          <div class="vl" style="color:#0A1530;">${fmtR(A.aEntrarT)}</div>
           <div class="dt"><span>${A.aEntrarN} ${plural(A.aEntrarN,'parcela')} até ${A.mesFim.slice(8,10)}/${A.mesFim.slice(5,7)}</span><span style="color:#8A94A6;">${fmtR(A.semanaRecT)} ${A.semanaRecN===1?'vence':'vencem'} esta semana</span></div>
         </div>
         <div class="cx-kpi">
-          <div class="cx-lb">Resultado realizado · ${escHtml(mesTitulo)}</div>
+          <div class="cx-lb">Resultado realizado</div>
           <div class="vl" style="color:${A.resultado >= 0 ? '#4C6647' : '#A65A4A'};">${fmtRs(A.resultado)}</div>
           <div class="dt"><span class="sb"><span>recebido</span><span style="color:#4C6647;">${fmtR(A.receita)}</span></span><span class="sb"><span>pago</span><span style="color:#7D3F33;">${fmtR(A.despesa)}</span></span></div>
         </div>
-        <div class="cx-kpi gold click" onclick="setFinTab('credores')">
-          <div class="cx-lb" style="color:#7A6428;">A repassar ao cedente</div>
-          <div class="vl" style="color:#9C7F40;">${fmtR(A.terceiros)}</div>
+        <div class="cx-kpi click" onclick="setFinTab('credores')">
+          <div class="cx-lb">A repassar ao cedente</div>
+          <div class="vl" style="color:#0A1530;">${fmtR(A.terceiros)}</div>
           <div class="dt"><span>${A.repasseN} ${plural(A.repasseN,'repasse')}${A.repasseN?` · o mais antigo há ${A.repasseMaisAntigo} ${plural(A.repasseMaisAntigo,'dia')}`:''}</span><span style="color:#8A94A6;">custódia · sai do caixa quando você repassar</span></div>
         </div>
         <div class="cx-kpi">
-          <div class="cx-lb">Acordos do mês</div>
-          <div class="vl" style="color:#0A1530;">${fmtR(A.ticket ? A.ticket*A.parcelasN : 0)}</div>
-          <div class="dt"><span>${A.parcelasN} ${plural(A.parcelasN,'parcela')} ${plural(A.parcelasN,'lançada')} · ticket ${fmtR(A.ticket)}</span></div>
+          <div class="cx-lb">Acordos de ${escHtml(A.mesLabel)}</div>
+          <div style="display:flex;align-items:baseline;gap:7px;">
+            <span class="vl" style="color:#0A1530;">${A.assinadosN}</span>
+            <span style="font-size:11px;color:#6B7683;">${plural(A.assinadosN,'assinado')}</span>
+          </div>
+          <div class="dt">
+            <span>${A.parcelasN} ${plural(A.parcelasN,'parcela')} ${plural(A.parcelasN,'lançada')} · ticket ${fmtR(A.ticket)}</span>
+            <span style="color:${A.semConferirN?'#A65A4A':'#8A94A6'};">${A.semConferirN ? `${A.semConferirN} ${plural(A.semConferirN,'assinado')} ainda sem conferir` : 'todos conferidos'}</span>
+          </div>
         </div>
       </div>
 
@@ -34975,7 +35935,7 @@ async function renderFinVisao(el){
                 const rec = c.valor >= 0, w = Math.max(2, Math.round(Math.abs(c.valor)/maxCat*100));
                 return `<div class="cx-catrow">
                   <span class="cx-catnome" title="${escHtml(c.nome)}">${escHtml(c.nome)}</span>
-                  <span class="cx-cattrilho" style="justify-content:${rec?'flex-start':'flex-end'};"><i style="width:${w}%;background:${rec?'#5E7C58':'#D8B7AF'};border-radius:4px;"></i></span>
+                  <span class="cx-cattrilho" style="justify-content:${rec?'flex-start':'flex-end'};"><i style="width:${w}%;background:${rec?'#7E9878':'#D9C0B9'};border-radius:4px;"></i></span>
                   <span class="cx-catval" style="color:${rec?'#4C6647':'#7D3F33'};">${rec?'':'−'}${fmtR(Math.abs(c.valor))}</span>
                 </div>`; }).join('')
                 : `<div style="font-size:12.5px;color:#8A94A6;">Nada liquidado neste mês ainda.</div>`}
@@ -34989,10 +35949,12 @@ async function renderFinVisao(el){
           <section style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:11px;">
             <div style="display:flex;align-items:baseline;gap:9px;">
               <h2 class="cx-h2">Inadimplência</h2>
-              <span style="background:#FBEAE7;border:1px solid #E7CFC7;color:#7D3F33;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;border-radius:4px;padding:2px 6px;">ASAAS</span>
             </div>
-            <div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:600;color:#A65A4A;white-space:nowrap;">${fmtR((inad.charges||[]).reduce((s,c)=>s+Math.abs(+c.value||0),0))}</div>
-            <div style="font-size:12px;color:#5A5F66;">${(inad.devList||[]).length} ${plural((inad.devList||[]).length,'devedor','devedores')} com parcela vencida · ${fmtR(A.atrasoInT)} em entradas atrasadas no razão</div>
+            <!-- Sem selo de origem: o valor é a entrada atrasada de TODAS as contas, não
+                 só do Asaas. O selo dizia "ASAAS" ao lado de um número que já somava o
+                 razão inteiro. Judicial pendente fica de fora — esperar não é atraso. -->
+            <div style="font-family:'JetBrains Mono',monospace;font-size:20px;font-weight:600;color:#A65A4A;white-space:nowrap;">${fmtR(A.atrasoInT)}</div>
+            <div style="font-size:12px;color:#5A5F66;">${(inad.devList||[]).length} ${plural((inad.devList||[]).length,'devedor','devedores')} com parcela vencida · todas as contas, exceto judicial</div>
             <button class="cx-btn2" onclick="setFinTab('asaas')">Disparar régua de cobrança</button>
           </section>
         </div>
@@ -35044,9 +36006,14 @@ function _finCaixaAjustarMeta(){
 // Ir para Movimentações já numa visão salva, limpando busca e seleção (handoff:
 // "Ver os atrasados →" e os KPIs clicáveis levam para a lista já filtrada).
 function _finIrMovimentacoes(visao){
-  _finLancCascataState.visao = visao || 'tudo';
-  _finLancCascataState.busca = '';
-  _finLancCascataState.sel = new Set();
+  const s = _finLancCascataState;
+  s.visao = visao || 'tudo';
+  s.busca = '';
+  // Chegar de outra aba com filtro de painel grudado já fez a lista parecer vazia sem
+  // explicação: quem vem de um KPI quer o recorte daquele KPI, não o da última visita.
+  _finMovZerarFiltros(s);
+  s.filtrosAbertos = false; s.maisFiltros = false;
+  _finMovReset();
   setFinTab('lancamentos');
 }
 
@@ -35107,26 +36074,456 @@ async function _asaasGetBalance(){
   }
 }
 
-// Aba "Judicial" — reaproveita a tela inteira de Movimentações (renderFinLancamentos,
-// hoje só usada por aqui), travando o filtro TIPO em 'judicial'.
-// O período vem do seletor da faixa escura, que é a fonte única desde 26/08.
-// Antes ela tinha navegador de mês próprio; ao migrar para a faixa (PR #567) ficavam dois
-// controles empilhados, e o de cima era inerte — dava para o topo dizer "outubro" e a
-// lista, que é quem manda, dizer "agosto".
+// ══════════════════════════════════════════════════════════════
+// ABA JUDICIAL  (id 'receitasjudiciais' — 4ª aba fixa desde o handoff de 29/08)
+// ──────────────────────────────────────────────────────────────
+// Por que existe: penhora de salário, Sisbajud e desconto INSS NÃO TÊM VENCIMENTO —
+// dependem de o juízo liberar. Enquanto ficavam na lista comum, contavam como atraso e
+// inflavam a previsão de caixa. A regra de dados vale para o módulo inteiro (ver o corte
+// em _finLancCascataCarregar e o Set `judicial` de _finCaixaAgg): judicial pendente sai
+// do alerta de atraso, da previsão de entrada e de Movimentações; quando cai, vira
+// entrada normal e reaparece lá.
+//
+// A espera NÃO sai do vencimento — sai de `judicial_pedido_em`, a data do pedido de
+// expedição do alvará/ofício (migração 20260829_fin_lancamento_judicial_pedido_em.sql).
+// Enquanto essa migração não for aplicada em produção, a aba funciona inteira e só os
+// dois cards de espera mostram "—": a checagem abaixo pergunta pela coluna UMA vez por
+// sessão e guarda a resposta, em vez de tomar 400 do PostgREST a cada carregamento.
+let _finTemPedidoJud = null;
+async function _finTemColunaPedidoJud(){
+  if(_finTemPedidoJud !== null) return _finTemPedidoJud;
+  try{
+    const { error } = await getSupabase().from('fin_lancamento').select('judicial_pedido_em').limit(1);
+    _finTemPedidoJud = !error;
+  }catch(_){ _finTemPedidoJud = false; }
+  return _finTemPedidoJud;
+}
+let _finJudState = { popEfet:null, menu:null, efetConta:'', efetData:'', efetValor:'' };
+
+// Modalidade a partir do que o banco realmente tem: a categoria diz Sisbajud ou penhora,
+// e o desconto em folha do INSS aparece na descrição. Um lugar só — o cabeçalho do grupo,
+// a chave de agrupamento e o texto de conferência da linha leem daqui.
+function _finJudModalidade(l, catNome){
+  if(/\bINSS\b/i.test(l.descricao||'')) return 'Desconto INSS';
+  if(/sisbajud/i.test(catNome||'')) return 'Sisbajud';
+  return 'Penhora de salário';
+}
+const _finJudDias = (iso) => {
+  if(!iso) return null;
+  const t = new Date(String(iso).slice(0,10)+'T00:00:00').getTime();
+  if(!isFinite(t)) return null;
+  return Math.max(0, Math.floor((new Date(hoje()+'T00:00:00').getTime() - t)/86400000));
+};
+const _finJudPrevisto = l => l.data_vencimento || l.data_competencia || '';
+
+async function _finJudCarregar(){
+  const sb = getSupabase();
+  const { ini, fim } = _finCascataPeriodoBounds();
+  const dim = await finApi.loadDimensoes();
+
+  // Categorias de origem judicial. "Acordos Judiciais" fica de fora de propósito: é
+  // acordo cujo processo é judicial, mas cobrado por boleto/Pix — mora em Movimentações.
+  const { data: catsAll } = await sb.from('fin_categoria').select('id,descricao').limit(2000);
+  const judCats = (catsAll||[]).filter(c => /sisbajud/i.test(c.descricao||'') || /penhora/i.test(c.descricao||''));
+  const nomePorCat = Object.fromEntries(judCats.map(c => [c.id, c.descricao]));
+  if(!judCats.length) return { grupos:[], pendentes:[], liberados:[], dim, temPedido:await _finTemColunaPedidoJud(), periodoLabel:_finCascataPeriodoBounds().label };
+
+  const links = [];
+  for(let i = 0; i < judCats.length; i += 50){
+    const { data } = await sb.from('fin_lancamento_categoria')
+      .select('lancamento_id,categoria_id').in('categoria_id', judCats.slice(i,i+50).map(c=>c.id)).limit(5000);
+    links.push(...(data||[]));
+  }
+  const catDoLanc = {};
+  for(const k of links) if(!catDoLanc[k.lancamento_id]) catDoLanc[k.lancamento_id] = nomePorCat[k.categoria_id] || '';
+  const ids = Object.keys(catDoLanc);
+  if(!ids.length) return { grupos:[], pendentes:[], liberados:[], dim, temPedido:await _finTemColunaPedidoJud(), periodoLabel:_finCascataPeriodoBounds().label };
+
+  const temPedido = await _finTemColunaPedidoJud();
+  const sel = 'id,descricao,valor,tipo_movimento,status,conta_id,cobranca_id,credor_id,contato_id,numero_parcela,total_parcelas,'
+            + 'data_competencia,data_vencimento,data_pagamento,judicial_liberado_em,observacoes' + (temPedido ? ',judicial_pedido_em' : '');
+  const rows = [];
+  for(let i = 0; i < ids.length; i += 200){
+    const { data, error } = await sb.from('fin_lancamento').select(sel).in('id', ids.slice(i,i+200)).limit(1000);
+    if(error) throw error;
+    rows.push(...(data||[]));
+  }
+  rows.forEach(r => { r._cat = catDoLanc[r.id] || ''; });
+
+  // Aguardando NÃO é recortado pelo período: esperar não é competência de mês nenhum, e
+  // cortar pelo mês esconderia justamente os mais antigos — que são os que precisam ser
+  // conferidos no processo. Só "liberado no mês" respeita o seletor de período.
+  const pendentes = rows.filter(r => !r.judicial_liberado_em);
+  const liberados = rows.filter(r => r.judicial_liberado_em && r.judicial_liberado_em >= ini && r.judicial_liberado_em <= fim);
+
+  // Processo e cedente vêm do vínculo real — nunca de identificador derivado do texto:
+  // número de processo gerado do nome já colidiu entre devedores.
+  const cobIds = [...new Set(pendentes.map(r => r.cobranca_id).filter(Boolean))];
+  const procPorCob = {}, cliPorCob = {};
+  if(cobIds.length){
+    try{
+      const { data: cbs } = await sb.from('cobrancas').select('id,numero_processo,cliente_id').in('id', cobIds);
+      (cbs||[]).forEach(c => { if(c.numero_processo) procPorCob[c.id] = c.numero_processo; if(c.cliente_id) cliPorCob[c.id] = c.cliente_id; });
+    }catch(_){ /* auxiliar: a aba funciona sem número de processo */ }
+  }
+  const cliIds = [...new Set([...Object.values(cliPorCob), ...pendentes.map(r => r.credor_id).filter(Boolean)])];
+  const nomeCli = {};
+  if(cliIds.length){
+    try{ const { data } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', cliIds);
+      (data||[]).forEach(c => { nomeCli[c.id] = c.nome_fantasia || c.nome; }); }catch(_){}
+  }
+
+  // Agrupamento por processo. A identidade é a cobrança quando existe; sem ela, o texto
+  // base da descrição (o mesmo critério que a exclusão de série já usa).
+  const mapa = {};
+  for(const r of pendentes){
+    const base = _finSerieBase(_finMovDescSemParcela(r)) || (r.descricao || '—');
+    const mod = _finJudModalidade(r, r._cat);
+    const chave = (r.cobranca_id ? 'c'+r.cobranca_id : 'd'+base) + '|' + mod;
+    if(!mapa[chave]) mapa[chave] = {
+      devedor: base, modalidade: mod, itens: [],
+      processo: r.cobranca_id ? (procPorCob[r.cobranca_id] || '') : '',
+      cobrancaId: r.cobranca_id || null,
+      cedente: nomeCli[r.credor_id] || (r.cobranca_id ? nomeCli[cliPorCob[r.cobranca_id]] : '') || '',
+    };
+    mapa[chave].itens.push(r);
+  }
+  const grupos = Object.values(mapa)
+    .sort((a,b) => a.devedor.localeCompare(b.devedor,'pt-BR'))
+    .map(g => {
+      g.itens.sort((a,b) => (_finJudPrevisto(a) || '').localeCompare(_finJudPrevisto(b) || '') || (a.id-b.id));
+      g.total = +g.itens.reduce((s,r) => s+Math.abs(+r.valor||0), 0).toFixed(2);
+      g.mensal = g.modalidade !== 'Sisbajud';
+      return g;
+    });
+
+  return { grupos, pendentes, liberados, dim, temPedido, periodoLabel: _finCascataPeriodoBounds().label };
+}
+
 async function renderFinReceitasJudiciais(el){
-  const b = _finCascataPeriodoBounds();
-  let st = window._finLancState;
-  if(!st || !st.filtros || st.filtros.tipoView !== 'judicial'){
-    st = window._finLancState = { page:1, filtros:{tipoView:'judicial',situacao:'todos'}, totalPages:1, total:0, loading:false, sel:new Set(), totais:{entradas:0,saidas:0} };
+  el.innerHTML = `<div style="padding:50px;text-align:center;color:#8A94A6;"><div class="mv2-spinner" style="margin:0 auto 10px;width:24px;height:24px;border-width:3px;"></div>Carregando os valores no juízo…</div>`;
+  let ctx;
+  try{ ctx = await _finJudCarregar(); }
+  catch(e){ el.innerHTML = `<div class="panel" style="padding:20px;color:var(--danger);">Erro: ${escHtml(e.message||String(e))}</div>`; return; }
+  window._finJudCtx = ctx;
+  _finJudRender();
+  _finSetCnt('receitasjudiciais', ctx.pendentes.length);
+}
+
+function _finJudRender(){
+  const el = document.getElementById('fin-content'); if(!el) return;
+  const ctx = window._finJudCtx; if(!ctx) return;
+  const s = _finJudState;
+  const soma = arr => +arr.reduce((a,r) => a+Math.abs(+r.valor||0), 0).toFixed(2);
+
+  const total = soma(ctx.pendentes);
+  const liberadoT = soma(ctx.liberados);
+  const esperas = ctx.pendentes.map(r => _finJudDias(r.judicial_pedido_em)).filter(d => d != null);
+  const esperaMedia = esperas.length ? Math.round(esperas.reduce((a,d)=>a+d,0)/esperas.length) : null;
+  const travados = ctx.pendentes.filter(r => { const d = _finJudDias(r.judicial_pedido_em); return d != null && d > 60; }).length;
+  const semPedido = ctx.pendentes.length - esperas.length;
+  const mesLabel = (ctx.periodoLabel||'').replace(/^./, c=>c.toUpperCase());
+
+  el.innerHTML = `
+    <style>
+      .finjd-wrap{max-width:1560px;margin:0 auto;display:flex;flex-direction:column;gap:16px;}
+      .finjd-tira{display:flex;align-items:center;gap:10px;background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:11px 16px;}
+      .finjd-tira .bar{width:5px;height:26px;border-radius:3px;background:#0A1530;flex-shrink:0;}
+      .finjd-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(216px,1fr));gap:12px;}
+      .finjd-kpi{background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:8px;min-width:0;}
+      .finjd-kpi.ink{background:#0A1530;border-color:#0A1530;color:#fff;gap:9px;}
+      .finjd-lb{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;}
+      .finjd-vl{font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;white-space:nowrap;color:#0A1530;}
+      .finjd-kpi.ink .finjd-vl{font-size:26px;color:#C9A961;}
+      .finjd-nt{font-size:11.5px;color:#5A5F66;}
+      .finjd-kpi.ink .finjd-nt{color:#B4BCCC;}
+      .finjd-sec{background:#fff;border:1px solid #E6E1D2;border-radius:10px;overflow:hidden;}
+      .finjd-sech{padding:14px 18px 12px;border-bottom:1px solid #F2EFE6;display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+      .finjd-h2{font-family:'Fraunces',Georgia,serif;font-size:16px;font-weight:500;color:#0A1530;}
+      .finjd-grupo{border-top:1px solid #F2EFE6;}
+      .finjd-gh{display:flex;align-items:center;gap:10px;padding:11px 18px 9px;background:#FBFAF6;flex-wrap:nowrap;min-width:0;}
+      .finjd-gh .dev{font-size:13px;font-weight:600;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      .finjd-mod{font-size:10.5px;background:#F2EFE6;color:#6B7683;border-radius:4px;padding:2px 7px;white-space:nowrap;flex-shrink:0;}
+      .finjd-proc{font-size:10.5px;color:#A6AEBD;white-space:nowrap;}
+      .finjd-ced{font-size:11px;font-weight:600;color:#9C7F40;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      .finjd-resumo{margin-left:auto;font-size:11px;color:#8A94A6;white-space:nowrap;}
+      .finjd-total{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;white-space:nowrap;color:#0A1530;}
+      .finjd-novo{background:#fff;border:1px solid #D8D2C5;color:#5A5F66;border-radius:6px;padding:5px 10px;font-size:11.5px;font-weight:600;white-space:nowrap;flex-shrink:0;cursor:pointer;font-family:inherit;}
+      .finjd-novo:hover{background:#FBFAF6;}
+      .finjd-row{display:grid;grid-template-columns:26px minmax(150px,1fr) 132px 116px 118px 34px 30px;align-items:center;gap:12px;padding:9px 18px 9px 30px;border-top:1px solid #F7F4EC;}
+      .finjd-row:hover{background:#FBFAF6;}
+      .finjd-parc{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#A6AEBD;}
+      .finjd-prev{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;white-space:nowrap;}
+      .finjd-val{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;text-align:right;white-space:nowrap;color:#0A1530;}
+      .finjd-espera{font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.06em;border-radius:4px;padding:3px 7px;text-align:center;white-space:nowrap;justify-self:end;}
+      .finjd-conf{font-size:11px;color:#A6AEBD;text-align:right;white-space:nowrap;}
+      .finjd-btnp{background:#0A1530;border:none;color:#fff;border-radius:6px;padding:7px 12px;font-size:12px;font-weight:600;white-space:nowrap;cursor:pointer;font-family:inherit;}
+      .finjd-btnp:hover{background:#15224A;}
+    </style>
+    <div class="finjd-wrap" onclick="_finJudFecharPopovers(event)">
+      <div class="finjd-tira">
+        <span class="bar"></span>
+        <span style="font-size:13px;color:#0A1530;"><strong style="font-weight:600;">Estes valores não têm vencimento</strong> <span style="color:#6B7683;">— dependem de o juízo liberar. Ficam fora do atraso e da previsão de caixa até caírem na conta.</span></span>
+      </div>
+
+      <div class="finjd-kpis">
+        <div class="finjd-kpi ink">
+          <span class="finjd-lb">Aguardando o juízo</span>
+          <span class="finjd-vl">${fmtR(total)}</span>
+          <span class="finjd-nt">${ctx.pendentes.length} ${ctx.pendentes.length===1?'valor':'valores'}${semPedido?` · ${semPedido} sem data de pedido`:''}</span>
+        </div>
+        <div class="finjd-kpi">
+          <span class="finjd-lb">Liberado ${escHtml(mesLabel.toLowerCase().startsWith('de ')?mesLabel:'em '+mesLabel.toLowerCase())}</span>
+          <span class="finjd-vl" style="color:#4C6647;">${fmtR(liberadoT)}</span>
+          <span class="finjd-nt">${ctx.liberados.length} ${ctx.liberados.length===1?'alvará ou desconto caiu':'alvarás e descontos caíram'}</span>
+        </div>
+        <div class="finjd-kpi">
+          <span class="finjd-lb">Espera média</span>
+          <span class="finjd-vl">${esperaMedia != null ? esperaMedia+' dias' : '—'}</span>
+          <span class="finjd-nt">${ctx.temPedido ? (esperaMedia != null ? 'do pedido até o crédito' : 'nenhum valor tem data de pedido registrada') : 'exige a coluna judicial_pedido_em — migração pendente'}</span>
+        </div>
+        <div class="finjd-kpi">
+          <span class="finjd-lb">Parados há +60 dias</span>
+          <span class="finjd-vl" style="color:${travados?'#A65A4A':'#0A1530'};">${ctx.temPedido ? travados : '—'}</span>
+          <span class="finjd-nt">${ctx.temPedido ? 'conferir no processo se já houve depósito' : 'exige a coluna judicial_pedido_em — migração pendente'}</span>
+        </div>
+      </div>
+
+      <section class="finjd-sec">
+        <div class="finjd-sech">
+          <h2 class="finjd-h2">Aguardando liberação</h2>
+          <span style="font-size:11.5px;color:#8A94A6;">por processo, em ordem alfabética · mensais mostram a data prevista de depósito</span>
+          <button class="finjd-btnp" style="margin-left:auto;" onclick="_finJudNovoValor()">+ Novo valor judicial</button>
+        </div>
+        ${ctx.grupos.length ? ctx.grupos.map(g=>_finJudGrupoHtml(g, ctx)).join('')
+          : `<div style="padding:38px 16px;text-align:center;font-size:12.5px;color:#8A94A6;">Nada aguardando o juízo. Penhora, Sisbajud e desconto INSS aparecem aqui assim que forem lançados.</div>`}
+      </section>
+    </div>`;
+}
+
+function _finJudGrupoHtml(g, ctx){
+  return `<div class="finjd-grupo">
+    <div class="finjd-gh">
+      <span class="dev" title="${escHtml(g.devedor)}">${escHtml(g.devedor)}</span>
+      <span class="finjd-mod">${escHtml(g.modalidade)}</span>
+      ${g.processo ? `<span class="finjd-proc">${escHtml(g.processo)}</span>` : ''}
+      ${g.cedente ? `<span class="finjd-ced" title="cedente">${escHtml(g.cedente)}</span>` : ''}
+      <span class="finjd-resumo">${g.itens.length} ${g.itens.length===1 ? 'parcela aguardando' : (g.mensal ? 'depósitos mensais aguardando' : 'valores aguardando')}</span>
+      <span class="finjd-total">${fmtR(g.total)}</span>
+      <button class="finjd-novo" title="${g.mensal?'Cria o depósito previsto do mês seguinte neste processo':'Adiciona outro valor esperado neste processo'}" onclick="_finJudProximo(${g.itens[g.itens.length-1].id}, ${g.mensal})">+ ${g.mensal?'Próximo mês':'Novo valor'}</button>
+    </div>
+    ${g.itens.map(r=>_finJudRowHtml(r, g, ctx)).join('')}
+  </div>`;
+}
+
+function _finJudRowHtml(r, g, ctx){
+  const s = _finJudState;
+  const dias = _finJudDias(r.judicial_pedido_em);
+  const velho = dias != null && dias > 60;
+  const prev = _finJudPrevisto(r);
+  return `<div class="finjd-row">
+    <span class="finjd-parc">${r.numero_parcela && r.total_parcelas ? r.numero_parcela+'/'+r.total_parcelas : '—'}</span>
+    <span style="display:flex;align-items:center;gap:7px;min-width:0;">
+      <span style="font-size:11px;color:#8A94A6;white-space:nowrap;">previsto para</span>
+      <span class="finjd-prev" style="color:${velho?'#7D3F33':'#0A1530'};">${prev ? prev.split('-').reverse().join('/') : 'sem data'}</span>
+    </span>
+    <span class="finjd-val">${fmtR(Math.abs(+r.valor||0))}</span>
+    <span class="finjd-espera" style="background:${velho?'#FBEAE7':'#F5F2EA'};color:${velho?'#7D3F33':'#6B7683'};border:1px solid ${velho?'#E7CFC7':'#E6E1D2'};">${dias != null ? 'há '+dias+' dias' : 'sem pedido'}</span>
+    <span class="finjd-conf">${g.mensal ? 'conferir no processo' : 'bloqueio Sisbajud'}</span>
+    <span class="finmv-cel">
+      ${_finMovPolegarHtml(r, { t:'A RECEBER' }, false, false, `_finJudAbrirEfetivar(${r.id})`, 'Marcar como recebido · ' + fmtR(Math.abs(+r.valor||0)))}
+      ${s.popEfet === r.id ? _finJudPopEfetivarHtml(r, ctx) : ''}
+    </span>
+    <span class="finmv-cel">
+      <button class="finmv-kebab ${s.menu===r.id?'on':''}" onclick="event.stopPropagation();_finJudAbrirMenu(${r.id})" title="Ações">⋮</button>
+      ${s.menu === r.id ? _finJudMenuHtml(r) : ''}
+    </span>
+  </div>`;
+}
+
+function _finJudFecharPopovers(ev){
+  const s = _finJudState;
+  if(!s.popEfet && !s.menu) return;
+  if(ev && ev.target && ev.target.closest && ev.target.closest('.finmv-pop,.finmv-menu')) return;
+  s.popEfet = null; s.menu = null;
+  _finJudRender();
+}
+function _finJudAbrirMenu(id){
+  const s = _finJudState;
+  s.popEfet = null;
+  s.menu = s.menu === id ? null : id;
+  _finJudRender();
+}
+function _finJudAbrirEfetivar(id){
+  const ctx = window._finJudCtx; if(!ctx) return;
+  const r = ctx.pendentes.find(x => x.id === id); if(!r) return;
+  const s = _finJudState;
+  // "Tribunal de Justiça" é ORIGEM, não conta: o destino tem de ser uma conta real, e o
+  // select nunca pode gravar a origem no lugar da conta (armadilha já vista em produção).
+  const contas = ((ctx.dim && ctx.dim.contas) || []).filter(c => !/tribunal/i.test(c.descricao||''));
+  const atual = contas.find(c => String(c.id) === String(r.conta_id));
+  s.menu = null;
+  s.popEfet = s.popEfet === id ? null : id;
+  s.efetConta = String((atual || contas[0] || {}).id || '');
+  s.efetData = hoje();
+  s.efetValor = Math.abs(+r.valor||0).toFixed(2).replace('.', ',');
+  _finJudRender();
+}
+function _finJudPopEfetivarHtml(r, ctx){
+  const s = _finJudState;
+  const contas = ((ctx.dim && ctx.dim.contas) || []).filter(c => !/tribunal/i.test(c.descricao||''));
+  return `<div class="finmv-pop" onclick="event.stopPropagation()">
+    <span style="font-size:13px;font-weight:600;color:#0A1530;">Marcar como recebido</span>
+    <label>Conta/carteira
+      <select onchange="_finJudState.efetConta=this.value">
+        ${contas.map(c=>`<option value="${c.id}" ${String(s.efetConta)===String(c.id)?'selected':''}>${escHtml(c.descricao||'—')}</option>`).join('')}
+      </select></label>
+    <label>Data de recebimento
+      <input type="date" value="${escHtml(s.efetData||'')}" onchange="_finJudState.efetData=this.value"></label>
+    <div style="display:flex;align-items:center;gap:9px;">
+      <span style="font-size:11px;color:#8A94A6;">Valor creditado</span>
+      <input value="${escHtml(s.efetValor)}" style="margin-left:auto;width:110px;text-align:right;font-family:'JetBrains Mono',monospace;font-size:11.5px;background:#fff;border:1px solid #E6E1D2;border-radius:7px;padding:7px 9px;color:#0A1530;" oninput="_finJudState.efetValor=this.value">
+    </div>
+    <span style="font-size:10.5px;color:#A6AEBD;line-height:1.4;">O juízo às vezes libera valor diferente do esperado — ajuste aqui e a diferença fica registrada na observação do lançamento.</span>
+    <div style="display:flex;align-items:center;gap:8px;border-top:1px solid #F2EFE6;padding-top:11px;">
+      <span style="font-size:11px;color:#8A94A6;">esperado</span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#8A94A6;white-space:nowrap;">${fmtR(Math.abs(+r.valor||0))}</span>
+      <button style="margin-left:auto;background:#5E7C58;border:none;color:#fff;border-radius:6px;padding:8px 12px;font-size:12px;font-weight:600;white-space:nowrap;cursor:pointer;font-family:inherit;" onclick="_finJudConfirmar(${r.id})">Marcar recebido</button>
+    </div>
+  </div>`;
+}
+async function _finJudConfirmar(id){
+  const ctx = window._finJudCtx;
+  const r = ctx && ctx.pendentes.find(x => x.id === id); if(!r) return;
+  const s = _finJudState;
+  if(!s.efetData){ showToast('Informe a data do crédito.', 'warning'); return; }
+  if(!s.efetConta){ showToast('Escolha a conta de destino.', 'warning'); return; }
+  const esperado = Math.abs(+r.valor||0);
+  const creditado = parseValorBR(s.efetValor);
+  if(!(creditado > 0)){ showToast('Informe o valor creditado.', 'warning'); return; }
+  try{
+    await finApi.confirmarRecebimentoJudicial(id, s.efetData, s.efetConta);
+    if(Math.abs(creditado - esperado) >= 0.005){
+      // A diferença não some: o valor do lançamento passa a ser o que caiu de fato e a
+      // observação guarda o que se esperava — senão o extrato deixa de bater e ninguém
+      // sabe por quê.
+      const nota = `Alvará creditado em ${s.efetData.split('-').reverse().join('/')}: ${fmtR(creditado)} (esperado ${fmtR(esperado)}).`;
+      const obs = (r.observacoes ? r.observacoes + '\n' : '') + nota;
+      const { error } = await getSupabase().from('fin_lancamento')
+        .update({ valor: creditado, valor_pago: creditado, observacoes: obs }).eq('id', id);
+      if(error) throw error;
+    }
+    s.popEfet = null;
+    showToast(creditado === esperado ? 'Valor creditado — saiu da fila judicial.' : `Creditado ${fmtR(creditado)} — diferença registrada.`, 'success');
+    renderFinTab('receitasjudiciais');
+  }catch(e){ showToast('Erro: '+(e.message||e), 'danger'); }
+}
+function _finJudMenuHtml(r){
+  const itens = [
+    ['Alterar data prevista', FIN_MOV_ICONES.calendario, `_finJudMenuAcao(${r.id},'datas')`, ''],
+    ['Editar lançamento',     FIN_MOV_ICONES.editar,     `_finJudMenuAcao(${r.id},'editar')`, ''],
+    ['Duplicar',              FIN_MOV_ICONES.duplicar,   `_finJudMenuAcao(${r.id},'duplicar')`, 'sep'],
+    ['Excluir',               FIN_MOV_ICONES.excluir,    `_finJudMenuAcao(${r.id},'excluir')`, 'del'],
+  ];
+  return `<div class="finmv-menu" style="width:200px;" onclick="event.stopPropagation()">
+    ${itens.map(([nome, ic, fn, cls])=>`<button class="finmv-mi ${cls}" onclick="event.stopPropagation();${fn}">${_finMovIcone(ic)}<span>${nome}</span></button>`).join('')}
+  </div>`;
+}
+async function _finJudMenuAcao(id, acao){
+  const ctx = window._finJudCtx;
+  const r = ctx && ctx.pendentes.find(x => x.id === id);
+  _finJudState.menu = null;
+  _finJudRender();
+  if(!r) return;
+  if(acao === 'datas'){ _finJudAbrirDatas(id); return; }
+  if(acao === 'editar'){ _finLancAbrirDrawer(id); return; }
+  if(acao === 'duplicar'){ _finJudProximo(id, false); return; }
+  if(acao === 'excluir'){
+    if(!confirm('Excluir este valor da fila judicial? Não dá para desfazer.')) return;
+    try{ await finApi.deleteLancamento(id); showToast('Valor judicial excluído.', 'success'); renderFinTab('receitasjudiciais'); }
+    catch(e){ showToast('Erro ao excluir: '+(e.message||e), 'danger'); }
   }
-  // Só zera paginação/seleção quando o período de fato mudou — este render também é o
-  // caminho de recarga de filtros e de lote.
-  if(st.filtros.dataIni !== b.ini || st.filtros.dataFim !== b.fim){
-    st.filtros = Object.assign({}, st.filtros, { dataIni:b.ini, dataFim:b.fim });
-    st.page = 1;
-    if(st.sel) st.sel.clear();
+}
+// A data prevista e a data do PEDIDO andam juntas: é do pedido que sai a espera, e não há
+// outro lugar na tela onde informá-la. Por isso as duas moram no mesmo diálogo — quem
+// corrige a previsão é quem acabou de olhar o processo.
+function _finJudAbrirDatas(id){
+  const ctx = window._finJudCtx;
+  const r = ctx && ctx.pendentes.find(x => x.id === id); if(!r) return;
+  let ov = document.getElementById('finjd-datas'); 
+  if(!ov){ ov = document.createElement('div'); ov.id='finjd-datas'; ov.className='overlay'; document.body.appendChild(ov); }
+  ov.innerHTML = `<div class="modal modal-sm">
+    <div class="modal-header"><span class="modal-title">Datas do valor judicial</span>
+      <button class="modal-close" onclick="closeModal('finjd-datas')">&#10005;</button></div>
+    <div class="modal-body">
+      <div style="font-size:12.5px;color:var(--text-2);margin-bottom:14px;">${escHtml(r.descricao||'—')}</div>
+      <div class="fg"><label>Previsto para</label><input type="date" id="finjd-prev" value="${escHtml(_finJudPrevisto(r)||'')}"></div>
+      <div class="fg"><label>Pedido de expedição em</label><input type="date" id="finjd-ped" value="${escHtml(r.judicial_pedido_em||'')}" ${ctx.temPedido?'':'disabled'}></div>
+      <div style="font-size:11px;color:var(--text-3);margin-top:8px;">${ctx.temPedido
+        ? 'A espera mostrada na aba conta do pedido de expedição até hoje — nunca do vencimento.'
+        : 'A coluna judicial_pedido_em ainda não existe no banco (migração 20260829 pendente): a espera continua em “—”.'}</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('finjd-datas')">Cancelar</button>
+      <button class="btn btn-primary" onclick="_finJudSalvarDatas(${id})">Salvar</button>
+    </div>
+  </div>`;
+  openModal('finjd-datas');
+}
+async function _finJudSalvarDatas(id){
+  const ctx = window._finJudCtx;
+  const prev = (document.getElementById('finjd-prev')||{}).value || null;
+  const ped  = (document.getElementById('finjd-ped')||{}).value || null;
+  try{
+    const payload = { data_vencimento: prev, data_competencia: prev };
+    if(ctx && ctx.temPedido) payload.judicial_pedido_em = ped;
+    const { error } = await getSupabase().from('fin_lancamento').update(payload).eq('id', id);
+    if(error) throw error;
+    closeModal('finjd-datas');
+    showToast('Datas atualizadas.', 'success');
+    renderFinTab('receitasjudiciais');
+  }catch(e){ showToast('Erro: '+(e.message||e), 'danger'); }
+}
+// "+ Próximo mês" nos recorrentes (penhora e INSS) cria o depósito do mês seguinte a
+// partir do último da série; "+ Novo valor" no Sisbajud cria uma cópia para ajustar.
+async function _finJudProximo(idBase, mensal){
+  const ctx = window._finJudCtx;
+  const r = ctx && ctx.pendentes.find(x => x.id === idBase); if(!r) return;
+  const prev = _finJudPrevisto(r);
+  let nova = prev;
+  if(mensal && prev){
+    const d = new Date(prev+'T00:00:00');
+    const dia = d.getDate();
+    const alvo = new Date(d.getFullYear(), d.getMonth()+1, 1);
+    // Dia 31 num mês de 30 cai no último dia do mês, não escorrega para o mês seguinte.
+    alvo.setDate(Math.min(dia, new Date(alvo.getFullYear(), alvo.getMonth()+1, 0).getDate()));
+    nova = `${alvo.getFullYear()}-${String(alvo.getMonth()+1).padStart(2,'0')}-${String(alvo.getDate()).padStart(2,'0')}`;
   }
-  await renderFinLancamentos(el);
+  try{
+    const salvo = await finApi.saveLancamento({
+      descricao: r.descricao, data_competencia: nova, data_vencimento: nova,
+      valor: Math.abs(+r.valor||0), tipo_movimento: r.tipo_movimento, status: 0,
+      conta_id: r.conta_id, contato_id: r.contato_id,
+    });
+    // Sem a categoria o novo lançamento não é judicial: cairia direto em Movimentações e
+    // voltaria a contar como atraso — exatamente o que esta aba existe para evitar.
+    const novoId = salvo && (salvo.id || (salvo[0] && salvo[0].id));
+    if(novoId){
+      const sb = getSupabase();
+      const { data: link } = await sb.from('fin_lancamento_categoria').select('categoria_id,valor').eq('lancamento_id', r.id).limit(5);
+      const rows = (link||[]).map(c => ({ lancamento_id: novoId, categoria_id: c.categoria_id, valor: Math.abs(+r.valor||0) }));
+      if(rows.length) await sb.from('fin_lancamento_categoria').insert(rows);
+      if(r.cobranca_id || r.credor_id){
+        await sb.from('fin_lancamento').update({ cobranca_id: r.cobranca_id || null, credor_id: r.credor_id || null }).eq('id', novoId);
+      }
+    }
+    showToast(mensal ? `Depósito previsto para ${nova ? nova.split('-').reverse().join('/') : 'sem data'} criado.` : 'Novo valor criado — ajuste data e montante.', 'success');
+    renderFinTab('receitasjudiciais');
+  }catch(e){ showToast('Erro ao criar: '+(e.message||e), 'danger'); }
+}
+function _finJudNovoValor(){
+  showToast('Cadastre a entrada com a categoria Sisbajud ou Penhora — ela aparece aqui automaticamente.', 'info');
+  abrirNovoLancamento();
 }
 
 async function renderFinLancamentos(el){
