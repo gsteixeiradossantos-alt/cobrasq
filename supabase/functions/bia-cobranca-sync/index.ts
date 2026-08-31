@@ -2,7 +2,7 @@
 // Puxa do Asaas: (1) todas OVERDUE (vencidas) + (2) PENDING que vencem HOJE (dia do vencimento).
 // Assim a cadência 'envia no dia que vence' passa a ter alvo. Só popula; envio é do bia-cobranca.
 // Preserva estado/contadores de linhas existentes. Retorna só CONTAGENS (sem PII).
-// Auth: exige CRON_INVOKE_SECRET se configurado; senão roda aberto (seed pontual).
+// Auth: EXIGE CRON_INVOKE_SECRET, sempre. Ver o bloco de autenticação abaixo.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 
@@ -18,11 +18,39 @@ function hojeSP(): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
 }
 
+// Comparação em tempo constante — mesmo padrão do asaas-webhook/zapsign-webhook.
+// Hashar antes normaliza o tamanho e não vaza o comprimento do segredo.
+async function safeEqual(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder();
+  const ha = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(a)));
+  const hb = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(b)));
+  let diff = 0;
+  for (let i = 0; i < ha.length; i++) diff |= ha[i] ^ hb[i];
+  return diff === 0;
+}
+
 Deno.serve(async (req) => {
+  // ENDPOINT ABERTO até 31/08/2026. O código era:
+  //
+  //   if (cronSecret) {
+  //     const provided = (headers.authorization || '').replace(/^Bearer\s+/i, '');
+  //     if (provided && provided !== cronSecret) return 401;
+  //   }
+  //
+  // Sem header nenhum, `provided` é string vazia, o `&&` curto-circuita e a função
+  // SEGUIA. A trava barrava quem chutava errado e deixava passar quem não mandava
+  // nada — e esta função escreve em bia_cobranca (insert, update, cancelamento).
+  // Com verify_jwt=false, o gateway também não segurava: bastava a URL, que é
+  // derivável do ref do projeto. Confirmado com um POST sem header: HTTP 200 e 29
+  // linhas sincronizadas.
+  //
+  // Agora falha FECHADO: sem segredo configurado no servidor, recusa em vez de
+  // rodar aberto — endpoint que escreve não tem "modo seed pontual".
   const cronSecret = Deno.env.get('CRON_INVOKE_SECRET');
-  if (cronSecret) {
-    const provided = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
-    if (provided && provided !== cronSecret) return json({ error: 'unauthorized' }, 401);
+  if (!cronSecret) return json({ error: 'CRON_INVOKE_SECRET não configurado no servidor.' }, 500);
+  const provided = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();
+  if (!provided || !(await safeEqual(provided, cronSecret))) {
+    return json({ error: 'unauthorized' }, 401);
   }
 
   const key = Deno.env.get('ASAAS_API_KEY');
