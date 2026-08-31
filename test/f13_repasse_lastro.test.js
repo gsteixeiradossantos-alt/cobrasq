@@ -82,7 +82,14 @@ assert.strictEqual(ehRepasse(SAIDA, base), true, 'ctx sem `liberadas` segue o ca
 // — sem esse cuidado o teste passaria por acidente, com o `false` vindo de outra origem.
 const fora = (l) => ehRepasse(l, { opsByLanc: {}, liberadas: new Set(),
                                    credorPorLanc: { [l.id]: 'Cedente Qualquer' } });
-assert.strictEqual(fora({ id: 1, tipo_movimento: 1, status: 0, credor_id: 'x', descricao: 'entrada' }),
+// A receita acende pela PRIMEIRA origem (operação de repasse pendente), não pelo mapa de
+// credor: desde 31/08 aquele mapa vale só para saídas — ele passou a cobrir também as
+// receitas, para a sublinha dizer a carteira, e sem o filtro toda entrada com cobrança
+// viraria "a repassar" (ver F-17). O que este caso prova continua o mesmo: o portão do
+// lastro não opina fora do universo que _finRepasseLiberado() apura.
+assert.strictEqual(
+  ehRepasse({ id: 1, tipo_movimento: 1, status: 0, credor_id: 'x', descricao: 'entrada' },
+            { opsByLanc: { 1: { repasse_status: 'pendente' } }, credorPorLanc: {}, liberadas: new Set() }),
   true, 'receita não é despesa de repasse — o portão não opina');
 assert.strictEqual(fora({ id: 2, tipo_movimento: 0, status: 1, credor_id: 'x', descricao: 'repasse pago' }),
   true, 'saída já paga está fora do universo apurado');

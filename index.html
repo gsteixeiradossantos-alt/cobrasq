@@ -31978,7 +31978,11 @@ function _finLancEhRepasse(l, ctx){
   const op = ctx.opsByLanc[l.id];
   if(op) return op.repasse_status === 'pendente' || op.repasse_status === 'preparado' || op.repasse_status === 'revisar';
   if(l.cedente_id) return true;
-  return !!(ctx.credorPorLanc && ctx.credorPorLanc[l.id]);
+  // `credorPorLanc` nasceu para as SAÍDAS de repasse importadas sem operação, e agora
+  // cobre também as receitas (para a sublinha dizer de quem é a carteira). Sem este
+  // filtro explícito, toda receita com cobrança viraria "a repassar" — o chip contaria
+  // as entradas junto com os repasses.
+  return l.tipo_movimento === 0 && !!(ctx.credorPorLanc && ctx.credorPorLanc[l.id]);
 }
 // Parcela recebida cuja divisão COBRASQ × cedente não foi calculada — nada pode ser
 // repassado até resolver. Sem cedente não há divisão a calcular (invariante 8).
@@ -32235,12 +32239,17 @@ async function _finLancCascataCarregar(){
     if(credIds.length){ const {data:cs}=await sb.from('clientes').select('id,nome').in('id',credIds); (cs||[]).forEach(c=>credMap[c.id]=c.nome); }
     (data||[]).forEach(o=>{ o._credorNome=credMap[o.credor_id]||null; if(o.lancamento_receita_id) opsByLanc[o.lancamento_receita_id]=o; if(o.lancamento_despesa_id) opsByLanc[o.lancamento_despesa_id]=o; });
   }catch(_){}
-  // Credor das SAÍDAS que não têm fin_operacao — sem isto a linha não diz para quem
-  // o dinheiro vai, que era o caso de 315 dos 323 repasses até 16/08/2026.
+  // Carteira da linha, quando não há fin_operacao: de quem é esse dinheiro.
+  //
+  // Nasceu para as SAÍDAS — sem isto a linha não dizia para quem o dinheiro vai, o caso
+  // de 315 dos 323 repasses até 16/08/2026. Em 31/08 passou a cobrir as RECEITAS pelo
+  // mesmo caminho: a Sthefany Gabrielli Pereira Allebrandt tem 13 parcelas cuja cobrança
+  // aponta para Arte Estofados Decor, e a tela não dizia de quem era nenhuma delas —
+  // enquanto as 10 despesas de repasse do MESMO caso diziam. São 696 receitas assim.
   // Precedência: credor_id do lançamento, depois cliente da cobrança.
   const credorPorLanc = {};
   try{
-    const saidas = rows.filter(r=>r.tipo_movimento===0 && !opsByLanc[r.id] && (r.credor_id || r.cobranca_id));
+    const saidas = rows.filter(r=>!opsByLanc[r.id] && (r.credor_id || r.cobranca_id));
     if(saidas.length){
       const porCob = {};
       const cobIds = [...new Set(saidas.map(r=>r.cobranca_id).filter(Boolean))];
@@ -32999,8 +33008,15 @@ async function _finMovMenuAcao(id, acao){
 // texto, e só acontece quando as colunas confirmam a parcela.
 function _finMovDescSemParcela(l){
   const d = _finDescCrua(l.descricao) || '—';
-  if(!l.numero_parcela || !l.total_parcelas) return d;
-  return d.replace(new RegExp('\\s*[-–—]?\\s*\\b'+l.numero_parcela+'\\s*/\\s*'+l.total_parcelas+'\\b\\s*$'), '').trim() || d;
+  let t = d;
+  if(l.numero_parcela && l.total_parcelas){
+    t = d.replace(new RegExp('\\s*[-–—]?\\s*\\b'+l.numero_parcela+'\\s*/\\s*'+l.total_parcelas+'\\b\\s*$'), '').trim() || d;
+  }
+  // A marca do pente-fino volta ao texto. `_finDescCrua` existe para os LEITORES da
+  // descrição (série, numeração, pareamento do repasse) — aplicá-la ao que se EXIBE
+  // apagou da tela o progresso do Gustavo: ele apaga a marca conforme confere cada
+  // lançamento, e sem vê-la não há como saber o que falta. Ela só reaparecia no tooltip.
+  return FIN_MARCA_PENTE.test(l.descricao || '') ? (t + ' · verificar') : t;
 }
 let _finLancCascataBuscaTimer=null;
 let _finLancCascataBuscaSeq=0;
