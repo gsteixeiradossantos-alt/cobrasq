@@ -31839,6 +31839,23 @@ async function _finTemColunasCascata(){
   return _finColsCascata;
 }
 
+// ── Coluna `repassa_lancamento_id` (qual receita a saída de repasse cobre) ──────────
+// Mesma disciplina da checagem acima, e pelo mesmo motivo: a migração
+// 20260831_fin_lancamento_repassa_lancamento_id.sql ainda não foi aplicada, e pedir a
+// coluna em toda consulta custaria um 400 por carregamento. Cache separado do de cima:
+// as duas migrações são independentes, e amarrar uma na outra faria esta ficar
+// desligada para sempre — aquelas cinco colunas nunca foram aplicadas.
+let _finColRepassa = null;             // null = ainda não perguntado
+async function _finTemColunaRepassa(){
+  if(_finColRepassa !== null) return _finColRepassa;
+  try{
+    const sb = getSupabase();
+    const { error } = await sb.from('fin_lancamento').select('repassa_lancamento_id').limit(1);
+    _finColRepassa = !error;
+  }catch(_){ _finColRepassa = false; }
+  return _finColRepassa;
+}
+
 // Estado da aba Movimentações. `visao` é a visão salva ativa (chips do topo); os campos
 // f* são o painel de filtros de 452px (handoff 29/08), que substituiu os dois selects
 // soltos da barra. `limite` é a paginação de 60 em 60 — sem ela a página trava montando
@@ -31871,7 +31888,21 @@ const FIN_MOV_VISOES = [
 // Dinheiro que ainda é do cedente. Três origens, na ordem em que o banco as tem hoje:
 // a operação de repasse (fin_operacao), o vínculo direto do lançamento (cedente_id) e,
 // para as saídas antigas importadas sem operação, o credor resolvido pela cobrança.
+//
+// ── Lastro (31/08/2026) ────────────────────────────────────────────────────────────
+// Antes disto, NENHUMA das três origens perguntava se o dinheiro tinha entrado: a saída
+// de repasse do Leonardo dos Santos Fortes (R$ 500,00, venc. 10/10) já acendia "↗ a
+// repassar" com a parcela 15/15 que ela repassa ainda em aberto, no mesmo 10/10. Eram
+// 323 saídas futuras, R$ 141.657,43, todas acesas — o chip contava dinheiro fora do
+// caixa, como o judicial pendente inflava o ATRASADO antes do corte do handoff 29/08.
+//
+// A pergunta é respondida por vínculo GRAVADO (`repassa_lancamento_id`), não por data:
+// data de vencimento não é recebimento, e devedor que atrasa faria a seta acender com o
+// caixa vazio. NULL, coluna ausente ou receita fora do alcance = "não sei", e "não sei"
+// mantém o comportamento antigo — presumir "sem lastro" esconderia repasse devido, que
+// é o erro mais caro dos dois.
 function _finLancEhRepasse(l, ctx){
+  if(ctx.lastro && l.repassa_lancamento_id && ctx.lastro[l.repassa_lancamento_id] === false) return false;
   const op = ctx.opsByLanc[l.id];
   if(op) return op.repasse_status === 'pendente' || op.repasse_status === 'preparado' || op.repasse_status === 'revisar';
   if(l.cedente_id) return true;
@@ -32104,8 +32135,9 @@ async function _finLancCascataCarregar(){
   const dim = await finApi.loadDimensoes();
   const baseSel = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,tipo_movimento,status,conciliado,conta_id,cobranca_id,credor_id,contato_id,numero_parcela,total_parcelas,judicial_liberado_em,fin_conta(descricao,banco_nome),fin_contato(nome)';
   const extra = (await _finTemColunasCascata()) ? ',cedente_id,capital,meu_total,amortizado,repasse_status' : '';
+  const extraRep = (await _finTemColunaRepassa()) ? ',repassa_lancamento_id' : '';
   const termo = (_finLancCascataState.busca||'').trim();
-  let q = sb.from('fin_lancamento').select(baseSel+extra)
+  let q = sb.from('fin_lancamento').select(baseSel+extra+extraRep)
     .gte('data_competencia', ini).lte('data_competencia', fim);
   if(termo) q = q.ilike('descricao', '%'+termo+'%');
   const { data } = await q.order('data_competencia',{ascending:_finLancOrdServidorAsc()}).limit(FIN_LANC_LIMITE);
@@ -32113,6 +32145,23 @@ async function _finLancCascataCarregar(){
   const cedIds=[...new Set(rows.map(r=>r.cedente_id).filter(Boolean))];
   let cedMap={};
   if(cedIds.length){ const {data}=await sb.from('clientes').select('id,nome').in('id',cedIds); (data||[]).forEach(c=>cedMap[c.id]=c.nome); }
+
+  // Lastro das saídas de repasse: a receita apontada por `repassa_lancamento_id` já foi
+  // recebida? Consulta própria de propósito — a receita pode estar fora do período
+  // carregado (o repasse de uma parcela de dezembro aparece num filtro que começa em
+  // janeiro), e ler do array já carregado responderia "não recebida" para uma parcela
+  // que está paga, escondendo repasse devido. Só ids, só status.
+  const lastro = {};
+  try{
+    const alvos = [...new Set(rows.map(r=>r.repassa_lancamento_id).filter(Boolean))];
+    if(alvos.length){
+      const { data } = await sb.from('fin_lancamento').select('id,status,data_pagamento').in('id', alvos);
+      // Mesma leitura de "pago" que a pílula da linha usa (_finLancSit): status 1 OU
+      // data de pagamento preenchida. Duas leituras diferentes de pago já fizeram a
+      // etiqueta e o contador discordarem na mesma tela.
+      (data||[]).forEach(r=>{ lastro[r.id] = (Number(r.status) === 1 || !!r.data_pagamento); });
+    }
+  }catch(_){ /* auxiliar: sem lastro a tela volta ao comportamento anterior */ }
 
   let opsByLanc = {};
   try{
@@ -32191,7 +32240,7 @@ async function _finLancCascataCarregar(){
   // (sem judicial pendente); só a busca global usa `todasRows` — senão o ⌘K deixava de
   // achar um Sisbajud que existe, e dizia "0 resultados" para um lançamento real.
   return { rows: visiveis, todasRows: rows, ehJudPendente, dim, cedMap, opsByLanc,
-           credorPorLanc, catPorLanc, judSet,
+           credorPorLanc, catPorLanc, judSet, lastro,
            periodoLabel: _finCascataPeriodoBounds().label,
            busca: termo, truncado: rows.length >= FIN_LANC_LIMITE };
 }
