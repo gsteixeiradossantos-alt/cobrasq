@@ -46,6 +46,7 @@ vm.runInContext(
   + // `_finEhTarifa` (F-18) é usado por _finLancEhRepasse e pelo escopo do lastro.
   corta('const _finEhTarifa', '\n') + '\n'
   + corta('function _finRepasseTemLastroApuravel(l){', '\n}')
+  + corta('const _finLancQuitado', '\n')
   + corta('function _finLancEhRepasse(l, ctx){', '\n}')
   + corta('function _finLancCedente(l, ctx){', '\n}')
   + 'this._desc = _finMovDescSemParcela; this._ehRepasse = _finLancEhRepasse; this._cedente = _finLancCedente;',
@@ -98,8 +99,8 @@ const fonte = corta('function _finLancEhRepasse(l, ctx){', '\n}');
 // Em 31/08 (F-20) o corte por tipo saiu da terceira origem e virou a PRIMEIRA linha da
 // função, valendo para as três — porque a receita também herdava o "a repassar" pela
 // operação. O que importa continua sendo o mesmo: receita não pode acender por aqui.
-assert.ok(/l\.tipo_movimento\s*!==\s*0\s*\)\s*return false/.test(fonte),
-  'a função precisa cortar receita logo na entrada');
+assert.ok(/l\.tipo_movimento\s*!==\s*0\s*\|\|\s*_finLancQuitado\(l\)\)\s*return false/.test(fonte),
+  'a função precisa cortar receita — e saída já quitada (F-23) — logo na entrada');
 assert.ok(fonte.indexOf('tipo_movimento !== 0') < fonte.indexOf('credorPorLanc'),
   'o corte tem de vir antes da origem por carteira');
 
