@@ -28856,6 +28856,22 @@ window.finApi = (function(){
     if(error) throw error;
   }
 
+  // Lote da aba Judicial. Um UPDATE ... WHERE id IN (...), atômico no Postgres — mesma
+  // forma das ações em lote de Movimentações. Não aceita valor creditado diferente do
+  // esperado de propósito: ajustar valor é decisão linha a linha (o juízo libera valor
+  // diferente em UMA parcela, não no bloco), e isso continua no polegar de cada linha.
+  async function confirmarRecebimentoJudicialLote(ids, dataRecebimento, contaId){
+    const sb = _sb();
+    const { error } = await sb.from('fin_lancamento').update({
+      judicial_liberado_em: dataRecebimento,
+      status: 1,
+      data_pagamento: dataRecebimento,
+      data_competencia: dataRecebimento,
+      conta_id: contaId,
+    }).in('id', ids);
+    if(error) throw error;
+  }
+
   async function deleteLancamento(id){
     const sb = _sb();
     const { error } = await sb.from('fin_lancamento').delete().eq('id', id);
@@ -29403,6 +29419,7 @@ window.finApi = (function(){
     fecharFatura,
     pagarLancamento,
     confirmarRecebimentoJudicial,
+    confirmarRecebimentoJudicialLote,
     deleteLancamento,
     confirmarPagamentoLote,
     conciliarLote,
@@ -32870,7 +32887,7 @@ async function _finMovMenuAcao(id, acao){
 // vem das COLUNAS numero_parcela/total_parcelas — este corte é só cosmético, sobre o
 // texto, e só acontece quando as colunas confirmam a parcela.
 function _finMovDescSemParcela(l){
-  const d = l.descricao || '—';
+  const d = _finDescCrua(l.descricao) || '—';
   if(!l.numero_parcela || !l.total_parcelas) return d;
   return d.replace(new RegExp('\\s*[-–—]?\\s*\\b'+l.numero_parcela+'\\s*/\\s*'+l.total_parcelas+'\\b\\s*$'), '').trim() || d;
 }
@@ -32982,9 +32999,21 @@ async function _finLancCascataLote(acao){
 // mostradas como preservadas na confirmação.
 // ══════════════════════════════════════════════════════════════
 
+// Marca do pente-fino de 31/08/2026: o Gustavo pediu ` · verificar` no fim de TODAS as
+// 1.448 descrições de fin_lancamento e vai apagando conforme confere cada lançamento.
+//
+// Só que os leitores da descrição são ancorados no FIM (` 12/60$`), porque é ali que a
+// numeração de parcela mora. A marca cegou os quatro: a série de 436 lançamentos sem
+// `cobranca_id` passou a virar um grupo por parcela em Recebíveis, o nome exibido passou
+// a incluir "59/60 · verificar", e o editor deixou de reconhecer a numeração.
+//
+// Tirar a marca ANTES de qualquer leitura resolve sem tocar no dado — e o código volta a
+// ser inócuo sozinho quando a última marca for apagada.
+const FIN_MARCA_PENTE = /\s*·\s*verificar\s*$/i;
+const _finDescCrua = d => String(d || '').replace(FIN_MARCA_PENTE, '');
 const _FIN_RE_PARCELA = / (\d+)\/(\d+)$/;
-const _finSerieBase = d => String(d||'').replace(_FIN_RE_PARCELA,'');
-function _finSerieNum(d){ const m = String(d||'').match(_FIN_RE_PARCELA); return m ? { n:+m[1], total:+m[2] } : null; }
+const _finSerieBase = d => _finDescCrua(d).replace(_FIN_RE_PARCELA,'');
+function _finSerieNum(d){ const m = _finDescCrua(d).match(_FIN_RE_PARCELA); return m ? { n:+m[1], total:+m[2] } : null; }
 const _finLancQuitado = l => l.status===1 || !!l.data_pagamento || !!l.conciliado;
 const _finLancData = l => l.data_vencimento || l.data_competencia || '';
 // % e _ são curingas no LIKE do Postgres; nome de contato pode conter os dois.
@@ -33527,18 +33556,6 @@ function _finEdCatEscolher(id){
 // reconhecer esses formatos carimbava texto idêntico em todas as parcelas e apagava a
 // numeração do acordo. Aqui reconhecemos os três, e — regra de ouro — quando NÃO se
 // consegue localizar a numeração de uma parcela, a descrição dela não é tocada.
-// Marca do pente-fino de 31/08/2026: o Gustavo pediu ` · verificar` no fim de TODAS as
-// 1.448 descrições de fin_lancamento e vai apagando conforme confere cada lançamento.
-//
-// Só que os leitores da descrição são ancorados no FIM (` 12/60$`), porque é ali que a
-// numeração de parcela mora. A marca cegou os quatro: a série de 436 lançamentos sem
-// `cobranca_id` passou a virar um grupo por parcela em Recebíveis, o nome exibido passou
-// a incluir "59/60 · verificar", e o editor deixou de reconhecer a numeração.
-//
-// Tirar a marca ANTES de qualquer leitura resolve sem tocar no dado — e o código volta a
-// ser inócuo sozinho quando a última marca for apagada.
-const FIN_MARCA_PENTE = /\s*·\s*verificar\s*$/i;
-const _finDescCrua = d => String(d || '').replace(FIN_MARCA_PENTE, '');
 
 const FIN_ED_FORMATOS_PARCELA = [
   { re: /\s(\d+)\s*\/\s*(\d+)\s*$/,        monta: (base, n, t) => `${base} ${n}/${t}` },
@@ -36412,7 +36429,7 @@ async function _finTemColunaPedidoJud(){
     return false;                              // desta vez não; volta a perguntar depois
   }catch(_){ return false; }
 }
-let _finJudState = { popEfet:null, menu:null, efetConta:'', efetData:'', efetValor:'' };
+let _finJudState = { popEfet:null, menu:null, efetConta:'', efetData:'', efetValor:'', sel:new Set(), popLote:false };
 // Carimbo do backfill de 29/08/2026: nos 122 pendentes que existiam então, a data do
 // pedido foi ESTIMADA pelo vencimento previsto, porque a real só existe nos autos. A aba
 // conta quantos ainda estão nessa condição e diz na cara — "espera média" apurada e
@@ -36590,7 +36607,28 @@ function _finJudRender(){
       .finjd-total{font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;white-space:nowrap;color:#0A1530;}
       .finjd-novo{background:#fff;border:1px solid #D8D2C5;color:#5A5F66;border-radius:6px;padding:5px 10px;font-size:11.5px;font-weight:600;white-space:nowrap;flex-shrink:0;cursor:pointer;font-family:inherit;}
       .finjd-novo:hover{background:#FBFAF6;}
-      .finjd-row{display:grid;grid-template-columns:26px minmax(150px,1fr) 132px 116px 118px 34px 30px;align-items:center;gap:12px;padding:9px 18px 9px 30px;border-top:1px solid #F7F4EC;}
+      .finjd-row{display:grid;grid-template-columns:22px 46px minmax(150px,1fr) 132px 116px 118px 34px 30px;align-items:center;gap:12px;padding:9px 18px 9px 18px;border-top:1px solid #F7F4EC;}
+      .finjd-row.sel{background:#F5F2EA;}
+      .finjd-ck{width:14px;height:14px;accent-color:#0A1530;cursor:pointer;}
+      /* As classes abaixo são as MESMAS de Movimentações, mas o <style> daquela aba vive
+         dentro do render dela — e a Judicial troca todo o #fin-content. Sem repeti-las
+         aqui, o polegar e o kebab renderizavam como <button> cru (relato de 31/08). */
+      .finmv-cel{position:relative;display:flex;align-items:center;justify-content:center;}
+      .finmv-pol{display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:6px;flex-shrink:0;cursor:pointer;border:none;padding:0;background:transparent;}
+      .finmv-kebab{background:transparent;border:none;border-radius:5px;color:#A6AEBD;font-size:14px;line-height:1;padding:3px 5px;cursor:pointer;font-family:inherit;}
+      .finmv-kebab.on{background:#F2EFE6;}
+      .finmv-pop{position:absolute;top:30px;right:-6px;z-index:45;background:#fff;border:1px solid #E6E1D2;border-radius:10px;box-shadow:0 18px 44px rgba(10,21,48,.2);padding:14px;display:flex;flex-direction:column;gap:11px;text-align:left;width:300px;cursor:default;}
+      .finmv-pop label{display:flex;flex-direction:column;gap:5px;font-size:11px;color:#8A94A6;}
+      .finmv-pop select,.finmv-pop input{background:#fff;border:1px solid #E6E1D2;border-radius:7px;padding:7px 9px;font-size:12px;color:#0A1530;font-family:inherit;}
+      .finmv-menu{position:absolute;top:28px;right:0;z-index:45;background:#fff;border:1px solid #E6E1D2;border-radius:9px;box-shadow:0 14px 34px rgba(10,21,48,.18);padding:6px;display:flex;flex-direction:column;min-width:186px;text-align:left;cursor:default;}
+      .finmv-menu button{background:transparent;border:none;text-align:left;padding:8px 10px;font-size:12.5px;color:#0A1530;border-radius:6px;cursor:pointer;font-family:inherit;white-space:nowrap;}
+      .finmv-menu button:hover{background:#FBFAF6;}
+      .finjd-lote{position:fixed;left:252px;right:24px;bottom:18px;z-index:60;background:#0A1530;border-radius:9px;box-shadow:0 8px 24px rgba(10,21,48,.28);padding:11px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+      .finjd-lote .qt{font-family:'JetBrains Mono',monospace;font-size:11.5px;font-weight:600;color:#fff;}
+      .finjd-lote .tt{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#C9A961;}
+      .finjd-lb{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.10);color:#fff;font-family:inherit;font-size:12px;font-weight:500;padding:6px 12px;border-radius:6px;cursor:pointer;white-space:nowrap;}
+      .finjd-lb.go{background:#5E7C58;border-color:#5E7C58;}
+      .finjd-lb.gh{margin-left:auto;background:transparent;}
       .finjd-row:hover{background:#FBFAF6;}
       .finjd-parc{font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#A6AEBD;}
       .finjd-prev{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;white-space:nowrap;}
@@ -36645,12 +36683,17 @@ function _finJudRender(){
         ${ctx.grupos.length ? ctx.grupos.map(g=>_finJudGrupoHtml(g, ctx)).join('')
           : `<div style="padding:38px 16px;text-align:center;font-size:12.5px;color:#8A94A6;">Nada aguardando o juízo. Penhora, Sisbajud e desconto INSS aparecem aqui assim que forem lançados.</div>`}
       </section>
+      ${_finJudLoteBarraHtml(ctx)}
     </div>`;
 }
 
 function _finJudGrupoHtml(g, ctx){
+  const todos = g.itens.length > 0 && g.itens.every(r => _finJudState.sel.has(r.id));
   return `<div class="finjd-grupo">
     <div class="finjd-gh">
+      <input type="checkbox" class="finjd-ck" ${todos?'checked':''}
+             title="Marcar as ${g.itens.length} parcelas deste processo"
+             onclick="event.stopPropagation();_finJudSelGrupo('${escHtml(String(g.itens.map(r=>r.id).join(',')))}', this.checked)">
       <span class="dev" title="${escHtml(g.devedor)}">${escHtml(g.devedor)}</span>
       <span class="finjd-mod">${escHtml(g.modalidade)}</span>
       ${g.processo ? `<span class="finjd-proc">${escHtml(g.processo)}</span>` : ''}
@@ -36668,8 +36711,16 @@ function _finJudRowHtml(r, g, ctx){
   const dias = _finJudDias(r.judicial_pedido_em);
   const velho = dias != null && dias > 60;
   const prev = _finJudPrevisto(r);
-  return `<div class="finjd-row">
-    <span class="finjd-parc">${r.numero_parcela && r.total_parcelas ? r.numero_parcela+'/'+r.total_parcelas : '—'}</span>
+  const sel = _finJudState.sel.has(r.id);
+  // As colunas numero_parcela/total_parcelas estão VAZIAS nos 122 judiciais (conferido
+  // em 31/08). A numeração existe, mas só dentro da descrição ("34/57"). Lê de lá quando
+  // a coluna não tem — mesma fonte que Movimentações já usa para agrupar a série.
+  const num = (r.numero_parcela && r.total_parcelas)
+    ? { n:r.numero_parcela, total:r.total_parcelas }
+    : _finSerieNum(r.descricao);
+  return `<div class="finjd-row${sel?' sel':''}">
+    <span><input type="checkbox" class="finjd-ck" ${sel?'checked':''} onclick="event.stopPropagation();_finJudSelToggle(${r.id})"></span>
+    <span class="finjd-parc">${num ? num.n+'/'+num.total : '—'}</span>
     <span style="display:flex;align-items:center;gap:7px;min-width:0;">
       <span style="font-size:11px;color:#8A94A6;white-space:nowrap;">previsto para</span>
       <span class="finjd-prev" style="color:${velho?'#7D3F33':'#0A1530'};">${prev ? prev.split('-').reverse().join('/') : 'sem data'}</span>
@@ -36688,11 +36739,83 @@ function _finJudRowHtml(r, g, ctx){
   </div>`;
 }
 
+// ── Seleção em lote da aba Judicial ──────────────────────────────────────────
+// Pedido do Gustavo em 31/08: a Judicial não tinha o seletor que Movimentações tem, e
+// sem ele não dava para conferir o total de um processo contra os autos sem somar na
+// mão. Mesma mecânica e mesma aparência da outra aba — quem já sabe usar lá, sabe aqui.
+function _finJudSelToggle(id){
+  const sel = _finJudState.sel;
+  if(sel.has(id)) sel.delete(id); else sel.add(id);
+  _finJudRender();
+}
+function _finJudSelGrupo(idsCsv, marcar){
+  const ids = String(idsCsv||'').split(',').map(Number).filter(Boolean);
+  const sel = _finJudState.sel;
+  ids.forEach(id => marcar ? sel.add(id) : sel.delete(id));
+  _finJudRender();
+}
+function _finJudSelLimpar(){ _finJudState.sel.clear(); _finJudState.popLote=false; _finJudRender(); }
+
+function _finJudLoteBarraHtml(ctx){
+  const sel = _finJudState.sel;
+  // A seleção sobrevive a um re-render, mas a linha pode ter saído da tela (liberada,
+  // excluída). Soma só o que ainda existe — barra anunciando total de linha que sumiu
+  // foi problema conhecido em Movimentações.
+  const vivos = ctx.pendentes.filter(r => sel.has(r.id));
+  if(!vivos.length) return '';
+  const total = vivos.reduce((a,r) => a + Math.abs(+r.valor||0), 0);
+  const contas = ((ctx.dim && ctx.dim.contas) || []).filter(c => !/tribunal/i.test(c.descricao||''));
+  const s = _finJudState;
+  return `<div class="finjd-lote" onclick="event.stopPropagation()">
+    <span class="qt">${vivos.length} ${vivos.length===1?'valor selecionado':'valores selecionados'}</span>
+    <span class="tt">${fmtR(total)}</span>
+    <span style="position:relative;">
+      <button class="finjd-lb go" onclick="_finJudState.popLote=!_finJudState.popLote;_finJudRender();">Marcar recebidas</button>
+      ${s.popLote ? `<div class="finmv-pop" style="bottom:36px;top:auto;right:auto;left:0;">
+        <span style="font-size:13px;font-weight:600;color:#0A1530;">Marcar ${vivos.length} como recebidas</span>
+        <label>Conta/carteira
+          <select onchange="_finJudState.efetConta=this.value">
+            ${contas.map(c=>`<option value="${c.id}" ${String(s.efetConta)===String(c.id)?'selected':''}>${escHtml(c.descricao||'—')}</option>`).join('')}
+          </select></label>
+        <label>Data de recebimento
+          <input type="date" value="${escHtml(s.efetData||isoLocal(new Date()))}" onchange="_finJudState.efetData=this.value"></label>
+        <span style="font-size:10.5px;color:#A6AEBD;line-height:1.4;">Todas entram pelo valor esperado. Se o juízo liberou valor diferente em alguma, faça essa pelo polegar da linha.</span>
+        <button style="background:#5E7C58;border:none;color:#fff;border-radius:6px;padding:8px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;" onclick="_finJudLote('receber')">Confirmar ${fmtR(total)}</button>
+      </div>` : ''}
+    </span>
+    <button class="finjd-lb" onclick="_finJudLote('excluir')">Excluir</button>
+    <button class="finjd-lb gh" onclick="_finJudSelLimpar()">Limpar seleção ✕</button>
+  </div>`;
+}
+
+async function _finJudLote(acao){
+  const ctx = window._finJudCtx; if(!ctx) return;
+  const ids = ctx.pendentes.filter(r => _finJudState.sel.has(r.id)).map(r => r.id);
+  if(!ids.length) return;
+  const s = _finJudState;
+  try{
+    if(acao==='receber'){
+      const data = s.efetData || isoLocal(new Date());
+      const conta = s.efetConta || (((ctx.dim&&ctx.dim.contas)||[])[0]||{}).id;
+      if(!conta){ showToast('Escolha a conta.', 'danger'); return; }
+      if(!confirm(`Marcar ${ids.length} valor(es) como recebidos em ${data.split('-').reverse().join('/')}? Eles saem da Judicial e entram no caixa.`)) return;
+      await finApi.confirmarRecebimentoJudicialLote(ids, data, conta);
+    } else if(acao==='excluir'){
+      if(!confirm(`Excluir ${ids.length} valor(es) judicial(is)? Não dá para desfazer.`)) return;
+      await finApi.excluirLote(ids);
+    }
+    s.sel.clear(); s.popLote = false;
+    _finFinanceiroInvalidaCaches();
+    showToast('Feito.', 'success');
+    renderFinTab('receitasjudiciais');
+  }catch(e){ showToast('Erro: '+(e.message||e), 'danger'); }
+}
+
 function _finJudFecharPopovers(ev){
   const s = _finJudState;
-  if(!s.popEfet && !s.menu) return;
-  if(ev && ev.target && ev.target.closest && ev.target.closest('.finmv-pop,.finmv-menu')) return;
-  s.popEfet = null; s.menu = null;
+  if(!s.popEfet && !s.menu && !s.popLote) return;
+  if(ev && ev.target && ev.target.closest && ev.target.closest('.finmv-pop,.finmv-menu,.finjd-lote')) return;
+  s.popEfet = null; s.menu = null; s.popLote = false;
   _finJudRender();
 }
 function _finJudAbrirMenu(id){
