@@ -184,9 +184,15 @@ ok('a troca de categoria também confirma antes', /Mudar \$\{ids\.length\}|confi
 
 // Rateio múltiplo: "a categoria" não existe, e trocar destruiria a divisão.
 const API = trecho('async function alterarCategoriaLote(ids, categoriaId){', '\n  }');
-ok('a API só troca lançamento com UMA categoria no rateio',
-  /linhas\.length === 1/.test(API),
-  'trocaria em bloco um lançamento rateado e apagaria a divisão');
+// A versão que existia antes de 31/08 fazia `delete().in('lancamento_id', ids)` e
+// reinseria UMA linha: num lançamento rateado em duas categorias, isso apagava a
+// divisão em silêncio. O delete em massa não pode voltar.
+ok('a API NÃO apaga o rateio em massa',
+  !/from\('fin_lancamento_categoria'\)\s*\.delete\(\)/.test(API),
+  'voltou a destruir a divisão de quem tem mais de uma categoria');
+ok('separa por quantas categorias o lançamento tem',
+  /n === 1/.test(API) && /n === 0/.test(API) && /pulados\.push/.test(API),
+  'sem essa separação ou destrói o rateio, ou deixa de categorizar quem não tinha');
 ok('e devolve os pulados para a tela poder dizer quais ficaram de fora',
   /pulados/.test(API) && /return \{ alterados/.test(API));
 
