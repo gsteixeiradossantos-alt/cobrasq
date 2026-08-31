@@ -29888,9 +29888,18 @@ const FIN_REP_SUFIXOS  = /\s*[-–]?\s*(pagar\s*)?\d+\s*\/\s*\d+\s*$/i;
 // que "Fatima Aparecida Cordova - pagar - conferido 18/21". Sem tirar isso, as duas
 // só casavam pelo primeiro nome — e primeiro nome sozinho confunde a Fernanda Dambros
 // com a Fernanda da Silva no mesmo mês.
-const FIN_REP_ANOTA = /\s*[-–]\s*(executar(\s+sen[ãa]o\s+pagar)?|pagar|conferido|conferir|repasse)\s*$/i;
+// "senão pagar" é opcional em DUAS partes de propósito: a regra da numeração acima é
+// gulosa e come o "pagar" de "executar senão pagar 8/10", deixando "- executar senão"
+// para trás. Sem aceitar esse resto, "Fernanda Dambros - executar senão pagar 8/10" e
+// "Fernanda Dambros 4/6" viram nomes diferentes — e o repasse dela fica sem par.
+const FIN_REP_ANOTA = /\s*[-–]\s*(executar(\s+sen[ãa]o(\s+pagar)?)?|pagar|conferido|conferir|repasse)\s*$/i;
 function _finRepasseNomeDevedor(desc){
-  let t = String(desc||'').replace(FIN_REP_SUFIXOS,'');
+  // A marca ` · verificar` (pente-fino de 31/08) fica DEPOIS da numeração, e FIN_REP_SUFIXOS
+  // exige o número no fim — com a marca, nada era removido e o "nome do devedor" virava a
+  // descrição inteira. O pareamento caía para primeiro nome + mês: das 14 despesas
+  // liberadas em 31/08, 13 casaram só pelo primeiro nome. O F-11 consertou quatro leitores
+  // da descrição e deixou este de fora; `_finDescCrua` é o mesmo helper que eles usam.
+  let t = _finDescCrua(desc).replace(FIN_REP_SUFIXOS,'');
   for(let i=0;i<4 && FIN_REP_ANOTA.test(t);i++) t = t.replace(FIN_REP_ANOTA,'');
   return t.replace(FIN_REP_PREFIXOS,'').trim();
 }
@@ -29912,10 +29921,25 @@ async function _finRepasseLiberado(force){
       .not('descricao','ilike','%tarifa%').limit(2000);
     despesas = r1.data || [];
     const r2 = await sb.from('fin_lancamento')
-      .select('id,descricao,valor,data_vencimento,status,data_pagamento,conciliado')
+      .select('id,descricao,valor,data_vencimento,status,data_pagamento,conciliado,credor_id,cobranca_id')
       .eq('tipo_movimento',1).limit(4000);
     entradas = r2.data || [];
   }catch(e){ console.warn('a repassar agora:', e); return { itens:[], total:0, retidos:0, semPar:0 }; }
+
+  // Carteira da entrada: de quem é esse dinheiro. A saída sempre sabe (`credor_id` é
+  // requisito para estar aqui); a entrada quase nunca — 17 das 925 têm o campo direto, e
+  // 696 resolvem pela cobrança. As 212 restantes não sabem, e por isso a carteira só
+  // ELIMINA um par quando os dois lados sabem e discordam. Exigir sempre deixaria essas
+  // 212 sem par nenhum, o que esconderia repasse devido.
+  try{
+    const cobIds = [...new Set(entradas.map(e=>e.cobranca_id).filter(Boolean))];
+    const porCob = {};
+    for(let i=0;i<cobIds.length;i+=200){
+      const { data } = await sb.from('cobrancas').select('id,cliente_id').in('id', cobIds.slice(i,i+200));
+      (data||[]).forEach(c=>{ if(c.cliente_id) porCob[c.id]=c.cliente_id; });
+    }
+    entradas.forEach(e=>{ e._carteira = e.credor_id || porCob[e.cobranca_id] || null; });
+  }catch(_){ /* sem carteira o pareamento segue por nome + data, como antes */ }
 
   // Uma entrada libera UM repasse. Foi o que faltava: três despesas do Valdair em agosto
   // apontavam todas para o mesmo boleto de R$ 214,00 pago em 05/08, e a tela mandava
@@ -29944,17 +29968,30 @@ async function _finRepasseLiberado(force){
     const id = (d.raw_payload||{}).repasse_de_lancamento_id;
     if(id && porId[id] && !usada.has(id)){ usada.add(id); par.set(d.id, { e:porId[id], exato:true }); }
   }
-  // 2ª passada: as antigas, pela heurística — nome igual e mesma data primeiro.
+  // 2ª passada: as antigas, por NOME + CARTEIRA + vencimento no mesmo mês (31/08/2026).
+  //
+  // Antes valia o melhor palpite do balde "primeiro nome + mês": se o boleto certo não
+  // estivesse ali, uma parcela de OUTRA pessoa de mesmo primeiro nome liberava o repasse.
+  // Agora o nome inteiro é REQUISITO — sem candidato de nome igual a despesa fica sem par
+  // e o repasse simplesmente não é anunciado, que é o erro barato. A carteira elimina o
+  // que sobrar de ambíguo, e a data escolhe entre parcelas da mesma pessoa no mesmo mês.
   for(const d of fila){
     if(par.has(d.id)) continue;
     const mes = String(d.data_vencimento||'').slice(0,7);
     const k = _finRepasseChave(d.descricao);
-    const livres = (pool[k.primeiro + '|' + mes] || []).filter(e => !usada.has(e.id));
+    const livres = (pool[k.primeiro + '|' + mes] || []).filter(e => !usada.has(e.id)
+      && e._nome === k.nome
+      && !(d.credor_id && e._carteira && e._carteira !== d.credor_id));
     if(!livres.length) continue;
     const venc = String(d.data_vencimento||'').slice(0,10);
-    const pontua = e => (e._nome === k.nome ? 2 : 0) + (String(e.data_vencimento||'').slice(0,10) === venc ? 1 : 0);
+    // Mesma data primeiro; depois a de vencimento mais antigo, para consumir na ordem em
+    // que o devedor paga.
     let melhor = livres[0];
-    for(const e of livres) if(pontua(e) > pontua(melhor)) melhor = e;
+    for(const e of livres){
+      const a = String(e.data_vencimento||'').slice(0,10), b = String(melhor.data_vencimento||'').slice(0,10);
+      if((a === venc) !== (b === venc)) { if(a === venc) melhor = e; continue; }
+      if(a < b) melhor = e;
+    }
     usada.add(melhor.id);
     par.set(d.id, { e:melhor, exato:false });
   }
