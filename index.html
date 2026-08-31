@@ -33014,6 +33014,14 @@ const _finDescCrua = d => String(d || '').replace(FIN_MARCA_PENTE, '');
 const _FIN_RE_PARCELA = / (\d+)\/(\d+)$/;
 const _finSerieBase = d => _finDescCrua(d).replace(_FIN_RE_PARCELA,'');
 function _finSerieNum(d){ const m = _finDescCrua(d).match(_FIN_RE_PARCELA); return m ? { n:+m[1], total:+m[2] } : null; }
+// Duas séries do MESMO devedor com a mesma base e totais diferentes — "Fulano 1/12" e
+// "Fulano 1/24" — NÃO são a mesma série. `_finSerieBase` sozinha as junta, e quem
+// depende disso é o "excluir esta e as próximas": ele varreria as duas de uma vez.
+// Medido em 31/08: 105 linhas em 13 bases estão exatamente nessa condição, e todas
+// caem no caminho de fallback (sem grupo_parcelamento e sem acordo_id).
+const _finSerieTotal = d => { const x = _finSerieNum(d); return x ? x.total : null; };
+const _finMesmaSerie = (a, b) => _finSerieBase(a) === _finSerieBase(b)
+                              && _finSerieTotal(a) === _finSerieTotal(b);
 const _finLancQuitado = l => l.status===1 || !!l.data_pagamento || !!l.conciliado;
 const _finLancData = l => l.data_vencimento || l.data_competencia || '';
 // % e _ são curingas no LIKE do Postgres; nome de contato pode conter os dois.
@@ -33044,7 +33052,7 @@ async function _finLancSerieResolver(ids){
     const { data, error: e2 } = await q.limit(500);
     if(e2) throw e2;
 
-    const serie = (data||[]).filter(l => _finSerieBase(l.descricao) === base);
+    const serie = (data||[]).filter(l => _finMesmaSerie(l.descricao, a.descricao));
     if(!serie.some(l => l.id === a.id)) serie.push(a);   // âncora sempre entra
     serie.sort(_finLancSerieCmp);
 
@@ -33202,7 +33210,7 @@ async function _finEditorSerie(l){
       let q = sb.from('fin_lancamento').select(col).eq('tipo_movimento', l.tipo_movimento);
       return (l.contato_id ? q.eq('contato_id', l.contato_id) : q.like('descricao', _finEscLike(base)+'%')).limit(500);
     });
-    serie = bruto.filter(x => _finSerieBase(x.descricao) === base);
+    serie = bruto.filter(x => _finMesmaSerie(x.descricao, l.descricao));
   }
   if(!serie.some(x => x.id === l.id)) serie.push(l);
   serie.sort(_finLancSerieCmp);
@@ -36524,7 +36532,7 @@ async function _finJudCarregar(){
   for(const r of pendentes){
     const base = _finSerieBase(_finMovDescSemParcela(r)) || (r.descricao || '—');
     const mod = _finJudModalidade(r, r._cat);
-    const chave = (r.cobranca_id ? 'c'+r.cobranca_id : 'd'+base) + '|' + mod;
+    const chave = (r.cobranca_id ? 'c'+r.cobranca_id : 'd'+base+'#'+(_finSerieTotal(r.descricao) ?? '')) + '|' + mod;
     if(!mapa[chave]) mapa[chave] = {
       devedor: base, modalidade: mod, itens: [],
       processo: r.cobranca_id ? (procPorCob[r.cobranca_id] || '') : '',
