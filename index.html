@@ -31893,10 +31893,34 @@ const FIN_MOV_VISOES = [
   { id:'divergencias', label:'Divergências',    ok:(l,ctx)=>_finLancEhDivergencia(l,ctx) },
   { id:'naoconc',      label:'Não conciliados', ok:(l)=>!l.conciliado },
 ];
+// Uma despesa de repasse está no universo de _finRepasseLiberado(): saída em aberto,
+// com credor, que não é tarifa. Fora daí a pergunta "a entrada dela caiu?" não se aplica
+// e o portão abaixo não pode opinar.
+function _finRepasseTemLastroApuravel(l){
+  return l.tipo_movimento === 0 && +l.status === 0 && !!l.credor_id
+      && !/tarifa/i.test(String(l.descricao||''));
+}
 // Dinheiro que ainda é do cedente. Três origens, na ordem em que o banco as tem hoje:
 // a operação de repasse (fin_operacao), o vínculo direto do lançamento (cedente_id) e,
 // para as saídas antigas importadas sem operação, o credor resolvido pela cobrança.
+//
+// ── Lastro (31/08/2026) ────────────────────────────────────────────────────────────
+// Nenhuma das três origens perguntava se o dinheiro tinha entrado. A saída de repasse do
+// Leonardo dos Santos Fortes (R$ 500,00, venc. 10/10) acendia "↗ a repassar" com a
+// parcela 15/15 que ela repassa ainda em aberto, no mesmo 10/10. Eram 323 saídas
+// futuras, R$ 141.657,43, todas acesas — o chip contava dinheiro fora do caixa, como o
+// judicial pendente inflava o ATRASADO antes do corte do handoff 29/08.
+//
+// Quem responde é `_finRepasseLiberado()`, que o Painel e Recebíveis já consomem: ela
+// pareia cada despesa com a entrada que a libera e CONSOME a entrada, para uma parcela
+// não liberar dois repasses (o caso Valdair, três despesas apontando um boleto só de
+// R$ 214,00). Perguntar aqui por conta própria criaria uma segunda resposta para a mesma
+// pergunta — que é como quase todo defeito deste módulo começou.
+//
+// `ctx.liberadas` nulo (a apuração falhou) mantém o comportamento antigo: das duas
+// formas de errar, esconder repasse devido é a cara — some dinheiro do credor da tela.
 function _finLancEhRepasse(l, ctx){
+  if(ctx.liberadas && _finRepasseTemLastroApuravel(l) && !ctx.liberadas.has(l.id)) return false;
   const op = ctx.opsByLanc[l.id];
   if(op) return op.repasse_status === 'pendente' || op.repasse_status === 'preparado' || op.repasse_status === 'revisar';
   if(l.cedente_id) return true;
@@ -32139,6 +32163,14 @@ async function _finLancCascataCarregar(){
   let cedMap={};
   if(cedIds.length){ const {data}=await sb.from('clientes').select('id,nome').in('id',cedIds); (data||[]).forEach(c=>cedMap[c.id]=c.nome); }
 
+  // Despesas de repasse cuja entrada já caiu. Set de ids; null quando a apuração falha —
+  // e null NÃO é "nenhuma liberada", é "não sei" (ver _finLancEhRepasse).
+  let liberadas = null;
+  try{
+    const lib = await _finRepasseLiberado();
+    liberadas = new Set((lib.itens||[]).map(i=>i.id));
+  }catch(_){ /* auxiliar: sem apuração a tela volta ao comportamento anterior */ }
+
   let opsByLanc = {};
   try{
     const { data } = await sb.from('fin_operacao')
@@ -32216,7 +32248,7 @@ async function _finLancCascataCarregar(){
   // (sem judicial pendente); só a busca global usa `todasRows` — senão o ⌘K deixava de
   // achar um Sisbajud que existe, e dizia "0 resultados" para um lançamento real.
   return { rows: visiveis, todasRows: rows, ehJudPendente, dim, cedMap, opsByLanc,
-           credorPorLanc, catPorLanc, judSet,
+           credorPorLanc, catPorLanc, judSet, liberadas,
            periodoLabel: _finCascataPeriodoBounds().label,
            busca: termo, truncado: rows.length >= FIN_LANC_LIMITE };
 }
