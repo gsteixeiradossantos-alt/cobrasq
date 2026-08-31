@@ -59,10 +59,12 @@ vm.runInContext([
   trecho('function _finJudSelToggle(id){', '\n}'),
   trecho('function _finJudSelGrupo(idsCsv, marcar){', '\n}'),
   trecho('function _finJudLoteBarraHtml(ctx){', '\n}'),
+  trecho('function _finJudModalidade(l, catNome){', '\n}'),
   'this._finJudState = _finJudState;',
   'this._finJudSelToggle = _finJudSelToggle;',
   'this._finJudSelGrupo = _finJudSelGrupo;',
   'this._finJudLoteBarraHtml = _finJudLoteBarraHtml;',
+  'this._finJudModalidade = _finJudModalidade;',
 ].join('\n'), ctxVm);
 
 const linha = (id, valor) => ({ id, valor, descricao: `X ${id}/40 · verificar` });
@@ -100,6 +102,58 @@ ctxVm._finJudState.sel = new Set([1]);
 h = ctxVm._finJudLoteBarraHtml(CTX);
 ok('singular quando é um só', qt(h) === '1 valor selecionado', qt(h));
 
+// ── Categoria: o rótulo do grupo vem da categoria, e dá para trocar em lote ──
+// Relato do Gustavo em 31/08: os 46 valores da Terezinha apareciam como
+// "Sisbajud / bloqueio Sisbajud" sendo penhora de remuneração. Causa: estão na
+// categoria "Sisbajud/Penhoras" (id 163) — que nem é a pai certa, pendura em
+// "Receitas de Serviços2", um galho duplicado — e o /sisbajud/ do NOME decidia.
+ok('categoria de penhora dá o próprio nome ao grupo',
+  ctxVm._finJudModalidade({ descricao: 'Terezinha Pinheiro - Desconto INSS 34/57' },
+    'Penhora de remuneração') === 'Penhora de remuneração',
+  'o grupo volta a se chamar pelo genérico "Penhora de salário"');
+
+ok('e isso tira o rótulo de bloqueio: deixa de ser Sisbajud',
+  ctxVm._finJudModalidade({ descricao: 'x' }, 'Penhora de remuneração') !== 'Sisbajud',
+  'seguiria mostrando "bloqueio Sisbajud" e negando o "+ Próximo mês"');
+
+ok('Sisbajud de verdade continua Sisbajud (é evento único, não mensal)',
+  ctxVm._finJudModalidade({ descricao: 'Sisbajud - Ana Claudia' }, 'Sisbajud') === 'Sisbajud');
+
+ok('a categoria-pai genérica não classifica: cai na regra antiga',
+  ctxVm._finJudModalidade({ descricao: 'Terezinha - Desconto INSS 34/57' },
+    'Sisbajud/Penhoras') === 'Sisbajud');
+
+// A CATEGORIA manda sobre a descrição — regressão conhecida: deixar o texto vencer
+// fazia "Sisbajud — bloqueio conta INSS de Fulano" virar "Desconto INSS" e partir a
+// série do mesmo devedor em dois grupos.
+ok('descrição com INSS não derruba a categoria Sisbajud',
+  ctxVm._finJudModalidade({ descricao: 'Sisbajud — bloqueio conta INSS de Fulano' },
+    'Sisbajud') === 'Sisbajud');
+
+const CTXCAT = {
+  pendentes: [linha(1, 150)],
+  dim: { contas: [{ id: 9, descricao: 'C' }], categorias: [
+    { id: 170, descricao: 'Expropriação Judicial', parent_id: 165, tipo_movimento: 1, ativa: true },
+    { id: 171, descricao: 'Penhora de remuneração', parent_id: 170, tipo_movimento: 1, ativa: true },
+    { id: 163, descricao: 'Sisbajud/Penhoras', parent_id: 164, tipo_movimento: 1, ativa: true },
+    { id: 164, descricao: 'Receitas de Serviços2', parent_id: 3, tipo_movimento: 1, ativa: true },
+  ] },
+};
+ctxVm._finJudState.sel = new Set([1]);
+ctxVm._finJudState.popCat = true;
+const hc = ctxVm._finJudLoteBarraHtml(CTXCAT);
+const opcoes = [...hc.matchAll(/<option value="\d+"[^>]*>([^<]+)<\/option>/g)].map(m => m[1]);
+
+ok('a barra oferece mudar a categoria', /Mudar categoria/.test(hc),
+  'sem isso não há alteração em lote — só marcar recebida e excluir');
+ok('o seletor mostra o CAMINHO, não só a folha',
+  opcoes.includes('Expropriação Judicial › Penhora de remuneração'),
+  'sem o caminho, "Penhora de remuneração" e "Sisbajud/Penhoras" parecem igualmente válidas');
+ok('o galho duplicado se denuncia no rótulo',
+  opcoes.includes('Receitas de Serviços2 › Sisbajud/Penhoras'),
+  'a categoria errada apareceria como se fosse judicial');
+ctxVm._finJudState.popCat = false;
+
 // ── Guardas de fonte ────────────────────────────────────────────────────────
 const styles = [...HTML.matchAll(/<style>([\s\S]*?)<\/style>/g)].map(m => m[1]);
 const cssJud = styles.find(b => b.includes('.finjd-row{'));
@@ -125,6 +179,16 @@ const lote = trecho('async function _finJudLote(acao){', '\n}');
 ok('o lote de recebimento confirma antes de mover dinheiro', /confirm\(/.test(lote),
   'marcar recebido em lote tira da Judicial e joga no caixa — sem confirmação, não');
 ok('o lote de exclusão também confirma', (lote.match(/confirm\(/g) || []).length >= 2);
+ok('a troca de categoria também confirma antes', /Mudar \$\{ids\.length\}|confirm\(`Mudar/.test(lote),
+  'trocar categoria em lote muda como 46 valores são classificados — sem confirmação, não');
+
+// Rateio múltiplo: "a categoria" não existe, e trocar destruiria a divisão.
+const API = trecho('async function alterarCategoriaLote(ids, categoriaId){', '\n  }');
+ok('a API só troca lançamento com UMA categoria no rateio',
+  /linhas\.length === 1/.test(API),
+  'trocaria em bloco um lançamento rateado e apagaria a divisão');
+ok('e devolve os pulados para a tela poder dizer quais ficaram de fora',
+  /pulados/.test(API) && /return \{ alterados/.test(API));
 
 console.log('');
 if (falhas) { console.error(`${falhas} falha(s).`); process.exit(1); }
