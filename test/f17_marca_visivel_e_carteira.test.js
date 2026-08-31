@@ -43,6 +43,8 @@ vm.createContext(ctx);
 vm.runInContext(
   corta('const FIN_MARCA_PENTE', '\n') + corta('const _finDescCrua', '\n')
   + corta('function _finMovDescSemParcela(l){', '\n}')
+  + // `_finEhTarifa` (F-18) é usado por _finLancEhRepasse e pelo escopo do lastro.
+  corta('const _finEhTarifa', '\n') + '\n'
   + corta('function _finRepasseTemLastroApuravel(l){', '\n}')
   + corta('function _finLancEhRepasse(l, ctx){', '\n}')
   + corta('function _finLancCedente(l, ctx){', '\n}')

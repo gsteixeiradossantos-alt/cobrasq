@@ -27,6 +27,14 @@ const HTML = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
 // Pegar o texto até o próximo "\n}" não serve: quase toda função aqui tem template
 // literal com `}` dentro. Contamos chaves ignorando strings, template literals,
 // comentários e regex — é o que faz o recorte sobreviver a `${...}` aninhado.
+// Recorte de uma linha só (const/arrow), quando não há chaves a casar.
+function trechoAte(marca, fim) {
+  const i = HTML.indexOf(marca);
+  assert.ok(i >= 0, `não achei no index.html: ${marca}`);
+  const j = HTML.indexOf(fim, i + marca.length);
+  assert.ok(j > i, `não achei o fim de ${marca}`);
+  return HTML.slice(i, j + fim.length);
+}
 function recorta(marca, abre) {
   abre = abre || '{';
   const fecha = abre === '[' ? ']' : '}';
@@ -190,6 +198,9 @@ const fonte = [
   'let _finCaixaAggCache = { at:0, v:null };',
   recorta('async function _finCaixaAgg(force){'),
   recorta('function _finLancSit(l){'),
+  // `_finEhTarifa` entrou em 31/08 (F-18): tarifa do Asaas não é repasse ao cedente, e a
+  // exclusão passou a morar num helper só, usado pelas três leituras.
+  trechoAte('const _finEhTarifa', '\n'),
   recorta('function _finLancEhRepasse(l, ctx){'),
   recorta('function _finLancEhDivergencia(l, ctx){'),
   recorta('function _finLancCedente(l, ctx){'),
