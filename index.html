@@ -28872,30 +28872,6 @@ window.finApi = (function(){
     if(error) throw error;
   }
 
-  // Troca a categoria de vários lançamentos de uma vez (aba Judicial). SÓ mexe em
-  // lançamento que tem UMA categoria no rateio: com rateio múltiplo, "a categoria" não
-  // existe — trocar destruiria a divisão. Esses voltam em `pulados` para a tela dizer
-  // quais ficaram de fora, em vez de sumir com a informação.
-  async function alterarCategoriaLote(ids, categoriaId){
-    const sb = _sb();
-    const { data: rat, error: e1 } = await sb.from('fin_lancamento_categoria')
-      .select('lancamento_id,categoria_id').in('lancamento_id', ids);
-    if(e1) throw e1;
-    const porLanc = {};
-    for(const r of (rat||[])) (porLanc[r.lancamento_id] = porLanc[r.lancamento_id] || []).push(r);
-    const alterar = [], pulados = [];
-    for(const id of ids){
-      const linhas = porLanc[id] || [];
-      if(linhas.length === 1) alterar.push(id); else pulados.push(id);
-    }
-    if(alterar.length){
-      const { error: e2 } = await sb.from('fin_lancamento_categoria')
-        .update({ categoria_id: categoriaId }).in('lancamento_id', alterar);
-      if(e2) throw e2;
-    }
-    return { alterados: alterar.length, pulados };
-  }
-
   async function deleteLancamento(id){
     const sb = _sb();
     const { error } = await sb.from('fin_lancamento').delete().eq('id', id);
@@ -28935,14 +28911,49 @@ window.finApi = (function(){
       .in('id', ids).eq('status', 0).is('data_pagamento', null);
     if(e2) console.warn('[reagendar] competência não acompanhou o vencimento:', e2.message||e2);
   }
+  // Troca a categoria de vários lançamentos de uma vez (Movimentações e Judicial).
+  //
+  // A versão anterior APAGAVA todo o rateio dos ids e reinseria UMA linha com o valor
+  // cheio. Para lançamento de categoria única isso equivale a um update — mas para
+  // lançamento RATEADO em duas ou mais categorias, destruía a divisão em silêncio, e o
+  // usuário só descobriria conferindo linha a linha depois.
+  //
+  //   sem rateio  → cria a linha (categorizar lançamento que não tinha categoria);
+  //   uma linha   → troca a categoria e PRESERVA o valor;
+  //   duas ou +   → não mexe, e volta em `pulados` para a tela dizer o que ficou de
+  //                 fora. Ali "a categoria" não existe: escolher uma é escolher apagar
+  //                 as outras, e isso não é decisão de um botão de lote.
   async function alterarCategoriaLote(ids, categoriaId){
     const sb = _sb();
-    const { data: lancs, error: e1 } = await sb.from('fin_lancamento').select('id,valor').in('id', ids);
+    const { data: rat, error: e1 } = await sb.from('fin_lancamento_categoria')
+      .select('id,lancamento_id').in('lancamento_id', ids);
     if(e1) throw e1;
-    const { error: e2 } = await sb.from('fin_lancamento_categoria').delete().in('lancamento_id', ids);
-    if(e2) throw e2;
-    const rows = (lancs||[]).map(l => ({ lancamento_id:l.id, categoria_id:categoriaId, valor:Math.abs(+l.valor||0) }));
-    if(rows.length){ const { error: e3 } = await sb.from('fin_lancamento_categoria').insert(rows); if(e3) throw e3; }
+    const porLanc = {};
+    for(const r of (rat || [])) (porLanc[r.lancamento_id] = porLanc[r.lancamento_id] || []).push(r);
+
+    const trocar = [], criar = [], pulados = [];
+    for(const id of ids){
+      const n = (porLanc[id] || []).length;
+      if(n === 1) trocar.push(id);
+      else if(n === 0) criar.push(id);
+      else pulados.push(id);
+    }
+
+    if(trocar.length){
+      const { error } = await sb.from('fin_lancamento_categoria')
+        .update({ categoria_id: categoriaId }).in('lancamento_id', trocar);
+      if(error) throw error;
+    }
+    if(criar.length){
+      const { data: lancs, error } = await sb.from('fin_lancamento').select('id,valor').in('id', criar);
+      if(error) throw error;
+      const rows = (lancs || []).map(l => ({ lancamento_id: l.id, categoria_id: categoriaId, valor: Math.abs(+l.valor || 0) }));
+      if(rows.length){
+        const { error: e3 } = await sb.from('fin_lancamento_categoria').insert(rows);
+        if(e3) throw e3;
+      }
+    }
+    return { alterados: trocar.length + criar.length, criados: criar.length, pulados };
   }
   async function excluirLote(ids){
     const sb = _sb();
@@ -29444,7 +29455,6 @@ window.finApi = (function(){
     pagarLancamento,
     confirmarRecebimentoJudicial,
     confirmarRecebimentoJudicialLote,
-    alterarCategoriaLote,
     deleteLancamento,
     confirmarPagamentoLote,
     conciliarLote,
@@ -36911,7 +36921,7 @@ async function _finJudLote(acao){
       const nome = (((ctx.dim&&ctx.dim.categorias)||[]).find(c => String(c.id)===String(cat))||{}).descricao || '—';
       if(!confirm(`Mudar ${ids.length} valor(es) para "${nome}"?`)) return;
       const r = await finApi.alterarCategoriaLote(ids, cat);
-      if(r.pulados && r.pulados.length){
+      if(r && r.pulados && r.pulados.length){
         showToast(`${r.alterados} alterado(s). ${r.pulados.length} ficaram de fora por terem rateio em mais de uma categoria.`, 'warning');
       }
     } else if(acao==='excluir'){
@@ -37411,7 +37421,14 @@ async function loteAlterarCategoria(){
   if(!escolha) return;
   const cat = (dim.categorias||[]).find(c=>c.descricao.trim().toLowerCase()===escolha.trim().toLowerCase());
   if(!cat){ showToast('Categoria não encontrada.','danger'); return; }
-  try{ await finApi.alterarCategoriaLote(ids, cat.id); showToast('Categoria alterada.','success'); limparSelLancs(); await carregarPaginaLancs(); }
+  try{
+    const r = await finApi.alterarCategoriaLote(ids, cat.id);
+    // Rateado em duas ou mais categorias não entra no lote — dizer isso é obrigatório,
+    // senão a tela anuncia sucesso sobre linhas que não mudaram.
+    if(r && r.pulados && r.pulados.length){
+      showToast(`${r.alterados} alterado(s). ${r.pulados.length} com rateio em mais de uma categoria ficaram de fora.`, 'warning');
+    } else { showToast('Categoria alterada.','success'); }
+    limparSelLancs(); await carregarPaginaLancs(); }
   catch(e){ showToast('Erro: '+e.message,'danger'); }
 }
 async function loteAlterarConta(){
