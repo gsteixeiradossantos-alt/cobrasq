@@ -31950,9 +31950,16 @@ const FIN_MOV_VISOES = [
 // Uma despesa de repasse está no universo de _finRepasseLiberado(): saída em aberto,
 // com credor, que não é tarifa. Fora daí a pergunta "a entrada dela caiu?" não se aplica
 // e o portão abaixo não pode opinar.
+// Tarifa do Asaas é custo da operação, não dinheiro do cedente. `_finRepasseLiberado()`
+// já a exclui do universo que apura (`not.ilike %tarifa%`), e o portão do lastro também
+// — mas a TERCEIRA origem de `_finLancEhRepasse` não excluía, e bastava a tarifa ganhar
+// uma cobrança para ela virar "↗ a repassar" com a sublinha "repasse a <credor>".
+// Aconteceu em 31/08 ao amarrar os lançamentos da Rita Bet à cobrança migrada: a tarifa
+// de R$ 1,99 passou a se anunciar como repasse à Injetcar. A exclusão mora aqui, num
+// lugar só, para as três leituras não divergirem de novo.
+const _finEhTarifa = l => /tarifa/i.test(String((l && l.descricao) || ''));
 function _finRepasseTemLastroApuravel(l){
-  return l.tipo_movimento === 0 && +l.status === 0 && !!l.credor_id
-      && !/tarifa/i.test(String(l.descricao||''));
+  return l.tipo_movimento === 0 && +l.status === 0 && !!l.credor_id && !_finEhTarifa(l);
 }
 // Dinheiro que ainda é do cedente. Três origens, na ordem em que o banco as tem hoje:
 // a operação de repasse (fin_operacao), o vínculo direto do lançamento (cedente_id) e,
@@ -31982,7 +31989,7 @@ function _finLancEhRepasse(l, ctx){
   // cobre também as receitas (para a sublinha dizer de quem é a carteira). Sem este
   // filtro explícito, toda receita com cobrança viraria "a repassar" — o chip contaria
   // as entradas junto com os repasses.
-  return l.tipo_movimento === 0 && !!(ctx.credorPorLanc && ctx.credorPorLanc[l.id]);
+  return l.tipo_movimento === 0 && !_finEhTarifa(l) && !!(ctx.credorPorLanc && ctx.credorPorLanc[l.id]);
 }
 // Parcela recebida cuja divisão COBRASQ × cedente não foi calculada — nada pode ser
 // repassado até resolver. Sem cedente não há divisão a calcular (invariante 8).
@@ -32693,7 +32700,13 @@ function _finLancCascataRowHtml(l, ctx){
   // Linha 2 da descrição: quem está do outro lado, sem repetir o que a linha 1 já diz.
   // Receita própria e despesa operacional não têm segunda linha (handoff).
   const cedente = _finLancCedente(l, ctx);
-  const sub = cedente ? (isEnt ? `carteira de ${escHtml(cedente)}` : `repasse a ${escHtml(cedente)}`) : '';
+  // "repasse a X" só vale para saída que É repasse. A tarifa do Asaas sai da conta da
+  // COBRASQ e pertence ao caso, não ao cedente — dizer "repasse a Injetcar" num débito de
+  // R$ 1,99 afirma um pagamento que não existe. Ela usa a mesma forma da receita: de qual
+  // carteira é o caso.
+  const sub = cedente
+    ? ((isEnt || _finEhTarifa(l)) ? `carteira de ${escHtml(cedente)}` : `repasse a ${escHtml(cedente)}`)
+    : '';
 
   // Marcador circular ao lado do título. Divergência tem precedência: é a que trava o
   // repasse. Substituem as tags de texto, que dobravam a altura da linha.

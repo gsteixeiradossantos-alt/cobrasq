@@ -29,19 +29,23 @@ const vm = require('vm');
 
 const HTML = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
 
-// As duas funções são curtas e sem template literal — recorte simples até o `\n}`.
-function recorta(marca) {
+// As funções são curtas e sem template literal — recorte simples até o fim indicado.
+// `fim` é '\n}' para função e '\n' para const de uma linha (o helper _finEhTarifa).
+function recorta(marca, fim) {
+  fim = fim || '\n}';
   const i = HTML.indexOf(marca);
   assert.ok(i >= 0, `não achei no index.html: ${marca}`);
-  const j = HTML.indexOf('\n}', i);
+  const j = HTML.indexOf(fim, i + marca.length);
   assert.ok(j > i, `não achei o fim de ${marca}`);
-  return HTML.slice(i, j + 2);
+  return HTML.slice(i, j + fim.length);
 }
 
 const ctxVm = {};
 vm.createContext(ctxVm);
 vm.runInContext(
-  recorta('function _finRepasseTemLastroApuravel(l){') + '\n'
+  // `_finEhTarifa` (F-18) é usado por _finLancEhRepasse e pelo escopo do lastro.
+  recorta('const _finEhTarifa', '\n') + '\n'
+  + recorta('function _finRepasseTemLastroApuravel(l){') + '\n'
   + recorta('function _finLancEhRepasse(l, ctx){') + '\n'
   + 'this._finLancEhRepasse = _finLancEhRepasse;'
   + 'this._finRepasseTemLastroApuravel = _finRepasseTemLastroApuravel;',
@@ -95,8 +99,12 @@ assert.strictEqual(fora({ id: 2, tipo_movimento: 0, status: 1, credor_id: 'x', d
   true, 'saída já paga está fora do universo apurado');
 assert.strictEqual(fora({ id: 3, tipo_movimento: 0, status: 0, credor_id: null, descricao: 'saída sem credor' }),
   true, 'saída sem credor está fora do universo apurado');
-assert.strictEqual(fora({ id: 4, tipo_movimento: 0, status: 0, credor_id: 'x', descricao: 'Tarifa Asaas (Pix) — Fulano' }),
-  true, 'tarifa é excluída lá; o portão tem de excluir aqui também');
+// A TARIFA saiu deste conjunto em 31/08 (F-18): ela deixou de acender por completo — não
+// é repasse ao cedente, e a exclusão agora vale também na terceira origem. Como ela não
+// acende por nenhum caminho, não serve mais para provar que o portão do lastro se cala.
+// Quem cobre tarifa é o F-18; aqui fica só a checagem de escopo, logo abaixo.
+assert.strictEqual(apuravel({ tipo_movimento: 0, status: 0, credor_id: 'x', descricao: 'Tarifa Asaas (Pix) — Fulano' }),
+  false, 'tarifa continua fora do universo que o lastro apura');
 // E a prova de que o fixture não é frouxo: DENTRO do escopo, o mesmo arranjo dá false.
 assert.strictEqual(fora({ id: 5, tipo_movimento: 0, status: 0, credor_id: 'x', descricao: 'repasse a fulano' }),
   false, 'dentro do escopo o portão precisa mesmo barrar — senão o teste acima não prova nada');
