@@ -1,5 +1,5 @@
 /*
- * Teste F-14 — o repasse pareia por NOME + CARTEIRA + vencimento no mesmo mês.
+ * Teste F-15 — o repasse pareia por NOME + CARTEIRA + vencimento no mesmo mês.
  *
  * `_finRepasseLiberado()` diz quais despesas de repasse já têm lastro. Até 31/08/2026 ela
  * escolhia o melhor palpite dentro do balde "primeiro nome + mês do vencimento". Dois
@@ -18,7 +18,7 @@
  * par — o repasse não é anunciado, que é o erro barato.
  *
  * Como rodar:
- *   node test/f14_pareamento_repasse.test.js
+ *   node test/f15_pareamento_repasse.test.js
  */
 'use strict';
 
@@ -160,5 +160,5 @@ function proximo() {
   });
 }
 
-function fim() { console.log('F-14 ok — repasse pareia por nome inteiro + carteira + vencimento.'); }
+function fim() { console.log('F-15 ok — repasse pareia por nome inteiro + carteira + vencimento.'); }
 function erro(e) { console.error(e); process.exit(1); }
