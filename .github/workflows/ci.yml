@@ -21,3 +21,82 @@ jobs:
         run: npm test
       - name: Portão de segurança (migrations)
         run: bash scripts/ci-seguranca-migrations.sh
+
+  # ── Publicação das Edge Functions ───────────────────────────────────────────
+  # Merge na main publica o site (Vercel) mas NÃO publicava Edge Function: elas só
+  # subiam quando alguém rodava `supabase functions deploy` na mão. Silêncio caro —
+  # em 31/08/2026 a auditoria achou a `quita-fechar` rodando a versão de 17/07, sem
+  # o fix do #463 (mergeado 30/07), e o #590 do `zapsign-webhook` mergeado três dias
+  # antes sem nunca ter entrado no ar. Ninguém errou; não havia passo.
+  #
+  # Só o que MUDOU no push é publicado — publicar as 24 a cada merge desperdiça
+  # minuto e move função que ninguém pediu para mover. `verify_jwt` não é escolhido
+  # aqui: vem do supabase/config.toml, que a CLI lê sozinha.
+  deploy-functions:
+    needs: test-and-lint
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # precisa do commit anterior para saber o que mudou
+
+      - name: Descobrir funções alteradas
+        id: alvo
+        run: |
+          set -euo pipefail
+          ANT="${{ github.event.before }}"
+          # Push inicial/force-push manda before=000...0; cai para o pai do HEAD.
+          if [ -z "$ANT" ] || [ "$ANT" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$ANT^{commit}" 2>/dev/null; then
+            ANT="$(git rev-parse HEAD~1)"
+          fi
+          MUDOU="$(git diff --name-only "$ANT" "${{ github.sha }}" -- supabase/functions/ || true)"
+
+          SLUGS="$(echo "$MUDOU" | sed -n 's|^supabase/functions/\([^/]*\)/.*|\1|p' \
+                   | grep -v '^_' | sort -u || true)"
+
+          # _shared não é função: é código importado. Se ele muda, quem o importa
+          # precisa subir de novo, senão a correção fica só no repo.
+          if echo "$MUDOU" | grep -q '^supabase/functions/_shared/'; then
+            DEP="$(grep -rl '_shared' supabase/functions/*/index.ts \
+                   | sed 's|supabase/functions/||; s|/index.ts||' | sort -u)"
+            echo "_shared mudou — arrastando quem importa: $(echo $DEP)"
+            SLUGS="$(printf '%s\n%s\n' "$SLUGS" "$DEP" | grep -v '^$' | sort -u)"
+          fi
+
+          echo "slugs<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$SLUGS"     >> "$GITHUB_OUTPUT"
+          echo "EOF"        >> "$GITHUB_OUTPUT"
+          if [ -z "$SLUGS" ]; then echo "Nenhuma Edge Function mudou."; fi
+
+      - uses: supabase/setup-cli@v1
+        if: steps.alvo.outputs.slugs != ''
+        with:
+          version: latest
+
+      - name: Publicar
+        if: steps.alvo.outputs.slugs != ''
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_ACCESS_TOKEN:-}" ] || [ -z "${PROJECT_REF:-}" ]; then
+            echo "::error::Faltam os secrets SUPABASE_ACCESS_TOKEN e/ou SUPABASE_PROJECT_REF."
+            exit 1
+          fi
+          FALHOU=0
+          while read -r slug; do
+            [ -z "$slug" ] && continue
+            # Função sem entrada no config.toml subiria com verify_jwt=true por
+            # padrão — o defeito que derrubou a bia-cobranca. Falhar é melhor.
+            if ! grep -q "^\[functions\.$slug\]" supabase/config.toml; then
+              echo "::error::$slug não está declarada em supabase/config.toml (verify_jwt)."
+              FALHOU=1; continue
+            fi
+            echo "──── $slug ────"
+            supabase functions deploy "$slug" --project-ref "$PROJECT_REF" \
+              || { echo "::error::deploy de $slug falhou"; FALHOU=1; }
+          done <<< "${{ steps.alvo.outputs.slugs }}"
+          exit $FALHOU
