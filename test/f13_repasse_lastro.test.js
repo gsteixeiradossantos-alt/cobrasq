@@ -91,10 +91,14 @@ const fora = (l) => ehRepasse(l, { opsByLanc: {}, liberadas: new Set(),
 // receitas, para a sublinha dizer a carteira, e sem o filtro toda entrada com cobrança
 // viraria "a repassar" (ver F-17). O que este caso prova continua o mesmo: o portão do
 // lastro não opina fora do universo que _finRepasseLiberado() apura.
+// A RECEITA saiu deste conjunto em 31/08 (F-20): desde então ela não acende por caminho
+// nenhum — nem pela operação —, então não serve mais para provar que o portão do lastro
+// se cala. Quem cobre receita é o F-20. Aqui fica a saída JÁ PAGA, que continua fora do
+// universo apurado e continua acendendo pela operação.
 assert.strictEqual(
-  ehRepasse({ id: 1, tipo_movimento: 1, status: 0, credor_id: 'x', descricao: 'entrada' },
+  ehRepasse({ id: 1, tipo_movimento: 0, status: 1, credor_id: 'x', descricao: 'repasse já pago' },
             { opsByLanc: { 1: { repasse_status: 'pendente' } }, credorPorLanc: {}, liberadas: new Set() }),
-  true, 'receita não é despesa de repasse — o portão não opina');
+  true, 'saída fora do universo apurado — o portão não opina');
 assert.strictEqual(fora({ id: 2, tipo_movimento: 0, status: 1, credor_id: 'x', descricao: 'repasse pago' }),
   true, 'saída já paga está fora do universo apurado');
 assert.strictEqual(fora({ id: 3, tipo_movimento: 0, status: 0, credor_id: null, descricao: 'saída sem credor' }),

@@ -95,8 +95,13 @@ assert.strictEqual(
 
 // ── 4. O filtro por tipo está escrito, não implícito ───────────────────────────────
 const fonte = corta('function _finLancEhRepasse(l, ctx){', '\n}');
-assert.ok(/l\.tipo_movimento\s*===\s*0\s*&&[\s\S]*credorPorLanc/.test(fonte),
-  'a terceira origem precisa filtrar por saída explicitamente');
+// Em 31/08 (F-20) o corte por tipo saiu da terceira origem e virou a PRIMEIRA linha da
+// função, valendo para as três — porque a receita também herdava o "a repassar" pela
+// operação. O que importa continua sendo o mesmo: receita não pode acender por aqui.
+assert.ok(/l\.tipo_movimento\s*!==\s*0\s*\)\s*return false/.test(fonte),
+  'a função precisa cortar receita logo na entrada');
+assert.ok(fonte.indexOf('tipo_movimento !== 0') < fonte.indexOf('credorPorLanc'),
+  'o corte tem de vir antes da origem por carteira');
 
 // ── 5. A carteira é montada para os DOIS tipos ─────────────────────────────────────
 assert.ok(HTML.includes('const saidas = rows.filter(r=>!opsByLanc[r.id] && (r.credor_id || r.cobranca_id));'),
