@@ -90,7 +90,10 @@ module.exports = async function handler(req, res) {
         // a cobrança. Best-effort: não pode impedir o pagamento.
         if (body.credor_id) {
           try {
-            const base = String(lanc.descricao || '').replace(/\s*\d+\/\d+\s*$/, '').trim();
+            // A marca ` · verificar` (pente-fino de 31/08) fica DEPOIS da numeração e cegava
+            // este corte, quebrando o `like` que propaga o credor às outras parcelas.
+            const base = String(lanc.descricao || '').replace(/\s*·\s*verificar\s*$/i, '')
+              .replace(/\s*\d+\/\d+\s*$/, '').trim();
             await sbFetch(`fin_lancamento?id=eq.${lanc.id}`, {
               method: 'PATCH', prefer: 'return=minimal',
               body: JSON.stringify({ credor_id: credorEscolhido }),
