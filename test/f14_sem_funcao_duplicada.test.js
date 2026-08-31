@@ -28,10 +28,6 @@ const HTML = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
 // Colisões que já existiam em 31/08/2026, com o efeito de cada uma. Consertar exige
 // decidir qual das duas fica — não é mecânico, e não cabia no PR que achou isto.
 const CONHECIDAS = {
-  // 31768 (opId, patch, msg) é engolida por 31807 (i). Os três chamadores da fila
-  // ("sem repasse", "repasse confirmado", "vincular credor") passam um uuid onde a
-  // sobrevivente espera um índice: `itens[uuid]` é undefined e ela retorna calada.
-  _finFilaResolver: 2,
   // 43781 (clienteId) é engolida por 48055 (devId). O botão "Vincular do ZapSign"
   // da ficha de CLIENTE abre o fluxo de DEVEDOR com um id de cliente.
   abrirVincularZapSign: 2,
