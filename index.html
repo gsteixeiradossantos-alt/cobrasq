@@ -28872,6 +28872,30 @@ window.finApi = (function(){
     if(error) throw error;
   }
 
+  // Troca a categoria de vários lançamentos de uma vez (aba Judicial). SÓ mexe em
+  // lançamento que tem UMA categoria no rateio: com rateio múltiplo, "a categoria" não
+  // existe — trocar destruiria a divisão. Esses voltam em `pulados` para a tela dizer
+  // quais ficaram de fora, em vez de sumir com a informação.
+  async function alterarCategoriaLote(ids, categoriaId){
+    const sb = _sb();
+    const { data: rat, error: e1 } = await sb.from('fin_lancamento_categoria')
+      .select('lancamento_id,categoria_id').in('lancamento_id', ids);
+    if(e1) throw e1;
+    const porLanc = {};
+    for(const r of (rat||[])) (porLanc[r.lancamento_id] = porLanc[r.lancamento_id] || []).push(r);
+    const alterar = [], pulados = [];
+    for(const id of ids){
+      const linhas = porLanc[id] || [];
+      if(linhas.length === 1) alterar.push(id); else pulados.push(id);
+    }
+    if(alterar.length){
+      const { error: e2 } = await sb.from('fin_lancamento_categoria')
+        .update({ categoria_id: categoriaId }).in('lancamento_id', alterar);
+      if(e2) throw e2;
+    }
+    return { alterados: alterar.length, pulados };
+  }
+
   async function deleteLancamento(id){
     const sb = _sb();
     const { error } = await sb.from('fin_lancamento').delete().eq('id', id);
@@ -29420,6 +29444,7 @@ window.finApi = (function(){
     pagarLancamento,
     confirmarRecebimentoJudicial,
     confirmarRecebimentoJudicialLote,
+    alterarCategoriaLote,
     deleteLancamento,
     confirmarPagamentoLote,
     conciliarLote,
@@ -31839,23 +31864,6 @@ async function _finTemColunasCascata(){
   return _finColsCascata;
 }
 
-// ── Coluna `repassa_lancamento_id` (qual receita a saída de repasse cobre) ──────────
-// Mesma disciplina da checagem acima, e pelo mesmo motivo: a migração
-// 20260831_fin_lancamento_repassa_lancamento_id.sql ainda não foi aplicada, e pedir a
-// coluna em toda consulta custaria um 400 por carregamento. Cache separado do de cima:
-// as duas migrações são independentes, e amarrar uma na outra faria esta ficar
-// desligada para sempre — aquelas cinco colunas nunca foram aplicadas.
-let _finColRepassa = null;             // null = ainda não perguntado
-async function _finTemColunaRepassa(){
-  if(_finColRepassa !== null) return _finColRepassa;
-  try{
-    const sb = getSupabase();
-    const { error } = await sb.from('fin_lancamento').select('repassa_lancamento_id').limit(1);
-    _finColRepassa = !error;
-  }catch(_){ _finColRepassa = false; }
-  return _finColRepassa;
-}
-
 // Estado da aba Movimentações. `visao` é a visão salva ativa (chips do topo); os campos
 // f* são o painel de filtros de 452px (handoff 29/08), que substituiu os dois selects
 // soltos da barra. `limite` é a paginação de 60 em 60 — sem ela a página trava montando
@@ -31885,24 +31893,34 @@ const FIN_MOV_VISOES = [
   { id:'divergencias', label:'Divergências',    ok:(l,ctx)=>_finLancEhDivergencia(l,ctx) },
   { id:'naoconc',      label:'Não conciliados', ok:(l)=>!l.conciliado },
 ];
+// Uma despesa de repasse está no universo de _finRepasseLiberado(): saída em aberto,
+// com credor, que não é tarifa. Fora daí a pergunta "a entrada dela caiu?" não se aplica
+// e o portão abaixo não pode opinar.
+function _finRepasseTemLastroApuravel(l){
+  return l.tipo_movimento === 0 && +l.status === 0 && !!l.credor_id
+      && !/tarifa/i.test(String(l.descricao||''));
+}
 // Dinheiro que ainda é do cedente. Três origens, na ordem em que o banco as tem hoje:
 // a operação de repasse (fin_operacao), o vínculo direto do lançamento (cedente_id) e,
 // para as saídas antigas importadas sem operação, o credor resolvido pela cobrança.
 //
 // ── Lastro (31/08/2026) ────────────────────────────────────────────────────────────
-// Antes disto, NENHUMA das três origens perguntava se o dinheiro tinha entrado: a saída
-// de repasse do Leonardo dos Santos Fortes (R$ 500,00, venc. 10/10) já acendia "↗ a
-// repassar" com a parcela 15/15 que ela repassa ainda em aberto, no mesmo 10/10. Eram
-// 323 saídas futuras, R$ 141.657,43, todas acesas — o chip contava dinheiro fora do
-// caixa, como o judicial pendente inflava o ATRASADO antes do corte do handoff 29/08.
+// Nenhuma das três origens perguntava se o dinheiro tinha entrado. A saída de repasse do
+// Leonardo dos Santos Fortes (R$ 500,00, venc. 10/10) acendia "↗ a repassar" com a
+// parcela 15/15 que ela repassa ainda em aberto, no mesmo 10/10. Eram 323 saídas
+// futuras, R$ 141.657,43, todas acesas — o chip contava dinheiro fora do caixa, como o
+// judicial pendente inflava o ATRASADO antes do corte do handoff 29/08.
 //
-// A pergunta é respondida por vínculo GRAVADO (`repassa_lancamento_id`), não por data:
-// data de vencimento não é recebimento, e devedor que atrasa faria a seta acender com o
-// caixa vazio. NULL, coluna ausente ou receita fora do alcance = "não sei", e "não sei"
-// mantém o comportamento antigo — presumir "sem lastro" esconderia repasse devido, que
-// é o erro mais caro dos dois.
+// Quem responde é `_finRepasseLiberado()`, que o Painel e Recebíveis já consomem: ela
+// pareia cada despesa com a entrada que a libera e CONSOME a entrada, para uma parcela
+// não liberar dois repasses (o caso Valdair, três despesas apontando um boleto só de
+// R$ 214,00). Perguntar aqui por conta própria criaria uma segunda resposta para a mesma
+// pergunta — que é como quase todo defeito deste módulo começou.
+//
+// `ctx.liberadas` nulo (a apuração falhou) mantém o comportamento antigo: das duas
+// formas de errar, esconder repasse devido é a cara — some dinheiro do credor da tela.
 function _finLancEhRepasse(l, ctx){
-  if(ctx.lastro && l.repassa_lancamento_id && ctx.lastro[l.repassa_lancamento_id] === false) return false;
+  if(ctx.liberadas && _finRepasseTemLastroApuravel(l) && !ctx.liberadas.has(l.id)) return false;
   const op = ctx.opsByLanc[l.id];
   if(op) return op.repasse_status === 'pendente' || op.repasse_status === 'preparado' || op.repasse_status === 'revisar';
   if(l.cedente_id) return true;
@@ -32135,9 +32153,8 @@ async function _finLancCascataCarregar(){
   const dim = await finApi.loadDimensoes();
   const baseSel = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,tipo_movimento,status,conciliado,conta_id,cobranca_id,credor_id,contato_id,numero_parcela,total_parcelas,judicial_liberado_em,fin_conta(descricao,banco_nome),fin_contato(nome)';
   const extra = (await _finTemColunasCascata()) ? ',cedente_id,capital,meu_total,amortizado,repasse_status' : '';
-  const extraRep = (await _finTemColunaRepassa()) ? ',repassa_lancamento_id' : '';
   const termo = (_finLancCascataState.busca||'').trim();
-  let q = sb.from('fin_lancamento').select(baseSel+extra+extraRep)
+  let q = sb.from('fin_lancamento').select(baseSel+extra)
     .gte('data_competencia', ini).lte('data_competencia', fim);
   if(termo) q = q.ilike('descricao', '%'+termo+'%');
   const { data } = await q.order('data_competencia',{ascending:_finLancOrdServidorAsc()}).limit(FIN_LANC_LIMITE);
@@ -32146,22 +32163,13 @@ async function _finLancCascataCarregar(){
   let cedMap={};
   if(cedIds.length){ const {data}=await sb.from('clientes').select('id,nome').in('id',cedIds); (data||[]).forEach(c=>cedMap[c.id]=c.nome); }
 
-  // Lastro das saídas de repasse: a receita apontada por `repassa_lancamento_id` já foi
-  // recebida? Consulta própria de propósito — a receita pode estar fora do período
-  // carregado (o repasse de uma parcela de dezembro aparece num filtro que começa em
-  // janeiro), e ler do array já carregado responderia "não recebida" para uma parcela
-  // que está paga, escondendo repasse devido. Só ids, só status.
-  const lastro = {};
+  // Despesas de repasse cuja entrada já caiu. Set de ids; null quando a apuração falha —
+  // e null NÃO é "nenhuma liberada", é "não sei" (ver _finLancEhRepasse).
+  let liberadas = null;
   try{
-    const alvos = [...new Set(rows.map(r=>r.repassa_lancamento_id).filter(Boolean))];
-    if(alvos.length){
-      const { data } = await sb.from('fin_lancamento').select('id,status,data_pagamento').in('id', alvos);
-      // Mesma leitura de "pago" que a pílula da linha usa (_finLancSit): status 1 OU
-      // data de pagamento preenchida. Duas leituras diferentes de pago já fizeram a
-      // etiqueta e o contador discordarem na mesma tela.
-      (data||[]).forEach(r=>{ lastro[r.id] = (Number(r.status) === 1 || !!r.data_pagamento); });
-    }
-  }catch(_){ /* auxiliar: sem lastro a tela volta ao comportamento anterior */ }
+    const lib = await _finRepasseLiberado();
+    liberadas = new Set((lib.itens||[]).map(i=>i.id));
+  }catch(_){ /* auxiliar: sem apuração a tela volta ao comportamento anterior */ }
 
   let opsByLanc = {};
   try{
@@ -32240,7 +32248,7 @@ async function _finLancCascataCarregar(){
   // (sem judicial pendente); só a busca global usa `todasRows` — senão o ⌘K deixava de
   // achar um Sisbajud que existe, e dizia "0 resultados" para um lançamento real.
   return { rows: visiveis, todasRows: rows, ehJudPendente, dim, cedMap, opsByLanc,
-           credorPorLanc, catPorLanc, judSet, lastro,
+           credorPorLanc, catPorLanc, judSet, liberadas,
            periodoLabel: _finCascataPeriodoBounds().label,
            busca: termo, truncado: rows.length >= FIN_LANC_LIMITE };
 }
@@ -36486,7 +36494,7 @@ async function _finTemColunaPedidoJud(){
     return false;                              // desta vez não; volta a perguntar depois
   }catch(_){ return false; }
 }
-let _finJudState = { popEfet:null, menu:null, efetConta:'', efetData:'', efetValor:'', sel:new Set(), popLote:false };
+let _finJudState = { popEfet:null, menu:null, efetConta:'', efetData:'', efetValor:'', sel:new Set(), popLote:false, popCat:false, catNova:'' };
 // Carimbo do backfill de 29/08/2026: nos 122 pendentes que existiam então, a data do
 // pedido foi ESTIMADA pelo vencimento previsto, porque a real só existe nos autos. A aba
 // conta quantos ainda estão nessa condição e diz na cara — "espera média" apurada e
@@ -36501,7 +36509,15 @@ function _finJudModalidade(l, catNome){
   // A CATEGORIA manda. Deixar o regex da descrição vencer fazia "Sisbajud — bloqueio
   // conta INSS de Fulano" virar "Desconto INSS": separava a série do mesmo devedor em
   // dois grupos e ainda oferecia "+ Próximo mês" para um bloqueio que é evento único.
-  if(/sisbajud/i.test(catNome||'')) return 'Sisbajud';
+  const c = String(catNome || '').trim();
+  // Relato do Gustavo em 31/08: a Terezinha aparecia como "Sisbajud / bloqueio Sisbajud"
+  // sendo penhora de remuneração. A causa: os 46 lançamentos dela estão na categoria-PAI
+  // "Sisbajud/Penhoras" (id 163), e o /sisbajud/ do NOME dela decidia o rótulo.
+  // Agora a categoria ESPECÍFICA manda e dá o próprio nome ao grupo — "Penhora de
+  // remuneração" aparece como tal, em vez de virar o genérico "Penhora de salário".
+  // A categoria-pai continua caindo nas regras antigas: ela não classifica nada.
+  if(/penhora/i.test(c) && !/sisbajud/i.test(c)) return c;
+  if(/sisbajud/i.test(c)) return 'Sisbajud';
   if(/\bINSS\b/i.test(l.descricao||'')) return 'Desconto INSS';
   return 'Penhora de salário';
 }
@@ -36822,6 +36838,25 @@ function _finJudLoteBarraHtml(ctx){
   if(!vivos.length) return '';
   const total = vivos.reduce((a,r) => a + Math.abs(+r.valor||0), 0);
   const contas = ((ctx.dim && ctx.dim.contas) || []).filter(c => !/tribunal/i.test(c.descricao||''));
+  // Categorias de ENTRADA e ativas — as folhas judiciais estão aqui (Penhora de
+  // remuneração, Sisbajud, Expropriação Judicial…). Ordenadas pelo nome para achar.
+  // Mostra o CAMINHO ("Expropriação Judicial › Penhora de remuneração"), não só a folha.
+  // Sem isso a escolha certa não é óbvia: em 31/08 os 46 valores da Terezinha estavam em
+  // "Sisbajud/Penhoras", que pendura em "Receitas de Serviços2" — um galho duplicado —,
+  // enquanto a árvore judicial de verdade é "Expropriação Judicial › {Sisbajud, Penhora
+  // de remuneração}". Com o caminho à vista, o galho errado se denuncia sozinho.
+  const _todasCats = (ctx.dim && ctx.dim.categorias) || [];
+  const _catPai = id => _todasCats.find(x => String(x.id) === String(id));
+  const _catCaminho = c => {
+    const partes = [], vistos = new Set();
+    let cur = c;
+    while(cur && !vistos.has(cur.id)){ vistos.add(cur.id); partes.unshift(cur.descricao || '—'); cur = _catPai(cur.parent_id); }
+    return partes.slice(-2).join(' › ');   // pai › folha basta para reconhecer
+  };
+  const catsJud = _todasCats
+    .filter(c => c && c.ativa !== false && (c.tipo_movimento === 1 || c.tipo_movimento == null))
+    .map(c => ({ id: c.id, rotulo: _catCaminho(c) }))
+    .sort((a,b) => a.rotulo.localeCompare(b.rotulo, 'pt-BR'));
   const s = _finJudState;
   return `<div class="finjd-lote" onclick="event.stopPropagation()">
     <span class="qt">${vivos.length} ${vivos.length===1?'valor selecionado':'valores selecionados'}</span>
@@ -36838,6 +36873,19 @@ function _finJudLoteBarraHtml(ctx){
           <input type="date" value="${escHtml(s.efetData||isoLocal(new Date()))}" onchange="_finJudState.efetData=this.value"></label>
         <span style="font-size:10.5px;color:#A6AEBD;line-height:1.4;">Todas entram pelo valor esperado. Se o juízo liberou valor diferente em alguma, faça essa pelo polegar da linha.</span>
         <button style="background:#5E7C58;border:none;color:#fff;border-radius:6px;padding:8px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;" onclick="_finJudLote('receber')">Confirmar ${fmtR(total)}</button>
+      </div>` : ''}
+    </span>
+    <span style="position:relative;">
+      <button class="finjd-lb" onclick="_finJudState.popCat=!_finJudState.popCat;_finJudState.popLote=false;_finJudRender();">Mudar categoria</button>
+      ${s.popCat ? `<div class="finmv-pop" style="bottom:36px;top:auto;right:auto;left:0;width:320px;">
+        <span style="font-size:13px;font-weight:600;color:#0A1530;">Mudar a categoria de ${vivos.length} ${vivos.length===1?'valor':'valores'}</span>
+        <label>Categoria
+          <select onchange="_finJudState.catNova=this.value">
+            <option value="">— escolher —</option>
+            ${catsJud.map(c=>`<option value="${c.id}" ${String(s.catNova)===String(c.id)?'selected':''}>${escHtml(c.rotulo)}</option>`).join('')}
+          </select></label>
+        <span style="font-size:10.5px;color:#A6AEBD;line-height:1.4;">A categoria decide o rótulo do grupo e se a aba trata o valor como depósito mensal ou bloqueio único. Lançamento com rateio em mais de uma categoria fica de fora — ali "a categoria" não existe.</span>
+        <button style="background:#0A1530;border:none;color:#fff;border-radius:6px;padding:8px 12px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;" onclick="_finJudLote('categoria')">Aplicar</button>
       </div>` : ''}
     </span>
     <button class="finjd-lb" onclick="_finJudLote('excluir')">Excluir</button>
@@ -36857,11 +36905,20 @@ async function _finJudLote(acao){
       if(!conta){ showToast('Escolha a conta.', 'danger'); return; }
       if(!confirm(`Marcar ${ids.length} valor(es) como recebidos em ${data.split('-').reverse().join('/')}? Eles saem da Judicial e entram no caixa.`)) return;
       await finApi.confirmarRecebimentoJudicialLote(ids, data, conta);
+    } else if(acao==='categoria'){
+      const cat = s.catNova;
+      if(!cat){ showToast('Escolha a categoria.', 'danger'); return; }
+      const nome = (((ctx.dim&&ctx.dim.categorias)||[]).find(c => String(c.id)===String(cat))||{}).descricao || '—';
+      if(!confirm(`Mudar ${ids.length} valor(es) para "${nome}"?`)) return;
+      const r = await finApi.alterarCategoriaLote(ids, cat);
+      if(r.pulados && r.pulados.length){
+        showToast(`${r.alterados} alterado(s). ${r.pulados.length} ficaram de fora por terem rateio em mais de uma categoria.`, 'warning');
+      }
     } else if(acao==='excluir'){
       if(!confirm(`Excluir ${ids.length} valor(es) judicial(is)? Não dá para desfazer.`)) return;
       await finApi.excluirLote(ids);
     }
-    s.sel.clear(); s.popLote = false;
+    s.sel.clear(); s.popLote = false; s.popCat = false;
     _finFinanceiroInvalidaCaches();
     showToast('Feito.', 'success');
     renderFinTab('receitasjudiciais');
@@ -36870,9 +36927,9 @@ async function _finJudLote(acao){
 
 function _finJudFecharPopovers(ev){
   const s = _finJudState;
-  if(!s.popEfet && !s.menu && !s.popLote) return;
+  if(!s.popEfet && !s.menu && !s.popLote && !s.popCat) return;
   if(ev && ev.target && ev.target.closest && ev.target.closest('.finmv-pop,.finmv-menu,.finjd-lote')) return;
-  s.popEfet = null; s.menu = null; s.popLote = false;
+  s.popEfet = null; s.menu = null; s.popLote = false; s.popCat = false;
   _finJudRender();
 }
 function _finJudAbrirMenu(id){
