@@ -33743,6 +33743,41 @@ const _finEdQuitado = l => l.status === 1 || l.status === 2 || !!l.data_pagament
 // ORDEM DA SÉRIE (data, depois número) — a mesma que a exclusão de série usa.
 // Devolve { ids, quitadas } — `quitadas` são as que foram deixadas de fora, para a
 // confirmação poder dizer isso em vez de mexer nelas em silêncio.
+// ── Deslocar o cronograma junto ────────────────────────────────────────────────────
+// "Esta e as próximas" e "Todas as parcelas" prometem valer para a série, mas até 31/08
+// só valor/tipo/conta/contato se propagavam — a DATA ficava só na parcela editada. Quem
+// remarcava um cronograma de repasse mudava a 1ª, escolhia "todas", salvava, e as outras
+// continuavam onde estavam (Marilete Lazarotto: a 1/5 foi para 10/01/2027 e as outras
+// quatro ficaram em out/nov/dez, com a 5/5 colidindo com a 1/5 no mesmo dia).
+//
+// A data não pode ser CARIMBADA igual em todas — isso empilharia o acordo inteiro num dia
+// só. O que se propaga é o SALTO: se a parcela editada andou 4 meses, as outras andam 4
+// meses, preservando o espaçamento entre elas.
+//
+// Mês, e não dias: de 10/09/2026 para 10/01/2027 são 122 dias, e somar 122 dias à parcela
+// seguinte (10/10) daria 09/02 — perderia o dia 10 do vencimento. Só cai em dias quando o
+// salto não é de meses inteiros no mesmo dia do mês.
+function _finEdSaltoDatas(de, para){
+  if(!de || !para || de === para) return null;
+  const [ay,am,ad] = de.split('-').map(Number), [by,bm,bd] = para.split('-').map(Number);
+  if(ad === bd) return { meses: (by-ay)*12 + (bm-am) };
+  return { dias: Math.round((Date.parse(para+'T00:00:00') - Date.parse(de+'T00:00:00')) / 86400000) };
+}
+function _finEdAplicaSalto(data, salto){
+  if(!data || !salto) return data;
+  const [y,m,d] = data.split('-').map(Number);
+  if(salto.dias != null){
+    const t = new Date(Date.parse(data+'T00:00:00') + salto.dias*86400000);
+    return isoLocal(t);
+  }
+  // Dia preservado; se o mês de destino não tiver aquele dia (31 em fevereiro), cai no
+  // último dia do mês, que é o que qualquer agenda de cobrança faz.
+  const total = m - 1 + salto.meses;
+  const ny = y + Math.floor(total/12), nm = (total%12+12)%12 + 1;
+  const ultimo = new Date(Date.UTC(ny, nm, 0)).getUTCDate();
+  const nd = Math.min(d, ultimo);
+  return `${ny}-${String(nm).padStart(2,'0')}-${String(nd).padStart(2,'0')}`;
+}
 function _finEdIdsEscopo(){
   const st = _finEdState;
   const eu = st.serie[st.idx] ? st.serie[st.idx].id : null;
@@ -33818,6 +33853,28 @@ async function _finEdSalvar(irProxima){
     if(outros.length){
       r = await sb.from('fin_lancamento').update(daSerie).in('id', outros);
       if(r.error) throw r.error;
+
+      // ── O cronograma anda junto ────────────────────────────────────────────────
+      // Ver _finEdSaltoDatas: propaga o SALTO, não a data. Uma consulta por parcela
+      // porque cada uma recebe uma data diferente — não dá para fazer num update só.
+      // Parcela sem vencimento fica intocada, e a data de PAGAMENTO nunca é deslocada:
+      // ela é fato consumado, não agenda.
+      const salto = _finEdSaltoDatas(l.data_vencimento || '', desta.data_vencimento || '');
+      if(salto){
+        for(const id of outros){
+          const item = st.serie.find(x => x.id === id);
+          if(!item || !item.data_vencimento) continue;
+          const nova = _finEdAplicaSalto(String(item.data_vencimento).slice(0,10), salto);
+          const patch = { data_vencimento: nova };
+          // A competência acompanha só quando ela era a própria data de vencimento —
+          // do contrário seria reescrever o mês de caixa de quem já foi pago.
+          if(String(item.data_competencia||'').slice(0,10) === String(item.data_vencimento).slice(0,10)){
+            patch.data_competencia = nova;
+          }
+          const { error } = await sb.from('fin_lancamento').update(patch).eq('id', id);
+          if(error) throw error;
+        }
+      }
       // A descrição não pode ser carimbada igual em toda a série: é dela que a própria
       // série é reconhecida. Cada parcela recebe a base nova mantendo o PRÓPRIO número,
       // no formato em que ele já estava; quem não tem numeração legível fica intocado.
