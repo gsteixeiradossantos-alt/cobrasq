@@ -43,7 +43,15 @@ function trecho(de, ate, incluirFim = true) {
 // `const` dentro do vm fica no escopo léxico do script e NÃO vira propriedade do
 // contexto — por isso tudo roda num script só, que no fim exporta o que o teste usa.
 const fonte = [
-  trecho('const FIN_MARCA_PENTE', 'function _finEdNumeracao(desc){', false),
+  // O helper da marca subiu para junto de _FIN_RE_PARCELA no #609 — é ele que todo
+  // leitor de descrição consulta antes de casar a numeração. Fatiar só até lá.
+  trecho('// Marca do pente-fino', 'const _FIN_RE_PARCELA', false),
+  trecho('const _FIN_RE_PARCELA', '\n'),
+  trecho('const _finSerieBase', '\n'),
+  trecho('function _finSerieNum(d){', '\n'),
+  trecho('const _finSerieTotal', '\n'),
+  trecho('const _finMesmaSerie', ';'),
+  trecho('const FIN_ED_FORMATOS_PARCELA = [', '];'),
   trecho('function _finEdNumeracao(desc){', '\n}'),
   trecho('const _fincrSerieChave', '\n'),
   trecho('const _fincrSerieNome', '\n'),
@@ -51,6 +59,9 @@ const fonte = [
   'this._fincrSerieChave = _fincrSerieChave;',
   'this._fincrSerieNome = _fincrSerieNome;',
   'this._finDescCrua = _finDescCrua;',
+  'this._finSerieBase = _finSerieBase;',
+  'this._finSerieNum = _finSerieNum;',
+  'this._finMesmaSerie = _finMesmaSerie;',
 ].join('\n');
 const ctx = { console, String, Number, Object, Array, RegExp, Set };
 vm.createContext(ctx);
@@ -108,6 +119,69 @@ ok('"verificar" no MEIO da descrição é preservado',
 
 ok('descrição que termina em "verificar" SEM o ponto não é tocada',
   ctx._fincrSerieNome(L('Pendência a verificar')) === 'Pendência a verificar');
+
+// ── Os dois leitores que ficaram de fora do #608 ────────────────────────────
+// Achados em 31/08 pelo print da aba Judicial: `_FIN_RE_PARCELA` também é ancorada no
+// fim, e é dela que sai o agrupamento POR PROCESSO da Judicial. Com a marca, os 76
+// judiciais sem `cobranca_id` viravam um grupo por parcela — 13 séries reais viradas
+// em dezenas de blocos de uma linha.
+ok('série judicial marcada agrupa por processo, não por parcela',
+  new Set([
+    'Adriane Lurdes Carneiro - Penhora de Salário 1 11/40 · verificar',
+    'Adriane Lurdes Carneiro - Penhora de Salário 1 12/40 · verificar',
+    'Adriane Lurdes Carneiro - Penhora de Salário 1 13/40 · verificar',
+  ].map(ctx._finSerieBase)).size === 1,
+  'voltou a partir a série judicial');
+
+ok('séries DIFERENTES do mesmo devedor seguem separadas (Salário 1 × 2)',
+  ctx._finSerieBase('Adriane Lurdes Carneiro - Penhora de Salário 1 11/40 · verificar')
+  !== ctx._finSerieBase('Adriane Lurdes Carneiro - Penhora de Salário 2 11/40 · verificar'),
+  'juntou duas penhoras distintas no mesmo grupo');
+
+ok('numeração é extraída mesmo com a marca (a coluna do banco está vazia)',
+  (r => r && r.n === 34 && r.total === 57)(ctx._finSerieNum('Terezinha Pinheiro - Desconto INSS 34/57 · verificar')),
+  'a coluna de parcela volta a mostrar — na aba Judicial');
+
+ok('descrição sem numeração devolve null, não inventa parcela',
+  ctx._finSerieNum('Sisbajud - Ana Claudia Reginato · verificar') === null);
+
+// ── Série é base IGUAL **e** total igual ────────────────────────────────────
+// Achado revisando o próprio PR #609: restaurar `_finSerieBase` reativou o
+// "excluir esta e as próximas", que desde 31/08 casava só a própria linha. Certo — mas
+// a comparação só por base junta duas séries distintas do mesmo devedor. 105 linhas em
+// 13 bases estão nessa condição no banco, TODAS sem grupo_parcelamento e sem acordo_id,
+// ou seja, todas no caminho que decide o que apagar.
+ok('mesma base e mesmo total = mesma série',
+  ctx._finMesmaSerie('Fulano 3/12 · verificar', 'Fulano 7/12'));
+
+ok('mesma base e totais DIFERENTES não são a mesma série',
+  !ctx._finMesmaSerie('Fulano 3/12 · verificar', 'Fulano 3/24 · verificar'),
+  '"excluir esta e as próximas" varreria duas séries de uma vez');
+
+ok('bases diferentes seguem diferentes mesmo com o mesmo total',
+  !ctx._finMesmaSerie('Fulano 3/12', 'Ciclano 3/12'));
+
+ok('duas sem numeração continuam comparáveis pela base',
+  ctx._finMesmaSerie('Sisbajud - Ana · verificar', 'Sisbajud - Ana'));
+
+ok('uma com numeração e outra sem NÃO são a mesma série',
+  !ctx._finMesmaSerie('Fulano 3/12', 'Fulano'),
+  'uma avulsa entraria no lote de exclusão de uma série');
+
+// Guarda de fonte: o helper certo tem de ser usado por QUEM DECIDE O QUE APAGAR.
+// Sem isto, trocar a chamada por `_finSerieBase(x) === base` nos dois filtros passa
+// despercebido — o teste acima continuaria verde exercitando só o helper solto.
+const RESOLVER = trecho('async function _finLancSerieResolver(ids){', '\n}');
+const SERIEDE  = trecho('async function _finEditorSerie(l){', '\n}');
+ok('o resolvedor da exclusão compara com _finMesmaSerie',
+  RESOLVER.includes('_finMesmaSerie('),
+  'voltou a juntar séries de totais diferentes no que vai ser excluído');
+ok('o levantamento da série do editor também',
+  SERIEDE.includes('_finMesmaSerie('),
+  'idem, no caminho do editor');
+ok('nenhum dos dois compara só pela base',
+  !/_finSerieBase\([^)]*\)\s*===\s*base/.test(RESOLVER + SERIEDE),
+  'a comparação frouxa voltou');
 
 // ── Guarda de fonte: o backend recebeu o mesmo tratamento ───────────────────
 const REPASSAR = fs.readFileSync(path.join(RAIZ, 'api', '_repassar.js'), 'utf8');
