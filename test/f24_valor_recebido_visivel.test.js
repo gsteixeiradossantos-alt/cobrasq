@@ -74,4 +74,13 @@ assert.strictEqual(r.v, 55, 'conciliado também é quitado');
 r = v({ valor: 100, valor_pago: 100.001, status: 1 });
 assert.strictEqual(r.extra, 0, 'diferença sub-centavo não vira anotação');
 
-console.log('F-24 ok — linha quitada mostra o valor recebido, previsto segue na face');
+
+// 8. A CONSULTA precisa trazer o campo. O #621 consertou a função e a linha continuou
+//    em R$ 252,00: `baseSel` de `_finLancCascataCarregar` pedia `valor` e não `valor_pago`,
+//    então `l.valor_pago` chegava `undefined` e a regra devolvia a face, sempre. Função
+//    certa alimentada por consulta incompleta é conserto que não existe na tela.
+const sel = corta("const baseSel = 'id,descricao", "';");
+assert.ok(/(^|,)valor_pago(,|')/.test(sel), 'a consulta da lista precisa buscar valor_pago');
+assert.ok(/(^|,)valor(,|')/.test(sel), 'e continuar buscando a face');
+
+console.log('F-24 ok — linha quitada mostra o valor recebido, previsto segue na face, e a consulta traz o campo');
