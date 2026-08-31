@@ -79,6 +79,29 @@ ok(`guarda · nenhum toISOString().slice(0,10) fora de comentário (${residuo} a
   residuo - emComentario === 0,
   'voltou a cortar data de UTC em algum lugar do index.html');
 
+// Guarda de fonte 2: os helpers consolidados não voltam.
+//
+// Em 29/08 conviviam quatro montadores da mesma data local no index.html
+// (isoLocal, _finHojeLocal, _finISO, _metaYmd) mais uma IIFE solta. Nada quebrava —
+// mas _finHojeLocal carregava um comentário afirmando que o `hoje()` global ainda era
+// UTC, o que deixou de ser verdade no mesmo dia. Cópia a mais não é bug: é a próxima
+// sessão corrigindo uma das quatro e achando que corrigiu todas.
+for (const morto of ['_finHojeLocal', '_finISO', '_metaYmd']) {
+  ok(`guarda · ${morto} não ressuscitou (use isoLocal)`, !HTML.includes(morto),
+    `${morto} voltou ao index.html — aponte para isoLocal em vez de recriar`);
+}
+
+// E nenhum montador NOVO entra. O padrão é o miolo de qualquer reimplementação:
+// getFullYear + getMonth()+1 + getDate() na mesma expressão. A linha de base abaixo é
+// o que sobrou de inline em 31/08 (fmt, sem7, chave e cia., mais três falso-positivos
+// que são `new Date(y, m+1, 0)` = último dia do mês). Consolidar esses é trabalho
+// separado; esta guarda só impede que o número CRESÇA.
+const BASE_MONTADORES = 15;
+const montadores = (HTML.match(/getFullYear\(\)[^;\n]*getMonth\(\) ?\+ ?1[^;\n]*getDate\(\)/g) || []).length;
+ok(`guarda · montadores de data inline não aumentaram (${montadores} ≤ ${BASE_MONTADORES})`,
+  montadores <= BASE_MONTADORES,
+  'apareceu um montador de data local novo — use isoLocal');
+
 console.log('');
 if (falhas) { console.error(`${falhas} falha(s).`); process.exit(1); }
 console.log('F-08 · isoLocal correto na faixa que quebrava.');
