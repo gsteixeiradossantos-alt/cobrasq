@@ -31990,7 +31990,15 @@ function _finLancEhRepasse(l, ctx){
   // (`lancamento_receita_id` e `lancamento_despesa_id`), então a entrada de R$ 176,00
   // herdava o "pendente" que era da despesa de R$ 89,25. Três receitas em produção
   // estavam assim.
-  if(l.tipo_movimento !== 0) return false;
+  // Quitada também não: o repasse que já saiu não é dinheiro a repassar. Parece óbvio, e
+  // mesmo assim o repasse 1/3 da Saine Americo Ribeiro (R$ 171,00, pago em 17/08/2026)
+  // exibia o marcador. A operação que o dá por `efetuado` tem `recebido_em` NULO, e a
+  // consulta de operações filtra por esse campo dentro do período — então ela nunca era
+  // carregada, o `efetuado` ficava invisível e a linha caía na origem por carteira.
+  //
+  // Perseguir a operação resolveria só este caminho. A quitação é o fato: qualquer origem
+  // que diga "a repassar" sobre linha já paga está errada, venha de onde vier.
+  if(l.tipo_movimento !== 0 || _finLancQuitado(l)) return false;
   if(ctx.liberadas && _finRepasseTemLastroApuravel(l) && !ctx.liberadas.has(l.id)) return false;
   const op = ctx.opsByLanc[l.id];
   if(op) return op.repasse_status === 'pendente' || op.repasse_status === 'preparado' || op.repasse_status === 'revisar';
@@ -32011,6 +32019,16 @@ function _finLancEhDivergencia(l, ctx){
 // Cedente da linha, num lugar só: a sublinha, o filtro por cedente e o marcador de
 // repasse leem daqui. Se cada um derivasse por conta própria, o chip "Cedente" filtraria
 // por um nome que a linha não mostra.
+// Nome do credor como a TELA o mostra: nome fantasia, caindo na razão social só quando
+// não há fantasia. É o mesmo critério da view `casos`, de onde sai a coluna "credor" do
+// CRM — e ter dois critérios fazia a MESMA empresa aparecer com dois nomes na mesma lista.
+//
+// Medido em 31/08/2026 na Saine Americo Ribeiro: o repasse vindo da fin_operacao dizia
+// "Cecato Clinica Veterinaria Ltda" (razão social) e os lançados à mão diziam
+// "S.O.S Animal" (fantasia) — parecia haver dois credores. Na Juliana Pinto Ribeiro a
+// mesma coisa: "Arte Estofados Decor Ltda" na parcela 1/8 e "Arte Estofados - Dois
+// Vizinhos" nas outras sete.
+const _finNomeCredor = c => (c && (c.nome_fantasia || c.nome)) || null;
 function _finLancCedente(l, ctx){
   const op = ctx.opsByLanc[l.id];
   if(op && op._credorNome) return op._credorNome;
@@ -32236,7 +32254,7 @@ async function _finLancCascataCarregar(){
   const rows = data||[];
   const cedIds=[...new Set(rows.map(r=>r.cedente_id).filter(Boolean))];
   let cedMap={};
-  if(cedIds.length){ const {data}=await sb.from('clientes').select('id,nome').in('id',cedIds); (data||[]).forEach(c=>cedMap[c.id]=c.nome); }
+  if(cedIds.length){ const {data}=await sb.from('clientes').select('id,nome,nome_fantasia').in('id',cedIds); (data||[]).forEach(c=>cedMap[c.id]=_finNomeCredor(c)); }
 
   // Despesas de repasse cuja entrada já caiu. Set de ids; null quando a apuração falha —
   // e null NÃO é "nenhuma liberada", é "não sei" (ver _finLancEhRepasse).
@@ -32253,7 +32271,7 @@ async function _finLancCascataCarregar(){
       .gte('recebido_em', ini).lte('recebido_em', fim).limit(2000);
     const credIds=[...new Set((data||[]).map(o=>o.credor_id).filter(Boolean))];
     let credMap={};
-    if(credIds.length){ const {data:cs}=await sb.from('clientes').select('id,nome').in('id',credIds); (cs||[]).forEach(c=>credMap[c.id]=c.nome); }
+    if(credIds.length){ const {data:cs}=await sb.from('clientes').select('id,nome,nome_fantasia').in('id',credIds); (cs||[]).forEach(c=>credMap[c.id]=_finNomeCredor(c)); }
     (data||[]).forEach(o=>{ o._credorNome=credMap[o.credor_id]||null; if(o.lancamento_receita_id) opsByLanc[o.lancamento_receita_id]=o; if(o.lancamento_despesa_id) opsByLanc[o.lancamento_despesa_id]=o; });
   }catch(_){}
   // Carteira da linha, quando não há fin_operacao: de quem é esse dinheiro.
@@ -32278,7 +32296,7 @@ async function _finLancCascataCarregar(){
       const nomes = {};
       if(todos.length){
         const { data:cls } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', todos);
-        (cls||[]).forEach(c=>{ nomes[c.id] = c.nome_fantasia || c.nome; });
+        (cls||[]).forEach(c=>{ nomes[c.id] = _finNomeCredor(c); });
       }
       saidas.forEach(r=>{
         const cid = r.credor_id || porCob[r.cobranca_id];

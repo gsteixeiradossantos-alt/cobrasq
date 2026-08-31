@@ -201,6 +201,7 @@ const fonte = [
   // `_finEhTarifa` entrou em 31/08 (F-18): tarifa do Asaas não é repasse ao cedente, e a
   // exclusão passou a morar num helper só, usado pelas três leituras.
   trechoAte('const _finEhTarifa', '\n'),
+  trechoAte('const _finLancQuitado', '\n'),
   recorta('function _finLancEhRepasse(l, ctx){'),
   recorta('function _finLancEhDivergencia(l, ctx){'),
   recorta('function _finLancCedente(l, ctx){'),
@@ -381,8 +382,16 @@ const perto = (a, b) => Math.abs(a - b) < 0.005;
   ok('10a · a visão "Atrasados" não devolve o judicial pendente',
     ctxVm.FIN_MOV_VISOES.find(v => v.id === 'atrasados').ok(linhas.find(l => l.id === 4), ctx2) === true
     && !linhas.some(l => l.id === 6));
+  // A linha 8 do fixture é um repasse PAGO, e desde 31/08 repasse já quitado nunca é
+  // "a repassar" (F-23) — o estado dela (paga + operação pendente) não existe em produção,
+  // conferido: zero casos. O invariante é sobre a ORIGEM, então exercita o predicado com um
+  // repasse em aberto, sem mexer no fixture (que alimenta os agregados de 2b e 10c).
   ok('10b · a visão "A repassar" acha o repasse pela operação',
-    ctxVm.FIN_MOV_VISOES.find(v => v.id === 'repassar').ok(linhas.find(l => l.id === 8), ctx2) === true);
+    ctxVm.FIN_MOV_VISOES.find(v => v.id === 'repassar').ok(
+      { id: 8, tipo_movimento: 0, status: 0, data_pagamento: null, conciliado: false,
+        descricao: 'Repasse ao credor — Ana', credor_id: 'cli-1' }, ctx2) === true);
+  ok('10b2 · e não acha o repasse que já saiu',
+    ctxVm.FIN_MOV_VISOES.find(v => v.id === 'repassar').ok(linhas.find(l => l.id === 8), ctx2) === false);
 
   // 11. Acordos assinados no mês — inclusive o das 22h do último dia, que a comparação
   //     de texto em UTC jogava para o mês seguinte.

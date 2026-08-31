@@ -37,6 +37,7 @@ vm.createContext(ctx);
 vm.runInContext(
   corta('const _finEhTarifa', '\n')
   + corta('function _finRepasseTemLastroApuravel(l){', '\n}')
+  + corta('const _finLancQuitado', '\n')
   + corta('function _finLancEhRepasse(l, ctx){', '\n}')
   + 'this._eh = _finLancEhRepasse;',
   ctx

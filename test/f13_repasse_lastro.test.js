@@ -46,6 +46,7 @@ vm.runInContext(
   // `_finEhTarifa` (F-18) é usado por _finLancEhRepasse e pelo escopo do lastro.
   recorta('const _finEhTarifa', '\n') + '\n'
   + recorta('function _finRepasseTemLastroApuravel(l){') + '\n'
+  + recorta('const _finLancQuitado', '\n') + '\n'
   + recorta('function _finLancEhRepasse(l, ctx){') + '\n'
   + 'this._finLancEhRepasse = _finLancEhRepasse;'
   + 'this._finRepasseTemLastroApuravel = _finRepasseTemLastroApuravel;',
@@ -95,12 +96,13 @@ const fora = (l) => ehRepasse(l, { opsByLanc: {}, liberadas: new Set(),
 // nenhum — nem pela operação —, então não serve mais para provar que o portão do lastro
 // se cala. Quem cobre receita é o F-20. Aqui fica a saída JÁ PAGA, que continua fora do
 // universo apurado e continua acendendo pela operação.
-assert.strictEqual(
-  ehRepasse({ id: 1, tipo_movimento: 0, status: 1, credor_id: 'x', descricao: 'repasse já pago' },
-            { opsByLanc: { 1: { repasse_status: 'pendente' } }, credorPorLanc: {}, liberadas: new Set() }),
-  true, 'saída fora do universo apurado — o portão não opina');
-assert.strictEqual(fora({ id: 2, tipo_movimento: 0, status: 1, credor_id: 'x', descricao: 'repasse pago' }),
-  true, 'saída já paga está fora do universo apurado');
+// A saída JÁ PAGA saiu deste conjunto em 31/08 (F-23): repasse que já saiu nunca é "a
+// repassar", por origem nenhuma. Ela continua fora do universo do lastro — o que este
+// bloco prova —, mas agora o `false` vem da quitação, não do portão. A checagem de escopo
+// que sobra é a de `apuravel`, logo abaixo.
+assert.strictEqual(apuravel({ tipo_movimento: 0, status: 1, credor_id: 'x', descricao: 'repasse já pago' }),
+  false, 'saída já paga está fora do universo que o lastro apura');
+// (a saída já paga é tratada acima, por `apuravel`: desde o F-23 ela nem chega às origens)
 assert.strictEqual(fora({ id: 3, tipo_movimento: 0, status: 0, credor_id: null, descricao: 'saída sem credor' }),
   true, 'saída sem credor está fora do universo apurado');
 // A TARIFA saiu deste conjunto em 31/08 (F-18): ela deixou de acender por completo — não
