@@ -29608,6 +29608,30 @@ function _finAbaAtualParaRender(){
   const t = window._finTab;
   return (t === 'receitasjudiciais' || t === 'credores' || t === 'visao') ? t : 'lancamentos';
 }
+// Saldo de UMA conta, num lugar só — as três telas que mostram saldo (cascata, Visão e o
+// resumo do fechamento) repetiam esta expressão e podiam divergir.
+//
+// Regra: ROLL-FORWARD. Ancora no último saldo bancário conferido (`bank_balance`, gravado
+// pelo import do OFX) e soma o que se movimentou DEPOIS dele (`realizado_pos_ancora`, vindo
+// da RPC). Antes a âncora era o valor final e nada a atualizava: a conta Asaas passou 25
+// dias mostrando R$ 4.893,82, de 06/08, com saldo real de R$ 9.592,26.
+//
+// Não dá para usar o saldo do razão puro no lugar: `saldo_inicial` já embute a posição de
+// uma data de corte, e os lançamentos anteriores a ela entram por cima — na Asaas isso
+// inflava o saldo em R$ 8.934,48. O razão só entra quando não existe âncora.
+//
+// `realizado_pos_ancora` pode não vir (RPC antiga, antes da migração
+// 20260831_fin_saldos_roll_forward): aí o comportamento é o de antes, a âncora crua.
+function _finSaldoDaConta(c, saldosByConta){
+  if(!c) return 0;
+  const r = (saldosByConta && saldosByConta[c.id]) || null;
+  if(c.bank_balance != null){
+    const pos = (r && r.realizado_pos_ancora != null) ? (+r.realizado_pos_ancora || 0) : 0;
+    return (+c.bank_balance || 0) + pos;
+  }
+  if(r && r.saldo_atual != null) return +r.saldo_atual || 0;
+  return +c.saldo_inicial || 0;
+}
 function _finSaldoIdadeDias(conta){
   if(!conta || conta.bank_balance == null || !conta.bank_balance_at) return null;
   const t = new Date(conta.bank_balance_at).getTime();
@@ -30093,7 +30117,7 @@ async function _finCascataMetricas(force){
   const dim = await finApi.loadDimensoes();
   const saldosByConta = {};
   try{ const { data } = await sb.rpc('fin_saldos_realizados'); for(const r of (data||[])) saldosByConta[r.conta_id]=r; }catch(_){}
-  const _saldoConta = c => c.bank_balance!=null ? +c.bank_balance : (saldosByConta[c.id]!=null ? (+saldosByConta[c.id].saldo_atual||0) : (+c.saldo_inicial||0));
+  const _saldoConta = c => _finSaldoDaConta(c, saldosByConta);
   const contasNoGeral = (dim.contas||[]).filter(c=>c.incluir_no_saldo_geral!==false);
   const saldoGeral = contasNoGeral.reduce((s,c)=>s+_saldoConta(c),0);
 
@@ -36302,8 +36326,7 @@ async function renderFinVisao(el){
   // saldo bancário declarado > saldo realizado do razão > saldo inicial.
   const saldosByConta = {};
   try{ const { data } = await _sb.rpc('fin_saldos_realizados'); for(const r of (data||[])) saldosByConta[r.conta_id] = r; }catch(_){}
-  const _saldoConta = c => c.bank_balance != null ? +c.bank_balance
-    : (saldosByConta[c.id] != null ? (+saldosByConta[c.id].saldo_atual||0) : (+c.saldo_inicial||0));
+  const _saldoConta = c => _finSaldoDaConta(c, saldosByConta);
 
   const plural = (n, s, p) => n === 1 ? s : (p || s+'s');
   const pct1 = v => v.toFixed(1).replace('.', ',');
@@ -38046,13 +38069,15 @@ async function renderFinExtratoConta(contaId){
   const el=document.getElementById('fin-content'); if(!el) return;
   el.innerHTML=`<div style="text-align:center;padding:30px;color:var(--text-3);"><div class="mv2-spinner" style="margin:0 auto 8px;width:26px;height:26px;border-width:3px;"></div>Carregando extrato…</div>`;
   const incNaoPagos=!!window._extNaoPagos;
-  let conta=null, lances=[], saldoInicial=0, saldoAtual=0;
+  let conta=null, lances=[], saldoInicial=0, saldoAtual=0, saldoDaConta=null;
   try{
     const dim=await finApi.loadDimensoes(true);
     conta=(dim.contas||[]).find(c=>c.id==contaId)||{descricao:'Conta',id:contaId};
     saldoInicial=+conta.saldo_inicial||0;
     const sb=getSupabase();
-    try{ const {data}=await sb.rpc('fin_saldos_realizados'); const r=(data||[]).find(x=>x.conta_id==contaId); saldoAtual=(r&&r.saldo_atual!=null)?+r.saldo_atual:saldoInicial; }catch(_){ saldoAtual=saldoInicial; }
+    // `saldoDaConta` sai do MESMO helper da lista de Contas: sem isso, abrir a conta mostraria
+    // um saldo diferente do que a lista acabou de exibir.
+    try{ const {data}=await sb.rpc('fin_saldos_realizados'); const r=(data||[]).find(x=>x.conta_id==contaId); saldoAtual=(r&&r.saldo_atual!=null)?+r.saldo_atual:saldoInicial; saldoDaConta=_finSaldoDaConta(conta, r?{[conta.id]:r}:null); }catch(_){ saldoAtual=saldoInicial; saldoDaConta=_finSaldoDaConta(conta, null); }
     const {data}=await sb.from('fin_lancamento').select('id,descricao,valor,tipo_movimento,status,data_pagamento,data_vencimento,data_competencia').eq('conta_id',contaId).limit(3000);
     lances=data||[];
   }catch(e){ el.innerHTML=`<div class="panel" style="padding:20px;color:var(--danger);">Erro: ${escHtml(e.message||String(e))}</div>`; return; }
@@ -38070,7 +38095,7 @@ async function renderFinExtratoConta(contaId){
   for(const it of items){ if(!byDay[it._dt]){ byDay[it._dt]=[]; order.push(it._dt); } byDay[it._dt].push(it); }
   const daysDesc=[...order].reverse();
   const fmtD=s=>(s||'').split('-').reverse().join('/');
-  const dispBal = conta.bank_balance!=null? +conta.bank_balance : saldoAtual;
+  const dispBal = saldoDaConta != null ? saldoDaConta : saldoAtual;
   let updatedAgo='';
   if(conta.bank_balance_at){ const d=new Date(conta.bank_balance_at); const days=Math.floor((Date.now()-d.getTime())/86400000); updatedAgo= days<=0?'hoje':days===1?'ontem':`há ${days}d`; }
 
@@ -39498,7 +39523,7 @@ async function _finFechCarregar(){
   const dim = await finApi.loadDimensoes().catch(()=>({contas:[]}));
   const saldosByConta = {};
   try{ const { data } = await sb.rpc('fin_saldos_realizados'); for(const r of (data||[])) saldosByConta[r.conta_id]=r; }catch(_){}
-  const _saldoConta = c => c.bank_balance!=null ? +c.bank_balance : (saldosByConta[c.id]!=null?(+saldosByConta[c.id].saldo_atual||0):(+c.saldo_inicial||0));
+  const _saldoConta = c => _finSaldoDaConta(c, saldosByConta);
   const contasNoGeral = (dim.contas||[]).filter(c=>c.incluir_no_saldo_geral!==false);
 
   return {
