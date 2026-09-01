@@ -187,6 +187,7 @@ const TABELAS = {
 const fonte = [
   recorta('function _finCaixaHoje(){'),
   recorta('function _finDiasUteisRestantes(){'),
+  recorta('function _finSaldoDaConta(c, saldosByConta){'),
   recorta('function _finSaldoIdadeDias(conta){'),
   'const FIN_SALDO_STALE_DIAS = 7;',
   // `_finCascataMetricas` entra de VERDADE no recorte. Antes ela era substituída por uma
