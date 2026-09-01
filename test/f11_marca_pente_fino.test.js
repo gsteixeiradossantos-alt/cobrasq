@@ -1,0 +1,204 @@
+/*
+ * Teste F-11 — a marca do pente-fino não cega quem LÊ a descrição do lançamento.
+ *
+ * Em 31/08/2026 as 1.448 descrições de `fin_lancamento` receberam o sufixo
+ * ` · verificar`: o Gustavo está conferindo lançamento por lançamento e apaga a marca
+ * conforme confere. A marca encolhendo é o progresso dele.
+ *
+ * O efeito colateral: TODO leitor da descrição é ancorado no FIM, porque é lá que a
+ * numeração de parcela mora (` 59/60`). A marca ficou depois dela e cegou os quatro:
+ *
+ *   · _fincrSerieChave  — 436 lançamentos sem `cobranca_id` viraram um grupo POR PARCELA
+ *                         em "Recebíveis e repasses", em vez de uma série só;
+ *   · _fincrSerieNome   — o nome exibido virou "Noeli Rodrigues da Rosa 59/60 · verificar";
+ *   · _finEdNumeracao   — o editor parou de reconhecer a numeração (devolvia null);
+ *   · api/_repassar.js  — o `like` que propaga o credor às outras parcelas parou de casar.
+ *
+ * O caso que mais importa é o MISTO: enquanto ele confere, a mesma série tem parcela com
+ * marca e parcela sem. As duas precisam continuar no mesmo grupo, senão a tela se parte
+ * ao meio no meio do trabalho dele.
+ *
+ * Como rodar:
+ *   node test/f11_marca_pente_fino.test.js
+ */
+'use strict';
+
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const RAIZ = path.join(__dirname, '..');
+const HTML = fs.readFileSync(path.join(RAIZ, 'index.html'), 'utf8');
+
+// Extrai o bloco do helper até o fim de _finEdNumeracao — é contíguo no arquivo.
+function trecho(de, ate, incluirFim = true) {
+  const i = HTML.indexOf(de);
+  assert.ok(i >= 0, `não achei no index.html: ${de}`);
+  const j = HTML.indexOf(ate, i + de.length);
+  assert.ok(j > i, `não achei o fim (${ate}) a partir de ${de}`);
+  return HTML.slice(i, incluirFim ? j + ate.length : j);
+}
+
+// `const` dentro do vm fica no escopo léxico do script e NÃO vira propriedade do
+// contexto — por isso tudo roda num script só, que no fim exporta o que o teste usa.
+const fonte = [
+  // O helper da marca subiu para junto de _FIN_RE_PARCELA no #609 — é ele que todo
+  // leitor de descrição consulta antes de casar a numeração. Fatiar só até lá.
+  trecho('// Marca do pente-fino', 'const _FIN_RE_PARCELA', false),
+  trecho('const _FIN_RE_PARCELA', '\n'),
+  trecho('const _finSerieBase', '\n'),
+  trecho('function _finSerieNum(d){', '\n'),
+  trecho('const _finSerieTotal', '\n'),
+  trecho('const _finMesmaSerie', ';'),
+  trecho('const FIN_ED_FORMATOS_PARCELA = [', '];'),
+  trecho('function _finEdNumeracao(desc){', '\n}'),
+  trecho('const _fincrSerieChave', '\n'),
+  trecho('const _fincrSerieNome', '\n'),
+  'this._finEdNumeracao = _finEdNumeracao;',
+  'this._fincrSerieChave = _fincrSerieChave;',
+  'this._fincrSerieNome = _fincrSerieNome;',
+  'this._finDescCrua = _finDescCrua;',
+  'this._finSerieBase = _finSerieBase;',
+  'this._finSerieNum = _finSerieNum;',
+  'this._finMesmaSerie = _finMesmaSerie;',
+].join('\n');
+const ctx = { console, String, Number, Object, Array, RegExp, Set };
+vm.createContext(ctx);
+vm.runInContext(fonte, ctx);
+
+let falhas = 0;
+function ok(nome, cond, detalhe) {
+  if (cond) { console.log(`  ok  ${nome}`); return; }
+  falhas++; console.log(`  FALHOU  ${nome}${detalhe ? ' — ' + detalhe : ''}`);
+}
+
+console.log('\nF-11 · marca do pente-fino × leitores da descrição\n');
+
+const L = (desc, cobranca_id = null) => ({ descricao: desc, cobranca_id });
+const grupos = rows => new Set(rows.map(ctx._fincrSerieChave)).size;
+
+// ── Agrupamento da série ────────────────────────────────────────────────────
+ok('série marcada continua UM grupo',
+  grupos([L('Noeli Rodrigues da Rosa 59/60 · verificar'),
+          L('Noeli Rodrigues da Rosa 60/60 · verificar')]) === 1,
+  'a marca voltou a partir a série em um grupo por parcela');
+
+ok('série MISTA (uma conferida, outra não) continua UM grupo',
+  grupos([L('Noeli Rodrigues da Rosa 59/60'),
+          L('Noeli Rodrigues da Rosa 60/60 · verificar')]) === 1,
+  'a tela se parte ao meio enquanto ele confere');
+
+ok('séries de devedores DIFERENTES seguem separadas',
+  grupos([L('Noeli Rodrigues da Rosa 1/60 · verificar'),
+          L('Terezinha Pinheiro 1/57 · verificar')]) === 2,
+  'agrupou gente diferente no mesmo balde');
+
+ok('nome da série sai limpo, sem numeração e sem marca',
+  ctx._fincrSerieNome(L('Noeli Rodrigues da Rosa 59/60 · verificar')) === 'Noeli Rodrigues da Rosa');
+
+// ── Editor: numeração de parcela ────────────────────────────────────────────
+const comMarca = ctx._finEdNumeracao('Noeli Rodrigues da Rosa 60/60 · verificar');
+const semMarca = ctx._finEdNumeracao('Noeli Rodrigues da Rosa 60/60');
+ok('editor reconhece a numeração COM a marca', !!comMarca && comMarca.n === 60 && comMarca.total === 60,
+  'devolveu ' + JSON.stringify(comMarca));
+ok('e devolve o mesmo que devolveria sem ela',
+  !!semMarca && comMarca && comMarca.base === semMarca.base && comMarca.n === semMarca.n);
+
+ok('formato com parênteses também', (r => r && r.n === 3 && r.total === 12 && r.base === 'Fulano')
+  (ctx._finEdNumeracao('Fulano (3/12) · verificar')));
+ok('formato com prefixo "Parcela N/T" também', (r => r && r.n === 3 && r.total === 12)
+  (ctx._finEdNumeracao('Parcela 3/12 · Fulano · verificar')));
+
+// ── Não pode comer texto legítimo ───────────────────────────────────────────
+// A marca só vale no FIM. "verificar" no meio da frase é palavra da descrição.
+const meio = ctx._finEdNumeracao('Honorário verificar de contas 2/3');
+ok('"verificar" no MEIO da descrição é preservado',
+  !!meio && meio.base === 'Honorário verificar de contas',
+  'devolveu base ' + JSON.stringify(meio && meio.base));
+
+ok('descrição que termina em "verificar" SEM o ponto não é tocada',
+  ctx._fincrSerieNome(L('Pendência a verificar')) === 'Pendência a verificar');
+
+// ── Os dois leitores que ficaram de fora do #608 ────────────────────────────
+// Achados em 31/08 pelo print da aba Judicial: `_FIN_RE_PARCELA` também é ancorada no
+// fim, e é dela que sai o agrupamento POR PROCESSO da Judicial. Com a marca, os 76
+// judiciais sem `cobranca_id` viravam um grupo por parcela — 13 séries reais viradas
+// em dezenas de blocos de uma linha.
+ok('série judicial marcada agrupa por processo, não por parcela',
+  new Set([
+    'Adriane Lurdes Carneiro - Penhora de Salário 1 11/40 · verificar',
+    'Adriane Lurdes Carneiro - Penhora de Salário 1 12/40 · verificar',
+    'Adriane Lurdes Carneiro - Penhora de Salário 1 13/40 · verificar',
+  ].map(ctx._finSerieBase)).size === 1,
+  'voltou a partir a série judicial');
+
+ok('séries DIFERENTES do mesmo devedor seguem separadas (Salário 1 × 2)',
+  ctx._finSerieBase('Adriane Lurdes Carneiro - Penhora de Salário 1 11/40 · verificar')
+  !== ctx._finSerieBase('Adriane Lurdes Carneiro - Penhora de Salário 2 11/40 · verificar'),
+  'juntou duas penhoras distintas no mesmo grupo');
+
+ok('numeração é extraída mesmo com a marca (a coluna do banco está vazia)',
+  (r => r && r.n === 34 && r.total === 57)(ctx._finSerieNum('Terezinha Pinheiro - Desconto INSS 34/57 · verificar')),
+  'a coluna de parcela volta a mostrar — na aba Judicial');
+
+ok('descrição sem numeração devolve null, não inventa parcela',
+  ctx._finSerieNum('Sisbajud - Ana Claudia Reginato · verificar') === null);
+
+// ── Série é base IGUAL **e** total igual ────────────────────────────────────
+// Achado revisando o próprio PR #609: restaurar `_finSerieBase` reativou o
+// "excluir esta e as próximas", que desde 31/08 casava só a própria linha. Certo — mas
+// a comparação só por base junta duas séries distintas do mesmo devedor. 105 linhas em
+// 13 bases estão nessa condição no banco, TODAS sem grupo_parcelamento e sem acordo_id,
+// ou seja, todas no caminho que decide o que apagar.
+ok('mesma base e mesmo total = mesma série',
+  ctx._finMesmaSerie('Fulano 3/12 · verificar', 'Fulano 7/12'));
+
+ok('mesma base e totais DIFERENTES não são a mesma série',
+  !ctx._finMesmaSerie('Fulano 3/12 · verificar', 'Fulano 3/24 · verificar'),
+  '"excluir esta e as próximas" varreria duas séries de uma vez');
+
+ok('bases diferentes seguem diferentes mesmo com o mesmo total',
+  !ctx._finMesmaSerie('Fulano 3/12', 'Ciclano 3/12'));
+
+ok('duas sem numeração continuam comparáveis pela base',
+  ctx._finMesmaSerie('Sisbajud - Ana · verificar', 'Sisbajud - Ana'));
+
+ok('uma com numeração e outra sem NÃO são a mesma série',
+  !ctx._finMesmaSerie('Fulano 3/12', 'Fulano'),
+  'uma avulsa entraria no lote de exclusão de uma série');
+
+// Guarda de fonte: o helper certo tem de ser usado por QUEM DECIDE O QUE APAGAR.
+// Sem isto, trocar a chamada por `_finSerieBase(x) === base` nos dois filtros passa
+// despercebido — o teste acima continuaria verde exercitando só o helper solto.
+const RESOLVER = trecho('async function _finLancSerieResolver(ids){', '\n}');
+const SERIEDE  = trecho('async function _finEditorSerie(l){', '\n}');
+ok('o resolvedor da exclusão compara com _finMesmaSerie',
+  RESOLVER.includes('_finMesmaSerie('),
+  'voltou a juntar séries de totais diferentes no que vai ser excluído');
+ok('o levantamento da série do editor também',
+  SERIEDE.includes('_finMesmaSerie('),
+  'idem, no caminho do editor');
+ok('nenhum dos dois compara só pela base',
+  !/_finSerieBase\([^)]*\)\s*===\s*base/.test(RESOLVER + SERIEDE),
+  'a comparação frouxa voltou');
+
+// ── Guarda de fonte: o backend recebeu o mesmo tratamento ───────────────────
+const REPASSAR = fs.readFileSync(path.join(RAIZ, 'api', '_repassar.js'), 'utf8');
+// Não basta o arquivo "citar" verificar: a marca tem de ser tirada ANTES do corte da
+// numeração, senão o `like` continua não casando. Extrai a expressão real e roda.
+const mBase = REPASSAR.match(/const base = String\(lanc\.descricao \|\| ''\)([\s\S]{0,220}?)\.trim\(\);/);
+ok('api/_repassar.js monta a base cortando marca E numeração', !!mBase,
+  'a expressão que monta `base` mudou de forma — reveja este teste junto');
+if (mBase) {
+  const base = new Function('lanc', `const base = String(lanc.descricao || '')${mBase[1]}.trim(); return base;`);
+  ok('base do `like` ignora a marca (propaga o credor às outras parcelas)',
+    base({ descricao: 'Noeli Rodrigues da Rosa 59/60 · verificar' }) === 'Noeli Rodrigues da Rosa',
+    'devolveu ' + JSON.stringify(base({ descricao: 'Noeli Rodrigues da Rosa 59/60 · verificar' })));
+  ok('e continua certa para quem já foi conferido',
+    base({ descricao: 'Noeli Rodrigues da Rosa 59/60' }) === 'Noeli Rodrigues da Rosa');
+}
+
+console.log('');
+if (falhas) { console.error(`${falhas} falha(s).`); process.exit(1); }
+console.log('F-11 · a marca do pente-fino não cega os leitores da descrição.');

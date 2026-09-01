@@ -47,6 +47,7 @@ const { asaasReq } = require('./_asaas.js');
 const { zapiSendText, zapiSendDocumentPdf } = require('./_zapi.js');
 const { gerarReciboPdfBase64, formaPagamento } = require('./_recibo.js');
 
+const { hojeBR } = require('./_data.js');
 // Conta e categorias da ponte fin_lancamento. Sem elas o lançamento nasce órfão:
 // some dos relatórios por categoria e não entra em conta nenhuma. A revisão de
 // 14/08/2026 achou 19 assim (R$ 1.970,86) — 11 "Recebimento" e 8 "Repasse ao
@@ -134,26 +135,36 @@ module.exports = async function handler(req, res) {
       cobValorOrig = cobs[0] ? cobs[0].valor_orig : null;
     }
 
-    // Split capital/honorário.
+    // ── O SISTEMA NÃO DIVIDE O RECEBIMENTO ──────────────────────────────────────
+    // Regra do dono (28/08/2026): quanto vai para o cedente é decisão dele, tomada UMA
+    // VEZ POR ACORDO, e materializada como despesas de repasse que ele mesmo lança. Não
+    // sai de conta nenhuma sobre o valor da dívida.
+    //
+    // O acordo da Ivone Klinzer mostra por quê: 27 entradas de R$ 506,00 e 28 saídas de
+    // R$ 250,00, sobre uma dívida registrada de R$ 7.068,00. Nenhuma proporção entre
+    // valor original e valor atual chega nesses números — eles vêm do combinado com o
+    // cedente.
+    //
+    // O que existia aqui tentava adivinhar: rateava capital/honorário pela razão
+    // capital_credor ÷ valor_total do acordo e, quando não conseguia, marcava a operação
+    // como 'revisar'. Os dois lados estavam errados. Quando calculava, inventava um
+    // número; quando não, criava uma pendência POR PAGAMENTO — a Ivone geraria 27
+    // pendências ao longo de dois anos para uma decisão única. Foi assim que a fila
+    // chegou a 46 em sete semanas, com 83% a 100% dos recebimentos travando.
+    //
+    // Agora o recebimento só é REGISTRADO. A pendência de definir o repasse vive no
+    // acordo, no passo "Definir repasse" da Pós-assinatura, que já lista os acordos sem
+    // repasse definido.
     const valorRecebido = round2(payment.value);
+    // Guardados só como referência de quem for conferir depois — não alimentam divisão.
     const acordoTotal = Number(acordo && acordo.valor_total) || 0;
     const capitalBase = Number((acordo && acordo.metadata && acordo.metadata.capital_credor)) ||
                         Number(cobValorOrig) || 0;
-    // P1 (auditoria 2026-06): só rateia quando há base segura (acordo.valor_total > 0).
-    // Sem acordo vinculado, o código antigo forçava capitalRatio=0 → 100% honorário e
-    // NUNCA repassava capital ao credor, silenciosamente. Agora, na falta de base,
-    // marca a operação para REVISÃO MANUAL em vez de classificar errado.
-    const podeRatear = acordoTotal > 0;
-    const capitalRatio = podeRatear ? Math.min(capitalBase / acordoTotal, 1) : null;
-    const valorCapital = podeRatear ? round2(valorRecebido * capitalRatio) : 0;
-    const valorHonorario = podeRatear ? round2(valorRecebido - valorCapital) : 0;
-    // Acordo vinculado mas SEM base de capital (capital_credor/valor_orig ausentes ou 0,
-    // ex.: dado legado não migrado) NÃO é o mesmo que capital genuinamente zero: também
-    // vai para REVISÃO MANUAL, senão o valor cai 100% em honorário e o credor nunca é
-    // repassado, sem alerta.
-    const repasseStatus = (!podeRatear || capitalBase <= 0)
-      ? 'revisar'
-      : (valorCapital > 0 ? 'pendente' : 'nao_aplica');
+    const valorCapital = null;
+    const valorHonorario = null;
+    // 'nao_aplica' = este PAGAMENTO não carrega uma operação de repasse. Não quer dizer
+    // que não há repasse: ele é definido no acordo e lançado como despesa.
+    const repasseStatus = 'nao_aplica';
 
     const row = {
       acordo_id: acordo ? acordo.id : null,
@@ -166,13 +177,15 @@ module.exports = async function handler(req, res) {
       valor_recebido: valorRecebido,
       valor_capital: valorCapital,
       valor_honorario: valorHonorario,
-      recebido_em: payment.paymentDate || payment.clientPaymentDate || new Date().toISOString().slice(0, 10),
+      recebido_em: payment.paymentDate || payment.clientPaymentDate || hojeBR(),
       recebimento_status: 'recebido',
       repasse_status: repasseStatus,
       nf_status: 'pendente',
       metadata: {
+        // Referência para quem for definir o repasse; NÃO é uma divisão calculada.
         capital_base: capitalBase,
-        capital_ratio: capitalRatio,
+        acordo_total: acordoTotal || null,
+        divisao_automatica: false,
         billing_type: payment.billingType || null,
         net_value: payment.netValue ?? null,
         credor_nome: credor ? credor.nome : null,
@@ -415,7 +428,22 @@ module.exports = async function handler(req, res) {
     try { b64 = await gerarReciboPdfBase64(dadosRec); } catch (e) { console.warn('[processar-recebimento] gerar recibo PDF:', e.message); }
 
     let zap = null, pdfEnviado = false, erroPdf = null;
-    const tel = String((devedor && devedor.telefone) || '').replace(/\D/g, '');
+    // O telefone do devedor tem DUAS moradas e elas divergem: `devedores.telefone` e
+    // `bia_cobranca.telefone`. Em 27/08/2026 eram 8 devedores com o campo relacional
+    // vazio e o número certo na fila da Bia — a Nely Therezinha Schaefer recebia o
+    // lembrete de vencimento (que lê a bia_cobranca) mas nenhum recibo (que lia só o
+    // relacional), e a única cópia do PDF ia para o número de monitoramento. Antes de
+    // desistir do envio, busca na bia_cobranca pelo pagamento e pelo customer Asaas.
+    let tel = String((devedor && devedor.telefone) || '').replace(/\D/g, '');
+    let telOrigem = tel ? 'devedores' : '';
+    if (!tel) {
+      const filtro = payment.customer
+        ? `or=(asaas_payment_id.eq.${encodeURIComponent(paymentId)},asaas_customer_id.eq.${encodeURIComponent(payment.customer)})`
+        : `asaas_payment_id=eq.${encodeURIComponent(paymentId)}`;
+      const bia = await sbFetch(`bia_cobranca?${filtro}&select=telefone&limit=1`).catch(() => []);
+      const t = String((bia && bia[0] && bia[0].telefone) || '').replace(/\D/g, '');
+      if (t) { tel = t; telOrigem = 'bia_cobranca'; }
+    }
     if (tel) {
       if (b64) { try { pdfEnviado = await zapiSendDocumentPdf(tel, b64, 'Recibo COBRASQ.pdf'); } catch (e) { pdfEnviado = false; erroPdf = e.message; } }
 
@@ -449,9 +477,13 @@ module.exports = async function handler(req, res) {
           payload: {
             payment_id: paymentId,
             valor: valorRecebido,
-            motivo: b64 ? 'PDF gerado, mas o envio pela Z-API falhou' : 'geração do PDF falhou (duas tentativas)',
+            // Sem telefone a Z-API nunca chega a ser chamada — dizer que ela falhou
+            // manda quem lê a ficha caçar problema de integração que não existe.
+            motivo: !tel ? 'devedor sem telefone (nem em devedores, nem na fila da Bia)'
+              : (b64 ? 'PDF gerado, mas o envio pela Z-API falhou' : 'geração do PDF falhou (duas tentativas)'),
             erro: erroPdf,
             tinha_telefone: !!tel,
+            telefone_origem: telOrigem || null,
           },
           autor_nome: 'Financeiro (webhook Asaas)',
         }),

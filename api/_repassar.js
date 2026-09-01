@@ -23,6 +23,7 @@ const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_compr
 const { lerDescricaoRepasse, descricaoPix, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
 const { saldoDeCapital, devedorPrincipal, resolverCobrancaId, registrarRepasseNaFicha } = require('./_repasse-ficha.js');
 
+const { hojeBR } = require('./_data.js');
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 function fmtBRL(v) { return 'R$ ' + (Number(v) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
@@ -89,7 +90,10 @@ module.exports = async function handler(req, res) {
         // a cobrança. Best-effort: não pode impedir o pagamento.
         if (body.credor_id) {
           try {
-            const base = String(lanc.descricao || '').replace(/\s*\d+\/\d+\s*$/, '').trim();
+            // A marca ` · verificar` (pente-fino de 31/08) fica DEPOIS da numeração e cegava
+            // este corte, quebrando o `like` que propaga o credor às outras parcelas.
+            const base = String(lanc.descricao || '').replace(/\s*·\s*verificar\s*$/i, '')
+              .replace(/\s*\d+\/\d+\s*$/, '').trim();
             await sbFetch(`fin_lancamento?id=eq.${lanc.id}`, {
               method: 'PATCH', prefer: 'return=minimal',
               body: JSON.stringify({ credor_id: credorEscolhido }),
@@ -158,9 +162,35 @@ module.exports = async function handler(req, res) {
     // outro. Reconcilia o status do transfer existente e retorna; só envia um novo
     // PIX quando ainda não há transfer vinculado à operação.
     if (op.repasse_asaas_transfer_id) {
-      const tr = await asaasReq('GET', `/transfers/${encodeURIComponent(op.repasse_asaas_transfer_id)}`).catch(() => null);
+      // Separar "não deu para perguntar ao Asaas" de "o Asaas respondeu que não existe":
+      // um erro de rede NÃO pode liberar o botão, senão um segundo PIX sai por cima de
+      // um primeiro que estava só demorando.
+      let tr = null, trErr = null;
+      try { tr = await asaasReq('GET', `/transfers/${encodeURIComponent(op.repasse_asaas_transfer_id)}`); }
+      catch (e) { trErr = e; }
+      const sumiu = !!trErr && /\b404\b/.test(String((trErr && trErr.message) || ''));
       const stExist = String((tr && tr.status) || op.metadata?.repasse_asaas_status || '').toUpperCase();
       const doneExist = stExist === 'DONE' || stExist === 'CONFIRMED';
+      // Transferência recusada, cancelada ou apagada dentro do Asaas: o dinheiro não
+      // saiu, então a operação volta a 'pendente' e o botão reaparece. Sem isto ela
+      // ficava 'preparado' para sempre e o repasse simplesmente não acontecia mais.
+      const falhouExist = !doneExist && (sumiu || /FAIL|CANCEL|ERROR|REFUS|REJECT|DENIED/.test(stExist));
+      if (falhouExist && op.repasse_status !== 'efetuado') {
+        await sbFetch(`fin_operacao?id=eq.${op.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            repasse_status: 'pendente',
+            repasse_asaas_transfer_id: null,
+            metadata: { ...(op.metadata || {}), repasse_asaas_status: sumiu ? 'NOT_FOUND' : stExist,
+                        repasse_liberado_em: new Date().toISOString() },
+          }),
+        }).catch(() => {});
+        return res.status(200).json({
+          ok: true, liberado: true, operacao_id: op.id,
+          asaas_status: sumiu ? 'NOT_FOUND' : (stExist || null), repasse_status: 'pendente',
+          motivo: sumiu ? 'transferência não existe mais no Asaas' : `transferência ${stExist} no Asaas`,
+        });
+      }
       if (doneExist && op.repasse_status !== 'efetuado') {
         await sbFetch(`fin_operacao?id=eq.${op.id}`, {
           method: 'PATCH',
@@ -265,7 +295,7 @@ module.exports = async function handler(req, res) {
     // Ponte fin_lancamento: ao efetivar, marca a despesa de repasse como PAGA. Move
     // data_competencia junto (mesmo motivo do lado da receita — ver _repasse-concluido.js).
     if (concluido && op.lancamento_despesa_id) {
-      const hoje = new Date().toISOString().slice(0, 10);
+      const hoje = hojeBR();
       await sbFetch(`fin_lancamento?id=eq.${op.lancamento_despesa_id}`, {
         method: 'PATCH',
         body: JSON.stringify({ status: 1, data_pagamento: hoje, data_competencia: hoje, valor_pago: -round2(op.valor_capital) }),
@@ -296,7 +326,7 @@ module.exports = async function handler(req, res) {
       if (!pdf) {
         pdf = await gerarComprovanteRepassePdf({
           credorNome: credor.nome, devedor: ref.devedor, parcela: ref.parcela,
-          valor: op.valor_capital, dataISO: new Date().toISOString().slice(0, 10),
+          valor: op.valor_capital, dataISO: hojeBR(),
           transferId: transfer.id, chavePix: pixKey, urlAsaas: comprovanteUrl,
         });
       }
@@ -318,7 +348,7 @@ module.exports = async function handler(req, res) {
       ficha = await registrarRepasseNaFicha({
         cobrancaId: await resolverCobrancaId(op),
         credor, valor: op.valor_capital, transferId: transfer.id,
-        dataPix: new Date().toISOString().slice(0, 10), comprovante: arq,
+        dataPix: hojeBR(), comprovante: arq,
       });
     }
 
