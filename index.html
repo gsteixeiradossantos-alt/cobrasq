@@ -20798,7 +20798,10 @@ async function renderCobrancaDetalhe(){
   const panelRepasses=`<div class="det2-panel">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
       <div class="det2-panel-tt" style="margin:0;">Repasses ao cliente${repasses.length?` (${repasses.length})`:''}</div>
-      <button class="cob-btn-primary" onclick="abrirRepasseIA()">${ico('file',14)} Enviar comprovantes (IA)</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-ghost btn-sm" onclick="extratoRepasseAcordoPDF()" title="Extrato de repasse deste acordo, em PDF, para enviar ao credor">${ico('file',13)} Extrato de repasse</button>
+        <button class="cob-btn-primary" onclick="abrirRepasseIA()">${ico('file',14)} Enviar comprovantes (IA)</button>
+      </div>
     </div>
     <div class="det2-kpis">
       <div class="det2-kpi"><div class="k">Capital</div><div class="v">${_temCapital?fmtR(vCapital):fmtR(vAtual)}</div>${_temCapital?'':'<div style="font-size:10px;color:var(--d-text-3);margin-top:2px;">capital não definido</div>'}</div>
@@ -35892,6 +35895,168 @@ async function cobrasqComprovantePDF(operacaoId){
   try{
     await _gerarPdf(html, { filename:`comprovante-repasse-${String(o.id).slice(0,8)}.pdf`, margin:0, saida:'save' });
   }catch(e){ showToast('Erro ao gerar PDF: '+(e.message||e),'danger'); }
+}
+
+// ═══ Extrato de repasse por acordo/cobrança ═══════════════════════════════════
+// Documento ao credor, no padrão visual COBRASQ v3 (faixa Marinho + corpo branco +
+// logo limpo, SEM descritor — decisão do proprietário jun/2026). Discrimina, parcela
+// a parcela, o repasse de CAPITAL daquele acordo.
+//
+// As linhas saem de DUAS fontes, sem se sobrepor:
+//   • repasses JÁ FEITOS  → `repasses_cliente` (PIX real, com transacao_id). É a fonte
+//     de verdade do que saiu; o Financeiro pode nem ter o lançamento correspondente.
+//   • repasses A FAZER    → `fin_lancamento` tipo_movimento=0 status=0 (parcela prevista).
+// Somar as duas tabelas para a MESMA parcela duplicaria — por isso o pago vem só de
+// `repasses_cliente` e o previsto só dos lançamentos em aberto.
+async function extratoRepasseAcordoPDF(){
+  const ctx = window._repasseCtx || {};
+  if(!ctx.cobId){ showToast('Abra um caso para gerar o extrato.','warning'); return; }
+  const supa = getSupabase();
+  if(!supa){ showToast('Sem conexão com o banco.','danger'); return; }
+  showToast('Gerando extrato…','info');
+  try{
+    const [{ data:pix }, { data:parc }] = await Promise.all([
+      supa.from('repasses_cliente').select('valor,data_pix,transacao_id')
+          .eq('cobranca_id', ctx.cobId).order('data_pix',{ascending:true}),
+      supa.from('fin_lancamento').select('valor,data_vencimento,numero_parcela,total_parcelas')
+          .eq('cobranca_id', ctx.cobId).eq('tipo_movimento',0).eq('status',0)
+          .order('data_vencimento',{ascending:true}),
+    ]);
+    const feitos = pix||[], previstos = parc||[];
+    if(!feitos.length && !previstos.length){
+      showToast('Este caso não tem repasse feito nem previsto.','warning'); return;
+    }
+    const cob = (typeof DB_cobrancas!=='undefined'?DB_cobrancas:[]||[]).find(c=>c.id===ctx.cobId) || {};
+    const cli = (DB.clientes||[]).find(c=>c.id===ctx.clienteId) || {};
+    const razao = cli.nome || '';
+    const fantasia = cli.nomeFantasia || cli.nome_fantasia || '';
+    const credor = (fantasia && razao && fantasia!==razao) ? `${fantasia} · ${razao}` : (fantasia||razao||ctx.clienteNome||'—');
+    const capital = (cob.valor_capital!=null) ? +cob.valor_capital : null;
+
+    const total_n = feitos.length + previstos.length;
+    const rows = [];
+    let i = 0, pago = 0, aberto = 0;
+    for(const r of feitos){
+      i++; pago += (+r.valor||0);
+      rows.push({ n:`${i} de ${total_n}`, ref:_extData(r.data_pix), pago:_extData(r.data_pix),
+                  aut:r.transacao_id||'', valor:+r.valor||0, ok:true });
+    }
+    for(const p of previstos){
+      i++; const v = Math.abs(+p.valor||0); aberto += v;
+      rows.push({ n:`${i} de ${total_n}`, ref:_extData(p.data_vencimento), pago:null, aut:'', valor:v, ok:false });
+    }
+    const total = pago + aberto;
+    const html = _extratoRepasseHtml({
+      credor, credorDoc: cli.doc||'', devedor: _cobrPrincipalNome(cob) || "—",
+      processo: cob.numero_processo || '—', capital, rows, pago, aberto, total,
+      nPagos: feitos.length,
+    });
+    await _gerarPdf(html, { filename:`extrato-repasse-${String(ctx.cobId).slice(0,8)}.pdf`, margin:0, saida:'save' });
+  }catch(e){ showToast('Erro ao gerar o extrato: '+(e.message||e),'danger'); }
+}
+function _extData(d){ return d ? String(d).slice(0,10).split('-').reverse().join('/') : '—'; }
+function _extExtenso(){
+  const M=['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+  const x=new Date(); return `${x.getDate()} de ${M[x.getMonth()]} de ${x.getFullYear()}`;
+}
+// Monta o HTML do extrato. `dense` compacta o layout quando há muitas parcelas,
+// pra o documento continuar cabendo numa página só.
+function _extratoRepasseHtml(d){
+  const dense = d.rows.length > 5 ? ' dense' : '';
+  const tr = (r)=>`<tr><td>${escHtml(r.n)}<span class="aut">${r.ok?'PIX em ':'venc. '}${escHtml(r.ref)}</span></td>
+    <td class="n">${r.pago?escHtml(r.pago):'—'}${r.aut?`<span class="aut">${escHtml(r.aut)}</span>`:''}</td>
+    <td class="n">${fmtR(r.valor)}</td>
+    <td class="n"><span class="pg ${r.ok?'ok':'ab'}">${r.ok?'Repassada':'Em aberto'}</span></td></tr>`;
+  const intro = d.nPagos
+    ? 'Discriminamos os repasses de <b>capital</b> efetuados ao credor, referentes ao acordo firmado nos autos em referência. Cada repasse foi feito por PIX; o código de autenticação de cada transferência acompanha a respectiva parcela.'
+    : 'Discriminamos abaixo o cronograma de repasse de <b>capital</b> ao credor, referente ao acordo firmado nos autos em referência. Até a presente data não houve repasse. Cada repasse será feito por PIX, e o código de autenticação da transferência passará a constar nesta relação.';
+  const fecho = d.nPagos
+    ? `Repassados <b>${fmtR(d.pago)}</b> em ${d.nPagos} ${d.nPagos===1?'transferência':'transferências'}; restam <b>${fmtR(d.aberto)}</b>. O valor nominal do débito retorna integralmente ao credor — a remuneração da COBRASQ recai apenas sobre os <span class="em">acessórios</span>.`
+    : `O total a repassar é de <b>${fmtR(d.total)}</b>, em ${d.rows.length} ${d.rows.length===1?'parcela':'parcelas'}, conforme o cronograma acima. O valor nominal do débito retorna integralmente ao credor — a remuneração da COBRASQ recai apenas sobre os <span class="em">acessórios</span>.`;
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"/>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,500&family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono&display=swap"/>
+<style>
+:root{--ink:#0A1530;--accent:#C9A961;--accent-2:#9C7F40;--paper:#EFEAD9;
+--line:rgba(10,21,48,.14);--mute:rgba(10,21,48,.55);--d-mute:rgba(239,234,217,.6);
+--serif:"Fraunces","Times New Roman",serif;--serif-edit:"Instrument Serif","Times New Roman",serif;
+--sans:"Inter Tight",system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace;}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+@page{size:210mm 297mm;margin:0;}
+html,body{font-family:var(--sans);color:var(--ink);}
+.doc-band{width:210mm;height:296.5mm;display:flex;flex-direction:column;background:#FFF;}
+.band{background:var(--ink);color:var(--paper);padding:34px 70px 30px;display:flex;justify-content:space-between;align-items:center;position:relative;}
+.band::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;background:var(--accent);opacity:.85;}
+.band .lockup{display:flex;align-items:center;gap:16px;}
+.band .dot{width:36px;height:36px;border-radius:50%;background:var(--accent);}
+.band .wm{font-family:var(--serif);font-weight:300;text-transform:lowercase;font-size:27px;line-height:1;color:var(--paper);}
+.band .wm::after{content:".";color:var(--accent);}
+.band .head-meta{font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--d-mute);text-align:right;line-height:1.9;}
+.doc-inner{padding:30px 62px 26px;flex:1;display:flex;flex-direction:column;gap:15px;}
+.foot{margin-top:auto;padding-top:16px;border-top:.5px solid var(--line);display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);}
+.kicker{font-family:var(--mono);font-size:11px;letter-spacing:.28em;text-transform:uppercase;color:var(--accent-2);}
+.doc-title{display:flex;justify-content:space-between;align-items:baseline;}
+.doc-title .t{font-family:var(--serif);font-weight:300;font-size:36px;letter-spacing:-.02em;line-height:1;}
+.doc-title .num{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);text-align:right;line-height:1.8;}
+.ref{display:grid;grid-template-columns:1fr 1fr;gap:0 30px;border-top:.5px solid var(--line);border-bottom:.5px solid var(--line);padding:12px 0;}
+.ref div{padding:5px 0;}
+.ref .l{font-family:var(--mono);font-size:8px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);}
+.ref .v{font-size:13.5px;margin-top:3px;}
+.value-box{display:flex;align-items:baseline;justify-content:space-between;border:.5px solid var(--accent);padding:15px 24px;background:rgba(201,169,97,.06);}
+.value-box .vl{font-family:var(--mono);font-size:9px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);}
+.value-box .vv{font-family:var(--serif);font-size:31px;letter-spacing:-.01em;}
+.decl{font-family:var(--serif-edit);font-size:15px;line-height:1.58;max-width:80ch;}
+.decl b{font-weight:400;font-family:var(--sans);}
+.em{color:var(--accent-2);font-style:italic;}
+table{width:100%;border-collapse:collapse;}
+th{font-family:var(--mono);font-size:8px;letter-spacing:.18em;text-transform:uppercase;color:var(--mute);font-weight:400;text-align:right;padding:0 10px 9px;border-bottom:.5px solid var(--ink);}
+th:first-child{text-align:left;}
+td{padding:8px 10px;border-bottom:.5px solid var(--line);font-size:12px;vertical-align:top;}
+td.n{text-align:right;white-space:nowrap;font-family:var(--mono);font-size:12px;}
+td .aut{display:block;font-family:var(--mono);font-size:7.4px;color:var(--mute);margin-top:3px;word-break:break-all;}
+.pg{font-family:var(--mono);font-size:8px;letter-spacing:.16em;text-transform:uppercase;}
+.pg.ok{color:#4C6647;}.pg.ab{color:var(--accent-2);}
+tr.tot td{border-bottom:0;border-top:.5px solid var(--ink);padding-top:11px;font-family:var(--mono);font-size:13px;}
+tr.tot td:first-child{font-size:8px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);}
+.place-date{font-family:var(--serif-edit);font-size:15px;}
+.sign{margin-top:16px;}
+.sign .line{width:240px;border-top:.5px solid var(--ink);opacity:.6;margin-bottom:10px;}
+.sign .name{font-family:var(--serif);font-size:20px;}
+.sign .role{font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);margin-top:4px;}
+.dense .doc-inner{padding:26px 62px 22px;gap:11px;}
+.dense .doc-title .t{font-size:31px;}
+.dense .value-box{padding:12px 24px;}.dense .value-box .vv{font-size:27px;}
+.dense .decl{font-size:13.6px;line-height:1.52;}
+.dense td{padding:6px 10px;font-size:11.4px;}
+.dense .ref{padding:10px 0;}.dense .ref .v{font-size:12.5px;}
+.dense .sign{margin-top:12px;}.dense .sign .name{font-size:18px;}
+.dense .place-date{font-size:14px;}
+</style></head><body>
+<div class="doc-band${dense}">
+  <div class="band"><div class="lockup"><span class="dot"></span><div class="wm">cobrasq</div></div>
+    <div class="head-meta">COBRASQ Recuperadora de Crédito e Cobrança Ltda.<br/>CNPJ 34.626.848/0001-42<br/>Dois Vizinhos · PR · cobrasq.com.br</div></div>
+  <div class="doc-inner">
+    <div class="doc-title"><div><div class="kicker">Extrato de repasse</div><div class="t">Prestação de contas</div></div>
+      <div class="num">Processo ${escHtml(d.processo)}<br/>Emitido em ${_extExtenso()}</div></div>
+    <div class="ref">
+      <div><div class="l">Credor</div><div class="v">${escHtml(d.credor)}</div></div>
+      <div><div class="l">CNPJ</div><div class="v">${escHtml(d.credorDoc||'—')}</div></div>
+      <div><div class="l">Devedor</div><div class="v">${escHtml(d.devedor)}</div></div>
+      <div><div class="l">Capital do acordo</div><div class="v">${d.capital!=null?fmtR(d.capital):'—'}</div></div>
+    </div>
+    <div class="value-box"><span class="vl">${d.nPagos?'Repassado até aqui':'A repassar ao credor'}</span>
+      <span class="vv">${fmtR(d.nPagos?d.pago:d.total)}</span></div>
+    <p class="decl">${intro}</p>
+    <table><thead><tr><th>Parcela</th><th>Pagamento</th><th>Valor</th><th>Situação</th></tr></thead>
+      <tbody>${d.rows.map(tr).join('')}
+      <tr class="tot"><td>Total do acordo</td><td class="n"></td><td class="n">${fmtR(d.total)}</td><td class="n"></td></tr></tbody></table>
+    <p class="decl">${fecho}</p>
+    <div class="place-date">Dois Vizinhos/PR, ${_extExtenso()}.</div>
+    <div class="sign"><div class="line"></div><div class="name">${escHtml((DB.config&&DB.config.nome)||'Gustavo Teixeira')}</div>
+      <div class="role">Proprietário · COBRASQ</div></div>
+    <div class="foot"><span>contato@cobrasq.com.br · (46) 98822-6533</span>
+      <span>cobrasq.com.br · @ccobrasq</span><span>Edifício Mara · 2º Andar · Sala 201</span></div>
+  </div>
+</div></body></html>`;
 }
 
 async function cobrasqReciboPDF(operacaoId){
