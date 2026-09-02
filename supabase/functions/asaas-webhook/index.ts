@@ -73,6 +73,34 @@ async function safeEqual(a: string, b: string): Promise<boolean> {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Recebimento confirmado que o /api/processar-recebimento NÃO conseguiu processar.
+// Vai para a mesma fila dos pagamentos órfãos (asaas_pagamento_orfao), que já tem tela
+// no painel — assim a falha aparece para uma pessoa em vez de morrer num log que
+// ninguém lê. Idempotente pelo índice único em asaas_payment_id: o Asaas reenvia o
+// webhook até receber 200, e a fila não pode encher de repetição.
+// Best-effort de propósito: registrar a falha não pode derrubar o webhook.
+// deno-lint-ignore no-explicit-any
+async function registrarFalhaProcessamento(sb: any, paymentId: string, payment: any, httpStatus: number, resposta: unknown) {
+  if (!paymentId) return;
+  try {
+    const detalhe = httpStatus
+      ? `processar-recebimento respondeu HTTP ${httpStatus}: ${JSON.stringify(resposta).slice(0, 500)}`
+      : `processar-recebimento não respondeu: ${JSON.stringify(resposta).slice(0, 500)}`;
+    await sb.from('asaas_pagamento_orfao').upsert({
+      asaas_payment_id: paymentId,
+      asaas_customer_id: payment?.customer || null,
+      valor: payment?.value ?? null,
+      due_date: payment?.dueDate || null,
+      payment_date: payment?.paymentDate || payment?.clientPaymentDate || null,
+      billing_type: payment?.billingType || null,
+      motivo: 'falha_processamento',
+      detalhe,
+    }, { onConflict: 'asaas_payment_id', ignoreDuplicates: true });
+  } catch (e) {
+    console.warn('[asaas-webhook] registrar falha de processamento: ' + String((e as Error)?.message || e));
+  }
+}
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -325,9 +353,19 @@ Deno.serve(async (req) => {
         signal: AbortSignal.timeout(25000),
       });
       operacao = await r.json().catch(() => ({ status: r.status }));
+      // O status HTTP precisa ser OLHADO. Sem isto, um 500 do endpoint virava só mais um
+      // campo no JSON de resposta e o webhook devolvia 200 ao Asaas, que então parava de
+      // reenviar: falha permanente, silenciosa e sem rastro. Foi assim que os recebimentos
+      // de 28/08 a 02/09/2026 se perderam — 8 pagamentos sem operação, sem lançamento e
+      // sem recibo, e ninguém soube até o devedor perguntar pelo comprovante.
+      if (!r.ok) {
+        await registrarFalhaProcessamento(sb, paymentId, payment, r.status, operacao);
+        operacao = { erro_http: r.status, resposta: operacao };
+      }
     } catch (e) {
       operacao = { error: String((e as Error)?.message || e) };
       console.warn('[asaas-webhook] processar-recebimento falhou: ' + JSON.stringify(operacao));
+      await registrarFalhaProcessamento(sb, paymentId, payment, 0, operacao);
     }
   }
 

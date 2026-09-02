@@ -11,11 +11,30 @@ function normalizarTelefone(phone) {
   // Grupo do WhatsApp ("120363417597227442-group"): a Z-API aceita o id do grupo no
   // mesmo campo `phone`. Só que ele tem 18 dígitos e sufixo — passar pelo tratamento
   // de número o deixaria irreconhecível. Vai como está.
-  if (/-group$/i.test(bruto) || /^\d{15,}$/.test(bruto.replace(/\D/g, ''))) {
-    return bruto.replace(/[^0-9A-Za-z-]/g, '');
-  }
-  let fone = bruto.replace(/\D/g, '');
-  if (fone && fone.length <= 11 && !fone.startsWith('55')) fone = '55' + fone;
+  if (/-group$/i.test(bruto)) return bruto.replace(/[^0-9A-Za-z-]/g, '');
+
+  // Um cadastro pode trazer VÁRIOS telefones no mesmo campo, separados por vírgula,
+  // ponto-e-vírgula, barra ou quebra de linha — 52 devedores em 02/09/2026, ex.:
+  // "42999642631, 42988521878, 42988568804, 43991694283". O `replace(/\D/g,'')` que
+  // havia aqui colava tudo num número de 43 dígitos, que então casava com o teste de
+  // id de grupo e ia para a Z-API como grupo inexistente: nada entregue, nenhum erro.
+  // Separadores INTERNOS de um número só ("(46) 99999-1111") não entram nesta lista,
+  // senão o DDD viraria um número à parte.
+  const partes = bruto.split(/[,;|\n]+|\s\/\s/).map((s) => s.replace(/\D/g, '')).filter(Boolean);
+  if (!partes.length) return '';
+
+  // Id de grupo sem o sufixo: 15+ dígitos num valor único (uma lista de telefones
+  // também passa de 15 dígitos depois de limpa, por isso o teste é depois do split).
+  if (partes.length === 1 && partes[0].length >= 15) return partes[0];
+
+  // Primeiro número plausível da lista: DDD + 8 ou 9 dígitos, com ou sem o DDI.
+  let fone = partes.find((p) => p.length >= 10 && p.length <= 13) || '';
+  // Nenhum plausível: não dá para escolher com segurança, e mandar recibo para o
+  // número errado expõe dado de terceiro. Melhor não enviar — quem chama já trata
+  // telefone vazio como "sem telefone" e registra o motivo na resposta.
+  if (!fone) return '';
+
+  if (fone.length <= 11 && !fone.startsWith('55')) fone = '55' + fone;
   return fone;
 }
 

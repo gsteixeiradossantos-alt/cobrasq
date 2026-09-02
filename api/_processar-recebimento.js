@@ -44,7 +44,7 @@ async function registrarOrfao({ paymentId, payment, motivo, detalhe, devedorId }
   }
 }
 const { asaasReq } = require('./_asaas.js');
-const { zapiSendText, zapiSendDocumentPdf } = require('./_zapi.js');
+const { zapiSendText, zapiSendDocumentPdf, normalizarTelefone } = require('./_zapi.js');
 const { gerarReciboPdfBase64, formaPagamento } = require('./_recibo.js');
 
 const { hojeBR } = require('./_data.js');
@@ -160,8 +160,15 @@ module.exports = async function handler(req, res) {
     const acordoTotal = Number(acordo && acordo.valor_total) || 0;
     const capitalBase = Number((acordo && acordo.metadata && acordo.metadata.capital_credor)) ||
                         Number(cobValorOrig) || 0;
-    const valorCapital = null;
-    const valorHonorario = null;
+    // ZERO, não NULL: `fin_operacao.valor_capital` e `valor_honorario` são NOT NULL
+    // (default 0), e um NULL explícito no INSERT não usa o default — viola a constraint
+    // e derruba o handler inteiro com 23502. Foi o que aconteceu entre 28/08 e 02/09/2026:
+    // o #589 trocou o cálculo por `null` e TODO recebimento passou a falhar em silêncio
+    // (8 pagamentos sem operação, sem lançamento e sem recibo ao devedor). Quem diz que
+    // não houve divisão são `repasse_status: 'nao_aplica'` e `divisao_automatica: false`,
+    // logo abaixo — não um NULL nestas colunas.
+    const valorCapital = 0;
+    const valorHonorario = 0;
     // 'nao_aplica' = este PAGAMENTO não carrega uma operação de repasse. Não quer dizer
     // que não há repasse: ele é definido no acordo e lançado como despesa.
     const repasseStatus = 'nao_aplica';
@@ -434,14 +441,17 @@ module.exports = async function handler(req, res) {
     // lembrete de vencimento (que lê a bia_cobranca) mas nenhum recibo (que lia só o
     // relacional), e a única cópia do PDF ia para o número de monitoramento. Antes de
     // desistir do envio, busca na bia_cobranca pelo pagamento e pelo customer Asaas.
-    let tel = String((devedor && devedor.telefone) || '').replace(/\D/g, '');
+    // normalizarTelefone (e não replace(/\D/g,'')): o campo pode trazer vários números
+    // separados por vírgula — colados, viravam um id de grupo inexistente e o envio
+    // falhava calado. Ver api/_zapi.js.
+    let tel = normalizarTelefone((devedor && devedor.telefone) || '');
     let telOrigem = tel ? 'devedores' : '';
     if (!tel) {
       const filtro = payment.customer
         ? `or=(asaas_payment_id.eq.${encodeURIComponent(paymentId)},asaas_customer_id.eq.${encodeURIComponent(payment.customer)})`
         : `asaas_payment_id=eq.${encodeURIComponent(paymentId)}`;
       const bia = await sbFetch(`bia_cobranca?${filtro}&select=telefone&limit=1`).catch(() => []);
-      const t = String((bia && bia[0] && bia[0].telefone) || '').replace(/\D/g, '');
+      const t = normalizarTelefone((bia && bia[0] && bia[0].telefone) || '');
       if (t) { tel = t; telOrigem = 'bia_cobranca'; }
     }
     if (tel) {
