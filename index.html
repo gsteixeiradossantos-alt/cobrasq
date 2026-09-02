@@ -20802,6 +20802,7 @@ async function renderCobrancaDetalhe(){
       <div class="det2-panel-tt" style="margin:0;">Repasses ao cliente${repasses.length?` (${repasses.length})`:''}</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button class="btn btn-ghost btn-sm" onclick="extratoRepasseAcordoPDF()" title="Extrato de repasse deste acordo, em PDF, para enviar ao credor">${ico('file',13)} Extrato de repasse</button>
+        <button class="btn btn-ghost btn-sm" onclick="enviarExtratoRepasseWA()" title="Envia o extrato em PNG ao WhatsApp do credor, com a mensagem padrão">${ico('whatsapp',13)} Enviar ao credor</button>
         <button class="cob-btn-primary" onclick="abrirRepasseIA()">${ico('file',14)} Enviar comprovantes (IA)</button>
       </div>
     </div>
@@ -33046,7 +33047,8 @@ function _finMovMenuHtml(l){
     ['Emitir nota',         FIN_MOV_ICONES.nota,    `_finMovMenuAcao(${l.id},'nota')`,    ''],
     ['Gerar recibo',        FIN_MOV_ICONES.recibo,  `_finMovMenuAcao(${l.id},'recibo')`,  ''],
     ['Duplicar',            FIN_MOV_ICONES.duplicar,`_finMovMenuAcao(${l.id},'duplicar')`,'sep'],
-    ...(l.cobranca_id ? [['Extrato de repasse', FIN_MOV_ICONES.extrato, `_finMovMenuAcao(${l.id},'extrato')`, '']] : []),
+    ...(l.cobranca_id ? [['Extrato de repasse', FIN_MOV_ICONES.extrato, `_finMovMenuAcao(${l.id},'extrato')`, ''],
+                          ['Enviar extrato ao credor', FIN_MOV_ICONES.extrato, `_finMovMenuAcao(${l.id},'enviar-extrato')`, '']] : []),
     ['Editar',              FIN_MOV_ICONES.editar,  `_finMovMenuAcao(${l.id},'editar')`,  ''],
     ['Excluir',             FIN_MOV_ICONES.excluir, `_finMovMenuAcao(${l.id},'excluir')`, 'del'],
   ];
@@ -33063,6 +33065,10 @@ async function _finMovMenuAcao(id, acao){
   if(acao === 'extrato'){
     if(!l || !l.cobranca_id){ showToast('Este lançamento não está vinculado a uma cobrança.','warning'); return; }
     extratoRepasseAcordoPDF(l.cobranca_id); return;
+  }
+  if(acao === 'enviar-extrato'){
+    if(!l || !l.cobranca_id){ showToast('Este lançamento não está vinculado a uma cobrança.','warning'); return; }
+    enviarExtratoRepasseWA(l.cobranca_id); return;
   }
   if(acao === 'editar'){ _finLancAbrirDrawer(id); return; }
   if(acao === 'recibo'){
@@ -35916,63 +35922,131 @@ async function cobrasqComprovantePDF(operacaoId){
 //   • repasses A FAZER    → `fin_lancamento` tipo_movimento=0 status=0 (parcela prevista).
 // Somar as duas tabelas para a MESMA parcela duplicaria — por isso o pago vem só de
 // `repasses_cliente` e o previsto só dos lançamentos em aberto.
-async function extratoRepasseAcordoPDF(cobId){
+// Coleta os dados do extrato. Separado de quem gera o PDF/PNG porque o mesmo
+// documento serve para baixar e para enviar ao credor por WhatsApp.
+async function _extratoRepasseDados(cobId){
   cobId = cobId || (window._repasseCtx||{}).cobId;
-  if(!cobId){ showToast('Abra um caso para gerar o extrato.','warning'); return; }
+  if(!cobId){ showToast('Abra um caso para gerar o extrato.','warning'); return null; }
   const supa = getSupabase();
-  if(!supa){ showToast('Sem conexão com o banco.','danger'); return; }
+  if(!supa){ showToast('Sem conexão com o banco.','danger'); return null; }
+  const [{ data:pix }, { data:parc }, { data:cobR }, { data:partes }] = await Promise.all([
+    supa.from('repasses_cliente').select('valor,data_pix,transacao_id')
+        .eq('cobranca_id', cobId).order('data_pix',{ascending:true}),
+    supa.from('fin_lancamento').select('valor,data_vencimento,numero_parcela,total_parcelas')
+        .eq('cobranca_id', cobId).eq('tipo_movimento',0).eq('status',0)
+        .order('data_vencimento',{ascending:true}),
+    supa.from('cobrancas').select('numero_processo,valor_capital,cliente_id').eq('id',cobId).maybeSingle(),
+    supa.from('cobranca_partes').select('principal,devedores(nome)').eq('cobranca_id',cobId),
+  ]);
+  const feitos = pix||[], previstos = parc||[];
+  if(!feitos.length && !previstos.length){
+    showToast('Este caso não tem repasse feito nem previsto.','warning'); return null;
+  }
+  const cob = cobR || {};
+  let cli = {};
+  if(cob.cliente_id){
+    const { data } = await supa.from('clientes').select('nome,nome_fantasia,doc,telefone').eq('id',cob.cliente_id).maybeSingle();
+    cli = data || {};
+  }
+  const razao = cli.nome || '';
+  const fantasia = cli.nome_fantasia || '';
+  const credor = (fantasia && razao && fantasia!==razao) ? `${fantasia} · ${razao}`
+               : (fantasia || razao || (window._repasseCtx||{}).clienteNome || '—');
+  const pp = (partes||[]).find(x=>x.principal) || (partes||[])[0];
+  const devedor = (pp && pp.devedores && pp.devedores.nome) || '—';
+  const capital = (cob.valor_capital!=null) ? +cob.valor_capital : null;
+
+  const total_n = feitos.length + previstos.length;
+  const rows = [];
+  let i = 0, pago = 0, aberto = 0;
+  for(const r of feitos){
+    i++; pago += (+r.valor||0);
+    rows.push({ n:`${i} de ${total_n}`, ref:_extData(r.data_pix), pago:_extData(r.data_pix),
+                aut:r.transacao_id||'', valor:+r.valor||0, ok:true });
+  }
+  for(const p of previstos){
+    i++; const v = Math.abs(+p.valor||0); aberto += v;
+    rows.push({ n:`${i} de ${total_n}`, ref:_extData(p.data_vencimento), pago:null, aut:'', valor:v, ok:false });
+  }
+  const total = pago + aberto;
+  const html = _extratoRepasseHtml({
+    credor, credorDoc: cli.doc||'', devedor,
+    processo: cob.numero_processo || '—', capital, rows, pago, aberto, total,
+    nPagos: feitos.length,
+  });
+  return { cobId, html, credor, credorTel: cli.telefone||'', devedor, total, pago, aberto };
+}
+
+async function extratoRepasseAcordoPDF(cobId){
   showToast('Gerando extrato…','info');
   try{
-    // Tudo vem do banco: chamado pela aba Movimentações, o caso pode nem estar
-    // carregado no blob em memória (DB_cobrancas só tem o que a tela do CRM trouxe).
-    const [{ data:pix }, { data:parc }, { data:cobR }, { data:partes }] = await Promise.all([
-      supa.from('repasses_cliente').select('valor,data_pix,transacao_id')
-          .eq('cobranca_id', cobId).order('data_pix',{ascending:true}),
-      supa.from('fin_lancamento').select('valor,data_vencimento,numero_parcela,total_parcelas')
-          .eq('cobranca_id', cobId).eq('tipo_movimento',0).eq('status',0)
-          .order('data_vencimento',{ascending:true}),
-      supa.from('cobrancas').select('numero_processo,valor_capital,cliente_id').eq('id',cobId).maybeSingle(),
-      supa.from('cobranca_partes').select('principal,devedores(nome)').eq('cobranca_id',cobId),
-    ]);
-    const feitos = pix||[], previstos = parc||[];
-    if(!feitos.length && !previstos.length){
-      showToast('Este caso não tem repasse feito nem previsto.','warning'); return;
-    }
-    const cob = cobR || {};
-    let cli = {};
-    if(cob.cliente_id){
-      const { data } = await supa.from('clientes').select('nome,nome_fantasia,doc').eq('id',cob.cliente_id).maybeSingle();
-      cli = data || {};
-    }
-    const razao = cli.nome || '';
-    const fantasia = cli.nome_fantasia || '';
-    const credor = (fantasia && razao && fantasia!==razao) ? `${fantasia} · ${razao}`
-                 : (fantasia || razao || (window._repasseCtx||{}).clienteNome || '—');
-    const pp = (partes||[]).find(x=>x.principal) || (partes||[])[0];
-    const devedor = (pp && pp.devedores && pp.devedores.nome) || '—';
-    const capital = (cob.valor_capital!=null) ? +cob.valor_capital : null;
-
-    const total_n = feitos.length + previstos.length;
-    const rows = [];
-    let i = 0, pago = 0, aberto = 0;
-    for(const r of feitos){
-      i++; pago += (+r.valor||0);
-      rows.push({ n:`${i} de ${total_n}`, ref:_extData(r.data_pix), pago:_extData(r.data_pix),
-                  aut:r.transacao_id||'', valor:+r.valor||0, ok:true });
-    }
-    for(const p of previstos){
-      i++; const v = Math.abs(+p.valor||0); aberto += v;
-      rows.push({ n:`${i} de ${total_n}`, ref:_extData(p.data_vencimento), pago:null, aut:'', valor:v, ok:false });
-    }
-    const total = pago + aberto;
-    const html = _extratoRepasseHtml({
-      credor, credorDoc: cli.doc||'', devedor,
-      processo: cob.numero_processo || '—', capital, rows, pago, aberto, total,
-      nPagos: feitos.length,
-    });
-    await _gerarPdf(html, { filename:`extrato-repasse-${String(cobId).slice(0,8)}.pdf`, margin:0, saida:'save' });
+    const d = await _extratoRepasseDados(cobId);
+    if(!d) return;
+    await _gerarPdf(d.html, { filename:`extrato-repasse-${String(d.cobId).slice(0,8)}.pdf`, margin:0, saida:'save' });
   }catch(e){ showToast('Erro ao gerar o extrato: '+(e.message||e),'danger'); }
 }
+
+// PNG do extrato — o credor recebe imagem, não documento, para ver no próprio
+// balão da conversa (a mensagem padrão diz "conforme a imagem acima").
+// Mesma trava anti-branco do gerador de PDF: nunca enviar documento vazio.
+async function _extratoRepassePngBlob(html){
+  if(typeof html2canvas==='undefined') throw new Error('html2canvas não carregado');
+  const container=document.createElement('div');
+  container.innerHTML=html;
+  container.style.cssText='position:absolute;left:0;top:0;width:210mm;z-index:-9999;background:#fff;';
+  document.body.appendChild(container);
+  try{
+    if(document.fonts&&document.fonts.ready){ try{ await document.fonts.ready; }catch(_){} }
+    const wpx=container.scrollWidth||794, hpx=container.scrollHeight||1123;
+    const canvas=await html2canvas(container,{scale:2,useCORS:true,backgroundColor:'#ffffff',
+      logging:false,width:wpx,height:hpx,windowWidth:wpx,windowHeight:hpx,x:0,y:0,scrollX:0,scrollY:0});
+    if(_canvasEmBranco(canvas)) throw new Error('O extrato foi gerado em branco — verifique os dados e tente novamente.');
+    const blob=await new Promise(res=>canvas.toBlob(res,'image/png'));
+    if(!blob || blob.size<5000) throw new Error('Falha ao gerar a imagem do extrato.');
+    return blob;
+  } finally { if(container.parentNode) container.parentNode.removeChild(container); }
+}
+
+// Envio do extrato ao credor por WhatsApp. Botão SEPARADO do de baixar: emitir
+// para conferir é uma coisa, mandar para fora é outra. Sempre confirma antes.
+async function enviarExtratoRepasseWA(cobId){
+  const supa = getSupabase();
+  if(!supa){ showToast('Sem conexão com o banco.','danger'); return; }
+  try{
+    showToast('Preparando o extrato…','info');
+    const d = await _extratoRepasseDados(cobId);
+    if(!d) return;
+    const tel = waTel55(d.credorTel);
+    if(!tel){
+      showToast(`O credor ${d.credor} não tem telefone cadastrado — preencha na aba Clientes.`,'warning'); return;
+    }
+    // 12 dígitos = falta o 9 do celular. A fila aceita e a mensagem fica adiada
+    // para sempre, sem erro. Melhor barrar aqui do que sumir em silêncio.
+    if(tel.length !== 13){
+      showToast(`Telefone do credor com ${tel.length} dígitos (${tel}) — o esperado são 13. Corrija na aba Clientes antes de enviar.`,'danger');
+      return;
+    }
+    if(!confirm(`Enviar o extrato de repasse ao credor?\n\n${d.credor}\nWhatsApp: ${tel}\nDevedor: ${d.devedor}\n\nA imagem e a mensagem padrão entram na fila de envio.`)) return;
+
+    const blob = await _extratoRepassePngBlob(d.html);
+    const { data:{ user } } = await supa.auth.getUser();
+    const operadorId = user && user.id;
+    const nome = `extrato-repasse-${String(d.cobId).slice(0,8)}.png`;
+    const up = await uploadMidiaWA(supa, operadorId, blob, nome, 'image/png');
+    if(!up.ok) throw new Error(up.error);
+
+    const legenda = `*Financeiro COBRASQ:*\nOlá! Foi realizado acordo com a *${d.devedor}*.\n\nOs valores serão repassados conforme a imagem acima.\n\nNa hipótese de haver restrições no nome do cliente como SPC, SERASA, BOAVISTA/CLD e afins, solicita a realização da retirada, com urgência. Na existência de PROTESTOS, me envie a carta de anuência na forma eletrônica, por gentileza. Qualquer dúvida é só me comunicar!`;
+
+    const { error } = await supa.from('crm_mensagens_agendadas').insert({
+      operador_id: operadorId, telefone: tel, tipo:'imagem',
+      agendada_para: new Date().toISOString(), status:'pendente', origem:'extrato_repasse',
+      media_path: up.path, media_nome: nome, media_mime:'image/png', legenda,
+    });
+    if(error) throw error;
+    showToast(`Extrato na fila para ${d.credor}.`,'success');
+  }catch(e){ showToast('Falha ao enviar o extrato: '+(e.message||e),'danger'); }
+}
+
 function _extData(d){ return d ? String(d).slice(0,10).split('-').reverse().join('/') : '—'; }
 function _extExtenso(){
   const M=['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
