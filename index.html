@@ -35989,8 +35989,12 @@ async function extratoRepasseAcordoPDF(cobId){
 // PNG do extrato — o credor recebe imagem, não documento, para ver no próprio
 // balão da conversa (a mensagem padrão diz "conforme a imagem acima").
 // Mesma trava anti-branco do gerador de PDF: nunca enviar documento vazio.
+// PNG do extrato. O `html2pdf.bundle` NÃO expõe `html2canvas` no escopo global —
+// chamar direto quebra com "html2canvas não carregado". O caminho que funciona é
+// o mesmo do `_gerarPdfRasterCliente`: html2pdf().toCanvas() e ler worker.prop.canvas.
+// Mesma trava anti-branco: nunca enviar documento vazio ao credor.
 async function _extratoRepassePngBlob(html){
-  if(typeof html2canvas==='undefined') throw new Error('html2canvas não carregado');
+  if(typeof html2pdf==='undefined') throw new Error('Gerador de imagem não carregado. Recarregue a página.');
   const container=document.createElement('div');
   container.innerHTML=html;
   container.style.cssText='position:absolute;left:0;top:0;width:210mm;z-index:-9999;background:#fff;';
@@ -35998,13 +36002,57 @@ async function _extratoRepassePngBlob(html){
   try{
     if(document.fonts&&document.fonts.ready){ try{ await document.fonts.ready; }catch(_){} }
     const wpx=container.scrollWidth||794, hpx=container.scrollHeight||1123;
-    const canvas=await html2canvas(container,{scale:2,useCORS:true,backgroundColor:'#ffffff',
-      logging:false,width:wpx,height:hpx,windowWidth:wpx,windowHeight:hpx,x:0,y:0,scrollX:0,scrollY:0});
-    if(_canvasEmBranco(canvas)) throw new Error('O extrato foi gerado em branco — verifique os dados e tente novamente.');
+    const worker=html2pdf().set({
+      margin:0, image:{type:'png'},
+      html2canvas:{scale:2,useCORS:true,backgroundColor:'#ffffff',logging:false,
+        width:wpx,height:hpx,windowWidth:wpx,windowHeight:hpx,x:0,y:0,scrollX:0,scrollY:0},
+    }).from(container).toCanvas();
+    await worker;
+    const canvas = worker.prop && worker.prop.canvas;
+    if(!canvas) throw new Error('Falha ao rasterizar o extrato.');
+    if(_canvasEmBranco(canvas)) throw new Error('O extrato saiu em branco — confira os dados do caso.');
     const blob=await new Promise(res=>canvas.toBlob(res,'image/png'));
     if(!blob || blob.size<5000) throw new Error('Falha ao gerar a imagem do extrato.');
     return blob;
   } finally { if(container.parentNode) container.parentNode.removeChild(container); }
+}
+
+// Prévia antes do envio: mostra a imagem que vai ao credor e deixa editar a
+// mensagem. Documento financeiro não sai para cliente sem alguém olhar.
+// Resolve com o texto final, ou com null se cancelar.
+function _extratoPreviaWA(blobUrl, dados, legendaPadrao){
+  return new Promise(resolve=>{
+    const ov=document.createElement('div');
+    ov.id='extPrevOv';
+    ov.style.cssText='position:fixed;inset:0;z-index:10000;background:rgba(10,21,48,.62);display:flex;align-items:center;justify-content:center;padding:22px;';
+    ov.innerHTML=`<div style="background:#fff;border-radius:10px;max-width:900px;width:100%;max-height:92vh;display:flex;flex-direction:column;overflow:hidden;">
+      <div style="padding:16px 20px;border-bottom:1px solid #E6E1D2;display:flex;justify-content:space-between;align-items:center;gap:12px;">
+        <div><div style="font-weight:600;font-size:15px;color:#0A1530;">Conferir antes de enviar</div>
+          <div style="font-size:12px;color:#8A94A6;margin-top:2px;">${escHtml(dados.credor)} &middot; ${escHtml(dados.tel)} &middot; devedor: ${escHtml(dados.devedor)}</div></div>
+        <button id="extPrevX" style="border:0;background:none;font-size:22px;line-height:1;cursor:pointer;color:#8A94A6;">&times;</button>
+      </div>
+      <div style="flex:1;overflow:auto;padding:18px 20px;display:flex;flex-direction:column;gap:14px;background:#FBFAF7;">
+        <img src="${blobUrl}" alt="Prévia do extrato" style="width:100%;border:1px solid #E6E1D2;border-radius:6px;display:block;"/>
+        <div>
+          <label style="font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:#8A94A6;">Mensagem que acompanha a imagem</label>
+          <textarea id="extPrevMsg" rows="9" style="width:100%;margin-top:6px;padding:11px 12px;border:1px solid #E6E1D2;border-radius:6px;font:inherit;font-size:13px;line-height:1.5;resize:vertical;">${escHtml(legendaPadrao)}</textarea>
+        </div>
+      </div>
+      <div style="padding:14px 20px;border-top:1px solid #E6E1D2;display:flex;justify-content:flex-end;gap:10px;">
+        <button id="extPrevCancel" class="btn btn-ghost btn-sm">Cancelar</button>
+        <button id="extPrevOk" class="cob-btn-primary">Enviar ao credor</button>
+      </div></div>`;
+    document.body.appendChild(ov);
+    const fim=(v)=>{ if(ov.parentNode) ov.parentNode.removeChild(ov); resolve(v); };
+    ov.querySelector('#extPrevX').onclick=()=>fim(null);
+    ov.querySelector('#extPrevCancel').onclick=()=>fim(null);
+    ov.querySelector('#extPrevOk').onclick=()=>{
+      const t=(ov.querySelector('#extPrevMsg').value||'').trim();
+      if(!t){ showToast('A mensagem não pode ficar vazia.','warning'); return; }
+      fim(t);
+    };
+    ov.addEventListener('click', e=>{ if(e.target===ov) fim(null); });
+  });
 }
 
 // Envio do extrato ao credor por WhatsApp. Botão SEPARADO do de baixar: emitir
@@ -36013,7 +36061,7 @@ async function enviarExtratoRepasseWA(cobId){
   const supa = getSupabase();
   if(!supa){ showToast('Sem conexão com o banco.','danger'); return; }
   try{
-    showToast('Preparando o extrato…','info');
+    showToast('Gerando a prévia do extrato…','info');
     const d = await _extratoRepasseDados(cobId);
     if(!d) return;
     const tel = waTel55(d.credorTel);
@@ -36026,16 +36074,23 @@ async function enviarExtratoRepasseWA(cobId){
       showToast(`Telefone do credor com ${tel.length} dígitos (${tel}) — o esperado são 13. Corrija na aba Clientes antes de enviar.`,'danger');
       return;
     }
-    if(!confirm(`Enviar o extrato de repasse ao credor?\n\n${d.credor}\nWhatsApp: ${tel}\nDevedor: ${d.devedor}\n\nA imagem e a mensagem padrão entram na fila de envio.`)) return;
-
+    // Gera a imagem ANTES de qualquer envio: a prévia serve justamente para
+    // pegar extrato gerado errado antes que ele saia para o cliente.
     const blob = await _extratoRepassePngBlob(d.html);
+    const legendaPadrao = `*Financeiro COBRASQ:*\nOlá! Foi realizado acordo com a *${d.devedor}*.\n\nOs valores serão repassados conforme a imagem acima.\n\nNa hipótese de haver restrições no nome do cliente como SPC, SERASA, BOAVISTA/CLD e afins, solicita a realização da retirada, com urgência. Na existência de PROTESTOS, me envie a carta de anuência na forma eletrônica, por gentileza. Qualquer dúvida é só me comunicar!`;
+
+    const blobUrl = URL.createObjectURL(blob);
+    let legenda;
+    try{
+      legenda = await _extratoPreviaWA(blobUrl, { credor:d.credor, tel, devedor:d.devedor }, legendaPadrao);
+    } finally { URL.revokeObjectURL(blobUrl); }
+    if(legenda == null){ showToast('Envio cancelado.','info'); return; }
+
     const { data:{ user } } = await supa.auth.getUser();
     const operadorId = user && user.id;
     const nome = `extrato-repasse-${String(d.cobId).slice(0,8)}.png`;
     const up = await uploadMidiaWA(supa, operadorId, blob, nome, 'image/png');
     if(!up.ok) throw new Error(up.error);
-
-    const legenda = `*Financeiro COBRASQ:*\nOlá! Foi realizado acordo com a *${d.devedor}*.\n\nOs valores serão repassados conforme a imagem acima.\n\nNa hipótese de haver restrições no nome do cliente como SPC, SERASA, BOAVISTA/CLD e afins, solicita a realização da retirada, com urgência. Na existência de PROTESTOS, me envie a carta de anuência na forma eletrônica, por gentileza. Qualquer dúvida é só me comunicar!`;
 
     const { error } = await supa.from('crm_mensagens_agendadas').insert({
       operador_id: operadorId, telefone: tel, tipo:'imagem',
