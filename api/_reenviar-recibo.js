@@ -12,7 +12,7 @@
 const { requireUser, applyCors } = require('./_auth.js');
 const { sbFetch } = require('./_sb.js');
 const { asaasReq } = require('./_asaas.js');
-const { zapiSendText, zapiSendDocumentPdf } = require('./_zapi.js');
+const { zapiSendText, zapiSendDocumentPdf, normalizarTelefone } = require('./_zapi.js');
 const { gerarReciboPdfBase64, formaPagamento } = require('./_recibo.js');
 
 function firstName(n) { return String(n || '').trim().split(/\s+/)[0] || 'tudo bem'; }
@@ -64,7 +64,7 @@ module.exports = async function handler(req, res) {
     // que não há telefone — a fila da Bia costuma ter o número certo (8 devedores
     // nessa situação em 27/08/2026). Sem isto, o reenvio manual — que existe
     // justamente para salvar o recibo que não saiu — também desiste.
-    let tel = String(dev.telefone || '').trim();
+    let tel = normalizarTelefone(dev.telefone || '');
     let telOrigem = tel ? 'devedores' : '';
     if (!tel) {
       const pid = asaasPaymentId || lanc.asaas_payment_id || '';
@@ -73,7 +73,7 @@ module.exports = async function handler(req, res) {
       if (dev.asaas_customer_id) filtros.push(`asaas_customer_id=eq.${encodeURIComponent(dev.asaas_customer_id)}`);
       for (const f of filtros) {
         const bia = await sbFetch(`bia_cobranca?${f}&select=telefone&limit=1`).catch(() => []);
-        const t = String((bia && bia[0] && bia[0].telefone) || '').trim();
+        const t = normalizarTelefone((bia && bia[0] && bia[0].telefone) || '');
         if (t) { tel = t; telOrigem = 'bia_cobranca'; break; }
       }
     }
