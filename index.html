@@ -28955,6 +28955,26 @@ window.finApi = (function(){
     }
     return { alterados: trocar.length + criar.length, criados: criar.length, pulados };
   }
+  // Renomeia vários lançamentos de uma vez. Recebe PARES [{id, descricao}] e não um
+  // texto único, porque o caso real é trocar um trecho comum PRESERVANDO o resto: a
+  // numeração "10/13" que identifica a parcela vive dentro da própria descrição (886
+  // linhas auditadas em 12/08/2026, 864 com "N/M" no texto e só 154 com numero_parcela
+  // na coluna). Um UPDATE com o mesmo texto para todos apagaria justamente isso — e é
+  // o acerto que custou trabalho manual na série da Veronilda em 31/08/2026.
+  async function renomearLote(pares){
+    const sb = _sb();
+    const limpos = (pares || [])
+      .map(p => ({ id: p.id, descricao: String(p.descricao || '').trim() }))
+      .filter(p => p.id && p.descricao);
+    if(!limpos.length) return 0;
+    // Um UPDATE por linha: cada uma recebe um texto diferente, não dá para agrupar
+    // num .in() só.
+    await Promise.all(limpos.map(async p => {
+      const { error } = await sb.from('fin_lancamento').update({ descricao: p.descricao }).eq('id', p.id);
+      if(error) throw error;
+    }));
+    return limpos.length;
+  }
   async function excluirLote(ids){
     const sb = _sb();
     const { error } = await sb.from('fin_lancamento').delete().in('id', ids);
@@ -29460,6 +29480,7 @@ window.finApi = (function(){
     conciliarLote,
     alterarContaLote,
     reagendarLote,
+    renomearLote,
     alterarCategoriaLote,
     excluirLote,
     saveConta, deactivateConta, reactivateConta,
@@ -33166,6 +33187,7 @@ function _finLancCascataRenderBulkbar(){
     <span class="tt">${fmtRs(total)}</span>
     <button class="finmv-lb go" onclick="_finLancCascataLote('pagar')">Confirmar pagamento</button>
     <button class="finmv-lb" onclick="_finLancCascataLote('conciliar')">Conciliar</button>
+    <button class="finmv-lb" onclick="_finLoteEditarAbrirModal()">Editar nome e vencimento</button>
     <button class="finmv-lb" onclick="_finLancSerieAbrirModal()">Excluir esta e as próximas</button>
     <button class="finmv-lb" onclick="_finLancCascataLote('excluir')">Excluir</button>
     <button class="finmv-lb gh" onclick="_finLancCascataState.sel.clear();_finLancCascataRender();">Limpar seleção ✕</button>
@@ -33180,6 +33202,143 @@ async function _finLancCascataLote(acao){
     else if(acao==='conciliar') await finApi.conciliarLote(ids);
     else if(acao==='excluir') await finApi.excluirLote(ids);
     showToast('Feito.', 'success');
+    renderFinTab('lancamentos');
+  }catch(e){ showToast('Erro: '+(e.message||e), 'danger'); }
+}
+
+// ══════════════════════════════════════════════════════════════
+// FINANCEIRO — Editar nome e vencimento EM LOTE
+// ──────────────────────────────────────────────────────────────
+// Pedido do proprietário (02/09/2026): dava para confirmar, conciliar e excluir em
+// lote, mas corrigir o nome ou remarcar o vencimento de várias parcelas só linha a
+// linha. Numa série de 13 parcelas isso são 13 aberturas de drawer.
+//
+// A descrição é trocada por LOCALIZAR E SUBSTITUIR, não por texto único, e esse é o
+// ponto da tela: a numeração da parcela ("10/13") mora dentro da própria descrição —
+// 864 de 886 lançamentos auditados têm o "N/M" no texto e só 154 têm a coluna
+// numero_parcela preenchida. Escrever o mesmo nome em todas apagaria a numeração de
+// uma vez só, em silêncio. Por isso o padrão troca só o trecho pedido, o modal mostra
+// o "antes → depois" de cada linha antes de gravar, e a substituição integral existe
+// mas é uma opção explícita.
+function _finLoteSelecionados(){
+  const ctx = window._finLancCascataCtx || { rows: [] };
+  const sel = _finLancCascataState.sel;
+  return (ctx.rows || []).filter(l => sel.has(l.id));
+}
+function _finLoteAbrirOverlay(){
+  let ov = document.getElementById('finlote-overlay');
+  if(!ov){ ov = document.createElement('div'); ov.id='finlote-overlay'; ov.className='overlay'; document.body.appendChild(ov); }
+  return ov;
+}
+// Prefixo comum das descrições da seleção — é o palpite mais útil para o campo
+// "trocar": numa série, o que varia é só o "N/M" do fim.
+function _finLotePrefixoComum(linhas){
+  const txts = linhas.map(l => String(l.descricao || '')).filter(Boolean);
+  if(!txts.length) return '';
+  let p = txts[0];
+  for(const t of txts.slice(1)){
+    let i = 0;
+    while(i < p.length && i < t.length && p[i] === t[i]) i++;
+    p = p.slice(0, i);
+    if(!p) break;
+  }
+  // Apara na fronteira de palavra: o prefixo bruto de "(SOS Animal)" com
+  // "(Styllus Fashion)" pára em "(S", e sugerir meia palavra no campo só atrapalha.
+  if(p.length && txts.some(t => t.length > p.length && /\S/.test(t[p.length]))){
+    p = p.slice(0, p.lastIndexOf(' ') + 1);
+  }
+  return p.trim();
+}
+function _finLoteNovaDescricao(atual, de, para, integral){
+  const orig = String(atual || '');
+  if(integral) return String(para || '').trim();
+  if(!de) return orig;
+  // split/join troca TODAS as ocorrências sem precisar escapar regex — o texto vem
+  // do usuário e costuma ter parênteses, que quebrariam um RegExp cru.
+  return orig.split(de).join(para == null ? '' : para);
+}
+function _finLoteEditarAbrirModal(){
+  const linhas = _finLoteSelecionados();
+  if(!linhas.length){ showToast('Nada selecionado.', 'danger'); return; }
+  window._finLoteCtx = { linhas };
+  _finLoteAbrirOverlay();
+  _finLoteEditarRender();
+  openModal('finlote-overlay');
+}
+function _finLoteEditarRender(){
+  const ov = document.getElementById('finlote-overlay'); if(!ov) return;
+  const linhas = (window._finLoteCtx || {}).linhas || [];
+  const de   = (document.getElementById('finlote-de')   || {}).value || '';
+  const para = (document.getElementById('finlote-para') || {}).value || '';
+  const dt   = (document.getElementById('finlote-venc') || {}).value || '';
+  const integral = !!(document.getElementById('finlote-integral') || {}).checked;
+
+  const previa = linhas.map(l => {
+    const nova = _finLoteNovaDescricao(l.descricao, de, para, integral);
+    return { l, nova, mudou: nova !== String(l.descricao || '') && !!nova };
+  });
+  const nMuda = previa.filter(p => p.mudou).length;
+  const pagas = linhas.filter(l => l.data_pagamento || l.status === 1).length;
+
+  ov.innerHTML = `<div class="modal modal-md">
+    <div class="modal-header">
+      <span class="modal-title">Editar ${linhas.length} lançamento${linhas.length!==1?'s':''}</span>
+      <button class="modal-close" onclick="closeModal('finlote-overlay')">&#10005;</button>
+    </div>
+    <div class="modal-body" style="max-height:62vh;overflow:auto;">
+
+      <div style="font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#8A94A6;margin-bottom:8px;">Nome</div>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+        <input id="finlote-de" class="input" style="flex:1;" placeholder="trocar este trecho"
+               value="${escHtml(_finLotePrefixoComum(linhas))}" oninput="_finLoteEditarRender()">
+        <span style="color:#8A94A6;">→</span>
+        <input id="finlote-para" class="input" style="flex:1;" placeholder="por este"
+               value="${escHtml(para)}" oninput="_finLoteEditarRender()">
+      </div>
+      <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:#6B7683;margin-bottom:4px;cursor:pointer;">
+        <input type="checkbox" id="finlote-integral" ${integral?'checked':''} onchange="_finLoteEditarRender()">
+        substituir a descrição inteira pelo texto da direita
+      </label>
+      ${integral ? `<p style="font-size:12.5px;color:#A8422F;margin:6px 0 0;">Todas as linhas ficam com o mesmo nome. A numeração da parcela que estiver no texto ("10/13") se perde.</p>` : ''}
+
+      <div style="font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#8A94A6;margin:18px 0 8px;">Vencimento</div>
+      <input id="finlote-venc" class="input" type="date" value="${escHtml(dt)}" style="max-width:200px;" oninput="_finLoteEditarRender()">
+      <p style="font-size:12.5px;color:#6B7683;margin:6px 0 0;">Em branco, o vencimento não muda. Nas linhas em aberto a competência acompanha; nas já pagas ela guarda a data do pagamento e não é tocada.</p>
+      ${dt && pagas ? `<p style="font-size:12.5px;color:#A8422F;margin:6px 0 0;">${pagas} selecionada${pagas!==1?'s':''} já paga${pagas!==1?'s':''} — o vencimento muda, a data de pagamento não.</p>` : ''}
+
+      <div style="font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#8A94A6;margin:18px 0 4px;">
+        Prévia — ${nMuda} de ${linhas.length} mudam de nome
+      </div>
+      ${previa.map(p => `
+        <div style="padding:7px 0;border-bottom:1px solid #F2EFE6;font-size:13px;">
+          <div style="color:#6B7683;${p.mudou?'text-decoration:line-through;':''}">${escHtml(p.l.descricao||'—')}</div>
+          ${p.mudou ? `<div style="color:#1B4D3E;">${escHtml(p.nova)}</div>` : ''}
+        </div>`).join('')}
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('finlote-overlay')">Cancelar</button>
+      <button class="btn btn-primary" onclick="_finLoteEditarConfirmar()" ${(!nMuda && !dt)?'disabled':''}>Aplicar</button>
+    </div>
+  </div>`;
+}
+async function _finLoteEditarConfirmar(){
+  const linhas = (window._finLoteCtx || {}).linhas || [];
+  const de   = (document.getElementById('finlote-de')   || {}).value || '';
+  const para = (document.getElementById('finlote-para') || {}).value || '';
+  const dt   = (document.getElementById('finlote-venc') || {}).value || '';
+  const integral = !!(document.getElementById('finlote-integral') || {}).checked;
+
+  const pares = linhas.map(l => ({ id: l.id, descricao: _finLoteNovaDescricao(l.descricao, de, para, integral) }))
+                      .filter(p => p.descricao && p.descricao !== String((linhas.find(l=>l.id===p.id)||{}).descricao || ''));
+  if(!pares.length && !dt){ showToast('Nada a alterar.', 'danger'); return; }
+
+  try{
+    let msg = [];
+    if(pares.length){ await finApi.renomearLote(pares); msg.push(`${pares.length} nome${pares.length!==1?'s':''}`); }
+    if(dt){ await finApi.reagendarLote(linhas.map(l=>l.id), dt); msg.push('vencimento'); }
+    closeModal('finlote-overlay');
+    _finLancCascataState.sel.clear();
+    showToast('Alterado: ' + msg.join(' e ') + '.', 'success');
     renderFinTab('lancamentos');
   }catch(e){ showToast('Erro: '+(e.message||e), 'danger'); }
 }
