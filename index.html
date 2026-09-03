@@ -35945,7 +35945,7 @@ async function _extratoRepasseDados(cobId){
   const cob = cobR || {};
   let cli = {};
   if(cob.cliente_id){
-    const { data } = await supa.from('clientes').select('nome,nome_fantasia,doc,telefone').eq('id',cob.cliente_id).maybeSingle();
+    const { data } = await supa.from('clientes').select('nome,nome_fantasia,doc,telefone,metadata').eq('id',cob.cliente_id).maybeSingle();
     cli = data || {};
   }
   const razao = cli.nome || '';
@@ -35974,7 +35974,12 @@ async function _extratoRepasseDados(cobId){
     processo: cob.numero_processo || '—', capital, rows, pago, aberto, total,
     nPagos: feitos.length,
   });
-  return { cobId, html, credor, credorTel: cli.telefone||'', devedor, total, pago, aberto };
+  // Quatro credores (S.O.S Animal, Odontomundi e duas Arte Estofados) são
+  // atendidos por GRUPO de WhatsApp, e o id fica em metadata.whatsapp_repasse.
+  // O grupo tem precedência: `clientes.telefone` nesses casos é um número
+  // pessoal, e mandar extrato de repasse para lá é entregar no lugar errado.
+  const grupo = (cli.metadata && cli.metadata.whatsapp_repasse) || '';
+  return { cobId, html, credor, credorTel: cli.telefone||'', credorGrupo: grupo, devedor, total, pago, aberto };
 }
 
 async function extratoRepasseAcordoPDF(cobId){
@@ -36064,13 +36069,15 @@ async function enviarExtratoRepasseWA(cobId){
     showToast('Gerando a prévia do extrato…','info');
     const d = await _extratoRepasseDados(cobId);
     if(!d) return;
-    const tel = waTel55(d.credorTel);
+    // Grupo tem precedência sobre o telefone: ver _extratoRepasseDados.
+    const tel = d.credorGrupo ? String(d.credorGrupo).trim() : waTel55(d.credorTel);
     if(!tel){
-      showToast(`O credor ${d.credor} não tem telefone cadastrado — preencha na aba Clientes.`,'warning'); return;
+      showToast(`O credor ${d.credor} não tem grupo nem telefone cadastrado — preencha na aba Clientes.`,'warning'); return;
     }
-    // 12 dígitos = falta o 9 do celular. A fila aceita e a mensagem fica adiada
-    // para sempre, sem erro. Melhor barrar aqui do que sumir em silêncio.
-    if(tel.length !== 13){
+    // A conferência de 13 dígitos vale só para número. Id de grupo não é número
+    // e seria barrado indevidamente. Para número, 12 dígitos (celular sem o 9)
+    // é aceito pela fila e fica adiado para sempre, sem erro — barrar aqui.
+    if(!d.credorGrupo && tel.length !== 13){
       showToast(`Telefone do credor com ${tel.length} dígitos (${tel}) — o esperado são 13. Corrija na aba Clientes antes de enviar.`,'danger');
       return;
     }
@@ -36082,7 +36089,7 @@ async function enviarExtratoRepasseWA(cobId){
     const blobUrl = URL.createObjectURL(blob);
     let legenda;
     try{
-      legenda = await _extratoPreviaWA(blobUrl, { credor:d.credor, tel, devedor:d.devedor }, legendaPadrao);
+      legenda = await _extratoPreviaWA(blobUrl, { credor:d.credor, tel: d.credorGrupo?`grupo ${tel}`:tel, devedor:d.devedor }, legendaPadrao);
     } finally { URL.revokeObjectURL(blobUrl); }
     if(legenda == null){ showToast('Envio cancelado.','info'); return; }
 
@@ -36094,7 +36101,7 @@ async function enviarExtratoRepasseWA(cobId){
 
     const { error } = await supa.from('crm_mensagens_agendadas').insert({
       operador_id: operadorId, telefone: tel, tipo:'imagem',
-      agendada_para: new Date().toISOString(), status:'pendente', origem:'extrato_repasse',
+      agendada_para: new Date().toISOString(), status:'pendente', origem:'manual_extrato_repasse',
       media_path: up.path, media_nome: nome, media_mime:'image/png', legenda,
     });
     if(error) throw error;

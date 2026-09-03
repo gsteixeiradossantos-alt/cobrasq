@@ -75,9 +75,29 @@ Deno.serve(async (req) => {
   // Bucket onde o frontend salva a mídia agendada (áudio/documento/imagem).
   const MEDIA_BUCKET = 'documentos';
 
+  // Destino de grupo do WhatsApp: id numérico com sufixo `-group`.
+  const ehGrupo = (t: unknown) => /-group$/i.test(String(t || '').trim());
+
   // Monta { url, body } da chamada Z-API conforme o tipo da mensagem.
   // Para mídia, gera um signed URL temporário (1h) que o Z-API baixa no envio.
   async function montarEnvio(m: any): Promise<{ ok: boolean; url?: string; body?: unknown; erro?: string }> {
+    // Destino de GRUPO (`120363...-group`) NÃO é número: passa intacto. O
+    // replace(/\D/g,'') apagaria o sufixo `-group` e o Z-API receberia 18
+    // dígitos soltos, que não roteiam para lugar nenhum. Quatro credores
+    // (S.O.S Animal, Odontomundi e duas Arte Estofados) só são atendidos assim.
+    if (ehGrupo(m.telefone)) {
+      const grupo = String(m.telefone).trim();
+      const tipoG = m.tipo || 'texto';
+      if (tipoG === 'texto') return { ok: true, url: `${zapiBase}/send-text`, body: { phone: grupo, message: m.mensagem || '' } };
+      if (!m.media_path) return { ok: false, erro: 'media_path ausente para tipo ' + tipoG };
+      const { data: sg, error: sgErr } = await sb.storage.from(MEDIA_BUCKET).createSignedUrl(m.media_path, 3600);
+      if (sgErr || !sg?.signedUrl) return { ok: false, erro: 'signed url: ' + (sgErr?.message || 'desconhecido') };
+      if (tipoG === 'audio') return { ok: true, url: `${zapiBase}/send-audio`, body: { phone: grupo, audio: sg.signedUrl } };
+      if (tipoG === 'imagem') return { ok: true, url: `${zapiBase}/send-image`, body: { phone: grupo, image: sg.signedUrl, caption: m.legenda || '' } };
+      const nomeG = m.media_nome || 'documento';
+      const extG = (nomeG.split('.').pop() || 'pdf').toLowerCase().replace(/[^a-z0-9]/g, '') || 'pdf';
+      return { ok: true, url: `${zapiBase}/send-document/${extG}`, body: { phone: grupo, document: sg.signedUrl, fileName: nomeG, caption: m.legenda || '' } };
+    }
     const phoneDigits = String(m.telefone || '').replace(/\D/g, '');
     // País (55) só quando o número está em formato local (DDD + número = 10-11 díg.);
     // 12-13 díg. já incluem o país. NÃO usar startsWith('55'): o DDD 55 (região central
@@ -183,8 +203,13 @@ Deno.serve(async (req) => {
       .select('id');
     if (!lock || lock.length === 0) continue;
 
+    // Os dois filtros abaixo são sobre CONVERSA COM DEVEDOR e casam pelos 8
+    // últimos dígitos. Num id de grupo esses 8 dígitos são arbitrários e podem
+    // colidir com o número de qualquer devedor — grupo de credor não entra neles.
+    const souGrupo = ehGrupo(m.telefone);
+
     // Régua bloqueada: cancela sem enviar.
-    if (bloqueados.has(dk(m.telefone))) {
+    if (!souGrupo && bloqueados.has(dk(m.telefone))) {
       await sb.from('crm_mensagens_agendadas')
         .update({ status: 'cancelada', erro: 'regua_bloqueada (spam/engano)', processando_desde: null })
         .eq('id', m.id);
@@ -206,7 +231,7 @@ Deno.serve(async (req) => {
     // painel); régua e lembretes automáticos usam 'auto_*', 'audiencia_*', 'bia_*'.
     // Só os automáticos cedem a vez.
     const escritaPorHumano = String(m.origem || '').startsWith('manual');
-    if (pendentes.has(dk(m.telefone)) && !escritaPorHumano) {
+    if (!souGrupo && pendentes.has(dk(m.telefone)) && !escritaPorHumano) {
       await sb.from('crm_mensagens_agendadas')
         .update({ status: 'pendente', processando_desde: null })
         .eq('id', m.id);
