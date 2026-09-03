@@ -162,7 +162,7 @@ Deno.serve(async (req) => {
   const agora = new Date().toISOString();
   const { data: lote, error: errSel } = await sb
     .from('crm_mensagens_agendadas')
-    .select('id, telefone, mensagem, tentativas, caso_id, operador_id, tipo, media_path, media_nome, media_mime, legenda')
+    .select('id, telefone, mensagem, tentativas, caso_id, operador_id, tipo, media_path, media_nome, media_mime, legenda, origem')
     .eq('status', 'pendente')
     .lte('agendada_para', agora)
     .order('agendada_para', { ascending: true })
