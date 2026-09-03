@@ -36075,9 +36075,14 @@ async function _extratoRepasseDados(cobId){
   const fantasia = cli.nome_fantasia || '';
   const credor = (fantasia && razao && fantasia!==razao) ? `${fantasia} · ${razao}`
                : (fantasia || razao || (window._repasseCtx||{}).clienteNome || '—');
-  const pp = (partes||[]).find(x=>x.principal) || (partes||[])[0];
-  const devedor = (pp && pp.devedores && pp.devedores.nome) || '—';
-  const devedorDoc = (pp && pp.devedores && pp.devedores.doc) || '';
+  // Um caso pode ter mais de um devedor (emitente + avalista, casal, sócios). O
+  // extrato e a mensagem ao credor precisam nomear TODOS: dizer só o principal
+  // esconde quem também responde pela dívida. Principal primeiro, depois os demais.
+  const _partes = (partes||[]).slice().sort((x,y)=>(y.principal?1:0)-(x.principal?1:0))
+    .map(x=>({ nome:(x.devedores&&x.devedores.nome)||'', doc:(x.devedores&&x.devedores.doc)||'' }))
+    .filter(x=>x.nome);
+  const devedor = _partes.map(x=>x.nome).join(' e ') || '—';
+  const devedorDoc = (_partes[0] && _partes[0].doc) || '';
   const capital = (cob.valor_capital!=null) ? +cob.valor_capital : null;
 
   const total_n = feitos.length + previstos.length;
@@ -36104,7 +36109,7 @@ async function _extratoRepasseDados(cobId){
   // O grupo tem precedência: `clientes.telefone` nesses casos é um número
   // pessoal, e mandar extrato de repasse para lá é entregar no lugar errado.
   const grupo = (cli.metadata && cli.metadata.whatsapp_repasse) || '';
-  return { cobId, html, credor, credorTel: cli.telefone||'', credorGrupo: grupo, devedor, devedorDoc, total, pago, aberto };
+  return { cobId, html, credor, credorTel: cli.telefone||'', credorGrupo: grupo, devedor, devedorDoc, devedorPartes: _partes, total, pago, aberto };
 }
 
 async function extratoRepasseAcordoPDF(cobId){
@@ -36196,9 +36201,16 @@ async function enviarExtratoRepasseWA(cobId){
     // O rotulo sai pelo tamanho: 11 digitos e CPF, 14 e CNPJ. So cai no
     // generico "CPF/CNPJ" se o cadastro estiver com um numero de digitos que
     // nao e nem um nem outro — aí nao da para afirmar qual e.
-    const _docN = String(d.devedorDoc||'').replace(/\D/g,'');
-    const _docRot = _docN.length===11 ? 'CPF' : (_docN.length===14 ? 'CNPJ' : 'CPF/CNPJ');
-    const quemDev = d.devedorDoc ? `*${d.devedor}*, ${_docRot} ${_tajDocFmt(d.devedorDoc)}` : `*${d.devedor}*`;
+    // Nomeia TODOS os devedores do caso, cada um com o seu documento. Com dois ou
+    // mais, o credor precisa saber quem responde — dizer só o principal esconde
+    // o avalista, que é justamente quem ele pode acionar.
+    const _docRot = (doc)=>{ const n=String(doc||'').replace(/\D/g,'');
+      return n.length===11 ? 'CPF' : (n.length===14 ? 'CNPJ' : 'CPF/CNPJ'); };
+    const _quemLista = (d.devedorPartes||[]).map(p =>
+      p.doc ? `*${p.nome}*, ${_docRot(p.doc)} ${_tajDocFmt(p.doc)}` : `*${p.nome}*`);
+    const quemDev = _quemLista.length === 0 ? `*${d.devedor}*`
+      : _quemLista.length === 1 ? _quemLista[0]
+      : _quemLista.slice(0,-1).join(', ') + ' e ' + _quemLista[_quemLista.length-1];
     const legendaPadrao = `*Financeiro COBRASQ:*\nOlá! Foi realizado acordo com a ${quemDev}.\n\nOs valores serão repassados conforme o extrato em anexo.\n\nNa hipótese de haver restrições no nome do cliente como SPC, SERASA, BOAVISTA/CLD e afins, solicita a realização da retirada, com urgência. Na existência de PROTESTOS, me envie a carta de anuência na forma eletrônica, por gentileza. Qualquer dúvida é só me comunicar!`;
 
     const blobUrl = URL.createObjectURL(blob);
