@@ -35978,7 +35978,7 @@ async function _extratoRepasseDados(cobId){
         .eq('cobranca_id', cobId).eq('tipo_movimento',0).eq('status',0)
         .order('data_vencimento',{ascending:true}),
     supa.from('cobrancas').select('numero_processo,valor_capital,cliente_id').eq('id',cobId).maybeSingle(),
-    supa.from('cobranca_partes').select('principal,devedores(nome)').eq('cobranca_id',cobId),
+    supa.from('cobranca_partes').select('principal,devedores(nome,doc)').eq('cobranca_id',cobId),
   ]);
   const feitos = pix||[], previstos = parc||[];
   if(!feitos.length && !previstos.length){
@@ -35996,6 +35996,7 @@ async function _extratoRepasseDados(cobId){
                : (fantasia || razao || (window._repasseCtx||{}).clienteNome || '—');
   const pp = (partes||[]).find(x=>x.principal) || (partes||[])[0];
   const devedor = (pp && pp.devedores && pp.devedores.nome) || '—';
+  const devedorDoc = (pp && pp.devedores && pp.devedores.doc) || '';
   const capital = (cob.valor_capital!=null) ? +cob.valor_capital : null;
 
   const total_n = feitos.length + previstos.length;
@@ -36021,7 +36022,7 @@ async function _extratoRepasseDados(cobId){
   // O grupo tem precedência: `clientes.telefone` nesses casos é um número
   // pessoal, e mandar extrato de repasse para lá é entregar no lugar errado.
   const grupo = (cli.metadata && cli.metadata.whatsapp_repasse) || '';
-  return { cobId, html, credor, credorTel: cli.telefone||'', credorGrupo: grupo, devedor, total, pago, aberto };
+  return { cobId, html, credor, credorTel: cli.telefone||'', credorGrupo: grupo, devedor, devedorDoc, total, pago, aberto };
 }
 
 async function extratoRepasseAcordoPDF(cobId){
@@ -36108,7 +36109,10 @@ async function enviarExtratoRepasseWA(cobId){
     // Gera a imagem ANTES de qualquer envio: a prévia serve justamente para
     // pegar extrato gerado errado antes que ele saia para o cliente.
     const blob = await _extratoRepassePdfBlob(d.html);
-    const legendaPadrao = `*Financeiro COBRASQ:*\nOlá! Foi realizado acordo com a *${d.devedor}*.\n\nOs valores serão repassados conforme o extrato em anexo.\n\nNa hipótese de haver restrições no nome do cliente como SPC, SERASA, BOAVISTA/CLD e afins, solicita a realização da retirada, com urgência. Na existência de PROTESTOS, me envie a carta de anuência na forma eletrônica, por gentileza. Qualquer dúvida é só me comunicar!`;
+    // O credor precisa do documento para localizar o cliente na base dele e dar
+    // baixa em SPC/SERASA/protesto — so o nome nao basta em caso de homonimo.
+    const quemDev = d.devedorDoc ? `*${d.devedor}*, CPF/CNPJ ${d.devedorDoc}` : `*${d.devedor}*`;
+    const legendaPadrao = `*Financeiro COBRASQ:*\nOlá! Foi realizado acordo com a ${quemDev}.\n\nOs valores serão repassados conforme o extrato em anexo.\n\nNa hipótese de haver restrições no nome do cliente como SPC, SERASA, BOAVISTA/CLD e afins, solicita a realização da retirada, com urgência. Na existência de PROTESTOS, me envie a carta de anuência na forma eletrônica, por gentileza. Qualquer dúvida é só me comunicar!`;
 
     const blobUrl = URL.createObjectURL(blob);
     let legenda;
@@ -36148,7 +36152,12 @@ function _extExtenso(){
 // Monta o HTML do extrato. `dense` compacta o layout quando há muitas parcelas,
 // pra o documento continuar cabendo numa página só.
 function _extratoRepasseHtml(d){
-  const dense = d.rows.length > 5 ? ' dense' : '';
+  const n_ = d.rows.length;
+  // Degraus de densidade: o documento e desenhado para caber numa folha. Sem os
+  // degraus, a partir de 10 linhas ele passava do .doc-band por poucos milimetros
+  // e o Chrome emitia uma segunda folha em branco. Acima de 19 linhas nao ha
+  // aperto que resolva: solta a altura travada e pagina de verdade.
+  const dense = n_ > 19 ? ' dense denser densest flow' : (n_ > 14 ? ' dense denser densest' : (n_ > 8 ? ' dense denser' : (n_ > 5 ? ' dense' : '')));
   const tr = (r)=>`<tr><td>${escHtml(r.n)}<span class="aut">${r.ok?'PIX em ':'venc. '}${escHtml(r.ref)}</span></td>
     <td class="n">${r.pago?escHtml(r.pago):'—'}${r.aut?`<span class="aut">${escHtml(r.aut)}</span>`:''}</td>
     <td class="n">${fmtR(r.valor)}</td>
@@ -36169,7 +36178,7 @@ function _extratoRepasseHtml(d){
 *{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
 @page{size:210mm 297mm;margin:0;}
 html,body{font-family:var(--sans);color:var(--ink);}
-.doc-band{width:210mm;height:296.5mm;display:flex;flex-direction:column;background:#FFF;}
+.doc-band{width:210mm;min-height:295mm;display:flex;flex-direction:column;background:#FFF;}
 .band{background:var(--ink);color:var(--paper);padding:34px 70px 30px;display:flex;justify-content:space-between;align-items:center;position:relative;}
 .band::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;background:var(--accent);opacity:.85;}
 .band .lockup{display:flex;align-items:center;gap:16px;}
@@ -36215,6 +36224,36 @@ tr.tot td:first-child{font-size:8px;letter-spacing:.2em;text-transform:uppercase
 .dense .ref{padding:10px 0;}.dense .ref .v{font-size:12.5px;}
 .dense .sign{margin-top:12px;}.dense .sign .name{font-size:18px;}
 .dense .place-date{font-size:14px;}
+.denser .doc-inner{padding:20px 62px 18px;gap:8px;}
+.denser .band{padding:26px 70px 22px;}
+.denser .doc-title .t{font-size:27px;}
+.denser .value-box{padding:9px 24px;}.denser .value-box .vv{font-size:23px;}
+.denser .decl{font-size:12.4px;line-height:1.45;}
+.denser td{padding:4px 10px;font-size:10.6px;}
+.denser th{padding:0 10px 6px;}
+.denser .ref{padding:7px 0;}.denser .ref div{padding:3px 0;}.denser .ref .v{font-size:11.6px;}
+.denser .sign{margin-top:9px;}.denser .sign .name{font-size:16px;}
+.denser .place-date{font-size:12.6px;}
+.denser .foot{padding-top:11px;}
+.densest .doc-inner{padding:15px 62px 14px;gap:6px;}
+.densest .band{padding:20px 70px 17px;}
+.densest .doc-title .t{font-size:23px;}
+.densest .value-box{padding:7px 24px;}.densest .value-box .vv{font-size:20px;}
+.densest .decl{font-size:11.4px;line-height:1.4;}
+.densest td{padding:2.6px 10px;font-size:9.8px;}
+.densest td .aut{font-size:6.6px;margin-top:1px;}
+.densest th{padding:0 10px 4px;}
+.densest .ref{padding:5px 0;}.densest .ref div{padding:2px 0;}.densest .ref .v{font-size:10.8px;}
+.densest .sign{margin-top:7px;}.densest .sign .name{font-size:14.5px;}
+.densest .place-date{font-size:11.6px;}
+.densest .foot{padding-top:8px;}
+/* Listas longas demais para uma folha: solta a altura e mantem o fecho junto,
+   para a ultima pagina nunca sair so com assinatura e rodape. */
+.flow.doc-band{min-height:0;}
+.flow .foot{margin-top:14px;break-before:avoid;}
+.flow tr{break-inside:avoid;}
+.flow .decl,.flow .place-date{break-after:avoid;}
+.flow .sign{break-inside:avoid;break-after:avoid;}
 </style></head><body>
 <div class="doc-band${dense}">
   <div class="band"><div class="lockup"><span class="dot"></span><div class="wm">cobrasq</div></div>
