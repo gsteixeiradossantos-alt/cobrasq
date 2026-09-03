@@ -167,6 +167,8 @@ const STATUS_FORA_REGUA = [
   'Quitado', 'Recebido', 'Devolvida', 'Sem êxito', 'Encerrado',
   // já tem acordo -> régua de acordo (não a de cobrança pré-acordo)
   'Acordo', 'Acordo firmado', 'Em pagamento',
+  // acordo descumprido, indo para execução -> quem fala é o advogado, não a régua
+  'Executar acordo',
   // fase judicial -> não cobrar por WhatsApp automático
   'Ação judicial', 'Petição inicial', 'Citação', 'Contestação',
   'Audiência', 'Sentença', 'Recurso', 'Execução', 'Penhora', 'Hasta pública',
