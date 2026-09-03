@@ -4208,25 +4208,21 @@ body.viewas-readonly select {
       <input type="hidden" id="macord-devId">
       <div class="fg-row">
         <div class="fg">
-          <label>Valor total do acordo (R$) *</label>
-          <input type="text" id="macord-valor" placeholder="0,00">
-        </div>
-        <div class="fg">
-          <label>Número de parcelas *</label>
-          <input type="number" id="macord-parc" min="1" placeholder="1">
-        </div>
-      </div>
-      <div class="fg-row">
-        <div class="fg">
           <label>Valor da entrada (R$)</label>
-          <input type="text" id="macord-entrada" placeholder="0,00">
+          <input type="text" id="macord-entrada" placeholder="0,00" oninput="recalcAcordoBlocos()">
         </div>
         <div class="fg">
           <label>Primeiro vencimento *</label>
-          <input type="date" id="macord-venc1">
+          <input type="date" id="macord-venc1" onchange="recalcAcordoBlocos()">
         </div>
       </div>
       <div class="fg">
+        <label>Parcelas — pode ter mais de uma faixa de valor (ex.: 3x R$300 e depois 12x R$400)</label>
+        <div id="macord-blocos"></div>
+        <button type="button" class="btn btn-ghost btn-sm" style="margin-top:6px;" onclick="addBlocoAcordo()">+ Adicionar faixa de parcelas</button>
+      </div>
+      <div id="macord-resumo" style="background:var(--bg);border-radius:var(--radius-sm);padding:10px 14px;font-size:13px;font-weight:600;color:var(--navy);margin-top:4px;">Total: R$ 0,00 em 0 parcela(s)</div>
+      <div class="fg" style="margin-top:10px;">
         <label>Observações</label>
         <textarea id="macord-obs" rows="3" placeholder="Condições do acordo..."></textarea>
       </div>
@@ -5093,6 +5089,7 @@ function load(){
 }
 const uid=()=>(typeof crypto!=='undefined'&&crypto.randomUUID)?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2);
 const fmt=v=>(+v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+const round2=v=>Math.round((+v||0)*100)/100;
 
 // ── LISTENERS ESCOPADOS (B2) ─────────────────────────────────
 // Cada "escopo" (drawer, popover, modal) tem um AbortController. Quando o
@@ -5880,6 +5877,8 @@ function _rowToAcordo(row){
     venc1: row.data_primeiro_venc || '',
     obs: (row.metadata && row.metadata.obs) || '',
     parcelas: parc,
+    blocos: (row.metadata && row.metadata.blocos) || null,
+    boletosEmitidos: !!(row.metadata && row.metadata.boletos_emitidos),
     forma: row.forma || 'outro',
     status: row.status || 'ativo',
     createdAt: row.created_at || null,
@@ -6732,7 +6731,7 @@ async function viaCepLookup(cepStr, alvo, force){
 //   • Telefone → (46) 99922-3332 / (46) 9922-3332   • CEP → 85660-000
 const _MASK_MONEY = new Set(['mlanc-valor','mlanc-juros','mlanc-multa','mlanc-desconto',
   'mtransf-valor','mcust-valor-previsto','mcust-valor-bloqueado','mcust-valor-sacado',
-  'mrec-valor','macord-valor','macord-entrada','di-valor','mpag-valor','cpnc-valor',
+  'mrec-valor','macord-entrada','di-valor','mpag-valor','cpnc-valor',
   'cobr-valor-capital','cobr-valor-atual']);
 const _MASK_DOC = new Set(['mdev-doc','mcli-doc','di-doc','cpnc-doc','mctf-doc',
   'cfg-cnpj','devedor-cpf']);
@@ -14748,9 +14747,13 @@ function acordoHtml(ac, ai, devId){
               <input type="checkbox" ${p.pago?'checked':''} onchange="toggleParcela('${devId}','${ac.id}',${pi})" style="accent-color:var(--navy);">
               <span style="font-size:13px;color:var(--text-2);">Parcela ${pi+1} — ${p.vencimento||''}</span>
             </div>
-            <span style="font-size:13px;font-weight:600;${p.pago?'text-decoration:line-through;color:var(--text-3);':'color:var(--navy);"'}>${fmtR(p.valor||0)}</span>
+            <span style="display:flex;align-items:center;gap:6px;">
+              <span style="font-size:13px;font-weight:600;${p.pago?'text-decoration:line-through;color:var(--text-3);':'color:var(--navy);"'}>${fmtR(p.valor||0)}</span>
+              ${(!p.pago && !ac.boletosEmitidos && !cancelado) ? `<button type="button" class="btn btn-ghost btn-sm" style="padding:2px 6px;" onclick="editarValorParcela('${devId}','${ac.id}',${pi})" title="Editar o valor desta parcela">&#9998;</button>` : ''}
+            </span>
           </div>
         `).join('')}
+        ${ac.boletosEmitidos?`<p style="font-size:11px;color:var(--text-3);margin-top:6px;">Boletos já emitidos no Asaas — editar o valor aqui não muda o que já foi cobrado.</p>`:''}
         ${ac.obs?`<p style="font-size:12px;color:var(--text-3);margin-top:8px;">${ac.obs}</p>`:''}
         <!-- Onda 1 #3 — ações do acordo dentro do caso (religa termo/ZapSign/boleto já existentes) -->
         <div id="acordo-meta-${ac.id}" style="margin-top:10px;">${cancelado?_acordoSeloCancelado(ac):''}</div>
@@ -17563,48 +17566,89 @@ function salvarHistorico(){
 }
 
 // ── ACORDO ───────────────────────────────────────────────────
+// ── BLOCOS DE PARCELAS (faixas de valor dentro de um mesmo acordo) ───────────
+// Cada bloco é { qtd, valor }: "qtd" parcelas mensais seguidas de "valor" cada.
+// Um acordo pode ter vários blocos em sequência (ex.: 3x300 depois 12x400) —
+// é o que permite negociar entrada + faixas de valor diferentes ao longo do
+// tempo, em vez de só "valor total ÷ nº de parcelas iguais".
+function addBlocoAcordo(qtd, valor){
+  const wrap = document.getElementById('macord-blocos');
+  if(!wrap) return;
+  const row = document.createElement('div');
+  row.className = 'fg-row macord-bloco-row';
+  row.style.cssText = 'align-items:flex-end;gap:8px;';
+  row.innerHTML = `
+    <div class="fg" style="flex:1;"><label>Nº parcelas</label><input type="number" min="1" class="macord-bloco-qtd" value="${qtd||1}" oninput="recalcAcordoBlocos()"></div>
+    <div class="fg" style="flex:1;"><label>Valor por parcela (R$)</label><input type="text" class="macord-bloco-valor" placeholder="0,00" value="${valor?fmt(valor):''}" oninput="recalcAcordoBlocos()"></div>
+    <button type="button" class="btn btn-ghost btn-sm macord-bloco-rm" title="Remover esta faixa" style="margin-bottom:2px;">&#10005;</button>
+  `;
+  row.querySelector('.macord-bloco-rm').onclick = ()=>{ row.remove(); recalcAcordoBlocos(); };
+  wrap.appendChild(row);
+  recalcAcordoBlocos();
+}
+
+function lerBlocosAcordo(){
+  return Array.from(document.querySelectorAll('#macord-blocos .macord-bloco-row')).map(row=>({
+    qtd: parseInt(row.querySelector('.macord-bloco-qtd').value)||0,
+    valor: parseValorBR(row.querySelector('.macord-bloco-valor').value||'0')
+  })).filter(b=>b.qtd>0 && b.valor>0);
+}
+
+function recalcAcordoBlocos(){
+  const entrada = parseValorBR(document.getElementById('macord-entrada')?.value||'0');
+  const blocos = lerBlocosAcordo();
+  const nParc = blocos.reduce((s,b)=>s+b.qtd,0);
+  const total = round2(entrada + blocos.reduce((s,b)=>s+b.qtd*b.valor,0));
+  const el = document.getElementById('macord-resumo');
+  if(el) el.textContent = `Total: ${fmtR(total)} em ${nParc + (entrada>0?1:0)} parcela(s)${entrada>0?' (incl. entrada)':''}`;
+}
+
 function abrirAcordo(devId){
   document.getElementById('macord-devId').value = devId;
-  document.getElementById('macord-valor').value = '';
-  document.getElementById('macord-parc').value = '1';
   document.getElementById('macord-entrada').value = '';
   document.getElementById('macord-venc1').value = hoje();
   document.getElementById('macord-obs').value = '';
+  document.getElementById('macord-blocos').innerHTML = '';
+  addBlocoAcordo(1, null);
   openModal('modal-acordo');
 }
 
 function salvarAcordo(){
   const devId = document.getElementById('macord-devId').value;
-  const valorTotal = parseValorBR(document.getElementById('macord-valor').value);
-  const numParc = parseInt(document.getElementById('macord-parc').value)||1;
   const entrada = parseValorBR(document.getElementById('macord-entrada').value||'0');
   const venc1 = document.getElementById('macord-venc1').value;
   const obs = document.getElementById('macord-obs').value||'';
+  const blocos = lerBlocosAcordo();
 
-  if(!devId || !valorTotal || !venc1){ alert('Preencha os campos obrigatórios.'); return; }
+  if(!devId || !venc1 || !blocos.length){ alert('Preencha o primeiro vencimento e ao menos uma faixa de parcelas (nº e valor).'); return; }
 
   const dev = (DB.devedores||[]).find(d=>d.id===devId);
   if(!dev){ alert('Devedor não encontrado.'); return; }
 
-  // Generate parcelas
-  const valorRestante = valorTotal - entrada;
-  const valorParc = numParc > 0 ? valorRestante / numParc : valorRestante;
   const parcelas = [];
-
-  // Entry installment
   if(entrada > 0){
     parcelas.push({ id:uid(), numero:0, valor:entrada, vencimento:venc1, pago:false, tipo:'entrada' });
   }
 
-  // Monthly installments
+  // Gera as parcelas em sequência mensal, bloco após bloco — cada parcela carrega
+  // o índice do bloco a que pertence (1-based) para a emissão de boleto agrupar
+  // corretamente cada faixa de valor como sua própria série no Asaas.
   const [y,m,d] = venc1.split('-').map(Number);
-  for(let i=0;i<numParc;i++){
-    const vDate = new Date(y, m-1+i+(entrada>0?1:0), d);
-    const vStr = isoLocal(vDate);
-    parcelas.push({ id:uid(), numero:i+1, valor:valorParc, vencimento:vStr, pago:false });
-  }
+  let mesOffset = entrada>0 ? 1 : 0;
+  let seq = entrada>0 ? 1 : 0;
+  blocos.forEach((b,bi)=>{
+    for(let i=0;i<b.qtd;i++){
+      const vDate = new Date(y, m-1+mesOffset, d);
+      const vStr = isoLocal(vDate);
+      parcelas.push({ id:uid(), numero:seq, valor:b.valor, vencimento:vStr, pago:false, bloco:bi+1 });
+      seq++; mesOffset++;
+    }
+  });
 
-  const acordo = { id:uid(), valorTotal, numParc, entrada, venc1, obs, parcelas, createdAt:hoje() };
+  const numParc = blocos.reduce((s,b)=>s+b.qtd,0);
+  const valorTotal = round2(entrada + blocos.reduce((s,b)=>s+b.qtd*b.valor,0));
+
+  const acordo = { id:uid(), valorTotal, numParc, entrada, venc1, obs, parcelas, blocos, createdAt:hoje() };
   if(!dev.acordos) dev.acordos = [];
   dev.acordos.push(acordo);
   dev.status = 'Acordo';
@@ -17614,6 +17658,8 @@ function salvarAcordo(){
   // Persiste na tabela dedicada `acordos` (fonte da verdade — o metadata não guarda
   // acordos). Sem isto, o acordo some no próximo load. forma/status respeitam os CHECKs
   // (forma ∈ avista/boleto/cartao/outro; status ∈ ativo/encerrado/cancelado).
+  // `blocos` vai dentro de metadata: é o que api/_emitir-acordo.js lê para emitir
+  // uma série de boleto por faixa de valor em vez de dividir o total igualmente.
   upsertAcordoRelational(devId, {
     id: acordo.id,
     forma: (numParc > 1 || entrada > 0) ? 'outro' : 'avista',
@@ -17623,13 +17669,48 @@ function salvarAcordo(){
     valorEntrada: entrada,
     numParcelas: numParc,
     dataPrimeiroVenc: venc1,
-    metadata: { obs }
+    metadata: { obs, blocos }
   }).then(res=>{
     if(!res || !res.ok) showToast('Acordo salvo na tela, mas falhou ao gravar no servidor'+(res&&res.error?': '+res.error:'')+'. Recarregue e tente de novo.','warning');
   });
   closeModal('modal-acordo');
   if(currentDevId === devId) renderDrawerBody(devId);
   renderDevedores();
+}
+
+// ── EDITAR VALOR DE UMA PARCELA (ajuste pontual, ex.: última parcela residual) ─
+// Faz PATCH parcial (só parcelas + valor_total) — nunca upsert da linha inteira,
+// para não sobrescrever metadata.boletos_emitidos/asaas_* gravados pela emissão.
+async function patchAcordoParcelasRelational(acordoId, parcelas, valorTotal){
+  const supa = getSupabase();
+  if(!supa) return { ok:false, error:'no supabase' };
+  try{
+    const { error } = await supa.from('acordos').update({ parcelas, valor_total: valorTotal }).eq('id', acordoId);
+    if(error){ console.warn('[rel] patchAcordoParcelas:', error.message); return { ok:false, error:error.message }; }
+    return { ok:true };
+  }catch(e){ return { ok:false, error:e.message }; }
+}
+
+function editarValorParcela(devId, acordoId, idx){
+  const dev = (DB.devedores||[]).find(d=>d.id===devId);
+  const ac = dev && (dev.acordos||[]).find(a=>a.id===acordoId);
+  const p = ac && ac.parcelas && ac.parcelas[idx];
+  if(!p) return;
+  if(p.pago){ showToast('Parcela já paga — não dá para editar.','warning'); return; }
+  if(ac.boletosEmitidos){ showToast('Este acordo já teve boleto emitido no Asaas — editar aqui não muda o valor cobrado lá.','warning'); return; }
+  promptModal('Editar valor da parcela', `Parcela ${idx+1} — novo valor (R$)`, (v)=>{
+    if(v==null) return;
+    const novo = parseValorBR(v);
+    if(!(novo>0)){ showToast('Valor inválido.','warning'); return; }
+    p.valor = novo;
+    ac.valorTotal = round2((ac.parcelas||[]).reduce((s,pp)=>s+(Number(pp.valor)||0),0));
+    dev.updatedAt = hoje();
+    save();
+    patchAcordoParcelasRelational(ac.id, ac.parcelas, ac.valorTotal).then(res=>{
+      if(!res || !res.ok) showToast('Editado na tela, mas falhou gravar no servidor'+(res&&res.error?': '+res.error:'')+'.','warning');
+    });
+    if(currentDevId===devId) renderDrawerBody(devId);
+  }, { value: fmt(p.valor) });
 }
 
 // ── TOGGLE PARCELA ───────────────────────────────────────────
@@ -44903,10 +44984,8 @@ function usarSimulacao(devId, valorOrig){
   closeModal('modal-simulador');
   abrirAcordo(devId);
   setTimeout(()=>{
-    const vEl = document.getElementById('macord-valor');
-    if(vEl) vEl.value = fmt(valorDesc);
-    const pEl = document.getElementById('macord-parc');
-    if(pEl) pEl.value = parc;
+    document.getElementById('macord-blocos').innerHTML = '';
+    addBlocoAcordo(parc, valorDesc/parc);
   }, 100);
 }
 
