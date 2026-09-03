@@ -75,8 +75,9 @@ Deno.serve(async (req) => {
     // não assina por aqui). Sem advogado informado, o comportamento é idêntico ao
     // anterior — array vazio, nada muda.
     const advs = (Array.isArray(dados.advogados) ? dados.advogados : []).filter((a: any) => a && a.nome);
+    const tipoAcordoLabel = dados.tipo === "judicial" ? "Acordo Judicial" : "Acordo Extrajudicial";
     const zapBody = {
-      name: (String(dev.nome || "Devedor").trim() + " - Acordo Extrajudicial"),
+      name: (String(dev.nome || "Devedor").trim() + " - " + tipoAcordoLabel),
       base64_pdf,
       external_id: String(casoId ?? ""),
       // Um signer por devedor; cada um assina na sua âncora <<assdevN>> (1-based).
