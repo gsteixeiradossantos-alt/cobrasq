@@ -34927,7 +34927,7 @@ function _finPrevisaoImprimir(){
   html,body{font-family:var(--sans);color:var(--ink);background:#FFFFFF;font-size:10.5pt;}
   .wm{font-family:var(--serif);font-weight:300;letter-spacing:.02em;text-transform:lowercase;line-height:1;display:inline-block;}
   .wm::after{content:".";color:var(--accent);}
-  .em{color:var(--accent-2);font-style:italic;}
+  .em{font-family:var(--serif-edit);color:var(--accent-2);font-style:italic;}
 
   .band{background:var(--ink);color:var(--paper);padding:9mm 18mm 8mm;display:flex;justify-content:space-between;align-items:center;position:relative;}
   .band::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;background:var(--accent);opacity:.85;}
@@ -36059,7 +36059,7 @@ async function _extratoRepasseDados(cobId){
         .eq('cobranca_id', cobId).eq('tipo_movimento',0).eq('status',0)
         .order('data_vencimento',{ascending:true}),
     supa.from('cobrancas').select('numero_processo,valor_capital,cliente_id').eq('id',cobId).maybeSingle(),
-    supa.from('cobranca_partes').select('principal,devedores(nome)').eq('cobranca_id',cobId),
+    supa.from('cobranca_partes').select('principal,devedores(nome,doc)').eq('cobranca_id',cobId),
   ]);
   const feitos = pix||[], previstos = parc||[];
   if(!feitos.length && !previstos.length){
@@ -36077,6 +36077,7 @@ async function _extratoRepasseDados(cobId){
                : (fantasia || razao || (window._repasseCtx||{}).clienteNome || '—');
   const pp = (partes||[]).find(x=>x.principal) || (partes||[])[0];
   const devedor = (pp && pp.devedores && pp.devedores.nome) || '—';
+  const devedorDoc = (pp && pp.devedores && pp.devedores.doc) || '';
   const capital = (cob.valor_capital!=null) ? +cob.valor_capital : null;
 
   const total_n = feitos.length + previstos.length;
@@ -36084,16 +36085,17 @@ async function _extratoRepasseDados(cobId){
   let i = 0, pago = 0, aberto = 0;
   for(const r of feitos){
     i++; pago += (+r.valor||0);
-    rows.push({ n:`${i} de ${total_n}`, ref:_extData(r.data_pix), pago:_extData(r.data_pix),
+    // repasses_cliente nao guarda vencimento — so a data em que o PIX saiu.
+    rows.push({ n:`${i} de ${total_n}`, venc:null, pago:_extData(r.data_pix),
                 aut:r.transacao_id||'', valor:+r.valor||0, ok:true });
   }
   for(const p of previstos){
     i++; const v = Math.abs(+p.valor||0); aberto += v;
-    rows.push({ n:`${i} de ${total_n}`, ref:_extData(p.data_vencimento), pago:null, aut:'', valor:v, ok:false });
+    rows.push({ n:`${i} de ${total_n}`, venc:_extData(p.data_vencimento), pago:null, aut:'', valor:v, ok:false });
   }
   const total = pago + aberto;
   const html = _extratoRepasseHtml({
-    credor, credorDoc: cli.doc||'', devedor,
+    credor, credorDoc: cli.doc||'', devedor, devedorDoc,
     processo: cob.numero_processo || '—', capital, rows, pago, aberto, total,
     nPagos: feitos.length,
   });
@@ -36102,7 +36104,7 @@ async function _extratoRepasseDados(cobId){
   // O grupo tem precedência: `clientes.telefone` nesses casos é um número
   // pessoal, e mandar extrato de repasse para lá é entregar no lugar errado.
   const grupo = (cli.metadata && cli.metadata.whatsapp_repasse) || '';
-  return { cobId, html, credor, credorTel: cli.telefone||'', credorGrupo: grupo, devedor, total, pago, aberto };
+  return { cobId, html, credor, credorTel: cli.telefone||'', credorGrupo: grupo, devedor, devedorDoc, total, pago, aberto };
 }
 
 async function extratoRepasseAcordoPDF(cobId){
@@ -36189,7 +36191,15 @@ async function enviarExtratoRepasseWA(cobId){
     // Gera a imagem ANTES de qualquer envio: a prévia serve justamente para
     // pegar extrato gerado errado antes que ele saia para o cliente.
     const blob = await _extratoRepassePdfBlob(d.html);
-    const legendaPadrao = `*Financeiro COBRASQ:*\nOlá! Foi realizado acordo com a *${d.devedor}*.\n\nOs valores serão repassados conforme o extrato em anexo.\n\nNa hipótese de haver restrições no nome do cliente como SPC, SERASA, BOAVISTA/CLD e afins, solicita a realização da retirada, com urgência. Na existência de PROTESTOS, me envie a carta de anuência na forma eletrônica, por gentileza. Qualquer dúvida é só me comunicar!`;
+    // O credor precisa do documento para localizar o cliente na base dele e dar
+    // baixa em SPC/SERASA/protesto — so o nome nao basta em caso de homonimo.
+    // O rotulo sai pelo tamanho: 11 digitos e CPF, 14 e CNPJ. So cai no
+    // generico "CPF/CNPJ" se o cadastro estiver com um numero de digitos que
+    // nao e nem um nem outro — aí nao da para afirmar qual e.
+    const _docN = String(d.devedorDoc||'').replace(/\D/g,'');
+    const _docRot = _docN.length===11 ? 'CPF' : (_docN.length===14 ? 'CNPJ' : 'CPF/CNPJ');
+    const quemDev = d.devedorDoc ? `*${d.devedor}*, ${_docRot} ${_tajDocFmt(d.devedorDoc)}` : `*${d.devedor}*`;
+    const legendaPadrao = `*Financeiro COBRASQ:*\nOlá! Foi realizado acordo com a ${quemDev}.\n\nOs valores serão repassados conforme o extrato em anexo.\n\nNa hipótese de haver restrições no nome do cliente como SPC, SERASA, BOAVISTA/CLD e afins, solicita a realização da retirada, com urgência. Na existência de PROTESTOS, me envie a carta de anuência na forma eletrônica, por gentileza. Qualquer dúvida é só me comunicar!`;
 
     const blobUrl = URL.createObjectURL(blob);
     let legenda;
@@ -36228,102 +36238,132 @@ function _extExtenso(){
 }
 // Monta o HTML do extrato. `dense` compacta o layout quando há muitas parcelas,
 // pra o documento continuar cabendo numa página só.
+// Assinatura digitalizada do Gustavo, embutida como data URI para o documento
+// ser autossuficiente (ele e impresso numa janela nova, sem acesso a assets).
+// Vazio = documento sai so com nome e cargo, como antes.
+const _ASSINATURA_SRC = 'data:image/png;base64,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';
+
 function _extratoRepasseHtml(d){
-  const dense = d.rows.length > 5 ? ' dense' : '';
-  const tr = (r)=>`<tr><td>${escHtml(r.n)}<span class="aut">${r.ok?'PIX em ':'venc. '}${escHtml(r.ref)}</span></td>
-    <td class="n">${r.pago?escHtml(r.pago):'—'}${r.aut?`<span class="aut">${escHtml(r.aut)}</span>`:''}</td>
-    <td class="n">${fmtR(r.valor)}</td>
-    <td class="n"><span class="pg ${r.ok?'ok':'ab'}">${r.ok?'Repassada':'Em aberto'}</span></td></tr>`;
+  // Documento reconstruido em 03/09/2026 sobre o template-documento-juridico da
+  // skill identidade-visual-cobrasq. Duas mudancas estruturais:
+  //  1. Rodape e numero de pagina vivem nas MARGIN-BOXES da @page (o Chrome as
+  //     renderiza). Saem do fluxo, entao nunca empurram uma folha quase vazia —
+  //     era a causa da segunda pagina em branco, e some junto a gambiarra dos
+  //     degraus de densidade que existia aqui.
+  //  2. Uma escala tipografica so, em pontos, herdada do template: 24 / 13 /
+  //     10.5 / 9.5 / 7.6 / 7.4 / 6.4pt. Antes eram oito tamanhos em px sem
+  //     relacao entre si, ajustados a olho para caber na pagina.
+  const temPg = d.nPagos > 0;
+  const _devN = String(d.devedorDoc||'').replace(/\D/g,'');
+  const _devRot = _devN.length===11 ? 'CPF' : (_devN.length===14 ? 'CNPJ' : 'CPF/CNPJ');
+  const _devDoc = d.devedorDoc ? _tajDocFmt(d.devedorDoc) : '—';
+  // O tratamento sai so na exibicao — o cadastro em DB.config.nome fica intacto.
+  const _nomeAssina = String((DB.config&&DB.config.nome)||'Gustavo Teixeira').replace(/^\s*(Dr\.|Dra\.)\s*/i,'');
+  const nCols = temPg ? 5 : 4;
+  const tr = (r)=>`<tr><td>${escHtml(r.n)}</td>
+    <td>${r.venc?escHtml(r.venc):'—'}</td>
+    ${temPg?`<td>${r.pago?escHtml(r.pago):'—'}${r.aut?`<span class="aut">${escHtml(r.aut)}</span>`:''}</td>`:''}
+    <td class="r">${fmtR(r.valor)}</td>
+    <td class="r st">${r.ok?'Repassada':'Em aberto'}</td></tr>`;
   const intro = d.nPagos
     ? 'Discriminamos os repasses de <b>capital</b> efetuados ao credor, referentes ao acordo firmado nos autos em referência. Cada repasse foi feito por PIX; o código de autenticação de cada transferência acompanha a respectiva parcela.'
     : 'Discriminamos abaixo o cronograma de repasse de <b>capital</b> ao credor, referente ao acordo firmado nos autos em referência. Até a presente data não houve repasse. Cada repasse será feito por PIX, e o código de autenticação da transferência passará a constar nesta relação.';
   const fecho = d.nPagos
-    ? `Repassados <b>${fmtR(d.pago)}</b> em ${d.nPagos} ${d.nPagos===1?'transferência':'transferências'}; restam <b>${fmtR(d.aberto)}</b>. O valor nominal do débito retorna integralmente ao credor — a remuneração da COBRASQ recai apenas sobre os <span class="em">acessórios</span>.`
-    : `O total a repassar é de <b>${fmtR(d.total)}</b>, em ${d.rows.length} ${d.rows.length===1?'parcela':'parcelas'}, conforme o cronograma acima. O valor nominal do débito retorna integralmente ao credor — a remuneração da COBRASQ recai apenas sobre os <span class="em">acessórios</span>.`;
+    ? `Repassados <b>${fmtR(d.pago)}</b> em ${d.nPagos} ${d.nPagos===1?'transferência':'transferências'}; restam <b>${fmtR(d.aberto)}</b>. O valor nominal do débito retorna integralmente ao credor, e a remuneração da COBRASQ recai apenas sobre os <span class="em">acessórios</span>.`
+    : `O total a repassar é de <b>${fmtR(d.total)}</b>, em ${d.rows.length} ${d.rows.length===1?'parcela':'parcelas'}, conforme o cronograma acima. O valor nominal do débito retorna integralmente ao credor, e a remuneração da COBRASQ recai apenas sobre os <span class="em">acessórios</span>.`;
   return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"/>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,500&family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono&display=swap"/>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500&family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"/>
 <style>
-:root{--ink:#0A1530;--accent:#C9A961;--accent-2:#9C7F40;--paper:#EFEAD9;
---line:rgba(10,21,48,.14);--mute:rgba(10,21,48,.55);--d-mute:rgba(239,234,217,.6);
+:root{--ink:#0A1530;--graphite:#15224A;--accent:#C9A961;--accent-2:#9C7F40;--paper:#EFEAD9;
+--line:rgba(10,21,48,.14);--mute:rgba(10,21,48,.55);
 --serif:"Fraunces","Times New Roman",serif;--serif-edit:"Instrument Serif","Times New Roman",serif;
---sans:"Inter Tight",system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace;}
+--sans:"Inter Tight",-apple-system,system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace;}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
-@page{size:210mm 297mm;margin:0;}
-html,body{font-family:var(--sans);color:var(--ink);}
-.doc-band{width:210mm;height:296.5mm;display:flex;flex-direction:column;background:#FFF;}
-.band{background:var(--ink);color:var(--paper);padding:34px 70px 30px;display:flex;justify-content:space-between;align-items:center;position:relative;}
-.band::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;background:var(--accent);opacity:.85;}
-.band .lockup{display:flex;align-items:center;gap:16px;}
-.band .dot{width:36px;height:36px;border-radius:50%;background:var(--accent);}
-.band .wm{font-family:var(--serif);font-weight:300;text-transform:lowercase;font-size:27px;line-height:1;color:var(--paper);}
-.band .wm::after{content:".";color:var(--accent);}
-.band .head-meta{font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--d-mute);text-align:right;line-height:1.9;}
-.doc-inner{padding:30px 62px 26px;flex:1;display:flex;flex-direction:column;gap:15px;}
-.foot{margin-top:auto;padding-top:16px;border-top:.5px solid var(--line);display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);}
-.kicker{font-family:var(--mono);font-size:11px;letter-spacing:.28em;text-transform:uppercase;color:var(--accent-2);}
-.doc-title{display:flex;justify-content:space-between;align-items:baseline;}
-.doc-title .t{font-family:var(--serif);font-weight:300;font-size:36px;letter-spacing:-.02em;line-height:1;}
-.doc-title .num{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);text-align:right;line-height:1.8;}
-.ref{display:grid;grid-template-columns:1fr 1fr;gap:0 30px;border-top:.5px solid var(--line);border-bottom:.5px solid var(--line);padding:12px 0;}
-.ref div{padding:5px 0;}
-.ref .l{font-family:var(--mono);font-size:8px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);}
-.ref .v{font-size:13.5px;margin-top:3px;}
-.value-box{display:flex;align-items:baseline;justify-content:space-between;border:.5px solid var(--accent);padding:15px 24px;background:rgba(201,169,97,.06);}
-.value-box .vl{font-family:var(--mono);font-size:9px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);}
-.value-box .vv{font-family:var(--serif);font-size:31px;letter-spacing:-.01em;}
-.decl{font-family:var(--serif-edit);font-size:15px;line-height:1.58;}
-.decl b{font-weight:400;font-family:var(--sans);}
-.em{color:var(--accent-2);font-style:italic;}
-table{width:100%;border-collapse:collapse;}
-th{font-family:var(--mono);font-size:8px;letter-spacing:.18em;text-transform:uppercase;color:var(--mute);font-weight:400;text-align:right;padding:0 10px 9px;border-bottom:.5px solid var(--ink);}
-th:first-child{text-align:left;}
-td{padding:8px 10px;border-bottom:.5px solid var(--line);font-size:12px;vertical-align:top;}
-td.n{text-align:right;white-space:nowrap;font-family:var(--mono);font-size:12px;}
-td .aut{display:block;font-family:var(--mono);font-size:7.4px;color:var(--mute);margin-top:3px;word-break:break-all;}
-.pg{font-family:var(--mono);font-size:8px;letter-spacing:.16em;text-transform:uppercase;}
-.pg.ok{color:#4C6647;}.pg.ab{color:var(--accent-2);}
-tr.tot td{border-bottom:0;border-top:.5px solid var(--ink);padding-top:11px;font-family:var(--mono);font-size:13px;}
-tr.tot td:first-child{font-size:8px;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);}
-.place-date{font-family:var(--serif-edit);font-size:15px;}
-.sign{margin-top:16px;}
-.sign .name{font-family:var(--serif);font-size:20px;}
-.sign .role{font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);margin-top:4px;}
-.dense .doc-inner{padding:26px 62px 22px;gap:11px;}
-.dense .doc-title .t{font-size:31px;}
-.dense .value-box{padding:12px 24px;}.dense .value-box .vv{font-size:27px;}
-.dense .decl{font-size:13.6px;line-height:1.52;}
-.dense td{padding:6px 10px;font-size:11.4px;}
-.dense .ref{padding:10px 0;}.dense .ref .v{font-size:12.5px;}
-.dense .sign{margin-top:12px;}.dense .sign .name{font-size:18px;}
-.dense .place-date{font-size:14px;}
+@page{size:A4 portrait;margin:16mm 19mm 17mm;
+  @top-left{content:"cobrasq.";font-family:"JetBrains Mono",monospace;font-size:6.4pt;letter-spacing:.16em;color:rgba(10,21,48,.42);}
+  @top-right{content:"Extrato de repasse";font-family:"JetBrains Mono",monospace;font-size:6.2pt;letter-spacing:.14em;text-transform:uppercase;color:rgba(10,21,48,.38);}
+  @bottom-center{content:"Av. Rio Grande do Sul, 380, Sala 201 · Centro · Dois Vizinhos/PR · 85660-000\\A ccobrasq@gmail.com · (46) 98822-6533";white-space:pre-line;text-align:center;font-family:"JetBrains Mono",monospace;font-size:5.8pt;letter-spacing:.03em;line-height:1.75;color:rgba(10,21,48,.45);}
+  @bottom-right{content:"Pág. " counter(page) "/" counter(pages);font-family:"JetBrains Mono",monospace;font-size:5.6pt;letter-spacing:.02em;color:rgba(10,21,48,.55);}}
+@page :first{@top-left{content:none;}@top-right{content:none;}}
+html,body{background:#FFF;color:var(--ink);font-family:var(--sans);font-size:10.5pt;line-height:1.62;-webkit-font-smoothing:antialiased;}
+p{orphans:2;widows:2;}
+/* faixa Marinho na largura do conteudo, como no template da skill */
+.masthead{background:var(--ink);color:var(--paper);position:relative;display:flex;justify-content:space-between;align-items:center;gap:18px;padding:11px 20px 10px;margin-bottom:12px;}
+.masthead::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1.4px;background:var(--accent);}
+.mh-lockup{display:flex;align-items:center;gap:13px;}
+.mh-dot{width:26px;height:26px;border-radius:50%;background:var(--accent);flex-shrink:0;}
+.mh-rule{width:1px;height:26px;background:rgba(239,234,217,.30);}
+.mh-wm{font-family:var(--serif);font-weight:300;font-size:27px;line-height:1;text-transform:lowercase;color:var(--paper);}
+.mh-wm .p{color:var(--accent);}
+.mh-meta{text-align:right;font-family:var(--mono);font-size:6.4pt;line-height:1.6;letter-spacing:.08em;text-transform:uppercase;color:rgba(239,234,217,.70);}
+.mh-meta strong{font-weight:500;color:rgba(239,234,217,.92);}
+.doc-head{text-align:center;margin-bottom:12px;}
+.doc-eyebrow{font-family:var(--mono);font-size:7.6pt;letter-spacing:.24em;text-transform:uppercase;color:var(--accent-2);margin-bottom:7px;}
+.doc-title{font-family:var(--serif);font-weight:400;font-size:21pt;line-height:1.08;letter-spacing:-.012em;}
+.doc-title .ed{display:block;font-family:var(--serif-edit);font-style:italic;font-size:13pt;color:var(--graphite);margin-top:4px;}
+/* rotulo unico para TODO metadado: preambulo, cabecalho da tabela e caixa de valor */
+.lbl{font-family:var(--mono);font-size:7.4pt;letter-spacing:.22em;text-transform:uppercase;color:var(--accent-2);}
+.ref{display:grid;grid-template-columns:1fr 1fr;gap:9px 26px;border-top:.5px solid var(--line);border-bottom:.5px solid var(--line);padding:9px 0;margin-bottom:11px;}
+.ref .v{margin-top:4px;}
+.ref .mono{font-family:var(--mono);font-size:9.5pt;}
+.value-box{display:flex;align-items:center;justify-content:space-between;gap:20px;border:.5px solid var(--accent);background:rgba(201,169,97,.06);padding:9px 20px;margin-bottom:11px;}
+.value-box .vv{font-family:var(--serif);font-weight:400;font-size:21pt;line-height:1;letter-spacing:-.01em;}
+.decl{text-align:justify;}
+.decl b{font-weight:600;}
+.em{font-family:var(--serif-edit);font-style:italic;color:var(--accent-2);}
+/* tabela: UMA familia (mono) e UM tamanho, para as linhas de base baterem */
+table{width:100%;border-collapse:collapse;margin:12px 0;font-family:var(--mono);font-size:9.5pt;}
+thead{display:table-header-group;}
+th{font-family:var(--mono);font-size:7.4pt;font-weight:400;letter-spacing:.22em;text-transform:uppercase;color:var(--accent-2);text-align:left;padding:0 9px 7px;border-bottom:.6px solid var(--ink);}
+th.r,td.r{text-align:right;}
+td{padding:4px 9px;border-bottom:.5px solid var(--line);vertical-align:baseline;}
+tr{break-inside:avoid;}
+td.st{color:var(--mute);}
+td .aut{display:block;font-size:5.8pt;line-height:1.15;color:var(--mute);letter-spacing:0;word-break:break-all;margin-top:0;}
+/* Chrome repete tfoot em TODA pagina quando ele e table-footer-group — o total
+   aparecia na folha 1 e de novo na 2. Como row-group sai so no fim, que e onde
+   o total pertence. */
+tfoot{display:table-row-group;}
+tfoot td{border-bottom:0;border-top:.6px solid var(--ink);padding-top:9px;}
+tfoot .lbl{font-family:var(--mono);}
+.closing{text-align:center;margin-top:9px;font-family:var(--serif-edit);font-style:italic;font-size:12.5pt;color:var(--graphite);}
+.sign{text-align:center;margin-top:8px;}
+.sign img{display:block;margin:0 auto -12px;height:42px;}
+.sign .name{margin-top:4px;}
+/* Só a DATA e a ASSINATURA andam juntas. O parágrafo de fecho fica livre para
+   ficar com a tabela: quando o bloco inteiro era indivisivel, ele pulava para a
+   folha seguinte e deixava um terco da primeira em branco. */
+.subscr{break-inside:avoid;}
+.sign .name{font-family:var(--serif);font-weight:500;font-size:13pt;line-height:1.1;}
+.sign .role{font-family:var(--mono);font-size:7pt;letter-spacing:.20em;text-transform:uppercase;color:var(--accent-2);margin-top:6px;}
 </style></head><body>
-<div class="doc-band${dense}">
-  <div class="band"><div class="lockup"><span class="dot"></span><div class="wm">cobrasq</div></div>
-    <div class="head-meta">COBRASQ Recuperadora de Crédito e Cobrança Ltda.<br/>CNPJ 34.626.848/0001-42<br/>Dois Vizinhos · PR · cobrasq.com.br</div></div>
-  <div class="doc-inner">
-    <div class="doc-title"><div><div class="kicker">Extrato de repasse</div><div class="t">Prestação de contas</div></div>
-      <div class="num">Processo ${escHtml(d.processo)}<br/>Emitido em ${_extExtenso()}</div></div>
-    <div class="ref">
-      <div><div class="l">Credor</div><div class="v">${escHtml(d.credor)}</div></div>
-      <div><div class="l">CNPJ</div><div class="v">${escHtml(d.credorDoc||'—')}</div></div>
-      <div><div class="l">Devedor</div><div class="v">${escHtml(d.devedor)}</div></div>
-      <div><div class="l">Capital do acordo</div><div class="v">${d.capital!=null?fmtR(d.capital):'—'}</div></div>
-    </div>
-    <div class="value-box"><span class="vl">${d.nPagos?'Repassado até aqui':'A repassar ao credor'}</span>
-      <span class="vv">${fmtR(d.nPagos?d.pago:d.total)}</span></div>
-    <p class="decl">${intro}</p>
-    <table><thead><tr><th>Parcela</th><th>Pagamento</th><th>Valor</th><th>Situação</th></tr></thead>
-      <tbody>${d.rows.map(tr).join('')}
-      <tr class="tot"><td>Total do acordo</td><td class="n"></td><td class="n">${fmtR(d.total)}</td><td class="n"></td></tr></tbody></table>
-    <p class="decl">${fecho}</p>
-    <div class="place-date">Dois Vizinhos/PR, ${_extExtenso()}.</div>
-    <div class="sign"><div class="name">${escHtml((DB.config&&DB.config.nome)||'Gustavo Teixeira')}</div>
-      <div class="role">Proprietário · COBRASQ</div></div>
-    <div class="foot"><span>contato@cobrasq.com.br · (46) 98822-6533</span>
-      <span>cobrasq.com.br · @ccobrasq</span><span>Edifício Mara · 2º Andar · Sala 201</span></div>
-  </div>
-</div></body></html>`;
+<header class="masthead">
+  <div class="mh-lockup"><div class="mh-dot"></div><div class="mh-rule"></div><div class="mh-wm">cobrasq<span class="p">.</span></div></div>
+  <div class="mh-meta"><strong>COBRASQ Recuperadora de Crédito e Cobrança Ltda.</strong><br>CNPJ 34.626.848/0001-42<br>Dois Vizinhos · PR · cobrasq.com.br</div>
+</header>
+<div class="doc-head">
+  <div class="doc-eyebrow">Extrato de repasse</div>
+  <h1 class="doc-title">Prestação de contas<span class="ed">${escHtml(d.processo&&d.processo!=='—'?'autos n. '+d.processo:'acordo extrajudicial')}</span></h1>
+</div>
+<section class="ref">
+  <div><div class="lbl">Credor</div><div class="v">${escHtml(d.credor)}</div></div>
+  <div><div class="lbl">CNPJ</div><div class="v mono">${escHtml(d.credorDoc||'—')}</div></div>
+  <div><div class="lbl">Devedor</div><div class="v">${escHtml(d.devedor)}</div></div>
+  <div><div class="lbl">${_devRot}</div><div class="v mono">${escHtml(_devDoc)}</div></div>
+</section>
+<div class="value-box"><span class="lbl">${d.nPagos?'Repassado até aqui':'A repassar ao credor'}</span><span class="vv">${fmtR(d.nPagos?d.pago:d.total)}</span></div>
+<p class="decl">${intro}</p>
+<table>
+  <thead><tr><th>Parcela</th><th>Vencimento</th>${temPg?'<th>Pagamento</th>':''}<th class="r">Valor</th><th class="r">Situação</th></tr></thead>
+  <tbody>${d.rows.map(tr).join('')}</tbody>
+  <tfoot><tr><td class="lbl" colspan="${nCols-2}">Total do acordo</td><td class="r">${fmtR(d.total)}</td><td></td></tr></tfoot>
+</table>
+<p class="decl">${fecho}</p>
+<section class="subscr"><div class="closing">Dois Vizinhos/PR, ${_extExtenso()}.</div>
+<div class="sign">${_ASSINATURA_SRC?`<img src="${_ASSINATURA_SRC}" alt="">`:''}<div class="name">${escHtml(_nomeAssina)}</div><div class="role">Proprietário · COBRASQ</div></div></section>
+</body></html>`;
 }
+
 
 async function cobrasqReciboPDF(operacaoId){
   if(typeof html2pdf==='undefined'){ showToast('Gerador de PDF não carregado','danger'); return; }
