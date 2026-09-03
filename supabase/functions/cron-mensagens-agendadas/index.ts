@@ -75,6 +75,10 @@ Deno.serve(async (req) => {
   // Bucket onde o frontend salva a mídia agendada (áudio/documento/imagem).
   const MEDIA_BUCKET = 'documentos';
 
+  // O Z-API acrescenta a extensão do endpoint (/send-document/<ext>) ao fileName.
+  // Mandar "extrato.pdf" fazia o credor receber "extrato.pdf.pdf".
+  const semExt = (n: string) => String(n || '').replace(/\.[a-z0-9]{1,5}$/i, '') || 'documento';
+
   // Destino de grupo do WhatsApp: id numérico com sufixo `-group`.
   const ehGrupo = (t: unknown) => /-group$/i.test(String(t || '').trim());
 
@@ -96,7 +100,7 @@ Deno.serve(async (req) => {
       if (tipoG === 'imagem') return { ok: true, url: `${zapiBase}/send-image`, body: { phone: grupo, image: sg.signedUrl, caption: m.legenda || '' } };
       const nomeG = m.media_nome || 'documento';
       const extG = (nomeG.split('.').pop() || 'pdf').toLowerCase().replace(/[^a-z0-9]/g, '') || 'pdf';
-      return { ok: true, url: `${zapiBase}/send-document/${extG}`, body: { phone: grupo, document: sg.signedUrl, fileName: nomeG, caption: m.legenda || '' } };
+      return { ok: true, url: `${zapiBase}/send-document/${extG}`, body: { phone: grupo, document: sg.signedUrl, fileName: semExt(nomeG), caption: m.legenda || '' } };
     }
     const phoneDigits = String(m.telefone || '').replace(/\D/g, '');
     // País (55) só quando o número está em formato local (DDD + número = 10-11 díg.);
@@ -131,7 +135,7 @@ Deno.serve(async (req) => {
       return {
         ok: true,
         url: `${zapiBase}/send-document/${ext}`,
-        body: { phone, document: mediaUrl, fileName: nome, caption: m.legenda || '' }
+        body: { phone, document: mediaUrl, fileName: semExt(nome), caption: m.legenda || '' }
       };
     }
     return { ok: false, erro: 'tipo desconhecido: ' + tipo };
