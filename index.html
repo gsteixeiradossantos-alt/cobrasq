@@ -6108,13 +6108,23 @@ async function flushRelational(){
       // beforeunload chama flushRelational) reescrevia TODOS os devedores a partir da memória
       // daquela aba — uma aba aberta há horas com dado velho (nome, telefone, doc, endereço...)
       // sobrescrevia o servidor de volta, mesmo sem o usuário tocar naquele devedor.
+      // Sem baseline (o load relacional ainda não populou), NÃO grava — mesma guarda já
+      // aplicada aos clientes acima. O fallback antigo era "envia tudo": qualquer save que
+      // caísse na janela entre o boot e o loadRelationalData() gravava a lista que estivesse
+      // em memória, que nessa janela é a do blob CONGELADO (cobrasq_data) — 74 devedores com
+      // ids velhos, contra 829 na tabela. Era isso que fazia o toast "Já existe um cadastro
+      // com esse CPF/CNPJ" aparecer na hora do login: o upsert tentava INSERIR devedores do
+      // blob cujo id não existe mais, mas cujo CPF já está na tabela sob outro id, e o
+      // índice idx_devedores_doc_digits_unique barrava (23505). Na dúvida, não escrever.
       const baseDev = _devedoresRelSnapshot;
+      if(!baseDev){ console.warn('[rel] syncDevedores: sem baseline do servidor — gravação adiada'); }
+      else{
       const rows = []; const sentDev = [];
       for(const d of DB.devedores){
         if(!d || d.id==null) continue;
         if(_tombstones.has(_tombKey('devedor', d.id))) continue;
         const row = devedorToRow(d); const json = JSON.stringify(row);
-        if(baseDev && baseDev.get(d.id) === json) continue; // inalterado → não toca no servidor
+        if(baseDev.get(d.id) === json) continue; // inalterado → não toca no servidor
         rows.push(row); sentDev.push([d.id, json]);
       }
       const { error } = rows.length ? await supa.from('devedores').upsert(rows, { onConflict:'id' }) : { error:null };
@@ -6128,8 +6138,8 @@ async function flushRelational(){
         try { showToast(msg, 'danger'); } catch(_){}
       } else if(sentDev.length){
         // Baseline avança só no sucesso — os enviados viram a nova referência da sessão.
-        if(!_devedoresRelSnapshot) _devedoresRelSnapshot = new Map();
         for(const [id,json] of sentDev) _devedoresRelSnapshot.set(id, json);
+      }
       }
     }
   }catch(e){
