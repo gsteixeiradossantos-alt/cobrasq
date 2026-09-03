@@ -42,6 +42,16 @@ function boletoMsg(nome, link) {
     + `Link do boleto:\n${link}\n\n`
     + `_Se precisar de alguma ajuda, é só nos chamar._`;
 }
+// Variante para acordo em faixas de valor (várias séries no Asaas — ver "usaBlocos"
+// mais abaixo): lista um link por faixa em vez de assumir um único boleto/série.
+function boletoMsgMultiplo(nome, links) {
+  const lista = links.map((l, i) => `Faixa ${i + 1}:\n${l}`).join('\n\n');
+  return `*Financeiro COBRASQ:*\n`
+    + `Olá, ${firstName(nome)}! Como vai?\n`
+    + `Informamos que os boletos referentes ao nosso acordo realizado recentemente foram emitidos e estão disponíveis para pagamento. Seguem os links:\n\n`
+    + `${lista}\n\n`
+    + `_Se precisar de alguma ajuda, é só nos chamar._`;
+}
 
 module.exports = async function handler(req, res) {
   applyCors(req, res);
@@ -78,17 +88,21 @@ module.exports = async function handler(req, res) {
     // Modo REENVIO: acordo já emitido → só reenvia o link do boleto por WhatsApp (não
     // cria boleto novo). Grava metadata.whatsapp_ok com o resultado (alimenta o Painel).
     if ((body.resend === true || req.query.resend) && meta.boletos_emitidos) {
+      // Acordo em faixas grava um link por série em metadata.asaas_series; acordo
+      // de série única só tem o campo singular de sempre. Reenvia todos que existirem.
+      const linksSeries = Array.isArray(meta.asaas_series) ? meta.asaas_series.map((s) => s.invoice_url).filter(Boolean) : [];
       const url = meta.asaas_invoice_url || '';
+      const links = linksSeries.length > 1 ? linksSeries : (url ? [url] : []);
       const dvs = await sbFetch(`devedores?id=eq.${acordo.devedor_id}&select=nome,telefone&limit=1`);
       const dev = dvs[0];
       const tel = String((dev && dev.telefone) || '').replace(/\D/g, '');
-      if (!tel || !url) return res.status(200).json({ ok: true, acordo_id: acordoId, reenviado: false, motivo: !tel ? 'devedor sem telefone' : 'acordo sem link' });
+      if (!tel || !links.length) return res.status(200).json({ ok: true, acordo_id: acordoId, reenviado: false, motivo: !tel ? 'devedor sem telefone' : 'acordo sem link' });
       let zap = null;
-      try { zap = await zapiSendText(tel, boletoMsg(dev.nome, url)); }
+      try { zap = await zapiSendText(tel, links.length > 1 ? boletoMsgMultiplo(dev.nome, links) : boletoMsg(dev.nome, links[0])); }
       catch (e) { zap = { error: e.message }; }
       const enviado = !!(zap && zap.messageId);
       await sbFetch(`acordos?id=eq.${acordo.id}`, { method: 'PATCH', body: JSON.stringify({ metadata: { ...meta, whatsapp_ok: enviado } }) }).catch(() => {});
-      await sbFetch('devedor_eventos', { method: 'POST', body: JSON.stringify({ devedor_id: acordo.devedor_id, tipo: 'asaas_boletos_emitidos', payload: { acordo_id: acordoId, invoice_url: url, whatsapp: enviado ? 'enviado' : 'falha', via: 'reenvio' }, autor_nome: 'Faturamento (reenvio)' }) }).catch(() => {});
+      await sbFetch('devedor_eventos', { method: 'POST', body: JSON.stringify({ devedor_id: acordo.devedor_id, tipo: 'asaas_boletos_emitidos', payload: { acordo_id: acordoId, invoice_url: links[0], invoice_urls: links, whatsapp: enviado ? 'enviado' : 'falha', via: 'reenvio' }, autor_nome: 'Faturamento (reenvio)' }) }).catch(() => {});
       return res.status(200).json({ ok: true, acordo_id: acordoId, reenviado: enviado, erro: enviado ? undefined : (zap && zap.error) });
     }
 
@@ -159,23 +173,68 @@ module.exports = async function handler(req, res) {
 
     // 1x = boleto único (campo `value`); 2x+ = parcelamento (installmentCount+totalValue).
     // O Asaas rejeita installmentCount=1, então os casos são separados.
-    const pay = {
-      customer: customerId,
-      billingType: 'BOLETO',
-      dueDate: firstDue,
-      description: `Acordo ${dev.nome}${nParc > 1 ? ` — ${nParc}x` : ' — à vista'}`,
-      externalReference: acordo.id,
-      // Multa 10% é o padrão declarado no termo de acordo (campo "Multa boleto (%)",
-      // peticao-teixeira-azzolin) — estava hardcoded em 2%, descasado do que o
-      // devedor assina. Achado junto com o R-19 (caso Edilaine, 05/08/2026).
-      fine: { value: 10 },
-      interest: { value: 1 },
-    };
-    if (nParc > 1) { pay.installmentCount = nParc; pay.totalValue = round2(total); }
-    else { pay.value = round2(total); }
-    const charge = await asaasReq('POST', '/payments', pay);
-    // charge = pagamento da 1ª parcela; charge.installment = id da série.
-    const invoiceUrl = charge.invoiceUrl || charge.bankSlipUrl || '';
+    //
+    // ACORDO EM FAIXAS ("blocos"): quando o acordo foi montado no Faturamento com
+    // mais de uma faixa de valor (ex.: 3x R$300 depois 12x R$400 — ver
+    // index.html: salvarAcordo()/addBlocoAcordo()), o Asaas NÃO tem como cobrar isso
+    // numa série só: installmentCount+totalValue sempre divide o total IGUALMENTE
+    // pelas parcelas. A saída é emitir 1 série por faixa (dentro de cada faixa o
+    // valor já é uniforme). Todas as séries usam o MESMO externalReference=acordo.id
+    // — é por esse campo que api/_processar-recebimento.js resolve o acordo no
+    // webhook, então ter várias séries no mesmo acordo não quebra esse caminho.
+    const blocosMeta = Array.isArray(meta.blocos) ? meta.blocos.filter((b) => b && b.qtd > 0 && b.valor > 0) : [];
+    const usaBlocos = blocosMeta.length > 1;
+
+    let series; // [{ bloco, qtd, total, dueDate, charge }] — sempre >=1 entrada.
+    if (usaBlocos) {
+      series = [];
+      for (let bi = 0; bi < blocosMeta.length; bi++) {
+        const bloco = blocosMeta[bi];
+        const parcelasDoBloco = parcelas.filter((p) => (p.bloco || 0) === bi + 1);
+        const dueBloco = (parcelasDoBloco[0] && (parcelasDoBloco[0].vencimento || parcelasDoBloco[0].venc)) || firstDue;
+        const totalBloco = round2(bloco.qtd * bloco.valor);
+        const payBloco = {
+          customer: customerId,
+          billingType: 'BOLETO',
+          dueDate: dueBloco,
+          description: `Acordo ${dev.nome} — faixa ${bi + 1}/${blocosMeta.length} (${bloco.qtd}x ${round2(bloco.valor)})`,
+          externalReference: acordo.id,
+          fine: { value: 10 },
+          interest: { value: 1 },
+        };
+        if (bloco.qtd > 1) { payBloco.installmentCount = bloco.qtd; payBloco.totalValue = totalBloco; }
+        else { payBloco.value = totalBloco; }
+        const chargeBloco = await asaasReq('POST', '/payments', payBloco);
+        series.push({ bloco: bi + 1, qtd: bloco.qtd, total: totalBloco, dueDate: dueBloco, charge: chargeBloco });
+      }
+    } else {
+      const pay = {
+        customer: customerId,
+        billingType: 'BOLETO',
+        dueDate: firstDue,
+        description: `Acordo ${dev.nome}${nParc > 1 ? ` — ${nParc}x` : ' — à vista'}`,
+        externalReference: acordo.id,
+        // Multa 10% é o padrão declarado no termo de acordo (campo "Multa boleto (%)",
+        // peticao-teixeira-azzolin) — estava hardcoded em 2%, descasado do que o
+        // devedor assina. Achado junto com o R-19 (caso Edilaine, 05/08/2026).
+        fine: { value: 10 },
+        interest: { value: 1 },
+      };
+      if (nParc > 1) { pay.installmentCount = nParc; pay.totalValue = round2(total); }
+      else { pay.value = round2(total); }
+      const charge = await asaasReq('POST', '/payments', pay);
+      series = [{ bloco: 1, qtd: nParc, total, dueDate: firstDue, charge }];
+    }
+
+    // charge da 1ª série = pagamento da 1ª parcela; .installment = id da série.
+    // Mantemos os campos singulares (asaas_installment_id/asaas_invoice_url/...)
+    // apontando pra 1ª série por compatibilidade com quem já lê só isso
+    // (index.html, api/_processar-recebimento.js fallback, painel) — e
+    // adicionamos asaas_series/asaas_installment_ids com TODAS as séries, que é
+    // o que api/_boletos-para-lancamentos.js passa a usar para não perder o
+    // vínculo dos boletos das faixas seguintes.
+    const primeira = series[0].charge;
+    const invoiceUrl = primeira.invoiceUrl || primeira.bankSlipUrl || '';
 
     const newMeta = {
       ...meta,
@@ -184,9 +243,19 @@ module.exports = async function handler(req, res) {
       emitido_via: manual ? 'manual' : 'auto',
       valor_entrada_excluida: entrada > 0 ? entrada : undefined,
       valor_boletos: total,
-      asaas_installment_id: charge.installment || null,
-      asaas_first_payment_id: charge.id || null,
+      asaas_installment_id: primeira.installment || null,
+      asaas_first_payment_id: primeira.id || null,
       asaas_invoice_url: invoiceUrl,
+      asaas_installment_ids: series.map((s) => s.charge.installment).filter(Boolean),
+      asaas_series: series.map((s) => ({
+        bloco: s.bloco,
+        qtd: s.qtd,
+        total: s.total,
+        due: s.dueDate,
+        installment_id: s.charge.installment || null,
+        first_payment_id: s.charge.id || null,
+        invoice_url: s.charge.invoiceUrl || s.charge.bankSlipUrl || null,
+      })),
       asaas_customer_id: customerId,
     };
     await sbFetch(`acordos?id=eq.${acordo.id}`, { method: 'PATCH', body: JSON.stringify({ status: 'ativo', metadata: newMeta }) });
@@ -200,52 +269,64 @@ module.exports = async function handler(req, res) {
     // vencimentos REAIS do Asaas — que ajusta data por fim de semana/feriado, então
     // calcular mês a mês aqui divergiria do boleto. Best-effort: falha não derruba a
     // emissão, que já está feita e é o que importa para o devedor.
+    // Percorre TODAS as séries (1 no caminho antigo, N com blocos) numerando as
+    // parcelas em sequência contínua (1..nParc) através das faixas.
     let previstas = 0;
     try {
-      let pagamentos = [];
-      if (charge.installment) {
-        const lista = await asaasReq('GET', `/payments?installment=${encodeURIComponent(charge.installment)}&limit=100`);
-        pagamentos = (lista && lista.data) || [];
-      } else if (charge.id) {
-        pagamentos = [charge];
-      }
-      if (pagamentos.length) {
-        const linhas = pagamentos
+      const linhasAll = [];
+      let offsetParc = 0;
+      for (const s of series) {
+        let pagamentos = [];
+        if (s.charge.installment) {
+          const lista = await asaasReq('GET', `/payments?installment=${encodeURIComponent(s.charge.installment)}&limit=100`);
+          pagamentos = (lista && lista.data) || [];
+        } else if (s.charge.id) {
+          pagamentos = [s.charge];
+        }
+        pagamentos
           .slice()
           .sort((a, b) => (a.installmentNumber || 1) - (b.installmentNumber || 1))
-          .map((p) => ({
-            descricao: `${dev.nome} ${p.installmentNumber || 1}/${nParc}`,
-            tipo_movimento: 1,
-            status: 0,
-            valor: round2(p.value),
-            data_competencia: p.dueDate,
-            data_vencimento: p.dueDate,
-            conta_id: CONTA_ASAAS,
-            cobranca_id: acordo.cobranca_id || acordo.devedor_id,   // vínculo real; devedor_id é fallback legado
-            acordo_id: acordo.id,
-            asaas_payment_id: p.id,
-            numero_parcela: p.installmentNumber || 1,
-            total_parcelas: nParc,
-            grupo_parcelamento: charge.installment || null,
-          }));
+          .forEach((p) => {
+            linhasAll.push({
+              descricao: `${dev.nome} ${offsetParc + (p.installmentNumber || 1)}/${nParc}`,
+              tipo_movimento: 1,
+              status: 0,
+              valor: round2(p.value),
+              data_competencia: p.dueDate,
+              data_vencimento: p.dueDate,
+              conta_id: CONTA_ASAAS,
+              cobranca_id: acordo.cobranca_id || acordo.devedor_id,   // vínculo real; devedor_id é fallback legado
+              acordo_id: acordo.id,
+              asaas_payment_id: p.id,
+              numero_parcela: offsetParc + (p.installmentNumber || 1),
+              total_parcelas: nParc,
+              grupo_parcelamento: s.charge.installment || null,
+            });
+          });
+        offsetParc += s.qtd;
+      }
+      if (linhasAll.length) {
         // ignoreDuplicates no asaas_payment_id: reemissão/retry não duplica a previsão.
         await sbFetch('fin_lancamento', {
           method: 'POST',
           prefer: 'resolution=ignore-duplicates,return=minimal',
-          body: JSON.stringify(linhas),
+          body: JSON.stringify(linhasAll),
         });
-        previstas = linhas.length;
+        previstas = linhasAll.length;
       }
     } catch (e) {
       console.warn('[emitir-acordo] parcelas previstas no financeiro:', e && e.message);
     }
 
-    // WhatsApp com o link do boleto/PIX (best-effort, não derruba a emissão).
+    // WhatsApp com o(s) link(s) do boleto/PIX (best-effort, não derruba a emissão).
+    // 1 série = mensagem simples (igual sempre foi); >1 série = lista uma por faixa.
     let zap = null;
     const tel = String(dev.telefone || '').replace(/\D/g, '');
-    if (tel && invoiceUrl) {
-      const msg = boletoMsg(dev.nome, invoiceUrl);
-      try { zap = await zapiSendText(tel, msg); } catch (e) { zap = { error: e.message }; }
+    const linksValidos = series.map((s) => s.charge.invoiceUrl || s.charge.bankSlipUrl || '').filter(Boolean);
+    if (tel && linksValidos.length === 1) {
+      try { zap = await zapiSendText(tel, boletoMsg(dev.nome, linksValidos[0])); } catch (e) { zap = { error: e.message }; }
+    } else if (tel && linksValidos.length > 1) {
+      try { zap = await zapiSendText(tel, boletoMsgMultiplo(dev.nome, linksValidos)); } catch (e) { zap = { error: e.message }; }
     }
 
     // Marca no acordo se o WhatsApp do boleto saiu (alimenta o alerta/reenvio do Painel).
@@ -258,7 +339,8 @@ module.exports = async function handler(req, res) {
         tipo: 'asaas_boletos_emitidos',
         payload: {
           acordo_id: acordo.id,
-          installment: charge.installment || null,
+          installment: primeira.installment || null,
+          series: series.length,
           parcelas: nParc,
           total,
           invoice_url: invoiceUrl,
@@ -273,7 +355,8 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       acordo_id: acordo.id,
-      installment: charge.installment || null,
+      installment: primeira.installment || null,
+      series: series.length,
       parcelas: nParc,
       total,
       invoice_url: invoiceUrl,

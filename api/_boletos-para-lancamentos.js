@@ -87,12 +87,21 @@ module.exports = async function handler(req, res) {
     // Casamos SÓ pelo installment (metadata.asaas_installment_id do acordo). Cair
     // para "acordo ativo do devedor" seria adivinhação: há devedor com 2 e 3 acordos
     // ativos (Elizandra, Bruna), e errar o vínculo é pior que não ter vínculo.
+    //
+    // Acordo em faixas de valor (blocos) emite MAIS de uma série no Asaas — uma por
+    // faixa — e guarda todos os installment ids em metadata.asaas_installment_ids
+    // (asaas_installment_id singular continua existindo, apontando só pra 1ª faixa,
+    // por compatibilidade). Sem ler o array aqui, os boletos das faixas seguintes
+    // caem no "sem vínculo" mesmo já tendo acordo — mapeamos os dois.
     const acordoByInstallment = {};
     try {
       const acs = await sbFetch(`acordos?select=id,metadata&status=eq.ativo&limit=2000`);
       for (const a of (acs || [])) {
-        const inst = a && a.metadata && a.metadata.asaas_installment_id;
-        if (inst) acordoByInstallment[String(inst)] = a.id;
+        const m = a && a.metadata;
+        const insts = (m && Array.isArray(m.asaas_installment_ids) && m.asaas_installment_ids.length)
+          ? m.asaas_installment_ids
+          : (m && m.asaas_installment_id ? [m.asaas_installment_id] : []);
+        for (const inst of insts) if (inst) acordoByInstallment[String(inst)] = a.id;
       }
     } catch (_) { /* segue sem vínculo: pior caso é o comportamento antigo */ }
 
