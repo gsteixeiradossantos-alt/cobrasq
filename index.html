@@ -19566,16 +19566,34 @@ async function _carregarSinaisPendencia(cobrs){
   if(!sb || !Array.isArray(cobrs) || !cobrs.length) return sinais;
   const devIds = [...new Set(cobrs.flatMap(c=>(c.cobranca_partes||[]).map(p=>p.devedor_id)).filter(Boolean))];
   const _chunks = (arr,n)=>{ const o=[]; for(let i=0;i<arr.length;i+=n) o.push(arr.slice(i,i+n)); return o; };
+  // Os 5 grupos abaixo são independentes entre si, e os chunks de um mesmo grupo
+  // cobrem devedores disjuntos. Rodavam em série: com 823 devedores isso dava 13
+  // viagens ao Supabase, uma esperando a outra (~200ms cada), para consultas que o
+  // banco resolve em milissegundos. Agora vão todas juntas e o custo vira o da mais
+  // lenta. Cada grupo mantém o try/catch próprio — um erro isolado não derruba o
+  // resto, que é o que o código original garantia com os try{}catch{} por bloco.
+  const _all = (ps)=>Promise.all(ps);
   // 1) Acordos por devedor: status_zapsign, boletos_emitidos, parcelas.
-  try{ for(const ch of _chunks(devIds,200)){ const {data}=await sb.from('acordos').select('devedor_id,status,status_zapsign,metadata,parcelas').in('devedor_id',ch); (data||[]).forEach(a=>{ if(!a.devedor_id) return; (sinais.acordoPorDev[a.devedor_id]=sinais.acordoPorDev[a.devedor_id]||[]).push(a); }); } }catch(_){}
+  const _pAcordos = _all(_chunks(devIds,200).map(ch=>
+    sb.from('acordos').select('devedor_id,status,status_zapsign,metadata,parcelas').in('devedor_id',ch)
+      .then(({data})=>{ (data||[]).forEach(a=>{ if(!a.devedor_id) return; (sinais.acordoPorDev[a.devedor_id]=sinais.acordoPorDev[a.devedor_id]||[]).push(a); }); })
+  )).catch(()=>{});
   // 2) WhatsApp aguardando resposta humana (fila global — filtra por devedor).
-  try{ const {data}=await sb.from('whatsapp_atendimentos').select('devedor_id,estado').eq('estado','aguardando_humano'); (data||[]).forEach(w=>{ if(w.devedor_id) sinais.waAguardando.add(w.devedor_id); }); }catch(_){}
+  const _pWa = sb.from('whatsapp_atendimentos').select('devedor_id,estado').eq('estado','aguardando_humano')
+    .then(({data})=>{ (data||[]).forEach(w=>{ if(w.devedor_id) sinais.waAguardando.add(w.devedor_id); }); }).catch(()=>{});
   // 3) Petições prontas para protocolar.
-  try{ const {data}=await sb.from('proc_peticionamentos').select('cobranca_id,devedor_id,status').eq('status','preparado'); (data||[]).forEach(p=>{ if(p.cobranca_id) sinais.peticaoPreparada.add(p.cobranca_id); if(p.devedor_id) sinais.peticaoPreparada.add(p.devedor_id); }); }catch(_){}
+  const _pPet = sb.from('proc_peticionamentos').select('cobranca_id,devedor_id,status').eq('status','preparado')
+    .then(({data})=>{ (data||[]).forEach(p=>{ if(p.cobranca_id) sinais.peticaoPreparada.add(p.cobranca_id); if(p.devedor_id) sinais.peticaoPreparada.add(p.devedor_id); }); }).catch(()=>{});
   // 4) Intimações/andamentos novos (DataJud) não lidos.
-  try{ const {data}=await sb.from('proc_intimacoes').select('devedor_id,lida').eq('lida',false); (data||[]).forEach(i=>{ if(i.devedor_id) sinais.intimacaoNova.add(i.devedor_id); }); }catch(_){}
+  const _pInt = sb.from('proc_intimacoes').select('devedor_id,lida').eq('lida',false)
+    .then(({data})=>{ (data||[]).forEach(i=>{ if(i.devedor_id) sinais.intimacaoNova.add(i.devedor_id); }); }).catch(()=>{});
   // 5) Última atividade por devedor (evento mais recente) → dias sem atividade.
-  try{ for(const ch of _chunks(devIds,200)){ const {data}=await sb.from('devedor_eventos').select('devedor_id,criado_em').in('devedor_id',ch).order('criado_em',{ascending:false}).limit(3000); (data||[]).forEach(e=>{ if(e.devedor_id && !sinais.ultimaAtividade[e.devedor_id]) sinais.ultimaAtividade[e.devedor_id]=e.criado_em; }); } }catch(_){}
+  const _pEventos = _all(_chunks(devIds,200).map(ch=>
+    sb.from('devedor_eventos').select('devedor_id,criado_em').in('devedor_id',ch).order('criado_em',{ascending:false}).limit(3000)
+      .then(({data})=>{ (data||[]).forEach(e=>{ if(e.devedor_id && !sinais.ultimaAtividade[e.devedor_id]) sinais.ultimaAtividade[e.devedor_id]=e.criado_em; }); })
+  )).catch(()=>{});
+
+  await _all([_pAcordos, _pWa, _pPet, _pInt, _pEventos]);
   return sinais;
 }
 function _diasDesde(iso){ if(!iso) return null; const d=new Date(String(iso).slice(0,10)); if(isNaN(d.getTime())) return null; return Math.floor((Date.now()-d.getTime())/86400000); }
@@ -19684,10 +19702,13 @@ async function renderCobrancas(opts){
   const soLocal = !!(opts && opts.soLocal) && Array.isArray(DB_cobrancas) && DB_cobrancas.length;
   if(!soLocal){
     el.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text-2);">Carregando cobranças…</div>`;
+    // Cobranças e roster não dependem um do outro — esperar em série custava uma
+    // viagem inteira de latência à toa. Vão juntos.
+    const _pRoster = (typeof carregarRosterAppUsers==='function' && !Array.isArray(_rosterAppUsers))
+      ? carregarRosterAppUsers().catch(()=>{}) : Promise.resolve();
     const rows = await loadCobrancasFromSupabase();
     if(Array.isArray(rows)) DB_cobrancas = rows;
-    // roster p/ resolver nome do responsável nas linhas e no filtro.
-    if(typeof carregarRosterAppUsers==='function' && !Array.isArray(_rosterAppUsers)){ try{ await carregarRosterAppUsers(); }catch(_){} }
+    await _pRoster;
     // Sinais de pendência em lote (defensivo — nunca aborta o render).
     try{ _cobrSinais = await _carregarSinaisPendencia((DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft)); }catch(_){ _cobrSinais = _cobrSinais || {}; }
   }
