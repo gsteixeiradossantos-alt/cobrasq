@@ -4201,7 +4201,7 @@ body.viewas-readonly select {
 <div id="modal-acordo" class="overlay">
   <div class="modal modal-md">
     <div class="modal-header">
-      <span class="modal-title">Registrar Acordo</span>
+      <span class="modal-title">Novo Acordo</span>
       <button class="modal-close" data-close="modal-acordo">&#10005;</button>
     </div>
     <div class="modal-body">
@@ -4209,27 +4209,22 @@ body.viewas-readonly select {
       <div class="fg-row">
         <div class="fg">
           <label>Valor da entrada (R$)</label>
-          <input type="text" id="macord-entrada" placeholder="0,00" oninput="recalcAcordoBlocos()">
+          <input type="text" id="macord-entrada" placeholder="0,00">
         </div>
         <div class="fg">
           <label>Primeiro vencimento *</label>
-          <input type="date" id="macord-venc1" onchange="recalcAcordoBlocos()">
+          <input type="date" id="macord-venc1">
         </div>
       </div>
-      <div class="fg">
-        <label>Parcelas — pode ter mais de uma faixa de valor (ex.: 3x R$300 e depois 12x R$400)</label>
-        <div id="macord-blocos"></div>
-        <button type="button" class="btn btn-ghost btn-sm" style="margin-top:6px;" onclick="addBlocoAcordo()">+ Adicionar faixa de parcelas</button>
-      </div>
-      <div id="macord-resumo" style="background:var(--bg);border-radius:var(--radius-sm);padding:10px 14px;font-size:13px;font-weight:600;color:var(--navy);margin-top:4px;">Total: R$ 0,00 em 0 parcela(s)</div>
       <div class="fg" style="margin-top:10px;">
         <label>Observações</label>
         <textarea id="macord-obs" rows="3" placeholder="Condições do acordo..."></textarea>
       </div>
+      <p style="font-size:11.5px;color:var(--text-3);margin-top:10px;">As parcelas — podendo ter mais de uma faixa de valor (ex.: 3x R$300 e depois 12x R$400) — são digitadas na próxima tela, junto com o Termo de acordo.</p>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" data-close="modal-acordo">Cancelar</button>
-      <button class="btn btn-success" id="btn-save-acordo">&#10003; Registrar e gerar Termo de acordo</button>
+      <button class="btn btn-success" id="btn-save-acordo">Continuar para o Termo de acordo →</button>
     </div>
   </div>
 </div>
@@ -17637,19 +17632,21 @@ function abrirAcordo(devId){
   document.getElementById('macord-entrada').value = '';
   document.getElementById('macord-venc1').value = hoje();
   document.getElementById('macord-obs').value = '';
-  document.getElementById('macord-blocos').innerHTML = '';
-  addBlocoAcordo(1, null);
   openModal('modal-acordo');
 }
 
+// Passo 1 de 2: só entrada + 1º vencimento + observações. As faixas de parcela
+// são digitadas uma única vez, no passo 2 (#taj-blocos, dentro do Termo de
+// acordo) — ver tajGerarPreview(), que fecha (upsert) o acordo aberto aqui com
+// as faixas de verdade antes de montar o documento. Cria um acordo "rascunho"
+// (valorTotal=entrada, numParc=0, sem faixas) só pra ter um id pra vincular.
 function salvarAcordo(){
   const devId = document.getElementById('macord-devId').value;
   const entrada = parseValorBR(document.getElementById('macord-entrada').value||'0');
   const venc1 = document.getElementById('macord-venc1').value;
   const obs = document.getElementById('macord-obs').value||'';
-  const blocos = lerBlocosAcordo();
 
-  if(!devId || !venc1 || !blocos.length){ alert('Preencha o primeiro vencimento e ao menos uma faixa de parcelas (nº e valor).'); return; }
+  if(!devId || !venc1){ alert('Preencha o primeiro vencimento.'); return; }
 
   const dev = (DB.devedores||[]).find(d=>d.id===devId);
   if(!dev){ alert('Devedor não encontrado.'); return; }
@@ -17659,25 +17656,7 @@ function salvarAcordo(){
     parcelas.push({ id:uid(), numero:0, valor:entrada, vencimento:venc1, pago:false, tipo:'entrada' });
   }
 
-  // Gera as parcelas em sequência mensal, bloco após bloco — cada parcela carrega
-  // o índice do bloco a que pertence (1-based) para a emissão de boleto agrupar
-  // corretamente cada faixa de valor como sua própria série no Asaas.
-  const [y,m,d] = venc1.split('-').map(Number);
-  let mesOffset = entrada>0 ? 1 : 0;
-  let seq = entrada>0 ? 1 : 0;
-  blocos.forEach((b,bi)=>{
-    for(let i=0;i<b.qtd;i++){
-      const vDate = new Date(y, m-1+mesOffset, d);
-      const vStr = isoLocal(vDate);
-      parcelas.push({ id:uid(), numero:seq, valor:b.valor, vencimento:vStr, pago:false, bloco:bi+1 });
-      seq++; mesOffset++;
-    }
-  });
-
-  const numParc = blocos.reduce((s,b)=>s+b.qtd,0);
-  const valorTotal = round2(entrada + blocos.reduce((s,b)=>s+b.qtd*b.valor,0));
-
-  const acordo = { id:uid(), valorTotal, numParc, entrada, venc1, obs, parcelas, blocos, createdAt:hoje() };
+  const acordo = { id:uid(), valorTotal:entrada, numParc:0, entrada, venc1, obs, parcelas, blocos:[], createdAt:hoje() };
   if(!dev.acordos) dev.acordos = [];
   dev.acordos.push(acordo);
   dev.status = 'Acordo';
@@ -17687,30 +17666,28 @@ function salvarAcordo(){
   // Persiste na tabela dedicada `acordos` (fonte da verdade — o metadata não guarda
   // acordos). Sem isto, o acordo some no próximo load. forma/status respeitam os CHECKs
   // (forma ∈ avista/boleto/cartao/outro; status ∈ ativo/encerrado/cancelado).
-  // `blocos` vai dentro de metadata: é o que api/_emitir-acordo.js lê para emitir
-  // uma série de boleto por faixa de valor em vez de dividir o total igualmente.
   upsertAcordoRelational(devId, {
     id: acordo.id,
-    forma: (numParc > 1 || entrada > 0) ? 'outro' : 'avista',
+    forma: entrada > 0 ? 'outro' : 'avista',
     status: 'ativo',
     parcelas,
-    valorTotal,
+    valorTotal: entrada,
     valorEntrada: entrada,
-    numParcelas: numParc,
+    numParcelas: 0,
     dataPrimeiroVenc: venc1,
-    metadata: { obs, blocos }
+    metadata: { obs, blocos: [] }
   }).then(res=>{
     if(!res || !res.ok) showToast('Acordo salvo na tela, mas falhou ao gravar no servidor'+(res&&res.error?': '+res.error:'')+'. Recarregue e tente de novo.','warning');
   });
   closeModal('modal-acordo');
   if(currentDevId === devId) renderDrawerBody(devId);
   renderDevedores();
-  // Encadeia direto no Termo de acordo, já com as mesmas faixas — o registro
-  // financeiro (acima) e o documento assinado nascem juntos, sem redigitar nada.
-  // Seguro por construção: vincular_zapsign_acordo (RPC) só ANEXA o link do
-  // ZapSign a um acordo ativo já existente — não sobrescreve valor_total/
-  // num_parcelas/metadata.blocos — então o registro que acabou de ser salvo
-  // não corre risco de ser substituído pelos valores do formulário do Termo.
+  // Encadeia direto no Termo de acordo — é lá que as faixas de parcela são
+  // digitadas (só uma vez) e o acordo é fechado de verdade, em
+  // tajGerarPreview(). Seguro por construção: vincular_zapsign_acordo (RPC) só
+  // ANEXA o link do ZapSign a um acordo ativo já existente — não sobrescreve
+  // valor_total/num_parcelas/metadata — então nada do que for fechado aqui é
+  // substituído por engano mais adiante.
   if(typeof abrirTermoAcordoJ==='function') abrirTermoAcordoJ(devId);
 }
 
@@ -45064,16 +45041,17 @@ function calcSimulador(){
   document.getElementById('msim-valor-total').textContent = fmtR(valorDesc);
 }
 
+// modal-acordo não tem mais campo de parcela (só entrada/vencimento/obs — as
+// faixas são digitadas no Termo de acordo, passo seguinte). O parcelamento
+// simulado aqui vira a faixa inicial de lá via _tajFaixasIniciais, um sinal
+// de uma vez só que abrirTermoAcordoJ() consome e descarta.
 function usarSimulacao(devId, valorOrig){
   const pct = parseInt(document.getElementById('msim-desc-pct').value)||0;
   const parc = parseInt(document.getElementById('msim-parc').value)||1;
   const valorDesc = valorOrig * (1 - pct/100);
   closeModal('modal-simulador');
+  window._tajFaixasIniciais = [{ qtd:parc, valor:round2(valorDesc/parc) }];
   abrirAcordo(devId);
-  setTimeout(()=>{
-    document.getElementById('macord-blocos').innerHTML = '';
-    addBlocoAcordo(parc, valorDesc/parc);
-  }, 100);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -45204,11 +45182,15 @@ function abrirTermoAcordoJ(devId){
   if(!window.TermoEngine){ showToast('Motor do termo não carregou — recarregue a página.','danger'); return; }
   const dev = (DB.devedores||[]).find(d=>d.id===devId);
   if(!dev){ showToast('Devedor não encontrado.','danger'); return; }
-  _tajState = { devId, html:'', editando:false, seq:0 };
-  const credor = (DB.clientes||[]).find(c=>c.id===dev.clienteId) || {};
   const acs = dev.acordos||[];
   const _acsVivos = acs.filter(acordoVivo);
   const ac = _acsVivos.find(a=>a.status==='Ativo'||a.status==='Em andamento') || _acsVivos[0] || {};
+  // acordoId: o acordo "rascunho" que salvarAcordo() acabou de criar (ou um já
+  // existente, se o Termo foi aberto pelo botão de dentro de um acordo). É nele
+  // que tajGerarPreview() grava as faixas de verdade — sem id, não tem o que
+  // atualizar depois.
+  _tajState = { devId, acordoId: ac.id || null, boletosEmitidos: !!ac.boletosEmitidos, html:'', editando:false, seq:0 };
+  const credor = (DB.clientes||[]).find(c=>c.id===dev.clienteId) || {};
   const total = ac.valorTotal || ac.total || parseValorBR(dev.valorAtual) || parseValorBR(dev.valorOrig) || 0;
   // A entrada é uma parcela à parte (tipo:'entrada') dentro de ac.parcelas — sem
   // excluí-la aqui, ela entrava na contagem/valor das faixas e o formulário
@@ -45218,7 +45200,9 @@ function abrirTermoAcordoJ(devId){
   const parcArr = _parcelasAc.filter(p=>p && p.tipo!=='entrada');
   const nParc = parcArr.length || (typeof ac.parcelas==='number'?ac.parcelas:1) || 1;
   const valorParc = (parcArr[0] && parcArr[0].valor) || (nParc ? total/nParc : total);
-  const venc1 = _tajToISO(parcArr[0] && (parcArr[0].vencimento||parcArr[0].venc)) || _tajMaisDias(30);
+  // Cascata do 1º vencimento: parcela real → o que foi digitado no passo 1
+  // (Novo Acordo, ac.venc1) → só em último caso um "daqui 30 dias" de socorro.
+  const venc1 = _tajToISO(parcArr[0] && (parcArr[0].vencimento||parcArr[0].venc)) || _tajToISO(ac.venc1) || _tajMaisDias(30);
   const entradaVenc = _tajToISO(_parcEntrada && (_parcEntrada.vencimento||_parcEntrada.venc)) || venc1;
   // Faixas do acordo já registrado (Novo Acordo) — mesma estrutura que o
   // documento passa a descrever. Sem acordo prévio, cai numa faixa só (nParc×valorParc).
@@ -45264,7 +45248,7 @@ function abrirTermoAcordoJ(devId){
   <div id="tajDevExtrasHint" style="grid-column:1/3;font-size:11px;color:var(--text-3);display:none;"></div>
   <div style="grid-column:1/3;font-size:11px;font-weight:700;color:var(--text-3);border-top:1px solid var(--border);padding-top:8px;">VALORES DO ACORDO</div>
   <div><label ${lbl}>Valor total (R$) <span style="font-weight:400;">— automático</span></label><input id="tajTotal" value="${escHtml(valorBRParaInput(total))}" type="text" readonly style="width:100%;padding:7px;border:1px solid var(--border);border-radius:5px;font-size:13px;background:var(--surface-2);color:var(--text);cursor:not-allowed;"></div>
-  <div style="grid-column:1/3;"><label ${lbl}>Parcelas — pode ter mais de uma faixa de valor (ex.: 3x R$300 e depois 12x R$400); mesmas faixas do acordo registrado, se houver. Tem entrada? Ponha ela aqui como a 1ª faixa, com 1 parcela — não tem campo de entrada separado neste formulário.</label>
+  <div style="grid-column:1/3;"><label ${lbl}>Parcelas — pode ter mais de uma faixa de valor (ex.: 3x R$300 e depois 12x R$400). Se tem entrada, ela já entrou como a 1ª faixa (1 parcela) — ajuste aqui se precisar.</label>
     <div id="taj-blocos"></div>
     <button type="button" class="btn btn-ghost btn-sm" style="margin-top:6px;" onclick="addBlocoAcordo(1,null,'taj-blocos')">+ Adicionar faixa de parcelas</button>
   </div>
@@ -45279,15 +45263,31 @@ function abrirTermoAcordoJ(devId){
   _tajPrefillCoobrigados(devId);
   document.getElementById('tajJudProcesso').value = proc;
   document.getElementById('tajJudComarca').value = comarca;
-  // Faixas: vêm do acordo já registrado (Novo Acordo), se houver; senão, uma
-  // faixa só com nParc×valorParc (equivalente ao comportamento de antes). Sem
-  // campo de entrada separado neste formulário (removido — duplicava com a
-  // entrada já registrada e inflava o total, ver F-29): a entrada do acordo,
-  // se houver, entra como a 1ª faixa (1 parcela), na frente das demais.
+  // Faixas: prioridade é _tajFaixasIniciais (parcelamento vindo do Simulador de
+  // Acordo, sinal de uso único — ver usarSimulacao()); senão as do acordo já
+  // registrado (Novo Acordo); senão, se o acordo é velho (tem parcelas mas
+  // nunca teve blocos), reconstrói 1 faixa de nParc×valorParc; um acordo NOVO
+  // (rascunho recém-criado por salvarAcordo(), ainda sem nenhuma faixa) cai
+  // em [] — nada pra reaproveitar, o usuário preenche do zero (não pode usar o
+  // fallback nParc×valorParc aqui: total/nParc daria uma faixa fantasma igual
+  // à entrada, dobrando o valor — foi exatamente o bug do F-29). Sem campo de
+  // entrada separado neste formulário: a entrada do acordo, se houver, entra
+  // como a 1ª faixa (1 parcela), na frente das demais.
   const tajBlocosWrap = document.getElementById('taj-blocos');
   if(tajBlocosWrap) tajBlocosWrap.innerHTML = '';
-  const _tajBlocosSeed = (acBlocos.length ? acBlocos.slice() : [{ qtd:nParc, valor:valorParc }]);
+  let _tajBlocosSeed;
+  if(Array.isArray(window._tajFaixasIniciais) && window._tajFaixasIniciais.length){
+    _tajBlocosSeed = window._tajFaixasIniciais.slice();
+  } else if(acBlocos.length){
+    _tajBlocosSeed = acBlocos.slice();
+  } else if(parcArr.length){
+    _tajBlocosSeed = [{ qtd:nParc, valor:valorParc }];
+  } else {
+    _tajBlocosSeed = [];
+  }
+  window._tajFaixasIniciais = null;
   if(temEntradaAc) _tajBlocosSeed.unshift({ qtd:1, valor:ac.entrada });
+  if(!_tajBlocosSeed.length) _tajBlocosSeed.push({ qtd:1, valor:null });
   _tajBlocosSeed.forEach(b=>addBlocoAcordo(b.qtd, b.valor, 'taj-blocos'));
   const _tajVencEl = document.getElementById('tajVenc'); if(_tajVencEl) _tajVencEl.value = temEntradaAc ? entradaVenc : venc1;
   _tajAoTrocarCredor();
@@ -45621,12 +45621,83 @@ function _tajDados(){
         contaExecutado:{ banco:v('tajExecBanco'), agencia:v('tajExecAg'), conta:v('tajExecConta'), pix:v('tajExecPix'), titular:v('tajExecTitular'), doc:v('tajExecDoc') } } }
   };
 }
+// Fecha (cria ou atualiza) o acordo vinculado com as faixas digitadas no
+// Termo — é a ÚNICA vez que elas são persistidas, já que o "Novo Acordo" não
+// tem mais campo de parcela. valor_entrada sempre zera: a entrada, se houver,
+// já está dentro das faixas como a 1ª (1 parcela) — mantê-la também em
+// valor_entrada faria api/_emitir-acordo.js subtraí-la do total DE NOVO antes
+// de montar as séries do Asaas (R-19), cobrando a menos.
+async function _tajFecharAcordo(faixas, venc1){
+  const devId = _tajState.devId;
+  const dev = (DB.devedores||[]).find(d=>d.id===devId);
+  if(!dev) return false;
+
+  const numParc = faixas.reduce((s,b)=>s+b.qtd,0);
+  const valorTotal = round2(faixas.reduce((s,b)=>s+b.qtd*b.valor,0));
+  const [y,m,d] = venc1.split('-').map(Number);
+  const parcelas = [];
+  let mesOffset=0, seq=0;
+  faixas.forEach((b,bi)=>{
+    for(let i=0;i<b.qtd;i++){
+      const vDate = new Date(y, m-1+mesOffset, d);
+      parcelas.push({ id:uid(), numero:seq, valor:b.valor, vencimento:isoLocal(vDate), pago:false, bloco:bi+1 });
+      seq++; mesOffset++;
+    }
+  });
+
+  let acordoId = _tajState.acordoId;
+  let acLocal = acordoId ? (dev.acordos||[]).find(a=>a.id===acordoId) : null;
+  const isNovo = !acLocal;
+  if(isNovo){
+    // Defensivo: Termo aberto sem acordo vinculado — não deveria acontecer no
+    // fluxo normal (que sempre passa por salvarAcordo() antes), mas não trava.
+    acordoId = uid();
+    acLocal = { id:acordoId, createdAt:hoje() };
+    if(!dev.acordos) dev.acordos = [];
+    dev.acordos.push(acLocal);
+    _tajState.acordoId = acordoId;
+  }
+  acLocal.parcelas = parcelas; acLocal.blocos = faixas; acLocal.numParc = numParc;
+  acLocal.valorTotal = valorTotal; acLocal.entrada = 0; acLocal.venc1 = venc1;
+  dev.status = 'Acordo'; dev.updatedAt = hoje();
+  save();
+  if(currentDevId===devId) renderDrawerBody(devId);
+  renderDevedores();
+
+  if(isNovo){
+    const res = await upsertAcordoRelational(devId, {
+      id: acordoId, forma: numParc>1?'outro':'avista', status:'ativo', parcelas,
+      valorTotal, valorEntrada:0, numParcelas:numParc, dataPrimeiroVenc:venc1,
+      metadata: { obs: acLocal.obs||'', blocos: faixas }
+    });
+    return !!(res && res.ok);
+  }
+  // Acordo já existia (reaberto pelo ⚖ de dentro de um acordo) — PATCH parcial,
+  // preservando zapsign_doc_id/status_zapsign/boletos_emitidos/asaas_* que já
+  // possa ter em metadata. upsertAcordoRelational faz upsert da linha INTEIRA
+  // e apagaria isso.
+  const supa = getSupabase();
+  if(!supa) return true;
+  try{
+    const { data: cur } = await supa.from('acordos').select('metadata').eq('id', acordoId).maybeSingle();
+    const metadata = { ...(cur && cur.metadata || {}), blocos: faixas };
+    const { error } = await supa.from('acordos').update({
+      parcelas, valor_total: valorTotal, valor_entrada: 0, num_parcelas: numParc,
+      data_primeiro_venc: venc1, metadata
+    }).eq('id', acordoId);
+    if(error){ console.warn('[taj] fecharAcordo:', error.message); return false; }
+    return true;
+  }catch(e){ console.warn('[taj] fecharAcordo:', e.message); return false; }
+}
+
 async function tajGerarPreview(){
   const btn=document.getElementById('taj-gerar'); if(btn){ btn.disabled=true; btn.textContent='Gerando…'; }
   try{
     const dados=_tajDados();
+    if(!dados.acordo.faixas.length){ showToast('Preencha ao menos uma faixa de parcelas.','danger'); return; }
     if(!dados.acordo.total){ showToast('Informe o valor total.','danger'); return; }
     if(!dados.acordo.vencimento){ showToast('Informe o 1º vencimento.','danger'); return; }
+    if(_tajState.boletosEmitidos){ showToast('Este acordo já teve boleto emitido no Asaas — mudar as faixas aqui não muda o que já foi cobrado. Ajuste um valor pontual pela gaveta do devedor em vez disso.','warning'); return; }
     if(dados.tipo==='judicial'){
       if(!dados.judicial.numeroProcesso){ showToast('Informe o nº do processo.','danger'); return; }
       if(!dados.judicial.comarca){ showToast('Informe a comarca.','danger'); return; }
@@ -45635,6 +45706,8 @@ async function tajGerarPreview(){
       _tajRenderComarcas();
       if(dados.judicial.clausula4.mode==='desistencia' && !dados.judicial.clausula4.proc2){ showToast('Informe os autos a desistir (cláusula 4).','danger'); return; }
     }
+    const fechou = await _tajFecharAcordo(dados.acordo.faixas, dados.acordo.vencimento);
+    if(!fechou){ showToast('Falha ao salvar as parcelas do acordo no servidor. Tente de novo.','danger'); return; }
     _tajState.html = dados.tipo==='judicial' ? await TermoEngine.montarTermoJudicial(dados) : await TermoEngine.montarTermoExtrajudicial(dados);
     document.getElementById('taj-frame').srcdoc=_tajState.html;
     _tajState.editando=false; document.getElementById('taj-editar').textContent='Editar texto';
