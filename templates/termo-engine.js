@@ -8,7 +8,9 @@
  * dados = {
  *   credor:  { nome, qualificacao, genero:'F'|'M', assNome, assDoc },
  *   devedor: { nome, tipo:'PF'|'PJ', genero:'M'|'F', documento, endereco:{rua,numero,complemento,bairro,cidade,uf,cep}, telefone, assNome, assDoc },
- *   acordo:  { total, parcelas, valorParcela, vencimento:'YYYY-MM-DD', multa, penal, entrada:{valor,vencimento}|null },
+ *   acordo:  { total, parcelas, valorParcela, faixas:[{qtd,valor}]|undefined, vencimento:'YYYY-MM-DD', multa, penal, entrada:{valor,vencimento}|null },
+ *            (faixas, quando tem mais de uma, descreve o parcelamento em blocos de valor
+ *            diferente — ex. 3x R$300 seguidas de 12x R$400 — em vez de parcelas/valorParcela)
  *   dataAcordo: 'YYYY-MM-DD'
  * }
  * ========================================================================== */
@@ -110,24 +112,30 @@
       (cred.endereco ? ", com endereço na " + cred.endereco : "") + ".";
   }
 
+  // Descreve uma única faixa (nº de parcelas × valor uniforme dentro dela).
+  function fraseFaixa(qtd, valor) {
+    if (qtd === 1) return "1 (uma) parcela mensal no valor de <strong>" + valorCompleto(valor) + "</strong>";
+    return qtd + " (" + extInt(qtd, true) + ") parcelas mensais e sucessivas no valor de <strong>" +
+      valorCompleto(valor) + "</strong> cada";
+  }
+
   function frasePagamento(ac) {
     const venc = "<strong>" + dataExtenso(ac.vencimento) + "</strong>";
+    // Faixas de valor diferentes (ex.: 3x R$300 seguidas de 12x R$400) — mais de
+    // uma faixa válida (qtd>0 e valor>0) é o sinal de que o acordo não é um
+    // parcelamento uniforme.
+    const faixas = Array.isArray(ac.faixas) ? ac.faixas.filter((f) => f && f.qtd > 0 && f.valor > 0) : [];
+    const usaFaixas = faixas.length > 1;
+    const corpo = usaFaixas
+      ? faixas.map((f) => fraseFaixa(f.qtd, f.valor)).join(", seguidas de ")
+      : (ac.parcelas === 1 ? fraseFaixa(1, ac.valorParcela) : fraseFaixa(ac.parcelas, ac.valorParcela));
     if (ac.entrada && ac.entrada.valor) {
       const ent = "<strong>" + valorCompleto(ac.entrada.valor) + "</strong>";
       const entVenc = ac.entrada.vencimento ? ", com vencimento em <strong>" + dataExtenso(ac.entrada.vencimento) + "</strong>," : "";
-      const np = ac.parcelas, plural = np === 1
-        ? "1 (uma) parcela mensal"
-        : np + " (" + extInt(np, true) + ") parcelas mensais e sucessivas";
       return "mediante o pagamento de uma entrada de " + ent + entVenc +
-        " e o remanescente em " + plural + " no valor de <strong>" + valorCompleto(ac.valorParcela) + "</strong>" +
-        (np === 1 ? "" : " cada") + ", sendo que a primeira parcela será considerada vencida em " + venc;
+        " e o remanescente em " + corpo + ", sendo que a primeira parcela será considerada vencida em " + venc;
     }
-    if (ac.parcelas === 1) {
-      return "mediante o pagamento de 1 (uma) parcela mensal no valor de <strong>" + valorCompleto(ac.valorParcela) +
-        "</strong>, sendo que a primeira parcela será considerada vencida em " + venc;
-    }
-    return "mediante o pagamento de " + ac.parcelas + " (" + extInt(ac.parcelas, true) + ") parcelas mensais e sucessivas no valor de <strong>" +
-      valorCompleto(ac.valorParcela) + "</strong> cada, sendo que a primeira parcela será considerada vencida em " + venc;
+    return "mediante o pagamento de " + corpo + ", sendo que a primeira parcela será considerada vencida em " + venc;
   }
 
   function escAttr(s) { return String(s == null ? "" : s); }
