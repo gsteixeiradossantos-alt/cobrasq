@@ -6,10 +6,19 @@
 -- Foi o que aconteceu com a cobrança de Andrelina Marca Lembeck (a817c664), cujo
 -- acordo extrajudicial deixou de ser cumprido em 02/09/2026.
 --
--- Mesma estratégia de 20260630_casos_view_etiquetas.sql: pega a definição VIVA
+-- Estratégia (mesma de 20260630_casos_view_etiquetas.sql): pega a definição VIVA
 -- (pg_get_viewdef), amplia SÓ o array de status do WHERE e recria com CREATE OR
 -- REPLACE VIEW, preservando colunas, os triggers INSTEAD OF e security_invoker.
--- Idempotente: se a etiqueta já estiver lá, não faz nada.
+--
+-- ATENÇÃO À ÂNCORA. A versão anterior deste arquivo ancorava em
+-- $$'Para protocolar'::text]$$, isto é, no ÚLTIMO item do array. Isso quebrou: entre
+-- 30/06 e 02/09/2026 o whitelist recebeu mais 8 etiquetas ('Quita Fácil',
+-- 'Quita Fácil Judicial', 'Reajuizar de bens', '4. Ação Monitória', 'Orto suspensa',
+-- 'Acordo enviado', 'Reajuizar', 'Reajuizar - Cessão') e o fecho do array deixou de
+-- ser aquele. Ancorar no fim é frágil por construção.
+-- Aqui a âncora é 'Hasta pública'::text, que fica no MEIO do array, só existe nele
+-- (o outro ARRAY de status da view, o do CASE de passo_atual, não a contém) e não se
+-- move quando etiquetas novas são acrescentadas ao fim.
 DO $mig$
 DECLARE
   def text;
@@ -24,8 +33,8 @@ BEGIN
 
   newdef := replace(
     def,
-    $old$'Para protocolar'::text]$old$,
-    $new$'Para protocolar'::text, 'Executar acordo'::text]$new$
+    $old$'Hasta pública'::text,$old$,
+    $new$'Hasta pública'::text, 'Executar acordo'::text,$new$
   );
 
   IF newdef = def THEN
