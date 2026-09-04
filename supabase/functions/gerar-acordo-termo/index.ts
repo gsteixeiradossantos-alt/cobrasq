@@ -75,8 +75,20 @@ Deno.serve(async (req) => {
     // não assina por aqui). Sem advogado informado, o comportamento é idêntico ao
     // anterior — array vazio, nada muda.
     const advs = (Array.isArray(dados.advogados) ? dados.advogados : []).filter((a: any) => a && a.nome);
+    const tipoAcordoLabel = dados.tipo === "judicial" ? "Acordo Judicial" : "Acordo Extrajudicial";
+    // Título do documento no ZapSign: "<devedores> | <tipo> | Proc. n. <nº> | <credor>"
+    // (judicial) ou "<devedores> | <tipo> | <credor>" (extrajudicial, sem processo).
+    // Todos os devedores entram pelo nome — sem abreviar em "+N" — com um corte
+    // defensivo pra não estourar o limite de tamanho do campo `name` no ZapSign.
+    const nomesDevedores = devs.map((d: any) => String(d?.nome || "").trim()).filter(Boolean).join(", ");
+    const nomesTitulo = nomesDevedores.length > 90 ? nomesDevedores.slice(0, 87).trim() + "..." : nomesDevedores;
+    const credorNome = String(dados.credor?.nome || "").trim();
+    const numeroProcesso = String(dados.judicial?.numeroProcesso || "").trim();
+    const partesTitulo = [nomesTitulo || "Devedor", tipoAcordoLabel];
+    if (dados.tipo === "judicial" && numeroProcesso) partesTitulo.push("Proc. n. " + numeroProcesso);
+    if (credorNome) partesTitulo.push(credorNome);
     const zapBody = {
-      name: (String(dev.nome || "Devedor").trim() + " - Acordo Extrajudicial"),
+      name: partesTitulo.join(" | "),
       base64_pdf,
       external_id: String(casoId ?? ""),
       // Um signer por devedor; cada um assina na sua âncora <<assdevN>> (1-based).
