@@ -10,7 +10,8 @@
  *   5. a classificação de saídas: credor = repasse, tarifa nunca é repasse, empréstimo
  *      e parcelamento são dívida, o resto é custo próprio; a recorrência do DAS não soma
  *      de novo (o imposto entra pela premissa);
- *   6. faturamento previsto = receitas previstas − só os repasses (a base da nota).
+ *   6. faturamento previsto = receitas previstas − só os repasses (a base da nota); o
+ *      judicial sem liberação fica fora da base.
  *
  * Roda contra o CÓDIGO REAL do index.html, sem rede e sem navegador.
  *
@@ -220,13 +221,13 @@ const seco = { realizacao: 1, judicialMes: 0, dasPct: 0, origContratadoMes: 0, a
     { tipo: 'repasse', valor: 900, mes: '2026-10' },
   ];
   const s = faturamento(itens, '2026-09');
-  perto(s.receitas, 1500, 'receitas do mês, judicial incluso');
-  perto(s.judicial, 500, 'judicial destacado');
+  perto(s.receitas, 1000, 'receitas do mês sem o judicial');
+  perto(s.judicial, 500, 'judicial sem liberação fica fora da base, mas visível');
   perto(s.repasses, 400, 'só repasses');
-  perto(s.faturamento, 1100, 'base da nota = receitas − repasses');
-  assert.strictEqual(s.nReceitas, 2); assert.strictEqual(s.nRepasses, 1);
+  perto(s.faturamento, 600, 'base da nota = receitas (sem judicial) − repasses');
+  assert.strictEqual(s.nReceitas, 1); assert.strictEqual(s.nJudicial, 1); assert.strictEqual(s.nRepasses, 1);
   const tudo = faturamento(itens, null);
-  perto(tudo.faturamento, 3500 - 1300, 'sem mês, soma o horizonte');
+  perto(tudo.faturamento, 3000 - 1300, 'sem mês, soma o horizonte');
   perto(faturamento([], '2026-09').faturamento, 0, 'vazio não explode');
 }
 
