@@ -2309,6 +2309,9 @@ body.viewas-readonly select {
       <div class="nav-item" data-page="audiencias" id="nav-audiencias">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></span><span>Audiências</span><span class="nav-badge" id="nav-audiencias-count" style="display:none;">0</span>
       </div>
+      <div class="nav-item" data-page="lembretes" id="nav-lembretes">
+        <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span><span>Lembretes</span><span class="nav-badge" id="nav-lembretes-count" style="display:none;">0</span>
+      </div>
     </div>
 
     <div class="sidebar-section">
@@ -2444,6 +2447,7 @@ body.viewas-readonly select {
               <!-- Onda 3 #13 — CRM unificado em Cobranças; link removido do menu (reversível). -->
               <a onclick="showPage('tarefas')">Tarefas</a>
               <a onclick="showPage('audiencias')">Audiências</a>
+              <a onclick="showPage('lembretes')">Lembretes</a>
               <a onclick="showPage('docs')">Documentos</a>
               <a onclick="showPage('assinaturas')">Assinaturas</a>
               <a onclick="showPage('wa')">WhatsApp</a>
@@ -2552,6 +2556,7 @@ body.viewas-readonly select {
     <div id="page-fila" class="page-content"></div>
     <div id="page-tarefas" class="page-content"></div>
     <div id="page-audiencias" class="page-content"></div>
+    <div id="page-lembretes" class="page-content"></div>
     <div id="page-docs" class="page-content">
       <!-- JS will populate -->
     </div>
@@ -7526,7 +7531,7 @@ const PAGE_TITLES = {
   painel:'Painel', fila:'Fila de decisões', cobr:'Cobranças', devedores:'Devedores', processos:'Processos',
   pipeline:'Pipeline', crm:'CRM', clientes:'Clientes', docs:'Documentos', pecas:'Peças & Ações Judiciais', fin:'Financeiro',
   relat:'Relatórios', wa:'WhatsApp', intimacoes:'Intimações', config:'Configurações', calc:'Calculadora Jurídica',
-  aprovacoes:'Aprovações', tarefas:'Tarefas', audiencias:'Audiências', delegacao:'Delegação', assinaturas:'Assinaturas', 'consultas-premium':'Consultas Premium',
+  aprovacoes:'Aprovações', tarefas:'Tarefas', audiencias:'Audiências', lembretes:'Lembretes', delegacao:'Delegação', assinaturas:'Assinaturas', 'consultas-premium':'Consultas Premium',
   repasses:'Repasses a clientes',
   importacao:'Importação', /* IMPORTACAO TEMP */
   'cobranca-detalhe':'Cobrança', 'devedor-detalhe':'Devedor', 'cliente-detalhe':'Cliente'
@@ -7539,6 +7544,7 @@ const PAGE_BREADCRUMBS = {
   tarefas:   ['Hoje','Tarefas'],
   delegacao: ['Hoje','Delegação'],
   audiencias:['Hoje','Audiências'],
+  lembretes: ['Hoje','Lembretes'],
   cobr:      ['Carteira','Cobranças'],
   assinaturas:['Carteira','Assinaturas'],
   devedores: ['Carteira','Devedores'],
@@ -7592,6 +7598,7 @@ const PAGE_RENDERERS = {
   agentes: ()=>renderAgentesPage(),
   tarefas: ()=>renderTarefas(),
   audiencias: ()=>renderAudiencias(),
+  lembretes: ()=>renderLembretes(),
   delegacao: ()=>renderDelegacao(),
   importacao: ()=>renderImportacao(), /* IMPORTACAO TEMP */
   'cobranca-detalhe': ()=>renderCobrancaDetalhe(),
@@ -7638,6 +7645,12 @@ async function refreshMenuBadges(){
     const { count, error } = await supa.from('audiencias').select('id',{count:'exact',head:true})
       .eq('status','agendada').gte('data_hora', new Date().toISOString());
     if(!error) navBadge('nav-audiencias-count', count);
+  }catch(_){}
+  // Lembretes agendados ainda por vir.
+  try{
+    const { count, error } = await supa.from('lembretes').select('id',{count:'exact',head:true})
+      .eq('status','agendado').gte('data_hora', new Date().toISOString());
+    if(!error) navBadge('nav-lembretes-count', count);
   }catch(_){}
   // Assinaturas no ar aguardando o signatário.
   try{
@@ -8933,6 +8946,231 @@ async function excluirAudiencia(id){
   if(error){ showToast('Falha ao excluir: '+error.message,'danger'); return; }
   showToast('Audiência excluída.','success');
   renderAudiencias();
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// LEMBRETES — tarefas e lembretes avulsos com aviso automático por WhatsApp.
+// Módulo irmão de Audiências (decisão do gestor, 04/09/2026: não mexer no que
+// está certo). Tabela `lembretes` + fila `crm_mensagens_agendadas`; o trigger
+// public.lembretes_agendar_avisos() agenda 3 avisos: véspera 19h, dia 08h e
+// 10min antes. O front-end não duplica essa lógica.
+// ══════════════════════════════════════════════════════════════════════════
+let _lemCache = [];
+
+async function renderLembretes(){
+  const el = document.getElementById('page-lembretes');
+  if(!el) return;
+  const ehG = currentUser?.tipo === 'gestor';
+  el.innerHTML = `<div class="cob-pg-head">
+      <div><h1 class="cob-h1">Lembretes</h1><div class="cob-h1-sub">Carregando…</div></div>
+    </div>`;
+  const supa = getSupabase();
+  if(!supa){ el.innerHTML = `<div class="cob-empty-big"><div class="cob-empty-tt">Supabase indisponível</div></div>`; return; }
+
+  const { data, error } = await supa.from('lembretes').select('*').order('data_hora',{ascending:true});
+  if(error){ el.innerHTML = `<div class="cob-empty-big"><div class="cob-empty-tt">Erro ao carregar lembretes</div><div class="cob-empty-ds">${escHtml(error.message)}</div></div>`; return; }
+  _lemCache = data || [];
+
+  // Status dos avisos por lembrete (pendente/enviada/cancelada), 3 bolinhas.
+  const ids = _lemCache.map(a=>a.id);
+  let avisosPorLem = {};
+  if(ids.length){
+    const { data: av } = await supa.from('crm_mensagens_agendadas').select('lembrete_id,origem,status').in('lembrete_id', ids);
+    (av||[]).forEach(l=>{
+      avisosPorLem[l.lembrete_id] = avisosPorLem[l.lembrete_id] || {};
+      const fase = (l.origem||'').replace('lembrete_aviso_','');
+      avisosPorLem[l.lembrete_id][fase] = l.status;
+    });
+  }
+  const dotHTML = (status)=>{
+    const cor = status==='enviada' ? '#0F8A5F' : status==='falhou' ? '#C0392B' : status==='cancelada' ? '#9AA5B1' : '#D69E2E';
+    const tit = status==='enviada' ? 'Enviado' : status==='falhou' ? 'Falhou' : status==='cancelada' ? 'Cancelado' : status ? 'Pendente' : 'Não agendado';
+    return `<span title="${tit}" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${cor};margin-right:3px;"></span>`;
+  };
+
+  const agora = new Date();
+  const proximos = _lemCache.filter(a=>a.status==='agendado' && new Date(a.data_hora) >= agora);
+  const passados = _lemCache.filter(a=>!(a.status==='agendado' && new Date(a.data_hora) >= agora));
+
+  const linha = (a)=>{
+    const av = avisosPorLem[a.id] || {};
+    const dh = new Date(a.data_hora);
+    const statusCor = a.status==='cancelado' ? '#9AA5B1' : a.status==='concluido' ? '#0F8A5F' : '#2B6CB0';
+    const statusLb = a.status==='concluido' ? 'concluído' : a.status;
+    return `<div class="cob-panel" style="margin-bottom:10px;padding:14px 16px;">
+      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+        <div style="min-width:0;flex:1;">
+          <div style="font-weight:700;font-size:13.5px;${a.status==='concluido'?'text-decoration:line-through;opacity:.75;':''}">${escHtml(a.titulo||'—')}</div>
+          ${a.descricao?`<div style="font-size:12px;color:var(--text-2);margin-top:3px;white-space:pre-wrap;">${escHtml(a.descricao)}</div>`:''}
+          ${a.numero_processo?`<div style="font-size:11.5px;color:var(--text-3);margin-top:4px;"><b>Processo:</b> ${escHtml(a.numero_processo)}</div>`:''}
+        </div>
+        <div style="text-align:right;min-width:150px;">
+          <div style="font-weight:700;font-size:13.5px;color:${statusCor};">${dh.toLocaleDateString('pt-BR')} ${dh.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</div>
+          <div style="font-size:11px;color:var(--text-3);text-transform:uppercase;letter-spacing:.03em;margin-top:2px;">${escHtml(statusLb)}</div>
+          <div style="margin-top:8px;">${dotHTML(av.d1)}${dotHTML(av.dia)}${dotHTML(av.min10)}<span style="font-size:10px;color:var(--text-3);margin-left:4px;">véspera · dia · 10min</span></div>
+        </div>
+      </div>
+      ${ehG ? `<div style="display:flex;gap:6px;margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">
+        <button class="btn btn-ghost btn-sm" onclick="abrirLembreteModal('${a.id}')">Editar</button>
+        ${a.status==='agendado' ? `<button class="btn btn-ghost btn-sm" onclick="concluirLembrete('${a.id}')">Marcar concluído</button>
+        <button class="btn btn-ghost btn-sm" style="color:var(--danger);" onclick="cancelarLembrete('${a.id}')">Cancelar</button>` : ''}
+        <button class="btn btn-ghost btn-sm" style="color:var(--danger);margin-left:auto;" onclick="excluirLembrete('${a.id}')">Excluir</button>
+      </div>` : ''}
+    </div>`;
+  };
+
+  // ── Card escuro do topo (mesmo desenho de Audiências) ────────────────────
+  const prox = proximos[0] || null;
+  const fimSemana = new Date(agora); fimSemana.setDate(fimSemana.getDate()+7);
+  const nSemana = proximos.filter(a=>new Date(a.data_hora) <= fimSemana).length;
+  const nAvisos = Object.values(avisosPorLem)
+    .reduce((n,m)=>n + Object.values(m||{}).filter(st=>st==='pendente'||st==='agendada').length, 0);
+  const _dhProx = prox ? new Date(prox.data_hora) : null;
+  const cardTopo = `<div class="pnl-dark" style="margin-bottom:18px;">
+    <div style="display:grid;grid-template-columns:minmax(0,1.6fr) 1fr 1fr;gap:18px;align-items:start;">
+      <div>
+        <div class="pnl-dark-lb">Próximo lembrete</div>
+        <div style="font-family:var(--font-display);font-size:21px;font-weight:400;color:#fff;margin-top:5px;line-height:1.2;">
+          ${prox ? `${_dhProx.toLocaleDateString('pt-BR',{day:'2-digit',month:'long'})} · ${_dhProx.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}` : 'Nenhum agendado'}
+        </div>
+        <div class="pnl-dark-sub" style="margin-top:4px;">${prox ? escHtml(prox.titulo||'') : 'Cadastre um lembrete para os avisos automáticos entrarem na fila.'}</div>
+      </div>
+      <div><div class="pnl-dark-lb">Esta semana</div><div class="pnl-dark-v" style="font-size:22px;">${nSemana}</div></div>
+      <div><div class="pnl-dark-lb">Avisos na fila</div><div class="pnl-dark-v" style="font-size:22px;">${nAvisos}</div></div>
+    </div>
+    <div class="pnl-dark-hr"></div>
+    <div style="display:flex;gap:9px;flex-wrap:wrap;">
+      <button class="cob-btn-ghost" style="background:transparent;color:#EFEAD9;border-color:rgba(255,255,255,.22);" onclick="showPage('wa');setTimeout(()=>setWATab&&setWATab('agendados'),50);">Ver avisos</button>
+    </div>
+  </div>`;
+
+  // ── Agrupamento por dia ──────────────────────────────────────────────────
+  const porDia = [];
+  proximos.forEach(a=>{
+    const iso = String(a.data_hora).slice(0,10);
+    let g = porDia.find(x=>x.iso===iso);
+    if(!g){ g = { iso, itens:[] }; porDia.push(g); }
+    g.itens.push(a);
+  });
+  const DOW = ['DOM','SEG','TER','QUA','QUI','SEX','SÁB'];
+  const MES = ['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'];
+  const grupoHtml = (g)=>{
+    const d = new Date(g.iso+'T12:00:00');
+    return `<div style="display:flex;gap:16px;align-items:flex-start;margin-bottom:14px;">
+      <div style="width:62px;flex-shrink:0;text-align:center;padding-top:6px;">
+        <div style="font-family:var(--font-mono);font-size:10px;letter-spacing:.12em;color:var(--text-3);">${DOW[d.getDay()]}</div>
+        <div style="font-family:var(--font-display);font-size:28px;font-weight:400;color:var(--text);line-height:1.05;">${String(d.getDate()).padStart(2,'0')}</div>
+        <div style="font-family:var(--font-mono);font-size:10.5px;color:#9C7F40;">${MES[d.getMonth()]}</div>
+      </div>
+      <div style="flex:1;min-width:0;">${g.itens.map(linha).join('')}</div>
+    </div>`;
+  };
+
+  el.innerHTML = `
+    <div class="cob-pg-head">
+      <div><h1 class="cob-h1">Lembretes</h1><div class="cob-h1-sub">${proximos.length} próximo${proximos.length!==1?'s':''} · aviso WhatsApp automático (véspera 19h, dia às 08h e 10min antes)</div></div>
+      <div class="cob-head-actions">${ehG?`<button class="cob-btn-primary" onclick="abrirLembreteModal(null)">${ico('plus',14)} Novo lembrete</button>`:''}</div>
+    </div>
+    ${cardTopo}
+    ${porDia.length ? porDia.map(grupoHtml).join('') : `<div class="cob-empty">Nenhum lembrete futuro cadastrado.</div>`}
+    ${passados.length ? `<h2 style="font-size:14px;margin:22px 0 8px;color:var(--text-3);">Concluídos / cancelados / passados</h2>${passados.map(linha).join('')}` : ''}
+  `;
+}
+
+async function abrirLembreteModal(id){
+  if(currentUser?.tipo!=='gestor') return;
+  const a = id ? _lemCache.find(x=>x.id===id) : null;
+  if(id && !a) return;
+  const inp='width:100%;padding:8px 10px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-family:inherit;background:var(--bg);color:var(--text);';
+  const lbl='font-size:11px;font-weight:600;color:var(--text-2);display:block;margin-bottom:3px;';
+  const toLocalInput = (iso)=>{ if(!iso) return ''; const d=new Date(iso); const pad=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+
+  _injAudModal('modal-lem', `
+    <div class="modal-header"><span class="modal-title">${id?'Editar':'Novo'} lembrete</span><button class="modal-close" onclick="closeModal('modal-lem')">✕</button></div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:10px;">
+      <div><label style="${lbl}">Título *</label><input id="lem-titulo" value="${escHtml(a?.titulo||'')}" placeholder="Ex.: Avisar cliente sobre desistência" style="${inp}"></div>
+      <div><label style="${lbl}">Descrição</label><textarea id="lem-desc" rows="3" style="${inp}resize:vertical;">${escHtml(a?.descricao||'')}</textarea></div>
+      <div style="display:flex;gap:10px;">
+        <div style="flex:1;"><label style="${lbl}">Data e hora *</label><input id="lem-data" type="datetime-local" value="${toLocalInput(a?.data_hora)}" style="${inp}"></div>
+        <div style="flex:1;"><label style="${lbl}">Processo (opcional)</label><input id="lem-processo" value="${escHtml(a?.numero_processo||'')}" placeholder="0000000-00.0000.8.16.0000" style="${inp}"></div>
+      </div>
+      <div><label style="${lbl}">Telefone p/ aviso WhatsApp</label><input id="lem-telefone" value="${escHtml(a?.telefone_notificacao||'46999223332')}" style="${inp}"></div>
+      <div style="font-size:11.5px;color:var(--text-3);">Avisos de WhatsApp serão (re)agendados automaticamente: véspera às 19h, no dia às 08h e 10 minutos antes.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-lem')">Cancelar</button>
+      <button class="btn btn-primary" id="lem-btn-salvar" onclick="salvarLembrete('${id||''}')">${id?'Salvar':'Criar'}</button>
+    </div>
+  `, 560);
+  setTimeout(()=>document.getElementById('lem-titulo')?.focus(), 50);
+}
+
+async function salvarLembrete(id){
+  const supa = getSupabase(); if(!supa){ showToast('Supabase indisponível.','danger'); return; }
+  const titulo = (document.getElementById('lem-titulo')?.value||'').trim();
+  const dataVal = document.getElementById('lem-data')?.value;
+  if(!titulo){ showToast('Informe o título.','warning'); return; }
+  if(!dataVal){ showToast('Informe a data e hora.','warning'); return; }
+  const telefone = (document.getElementById('lem-telefone')?.value||'').replace(/\D/g,'');
+  if(!telefone){ showToast('Informe o telefone de aviso.','warning'); return; }
+
+  const payload = {
+    titulo,
+    descricao: (document.getElementById('lem-desc')?.value||'').trim() || null,
+    data_hora: new Date(dataVal).toISOString(),
+    numero_processo: (document.getElementById('lem-processo')?.value||'').trim() || null,
+    telefone_notificacao: telefone,
+  };
+
+  const btn = document.getElementById('lem-btn-salvar'); if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
+  try{
+    if(id){
+      const { error } = await supa.from('lembretes').update(payload).eq('id', id);
+      if(error) throw error;
+    } else {
+      const { error } = await supa.from('lembretes').insert({ ...payload, origem:'manual', created_by: currentUser?.nome||'' });
+      if(error) throw error;
+    }
+    // Os 3 avisos são agendados pelo trigger no banco (lembretes_agendar_avisos).
+    showToast('Lembrete salvo. Avisos agendados.','success');
+    closeModal('modal-lem');
+    renderLembretes();
+  }catch(e){
+    showToast('Falha ao salvar: '+(e.message||e),'danger');
+    if(btn){ btn.disabled=false; btn.textContent=id?'Salvar':'Criar'; }
+  }
+}
+
+async function cancelarLembrete(id){
+  if(currentUser?.tipo!=='gestor') return;
+  if(!confirm('Cancelar este lembrete? Os avisos de WhatsApp ainda não enviados serão cancelados junto.')) return;
+  const supa = getSupabase(); if(!supa) return;
+  // O trigger no banco cancela os avisos pendentes ao ver status != 'agendado'.
+  const { error } = await supa.from('lembretes').update({ status:'cancelado' }).eq('id', id);
+  if(error){ showToast('Falha ao cancelar: '+error.message,'danger'); return; }
+  showToast('Lembrete cancelado.','success');
+  renderLembretes();
+}
+
+async function concluirLembrete(id){
+  if(currentUser?.tipo!=='gestor') return;
+  const supa = getSupabase(); if(!supa) return;
+  // O trigger no banco cancela os avisos pendentes ao ver status != 'agendado'.
+  const { error } = await supa.from('lembretes').update({ status:'concluido' }).eq('id', id);
+  if(error){ showToast('Falha ao atualizar: '+error.message,'danger'); return; }
+  showToast('Lembrete marcado como concluído.','success');
+  renderLembretes();
+}
+
+async function excluirLembrete(id){
+  if(currentUser?.tipo!=='gestor') return;
+  const a = _lemCache.find(x=>x.id===id);
+  if(!a || !confirm(`Excluir o lembrete "${a.titulo}"? Os avisos agendados também são removidos.`)) return;
+  const supa = getSupabase(); if(!supa) return;
+  const { error } = await supa.from('lembretes').delete().eq('id', id);
+  if(error){ showToast('Falha ao excluir: '+error.message,'danger'); return; }
+  showToast('Lembrete excluído.','success');
+  renderLembretes();
 }
 
 // ── IA (Claude) + Mermaid para o "Como fazer" ────────────────────────────────
@@ -10632,12 +10870,12 @@ async function renderPainel(){
       #page-painel .pnl-sit-lb i{width:7px;height:7px;border-radius:2px;display:inline-block;}
       #page-painel .pnl-sit-v{font-family:var(--font-mono);font-size:15px;font-weight:600;color:var(--text);}
       #page-painel .pnl-sit-c{font-size:11.5px;color:var(--text-3);}
-      #page-painel .pnl-dark, #page-audiencias .pnl-dark{background:var(--side-bg);border-radius:12px;padding:18px;color:#fff;display:flex;flex-direction:column;gap:14px;}
-      #page-painel .pnl-dark-lb, #page-audiencias .pnl-dark-lb{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--side-fg-mute);}
-      #page-painel .pnl-dark-v, #page-audiencias .pnl-dark-v{font-family:var(--font-mono);font-size:26px;font-weight:600;letter-spacing:-.01em;color:#fff;}
-      #page-painel .pnl-dark-sub, #page-audiencias .pnl-dark-sub{font-size:12px;color:var(--side-fg-mute);}
-      #page-painel .pnl-dark-hr, #page-audiencias .pnl-dark-hr{height:1px;background:rgba(255,255,255,.12);}
-      #page-painel .pnl-dark-2col, #page-audiencias .pnl-dark-2col{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+      #page-painel .pnl-dark, #page-audiencias .pnl-dark, #page-lembretes .pnl-dark{background:var(--side-bg);border-radius:12px;padding:18px;color:#fff;display:flex;flex-direction:column;gap:14px;}
+      #page-painel .pnl-dark-lb, #page-audiencias .pnl-dark-lb, #page-lembretes .pnl-dark-lb{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--side-fg-mute);}
+      #page-painel .pnl-dark-v, #page-audiencias .pnl-dark-v, #page-lembretes .pnl-dark-v{font-family:var(--font-mono);font-size:26px;font-weight:600;letter-spacing:-.01em;color:#fff;}
+      #page-painel .pnl-dark-sub, #page-audiencias .pnl-dark-sub, #page-lembretes .pnl-dark-sub{font-size:12px;color:var(--side-fg-mute);}
+      #page-painel .pnl-dark-hr, #page-audiencias .pnl-dark-hr, #page-lembretes .pnl-dark-hr{height:1px;background:rgba(255,255,255,.12);}
+      #page-painel .pnl-dark-2col, #page-audiencias .pnl-dark-2col, #page-lembretes .pnl-dark-2col{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
       #page-painel .pnl-dias7{display:flex;gap:5px;margin-bottom:14px;}
       #page-painel .pnl-dia{flex:1;border:1px solid var(--border);background:var(--card);border-radius:6px;padding:7px 4px;display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;transition:border-color .12s,box-shadow .12s;}
       #page-painel .pnl-dia:hover{border-color:var(--accent);}
@@ -10657,7 +10895,7 @@ async function renderPainel(){
       #page-painel .pnl-risco-hr{height:1px;background:var(--border-2);}
       #page-painel .pnl-risco-v{font-family:var(--font-mono);font-size:17px;font-weight:600;width:80px;flex-shrink:0;}
       @media(max-width:1180px){ #page-painel .pnl-acordos-grid{grid-template-columns:repeat(2,1fr);} }
-      @media(max-width:980px){ #page-painel .pnl-grid2,#page-painel .pnl-dark-2col, #page-audiencias .pnl-dark-2col{grid-template-columns:1fr;} #page-painel .pnl-acordos-grid{grid-template-columns:repeat(2,1fr);} .cob-kpis{grid-template-columns:repeat(2,1fr);} }
+      @media(max-width:980px){ #page-painel .pnl-grid2,#page-painel .pnl-dark-2col, #page-audiencias .pnl-dark-2col, #page-lembretes .pnl-dark-2col{grid-template-columns:1fr;} #page-painel .pnl-acordos-grid{grid-template-columns:repeat(2,1fr);} .cob-kpis{grid-template-columns:repeat(2,1fr);} }
     </style>
 
     <div class="pnl-head">
