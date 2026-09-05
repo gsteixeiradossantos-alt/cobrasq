@@ -66,3 +66,16 @@ uma vez por sessão): enquanto a migração não for aplicada, a aba funciona in
 apenas os cards **espera média** e **parados há +60 dias** ficam em "—", com a nota
 dizendo que a migração está pendente. Depois de aplicar, a data se informa pelo
 diálogo "Alterar data prevista" do menu ⋮ de cada linha.
+
+## 20260905 — `lembretes` (menu Lembretes, irmão de Audiências)
+
+**Não aplicada.** Aditiva: tabela `public.lembretes`, coluna
+`crm_mensagens_agendadas.lembrete_id` (FK cascade), RLS (proprietário tudo,
+colaborador lê) e trigger `lembretes_agendar_avisos()` que enfileira 3 avisos
+de WhatsApp (véspera 19h, dia 08h, 10 min antes) com origem `lembrete_aviso_*`.
+Dry-run completo em prod dentro de `DO ... RAISE EXCEPTION` (R-18, gestor e
+colaborador) antes de abrir o PR. Enquanto não aplicada, a tela "Lembretes"
+abre e mostra "Erro ao carregar lembretes" (tabela inexistente) — sem efeito
+sobre as demais telas. Depois de aplicar: mover para `lembretes` o registro
+de 04/09/2026 gravado em `audiencias` (processo 0005592-24.2024.8.16.0079,
+"NÃO É AUDIÊNCIA") e excluí-lo de lá.
