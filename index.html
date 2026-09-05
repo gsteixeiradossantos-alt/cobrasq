@@ -29721,7 +29721,7 @@ function finDivideCascata(lancamento, valorRecebido, contrato){
 // lista fica inalcançável — ao acrescentar uma tela, entrar aqui E num dos dois.
 // O corpo de toda aba continua sendo montado por renderFinTab, que não mudou.
 const FIN_CASCATA_TABS = ['credores','fila','visao','lancamentos','repasses','previsaocredor','receitasjudiciais',
-  'conciliacao','fechamento','contas','cartoes','categorias','contatos','centroscusto',
+  'fluxocaixa','conciliacao','fechamento','contas','cartoes','categorias','contatos','centroscusto',
   'transferencias','recorrencias','asaas','judicial','relatorios','diagnostico'];
 // Menus suspensos da barra. Só Painel e Lançamentos ficam como aba fixa; o resto vive
 // aqui. "Credores" junta o que trata do dinheiro de terceiro e "Outros" guarda as telas
@@ -30324,6 +30324,9 @@ const FIN_CASCATA_UI_TABS = [
   {id:'lancamentos', label:'Movimentações', cnt:true},
   {id:'credores', label:'Recebíveis e repasses', cnt:true, acao:true},
   {id:'receitasjudiciais', label:'Judicial', cnt:true},
+  // Projeção de 12 meses (04/09/2026): quanto sobra para o sócio. Sem contador — é
+  // uma leitura, não uma fila.
+  {id:'fluxocaixa', label:'Fluxo de caixa'},
 ];
 // Último contador conhecido de cada aba. O cabeçalho é remontado a cada troca de aba;
 // sem esta memória, os contadores voltavam a "—" toda vez e só reapareciam depois de
@@ -35296,6 +35299,7 @@ function renderFinTab(tab){
   // (a implementação antiga, intacta) diretamente, então continua funcionando igual.
   else if(tab==='lancamentos') renderFinLancamentosCascata(el);
   else if(tab==='receitasjudiciais') renderFinReceitasJudiciais(el);
+  else if(tab==='fluxocaixa') renderFinFluxoCaixa(el);
   else if(tab==='contas') renderFinContas(el);
   else if(tab==='categorias') renderFinCategorias(el);
   else if(tab==='contatos') renderFinContatos(el);
@@ -40416,6 +40420,613 @@ function _bankColorFallback(nome){
   if(n.includes('nubank')) return '#8A05BE';
   if(n.includes('sicoob')) return '#006B3F';
   return '#0A1530';
+}
+
+// ══════════════════════════════════════════════════════════════
+// FINANCEIRO — FLUXO DE CAIXA (projeção de 12 meses)
+// ──────────────────────────────────────────────────────────────
+// Responde "quanto sobra para o sócio, mês a mês" com o que JÁ está lançado (boletos,
+// parcelas de acordo, repasses programados, dívidas), mais as recorrências que ainda
+// não viraram lançamento e um punhado de premissas que o dono ajusta na própria tela
+// (realização, judicial, originação, retirada alvo). Nasceu do plano de recuperação de
+// caixa de 04/09/2026: a planilha virou tela para a regra de sexta-feira ter onde morar.
+//
+// Três invariantes que o teste F-29 fixa:
+//   1. receita própria = tudo que entra − tudo que é do cedente (repasse), mês a mês;
+//   2. a retirada nunca passa do alvo nem fica negativa: é o que sobra depois de fixos,
+//      DAS e dívida, limitada ao alvo;
+//   3. honorário na frente: numa safra nova, as primeiras parcelas são 100% da COBRASQ
+//      até completar a parte dela; daí em diante são 100% capital do cedente.
+// O motor (finFluxoProjetar) é puro — sem rede e sem DOM — justamente para ser testável.
+// Repasse do cronograma NÃO é custo: é dinheiro de terceiro passando pelo caixa. Por isso
+// ele sai do "entra" antes de qualquer conta própria, e não aparece em "saídas próprias".
+const FIN_FLUXO_PREMISSAS_KEY = 'cobrasq_fin_fluxo_premissas_v1';
+const FIN_FLUXO_PREMISSAS_PADRAO = Object.freeze({
+  realizacao: 0.85,          // fração dos boletos/parcelas previstos que cai de fato
+  judicialMes: 3000,         // Sisbajud/alvará/penhora por mês, além do que já está lançado
+  judicialCapitalPct: 0.5,   // parte do judicial que é capital do cedente
+  dasPct: 0.09,              // DAS sobre a receita própria (o capital do cedente não é receita)
+  prolaboreAlvo: 20000,      // retirada que a PF precisa por mês
+  backlogMeses: 3,           // em quantos meses os repasses vencidos são quitados
+  origContratadoMes: 68000,  // valor contratado em acordos novos por mês (a partir do mês seguinte)
+  origEntradaPct: 0.2,       // entrada exigida no acordo (100% da COBRASQ)
+  origParcelas: 12,          // parcelas médias do acordo, depois da entrada
+  origSharePct: 0.45,        // parte da COBRASQ no valor do acordo (o resto é capital)
+  avistaMes: 0,              // parte própria vinda de quitações à vista, por mês
+  dividasNaoLancadas: 0,     // parcelas de dívida que não estão no sistema (ex.: BNDES)
+  fixosNaoLancados: 0,       // custos fixos sem recorrência cadastrada
+  horizonte: 12,
+});
+const FIN_FLUXO_RX_REPASSE  = /aquisi[cç][aã]o de d[ií]vidas|repasse/i;
+const FIN_FLUXO_RX_DIVIDA   = /empr[eé]stimo|financiamento|parcelamento|cart[aã]o de cr[eé]dito|fatura do cart/i;
+const FIN_FLUXO_RX_JUDICIAL = /sisbajud|penhora/i;
+
+function _finFluxoPremissas(){
+  const p = Object.assign({}, FIN_FLUXO_PREMISSAS_PADRAO);
+  try{
+    const s = JSON.parse(localStorage.getItem(FIN_FLUXO_PREMISSAS_KEY) || '{}');
+    for(const k of Object.keys(FIN_FLUXO_PREMISSAS_PADRAO)) if(s[k] != null && isFinite(+s[k])) p[k] = +s[k];
+  }catch(_){}
+  return p;
+}
+function _finFluxoSalvarPremissas(p){
+  try{ localStorage.setItem(FIN_FLUXO_PREMISSAS_KEY, JSON.stringify(p)); }catch(_){}
+}
+
+// De que tipo é uma SAÍDA pendente. Repasse = dinheiro do cedente (credor definido, ou a
+// categoria diz); tarifa com credor não é repasse (#616). Dívida = empréstimo, parcelamento
+// e cartão. O resto é custo próprio já lançado (aluguel, custas, IPTU…).
+function _finFluxoClassificaSaida(l, catNome){
+  const cat = String(catNome || ''), desc = String((l && l.descricao) || '');
+  if(!_finEhTarifa(l) && (l.credor_id || FIN_FLUXO_RX_REPASSE.test(cat))) return 'repasse';
+  if(FIN_FLUXO_RX_DIVIDA.test(cat) || FIN_FLUXO_RX_DIVIDA.test(desc)) return 'divida';
+  return 'outros';
+}
+// Recorrência de saída: o DAS já entra pela premissa (% da receita própria), então a
+// recorrência dele não pode somar de novo — em 05/09/2026 a de R$ 4.000 dobrava o imposto.
+// Empréstimo recorrente é dívida, não custo fixo.
+function _finFluxoClassificaRecorrencia(r){
+  const d = String((r && r.descricao) || '');
+  if(/\bDAS\b|simples nacional/i.test(d)) return 'das';
+  if(FIN_FLUXO_RX_DIVIDA.test(d)) return 'divida';
+  return 'fixo';
+}
+// ENTRADA judicial ainda não liberada (Sisbajud/penhora sem judicial_liberado_em) é
+// expectativa de bloqueio, não boleto: fica fora da carteira e entra pela premissa.
+function _finFluxoClassificaEntrada(l, catNome){
+  if(FIN_FLUXO_RX_JUDICIAL.test(String(catNome||'')) && !(l && l.judicial_liberado_em)) return 'judicial';
+  return 'normal';
+}
+// Repasse "contingente": só é devido se o devedor pagar a parcela casada. A saída e a
+// entrada compartilham a cobrança e vencem perto (a entrada até 20 dias antes ou 5 depois).
+function _finFluxoEhContingente(l, entradasPorCob){
+  if(!l || !l.cobranca_id) return false;
+  const lista = entradasPorCob[l.cobranca_id]; if(!lista || !lista.length) return false;
+  const v = _finDeISO(String(l.data_vencimento||'').slice(0,10)); if(!v || !isFinite(v.getTime())) return false;
+  const a = new Date(v); a.setDate(a.getDate()-20);
+  const b = new Date(v); b.setDate(b.getDate()+5);
+  return lista.some(d => { const e = _finDeISO(d); return e && isFinite(e.getTime()) && e >= a && e <= b; });
+}
+
+// Motor. `base.meses[i]` = { key, label, entradas, judicialPrevisto, repFixo, repCont,
+// dividas, outros, recorrencias }; `base.caixaInicial`; `base.backlog` (repasses vencidos
+// devidos de qualquer jeito); `base.fracMesAtual` (quanto do mês corrente ainda falta).
+function finFluxoProjetar(base, p){
+  p = Object.assign({}, FIN_FLUXO_PREMISSAS_PADRAO, p || {});
+  const meses = (base.meses || []).slice(0, Math.max(1, +p.horizonte || 12));
+  const n = meses.length;
+  const frac0 = base.fracMesAtual == null ? 1 : Math.max(0, Math.min(1, +base.fracMesAtual));
+  const backlog = Math.max(0, +base.backlog || 0);
+  const nb = Math.max(1, Math.round(+p.backlogMeses || 1));
+  const real = Math.max(0, Math.min(1, +p.realizacao || 0));
+  const C = Math.max(0, +p.origContratadoMes || 0), eP = Math.max(0, Math.min(1, +p.origEntradaPct || 0));
+  const P = Math.max(1, Math.round(+p.origParcelas || 1)), share = Math.max(0, Math.min(1, +p.origSharePct || 0));
+  let caixa = +base.caixaInicial || 0, backlogPago = 0;
+  const rows = [];
+  for(let i = 0; i < n; i++){
+    const m = meses[i];
+    const recCarteira = (+m.entradas || 0) * real;
+    const recJudicial = +p.judicialMes || 0;
+    // Safras novas: a de índice c nasce no mês c (c ≥ 1 — o mês corrente já está na
+    // carteira). Entrada no mês de assinatura; parcelas nos P meses seguintes, honorário
+    // na frente.
+    let recEntradasNovos = 0, recNovosProprio = 0, recNovosCapital = 0;
+    for(let c = 1; c <= i; c++){
+      const honTotal = share * C, parc = (1 - eP) * C / P;
+      if(c === i){ recEntradasNovos += eP * C * real; continue; }
+      const k = i - c; if(k > P) continue;
+      const honAntes = eP * C + parc * (k - 1);
+      const own = Math.min(parc, Math.max(0, honTotal - honAntes));
+      recNovosProprio += own * real; recNovosCapital += (parc - own) * real;
+    }
+    const recAvista = (+p.avistaMes || 0) * (i === 0 ? frac0 : 1);
+    const totalRec = recCarteira + recJudicial + recEntradasNovos + recNovosProprio + recNovosCapital + recAvista;
+
+    const repFixo = +m.repFixo || 0, repCont = (+m.repCont || 0) * real;
+    const repJudicial = recJudicial * (+p.judicialCapitalPct || 0);
+    const repBacklog = i < nb ? Math.min(backlog - backlogPago, backlog / nb) : 0;
+    backlogPago += repBacklog;
+    const totalRep = repFixo + repCont + repJudicial + recNovosCapital + repBacklog;
+    const receitaPropria = totalRec - totalRep;
+
+    const fixos = (+m.outros || 0) + (+m.recorrencias || 0) + (+p.fixosNaoLancados || 0);
+    const dividas = (+m.dividas || 0) + (+p.dividasNaoLancadas || 0);
+    const das = Math.max(0, receitaPropria) * (+p.dasPct || 0);
+    const alvo = Math.max(0, +p.prolaboreAlvo || 0);
+    const necessidade = fixos + das + dividas + alvo;
+    const disponivel = receitaPropria - fixos - das - dividas;
+    const retirada = Math.max(0, Math.min(alvo, disponivel));
+    const totalSaidas = fixos + das + dividas + retirada;
+    const resultado = receitaPropria - totalSaidas;
+    const caixaIni = caixa; caixa += resultado;
+    rows.push({
+      key: m.key, label: m.label,
+      recCarteira, recJudicial, recEntradasNovos, recNovosProprio, recNovosCapital, recAvista, totalRec,
+      repFixo, repCont, repJudicial, repNovos: recNovosCapital, repBacklog, totalRep,
+      receitaPropria, fixos, das, dividas, retirada, totalSaidas, necessidade,
+      falta: alvo - retirada, disponivel, resultado,
+      caixaIni, caixaFim: caixa, backlogRestante: backlog - backlogPago, caixaLivre: caixa - (backlog - backlogPago),
+      judicialPrevisto: +m.judicialPrevisto || 0,
+    });
+  }
+  const soma = k => rows.reduce((s, r) => s + (+r[k] || 0), 0);
+  return { rows, premissas: p, totais: {
+    totalRec: soma('totalRec'), totalRep: soma('totalRep'), receitaPropria: soma('receitaPropria'),
+    totalSaidas: soma('totalSaidas'), retirada: soma('retirada'), falta: soma('falta'),
+    retiradaMedia: n ? soma('retirada') / n : 0, mesesNoAlvo: rows.filter(r => r.falta <= 0.005).length,
+    caixaMin: rows.length ? Math.min(...rows.map(r => r.caixaFim)) : 0,
+  } };
+}
+
+let _finFluxoBaseCache = { at:0, v:null };
+async function _finFluxoCarregarBase(force){
+  if(!force && _finFluxoBaseCache.v && (Date.now() - _finFluxoBaseCache.at) < 30000) return _finFluxoBaseCache.v;
+  const sb = getSupabase();
+  const t = _finCaixaHoje(), hoje = t.iso;
+  const H = FIN_FLUXO_PREMISSAS_PADRAO.horizonte;
+  const meses = [];
+  for(let k = 0; k < H; k++){
+    const d = new Date(t.y, t.m - 1 + k, 1);
+    const key = isoLocal(d).slice(0,7);
+    meses.push({ key, label: d.toLocaleDateString('pt-BR',{month:'short'}).replace('.','') + '/' + String(d.getFullYear()).slice(2),
+      entradas:0, judicialPrevisto:0, repFixo:0, repCont:0, dividas:0, outros:0, recorrencias:0,
+      nEntradas:0, nRepasses:0 });
+  }
+  const idx = Object.fromEntries(meses.map((m,i)=>[m.key,i]));
+  const fimHorizonte = isoLocal(new Date(t.y, t.m - 1 + H, 0));
+  const diasMes = new Date(t.y, t.m, 0).getDate();
+  const fracMesAtual = Math.max(0, (diasMes - t.d + 1) / diasMes);
+
+  const SEL = 'id,descricao,valor,tipo_movimento,status,data_vencimento,credor_id,cobranca_id,recorrencia_template_id,judicial_liberado_em';
+  async function paginadoFluxo(build){
+    const out = []; let from = 0;
+    for(;;){
+      const { data, error } = await build(sb.from('fin_lancamento').select(SEL)).order('id',{ascending:true}).range(from, from+999);
+      if(error) throw error;
+      out.push(...(data||[]));
+      if(!data || data.length < 1000 || from >= 20000) break;
+      from += 1000;
+    }
+    return out;
+  }
+  const [pend, metricas, dim, recs, acordos] = await Promise.all([
+    paginadoFluxo(q => q.eq('status', 0).not('data_vencimento','is',null).lte('data_vencimento', fimHorizonte)),
+    _finCascataMetricas(),
+    finApi.loadDimensoes(),
+    finApi.listRecorrencias().catch(()=>[]),
+    (async ()=>{ try{
+      const ini = new Date(t.y, t.m - 4, 1);
+      const { data } = await sb.from('acordos').select('created_at,valor_total,valor_entrada,num_parcelas,status')
+        .gte('created_at', isoLocal(ini)).limit(2000);
+      return data || [];
+    }catch(_){ return []; } })(),
+  ]);
+
+  // Categoria (o rateio mora em fin_lancamento_categoria): a primeira basta para classificar.
+  const catPorLanc = {};
+  const ids = pend.map(l => l.id);
+  for(let i = 0; i < ids.length; i += 300){
+    try{
+      const { data } = await sb.from('fin_lancamento_categoria').select('lancamento_id,fin_categoria(descricao)').in('lancamento_id', ids.slice(i, i+300)).limit(2000);
+      for(const c of (data||[])) if(!catPorLanc[c.lancamento_id]) catPorLanc[c.lancamento_id] = (c.fin_categoria && c.fin_categoria.descricao) || '';
+    }catch(_){ /* sem categoria a linha cai em "outros" — nunca some do total */ }
+  }
+
+  // Entradas pendentes por cobrança, para saber se um repasse depende de parcela a cair.
+  const entradasPorCob = {};
+  for(const l of pend){
+    if(l.tipo_movimento !== 1 || !l.cobranca_id) continue;
+    (entradasPorCob[l.cobranca_id] = entradasPorCob[l.cobranca_id] || []).push(String(l.data_vencimento||'').slice(0,10));
+  }
+
+  const vencidos = { entradas:0, nEntradas:0, judicial:0, nJudicial:0, repasses:0, nRepasses:0, repassesContingentes:0, saidas:0, nSaidas:0 };
+  const backlogItens = [];
+  for(const l of pend){
+    const venc = String(l.data_vencimento||'').slice(0,10);
+    const v = Math.abs(+l.valor || 0);
+    const cat = catPorLanc[l.id] || '';
+    const vencido = venc < hoje;
+    const mi = vencido ? 0 : idx[venc.slice(0,7)];
+    if(mi == null) continue;
+    const m = meses[mi];
+    if(l.tipo_movimento === 1){
+      if(_finFluxoClassificaEntrada(l, cat) === 'judicial'){
+        if(vencido){ vencidos.judicial += v; vencidos.nJudicial++; } else m.judicialPrevisto += v;
+        continue;
+      }
+      // Boleto vencido ainda pode cair: entra no mês corrente com a mesma realização.
+      if(vencido){ vencidos.entradas += v; vencidos.nEntradas++; }
+      m.entradas += v; m.nEntradas++;
+      continue;
+    }
+    if(l.tipo_movimento !== 0) continue;
+    const tipo = _finFluxoClassificaSaida(l, cat);
+    if(tipo === 'repasse'){
+      const cont = _finFluxoEhContingente(l, entradasPorCob);
+      if(vencido){
+        vencidos.nRepasses++;
+        // Vencido e sem parcela pendente casada = o devedor já pagou: é o backlog, devido
+        // de qualquer jeito. Vencido com parcela ainda a cair segue contingente.
+        if(cont){ vencidos.repassesContingentes += v; m.repCont += v; }
+        else { vencidos.repasses += v; backlogItens.push({ id:l.id, descricao:l.descricao, valor:v, vence:venc, credorId:l.credor_id }); }
+        continue;
+      }
+      m.nRepasses++;
+      if(cont) m.repCont += v; else m.repFixo += v;
+      continue;
+    }
+    if(vencido){ vencidos.saidas += v; vencidos.nSaidas++; }
+    if(tipo === 'divida') m.dividas += v; else m.outros += v;
+  }
+
+  // Recorrências ativas de saída que ainda não viraram lançamento no mês. Quando o
+  // lançamento existe (recorrencia_template_id preenchido), a linha acima já o contou.
+  const geradas = new Set(pend.filter(l => l.recorrencia_template_id).map(l => l.recorrencia_template_id + '|' + String(l.data_vencimento||'').slice(0,7)));
+  const recorrencias = [], recorrenciasDas = [];
+  for(const r of (recs||[])){
+    if(r.tipo_movimento !== 0 || r.ativa === false) continue;
+    const v = Math.abs(+r.valor || 0); if(!v) continue;
+    const tipo = _finFluxoClassificaRecorrencia(r);
+    if(tipo === 'das'){ recorrenciasDas.push({ descricao:r.descricao, valor:v }); continue; }
+    recorrencias.push({ descricao:r.descricao, valor:v, tipo });
+    for(const m of meses){
+      if(r.data_inicio && String(r.data_inicio).slice(0,7) > m.key) continue;
+      if(r.data_fim && String(r.data_fim).slice(0,7) < m.key) continue;
+      if(geradas.has(r.id + '|' + m.key)) continue;
+      if(tipo === 'divida') m.dividas += v; else m.recorrencias += v;
+    }
+  }
+
+  // Originação realizada, por mês de criação do acordo, na métrica do plano: valor
+  // contratado, entradas e parcela mensal nova. Cancelado não conta.
+  const orig = {};
+  for(const a of (acordos||[])){
+    if(String(a.status||'').toLowerCase() === 'cancelado') continue;
+    const k = String(a.created_at||'').slice(0,7); if(!k) continue;
+    const o = orig[k] = orig[k] || { n:0, contratado:0, entradas:0, parcelaNova:0 };
+    const tot = +a.valor_total || 0, ent = +a.valor_entrada || 0, np = Math.max(1, +a.num_parcelas || 1);
+    o.n++; o.contratado += tot; o.entradas += ent; o.parcelaNova += Math.max(0, tot - ent) / np;
+  }
+
+  const contas = (dim.contas||[]).filter(c => c.incluir_no_saldo_geral !== false);
+  const v = {
+    meses, caixaInicial: +metricas.saldoGeral || 0, backlog: +vencidos.repasses.toFixed(2), fracMesAtual,
+    metricas, vencidos, backlogItens: backlogItens.sort((a,b)=> b.valor - a.valor), recorrencias, recorrenciasDas, orig,
+    contasCount: contas.length, hoje, geradoEm: Date.now(),
+  };
+  _finFluxoBaseCache = { at: Date.now(), v };
+  return v;
+}
+
+let _finFluxoCharts = {};
+function _finFluxoDestruirCharts(){
+  for(const k of Object.keys(_finFluxoCharts)){ try{ _finFluxoCharts[k].destroy(); }catch(_){} }
+  _finFluxoCharts = {};
+}
+
+async function renderFinFluxoCaixa(el){
+  el.innerHTML = `<div style="text-align:center;padding:40px;color:#8A94A6;">
+    <div class="mv2-spinner" style="margin:0 auto 10px;width:26px;height:26px;border-width:3px;"></div>
+    Montando a projeção de 12 meses…
+  </div>`;
+  let base;
+  try{ base = await _finFluxoCarregarBase(); }
+  catch(e){
+    el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--danger);">
+      Erro ao montar o fluxo de caixa: ${escHtml(e.message||String(e))}
+      <div style="margin-top:12px;"><button class="btn btn-ghost btn-sm" onclick="renderFinTab('fluxocaixa')">↻ Tentar novamente</button></div>
+    </div>`;
+    return;
+  }
+  _finFluxoDesenhar(el, base, _finFluxoPremissas());
+}
+
+// Lê o formulário de premissas, guarda no localStorage (preferência de quem usa, não dado
+// da empresa) e redesenha sem voltar ao banco.
+function _finFluxoAplicar(){
+  const p = Object.assign({}, _finFluxoPremissas());
+  const pct = ['realizacao','judicialCapitalPct','dasPct','origEntradaPct','origSharePct'];
+  for(const k of Object.keys(FIN_FLUXO_PREMISSAS_PADRAO)){
+    const inp = document.getElementById('fx-p-'+k); if(!inp) continue;
+    let v = parseFloat(String(inp.value).replace(',', '.'));
+    if(!isFinite(v)) continue;
+    if(pct.includes(k)) v = v / 100;
+    p[k] = v;
+  }
+  _finFluxoSalvarPremissas(p);
+  const el = document.getElementById('fin-content');
+  if(el && _finFluxoBaseCache.v) _finFluxoDesenhar(el, _finFluxoBaseCache.v, p);
+}
+function _finFluxoRestaurar(){
+  try{ localStorage.removeItem(FIN_FLUXO_PREMISSAS_KEY); }catch(_){}
+  const el = document.getElementById('fin-content');
+  if(el && _finFluxoBaseCache.v) _finFluxoDesenhar(el, _finFluxoBaseCache.v, _finFluxoPremissas());
+}
+async function _finFluxoRecarregar(){
+  _finFluxoBaseCache = { at:0, v:null };
+  const el = document.getElementById('fin-content'); if(!el) return;
+  await renderFinFluxoCaixa(el);
+}
+
+function _finFluxoDesenhar(el, base, p){
+  const proj = finFluxoProjetar(base, p);
+  const rows = proj.rows, T = proj.totais;
+  const r0 = rows[0] || {};
+  const plural = (n, s, pl) => n === 1 ? s : (pl || s+'s');
+  const pct0 = v => (v*100).toFixed(0);
+  const mil = v => { v = +v || 0; const a = Math.abs(v); return (v < 0 ? '−' : '') + (a >= 1000 ? (a/1000).toLocaleString('pt-BR',{maximumFractionDigits: a >= 100000 ? 0 : 1}) + ' mil' : a.toFixed(0)); };
+  const M = base.metricas || {};
+  const V = base.vencidos || {};
+  const origMes = (base.orig||{})[base.meses[0].key] || { n:0, contratado:0, entradas:0, parcelaNova:0 };
+  const metaParcela = (1 - p.origEntradaPct) * p.origContratadoMes / Math.max(1, p.origParcelas);
+  const metaEntradas = p.origEntradaPct * p.origContratadoMes;
+  const pctBar = (v, meta) => meta > 0 ? Math.max(0, Math.min(100, v / meta * 100)).toFixed(0) : 0;
+  const stale = (M.stale||[]);
+  const backlogN = (base.backlogItens||[]).length;
+
+  const faixas = [];
+  if(base.backlog > 0) faixas.push(`<div class="fxa"><span class="fxa-bar" style="background:#A65A4A;"></span>
+    <span class="fxa-tx"><strong>${fmtR(base.backlog)} de repasse vencido com o devedor já pago</strong> <span class="fxa-sec">em ${backlogN} ${plural(backlogN,'lançamento')} — a projeção quita em ${p.backlogMeses} ${plural(p.backlogMeses,'mês','meses')}, ${fmtR(base.backlog / Math.max(1,p.backlogMeses))} por mês.</span></span>
+    <button class="fxa-btn" onclick="setFinTab('credores')">Ver os repasses →</button></div>`);
+  if(stale.length) faixas.push(`<div class="fxa"><span class="fxa-bar" style="background:#C9A961;"></span>
+    <span class="fxa-tx"><strong>Saldo bancário desatualizado</strong> <span class="fxa-sec">em ${stale.length} ${plural(stale.length,'conta')} (${escHtml(stale.map(s=>s.nome.split(' — ')[0]+' há '+s.dias+'d').join(', '))}) — o caixa inicial da projeção parte dele.</span></span>
+    <button class="fxa-btn" onclick="setFinTab('conciliacao')">Conciliar →</button></div>`);
+  if(V.judicial > 0) faixas.push(`<div class="fxa"><span class="fxa-bar" style="background:#8A94A6;"></span>
+    <span class="fxa-tx"><strong>${fmtR(V.judicial)} de judicial vencido sem liberação</strong> <span class="fxa-sec">(${V.nJudicial} ${plural(V.nJudicial,'lançamento')} de Sisbajud/penhora) — fora da carteira; entra só pela premissa "judicial por mês".</span></span>
+    <button class="fxa-btn" onclick="setFinTab('receitasjudiciais')">Ver o judicial →</button></div>`);
+
+  const inp = (k, label, opts) => {
+    opts = opts || {};
+    const isPct = !!opts.pct;
+    const v = isPct ? +(p[k]*100).toFixed(2) : p[k];
+    return `<label class="fx-inp"><span>${label}</span><span class="fx-inp-w">${opts.pre?`<i>${opts.pre}</i>`:''}<input type="number" id="fx-p-${k}" value="${v}" step="${opts.step||'any'}" min="0">${isPct?'<i>%</i>':''}</span></label>`;
+  };
+
+  el.innerHTML = `
+    <style>
+      .fx-wrap{display:flex;flex-direction:column;gap:16px;}
+      .fx-alertas{background:#fff;border:1px solid #E6E1D2;border-radius:10px;display:flex;flex-direction:column;}
+      .fx-alertas .fxa + .fxa{border-top:1px solid #F2EFE6;}
+      .fxa{display:flex;align-items:center;gap:10px;padding:11px 16px;}
+      .fxa-bar{width:5px;height:26px;border-radius:3px;flex-shrink:0;}
+      .fxa-tx{font-size:13px;color:#0A1530;}
+      .fxa-tx strong{font-weight:600;}
+      .fxa-sec{color:#6B7683;}
+      .fxa-btn{margin-left:auto;white-space:nowrap;background:transparent;border:none;padding:0;font-family:inherit;font-size:12.5px;font-weight:600;color:#15224A;cursor:pointer;}
+      .fxa-btn:hover{color:#9C7F40;}
+      .fx-top{display:grid;grid-template-columns:minmax(250px,1fr) minmax(0,1.3fr) minmax(0,1.3fr);gap:12px;align-items:stretch;}
+      @media (max-width: 1200px){ .fx-top{grid-template-columns:1fr 1fr;} }
+      @media (max-width: 800px){ .fx-top{grid-template-columns:1fr;} }
+      .fx-lb{font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:#8A94A6;}
+      .fx-dark{background:#0A1530;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:10px;color:#fff;min-width:0;}
+      .fx-dark-v{font-family:'JetBrains Mono',monospace;font-size:27px;font-weight:600;letter-spacing:-.02em;white-space:nowrap;}
+      .fx-deriv{border-top:1px solid rgba(255,255,255,.10);padding-top:9px;font-size:11.5px;color:#B4BCCC;display:flex;flex-direction:column;gap:4px;}
+      .fx-deriv > div{display:flex;justify-content:space-between;gap:10px;}
+      .fx-deriv b{font-family:'JetBrains Mono',monospace;font-weight:500;white-space:nowrap;}
+      .fx-frase{margin-top:auto;font-size:11px;color:#8A94A6;line-height:1.45;}
+      .fx-card{background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;display:flex;flex-direction:column;gap:12px;min-width:0;}
+      .fx-card-h{display:flex;align-items:center;gap:9px;flex-wrap:wrap;}
+      .fx-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;}
+      .fx-metrics .lb{font-size:11px;color:#8A94A6;}
+      .fx-metrics .vl{font-family:'JetBrains Mono',monospace;font-size:19px;font-weight:600;white-space:nowrap;margin-top:2px;}
+      .fx-metrics .nt{font-size:10.5px;color:#6B7683;margin-top:2px;}
+      .fx-trilho{height:10px;background:#F2EFE6;border-radius:5px;overflow:hidden;display:flex;}
+      .fx-trilho i{display:block;height:100%;}
+      .fx-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;}
+      @media (max-width: 1131px){ .fx-kpis{grid-template-columns:repeat(2,minmax(0,1fr));} }
+      .fx-kpi{background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:15px;display:flex;flex-direction:column;gap:8px;min-width:0;}
+      .fx-kpi .vl{font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;white-space:nowrap;}
+      .fx-kpi .dt{font-size:11px;color:#5A5F66;margin-top:auto;display:flex;flex-direction:column;gap:2px;}
+      .fx-charts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;}
+      @media (max-width: 1131px){ .fx-charts{grid-template-columns:1fr;} }
+      .fx-sec{background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;}
+      .fx-sec-h{padding:14px 16px 12px;border-bottom:1px solid #F2EFE6;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
+      .fx-h2{font-family:'Fraunces',Georgia,serif;font-size:16px;font-weight:500;color:#0A1530;}
+      .fx-nota{font-size:11.5px;color:#8A94A6;}
+      .fx-tbl-wrap{overflow-x:auto;}
+      .fx-tbl{border-collapse:collapse;width:100%;font-size:12px;min-width:980px;}
+      .fx-tbl th,.fx-tbl td{padding:7px 10px;border-bottom:1px solid #F2EFE6;text-align:right;white-space:nowrap;font-family:'JetBrains Mono',monospace;}
+      .fx-tbl th{font-family:inherit;font-weight:600;color:#5A5F66;font-size:11px;background:#FBFAF6;position:sticky;top:0;}
+      .fx-tbl th:first-child,.fx-tbl td:first-child{text-align:left;font-family:inherit;font-weight:600;color:#0A1530;}
+      .fx-tbl tr.neg td{background:#FDF6F4;}
+      .fx-tbl td.sub{color:#8A94A6;}
+      .fx-cols{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(300px,1fr);gap:16px;align-items:start;}
+      @media (max-width: 1131px){ .fx-cols{grid-template-columns:1fr;} }
+      .fx-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px 14px;padding:14px 16px;}
+      .fx-inp{display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:#5A5F66;min-width:0;}
+      .fx-inp-w{display:flex;align-items:center;border:1px solid #DDD7C8;border-radius:6px;background:#fff;overflow:hidden;}
+      .fx-inp-w input{flex:1;min-width:0;border:none;padding:6px 8px;font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#0A1530;background:transparent;text-align:right;}
+      .fx-inp-w i{font-style:normal;font-size:11px;color:#8A94A6;padding:0 7px;background:#FBFAF6;align-self:stretch;display:flex;align-items:center;}
+      .fx-grp{grid-column:1/-1;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:#8A94A6;margin-top:6px;}
+      .fx-btns{display:flex;gap:8px;padding:0 16px 16px;flex-wrap:wrap;}
+      .fx-btn{background:#0A1530;color:#fff;border:none;padding:8px 14px;border-radius:6px;font-weight:600;font-size:12px;cursor:pointer;font-family:inherit;}
+      .fx-btn:hover{background:#15224A;}
+      .fx-btn.ghost{background:#fff;color:#0A1530;border:1px solid #D8D2C5;font-weight:500;}
+      .fx-btn.ghost:hover{background:#FBFAF6;}
+      .fx-fontes{padding:14px 16px 16px;font-size:12px;color:#5A5F66;line-height:1.55;display:flex;flex-direction:column;gap:6px;}
+      .fx-fontes b{color:#0A1530;font-weight:600;}
+    </style>
+    <div class="fx-wrap">
+      ${faixas.length ? `<div class="fx-alertas">${faixas.join('')}</div>` : ''}
+
+      <div class="fx-top">
+        <div class="fx-dark">
+          <div class="fx-lb">Caixa livre hoje</div>
+          <div class="fx-dark-v" style="color:${(M.caixaLivre||0) < 0 ? '#E8A79A' : '#fff'};">${fmtRs(M.caixaLivre||0)}</div>
+          <div class="fx-deriv">
+            <div><span>saldo geral · ${base.contasCount} ${plural(base.contasCount,'conta')}</span><b style="color:#fff;">${fmtR(M.saldoGeral||0)}</b></div>
+            <div><span>− repasses a enviar (cronograma)</span><b style="color:#E8A79A;">${fmtR(M.aRepassar||0)}</b></div>
+            <div><span>repasses vencidos na projeção</span><b style="color:#E2C98A;">${fmtR(base.backlog)}</b></div>
+          </div>
+          <div class="fx-frase">A projeção parte do saldo geral e devolve o vencido em ${p.backlogMeses} ${plural(p.backlogMeses,'mês','meses')}. Só é seu o que sobra depois de separar o capital dos cedentes.</div>
+        </div>
+
+        <div class="fx-card">
+          <div class="fx-card-h"><span class="fx-lb">${escHtml(r0.label||'')} · o que a empresa consegue pagar ao sócio</span></div>
+          <div class="fx-metrics">
+            <div><div class="lb">Receita própria prevista</div><div class="vl" style="color:#0A1530;">${fmtR(r0.receitaPropria||0)}</div><div class="nt">entra ${fmtR(r0.totalRec||0)} · repassa ${fmtR(r0.totalRep||0)}</div></div>
+            <div><div class="lb">Necessidade (fixos + DAS + dívida + alvo)</div><div class="vl" style="color:#0A1530;">${fmtR(r0.necessidade||0)}</div><div class="nt">fixos ${fmtR(r0.fixos||0)} · dívida ${fmtR(r0.dividas||0)}</div></div>
+            <div><div class="lb">Retirada possível</div><div class="vl" style="color:${(r0.retirada||0) >= p.prolaboreAlvo - 0.005 ? '#4C6647' : '#9C7F40'};">${fmtR(r0.retirada||0)}</div><div class="nt">alvo ${fmtR(p.prolaboreAlvo)}</div></div>
+            <div><div class="lb">Falta para o alvo</div><div class="vl" style="color:${(r0.falta||0) > 0.005 ? '#A65A4A' : '#4C6647'};">${fmtR(r0.falta||0)}</div><div class="nt">${(r0.falta||0) > 0.005 ? 'precisa vir de fora da operação' : 'alvo coberto'}</div></div>
+          </div>
+          <div class="fx-trilho"><i style="width:${pctBar(r0.retirada||0, p.prolaboreAlvo)}%;background:#5E7C58;"></i></div>
+        </div>
+
+        <div class="fx-card">
+          <div class="fx-card-h"><span class="fx-lb">Originação de ${escHtml(r0.label||'')} · medida em dinheiro, não em quantidade</span></div>
+          <div class="fx-metrics">
+            <div><div class="lb">Contratado no mês</div><div class="vl" style="color:#0A1530;">${fmtR(origMes.contratado)}</div><div class="nt">${origMes.n} ${plural(origMes.n,'acordo')} · meta ${fmtR(p.origContratadoMes)}</div></div>
+            <div><div class="lb">Entradas contratadas</div><div class="vl" style="color:#0A1530;">${fmtR(origMes.entradas)}</div><div class="nt">meta ${fmtR(metaEntradas)} (${pct0(p.origEntradaPct)}%)</div></div>
+            <div><div class="lb">Parcela mensal nova</div><div class="vl" style="color:#0A1530;">${fmtR(origMes.parcelaNova)}</div><div class="nt">meta ${fmtR(metaParcela)} por mês</div></div>
+            <div><div class="lb">Mês anterior</div><div class="vl" style="color:#5A5F66;">${fmtR(((base.orig||{})[_finFluxoMesAnterior(base.meses[0].key)]||{}).contratado||0)}</div><div class="nt">${(((base.orig||{})[_finFluxoMesAnterior(base.meses[0].key)]||{}).n||0)} ${plural((((base.orig||{})[_finFluxoMesAnterior(base.meses[0].key)]||{}).n||0),'acordo')} contratados</div></div>
+          </div>
+          <div class="fx-trilho"><i style="width:${pctBar(origMes.contratado, p.origContratadoMes)}%;background:#2a78d6;"></i></div>
+        </div>
+      </div>
+
+      <div class="fx-kpis">
+        <div class="fx-kpi"><div class="fx-lb">Entra em ${rows.length} meses</div><div class="vl" style="color:#0A1530;">${fmtR(T.totalRec)}</div><div class="dt"><span>carteira ${fmtR(rows.reduce((s,r)=>s+r.recCarteira,0))} · judicial ${fmtR(rows.reduce((s,r)=>s+r.recJudicial,0))}</span><span>acordos novos ${fmtR(rows.reduce((s,r)=>s+r.recEntradasNovos+r.recNovosProprio+r.recNovosCapital,0))}</span></div></div>
+        <div class="fx-kpi"><div class="fx-lb">É do cedente (repasses)</div><div class="vl" style="color:#0A1530;">${fmtR(T.totalRep)}</div><div class="dt"><span>${T.totalRec > 0 ? (T.totalRep/T.totalRec*100).toFixed(0) : 0}% do que entra</span><span>inclui ${fmtR(base.backlog)} de vencidos</span></div></div>
+        <div class="fx-kpi"><div class="fx-lb">Receita própria</div><div class="vl" style="color:#4C6647;">${fmtR(T.receitaPropria)}</div><div class="dt"><span>saídas próprias ${fmtR(T.totalSaidas)}</span><span>caixa mínimo no período ${fmtRs(T.caixaMin)}</span></div></div>
+        <div class="fx-kpi"><div class="fx-lb">Retirada média possível</div><div class="vl" style="color:${T.mesesNoAlvo === rows.length ? '#4C6647' : '#9C7F40'};">${fmtR(T.retiradaMedia)}</div><div class="dt"><span>${T.mesesNoAlvo} de ${rows.length} ${plural(rows.length,'mês','meses')} no alvo</span><span>falta ${fmtR(T.falta)} no período</span></div></div>
+      </div>
+
+      <div class="fx-charts">
+        <section class="fx-sec">
+          <div class="fx-sec-h"><h2 class="fx-h2">Entra, repassa, sai</h2><span class="fx-nota">por mês · a linha é o caixa no fim do mês</span></div>
+          <div style="position:relative;height:300px;padding:12px 12px 6px;"><canvas id="fx-chart-fluxo"></canvas></div>
+        </section>
+        <section class="fx-sec">
+          <div class="fx-sec-h"><h2 class="fx-h2">Receita própria × necessidade</h2><span class="fx-nota">as barras são a retirada que cabe no mês</span></div>
+          <div style="position:relative;height:300px;padding:12px 12px 6px;"><canvas id="fx-chart-meta"></canvas></div>
+        </section>
+      </div>
+
+      <section class="fx-sec">
+        <div class="fx-sec-h"><h2 class="fx-h2">Mês a mês</h2><span class="fx-nota">valores em R$ · realização de ${pct0(p.realizacao)}% sobre a carteira · linha vermelha = não paga o alvo</span></div>
+        <div class="fx-tbl-wrap"><table class="fx-tbl">
+          <thead><tr><th>Mês</th><th>Entra</th><th>Carteira</th><th>Acordos novos</th><th>Repasses</th><th>Receita própria</th><th>Fixos</th><th>DAS</th><th>Dívida</th><th>Retirada</th><th>Falta p/ alvo</th><th>Caixa fim</th><th>Caixa livre</th></tr></thead>
+          <tbody>${rows.map(r => `<tr class="${r.falta > 0.005 ? 'neg' : ''}">
+            <td>${escHtml(r.label)}</td>
+            <td>${mil(r.totalRec)}</td>
+            <td class="sub">${mil(r.recCarteira)}</td>
+            <td class="sub">${mil(r.recEntradasNovos + r.recNovosProprio + r.recNovosCapital)}</td>
+            <td>${mil(r.totalRep)}</td>
+            <td><b>${mil(r.receitaPropria)}</b></td>
+            <td class="sub">${mil(r.fixos)}</td>
+            <td class="sub">${mil(r.das)}</td>
+            <td class="sub">${mil(r.dividas)}</td>
+            <td><b>${mil(r.retirada)}</b></td>
+            <td style="color:${r.falta > 0.005 ? '#A65A4A' : '#4C6647'};">${mil(r.falta)}</td>
+            <td>${mil(r.caixaFim)}</td>
+            <td class="sub">${mil(r.caixaLivre)}</td>
+          </tr>`).join('')}</tbody>
+          <tfoot><tr><th>Total</th><th>${mil(T.totalRec)}</th><th></th><th></th><th>${mil(T.totalRep)}</th><th>${mil(T.receitaPropria)}</th><th></th><th></th><th></th><th>${mil(T.retirada)}</th><th>${mil(T.falta)}</th><th></th><th></th></tr></tfoot>
+        </table></div>
+      </section>
+
+      <div class="fx-cols">
+        <section class="fx-sec">
+          <div class="fx-sec-h"><h2 class="fx-h2">Premissas</h2><span class="fx-nota">ficam salvas neste navegador · o resto vem do que está lançado</span></div>
+          <div class="fx-form">
+            <div class="fx-grp">Recebimento</div>
+            ${inp('realizacao','Realização dos boletos e parcelas previstos',{pct:true,step:'1'})}
+            ${inp('judicialMes','Judicial por mês (Sisbajud, alvará, penhora)',{pre:'R$',step:'100'})}
+            ${inp('judicialCapitalPct','Parte do judicial que é capital do cedente',{pct:true,step:'1'})}
+            ${inp('backlogMeses','Meses para quitar os repasses vencidos',{step:'1'})}
+            <div class="fx-grp">Originação (a partir do mês seguinte)</div>
+            ${inp('origContratadoMes','Contratado em acordos novos por mês',{pre:'R$',step:'1000'})}
+            ${inp('origEntradaPct','Entrada exigida (100% da COBRASQ)',{pct:true,step:'1'})}
+            ${inp('origParcelas','Parcelas médias depois da entrada',{step:'1'})}
+            ${inp('origSharePct','Parte da COBRASQ no valor do acordo',{pct:true,step:'1'})}
+            ${inp('avistaMes','Quitações à vista — parte própria por mês',{pre:'R$',step:'500'})}
+            <div class="fx-grp">Saídas próprias</div>
+            ${inp('dasPct','DAS sobre a receita própria',{pct:true,step:'0.5'})}
+            ${inp('dividasNaoLancadas','Dívida não lançada no sistema, por mês',{pre:'R$',step:'100'})}
+            ${inp('fixosNaoLancados','Custo fixo sem recorrência cadastrada, por mês',{pre:'R$',step:'100'})}
+            ${inp('prolaboreAlvo','Retirada alvo do sócio por mês',{pre:'R$',step:'500'})}
+          </div>
+          <div class="fx-btns">
+            <button class="fx-btn" onclick="_finFluxoAplicar()">Aplicar premissas</button>
+            <button class="fx-btn ghost" onclick="_finFluxoRestaurar()">Restaurar padrão</button>
+            <button class="fx-btn ghost" onclick="_finFluxoRecarregar()">↻ Recarregar do banco</button>
+          </div>
+        </section>
+        <section class="fx-sec">
+          <div class="fx-sec-h"><h2 class="fx-h2">De onde vêm os números</h2></div>
+          <div class="fx-fontes">
+            <div><b>Carteira:</b> ${base.meses.reduce((s,m)=>s+m.nEntradas,0)} entradas e ${base.meses.reduce((s,m)=>s+m.nRepasses,0)} repasses pendentes com vencimento até ${escHtml(base.meses[base.meses.length-1].label)}, mais dívidas e custos já lançados. Boleto vencido (${fmtR(V.entradas||0)}) entra no mês corrente com a mesma realização.</div>
+            <div><b>Repasse contingente:</b> só é devido se a parcela casada do devedor cair, por isso recebe a realização. O já lastreado (${fmtR(rows.reduce((s,r)=>s+r.repFixo,0))} no período) é devido de qualquer jeito.</div>
+            <div><b>Recorrências:</b> ${base.recorrencias.length} ${plural(base.recorrencias.length,'ativa')} (${fmtR(base.recorrencias.reduce((s,r)=>s+r.valor,0))}/mês), contadas só nos meses em que ainda não viraram lançamento.${(base.recorrenciasDas||[]).length ? ` A recorrência do DAS (${fmtR(base.recorrenciasDas.reduce((s,r)=>s+r.valor,0))}) fica de fora: o imposto entra pela premissa de ${pct0(p.dasPct)}% da receita própria.` : ''}</div>
+            <div><b>Judicial:</b> ${fmtR(base.meses.reduce((s,m)=>s+m.judicialPrevisto,0))} previstos em Sisbajud/penhora sem liberação ficam fora da carteira — o juiz decide a data — e entram pela premissa.</div>
+            <div><b>Acordos novos:</b> honorário na frente — entrada e primeiras parcelas são 100% da COBRASQ até completar a parte dela; o resto é capital do cedente.</div>
+            <div><b>Saídas vencidas:</b> ${fmtR(V.saidas||0)} em ${V.nSaidas||0} ${plural(V.nSaidas||0,'lançamento')} de dívida/custo já vencidos, somados ao mês corrente.</div>
+            <div style="color:#8A94A6;">Dados do banco em ${new Date(base.geradoEm).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})} · saldo inicial = saldo geral das ${base.contasCount} contas no saldo geral.</div>
+          </div>
+        </section>
+      </div>
+    </div>`;
+
+  _finFluxoGraficos(rows, p);
+}
+function _finFluxoMesAnterior(key){
+  const a = String(key||'').split('-'); if(a.length < 2) return '';
+  return isoLocal(new Date(+a[0], +a[1]-2, 1)).slice(0,7);
+}
+
+// Dois gráficos, um eixo cada (nunca eixo duplo): tudo em R$. Paleta categórica fixa,
+// validada para daltonismo (azul, laranja, verde-água, amarelo); rótulos em tinta de texto.
+function _finFluxoGraficos(rows, p){
+  if(typeof Chart === 'undefined') return;
+  _finFluxoDestruirCharts();
+  const labels = rows.map(r => r.label);
+  const tickR = v => (Math.abs(v) >= 1000 ? (v/1000).toLocaleString('pt-BR',{maximumFractionDigits:0}) + ' mil' : String(v));
+  const tip = { callbacks: { label: c => ` ${c.dataset.label}: ${fmtRs(c.parsed.y)}` } };
+  const grid = { color: 'rgba(10,21,48,.06)' };
+  const c1 = document.getElementById('fx-chart-fluxo');
+  if(c1) _finFluxoCharts.fluxo = new Chart(c1, {
+    data: { labels, datasets: [
+      { type:'bar',  label:'Entra no caixa',  data: rows.map(r=>+r.totalRec.toFixed(2)),   backgroundColor:'#2a78d6', borderRadius:4, borderSkipped:'bottom', maxBarThickness:22 },
+      { type:'bar',  label:'Repasses',        data: rows.map(r=>+r.totalRep.toFixed(2)),   backgroundColor:'#eb6834', borderRadius:4, borderSkipped:'bottom', maxBarThickness:22 },
+      { type:'bar',  label:'Saídas próprias', data: rows.map(r=>+r.totalSaidas.toFixed(2)),backgroundColor:'#1baf7a', borderRadius:4, borderSkipped:'bottom', maxBarThickness:22 },
+      { type:'line', label:'Caixa no fim do mês', data: rows.map(r=>+r.caixaFim.toFixed(2)), borderColor:'#eda100', backgroundColor:'#eda100', borderWidth:2, pointRadius:3, pointHoverRadius:5, tension:.25, fill:false },
+    ]},
+    options: { responsive:true, maintainAspectRatio:false, interaction:{ mode:'index', intersect:false },
+      plugins:{ legend:{ position:'bottom', labels:{ boxWidth:10, boxHeight:10, usePointStyle:false, font:{ size:11 } } }, tooltip: tip },
+      scales:{ x:{ grid:{ display:false }, ticks:{ font:{ size:11 } } }, y:{ grid, ticks:{ callback: tickR, font:{ size:11 } } } } }
+  });
+  const c2 = document.getElementById('fx-chart-meta');
+  if(c2) _finFluxoCharts.meta = new Chart(c2, {
+    data: { labels, datasets: [
+      { type:'bar',  label:'Retirada possível', data: rows.map(r=>+r.retirada.toFixed(2)), backgroundColor:'#1baf7a', borderRadius:4, borderSkipped:'bottom', maxBarThickness:26 },
+      { type:'line', label:'Receita própria', data: rows.map(r=>+r.receitaPropria.toFixed(2)), borderColor:'#2a78d6', backgroundColor:'#2a78d6', borderWidth:2, pointRadius:3, pointHoverRadius:5, tension:.25, fill:false },
+      { type:'line', label:'Necessidade (fixos + DAS + dívida + alvo)', data: rows.map(r=>+r.necessidade.toFixed(2)), borderColor:'#eb6834', backgroundColor:'#eb6834', borderWidth:2, borderDash:[6,4], pointRadius:0, pointHoverRadius:4, tension:0, fill:false },
+      { type:'line', label:'Alvo de retirada', data: rows.map(()=>+p.prolaboreAlvo), borderColor:'#eda100', backgroundColor:'#eda100', borderWidth:1.5, borderDash:[2,3], pointRadius:0, pointHoverRadius:0, tension:0, fill:false },
+    ]},
+    options: { responsive:true, maintainAspectRatio:false, interaction:{ mode:'index', intersect:false },
+      plugins:{ legend:{ position:'bottom', labels:{ boxWidth:10, boxHeight:10, font:{ size:11 } } }, tooltip: tip },
+      scales:{ x:{ grid:{ display:false }, ticks:{ font:{ size:11 } } }, y:{ grid, beginAtZero:true, ticks:{ callback: tickR, font:{ size:11 } } } } }
+  });
 }
 
 // ============================================================
