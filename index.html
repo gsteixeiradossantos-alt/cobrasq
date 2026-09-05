@@ -40698,8 +40698,11 @@ function _bankColorFallback(nome){
 const FIN_FLUXO_PREMISSAS_KEY = 'cobrasq_fin_fluxo_premissas_v1';
 const FIN_FLUXO_PREMISSAS_PADRAO = Object.freeze({
   realizacao: 0.85,          // fração dos boletos/parcelas previstos que cai de fato
-  judicialMes: 3000,         // Sisbajud/alvará/penhora por mês, além do que já está lançado
-  judicialCapitalPct: 0.5,   // parte do judicial que é capital do cedente
+  // Judicial (Sisbajud/alvará/penhora) fica FORA da projeção desde 05/09/2026, a pedido do
+  // dono: ninguém sabe quando o juiz manda. O motor ainda aceita as duas chaves, mas a
+  // tela não as expõe e o padrão é zero.
+  judicialMes: 0,
+  judicialCapitalPct: 0.5,
   dasPct: 0.09,              // DAS sobre a receita própria (o capital do cedente não é receita)
   prolaboreAlvo: 20000,      // retirada que a PF precisa por mês
   backlogMeses: 3,           // em quantos meses os repasses vencidos são quitados
@@ -40783,9 +40786,39 @@ function _finFluxoFaturamentoResumo(itens, mesKey){
   return r;
 }
 
+// Ponte entre o "líquido" de Movimentações e a sobra do mês desta aba. Movimentações soma
+// os lançamentos com COMPETÊNCIA no mês, pagos e pendentes, sem realização e sem o que
+// não está lançado. Esta aba parte do pendente por VENCIMENTO, puxa o vencido de meses
+// anteriores, aplica a realização, soma recorrências e premissas e tira o DAS. Cada linha
+// abaixo é uma dessas diferenças; a soma delas fecha exatamente na sobra (r0.disponivel) —
+// o teste F-29 garante. `comp` = { pagasEnt, pagasSai, pendEnt, pendSai } por competência.
+function _finFluxoPonte(base, r0, p){
+  p = Object.assign({}, FIN_FLUXO_PREMISSAS_PADRAO, p || {});
+  const m = (base.meses || [])[0] || {}, V = base.vencidos || {}, c = base.compMes || {};
+  const real = Math.max(0, Math.min(1, +p.realizacao || 0));
+  const inicio = (+c.pagasEnt||0) + (+c.pendEnt||0) - (+c.pagasSai||0) - (+c.pendSai||0);
+  const vencNet = (+V.entradas||0) - (+V.repassesContingentes||0) - (+V.saidas||0);
+  const nVenc = (+m.entradas||0) - (+m.repFixo||0) - (+m.repCont||0) - (+m.dividas||0) - (+m.outros||0);
+  const linhas = [
+    { k:'liquidado', label:'Já liquidado no mês (está no saldo, não na projeção)', v: -((+c.pagasEnt||0) - (+c.pagasSai||0)) },
+    { k:'compet', label:'Competência ≠ vencimento (lançado no mês que vence em outro, e vice-versa)', v: (nVenc - vencNet) - ((+c.pendEnt||0) - (+c.pendSai||0)) },
+    { k:'vencidos', label:'Vencidos de meses anteriores puxados para este mês', v: vencNet },
+    { k:'realizacao', label:`Realização de ${Math.round(real*100)}% (menos entrada, menos repasse contingente)`, v: -(1-real)*(+m.entradas||0) + (1-real)*(+m.repCont||0) },
+    { k:'backlog', label:'Parcela do mês dos repasses vencidos com devedor já pago', v: -(+r0.repBacklog||0) },
+    { k:'recorrencias', label:'Recorrências que ainda não viraram lançamento', v: -((+m.recorrencias||0) + (+m.dividasRecorrentes||0)) },
+    { k:'naolancado', label:'Dívida e fixos não lançados (premissas)', v: -((+p.dividasNaoLancadas||0) + (+p.fixosNaoLancados||0)) },
+    { k:'das', label:`DAS de ${(+p.dasPct*100).toFixed(1).replace('.',',')}% sobre a receita própria`, v: -(+r0.das||0) },
+    { k:'judicial', label:'Judicial (premissa)', v: (+r0.recJudicial||0) - (+r0.repJudicial||0) },
+    { k:'originacao', label:'Acordos novos e quitações à vista (premissa)', v: (+r0.recEntradasNovos||0) + (+r0.recNovosProprio||0) + (+r0.recAvista||0) },
+  ];
+  const fim = inicio + linhas.reduce((s,l)=>s+l.v, 0);
+  return { inicio, linhas, fim };
+}
+
 // Motor. `base.meses[i]` = { key, label, entradas, judicialPrevisto, repFixo, repCont,
-// dividas, outros, recorrencias }; `base.caixaInicial`; `base.backlog` (repasses vencidos
-// devidos de qualquer jeito); `base.fracMesAtual` (quanto do mês corrente ainda falta).
+// dividas, dividasRecorrentes, outros, recorrencias }; `base.caixaInicial`; `base.backlog`
+// (repasses vencidos devidos de qualquer jeito); `base.fracMesAtual` (quanto do mês
+// corrente ainda falta).
 function finFluxoProjetar(base, p){
   p = Object.assign({}, FIN_FLUXO_PREMISSAS_PADRAO, p || {});
   const meses = (base.meses || []).slice(0, Math.max(1, +p.horizonte || 12));
@@ -40825,7 +40858,7 @@ function finFluxoProjetar(base, p){
     const receitaPropria = totalRec - totalRep;
 
     const fixos = (+m.outros || 0) + (+m.recorrencias || 0) + (+p.fixosNaoLancados || 0);
-    const dividas = (+m.dividas || 0) + (+p.dividasNaoLancadas || 0);
+    const dividas = (+m.dividas || 0) + (+m.dividasRecorrentes || 0) + (+p.dividasNaoLancadas || 0);
     const das = Math.max(0, receitaPropria) * (+p.dasPct || 0);
     const alvo = Math.max(0, +p.prolaboreAlvo || 0);
     const necessidade = fixos + das + dividas + alvo;
@@ -40864,7 +40897,7 @@ async function _finFluxoCarregarBase(force){
     const d = new Date(t.y, t.m - 1 + k, 1);
     const key = isoLocal(d).slice(0,7);
     meses.push({ key, label: d.toLocaleDateString('pt-BR',{month:'short'}).replace('.','') + '/' + String(d.getFullYear()).slice(2),
-      entradas:0, judicialPrevisto:0, repFixo:0, repCont:0, dividas:0, outros:0, recorrencias:0,
+      entradas:0, judicialPrevisto:0, repFixo:0, repCont:0, dividas:0, dividasRecorrentes:0, outros:0, recorrencias:0,
       nEntradas:0, nRepasses:0 });
   }
   const idx = Object.fromEntries(meses.map((m,i)=>[m.key,i]));
@@ -40974,9 +41007,38 @@ async function _finFluxoCarregarBase(force){
       if(r.data_inicio && String(r.data_inicio).slice(0,7) > m.key) continue;
       if(r.data_fim && String(r.data_fim).slice(0,7) < m.key) continue;
       if(geradas.has(r.id + '|' + m.key)) continue;
-      if(tipo === 'divida') m.dividas += v; else m.recorrencias += v;
+      if(tipo === 'divida') m.dividasRecorrentes += v; else m.recorrencias += v;
     }
   }
+
+  // Competência do mês corrente, do jeito que Movimentações soma: pagos e pendentes, sem
+  // judicial não liberado. Serve só à ponte "por que difere de Movimentações".
+  const compMes = { pagasEnt:0, pagasSai:0, pendEnt:0, pendSai:0 };
+  try{
+    const mesIni = `${meses[0].key}-01`;
+    const mesFim = isoLocal(new Date(t.y, t.m, 0));
+    const comp = [];
+    for(let from = 0;; from += 1000){
+      const { data, error } = await sb.from('fin_lancamento').select('id,valor,valor_pago,tipo_movimento,status,judicial_liberado_em')
+        .gte('data_competencia', mesIni).lte('data_competencia', mesFim).order('id',{ascending:true}).range(from, from+999);
+      if(error) throw error;
+      comp.push(...(data||[]));
+      if(!data || data.length < 1000 || from >= 20000) break;
+    }
+    const jud = new Set();
+    const idsC = comp.map(l => l.id);
+    for(let i = 0; i < idsC.length; i += 300){
+      const { data } = await sb.from('fin_lancamento_categoria').select('lancamento_id,fin_categoria(descricao)').in('lancamento_id', idsC.slice(i, i+300)).limit(2000);
+      for(const cc of (data||[])) if(FIN_FLUXO_RX_JUDICIAL.test((cc.fin_categoria && cc.fin_categoria.descricao) || '')) jud.add(cc.lancamento_id);
+    }
+    for(const l of comp){
+      if(l.tipo_movimento === 1 && jud.has(l.id) && !l.judicial_liberado_em) continue;
+      const pago = l.status === 1 || l.status === 2;
+      const v = Math.abs(+(pago ? (l.valor_pago != null ? l.valor_pago : l.valor) : l.valor) || 0);
+      if(l.tipo_movimento === 1) compMes[pago ? 'pagasEnt' : 'pendEnt'] += v;
+      else if(l.tipo_movimento === 0) compMes[pago ? 'pagasSai' : 'pendSai'] += v;
+    }
+  }catch(_){ /* sem a ponte a aba funciona igual */ }
 
   // Originação realizada, por mês de criação do acordo, na métrica do plano: valor
   // contratado, entradas e parcela mensal nova. Cancelado não conta.
@@ -41005,7 +41067,7 @@ async function _finFluxoCarregarBase(force){
   const contas = (dim.contas||[]).filter(c => c.incluir_no_saldo_geral !== false);
   const v = {
     meses, caixaInicial: +metricas.saldoGeral || 0, backlog: +vencidos.repasses.toFixed(2), fracMesAtual,
-    metricas, vencidos, backlogItens: backlogItens.sort((a,b)=> b.valor - a.valor), recorrencias, recorrenciasDas, orig, itens,
+    metricas, vencidos, backlogItens: backlogItens.sort((a,b)=> b.valor - a.valor), recorrencias, recorrenciasDas, orig, itens, compMes,
     contasCount: contas.length, hoje, geradoEm: Date.now(),
   };
   _finFluxoBaseCache = { at: Date.now(), v };
@@ -41062,8 +41124,36 @@ async function _finFluxoRecarregar(){
   await renderFinFluxoCaixa(el);
 }
 
-function _finFluxoDesenhar(el, base, p){
+// Duas leituras da mesma carteira. 'real' = só o que já está lançado (originação e à
+// vista zeradas); 'premissa' = com os acordos que a premissa diz que ainda vão ser
+// fechados. O dono pediu para ver "o que é real e o que é fantasia" separados (05/09).
+function _finFluxoModo(){ return window._finFluxoModo === 'premissa' ? 'premissa' : 'real'; }
+function _finFluxoSetModo(m){
+  window._finFluxoModo = m;
+  const el = document.getElementById('fin-content');
+  if(el && _finFluxoBaseCache.v) _finFluxoDesenhar(el, _finFluxoBaseCache.v, _finFluxoPremissas());
+}
+function _finFluxoPremissasDoModo(p){
+  if(_finFluxoModo() === 'premissa') return p;
+  return Object.assign({}, p, { origContratadoMes: 0, avistaMes: 0 });
+}
+function _finFluxoToggleDetalhe(){
+  window._finFluxoDetalhe = !window._finFluxoDetalhe;
+  const el = document.getElementById('fin-content');
+  if(el && _finFluxoBaseCache.v) _finFluxoDesenhar(el, _finFluxoBaseCache.v, _finFluxoPremissas());
+}
+function _finFluxoTogglePonte(){
+  window._finFluxoPonte = !window._finFluxoPonte;
+  const el = document.getElementById('fin-content');
+  if(el && _finFluxoBaseCache.v) _finFluxoDesenhar(el, _finFluxoBaseCache.v, _finFluxoPremissas());
+}
+function _finFluxoDesenhar(el, base, pForm){
+  const modo = _finFluxoModo();
+  const p = _finFluxoPremissasDoModo(pForm);
   const proj = finFluxoProjetar(base, p);
+  const detalhe = !!window._finFluxoDetalhe;
+  const ponteAberta = !!window._finFluxoPonte;
+  const ponte = _finFluxoPonte(base, proj.rows[0] || {}, p);
   const rows = proj.rows, T = proj.totais;
   const r0 = rows[0] || {};
   const plural = (n, s, pl) => n === 1 ? s : (pl || s+'s');
@@ -41072,8 +41162,10 @@ function _finFluxoDesenhar(el, base, p){
   const M = base.metricas || {};
   const V = base.vencidos || {};
   const origMes = (base.orig||{})[base.meses[0].key] || { n:0, contratado:0, entradas:0, parcelaNova:0 };
-  const metaParcela = (1 - p.origEntradaPct) * p.origContratadoMes / Math.max(1, p.origParcelas);
-  const metaEntradas = p.origEntradaPct * p.origContratadoMes;
+  // Metas de originação vêm do formulário (pForm): no modo "só o que já está lançado"
+  // a premissa é zerada para a projeção, mas a meta do mês continua valendo.
+  const metaParcela = (1 - pForm.origEntradaPct) * pForm.origContratadoMes / Math.max(1, pForm.origParcelas);
+  const metaEntradas = pForm.origEntradaPct * pForm.origContratadoMes;
   const pctBar = (v, meta) => meta > 0 ? Math.max(0, Math.min(100, v / meta * 100)).toFixed(0) : 0;
   const stale = (M.stale||[]);
   const backlogN = (base.backlogItens||[]).length;
@@ -41088,13 +41180,13 @@ function _finFluxoDesenhar(el, base, p){
     <span class="fxa-tx"><strong>Saldo bancário desatualizado</strong> <span class="fxa-sec">em ${stale.length} ${plural(stale.length,'conta')} (${escHtml(stale.map(s=>s.nome.split(' — ')[0]+' há '+s.dias+'d').join(', '))}) — o caixa inicial da projeção parte dele.</span></span>
     <button class="fxa-btn" onclick="setFinTab('conciliacao')">Conciliar →</button></div>`);
   if(V.judicial > 0) faixas.push(`<div class="fxa"><span class="fxa-bar" style="background:#8A94A6;"></span>
-    <span class="fxa-tx"><strong>${fmtR(V.judicial)} de judicial vencido sem liberação</strong> <span class="fxa-sec">(${V.nJudicial} ${plural(V.nJudicial,'lançamento')} de Sisbajud/penhora) — fora da carteira; entra só pela premissa "judicial por mês".</span></span>
+    <span class="fxa-tx"><strong>${fmtR(V.judicial)} de judicial vencido sem liberação</strong> <span class="fxa-sec">(${V.nJudicial} ${plural(V.nJudicial,'lançamento')} de Sisbajud/penhora) — fora da projeção: ninguém sabe quando o juiz manda. Quando cair, vira caixa sozinho.</span></span>
     <button class="fxa-btn" onclick="setFinTab('receitasjudiciais')">Ver o judicial →</button></div>`);
 
   const inp = (k, label, opts) => {
     opts = opts || {};
     const isPct = !!opts.pct;
-    const v = isPct ? +(p[k]*100).toFixed(2) : p[k];
+    const v = isPct ? +(pForm[k]*100).toFixed(2) : pForm[k];
     return `<label class="fx-inp"><span>${label}</span><span class="fx-inp-w">${opts.pre?`<i>${opts.pre}</i>`:''}<input type="number" id="fx-p-${k}" value="${v}" step="${opts.step||'any'}" min="0">${isPct?'<i>%</i>':''}</span></label>`;
   };
 
@@ -41129,6 +41221,12 @@ function _finFluxoDesenhar(el, base, p){
       .fx-trilho{height:10px;background:#F2EFE6;border-radius:5px;overflow:hidden;display:flex;}
       .fx-trilho i{display:block;height:100%;}
       .fx-acoes{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+      .fx-modo{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+      .fx-seg{background:#fff;color:#0A1530;border:1px solid #D8D2C5;padding:7px 13px;border-radius:6px;font-weight:500;font-size:12.5px;cursor:pointer;font-family:inherit;}
+      .fx-seg.on{background:#0A1530;color:#fff;border-color:#0A1530;font-weight:600;}
+      .fx-seg:hover:not(.on){background:#FBFAF6;}
+      .fx-link{font-size:12px;font-weight:600;color:#15224A;cursor:pointer;align-self:flex-start;}
+      .fx-link:hover{color:#9C7F40;}
       .fx-fat-h{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
       .fx-fat-nav{display:flex;align-items:center;gap:2px;border:1px solid #E6E1D2;border-radius:7px;overflow:hidden;background:#fff;margin-left:auto;}
       .fx-fat-nav button{background:transparent;border:none;color:#0A1530;font-family:inherit;font-size:12.5px;padding:5px 11px;cursor:pointer;}
@@ -41185,6 +41283,13 @@ function _finFluxoDesenhar(el, base, p){
       .fx-fontes b{color:#0A1530;font-weight:600;}
     </style>
     <div class="fx-wrap">
+      <div class="fx-modo">
+        <button class="fx-seg ${modo==='real'?'on':''}" onclick="_finFluxoSetModo('real')">Só o que já está lançado</button>
+        <button class="fx-seg ${modo==='premissa'?'on':''}" onclick="_finFluxoSetModo('premissa')">Com os acordos que ainda vou fechar</button>
+        <span class="fx-nota">${modo==='real'
+          ? 'boletos, parcelas de acordos assinados, repasses programados, dívidas e recorrências — nada de originação futura'
+          : `o real + ${fmtR(pForm.origContratadoMes)}/mês contratados a partir do mês seguinte${pForm.avistaMes ? ` e ${fmtR(pForm.avistaMes)}/mês de quitações à vista` : ''} (premissa)`}</span>
+      </div>
       ${faixas.length ? `<div class="fx-alertas">${faixas.join('')}</div>` : ''}
 
       <div class="fx-top">
@@ -41208,23 +41313,36 @@ function _finFluxoDesenhar(el, base, p){
             <div><div class="lb">Falta para o alvo</div><div class="vl" style="color:${(r0.falta||0) > 0.005 ? '#A65A4A' : '#4C6647'};">${fmtR(r0.falta||0)}</div><div class="nt">${(r0.falta||0) > 0.005 ? 'precisa vir de fora da operação' : 'alvo coberto'}</div></div>
           </div>
           <div class="fx-trilho"><i style="width:${pctBar(r0.retirada||0, p.prolaboreAlvo)}%;background:#5E7C58;"></i></div>
+          <span class="fx-link" onclick="_finFluxoTogglePonte()">${ponteAberta ? 'esconder a conta' : 'por que difere do líquido de Movimentações?'}</span>
         </div>
 
         <div class="fx-card">
           <div class="fx-card-h"><span class="fx-lb">Originação de ${escHtml(r0.label||'')} · medida em dinheiro, não em quantidade</span></div>
           <div class="fx-metrics">
-            <div><div class="lb">Contratado no mês</div><div class="vl" style="color:#0A1530;">${fmtR(origMes.contratado)}</div><div class="nt">${origMes.n} ${plural(origMes.n,'acordo')} · meta ${fmtR(p.origContratadoMes)}</div></div>
-            <div><div class="lb">Entradas contratadas</div><div class="vl" style="color:#0A1530;">${fmtR(origMes.entradas)}</div><div class="nt">meta ${fmtR(metaEntradas)} (${pct0(p.origEntradaPct)}%)</div></div>
+            <div><div class="lb">Contratado no mês</div><div class="vl" style="color:#0A1530;">${fmtR(origMes.contratado)}</div><div class="nt">${origMes.n} ${plural(origMes.n,'acordo')} · meta ${fmtR(pForm.origContratadoMes)}</div></div>
+            <div><div class="lb">Entradas contratadas</div><div class="vl" style="color:#0A1530;">${fmtR(origMes.entradas)}</div><div class="nt">meta ${fmtR(metaEntradas)} (${pct0(pForm.origEntradaPct)}%)</div></div>
             <div><div class="lb">Parcela mensal nova</div><div class="vl" style="color:#0A1530;">${fmtR(origMes.parcelaNova)}</div><div class="nt">meta ${fmtR(metaParcela)} por mês</div></div>
             <div><div class="lb">Mês anterior</div><div class="vl" style="color:#5A5F66;">${fmtR(((base.orig||{})[_finFluxoMesAnterior(base.meses[0].key)]||{}).contratado||0)}</div><div class="nt">${(((base.orig||{})[_finFluxoMesAnterior(base.meses[0].key)]||{}).n||0)} ${plural((((base.orig||{})[_finFluxoMesAnterior(base.meses[0].key)]||{}).n||0),'acordo')} contratados</div></div>
           </div>
-          <div class="fx-trilho"><i style="width:${pctBar(origMes.contratado, p.origContratadoMes)}%;background:#2a78d6;"></i></div>
+          <div class="fx-trilho"><i style="width:${pctBar(origMes.contratado, pForm.origContratadoMes)}%;background:#2a78d6;"></i></div>
         </div>
       </div>
+
+      ${ponteAberta ? `<section class="fx-sec">
+        <div class="fx-sec-h"><h2 class="fx-h2">Do líquido de Movimentações à sobra de ${escHtml(r0.label||'')}</h2><span class="fx-nota">Movimentações soma os lançamentos com competência no mês, pagos e pendentes, sem realização e sem o que não está lançado</span></div>
+        <div class="fx-tbl-wrap"><table class="fx-fat-tbl">
+          <tbody>
+            <tr><td><b>Líquido dos lançamentos de ${escHtml(r0.label||'')} (como em Movimentações)</b></td><td class="v"><b>${fmtRs(ponte.inicio)}</b></td></tr>
+            ${ponte.linhas.filter(l => Math.abs(l.v) >= 0.005).map(l => `<tr><td>${escHtml(l.label)}</td><td class="v" style="color:${l.v < 0 ? '#7D3F33' : '#4C6647'};">${fmtRs(l.v)}</td></tr>`).join('')}
+            <tr><td><b>Sobra antes da retirada</b></td><td class="v"><b>${fmtRs(ponte.fim)}</b></td></tr>
+          </tbody>
+        </table></div>
+      </section>` : ''}
 
       <div class="fx-acoes">
         <button class="fx-btn ${fatAberto ? '' : 'ghost'}" onclick="_finFluxoFatToggle()">${fatAberto ? 'Fechar faturamento previsto' : 'Faturamento previsto'}</button>
         <span class="fx-nota">o que está previsto entrar menos só os repasses — a base da nota</span>
+        <button class="fx-btn ghost" style="margin-left:auto;" onclick="_finFluxoToggleDetalhe()">${detalhe ? 'Esconder detalhes' : 'Detalhar (tabela e premissas)'}</button>
       </div>
       ${fatAberto ? _finFluxoFaturamentoHtml(base, fatMes) : ''}
 
@@ -41246,15 +41364,15 @@ function _finFluxoDesenhar(el, base, p){
         </section>
       </div>
 
-      <section class="fx-sec">
-        <div class="fx-sec-h"><h2 class="fx-h2">Mês a mês</h2><span class="fx-nota">valores em R$ · realização de ${pct0(p.realizacao)}% sobre a carteira · linha vermelha = não paga o alvo</span></div>
+      ${detalhe ? `<section class="fx-sec">
+        <div class="fx-sec-h"><h2 class="fx-h2">Mês a mês</h2><span class="fx-nota">valores em R$ · realização de ${pct0(p.realizacao)}% sobre o já lançado · linha vermelha = não paga o alvo</span></div>
         <div class="fx-tbl-wrap"><table class="fx-tbl">
-          <thead><tr><th>Mês</th><th>Entra</th><th>Carteira</th><th>Acordos novos</th><th>Repasses</th><th>Receita própria</th><th>Fixos</th><th>DAS</th><th>Dívida</th><th>Retirada</th><th>Falta p/ alvo</th><th>Caixa fim</th><th>Caixa livre</th></tr></thead>
+          <thead><tr><th>Mês</th><th>Entra</th><th>Já lançado hoje</th>${modo==='premissa' ? '<th>Acordos que ainda vou fechar</th>' : ''}<th>Repasses</th><th>Receita própria</th><th>Fixos</th><th>DAS</th><th>Dívida</th><th>Retirada</th><th>Falta p/ alvo</th><th>Caixa fim</th><th>Caixa livre</th></tr></thead>
           <tbody>${rows.map(r => `<tr class="${r.falta > 0.005 ? 'neg' : ''}">
             <td>${escHtml(r.label)}</td>
             <td>${mil(r.totalRec)}</td>
             <td class="sub">${mil(r.recCarteira)}</td>
-            <td class="sub">${mil(r.recEntradasNovos + r.recNovosProprio + r.recNovosCapital)}</td>
+            ${modo==='premissa' ? `<td class="sub">${mil(r.recEntradasNovos + r.recNovosProprio + r.recNovosCapital)}</td>` : ''}
             <td>${mil(r.totalRep)}</td>
             <td><b>${mil(r.receitaPropria)}</b></td>
             <td class="sub">${mil(r.fixos)}</td>
@@ -41265,8 +41383,9 @@ function _finFluxoDesenhar(el, base, p){
             <td>${mil(r.caixaFim)}</td>
             <td class="sub">${mil(r.caixaLivre)}</td>
           </tr>`).join('')}</tbody>
-          <tfoot><tr><th>Total</th><th>${mil(T.totalRec)}</th><th></th><th></th><th>${mil(T.totalRep)}</th><th>${mil(T.receitaPropria)}</th><th></th><th></th><th></th><th>${mil(T.retirada)}</th><th>${mil(T.falta)}</th><th></th><th></th></tr></tfoot>
+          <tfoot><tr><th>Total</th><th>${mil(T.totalRec)}</th><th></th>${modo==='premissa' ? '<th></th>' : ''}<th>${mil(T.totalRep)}</th><th>${mil(T.receitaPropria)}</th><th></th><th></th><th></th><th>${mil(T.retirada)}</th><th>${mil(T.falta)}</th><th></th><th></th></tr></tfoot>
         </table></div>
+        <div class="fx-fontes" style="padding-top:10px;">"Já lançado hoje" só pode cair: são parcelas de acordos já assinados, que vão terminando. ${modo==='premissa' ? '"Acordos que ainda vou fechar" só pode subir: é a premissa de originação, com as safras se sobrepondo mês a mês. A soma das duas é o "Entra".' : 'Para ver o efeito da originação futura, troque para "Com os acordos que ainda vou fechar" no topo.'}</div>
       </section>
 
       <div class="fx-cols">
@@ -41275,10 +41394,8 @@ function _finFluxoDesenhar(el, base, p){
           <div class="fx-form">
             <div class="fx-grp">Recebimento</div>
             ${inp('realizacao','Realização dos boletos e parcelas previstos',{pct:true,step:'1'})}
-            ${inp('judicialMes','Judicial por mês (Sisbajud, alvará, penhora)',{pre:'R$',step:'100'})}
-            ${inp('judicialCapitalPct','Parte do judicial que é capital do cedente',{pct:true,step:'1'})}
             ${inp('backlogMeses','Meses para quitar os repasses vencidos',{step:'1'})}
-            <div class="fx-grp">Originação (a partir do mês seguinte)</div>
+            <div class="fx-grp">Originação (a partir do mês seguinte · só entra em "Com os acordos que ainda vou fechar")</div>
             ${inp('origContratadoMes','Contratado em acordos novos por mês',{pre:'R$',step:'1000'})}
             ${inp('origEntradaPct','Entrada exigida (100% da COBRASQ)',{pct:true,step:'1'})}
             ${inp('origParcelas','Parcelas médias depois da entrada',{step:'1'})}
@@ -41302,13 +41419,13 @@ function _finFluxoDesenhar(el, base, p){
             <div><b>Carteira:</b> ${base.meses.reduce((s,m)=>s+m.nEntradas,0)} entradas e ${base.meses.reduce((s,m)=>s+m.nRepasses,0)} repasses pendentes com vencimento até ${escHtml(base.meses[base.meses.length-1].label)}, mais dívidas e custos já lançados. Boleto vencido (${fmtR(V.entradas||0)}) entra no mês corrente com a mesma realização.</div>
             <div><b>Repasse contingente:</b> só é devido se a parcela casada do devedor cair, por isso recebe a realização. O já lastreado (${fmtR(rows.reduce((s,r)=>s+r.repFixo,0))} no período) é devido de qualquer jeito.</div>
             <div><b>Recorrências:</b> ${base.recorrencias.length} ${plural(base.recorrencias.length,'ativa')} (${fmtR(base.recorrencias.reduce((s,r)=>s+r.valor,0))}/mês), contadas só nos meses em que ainda não viraram lançamento.${(base.recorrenciasDas||[]).length ? ` A recorrência do DAS (${fmtR(base.recorrenciasDas.reduce((s,r)=>s+r.valor,0))}) fica de fora: o imposto entra pela premissa de ${pct0(p.dasPct)}% da receita própria.` : ''}</div>
-            <div><b>Judicial:</b> ${fmtR(base.meses.reduce((s,m)=>s+m.judicialPrevisto,0))} previstos em Sisbajud/penhora sem liberação ficam fora da carteira — o juiz decide a data — e entram pela premissa.</div>
+            <div><b>Judicial:</b> ${fmtR(base.meses.reduce((s,m)=>s+m.judicialPrevisto,0))} previstos em Sisbajud/penhora sem liberação ficam fora da projeção — o juiz decide a data. Quando o alvará sair e o recebimento for confirmado, o lançamento vira caixa normal.</div>
             <div><b>Acordos novos:</b> honorário na frente — entrada e primeiras parcelas são 100% da COBRASQ até completar a parte dela; o resto é capital do cedente.</div>
             <div><b>Saídas vencidas:</b> ${fmtR(V.saidas||0)} em ${V.nSaidas||0} ${plural(V.nSaidas||0,'lançamento')} de dívida/custo já vencidos, somados ao mês corrente.</div>
             <div style="color:#8A94A6;">Dados do banco em ${new Date(base.geradoEm).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})} · saldo inicial = saldo geral das ${base.contasCount} contas no saldo geral.</div>
           </div>
         </section>
-      </div>
+      </div>` : ''}
     </div>`;
 
   _finFluxoGraficos(rows, p);
@@ -42861,7 +42978,7 @@ function feriadosBR(ano){
         i=Math.floor(c/4), k=c%4, l=(32+2*e+2*i-h-k)%7, mth=Math.floor((a+11*h+22*l)/451),
         mes=Math.floor((h+l-7*mth+114)/31), dia=((h+l-7*mth+114)%31)+1;
   const pascoa = new Date(ano, mes-1, dia);
-  const addDias = (base, n) => { const x=new Date(base); x.setDate(x.getDate()+n); return ymd(x.getFullYear(), x.getMonth()+1, x.getDate()); };
+  const addDias = (base, n) => { const x=new Date(base); x.setDate(x.getDate()+n); return isoLocal(x); };
   return new Set([
     ymd(ano,1,1),   // Confraternização Universal
     ymd(ano,4,21),  // Tiradentes
@@ -42883,7 +43000,7 @@ function feriadosBR(ano){
 function ehDiaUtilWA(dt){
   if(dt.getDay()===0) return false; // domingo
   const pad = n => String(n).padStart(2,'0');
-  const chave = `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}`;
+  const chave = isoLocal(dt);
   return !feriadosBR(dt.getFullYear()).has(chave);
 }
 
@@ -42900,7 +43017,7 @@ function proximoEnvioUtil(){
 // Date -> 'YYYY-MM-DDTHH:mm' no horário local (formato do datetime-local).
 function paraDatetimeLocal(dt){
   const pad = n => String(n).padStart(2,'0');
-  return `${dt.getFullYear()}-${pad(dt.getMonth()+1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
+  return `${isoLocal(dt)}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
 }
 
 // ============================================================
