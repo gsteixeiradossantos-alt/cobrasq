@@ -32469,6 +32469,22 @@ function _finLancEhDivergencia(l, ctx){
   if(op && op.repasse_status === 'revisar') return true;
   return !!(l.cedente_id && l.capital == null);
 }
+// Faturamento previsto (chip da seção Tipo, 05/09/2026): o que a COBRASQ fatura de fato
+// no período. São TODAS as entradas mais, das saídas, só a categoria "Aquisição de
+// dívidas de terceiros" — o dinheiro que é do cedente e sai de novo. Custo próprio
+// (aluguel, tarifa, custas, IPTU…) fica de fora. É a mesma leitura que a aba Fluxo de
+// caixa chama de "faturamento previsto" (receitas − repasses), só que linha a linha.
+// A categoria é lida do rateio inteiro (`nomes`), não só da maior: um lançamento dividido
+// entre aquisição e outra coisa continua sendo repasse ao cedente.
+const FIN_RX_AQUISICAO_DIVIDAS = /aquisi[cç][aã]o de d[ií]vidas/i;
+function _finLancEhFaturamentoPrevisto(l, ctx){
+  if(l.tipo_movimento === 1) return true;
+  if(l.tipo_movimento !== 0) return false;
+  const c = ctx && ctx.catPorLanc && ctx.catPorLanc[l.id];
+  if(!c) return false;
+  const nomes = Array.isArray(c.nomes) && c.nomes.length ? c.nomes : [c.nome];
+  return nomes.some(n => FIN_RX_AQUISICAO_DIVIDAS.test(String(n||'')));
+}
 // Cedente da linha, num lugar só: a sublinha, o filtro por cedente e o marcador de
 // repasse leem daqui. Se cada um derivasse por conta própria, o chip "Cedente" filtraria
 // por um nome que a linha não mostra.
@@ -32780,7 +32796,7 @@ async function _finLancCascataCarregar(){
       }
       for(const [k,v] of Object.entries(agg)){
         const ord = Object.entries(v.itens).sort((a,b)=>b[1]-a[1]);
-        catPorLanc[k] = { nome: ord[0][0], extras: ord.length-1 };
+        catPorLanc[k] = { nome: ord[0][0], extras: ord.length-1, nomes: ord.map(x=>x[0]) };
         if(v.jud) judSet.add(String(k));
       }
     }
@@ -32830,6 +32846,7 @@ function _finLancCascataFiltrados(visaoId){
     if(s.fTipo === 'in'  && l.tipo_movimento !== 1) return false;
     if(s.fTipo === 'out' && l.tipo_movimento !== 0) return false;
     if(s.fTipo === 'repasse' && !_finLancEhRepasse(l, ctx)) return false;
+    if(s.fTipo === 'fatprev' && !_finLancEhFaturamentoPrevisto(l, ctx)) return false;
     if(s.fStatus){
       const t = _finLancSit(l).t;
       const efetivado = t === 'PAGO' || t === 'CONCILIADO';
@@ -33088,7 +33105,7 @@ function _finMovPainelFiltrosHtml(contas, cats, cedentes, contador, chipF){
       <div class="ops">${opcoes.map(o=>`<button style="${chipF(s[campo]===o[0])}" onclick="event.stopPropagation();_finMovToggleChip('${campo}','${o[0]}')">${escHtml(o[1])}</button>`).join('')}</div>
     </div>`;
   return `<div class="finmv-painel" onclick="event.stopPropagation()">
-    ${secao('Tipo','fTipo',[['in','Entradas'],['out','Saídas'],['repasse','Repasses']])}
+    ${secao('Tipo','fTipo',[['in','Entradas'],['out','Saídas'],['repasse','Repasses'],['fatprev','Faturamento previsto']])}
     ${secao('Status','fStatus',[['pago','Efetivado'],['pendente','Pendente'],['atrasado','Atrasado']])}
     <div class="sec">
       <span class="tt">Contas e carteiras</span>
