@@ -11,7 +11,8 @@
  *      e parcelamento são dívida, o resto é custo próprio; a recorrência do DAS não soma
  *      de novo (o imposto entra pela premissa);
  *   6. faturamento previsto = receitas previstas − só os repasses (a base da nota); o
- *      judicial sem liberação fica fora da base.
+ *      judicial sem liberação fica fora da base;
+ *   7. a ponte entre o líquido de Movimentações e a sobra do mês fecha exata, linha a linha.
  *
  * Roda contra o CÓDIGO REAL do index.html, sem rede e sem navegador.
  *
@@ -74,11 +75,12 @@ vm.runInContext(
   + recorta('function _finFluxoEhContingente(l, entradasPorCob)') + '\n'
   + recorta('function _finFluxoFaturamentoResumo(itens, mesKey)') + '\n'
   + recorta('function finFluxoProjetar(base, p)') + '\n'
+  + recorta('function _finFluxoPonte(base, r0, p)') + '\n'
   + 'this.projetar = finFluxoProjetar; this.saida = _finFluxoClassificaSaida; this.entrada = _finFluxoClassificaEntrada;'
-  + 'this.contingente = _finFluxoEhContingente; this.PADRAO = FIN_FLUXO_PREMISSAS_PADRAO; this.recorrencia = _finFluxoClassificaRecorrencia; this.faturamento = _finFluxoFaturamentoResumo;',
+  + 'this.contingente = _finFluxoEhContingente; this.PADRAO = FIN_FLUXO_PREMISSAS_PADRAO; this.recorrencia = _finFluxoClassificaRecorrencia; this.faturamento = _finFluxoFaturamentoResumo; this.ponte = _finFluxoPonte;',
   ctx
 );
-const { projetar, saida, entrada, contingente, PADRAO, recorrencia, faturamento } = ctx;
+const { projetar, saida, entrada, contingente, PADRAO, recorrencia, faturamento, ponte } = ctx;
 const perto = (a, b, msg) => assert.ok(Math.abs(a - b) < 0.01, `${msg}: ${a} ≠ ${b}`);
 
 // Base redonda: 3 meses, sem judicial, sem originação, sem DAS — o que entra e sai é
@@ -231,9 +233,36 @@ const seco = { realizacao: 1, judicialMes: 0, dasPct: 0, origContratadoMes: 0, a
   perto(faturamento([], '2026-09').faturamento, 0, 'vazio não explode');
 }
 
-// ── 9. Premissas padrão fazem sentido e o motor aceita omissões ─────────────────────
+// ── 9. Ponte: do líquido de Movimentações à sobra do mês, linha a linha, fecha exato ──
+{
+  const b = base3();
+  b.meses[0].dividasRecorrentes = 250;
+  // Vencidos de agosto que a projeção puxa para setembro (já dentro de meses[0]).
+  b.vencidos = { entradas: 700, repassesContingentes: 300, saidas: 150 };
+  // Competência de setembro como Movimentações soma: 900 pagos de entrada, 200 pagos de
+  // saída, 9.300 pendentes de entrada e 3.300 pendentes de saída.
+  b.compMes = { pagasEnt: 900, pagasSai: 200, pendEnt: 9300, pendSai: 3300 };
+  const p = Object.assign({}, seco, { realizacao: 0.8, dasPct: 0.05, dividasNaoLancadas: 120, fixosNaoLancados: 80, prolaboreAlvo: 0 });
+  const { rows } = projetar(b, p);
+  const pt = ponte(b, rows[0], p);
+  perto(pt.inicio, 900 + 9300 - 200 - 3300, 'parte do líquido de Movimentações');
+  perto(pt.fim, rows[0].disponivel, 'a soma das linhas fecha na sobra antes da retirada');
+  const por = Object.fromEntries(pt.linhas.map(l => [l.k, l.v]));
+  perto(por.liquidado, -700, 'o já pago está no saldo, não na projeção');
+  perto(por.vencidos, 700 - 300 - 150, 'vencidos anteriores entram líquidos');
+  perto(por.realizacao, -0.2 * 10000 + 0.2 * 2000, 'realização corta entrada e repasse contingente');
+  perto(por.backlog, -100, '1/3 do backlog de 300');
+  perto(por.recorrencias, -(100 + 250), 'recorrência fixa e recorrência de dívida');
+  perto(por.naolancado, -200, 'premissas não lançadas');
+  perto(por.judicial, 0, 'judicial fora da projeção por padrão');
+  perto(por.originacao, 0, 'sem originação no modo real');
+  perto(rows[0].dividas, 500 + 250 + 120, 'dívida = lançada + recorrente + premissa');
+}
+
+// ── 10. Premissas padrão fazem sentido e o motor aceita omissões ────────────────────
 {
   assert.ok(PADRAO.realizacao > 0 && PADRAO.realizacao <= 1);
+  assert.strictEqual(PADRAO.judicialMes, 0, 'judicial fora da projeção (05/09/2026)');
   assert.ok(PADRAO.origSharePct > 0 && PADRAO.origSharePct < 1);
   const { rows, totais } = projetar(base3(), {});
   assert.strictEqual(rows.length, 3);
