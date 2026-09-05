@@ -9,7 +9,8 @@
  *   4. o backlog de repasses vencidos é quitado inteiro em N meses e sai do caixa livre;
  *   5. a classificação de saídas: credor = repasse, tarifa nunca é repasse, empréstimo
  *      e parcelamento são dívida, o resto é custo próprio; a recorrência do DAS não soma
- *      de novo (o imposto entra pela premissa).
+ *      de novo (o imposto entra pela premissa);
+ *   6. faturamento previsto = receitas previstas − só os repasses (a base da nota).
  *
  * Roda contra o CÓDIGO REAL do index.html, sem rede e sem navegador.
  *
@@ -70,12 +71,13 @@ vm.runInContext(
   + recorta('function _finFluxoClassificaEntrada(l, catNome)') + '\n'
   + recorta('function _finFluxoClassificaRecorrencia(r)') + '\n'
   + recorta('function _finFluxoEhContingente(l, entradasPorCob)') + '\n'
+  + recorta('function _finFluxoFaturamentoResumo(itens, mesKey)') + '\n'
   + recorta('function finFluxoProjetar(base, p)') + '\n'
   + 'this.projetar = finFluxoProjetar; this.saida = _finFluxoClassificaSaida; this.entrada = _finFluxoClassificaEntrada;'
-  + 'this.contingente = _finFluxoEhContingente; this.PADRAO = FIN_FLUXO_PREMISSAS_PADRAO; this.recorrencia = _finFluxoClassificaRecorrencia;',
+  + 'this.contingente = _finFluxoEhContingente; this.PADRAO = FIN_FLUXO_PREMISSAS_PADRAO; this.recorrencia = _finFluxoClassificaRecorrencia; this.faturamento = _finFluxoFaturamentoResumo;',
   ctx
 );
-const { projetar, saida, entrada, contingente, PADRAO, recorrencia } = ctx;
+const { projetar, saida, entrada, contingente, PADRAO, recorrencia, faturamento } = ctx;
 const perto = (a, b, msg) => assert.ok(Math.abs(a - b) < 0.01, `${msg}: ${a} ≠ ${b}`);
 
 // Base redonda: 3 meses, sem judicial, sem originação, sem DAS — o que entra e sai é
@@ -208,7 +210,27 @@ const seco = { realizacao: 1, judicialMes: 0, dasPct: 0, origContratadoMes: 0, a
   assert.ok(!contingente({ data_vencimento: '2026-10-10' }, pend), 'sem cobrança não há como casar');
 }
 
-// ── 8. Premissas padrão fazem sentido e o motor aceita omissões ─────────────────────
+// ── 8. Faturamento previsto = receitas − só repasses; dívida e custo ficam de fora ──
+{
+  const itens = [
+    { tipo: 'entrada', valor: 1000, mes: '2026-09', judicial: false },
+    { tipo: 'entrada', valor: 500, mes: '2026-09', judicial: true },
+    { tipo: 'repasse', valor: 400, mes: '2026-09' },
+    { tipo: 'entrada', valor: 2000, mes: '2026-10', judicial: false },
+    { tipo: 'repasse', valor: 900, mes: '2026-10' },
+  ];
+  const s = faturamento(itens, '2026-09');
+  perto(s.receitas, 1500, 'receitas do mês, judicial incluso');
+  perto(s.judicial, 500, 'judicial destacado');
+  perto(s.repasses, 400, 'só repasses');
+  perto(s.faturamento, 1100, 'base da nota = receitas − repasses');
+  assert.strictEqual(s.nReceitas, 2); assert.strictEqual(s.nRepasses, 1);
+  const tudo = faturamento(itens, null);
+  perto(tudo.faturamento, 3500 - 1300, 'sem mês, soma o horizonte');
+  perto(faturamento([], '2026-09').faturamento, 0, 'vazio não explode');
+}
+
+// ── 9. Premissas padrão fazem sentido e o motor aceita omissões ─────────────────────
 {
   assert.ok(PADRAO.realizacao > 0 && PADRAO.realizacao <= 1);
   assert.ok(PADRAO.origSharePct > 0 && PADRAO.origSharePct < 1);

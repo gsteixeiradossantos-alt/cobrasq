@@ -40508,6 +40508,23 @@ function _finFluxoEhContingente(l, entradasPorCob){
   return lista.some(d => { const e = _finDeISO(d); return e && isFinite(e.getTime()) && e >= a && e <= b; });
 }
 
+// Faturamento previsto = o que está previsto entrar menos SÓ os repasses (capital que
+// volta ao cedente). É a base sobre a qual a nota costuma ser emitida — o resto das
+// saídas (aluguel, dívida) não entra na conta. `itens` são os lançamentos pendentes
+// classificados pelo carregador; `mesKey` 'AAAA-MM' filtra o mês (null = todos).
+function _finFluxoFaturamentoResumo(itens, mesKey){
+  const r = { receitas:0, nReceitas:0, judicial:0, nJudicial:0, repasses:0, nRepasses:0, faturamento:0 };
+  for(const it of (itens||[])){
+    if(mesKey && it.mes !== mesKey) continue;
+    if(it.tipo === 'entrada'){
+      r.receitas += it.valor; r.nReceitas++;
+      if(it.judicial){ r.judicial += it.valor; r.nJudicial++; }
+    } else if(it.tipo === 'repasse'){ r.repasses += it.valor; r.nRepasses++; }
+  }
+  r.faturamento = r.receitas - r.repasses;
+  return r;
+}
+
 // Motor. `base.meses[i]` = { key, label, entradas, judicialPrevisto, repFixo, repCont,
 // dividas, outros, recorrencias }; `base.caixaInicial`; `base.backlog` (repasses vencidos
 // devidos de qualquer jeito); `base.fracMesAtual` (quanto do mês corrente ainda falta).
@@ -40641,6 +40658,9 @@ async function _finFluxoCarregarBase(force){
 
   const vencidos = { entradas:0, nEntradas:0, judicial:0, nJudicial:0, repasses:0, nRepasses:0, repassesContingentes:0, saidas:0, nSaidas:0 };
   const backlogItens = [];
+  // Lista para o "Faturamento previsto": entradas e repasses pendentes, no mês em que
+  // vencem (o vencido vai para o mês corrente, como na projeção).
+  const itens = [];
   for(const l of pend){
     const venc = String(l.data_vencimento||'').slice(0,10);
     const v = Math.abs(+l.valor || 0);
@@ -40650,7 +40670,9 @@ async function _finFluxoCarregarBase(force){
     if(mi == null) continue;
     const m = meses[mi];
     if(l.tipo_movimento === 1){
-      if(_finFluxoClassificaEntrada(l, cat) === 'judicial'){
+      const judicial = _finFluxoClassificaEntrada(l, cat) === 'judicial';
+      itens.push({ id:l.id, descricao:l.descricao, valor:v, tipo:'entrada', judicial, vence:venc, vencido, mes:m.key, credorId:l.credor_id, categoria:cat });
+      if(judicial){
         if(vencido){ vencidos.judicial += v; vencidos.nJudicial++; } else m.judicialPrevisto += v;
         continue;
       }
@@ -40663,6 +40685,7 @@ async function _finFluxoCarregarBase(force){
     const tipo = _finFluxoClassificaSaida(l, cat);
     if(tipo === 'repasse'){
       const cont = _finFluxoEhContingente(l, entradasPorCob);
+      itens.push({ id:l.id, descricao:l.descricao, valor:v, tipo:'repasse', contingente:cont, vence:venc, vencido, mes:m.key, credorId:l.credor_id, categoria:cat });
       if(vencido){
         vencidos.nRepasses++;
         // Vencido e sem parcela pendente casada = o devedor já pagou: é o backlog, devido
@@ -40708,10 +40731,23 @@ async function _finFluxoCarregarBase(force){
     o.n++; o.contratado += tot; o.entradas += ent; o.parcelaNova += Math.max(0, tot - ent) / np;
   }
 
+  // Nome do credor como a tela mostra (fantasia, senão razão social) — critério único
+  // do módulo (_finNomeCredor). Sem ele a lista do faturamento só teria o id.
+  const credorNome = {};
+  const credIds = [...new Set(itens.map(i => i.credorId).filter(Boolean))];
+  for(let i = 0; i < credIds.length; i += 200){
+    try{
+      const { data } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', credIds.slice(i, i+200));
+      for(const c of (data||[])) credorNome[c.id] = _finNomeCredor(c) || '';
+    }catch(_){ /* sem nome a linha mostra só a descrição */ }
+  }
+  for(const it of itens) it.credor = it.credorId ? (credorNome[it.credorId] || '') : '';
+  itens.sort((a,b)=> a.vence < b.vence ? -1 : (a.vence > b.vence ? 1 : (a.tipo < b.tipo ? -1 : 1)));
+
   const contas = (dim.contas||[]).filter(c => c.incluir_no_saldo_geral !== false);
   const v = {
     meses, caixaInicial: +metricas.saldoGeral || 0, backlog: +vencidos.repasses.toFixed(2), fracMesAtual,
-    metricas, vencidos, backlogItens: backlogItens.sort((a,b)=> b.valor - a.valor), recorrencias, recorrenciasDas, orig,
+    metricas, vencidos, backlogItens: backlogItens.sort((a,b)=> b.valor - a.valor), recorrencias, recorrenciasDas, orig, itens,
     contasCount: contas.length, hoje, geradoEm: Date.now(),
   };
   _finFluxoBaseCache = { at: Date.now(), v };
@@ -40783,6 +40819,8 @@ function _finFluxoDesenhar(el, base, p){
   const pctBar = (v, meta) => meta > 0 ? Math.max(0, Math.min(100, v / meta * 100)).toFixed(0) : 0;
   const stale = (M.stale||[]);
   const backlogN = (base.backlogItens||[]).length;
+  const fatAberto = !!window._finFluxoFatAberto;
+  const fatMes = window._finFluxoFatMes || base.meses[0].key;
 
   const faixas = [];
   if(base.backlog > 0) faixas.push(`<div class="fxa"><span class="fxa-bar" style="background:#A65A4A;"></span>
@@ -40832,6 +40870,28 @@ function _finFluxoDesenhar(el, base, p){
       .fx-metrics .nt{font-size:10.5px;color:#6B7683;margin-top:2px;}
       .fx-trilho{height:10px;background:#F2EFE6;border-radius:5px;overflow:hidden;display:flex;}
       .fx-trilho i{display:block;height:100%;}
+      .fx-acoes{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+      .fx-fat-h{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+      .fx-fat-nav{display:flex;align-items:center;gap:2px;border:1px solid #E6E1D2;border-radius:7px;overflow:hidden;background:#fff;margin-left:auto;}
+      .fx-fat-nav button{background:transparent;border:none;color:#0A1530;font-family:inherit;font-size:12.5px;padding:5px 11px;cursor:pointer;}
+      .fx-fat-nav button:hover{background:#FBFAF6;}
+      .fx-fat-nav .lbl{font-weight:600;min-width:120px;text-align:center;}
+      .fx-fat-tot{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;padding:14px 16px;border-bottom:1px solid #F2EFE6;}
+      @media (max-width: 795px){ .fx-fat-tot{grid-template-columns:1fr;} }
+      .fx-fat-tot .lb{font-size:11px;color:#8A94A6;}
+      .fx-fat-tot .vl{font-family:'JetBrains Mono',monospace;font-size:21px;font-weight:600;white-space:nowrap;margin-top:2px;}
+      .fx-fat-tot .nt{font-size:10.5px;color:#6B7683;margin-top:2px;}
+      .fx-fat-tbl{border-collapse:collapse;width:100%;font-size:12.5px;}
+      .fx-fat-tbl th,.fx-fat-tbl td{padding:7px 12px;border-bottom:1px solid #F7F4EC;text-align:left;vertical-align:top;}
+      .fx-fat-tbl th{font-size:11px;font-weight:600;color:#5A5F66;background:#FBFAF6;}
+      .fx-fat-tbl td.v,.fx-fat-tbl th.v{text-align:right;font-family:'JetBrains Mono',monospace;white-space:nowrap;}
+      .fx-fat-tbl td.d{white-space:nowrap;color:#5A5F66;font-family:'JetBrains Mono',monospace;font-size:11.5px;}
+      .fx-fat-tbl .sub{color:#8A94A6;font-size:11px;}
+      .fx-tag{display:inline-block;font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.06em;text-transform:uppercase;border-radius:4px;padding:1px 5px;margin-left:6px;vertical-align:middle;}
+      .fx-tag.rep{background:#FBEAE3;color:#8A4A3A;}
+      .fx-tag.ent{background:#E3EEF8;color:#1D4F86;}
+      .fx-tag.jud{background:#EEEEEE;color:#555;}
+      .fx-tag.atr{background:#FBF3E1;color:#7A6428;}
       .fx-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;}
       @media (max-width: 1131px){ .fx-kpis{grid-template-columns:repeat(2,minmax(0,1fr));} }
       .fx-kpi{background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:15px;display:flex;flex-direction:column;gap:8px;min-width:0;}
@@ -40903,6 +40963,12 @@ function _finFluxoDesenhar(el, base, p){
           <div class="fx-trilho"><i style="width:${pctBar(origMes.contratado, p.origContratadoMes)}%;background:#2a78d6;"></i></div>
         </div>
       </div>
+
+      <div class="fx-acoes">
+        <button class="fx-btn ${fatAberto ? '' : 'ghost'}" onclick="_finFluxoFatToggle()">${fatAberto ? 'Fechar faturamento previsto' : 'Faturamento previsto'}</button>
+        <span class="fx-nota">o que está previsto entrar menos só os repasses — a base da nota</span>
+      </div>
+      ${fatAberto ? _finFluxoFaturamentoHtml(base, fatMes) : ''}
 
       <div class="fx-kpis">
         <div class="fx-kpi"><div class="fx-lb">Entra em ${rows.length} meses</div><div class="vl" style="color:#0A1530;">${fmtR(T.totalRec)}</div><div class="dt"><span>carteira ${fmtR(rows.reduce((s,r)=>s+r.recCarteira,0))} · judicial ${fmtR(rows.reduce((s,r)=>s+r.recJudicial,0))}</span><span>acordos novos ${fmtR(rows.reduce((s,r)=>s+r.recEntradasNovos+r.recNovosProprio+r.recNovosCapital,0))}</span></div></div>
@@ -40988,6 +41054,57 @@ function _finFluxoDesenhar(el, base, p){
     </div>`;
 
   _finFluxoGraficos(rows, p);
+}
+function _finFluxoFatToggle(){
+  window._finFluxoFatAberto = !window._finFluxoFatAberto;
+  const el = document.getElementById('fin-content');
+  if(el && _finFluxoBaseCache.v) _finFluxoDesenhar(el, _finFluxoBaseCache.v, _finFluxoPremissas());
+}
+function _finFluxoFatMesPasso(n){
+  const base = _finFluxoBaseCache.v; if(!base) return;
+  const keys = base.meses.map(m => m.key);
+  const atual = window._finFluxoFatMes || keys[0];
+  let i = keys.indexOf(atual); if(i < 0) i = 0;
+  i = Math.max(0, Math.min(keys.length - 1, i + n));
+  window._finFluxoFatMes = keys[i];
+  const el = document.getElementById('fin-content');
+  if(el) _finFluxoDesenhar(el, base, _finFluxoPremissas());
+}
+function _finFluxoFaturamentoHtml(base, mesKey){
+  const meses = base.meses || [];
+  const m = meses.find(x => x.key === mesKey) || meses[0];
+  if(!m) return '';
+  const R = _finFluxoFaturamentoResumo(base.itens, m.key);
+  const T = _finFluxoFaturamentoResumo(base.itens, null);
+  const itens = (base.itens||[]).filter(it => it.mes === m.key);
+  const dm = s => { s = String(s||'').slice(0,10); return s ? s.split('-').slice(1).reverse().join('/') : '—'; };
+  const plural = (n, s, p) => n === 1 ? s : (p || s+'s');
+  const linhas = itens.map(it => `<tr>
+    <td class="d">${dm(it.vence)}</td>
+    <td>${escHtml(it.descricao||'')}${it.tipo === 'repasse' ? '<span class="fx-tag rep">repasse</span>' : (it.judicial ? '<span class="fx-tag jud">judicial</span>' : '<span class="fx-tag ent">receita</span>')}${it.vencido ? '<span class="fx-tag atr">vencido</span>' : ''}${it.credor ? `<div class="sub">${escHtml(it.credor)}</div>` : ''}</td>
+    <td class="v" style="color:${it.tipo === 'repasse' ? '#7D3F33' : '#4C6647'};">${it.tipo === 'repasse' ? '−' : ''}${fmtR(it.valor)}</td>
+  </tr>`).join('');
+  return `<section class="fx-sec">
+    <div class="fx-sec-h fx-fat-h">
+      <h2 class="fx-h2">Faturamento previsto</h2>
+      <span class="fx-nota">receitas previstas − repasses (aquisição de dívidas de terceiros) · sem realização, valor a valor</span>
+      <div class="fx-fat-nav">
+        <button title="Mês anterior" onclick="_finFluxoFatMesPasso(-1)">&lsaquo;</button>
+        <button class="lbl">${escHtml(m.label)}</button>
+        <button title="Próximo mês" onclick="_finFluxoFatMesPasso(1)">&rsaquo;</button>
+      </div>
+    </div>
+    <div class="fx-fat-tot">
+      <div><div class="lb">Receitas previstas</div><div class="vl" style="color:#4C6647;">${fmtR(R.receitas)}</div><div class="nt">${R.nReceitas} ${plural(R.nReceitas,'lançamento')}${R.nJudicial ? ` · ${fmtR(R.judicial)} judicial sem liberação` : ''}</div></div>
+      <div><div class="lb">Repasses previstos</div><div class="vl" style="color:#7D3F33;">−${fmtR(R.repasses)}</div><div class="nt">${R.nRepasses} ${plural(R.nRepasses,'lançamento')} · capital do cedente</div></div>
+      <div><div class="lb">Faturamento previsto (base da nota)</div><div class="vl" style="color:#0A1530;">${fmtRs(R.faturamento)}</div><div class="nt">nos ${meses.length} meses: ${fmtRs(T.faturamento)} (${fmtR(T.receitas)} − ${fmtR(T.repasses)})</div></div>
+    </div>
+    <div class="fx-tbl-wrap"><table class="fx-fat-tbl">
+      <thead><tr><th>Vence</th><th>Lançamento</th><th class="v">Valor</th></tr></thead>
+      <tbody>${linhas || `<tr><td colspan="3" style="color:#8A94A6;">Nada previsto neste mês.</td></tr>`}</tbody>
+      <tfoot><tr><th></th><th>Faturamento previsto de ${escHtml(m.label)}</th><th class="v">${fmtRs(R.faturamento)}</th></tr></tfoot>
+    </table></div>
+  </section>`;
 }
 function _finFluxoMesAnterior(key){
   const a = String(key||'').split('-'); if(a.length < 2) return '';
