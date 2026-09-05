@@ -205,6 +205,8 @@ const fonte = [
   trechoAte('const _finLancQuitado', '\n'),
   recorta('function _finLancEhRepasse(l, ctx){'),
   recorta('function _finLancEhDivergencia(l, ctx){'),
+  trechoAte('const FIN_RX_AQUISICAO_DIVIDAS', '\n'),
+  recorta('function _finLancEhFaturamentoPrevisto(l, ctx){'),
   recorta('function _finLancCedente(l, ctx){'),
   recorta('const FIN_MOV_VISOES = [', '['),
   recorta('function _finLancCascataFiltrados(visaoId){'),
@@ -379,6 +381,24 @@ const perto = (a, b) => Math.abs(a - b) < 0.005;
   ctxVm._finLancCascataState.fTipo = 'out';
   ok('10d · painel de filtros (Tipo=Saídas) recorta a mesma base',
     ctxVm._finLancCascataFiltrados().length === ctx2.rows.filter(l => l.tipo_movimento === 0).length);
+  ctxVm._finMovZerarFiltros(ctxVm._finLancCascataState);
+  // 10g. Chip "Faturamento previsto" (05/09): todas as entradas + só a saída da categoria
+  //      "Aquisição de dívidas de terceiros". O aluguel (custo próprio) fica fora, e a
+  //      categoria é lida do rateio inteiro — aqui a aquisição é a SEGUNDA do lançamento 8.
+  ctx2.catPorLanc = {
+    3: { nome: 'Aluguel', extras: 0, nomes: ['Aluguel'] },
+    8: { nome: 'Custas', extras: 1, nomes: ['Custas', 'Aquisição de dívidas de terceiros'] },
+  };
+  ctxVm._finLancCascataState.fTipo = 'fatprev';
+  const fat = ctxVm._finLancCascataFiltrados();
+  const esperado = ctx2.rows.filter(l => l.tipo_movimento === 1).length + 1;
+  ok('10g · "Faturamento previsto" = entradas + aquisição de dívidas de terceiros',
+    fat.length === esperado && fat.some(l => l.id === 8) && !fat.some(l => l.id === 3),
+    `${fat.length} linhas (esperado ${esperado}); tem 8? ${fat.some(l => l.id === 8)}; tem 3? ${fat.some(l => l.id === 3)}`);
+  ok('10g2 · sem categoria conhecida, saída não entra no faturamento previsto',
+    ctxVm._finLancEhFaturamentoPrevisto({ id: 99, tipo_movimento: 0 }, ctx2) === false
+    && ctxVm._finLancEhFaturamentoPrevisto({ id: 98, tipo_movimento: 1 }, ctx2) === true);
+  ctx2.catPorLanc = {};
   ctxVm._finMovZerarFiltros(ctxVm._finLancCascataState);
   ok('10a · a visão "Atrasados" não devolve o judicial pendente',
     ctxVm.FIN_MOV_VISOES.find(v => v.id === 'atrasados').ok(linhas.find(l => l.id === 4), ctx2) === true
