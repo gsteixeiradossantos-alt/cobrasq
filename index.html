@@ -30886,16 +30886,28 @@ function _finBuscaIr(id){
   if(window._finTab !== 'lancamentos') setFinTab('lancamentos');
   _finLancAbrirDrawer(Number(id));
 }
+// Buscar sem precisar digitar acento (09/09/2026, a pedido): "joao" acha "João" e
+// "João" acha "Joao". São duas buscas diferentes e cada uma resolve do seu jeito:
+//   • a da barra de Movimentações vai ao SERVIDOR — o termo vira uma regex `~*` com uma
+//     classe por letra ("joao" → "jo[aàáâãä]o"), porque ilike compara acento a acento;
+//   • a global (⌘K) filtra em memória — compara os dois lados já sem acento.
+const _finSemAcento = s => String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+const FIN_BUSCA_ACENTOS = { a:'aàáâãä', e:'eèéêë', i:'iìíîï', o:'oòóôõö', u:'uùúûü', c:'cç', n:'nñ' };
+function _finBuscaRegexSemAcento(termo){
+  return _finSemAcento(termo)
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')          // o que o usuário digitou é texto, não regex
+    .replace(/[aeioucn]/g, ch => '[' + FIN_BUSCA_ACENTOS[ch] + ']');
+}
 function _finBuscaResultados(termo){
   const ctx = window._finLancCascataCtx;
   if(!ctx) return [];
-  const q = (termo||'').trim().toLowerCase();
+  const q = _finSemAcento((termo||'').trim());
   const texto = l => {
     const cat = (ctx.catPorLanc && ctx.catPorLanc[l.id] && ctx.catPorLanc[l.id].nome) || '';
     const conta = (l.fin_conta && l.fin_conta.descricao) || '';
     const contato = (l.fin_contato && l.fin_contato.nome) || '';
     const parc = l.numero_parcela && l.total_parcelas ? `${l.numero_parcela}/${l.total_parcelas}` : '';
-    return [l.descricao, contato, cat, conta, _finLancSit(l).t, parc, fmtR(Math.abs(+l.valor||0))].join(' ').toLowerCase();
+    return _finSemAcento([l.descricao, contato, cat, conta, _finLancSit(l).t, parc, fmtR(Math.abs(+l.valor||0))].join(' '));
   };
   // Busca sobre a base COMPLETA (inclui judicial pendente, que não aparece na lista):
   // não achar o que existe é pior do que achar algo que mora noutra aba — e o resultado
@@ -32894,10 +32906,18 @@ async function _finLancCascataCarregar(){
   const baseSel = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,valor_pago,tipo_movimento,status,conciliado,conta_id,cobranca_id,credor_id,contato_id,numero_parcela,total_parcelas,judicial_liberado_em,fin_conta(descricao,banco_nome),fin_contato(nome)';
   const extra = (await _finTemColunasCascata()) ? ',cedente_id,capital,meu_total,amortizado,repasse_status' : '';
   const termo = (_finLancCascataState.busca||'').trim();
-  let q = sb.from('fin_lancamento').select(baseSel+extra)
+  const consultaBase = () => sb.from('fin_lancamento').select(baseSel+extra)
     .gte('data_competencia', ini).lte('data_competencia', fim);
-  if(termo) q = q.ilike('descricao', '%'+termo+'%');
-  const { data } = await q.order('data_competencia',{ascending:_finLancOrdServidorAsc()}).limit(FIN_LANC_LIMITE);
+  const ordenaLimita = c => c.order('data_competencia',{ascending:_finLancOrdServidorAsc()}).limit(FIN_LANC_LIMITE);
+  let q = consultaBase();
+  if(termo) q = q.filter('descricao', 'imatch', _finBuscaRegexSemAcento(termo));
+  let { data, error } = await ordenaLimita(q);
+  // Se o servidor não aceitar o operador de regex, a lista voltaria VAZIA em silêncio —
+  // pior que buscar exigindo acento. Nesse caso repete com o ilike de sempre.
+  if(error && termo){
+    console.warn('busca sem acento recusada pelo servidor; usando ilike:', error.message || error);
+    ({ data } = await ordenaLimita(consultaBase().ilike('descricao', '%'+termo+'%')));
+  }
   const rows = data||[];
   const cedIds=[...new Set(rows.map(r=>r.cedente_id).filter(Boolean))];
   let cedMap={};
