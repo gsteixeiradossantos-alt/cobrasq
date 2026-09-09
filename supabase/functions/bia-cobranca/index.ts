@@ -145,16 +145,33 @@ Deno.serve(async (req) => {
     } catch { /* */ }
     return true; // fail-open: é o celular cadastrado no Asaas
   }
+  // Toda alteração de vencimento aqui é COMBINADA com o devedor. Por isso zera
+  // multa E juros SEMPRE — inclusive quando não há novo valor (sem_acrescimo do
+  // gestor). Antes o `fine: 0` só ia junto com o `value`, e os juros nunca eram
+  // zerados: o boleto seguia exibindo os encargos do atraso por cima do valor
+  // combinado. Foi o que aconteceu com o Leandro em 09/09/2026 — combinamos
+  // R$ 395,16 e a fatura mostrou R$ 432,53 (multa de 10% + juros de 1% a.m. do
+  // período vencido). Quando cabe acréscimo, ele já vem embutido no `value`.
   async function alterarVenc(paymentId: string, novaISO: string, novoValor?: number | null, descricao?: string): Promise<{ ok: boolean; erro?: string; invoiceUrl?: string; value?: number }> {
     try {
-      const body: any = { dueDate: novaISO };
+      const body: any = { dueDate: novaISO, fine: { value: 0 }, interest: { value: 0 } };
       if (descricao) body.description = descricao;
-      if (novoValor != null && novoValor > 0) { body.value = novoValor; body.fine = { value: 0 }; } // +11% embutido + zera multa 10%
+      if (novoValor != null && novoValor > 0) body.value = novoValor; // acréscimo já embutido
       const r = await fetch(`${aBase}/payments/${paymentId}`, { method: 'PUT', headers: aHead, body: JSON.stringify(body) });
       const j = await r.json().catch(() => null);
       if (r.ok && j && String(j.dueDate) === novaISO) return { ok: true, invoiceUrl: j.invoiceUrl, value: Number(j.value) };
       return { ok: false, erro: j?.errors?.[0]?.description || ('status ' + r.status) };
     } catch (e) { return { ok: false, erro: e instanceof Error ? e.message : String(e) }; }
+  }
+  // O Asaas e a bia_cobranca eram atualizados, o financeiro não: a parcela ficava
+  // no fin_lancamento com a data e o valor antigos, em silêncio. Só mexe em
+  // parcela em aberto (status 0). Best-effort.
+  async function sincFinanceiro(paymentId: string, novaISO: string, valor?: number | null): Promise<void> {
+    try {
+      const patch: Record<string, unknown> = { data_vencimento: novaISO, atualizada_em: new Date().toISOString() };
+      if (valor != null && valor > 0) patch.valor = valor;
+      await sb.from('fin_lancamento').update(patch).eq('asaas_payment_id', paymentId).eq('status', 0);
+    } catch { /* tolera schema diferente — não derruba o executor */ }
   }
   const brD = (d: any) => d ? String(d).slice(0, 10).split('-').reverse().join('/') : '';
 
@@ -187,7 +204,12 @@ Deno.serve(async (req) => {
                 // alteração de vencimento a pedido -> +11% e zera multa (salvo override do gestor)
                 const novoV = semAcresc ? null : Math.round(Number(p.value || 0) * 1.11 * 100) / 100;
                 const rr = await alterarVenc(String(p.id), nova, novoV, `Vencimento recorrente no dia ${dd} (mediante pedido)`);
-                if (rr.ok) { novasDatas.push(brD(nova)); await sb.from('bia_cobranca').update({ venc_atual: nova, valor: rr.value ?? novoV ?? p.value }).eq('asaas_payment_id', String(p.id)); }
+                if (rr.ok) {
+                  const vFinal = rr.value ?? novoV ?? Number(p.value);
+                  novasDatas.push(brD(nova));
+                  await sb.from('bia_cobranca').update({ venc_atual: nova, valor: vFinal }).eq('asaas_payment_id', String(p.id));
+                  await sincFinanceiro(String(p.id), nova, vFinal);
+                }
               }
             } catch { /* */ }
           }
@@ -214,6 +236,7 @@ Deno.serve(async (req) => {
           const valorFinal = alt.value ?? novoValor ?? Number(cRow?.valor || 0);
           const linkAtual = alt.invoiceUrl || cRow?.invoice_url || '';
           await sb.from('bia_cobranca').update({ venc_atual: dataISO, valor: valorFinal, invoice_url: linkAtual || cRow?.invoice_url, data_prometida: dataISO, adiamentos: (cRow?.adiamentos ?? 0) + 1, status: 'adiada', proximo_lembrete_em: new Date(dataISO + 'T12:00:00-03:00').toISOString(), observacao: 'prazo aprovado pelo gestor' + (novoValor ? ' (+11%, multa zerada)' : ''), updated_at: new Date().toISOString() }).eq('asaas_payment_id', ap.asaas_payment_id);
+          await sincFinanceiro(ap.asaas_payment_id, dataISO, valorFinal);
           const linhaVal = (aposVenc && !semAcresc) ? ` Com o acréscimo de 11% pelo novo prazo, o valor fica R$ ${brMoney(valorFinal)}.` : '';
           // descobre ANTES se há próxima parcela a vencer — pra decidir a despedida.
           let prox: any = null;
