@@ -30012,7 +30012,7 @@ const FIN_SALDO_STALE_DIAS = 7;
 // com o número velho — o defeito nº 1 do handoff. Quem escreve chama esta função.
 function _finFinanceiroInvalidaCaches(){
   try{ _finRepasseAggCache = { at:0, v:null }; }catch(_){}
-  try{ _finRepAbertosCache = { at:0, v:null }; }catch(_){}
+  try{ _finRepAbertosCache = { at:0, v:null }; _finRepAbertosVoo = null; _finRepAbertosGer++; }catch(_){}
   try{ _finCaixaV2Cache = { at:0, key:'', v:null }; }catch(_){}
   try{ _finCascataCache = { at:0, m:null }; }catch(_){}
   try{ _finCaixaAggCache = { at:0, v:null }; }catch(_){}
@@ -30552,8 +30552,6 @@ async function _finCascataMetricas(force){
   const m = {
     saldoGeral, aRepassar, caixaLivre: saldoGeral - aRepassar, stale,
     contasCount: contasNoGeral.length,
-    filaCount: rep.filaCount,
-    repassesCount: rep.pendCount + rep.revisarCount,
   };
   _finCascataCache = { at: Date.now(), m };
   return m;
@@ -30946,6 +30944,13 @@ function _finAtalhosInstalar(){
 // repasse). Alimenta o badge da aba Movimentações, a custódia e o caixa livre do Caixa.
 // Sem recorte de período, de propósito: é "hoje", não "no mês".
 let _finRepAbertosCache = { at:0, v:null };
+// Promessa em voo + geração. O badge da aba e o _finCaixaV2Agg pedem os repasses ao MESMO
+// tempo no primeiro render, com o cache ainda vazio: sem compartilhar a promessa, a
+// varredura das saídas em aberto e as consultas de categoria rodavam duas vezes a cada
+// abertura do Financeiro. A geração impede que uma leitura iniciada ANTES de uma escrita
+// (invalidação) volte e reponha o número velho no cache.
+let _finRepAbertosVoo = null;
+let _finRepAbertosGer = 0;
 async function _finCatNomePorLanc(ids){
   const sb = getSupabase(); const out = {};
   for(let i = 0; i < ids.length; i += 300){
@@ -30966,6 +30971,13 @@ async function _finCatNomePorLanc(ids){
 }
 async function _finRepassesAbertos(force){
   if(!force && _finRepAbertosCache.v && (Date.now() - _finRepAbertosCache.at) < 30000) return _finRepAbertosCache.v;
+  if(!force && _finRepAbertosVoo) return _finRepAbertosVoo;
+  const p = _finRepassesAbertosLer();
+  _finRepAbertosVoo = p;
+  try{ return await p; } finally { if(_finRepAbertosVoo === p) _finRepAbertosVoo = null; }
+}
+async function _finRepassesAbertosLer(){
+  const ger = _finRepAbertosGer;
   const sb = getSupabase();
   const rows = [];
   for(let from = 0;; from += 1000){
@@ -30980,7 +30992,7 @@ async function _finRepassesAbertos(force){
   const itens = rows.filter(l => _finFluxoClassificaSaida(l, catPorLanc[l.id] || '') === 'repasse')
     .map(l => Object.assign({}, l, { valor: Math.abs(+l.valor||0), categoria: catPorLanc[l.id] || '' }));
   const v = { itens, n: itens.length, total: +itens.reduce((s,l) => s + l.valor, 0).toFixed(2), catPorLanc };
-  _finRepAbertosCache = { at: Date.now(), v };
+  if(ger === _finRepAbertosGer) _finRepAbertosCache = { at: Date.now(), v };
   return v;
 }
 // Frase-resumo do cabeçalho, por aba. Caixa: quanto sobrou e o que falta; Movimentações:
@@ -31133,31 +31145,27 @@ async function renderFinanceiroCascata(el, activeTab){
     const el = document.getElementById('fincx-header-sub');
     if(el) el.textContent = 'não foi possível ler o resumo do período';
   });
-  _finCascataMetricas().then(m=>{
-    const set=(id,txt)=>{ const e=document.getElementById(id); if(e) e.textContent=txt; };
-    // caixa livre / a repassar / saldo geral saíram do topo (vivem no corpo da aba
-    // Caixa). set() ignora id ausente, mas deixar as três linhas aqui faria parecer que
-    // o topo ainda os mostra.
-    // O aviso de saldo desatualizado acompanha o caixa livre, que agora está no corpo
-    // da aba Caixa (card escuro) — ver a frase final de renderFinVisao.
-    // Alerta de sync: "Asaas há N dias · conciliar". Só existe quando há o que anunciar —
-    // o saldo declarado de alguma conta passou de FIN_SALDO_STALE_DIAS. Nada o atualiza
-    // sozinho desde que a sync do Controlle foi desligada, e um saldo velho envenena em
-    // silêncio o caixa livre.
-    const sy = document.getElementById('fincx-sync');
-    if(sy){
-      const pior = (m.stale||[])[0];
-      sy.innerHTML = pior
-        ? `<button class="fincx-sync-btn" onclick="setFinTab('conciliacao')" title="Saldo declarado de ${escHtml(pior.nome||'')} conferido ${escHtml(_finSaldoIdadeTexto(pior.dias))}">`
-          + `<span class="pt"></span>${escHtml((pior.nome||'conta').split(' — ')[0])} há ${pior.dias} ${pior.dias===1?'dia':'dias'} · conciliar</button>`
-        : '';
-    }
-    _finSetCnt('credores', m.filaCount);
-    set('fincx-cnt-fila', m.filaCount);
-    set('fincx-cnt-repasses', m.repassesCount);
-    set('fincx-cnt-conciliacao', '—');
-    set('fincx-cnt-fechamento', '—');
-  }).catch(e=>console.warn('métricas Financeiro cascata:', e));
+  // Alerta de sync: "Asaas há N dias · conciliar". Só existe quando o saldo DECLARADO de
+  // alguma conta do saldo geral passou de FIN_SALDO_STALE_DIAS — nada o atualiza sozinho
+  // desde que a sync do Controlle foi desligada, e um saldo velho envenena em silêncio o
+  // caixa livre. Sai de finApi.loadDimensoes() (cacheado), e não mais de
+  // _finCascataMetricas(): aquela arrasta o _finRepasseAgg inteiro, ou seja, varria os
+  // repasses a cada render da shell só para desenhar esta tarja. Quem precisa de
+  // aRepassar/caixaLivre (Fluxo de caixa e _finCaixaAgg) segue chamando as métricas.
+  // Os contadores das abas que saíram da barra em 05/09 (credores, fila, repasses,
+  // conciliação, fechamento) foram removidos daqui: os ids não existem mais.
+  finApi.loadDimensoes().then(dim=>{
+    const sy = document.getElementById('fincx-sync'); if(!sy) return;
+    const pior = (dim.contas||[])
+      .filter(c => c.incluir_no_saldo_geral !== false)
+      .map(c => ({ nome: c.descricao, dias: _finSaldoIdadeDias(c) }))
+      .filter(x => x.dias != null && x.dias >= FIN_SALDO_STALE_DIAS)
+      .sort((a,b) => b.dias - a.dias)[0];
+    sy.innerHTML = pior
+      ? `<button class="fincx-sync-btn" onclick="setFinTab('conciliacao')" title="Saldo declarado de ${escHtml(pior.nome||'')} conferido ${escHtml(_finSaldoIdadeTexto(pior.dias))}">`
+        + `<span class="pt"></span>${escHtml((pior.nome||'conta').split(' — ')[0])} há ${pior.dias} ${pior.dias===1?'dia':'dias'} · conciliar</button>`
+      : '';
+  }).catch(e=>console.warn('aviso de saldo do Financeiro:', e));
 }
 
 // ── Seção "Fila" — lista de decisão. Fontes reais: fin_operacao (repasse_status
@@ -33173,8 +33181,6 @@ function _finLancCascataRender(){
       .finmv-rep:hover{background:#C9A961;color:#2A1A05;}
       .finmv-gh{background:#fff;border:1px solid rgba(10,21,48,.14);border-radius:7px;padding:5px 9px;font-size:11.5px;font-weight:600;color:#0A1530;cursor:pointer;font-family:inherit;white-space:nowrap;}
       .finmv-gh:hover{background:#FBFAF6;}
-      .finmv-lnk{background:transparent;border:none;padding:5px 4px;font-size:11.5px;font-weight:600;color:#15224A;cursor:pointer;font-family:inherit;white-space:nowrap;}
-      .finmv-lnk:hover{color:#97793A;}
       .finmv-aguard{background:transparent;border:none;padding:5px 4px;font-size:11.5px;font-weight:600;color:#97793A;white-space:nowrap;cursor:pointer;font-family:inherit;}
       .finmv-aguard:hover{text-decoration:underline;}
       .finmv-compr{font-size:11.5px;font-weight:600;color:#4A7A52;white-space:nowrap;text-decoration:none;}
