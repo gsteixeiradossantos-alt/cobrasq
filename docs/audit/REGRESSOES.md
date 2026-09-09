@@ -421,6 +421,43 @@ carregadas de propósito). E o aviso de corte tem que dizer sobre o que ele caiu
 **Corrigido:** `_finLancCascataCarregar` manda a busca ao servidor e recarrega a
 cada digitação; o aviso passa a sugerir refinar a busca quando há termo.
 
+## R-22 · Identificador `@lid` do WhatsApp no lugar do telefone (a conversa respondida continua "pendente")
+
+**O que acontece.** O WhatsApp identifica parte das conversas por
+`<numero>@lid` em vez do telefone. O callback `fromMe` do Z-API — que é como a
+**resposta manual digitada no WhatsApp Web** chega até nós — vem com esse `@lid`
+no campo `phone`. Gravado cru em `crm_mensagens_status.telefone_enviado`, ele
+não bate com o telefone da recebida, `vw_conversas_pendentes` não enxerga a
+resposta e a conversa fica na fila de pendentes para sempre. Na entrada, o mesmo
+`@lid` vira "telefone" e cria contato-fantasma, sem nome e sem caso.
+
+Descoberto em 09/09/2026: das saídas de 30 dias, **1.610 estavam sob `@lid`** e
+957 sob telefone. Quatro conversas já respondidas apareceram no levantamento de
+pendências como se ninguém tivesse retornado.
+
+**Teste (SQL).** Não pode sobrar saída recente com `@lid` sem par resolvido:
+```sql
+select count(*) from public.crm_mensagens_status
+ where raw_payload ->> 'phone' like '%@lid' and lid is null
+   and evento_em >= now() - interval '7 days';
+```
+E nenhuma recebida pode ter "telefone" fora do formato BR:
+```sql
+select count(*) from public.crm_mensagens_recebidas
+ where telefone !~ '^55[0-9]{10,11}$';
+```
+
+**Estado-correto.** `wa_lid_map` traduz `@lid` → telefone, alimentada pelo
+gatilho `trg_wa_lid_map` sobre `crm_mensagens_recebidas` (que trazem `phone`
+real e `chatLid` no mesmo payload), e `zapi-recebidas` consulta o mapa antes de
+gravar, na saída e na entrada. Migration `20260909_wa_lid_map.sql`.
+
+**A regra, para além deste caso.** Identificador de terceiro não entra em coluna
+de chave de negócio sem tradução. Se o provedor pode mandar dois formatos no
+mesmo campo, a normalização é obrigatória na borda — e o formato aceito precisa
+de validação (aqui, `^55[0-9]{10,11}$`), senão o valor estranho vira um
+"contato" novo e o cruzamento falha em silêncio.
+
 ---
 
 ### Pendências de evolução (não-regressão — rever a cada vistoria)

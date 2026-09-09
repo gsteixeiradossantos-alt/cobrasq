@@ -6,6 +6,8 @@
 // Idempotente por message_id. Ignora grupos e callbacks de status. Mensagens
 // nossas (fromMe) — inclusive resposta MANUAL no celular — são gravadas como
 // outbound em crm_mensagens_status pra tirar a conversa da fila de pendentes.
+// Quando o Z-API manda "<numero>@lid" no lugar do telefone, traduz pelo
+// wa_lid_map antes de gravar (senão a saída manual não bate com a recebida).
 // Resolve o caso (devedor) pelo telefone via RPC.
 //
 // verify_jwt: false (Z-API não tem JWT do Supabase).
@@ -81,7 +83,8 @@ Deno.serve(async (req) => {
 
   const messageId = body?.messageId || body?.id || body?.zaapId || null;
   // Em mensagem nossa (fromMe) o `phone` é o DESTINATÁRIO; em recebida é o remetente.
-  const telefone = normalizarTelefone(body?.phone || body?.to || body?.from || '');
+  const phoneBruto = String(body?.phone || body?.to || body?.from || '');
+  let telefone = normalizarTelefone(phoneBruto);
   if (!messageId || !telefone) {
     return new Response(JSON.stringify({ ok: true, ignored: 'sem messageId/telefone' }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   }
@@ -90,6 +93,24 @@ Deno.serve(async (req) => {
     Deno.env.get('SUPABASE_URL')!,
     Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
   );
+
+  // O WhatsApp identifica parte das conversas por "<numero>@lid" em vez do
+  // telefone, e é assim que chega a MAIORIA dos callbacks fromMe (a resposta
+  // manual digitada no WhatsApp Web). Gravado cru, o @lid não bate com a
+  // recebida e a conversa fica presa em vw_conversas_pendentes mesmo já
+  // respondida; na entrada, vira contato-fantasma. wa_lid_map traduz — ele é
+  // alimentado pelas próprias recebidas (trigger trg_wa_lid_map), que trazem
+  // `phone` real e `chatLid` no mesmo payload. Best-effort: sem par conhecido,
+  // mantém o comportamento antigo.
+  const lid: string | null = phoneBruto.includes('@lid')
+    ? String(body?.chatLid || phoneBruto)
+    : null;
+  if (lid) {
+    try {
+      const { data: par } = await sb.from('wa_lid_map').select('telefone').eq('lid', lid).maybeSingle();
+      if (par?.telefone) telefone = par.telefone;
+    } catch { /* tabela ainda não migrada -> comportamento antigo */ }
+  }
 
   // Resolve o caso (devedor) pelo telefone (últimos 8 dígitos). Best-effort.
   let casoId: string | null = null;
@@ -108,6 +129,7 @@ Deno.serve(async (req) => {
       caso_id: casoId,
       message_id: String(messageId),
       telefone_enviado: telefone,
+      lid,
       status: 'sent',
       evento_em: new Date().toISOString(),
       raw_payload: body
