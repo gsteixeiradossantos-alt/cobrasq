@@ -72,4 +72,14 @@ async function resolverJid(base, headers, telefone) {
   return r;
 }
 
-module.exports = { comDDI55, ehIdentificadorNaoTelefone, variantesComEsem9, resolverJid };
+// Mesmo assinante? Compara pelos últimos 8 dígitos, que não mudam entre os
+// formatos do mesmo número (com/sem nono dígito, com/sem DDI). Distingue "outro
+// formato do mesmo telefone" de "telefone trocado".
+function mesmoNumero(a, b) {
+  const sa = String(a == null ? '' : a).replace(/\D/g, '');
+  const sb = String(b == null ? '' : b).replace(/\D/g, '');
+  if (sa.length < 8 || sb.length < 8) return false;
+  return sa.slice(-8) === sb.slice(-8);
+}
+
+module.exports = { comDDI55, ehIdentificadorNaoTelefone, variantesComEsem9, resolverJid, mesmoNumero };

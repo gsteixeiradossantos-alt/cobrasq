@@ -5,6 +5,7 @@
 // Auth: EXIGE CRON_INVOKE_SECRET, sempre. Ver o bloco de autenticação abaixo.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
+import { mesmoNumero } from '../_shared/telefone-jid.ts';
 
 function json(o: unknown, status = 200) {
   return new Response(JSON.stringify(o), { status, headers: { 'Content-Type': 'application/json' } });
@@ -114,12 +115,31 @@ Deno.serve(async (req) => {
     }));
   }
 
-  // quais já existem (pra preservar estado)
+  // quais já existem (pra preservar estado) — e com que telefone, para não
+  // desfazer a canonização (ver telefonePreservado abaixo).
   const payIds = pays.map(p => p.id);
   const jaExiste = new Set<string>();
+  const telSalvo = new Map<string, string>();
   for (let i = 0; i < payIds.length; i += 100) {
-    const { data } = await sb.from('bia_cobranca').select('asaas_payment_id').in('asaas_payment_id', payIds.slice(i, i + 100));
-    (data || []).forEach((r: any) => jaExiste.add(r.asaas_payment_id));
+    const { data } = await sb.from('bia_cobranca').select('asaas_payment_id, telefone').in('asaas_payment_id', payIds.slice(i, i + 100));
+    (data || []).forEach((r: any) => {
+      jaExiste.add(r.asaas_payment_id);
+      if (r.telefone) telSalvo.set(r.asaas_payment_id, String(r.telefone));
+    });
+  }
+
+  // O Asaas guarda o celular COM o nono dígito; o WhatsApp conhece boa parte
+  // desses contatos SEM ele, e é esse JID que fica gravado aqui depois que a
+  // régua o resolve (ou pelo backfill de 09/09/2026). Sobrescrever com o
+  // mobilePhone cru a cada sync desfazia essa correção a cada rodada.
+  //
+  // Mesmo número (últimos 8 dígitos iguais) => mantém o que já está salvo, que é
+  // o formato que entrega. Número REALMENTE trocado no Asaas (sufixo diferente)
+  // => o novo vale, senão a régua ficaria presa no telefone antigo do devedor.
+  function telefonePreservado(payId: string, telAsaas: string): string | null {
+    const salvo = telSalvo.get(payId) || '';
+    if (salvo && mesmoNumero(salvo, telAsaas)) return salvo;
+    return telAsaas || null;
   }
 
   const agora = new Date().toISOString();
@@ -128,7 +148,7 @@ Deno.serve(async (req) => {
     const c = cust[p.customer] || { nome: '', tel: '' };
     if (jaExiste.has(p.id)) {
       atualizadas.push(sb.from('bia_cobranca').update({
-        asaas_customer_id: p.customer, telefone: c.tel || null, nome: c.nome || null,
+        asaas_customer_id: p.customer, telefone: telefonePreservado(p.id, c.tel), nome: c.nome || null,
         valor: p.value, invoice_url: p.invoiceUrl || null, synced_em: agora, updated_at: agora,
       }).eq('asaas_payment_id', p.id));
     } else {
