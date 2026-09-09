@@ -87,7 +87,14 @@ end $$;
 -- ── 4. backfill ──────────────────────────────────────────────────────────────
 -- O trigger só dispara em insert/update; sem isto as cobranças já existentes
 -- ficariam com a etapa antiga até alguém tocá-las.
+--
+-- `set status = status` e não `updated_at`: o trigger é
+-- `BEFORE INSERT OR UPDATE **OF status, numero_processo**`, então update que não
+-- toca nenhuma dessas duas colunas NÃO o dispara. A primeira aplicação desta
+-- migração, em 09/09/2026, usava `updated_at` e passou sem erro nenhum deixando
+-- as 37 linhas na etapa velha — silêncio idêntico ao de um backfill que
+-- funcionou. Conferir a contagem depois de aplicar, sempre.
 update public.cobrancas
-   set updated_at = updated_at
+   set status = status
  where status ~* 'reajuizar'
    and coalesce(etapa,'') is distinct from 'reajuizar';
