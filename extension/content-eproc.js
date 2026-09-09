@@ -20,9 +20,47 @@
   // processado 2× (duplo runCentral, duplo protocolo). Ver auditoria CA1/M1.
   if (window.__cobrasqEproc) return;
   window.__cobrasqEproc = true;
-  // Guarda de hostname: se a aba do tribunal foi navegada para outro site e a Central
-  // reinjeta aqui, não rodar (evita "pausas" absurdas em página alheia). Ver CM3.
-  if (!/\.tjpr\.jus\.br$/.test(location.hostname)) return;
+  // Guarda de hostname: só roda em domínio do eproc (multi-estado: eprocNg.tj<UF>.jus.br
+  // ou eproc.trf<N>.jus.br). Se a aba foi navegada p/ outro site e a Central reinjeta
+  // aqui, não roda (evita "pausas" absurdas em página alheia). Ver CM3.
+  if (!/^eproc[\dg]*\.[\w.-]+\.jus\.br$/i.test(location.hostname)) return;
+
+  // ── Botão de SUPORTE: copia o HTML desta página (+ iframes de mesma origem)
+  // pro clipboard, pro usuário colar no chat. Sempre visível, independe da fila.
+  function copiarTextoSuporte(txt) {
+    return (navigator.clipboard ? navigator.clipboard.writeText(txt).then(() => true).catch(() => false) : Promise.resolve(false))
+      .then(ok => {
+        if (ok) return true;
+        const ta = document.createElement('textarea'); ta.value = txt;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0;';
+        (document.body || document.documentElement).appendChild(ta); ta.focus(); ta.select();
+        let r = false; try { r = document.execCommand('copy'); } catch (_) {} ta.remove(); return r;
+      });
+  }
+  function htmlDaPaginaSuporte() {
+    let html = '<!-- ===== PAGINA: ' + location.href + ' ===== -->\n' + document.documentElement.outerHTML;
+    for (const f of Array.from(document.querySelectorAll('iframe'))) {
+      try { const d = f.contentDocument; if (d && d.documentElement) html += '\n\n<!-- ===== IFRAME: ' + (f.src || f.id || '(sem src)') + ' ===== -->\n' + d.documentElement.outerHTML; } catch (_) { /* iframe de outra origem */ }
+    }
+    return html;
+  }
+  function botaoCapturaSuporte() {
+    if (window.top !== window) return;                     // só no frame principal
+    if (document.getElementById('cobrasq-cap-html')) return;
+    const b = document.createElement('button');
+    b.id = 'cobrasq-cap-html'; b.textContent = '📋 HTML';
+    b.title = 'Copiar o HTML desta página para enviar ao suporte (Claude)';
+    b.style.cssText = 'position:fixed;bottom:16px;left:16px;z-index:2147483647;background:#0c2340;color:#fff;border:0;border-radius:8px;padding:8px 12px;font:12px system-ui,Arial,sans-serif;cursor:pointer;opacity:.8;box-shadow:0 4px 14px rgba(0,0,0,.2);';
+    b.addEventListener('click', async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const html = htmlDaPaginaSuporte();
+      const ok = await copiarTextoSuporte(html);
+      b.textContent = ok ? ('✅ copiado (' + Math.round(html.length / 1024) + ' KB) — cole no chat') : '⚠ não copiou — use o F12';
+      setTimeout(() => { b.textContent = '📋 HTML'; }, 5000);
+    }, true);
+    (document.body || document.documentElement).appendChild(b);
+  }
+  try { botaoCapturaSuporte(); } catch (_) {}
   const SEL = window.EPROC_SEL || {};
   const TXT = window.EPROC_TXT || {};
   const DIST = window.EPROC_DIST || {};
@@ -475,6 +513,22 @@
       const etapa = detectarEtapa();
       try {
       if (etapa === 6) { // sucesso — processa mesmo se estava pausado (1º caso validado à mão)
+        // SUCESSO REQUENTADO (auditoria, CRÍTICO): a tela "Processo distribuído" pode
+        // ser SOBRA do caso anterior (btnNovaPeticao caiu no vazio, ou a aba estava
+        // parada numa tela de sucesso antiga ao iniciar o lote). Só é sucesso DESTE
+        // caso se ele passou pela etapa 5 (c.chegouE5). Senão: sai da tela sem
+        // reportar OK — reportar aqui marcaria o caso como protocolado com número
+        // alheio, SEM petição, e isso cascatearia pelo lote.
+        if (!c.chegouE5) {
+          const nova0 = document.querySelector('#btnNovaPeticao');
+          if (nova0) {
+            progresso(c, 'tela de sucesso ANTIGA na aba — abrindo Nova Petição pra começar este caso…');
+            clicar(nova0);
+            setTimeout(() => runCentral().catch(() => {}), 2500);
+            return;
+          }
+          return pausar(c, 'a aba está numa tela de "Processo distribuído" ANTIGA (de outro caso) e não achei "Nova Petição" — navegue você até a distribuição e clique Continuar.');
+        }
         const elNum = qFirst(IDS.numeroSucesso) || qFirst(SEL.resultadoProtocolo);
         const numero = elNum ? (elNum.textContent || '').trim() : '';
         await casoLimpar();
@@ -489,6 +543,15 @@
         else { setBody(msg('⏸ <b>Pausado:</b> ' + (c.motivo || ''), '#fff3bf') + msg('Use os botões na aba da Central.', '#e7f5ff')); return; }
       }
       if (temLogin()) { await pausar(c, 'login'); setBody(msg('Faça o <b>login no eproc</b> — a fila continua sozinha depois.', '#fff3bf')); return; }
+      // Tela de CADASTRO de parte nova (pessoa_cadastrar) — tratada ANTES do despacho
+      // por etapa (a URL contém processo_cadastrar_3 e poderia ser confundida com a
+      // etapa 3). Preenche 1x; se já tentou e continua aberta, pausa.
+      if (c.parte && ehTelaCadastroPessoa()) {
+        const pc = [...(c.dados.requerentes || []), ...(c.dados.requeridos || [])]
+          .find(x => x && x.doc && String(x.doc).replace(/\D/g, '') === c.parte.doc);
+        if (!c.parte.cadastroTentado) return await preencherCadastroPessoa(c, pc, c.parte.chave === 'requerentes');
+        return pausar(c, 'a tela de cadastro ainda está aberta — complete o que faltar (ex.: <b>Data de Nascimento</b>), clique <b>Salvar</b> e depois Continuar.' + fichaParte(pc || { doc: c.parte.doc }));
+      }
       if (etapa === 1) return await autoE1(c);
       if (etapa === 2) return await autoE2(c);
       if (etapa === 3) return await autoPartes(c, 'requerentes', 'Etapa 3/5 — autores');
@@ -587,8 +650,14 @@
       if (!ok) return pausar(c, 'Etapa 2: não consegui incluir o assunto (' + diag.join(' → ') + '; a tabela "Assunto Principal" segue vazia) — inclua manualmente e Continuar');
     }
     const comp = qFirst(IDS.competencia);
-    if (comp && d.competencia && comp.value === '-1' && !setSelectByText(comp, d.competencia))
-      return pausar(c, 'Etapa 2: competência "' + d.competencia + '" não está na lista', comp);
+    // Ajusta a competência SEMPRE que o caso tiver uma (não só quando o select está em
+    // -1): o eproc pode pré-selecionar a última usada e o caso iria pra competência
+    // errada em silêncio (auditoria). Se a desejada não existir na lista, pausa.
+    if (comp && d.competencia) {
+      const jaCerta = norm((comp.selectedOptions && comp.selectedOptions[0] && comp.selectedOptions[0].textContent) || '') === norm(d.competencia);
+      if (!jaCerta && !setSelectByText(comp, d.competencia))
+        return pausar(c, 'Etapa 2: competência "' + d.competencia + '" não está na lista', comp);
+    }
     const btn = document.querySelector('button[name="sbmProcessoEtapa2"]');
     if (!btn) return pausar(c, 'Etapa 2: botão Próxima não encontrado');
     progresso(c, 'Etapa 2 ok → Próxima');
@@ -629,7 +698,141 @@
     return Array.from(document.querySelectorAll('.ui-dialog, #divInfraDialog, .modal.show'))
       .find(el => visivel(el) && el.offsetHeight > 60) || null;
   }
+  // ── cadastro de parte NOVA (tela pessoa_cadastrar) ──────────────────────────
+  // Contato PADRÃO do autor (definido pelo usuário): e-mail + celular fixos.
+  const AUTOR_EMAIL = 'adv.teixeiraeazzolin@gmail.com';
+  const AUTOR_CELULAR = '46988226533';
+  const UFS_BR = ['AC', 'AL', 'AM', 'AP', 'BA', 'CE', 'DF', 'ES', 'GO', 'MA', 'MG', 'MS', 'MT', 'PA', 'PB', 'PE', 'PI', 'PR', 'RJ', 'RN', 'RO', 'RR', 'RS', 'SC', 'SE', 'SP', 'TO'];
+  // Deduz o sexo pelo 1º nome (heurística — o usuário aceitou o risco). Dicionário
+  // de exceções + regra "termina em A → F, senão M".
+  // Femininos que NÃO terminam em "a" (a heurística "termina em a → F" erraria pra M).
+  // É a lista mais importante: sem ela, Nicole/Adriane/Cléo etc. iam como masculino.
+  const NOMES_F = new Set(('ana,alice,beatriz,bruna,carla,carmen,carolina,caroline,carol,cecilia,clara,cristina,cristiane,debora,eliane,elis,elaine,ester,esther,fatima,gabriele,gabrielle,helena,ines,isabel,isabele,isabelle,isis,iris,jaqueline,jennifer,jasmin,yasmin,karen,karin,kelly,lais,liz,luz,luciane,juliane,daniele,madalena,margareth,marlene,marilene,maria,marli,mercedes,michele,michelle,miriam,monique,nicole,noemi,adriane,agnes,cleo,denise,doris,heloise,rebeca,raquel,rute,ruth,rosane,rosangela,sol,solange,soraia,sirlene,tais,thais,viviane,vitoria,evelyn,evelin,sharon,eloa,heloisa,ivone,ione').split(','));
+  // Masculinos de risco: os que terminam em "a" (heurística os mandaria pra F) + comuns.
+  const NOMES_M = new Set(('andre,benjamin,caua,caue,cesar,darlei,davi,elias,emerson,ezequiel,gilmar,hamilton,isaac,ivan,jean,joel,jonas,josue,luca,moises,nicolas,noe,ramon,vinicius,wallace,washington,wesley,joao,jose,antonio,francisco,carlos,paulo,pedro,lucas,luiz,luis,marcos,marcelo,rafael,daniel,rodrigo,felipe,bruno,eduardo,gustavo,leonardo,matheus,mateus,thiago,tiago,guilherme,henrique,fabio,fernando,ricardo,roberto,sergio,alexandre,diego,douglas,wagner,anderson,wilson,nelson,valdir,valter,walter,gabriel,samuel,miguel,arthur,bernardo,heitor,enzo,lorenzo,vicente,otavio,murilo,caio,juca').split(','));
+  function deduzirSexo(nome) {
+    const p = norm(String(nome || '').trim().split(/\s+/)[0] || '');
+    if (!p) return null;
+    if (NOMES_F.has(p)) return 'F';
+    if (NOMES_M.has(p)) return 'M';
+    return /a$/.test(p) ? 'F' : 'M';
+  }
+  // Extrai CEP, número e UF de um endereço em texto (fallback quando não há campos
+  // estruturados vindos da IA).
+  function parseEndereco(str) {
+    const s = String(str || ''); const out = {};
+    // CEP: NÃO casar "8 dígitos quaisquer" (um CPF/telefone sem máscara no texto viraria
+    // CEP e dispararia a busca que sobrescreve o endereço). Aceita só: "CEP 12345-678",
+    // "CEP: 12345678" ou o formato pontuado 12345-678 (com o hífen). Sem hífen, exige a
+    // palavra CEP por perto.
+    const cep = s.match(/cep[:\s]*?(\d{5})-?(\d{3})\b/i) || s.match(/\b(\d{5})-(\d{3})\b/);
+    if (cep) out.cep = cep[1] + '-' + cep[2];
+    const num = s.match(/n[ºo°.]?\s*(\d{1,6})\b/i) || s.match(/,\s*(\d{1,6})\b/); if (num) out.numero = num[1];
+    // UF: prefere o padrão "cidade/UF" ou "cidade - UF" (o jeito que a qualificação
+    // escreve) — o .pop() genérico pegava "AP" de "ap. 32" (apartamento) como Amapá.
+    const su = s.toUpperCase();
+    const ufSep = (su.match(/[\/\-–]\s*([A-Z]{2})\b/g) || [])
+      .map(m => m.replace(/[^A-Z]/g, '')).filter(u => UFS_BR.includes(u)).pop();
+    const uf = ufSep || (su.match(/\b([A-Z]{2})\b/g) || []).filter(u => UFS_BR.includes(u)).pop();
+    if (uf) out.uf = uf;
+    return out;
+  }
+  function setSelectValor(sel, valor) { // set direto por value (ex.: 'F'/'M'/'PR')
+    if (!sel || valor == null || valor === '') return false;
+    const ok = Array.from(sel.options || []).some(o => o.value === valor);
+    if (!ok) return false;
+    sel.value = valor; sel.dispatchEvent(new Event('change', { bubbles: true })); return true;
+  }
+  function ehTelaCadastroPessoa() {
+    return !!document.getElementById('frmPessoaCadastro') || /pessoa_cadastrar/i.test(location.href || '');
+  }
+  // Preenche a tela "Cadastro de Pessoa" (PF/PJ) com o que a IA extraiu + padrões, e
+  // salva. Autor: contato fixo do escritório. Réu PF: sexo (deduzido) + etnia "não
+  // informada". Campos que a petição não traz (ex.: data de nascimento) ficam para o
+  // humano — se o eproc recusar o Salvar, pausamos com instrução.
+  async function preencherCadastroPessoa(c, parte, ehAutor) {
+    await new Promise(r => setTimeout(r, 1200)); // deixa o form/bundles assentarem
+    const doc = String((parte && parte.doc) || (c.parte && c.parte.doc) || '').replace(/\D/g, '');
+    const ehPF = doc.length === 11;
+    const p = parte || {};
+    progresso(c, 'cadastrando ' + (p.nome || doc) + ' no eproc…');
+    c.parte = { ...(c.parte || {}), doc, cadastroTentado: true }; await casoSalvar(c);
+
+    // Nome (só se o campo existir, visível, vazio e habilitado — PJ costuma vir travado
+    // e pré-preenchido pela Receita).
+    const txtNome = document.getElementById('txtNome');
+    if (txtNome && visivel(txtNome) && !txtNome.disabled && !txtNome.value && p.nome) setInput(txtNome, p.nome);
+    const txtFant = document.getElementById('txtNomeFantasia');
+    if (txtFant && visivel(txtFant) && !txtFant.value && p.nome) setInput(txtFant, p.nome);
+
+    // PF: sexo + etnia + estado civil (mínimos p/ o form aceitar).
+    if (ehPF) {
+      // Normaliza o sexo vindo da IA ("Feminino"/"masc"/"f") para o value F/M do select;
+      // texto não-normalizável cai na dedução pelo nome (antes: setSelectValor falhava
+      // em silêncio e o Salvar era rejeitado por sexo vazio).
+      const sxRaw = norm(String(p.sexo || ''));
+      const sx = (/^f/.test(sxRaw) ? 'F' : /^m/.test(sxRaw) ? 'M' : null) || deduzirSexo(p.nome);
+      setSelectValor(document.getElementById('selSexo'), sx);
+      const selEtnia = document.getElementById('selEtnia') || byAnyLabel(['cor/raca', 'cor / raca', 'raca/cor', 'etnia', 'raca', 'cor']);
+      if (selEtnia && selEtnia.tagName === 'SELECT') (setSelectByText(selEtnia, 'nao informad') || setSelectByText(selEtnia, 'nao declarad'));
+      const selEC = document.getElementById('selEstCivil');
+      if (selEC && (!selEC.value || selEC.value === 'null')) setSelectByText(selEC, 'nao informado');
+    }
+
+    // Endereço: usa campos estruturados da IA se houver; senão, parseia do texto.
+    const pe = parseEndereco(p.endereco);
+    const cep = (p.cep || pe.cep || '').replace(/\D/g, '');
+    if (!document.querySelector('#tblEnderecos tbody tr')) {
+      const txtCep = document.getElementById('txtCep');
+      if (txtCep && cep) {
+        setInput(txtCep, cep.replace(/(\d{5})(\d{3})/, '$1-$2'));
+        const busca = document.getElementById('txtImage');
+        if (busca) { clicar(busca); await esperar(() => (document.getElementById('txtEndLog') || {}).value, 4000); }
+      }
+      const set = (id, v) => { const el = document.getElementById(id); if (el && v && !el.value) setInput(el, v); };
+      set('txtEndLog', p.logradouro || (!cep ? (p.endereco || '').slice(0, 50) : ''));
+      set('txtEndNum', p.numero || pe.numero);
+      set('txtEndComp', p.complemento);
+      set('txtBairro', p.bairro);
+      setSelectValor(document.getElementById('selUf'), p.uf || pe.uf);
+      const selLoc = document.getElementById('selLocalidade');
+      if (selLoc && p.cidade) { await esperar(() => selLoc.options.length > 1, 3000); setSelectByText(selLoc, p.cidade); }
+      const incEnd = document.getElementById('btnIncEnd');
+      if (incEnd) { clicar(incEnd); await esperar(() => document.querySelector('#tblEnderecos tbody tr'), 4000); }
+    }
+
+    // Contatos: autor = e-mail + celular FIXOS; réu = o que a IA extraiu (se houver).
+    const contatos = [];
+    if (ehAutor) { contatos.push(['2', AUTOR_EMAIL], ['3', AUTOR_CELULAR]); }
+    else { if (p.email) contatos.push(['2', p.email]); const cel = (p.celular || p.telefone || '').toString().replace(/\D/g, ''); if (cel) contatos.push(['3', cel]); }
+    const jaContatos = document.querySelectorAll('#tblContatos tbody tr').length;
+    if (!jaContatos) {
+      for (const [tipo, valor] of contatos) {
+        const selTC = document.getElementById('selTipoCont'), txtC = document.getElementById('txtContato');
+        if (!selTC || !txtC) break;
+        setSelectValor(selTC, tipo); setInput(txtC, valor);
+        const incCont = document.getElementById('btnIncCont');
+        if (incCont) { clicar(incCont); await new Promise(r => setTimeout(r, 900)); }
+      }
+    }
+
+    // Salvar (submeterFrmSalvar). Marca jaCadastrado ANTES de navegar, p/ a lista de
+    // partes re-consultar (e não reabrir "Novo" em loop).
+    const salvar = document.querySelector('button[name="sbmSalvarPessoa"]') || acharBotao(['salvar']);
+    c.parte = { ...c.parte, jaCadastrado: true }; await casoSalvar(c);
+    if (!salvar) return pausar(c, 'cadastro: não achei o botão <b>Salvar</b> — confira e salve você; depois Continuar.' + fichaParte(p));
+    progresso(c, 'salvando o cadastro de ' + (p.nome || doc) + '…');
+    clicar(salvar);
+    const saiu = await esperar(() => !ehTelaCadastroPessoa() || /processo_cadastrar_3/i.test(location.href), 6000);
+    if (!saiu) {
+      return pausar(c, 'preenchi o cadastro de <b>' + escHtml(p.nome || doc) + '</b>, mas o eproc não salvou — deve faltar um campo obrigatório que a petição não traz (ex.: <b>Data de Nascimento</b>). Complete o que estiver destacado, clique <b>Salvar</b> e depois Continuar.' + fichaParte(p));
+    }
+  }
+
   async function autoPartes(c, chave, rot) {
+    // Voltou do cadastro (pessoa recém-salva): limpa o estado p/ RE-CONSULTAR a pessoa
+    // (agora existente) e incluí-la — sem reabrir "Novo".
+    if (c.parte && c.parte.jaCadastrado && c.parte.chave === chave) { c.parte = null; await casoSalvar(c); }
     progresso(c, rot + '…');
     // Os bundles JS do eproc carregam DEPOIS do content script; clique cedo demais em
     // botão de onclick inline cai no vazio (visto ao vivo no Filtrar e no Próxima).
@@ -640,10 +843,26 @@
     // Tabela vazia e nada para incluir = a IA não extraiu essa ponta. NUNCA avançar assim.
     if (!lista.length && !presentes.length)
       return pausar(c, rot + ': nenhuma parte com CPF/CNPJ nos dados do caso — a IA não extraiu. Inclua manualmente aqui (Consultar/Novo) e clique Continuar, ou corrija na revisão da Central e recomece o caso.' + fichaParte(semDoc[0]));
-    const falta = lista.find(p => !presentes.includes(String(p.doc).replace(/\D/g, '')));
+    // Partes CONFIRMADAS pelo humano (pausa anti-duplicata + Continuar = "ela já está
+    // na tabela, o CPF só está mascarado") não voltam a contar como faltantes.
+    const confirmadas = c.partesConfirmadas || [];
+    const falta = lista.find(p => {
+      const d = String(p.doc).replace(/\D/g, '');
+      return !presentes.includes(d) && !confirmadas.includes(d);
+    });
     if (!falta) {
-      if (semDoc.length && !presentes.length)
-        return pausar(c, rot + ': "' + semDoc[0].nome + '" está sem CPF/CNPJ — inclua manualmente e Continuar' + fichaParte(semDoc[0]));
+      // Parte com NOME mas SEM CPF/CNPJ não é incluída automaticamente. ANTES só avisava
+      // quando a tabela estava vazia — se já houvesse OUTRA parte incluída, a sem-doc era
+      // silenciosamente DERRUBADA e o eproc avançava sem ela. Agora avisa SEMPRE que houver
+      // parte sem doc, uma única vez por polo (flag evita loop depois do seu Continuar).
+      if (semDoc.length) {
+        c.semDocAvisado = c.semDocAvisado || {};
+        if (!c.semDocAvisado[chave]) {
+          c.semDocAvisado[chave] = true; await casoSalvar(c);
+          const nomes = semDoc.map(p => p.nome).filter(Boolean).join(', ');
+          return pausar(c, rot + ': parte(s) <b>sem CPF/CNPJ</b>: ' + escHtml(nomes) + ' — inclua manualmente (Consultar/Novo) e clique Continuar. Se realmente não houver documento, é só clicar <b>Continuar</b> de novo para seguir sem ela.' + fichaParte(semDoc[0]));
+        }
+      }
       const btn = document.querySelector('#btnProxima');
       if (!btn) return pausar(c, rot + ': botão Próxima não encontrado');
       // O "Próxima" valida endereço/contato das partes (hdnSinCadastroEnderecoObrigatorio=S):
@@ -676,16 +895,43 @@
         progresso(c, rot + ': incluindo ' + (falta.nome || doc) + '…');
         clicar(incluir);
         const ok = await esperar(() => docsDaTabelaPartes().includes(doc), 10000);
-        if (ok) { c.parte = null; await casoSalvar(c); return runCentral(); }
+        // ATENÇÃO (auditoria): chamar runCentral() DIRETO aqui é no-op — o mutex
+        // _rodandoEproc ainda está travado pela passada atual. Agenda pra depois.
+        if (ok) { c.parte = null; await casoSalvar(c); setTimeout(() => runCentral().catch(() => {}), 400); return; }
       }
       const dlgParte = dialogoAberto();
       if (dlgParte) return pausar(c, rot + ': o eproc abriu uma janela — complete-a (endereço/contato?) e clique Continuar.' + fichaParte(falta));
+      // ANTI-DUPLICATA: se JÁ clicamos "Incluir" (o botão existia → a pessoa EXISTE no
+      // eproc) mas o doc não apareceu na tabela, NÃO abrir "Novo" (criaria cadastro
+      // duplicado). Costuma ser CPF mascarado na tabela (`***.456.789-01` → 8 dígitos,
+      // não casa 11/14) ou inclusão mais lenta que os 10s. Entrega ao humano.
+      if (c.parte && c.parte.incluiu) {
+        // 2ª passada após o aviso (você clicou Continuar) = CONFIRMAÇÃO de que a parte
+        // está na tabela (CPF mascarado não casa 11/14 dígitos) → marca como confirmada
+        // e segue. Sem isto, o Continuar re-pausava com a mesma mensagem para sempre.
+        if (c.parte.avisadoInclusao) {
+          c.partesConfirmadas = [...(c.partesConfirmadas || []), doc];
+          c.parte = null; await casoSalvar(c);
+          progresso(c, rot + ': ok, considerando "' + (falta.nome || doc) + '" como incluída (confirmação sua) — seguindo…');
+          setTimeout(() => runCentral().catch(() => {}), 400);
+          return;
+        }
+        c.parte.avisadoInclusao = true; await casoSalvar(c);
+        return pausar(c, rot + ': cliquei em <b>Incluir</b> "' + escHtml(falta.nome || doc) + '" mas não confirmei na tabela (o CPF pode estar mascarado). <b>Verifique se a parte já consta</b> — se sim, clique Continuar (vou considerá-la incluída); se faltar, inclua-a você e depois Continuar. NÃO use "Novo" pra não duplicar.' + fichaParte(falta));
+      }
       // Consulta não devolveu Salvar/Incluir: pessoa sem cadastro no eproc.
       // O caminho é o botão "Novo" (ao lado do Consultar) → formulário de cadastro
       // com endereço/contato obrigatórios. Destacamos e entregamos a ficha pronta.
       const novo = document.querySelector('#btnNovo');
       if (novo && visivel(novo)) {
-        return pausar(c, rot + ': "' + (falta.nome || doc) + '" parece NÃO ter cadastro no eproc. Clique em <b>Novo</b> (destacado), preencha o cadastro (endereço e contato são obrigatórios), inclua a parte e clique Continuar.' + fichaParte(falta), novo);
+        // Loop-guard: no máx. 1 tentativa de cadastro automático por parte.
+        if (c.parte && c.parte.cadastroTentado) {
+          return pausar(c, rot + ': tentei cadastrar "' + escHtml(falta.nome || doc) + '" mas o eproc ainda não incluiu — confira o cadastro (deve faltar um campo obrigatório), inclua a parte e clique Continuar.' + fichaParte(falta), novo);
+        }
+        c.parte = { ...(c.parte || {}), doc, chave, cadastroTentado: false }; await casoSalvar(c);
+        progresso(c, rot + ': "' + (falta.nome || doc) + '" sem cadastro — abrindo o cadastro (Novo)…');
+        clicar(novo); // navega para pessoa_cadastrar; o preenchimento roda lá
+        return;
       }
       return pausar(c, rot + ': não consegui incluir ' + (falta.nome || doc) + ' (pode exigir endereço/cadastro novo) — inclua manualmente e clique Continuar' + fichaParte(falta));
     }
@@ -695,7 +941,7 @@
     const docEl = qFirst(IDS.docParte);
     if (!docEl) return pausar(c, rot + ': campo CPF/CNPJ não encontrado');
     setInput(docEl, falta.doc);
-    c.parte = { doc }; await casoSalvar(c);
+    c.parte = { doc, chave }; await casoSalvar(c);
     const consultar = document.querySelector('#btnConsultar') || qFirst(IDS.consultar);
     if (!consultar) return pausar(c, rot + ': botão Consultar não encontrado');
     progresso(c, rot + ': consultando ' + (falta.nome || doc) + '…');
@@ -704,7 +950,7 @@
     for (let tent = 0; tent < 3; tent++) {
       clicar(consultar);
       const respondeu = await esperar(() => acharBotaoParte(['salvar']) || acharBotaoParte(['incluir']) || dialogoAberto(), 6000);
-      if (respondeu) return runCentral();
+      if (respondeu) { setTimeout(() => runCentral().catch(() => {}), 400); return; } // mutex: agendar, não chamar direto
       progresso(c, rot + ': Consultar não respondeu, tentando de novo… (' + (tent + 2) + '/3)');
     }
     return pausar(c, rot + ': o botão Consultar não respondeu — consulte o CPF/CNPJ manualmente e clique Continuar' + fichaParte(falta), consultar);
@@ -722,6 +968,9 @@
   }
   async function autoE5(c) {
     progresso(c, 'Etapa 5/5 — documentos…');
+    // Marca que ESTE caso chegou à etapa 5 — é o vínculo que autoriza a etapa 6 a ser
+    // tratada como sucesso DESTE caso (guarda contra "tela de sucesso requentada").
+    if (!c.chegouE5) { c.chegouE5 = true; await casoSalvar(c); }
     // Padrão do escritório: "Opção por Juízo 100% Digital" sempre marcada
     // (checkbox #chkJuizoDigital desta tela; click dispara o onchange da página).
     const jd = document.querySelector('#chkJuizoDigital');
@@ -730,9 +979,27 @@
     const naTabela = () => document.querySelectorAll('#tbDocumentosCadastradas tbody tr').length;
     if (naTabela() < n) {
       if (uploadsProntos() === 0) {
-        const input = qFirst(IDS.anexo);
-        if (!input) return pausar(c, 'Etapa 5: uploader não encontrado');
+        // ANTI-DUPLICATA (auditoria): se JÁ anexamos uma vez neste caso e a tabela ainda
+        // não fechou a conta (ex.: você anexou/confirmou 1 PDF à mão), NÃO reanexar o
+        // conjunto todo — duplicaria documento na inicial. Humano completa.
+        if (c.anexouDocs) {
+          return pausar(c, 'Etapa 5: já anexei os PDFs uma vez e a tabela está com ' + naTabela() + '/' + n +
+            ' — para não duplicar, complete a seleção você (anexe só o que falta, confirme) e clique Continuar.');
+        }
+        const acharUploader = () => qFirst(IDS.anexo) ||
+          document.querySelector('#divInfDocumentos input[type="file"], #containerDocumentos input[type="file"], .qq-uploader input[type="file"], input.qq-upload-input, input[type="file"]');
+        let input = acharUploader();
+        if (!input) {
+          // A tela pode iniciar SEM slot de arquivo — o campo só nasce ao clicar
+          // "Adicionar mais Documentos" (showInput). Clica e espera o uploader surgir.
+          const add = document.querySelector('#lblAdicionarDocumento') ||
+            acharBotao(['adicionar mais documentos', 'adicionar documento', 'adicionar arquivo', 'escolher arquivo']);
+          if (add) { progresso(c, 'Etapa 5: abrindo o campo de arquivo…'); clicar(add); }
+          input = await esperar(acharUploader, 12000, 400);
+        }
+        if (!input) return pausar(c, 'Etapa 5: não achei o campo de <b>anexar arquivo</b> — confira se a tela de Documentos carregou; anexe 1 PDF manualmente e clique Continuar. (se for eproc federal/JFPR, me avise)');
         progresso(c, 'Etapa 5: baixando e anexando ' + n + ' PDF(s)…');
+        c.anexouDocs = true; await casoSalvar(c);
         const dt = new DataTransfer();
         for (const d of c.docs) dt.items.add(await pedirDoc(c.id, d.idx));
         input.files = dt.files;
@@ -766,10 +1033,18 @@
     }
     const fin = qFirst(IDS.finalizar);
     if (!fin) return pausar(c, 'Etapa 5: botão Finalizar não encontrado');
-    if (c.primeiro && !c.validado) {
-      c.validado = true;
+    // Trava de segurança: NUNCA finalizar (protocolo automático) sem ao menos 1 documento
+    // na tabela — uma inicial sem PDF seria protocolada vazia.
+    if (naTabela() < 1) return pausar(c, 'Etapa 5: nenhum documento na tabela — anexe ao menos a petição inicial e clique Continuar.');
+    // Mesmo toggle "Modo automático" do Projudi: SEM ele ligado, ou no 1º caso do lote,
+    // o protocolo é SEU — destaca Finalizar e pausa. Com auto ligado, do 2º em diante,
+    // finaliza sozinho. Nos dois casos, a tela de sucesso (etapa 6) faz a fila seguir.
+    if (!c.autoConcluir || (c.primeiro && !c.validado)) {
+      c.validado = true; await casoSalvar(c);
       destacar(fin);
-      return pausar(c, '1º caso do lote: confira as etapas e clique VOCÊ em Finalizar — depois disso a fila segue sozinha');
+      return pausar(c, c.autoConcluir
+        ? '1º caso do lote: confira as etapas e clique VOCÊ em <b>Finalizar</b> — depois disso os próximos seguem sozinhos.'
+        : 'Confira as etapas e clique VOCÊ em <b>Finalizar</b> — a fila segue sozinha após o protocolo (modo automático desligado).');
     }
     progresso(c, 'finalizando (protocolo automático)…');
     await chrome.runtime.sendMessage({ type: 'OVERRIDE_DIALOGS' }).catch(() => {});
@@ -795,7 +1070,14 @@
     } else if (m.type === 'CONTINUAR_CENTRAL') {
       (async () => {
         const c = await casoLer();
-        if (c) { c.status = 'rodando'; c.motivo = null; await casoSalvar(c); runCentral().catch(() => {}); }
+        if (c) {
+          c.status = 'rodando'; c.motivo = null;
+          // Continuar = o humano resolveu algo (ex.: completou endereço via 🏠) — zera o
+          // contador de tentativas do Próxima, senão a pausa "não avança" re-dispara
+          // para sempre sem nem tentar clicar (loop achado na auditoria).
+          c.avanco = {};
+          await casoSalvar(c); runCentral().catch(() => {});
+        }
       })();
       send({ ok: true });
     } else if (m.type === 'CANCELAR_CENTRAL') {
