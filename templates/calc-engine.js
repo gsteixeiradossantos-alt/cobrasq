@@ -29,7 +29,17 @@
 
   // TABELAS = dado embutido (TJPR e TAXA-LEGAL já vêm calculados no bloco acima).
   const TABELAS = TABELAS_DATA;
-  const INDICES_ATE = '2026-07';                 // último mês de índice de correção publicado
+  const INDICES_ATE = '2026-07';                 // fallback: índice sem tabela conhecida
+  // Último mês efetivamente presente na tabela do índice em uso. Derivado do dado,
+  // não fixado à mão: o rótulo "índices oficiais até ..." vai em peça processual e
+  // não pode divergir do que o cálculo realmente aplicou.
+  function ultimoMesIndice(idx) {
+    const tab = TABELAS[idx];
+    if (!tab) return INDICES_ATE;
+    let max = null;
+    for (const k in tab) { if (!max || k > max) max = k; }
+    return max || INDICES_ATE;
+  }
   const LEI_14905_VIGENCIA = '2024-08-30';
   const BCB_SERIES = { 'INPC': 188, 'IPCA': 433, 'IGP-M': 189, 'IGP-DI': 190, 'SELIC': 4390, 'TAXA-LEGAL-SELIC': 29541, 'TAXA-LEGAL-IPCA15': 29542 };
   const MES_CURTO = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
@@ -371,7 +381,7 @@
       juros, multa, honorarios, total,
       mesesPRO: Math.round((diffDias(dataIni, dataFim) / 30) * 100) / 100,
       mesesCorrigidos: r.linhas.filter(l => l.tipo === 'mes').length,
-      multaPct: _num(multaPct), honPct: _num(honPct), jurosMensalPct: taxa, indice_ate: INDICES_ATE, linhas: r.linhas
+      multaPct: _num(multaPct), honPct: _num(honPct), jurosMensalPct: taxa, indice_ate: ultimoMesIndice(indice), linhas: r.linhas
     };
   }
 
@@ -389,7 +399,7 @@
   }
 
   const CalcEngine = {
-    TABELAS, INDICES_ATE, LEI_14905_VIGENCIA, BCB_SERIES,
+    TABELAS, INDICES_ATE, ultimoMesIndice, LEI_14905_VIGENCIA, BCB_SERIES,
     fmtBRL, fmtNum, fmtData, fmtMesAno, fmtMesAnoLong, chaveMes, diasNoMes, parseDataLocal, diffDias, parseValor, parseDec,
     segmentarPorMes, getIndiceParaSegmento, calcularPrincipal, calcularHonorario, calcularJudicial, calcularCobranca,
     taxaEfetivaMensal, analisarFinanciamento, fetchBCBSerie,
