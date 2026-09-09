@@ -17,6 +17,7 @@ const handlers = {
   'emitir-nf-avulso': require('./_emitir-nf-avulso.js'),
   'importar-asaas': require('./_importar-asaas.js'),
   'backfill-asaas-customers': require('./_backfill-asaas-customers.js'),
+  'asaas-atualizar-contato': require('./_asaas-atualizar-contato.js'),
   'boletos-para-lancamentos': require('./_boletos-para-lancamentos.js'),
   'reenviar-recibo': require('./_reenviar-recibo.js'),
   'reenviar-comprovante': require('./_reenviar-comprovante.js'),
