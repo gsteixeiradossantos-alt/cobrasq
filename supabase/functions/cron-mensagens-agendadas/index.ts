@@ -13,6 +13,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
+import { resolverJid } from '../_shared/telefone-jid.ts';
 
 const MAX_LOTE = 50;
 const MAX_TENTATIVAS = 5;
@@ -102,12 +103,21 @@ Deno.serve(async (req) => {
       const extG = (nomeG.split('.').pop() || 'pdf').toLowerCase().replace(/[^a-z0-9]/g, '') || 'pdf';
       return { ok: true, url: `${zapiBase}/send-document/${extG}`, body: { phone: grupo, document: sg.signedUrl, fileName: semExt(nomeG), caption: m.legenda || '' } };
     }
-    const phoneDigits = String(m.telefone || '').replace(/\D/g, '');
     // País (55) só quando o número está em formato local (DDD + número = 10-11 díg.);
-    // 12-13 díg. já incluem o país. NÃO usar startsWith('55'): o DDD 55 (região central
-    // do RS) colide com o código do país e um celular DDD 55 sem país ('559XXXXXXXX',
-    // 11 díg.) ficaria sem o 55 de país, sendo roteado errado pelo Z-API.
-    const phone = (phoneDigits.length === 10 || phoneDigits.length === 11) ? '55' + phoneDigits : phoneDigits;
+    // 12-13 díg. já incluem o país — a regra é por comprimento, e não
+    // startsWith('55'), por causa do DDD 55 (região central do RS). Feito isso,
+    // o phone-exists diz com qual JID o WhatsApp conhece o contato: o cadastro
+    // guarda o celular COM o nono dígito, mas boa parte dos números do Sul está
+    // registrada SEM ele, e discar o formato errado não dá erro — a Z-API aceita
+    // e a mensagem fica num ✓ único para sempre. Ver _shared/telefone-jid.ts.
+    const jid = await resolverJid(zapiBase, zapiHeaders, m.telefone);
+    if (!jid.jid) return { ok: false, erro: 'telefone inválido' };
+    // `indeterminado` = a Z-API não respondeu à checagem. Segue com o formato
+    // normalizado em vez de acusar número inexistente por instabilidade dela.
+    if (!jid.existe && !jid.indeterminado) {
+      return { ok: false, erro: 'numero_sem_whatsapp: nenhuma variação (' + jid.tentativas.join(', ') + ') tem WhatsApp ativo' };
+    }
+    const phone = jid.jid;
     const tipo = m.tipo || 'texto';
 
     if (tipo === 'texto') {

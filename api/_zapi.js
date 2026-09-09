@@ -34,8 +34,26 @@ function normalizarTelefone(phone) {
   // telefone vazio como "sem telefone" e registra o motivo na resposta.
   if (!fone) return '';
 
-  if (fone.length <= 11 && !fone.startsWith('55')) fone = '55' + fone;
+  // DDI por COMPRIMENTO, não por startsWith('55'): o DDD 55 (região central do
+  // RS) colide com o código do país, e um celular DDD 55 em formato local
+  // ('55999137675', 11 díg.) ficaria sem o 55 de país, roteado errado.
+  if (fone.length === 10 || fone.length === 11) fone = '55' + fone;
   return fone;
+}
+
+const { resolverJid } = require('./_telefone-jid');
+
+// DDI certo ainda não é destino certo: o WhatsApp registra boa parte dos números
+// do Sul SEM o nono dígito, e discar o formato do cadastro não dá erro — a Z-API
+// aceita, devolve zaapId e a mensagem morre num ✓ único. Resolve o JID real via
+// phone-exists antes de enviar; se a Z-API não responder à checagem, segue com o
+// número normalizado (o comportamento de antes).
+async function destino(phone) {
+  const normalizado = normalizarTelefone(phone);
+  if (!normalizado) return '';
+  const { base, headers } = credenciais();
+  const r = await resolverJid(base, headers, normalizado);
+  return r.jid || normalizado;
 }
 
 function credenciais() {
@@ -59,7 +77,7 @@ async function postZapi(url, headers, corpo) {
 
 async function zapiSendText(phone, message) {
   const { base, headers } = credenciais();
-  return postZapi(`${base}/send-text`, headers, { phone: normalizarTelefone(phone), message });
+  return postZapi(`${base}/send-text`, headers, { phone: await destino(phone), message });
 }
 
 // Limite do payload aceito pela função serverless (Vercel corta o body acima de ~4,5 MB).
@@ -97,7 +115,7 @@ async function zapiSendDocument(phone, { document, fileName, caption, extension 
 
   const { base, headers } = credenciais();
   return postZapi(`${base}/send-document/${ext}`, headers, {
-    phone: normalizarTelefone(phone),
+    phone: await destino(phone),
     document: payloadDoc,
     fileName,
     caption: caption || '',
@@ -122,4 +140,4 @@ async function zapiSendDocumentPdf(phone, base64, fileName, caption) {
   return !!(r && (r.messageId || r.id || r.zaapId));
 }
 
-module.exports = { zapiSendText, zapiSendDocument, zapiSendDocumentPdf, normalizarTelefone };
+module.exports = { zapiSendText, zapiSendDocument, zapiSendDocumentPdf, normalizarTelefone, destino };

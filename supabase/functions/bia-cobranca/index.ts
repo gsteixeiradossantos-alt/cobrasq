@@ -9,6 +9,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { MODELO } from '../_shared/bia-system.ts';
+import { resolverJid } from '../_shared/telefone-jid.ts';
 
 const SIG = '*Bia • COBRASQ*';
 const MAX_POR_RUN = 10; // query limit (pode ter duplicatas de telefone que serão deduplicadas)
@@ -75,15 +76,44 @@ Deno.serve(async (req) => {
       try { await fetch(`${zBase}/send-text`, { method: 'POST', headers: zHead, body: JSON.stringify({ phone: dest, message: texto }) }); } catch { /* */ }
     }
   }
-  async function enviarTexto(tel: string, msg: string) {
+  // O cadastro (Asaas) guarda o celular COM o nono dígito, mas o WhatsApp
+  // registra boa parte desses contatos SEM ele. Discar o número cru não dá erro
+  // — a Z-API aceita e devolve zaapId — e a mensagem morre num ✓ único. Por isso
+  // toda saída daqui passa pelo phone-exists antes (ver _shared/telefone-jid.ts).
+  // Dica: o formato com que o contato já falou conosco, que costuma acertar de
+  // primeira e poupar a consulta externa.
+  const jidCache = new Map<string, string | null>();
+  async function jidPara(tel: string): Promise<string | null> {
+    if (!tel) return null;
+    if (jidCache.has(tel)) return jidCache.get(tel) ?? null;
+    let dica: string | null = null;
     try {
-      const e = await fetch(`${zBase}/send-text`, { method: 'POST', headers: zHead, body: JSON.stringify({ phone: tel, message: msg.slice(0, 4000) }) });
+      const { data } = await sb.from('crm_mensagens_recebidas')
+        .select('telefone').like('telefone', '%' + tel.slice(-8))
+        .order('recebida_em', { ascending: false }).limit(1).maybeSingle();
+      dica = data?.telefone ?? null;
+    } catch { /* dica é best-effort */ }
+    const r = await resolverJid(zBase, zHead, tel, dica);
+    // Z-API fora do ar não é veredito: mantém o fail-open antigo (envia no
+    // formato normalizado) e não cacheia, para a próxima rodada consultar.
+    if (r.indeterminado) return r.jid;
+    // Sem WhatsApp em nenhuma variante: não gasta disparo nem reputação da
+    // instância. Quem chama trata o null (a régua pausa a cobrança).
+    const jid = r.existe ? r.jid : null;
+    jidCache.set(tel, jid);
+    return jid;
+  }
+  async function enviarTexto(tel: string, msg: string) {
+    const phone = await jidPara(tel);
+    if (!phone) return;
+    try {
+      const e = await fetch(`${zBase}/send-text`, { method: 'POST', headers: zHead, body: JSON.stringify({ phone, message: msg.slice(0, 4000) }) });
       const ej = await e.json().catch(() => null);
       if (e.ok && ej && !ej.error) {
         const oid = String(ej.messageId || ej.id || ej.zaapId || '');
         if (oid) {
-          await sb.from('crm_mensagens_status').upsert({ message_id: oid, telefone_enviado: tel, status: 'sent', evento_em: new Date().toISOString(), raw_payload: { via: 'bia-cobranca-aprovacao' } }, { onConflict: 'message_id' });
-          try { await sb.from('whatsapp_bia_enviadas').upsert({ message_id: oid, telefone: tel, lote_id: crypto.randomUUID() }, { onConflict: 'message_id' }); } catch { /* */ }
+          await sb.from('crm_mensagens_status').upsert({ message_id: oid, telefone_enviado: phone, status: 'sent', evento_em: new Date().toISOString(), raw_payload: { via: 'bia-cobranca-aprovacao', telefone_cadastro: tel } }, { onConflict: 'message_id' });
+          try { await sb.from('whatsapp_bia_enviadas').upsert({ message_id: oid, telefone: phone, lote_id: crypto.randomUUID() }, { onConflict: 'message_id' }); } catch { /* */ }
         }
       }
     } catch { /* */ }
@@ -92,16 +122,18 @@ Deno.serve(async (req) => {
   async function enviarBlocos(tel: string, blocos: string[]): Promise<{ ok: boolean; outId: string }> {
     const loteId = crypto.randomUUID();
     let ok = false, outId = '';
+    const phone = await jidPara(tel);
+    if (!phone) return { ok: false, outId: '' };
     for (const bloco of blocos) {
       try {
-        const e = await fetch(`${zBase}/send-text`, { method: 'POST', headers: zHead, body: JSON.stringify({ phone: tel, message: bloco.slice(0, 4000) }) });
+        const e = await fetch(`${zBase}/send-text`, { method: 'POST', headers: zHead, body: JSON.stringify({ phone, message: bloco.slice(0, 4000) }) });
         const ej = await e.json().catch(() => null);
         if (e.ok && ej && !ej.error && (ej.messageId || ej.id || ej.zaapId)) {
           ok = true;
           const oid = String(ej.messageId || ej.id || ej.zaapId);
           if (!outId) outId = oid;
-          await sb.from('crm_mensagens_status').upsert({ message_id: oid, telefone_enviado: tel, status: 'sent', evento_em: new Date().toISOString(), raw_payload: { via: 'bia-cobranca' } }, { onConflict: 'message_id' });
-          try { await sb.from('whatsapp_bia_enviadas').upsert({ message_id: oid, telefone: tel, lote_id: loteId }, { onConflict: 'message_id' }); } catch { /* */ }
+          await sb.from('crm_mensagens_status').upsert({ message_id: oid, telefone_enviado: phone, status: 'sent', evento_em: new Date().toISOString(), raw_payload: { via: 'bia-cobranca', telefone_cadastro: tel } }, { onConflict: 'message_id' });
+          try { await sb.from('whatsapp_bia_enviadas').upsert({ message_id: oid, telefone: phone, lote_id: loteId }, { onConflict: 'message_id' }); } catch { /* */ }
         }
       } catch { /* */ }
       await new Promise((r) => setTimeout(r, 400));
@@ -137,13 +169,10 @@ Deno.serve(async (req) => {
       await enviarBlocos(tel, blocos);
     } catch { await enviarTexto(tel, fallback); }
   }
+  // Existe = alguma variante (com/sem nono dígito) tem WhatsApp. Reaproveita a
+  // resolução do JID, então a checagem não custa uma consulta a mais.
   async function whatsappExiste(tel: string): Promise<boolean> {
-    try {
-      const r = await fetch(`${zBase}/phone-exists/${tel}`, { headers: zHead });
-      const j = await r.json().catch(() => null);
-      if (j && typeof j.exists === 'boolean') return j.exists;
-    } catch { /* */ }
-    return true; // fail-open: é o celular cadastrado no Asaas
+    return (await jidPara(tel)) !== null;
   }
   // Toda alteração de vencimento aqui é COMBINADA com o devedor. Por isso zera
   // multa E juros SEMPRE — inclusive quando não há novo valor (sem_acrescimo do

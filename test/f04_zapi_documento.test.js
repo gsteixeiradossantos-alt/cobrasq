@@ -24,8 +24,22 @@ process.env.ZAPI_CLIENT_TOKEN = 'client-teste';
 
 const { zapiSendDocument, normalizarTelefone } = require(path.join(__dirname, '..', 'api', '_zapi.js'));
 
+// `chamadas` guarda só os ENVIOS. As consultas ao /phone-exists ficam à parte:
+// desde 09/2026 todo envio resolve antes o JID com que o WhatsApp conhece o
+// número (o cadastro traz o nono dígito, o WhatsApp costuma não ter), e sem esse
+// passo a mensagem some num ✓ único. `existeResposta` deixa cada teste escolher
+// o que a Z-API responde à checagem.
 let chamadas = [];
+let consultas = [];
+let existeResposta = (fone) => ({ exists: true, outputPhone: fone });
 global.fetch = async (url, opts) => {
+  const m = String(url).match(/\/phone-exists\/([^/?]+)/);
+  if (m) {
+    consultas.push(m[1]);
+    const r = existeResposta(m[1]);
+    if (r === null) return { ok: false, status: 500, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => r };
+  }
   chamadas.push({ url, opts });
   return { ok: true, status: 200, text: async () => JSON.stringify({ messageId: 'ok' }) };
 };
@@ -60,7 +74,7 @@ async function rejeita(nome, fn, trecho) {
   });
 
   await checaAsync('base64 vira data URI e cai em /send-document/pdf', async () => {
-    chamadas = [];
+    chamadas = []; consultas = [];
     await zapiSendDocument('46988226533', { document: b64, fileName: 'Devolucao.pdf', caption: 'Segue' });
     assert.strictEqual(chamadas.length, 1);
     const { url, opts } = chamadas[0];
@@ -75,16 +89,46 @@ async function rejeita(nome, fn, trecho) {
   });
 
   await checaAsync('extensão sai do fileName', async () => {
-    chamadas = [];
+    chamadas = []; consultas = [];
     await zapiSendDocument('46988226533', { document: b64, fileName: 'planilha.xlsx' });
     assert.ok(chamadas[0].url.endsWith('/send-document/xlsx'), chamadas[0].url);
   });
 
   await checaAsync('URL https passa intacta', async () => {
-    chamadas = [];
+    chamadas = []; consultas = [];
     const url = 'https://exemplo.com/carta.pdf';
     await zapiSendDocument('46988226533', { document: url, fileName: 'carta.pdf' });
     assert.strictEqual(JSON.parse(chamadas[0].opts.body).document, url);
+  });
+
+  // O número do cadastro tem o nono dígito; o WhatsApp conhece o contato sem ele.
+  // Sem esta resolução o envio ia para um JID que não existe: a Z-API aceita,
+  // devolve messageId e a mensagem fica em ✓ único para sempre.
+  await checaAsync('usa o JID que o WhatsApp devolve, não o número do cadastro', async () => {
+    chamadas = []; consultas = [];
+    existeResposta = (fone) => (fone === '554699189842'
+      ? { exists: true, outputPhone: '554699189842' }
+      : { exists: false });
+    await zapiSendDocument('5546999189842', { document: b64, fileName: 'Recibo.pdf' });
+    existeResposta = (fone) => ({ exists: true, outputPhone: fone });
+    assert.deepStrictEqual(consultas, ['5546999189842', '554699189842'], 'ordem das variantes');
+    assert.strictEqual(JSON.parse(chamadas[0].opts.body).phone, '554699189842');
+  });
+
+  // Z-API fora do ar não pode virar veredito sobre o número: envia no formato
+  // normalizado, como antes de existir a checagem.
+  await checaAsync('checagem indisponível não impede o envio', async () => {
+    chamadas = []; consultas = [];
+    existeResposta = () => null;
+    await zapiSendDocument('46988226599', { document: b64, fileName: 'Recibo.pdf' });
+    existeResposta = (fone) => ({ exists: true, outputPhone: fone });
+    assert.strictEqual(JSON.parse(chamadas[0].opts.body).phone, '5546988226599');
+  });
+
+  // DDD 55 (região central do RS) colide com o código do país: por comprimento,
+  // '55999137675' são 11 dígitos e precisa ganhar o 55 de país.
+  checa('DDD 55 não é confundido com o DDI', () => {
+    assert.strictEqual(normalizarTelefone('55999137675'), '5555999137675');
   });
 
   await rejeita('recusa http sem TLS', () =>
