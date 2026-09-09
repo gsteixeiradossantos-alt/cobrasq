@@ -37,15 +37,25 @@ async function refrescarTokenDoApp() {
         const [r] = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           func: () => {
+            // Pega o token da sessão MAIS NOVA (maior expires_at) — se houver mais de uma
+            // chave sb-*-auth-token (projetos/sessões antigas), a velha daria 401.
+            let best = null, bestExp = -1;
             for (let i = 0; i < localStorage.length; i++) {
               const k = localStorage.key(i);
               if (!k || !/^sb-.*-auth-token$/.test(k)) continue;
               let raw = localStorage.getItem(k);
               if (!raw) continue;
               if (raw.startsWith('base64-')) { try { raw = atob(raw.slice(7).replace(/-/g, '+').replace(/_/g, '/')); } catch (_) { continue; } }
-              try { const o = JSON.parse(raw); const t = (o && o.access_token) || (o && o.currentSession && o.currentSession.access_token); if (t) return t; } catch (_) {}
+              try {
+                const o = JSON.parse(raw);
+                const sess = (o && o.access_token) ? o : (o && o.currentSession) ? o.currentSession : null;
+                const t = sess && sess.access_token;
+                if (!t) continue;
+                const exp = Number(sess.expires_at || 0);
+                if (exp >= bestExp) { bestExp = exp; best = t; }
+              } catch (_) {}
             }
-            return null;
+            return best;
           },
         });
         if (r && r.result) { await chrome.storage.session.set({ token: r.result }); return r.result; }
@@ -55,25 +65,28 @@ async function refrescarTokenDoApp() {
   return null;
 }
 
-async function apiGetJobs() {
+async function apiGetJobs(_jaRenovou = false) {
   const token = await getToken();
-  if (!token) return { error: 'sem_sessao' };
+  if (!token) { if (!_jaRenovou && await refrescarTokenDoApp()) return apiGetJobs(true); return { error: 'sem_sessao' }; }
   const r = await fetchTimeout(`${API_BASE}/api/eproc-peticionamento?status=preparado`, {
     headers: { Authorization: `Bearer ${token}` },
   });
+  // token velho no cache → renova da aba do app (logada) e repete UMA vez.
+  if ((r.status === 401 || r.status === 403) && !_jaRenovou && await refrescarTokenDoApp()) return apiGetJobs(true);
   const j = await r.json().catch(() => ({}));
   if (!r.ok) return { error: j.error || ('HTTP ' + r.status) };
   return j; // { ok, jobs }
 }
 
-async function apiReport(payload) {
+async function apiReport(payload, _jaRenovou = false) {
   const token = await getToken();
-  if (!token) return { error: 'sem_sessao' };
+  if (!token) { if (!_jaRenovou && await refrescarTokenDoApp()) return apiReport(payload, true); return { error: 'sem_sessao' }; }
   const r = await fetchTimeout(`${API_BASE}/api/eproc-peticionamento`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
+  if ((r.status === 401 || r.status === 403) && !_jaRenovou && await refrescarTokenDoApp()) return apiReport(payload, true);
   const j = await r.json().catch(() => ({}));
   if (!r.ok) return { error: j.error || ('HTTP ' + r.status) };
   return j;
@@ -83,8 +96,8 @@ async function apiReport(payload) {
 const PROMPT_EXTRACAO = `Você é assistente de um escritório de cobrança que distribui petições iniciais no eproc TJPR.
 Leia a petição inicial anexa e devolva SOMENTE um JSON válido (sem cercas de código, sem comentários) com:
 {
- "requerentes": [{"nome": "...", "doc": "CPF ou CNPJ com pontuação, ou null", "endereco": "endereço completo da qualificação (rua, nº, bairro, cidade/UF, CEP) ou null", "email": "e-mail ou null", "telefone": "telefone/celular ou null"}],
- "requeridos":  [{"nome": "...", "doc": "CPF ou CNPJ com pontuação, ou null", "endereco": "endereço completo da qualificação (rua, nº, bairro, cidade/UF, CEP) ou null", "email": "e-mail ou null", "telefone": "telefone/celular ou null"}],
+ "requerentes": [{"nome": "...", "doc": "CPF ou CNPJ com pontuação, ou null", "sexo": "M ou F (só p/ pessoa física; deduza do nome/tratamento; senão null)", "endereco": "endereço completo da qualificação ou null", "cep": "CEP (00000-000) ou null", "logradouro": "rua/av (sem número) ou null", "numero": "número ou null", "complemento": "complemento ou null", "bairro": "bairro ou null", "cidade": "cidade ou null", "uf": "sigla UF (2 letras) ou null", "email": "e-mail ou null", "telefone": "telefone fixo ou null", "celular": "celular ou null"}],
+ "requeridos":  [{"nome": "...", "doc": "CPF ou CNPJ com pontuação, ou null", "sexo": "M ou F (só p/ pessoa física; deduza do nome/tratamento; senão null)", "endereco": "endereço completo da qualificação ou null", "cep": "CEP (00000-000) ou null", "logradouro": "rua/av (sem número) ou null", "numero": "número ou null", "complemento": "complemento ou null", "bairro": "bairro ou null", "cidade": "cidade ou null", "uf": "sigla UF (2 letras) ou null", "email": "e-mail ou null", "telefone": "telefone fixo ou null", "celular": "celular ou null"}],
  "valor_causa": 1234.56,
  "comarca": "cidade do foro/comarca indicada no endereçamento",
  "classe": "classe processual (ex.: Procedimento do Juizado Especial Cível)",
@@ -96,8 +109,11 @@ Leia a petição inicial anexa e devolva SOMENTE um JSON válido (sem cercas de 
 }
 Se um campo não constar na peça, use null (ou [] em listas). Não invente documentos.`;
 
-async function claudeExtrair(base64Pdf) {
-  const token = await getToken();
+async function claudeExtrair(base64Pdf, _jaRenovou = false) {
+  // Token guardado pode ter expirado (sessão longa) — se não houver, tenta puxar da
+  // aba do painel ANTES de falhar.
+  let token = await getToken();
+  if (!token) token = await refrescarTokenDoApp();
   if (!token) return { error: 'sem_sessao' };
   const r = await fetchTimeout(`${API_BASE}/api/claude`, {
     method: 'POST',
@@ -114,8 +130,18 @@ async function claudeExtrair(base64Pdf) {
       }],
     }),
   }, 120000); // extração de PDF pela IA pode demorar
+  // CC3/M10: token expirado (401/403) → renova da aba do painel e repete UMA vez
+  // (mesma proteção que o pgrest já tinha; faltava aqui — causa do "IA falhou: HTTP 401").
+  if ((r.status === 401 || r.status === 403) && !_jaRenovou) {
+    const novo = await refrescarTokenDoApp();
+    if (novo && novo !== token) return claudeExtrair(base64Pdf, true);
+  }
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) return { error: (j.error && j.error.message) || ('HTTP ' + r.status) };
+  if (!r.ok) {
+    const base = (j.error && j.error.message) || ('HTTP ' + r.status);
+    if (r.status === 401 || r.status === 403) return { error: base + ' — sua sessão expirou. Recarregue o painel do Cobrasq (F5), confirme que está logado, e clique "Extrair de novo".' };
+    return { error: base };
+  }
   // A resposta vem em BLOCOS (content: [...]) e o texto pode não ser o 1º bloco
   // (modelos com raciocínio emitem um bloco de thinking antes) — junta todos.
   const blocos = (j && j.content) || [];
@@ -128,10 +154,14 @@ async function claudeExtrair(base64Pdf) {
 
 // ── Registro do protocolo no banco (PostgREST com o token; RLS aplicada) ──────
 let _cfgCache = null;
-async function configSupabase() {
+async function configSupabase(_jaRenovou = false) {
   if (_cfgCache) return _cfgCache;
   const token = await getToken();
   const r = await fetchTimeout(`${API_BASE}/api/config`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  // Se /api/config exigir auth e o token do cache estiver velho, renova e repete UMA
+  // vez — sem isto o registro do protocolo (que JÁ aconteceu no tribunal) falhava com
+  // "config/sessão indisponível".
+  if ((r.status === 401 || r.status === 403) && !_jaRenovou && await refrescarTokenDoApp()) return configSupabase(true);
   const j = await r.json().catch(() => ({}));
   const url = j.supabaseUrl || j.url || j.SUPABASE_URL || (j.supabase && j.supabase.url);
   const anon = j.supabaseAnonKey || j.anonKey || j.anon || j.SUPABASE_ANON_KEY || (j.supabase && j.supabase.anonKey);
@@ -235,9 +265,12 @@ async function registrarProtocolo({ numero, caso }) {
 }
 
 // Override de diálogos nativos na página (modo auto): confirm→true, alert→captura.
-async function overrideDialogos(tabId) {
+async function overrideDialogos(tabId, allFrames) {
   await chrome.scripting.executeScript({
-    target: { tabId }, world: 'MAIN',
+    // allFrames só quando pedido (Projudi é frameset — o "Concluir Movimento" e o
+    // confirm que ele dispara vivem no userMainFrame). No eproc (página única) fica no
+    // topo, pra não sequestrar confirm() de frames/telas fora do fluxo.
+    target: { tabId, allFrames: !!allFrames }, world: 'MAIN',
     func: () => {
       if (window.__cbDialogosOk) return;
       window.__cbDialogosOk = true;
@@ -270,27 +303,41 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse(await registrarProtocolo(msg));
       } else if (msg.type === 'OVERRIDE_DIALOGS') {
         const tabId = (sender.tab && sender.tab.id) || msg.tabId;
-        if (tabId) { await overrideDialogos(tabId); sendResponse({ ok: true }); }
+        if (tabId) { await overrideDialogos(tabId, msg.allFrames); sendResponse({ ok: true }); }
         else sendResponse({ error: 'sem tabId' });
       } else if (msg.type === 'EXEC_PAGINA') {
-        // Executa uma ação NO MUNDO DA PÁGINA (world:'MAIN') no FRAME que pediu —
-        // imune ao CSP da página (scripts injetados pela extensão são isentos).
-        // Prefere chamar a função global (msg.fn + msg.args); senão avalia msg.code.
+        // Executa uma ação NO MUNDO DA PÁGINA (world:'MAIN') no FRAME que pediu.
+        // Prefere chamadas de função global (msg.fn+msg.args ou msg.calls=[{fn,args}])
+        // — o eval de msg.code fica como ÚLTIMO recurso: no mundo MAIN o eval é
+        // sujeito ao CSP da página e costuma ser bloqueado (causa raiz do Selecionar
+        // do Projudi nunca disparar em multi-statement).
         const tabId = sender.tab && sender.tab.id;
         if (tabId == null) { sendResponse({ error: 'sem tabId' }); return; }
         try {
-          const target = { tabId, world: 'MAIN' };
+          // ATENÇÃO (causa raiz v0.8.2): world é propriedade da INJEÇÃO, não do
+          // target — dentro do target a API rejeita a chamada inteira ("Unexpected
+          // property") e NENHUMA função da página roda. Ficou meses silencioso
+          // porque o erro voltava como {error} e o fallback local também é barrado.
+          const target = { tabId };
           if (sender.frameId != null) target.frameIds = [sender.frameId];
           const [res] = await chrome.scripting.executeScript({
             target,
-            func: (fn, args, code) => {
+            world: 'MAIN',
+            func: (fn, args, code, calls) => {
               try {
-                if (fn && typeof window[fn] === 'function') { window[fn].apply(window, args || []); return true; }
+                const lista = (calls && calls.length) ? calls : (fn ? [{ fn, args }] : null);
+                if (lista) {
+                  let rodou = false;
+                  for (const ch of lista) {
+                    if (ch && ch.fn && typeof window[ch.fn] === 'function') { window[ch.fn].apply(window, ch.args || []); rodou = true; }
+                  }
+                  if (rodou) return true;
+                }
                 if (code) { (0, eval)(code); return true; } // eslint-disable-line no-eval
               } catch (e) { return 'erro: ' + (e && e.message || e); }
               return false;
             },
-            args: [msg.fn || null, msg.args || [], msg.code || null],
+            args: [msg.fn || null, msg.args || [], msg.code || null, msg.calls || null],
           });
           sendResponse({ ok: true, resultado: res && res.result });
         } catch (e) { sendResponse({ error: String((e && e.message) || e) }); }

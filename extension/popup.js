@@ -9,7 +9,11 @@ async function send(msg) { return chrome.runtime.sendMessage(msg); }
 
 async function abaEprocAtiva() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !/:\/\/[^/]*\.tjpr\.jus\.br\//.test(tab.url || '')) return null;
+  // SÓ eproc (estadual eprocNg.tj<UF>.jus.br ou federal eproc.trf<N>/jf<UF>.jus.br). O
+  // popup injeta content-eproc.js e manda FILL_JOB/ANEXAR_PDF_LOCAL — o Projudi não
+  // entende essas mensagens (seria no-op silencioso). Peticionamento no Projudi é pela
+  // Central (⚖️), que injeta o content certo por sistema.
+  if (!tab || !/:\/\/eproc[\dg]*\.[\w.-]+\.jus\.br\//i.test(tab.url || '')) return null;
   return tab;
 }
 
@@ -61,7 +65,7 @@ function b64DeBuffer(buf) {
 async function listarPdfs(handle) {
   const arqs = [];
   for await (const [nome, h] of handle.entries()) {
-    if (h.kind === 'file' && /\.pdf$/i.test(nome)) arqs.push(h);
+    if (h.kind === 'file' && /\.(pdf|p7s)$/i.test(nome)) arqs.push(h); // .pdf ou .pdf.p7s (assinado)
   }
   // Mais recentes primeiro (limite de 12 pra não lotar o popup).
   const comData = await Promise.all(arqs.map(async h => ({ h, f: await h.getFile() })));
@@ -127,6 +131,9 @@ async function puxarTokenDoApp() {
         const [r] = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           func: () => {
+            // Sessão MAIS NOVA (maior expires_at): mais de uma chave sb-*-auth-token
+            // (sessão antiga) faria escolher um token velho → 401.
+            let best = null, bestExp = -1;
             for (let i = 0; i < localStorage.length; i++) {
               const k = localStorage.key(i);
               if (!k || !/^sb-.*-auth-token$/.test(k)) continue;
@@ -137,11 +144,14 @@ async function puxarTokenDoApp() {
               }
               try {
                 const o = JSON.parse(raw);
-                const t = (o && o.access_token) || (o && o.currentSession && o.currentSession.access_token);
-                if (t) return t;
+                const sess = (o && o.access_token) ? o : (o && o.currentSession) ? o.currentSession : null;
+                const t = sess && sess.access_token;
+                if (!t) continue;
+                const exp = Number(sess.expires_at || 0);
+                if (exp >= bestExp) { bestExp = exp; best = t; }
               } catch (_) {}
             }
-            return null;
+            return best;
           },
         });
         if (r && r.result) { await send({ type: 'SET_TOKEN', token: r.result }); return true; }
@@ -152,12 +162,21 @@ async function puxarTokenDoApp() {
 }
 
 // Botão fixo pra abrir a Central de Peticionamento (lote de iniciais com IA).
+// FOCA a aba existente se já houver uma (auditoria: DUAS Centrais abertas brigam pelo
+// PEDIR_DOC — a antiga responde "doc não encontrado" antes da certa e o lote falha).
 function renderCentralLink() {
   const div = document.createElement('div');
   div.style.cssText = 'margin-top:10px;';
   div.innerHTML = '<button class="btn" id="abrir-central" style="background:#1a7f37;">⚖️ Central de Peticionamento (lote)</button>';
   body.appendChild(div);
-  div.querySelector('#abrir-central').onclick = () => chrome.tabs.create({ url: chrome.runtime.getURL('central.html') });
+  div.querySelector('#abrir-central').onclick = async () => {
+    const url = chrome.runtime.getURL('central.html');
+    try {
+      const [aba] = await chrome.tabs.query({ url });
+      if (aba) { await chrome.tabs.update(aba.id, { active: true }); await chrome.windows.update(aba.windowId, { focused: true }); window.close(); return; }
+    } catch (_) {}
+    chrome.tabs.create({ url });
+  };
 }
 
 async function carregar() {
