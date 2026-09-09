@@ -149,5 +149,18 @@ export async function resolverJid(
   return r;
 }
 
+/**
+ * Mesmo assinante? Compara pelos últimos 8 dígitos, que não mudam entre os
+ * formatos do mesmo número (com/sem nono dígito, com/sem DDI). Serve para
+ * distinguir "outro formato do mesmo telefone" de "telefone trocado" — a
+ * diferença entre preservar o JID que entrega e ficar preso num número velho.
+ */
+export function mesmoNumero(a: unknown, b: unknown): boolean {
+  const sa = String(a ?? '').replace(/\D/g, '');
+  const sb = String(b ?? '').replace(/\D/g, '');
+  if (sa.length < 8 || sb.length < 8) return false;
+  return sa.slice(-8) === sb.slice(-8);
+}
+
 /** Esvazia o cache — usado nos testes. */
 export function _limparCacheJid(): void { cache.clear(); }
