@@ -5796,11 +5796,119 @@ function rowToCliente(r){
   };
 }
 
+// ── Paginação das cargas grandes ────────────────────────────────────────────
+// O PostgREST deste projeto corta em 1.000 LINHAS por requisição. Medido em
+// produção em 10/09/2026: pedir as 18.258 linhas de `proc_intimacoes` devolve
+// `content-range: 0-999/18258`. O corte NÃO gera erro — a resposta volta menor e
+// o app segue como se aquilo fosse a base inteira.
+//
+// E NADA avisaria. Chequei a suposição contrária e ela é falsa por dois motivos,
+// e o segundo é o que dói: (a) o trigger F-20 é BEFORE UPDATE em `cobrasq_data` e
+// conta `data->'devedores'` no BLOB — não está na tabela `devedores`, então uma
+// carga relacional truncada não passa nem perto dele; e (b) existe uma guarda no
+// cliente que PEGARIA: o gate `localDevs < _lastKnownDevCount - 2` chega a
+// conferir contra o count do servidor. Só que `_lastKnownDevCount` é rebaseado
+// para o valor já truncado no fim de loadRelationalData — a guarda se desarma
+// sozinha. E flushRelational só faz upsert de diff, nunca apaga o que falta.
+// Com 892 devedores e 861 cobranças contra um teto de 1.000, isso estava a cerca
+// de cem cadastros de acontecer em silêncio.
+//
+// TRÊS GUARDAS, cada uma para um jeito diferente de truncar sem avisar:
+//
+// 1. KEYSET, não OFFSET. Paginar por offset com a base mudando embaixo repete ou
+//    PULA linha: um insert entre a página 1 e a 2 empurra tudo e a linha da
+//    fronteira volta DUAS VEZES; uma exclusão puxa tudo para cima e uma linha SOME
+//    sem ninguém ver. Aqui cada página pede `id > último id da anterior`, então
+//    nada do que já passou se desloca. (Em compensação, linha inserida durante a
+//    carga com uuid abaixo do cursor não aparece — keyset dá instantâneo coerente,
+//    não frescor; a conferência da guarda 3 não se incomoda com isso, porque o
+//    count foi tirado antes da inserção.)
+// 2. PÁGINA DE 900, abaixo do teto. Ser menor que o teto importa porque é a única
+//    defesa que funciona onde não há count para conferir (o `_reidratarAcordos`
+//    pagina por chunk e não tem conferência nenhuma), e qualquer teto abaixo de 900
+//    faz a 1ª página voltar curta, o que a guarda 3 pega na hora.
+//
+//    Sobre o custo: paginar cobra uma viagem a mais quando a base passa do tamanho
+//    da página, e isso JÁ está acontecendo — devedores saiu de 892 para 901 no
+//    intervalo de uma tarde. Não adianta esticar a página para adiar: a 1.000 o
+//    teto do servidor manda, e a segunda viagem passa a ser obrigatória de todo
+//    jeito. Preferir uma requisição a mais no boot a perder cadastro em silêncio é
+//    a troca inteira deste bloco.
+// 3. CONFERÊNCIA CONTRA `count`. A primeira página pede a contagem exata; no fim,
+//    o que foi carregado tem de bater. Se faltar linha por qualquer motivo — teto
+//    novo, limite de páginas, filtro inesperado — devolve ERRO, e o chamador cai
+//    no modo seguro em vez de assumir lista parcial como completa.
+//    Exclusão concorrente durante a carga também cairia aqui, e por isso a carga é
+//    RELIDA uma vez antes de virar erro: corrida se cura na releitura, truncagem
+//    estrutural não. Vale saber o que o modo seguro faz de verdade: bloqueia o
+//    flush em lote, mas NÃO os upserts de registro único (upsertDevedorRelational
+//    / upsertClienteRelational não consultam _relReadFailed), e a lista exibida cai
+//    para o blob congelado. Ou seja, é rede parcial — não é "só dar F5".
+//
+// `montar(depoisDe, tamanho, pedirContagem)` devolve o builder pronto. Ordenar por
+// `id` é obrigatório: keyset precisa de coluna única e estável, e `id` é a PK.
+const _PG_PAGINA = 900;
+const _PG_TETO_PAGINAS = 200;   // 100 mil linhas — trava contra laço infinito
+async function _paginarUmaVez(montar){
+  const tudo = [];
+  let depoisDe = null, total = null, primeiraCurta = false;
+  for(let p = 0; p < _PG_TETO_PAGINAS; p++){
+    const { data, error, count } = await montar(depoisDe, _PG_PAGINA, total === null);
+    if(error) return { erro:error };
+    if(total === null){
+      // Sem count numérico a guarda 3 não teria como conferir nada. Falhar alto é
+      // melhor que seguir sem rede achando que está tudo bem.
+      // Number.isFinite, NÃO `typeof === 'number'`: se o header Prefer não for
+      // honrado (proxy que normaliza cabeçalhos), o PostgREST devolve
+      // `content-range: 0-899/*`, o supabase-js faz parseInt('*') e entrega NaN.
+      // `typeof NaN === 'number'` é true, e aí toda comparação com o total vira
+      // false — a guarda 3 desligaria sozinha, em silêncio, que é o defeito exato
+      // que ela existe para impedir.
+      if(!Number.isFinite(count)) return { erro:{ message:'paginação sem count exato — não dá para conferir a carga' } };
+      total = count;
+    }
+    const lote = data || [];
+    for(const r of lote) tudo.push(r);
+    if(lote.length < _PG_PAGINA){ primeiraCurta = (p === 0); break; }
+    depoisDe = lote[lote.length - 1].id;
+    if(!depoisDe) return { erro:{ message:'paginação: última linha sem id' } };
+  }
+  return { tudo, total, primeiraCurta };
+}
+async function _carregarPaginado(montar){
+  // Duas tentativas, e só para o caso de FALTAR linha. Uma exclusão concorrente
+  // durante a carga deixa o total (capturado na 1ª página) maior que o carregado —
+  // some numa releitura. Truncagem estrutural sobrevive à retentativa, e aí o erro
+  // é legítimo. Erro de transporte não repete: volta na hora.
+  for(let tentativa = 1; tentativa <= 2; tentativa++){
+    const r = await _paginarUmaVez(montar);
+    if(r.erro) return { data:null, error:r.erro };
+    if(r.tudo.length >= r.total) return { data:r.tudo, error:null };
+    // Primeira página já curta com total muito maior = o teto do servidor mudou.
+    // Não é corrida, releitura não conserta — diz isso, em vez de "incompleta".
+    if(r.primeiraCurta){
+      return { data:null, error:{ message:`teto do servidor menor que a página: ${r.tudo.length} de ${r.total} — reduza _PG_PAGINA` } };
+    }
+    if(tentativa === 2){
+      return { data:null, error:{ message:`carga incompleta após 2 tentativas: ${r.tudo.length} de ${r.total}` } };
+    }
+    console.warn('[rel] carga incompleta (' + r.tudo.length + ' de ' + r.total + ') — relendo');
+  }
+  // Inalcançável hoje (a 2ª tentativa sempre retorna). Existe para que uma mudança
+  // futura no laço não faça a função devolver undefined e estourar no destructuring
+  // do chamador — devolver erro cai no modo seguro, que é o lado certo de falhar.
+  return { data:null, error:{ message:'paginação terminou sem resultado' } };
+}
+
 async function loadDevedoresFromSupabase(){
   const supa = getSupabase();
   if(!supa) return null;
   try{
-    const { data, error } = await supa.from('devedores').select('*');
+    const { data, error } = await _carregarPaginado((depoisDe,tam,contar)=>{
+      let q = supa.from('devedores').select('*', contar?{count:'exact'}:undefined);
+      if(depoisDe) q = q.gt('id', depoisDe);
+      return q.order('id',{ascending:true}).limit(tam);
+    });
     if(error){ console.warn('[rel] loadDevedores:', error.message); return null; }
     return (data||[]).map(rowToDevedor);
   }catch(e){ console.warn('[rel] loadDevedores ex:', e.message); return null; }
@@ -5810,7 +5918,11 @@ async function loadClientesFromSupabase(){
   const supa = getSupabase();
   if(!supa) return null;
   try{
-    const { data, error } = await supa.from('clientes').select('*');
+    const { data, error } = await _carregarPaginado((depoisDe,tam,contar)=>{
+      let q = supa.from('clientes').select('*', contar?{count:'exact'}:undefined);
+      if(depoisDe) q = q.gt('id', depoisDe);
+      return q.order('id',{ascending:true}).limit(tam);
+    });
     if(error){ console.warn('[rel] loadClientes:', error.message); return null; }
     return (data||[]).map(rowToCliente);
   }catch(e){ console.warn('[rel] loadClientes ex:', e.message); return null; }
@@ -5954,11 +6066,17 @@ async function _reidratarAcordos(devs){
     // maior: salvar uma cobrança com a tela Cobranças aberta faz estes chunks
     // coincidirem com a revalidação e os sinais que ainda estão voando.
     //
-    // Antes de aumentar a concorrência aqui, saiba que o teto do PostgREST neste
-    // projeto é 1.000 LINHAS por requisição (medido: pedir as 18.258 intimações
-    // devolve content-range 0-999/18258). loadDevedoresFromSupabase não pagina,
-    // então DB.devedores trava em 1.000 e o número de chunks nunca passa de 5 —
-    // o corte silencioso chega antes de a concorrência virar problema.
+    // O número de chunks NÃO tem mais teto: loadDevedoresFromSupabase passou a
+    // paginar, então DB.devedores acompanha a base. Com 3.000 devedores isto vira
+    // 15 requisições simultâneas. Se a base crescer assim, vale limitar a
+    // concorrência e/ou aplicar os chunks que deram certo em vez do tudo-ou-nada.
+    //
+    // E o `select('*')` de cada chunk continua sujeito ao teto de 1.000 LINHAS por
+    // requisição do PostgREST: 200 devedores com mais de 1.000 acordos entre eles
+    // devolveriam uma página cortada, em silêncio. Hoje são 61 acordos no total,
+    // então não paginei — mas é a mesma armadilha das cargas do boot, e quem
+    // aumentar o chunk ou vir a base de acordos crescer precisa usar o
+    // _carregarPaginado daqui de cima.
     for(const { error } of _res){ if(error){ console.warn('[rel] reidratarAcordos:', error.message); return; } }
     for(const { data } of _res){
       for(const row of (data||[])){ (byDev[row.devedor_id] = byDev[row.devedor_id] || []).push(_rowToAcordo(row)); }
@@ -6013,7 +6131,19 @@ async function loadTombstones(){
   const supa = getSupabase();
   if(!supa) return;
   try{
-    const { data, error } = await supa.from('registro_excluidos').select('tipo,id');
+    // Pagina pelo mesmo motivo das outras cargas: acima de 1.000 lápides o servidor
+    // cortaria em silêncio e `_tombstones` ficaria incompleto, fazendo o
+    // flushRelational reenviar no upsert linhas apagadas de propósito. A guarda
+    // autoritativa é o trigger BEFORE INSERT no banco, que descarta a linha tombada
+    // de qualquer jeito — então isto é defesa em profundidade, não a única rede.
+    // A PK aqui é COMPOSTA (tipo, id), então o keyset por `id` sozinho pularia o
+    // segundo de dois registros que dividissem o mesmo uuid em tipos diferentes.
+    // Não deixo isso passar calado: a conferência por count acusaria a falta.
+    const { data, error } = await _carregarPaginado((depoisDe,tam,contar)=>{
+      let q = supa.from('registro_excluidos').select('tipo,id', contar?{count:'exact'}:undefined);
+      if(depoisDe) q = q.gt('id', depoisDe);
+      return q.order('id',{ascending:true}).limit(tam);
+    });
     if(error){ console.warn('[rel] loadTombstones:', error.message); return; }
     _tombstones = new Set((data||[]).map(r=>_tombKey(r.tipo, r.id)));
   }catch(e){ console.warn('[rel] loadTombstones ex:', e && e.message); }
@@ -6036,9 +6166,19 @@ async function loadRelationalData(){
   // Fase 3 — modo seguro: se a carga FALHOU (null = erro de RLS/rede; ≠ [] que é
   // vazio legítimo), NÃO tratar o blob como verdade — bloqueia a escrita relacional
   // (flushRelational) pra não sobrescrever o servidor com dado velho, e avisa.
-  if(devedoresRel === null || clientesRel === null){
+  // `cobrancasRel` entra aqui desde 10/09/2026. Antes ficava de fora, e como a
+  // atribuição logo abaixo é `if(Array.isArray(...))`, uma falha na carga de
+  // cobranças deixava DB_cobrancas com o valor anterior — `[]` num boot. Resultado:
+  // tela de Cobranças VAZIA em silêncio, com um console.warn e nada mais. Era
+  // exatamente a classe de falha que a paginação foi feita para eliminar.
+  if(devedoresRel === null || clientesRel === null || cobrancasRel === null){
     _relReadFailed = true;
-    try{ showToast('Modo seguro: não consegui carregar seus dados do servidor. Recarregue a página (F5) antes de salvar — não vou gravar por cima do servidor.', 'danger'); }catch(_){}
+    // O motivo vai no aviso porque nem toda falha se resolve com F5: erro de rede é
+    // transitório, mas "carga incompleta" por teto do servidor menor que a página se
+    // repete em toda recarga, e sem o motivo na tela o usuário fica apertando F5 sem
+    // saber que é problema de configuração. O detalhe exato sai no console.
+    const _quais = [devedoresRel===null?'devedores':null, clientesRel===null?'credores':null, cobrancasRel===null?'cobranças':null].filter(Boolean).join(', ');
+    try{ showToast('Modo seguro: não consegui carregar ' + _quais + ' do servidor. Recarregue (F5) antes de salvar — não vou gravar por cima do servidor. Se repetir, veja o console e chame o suporte.', 'danger'); }catch(_){}
   } else {
     _relReadFailed = false;
   }
@@ -19524,11 +19664,30 @@ async function loadCobrancasFromSupabase(){
   const supa = getSupabase();
   if(!supa) return null;
   try{
-    const { data, error } = await supa.from('cobrancas')
-      .select('*, cobranca_partes(id, devedor_id, papel, principal, devedores(nome, doc, telefone, tags))')
-      .order('created_at', { ascending:false });
+    // Pagina por `id` (keyset) e reordena em memória. Paginar por `created_at desc`
+    // quebraria no EMPATE: importação em lote grava tudo no mesmo instante, e um
+    // grupo de empatados atravessando a fronteira da página é cortado pela metade —
+    // `id` é PK, então não empata nunca.
+    // `limit` conta LINHAS DE COBRANÇA, não do embed: no PostgREST o recurso
+    // embutido vem aninhado dentro do pai.
+    const { data, error } = await _carregarPaginado((depoisDe,tam,contar)=>{
+      let q = supa.from('cobrancas')
+        .select('*, cobranca_partes(id, devedor_id, papel, principal, devedores(nome, doc, telefone, tags))',
+                contar?{count:'exact'}:undefined);
+      if(depoisDe) q = q.gt('id', depoisDe);
+      return q.order('id',{ascending:true}).limit(tam);
+    });
     if(error){ console.warn('[rel] loadCobrancas:', error.message); return null; }
-    const rows = data || [];
+    // Contrato que os chamadores já esperavam desde sempre.
+    // Comparação simples, não localeCompare: com um carimbo COM fração de segundo e
+    // outro SEM (o Postgres omite a fração quando os microssegundos são zero), o
+    // ICU pesa '.' e '+' de formas diferentes e INVERTE o par em relação a `<`/`>`
+    // — e o resultado ainda muda com o idioma do navegador, porque a chamada é sem
+    // locale. Em ISO-8601 no mesmo fuso, `<`/`>` já é ordem cronológica.
+    const rows = (data || []).sort((a,b)=>{
+      const x = a.created_at || '', y = b.created_at || '';
+      return x < y ? 1 : (x > y ? -1 : 0);
+    });
     // Valor atualizado sempre corrente (compute-on-read) — painel, busca e a
     // tela Cobranças passam a ver a dívida corrigida de hoje, não o congelado.
     try{ for(const c of rows){ if(parseValorBR(c.valor_orig) > 0){ const f = dividaAtualHoje(c); if(f && isFinite(f)) c.valor_atual = f; } } }catch(_){}
