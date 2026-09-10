@@ -93,4 +93,9 @@ comment on function public.cobr_sinais_pendencia() is
   'Sinais de pendência da tela Cobranças (acordos, petições, intimações, última atividade) em uma chamada. SECURITY INVOKER: respeita a RLS do chamador.';
 
 revoke all on function public.cobr_sinais_pendencia() from public;
+-- `from public` NÃO alcança o grant que o Supabase dá a `anon` por default
+-- privileges — conferido em produção, anon continuava com EXECUTE depois do
+-- revoke acima. A tela Cobranças é só de usuário interno; a função é SECURITY
+-- INVOKER e a RLS já barraria o conteúdo, mas menor privilégio é menor superfície.
+revoke execute on function public.cobr_sinais_pendencia() from anon;
 grant execute on function public.cobr_sinais_pendencia() to authenticated;
