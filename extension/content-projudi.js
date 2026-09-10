@@ -329,6 +329,30 @@
     return pausar(c, 'estou na intimação mas não achei <b>Cumprir Prazo</b> — clique você e depois Continuar.');
   }
 
+  // Pendências de intimação do quadro #quadroPendencias, UMA por prazo (dedup por linha:
+  // cada pendência costuma ter 2 links — "Ver Intimação" (intimacao.do) e "Cumprir Prazo"
+  // (cumprirIntimacao.do); só o primeiro conta aqui). `texto` = descrição da linha (evento,
+  // prazo, tipo) para o humano escolher na pausa.
+  function pendenciasIntimacao() {
+    const quadro = document.getElementById('quadroPendencias');
+    if (!quadro) return [];
+    const ehVer = a => {
+      const h = a.getAttribute('href') || '';
+      return /intimacao\.do/i.test(h) && !/cumprir/i.test(h);
+    };
+    const linhas = new Set(), out = [];
+    Array.from(quadro.querySelectorAll('a[href]')).forEach(a => {
+      if (!visivel(a) || !ehVer(a)) return;
+      const linha = a.closest('tr') || a.parentElement || a;
+      if (linhas.has(linha)) return;
+      linhas.add(linha);
+      const txt = String((linha.innerText || linha.textContent || a.textContent || ''))
+        .replace(/\s+/g, ' ').replace(/\s*(ver intima[cç][aã]o|cumprir prazo)\s*/gi, ' ').trim();
+      out.push({ link: a, texto: txt.slice(0, 180) || 'prazo pendente' });
+    });
+    return out;
+  }
+
   // Tela: o processo (processo.do — form processoForm com #cumprirButton/#peticionarButton).
   async function telaProcesso(c) {
     // GUARDA DE PROCESSO CERTO (bug do lote): ao começar um caso NOVO, a tela ainda pode
@@ -363,7 +387,18 @@
     }
     // PRIORIDADE: se há intimação não lida (Pendências → "Ver Intimação"), o caminho é
     // CUMPRIR O PRAZO dela — não "Petição Eletrônica" (petição avulsa, sem vínculo).
-    const verIntim = document.querySelector('#quadroPendencias a[href*="intimacao.do"]') ||
+    // MAIS DE UM PRAZO PENDENTE → PAUSA (fail-closed): o quadro de pendências pode ter
+    // 2+ intimações (ex.: "OUTRAS DECISÕES" 10 dias + "JUNTADA DE CERTIDÃO" 5 dias) e a
+    // extensão NÃO tem como saber a qual delas a peça responde — cumprir a errada consome
+    // o prazo errado e é irreversível. Antes: querySelector pegava sempre a PRIMEIRA.
+    const pend = pendenciasIntimacao();
+    if (pend.length > 1) {
+      pend.forEach(p => { try { destacar(p.link, '#fab005'); } catch (_) {} });
+      return pausar(c, 'este processo tem <b>' + pend.length + ' prazos pendentes</b> e eu não sei a qual deles esta petição responde:' +
+        '<ul style="margin:6px 0 6px 16px;padding:0">' + pend.map(p => '<li>' + escHtml(p.texto) + '</li>').join('') + '</ul>' +
+        'Clique você em <b>Ver Intimação</b> do prazo certo (destaquei todos na tela), chegue na tela da intimação e depois clique <b>Continuar</b> na Central — dali eu sigo (Cumprir Prazo → juntada → upload).');
+    }
+    const verIntim = (pend[0] && pend[0].link) ||
       Array.from(document.querySelectorAll('#quadroPendencias a, a')).find(a => visivel(a) && /ver\s+intima[cç][aã]o/i.test(a.textContent || ''));
     if (verIntim && visivel(verIntim)) {
       progresso(c, 'intimação pendente → abrindo (Cumprir Prazo)…');
