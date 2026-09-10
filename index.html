@@ -2236,6 +2236,33 @@ body.viewas-readonly select {
   </div>
 </div>
 
+<!-- ── 2FA · INSCRIÇÃO (TOTP) ── overlay aberto em Configurações › Senha ── -->
+<div id="mfaEnrollOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:10000;align-items:center;justify-content:center;">
+  <div style="background:var(--bg);border-radius:14px;padding:32px 30px;width:100%;max-width:440px;box-shadow:0 12px 48px rgba(0,0,0,.35);margin:16px;max-height:92vh;overflow:auto;">
+    <div style="text-align:center;margin-bottom:8px;"><svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
+    <h2 style="margin:0 0 18px;font-size:20px;font-weight:700;text-align:center;">Configurar 2FA</h2>
+    <div id="mfa-enroll-body"></div>
+    <button type="button" onclick="mfa2faFecharInscricao()" style="width:100%;margin-top:12px;background:none;border:none;color:var(--text-3);font-size:13px;cursor:pointer;">Cancelar</button>
+  </div>
+</div>
+
+<!-- ── 2FA · DESAFIO NO LOGIN ── pedido do código quando a conta tem fator ── -->
+<div id="mfaChallengeOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:10000;align-items:center;justify-content:center;">
+  <div style="background:var(--bg);border-radius:14px;padding:36px 32px;width:100%;max-width:420px;box-shadow:0 12px 48px rgba(0,0,0,.35);margin:16px;">
+    <div style="text-align:center;margin-bottom:8px;"><svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
+    <h2 style="margin:0 0 6px;font-size:20px;font-weight:700;text-align:center;">Verificação em duas etapas</h2>
+    <p style="color:var(--text-3);font-size:13px;margin:0 0 24px;text-align:center;">Digite o código de 6 dígitos do seu app autenticador (Google Authenticator, Authy).</p>
+    <div class="login-field">
+      <label>Código de verificação</label>
+      <input type="text" id="mfa-login-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000"
+             oninput="this.value=this.value.replace(/\D/g,'')" onkeydown="if(event.key==='Enter')_mfaLoginConfirmar()">
+    </div>
+    <div id="mfa-login-msg" style="font-size:13px;min-height:18px;margin-bottom:14px;"></div>
+    <button class="btn-login" id="btnMfaLoginConfirmar" onclick="_mfaLoginConfirmar()">Verificar</button>
+    <button type="button" onclick="_mfaLoginCancelar()" style="width:100%;margin-top:10px;background:none;border:none;color:var(--text-3);font-size:13px;cursor:pointer;">Cancelar</button>
+  </div>
+</div>
+
 <!-- ── ESQUECI SENHA OVERLAY ── formulário para solicitar reset ── -->
 <div id="forgotOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9999;align-items:center;justify-content:center;">
   <div style="background:var(--bg);border-radius:14px;padding:36px 32px;width:100%;max-width:420px;box-shadow:0 12px 48px rgba(0,0,0,.35);margin:16px;">
@@ -6238,6 +6265,224 @@ async function salvarNovaSenha(){
   btn.disabled = false;
 }
 
+// ═══ 2FA / MFA (TOTP) — OPT-IN via Supabase Auth ══════════════════════════
+// Duas partes:
+//  (1) Inscrição opt-in em Configurações › Senha (mfa2fa*).
+//  (2) Desafio no login (_mfaDesafioSeNecessario), chamado por doLogin nos dois
+//      caminhos com sessão real (gestor e cedente).
+// TRAVA: opt-in puro, zero enforcement. Quem NÃO tem fator verificado tem
+// getAuthenticatorAssuranceLevel() = aal1/aal1 e o desafio é pulado — login
+// idêntico ao de hoje. Nenhuma tela/RLS passa a exigir aal2.
+
+// ── Parte 1: inscrição ────────────────────────────────────────────────────
+let _mfa2faEnroll = null; // { factorId } do enroll em andamento (ainda não verificado)
+
+// Card na seção Configurações › Senha: lista fatores verificados ou oferece configurar.
+async function mfa2faRenderCard(){
+  const host = document.getElementById('cfg-2fa-host');
+  if(!host) return;
+  const supa = getSupabase();
+  if(!supa){ host.innerHTML = '<div style="font-size:12px;color:var(--text-3);">Indisponível sem conexão com o servidor.</div>'; return; }
+  try{
+    const { data, error } = await supa.auth.mfa.listFactors();
+    if(error) throw error;
+    const verificados = (data?.totp || []).filter(f=>f.status==='verified');
+    if(verificados.length){
+      host.innerHTML = `
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+          <span style="display:inline-flex;width:9px;height:9px;border-radius:50%;background:var(--success);"></span>
+          <span style="font-size:13.5px;font-weight:700;color:var(--text);">2FA ativado</span>
+        </div>
+        <div style="font-size:12.5px;color:var(--text-2);margin-bottom:14px;">A cada login o sistema pedirá um código do seu app autenticador.</div>
+        ${verificados.map(f=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 14px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px;">
+          <div style="min-width:0;"><div style="font-size:13px;font-weight:600;">${escHtml(f.friendly_name||'Autenticador')}</div><div style="font-size:11px;color:var(--text-3);">Adicionado em ${f.created_at?new Date(f.created_at).toLocaleDateString('pt-BR'):'—'}</div></div>
+          <button class="btn btn-ghost btn-sm" style="color:var(--danger);white-space:nowrap;" onclick="mfa2faRemover('${f.id}')">Remover 2FA</button>
+        </div>`).join('')}`;
+    } else {
+      host.innerHTML = `
+        <div style="font-size:12.5px;color:var(--text-2);margin-bottom:14px;">Camada extra de proteção: além da senha, o login pedirá um código gerado no seu celular (Google Authenticator, Authy).</div>
+        <button class="btn btn-primary" onclick="mfa2faIniciarInscricao()">Configurar 2FA</button>`;
+    }
+  }catch(e){
+    host.innerHTML = `<div style="font-size:12px;color:var(--danger);">Não foi possível carregar o status do 2FA. ${escHtml(traduzirErro(e?.message||''))}</div>`;
+  }
+}
+
+// Abre o overlay e executa o enroll TOTP (com limpeza de fatores pendentes).
+async function mfa2faIniciarInscricao(){
+  const supa = getSupabase();
+  if(!supa){ showToast('2FA indisponível sem conexão.','warning'); return; }
+  const ov = document.getElementById('mfaEnrollOverlay');
+  const body = document.getElementById('mfa-enroll-body');
+  if(ov) ov.style.display='flex';
+  if(body) body.innerHTML = '<div style="text-align:center;color:var(--text-3);font-size:13px;padding:20px;">Gerando QR Code…</div>';
+  try{
+    // Fator não-verificado de uma tentativa anterior faz o enroll falhar
+    // ("factor already exists"). Remove os TOTP unverified antes de re-enroll.
+    try{
+      const { data: fData } = await supa.auth.mfa.listFactors();
+      const pendentes = (fData?.all || []).filter(f=>f.factor_type==='totp' && f.status==='unverified');
+      for(const f of pendentes){ try{ await supa.auth.mfa.unenroll({ factorId: f.id }); }catch(_){ /* ignora */ } }
+    }catch(_){ /* segue mesmo assim */ }
+
+    const { data, error } = await supa.auth.mfa.enroll({ factorType:'totp', friendlyName:'COBRASQ' });
+    if(error) throw error;
+    _mfa2faEnroll = { factorId: data.id };
+    const qr = data.totp?.qr_code || '';
+    const secret = data.totp?.secret || '';
+    // qr_code vem como data-URL (SVG) ou como SVG cru — renderiza os dois casos.
+    const qrHtml = /^(data:|https?:)/.test(qr) ? `<img alt="QR Code 2FA" src="${qr}" style="width:196px;height:196px;display:block;">` : qr;
+    if(body) body.innerHTML = `
+      <p style="color:var(--text-3);font-size:13px;margin:0 0 16px;text-align:center;">Escaneie o QR Code no <b>Google Authenticator</b> ou <b>Authy</b> — ou digite a chave manualmente.</p>
+      <div style="display:flex;justify-content:center;margin-bottom:14px;"><div style="background:#fff;padding:10px;border-radius:10px;line-height:0;">${qrHtml}</div></div>
+      <div style="font-size:11px;color:var(--text-3);text-align:center;margin-bottom:4px;text-transform:uppercase;letter-spacing:.08em;">Chave manual</div>
+      <div style="font-family:var(--font-mono,monospace);font-size:13px;text-align:center;word-break:break-all;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:16px;user-select:all;">${escHtml(secret)}</div>
+      <div class="login-field">
+        <label>Código de 6 dígitos</label>
+        <input type="text" id="mfa-enroll-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000"
+               oninput="this.value=this.value.replace(/\\D/g,'')" onkeydown="if(event.key==='Enter')mfa2faConfirmarInscricao()">
+      </div>
+      <div id="mfa-enroll-msg" style="font-size:13px;min-height:18px;margin-bottom:12px;"></div>
+      <button class="btn-login" id="btnMfaEnrollConfirmar" onclick="mfa2faConfirmarInscricao()">Ativar 2FA</button>`;
+    setTimeout(()=>document.getElementById('mfa-enroll-code')?.focus(),120);
+  }catch(e){
+    if(body) body.innerHTML = `<div style="color:var(--danger);font-size:13px;text-align:center;padding:12px;">Não foi possível iniciar o 2FA.<br>${escHtml(traduzirErro(e?.message||''))}</div>`;
+  }
+}
+
+// challenge + verify do código digitado durante a inscrição.
+async function mfa2faConfirmarInscricao(){
+  const supa = getSupabase();
+  if(!supa || !_mfa2faEnroll) return;
+  const inp = document.getElementById('mfa-enroll-code');
+  const msg = document.getElementById('mfa-enroll-msg');
+  const btn = document.getElementById('btnMfaEnrollConfirmar');
+  const code = (inp?.value||'').replace(/\D/g,'');
+  if(code.length!==6){ if(msg){ msg.style.color='var(--danger)'; msg.textContent='Digite os 6 dígitos.'; } return; }
+  if(btn){ btn.disabled=true; btn.textContent='Verificando…'; }
+  if(msg){ msg.textContent=''; }
+  try{
+    const factorId = _mfa2faEnroll.factorId;
+    const ch = await supa.auth.mfa.challenge({ factorId });
+    if(ch.error) throw ch.error;
+    const ver = await supa.auth.mfa.verify({ factorId, challengeId: ch.data.id, code });
+    if(ver.error) throw ver.error;
+    _mfa2faEnroll = null; // verificado: não limpar no fechamento
+    if(msg){ msg.style.color='var(--success)'; msg.textContent='2FA ativado!'; }
+    showToast('2FA ativado','success');
+    setTimeout(()=>{ const ov=document.getElementById('mfaEnrollOverlay'); if(ov) ov.style.display='none'; mfa2faRenderCard(); },900);
+  }catch(e){
+    if(msg){ msg.style.color='var(--danger)'; msg.textContent='Código inválido. Tente novamente.'; }
+    if(inp){ inp.value=''; inp.focus(); }
+  }finally{
+    if(btn){ btn.disabled=false; btn.textContent='Ativar 2FA'; }
+  }
+}
+
+// Fecha o overlay de inscrição; se saiu antes de verificar, descarta o fator pendente.
+async function mfa2faFecharInscricao(){
+  const ov = document.getElementById('mfaEnrollOverlay');
+  if(ov) ov.style.display='none';
+  if(_mfa2faEnroll){
+    const supa = getSupabase();
+    const fid = _mfa2faEnroll.factorId;
+    _mfa2faEnroll = null;
+    if(supa && fid){ try{ await supa.auth.mfa.unenroll({ factorId: fid }); }catch(_){ /* ignora */ } }
+  }
+}
+
+// Remove um fator verificado (com confirmação).
+async function mfa2faRemover(factorId){
+  const supa = getSupabase();
+  if(!supa) return;
+  if(!confirm('Remover o 2FA desta conta? O login voltará a pedir apenas a senha.')) return;
+  try{
+    const { error } = await supa.auth.mfa.unenroll({ factorId });
+    if(error) throw error;
+    showToast('2FA removido.','info');
+    mfa2faRenderCard();
+  }catch(e){
+    showToast('Falha ao remover 2FA: '+traduzirErro(e?.message||''),'danger');
+  }
+}
+
+// ── Parte 2: desafio no login ─────────────────────────────────────────────
+// Resolvers do overlay de desafio (confirm/cancel).
+let _mfaLoginResolver = null;
+function _mfaLoginConfirmar(){ if(_mfaLoginResolver) _mfaLoginResolver('confirm'); }
+function _mfaLoginCancelar(){ if(_mfaLoginResolver) _mfaLoginResolver('cancel'); }
+function _mfaAguardarAcao(){ return new Promise(res=>{ _mfaLoginResolver = res; }); }
+
+// Mostra o overlay e faz challenge+verify em laço até acertar ou cancelar.
+// Retorna true (verificado) ou false (cancelou).
+async function _mfaPromptLoop(supa, factorId){
+  const ov  = document.getElementById('mfaChallengeOverlay');
+  const inp = document.getElementById('mfa-login-code');
+  const msg = document.getElementById('mfa-login-msg');
+  const btn = document.getElementById('btnMfaLoginConfirmar');
+  if(ov) ov.style.display='flex';
+  if(inp){ inp.value=''; setTimeout(()=>inp.focus(),100); }
+  if(msg){ msg.textContent=''; }
+  try{
+    while(true){
+      const acao = await _mfaAguardarAcao();
+      if(acao === 'cancel') return false;
+      const code = (inp?.value||'').replace(/\D/g,'');
+      if(code.length!==6){ if(msg){ msg.style.color='var(--danger)'; msg.textContent='Digite os 6 dígitos.'; } continue; }
+      if(btn){ btn.disabled=true; btn.textContent='Verificando…'; }
+      if(msg){ msg.textContent=''; }
+      try{
+        const ch = await supa.auth.mfa.challenge({ factorId });
+        if(ch.error) throw ch.error;
+        const ver = await supa.auth.mfa.verify({ factorId, challengeId: ch.data.id, code });
+        if(ver.error) throw ver.error;
+        return true; // sessão elevada a aal2
+      }catch(e){
+        if(msg){ msg.style.color='var(--danger)'; msg.textContent='Código inválido. Tente novamente.'; }
+        if(inp){ inp.value=''; inp.focus(); }
+      }finally{
+        if(btn){ btn.disabled=false; btn.textContent='Verificar'; }
+      }
+    }
+  }finally{
+    if(ov) ov.style.display='none';
+    _mfaLoginResolver = null;
+  }
+}
+
+// Chamado por doLogin após signInWithPassword bem-sucedido e ANTES de carregar dados.
+// true  → seguir o login (sem fator, ou código verificado);
+// false → challenge cancelado/abortado; o chamador reabilita o botão e faz return.
+async function _mfaDesafioSeNecessario(supa){
+  let aal;
+  try{
+    const r = await supa.auth.mfa.getAuthenticatorAssuranceLevel();
+    if(r.error) throw r.error;
+    aal = r.data;
+  }catch(e){
+    // Não deu para saber o AAL (erro transitório). Para não travar o login de
+    // quem NÃO usa 2FA (trava: zero enforcement / deploy seguro), segue como hoje.
+    console.warn('[2FA] getAuthenticatorAssuranceLevel falhou; seguindo sem desafio.', e);
+    return true;
+  }
+  // Sem fator verificado: nextLevel === currentLevel === 'aal1' → login normal.
+  if(!(aal && aal.nextLevel === 'aal2' && aal.currentLevel === 'aal1')) return true;
+  // Tem fator → localiza o TOTP verificado e exige o código.
+  let factorId = null;
+  try{
+    const { data: fData } = await supa.auth.mfa.listFactors();
+    factorId = (fData?.totp || []).filter(f=>f.status==='verified')[0]?.id || null;
+  }catch(_){ /* cai no defensivo abaixo */ }
+  if(!factorId){
+    // AAL pede aal2 mas não achamos o fator (não deveria ocorrer). Não travar o acesso.
+    console.warn('[2FA] AAL exige aal2 mas nenhum fator TOTP verificado foi encontrado; seguindo.');
+    return true;
+  }
+  const ok = await _mfaPromptLoop(supa, factorId);
+  if(!ok){ try{ await supa.auth.signOut(); }catch(_){ /* ignora */ } return false; }
+  return true;
+}
+
 // ── ESQUECEU A SENHA ──────────────────────────────────────────
 function esqueceuSenha(){
   const supa = getSupabase();
@@ -7051,6 +7296,12 @@ async function doLogin(type){
           if(btnLogin){ btnLogin.disabled=false; btnLogin.innerHTML='Entrar como gestor '+_btnArrow; }
           return;
         }
+        // ── 2FA (opt-in): conta com fator verificado exige o código agora, antes de carregar dados.
+        const _mfaOk = await _mfaDesafioSeNecessario(supa);
+        if(!_mfaOk){
+          if(btnLogin){ btnLogin.disabled=false; btnLogin.innerHTML='Entrar como gestor '+_btnArrow; }
+          return;
+        }
         // Load fresh data from Supabase
         await loadFromSupabase();
         // Fase 3 (freeze): o blob de devedores/clientes ficou congelado; recarrega a
@@ -7130,6 +7381,9 @@ async function doLogin(type){
     try{
       const { data, error } = await supa.auth.signInWithPassword({ email, password: senhaInput });
       if(error){ showToast('E-mail ou senha inválidos.','danger'); _reset(); return; }
+      // ── 2FA (opt-in): conta com fator verificado exige o código agora, antes de carregar dados.
+      const _mfaOk = await _mfaDesafioSeNecessario(supa);
+      if(!_mfaOk){ _reset(); return; }
       const appRes = await carregarAppUserComRetry(supa, data.user.id);
       if(appRes.status!=='ok' || !appRes.user || appRes.user.papel!=='cedente'){
         await supa.auth.signOut();
@@ -46079,7 +46333,11 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
         <div class="fg"><label>Nova senha</label><input type="password" id="cfg-senha-nova"/></div>
         <div class="fg"><label>Confirmar nova senha</label><input type="password" id="cfg-senha-conf"/></div>
         <button class="btn btn-primary" onclick="salvarMinhaSenha()">Alterar senha</button>
-        <div id="cfg-senha-msg" style="margin-top:8px;font-size:12px;color:var(--text-2);">Mínimo 6 caracteres.</div>`;
+        <div id="cfg-senha-msg" style="margin-top:8px;font-size:12px;color:var(--text-2);">Mínimo 6 caracteres.</div>
+        <div style="height:1px;background:var(--border);margin:26px 0 22px;"></div>
+        <h3 style="font-size:15px;font-weight:700;margin-bottom:4px;">Segurança · Autenticação em duas etapas (2FA)</h3>
+        <div id="cfg-2fa-host" style="margin-top:12px;"><div style="font-size:12px;color:var(--text-3);">Carregando…</div></div>`;
+      mfa2faRenderCard();
     } else {
       el.innerHTML = `<h3 style="font-size:15px;font-weight:700;margin-bottom:18px;">Alterar senha</h3>
         <div class="fg"><label>Senha atual</label><input type="password" id="cfg-senha-atual" placeholder="••••••••"/></div>
