@@ -532,6 +532,25 @@
   }
   // Escolhe o tipo na janela: Descrição → Pesquisar → marca o radio que casa →
   // Selecionar (o Projudi fecha o diálogo e preenche o hidden na tela-mãe).
+  // Consultas para a busca por Descrição da janela de tipo, da mais específica para a
+  // mais tolerante. O corte para antes da 1ª letra "arriscada" (vogal ou c, que no
+  // catálogo do Projudi pode ser á/ã/é/ç…) deixa a consulta imune a acento:
+  //   "Alvará"/"Alvara" → "Alv" · "Peticao" → "Pet" · "Manifestacao" → "Man"
+  function consultasTipo(txt) {
+    const out = [];
+    const push = (v) => { v = String(v || '').trim(); if (v.length >= 3 && !out.includes(v)) out.push(v); };
+    const corte = (v) => {
+      const t = String(v || '');
+      for (let i = 3; i < t.length; i++) if (/[aeiouc]/i.test(t[i])) return t.slice(0, i);
+      return t;
+    };
+    push(txt);
+    push(corte(txt));
+    const longa = (norm(txt).split(/\W+/).filter(w => w.length >= 4)[0]) || '';
+    push(corte(longa));
+    return out;
+  }
+
   async function telaDialogoTipo(c) {
     const tipoTxt = c.tipo_peticao || 'Manifestação da Parte';
     const alvo = norm(tipoTxt);
@@ -550,15 +569,34 @@
       const desc = inputPorRotulo(['descricao', 'descrição']) ||
         Array.from(document.querySelectorAll('input[type="text"],input:not([type])')).find(visivel);
       if (desc) {
-        setInput(desc, tipoTxt);
-        const pesquisar = acharControle(['pesquisar', 'filtrar', 'consultar']);
-        if (pesquisar) await clicarPagina(pesquisar);
-        await esperar(() => radiosVis().some(casa), 6000);
-        radios = radiosVis();
+        // A busca por Descrição do Projudi é SENSÍVEL A ACENTO ("alvara" não acha
+        // "ALVARÁ") e o tipo vem do NOME DO ARQUIVO, que nunca tem acento. Então
+        // tentamos as consultas em cascata (consultasTipo): o texto como está e,
+        // se não achar, prefixos cortados ANTES de qualquer letra que possa estar
+        // acentuada. A conferência do item (casa) ignora acento, então um prefixo
+        // curto é seguro: traz mais linhas e escolhemos a certa entre elas.
+        for (const q of consultasTipo(tipoTxt)) {
+          setInput(desc, q);
+          const pesquisar = acharControle(['pesquisar', 'filtrar', 'consultar']);
+          if (pesquisar) await clicarPagina(pesquisar);
+          await esperar(() => radiosVis().some(casa), 6000);
+          radios = radiosVis();
+          if (radios.some(casa)) break;
+          progresso(c, 'tipo: "' + q + '" não achou — tentando outra grafia…');
+        }
       }
     }
     let alvoRadio = radios.find(casa) || (radios.length === 1 ? radios[0] : null);
-    if (!alvoRadio) return pausar(c, 'não achei "' + escHtml(tipoTxt) + '" na janela de tipo — escolha você na lista e clique <b>Selecionar</b>; depois Continuar.');
+    if (!alvoRadio) {
+      // Mostra o que ESTÁ na tela: ajuda a descobrir o nome exato do tipo no Projudi
+      // (o nome do arquivo pode divergir do catálogo — ex.: acento, plural, sinônimo).
+      const opcoes = radiosVis().slice(0, 8)
+        .map(r => (linhaDoRadio(r) || '').replace(/\s+/g, ' ').trim().slice(0, 60))
+        .filter(Boolean).join(' · ');
+      return pausar(c, 'não achei "<b>' + escHtml(tipoTxt) + '</b>" na janela de tipo (busquei também sem acento). ' +
+        (opcoes ? 'O que aparece na lista: <b>' + escHtml(opcoes) + '</b>. ' : '') +
+        'Escolha você na lista e clique <b>Selecionar</b>; depois Continuar — e me diga o nome certo, que eu ensino a extensão.');
+    }
     // SELEÇÃO ROBUSTA: o Projudi (ajaxtags) registra a escolha pelo onclick do rádio/
     // linha, não só pelo .checked — então marca, dispara a sequência de mouse COMPLETA
     // (mousedown→mouseup→click) e, se o rádio/linha tiver onclick da página, executa
