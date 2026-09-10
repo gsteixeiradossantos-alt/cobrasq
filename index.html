@@ -52517,8 +52517,11 @@ function _relNorm(c){
   const jud = (c.fase==='judicial') || st.g==='jud' || st.g==='cumpr';
   const promove = jud && st.g==='extra';
   return {
+    id: c.id||null,
     nome: _cobrPrincipalNome(c), doc: _cobrPrincipalDoc(c), credor: _cobrCredorNome(c), credorId: c.cliente_id||null,
     processo: c.numero_processo||'',
+    // Referência do crédito ("· Gol 2014", "· peças") na tabela do relatório v4.
+    ref: (c.metadata && (c.metadata.referencia || c.metadata.bem || c.metadata.veiculo)) || '',
     nominal: (+c.valor_orig || +c.valor_atual || 0), atual: (+c.valor_atual || +c.valor_orig || 0),
     statusRaw: statusLabel(c.status)||'—', dias: _cobrAgingDias(c),
     esfera: jud ? 'Judicial' : 'Extrajudicial',
@@ -52534,7 +52537,10 @@ async function _relColetarCobrancas(){
   if(typeof loadCobrancasFromSupabase==='function'){
     try{ const f = await loadCobrancasFromSupabase(); if(Array.isArray(f)) lista = f; }catch(_){ }
   }
-  return (lista||[]).filter(c=>!c.arquivado && !c.is_draft).map(_relNorm);
+  // Quitados entram mesmo arquivados: o relatório ao credor abre com "quanto voltou",
+  // e essa é a única linha boa do documento. Os demais arquivados ficam de fora.
+  const vale = c => !c.is_draft && (!c.arquivado || /quitad|liquidad/i.test(c.status||''));
+  return (lista||[]).filter(vale).map(_relNorm);
 }
 
 function _relFechar(){ document.getElementById('rel-cobr-overlay')?.remove(); }
@@ -52769,8 +52775,22 @@ async function gerarRelatorioCobrancas(){
   if(tipo==='credor'){
     const casos = todos.filter(k=>k.credorId===credorId);
     if(!casos.length){ showToast('Esse credor não tem cobranças ativas.','warning'); return; }
-    html = _relHtmlCredor(casos[0].credor, casos);
-    rotuloLog = `Andamento — ${casos[0].credor}`;
+    const ctx = { andamentos: await _relV4Andamentos(casos.map(k=>k.id).filter(Boolean)) };
+    // Ciclo = últimos 30 dias. Só entra o que o banco registrou; sem evento, a
+    // seção 02 não é impressa (melhor ausente que preenchida com texto genérico).
+    const corte = Date.now() - 30*864e5;
+    ctx.eventos = [
+      ...casos.filter(k=>k.enc).map(k=>({ rotulo:'Quitação',
+        texto:`Dívida de ${k.nome} encerrada com pagamento integral. Valor original repassado a você sem desconto; os acessórios cobriram o trabalho da COBRASQ.` })),
+      ...Object.entries(ctx.andamentos)
+        .filter(([id,a])=>a.em && a.em.getTime()>=corte)
+        .map(([id,a])=>{ const k=casos.find(x=>x.id===id)||{};
+          return { data:`${a.em.getDate()} ${['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'][a.em.getMonth()]}`,
+                   texto:`${k.nome?k.nome+': ':''}${a.txt}` }; })
+    ];
+    ctx.proximos = [];   // sem fonte de prazos hoje; a seção 06 se omite sozinha
+    html = _relHtmlCredorV4(casos[0].credor, casos, ctx);
+    rotuloLog = `Andamento v4 — ${casos[0].credor}`;
   }else{
     html = _relHtmlGerencial(todos);
     rotuloLog = 'Gerencial interno';
@@ -52779,6 +52799,399 @@ async function gerarRelatorioCobrancas(){
   if(!w){ showToast('Libere pop-ups para emitir o relatório.','warning'); return; }
   w.document.write(html); w.document.close();
   if(typeof logAtividade==='function') logAtividade('Emitiu relatório de cobranças', rotuloLog);
+}
+
+// ============================================================================
+// RELATÓRIO DE ANDAMENTO AO CREDOR — v4 "Marinho & Champagne"
+// Handoff design_handoff_relatorio_credor/README.md (10/09/2026).
+// Quatro páginas A4 fixas. O leitor é o dono da empresa, leigo em Direito:
+// nada de juridiquês, e nenhum campo narrativo é inventado — seção sem dado
+// no banco simplesmente não é impressa (ver _v4Ciclo/_v4Proximos).
+// ============================================================================
+
+const _V4_SELO = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><circle cx="50" cy="50" r="48" fill="none" stroke="currentColor" stroke-width="1"/><path d="M 78,28 A 32,32 0 1,0 78,72 L 65,62 A 18,18 0 1,1 65,38 Z" fill="currentColor"/><circle cx="50" cy="50" r="3" fill="currentColor"/></svg>`;
+
+// As cinco etapas do relatório, na ordem em que aparecem na tabela (da mais
+// avançada à mais recente) e com a cor do segmento na barra da página 2.
+const _V4_ETAPAS = [
+  { k:'quitada',    nome:'Quitada',                        cor:'#5E7C58', barra:false },
+  { k:'ganha',      nome:'Dívida ganha — cobrança forçada', cor:'#0A1530', barra:true,
+    txt:'O juiz já reconheceu a dívida. Bloqueamos contas e veículos do devedor por ordem judicial até o pagamento.' },
+  { k:'justica',    nome:'Na Justiça',                     cor:'#6B7691', barra:true,
+    txt:'O juiz notifica o devedor, ouve os dois lados e decide. Costuma levar de 6 a 18 meses — o ritmo é do Judiciário.' },
+  { k:'preparando', nome:'Preparando ação',                cor:'#9C7F40', barra:true,
+    txt:'A negociação se esgotou. Organizamos os documentos e redigimos a ação para entrar na Justiça.' },
+  { k:'negociacao', nome:'Negociação direta',              cor:'#C9A961', barra:true,
+    txt:'Contato direto com o devedor por telefone, mensagem e notificação formal. Sem processo, sem desconto no seu valor.' },
+];
+const _v4Etapa = k => _V4_ETAPAS.find(e=>e.k===k) || _V4_ETAPAS[4];
+
+// Reduz a etiqueta livre do sistema às cinco etapas do credor. Reusa a
+// classificação de _relNorm (k.g), que já resolveu esfera × etiqueta.
+function _v4Grupo(k){
+  const s = (k.statusRaw||'').toLowerCase();
+  if(k.enc || /quitad|liquidad/.test(s)) return 'quitada';
+  if(k.g === 'cumpr') return 'ganha';
+  if(k.g === 'jud')   return 'justica';
+  if(/fazer a[çc][ãa]o|reajuizar|executar acordo/.test(s)) return 'preparando';
+  return 'negociacao';
+}
+
+// "3a 10m" · "1a 1m" · "2m" · "14d". Idade = tempo desde a entrada na COBRASQ.
+function _v4Idade(dias){
+  if(dias==null || dias<0) return '—';
+  if(dias < 31) return dias + 'd';
+  const meses = Math.floor(dias/30.44);
+  if(meses < 12) return meses + 'm';
+  const a = Math.floor(meses/12), m = meses % 12;
+  return a + 'a' + (m ? ' ' + m + 'm' : '');
+}
+
+// Números por extenso para o lede da capa (0–99 basta: é contagem de dívidas).
+function _v4Extenso(n){
+  const u=['zero','uma','duas','três','quatro','cinco','seis','sete','oito','nove','dez','onze','doze','treze','catorze','quinze','dezesseis','dezessete','dezoito','dezenove'];
+  const d=['','','vinte','trinta','quarenta','cinquenta','sessenta','setenta','oitenta','noventa'];
+  if(n < 20) return u[n] || String(n);
+  if(n > 99) return String(n);
+  const dez = Math.floor(n/10), un = n%10;
+  return d[dez] + (un ? ' e ' + u[un] : '');
+}
+
+// "R$ 1,04 mi" para o KPI; o valor cheio vai na sublinha.
+function _v4Curto(v){
+  v = +v || 0;
+  if(v >= 1e6) return { n:'R$ ' + (v/1e6).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}), suf:' mi' };
+  if(v >= 1e3) return { n:'R$ ' + Math.round(v/1e3).toLocaleString('pt-BR'), suf:' mil' };
+  return { n:_fmtR(v), suf:'' };
+}
+const _v4R = v => (+v||0).toLocaleString('pt-BR',{minimumFractionDigits:0,maximumFractionDigits:0});
+
+// Última movimentação por cobrança, para a coluna "último passo · próximo passo".
+// Fail-soft de propósito: sem Supabase ou sem evento, a coluna cai para o rótulo
+// da etapa — nunca para texto inventado.
+async function _relV4Andamentos(ids){
+  const out = {};
+  if(!ids.length) return out;
+  const sb = (typeof getSupabase==='function') ? getSupabase() : null;
+  if(!sb) return out;
+  try{
+    const { data } = await sb.from('devedor_eventos')
+      .select('cobranca_id,tipo,payload,criado_em')
+      .in('cobranca_id', ids).order('criado_em', { ascending:false });
+    (data||[]).forEach(e=>{
+      if(out[e.cobranca_id]) return;                       // já tem o mais recente
+      const p = e.payload || {};
+      const txt = p.descricao || p.texto || p.movimento || '';
+      if(!txt) return;
+      out[e.cobranca_id] = {
+        txt: String(txt).replace(/\s+/g,' ').trim().slice(0,120),
+        em:  e.criado_em ? new Date(e.criado_em) : null
+      };
+    });
+  }catch(_){ }
+  return out;
+}
+
+// Dicionário do handoff: o relatório fala a língua do credor, não a do processo.
+function _v4Traduz(s){
+  return String(s||'')
+    .replace(/dilig[êe]ncias?/gi,'buscas')
+    .replace(/constri[çc][ãa]o/gi,'bloqueio')
+    .replace(/composi[çc][ãa]o/gi,'acordo')
+    .replace(/\bautos\b/gi,'processo').replace(/\bfeitos?\b/gi,'processo')
+    .replace(/satisfa[çc][ãa]o do cr[ée]dito/gi,'pagamento')
+    .replace(/cita[çc][ãa]o/gi,'notificação da Justiça')
+    .replace(/cumprimento de senten[çc]a/gi,'cobrança forçada')
+    .replace(/Sisbajud/gi,'Sisbajud (bloqueio de contas)')
+    .replace(/Renajud/gi,'Renajud (restrição de veículos)');
+}
+
+// Fallback honesto do "próximo passo": o que a etapa determina, sem promessa.
+const _V4_PROX = {
+  quitada:    'encerrada',
+  ganha:      'buscas de bens e valores do devedor',
+  justica:    'acompanhamento do processo',
+  preparando: 'protocolo da ação',
+  negociacao: 'contato ativo com o devedor'
+};
+
+// ---- folha de estilo do documento v4 ---------------------------------------
+function _relV4Css(){
+  return `*{box-sizing:border-box;margin:0;padding:0}
+@page{size:A4;margin:0}
+:root{--ink:#0A1530;--graphite:#15224A;--paper:#EFEAD9;--paper-2:#E2DBC6;--accent:#C9A961;--accent-2:#9C7F40;--judicial:#6B7691;--line:rgba(10,21,48,.14);--mute:rgba(10,21,48,.55);
+--serif:'Fraunces',Georgia,serif;--sans:'Inter Tight',-apple-system,sans-serif;--mono:'JetBrains Mono',ui-monospace,monospace;--italic:'Instrument Serif',Georgia,serif}
+body{background:#C9C3B2;font-family:var(--sans);-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.page{width:210mm;height:297mm;margin:0 auto 10mm;background:var(--paper);color:var(--ink);
+  padding:16mm 18mm 14mm;display:flex;flex-direction:column;position:relative;overflow:hidden;page-break-after:always}
+.page:last-child{page-break-after:auto}
+@media print{body{background:none}.page{margin:0;box-shadow:none}.no-print{display:none}}
+@media screen{.page{box-shadow:0 6px 34px rgba(10,21,48,.22)}}
+
+/* ---- capa ---- */
+.p1{background:var(--ink);color:var(--paper);padding:18mm 18mm 14mm}
+.p1 .rule{height:1px;background:var(--accent);opacity:.7;margin-bottom:26px}
+.p1 .selo-bg{position:absolute;right:-70px;bottom:-70px;width:420px;color:var(--accent);opacity:.07;pointer-events:none}
+.p1 .selo-bg svg{width:100%;height:100%;display:block}
+.cab{display:flex;justify-content:space-between;align-items:flex-start}
+.cab-l{display:flex;align-items:center;gap:12px}
+.cab-selo{width:34px;height:34px;color:var(--accent);flex:none}
+.cab-selo svg{width:100%;height:100%;display:block}
+.cab-div{width:1px;height:34px;background:currentColor;opacity:.25}
+.wm{font-family:var(--serif);font-weight:300;font-size:18px;line-height:1}
+.wm .dot{color:var(--accent)}
+.wm-sub{font-family:var(--mono);font-size:7px;letter-spacing:.28em;text-transform:uppercase;opacity:.6;margin-top:3px}
+.cab-r{font-family:var(--mono);font-size:8px;letter-spacing:.18em;text-transform:uppercase;opacity:.6;text-align:right;line-height:1.9}
+.p1 .eyebrow{font-family:var(--mono);font-size:9px;letter-spacing:.22em;text-transform:uppercase;color:var(--accent);margin-top:78px}
+.p1 h1{font-family:var(--serif);font-weight:300;font-size:58px;line-height:1.02;letter-spacing:-.025em;max-width:15ch;margin-top:16px}
+.p1 h1 em{font-family:var(--italic);font-style:italic;color:var(--accent)}
+.lede{font-family:var(--italic);font-style:italic;font-size:19px;line-height:1.4;opacity:.8;max-width:52ch;margin-top:22px}
+.kpis{margin-top:auto;display:grid;grid-template-columns:repeat(3,1fr);gap:40px;border-top:1px solid rgba(239,234,217,.18);padding-top:28px}
+.kpi-lb{font-family:var(--mono);font-size:8px;letter-spacing:.2em;text-transform:uppercase;opacity:.65}
+.kpi-lb.ouro{color:var(--accent);opacity:1}
+.kpi-n{font-family:var(--serif);font-weight:300;font-size:40px;line-height:1.1;margin:8px 0 6px}
+.kpi-n.ouro{color:var(--accent)}
+.kpi-n span{font-size:20px;opacity:.6}
+.kpi-s{font-size:11px;line-height:1.45;opacity:.65}
+.p1-pe{margin-top:26px;font-family:var(--mono);font-size:7.5px;letter-spacing:.18em;text-transform:uppercase;opacity:.5;display:flex;justify-content:space-between}
+
+/* ---- páginas de miolo ---- */
+.ph{display:flex;justify-content:space-between;align-items:baseline;border-bottom:.5px solid var(--accent);padding-bottom:12px}
+.ph .wm{font-size:14px;color:var(--ink)}
+.ph-r{font-family:var(--mono);font-size:7.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
+.sec{display:flex;align-items:center;gap:10px;margin:42px 0 14px}
+.sec-n{font-family:var(--mono);font-size:9px;letter-spacing:.18em;color:var(--accent-2);font-weight:500}
+.sec-t{font-family:var(--mono);font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--mute)}
+.sec-l{flex:1;height:1px;background:var(--line)}
+h2{font-family:var(--serif);font-weight:300;font-size:30px;line-height:1.15;letter-spacing:-.01em}
+.h2-nota{font-size:10px;color:var(--mute);text-align:right;line-height:1.5}
+.pe{margin-top:auto;padding-top:12px;border-top:.5px solid var(--line);display:flex;justify-content:space-between;
+  font-family:var(--mono);font-size:7.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute)}
+
+/* ---- 01 onde está cada real ---- */
+.barra{display:flex;gap:2px;height:8px;margin:18px 0 16px}
+.barra i{display:block}
+.leg{display:grid;grid-template-columns:repeat(4,1fr);gap:22px}
+.leg-h{display:flex;align-items:center;gap:6px}
+.leg-q{width:7px;height:7px;flex:none}
+.leg-k{font-family:var(--mono);font-size:7.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute)}
+.leg-v{font-family:var(--serif);font-weight:300;font-size:22px;margin:7px 0 2px}
+.leg-n{font-size:11px;color:var(--mute)}
+.leg-p{font-size:11.5px;line-height:1.5;margin-top:8px}
+
+/* ---- 02 ciclo ---- */
+.ciclo{display:grid;grid-template-columns:90px 1fr;row-gap:13px;column-gap:14px;margin-top:16px}
+.ciclo dt{font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--mute);padding-top:2px}
+.ciclo dt.ouro{color:var(--accent-2)}
+.ciclo dd{font-size:12.5px;line-height:1.55}
+.ciclo dd em{font-family:var(--italic);font-style:italic;font-size:14px}
+.porque{font-family:var(--italic);font-size:17px;line-height:1.45;max-width:62ch;margin-top:14px}
+
+/* ---- 03 tabela ---- */
+table{width:100%;border-collapse:collapse;font-size:10px;line-height:1.35;margin-top:14px;table-layout:fixed}
+col.c-dev{width:31%}col.c-val{width:13%}col.c-ida{width:9%}col.c-pas{width:47%}
+thead th{font-family:var(--mono);font-size:7.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);
+  font-weight:500;text-align:left;padding-bottom:7px;border-bottom:1px solid var(--ink)}
+thead th.num{text-align:right}
+tr.grp td{padding:14px 0 5px;border-bottom:.5px solid var(--ink)}
+.grp-h{display:flex;align-items:center;gap:7px}
+.grp-q{width:7px;height:7px;flex:none}
+.grp-n{font-family:var(--mono);font-size:8px;letter-spacing:.16em;text-transform:uppercase;font-weight:500}
+.grp-m{font-size:10px;color:var(--mute);margin-left:auto}
+tbody td{padding:4.5px 8px 4.5px 0;border-bottom:.5px solid var(--line);vertical-align:top}
+td.dev{font-weight:500}
+td.dev span{color:var(--mute);font-weight:400}
+td.num{text-align:right;font-family:var(--mono);font-size:9.5px;white-space:nowrap;padding-right:14px}
+thead th.num{padding-right:14px}
+td.idade{font-family:var(--mono);font-size:9px;color:var(--mute);white-space:nowrap}
+td.passo{color:var(--ink)}
+td.passo b{color:var(--accent-2);font-weight:600}
+.tab-pe{display:flex;justify-content:space-between;align-items:baseline;margin-top:12px;padding-top:10px;border-top:1px solid var(--ink)}
+.tab-pe .k{font-family:var(--mono);font-size:8px;letter-spacing:.16em;text-transform:uppercase}
+.tab-pe .v{font-family:var(--mono);font-size:10px;font-weight:500}
+.tab-nota{font-size:9.5px;color:var(--mute);margin-top:6px}
+
+/* ---- 04 método ---- */
+.metodo{display:grid;grid-template-columns:repeat(4,1fr);gap:22px;border-top:1px solid var(--ink);padding-top:16px;margin-top:14px}
+.met-n{font-family:var(--serif);font-weight:300;font-size:30px;color:var(--accent);line-height:1}
+.met-t{font-size:12.5px;font-weight:600;margin:6px 0 5px}
+.met-p{font-size:11.5px;line-height:1.5;color:rgba(10,21,48,.8)}
+.bloco-ink{background:var(--ink);color:var(--paper);padding:22px 26px;display:grid;grid-template-columns:1.2fr 1fr;gap:26px;align-items:center;margin-top:26px}
+.bloco-ink h3{font-family:var(--serif);font-weight:300;font-size:22px;line-height:1.2}
+.bloco-ink h3 em{font-family:var(--italic);font-style:italic;color:var(--accent)}
+.bloco-ink p{font-size:11.5px;line-height:1.55;opacity:.8}
+.prox{display:grid;grid-template-columns:1fr 1fr;gap:10px 26px;margin-top:14px}
+.prox-i{display:grid;grid-template-columns:52px 1fr;gap:10px;align-items:baseline}
+.prox-d{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent-2)}
+.prox-t{font-size:12px;line-height:1.45}
+.fecho{font-family:var(--italic);font-style:italic;font-size:15px;line-height:1.5;margin-top:18px}
+.aviso{border:.5px solid rgba(10,21,48,.25);padding:12px 14px;display:grid;grid-template-columns:auto 1fr;gap:12px;margin-top:20px}
+.aviso-k{font-family:var(--mono);font-size:7.5px;letter-spacing:.18em;color:var(--accent-2)}
+.aviso-t{font-size:10.5px;line-height:1.5}
+.ass{margin-top:auto;padding-top:14px;border-top:.5px solid var(--accent);display:flex;justify-content:space-between;align-items:flex-end}
+.ass-n{font-family:var(--serif);font-weight:400;font-size:15px}
+.ass-c{font-family:var(--mono);font-size:7.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);margin-top:4px}
+.ass-r{font-family:var(--mono);font-size:7.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);text-align:right;line-height:1.9}
+.barra-btn{text-align:center;padding:14px}
+.barra-btn button{font:500 13px var(--sans);padding:9px 18px;border:1px solid var(--ink);background:var(--ink);color:var(--paper);cursor:pointer}`;
+}
+
+// ---- documento -------------------------------------------------------------
+// ctx.andamentos: cobranca_id -> { txt, em } (ver _relV4Andamentos).
+// ctx.eventos:    [{ data|rotulo, texto }] do ciclo; vazio => seção 02 não sai.
+// ctx.proximos:   [{ data, texto }] dos próximos 30 dias; vazio => seção 06 não sai.
+function _relHtmlCredorV4(nomeCredor, casos, ctx){
+  ctx = ctx||{};
+  const and = ctx.andamentos||{}, eventos = ctx.eventos||[], proximos = ctx.proximos||[];
+  const hoje = new Date();
+  const MES=['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+  const MESc=['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'];
+  const dLongo = `${hoje.getDate()} de ${MES[hoje.getMonth()]}`;
+  const ref = String(hoje.getMonth()+1).padStart(2,'0')+' / '+hoje.getFullYear();
+  const resp  = (typeof currentUser!=='undefined' && currentUser?.nome) ? currentUser.nome : 'COBRASQ';
+  const cargo = (typeof currentUser!=='undefined' && currentUser?.role) ? currentUser.role : 'Equipe COBRASQ';
+  const d30 = new Date(hoje.getTime()+30*864e5);
+
+  casos.forEach(k=>{ k._g = _v4Grupo(k); });
+  const por={}; _V4_ETAPAS.forEach(e=>por[e.k]=[]);
+  casos.forEach(k=>por[k._g].push(k));
+  Object.values(por).forEach(a=>a.sort((x,y)=>y.nominal-x.nominal));
+  const soma = a => a.reduce((s,k)=>s+k.nominal,0);
+  const quitadas=por.quitada, ativas=casos.filter(k=>k._g!=='quitada');
+  const totAtivo=soma(ativas), naJustica=[...por.ganha,...por.justica];
+  const barra=_V4_ETAPAS.filter(e=>e.barra).map(e=>({...e,cs:por[e.k],v:soma(por[e.k])})).filter(e=>e.cs.length);
+
+  const ph = `<div class="ph"><div class="wm">cobrasq<span class="dot">.</span></div><div class="ph-r">${escHtml(nomeCredor)} · Relatório ${ref}</div></div>`;
+  const pe = n => `<div class="pe"><span>Confidencial · exclusivo ao credor</span><span>${String(n).padStart(2,'0')} / {{N}}</span></div>`;
+  const sec = (n,t) => `<div class="sec"><span class="sec-n">${n}</span><span class="sec-t">${t}</span><span class="sec-l"></span></div>`;
+  const pgs = [];
+
+  // ---- página 1 · capa -------------------------------------------------------
+  const kTot=_v4Curto(totAtivo);
+  const lede = `${_v4Extenso(casos.length).replace(/^./,c=>c.toUpperCase())} dívida${casos.length!==1?'s':''} confiada${casos.length!==1?'s':''} à COBRASQ: `
+    +(quitadas.length?`${_v4Extenso(quitadas.length)} quitada${quitadas.length!==1?'s':''}, `:'')
+    +`${_v4Extenso(ativas.length)} em andamento. Este relatório mostra onde cada uma está e qual é o próximo passo.`;
+  pgs.push(`<section class="page p1"><div class="selo-bg">${_V4_SELO}</div><div class="rule"></div>
+<div class="cab"><div class="cab-l"><div class="cab-selo">${_V4_SELO}</div><div class="cab-div"></div>
+  <div><div class="wm">cobrasq<span class="dot">.</span></div><div class="wm-sub">Recuperação de crédito</div></div></div>
+  <div class="cab-r">Relatório de andamento<br>Ref. ${ref} · Confidencial</div></div>
+<div class="eyebrow">Para ${escHtml(nomeCredor)}</div>
+<h1>Posição da carteira em <em>${dLongo}</em>.</h1>
+<p class="lede">${escHtml(lede)}</p>
+<div class="kpis">
+  <div><div class="kpi-lb ouro">Quitada${quitadas.length!==1?'s':''}</div>
+    <div class="kpi-n ouro">${quitadas.length||'—'}</div>
+    <div class="kpi-s">${quitadas.length
+      ? escHtml(quitadas.map(k=>k.nome).join(', '))+' — dívida encerrada com pagamento integral do valor original.'
+      : 'Nenhuma dívida encerrada até esta data.'}</div></div>
+  <div><div class="kpi-lb">Em recuperação</div><div class="kpi-n">${kTot.n}<span>${kTot.suf}</span></div>
+    <div class="kpi-s">${_fmtR(totAtivo)} em ${ativas.length} dívida${ativas.length!==1?'s':''}. Volta integral ao seu caixa.</div></div>
+  <div><div class="kpi-lb">Na Justiça</div><div class="kpi-n">${naJustica.length}</div>
+    <div class="kpi-s">R$ ${_v4R(soma(naJustica))} em processo${por.ganha.length?`; ${por.ganha.length} dela${por.ganha.length!==1?'s':''} já com sentença favorável`:''}.</div></div>
+</div>
+<div class="p1-pe"><span>cobrasq.com.br</span><span>Responsável · ${escHtml(resp)}</span><span>01 / {{N}}</span></div></section>`);
+
+  // ---- página 2 · onde está cada real · ciclo · por que não entrou -----------
+  const larg = v => totAtivo ? Math.max(2, Math.round(v/totAtivo*100)) : 0;
+  const p2 = [ph, sec('01','Onde está cada real'),
+    `<h2>Toda dívida percorre o mesmo caminho.<br>Veja quanto está em cada etapa.</h2>`,
+    `<div class="barra">${barra.map(e=>`<i style="background:${e.cor};width:${larg(e.v)}%"></i>`).join('')}</div>`,
+    `<div class="leg">${barra.map(e=>`<div>
+      <div class="leg-h"><i class="leg-q" style="background:${e.cor}"></i><span class="leg-k">${escHtml(e.nome.split(' — ')[0])}</span></div>
+      <div class="leg-v">R$ ${_v4R(e.v)}</div>
+      <div class="leg-n">${e.cs.length} dívida${e.cs.length!==1?'s':''} · ${totAtivo?Math.round(e.v/totAtivo*100):0}%</div>
+      <div class="leg-p">${escHtml(e.txt||'')}</div></div>`).join('')}</div>`];
+  if(eventos.length){
+    p2.push(sec('02','O que aconteceu neste ciclo'),
+      `<dl class="ciclo">${eventos.map(ev=>`<dt class="${ev.rotulo?'ouro':''}">${escHtml(ev.rotulo||ev.data||'')}</dt><dd>${_v4Traduz(escHtml(ev.texto))}</dd>`).join('')}</dl>`);
+  }
+  p2.push(sec('03','Por que o restante ainda não entrou'),
+    `<p class="porque">${escHtml(
+      por.negociacao.length || por.preparando.length
+        ? 'O devedor só paga quando é alcançado — por telefone, por notificação ou por ordem judicial. '
+          + 'Cada etapa acima existe porque a anterior não bastou, e a passagem de uma para a outra depende '
+          + (por.justica.length||por.ganha.length ? 'ora de nós, ora do Judiciário. ' : 'do retorno do devedor. ')
+          + 'O que está em negociação pode entrar a qualquer momento; o que está na Justiça segue o ritmo dela.'
+        : 'Todas as dívidas em aberto já estão na Justiça. A partir daqui o prazo é do Judiciário, e atuamos '
+          + 'a cada movimentação do processo para encurtá-lo.')}</p>`,
+    pe(2));
+  pgs.push(`<section class="page">${p2.join('\n')}</section>`);
+
+  // ---- página 3+ · a carteira, dívida a dívida -------------------------------
+  // Cada grupo custa 1 linha; ~26 linhas cabem numa A4. Estourando, abre página
+  // nova com o mesmo cabeçalho (o rodapé renumera sozinho no fim).
+  const linhas = [];
+  _V4_ETAPAS.forEach(e=>{
+    const cs = por[e.k]; if(!cs.length) return;
+    linhas.push({ grupo:true, e, n:cs.length, v:soma(cs) });
+    cs.forEach(k=>linhas.push({ grupo:false, k }));
+  });
+  const trGrupo = l => `<tr class="grp"><td colspan="4"><div class="grp-h">
+    <i class="grp-q" style="background:${l.e.cor}"></i><span class="grp-n">${escHtml(l.e.nome)}</span>
+    <span class="grp-m">${l.n} dívida${l.n!==1?'s':''} · R$ ${_v4R(l.v)}</span></div></td></tr>`;
+  const trCaso = k=>{
+    const a = and[k.id];
+    let passo;
+    if(a && a.txt){
+      const q = a.em ? ` ${a.em.getDate()}/${String(a.em.getMonth()+1).padStart(2,'0')}` : '';
+      passo = `${_v4Traduz(escHtml(a.txt))}${q} · ${_V4_PROX[k._g]}`;
+    }else{
+      passo = `${escHtml(k.rotulo||'—')} · ${_V4_PROX[k._g]}`;
+    }
+    return `<tr><td class="dev">${escHtml(k.nome)}${k.ref?` <span>· ${escHtml(k.ref)}</span>`:''}</td>
+      <td class="num">${k._g==='quitada'?'—':_v4R(k.nominal)}</td>
+      <td class="idade">${k._g==='quitada'?'—':_v4Idade(k.dias)}</td>
+      <td class="passo">${passo}</td></tr>`;
+  };
+  const CAP = 28;
+  for(let i=0, pg=0; i<linhas.length; pg++){
+    const fatia = linhas.slice(i, i+CAP); i += fatia.length;
+    const cabTab = `<table><colgroup><col class="c-dev"><col class="c-val"><col class="c-ida"><col class="c-pas"></colgroup><thead><tr><th>Devedor</th><th class="num">Valor original</th><th>Idade</th><th>Último passo · próximo passo</th></tr></thead><tbody>`
+      + fatia.map(l=>l.grupo?trGrupo(l):trCaso(l.k)).join('') + `</tbody></table>`;
+    const ultima = i >= linhas.length;
+    pgs.push(`<section class="page">${ph}
+${pg===0 ? sec('04','A carteira, dívida a dívida')
+  + `<div style="display:flex;justify-content:space-between;align-items:flex-end;gap:30px">
+      <h2>Agrupadas por etapa, da mais<br>avançada à mais recente.</h2>
+      <div class="h2-nota">Dentro de cada etapa, da maior para a menor.<br>Idade = tempo desde a entrada na COBRASQ.</div></div>`
+  : sec('04','A carteira, dívida a dívida — continuação')}
+${cabTab}
+${ultima ? `<div class="tab-pe"><span class="k">Em recuperação · ${ativas.length} dívida${ativas.length!==1?'s':''}</span><span class="v">R$ ${_v4R(totAtivo)}</span></div>
+<div class="tab-nota">Valores originais, sem juros; retornam integralmente ao credor.</div>` : ''}
+${pe(pgs.length+1)}</section>`);
+  }
+
+  // ---- página final · método · remuneração · próximos 30 dias · aviso --------
+  const metodo = [
+    ['01','Negociação direta','Telefone, mensagem e notificação formal. Qualquer acordo preserva 100% do seu valor. Resolve a maioria sem processo.'],
+    ['02','Ação judicial','Reunimos documentos e protocolamos. A Justiça notifica o devedor, que tem 15 dias para se defender.'],
+    ['03','Sentença','O juiz decide. Sendo favorável, a dívida é reconhecida e o devedor é intimado a pagar. Prazo típico: 6 a 18 meses — o ritmo é do Judiciário.'],
+    ['04','Cobrança forçada','Bloqueamos contas bancárias e veículos do devedor por ordem judicial, até que o valor seja pago.']
+  ];
+  const pf = [ph, sec('05','Como a cobrança caminha'),
+    `<div class="metodo">${metodo.map(([n,t,p])=>`<div><div class="met-n">${n}</div><div class="met-t">${t}</div><div class="met-p">${p}</div></div>`).join('')}</div>`,
+    `<div class="bloco-ink"><h3>O capital volta <em>inteiro</em>.<br>Os acessórios pagam o trabalho.</h3>
+      <p>Você recebe 100% do valor original de cada dívida. A remuneração da COBRASQ vem apenas dos acréscimos — juros, correção e multa que o devedor deve por ter atrasado. Se ele não paga, nós não ganhamos.</p></div>`];
+  if(proximos.length){
+    pf.push(sec('06','Próximos trinta dias'),
+      `<div class="prox">${proximos.map(p=>`<div class="prox-i"><span class="prox-d">${escHtml(p.data||'')}</span><span class="prox-t">${_v4Traduz(escHtml(p.texto))}</span></div>`).join('')}</div>`);
+  }
+  pf.push(`<p class="fecho">Seguimos com a cobrança de cada dívida e avisamos assim que houver pagamento, acordo ou decisão relevante. O próximo relatório consolidado sai em ${d30.getDate()} de ${MES[d30.getMonth()]}.</p>`,
+    `<div class="aviso"><span class="aviso-k">Aviso</span><span class="aviso-t">Este relatório é gerado automaticamente a partir dos registros do sistema COBRASQ e dos tribunais na data indicada. Andamentos, valores e prazos podem conter atrasos de atualização ou imprecisões. Nenhuma informação aqui substitui os autos do processo ou a confirmação por escrito do responsável. Encontrou algo divergente? Avise-nos e corrigimos no próximo ciclo.</span></div>`,
+    `<div class="ass"><div><div class="ass-n">${escHtml(resp)}</div><div class="ass-c">${escHtml(cargo)} — COBRASQ Recuperadora de Crédito e Cobrança Ltda.</div></div>
+      <div class="ass-r">46 98822-6533<br>cobrasq.com.br<br>${String(pgs.length+1).padStart(2,'0')} / {{N}}</div></div>`);
+  pgs.push(`<section class="page">${pf.join('\n')}</section>`);
+
+  const N = String(pgs.length).padStart(2,'0');
+  const corpo = pgs.join('\n').split('{{N}}').join(N);
+  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
+<title>Relatório de Andamento — ${escHtml(nomeCredor)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400&family=Inter+Tight:wght@400;500;600&family=Instrument+Serif:ital@1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>${_relV4Css()}</style></head><body>
+<div class="barra-btn no-print"><button onclick="window.print()">Imprimir / Salvar PDF</button></div>
+${corpo}
+</body></html>`;
 }
 
 // ---- moldura visual (cabeçalho marinho + onda dourada, rodapé institucional) --
