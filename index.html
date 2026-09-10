@@ -53353,6 +53353,7 @@ function abrirRelatorioCobrancas(){
 async function gerarRelatorioCobrancas(){
   const tipo = document.querySelector('input[name="rel-cobr-tipo"]:checked')?.value || 'gerencial';
   const credorId = document.getElementById('rel-cobr-credor')?.value || '';
+  let _relDegradado = false;   // marca o registro em logAtividade, não só a tela
   _relFechar();
   showToast('Gerando relatório…','info');
   const todos = await _relColetarCobrancas();
@@ -53362,6 +53363,17 @@ async function gerarRelatorioCobrancas(){
     const casos = todos.filter(k=>k.credorId===credorId);
     if(!casos.length){ showToast('Esse credor não tem cobranças ativas.','warning'); return; }
     const ctx = { andamentos: await _relV4Andamentos(casos.map(k=>k.id).filter(Boolean)) };
+    // Andamento faltando por falha de carga é indistinguível, no PDF, de caso que
+    // não teve movimento. Toast não basta: ele some em 3,2 s e o window.open logo
+    // abaixo leva o foco para a aba nova, então o aviso expira na aba de trás sem
+    // ninguém ler. E o credor de hoje com mais casos tem 126 contra chunk de 150 —
+    // ou seja, roda um chunk só, e se ele falhar o relatório sai VAZIO de andamento.
+    // Por isso trava aqui e exige decisão humana antes de abrir o documento.
+    if(ctx.andamentos.__degradado){
+      const _segue = confirm('Não consegui carregar todos os andamentos.\n\nO relatório vai sair com movimentação faltando, e isso é indistinguível de um caso que não teve movimento. Gerar assim mesmo?');
+      if(!_segue){ showToast('Relatório cancelado. Tente de novo em instantes.','info'); return; }
+      _relDegradado = true;
+    }
     // Ciclo = últimos 30 dias. Só entra o que o banco registrou; sem evento, a
     // seção 02 não é impressa (melhor ausente que preenchida com texto genérico).
     const corte = Date.now() - 30*864e5;
@@ -53376,7 +53388,7 @@ async function gerarRelatorioCobrancas(){
     ];
     ctx.proximos = [];   // sem fonte de prazos hoje; a seção 06 se omite sozinha
     html = _relHtmlCredorV4(casos[0].credor, casos, ctx);
-    rotuloLog = `Andamento v4 — ${casos[0].credor}`;
+    rotuloLog = `Andamento v4 — ${casos[0].credor}` + (_relDegradado ? ' (PARCIAL — andamentos incompletos)' : '');
   }else{
     html = _relHtmlGerencial(todos);
     rotuloLog = 'Gerencial interno';
@@ -53463,21 +53475,79 @@ async function _relV4Andamentos(ids){
   if(!ids.length) return out;
   const sb = (typeof getSupabase==='function') ? getSupabase() : null;
   if(!sb) return out;
-  try{
-    const { data } = await sb.from('devedor_eventos')
-      .select('cobranca_id,tipo,payload,criado_em')
-      .in('cobranca_id', ids).order('criado_em', { ascending:false });
-    (data||[]).forEach(e=>{
-      if(out[e.cobranca_id]) return;                       // já tem o mais recente
-      const p = e.payload || {};
-      const txt = p.descricao || p.texto || p.movimento || '';
-      if(!txt) return;
-      out[e.cobranca_id] = {
-        txt: String(txt).replace(/\s+/g,' ').trim().slice(0,120),
-        em:  e.criado_em ? new Date(e.criado_em) : null
-      };
-    });
-  }catch(_){ }
+  // PAGINADO. O PostgREST corta em 1.000 linhas por requisição e um credor com
+  // muito movimento passa disso: medido em 10/09/2026, a Clínica Odontológica
+  // Balvedi tinha 1.421 eventos e esta consulta recebia 1.000. Ordenado por
+  // `criado_em desc`, as cobranças cujos eventos são todos mais antigos que o
+  // milésimo saíam do relatório do credor como se não tivessem andamento.
+  //
+  // TAMANHO REAL do estrago hoje: 1 cobrança. Não as 11 que a conta ingênua sugere.
+  // A diferença é que este relatório só exibe evento com texto que ELE saiba ler, e
+  // quase nenhum tem: das 126 cobranças do credor medido, 23 têm andamento exibível,
+  // e a truncagem custava 1 delas. Registro o número para ninguém herdar estimativa
+  // inflada — mas isso vai mudar, porque o leitor logo abaixo ignora `acao_completa`,
+  // que é a chave que 5.794 dos 6.418 eventos realmente carregam. Consertado o
+  // leitor, a truncagem passa a doer de verdade.
+  //
+  // Chunk de 150 nos ids: a query string de um chunk cheio de 200 uuids dá ~7,9 KB
+  // depois do encode, contra o limite comum de 8 KB de cabeçalho — margem pequena
+  // demais para um valor que só cresce. O maior credor tem 126 cobranças hoje.
+  //
+  // Keyset por `id`, não por `criado_em`: keyset exige coluna ÚNICA, e `criado_em` é
+  // `DEFAULT now()` — o timestamp da transação —, então um lote inserido junto sai
+  // com o mesmo carimbo. Empate existe em 111 dos 6.418 eventos (1,7%), e em nenhuma
+  // cobrança ele cai no evento mais recente; `id` é PK e não empata nunca.
+  //
+  // O fold é POR CHUNK, de propósito: cada cobranca_id vive em exatamente um chunk,
+  // então dobrar por chunk dá o mesmo resultado que dobrar no fim — e preserva o
+  // que já foi lido se um chunk seguinte falhar. A primeira versão disto acumulava
+  // tudo e só dobrava depois do laço, então um erro no chunk 3 de 5 jogava fora os
+  // dois primeiros e devolvia {}: relatório SEM NENHUM andamento, com cara de
+  // completo, indo para cliente pagante. Era pior que a truncagem que este código
+  // veio consertar.
+  let degradou = false;
+  for(let i=0;i<ids.length;i+=150){
+    const fatia = ids.slice(i, i+150);
+    try{
+      const { data, error } = await _carregarPaginado((depoisDe,tam,contar)=>{
+        let q = sb.from('devedor_eventos')
+          .select('id,cobranca_id,tipo,payload,criado_em', contar?{count:'exact'}:undefined)
+          .in('cobranca_id', fatia);
+        if(depoisDe) q = q.gt('id', depoisDe);
+        return q.order('id',{ascending:true}).limit(tam);
+      });
+      if(error) throw error;
+      // A ordenação por data que o servidor fazia passa para cá, já que paginar
+      // exige ordenar por id. Empate agora resolve pelo menor uuid; antes era a
+      // ordem arbitrária do plano do Postgres — nenhum dos dois é "o mais recente",
+      // então o texto impresso pode mudar num empate, a data não.
+      const ev = (data||[]).sort((a,b)=>{
+        const x=a.criado_em||'', y=b.criado_em||'';
+        return x<y ? 1 : (x>y ? -1 : 0);
+      });
+      for(const e of ev){
+        if(out[e.cobranca_id]) continue;                    // já tem o mais recente
+        const p = e.payload || {};
+        const txt = p.descricao || p.texto || p.movimento || '';
+        if(!txt) continue;
+        out[e.cobranca_id] = {
+          txt: String(txt).replace(/\s+/g,' ').trim().slice(0,120),
+          em:  e.criado_em ? new Date(e.criado_em) : null
+        };
+      }
+    }catch(e){
+      // Um chunk que falha não derruba os outros nem apaga o que já veio.
+      degradou = true;
+      console.warn('[rel] andamentos, chunk ' + (i/150+1) + ':', e && e.message);
+    }
+  }
+  // O chamador avisa na tela. Relatório com andamento faltando é indistinguível,
+  // para quem olha, de caso que realmente não teve movimento — e quem gera o
+  // documento é o operador, sem devtools aberto.
+  // NÃO-enumerável de propósito: o chamador faz Object.entries(ctx.andamentos)
+  // para montar a seção 02, e uma chave a mais entraria na lista de eventos como
+  // se fosse uma cobrança.
+  if(degradou) Object.defineProperty(out, '__degradado', { value:true });
   return out;
 }
 
