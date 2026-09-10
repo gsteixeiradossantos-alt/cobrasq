@@ -5929,11 +5929,21 @@ async function _reidratarAcordos(devs){
   const ids = devs.map(d=>d.id).filter(Boolean);
   try{
     const byDev = {};
-    // Chunk defensivo p/ não estourar o comprimento da URL do PostgREST.
-    for(let i=0;i<ids.length;i+=200){
-      const slice = ids.slice(i, i+200);
-      const { data, error } = await supa.from('acordos').select('*').in('devedor_id', slice);
-      if(error){ console.warn('[rel] reidratarAcordos:', error.message); return; }
+    // Chunk defensivo p/ não estourar o comprimento da URL do PostgREST. Os chunks
+    // cobrem devedores DISJUNTOS e não dependem um do outro — só estavam em série
+    // porque o `await` morava dentro do for. Com 888 devedores isso dava 5 viagens
+    // esperando uma pela outra (~400 ms cada) DENTRO do boot, que fica bloqueado em
+    // loadRelationalData: 2,26 s medidos num F5 real, com o usuário olhando a tela de
+    // login (que nasce `active` no HTML) enquanto o app decide se ele está logado.
+    // Em paralelo o custo vira o da mais lenta.
+    const _slices = [];
+    for(let i=0;i<ids.length;i+=200) _slices.push(ids.slice(i, i+200));
+    const _res = await Promise.all(_slices.map(sl => supa.from('acordos').select('*').in('devedor_id', sl)));
+    // Erro em QUALQUER chunk aborta sem aplicar nada — igual ao comportamento
+    // anterior. Aplicar um resultado parcial deixaria devedores com acordo some
+    // do lado do cliente, que é pior que não reidratar.
+    for(const { error } of _res){ if(error){ console.warn('[rel] reidratarAcordos:', error.message); return; } }
+    for(const { data } of _res){
       for(const row of (data||[])){ (byDev[row.devedor_id] = byDev[row.devedor_id] || []).push(_rowToAcordo(row)); }
     }
     for(const d of devs){ if(byDev[d.id]) d.acordos = byDev[d.id]; }
@@ -19493,6 +19503,9 @@ let cobSelectionMode = false;
 let selectedCobrIds = new Set();
 let _cobrVisiveis = []; // ids dos casos visíveis no último render (p/ "selecionar todos")
 
+// Instante da última carga de cobranças VINDA DO SERVIDOR. A revalidação em
+// segundo plano consulta isto para não repetir uma busca que acabou de acontecer.
+let _cobrCarregadoEm = 0;
 async function loadCobrancasFromSupabase(){
   const supa = getSupabase();
   if(!supa) return null;
@@ -19502,6 +19515,7 @@ async function loadCobrancasFromSupabase(){
       .order('created_at', { ascending:false });
     if(error){ console.warn('[rel] loadCobrancas:', error.message); return null; }
     const rows = data || [];
+    _cobrCarregadoEm = Date.now();
     // Valor atualizado sempre corrente (compute-on-read) — painel, busca e a
     // tela Cobranças passam a ver a dívida corrigida de hoje, não o congelado.
     try{ for(const c of rows){ if(parseValorBR(c.valor_orig) > 0){ const f = dividaAtualHoje(c); if(f && isFinite(f)) c.valor_atual = f; } } }catch(_){}
@@ -20349,6 +20363,8 @@ function _cobrRepintar(_ate){
 // seguidas (o item QuitaFácil do menu faz showPage('cobr') e logo renderCobrancas()),
 // e cada rodada custa 12 requisições. Chamadas concorrentes reusam a que já está no ar.
 let _cobrRevalidando = null;
+// Janela em que uma carga recém-feita conta como fresca (ver a guarda em renderCobrancas).
+const _COBR_REVALIDAR_APOS_MS = 10000;
 
 async function renderCobrancas(opts){
   const el = document.getElementById('page-cobr');
@@ -20368,13 +20384,25 @@ async function renderCobrancas(opts){
     // || {}`), então nunca mais seguram a primeira pintura.
     const temCache = Array.isArray(DB_cobrancas) && DB_cobrancas.length > 0;
     if(!temCache) el.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text-2);">Carregando cobranças…</div>`;
+    // O boot (loadRelationalData) já busca as cobranças. Sem esta guarda, abrir a
+    // tela logo depois disparava a MESMA busca de novo: num F5 real, cobranças vinham
+    // aos 2,2 s e eram rebuscadas aos 6,8 s, 1,2 s de rede jogados fora. Pior, a RPC
+    // dos sinais só começa depois dela — os selos de pendência chegavam 1,2 s mais
+    // tarde por causa de uma busca redundante. A janela também cobre ir e voltar
+    // rápido entre a lista e um caso.
+    // Não é risco de dado velho: alteração feita aqui já atualiza DB_cobrancas em
+    // memória; a revalidação serve para pegar mudança de OUTRA sessão, que espera.
+    // A guarda vale SÓ para a busca das cobranças. Os SINAIS têm de rodar de todo
+    // jeito: num F5 o boot traz as cobranças mas não os sinais, e pular tudo deixaria
+    // a tela para sempre sem selo de pendência e sem os recortes.
+    const _fresco = temCache && (Date.now() - _cobrCarregadoEm) < _COBR_REVALIDAR_APOS_MS;
     let _rev = _cobrRevalidando;
     if(!_rev){
       // Cobranças e roster não dependem um do outro — esperar em série custava uma
       // viagem inteira de latência à toa. Vão juntos.
       const _pRoster = (typeof carregarRosterAppUsers==='function' && !Array.isArray(_rosterAppUsers))
         ? carregarRosterAppUsers().catch(()=>{}) : Promise.resolve();
-      const _pDados = (async ()=>{
+      const _pDados = _fresco ? _pRoster : (async ()=>{
         const rows = await loadCobrancasFromSupabase();
         if(Array.isArray(rows)) DB_cobrancas = rows;
         await _pRoster;
@@ -20386,7 +20414,7 @@ async function renderCobrancas(opts){
       })();
       // Repinta duas vezes: assim que a lista fresca chega e de novo quando os sinais
       // (pill de pendência, recortes) pousam. Só termina a revalidação no fim das duas.
-      _pDados.then(_cobrRepintar).catch(()=>{});
+      if(!_fresco) _pDados.then(_cobrRepintar).catch(()=>{});
       _rev = { dados:_pDados, tudo: _pSinais.then(_cobrRepintar).catch(()=>{}) };
       _cobrRevalidando = _rev;
       // Libera a trava só no fim, e apenas se ninguém já a substituiu.
