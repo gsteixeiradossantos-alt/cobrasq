@@ -20248,22 +20248,87 @@ function cobToggleRecorte(k){ cobrFilter[k] = !cobrFilter[k]; renderCobrancas({s
 function cobLimparRecortes(){ _COB_RECORTES.forEach(r=>{ cobrFilter[r.key]=false; }); renderCobrancas({soLocal:true}); }
 function cobSetEtapa(k){ cobrFilter.etapa = k; renderCobrancas({soLocal:true}); }
 
+// ── Repaint em segundo plano (revalidação) ───────────────────────────────────
+// A revalidação repinta a lista quando os dados frescos chegam. Duas guardas:
+// (a) só repinta se Cobranças ainda é a tela ativa — senão sobrescreveria a página
+//     que o usuário abriu enquanto a rede corria;
+// (b) NUNCA repinta com o foco dentro da tela. O render reconstrói o innerHTML
+//     inteiro: repintar enquanto alguém digita na busca (ou está num select) tira o
+//     foco e o cursor no meio da digitação. Nesse caso reagenda.
+//
+// A espera é por RETENTATIVA, não por evento de foco. A primeira versão disto
+// escutava `focusout` uma única vez e ficou presa: quando um render qualquer
+// substitui o innerHTML, o campo focado é destruído junto e o focusout nunca chega
+// — a flag ficava `true` para sempre e nenhum repaint voltava a acontecer na
+// sessão inteira (os selos de pendência simplesmente paravam de atualizar).
+// Reverificar não tem esse ponto cego: se o foco saiu, repinta; se não, tenta de
+// novo. O teto existe só para não reagendar eternamente numa aba esquecida aberta
+// — passado ele, a próxima interação (filtro, busca, troca de etapa) já redesenha.
+const _COBR_REPINT_RETRY_MS = 700;
+const _COBR_REPINT_TETO_MS  = 60000;
+let _cobrRepintarTimer = null;
+function _cobrRepintar(_ate){
+  const pg = document.getElementById('page-cobr');
+  if(_cobrRepintarTimer){ clearTimeout(_cobrRepintarTimer); _cobrRepintarTimer = null; }
+  if(!pg || !pg.classList.contains('active')) return;
+  const ate = _ate || (Date.now() + _COBR_REPINT_TETO_MS);
+  if(pg.contains(document.activeElement) && document.activeElement !== document.body){
+    if(Date.now() >= ate) return;
+    _cobrRepintarTimer = setTimeout(()=>{ _cobrRepintarTimer = null; _cobrRepintar(ate); }, _COBR_REPINT_RETRY_MS);
+    return;
+  }
+  try{ renderCobrancas({soLocal:true}); }catch(_){}
+}
+// Revalidação única compartilhada: há caminhos que chamam renderCobrancas() duas vezes
+// seguidas (o item QuitaFácil do menu faz showPage('cobr') e logo renderCobrancas()),
+// e cada rodada custa 12 requisições. Chamadas concorrentes reusam a que já está no ar.
+let _cobrRevalidando = null;
+
 async function renderCobrancas(opts){
   const el = document.getElementById('page-cobr');
   if(!el) return;
   // Interações de seleção redesenham só com os dados já em memória — sem refetch nem tela "Carregando…".
   const soLocal = !!(opts && opts.soLocal) && Array.isArray(DB_cobrancas) && DB_cobrancas.length;
   if(!soLocal){
-    el.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text-2);">Carregando cobranças…</div>`;
-    // Cobranças e roster não dependem um do outro — esperar em série custava uma
-    // viagem inteira de latência à toa. Vão juntos.
-    const _pRoster = (typeof carregarRosterAppUsers==='function' && !Array.isArray(_rosterAppUsers))
-      ? carregarRosterAppUsers().catch(()=>{}) : Promise.resolve();
-    const rows = await loadCobrancasFromSupabase();
-    if(Array.isArray(rows)) DB_cobrancas = rows;
-    await _pRoster;
-    // Sinais de pendência em lote (defensivo — nunca aborta o render).
-    try{ _cobrSinais = await _carregarSinaisPendencia((DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft)); }catch(_){ _cobrSinais = _cobrSinais || {}; }
+    // Abrir Cobranças NÃO precisa esperar a rede. O boot (loadRelationalData) já deixou
+    // DB_cobrancas em memória, e mesmo assim esta tela jogava tudo fora e rebuscava:
+    // medido em produção, 3,5 s de tela branca (até 6,4 s a frio) para desenhar uma
+    // lista que sai em 0,2 s com os dados que já estavam ali. Agora pinta o que já
+    // temos e revalida por trás, repintando quando chegar.
+    //
+    // Os SINAIS de pendência (11 requisições: acordos, WhatsApp, petições, intimações,
+    // eventos) sozinhos custam 2,7–4 s e só DECORAM a lista — pill de pendência, os
+    // recortes e o motivo. Todo consumidor já degrada sem eles (`sinais || _cobrSinais
+    // || {}`), então nunca mais seguram a primeira pintura.
+    const temCache = Array.isArray(DB_cobrancas) && DB_cobrancas.length > 0;
+    if(!temCache) el.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text-2);">Carregando cobranças…</div>`;
+    let _rev = _cobrRevalidando;
+    if(!_rev){
+      // Cobranças e roster não dependem um do outro — esperar em série custava uma
+      // viagem inteira de latência à toa. Vão juntos.
+      const _pRoster = (typeof carregarRosterAppUsers==='function' && !Array.isArray(_rosterAppUsers))
+        ? carregarRosterAppUsers().catch(()=>{}) : Promise.resolve();
+      const _pDados = (async ()=>{
+        const rows = await loadCobrancasFromSupabase();
+        if(Array.isArray(rows)) DB_cobrancas = rows;
+        await _pRoster;
+      })();
+      const _pSinais = (async ()=>{
+        await _pDados;
+        // Defensivo — nunca aborta o render.
+        try{ _cobrSinais = await _carregarSinaisPendencia((DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft)); }catch(_){ _cobrSinais = _cobrSinais || {}; }
+      })();
+      // Repinta duas vezes: assim que a lista fresca chega e de novo quando os sinais
+      // (pill de pendência, recortes) pousam. Só termina a revalidação no fim das duas.
+      _pDados.then(_cobrRepintar).catch(()=>{});
+      _rev = { dados:_pDados, tudo: _pSinais.then(_cobrRepintar).catch(()=>{}) };
+      _cobrRevalidando = _rev;
+      // Libera a trava só no fim, e apenas se ninguém já a substituiu.
+      _rev.tudo.finally(()=>{ if(_cobrRevalidando === _rev) _cobrRevalidando = null; });
+    }
+    // Só bloqueia quando não há NADA para desenhar; com cache, pinta agora e o
+    // repaint entra sozinho quando a revalidação chegar.
+    if(!temCache) await _rev.dados;
   }
 
   const todas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft);
