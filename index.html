@@ -5796,11 +5796,46 @@ function rowToCliente(r){
   };
 }
 
+// ── Paginação das cargas grandes ────────────────────────────────────────────
+// O PostgREST deste projeto corta em 1.000 LINHAS por requisição. Medido em
+// produção em 10/09/2026: pedir as 18.258 linhas de `proc_intimacoes` devolve
+// `content-range: 0-999/18258`. O corte NÃO gera erro — a resposta volta menor e
+// o app segue como se aquilo fosse a base inteira.
+//
+// Isso era uma bomba-relógio: 892 devedores e 861 cobranças na mesma data, teto
+// de 1.000. Ao cruzar, `DB.devedores` passaria a carregar 1.000 em silêncio — e
+// carga truncada é indistinguível de exclusão em massa para o trigger F-20
+// (anti-shrink, criado direto em produção): o primeiro save do usuário seria
+// bloqueado, do jeito que já aconteceu com colaborador (ver CLAUDE.md).
+//
+// `montar(de, ate)` recebe a faixa e devolve o builder já com select/filtros.
+// A ORDEM TEM DE SER TOTAL E ESTÁVEL: paginar por coluna que empata pode repetir
+// uma linha numa página e pular outra na seguinte, então todo chamador desempata
+// por `id`. Sem ORDER BY, o Postgres nem garante ordem consistente entre páginas.
+const _PG_PAGINA = 1000;
+const _PG_TETO_PAGINAS = 50;   // 50 mil linhas — trava contra laço infinito
+async function _carregarPaginado(montar){
+  const tudo = [];
+  for(let p = 0; p < _PG_TETO_PAGINAS; p++){
+    const de = p * _PG_PAGINA;
+    const { data, error } = await montar(de, de + _PG_PAGINA - 1);
+    if(error) return { data:null, error };
+    const lote = data || [];
+    for(const r of lote) tudo.push(r);
+    // Página incompleta = acabou. Página cheia pede a próxima; se a base terminar
+    // num múltiplo exato de 1.000, a requisição seguinte volta vazia e encerra.
+    if(lote.length < _PG_PAGINA) return { data: tudo, error:null };
+  }
+  console.warn('[rel] paginação parou no teto de', _PG_TETO_PAGINAS * _PG_PAGINA, 'linhas — a carga pode estar incompleta');
+  return { data: tudo, error:null };
+}
+
 async function loadDevedoresFromSupabase(){
   const supa = getSupabase();
   if(!supa) return null;
   try{
-    const { data, error } = await supa.from('devedores').select('*');
+    const { data, error } = await _carregarPaginado((de,ate)=>
+      supa.from('devedores').select('*').order('id',{ascending:true}).range(de,ate));
     if(error){ console.warn('[rel] loadDevedores:', error.message); return null; }
     return (data||[]).map(rowToDevedor);
   }catch(e){ console.warn('[rel] loadDevedores ex:', e.message); return null; }
@@ -5810,7 +5845,8 @@ async function loadClientesFromSupabase(){
   const supa = getSupabase();
   if(!supa) return null;
   try{
-    const { data, error } = await supa.from('clientes').select('*');
+    const { data, error } = await _carregarPaginado((de,ate)=>
+      supa.from('clientes').select('*').order('id',{ascending:true}).range(de,ate));
     if(error){ console.warn('[rel] loadClientes:', error.message); return null; }
     return (data||[]).map(rowToCliente);
   }catch(e){ console.warn('[rel] loadClientes ex:', e.message); return null; }
@@ -19524,9 +19560,16 @@ async function loadCobrancasFromSupabase(){
   const supa = getSupabase();
   if(!supa) return null;
   try{
-    const { data, error } = await supa.from('cobrancas')
-      .select('*, cobranca_partes(id, devedor_id, papel, principal, devedores(nome, doc, telefone, tags))')
-      .order('created_at', { ascending:false });
+    // `range` conta LINHAS DE COBRANÇA, não linhas do embed: no PostgREST o
+    // recurso embutido vem aninhado dentro do pai, e limit/offset valem para o pai.
+    // O desempate por `id` preserva a ordem que os chamadores já esperavam
+    // (created_at desc) e ainda torna a paginação estável quando há empate de
+    // created_at — que existe, porque importação em lote grava tudo no mesmo instante.
+    const { data, error } = await _carregarPaginado((de,ate)=>
+      supa.from('cobrancas')
+        .select('*, cobranca_partes(id, devedor_id, papel, principal, devedores(nome, doc, telefone, tags))')
+        .order('created_at', { ascending:false }).order('id', { ascending:true })
+        .range(de,ate));
     if(error){ console.warn('[rel] loadCobrancas:', error.message); return null; }
     const rows = data || [];
     // Valor atualizado sempre corrente (compute-on-read) — painel, busca e a
