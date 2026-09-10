@@ -19258,6 +19258,22 @@ function _cobrCredorNome(c){
   const cli = (DB.clientes||[]).find(x=>x.id === c.cliente_id);
   return cli ? (cli.nomeFantasia || cli.nome_fantasia || cli.nome) : (c.metadata?.credorOriginal || '—');
 }
+// Documento do devedor principal, mascarado, para o relatório ao credor. Existe
+// para distinguir xarás: na carteira R. Pereira de 09/2026 o relatório listava
+// "Tainara Manfro" três vezes e "Tatiane Manfro" uma — duas pessoas diferentes,
+// e nada no documento dizia isso. Mostra o miolo do número, que basta para
+// diferenciar, sem expor o documento inteiro num PDF que circula por e-mail.
+function _relDocMasc(d){
+  const n = String(d||'').replace(/\D/g,'');
+  if(n.length===11) return `•••.${n.slice(3,6)}.${n.slice(6,9)}-••`;
+  if(n.length===14) return `••.${n.slice(2,5)}.${n.slice(5,8)}/${n.slice(8,12)}-••`;
+  return '';
+}
+function _cobrPrincipalDoc(c){
+  const partes = c.cobranca_partes || [];
+  const p = partes.find(x=>x.principal) || partes[0];
+  return p?.devedores?.doc || '';
+}
 function _cobrPrincipalNome(c){
   const partes = c.cobranca_partes || [];
   const p = partes.find(x=>x.principal) || partes[0];
@@ -52501,7 +52517,7 @@ function _relNorm(c){
   const jud = (c.fase==='judicial') || st.g==='jud' || st.g==='cumpr';
   const promove = jud && st.g==='extra';
   return {
-    nome: _cobrPrincipalNome(c), credor: _cobrCredorNome(c), credorId: c.cliente_id||null,
+    nome: _cobrPrincipalNome(c), doc: _cobrPrincipalDoc(c), credor: _cobrCredorNome(c), credorId: c.cliente_id||null,
     processo: c.numero_processo||'',
     nominal: (+c.valor_orig || +c.valor_atual || 0), atual: (+c.valor_atual || +c.valor_orig || 0),
     statusRaw: statusLabel(c.status)||'—', dias: _cobrAgingDias(c),
@@ -52963,7 +52979,11 @@ function _relTimeline5(casos){
     const cls = cnt[i]>0 ? 'on' : (i<last ? 'done' : '');
     return `<div class="tl-step ${cls}"><div class="tl-dot">${i+1}</div><div class="tl-nm">${nm}</div>${cnt[i]>0?`<div class="tl-cnt">◂ seus ${cnt[i]} caso${_relS(cnt[i])}</div>`:''}</div>`;
   }).join('');
-  return `<div class="tl">${steps}</div><div class="tl-note">No cumprimento de sentença, a COBRASQ aciona ferramentas eletrônicas de constrição — Sisbajud (bloqueio de valores) e Renajud (restrição de veículos) — para localizar bens e satisfazer o crédito.</div>`;
+  // Só as fases judiciais entram aqui. Sem dizer isso, o credor soma os números da
+  // linha do tempo, não bate com o total da carteira e pergunta o que sumiu.
+  const nExtra = casos.filter(k=>k.g==='extra'||k.g==='acordo').length;
+  const notaExtra = nExtra ? ` ${nExtra===1?'Um caso segue':`${nExtra} casos seguem`} pela via extrajudicial e, por isso, não ${nExtra===1?'aparece':'aparecem'} nesta linha do tempo.` : '';
+  return `<div class="tl">${steps}</div><div class="tl-note">No cumprimento de sentença, buscam-se bens e valores do devedor por sistemas eletrônicos, para satisfazer o crédito.${notaExtra}</div>`;
 }
 // Lista de distribuição (por situação com ponto colorido / por credor / por responsável).
 function _relDistList(grupos, colored){
@@ -52989,7 +53009,8 @@ function _relTabelaCasos(cs, opts){
   const linhas = cs.slice().sort((a,b)=>(a.enc?1:0)-(b.enc?1:0) || b.nominal-a.nominal).map(k=>{
     let proc = k.processo;
     if(opts.sanitizar && /sem numera|refazer/i.test(proc)) proc = '';
-    return `<tr><td class="devedor">${escHtml(k.nome)}</td>${opts.credor?`<td>${escHtml(k.credor)}</td>`:''}<td class="proc">${escHtml(proc||'—')}</td><td class="num">${_fmtR(k.nominal)}</td>${opts.atual?`<td class="num">${_fmtR(k.atual)}</td>`:''}<td>${_relBadge(k)}</td></tr>`;
+    const docm = _relDocMasc(k.doc);
+    return `<tr><td class="devedor">${escHtml(k.nome)}${docm?`<div class="proc">${docm}</div>`:''}</td>${opts.credor?`<td>${escHtml(k.credor)}</td>`:''}<td class="proc">${escHtml(proc||'—')}</td><td class="num">${_fmtR(k.nominal)}</td>${opts.atual?`<td class="num">${_fmtR(k.atual)}</td>`:''}<td>${_relBadge(k)}</td></tr>`;
   }).join('');
   const atv = cs.filter(k=>!k.enc), enc = cs.filter(k=>k.enc);
   const totN = atv.reduce((s,k)=>s+k.nominal,0), totA = atv.reduce((s,k)=>s+k.atual,0);
@@ -53013,7 +53034,7 @@ function _relHtmlCredor(nomeCredor, casos){
   const vj = jud.reduce((s,k)=>s+k.nominal,0), vx = ext.reduce((s,k)=>s+k.nominal,0);
   const pc = v => tot ? Math.round(v/tot*100)+'%' : '0%';
   const inds = _relInd('Casos Ativos', na, ne?`${ne} encerrado${_relS(ne)} no histórico`:'em recuperação')
-    + _relInd('Valor Nominal Total', _fmtR(tot), 'Base de repasse ao credor')
+    + _relInd('Valor Nominal Total', _fmtR(tot), 'Valor nominal sob cobrança')
     + _relInd('Esfera Judicial', jud.length, `${ext.length} ${ext.length===1?'extrajudicial':'extrajudiciais'} · ${pc(vj)} do valor`, 'blue');
 
   const p1 = `Este relatório consolida a posição da carteira de <b>${escHtml(nomeCredor)}</b> sob gestão da COBRASQ. `
@@ -53028,13 +53049,13 @@ function _relHtmlCredor(nomeCredor, casos){
       'Nessa etapa, as diligências concentram-se na localização de bens e valores passíveis de penhora, com utilização das ferramentas eletrônicas de pesquisa patrimonial disponíveis ao juízo.'],
     ['jud','Ações Judiciais em Curso',
       n => n===1?'tramita com <b>ação judicial ajuizada</b>':'tramitam com <b>ação judicial ajuizada</b>',
-      'Seguiremos acompanhando os autos e praticando os atos processuais cabíveis em cada feito, informando os desdobramentos relevantes nos próximos ciclos de reporte.'],
+      'Seguiremos acompanhando cada processo e praticando os atos necessários, e informaremos o que houver de relevante nos próximos relatórios.'],
     ['prejud','Em Preparação para Ajuizamento',
       n => n===1?'encontra-se em <b>preparação para a via judicial</b>':'encontram-se em <b>preparação para a via judicial</b>',
-      'A documentação de cada crédito está em organização para o ajuizamento da medida adequada, e o protocolo será promovido tão logo concluída essa etapa.'],
+      'Estamos organizando a documentação de cada crédito para entrar com a ação mais adequada, o que será feito assim que essa etapa terminar.'],
     ['extra','Cobrança Extrajudicial',
       n => n===1?'permanece em <b>tratativa extrajudicial</b>':'permanecem em <b>tratativa extrajudicial</b>',
-      'A régua de contato ativo — mensagens e ligações de cobrança — segue aplicada a esses devedores, buscando a composição sem necessidade de judicialização.'],
+      'Seguimos em contato ativo com esses devedores, por mensagens e ligações, buscando um acordo sem precisar recorrer à Justiça.'],
     ['acordo','Acordos em Cumprimento',
       n => n===1?'possui <b>acordo de pagamento em cumprimento</b>':'possuem <b>acordo de pagamento em cumprimento</b>',
       'Os pagamentos são monitorados parcela a parcela e, em caso de inadimplemento, a cobrança é retomada de imediato pela via cabível.']
@@ -53053,16 +53074,16 @@ function _relHtmlCredor(nomeCredor, casos){
 
   const notas = [];
   if(atv.some(k=>['jud','cumpr','prejud'].includes(k.g)))
-    notas.push('Na esfera judicial, a cobrança percorre etapas sucessivas: o ajuizamento da ação, a citação do devedor, a instrução e a sentença e, sendo esta favorável, o cumprimento de sentença — fase em que se buscam bens e valores para satisfação do crédito, inclusive por meio de sistemas eletrônicos de constrição como o Sisbajud (bloqueio de valores em contas bancárias) e o Renajud (restrição de veículos). Os prazos de cada etapa dependem do andamento do Poder Judiciário.');
+    notas.push('Na esfera judicial, a cobrança percorre etapas sucessivas: o ajuizamento da ação, a citação do devedor, a instrução e a sentença e, sendo esta favorável, o cumprimento de sentença — fase em que se buscam bens e valores para satisfação do crédito, inclusive por meio de sistemas eletrônicos como o Sisbajud (bloqueio de valores em contas bancárias) e o Renajud (restrição de veículos). Os prazos de cada etapa dependem do andamento do Poder Judiciário.');
   if(atv.some(k=>['extra','acordo'].includes(k.g)))
-    notas.push('Na via extrajudicial, a atuação se dá por contato direto e estruturado com o devedor, com propostas de composição que preservam a integralidade do valor nominal devido ao credor. Os acordos firmados são formalizados por escrito e acompanhados parcela a parcela; verificado o descumprimento, a cobrança é retomada e o caso passa a ser avaliado para a medida judicial cabível.');
+    notas.push('Na via extrajudicial, a atuação se dá por contato direto e estruturado com o devedor, com propostas de acordo que preservam integralmente o valor nominal devido ao credor. Os acordos são formalizados por escrito e acompanhados parcela a parcela; se houver descumprimento, a cobrança é retomada e o caso passa a ser avaliado para a ação judicial adequada.');
   if(!notas.length)
     notas.push('Os casos desta carteira encontram-se encerrados, permanecendo o registro histórico disponível para conferência.');
 
   const pp = [];
   if(atv.some(k=>k.g==='prejud')) pp.push('concluir a organização documental dos casos em preparação e promover os respectivos ajuizamentos');
   if(atv.some(k=>['jud','cumpr'].includes(k.g))) pp.push('dar seguimento aos atos processuais das ações em curso e às diligências de localização patrimonial');
-  if(atv.some(k=>['extra','acordo'].includes(k.g))) pp.push('manter a régua de cobrança ativa e o acompanhamento dos acordos em cumprimento');
+  if(atv.some(k=>['extra','acordo'].includes(k.g))) pp.push('manter o contato ativo de cobrança e o acompanhamento dos acordos em andamento');
   const ppItems = pp.length ? pp.map(x=>x.charAt(0).toUpperCase()+x.slice(1)+'.') : ['Não há providências pendentes para os casos desta carteira.'];
   const pp2 = 'Eventuais recebimentos, composições firmadas ou decisões relevantes serão comunicados ao credor tão logo verificados, e a posição consolidada da carteira será atualizada no próximo relatório de andamento.';
   const tl = _relTimeline5(atv);
@@ -53071,7 +53092,7 @@ function _relHtmlCredor(nomeCredor, casos){
 
   const corpo = `
 <section class="secao"><h2 class="sec">Sumário Executivo</h2><div class="inds" style="--n:3">${inds}</div><p>${p1}</p>
-<div class="box-gold"><div class="bt">Como a COBRASQ é remunerada</div><p>O credor recebe <b>100% do valor nominal</b> recuperado. A remuneração da COBRASQ provém exclusivamente dos <b>acessórios</b> do crédito — juros, correção monetária e multa —, de modo que o trabalho de recuperação não reduz o principal devido ao credor.</p></div>
+<div class="box-gold"><div class="bt">Como a COBRASQ é remunerada</div><p>O credor recebe <b>100% do valor nominal</b> recuperado. A remuneração da COBRASQ vem exclusivamente dos <b>acréscimos</b> do crédito — juros, correção monetária e multa —, de modo que o trabalho de recuperação não reduz o principal devido ao credor.</p></div>
 <p>${p2}</p></section>
 <section class="secao"><h2 class="sec">Andamento Detalhado</h2>${subs}</section>
 ${tl?`<section class="secao"><h2 class="sec">Linha do Tempo — Fases Judiciais</h2>${tl}</section>`:''}
@@ -53094,7 +53115,7 @@ function _relHtmlGerencial(casos){
   const comProc = atv.filter(k=>k.processo).length;
   const inds = _relInd('Casos na Carteira', casos.length, `${atv.length} ativos · ${enc.length} encerrados`)
     + _relInd('Valor Atual em Aberto', _fmtR(totAtual), 'Soma do valor atualizado (ativos)')
-    + _relInd('Valor Nominal (Ativos)', _fmtR(totNom), 'Base de repasse ao credor', 'green')
+    + _relInd('Valor Nominal (Ativos)', _fmtR(totNom), 'Valor nominal sob cobrança', 'green')
     + _relInd('Com Nº de Processo', comProc, `${atv.length-comProc} ativos sem processo`, 'blue');
 
   const agrupar = fn => {
