@@ -235,6 +235,18 @@ const MAPA_EVENTO = {
   conciliacao: 'Conciliação',
   intimacao: 'Intimação',
   citacao: 'Citação',
+  habilitacaodecredito: 'Habilitação de Crédito',
+  credito: 'Crédito',
+  debito: 'Débito',
+  atualizacaodedebito: 'Atualização de Débito',
+  atualizacaodocalculo: 'Atualização de Cálculo',
+  desarquivamento: 'Desarquivamento',
+  pedidodedesarquivamento: 'Pedido de Desarquivamento',
+  reqalvara: 'Requerimento de Alvará',
+  reqpenhora: 'Requerimento de Penhora',
+  reqcitacao: 'Requerimento de Citação',
+  titulo: 'Título',
+  pericia: 'Perícia',
 };
 // Recupera acentos comuns do português jurídico quando o tipo NÃO está no mapa (o
 // nome do arquivo nunca tem acento, mas a busca da lupa do Projudi espera com).
@@ -248,6 +260,18 @@ function acentuar(palavra) {
     [/ancias$/, 'âncias'], [/ancia$/, 'ância'],
     [/orios$/, 'órios'], [/orio$/, 'ório'],   // declaratorio → declaratório
     [/arios$/, 'ários'], [/ario$/, 'ário'],   // inventario → inventário
+    [/soes$/, 'sões'], [/sao$/, 'são'],       // revisao → revisão; conclusao → conclusão
+    [/zoes$/, 'zões'], [/zao$/, 'zão'],       // razao → razão
+    [/does$/, 'dões'], [/dao$/, 'dão'],       // certidao → certidão
+    [/icias$/, 'ícias'], [/icia$/, 'ícia'],   // pericia → perícia
+    [/aveis$/, 'áveis'], [/avel$/, 'ável'],   // responsavel → responsável
+    [/oveis$/, 'óveis'], [/ovel$/, 'óvel'],   // imovel → imóvel
+    [/editos$/, 'éditos'], [/edito$/, 'édito'], // credito → crédito
+    [/ebitos$/, 'ébitos'], [/ebito$/, 'ébito'], // debito → débito
+    [/itulos$/, 'ítulos'], [/itulo$/, 'ítulo'], // titulo → título
+    [/uizos$/, 'uízos'], [/uizo$/, 'uízo'],   // juizo → juízo
+    [/ublicos$/, 'úblicos'], [/ublico$/, 'úblico'],
+    [/umeros$/, 'úmeros'], [/umero$/, 'úmero'],
   ];
   for (const [re, rep] of regras) {
     if (re.test(baixa)) {

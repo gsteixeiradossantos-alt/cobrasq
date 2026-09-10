@@ -329,6 +329,75 @@
     return pausar(c, 'estou na intimação mas não achei <b>Cumprir Prazo</b> — clique você e depois Continuar.');
   }
 
+  // Pendências de intimação do quadro #quadroPendencias, UMA por prazo. Cada pendência
+  // traz 2 links — "Ver Intimação" (intimacao.do) e "Cumprir Prazo" (cumprirIntimacao.do);
+  // conta só o primeiro, deduplicando pela linha. `texto` = descrição (evento/prazo/tipo).
+  function pendenciasIntimacao() {
+    const quadro = document.getElementById('quadroPendencias');
+    if (!quadro) return [];
+    const ehVer = a => {
+      const h = a.getAttribute('href') || '';
+      return /intimacao\.do/i.test(h) && !/cumprir/i.test(h);
+    };
+    const linhas = new Set(), out = [];
+    Array.from(quadro.querySelectorAll('a[href]')).forEach(a => {
+      if (!visivel(a) || !ehVer(a)) return;
+      const linha = a.closest('tr') || a.parentElement || a;
+      if (linhas.has(linha)) return;
+      linhas.add(linha);
+      const txt = String((linha.innerText || linha.textContent || a.textContent || ''))
+        .replace(/\s+/g, ' ').replace(/\s*(ver intima[cç][aã]o|cumprir prazo)\s*/gi, ' ').trim();
+      out.push({ link: a, texto: txt.slice(0, 180) || 'prazo pendente' });
+    });
+    return out;
+  }
+
+  // Tela: LISTA de intimações do advogado (intimacaoAdvogado.do — form
+  // intimacaoAdvogadoForm com uma linha/checkbox por intimação). É onde o processo cai
+  // ao clicar "Cumprir Prazo" tendo VÁRIOS prazos pendentes. Aqui marcamos as linhas
+  // DESTE processo e clicamos "Cumprir Prazo" → cumprirIntimacaoEmLote.do abre UMA
+  // juntada que cumpre todos os prazos marcados de uma vez.
+  function ehTelaListaIntimacoes() {
+    const f = document.getElementById('intimacaoAdvogadoForm');
+    return !!f && !!f.querySelector('input[name="codIntimacao"]');
+  }
+  async function telaListaIntimacoes(c) {
+    const alvo = digitos(c.numero_processo);
+    const caixas = Array.from(document.querySelectorAll('#intimacaoAdvogadoForm input[name="codIntimacao"]'));
+    // FAIL-CLOSED: marca SÓ as linhas cujo CNJ é o do caso. A lista pode ter sido aberta
+    // pelo menu (intimações de vários processos) — cumprir o prazo de outro processo é
+    // irreversível. Linhas de outros processos ficam desmarcadas.
+    const minhas = [], outras = [];
+    caixas.forEach(cx => {
+      const linha = cx.closest('tr');
+      const dig = digitos((linha && (linha.innerText || linha.textContent)) || '');
+      (alvo.length >= 13 && dig.includes(alvo) ? minhas : outras).push(cx);
+    });
+    if (!minhas.length) {
+      return pausar(c, 'a lista de intimações não trouxe nenhuma linha do processo <b>' + escHtml(c.numero_processo) + '</b>' +
+        (outras.length ? ' (só linhas de outros processos)' : '') +
+        ' — pode ser que as intimações ainda não estejam LIDAS (nesse caso abra "Ver Intimação" primeiro, o que inicia o prazo). Resolva na tela e clique <b>Continuar</b>.');
+    }
+    // Anti-loop: se o clique não sair desta tela, no máx. 2 tentativas por caso.
+    c.tentouLote = (c.tentouLote || 0) + 1;
+    if (c.tentouLote > 2) {
+      return pausar(c, 'marquei as intimações e cliquei <b>Cumprir Prazo</b> 2× e continuo voltando para a lista — marque você as intimações do processo, clique Cumprir Prazo e depois <b>Continuar</b>.');
+    }
+    await casoSalvar(c);
+    minhas.forEach(cx => {
+      if (!cx.checked) { cx.checked = true; cx.dispatchEvent(new Event('change', { bubbles: true })); }
+    });
+    const btn = document.getElementById('cumprirIntimacao') ||
+      acharControle(['cumprir prazo', 'cumprir'], 'input[type=submit],input[type=button],button,a');
+    if (!btn || !visivel(btn)) {
+      return pausar(c, 'marquei ' + minhas.length + ' intimação(ões) deste processo, mas não achei o botão <b>Cumprir Prazo</b> da lista — clique você e depois Continuar.');
+    }
+    progresso(c, 'lista: marquei ' + minhas.length + ' prazo(s) deste processo' +
+      (outras.length ? ' (deixei ' + outras.length + ' de outros processos de fora)' : '') + ' → Cumprir Prazo');
+    clicar(btn);
+    setTimeout(() => runCentral().catch(() => {}), 2500);
+  }
+
   // Tela: o processo (processo.do — form processoForm com #cumprirButton/#peticionarButton).
   async function telaProcesso(c) {
     // GUARDA DE PROCESSO CERTO (bug do lote): ao começar um caso NOVO, a tela ainda pode
@@ -363,7 +432,26 @@
     }
     // PRIORIDADE: se há intimação não lida (Pendências → "Ver Intimação"), o caminho é
     // CUMPRIR O PRAZO dela — não "Petição Eletrônica" (petição avulsa, sem vínculo).
-    const verIntim = document.querySelector('#quadroPendencias a[href*="intimacao.do"]') ||
+    // VÁRIOS PRAZOS PENDENTES: não dá para escolher "o primeiro da lista" (cumpriria um
+    // prazo que pode não ser o da peça). O caminho é o "Cumprir Prazo" do processo →
+    // lista de intimações → marcar os prazos deste processo → cumprir TODOS na mesma
+    // juntada (cumprirIntimacaoEmLote.do), com um único documento.
+    const pend = pendenciasIntimacao();
+    if (pend.length > 1) {
+      const btnLote = document.getElementById('cumprirButton') ||
+        acharControle(['cumprir prazo', 'cumprir'], 'input[type=submit],input[type=button],button,a');
+      if (btnLote && visivel(btnLote)) {
+        progresso(c, pend.length + ' prazos pendentes → abrindo a lista para cumprir em lote…');
+        clicar(btnLote);
+        setTimeout(() => runCentral().catch(() => {}), 2500);
+        return;
+      }
+      pend.forEach(p => { try { destacar(p.link, '#fab005'); } catch (_) {} });
+      return pausar(c, 'este processo tem <b>' + pend.length + ' prazos pendentes</b> e não achei o botão <b>Cumprir Prazo</b> do processo para cumprir os dois de uma vez:' +
+        '<ul style="margin:6px 0 6px 16px;padding:0">' + pend.map(p => '<li>' + escHtml(p.texto) + '</li>').join('') + '</ul>' +
+        'Abra você a lista de intimações (Cumprir Prazo), marque os prazos e clique <b>Continuar</b>.');
+    }
+    const verIntim = (pend[0] && pend[0].link) ||
       Array.from(document.querySelectorAll('#quadroPendencias a, a')).find(a => visivel(a) && /ver\s+intima[cç][aã]o/i.test(a.textContent || ''));
     if (verIntim && visivel(verIntim)) {
       progresso(c, 'intimação pendente → abrindo (Cumprir Prazo)…');
@@ -444,6 +532,25 @@
   }
   // Escolhe o tipo na janela: Descrição → Pesquisar → marca o radio que casa →
   // Selecionar (o Projudi fecha o diálogo e preenche o hidden na tela-mãe).
+  // Consultas para a busca por Descrição da janela de tipo, da mais específica para a
+  // mais tolerante. O corte para antes da 1ª letra "arriscada" (vogal ou c, que no
+  // catálogo do Projudi pode ser á/ã/é/ç…) deixa a consulta imune a acento:
+  //   "Alvará"/"Alvara" → "Alv" · "Peticao" → "Pet" · "Manifestacao" → "Man"
+  function consultasTipo(txt) {
+    const out = [];
+    const push = (v) => { v = String(v || '').trim(); if (v.length >= 3 && !out.includes(v)) out.push(v); };
+    const corte = (v) => {
+      const t = String(v || '');
+      for (let i = 3; i < t.length; i++) if (/[aeiouc]/i.test(t[i])) return t.slice(0, i);
+      return t;
+    };
+    push(txt);
+    push(corte(txt));
+    const longa = (norm(txt).split(/\W+/).filter(w => w.length >= 4)[0]) || '';
+    push(corte(longa));
+    return out;
+  }
+
   async function telaDialogoTipo(c) {
     const tipoTxt = c.tipo_peticao || 'Manifestação da Parte';
     const alvo = norm(tipoTxt);
@@ -462,15 +569,34 @@
       const desc = inputPorRotulo(['descricao', 'descrição']) ||
         Array.from(document.querySelectorAll('input[type="text"],input:not([type])')).find(visivel);
       if (desc) {
-        setInput(desc, tipoTxt);
-        const pesquisar = acharControle(['pesquisar', 'filtrar', 'consultar']);
-        if (pesquisar) await clicarPagina(pesquisar);
-        await esperar(() => radiosVis().some(casa), 6000);
-        radios = radiosVis();
+        // A busca por Descrição do Projudi é SENSÍVEL A ACENTO ("alvara" não acha
+        // "ALVARÁ") e o tipo vem do NOME DO ARQUIVO, que nunca tem acento. Então
+        // tentamos as consultas em cascata (consultasTipo): o texto como está e,
+        // se não achar, prefixos cortados ANTES de qualquer letra que possa estar
+        // acentuada. A conferência do item (casa) ignora acento, então um prefixo
+        // curto é seguro: traz mais linhas e escolhemos a certa entre elas.
+        for (const q of consultasTipo(tipoTxt)) {
+          setInput(desc, q);
+          const pesquisar = acharControle(['pesquisar', 'filtrar', 'consultar']);
+          if (pesquisar) await clicarPagina(pesquisar);
+          await esperar(() => radiosVis().some(casa), 6000);
+          radios = radiosVis();
+          if (radios.some(casa)) break;
+          progresso(c, 'tipo: "' + q + '" não achou — tentando outra grafia…');
+        }
       }
     }
     let alvoRadio = radios.find(casa) || (radios.length === 1 ? radios[0] : null);
-    if (!alvoRadio) return pausar(c, 'não achei "' + escHtml(tipoTxt) + '" na janela de tipo — escolha você na lista e clique <b>Selecionar</b>; depois Continuar.');
+    if (!alvoRadio) {
+      // Mostra o que ESTÁ na tela: ajuda a descobrir o nome exato do tipo no Projudi
+      // (o nome do arquivo pode divergir do catálogo — ex.: acento, plural, sinônimo).
+      const opcoes = radiosVis().slice(0, 8)
+        .map(r => (linhaDoRadio(r) || '').replace(/\s+/g, ' ').trim().slice(0, 60))
+        .filter(Boolean).join(' · ');
+      return pausar(c, 'não achei "<b>' + escHtml(tipoTxt) + '</b>" na janela de tipo (busquei também sem acento). ' +
+        (opcoes ? 'O que aparece na lista: <b>' + escHtml(opcoes) + '</b>. ' : '') +
+        'Escolha você na lista e clique <b>Selecionar</b>; depois Continuar — e me diga o nome certo, que eu ensino a extensão.');
+    }
     // SELEÇÃO ROBUSTA: o Projudi (ajaxtags) registra a escolha pelo onclick do rádio/
     // linha, não só pelo .checked — então marca, dispara a sequência de mouse COMPLETA
     // (mousedown→mouseup→click) e, se o rádio/linha tiver onclick da página, executa
@@ -896,6 +1022,7 @@
       if (upForm && upFile && visivel(upFile)) return await telaUpload(c);
       if (document.getElementById('juntarDocumentoForm')) return await telaJuntar(c);
       if (upForm && upFile) return await telaUpload(c); // upload em iframe próprio sem juntada na tela
+      if (ehTelaListaIntimacoes()) return await telaListaIntimacoes(c); // lista → cumprir em lote
       if (ehTelaIntimacao()) return await telaIntimacao(c); // aviso/"Cumprir Prazo"
       if (document.getElementById('processoForm')) return await telaProcesso(c); // M2: espera botões lá dentro
       if (document.getElementById('buscaProcessosQualquerInstanciaForm')) {
