@@ -5802,31 +5802,52 @@ function rowToCliente(r){
 // `content-range: 0-999/18258`. O corte NÃO gera erro — a resposta volta menor e
 // o app segue como se aquilo fosse a base inteira.
 //
-// Isso era uma bomba-relógio: 892 devedores e 861 cobranças na mesma data, teto
-// de 1.000. Ao cruzar, `DB.devedores` passaria a carregar 1.000 em silêncio — e
-// carga truncada é indistinguível de exclusão em massa para o trigger F-20
-// (anti-shrink, criado direto em produção): o primeiro save do usuário seria
-// bloqueado, do jeito que já aconteceu com colaborador (ver CLAUDE.md).
+// E NADA avisaria. Chequei a suposição contrária e ela é falsa: o trigger F-20
+// (anti-shrink) NÃO pegaria uma carga truncada de devedores, porque COLECOES_SYNC
+// tirou `devedores`/`clientes` do blob na Fase 3 (o merge nem toca nesse array),
+// `_lastKnownDevCount` é rebaseado para o valor já truncado no fim de
+// loadRelationalData, e flushRelational só faz upsert de diff, nunca apaga o que
+// falta. Com 892 devedores e 861 cobranças na mesma data, contra um teto de
+// 1.000, isso estava a poucas dezenas de cadastros de acontecer em silêncio.
 //
-// `montar(de, ate)` recebe a faixa e devolve o builder já com select/filtros.
-// A ORDEM TEM DE SER TOTAL E ESTÁVEL: paginar por coluna que empata pode repetir
-// uma linha numa página e pular outra na seguinte, então todo chamador desempata
-// por `id`. Sem ORDER BY, o Postgres nem garante ordem consistente entre páginas.
-const _PG_PAGINA = 1000;
-const _PG_TETO_PAGINAS = 50;   // 50 mil linhas — trava contra laço infinito
+// TRÊS GUARDAS, cada uma para um jeito diferente de truncar sem avisar:
+//
+// 1. KEYSET, não OFFSET. Paginar por offset com a base mudando embaixo repete ou
+//    PULA linha: um insert entre a página 1 e a 2 empurra tudo e a linha da
+//    fronteira volta duas vezes (ou some, quando a ordem é por uuid). Aqui cada
+//    página pede `id > último id da anterior`, então inserção concorrente não
+//    desloca nada do que já passou.
+// 2. PÁGINA DE 500, com folga sob o teto. Se `_PG_PAGINA` fosse igual ao teto do
+//    servidor e o teto caísse para 500, cada página voltaria curta, o laço
+//    encerraria na primeira e o bug voltaria escondido atrás de código que
+//    PARECE paginar.
+// 3. CONFERÊNCIA CONTRA `count`. A primeira página pede a contagem exata; no fim,
+//    o que foi carregado tem de bater. Se faltar linha por qualquer motivo — teto
+//    novo, limite de páginas, filtro inesperado — devolve ERRO, e o chamador cai
+//    no modo seguro (que bloqueia gravação) em vez de assumir lista parcial como
+//    completa. Uma exclusão concorrente durante a carga também cai aqui: é falso
+//    positivo, mas o custo é um F5, e errar para o lado seguro é o certo aqui.
+//
+// `montar(depoisDe, tamanho, pedirContagem)` devolve o builder pronto. Ordenar por
+// `id` é obrigatório: keyset precisa de coluna única e estável, e `id` é a PK.
+const _PG_PAGINA = 500;
+const _PG_TETO_PAGINAS = 200;   // 100 mil linhas — trava contra laço infinito
 async function _carregarPaginado(montar){
   const tudo = [];
+  let depoisDe = null, total = null;
   for(let p = 0; p < _PG_TETO_PAGINAS; p++){
-    const de = p * _PG_PAGINA;
-    const { data, error } = await montar(de, de + _PG_PAGINA - 1);
+    const { data, error, count } = await montar(depoisDe, _PG_PAGINA, total === null);
     if(error) return { data:null, error };
+    if(total === null && typeof count === 'number') total = count;
     const lote = data || [];
     for(const r of lote) tudo.push(r);
-    // Página incompleta = acabou. Página cheia pede a próxima; se a base terminar
-    // num múltiplo exato de 1.000, a requisição seguinte volta vazia e encerra.
-    if(lote.length < _PG_PAGINA) return { data: tudo, error:null };
+    if(lote.length < _PG_PAGINA) break;       // página curta = acabou
+    depoisDe = lote[lote.length - 1].id;
+    if(!depoisDe) return { data:null, error:{ message:'paginação: última linha sem id' } };
   }
-  console.warn('[rel] paginação parou no teto de', _PG_TETO_PAGINAS * _PG_PAGINA, 'linhas — a carga pode estar incompleta');
+  if(typeof total === 'number' && tudo.length < total){
+    return { data:null, error:{ message:`paginação incompleta: ${tudo.length} de ${total}` } };
+  }
   return { data: tudo, error:null };
 }
 
@@ -5834,8 +5855,11 @@ async function loadDevedoresFromSupabase(){
   const supa = getSupabase();
   if(!supa) return null;
   try{
-    const { data, error } = await _carregarPaginado((de,ate)=>
-      supa.from('devedores').select('*').order('id',{ascending:true}).range(de,ate));
+    const { data, error } = await _carregarPaginado((depoisDe,tam,contar)=>{
+      let q = supa.from('devedores').select('*', contar?{count:'exact'}:undefined);
+      if(depoisDe) q = q.gt('id', depoisDe);
+      return q.order('id',{ascending:true}).limit(tam);
+    });
     if(error){ console.warn('[rel] loadDevedores:', error.message); return null; }
     return (data||[]).map(rowToDevedor);
   }catch(e){ console.warn('[rel] loadDevedores ex:', e.message); return null; }
@@ -5845,8 +5869,11 @@ async function loadClientesFromSupabase(){
   const supa = getSupabase();
   if(!supa) return null;
   try{
-    const { data, error } = await _carregarPaginado((de,ate)=>
-      supa.from('clientes').select('*').order('id',{ascending:true}).range(de,ate));
+    const { data, error } = await _carregarPaginado((depoisDe,tam,contar)=>{
+      let q = supa.from('clientes').select('*', contar?{count:'exact'}:undefined);
+      if(depoisDe) q = q.gt('id', depoisDe);
+      return q.order('id',{ascending:true}).limit(tam);
+    });
     if(error){ console.warn('[rel] loadClientes:', error.message); return null; }
     return (data||[]).map(rowToCliente);
   }catch(e){ console.warn('[rel] loadClientes ex:', e.message); return null; }
@@ -5990,11 +6017,17 @@ async function _reidratarAcordos(devs){
     // maior: salvar uma cobrança com a tela Cobranças aberta faz estes chunks
     // coincidirem com a revalidação e os sinais que ainda estão voando.
     //
-    // Antes de aumentar a concorrência aqui, saiba que o teto do PostgREST neste
-    // projeto é 1.000 LINHAS por requisição (medido: pedir as 18.258 intimações
-    // devolve content-range 0-999/18258). loadDevedoresFromSupabase não pagina,
-    // então DB.devedores trava em 1.000 e o número de chunks nunca passa de 5 —
-    // o corte silencioso chega antes de a concorrência virar problema.
+    // O número de chunks NÃO tem mais teto: loadDevedoresFromSupabase passou a
+    // paginar, então DB.devedores acompanha a base. Com 3.000 devedores isto vira
+    // 15 requisições simultâneas. Se a base crescer assim, vale limitar a
+    // concorrência e/ou aplicar os chunks que deram certo em vez do tudo-ou-nada.
+    //
+    // E o `select('*')` de cada chunk continua sujeito ao teto de 1.000 LINHAS por
+    // requisição do PostgREST: 200 devedores com mais de 1.000 acordos entre eles
+    // devolveriam uma página cortada, em silêncio. Hoje são 61 acordos no total,
+    // então não paginei — mas é a mesma armadilha das cargas do boot, e quem
+    // aumentar o chunk ou vir a base de acordos crescer precisa usar o
+    // _carregarPaginado daqui de cima.
     for(const { error } of _res){ if(error){ console.warn('[rel] reidratarAcordos:', error.message); return; } }
     for(const { data } of _res){
       for(const row of (data||[])){ (byDev[row.devedor_id] = byDev[row.devedor_id] || []).push(_rowToAcordo(row)); }
@@ -19560,18 +19593,22 @@ async function loadCobrancasFromSupabase(){
   const supa = getSupabase();
   if(!supa) return null;
   try{
-    // `range` conta LINHAS DE COBRANÇA, não linhas do embed: no PostgREST o
-    // recurso embutido vem aninhado dentro do pai, e limit/offset valem para o pai.
-    // O desempate por `id` preserva a ordem que os chamadores já esperavam
-    // (created_at desc) e ainda torna a paginação estável quando há empate de
-    // created_at — que existe, porque importação em lote grava tudo no mesmo instante.
-    const { data, error } = await _carregarPaginado((de,ate)=>
-      supa.from('cobrancas')
-        .select('*, cobranca_partes(id, devedor_id, papel, principal, devedores(nome, doc, telefone, tags))')
-        .order('created_at', { ascending:false }).order('id', { ascending:true })
-        .range(de,ate));
+    // Pagina por `id` (keyset) e reordena em memória: manter `created_at desc` como
+    // chave de paginação seria frágil de duas formas — empate (importação em lote
+    // grava tudo no mesmo instante) e inserção concorrente entrando na POSIÇÃO 0,
+    // que empurra a fronteira e duplica uma linha.
+    // `limit` conta LINHAS DE COBRANÇA, não do embed: no PostgREST o recurso
+    // embutido vem aninhado dentro do pai.
+    const { data, error } = await _carregarPaginado((depoisDe,tam,contar)=>{
+      let q = supa.from('cobrancas')
+        .select('*, cobranca_partes(id, devedor_id, papel, principal, devedores(nome, doc, telefone, tags))',
+                contar?{count:'exact'}:undefined);
+      if(depoisDe) q = q.gt('id', depoisDe);
+      return q.order('id',{ascending:true}).limit(tam);
+    });
     if(error){ console.warn('[rel] loadCobrancas:', error.message); return null; }
-    const rows = data || [];
+    // Contrato que os chamadores já esperavam desde sempre.
+    const rows = (data || []).sort((a,b)=> String(b.created_at||'').localeCompare(String(a.created_at||'')));
     // Valor atualizado sempre corrente (compute-on-read) — painel, busca e a
     // tela Cobranças passam a ver a dívida corrigida de hoje, não o congelado.
     try{ for(const c of rows){ if(parseValorBR(c.valor_orig) > 0){ const f = dividaAtualHoje(c); if(f && isFinite(f)) c.valor_atual = f; } } }catch(_){}
