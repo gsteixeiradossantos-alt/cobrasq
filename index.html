@@ -53464,9 +53464,37 @@ async function _relV4Andamentos(ids){
   const sb = (typeof getSupabase==='function') ? getSupabase() : null;
   if(!sb) return out;
   try{
-    const { data } = await sb.from('devedor_eventos')
-      .select('cobranca_id,tipo,payload,criado_em')
-      .in('cobranca_id', ids).order('criado_em', { ascending:false });
+    // PAGINADO. O PostgREST corta em 1.000 linhas por requisição e um credor com
+    // muito movimento passa disso: medido em 10/09/2026, a Clínica Odontológica
+    // Balvedi tinha 1.421 eventos em 126 cobranças e esta consulta recebia 1.000.
+    // Ordenado por `criado_em desc`, as cobranças cujos eventos são todos mais
+    // antigos que o milésimo saem do relatório do credor como se não tivessem
+    // andamento nenhum.
+    //
+    // Tamanho REAL do estrago hoje: 1 cobrança, não as 11 que a conta ingênua
+    // sugere. A diferença é que o relatório só mostra evento com texto aproveitável
+    // (descricao/texto/movimento) e a maioria não tem — das 126, só 23 têm andamento
+    // exibível. Vale corrigir porque a truncagem é real e cresce com a base, não
+    // porque hoje esteja arruinando o documento.
+    //
+    // Chunk nos ids para a URL não estourar, e paginação por `id` dentro de cada
+    // chunk (keyset precisa de coluna única; `criado_em` empata). A ordenação por
+    // data que o servidor fazia passou para cá, já que paginar exige ordenar por id.
+    const eventos = [];
+    for(let i=0;i<ids.length;i+=200){
+      const fatia = ids.slice(i, i+200);
+      const { data:pag, error:ePag } = await _carregarPaginado((depoisDe,tam,contar)=>{
+        let q = sb.from('devedor_eventos')
+          .select('id,cobranca_id,tipo,payload,criado_em', contar?{count:'exact'}:undefined)
+          .in('cobranca_id', fatia);
+        if(depoisDe) q = q.gt('id', depoisDe);
+        return q.order('id',{ascending:true}).limit(tam);
+      });
+      if(ePag) throw ePag;
+      for(const e of (pag||[])) eventos.push(e);
+    }
+    eventos.sort((a,b)=>{ const x=a.criado_em||'', y=b.criado_em||''; return x<y?1:(x>y?-1:0); });
+    const data = eventos;
     (data||[]).forEach(e=>{
       if(out[e.cobranca_id]) return;                       // já tem o mais recente
       const p = e.payload || {};
@@ -53477,7 +53505,12 @@ async function _relV4Andamentos(ids){
         em:  e.criado_em ? new Date(e.criado_em) : null
       };
     });
-  }catch(_){ }
+  }catch(e){
+    // Continua devolvendo o que deu para montar, como antes — mas agora AVISA. Um
+    // relatório sem andamento por falha de carga é indistinguível, na tela, de um
+    // caso que realmente não teve movimento; sem este aviso ninguém descobre.
+    console.warn('[rel] andamentos do relatório (parcial):', e && e.message);
+  }
   return out;
 }
 
