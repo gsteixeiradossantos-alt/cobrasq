@@ -39,6 +39,11 @@ Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
 
+  const _authHeader = req.headers.get('authorization') || '';
+  const _uc = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_ANON_KEY')!, { global: { headers: { Authorization: _authHeader } } });
+  const { data: { user: _user }, error: _eAuth } = await _uc.auth.getUser();
+  if (_eAuth || !_user) return json({ error: 'unauthorized' }, 401);
+
   const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
   const SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
   const ZAPI_INSTANCE = Deno.env.get('ZAPI_INSTANCE');
