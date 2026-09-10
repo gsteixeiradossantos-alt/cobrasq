@@ -20129,6 +20129,24 @@ function cobStatusBadge(c){
 // boletos, WhatsApp aguardando, petição/intimação, última atividade) vêm de _cobrSinais,
 // buscado em LOTE e de forma defensiva; se faltarem, degrada para status+aging.
 let _cobrSinais = null; // { acordoPorDev, waAguardando:Set, peticaoPreparada:Set, intimacaoNova:Set, ultimaAtividade }
+// Caminho rápido: a RPC `cobr_sinais_pendencia()` devolve acordos, petições,
+// intimações e última atividade numa viagem só (migração 20260910_02) — contra as
+// 10 de antes. Devolve `true` se conseguiu; `false` manda o chamador usar o caminho
+// antigo, que continua inteiro logo abaixo. O fallback não é decoração: enquanto a
+// migração não estiver aplicada em produção a função não existe, e a tela não pode
+// depender disso para desenhar.
+async function _sinaisViaRpc(sb, sinais){
+  try{
+    const { data, error } = await sb.rpc('cobr_sinais_pendencia');
+    if(error || !data || typeof data !== 'object') return false;
+    sinais.acordoPorDev    = data.acordoPorDev    || {};
+    sinais.ultimaAtividade = data.ultimaAtividade || {};
+    (data.peticaoPreparada || []).forEach(id=>{ if(id) sinais.peticaoPreparada.add(id); });
+    (data.intimacaoNova    || []).forEach(id=>{ if(id) sinais.intimacaoNova.add(id); });
+    return true;
+  }catch(_){ return false; }
+}
+
 async function _carregarSinaisPendencia(cobrs){
   const sinais = { acordoPorDev:{}, waAguardando:new Set(), peticaoPreparada:new Set(), intimacaoNova:new Set(), ultimaAtividade:{} };
   const sb = (typeof getSupabase==='function') ? getSupabase() : null;
@@ -20142,27 +20160,34 @@ async function _carregarSinaisPendencia(cobrs){
   // lenta. Cada grupo mantém o try/catch próprio — um erro isolado não derruba o
   // resto, que é o que o código original garantia com os try{}catch{} por bloco.
   const _all = (ps)=>Promise.all(ps);
-  // 1) Acordos por devedor: status_zapsign, boletos_emitidos, parcelas.
-  const _pAcordos = _all(_chunks(devIds,200).map(ch=>
-    sb.from('acordos').select('devedor_id,status,status_zapsign,metadata,parcelas').in('devedor_id',ch)
-      .then(({data})=>{ (data||[]).forEach(a=>{ if(!a.devedor_id) return; (sinais.acordoPorDev[a.devedor_id]=sinais.acordoPorDev[a.devedor_id]||[]).push(a); }); })
-  )).catch(()=>{});
-  // 2) WhatsApp aguardando resposta humana (fila global — filtra por devedor).
+  // WhatsApp fica FORA da RPC de propósito (o porquê está na migração 20260910_02:
+  // a coluna consultada não existe e este sinal nunca dispara hoje; consertar muda
+  // o que a tela mostra e é decisão à parte). Roda em paralelo com o resto.
   const _pWa = sb.from('whatsapp_atendimentos').select('devedor_id,estado').eq('estado','aguardando_humano')
     .then(({data})=>{ (data||[]).forEach(w=>{ if(w.devedor_id) sinais.waAguardando.add(w.devedor_id); }); }).catch(()=>{});
-  // 3) Petições prontas para protocolar.
-  const _pPet = sb.from('proc_peticionamentos').select('cobranca_id,devedor_id,status').eq('status','preparado')
-    .then(({data})=>{ (data||[]).forEach(p=>{ if(p.cobranca_id) sinais.peticaoPreparada.add(p.cobranca_id); if(p.devedor_id) sinais.peticaoPreparada.add(p.devedor_id); }); }).catch(()=>{});
-  // 4) Intimações/andamentos novos (DataJud) não lidos.
-  const _pInt = sb.from('proc_intimacoes').select('devedor_id,lida').eq('lida',false)
-    .then(({data})=>{ (data||[]).forEach(i=>{ if(i.devedor_id) sinais.intimacaoNova.add(i.devedor_id); }); }).catch(()=>{});
-  // 5) Última atividade por devedor (evento mais recente) → dias sem atividade.
-  const _pEventos = _all(_chunks(devIds,200).map(ch=>
-    sb.from('devedor_eventos').select('devedor_id,criado_em').in('devedor_id',ch).order('criado_em',{ascending:false}).limit(3000)
-      .then(({data})=>{ (data||[]).forEach(e=>{ if(e.devedor_id && !sinais.ultimaAtividade[e.devedor_id]) sinais.ultimaAtividade[e.devedor_id]=e.criado_em; }); })
-  )).catch(()=>{});
 
-  await _all([_pAcordos, _pWa, _pPet, _pInt, _pEventos]);
+  // Uma viagem em vez de dez. Sem a função no banco, segue o caminho antigo.
+  if(!(await _sinaisViaRpc(sb, sinais))){
+    // 1) Acordos por devedor: status_zapsign, boletos_emitidos, parcelas.
+    const _pAcordos = _all(_chunks(devIds,200).map(ch=>
+      sb.from('acordos').select('devedor_id,status,status_zapsign,metadata,parcelas').in('devedor_id',ch)
+        .then(({data})=>{ (data||[]).forEach(a=>{ if(!a.devedor_id) return; (sinais.acordoPorDev[a.devedor_id]=sinais.acordoPorDev[a.devedor_id]||[]).push(a); }); })
+    )).catch(()=>{});
+    // 2) Petições prontas para protocolar.
+    const _pPet = sb.from('proc_peticionamentos').select('cobranca_id,devedor_id,status').eq('status','preparado')
+      .then(({data})=>{ (data||[]).forEach(p=>{ if(p.cobranca_id) sinais.peticaoPreparada.add(p.cobranca_id); if(p.devedor_id) sinais.peticaoPreparada.add(p.devedor_id); }); }).catch(()=>{});
+    // 3) Intimações/andamentos novos (DataJud) não lidos.
+    const _pInt = sb.from('proc_intimacoes').select('devedor_id,lida').eq('lida',false)
+      .then(({data})=>{ (data||[]).forEach(i=>{ if(i.devedor_id) sinais.intimacaoNova.add(i.devedor_id); }); }).catch(()=>{});
+    // 4) Última atividade por devedor (evento mais recente) → dias sem atividade.
+    const _pEventos = _all(_chunks(devIds,200).map(ch=>
+      sb.from('devedor_eventos').select('devedor_id,criado_em').in('devedor_id',ch).order('criado_em',{ascending:false}).limit(3000)
+        .then(({data})=>{ (data||[]).forEach(e=>{ if(e.devedor_id && !sinais.ultimaAtividade[e.devedor_id]) sinais.ultimaAtividade[e.devedor_id]=e.criado_em; }); })
+    )).catch(()=>{});
+    await _all([_pAcordos, _pPet, _pInt, _pEventos]);
+  }
+
+  await _pWa;
   return sinais;
 }
 function _diasDesde(iso){ if(!iso) return null; const d=new Date(String(iso).slice(0,10)); if(isNaN(d.getTime())) return null; return Math.floor((Date.now()-d.getTime())/86400000); }
