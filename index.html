@@ -20169,8 +20169,27 @@ async function _carregarSinaisPendencia(cobrs){
   // WhatsApp fica FORA da RPC de propósito (o porquê está na migração 20260910_02:
   // a coluna consultada não existe e este sinal nunca dispara hoje; consertar muda
   // o que a tela mostra e é decisão à parte). Roda em paralelo com o resto.
-  const _pWa = sb.from('whatsapp_atendimentos').select('devedor_id,estado').eq('estado','aguardando_humano')
-    .then(({data})=>{ (data||[]).forEach(w=>{ if(w.devedor_id) sinais.waAguardando.add(w.devedor_id); }); }).catch(()=>{});
+  // `whatsapp_atendimentos` NÃO tem `devedor_id` — a chave é `telefone` e o vínculo
+  // com o caso é `caso_id`. Pedir a coluna inexistente fazia o PostgREST devolver
+  // erro, o .catch() engolia, e `waAguardando` ficava SEMPRE vazio: o sinal 🔴
+  // "Cliente respondeu no WhatsApp" nunca disparou desde que foi escrito, e o ramo
+  // dele em cobPendencia() era código morto. Casos com o devedor esperando resposta
+  // não apareciam como "Agir" na lista nem no recorte "Ação atrasada".
+  //
+  // O mapeamento atendimento→devedor é o `waDevedorDe` que a tela de Pendentes já
+  // usa (caso_id e, sem ele, últimos 8 dígitos do telefone). De propósito o MESMO
+  // helper, não uma regra nova: duas telas discordando sobre de quem é a conversa
+  // seria pior que o sinal faltando. Em produção só 17% das linhas têm caso_id — e
+  // a que estava aguardando não tinha —, então o caminho do telefone não é
+  // exceção, é o normal.
+  const _pWa = sb.from('whatsapp_atendimentos').select('telefone,caso_id').eq('estado','aguardando_humano')
+    .then(({data,error})=>{
+      if(error){ console.warn('[cobr] sinais/whatsapp:', error.message); return; }
+      (data||[]).forEach(w=>{
+        const d = (typeof waDevedorDe==='function') ? waDevedorDe(w) : null;
+        if(d && d.id) sinais.waAguardando.add(d.id);
+      });
+    }).catch(e=>{ console.warn('[cobr] sinais/whatsapp:', e && e.message); });
 
   // Uma viagem em vez de dez. Sem a função no banco, segue o caminho antigo.
   if(!(await _sinaisViaRpc(sb, sinais))){
@@ -20178,18 +20197,18 @@ async function _carregarSinaisPendencia(cobrs){
     const _pAcordos = _all(_chunks(devIds,200).map(ch=>
       sb.from('acordos').select('devedor_id,status,status_zapsign,metadata,parcelas').in('devedor_id',ch)
         .then(({data})=>{ (data||[]).forEach(a=>{ if(!a.devedor_id) return; (sinais.acordoPorDev[a.devedor_id]=sinais.acordoPorDev[a.devedor_id]||[]).push(a); }); })
-    )).catch(()=>{});
+    )).catch(e=>{ console.warn('[cobr] sinais/acordos:', e && e.message); });
     // 2) Petições prontas para protocolar.
     const _pPet = sb.from('proc_peticionamentos').select('cobranca_id,devedor_id,status').eq('status','preparado')
-      .then(({data})=>{ (data||[]).forEach(p=>{ if(p.cobranca_id) sinais.peticaoPreparada.add(p.cobranca_id); if(p.devedor_id) sinais.peticaoPreparada.add(p.devedor_id); }); }).catch(()=>{});
+      .then(({data})=>{ (data||[]).forEach(p=>{ if(p.cobranca_id) sinais.peticaoPreparada.add(p.cobranca_id); if(p.devedor_id) sinais.peticaoPreparada.add(p.devedor_id); }); }).catch(e=>{ console.warn('[cobr] sinais/peticoes:', e && e.message); });
     // 3) Intimações/andamentos novos (DataJud) não lidos.
     const _pInt = sb.from('proc_intimacoes').select('devedor_id,lida').eq('lida',false)
-      .then(({data})=>{ (data||[]).forEach(i=>{ if(i.devedor_id) sinais.intimacaoNova.add(i.devedor_id); }); }).catch(()=>{});
+      .then(({data})=>{ (data||[]).forEach(i=>{ if(i.devedor_id) sinais.intimacaoNova.add(i.devedor_id); }); }).catch(e=>{ console.warn('[cobr] sinais/intimacoes:', e && e.message); });
     // 4) Última atividade por devedor (evento mais recente) → dias sem atividade.
     const _pEventos = _all(_chunks(devIds,200).map(ch=>
       sb.from('devedor_eventos').select('devedor_id,criado_em').in('devedor_id',ch).order('criado_em',{ascending:false}).limit(3000)
         .then(({data})=>{ (data||[]).forEach(e=>{ if(e.devedor_id && !sinais.ultimaAtividade[e.devedor_id]) sinais.ultimaAtividade[e.devedor_id]=e.criado_em; }); })
-    )).catch(()=>{});
+    )).catch(e=>{ console.warn('[cobr] sinais/eventos:', e && e.message); });
     await _all([_pAcordos, _pPet, _pInt, _pEventos]);
   }
 
