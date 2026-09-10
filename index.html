@@ -5929,11 +5929,38 @@ async function _reidratarAcordos(devs){
   const ids = devs.map(d=>d.id).filter(Boolean);
   try{
     const byDev = {};
-    // Chunk defensivo p/ não estourar o comprimento da URL do PostgREST.
-    for(let i=0;i<ids.length;i+=200){
-      const slice = ids.slice(i, i+200);
-      const { data, error } = await supa.from('acordos').select('*').in('devedor_id', slice);
-      if(error){ console.warn('[rel] reidratarAcordos:', error.message); return; }
+    // Chunk defensivo p/ não estourar o comprimento da URL do PostgREST. Os chunks
+    // cobrem devedores DISJUNTOS e não dependem um do outro — só estavam em série
+    // porque o `await` morava dentro do for. Com 888 devedores isso dava 5 viagens
+    // esperando uma pela outra (~400 ms cada) DENTRO do boot, que fica bloqueado em
+    // loadRelationalData: 2,26 s medidos num F5 real, com o usuário olhando a tela de
+    // login (que nasce `active` no HTML) enquanto o app decide se ele está logado.
+    // Em paralelo o custo vira o da mais lenta.
+    const _slices = [];
+    for(let i=0;i<ids.length;i+=200) _slices.push(ids.slice(i, i+200));
+    const _res = await Promise.all(_slices.map(sl => supa.from('acordos').select('*').in('devedor_id', sl)));
+    // Erro em QUALQUER chunk aborta sem aplicar nada — igual ao comportamento
+    // anterior. Aplicar um resultado parcial deixaria devedores com acordo some
+    // do lado do cliente, que é pior que não reidratar.
+    //
+    // Uma diferença herdada de sair da série: antes o primeiro erro impedia os
+    // chunks seguintes de serem sequer disparados; agora todos vão. São
+    // ceil(devedores/200) requisições simultâneas — 5 hoje, com ~890 devedores.
+    //
+    // NO BOOT elas voam sozinhas: o Promise.all das quatro queries e o
+    // loadGruposEconomicos() já foram aguardados quando esta função roda. Mas
+    // loadRelationalData tem outros 5 chamadores DENTRO do app (login gestor e
+    // cedente, import, atender solicitação, salvar cobrança), e nesses o pico é
+    // maior: salvar uma cobrança com a tela Cobranças aberta faz estes chunks
+    // coincidirem com a revalidação e os sinais que ainda estão voando.
+    //
+    // Antes de aumentar a concorrência aqui, saiba que o teto do PostgREST neste
+    // projeto é 1.000 LINHAS por requisição (medido: pedir as 18.258 intimações
+    // devolve content-range 0-999/18258). loadDevedoresFromSupabase não pagina,
+    // então DB.devedores trava em 1.000 e o número de chunks nunca passa de 5 —
+    // o corte silencioso chega antes de a concorrência virar problema.
+    for(const { error } of _res){ if(error){ console.warn('[rel] reidratarAcordos:', error.message); return; } }
+    for(const { data } of _res){
       for(const row of (data||[])){ (byDev[row.devedor_id] = byDev[row.devedor_id] || []).push(_rowToAcordo(row)); }
     }
     for(const d of devs){ if(byDev[d.id]) d.acordos = byDev[d.id]; }
