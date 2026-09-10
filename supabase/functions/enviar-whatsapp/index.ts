@@ -4,6 +4,7 @@
 // sem o 9, outros com). Retorna 422 se nenhuma variação existe.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { createClient } from 'jsr:@supabase/supabase-js@2';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -85,6 +86,11 @@ Deno.serve(async (req) => {
   if (req.method !== 'POST') return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
   try {
+    const _authHeader = req.headers.get('authorization') || '';
+    const _uc = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_ANON_KEY')!, { global: { headers: { Authorization: _authHeader } } });
+    const { data: { user: _user }, error: _eAuth } = await _uc.auth.getUser();
+    if (_eAuth || !_user) return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
     const body = await req.json().catch(() => ({}));
     const { telefone, mensagem, skipPhoneExists } = body;
 

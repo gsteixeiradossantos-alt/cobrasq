@@ -15,6 +15,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { encodeBase64 } from "jsr:@std/encoding@1/base64";
+import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -37,6 +38,11 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
   try {
+    const _authHeader = req.headers.get("authorization") || "";
+    const _uc = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY")!, { global: { headers: { Authorization: _authHeader } } });
+    const { data: { user: _user }, error: _eAuth } = await _uc.auth.getUser();
+    if (_eAuth || !_user) return json({ error: "unauthorized" }, 401);
+
     const { casoId, html, dados } = await req.json().catch(() => ({}));
     if (!html || typeof html !== "string") return json({ error: 'Campo "html" obrigatório.' }, 400);
     if (!dados || !dados.devedor) return json({ error: 'Campo "dados" obrigatório.' }, 400);
