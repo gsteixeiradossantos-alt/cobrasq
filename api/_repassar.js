@@ -226,7 +226,13 @@ module.exports = async function handler(req, res) {
 
     // Parcela e devedor — o que o credor vê no extrato do PIX e na mensagem.
     // Vêm da descrição do lançamento; devedor cadastrado, quando existe, prevalece.
-    const ref = lerDescricaoRepasse(body.descricao || (op.metadata && op.metadata.lancamento_descricao) || '');
+    //
+    // `body.descricao` é a descrição EDITADA no modal (10/09/2026): o gestor corrige o
+    // número da parcela quando a numeração do lançamento não bate com o que o credor já
+    // recebeu (ex.: R$ 20 pagos por fora antes da série). Ela vai literal ao extrato do
+    // PIX; o número inicial ("2 - Fulana") vira a parcela da mensagem e da operação.
+    const descEditada = String(body.descricao || '').trim().slice(0, 500);
+    const ref = lerDescricaoRepasse(descEditada || (op.metadata && op.metadata.lancamento_descricao) || '');
     if (op.devedor_id) {
       const dvs = await sbFetch(`devedores?id=eq.${op.devedor_id}&select=nome&limit=1`).catch(() => []);
       if (dvs[0] && dvs[0].nome) ref.devedor = dvs[0].nome;
@@ -253,7 +259,7 @@ module.exports = async function handler(req, res) {
       // 16/08/2026). O que o front manda é a descrição CRUA do lançamento, com as
       // anotações internas ("pagar", "conferido", "depende do Sisbajud") — normalizamos
       // aqui, no servidor, para que o webhook e a mensagem falem a mesma língua.
-      description: descricaoPix(ref) || `Repasse Cobrasq — ${credor.nome || 'credor'}`,
+      description: descEditada || descricaoPix(ref) || `Repasse Cobrasq — ${credor.nome || 'credor'}`,
       externalReference: op.id,
     };
     if (body.pix_key_type) transferPayload.pixAddressKeyType = body.pix_key_type;
@@ -284,9 +290,13 @@ module.exports = async function handler(req, res) {
       // Parcela e devedor ficam gravados: quando o Asaas conclui depois, é o webhook
       // que manda o comprovante, e lá a descrição do lançamento não está mais em mão.
       ...(ref.parcela && !op.parcela ? { parcela: ref.parcela, total_parcelas: ref.total } : {}),
+      // Descrição editada com parcela diferente da do lançamento: a operação passa a
+      // dizer a parcela corrigida, senão o webhook mandaria o comprovante com a errada.
+      ...(descEditada && ref.parcela && ref.parcela !== op.parcela ? { parcela: ref.parcela, total_parcelas: ref.total || op.total_parcelas || null } : {}),
       metadata: {
         ...(op.metadata || {}), repasse_pix_key: pixKey, repasse_asaas_status: st,
         repasse_devedor_nome: ref.devedor || undefined,
+        ...(descEditada ? { repasse_descricao_pix: descEditada } : {}),
         ...(arq ? { comprovante_storage_path: arq.storage_path, comprovante_bytes: arq.bytes } : {}),
       },
     };
