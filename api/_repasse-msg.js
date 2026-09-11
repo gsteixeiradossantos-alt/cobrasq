@@ -12,6 +12,103 @@
 // lugar onde essa informação existe.
 
 const { zapiSendText, zapiSendDocument } = require('./_zapi.js');
+const { sbFetch } = require('./_sb.js');
+const { FUSO_BR, isoBR, addDiasBR } = require('./_data.js');
+
+// ---------------------------------------------------------------------------------
+// Horário comercial do comprovante.
+//
+// Em 11/09/2026, à 01h26, o Gustavo clicou em Repassar e a mensagem com o comprovante
+// ia para o grupo do credor naquela hora. O PIX pode sair de madrugada; a mensagem, não:
+// credor recebendo WhatsApp da COBRASQ à 1h da manhã é o tipo de coisa que queima a
+// relação. Fora da janela o comprovante NÃO é enviado na hora — entra na fila
+// `crm_mensagens_agendadas` (a mesma da régua e dos lembretes) com `agendada_para` no
+// próximo horário útil, e o worker `cron-mensagens-agendadas` (pg_cron, 1/min) manda.
+//
+// Janela definida pelo Gustavo em 11/09/2026: segunda a sexta, 08h–20h (Curitiba).
+// ---------------------------------------------------------------------------------
+const JANELA_COMPROVANTE = { diasUteis: [1, 2, 3, 4, 5], horaInicio: 8, horaFim: 20 };
+
+const _fmtPartes = new Intl.DateTimeFormat('en-US', {
+  timeZone: FUSO_BR, weekday: 'short', hour: 'numeric', hour12: false,
+});
+const _DIA = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+// Dia da semana (0=dom) e hora cheia em Curitiba para um instante.
+function partesBR(d) {
+  const partes = _fmtPartes.formatToParts(d);
+  const dia = _DIA[(partes.find(x => x.type === 'weekday') || {}).value] ?? 0;
+  // Alguns runtimes formatam meia-noite como "24" com hour12:false.
+  const hora = Number((partes.find(x => x.type === 'hour') || {}).value) % 24;
+  return { dia, hora };
+}
+
+// Instante em que a mensagem pode sair. `null` = agora está dentro da janela, manda já.
+// Fora dela devolve o próximo dia útil às 08h00 de Curitiba. O Brasil não tem horário
+// de verão desde 2019, então "-03:00" fixo é exato (mesma premissa de addDiasBR).
+function proximoHorarioComercial(agora, janela) {
+  const J = janela || JANELA_COMPROVANTE;
+  const d = agora instanceof Date ? agora : new Date(agora == null ? Date.now() : agora);
+  const { dia, hora } = partesBR(d);
+  const diaUtil = J.diasUteis.includes(dia);
+  if (diaUtil && hora >= J.horaInicio && hora < J.horaFim) return null;
+  const hh = String(J.horaInicio).padStart(2, '0');
+  // Hoje ainda não abriu (madrugada de dia útil) → hoje às 08h. Senão, anda dia a dia.
+  if (diaUtil && hora < J.horaInicio) return new Date(`${isoBR(d)}T${hh}:00:00-03:00`);
+  for (let n = 1; n <= 7; n++) {
+    const data = addDiasBR(n, d);
+    const diaN = new Date(`${data}T12:00:00-03:00`);
+    if (J.diasUteis.includes(partesBR(diaN).dia)) return new Date(`${data}T${hh}:00:00-03:00`);
+  }
+  return null;
+}
+
+// Guarda o PDF que IRIA no WhatsApp no bucket `documentos` (o worker gera signed URL na
+// hora do envio). Caminho separado do arquivamento do comprovante (_comprovante.js):
+// aquele é o registro permanente do Asaas; este é o anexo exato da mensagem, que pode
+// ser a página impressa do Asaas ou o PDF da COBRASQ.
+const SB_URL = (process.env.SUPABASE_URL || '').replace(/\/+$/, '');
+const SB_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || '';
+const BUCKET_FILA = 'documentos';
+async function guardarAnexoFila(base64, nome) {
+  const safe = String(nome || 'comprovante').replace(/[^A-Za-z0-9_.-]+/g, '_').slice(0, 80);
+  const path = `repasses/fila-whatsapp/${Date.now()}-${safe}.pdf`;
+  const up = await fetch(`${SB_URL}/storage/v1/object/${BUCKET_FILA}/${path}`, {
+    method: 'POST',
+    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}`, 'Content-Type': 'application/pdf', 'x-upsert': 'true' },
+    body: Buffer.from(base64, 'base64'),
+  });
+  if (!up.ok) throw new Error(`upload do anexo falhou: ${up.status} ${await up.text().catch(() => '')}`);
+  return path;
+}
+
+// Enfileira o comprovante para o próximo horário comercial. Uma linha por PIX, igual ao
+// envio direto. `origem` começa com "manual_" DE PROPÓSITO: o worker só deixa passar por
+// cima de "conversa pendente" o que tem origem manual_* ou aviso interno (R-23); o
+// comprovante é disparado por um humano clicando em Repassar e não pode ficar preso
+// atrás de uma pergunta do credor sem resposta.
+async function enfileirarComprovanteCredor({ tel, msg, base64, nomeArquivo, comprovanteUrl, quando }) {
+  const row = {
+    telefone: tel,
+    agendada_para: quando.toISOString(),
+    status: 'pendente',
+    origem: 'manual_repasse_comprovante',
+  };
+  if (base64) {
+    row.tipo = 'documento';
+    row.media_path = await guardarAnexoFila(base64, nomeArquivo);
+    row.media_nome = nomeArquivo;
+    row.media_mime = 'application/pdf';
+    row.legenda = msg;
+    row.mensagem = msg;
+  } else {
+    row.tipo = 'texto';
+    row.mensagem = comprovanteUrl ? `${msg}\n\nComprovante: ${comprovanteUrl}` : msg;
+  }
+  const ins = await sbFetch('crm_mensagens_agendadas', { method: 'POST', body: JSON.stringify(row) });
+  const id = Array.isArray(ins) ? (ins[0] && ins[0].id) : (ins && ins.id);
+  return { enviado: false, agendado: true, agendada_para: row.agendada_para, fila_id: id || null, via: row.tipo };
+}
 
 // "Fernanda da Silva - Avisar e pagar - conferido 1/9" -> { parcela:1, total:9, devedor:'Fernanda da Silva' }
 //
@@ -117,7 +214,7 @@ function destinoWhatsapp(credor) {
 //
 // Best-effort por design: o PIX já saiu quando isto roda. Falha aqui vira log, nunca
 // erro do repasse.
-async function enviarComprovanteCredor({ telefone, parcela, devedor, doc, base64, ext, comprovanteUrl }) {
+async function enviarComprovanteCredor({ telefone, parcela, devedor, doc, base64, ext, comprovanteUrl, agora }) {
   // Não limpar aqui: o destino pode ser um GRUPO do WhatsApp ("1203634…-group"), que a
   // Z-API trata no mesmo campo. Quem normaliza é o _zapi.js, que sabe distinguir os dois.
   const tel = String(telefone || '').trim();
@@ -139,6 +236,21 @@ async function enviarComprovanteCredor({ telefone, parcela, devedor, doc, base64
   // que alguém passou HTML adiante — foi o que chegou à Vetclin em 17/08/2026.
   const pdfValido = !!base64 && Buffer.from(String(base64).slice(0, 16), 'base64').slice(0, 4).toString('latin1') === '%PDF';
   if (base64 && !pdfValido) console.warn('[repasse-msg] anexo descartado: não é PDF');
+
+  // Fora do horário comercial: fila, não Z-API. Se a fila falhar (storage, PostgREST),
+  // NÃO cai para o envio direto — mandar de madrugada é justamente o que se quer evitar.
+  const quando = proximoHorarioComercial(agora);
+  if (quando) {
+    try {
+      const r = await enfileirarComprovanteCredor({ tel, msg, base64: pdfValido ? base64 : '', nomeArquivo, comprovanteUrl, quando });
+      console.log('[repasse-msg] fora do horário comercial: comprovante agendado para', r.agendada_para, 'fila', r.fila_id);
+      return r;
+    } catch (e) {
+      console.warn('[repasse-msg] agendamento falhou:', e.message);
+      return { enviado: false, agendado: false, motivo: 'fora do horário comercial e a fila falhou: ' + e.message };
+    }
+  }
+
   if (pdfValido) {
     try {
       const r = await zapiSendDocument(tel, { document: base64, fileName: nomeArquivo, caption: msg, extension: ext || 'pdf' });
@@ -158,4 +270,4 @@ async function enviarComprovanteCredor({ telefone, parcela, devedor, doc, base64
   }
 }
 
-module.exports = { lerDescricaoRepasse, descricaoPix, msgComprovanteCredor, enviarComprovanteCredor, destinoWhatsapp, docPorExtenso };
+module.exports = { lerDescricaoRepasse, descricaoPix, msgComprovanteCredor, enviarComprovanteCredor, destinoWhatsapp, docPorExtenso, proximoHorarioComercial, JANELA_COMPROVANTE };
