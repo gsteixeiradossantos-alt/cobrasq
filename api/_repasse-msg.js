@@ -202,22 +202,51 @@ function docPorExtenso(doc) {
   return '';
 }
 
-function msgComprovanteCredor({ parcela, devedor, doc }) {
+// "A", "A e B", "A, B e C" — cada um com o documento entre parênteses quando conhecido.
+function listarPagadores(partes) {
+  const nomes = (partes || []).filter(p => p && p.nome).map(p => {
+    const d = docPorExtenso(p.doc);
+    return d ? `${p.nome} (${d})` : p.nome;
+  });
+  if (nomes.length <= 1) return nomes[0] || '';
+  return nomes.slice(0, -1).join(', ') + ' e ' + nomes[nomes.length - 1];
+}
+
+// Pedido ao credor que acompanha o PRIMEIRO repasse de cada dívida: baixar as
+// restrições que ele mesmo lançou contra o devedor e, havendo protesto, mandar a carta
+// de anuência. Texto do Gustavo, 11/09/2026. Só na 1ª parcela (decisão dele no mesmo
+// dia): repetir a cada parcela viraria ruído para o credor. Pagamento à vista/único
+// (sem número de parcela) conta como primeiro — é o único que haverá.
+const PARAGRAFO_RESTRICOES =
+  'Na hipótese de haver restrições no nome do(s) devedor(es) em SPC, SERASA, Boa Vista/CDL e afins, '
+  + 'solicitamos a retirada com urgência. Havendo PROTESTO, pedimos o envio da carta de anuência em forma eletrônica.';
+
+function pedeBaixaRestricoes(parcela) {
+  return !parcela || Number(parcela) === 1;
+}
+
+function msgComprovanteCredor({ parcela, devedor, doc, partes }) {
   // Documento entre parênteses quando conhecido — pedido do Gustavo em 17/08/2026, para o
   // credor identificar o devedor sem depender do nome. Devedor sem cadastro não tem doc:
   // a frase sai sem, em vez de com um campo vazio.
+  //
+  // `partes` (todas as partes da cobrança, principal primeiro) tem precedência: cobrança
+  // com dois devedores nomeia os dois — "Elaine Baranoski (CPF n. …) e Sidimar Pruch
+  // (CPF n. …)". Até 11/09/2026 saía só o principal, e o credor estranhou a ausência do
+  // segundo. Sem partes, cai no par devedor/doc de antes.
   const docTxt = docPorExtenso(doc);
-  const quem = docTxt ? `${devedor} (${docTxt})` : devedor;
+  const quem = listarPagadores(partes) || (docTxt ? `${devedor} (${docTxt})` : devedor);
   // Sem devedor identificado (descrição da ponte de recebimento), a frase omite o
   // "realizado por" em vez de inventar um nome.
-  const ref = devedor
+  const ref = quem
     ? (parcela
-        ? `do pagamento referente a *parcela n. ${parcela}* do pagamento realizado por *${quem}.*`
+        ? `referente à *parcela n. ${parcela}* do pagamento realizado por *${quem}.*`
         : `do pagamento realizado por *${quem}.*`)
-    : (parcela ? `referente a *parcela n. ${parcela}*.` : `.`);
+    : (parcela ? `referente à *parcela n. ${parcela}*.` : `.`);
   return `*Setor financeiro | COBRASQ:*\n`
     + `Encaminhamos, em anexo, o comprovante de repasse ${ref}\n\n`
-    + `Ficamos à disposição para quaisquer esclarecimentos.\n\n`
+    + (pedeBaixaRestricoes(parcela) ? `${PARAGRAFO_RESTRICOES}\n\n` : '')
+    + `Qualquer dúvida é só nos comunicar!\n\n`
     + `Atenciosamente,\n`
     + `*COBRASQ Recuperadora de Crédito e Cobrança*`;
 }
@@ -238,14 +267,14 @@ function destinoWhatsapp(credor) {
 //
 // Best-effort por design: o PIX já saiu quando isto roda. Falha aqui vira log, nunca
 // erro do repasse.
-async function enviarComprovanteCredor({ telefone, parcela, devedor, doc, base64, ext, comprovanteUrl, agora }) {
+async function enviarComprovanteCredor({ telefone, parcela, devedor, doc, partes, base64, ext, comprovanteUrl, agora }) {
   // Não limpar aqui: o destino pode ser um GRUPO do WhatsApp ("1203634…-group"), que a
   // Z-API trata no mesmo campo. Quem normaliza é o _zapi.js, que sabe distinguir os dois.
   const tel = String(telefone || '').trim();
   const digitos = tel.replace(/\D/g, '');
   if (digitos.length < 10) return { enviado: false, motivo: 'credor sem telefone válido' };
 
-  const msg = msgComprovanteCredor({ parcela, devedor, doc });
+  const msg = msgComprovanteCredor({ parcela, devedor, doc, partes });
   // Nome do arquivo = a mesma identificação do extrato do PIX: "1 - Elen Demgenski".
   // O credor arquiva vários comprovantes; assim ele acha pelo nome sem abrir um a um.
   //
@@ -294,4 +323,4 @@ async function enviarComprovanteCredor({ telefone, parcela, devedor, doc, base64
   }
 }
 
-module.exports = { lerDescricaoRepasse, descricaoPix, msgComprovanteCredor, enviarComprovanteCredor, destinoWhatsapp, docPorExtenso, proximoHorarioComercial, JANELA_COMPROVANTE, ESPACO_MS };
+module.exports = { lerDescricaoRepasse, descricaoPix, msgComprovanteCredor, listarPagadores, pedeBaixaRestricoes, PARAGRAFO_RESTRICOES, enviarComprovanteCredor, destinoWhatsapp, docPorExtenso, proximoHorarioComercial, JANELA_COMPROVANTE, ESPACO_MS };

@@ -21,7 +21,7 @@ const { asaasReq } = require('./_asaas.js');
 const { guardarComprovante } = require('./_comprovante.js');
 const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_comprovante-pdf.js');
 const { lerDescricaoRepasse, descricaoPix, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
-const { saldoDeCapital, devedorPrincipal, resolverCobrancaId, registrarRepasseNaFicha } = require('./_repasse-ficha.js');
+const { saldoDeCapital, devedorPrincipal, partesDaCobranca, resolverCobrancaId, registrarRepasseNaFicha } = require('./_repasse-ficha.js');
 
 const { hojeBR } = require('./_data.js');
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
@@ -344,10 +344,16 @@ module.exports = async function handler(req, res) {
       }
       // Documento do devedor na mensagem (pedido do Gustavo, 17/08/2026). Best-effort:
       // devedor sem cadastro não tem doc, e a frase sai sem ele.
-      const dp = await devedorPrincipal(await resolverCobrancaId(op).catch(() => null)).catch(() => null);
+      // Todas as partes (co-devedores) entram na mensagem, cada uma com seu documento;
+      // `dp` fica como reserva para cobrança sem partes cadastradas.
+      const cobId = await resolverCobrancaId(op).catch(() => null);
+      const [dp, partes] = await Promise.all([
+        devedorPrincipal(cobId).catch(() => null),
+        partesDaCobranca(cobId).catch(() => []),
+      ]);
       envio = await enviarComprovanteCredor({
         telefone: destinoWhatsapp(credor), parcela: ref.parcela, devedor: ref.devedor,
-        doc: dp && dp.doc,
+        doc: dp && dp.doc, partes,
         base64: pdf, ext: 'pdf', comprovanteUrl,
       });
     }
