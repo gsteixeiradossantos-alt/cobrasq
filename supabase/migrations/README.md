@@ -79,3 +79,28 @@ abre e mostra "Erro ao carregar lembretes" (tabela inexistente) — sem efeito
 sobre as demais telas. Depois de aplicar: mover para `lembretes` o registro
 de 04/09/2026 gravado em `audiencias` (processo 0005592-24.2024.8.16.0079,
 "NÃO É AUDIÊNCIA") e excluí-lo de lá.
+
+## 20260910_03 — lembretes do tipo `prazo` sem o aviso "Em 10 minutos"
+
+**Aplicada em 10/09/2026** (MCP `apply_migration`, nome `lembretes_prazo_sem_min10`). Só `CREATE OR REPLACE` de `lembretes_agendar_avisos()`; tabela,
+RLS e trigger ficam como estão. `origem = 'prazo'` gera véspera 19h + dia 08h (sem
+`min10`) e usa texto próprio ("Prazo vence amanhã/hoje", "Prazo fatal: dd/mm/aaaa");
+`origem` passa a contar como mudança que recria os avisos. Decisão do gestor em
+10/09/2026 — prazos processuais deixam de viver só na Google Agenda e passam a
+avisar no WhatsApp; prazo não tem hora, então o terceiro aviso (07:50) era ruído.
+Dry-run R-18 em prod dentro de begin/rollback, gestor e colaborador: prazo → 2
+avisos, tarefa → 3, `UPDATE origem` manual→prazo → 2 pendentes/3 cancelados,
+concluir → 0, colaborador barrado no INSERT e lendo 2. A tela grava só
+`origem = 'manual'`; prazos nascem pela skill. Rollback pareado.
+
+## 20260910_04 — resumo diário da agenda no WhatsApp (07:00 BRT)
+
+**Aplicada em 10/09/2026** (MCP `apply_migration`, nome `resumo_diario_agenda`; cron `resumo-diario-agenda` ativo). Função `resumo_diario_agenda(p_dry_run, p_dia)` (SECURITY DEFINER,
+REVOKE de PUBLIC/anon/authenticated) + pg_cron `resumo-diario-agenda` às `0 10 * * *`
+(10:00 UTC = 07:00 BRT). Lê `audiencias` e `lembretes` do dia e enfileira UMA mensagem
+(origem `resumo_diario`) para o número do escritório; idempotente por dia; dia útil
+vazio avisa "Nenhuma audiência, prazo ou lembrete", fim de semana vazio fica em
+silêncio. Fonte é só o banco — a Google Agenda é espelho (decisão de 10/09/2026);
+os "Debito DDA" da agenda são automação externa e ficam de fora. Dry-run em prod
+(begin/rollback) com `p_dry_run = true` para 10, 11, 12, 14 e 16/09: mensagens
+conferidas, nada persistiu. Rollback pareado.
