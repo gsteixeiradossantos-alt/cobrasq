@@ -126,3 +126,10 @@ de `repasses_cedente_grupo`, mantendo a regra da `_01`. Dry-run R-18 em prod:
 colaborador 0 → 7 objetos, INSERT em caso dele passa e em caso alheio é negado;
 cedente de grupo 0/16 → 16/16 comprovantes; cedente próprio e gestor iguais.
 Rollback pareado.
+
+## 20260911 — resumo das 07h com o CNJ inteiro
+
+**Aplicada em 11/09/2026** (MCP `apply_migration`, nome `resumo_cnj_inteiro`). Só `CREATE OR
+REPLACE` de `resumo_diario_agenda()`: os três `left(numero_processo, 10)` viram o número inteiro,
+porque o Gustavo pesquisa pelo CNJ completo (mesma decisão do título dos eventos na agenda).
+Rollback = reaplicar a função de `20260910_04`.
