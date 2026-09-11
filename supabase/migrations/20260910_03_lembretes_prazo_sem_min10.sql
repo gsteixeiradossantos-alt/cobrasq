@@ -1,7 +1,8 @@
 -- ============================================================================
 -- Lembretes do tipo PRAZO: sem o aviso "Em 10 minutos" e com texto próprio.
 --
--- NÃO APLICADA EM PRODUÇÃO (aguardando autorização). Rollback pareado em
+-- APLICADA EM PRODUÇÃO em 10/09/2026 (MCP apply_migration, nome `lembretes_prazo_sem_min10`), com
+-- autorização do gestor. Não rodar de novo. Rollback pareado em
 -- 20260910_03_lembretes_prazo_sem_min10_rollback.sql.
 --
 -- POR QUÊ. Decisão do gestor em 10/09/2026: todo compromisso do escritório

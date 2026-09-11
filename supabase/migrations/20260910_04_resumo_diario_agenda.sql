@@ -1,7 +1,8 @@
 -- ============================================================================
 -- Resumo diário da agenda no WhatsApp do escritório, às 07:00 (BRT).
 --
--- NÃO APLICADA EM PRODUÇÃO (aguardando autorização). Rollback pareado em
+-- APLICADA EM PRODUÇÃO em 10/09/2026 (MCP apply_migration, nome `resumo_diario_agenda`), com
+-- autorização do gestor. Não rodar de novo. Rollback pareado em
 -- 20260910_04_resumo_diario_agenda_rollback.sql.
 --
 -- POR QUÊ. Decisão do gestor em 10/09/2026: "todo aviso no WhatsApp". Os

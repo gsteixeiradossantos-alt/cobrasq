@@ -82,7 +82,7 @@ de 04/09/2026 gravado em `audiencias` (processo 0005592-24.2024.8.16.0079,
 
 ## 20260910_03 — lembretes do tipo `prazo` sem o aviso "Em 10 minutos"
 
-**Não aplicada.** Só `CREATE OR REPLACE` de `lembretes_agendar_avisos()`; tabela,
+**Aplicada em 10/09/2026** (MCP `apply_migration`, nome `lembretes_prazo_sem_min10`). Só `CREATE OR REPLACE` de `lembretes_agendar_avisos()`; tabela,
 RLS e trigger ficam como estão. `origem = 'prazo'` gera véspera 19h + dia 08h (sem
 `min10`) e usa texto próprio ("Prazo vence amanhã/hoje", "Prazo fatal: dd/mm/aaaa");
 `origem` passa a contar como mudança que recria os avisos. Decisão do gestor em
@@ -95,7 +95,7 @@ concluir → 0, colaborador barrado no INSERT e lendo 2. A tela grava só
 
 ## 20260910_04 — resumo diário da agenda no WhatsApp (07:00 BRT)
 
-**Não aplicada.** Função `resumo_diario_agenda(p_dry_run, p_dia)` (SECURITY DEFINER,
+**Aplicada em 10/09/2026** (MCP `apply_migration`, nome `resumo_diario_agenda`; cron `resumo-diario-agenda` ativo). Função `resumo_diario_agenda(p_dry_run, p_dia)` (SECURITY DEFINER,
 REVOKE de PUBLIC/anon/authenticated) + pg_cron `resumo-diario-agenda` às `0 10 * * *`
 (10:00 UTC = 07:00 BRT). Lê `audiencias` e `lembretes` do dia e enfileira UMA mensagem
 (origem `resumo_diario`) para o número do escritório; idempotente por dia; dia útil
