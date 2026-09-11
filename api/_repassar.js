@@ -329,10 +329,12 @@ module.exports = async function handler(req, res) {
       // terceiro, com o identificador oficial do PIX e as instituições das duas partes —
       // documento que a COBRASQ emite sobre si mesma não tem a mesma força. O nosso PDF
       // entra só se o Asaas não entregar o dele.
-      // Ordem: página do Asaas impressa (layout completo) → PDF estático do Asaas →
-      // comprovante da COBRASQ. Os dois primeiros são do banco; o terceiro é nosso.
-      let pdf = await imprimirPaginaAsaasPdf(comprovanteUrl);
-      if (!pdf) pdf = (arq && arq.base64) || '';
+      // Ordem: PDF ORIGINAL do Asaas (o do botão "Baixar pdf", já baixado por
+      // guardarComprovante) → página do Asaas impressa → comprovante da COBRASQ.
+      // Até 11/09/2026 a página impressa vinha primeiro; o Gustavo viu o resultado
+      // (2 páginas, "BAIXAR PDF" no rodapé, layout de tela) e pediu o original.
+      let pdf = (arq && arq.base64) || '';
+      if (!pdf) pdf = await imprimirPaginaAsaasPdf(comprovanteUrl);
       if (!pdf) {
         pdf = await gerarComprovanteRepassePdf({
           credorNome: credor.nome, devedor: ref.devedor, parcela: ref.parcela,
