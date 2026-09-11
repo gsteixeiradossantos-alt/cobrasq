@@ -87,10 +87,30 @@ async function guardarAnexoFila(base64, nome) {
 // cima de "conversa pendente" o que tem origem manual_* ou aviso interno (R-23); o
 // comprovante é disparado por um humano clicando em Repassar e não pode ficar preso
 // atrás de uma pergunta do credor sem resposta.
+// Espaçamento entre comprovantes agendados para a mesma janela. Em 11/09/2026 as 08h
+// abriram com 27 comprovantes em 25 segundos — rajada que o WhatsApp lê como spam e
+// pode derrubar o número da COBRASQ. Cada comprovante novo entra ESPACO_MS depois do
+// último já agendado a partir da mesma hora (26 comprovantes → ~13 min a partir das 08h).
+const ESPACO_MS = 30 * 1000;
+async function horarioEspacado(quando) {
+  try {
+    const iso = quando.toISOString();
+    const ult = await sbFetch(
+      `crm_mensagens_agendadas?origem=eq.manual_repasse_comprovante&status=eq.pendente` +
+      `&agendada_para=gte.${encodeURIComponent(iso)}&select=agendada_para&order=agendada_para.desc&limit=1`
+    );
+    const ultimo = Array.isArray(ult) && ult[0] ? Date.parse(ult[0].agendada_para) : NaN;
+    if (!isNaN(ultimo) && ultimo >= quando.getTime()) return new Date(ultimo + ESPACO_MS);
+  } catch (e) {
+    console.warn('[repasse-msg] espaçamento da fila falhou, usa a hora cheia:', e.message);
+  }
+  return quando;
+}
+
 async function enfileirarComprovanteCredor({ tel, msg, base64, nomeArquivo, comprovanteUrl, quando }) {
   const row = {
     telefone: tel,
-    agendada_para: quando.toISOString(),
+    agendada_para: (await horarioEspacado(quando)).toISOString(),
     status: 'pendente',
     origem: 'manual_repasse_comprovante',
   };
@@ -274,4 +294,4 @@ async function enviarComprovanteCredor({ telefone, parcela, devedor, doc, base64
   }
 }
 
-module.exports = { lerDescricaoRepasse, descricaoPix, msgComprovanteCredor, enviarComprovanteCredor, destinoWhatsapp, docPorExtenso, proximoHorarioComercial, JANELA_COMPROVANTE };
+module.exports = { lerDescricaoRepasse, descricaoPix, msgComprovanteCredor, enviarComprovanteCredor, destinoWhatsapp, docPorExtenso, proximoHorarioComercial, JANELA_COMPROVANTE, ESPACO_MS };

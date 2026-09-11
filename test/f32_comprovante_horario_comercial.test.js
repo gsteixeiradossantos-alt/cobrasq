@@ -57,6 +57,11 @@ global.fetch = async (url, opts) => {
   if (/z-api\.io.*phone-exists/.test(url)) return { ok: true, status: 200, text: async () => JSON.stringify({ exists: true }) };
   if (/z-api\.io/.test(url)) return { ok: true, status: 200, text: async () => JSON.stringify({ messageId: 'zapi-1' }) };
   if (/storage\/v1\/object/.test(url)) return { ok: true, status: 200, text: async () => '' };
+  if (/rest\/v1\/crm_mensagens_agendadas/.test(url) && (!opts || !opts.method || opts.method === 'GET')) {
+    // Último comprovante já agendado para a janela (vazio por padrão; o teste do
+    // espaçamento preenche).
+    return { ok: true, status: 200, text: async () => JSON.stringify(global.__ultimoAgendado ? [{ agendada_para: global.__ultimoAgendado }] : []) };
+  }
   if (/rest\/v1\/crm_mensagens_agendadas/.test(url)) return { ok: true, status: 201, text: async () => JSON.stringify([{ id: 'fila-1' }]) };
   throw new Error('fetch inesperado: ' + url);
 };
@@ -74,7 +79,7 @@ global.fetch = async (url, opts) => {
   assert.ok(!chamadas.some(c => /z-api\.io/.test(c.url)), 'não pode chamar a Z-API de madrugada');
   const up = chamadas.find(c => /storage\/v1\/object\/documentos\//.test(c.url));
   assert.ok(up, 'PDF vai para o bucket documentos');
-  const ins = chamadas.find(c => /crm_mensagens_agendadas/.test(c.url));
+  const ins = chamadas.find(c => /crm_mensagens_agendadas/.test(c.url) && c.opts && c.opts.method === 'POST');
   const row = JSON.parse(ins.opts.body);
   assert.strictEqual(row.telefone, '120363400743792709-group', 'grupo passa intacto');
   assert.strictEqual(row.tipo, 'documento');
@@ -87,11 +92,26 @@ global.fetch = async (url, opts) => {
   assert.strictEqual(row.media_nome, '2 - Fernanda Dambros.pdf');
   assert.ok(/parcela n\. 2/.test(row.legenda) && /Fernanda Dambros/.test(row.legenda));
 
+  // ---- Espaçamento anti-spam: cada comprovante entra 30 s depois do último agendado --
+  // 11/09/2026: 27 comprovantes em 25 s às 08h. Com dois já na fila (08:00:00 e
+  // 08:00:30), o terceiro vai para 08:01:00 — não para 08:00:00.
+  global.__ultimoAgendado = '2026-09-11T11:00:30.000Z';
+  chamadas = [];
+  r = await enviarComprovanteCredor({ telefone: '46999289933', parcela: 3, devedor: 'Y', base64: PDF, agora: madrugada });
+  assert.strictEqual(r.agendada_para, '2026-09-11T11:01:00.000Z', 'terceiro comprovante 30 s depois do segundo');
+  const rowEsp = JSON.parse(chamadas.find(c => /crm_mensagens_agendadas/.test(c.url) && c.opts && c.opts.method === 'POST').opts.body);
+  assert.strictEqual(rowEsp.agendada_para, '2026-09-11T11:01:00.000Z');
+  // Último agendado ANTES da janela (sobra de ontem) não empurra: vai na hora cheia.
+  global.__ultimoAgendado = '2026-09-10T11:05:00.000Z';
+  r = await enviarComprovanteCredor({ telefone: '46999289933', parcela: 4, devedor: 'Y', base64: PDF, agora: madrugada });
+  assert.strictEqual(r.agendada_para, '2026-09-11T11:00:00.000Z');
+  global.__ultimoAgendado = null;
+
   // Sem PDF: texto com o link, ainda na fila.
   chamadas = [];
   r = await enviarComprovanteCredor({ telefone: '46999289933', parcela: 1, devedor: 'X', base64: '', comprovanteUrl: 'https://asaas/y', agora: madrugada });
   assert.strictEqual(r.agendado, true);
-  const row2 = JSON.parse(chamadas.find(c => /crm_mensagens_agendadas/.test(c.url)).opts.body);
+  const row2 = JSON.parse(chamadas.find(c => /crm_mensagens_agendadas/.test(c.url) && c.opts && c.opts.method === 'POST').opts.body);
   assert.strictEqual(row2.tipo, 'texto');
   assert.ok(/Comprovante: https:\/\/asaas\/y/.test(row2.mensagem));
   assert.ok(!chamadas.some(c => /storage/.test(c.url)), 'sem PDF não sobe nada');
@@ -100,7 +120,7 @@ global.fetch = async (url, opts) => {
   chamadas = [];
   const fetchOk = global.fetch;
   global.fetch = async (url, opts) => {
-    if (/crm_mensagens_agendadas/.test(url)) return { ok: false, status: 500, text: async () => 'boom' };
+    if (/crm_mensagens_agendadas/.test(url) && opts && opts.method === 'POST') return { ok: false, status: 500, text: async () => 'boom' };
     return fetchOk(url, opts);
   };
   r = await enviarComprovanteCredor({ telefone: '46999289933', parcela: 1, devedor: 'X', base64: PDF, agora: madrugada });
