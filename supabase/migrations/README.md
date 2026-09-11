@@ -104,3 +104,25 @@ silêncio. Fonte é só o banco — a Google Agenda é espelho (decisão de 10/0
 os "Debito DDA" da agenda são automação externa e ficam de fora. Dry-run em prod
 (begin/rollback) com `p_dry_run = true` para 10, 11, 12, 14 e 16/09: mensagens
 conferidas, nada persistiu. Rollback pareado.
+
+## 20260911_01 — cedente só lê documento de repasse
+
+**Aplicada em 11/09/2026** (MCP `apply_migration`). Reescreve `documentos_cedente_scope`
+(tabela) e `documentos_cedente_select` (bucket): o cedente passa a ler só
+`categoria = 'repasse'` ou documento referenciado por `repasses_cliente.documento_id`
+do próprio cliente. Antes lia qualquer documento das cobranças dele (contrato, acordo
+assinado, petição) — o portal não listava, mas a API entregava. Decisão do gestor em
+11/09/2026. Dry-run R-18 em prod: cedente `bfc42619` 69 repasse + 1 acordo sintético →
+69 repasse; gestor inalterado. Rollback pareado.
+
+## 20260911_02 — colaborador em `cobrancas/…` no bucket; cedente de grupo lê repasse
+
+**Não aplicada.** Só policies, aditivas. (A) `documentos_cobranca_staff_insert/select`
+em `storage.objects`: paths `cobrancas/<id>/…` resolvidos pela RLS de `cobrancas` e
+restritos a `proprietario`/`colaborador` — as policies antigas avaliam
+`pode_ver_devedor(foldername[2])`, que nunca casa com id de cobrança (R-24). (B)
+`documentos_cedente_grupo` + `documentos_cedente_grupo_select`: espelham o predicado
+de `repasses_cedente_grupo`, mantendo a regra da `_01`. Dry-run R-18 em prod:
+colaborador 0 → 7 objetos, INSERT em caso dele passa e em caso alheio é negado;
+cedente de grupo 0/16 → 16/16 comprovantes; cedente próprio e gestor iguais.
+Rollback pareado.
