@@ -516,3 +516,31 @@ lembrar o Gustavo e, se já tiverem virado código, conferir a migração/RLS co
   confirmar que a **migração está aplicada em prod** (não só em PR — ver R-04) e que a tabela nova
   tem **RLS** ligada (mesma classe do R-07, para não vazar PII de execução). Base já no ar: modo
   intercorrente (#169) + catálogo `DILIG_MEDIDAS`/checklist de diligências (#181) em `index.html`.
+
+## R-24 · Policy do bucket decide pelo 2º segmento do path — e o path mudou de dono
+
+**O que acontece.** As policies de `storage.objects` do bucket `documentos`
+(`documentos_insert/select/update`) foram escritas quando todo arquivo vivia em
+`<cpf-ou-id-do-devedor>/<cat>/arquivo`: avaliam `pode_ver_devedor((storage.foldername(name))[2])`.
+A Fase C2 criou "Documentos do caso", que grava em `cobrancas/<id-da-cobrança>/<cat>/arquivo`
+— o 2º segmento virou o id da cobrança, sem o prefixo `id-`, e a função nunca casa.
+Só o proprietário (que passa por `current_user_papel()`) consegue anexar ou baixar;
+o colaborador responsável recebe *"só o gestor e o responsável podem anexar"* — a
+mensagem promete o que a policy nega — e, nas linhas que já vê em `documentos`, o
+"Baixar" falha. Descoberto em 11/09/2026 na vistoria do #695: colaborador `38c7e348`
+via 7 linhas em `cobrancas/…` e 0 objetos.
+
+**Teste (SQL, como colaborador — R-18).** Linhas visíveis e objetos visíveis em
+`cobrancas/…` têm de bater:
+```sql
+select (select count(*) from public.documentos where storage_path like 'cobrancas/%') as linhas,
+       (select count(*) from storage.objects where bucket_id='documentos' and name like 'cobrancas/%') as objetos;
+```
+
+**Estado-correto.** Migração `20260911_02`: policies aditivas para `cobrancas/%`
+resolvidas pela RLS de `cobrancas`, restritas a staff.
+
+**A regra, para além deste caso.** Policy de storage que lê o path é contrato com
+quem grava o path. Quem cria um prefixo novo no bucket (`cobrancas/`, `_lixeira/`…)
+tem que abrir a policy junto — e testar o upload **como colaborador**, não como
+proprietário, porque o proprietário passa por qualquer predicado.
