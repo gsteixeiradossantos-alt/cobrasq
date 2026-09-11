@@ -167,7 +167,9 @@ async function saldoDeCapital(cobrancaId) {
   // saídas baixadas no financeiro. Vale o MAIOR — subestimar aqui deixaria passar.
   const rps = await sbFetch(`repasses_cliente?cobranca_id=eq.${cobrancaId}&select=valor`).catch(() => []);
   const naFicha = (rps || []).reduce((s, r) => s + (Number(r.valor) || 0), 0);
-  const lancs = await sbFetch(`fin_lancamento?cobranca_id=eq.${cobrancaId}&tipo_movimento=eq.0&status=eq.1&select=valor`).catch(() => []);
+  // Tarifa do Asaas vinculada ao caso não é repasse (F-18): contá-la aqui inflava o
+  // "já repassado" em R$ 1,99 por PIX e estreitava o teto sem motivo.
+  const lancs = await sbFetch(`fin_lancamento?cobranca_id=eq.${cobrancaId}&tipo_movimento=eq.0&status=eq.1&descricao=not.ilike.*tarifa*&select=valor`).catch(() => []);
   const noFinanceiro = (lancs || []).reduce((s, l) => s + Math.abs(Number(l.valor) || 0), 0);
 
   const enviado = Math.max(naFicha, noFinanceiro);

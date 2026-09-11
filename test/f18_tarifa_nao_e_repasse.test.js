@@ -85,4 +85,17 @@ const linha = corta('const sub = cedente', ';');
 assert.ok(linha.includes('_finEhTarifa(l)'),
   'a sublinha precisa tratar tarifa como "carteira de", não "repasse a"');
 
-console.log('F-18 ok — tarifa é do caso, não é repasse ao cedente.');
+// ── O "Já repassado" do modal Repassar e o teto do backend ─────────────────────────
+// 11/09/2026: o modal do Luiz Carlos de França (Odontomundi) mostrava "Já repassado
+// R$ 1,99" — a tarifa do PIX de 21/08 — antes de qualquer PIX ao credor. A soma das
+// saídas pagas do caso (modal em index.html e saldoDeCapital em api/_repasse-ficha.js)
+// era o QUARTO lugar sem a exclusão.
+const modal = corta("sb.from('fin_lancamento').select('valor').eq('cobranca_id', l.cobranca_id).eq('tipo_movimento', 0).eq('status', 1)", '\n');
+assert.ok(/not\('descricao'\s*,\s*'ilike'\s*,\s*'%tarifa%'\)/.test(modal),
+  'o "Já repassado" do modal Repassar tem de excluir tarifa');
+const FICHA = fs.readFileSync(path.join(__dirname, '..', 'api', '_repasse-ficha.js'), 'utf8');
+const teto = FICHA.slice(FICHA.indexOf('async function saldoDeCapital'), FICHA.indexOf('return { capital: cap, enviado'));
+assert.ok(/tipo_movimento=eq\.0&status=eq\.1&descricao=not\.ilike\.\*tarifa\*/.test(teto),
+  'saldoDeCapital (teto do repasse) tem de excluir tarifa das saídas pagas');
+
+console.log('F-18 ok — tarifa é do caso, não é repasse ao cedente (nem no teto do repasse).');
