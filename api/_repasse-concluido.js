@@ -136,6 +136,7 @@ module.exports = async function handler(req, res) {
       ok: true, operacao_id: op.id, repasse_status: update.repasse_status,
       comprovante_enviado: !!(envio && envio.enviado),
       comprovante_via: (envio && envio.via) || null,
+      comprovante_agendado_para: (envio && envio.agendado && envio.agendada_para) || null,
       ficha_caso: ficha ? { repasse_id: ficha.repasse_id, status_caso: ficha.status_caso || null } : null,
     });
   } catch (e) {

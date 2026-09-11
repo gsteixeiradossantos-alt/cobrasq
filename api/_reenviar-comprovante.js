@@ -100,6 +100,7 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({
       ok: true, operacao_id: op.id, credor: credor.nome, devedor: devNome, parcela: op.parcela,
       enviado: !!envio.enviado, via: envio.via || null, motivo: envio.motivo || null,
+      agendado_para: (envio.agendado && envio.agendada_para) || null,
       ficha: cobrancaId ? (ficha && ficha.duplicado ? 'já estava na ficha' : (ficha ? 'registrado na ficha' : 'falhou ao registrar')) : 'lançamento sem cobrança vinculada',
       origem_pdf: (arq && arq.base64) ? 'asaas' : (pdf ? 'cobrasq' : 'nenhum'),
       arquivo_guardado: (arq && arq.storage_path) || null,
