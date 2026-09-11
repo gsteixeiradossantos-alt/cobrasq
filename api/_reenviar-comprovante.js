@@ -55,8 +55,9 @@ module.exports = async function handler(req, res) {
 
     const url = op.repasse_comprovante_url || '';
     const arq = await guardarComprovante(url, op.repasse_asaas_transfer_id);
-    let pdf = await imprimirPaginaAsaasPdf(url);
-    if (!pdf) pdf = (arq && arq.base64) || '';
+    // PDF original do Asaas primeiro (ver _repassar.js).
+    let pdf = (arq && arq.base64) || '';
+    if (!pdf) pdf = await imprimirPaginaAsaasPdf(url);
     if (!pdf) {
       pdf = await gerarComprovanteRepassePdf({
         credorNome: credor.nome, devedor: devNome, parcela: op.parcela,

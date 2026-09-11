@@ -106,9 +106,10 @@ module.exports = async function handler(req, res) {
       if (!devNome && op.metadata && op.metadata.lancamento_descricao) {
         devNome = lerDescricaoRepasse(op.metadata.lancamento_descricao).devedor;
       }
-      // Comprovante do BANCO primeiro; o nosso só se o Asaas não entregar (ver _repassar.js).
-      let pdf = await imprimirPaginaAsaasPdf(comprovanteUrl);
-      if (!pdf) pdf = (arqCompr && arqCompr.base64) || '';
+      // PDF original do Asaas primeiro; página impressa e o nosso só se ele não vier
+      // (ver _repassar.js).
+      let pdf = (arqCompr && arqCompr.base64) || '';
+      if (!pdf) pdf = await imprimirPaginaAsaasPdf(comprovanteUrl);
       if (!pdf) {
         pdf = await gerarComprovanteRepassePdf({
           credorNome: credor.nome, devedor: devNome, parcela: op.parcela,

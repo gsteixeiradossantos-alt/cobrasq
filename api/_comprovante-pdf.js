@@ -114,9 +114,10 @@ async function gerarComprovanteRepassePdf(d) {
 }
 
 // Imprime a PÁGINA do comprovante do Asaas em PDF (Chrome headless, JS executado).
-// Sai no layout que o Asaas mostra no navegador — melhor que o PDF estático que eles
-// servem em /transactionReceipt/pdf, que é uma versão simplificada.
-// Best-effort: '' em qualquer falha, e quem chama cai no PDF estático.
+// É o RESERVA do PDF original (/transactionReceipt/pdf, o do botão "Baixar pdf"): desde
+// 11/09/2026 o original vem primeiro — o Gustavo viu a página impressa (2 páginas,
+// "BAIXAR PDF" no rodapé) e pediu o documento do banco como ele é.
+// Best-effort: '' em qualquer falha, e quem chama cai no comprovante da COBRASQ.
 async function imprimirPaginaAsaasPdf(comprovanteUrl) {
   const base = (process.env.APP_BASE_URL || '').replace(/\/+$/, '');
   const secret = process.env.EMIT_ACORDO_SECRET;
