@@ -82,7 +82,9 @@ global.fetch = async (url, opts) => {
   assert.strictEqual(row.origem, 'manual_repasse_comprovante', 'manual_* para não ficar preso atrás de conversa pendente (R-23)');
   assert.strictEqual(row.agendada_para, '2026-09-11T11:00:00.000Z');
   assert.ok(up.url.endsWith('/' + row.media_path), 'media_path aponta para o arquivo subido');
-  assert.strictEqual(row.media_nome, '2 - Fernanda Dambros');
+  // Com ".pdf": o worker deriva a extensão do nome e tira ela do fileName. Sem, o credor
+  // recebeu "2 - José Lentz.2joslentz" (11/09/2026, 08h).
+  assert.strictEqual(row.media_nome, '2 - Fernanda Dambros.pdf');
   assert.ok(/parcela n\. 2/.test(row.legenda) && /Fernanda Dambros/.test(row.legenda));
 
   // Sem PDF: texto com o link, ainda na fila.
