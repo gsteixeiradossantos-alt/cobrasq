@@ -245,7 +245,18 @@ Deno.serve(async (req) => {
     // painel); régua e lembretes automáticos usam 'auto_*', 'audiencia_*', 'bia_*'.
     // Só os automáticos cedem a vez.
     const escritaPorHumano = String(m.origem || '').startsWith('manual');
-    if (!souGrupo && pendentes.has(dk(m.telefone)) && !escritaPorHumano) {
+    //
+    // 11/09/2026 — aviso INTERNO também não cede a vez. Lembrete, audiência, resumo do
+    // dia e vigia vão para o número do escritório — e o escritório também escreve para
+    // a Bia (17 mensagens em 30 dias: links, encaminhamentos). Cada uma abria uma
+    // "conversa pendente" no próprio número e o worker passava a adiar TODOS os avisos
+    // — resumo das 07h, prazo fatal, audiência — até alguém enfileirar algo no mesmo
+    // formato de telefone (a view compara o número inteiro; aqui comparamos 8 dígitos).
+    // Silencioso: nada falhava, só não chegava. No teste de 11/09, 9 avisos ficaram em
+    // adiadas:9 por 4 minutos. Aviso com hora marcada não espera conversa nenhuma.
+    const avisoInterno = /^(lembrete_aviso_|audiencia_lembrete_|resumo_diario$|vigia_seguranca$)/
+      .test(String(m.origem || ''));
+    if (!souGrupo && pendentes.has(dk(m.telefone)) && !escritaPorHumano && !avisoInterno) {
       await sb.from('crm_mensagens_agendadas')
         .update({ status: 'pendente', processando_desde: null })
         .eq('id', m.id);
