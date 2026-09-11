@@ -97,7 +97,11 @@ async function enfileirarComprovanteCredor({ tel, msg, base64, nomeArquivo, comp
   if (base64) {
     row.tipo = 'documento';
     row.media_path = await guardarAnexoFila(base64, nomeArquivo);
-    row.media_nome = nomeArquivo;
+    // COM ".pdf": o worker tira a extensão do nome (`/send-document/<ext>` e fileName sem
+    // ela). Sem o ".pdf", ele tomou "2 - José Lentz" inteiro como extensão e o credor
+    // recebeu "2 - José Lentz.2joslentz" — 26 comprovantes assim às 08h de 11/09/2026.
+    // (No envio direto, acima, é o contrário: nome SEM extensão, a Z-API põe a dela.)
+    row.media_nome = nomeArquivo + '.pdf';
     row.media_mime = 'application/pdf';
     row.legenda = msg;
     row.mensagem = msg;
