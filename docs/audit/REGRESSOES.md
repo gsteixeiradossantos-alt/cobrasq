@@ -458,6 +458,47 @@ mesmo campo, a normalização é obrigatória na borda — e o formato aceito pr
 de validação (aqui, `^55[0-9]{10,11}$`), senão o valor estranho vira um
 "contato" novo e o cruzamento falha em silêncio.
 
+## R-23 · Aviso interno preso pela "conversa pendente" do próprio escritório (não chega e não falha)
+
+**O que acontece.** O worker `cron-mensagens-agendadas` adia qualquer mensagem
+automática cujo telefone (últimos 8 dígitos) esteja em `vw_conversas_pendentes` —
+regra certa para devedor: não mandar cobrança por cima de pergunta sem resposta.
+Só `manual_*` escapava. Mas os avisos internos (lembrete, audiência, resumo das 07h,
+vigia) vão para o número do escritório, e o escritório **também escreve para a Bia**
+(17 mensagens em 30 dias — links, encaminhamentos). Cada uma dessas abre uma
+pendência no próprio número e, a partir dali, **todo aviso é adiado a cada minuto**:
+resumo, prazo fatal, audiência. Nada falha, nada aparece em `erro` — só não chega.
+
+A pendência não se limpa sozinha: a view compara o telefone **inteiro**
+(recebida chega como `554699223332`, aviso sai como `46999223332`), o worker compara
+**8 dígitos**. Mesma assimetria do caso Luiz Carlos de França (21/08), agora no
+número do dono.
+
+Descoberto em 11/09/2026 num teste deliberado: 9 avisos (3 fases de tarefa, 2 de
+prazo, 3 de audiência, resumo) ficaram em `adiadas:9` por 4 minutos até uma mensagem
+ser enfileirada para `554699223332`; no minuto seguinte, `enviadas:10`.
+
+**Teste (SQL).** Não pode haver aviso interno vencido e parado na fila enquanto o
+número do escritório consta como pendente:
+```sql
+select count(*) from public.crm_mensagens_agendadas a
+ where a.status = 'pendente' and a.agendada_para < now() - interval '3 minutes'
+   and (a.origem like 'lembrete_aviso_%' or a.origem like 'audiencia_lembrete_%'
+        or a.origem in ('resumo_diario','vigia_seguranca'));
+```
+E a resposta do último run em `net._http_response` não pode trazer `adiadas` > 0
+com lote só de avisos internos.
+
+**Estado-correto.** No worker, `avisoInterno` (origens `lembrete_aviso_*`,
+`audiencia_lembrete_*`, `resumo_diario`, `vigia_seguranca`) não cede a vez, como
+`manual_*`. Aviso com hora marcada não espera conversa nenhuma.
+
+**A regra, para além deste caso.** Trava pensada para uma classe de destinatário
+(devedor) não pode valer para todos os destinatários por omissão. Quando a mesma
+fila serve cobrança e notificação interna, a exceção tem que estar escrita na
+origem — e todo teste de fila precisa incluir o número do escritório com uma
+pendência aberta, porque é o cenário que ninguém simula.
+
 ---
 
 ### Pendências de evolução (não-regressão — rever a cada vistoria)
