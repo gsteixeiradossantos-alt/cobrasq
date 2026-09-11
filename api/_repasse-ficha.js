@@ -190,4 +190,21 @@ async function devedorPrincipal(cobrancaId) {
   } catch (e) { console.warn('[repasse-ficha] devedorPrincipal:', e.message); return null; }
 }
 
-module.exports = { registrarRepasseNaFicha, resolverCobrancaId, saldoDeCapital, devedorPrincipal };
+// Todas as partes da cobrança (principal primeiro), com nome e documento. Serve para a
+// mensagem do comprovante nomear TODOS os pagadores: em 11/09/2026 o repasse da
+// Imobiliária Casaril saiu como "pagamento realizado por Elaine Baranoski" quando a
+// cobrança é dela E de Sidimar Pruch — devedorPrincipal() só via um. Sem cobrança ou
+// sem partes devolve [] e quem chama cai no nome que já tinha.
+async function partesDaCobranca(cobrancaId) {
+  if (!cobrancaId) return [];
+  try {
+    const rows = await sbFetch(
+      `cobranca_partes?cobranca_id=eq.${cobrancaId}&select=principal,created_at,devedores(nome,doc)&order=principal.desc,created_at.asc`
+    ).catch(() => []);
+    return (Array.isArray(rows) ? rows : [])
+      .map(r => ({ nome: r.devedores && r.devedores.nome, doc: r.devedores && r.devedores.doc, principal: !!r.principal }))
+      .filter(p => p.nome);
+  } catch (e) { console.warn('[repasse-ficha] partesDaCobranca:', e.message); return []; }
+}
+
+module.exports = { registrarRepasseNaFicha, resolverCobrancaId, saldoDeCapital, devedorPrincipal, partesDaCobranca };

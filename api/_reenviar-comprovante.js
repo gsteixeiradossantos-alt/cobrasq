@@ -13,7 +13,7 @@ const { sbFetch } = require('./_sb.js');
 const { guardarComprovante } = require('./_comprovante.js');
 const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_comprovante-pdf.js');
 const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
-const { registrarRepasseNaFicha, resolverCobrancaId, devedorPrincipal } = require('./_repasse-ficha.js');
+const { registrarRepasseNaFicha, resolverCobrancaId, devedorPrincipal, partesDaCobranca } = require('./_repasse-ficha.js');
 
 const { hojeBR } = require('./_data.js');
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
@@ -68,10 +68,17 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    const dp = await devedorPrincipal(cobrancaId).catch(() => null);
+    // Resolvido AQUI, antes do uso: até 11/09/2026 `cobrancaId` era lido nesta altura
+    // mas só declarado (const) depois da mensagem — ReferenceError de TDZ em todo
+    // reenvio, engolido pelo catch geral e devolvido como 500.
+    const cobrancaId = await resolverCobrancaId(op).catch(() => null);
+    const [dp, partes] = await Promise.all([
+      devedorPrincipal(cobrancaId).catch(() => null),
+      partesDaCobranca(cobrancaId).catch(() => []),
+    ]);
     const envio = await enviarComprovanteCredor({
       telefone: destinoWhatsapp(credor), parcela: op.parcela, devedor: devNome,
-      doc: dp && dp.doc,
+      doc: dp && dp.doc, partes,
       base64: pdf, ext: 'pdf', comprovanteUrl: url,
     });
 
@@ -81,7 +88,6 @@ module.exports = async function handler(req, res) {
     // o registro só acontecia no instante do pagamento. Agora este botão também remedia
     // isso. É idempotente: mesma transferência não vira duas linhas.
     let ficha = null;
-    const cobrancaId = await resolverCobrancaId(op);
     if (cobrancaId && pdf) {
       ficha = await registrarRepasseNaFicha({
         cobrancaId, credor, valor: op.valor_capital,

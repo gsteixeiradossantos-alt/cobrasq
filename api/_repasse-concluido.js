@@ -8,7 +8,7 @@
 
 const { sbFetch } = require('./_sb.js');
 const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
-const { devedorPrincipal, registrarRepasseNaFicha, resolverCobrancaId } = require('./_repasse-ficha.js');
+const { devedorPrincipal, partesDaCobranca, registrarRepasseNaFicha, resolverCobrancaId } = require('./_repasse-ficha.js');
 const { guardarComprovante } = require('./_comprovante.js');
 const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_comprovante-pdf.js');
 const { hojeBR } = require('./_data.js');
@@ -118,10 +118,14 @@ module.exports = async function handler(req, res) {
           chavePix: (op.metadata && op.metadata.repasse_pix_key) || '', urlAsaas: comprovanteUrl,
         });
       }
-      const dp = await devedorPrincipal(await resolverCobrancaId(op).catch(() => null)).catch(() => null);
+      const cobId = await resolverCobrancaId(op).catch(() => null);
+      const [dp, partes] = await Promise.all([
+        devedorPrincipal(cobId).catch(() => null),
+        partesDaCobranca(cobId).catch(() => []),
+      ]);
       envio = await enviarComprovanteCredor({
         telefone: destinoWhatsapp(credor), parcela: op.parcela, devedor: devNome,
-        doc: dp && dp.doc,
+        doc: dp && dp.doc, partes,
         base64: pdf, ext: 'pdf', comprovanteUrl,
       });
       // Ficha do caso — idempotente pelo transacao_id, então não duplica se /api/repassar
