@@ -597,3 +597,29 @@ dedup por sha1(cnj:data:texto), cruzamento `intimacoes_djen_cruzar()`, aba "Só 
 resolve mandar por e-mail. A fonte de verdade da intimação é o diário; quando um ato
 "não chegou", a pergunta certa é "por qual canal ele saiu?", não "por que o parser
 não pegou?".
+
+## R-27 · INSERT "best-effort" que falha sempre (a aba "Andamentos" nunca recebe o e-mail)
+
+**O que acontece.** O worker `email-intimacoes` e o botão "Vincular" (`ivVincular`)
+gravam cada ato vinculado também em `proc_intimacoes` com `fonte='email'` — é o que
+alimenta a aba "Andamentos" e o badge de não-lidas. O CHECK de `fonte` só aceitava
+escavador/jusbrasil/codilo/datajud/manual: o INSERT falha **desde 07/2026**, o código
+engole o erro (`catch(_){}` / "best-effort") e ninguém vê. Em 12/09/2026: 328 atos
+de e-mail vinculados, **0** em `proc_intimacoes`. Dos 328, 19 apontam para cobrança
+sem linha em `devedores` (FK) — esses falhariam de qualquer jeito.
+
+**Teste (SQL).** Tem de dar zero:
+```sql
+select count(*) from public.intimacoes_email e
+ where e.status = 'vinculada' and e.dedup is not null
+   and exists (select 1 from public.devedores d where d.id = e.cobranca_id)
+   and not exists (select 1 from public.proc_intimacoes p where p.dedup_key = 'email:' || e.dedup);
+```
+
+**Estado-correto.** Migração `20260912_03`: CHECK aceita `'email'` e `'djen'`; backfill
+dos 309 como `lida=true` (histórico não vira alerta).
+
+**A regra, para além deste caso.** Um insert marcado como "best-effort" precisa de um
+teste que prove que ele **consegue** acontecer pelo menos uma vez (companheiro do R-18:
+o caminho da tela é outro). CHECK de domínio é contrato: toda fonte nova que o código
+grava tem de entrar no CHECK **na mesma migração** que cria o gravador.
