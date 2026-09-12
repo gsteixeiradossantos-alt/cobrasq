@@ -259,8 +259,15 @@ def carregar(env: dict, out_emp: Path, out_est: Path, out_soc: Path):
         print(f"    \\copy public.rf_estabelecimentos (cnpj_basico,cnpj_ordem,cnpj_dv,matriz_filial,nome_fantasia,situacao,uf,municipio,data_situacao,motivo_situacao,data_inicio,cnae,tipo_logradouro,logradouro,numero,complemento,bairro,cep,telefone1,telefone2,email) from '{out_est}' csv")
         print(f"    \\copy public.rf_socios (cnpj_basico,identificador,nome_socio,cnpj_cpf_socio,qualificacao,data_entrada) from '{out_soc}' csv")
         return
+    # statement_timeout: o Supabase cancela comando longo por padrão ("canceling
+    # statement due to statement timeout" — aconteceu em 12/09/2026 na linha 670 mil
+    # de rf_empresas, com 12,8 M linhas para copiar). Zerar na sessão é permitido
+    # para o role postgres e vale só para esta conexão.
     sql = f"""
 \\set ON_ERROR_STOP on
+set statement_timeout = 0;
+set lock_timeout = 0;
+set idle_in_transaction_session_timeout = 0;
 begin;
 truncate public.rf_socios, public.rf_estabelecimentos, public.rf_empresas;
 \\copy public.rf_empresas (cnpj_basico,razao_social,natureza_juridica,porte,atualizado_em,capital_social) from '{out_emp}' csv
