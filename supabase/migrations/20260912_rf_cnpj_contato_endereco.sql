@@ -1,7 +1,7 @@
 -- ============================================================
--- ⏳ NÃO APLICADA. Aditiva (colunas novas + índices + RPCs); rollback pareado em
---    _rollback.sql. Aplicar ANTES de rodar scripts/import_cnpj_rf.py --uf PR,SC,RS,
---    que passa a escrever as colunas novas. As tabelas continuam VAZIAS até a carga.
+-- ✅ APLICADA EM PRODUÇÃO 2026-09-12 (via MCP, projeto jokbxzhcctcwnbhkhgru, nome
+--    rf_cnpj_contato_endereco). Não reaplicar. Rollback pareado em _rollback.sql.
+--    As tabelas continuam VAZIAS até rodar scripts/import_cnpj_rf.py --uf PR,SC,RS.
 -- ============================================================
 -- Base pública de CNPJ (Receita Federal) — 2ª etapa, decidida no piloto de 12/09/2026:
 -- além de "pessoa → empresas" (migração 2026-07-27), a base passa a responder
