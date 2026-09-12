@@ -15237,6 +15237,7 @@ function acordoHtml(ac, ai, devId){
             <div style="display:flex;align-items:center;gap:8px;">
               <input type="checkbox" ${p.pago?'checked':''} onchange="toggleParcela('${devId}','${ac.id}',${pi})" style="accent-color:var(--navy);">
               <span style="font-size:13px;color:var(--text-2);">Parcela ${pi+1} — ${p.vencimento||''}</span>
+              ${p.meio==='pix'?`<span title="Faixa via PIX: não vai ao Asaas, baixa manual aqui" style="font-size:10px;font-weight:700;letter-spacing:.04em;padding:1px 6px;border-radius:4px;background:var(--active-bg);color:var(--navy);">PIX</span>`:''}
             </div>
             <span style="display:flex;align-items:center;gap:6px;">
               <span style="font-size:13px;font-weight:600;${p.pago?'text-decoration:line-through;color:var(--text-3);':'color:var(--navy);"'}>${fmtR(p.valor||0)}</span>
@@ -18054,20 +18055,26 @@ function salvarHistorico(){
 // (#macord-blocos) quanto no assistente do Termo de acordo (#taj-blocos), que
 // reaproveita as mesmas faixas em vez de ter seu próprio "nº parcelas + valor
 // único" desencontrado do que foi registrado.
-function addBlocoAcordo(qtd, valor, containerId){
+// meio: 'boleto' (Asaas, padrão) ou 'pix'. Faixa PIX não vai ao Asaas — é o
+// caso típico da entrada/parcela única paga na hora — e o termo diz "via PIX,
+// para a chave X". A baixa dessas parcelas é manual, na gaveta do devedor.
+function addBlocoAcordo(qtd, valor, containerId, meio){
   const wrap = document.getElementById(containerId||'macord-blocos');
   if(!wrap) return;
   const row = document.createElement('div');
   row.className = 'fg-row macord-bloco-row';
   row.style.cssText = 'align-items:flex-end;gap:8px;';
+  const isPix = meio==='pix';
   row.innerHTML = `
     <div class="fg" style="flex:1;"><label>Nº parcelas</label><input type="number" min="1" class="macord-bloco-qtd" value="${qtd||1}"></div>
     <div class="fg" style="flex:1;"><label>Valor por parcela (R$)</label><input type="text" class="macord-bloco-valor" placeholder="0,00" value="${valor?fmt(valor):''}"></div>
+    <div class="fg" style="flex:0 0 150px;"><label>Meio</label><select class="macord-bloco-meio"><option value="boleto"${isPix?'':' selected'}>Boleto (Asaas)</option><option value="pix"${isPix?' selected':''}>PIX</option></select></div>
     <button type="button" class="btn btn-ghost btn-sm macord-bloco-rm" title="Remover esta faixa" style="margin-bottom:2px;">&#10005;</button>
   `;
   const onInput = ()=>recalcAcordoBlocos(containerId);
   row.querySelector('.macord-bloco-qtd').addEventListener('input', onInput);
   row.querySelector('.macord-bloco-valor').addEventListener('input', onInput);
+  row.querySelector('.macord-bloco-meio').addEventListener('change', onInput);
   row.querySelector('.macord-bloco-rm').onclick = ()=>{ row.remove(); recalcAcordoBlocos(containerId); };
   wrap.appendChild(row);
   recalcAcordoBlocos(containerId);
@@ -18076,7 +18083,8 @@ function addBlocoAcordo(qtd, valor, containerId){
 function lerBlocosAcordo(containerId){
   return Array.from(document.querySelectorAll('#'+(containerId||'macord-blocos')+' .macord-bloco-row')).map(row=>({
     qtd: parseInt(row.querySelector('.macord-bloco-qtd').value)||0,
-    valor: parseValorBR(row.querySelector('.macord-bloco-valor').value||'0')
+    valor: parseValorBR(row.querySelector('.macord-bloco-valor').value||'0'),
+    meio: (row.querySelector('.macord-bloco-meio')||{}).value==='pix' ? 'pix' : 'boleto'
   })).filter(b=>b.qtd>0 && b.valor>0);
 }
 
@@ -18098,7 +18106,11 @@ function recalcAcordoBlocos(containerId, entradaId, resumoId){
     const el = document.getElementById(rId);
     if(el) el.textContent = `Total: ${fmtR(total)} em ${nParc + (entrada>0?1:0)} parcela(s)${entrada>0?' (incl. entrada)':''}`;
   }
-  if(cId==='taj-blocos'){ const elT=document.getElementById('tajTotal'); if(elT) elT.value = valorBRParaInput(total); }
+  if(cId==='taj-blocos'){
+    const elT=document.getElementById('tajTotal'); if(elT) elT.value = valorBRParaInput(total);
+    // Chave PIX só aparece quando alguma faixa é PIX — é o que o termo vai citar.
+    const w=document.getElementById('tajPixWrap'); if(w) w.style.display = blocos.some(b=>b.meio==='pix') ? '' : 'none';
+  }
 }
 
 // "Novo Acordo" vai DIRETO ao Termo de acordo — não há mais o modal
@@ -45135,6 +45147,7 @@ let _mv2SoCredor = false;
 // Modais criados via JS (auto-contidos), sem tocar no corpo HTML.
 // ══════════════════════════════════════════════════════════════════════════
 const _TAJ_COBRASQ_NOME = 'COBRASQ Recuperadora de Crédito e Cobrança Ltda.';
+const _TAJ_COBRASQ_PIX = 'ccobrasq@gmail.com';   // chave PIX da COBRASQ citada no termo nas faixas via PIX
 const _TAJ_QUALIF_COBRASQ = 'sociedade empresária limitada, inscrita no CNPJ sob n. 34.626.848/0001-42, com endereço na Av. Rio Grande do Sul, n. 380, sala 201, centro, CEP 85660-000, município de Dois Vizinhos, Estado do Paraná.';
 let _tajState = { devId:null, html:'', editando:false, seq:0 };
 // O CEP do formulário do termo não preenchia nada: o campo era um input cru, sem
@@ -45256,6 +45269,8 @@ function abrirTermoAcordoJ(devId){
     <div id="taj-blocos"></div>
     <button type="button" class="btn btn-ghost btn-sm" style="margin-top:6px;" onclick="addBlocoAcordo(1,null,'taj-blocos')">+ Adicionar faixa de parcelas</button>
   </div>
+  <div id="tajPixWrap" style="grid-column:1/3;display:none;"><label ${lbl}>Chave PIX (faixas marcadas como PIX)</label><input id="tajPix" value="${escHtml(_TAJ_COBRASQ_PIX)}" ${inp}>
+    <div style="font-size:11px;color:var(--text-3);margin-top:4px;">Vem com a chave da COBRASQ. Se o credor do termo for o cedente, troque pela chave dele — o termo diz "via PIX, para a chave …, de titularidade da credora".</div></div>
   ${F('tajVenc','1º vencimento',venc1,'type="date"')}
   ${F('tajMulta','Multa boleto (%)',10,'type="number"')}
   ${F('tajPenal','Cláusula penal (%)',50,'type="number"')}
@@ -45293,7 +45308,7 @@ function abrirTermoAcordoJ(devId){
   window._tajFaixasIniciais = null;
   if(temEntradaAc) _tajBlocosSeed.unshift({ qtd:1, valor:ac.entrada });
   if(!_tajBlocosSeed.length) _tajBlocosSeed.push({ qtd:1, valor:null });
-  _tajBlocosSeed.forEach(b=>addBlocoAcordo(b.qtd, b.valor, 'taj-blocos'));
+  _tajBlocosSeed.forEach(b=>addBlocoAcordo(b.qtd, b.valor, 'taj-blocos', b.meio));
   const _tajVencEl = document.getElementById('tajVenc'); if(_tajVencEl) _tajVencEl.value = temEntradaAc ? entradaVenc : venc1;
   _tajAoTrocarCredor();
   const rExt=document.querySelector('input[name="tajTipo"][value="extrajudicial"]'); if(rExt) rExt.checked=true;
@@ -45670,7 +45685,7 @@ function _tajDados(){
     credor:{ nome:credorNome, genero:'F', qualificacao:v('tajCredorQualif'), assNome:/cobrasq/i.test(credorNome)?'COBRASQ':credorNome, assDoc:credorAssDoc },
     devedores, devedor:principal,
     advogadoExec, advogados:advogadoExec?[advogadoExec]:[],
-    acordo:{ total:num('tajTotal'), parcelas:_tajNParcTotal, valorParcela:(_tajFaixas[0]&&_tajFaixas[0].valor)||0, faixas:_tajFaixas, vencimento:v('tajVenc'), multa:num('tajMulta'), penal:num('tajPenal'), entrada:null },
+    acordo:{ total:num('tajTotal'), parcelas:_tajNParcTotal, valorParcela:(_tajFaixas[0]&&_tajFaixas[0].valor)||0, faixas:_tajFaixas, vencimento:v('tajVenc'), multa:num('tajMulta'), penal:num('tajPenal'), entrada:null, pixChave:v('tajPix').trim() },
     foroComarca:v('tajForo').trim(),
     dataAcordo:v('tajData'), tipo:_tajTipoAtual(),
     judicial:{ numeroProcesso:v('tajJudProcesso'), comarca:v('tajJudComarca'), foro:v('tajJudForo')||'jec',
@@ -45699,7 +45714,7 @@ async function _tajFecharAcordo(faixas, venc1){
   faixas.forEach((b,bi)=>{
     for(let i=0;i<b.qtd;i++){
       const vDate = new Date(y, m-1+mesOffset, d);
-      parcelas.push({ id:uid(), numero:seq, valor:b.valor, vencimento:isoLocal(vDate), pago:false, bloco:bi+1 });
+      parcelas.push({ id:uid(), numero:seq, valor:b.valor, vencimento:isoLocal(vDate), pago:false, bloco:bi+1, meio:b.meio||'boleto' });
       seq++; mesOffset++;
     }
   });
