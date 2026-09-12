@@ -156,7 +156,11 @@ def linhas_do_zip(zip_path: Path):
         nome = z.namelist()[0]
         with z.open(nome) as raw:
             txt = io.TextIOWrapper(raw, encoding="latin-1", newline="")
-            yield from csv.reader(txt, delimiter=";", quotechar='"')
+            # A Receita deixa lixo binário (bytes \0) em campos como complemento — uma
+            # linha em 13 M derrubou a carga inteira em 12/09/2026 ("extra data after
+            # last expected column"). O Postgres não aceita NUL em text: limpar aqui.
+            for row in csv.reader(txt, delimiter=";", quotechar='"'):
+                yield [c.replace("\x00", "") for c in row]
 
 
 def _dig(s: str) -> str:
@@ -187,7 +191,7 @@ def processar(mes: str, ufs: set[str], work: Path, baixar_zips: bool):
     pr_basicos: set[str] = set()
     n = 0
     with open(out_est, "w", newline="", encoding="utf-8") as fo:
-        w = csv.writer(fo)
+        w = csv.writer(fo, lineterminator="\n")
         for zp in grupo("Estabelecimentos"):
             print(f"  ⚙ {zp.name}")
             for row in linhas_do_zip(zp):
@@ -210,7 +214,7 @@ def processar(mes: str, ufs: set[str], work: Path, baixar_zips: bool):
     print("\n[2/3] Empresas…")
     n = 0
     with open(out_emp, "w", newline="", encoding="utf-8") as fo:
-        w = csv.writer(fo)
+        w = csv.writer(fo, lineterminator="\n")
         for zp in grupo("Empresas"):
             print(f"  ⚙ {zp.name}")
             for row in linhas_do_zip(zp):
@@ -233,7 +237,7 @@ def processar(mes: str, ufs: set[str], work: Path, baixar_zips: bool):
     print("\n[3/3] Sócios…")
     n = 0
     with open(out_soc, "w", newline="", encoding="utf-8") as fo:
-        w = csv.writer(fo)
+        w = csv.writer(fo, lineterminator="\n")
         for zp in grupo("Socios"):
             print(f"  ⚙ {zp.name}")
             for row in linhas_do_zip(zp):
@@ -269,10 +273,23 @@ set statement_timeout = 0;
 set lock_timeout = 0;
 set idle_in_transaction_session_timeout = 0;
 begin;
+-- Índices (menos PK) saem antes do COPY e voltam depois: manter 8 índices vivos
+-- durante 32 M de inserts foi o que fez a 1ª carga levar >1h só na 1ª tabela.
+create temp table _rf_idx as
+  select indexname, indexdef from pg_indexes
+  where schemaname = 'public' and tablename in ('rf_socios','rf_estabelecimentos','rf_empresas')
+    and indexname not like '%_pkey';
+do $$ declare r record; begin
+  for r in select indexname from _rf_idx loop execute format('drop index public.%I', r.indexname); end loop;
+end $$;
 truncate public.rf_socios, public.rf_estabelecimentos, public.rf_empresas;
 \\copy public.rf_empresas (cnpj_basico,razao_social,natureza_juridica,porte,atualizado_em,capital_social) from '{out_emp}' csv
 \\copy public.rf_estabelecimentos (cnpj_basico,cnpj_ordem,cnpj_dv,matriz_filial,nome_fantasia,situacao,uf,municipio,data_situacao,motivo_situacao,data_inicio,cnae,tipo_logradouro,logradouro,numero,complemento,bairro,cep,telefone1,telefone2,email) from '{out_est}' csv
 \\copy public.rf_socios (cnpj_basico,identificador,nome_socio,cnpj_cpf_socio,qualificacao,data_entrada) from '{out_soc}' csv
+do $$ declare r record; begin
+  for r in select indexdef from _rf_idx loop execute r.indexdef; end loop;
+end $$;
+analyze public.rf_empresas; analyze public.rf_estabelecimentos; analyze public.rf_socios;
 commit;
 """
     print("\n⇪ Carregando no Supabase via psql…")
