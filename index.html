@@ -2306,7 +2306,7 @@ body.viewas-readonly select {
          6 grupos por MOMENTO DE USO (não por módulo): HOJE · CARTEIRA ·
          JURÍDICO · DINHEIRO · CANAIS · SISTEMA. 22 itens de nível 1.
          Uma fusão de rota (o resto é só reagrupamento):
-           #/intimacoes + #/intimvincular + #/intimurgentes → um item, três abas
+           #/intimacoes + #/intimvincular + #/intimurgentes + #/intimdiario → um item, quatro abas
          As rotas antigas seguem válidas como alias e abrem a aba certa.
          (#/custodias existiu como fusão com #/repasses até 2026-08-06 — removida:
          era o redesenho fin_custodia que nunca teve a migração aplicada em
@@ -2541,6 +2541,7 @@ body.viewas-readonly select {
     <div id="page-intimacoes" class="page-content"><!-- renderIntimacoes() --></div>
     <div id="page-intimvincular" class="page-content"><!-- renderIntimVincular() --></div>
     <div id="page-intimurgentes" class="page-content"><!-- renderIntimUrgentes() --></div>
+    <div id="page-intimdiario" class="page-content"><!-- renderIntimDiario() --></div>
     <div id="page-processos" class="page-content">
       <!-- JS will populate -->
     </div>
@@ -7776,6 +7777,7 @@ const PAGE_BREADCRUMBS = {
   intimacoes:['Jurídico','Intimações','Andamentos'],
   intimvincular:['Jurídico','Intimações','A vincular'],
   intimurgentes:['Jurídico','Intimações','Urgentes — fora do Paraná'],
+  intimdiario:['Jurídico','Intimações','Só no diário'],
   fin:       ['Dinheiro','Financeiro'],
   repasses:  ['Dinheiro','Repasses a clientes'],
   'nf-avulsa':['Dinheiro','Emitir NF'],
@@ -7807,6 +7809,7 @@ const PAGE_RENDERERS = {
   intimacoes: ()=>renderIntimacoes(),
   intimvincular: ()=>renderIntimVincular(),
   intimurgentes: ()=>renderIntimUrgentes(),
+  intimdiario: ()=>renderIntimDiario(),
   config: ()=>renderConfiguracoes(),
   calc: ()=>renderCalculadora(),
   tarefas: ()=>renderTarefas(),
@@ -7824,9 +7827,9 @@ const ADMIN_ONLY_PAGES = new Set(['fin','repasses','relat','pipeline','importaca
 
 // ALIAS DA FUSÃO (handoff v3 §2). As rotas antigas continuam abrindo a tela
 // certa; quem acende no menu é o item único da fusão.
-//   #/intimvincular · #/intimurgentes → item "Intimações"
+//   #/intimvincular · #/intimurgentes · #/intimdiario → item "Intimações"
 const NAV_DE_PAGINA = {
-  intimvincular:'intimacoes', intimurgentes:'intimacoes',
+  intimvincular:'intimacoes', intimurgentes:'intimacoes', intimdiario:'intimacoes',
 };
 
 // ── BADGES DO MENU ───────────────────────────────────────────
@@ -18520,6 +18523,18 @@ async function refreshIntimUrgentesBadge(){
     if(count>0){ badge.textContent = count>99?'99+':String(count); badge.style.display='inline-block'; }
     else { badge.style.display='none'; }
   }
+  refreshIntimDiarioBadge();
+}
+
+// Contagem da aba "Só no diário" = comunicações do DJEN que NENHUM e-mail do
+// tribunal trouxe (intimacoes_djen.intimacao_email_id IS NULL) e não arquivadas.
+// Alimenta só o rótulo da aba (não há item de menu próprio).
+async function refreshIntimDiarioBadge(){
+  const supa = getSupabase(); if(!supa) return;
+  const { count, error } = await supa.from('intimacoes_djen')
+    .select('id', { count:'exact', head:true }).is('intimacao_email_id', null).neq('status','ignorada');
+  if(error) return; // tabela ainda sem migração / RLS: a aba fica sem número
+  _intimCounts.diario = count||0;
 }
 
 async function marcarIntimacaoLida(id, lida){
@@ -18587,7 +18602,7 @@ function _ivSugerir(execNome, devs){
 // fusão (nav-intimacoes) — ver NAV_DE_PAGINA em showPage.
 // ════════════════════════════════════════════════════════════════════════════
 // Contagens das abas de Intimações — preenchidas pelos refresh*Badge().
-let _intimCounts = { naolidas:null, vincular:null, urgentes:null };
+let _intimCounts = { naolidas:null, vincular:null, urgentes:null, diario:null };
 function _tabN(n, act){
   if(n==null) return '';
   return `<span class="n${act&&n>0?' act':''}">${n>99?'99+':n}</span>`;
@@ -18597,6 +18612,7 @@ function intimTabsHtml(active){
     ['intimacoes',   'Andamentos', _intimCounts.naolidas, true],
     ['intimvincular','A vincular', _intimCounts.vincular, false],
     ['intimurgentes','Urgentes',   _intimCounts.urgentes, true],
+    ['intimdiario',  'Só no diário', _intimCounts.diario, true],
   ];
   return `<div class="pg-tabs">${t.map(([pg,lbl,n,act])=>
     `<button class="pg-tab${active===pg?' on':''}" onclick="showPage('${pg}')">${lbl}${_tabN(n,act)}</button>`
@@ -18688,7 +18704,9 @@ async function ivIgnorar(id){
 function _ivRefresh(){
   try{ refreshIntimVincularBadge(); }catch(_){}
   const urg = document.getElementById('page-intimurgentes');
+  const dia = document.getElementById('page-intimdiario');
   if(urg && urg.classList.contains('active')) { try{ renderIntimUrgentes(); }catch(_){} }
+  else if(dia && dia.classList.contains('active')) { try{ renderIntimDiario(); }catch(_){} }
   else { try{ renderIntimVincular(); }catch(_){} }
 }
 
@@ -18741,6 +18759,107 @@ async function renderIntimUrgentes(){
   }).join('');
 
   el.innerHTML = head + rowsHtml;
+}
+
+// ── Aba "Só no diário" — o que saiu no DJEN e NENHUM e-mail trouxe ───────────
+// Fonte: intimacoes_djen (worker djen-intimacoes, API pública do DJEN por OAB).
+// O worker cruza cada comunicação com intimacoes_email pelo CNJ ± 3 dias; o que
+// fica sem par (intimacao_email_id NULL) é o que o escritório NÃO recebeu por
+// e-mail — caso típico: ato ordinatório do eproc TJRS publicado só no diário.
+// Mesmo fluxo de vínculo/arquivo das outras abas, gravando na própria tabela.
+function _idResumo(t){
+  const s = String(t||'').replace(/\s+/g,' ').trim();
+  return s.length>320 ? s.slice(0,320)+'…' : s;
+}
+async function renderIntimDiario(){
+  const el = document.getElementById('page-intimdiario'); if(!el) return;
+  const supa = getSupabase();
+  el.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text-2);">Carregando publicações do diário…</div>`;
+  let rows = [], erro = null;
+  if(supa){
+    const { data, error } = await supa.from('intimacoes_djen').select('*')
+      .is('intimacao_email_id', null).neq('status','ignorada')
+      .order('data_disponibilizacao',{ascending:false}).order('criado_em',{ascending:false}).limit(500);
+    rows = data||[]; erro = error||null;
+  }
+
+  const devs = (DB.devedores||[]);
+  const devNome = {}; devs.forEach(d=>{ devNome[d.id]=d.nome; });
+  _ivDevByLabel = {};
+  const dlOpts = devs.map(d=>{ const lbl=_ivLabelDev(d); _ivDevByLabel[lbl]=d.id; return `<option value="${escHtml(lbl)}"></option>`; }).join('');
+
+  const head = `
+    ${intimTabsHtml('intimdiario')}
+    <div style="margin-bottom:14px;">
+      <h1 class="cob-h1">Só no diário <span style="font-size:13px;font-weight:500;color:var(--text-2);">· DJEN</span></h1>
+      <div style="font-size:12.5px;color:var(--text-2);margin-top:3px;">Publicações do Diário de Justiça Eletrônico Nacional em nome das OABs do escritório que <strong>não chegaram por e-mail</strong> do tribunal (ex.: ato ordinatório do eproc TJRS). Conferidas todo dia; cada uma casa com o e-mail pelo número do processo (± 3 dias) — o que sobra aparece aqui.</div>
+    </div>
+    <datalist id="dlDevedores">${dlOpts}</datalist>`;
+
+  if(erro){
+    el.innerHTML = head + `<div class="cob-panel" style="padding:24px;text-align:center;color:var(--text-2);">Não foi possível ler o diário: ${escHtml(erro.message||'')}<br><span style="font-size:12px;">(a migração 20260912_02_intimacoes_djen ainda não foi aplicada?)</span></div>`;
+    return;
+  }
+  if(!rows.length){
+    el.innerHTML = head + `<div class="cob-panel" style="padding:40px;text-align:center;color:var(--text-2);font-style:italic;">Nada no diário que não tenha chegado por e-mail. 👌</div>`;
+    return;
+  }
+
+  const rowsHtml = rows.map(r=>{
+    const foraPR = r.tribunal && r.tribunal!=='TJPR';
+    const quando = (r.data_ato && r.data_ato!==r.data_disponibilizacao)
+      ? `ato ${_detData(r.data_ato)} · diário ${_detData(r.data_disponibilizacao)}`
+      : (r.data_disponibilizacao?`diário ${_detData(r.data_disponibilizacao)}`:'');
+    const meta = [quando,
+      `<strong${foraPR?' style="color:var(--danger);"':''}>${escHtml(r.tribunal||'?')}</strong>`,
+      r.orgao||'', r.tipo_documento||r.tipo_comunicacao||''].filter(Boolean).join(' · ');
+    const acao = (r.status==='vinculada')
+      ? `<div style="flex:1;min-width:220px;font-size:12.5px;color:var(--text-2);">✓ Caso <strong>${escHtml(devNome[r.devedor_id||r.cobranca_id]||'vinculado')}</strong> — já está na timeline</div>
+         <button class="btn btn-ghost btn-sm" onclick="idIgnorar('${r.id}')">Arquivar</button>`
+      : `<input class="cob-input" id="id-${r.id}" list="dlDevedores" placeholder="Vincular ao caso (nome ou CPF/CNPJ)" style="flex:1;min-width:220px;height:34px;font-size:13px;">
+         <button class="btn btn-primary btn-sm" onclick="idVincular('${r.id}')">Vincular</button>
+         <button class="btn btn-ghost btn-sm" onclick="idIgnorar('${r.id}')" style="color:var(--danger);">Arquivar</button>`;
+    return `<div class="cob-panel" style="padding:14px 18px;margin-bottom:10px;border-left:3px solid ${foraPR?'var(--danger)':'var(--gold)'};">
+      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline;">
+        <div style="font-family:var(--font-mono);font-size:11px;color:var(--text-3);">${meta}</div>
+        <div style="font-family:var(--font-mono);font-size:11px;color:var(--text-3);">${escHtml(r.numero_processo||'sem número')}</div>
+      </div>
+      <div style="font-size:14px;color:var(--text);font-weight:600;margin:4px 0 2px;">${escHtml(r.tipo_documento||'Publicação')}${r.classe?` <span style="font-weight:400;color:var(--text-2);">· ${escHtml(r.classe)}</span>`:''}</div>
+      <div style="font-size:12.5px;color:var(--text-2);margin-bottom:8px;white-space:pre-line;">${escHtml(_idResumo(r.texto_limpo))}</div>
+      ${r.link?`<div style="margin-bottom:10px;"><a href="${escHtml(r.link)}" target="_blank" rel="noopener" style="font-size:11.5px;color:var(--navy);">Abrir no tribunal ›</a></div>`:''}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">${acao}</div>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = head + rowsHtml;
+}
+
+async function idVincular(id){
+  const inp = document.getElementById('id-'+id); const label=(inp?.value||'').trim();
+  const devId = _ivDevByLabel[label];
+  if(!devId){ showToast('Escolha um caso válido da lista (nome/CPF).','warning'); return; }
+  const supa = getSupabase(); if(!supa){ showToast('Sem conexão.','danger'); return; }
+  try{
+    const { data:arr } = await supa.from('intimacoes_djen').select('*').eq('id',id).limit(1);
+    const r = (arr||[])[0]; if(!r){ showToast('Publicação não encontrada.','danger'); return; }
+    const evDedup = 'djen:'+(r.dedup||id);
+    // 1) timeline unificada (mesmo payload que o worker grava; idempotente por dedup)
+    await supa.from('devedor_eventos').insert({ devedor_id:devId, cobranca_id:devId, tipo:'andamento_judicial',
+      payload:{ acao_completa:`${r.tipo_documento||'Publicação no diário'} (DJEN)`, fonte:'djen', data:r.data_ato||r.data_disponibilizacao, publicado_em:r.data_disponibilizacao, tribunal:r.tribunal, orgao:r.orgao, resumo:String(r.texto_limpo||'').slice(0,600), dedup:evDedup } });
+    // 2) marca vinculada
+    await supa.from('intimacoes_djen').update({ status:'vinculada', cobranca_id:devId, devedor_id:devId, evento_gravado:true }).eq('id',id);
+    // 3) grava o número do processo na cobrança se estiver vazio (casa os próximos sozinho)
+    if(r.numero_processo){ try{ await supa.from('cobrancas').update({ numero_processo:r.numero_processo }).eq('id',devId).is('numero_processo',null); }catch(_){} }
+    showToast('Vinculado — a publicação entrou na timeline do caso.','success');
+    _ivRefresh();
+  }catch(e){ showToast('Falha ao vincular: '+(e.message||e),'danger'); }
+}
+
+async function idIgnorar(id){
+  if(!confirm('Arquivar esta publicação do diário? (sai da aba; não entra em nenhum caso)')) return;
+  const supa = getSupabase(); if(!supa) return;
+  try{ await supa.from('intimacoes_djen').update({ status:'ignorada' }).eq('id',id); showToast('Arquivada.','info'); _ivRefresh(); }
+  catch(e){ showToast('Falha: '+(e.message||e),'danger'); }
 }
 
 async function renderIntimacoes(){

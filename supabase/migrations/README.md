@@ -148,3 +148,28 @@ Ordem: **aplicar a migração → rodar `scripts/import_cnpj_rf.py --uf PR,SC,RS
 Receita; a carga faz TRUNCATE + COPY das 3 tabelas numa transação). Enquanto a base
 está vazia, `api/_cnpja.js` responde "indisponível" + link manual (F-35) em vez do
 falso "nenhuma empresa".
+
+## 20260912_02 — tribunal pelo segmento do CNJ + intimações do DJEN
+
+**Não aplicada.** `20260912_02_intimacoes_djen.sql` (+ `_rollback`). Aditiva:
+função `cnj_tribunal(text)` (tabela J.TR completa da Res. CNJ 65/2008) + backfill de
+`intimacoes_email.tribunal` onde era NULL (R-25: 18 linhas em prod — TRF4/TRT9/TJMT,
+que sumiam da aba "Urgentes"); tabela `intimacoes_djen` (RLS = `intimacoes_email`:
+staff lê, proprietário escreve), função `intimacoes_djen_cruzar(p_dias)` (SECURITY
+DEFINER, REVOKE de PUBLIC/anon/authenticated — só o worker chama), view
+`vw_intimacoes_so_diario` (security_invoker), índice `uq_dev_eventos_djen_dedup` e
+cron `djen-intimacoes` às `0 11 * * *` (08:00 BRT) chamando a Edge Function nova.
+
+Dry-run em prod (begin/rollback) em 12/09/2026: compila; `cnj_tribunal` devolve
+TRF4/TRT9/TJMT/TJPR/TJRS/TRE-PR/TJMSP e NULL p/ lixo; backfill acerta 18/19 (a 19ª não
+tem número); com as 107 comunicações reais de 10–20/08 inseridas, o cruzamento casa 13
+pela publicação ± 3 e 58 pela data do ato citada no texto — sobram 38 TJPR + as 2 do
+TJRS "só no diário". RLS (R-18): cedente 0 linhas e INSERT/UPDATE negados; colaborador
+lê 1 e não escreve; proprietário tudo; `authenticated` sem EXECUTE na RPC.
+
+**Ordem:** aplicar a migração → `supabase functions deploy djen-intimacoes` (secrets já
+existentes: `CRON_INVOKE_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`; opcional
+`DJEN_OABS`) → `supabase functions deploy email-intimacoes` (tabela de tribunais nova)
+→ backfill manual `POST /djen-intimacoes {"inicio":"2026-08-01","fim":"<hoje>"}` com
+o bearer do cron. Enquanto a migração não estiver aplicada, a aba "Só no diário" abre
+com a mensagem "Não foi possível ler o diário" e as outras abas seguem iguais.
