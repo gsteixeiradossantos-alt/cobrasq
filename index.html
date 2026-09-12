@@ -45596,7 +45596,11 @@ async function _tajVerificarDoc(){
       const dev=(DB.devedores||[]).find(x=>x.id===_tajState.devId)||{};
       const nome=dev.nome||'';
       if(!nome){ msg('<div style="color:var(--danger);font-size:12px;">Devedor sem nome cadastrado — a busca reversa por CPF precisa do nome completo.</div>'); return; }
-      const resp=await fetch('/api/automacao?action=cnpja',{ method:'POST', headers:{ 'Content-Type':'application/json', ...(await authHeaders()) }, body:JSON.stringify({ nome, cpf:d }) });
+      // Cruzamentos extras: telefone/endereço/e-mail como estão na tela do Termo
+      // (o usuário pode ter corrigido) — a base local responde "quem mais usa".
+      const v=id=>String((document.getElementById(id)||{}).value||'').trim();
+      const extra={ telefone:v('tajTel'), email:dev.email||'', endereco:{ cep:v('tajCep'), numero:v('tajNumero'), logradouro:v('tajRua') } };
+      const resp=await fetch('/api/automacao?action=cnpja',{ method:'POST', headers:{ 'Content-Type':'application/json', ...(await authHeaders()) }, body:JSON.stringify({ nome, cpf:d, ...extra }) });
       const j=await resp.json().catch(()=>({}));
       if(!resp.ok){ msg('<div style="color:var(--danger);font-size:12px;">'+escHtml(j.error||('Falha HTTP '+resp.status))+'</div>'); return; }
       _tajRenderEmpresasPF(j, nome, d);
@@ -45632,20 +45636,41 @@ function _tajRenderEmpresasPF(j, nome, cpf){
   }
   const empresas=(j&&j.empresas)||[]; _tajState._empresas=empresas;
   const miolo=(String(cpf||'').replace(/\D/g,'').slice(3,9))||'—';
-  if(!empresas.length){ box.innerHTML=`<div style="font-size:12px;color:var(--text-3);">Nenhuma empresa encontrada no nome de <strong>${escHtml(nome||'')}</strong> (miolo do CPF ${escHtml(miolo)}).</div>`; return; }
+  // Cruzamentos por telefone / endereço / e-mail (base local). Pista, não prova:
+  // telefone usado por >3 CNPJs é de contador/escritório e vira aviso.
+  const sit=c=>({'02':'ativa','03':'suspensa','04':'inapta','08':'baixada','01':'nula'})[c]||c||'';
+  const linhaX=(e,extra)=>`<div style="padding:4px 0;border-bottom:1px solid var(--border);font-size:11.5px;"><strong>${escHtml(e.nome||e.fantasia||'')}</strong>${e.fantasia&&e.nome?' · '+escHtml(e.fantasia):''} <span style="color:var(--text-3);">· ${escHtml(e.cnpj)} · ${escHtml(sit(e.situacao))}${e.uf?' · '+escHtml(e.uf):''}${extra?' · '+escHtml(extra):''}</span></div>`;
+  let cruz='';
+  const tel=Array.isArray(j.por_telefone)?j.por_telefone:null;
+  if(tel){
+    const n=tel.length?tel[0].compartilhado_com:0;
+    cruz+=`<div style="font-size:11px;font-weight:700;color:var(--text-3);margin:8px 0 2px;">MESMO TELEFONE</div>`;
+    if(!tel.length) cruz+=`<div style="font-size:11.5px;color:var(--text-3);">Nenhum CNPJ usa este telefone.</div>`;
+    else if(n>3) cruz+=`<div style="font-size:11.5px;color:var(--text-3);">⚠ ${n} CNPJs usam este telefone — é de contador/escritório, não do devedor. Ignorado.</div>`;
+    else cruz+=tel.map(e=>linhaX(e)).join('');
+  }
+  const endr=Array.isArray(j.por_endereco)?j.por_endereco:null;
+  if(endr){
+    cruz+=`<div style="font-size:11px;font-weight:700;color:var(--text-3);margin:8px 0 2px;">MESMO ENDEREÇO</div>`;
+    cruz+= endr.length ? endr.map(e=>linhaX(e,[e.logradouro,e.numero,e.complemento].filter(Boolean).join(' '))).join('') : `<div style="font-size:11.5px;color:var(--text-3);">Nenhum CNPJ neste endereço.</div>`;
+  }
+  const mail=Array.isArray(j.por_email)?j.por_email:null;
+  if(mail&&mail.length){ cruz+=`<div style="font-size:11px;font-weight:700;color:var(--text-3);margin:8px 0 2px;">MESMO E-MAIL</div>`+mail.map(e=>linhaX(e)).join(''); }
+  const baseInfo=(j.base&&j.base.ufs&&j.base.ufs.length)?`<div style="font-size:10.5px;color:var(--text-3);margin-top:6px;">Base da Receita: ${escHtml(j.base.ufs.join(', '))}${j.base.atualizado_em?' · dump '+escHtml(String(j.base.atualizado_em).slice(0,7)):''} — devedor com empresa em outro estado não aparece.</div>`:'';
+  if(!empresas.length){ box.innerHTML=`<div style="font-size:12px;color:var(--text-3);">Nenhuma empresa encontrada no nome de <strong>${escHtml(nome||'')}</strong> (miolo do CPF ${escHtml(miolo)}).</div>${cruz}${baseInfo}`; return; }
   const linhas=empresas.map((e,i)=>{
     const tag = e.confere===true ? '<span style="font-size:10px;color:var(--success);font-weight:700;">✓ confere CPF</span>'
               : e.confere===false ? '<span style="font-size:10px;color:var(--danger);font-weight:700;">✗ CPF não bate</span>' : '';
     return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);">
       <div style="flex:1;min-width:0;">
         <div style="font-size:12.5px;font-weight:600;">${escHtml(e.nome||'')} ${tag}</div>
-        <div style="font-size:11px;color:var(--text-3);">${escHtml([e.cnpj,e.papel].filter(Boolean).join(' · '))}</div>
+        <div style="font-size:11px;color:var(--text-3);">${escHtml([e.cnpj,e.papel,sit(e.situacao)].filter(Boolean).join(' · '))}</div>
       </div>
       <button type="button" class="btn btn-ghost btn-sm" onclick="_tajAddAvalistaFromEmpresa(${i})">+ avalista</button>
     </div>`;
   }).join('');
   const fonte=(j&&j.fonte)?' · fonte: '+escHtml(j.fonte):'';
-  box.innerHTML=`<div style="font-size:11px;font-weight:700;color:var(--text-3);margin-bottom:4px;">EMPRESAS NO NOME · miolo do CPF ${escHtml(miolo)}${fonte}</div>${linhas}`;
+  box.innerHTML=`<div style="font-size:11px;font-weight:700;color:var(--text-3);margin-bottom:4px;">EMPRESAS NO NOME · miolo do CPF ${escHtml(miolo)}${fonte}</div>${linhas}${cruz}${baseInfo}`;
 }
 function _tajAddAvalistaFromSocio(i){
   const s=(_tajState._socios||[])[i]; if(!s) return;

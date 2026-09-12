@@ -66,6 +66,12 @@ module.exports = async function handler(req, res) {
     : (req.query || {});
   const nome = String(src.nome || '').trim();
   const cpf = onlyDigits(src.cpf);
+  // Cruzamentos extras (opcionais): telefone, endereço e e-mail do devedor → CNPJs que
+  // usam o mesmo contato/endereço. Só a base local responde isso (nenhuma API pública
+  // aceita telefone/endereço como entrada — conferido em 12/09/2026).
+  const tel = onlyDigits(src.telefone);
+  const email = String(src.email || '').trim().toLowerCase();
+  const end = src.endereco && typeof src.endereco === 'object' ? src.endereco : {};
 
   if (!nome) return res.status(400).json({ error: 'Informe o nome completo do devedor.' });
   if (cpf && cpf.length !== 11) return res.status(400).json({ error: 'CPF inválido (11 dígitos).' });
@@ -73,7 +79,20 @@ module.exports = async function handler(req, res) {
   // 1) FONTE GRATUITA: base pública da Receita Federal carregada no Supabase (rf_socios),
   //    consultada pela RPC buscar_empresas_por_socio. Se a migração/carga ainda não foi
   //    feita (import_cnpj_rf.py), a RPC falha → cai no CNPJá pago (fallback) abaixo.
+  //
+  //    BASE VAZIA ≠ "nenhuma empresa". As tabelas nasceram vazias em 27/07 e a carga só
+  //    foi decidida em 12/09/2026; nesse intervalo a RPC devolvia [] e o botão dizia
+  //    "Nenhuma empresa encontrada" — falso negativo silencioso. Agora a API confere
+  //    rf_base_status() antes: base vazia → cai no fallback (CNPJá pago ou aviso manual).
+  let baseOk = false, baseStatus = null;
   try {
+    const st = await sbFetch('rpc/rf_base_status', { method: 'POST', body: '{}' });
+    baseStatus = Array.isArray(st) ? st[0] : st;
+    baseOk = !!(baseStatus && Number(baseStatus.socios) > 0);
+  } catch (e) {
+    console.warn('[cnpja] rf_base_status indisponível (migração 20260912 não aplicada?):', e && e.message);
+  }
+  if (baseOk) try {
     const rows = await sbFetch('rpc/buscar_empresas_por_socio', {
       method: 'POST',
       body: JSON.stringify({ p_nome: nome, p_cpf: cpf || null }),
@@ -83,9 +102,34 @@ module.exports = async function handler(req, res) {
         cnpj: onlyDigits(r.cnpj),
         nome: r.nome || '',
         papel: r.papel || '',
+        situacao: r.situacao || '',
         confere: (r.confere === true || r.confere === false) ? r.confere : null,
       })).filter((e) => e.cnpj);
-      return res.status(200).json({ ok: true, fonte: 'Receita Federal (Supabase)', empresas, total: empresas.length });
+      const out = {
+        ok: true, fonte: 'Receita Federal (Supabase)', empresas, total: empresas.length,
+        base: { ufs: baseStatus.ufs || [], atualizado_em: baseStatus.atualizado_em || null },
+      };
+      // Cruzamentos (best-effort: falha num deles não derruba a resposta).
+      if (tel.length >= 10) {
+        try {
+          const t = await sbFetch('rpc/buscar_empresas_por_telefone', { method: 'POST', body: JSON.stringify({ p_tel: tel }) });
+          // Telefone usado por >3 CNPJs é de contador/escritório — vira aviso, não pista.
+          out.por_telefone = Array.isArray(t) ? t.map((r) => ({ cnpj: onlyDigits(r.cnpj), nome: r.nome || '', fantasia: r.fantasia || '', situacao: r.situacao || '', uf: r.uf || '', compartilhado_com: Number(r.compartilhado_com) || 0 })) : [];
+        } catch (e) { console.warn('[cnpja] por_telefone:', e && e.message); }
+      }
+      if (end.cep && end.numero && end.logradouro) {
+        try {
+          const a = await sbFetch('rpc/buscar_empresas_por_endereco', { method: 'POST', body: JSON.stringify({ p_cep: onlyDigits(end.cep), p_numero: String(end.numero), p_logradouro: String(end.logradouro) }) });
+          out.por_endereco = Array.isArray(a) ? a.map((r) => ({ cnpj: onlyDigits(r.cnpj), nome: r.nome || '', fantasia: r.fantasia || '', situacao: r.situacao || '', logradouro: r.logradouro || '', numero: r.numero || '', complemento: r.complemento || '', uf: r.uf || '' })) : [];
+        } catch (e) { console.warn('[cnpja] por_endereco:', e && e.message); }
+      }
+      if (email.includes('@')) {
+        try {
+          const m = await sbFetch('rpc/buscar_empresas_por_email', { method: 'POST', body: JSON.stringify({ p_email: email }) });
+          out.por_email = Array.isArray(m) ? m.map((r) => ({ cnpj: onlyDigits(r.cnpj), nome: r.nome || '', fantasia: r.fantasia || '', situacao: r.situacao || '', uf: r.uf || '' })) : [];
+        } catch (e) { console.warn('[cnpja] por_email:', e && e.message); }
+      }
+      return res.status(200).json(out);
     }
   } catch (e) {
     // RPC/tabela ausente ou Supabase indisponível — segue para o CNPJá pago (fallback).
@@ -98,7 +142,8 @@ module.exports = async function handler(req, res) {
     // Sem base local nem token pago: orienta o operador a usar a busca manual gratuita.
     return res.status(200).json({
       pendente: true,
-      motivo: 'CNPJA_TOKEN não configurada no servidor.',
+      motivo: baseOk ? 'CNPJA_TOKEN não configurada no servidor.'
+        : 'base da Receita ainda não carregada no Supabase (rf_socios vazia) e CNPJA_TOKEN não configurada.',
       hint: 'Defina CNPJA_TOKEN (API Comercial do CNPJá) no painel da Vercel para ligar a busca automática por sócio.',
       fallbackUrl: 'https://casadosdados.com.br/solucao/cnpj/busca-avancada?socio=' + encodeURIComponent(nome),
     });

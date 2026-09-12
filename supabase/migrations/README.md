@@ -133,3 +133,18 @@ Rollback pareado.
 REPLACE` de `resumo_diario_agenda()`: os três `left(numero_processo, 10)` viram o número inteiro,
 porque o Gustavo pesquisa pelo CNJ completo (mesma decisão do título dos eventos na agenda).
 Rollback = reaplicar a função de `20260910_04`.
+
+## 20260912 — base da Receita: contato/endereço + busca reversa (`rf_*`)
+
+**Não aplicada.** `20260912_rf_cnpj_contato_endereco.sql` (+ `_rollback`). Aditiva:
+colunas de contato/endereço em `rf_estabelecimentos`, `capital_social` em
+`rf_empresas`, índices, e as RPCs `buscar_empresas_por_telefone`,
+`buscar_empresas_por_endereco`, `buscar_empresas_por_email` e `rf_base_status`.
+Validada em 12/09/2026 num `begin … rollback` em produção (compila; com uma linha
+sintética, telefone/endereço/e-mail acham a COBRASQ e rua errada no mesmo CEP+nº → 0).
+
+Ordem: **aplicar a migração → rodar `scripts/import_cnpj_rf.py --uf PR,SC,RS`**
+(precisa de `scripts/.env.local` com `DATABASE_URL`; baixa ~7,6 GB do WebDAV da
+Receita; a carga faz TRUNCATE + COPY das 3 tabelas numa transação). Enquanto a base
+está vazia, `api/_cnpja.js` responde "indisponível" + link manual (F-35) em vez do
+falso "nenhuma empresa".
