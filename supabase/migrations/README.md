@@ -136,7 +136,7 @@ Rollback = reaplicar a função de `20260910_04`.
 
 ## 20260912 — base da Receita: contato/endereço + busca reversa (`rf_*`)
 
-**Não aplicada.** `20260912_rf_cnpj_contato_endereco.sql` (+ `_rollback`). Aditiva:
+**Aplicada em 12/09/2026** (MCP, `rf_cnpj_contato_endereco`). `20260912_rf_cnpj_contato_endereco.sql` (+ `_rollback`). Aditiva:
 colunas de contato/endereço em `rf_estabelecimentos`, `capital_social` em
 `rf_empresas`, índices, e as RPCs `buscar_empresas_por_telefone`,
 `buscar_empresas_por_endereco`, `buscar_empresas_por_email` e `rf_base_status`.
