@@ -6992,7 +6992,7 @@ const _MASK_MONEY = new Set(['mlanc-valor','mlanc-juros','mlanc-multa','mlanc-de
 const _MASK_DOC = new Set(['mdev-doc','mcli-doc','di-doc','cpnc-doc','mctf-doc',
   'cfg-cnpj','devedor-cpf']);
 const _MASK_TEL = new Set(['mcli-tel','di-tel','cpnc-tel','mctf-tel',
-  'cfg-zapi-admin-tel','mudou-tel']);
+  'cfg-zapi-admin-tel','mudou-tel','tajTel']);
 const _MASK_CEP = new Set(['mdr-end-cep']);
 // Decide o tipo de máscara de um input. Só campos de texto. Exclui, de propósito,
 // nº de processo CNJ (0000000-00.0000.…), chave PIX/e-mail e agência/conta.
@@ -45210,7 +45210,12 @@ function abrirTermoAcordoJ(devId){
   const tipoDoc = _tajTipoDoc(dev.doc);
   const end = _tajEndDev(dev);
   const proc = dev.processoNum || dev.numero_processo || '';
-  const comarca = dev.comarca || '';
+  // Comarca do acordo judicial: o caso quase nunca tem dev.comarca preenchido —
+  // o que ele tem é a vara ("Juizado Especial Cível de Dois Vizinhos") e o nº
+  // CNJ, cujo sufixo é o código do foro. Sugere por essa cascata; o campo
+  // continua editável.
+  const comarca = dev.comarca || _tajComarcaDaVara(dev.vara) || _tajComarcaDoProcesso(proc) || '';
+  const foroJud = _tajForoDaVara(dev.vara);
   const inp='style="width:100%;padding:7px;border:1px solid var(--border);border-radius:5px;font-size:13px;background:var(--surface);color:var(--text);"';
   const lbl='style="display:block;font-size:11px;color:var(--text-3);margin-bottom:3px;"';
   const F=(id,label,val,attrs,full)=>`<div style="${full?'grid-column:1/3;':''}"><label ${lbl}>${label}</label><input id="${id}" value="${escHtml(val==null?'':String(val))}" ${attrs||''} ${inp}></div>`;
@@ -45225,7 +45230,7 @@ function abrirTermoAcordoJ(devId){
     <label style="font-size:13px;margin-right:16px;"><input type="radio" name="tajGenero" value="F" checked> Feminino</label>
     <label style="font-size:13px;"><input type="radio" name="tajGenero" value="M"> Masculino</label></div>
   ${F('tajDoc','CPF/CNPJ',dev.doc||'')}
-  ${F('tajTel','Telefone (link no WhatsApp)',dev.tel||dev.telefone||'')}
+  ${F('tajTel','Telefone (link no WhatsApp)',formatTelWA(dev.tel||dev.telefone||''))}
   <div style="grid-column:1/3;">
     <button type="button" class="btn btn-ghost btn-sm" id="taj-verificar" onclick="_tajVerificarDoc()">🔎 Verificar sócios / empresas</button>
     <span style="font-size:11px;color:var(--text-3);margin-left:8px;">PJ → sócios (grátis) · PF → empresas no nome (miolo do CPF)</span>
@@ -45234,7 +45239,7 @@ function abrirTermoAcordoJ(devId){
   <div style="grid-column:1/3;"><label ${lbl}>Credor</label><input id="tajCredor" list="tajCredorLista" autocomplete="off" value="${escHtml(credNome)}" oninput="_tajAoTrocarCredor()" ${inp}>
     <datalist id="tajCredorLista">${_tajCredorOptionsHtml()}</datalist>
     <div style="font-size:11px;color:var(--text-3);margin-top:4px;">Vem preenchido com a <strong>COBRASQ</strong> (cessionária). Digite para buscar entre os ${_tajCredorLista().length} credores cadastrados (nome ou fantasia) — a qualificação é preenchida sozinha. Troque só se o título não foi cedido e o credor é o cedente.</div></div>
-  ${F('tajForo','Foro de eleição (comarca da credora)','','placeholder="Cidade/UF"',true)}
+  <div id="tajForoWrap" style="grid-column:1/3;"><label ${lbl}>Foro de eleição (comarca da credora)</label><input id="tajForo" value="" placeholder="Cidade/UF" ${inp}></div>
   <div style="grid-column:1/3;"><label ${lbl}>Qualificação do credor</label><textarea id="tajCredorQualif" style="width:100%;min-height:52px;padding:7px;border:1px solid var(--border);border-radius:5px;font-size:12px;background:var(--surface);color:var(--text);"></textarea></div>
   <div style="grid-column:1/3;font-size:11px;font-weight:700;color:var(--text-3);border-top:1px solid var(--border);padding-top:8px;">ENDEREÇO DO DEVEDOR</div>
   ${F('tajRua','Rua',end.rua)}${F('tajNumero','Nº',end.numero)}
@@ -45262,6 +45267,7 @@ function abrirTermoAcordoJ(devId){
   _tajPrefillCoobrigados(devId);
   document.getElementById('tajJudProcesso').value = proc;
   document.getElementById('tajJudComarca').value = comarca;
+  { const fsel=document.getElementById('tajJudForo'); if(fsel) fsel.value = foroJud || 'jec'; }   // o modal é reaproveitado: sem reset, herdava o foro do caso anterior
   // Faixas: prioridade é _tajFaixasIniciais (parcelamento vindo do Simulador de
   // Acordo, sinal de uso único — ver usarSimulacao()); senão as do acordo já
   // registrado (Novo Acordo); senão, se o acordo é velho (tem parcelas mas
@@ -45326,6 +45332,56 @@ function _tajComarcasLista(){
     const k=t.toLowerCase(); if(vistos.has(k)) return; vistos.add(k); out.push(t);
   });
   return out;
+}
+// Código do foro (4 últimos dígitos do nº CNJ) → comarca, só TJPR (segmento
+// "8.16"). Tabela base conferida contra as audiências cadastradas em 12/09/2026;
+// o que estiver em audiencias.numero_processo ↔ comarca tem precedência (aprende
+// sozinho comarcas que não estão aqui).
+const _TAJ_FORO_TJPR = {
+  '0018':'Maringá', '0068':'Chopinzinho', '0079':'Dois Vizinhos', '0083':'Francisco Beltrão',
+  '0104':'Laranjeiras do Sul', '0123':'Palmas', '0131':'Pato Branco', '0134':'Pinhão',
+  '0140':'Quedas do Iguaçu', '0149':'Salto do Lontra', '0154':'Santo Antônio do Sudoeste',
+  '0181':'Marmeleiro', '0183':'São João', '0209':'Francisco Beltrão'
+};
+function _tajComarcaDoProcesso(num){
+  const d=String(num||'').replace(/\D/g,''); if(d.length!==20) return '';
+  if(d.slice(13,16)!=='816') return '';          // outro tribunal: código de foro não é o do TJPR
+  const foro=d.slice(16);
+  const aud=(typeof _audCache!=='undefined' && Array.isArray(_audCache) ? _audCache : [])
+    .find(a=>a && String(a.comarca||'').trim() && String(a.numero_processo||'').replace(/\D/g,'').endsWith('816'+foro));
+  if(aud) return String(aud.comarca).trim();
+  return _TAJ_FORO_TJPR[foro]||'';
+}
+// "Juizado Especial Cível de Dois Vizinhos", "Comarca de Marmeleiro/PR", "2ª Vara
+// Cível de Francisco Beltrão", "Juízo Único de Santo Antônio do Sudoeste/PR" →
+// comarca. Primeiro tenta casar um nome conhecido da lista (o mais longo vence —
+// "Santo Antônio do Sudoeste" antes de "Sudoeste"); senão pega o que vem depois
+// do último " de ".
+function _tajComarcaDaVara(vara){
+  const v=String(vara||'').trim(); if(!v) return '';
+  const norm=t=>String(t||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+  const nv=norm(v);
+  const hit=_tajComarcasLista().slice().sort((a,b)=>b.length-a.length).find(c=>nv.includes(norm(c)));
+  if(hit) return hit;
+  const m=v.match(/\sde\s+([A-Za-zÀ-ÿ'][A-Za-zÀ-ÿ' ]*?)\s*(?:\/\s*[A-Za-z]{2})?\s*(?:—|–|-\s|,|$)/);
+  return m ? m[1].trim() : '';
+}
+function _tajForoDaVara(vara){
+  const v=String(vara||'');
+  if(/juizado|\bjec\b/i.test(v)) return 'jec';
+  if(/\bvara\b/i.test(v)) return 'vara';
+  return '';
+}
+// Chamado ao digitar o nº do processo no bloco judicial: se a comarca ainda está
+// vazia (ou foi a última sugestão automática), preenche pelo código do foro.
+let _tajComarcaAuto='';
+function _tajSugerirComarca(){
+  const num=(document.getElementById('tajJudProcesso')||{}).value||'';
+  const el=document.getElementById('tajJudComarca'); if(!el) return;
+  const atual=String(el.value||'').trim();
+  if(atual && atual!==_tajComarcaAuto) return;
+  const sug=_tajComarcaDoProcesso(num);
+  if(sug){ el.value=sug; _tajComarcaAuto=sug; }
 }
 function _tajRenderComarcas(){
   const dl=document.getElementById('tajComarcaLista'); if(!dl) return;
@@ -45450,7 +45506,11 @@ function _tajOnTipoChange(){
   const jud=_tajTipoAtual()==='judicial';
   const box=document.getElementById('tajJudFields'); if(box) box.style.display=jud?'grid':'none';
   const tit=document.getElementById('taj-titulo'); if(tit) tit.textContent='Gerar termo de acordo'+(jud?' (judicial)':' (extrajudicial)');
-  if(jud) _tajOnClausula4();
+  // Foro de eleição é cláusula do EXTRAjudicial (cláusula 9). O termo judicial
+  // vai ao juízo do processo — o template acordo-judicial.html nem tem o
+  // placeholder {{foroComarca}} — então o campo some pra não confundir.
+  const foroWrap=document.getElementById('tajForoWrap'); if(foroWrap) foroWrap.style.display=jud?'none':'';
+  if(jud){ _tajOnClausula4(); _tajSugerirComarca(); }
 }
 function _tajOnClausula4(){
   const mode=(document.getElementById('tajJudClausula4')||{}).value||'consolidacao';
@@ -45805,7 +45865,7 @@ function _tajEnsureModals(){
         </div>
         <div id="tajJudFields" style="display:none;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;padding:10px;border:1px dashed var(--border);border-radius:6px;">
           <div style="grid-column:1/3;font-size:11px;color:var(--gold-dark,#9C7F40);text-transform:uppercase;letter-spacing:.08em;">⚖ Dados do processo</div>
-          <div><label ${lbl}>Nº do processo</label><input id="tajJudProcesso" placeholder="0000000-00.0000.8.16.0000" ${inp}></div>
+          <div><label ${lbl}>Nº do processo</label><input id="tajJudProcesso" placeholder="0000000-00.0000.8.16.0000" oninput="_tajSugerirComarca()" ${inp}></div>
           <div><label ${lbl}>Comarca</label><input id="tajJudComarca" list="tajComarcaLista" autocomplete="off" ${inp}><datalist id="tajComarcaLista"></datalist></div>
           <div><label ${lbl}>Foro</label><select id="tajJudForo" ${inp}><option value="jec">Juizado Especial Cível</option><option value="vara">Vara Cível</option></select></div>
           <div><label ${lbl}>Cláusula 4 (variável)</label><select id="tajJudClausula4" onchange="_tajOnClausula4()" ${inp}><option value="consolidacao">Consolidação neste feito</option><option value="desistencia">Concentração + desistência de outro processo</option><option value="sisbajud">Sisbajud (liberação de bloqueio)</option></select></div>
