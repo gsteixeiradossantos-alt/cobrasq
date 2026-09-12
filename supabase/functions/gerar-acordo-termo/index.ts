@@ -82,17 +82,25 @@ Deno.serve(async (req) => {
     // anterior — array vazio, nada muda.
     const advs = (Array.isArray(dados.advogados) ? dados.advogados : []).filter((a: any) => a && a.nome);
     const tipoAcordoLabel = dados.tipo === "judicial" ? "Acordo Judicial" : "Acordo Extrajudicial";
-    // Título do documento no ZapSign: "<devedores> | <tipo> | Proc. n. <nº> | <credor>"
-    // (judicial) ou "<devedores> | <tipo> | <credor>" (extrajudicial, sem processo).
+    // Título do documento no ZapSign: "<devedores> | <tipo> | Proc. n. <nº> | <cedente>"
+    // (judicial) ou "<devedores> | <tipo> | <cedente>" (extrajudicial, sem processo).
     // Todos os devedores entram pelo nome — sem abreviar em "+N" — com um corte
     // defensivo pra não estourar o limite de tamanho do campo `name` no ZapSign.
+    // O último campo é o CEDENTE do caso (dados.cedente.nome, nome fantasia do cliente
+    // do cadastro) — não a parte que assina como credora no termo. Desde que o campo
+    // Credor passou a vir "COBRASQ" por padrão (28/08), o título saía sempre com a
+    // cessionária e não dizia de que carteira era o acordo. Decisão do Gustavo em
+    // 12/09/2026: só o cedente, pelo nome fantasia. `dados.credor.nome` fica como
+    // fallback para chamadas antigas que ainda não mandam `cedente`.
     const nomesDevedores = devs.map((d: any) => String(d?.nome || "").trim()).filter(Boolean).join(", ");
     const nomesTitulo = nomesDevedores.length > 90 ? nomesDevedores.slice(0, 87).trim() + "..." : nomesDevedores;
+    const cedenteNome = String(dados.cedente?.nome || "").trim();
     const credorNome = String(dados.credor?.nome || "").trim();
     const numeroProcesso = String(dados.judicial?.numeroProcesso || "").trim();
     const partesTitulo = [nomesTitulo || "Devedor", tipoAcordoLabel];
     if (dados.tipo === "judicial" && numeroProcesso) partesTitulo.push("Proc. n. " + numeroProcesso);
-    if (credorNome) partesTitulo.push(credorNome);
+    const tituloCedente = cedenteNome || credorNome;
+    if (tituloCedente) partesTitulo.push(tituloCedente);
     const zapBody = {
       name: partesTitulo.join(" | "),
       base64_pdf,
