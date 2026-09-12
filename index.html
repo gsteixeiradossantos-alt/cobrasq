@@ -4195,38 +4195,6 @@ body.viewas-readonly select {
   </div>
 </div>
 
-<!-- MODAL: ACORDO -->
-<div id="modal-acordo" class="overlay">
-  <div class="modal modal-md">
-    <div class="modal-header">
-      <span class="modal-title">Novo Acordo</span>
-      <button class="modal-close" data-close="modal-acordo">&#10005;</button>
-    </div>
-    <div class="modal-body">
-      <input type="hidden" id="macord-devId">
-      <div class="fg-row">
-        <div class="fg">
-          <label>Valor da entrada (R$)</label>
-          <input type="text" id="macord-entrada" placeholder="0,00">
-        </div>
-        <div class="fg">
-          <label>Primeiro vencimento *</label>
-          <input type="date" id="macord-venc1">
-        </div>
-      </div>
-      <div class="fg" style="margin-top:10px;">
-        <label>Observações</label>
-        <textarea id="macord-obs" rows="3" placeholder="Condições do acordo..."></textarea>
-      </div>
-      <p style="font-size:11.5px;color:var(--text-3);margin-top:10px;">As parcelas — podendo ter mais de uma faixa de valor (ex.: 3x R$300 e depois 12x R$400) — são digitadas na próxima tela, junto com o Termo de acordo.</p>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-ghost" data-close="modal-acordo">Cancelar</button>
-      <button class="btn btn-success" id="btn-save-acordo">Continuar para o Termo de acordo →</button>
-    </div>
-  </div>
-</div>
-
 <!-- MODAL: PROJETO -->
 <div id="modal-projeto" class="overlay">
   <div class="modal modal-md">
@@ -6091,7 +6059,7 @@ async function loadRelationalData(){
   // Valor atualizado sempre corrente: recalcula HOJE em memória (compute-on-read).
   _refrescarValorAtualHoje();
   await loadGruposEconomicos();
-  // Reidrata os acordos da tabela dedicada (salvarAcordo/toggleParcela persistem lá).
+  // Reidrata os acordos da tabela dedicada (abrirAcordo/toggleParcela persistem lá).
   await _reidratarAcordos(DB.devedores);
   // F-20 (Fase 2): rebaseia a referência anti-encolhimento ao que ESTE usuário REALMENTE
   // carregou. O blob (cobrasq_data) tem TODOS os devedores (RLS SELECT=true), mas o
@@ -7019,7 +6987,7 @@ async function viaCepLookup(cepStr, alvo, force){
 //   • Telefone → (46) 99922-3332 / (46) 9922-3332   • CEP → 85660-000
 const _MASK_MONEY = new Set(['mlanc-valor','mlanc-juros','mlanc-multa','mlanc-desconto',
   'mtransf-valor','mcust-valor-previsto','mcust-valor-bloqueado','mcust-valor-sacado',
-  'mrec-valor','macord-entrada','di-valor','mpag-valor','cpnc-valor',
+  'mrec-valor','di-valor','mpag-valor','cpnc-valor',
   'cobr-valor-capital','cobr-valor-atual']);
 const _MASK_DOC = new Set(['mdev-doc','mcli-doc','di-doc','cpnc-doc','mctf-doc',
   'cfg-cnpj','devedor-cpf']);
@@ -18133,36 +18101,19 @@ function recalcAcordoBlocos(containerId, entradaId, resumoId){
   if(cId==='taj-blocos'){ const elT=document.getElementById('tajTotal'); if(elT) elT.value = valorBRParaInput(total); }
 }
 
+// "Novo Acordo" vai DIRETO ao Termo de acordo — não há mais o modal
+// intermediário (entrada / 1º vencimento / observações): o Termo já pede o 1º
+// vencimento, e a entrada, quando existe, é digitada lá como a 1ª faixa (1
+// parcela). O passo só servia pra clicar em "Continuar" (decisão do Gustavo,
+// 12/09/2026). O que fica é a criação do acordo "rascunho" (valorTotal=0,
+// numParc=0, sem faixas) só pra ter um id — tajGerarPreview() fecha (upsert)
+// esse acordo com as faixas de verdade antes de montar o documento.
 function abrirAcordo(devId){
-  document.getElementById('macord-devId').value = devId;
-  document.getElementById('macord-entrada').value = '';
-  document.getElementById('macord-venc1').value = hoje();
-  document.getElementById('macord-obs').value = '';
-  openModal('modal-acordo');
-}
-
-// Passo 1 de 2: só entrada + 1º vencimento + observações. As faixas de parcela
-// são digitadas uma única vez, no passo 2 (#taj-blocos, dentro do Termo de
-// acordo) — ver tajGerarPreview(), que fecha (upsert) o acordo aberto aqui com
-// as faixas de verdade antes de montar o documento. Cria um acordo "rascunho"
-// (valorTotal=entrada, numParc=0, sem faixas) só pra ter um id pra vincular.
-function salvarAcordo(){
-  const devId = document.getElementById('macord-devId').value;
-  const entrada = parseValorBR(document.getElementById('macord-entrada').value||'0');
-  const venc1 = document.getElementById('macord-venc1').value;
-  const obs = document.getElementById('macord-obs').value||'';
-
-  if(!devId || !venc1){ alert('Preencha o primeiro vencimento.'); return; }
-
   const dev = (DB.devedores||[]).find(d=>d.id===devId);
   if(!dev){ alert('Devedor não encontrado.'); return; }
+  const venc1 = hoje();
 
-  const parcelas = [];
-  if(entrada > 0){
-    parcelas.push({ id:uid(), numero:0, valor:entrada, vencimento:venc1, pago:false, tipo:'entrada' });
-  }
-
-  const acordo = { id:uid(), valorTotal:entrada, numParc:0, entrada, venc1, obs, parcelas, blocos:[], createdAt:hoje() };
+  const acordo = { id:uid(), valorTotal:0, numParc:0, entrada:0, venc1, obs:'', parcelas:[], blocos:[], createdAt:hoje() };
   if(!dev.acordos) dev.acordos = [];
   dev.acordos.push(acordo);
   dev.status = 'Acordo';
@@ -18174,24 +18125,21 @@ function salvarAcordo(){
   // (forma ∈ avista/boleto/cartao/outro; status ∈ ativo/encerrado/cancelado).
   upsertAcordoRelational(devId, {
     id: acordo.id,
-    forma: entrada > 0 ? 'outro' : 'avista',
+    forma: 'avista',
     status: 'ativo',
-    parcelas,
-    valorTotal: entrada,
-    valorEntrada: entrada,
+    parcelas: [],
+    valorTotal: 0,
+    valorEntrada: 0,
     numParcelas: 0,
     dataPrimeiroVenc: venc1,
-    metadata: { obs, blocos: [] }
+    metadata: { obs: '', blocos: [] }
   }).then(res=>{
     if(!res || !res.ok) showToast('Acordo salvo na tela, mas falhou ao gravar no servidor'+(res&&res.error?': '+res.error:'')+'. Recarregue e tente de novo.','warning');
   });
-  closeModal('modal-acordo');
   if(currentDevId === devId) renderDrawerBody(devId);
   renderDevedores();
-  // Encadeia direto no Termo de acordo — é lá que as faixas de parcela são
-  // digitadas (só uma vez) e o acordo é fechado de verdade, em
-  // tajGerarPreview(). Seguro por construção: vincular_zapsign_acordo (RPC) só
-  // ANEXA o link do ZapSign a um acordo ativo já existente — não sobrescreve
+  // Seguro por construção: vincular_zapsign_acordo (RPC) só ANEXA o link do
+  // ZapSign a um acordo ativo já existente — não sobrescreve
   // valor_total/num_parcelas/metadata — então nada do que for fechado aqui é
   // substituído por engano mais adiante.
   if(typeof abrirTermoAcordoJ==='function') abrirTermoAcordoJ(devId);
@@ -45100,10 +45048,10 @@ function calcSimulador(){
   document.getElementById('msim-valor-total').textContent = fmtR(valorDesc);
 }
 
-// modal-acordo não tem mais campo de parcela (só entrada/vencimento/obs — as
-// faixas são digitadas no Termo de acordo, passo seguinte). O parcelamento
-// simulado aqui vira a faixa inicial de lá via _tajFaixasIniciais, um sinal
-// de uma vez só que abrirTermoAcordoJ() consome e descarta.
+// Não há mais modal intermediário: abrirAcordo() cria o rascunho e abre o
+// Termo de acordo, onde as faixas são digitadas. O parcelamento simulado aqui
+// vira a faixa inicial de lá via _tajFaixasIniciais, um sinal de uma vez só
+// que abrirTermoAcordoJ() consome e descarta.
 function usarSimulacao(devId, valorOrig){
   const pct = parseInt(document.getElementById('msim-desc-pct').value)||0;
   const parc = parseInt(document.getElementById('msim-parc').value)||1;
@@ -45236,7 +45184,7 @@ function abrirTermoAcordoJ(devId){
   const acs = dev.acordos||[];
   const _acsVivos = acs.filter(acordoVivo);
   const ac = _acsVivos.find(a=>a.status==='Ativo'||a.status==='Em andamento') || _acsVivos[0] || {};
-  // acordoId: o acordo "rascunho" que salvarAcordo() acabou de criar (ou um já
+  // acordoId: o acordo "rascunho" que abrirAcordo() acabou de criar (ou um já
   // existente, se o Termo foi aberto pelo botão de dentro de um acordo). É nele
   // que tajGerarPreview() grava as faixas de verdade — sem id, não tem o que
   // atualizar depois.
@@ -45299,7 +45247,7 @@ function abrirTermoAcordoJ(devId){
   <div id="tajDevExtrasHint" style="grid-column:1/3;font-size:11px;color:var(--text-3);display:none;"></div>
   <div style="grid-column:1/3;font-size:11px;font-weight:700;color:var(--text-3);border-top:1px solid var(--border);padding-top:8px;">VALORES DO ACORDO</div>
   <div><label ${lbl}>Valor total (R$) <span style="font-weight:400;">— automático</span></label><input id="tajTotal" value="${escHtml(valorBRParaInput(total))}" type="text" readonly style="width:100%;padding:7px;border:1px solid var(--border);border-radius:5px;font-size:13px;background:var(--surface-2);color:var(--text);cursor:not-allowed;"></div>
-  <div style="grid-column:1/3;"><label ${lbl}>Parcelas — pode ter mais de uma faixa de valor (ex.: 3x R$300 e depois 12x R$400). Se tem entrada, ela já entrou como a 1ª faixa (1 parcela) — ajuste aqui se precisar.</label>
+  <div style="grid-column:1/3;"><label ${lbl}>Parcelas — pode ter mais de uma faixa de valor (ex.: 3x R$300 e depois 12x R$400). Se tem entrada, digite-a como a 1ª faixa (1 parcela), antes das demais.</label>
     <div id="taj-blocos"></div>
     <button type="button" class="btn btn-ghost btn-sm" style="margin-top:6px;" onclick="addBlocoAcordo(1,null,'taj-blocos')">+ Adicionar faixa de parcelas</button>
   </div>
@@ -45318,7 +45266,7 @@ function abrirTermoAcordoJ(devId){
   // Acordo, sinal de uso único — ver usarSimulacao()); senão as do acordo já
   // registrado (Novo Acordo); senão, se o acordo é velho (tem parcelas mas
   // nunca teve blocos), reconstrói 1 faixa de nParc×valorParc; um acordo NOVO
-  // (rascunho recém-criado por salvarAcordo(), ainda sem nenhuma faixa) cai
+  // (rascunho recém-criado por abrirAcordo(), ainda sem nenhuma faixa) cai
   // em [] — nada pra reaproveitar, o usuário preenche do zero (não pode usar o
   // fallback nParc×valorParc aqui: total/nParc daria uma faixa fantasma igual
   // à entrada, dobrando o valor — foi exatamente o bug do F-29). Sem campo de
@@ -45701,7 +45649,7 @@ async function _tajFecharAcordo(faixas, venc1){
   const isNovo = !acLocal;
   if(isNovo){
     // Defensivo: Termo aberto sem acordo vinculado — não deveria acontecer no
-    // fluxo normal (que sempre passa por salvarAcordo() antes), mas não trava.
+    // fluxo normal (que sempre passa por abrirAcordo() antes), mas não trava.
     acordoId = uid();
     acLocal = { id:acordoId, createdAt:hoje() };
     if(!dev.acordos) dev.acordos = [];
@@ -49454,7 +49402,6 @@ document.addEventListener('DOMContentLoaded', ()=>{
   document.getElementById('btn-save-historico').addEventListener('click', salvarHistorico);
 
   // ── MODAL: ACORDO ─────────────────────────────────────────
-  document.getElementById('btn-save-acordo').addEventListener('click', salvarAcordo);
 
   // ── MODAL: PROCESSO ───────────────────────────────────────
   document.getElementById('btn-save-processo').addEventListener('click', salvarProcesso);
