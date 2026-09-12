@@ -183,13 +183,30 @@ module.exports = async function handler(req, res) {
     // — é por esse campo que api/_processar-recebimento.js resolve o acordo no
     // webhook, então ter várias séries no mesmo acordo não quebra esse caminho.
     const blocosMeta = Array.isArray(meta.blocos) ? meta.blocos.filter((b) => b && b.qtd > 0 && b.valor > 0) : [];
-    const usaBlocos = blocosMeta.length > 1;
+    // FAIXA VIA PIX (meio:'pix', escolhido no Termo de acordo): paga fora do Asaas
+    // — entrada/parcela única no ato, tipicamente. Não emite boleto para ela; a
+    // baixa é manual na gaveta do devedor. Só as faixas 'boleto' viram série.
+    const blocosBoleto = blocosMeta.filter((b) => b.meio !== 'pix');
+    const temPix = blocosBoleto.length < blocosMeta.length;
+    const usaBlocos = blocosMeta.length > 1 || temPix;
+
+    if (temPix && !blocosBoleto.length) {
+      // Acordo 100% PIX: nada a emitir. Marca como emitido (idempotência e o
+      // botão "Emitir" do Painel param de insistir) e registra o porquê.
+      const metaPix = { ...meta, boletos_emitidos: true, emitido_em: new Date().toISOString(), emitido_via: manual ? 'manual' : 'auto', sem_boleto: 'todas as faixas via PIX', valor_boletos: 0, asaas_series: [] };
+      delete metaPix.emitindo;
+      await sbFetch(`acordos?id=eq.${acordo.id}`, { method: 'PATCH', body: JSON.stringify({ status: 'ativo', metadata: metaPix }) });
+      claimedAcordo = false;
+      await sbFetch('devedor_eventos', { method: 'POST', body: JSON.stringify({ devedor_id: dev.id, tipo: 'acordo_sem_boleto_pix', payload: { acordo_id: acordo.id, parcelas: nParc, total }, autor_nome: manual ? 'Faturamento' : 'Automação' }) }).catch(() => {});
+      return res.status(200).json({ ok: true, skipped: 'todas as faixas via PIX — nenhum boleto a emitir', acordo_id: acordo.id, series: 0, parcelas: nParc, total: 0 });
+    }
 
     let series; // [{ bloco, qtd, total, dueDate, charge }] — sempre >=1 entrada.
     if (usaBlocos) {
       series = [];
       for (let bi = 0; bi < blocosMeta.length; bi++) {
         const bloco = blocosMeta[bi];
+        if (bloco.meio === 'pix') continue;   // faixa PIX: sem série no Asaas
         const parcelasDoBloco = parcelas.filter((p) => (p.bloco || 0) === bi + 1);
         const dueBloco = (parcelasDoBloco[0] && (parcelasDoBloco[0].vencimento || parcelasDoBloco[0].venc)) || firstDue;
         const totalBloco = round2(bloco.qtd * bloco.valor);
@@ -235,6 +252,8 @@ module.exports = async function handler(req, res) {
     // vínculo dos boletos das faixas seguintes.
     const primeira = series[0].charge;
     const invoiceUrl = primeira.invoiceUrl || primeira.bankSlipUrl || '';
+    // Com faixa PIX no meio, o que foi ao Asaas é só a soma das séries emitidas.
+    if (temPix) total = round2(series.reduce((s, x) => s + x.total, 0));
 
     const newMeta = {
       ...meta,
@@ -275,7 +294,13 @@ module.exports = async function handler(req, res) {
     try {
       const linhasAll = [];
       let offsetParc = 0;
+      // Parcelas via PIX não têm boleto nem asaas_payment_id — não entram como
+      // previstas aqui (a baixa manual na gaveta cuida delas), mas contam na
+      // numeração: faixa PIX de 1 parcela antes de 12 boletos → boletos 2..13.
+      const offsetDeBloco = {};
+      { let acc = 0; blocosMeta.forEach((b, i) => { offsetDeBloco[i + 1] = acc; acc += b.qtd; }); }
       for (const s of series) {
+        if (temPix) offsetParc = offsetDeBloco[s.bloco] || 0;
         let pagamentos = [];
         if (s.charge.installment) {
           const lista = await asaasReq('GET', `/payments?installment=${encodeURIComponent(s.charge.installment)}&limit=100`);
