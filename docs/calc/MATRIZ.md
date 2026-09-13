@@ -27,10 +27,18 @@ servido de `templates/` para **não** cair no rewrite catch-all do `vercel.json`
   `CalcEngine.calcularJudicial` / `CalcEngine.TABELAS` (calculadora standalone, já migrada).
 
 ## Atualização mensal dos índices (o ganho)
-Editar **só** `CalcEngine.TABELAS` em `templates/calc-engine.js` (acrescentar o mês novo
-nas 7 séries — INPC/IPCA/IGP-M/IGP-DI/SELIC/TJPR/TAXA-LEGAL; TJPR e TAXA-LEGAL são
-derivadas/auto-fetch, mas confira) e avançar `INDICES_ATE`. Peça, memorial, cobrança do
-painel/CRM e a calc-jurídica passam a usar o valor novo automaticamente.
+**Automática desde 12/09/2026:** o workflow `.github/workflows/atualizar-indices.yml` roda nos
+dias 12 e 16, chama `scripts/atualizar-indices.mjs` (BCB/SGS → `CalcEngine.TABELAS`, só meses
+fechados, nunca sobrescreve valor já gravado) e abre o PR `bot/indices-AAAA-MM`. **O merge é
+humano** — conferir os valores contra a fonte antes. O job `indices-atualizados` do CI fica
+vermelho a partir do dia 16 se o mês anterior ainda faltar (não trava o `test-and-lint`).
+À mão: `node scripts/atualizar-indices.mjs` (ou `--check` para só conferir).
+Peça, memorial, cobrança do painel/CRM e a calc-jurídica usam o valor novo automaticamente
+depois do merge. A calc-jurídica ainda sincroniza do BCB ao abrir (`syncBCB`), mas só meses
+fechados — o mês em curso nunca entra (era o erro do #509).
+
+Regra do motor que justifica a pressa: **mês sem índice na tabela vale 0%** (`calc-engine.js`,
+`varPct === undefined → 0`), sem aviso. O único sinal é o "Índices até AAAA-MM" no PDF.
 
 ## Testes
 `npm test` (inclui `test/calc_engine.test.js`) ou, sem Node:
