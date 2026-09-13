@@ -185,6 +185,34 @@
     }).join("");
   }
 
+  // Visto (rubrica) do devedor em TODAS as páginas — pedido do Gustavo, 12/09/2026.
+  // O ZapSign posiciona a rubrica onde achar o texto âncora <<vistodevN>> (campo
+  // rubrica_placement do signatário, gerado em gerar-acordo-termo/index.ts). Para o
+  // texto existir em cada página sem depender de JS de paginação, ele vai nas caixas
+  // de margem do @page (Chromium 131+ imprime `content` de margin box como texto real
+  // — testado com PyMuPDF em 12/09/2026; position:fixed NÃO serve: some da página 1).
+  // Duas âncoras por caixa, separadas por word-spacing de 30mm, porque o carimbo do
+  // ZapSign nasce no canto inferior-esquerdo da âncora e cresce para cima e para a
+  // direita (medido no acordo da Jéssica: 32×19mm a assinatura). Ordem das caixas:
+  // inferior-esquerda, inferior-direita, superior-esquerda, superior-direita — até 8
+  // devedores; do 9º em diante fica sem visto (assinatura completa continua). A margem
+  // inferior dos templates é de 34mm justamente para o visto (≤28mm) não invadir o texto.
+  // Mesma regra da âncora de assinatura: Arial (TrueType → trecho único no PDF), 3pt,
+  // cinza-claro, letter-spacing 0. Não trocar por fonte via data:.
+  function vistosPageCss(n) {
+    n = Math.min(Math.max(parseInt(n, 10) || 0, 0), 8);
+    if (!n) return "";
+    const caixas = ["bottom-left", "bottom-right", "top-left", "top-right"];
+    const est = "font-family:Arial,Helvetica,sans-serif; font-size:3pt; color:#e6e6e3; letter-spacing:0; word-spacing:30mm; white-space:nowrap; text-align:left; vertical-align:bottom; padding-bottom:2mm;";
+    let css = "";
+    for (let i = 0; i < n; i += 2) {
+      const anc = ["<<vistodev" + (i + 1) + ">>"];
+      if (i + 1 < n) anc.push("<<vistodev" + (i + 2) + ">>");
+      css += "@" + caixas[i / 2] + "{ content:\"" + anc.join(" ") + "\"; " + est + " }\n";
+    }
+    return "@page{\n" + css + "}";
+  }
+
   // Assinaturas: um bloco por devedor, com a âncora <<assdevN>> (1-based).
   function assinaturasDevedores(devs) {
     return (devs || []).map(function (dv, i) {
@@ -236,6 +264,7 @@
       credorQualificacao: qualifCredor(cr),
       devedoresPreambulo: preambuloDevedores(devs),
       assinaturasDevedores: assinaturasDevedores(devs),
+      vistosPageCss: vistosPageCss(devs.length),
       valorDivida: valorCompleto(ac.total),
       frasePagamento: frasePagamento(ac),
       fraseEntregaBoletos: fraseEntregaBoletos(ac, cr.genero),
@@ -471,7 +500,7 @@
   // preenche já permitindo HTML nos valores de cláusula 4 / contato (não escapa esses)
   function preencherJudicial(templateHtml, dados) {
     const map = placeholdersJudicial(dados);
-    const rawHtml = { clausula4Corpo: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1, frasePagamento: 1, fraseEntregaBoletos: 1, credorQualificacao: 1 };
+    const rawHtml = { clausula4Corpo: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1, frasePagamento: 1, fraseEntregaBoletos: 1, credorQualificacao: 1, vistosPageCss: 1 };
     return templateHtml.replace(/\{\{(\w+)\}\}/g, function (m, k) {
       if (!Object.prototype.hasOwnProperty.call(map, k)) return m;
       return rawHtml[k] ? String(map[k] == null ? "" : map[k]) : escAttr(map[k]);
@@ -496,7 +525,7 @@
     extInt, reaisExt, valorCompleto, pctExt, dataExtenso, estadoFrase,
     qualifDevedor, qualifCredor, frasePagamento, fraseEntregaBoletos, placeholders,
     foroDe, comarcaDaQualificacao,
-    preambuloDevedores, assinaturasDevedores, generoDevedorLabel,
+    preambuloDevedores, assinaturasDevedores, generoDevedorLabel, vistosPageCss,
     preencher, carregarTemplate, montarTermoExtrajudicial,
     credorEhCobrasq, timbreDe, carregarTimbreTA, aplicarTimbreTA,
     enderecamentoJudicial, clausula4Judicial, contatoReJudicial, contaFrase, assinaturaAdvExec,
