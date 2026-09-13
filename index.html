@@ -27793,36 +27793,42 @@ window.finApi = (function(){
     if(e1) throw e1;
     const ids = [...new Set((cats||[]).map(c=>c.lancamento_id))];
     if(!ids.length) return [];
+    // Blocos de 300 ids disjuntos: juntos, não em fila.
+    const blocos = []; for(let i=0;i<ids.length;i+=300) blocos.push(ids.slice(i,i+300));
+    const partes = await Promise.all(blocos.map(bloco => sb.from('fin_lancamento')
+      .select('id,descricao,data_vencimento,valor,cobranca_id,credor_id')
+      .in('id', bloco)
+      .eq('tipo_movimento', 0).eq('status', 0)));
     const lancs = [];
-    for(let i=0;i<ids.length;i+=300){
-      const { data, error } = await sb.from('fin_lancamento')
-        .select('id,descricao,data_vencimento,valor,cobranca_id,credor_id')
-        .in('id', ids.slice(i,i+300))
-        .eq('tipo_movimento', 0).eq('status', 0);
-      if(error) throw error;
-      lancs.push(...(data||[]));
-    }
+    for(const { data, error } of partes){ if(error) throw error; lancs.push(...(data||[])); }
+    // Duas cadeias independentes — cliente pela cobrança, e credor gravado direto no
+    // lançamento — vão juntas. Precedência na montagem: credor_id gravado no lançamento >
+    // cliente da cobrança. A coluna existe porque a cadeia devedor→cobrança→cliente não
+    // resolve a maioria dos repasses importados (239 de 323 em 16/08/2026).
     const cobIds = [...new Set(lancs.map(l=>l.cobranca_id).filter(Boolean))];
-    const credPorCob = {};
-    if(cobIds.length){
-      const { data: cobs } = await sb.from('cobrancas').select('id,cliente_id').in('id', cobIds);
-      const cliIds = [...new Set((cobs||[]).map(c=>c.cliente_id).filter(Boolean))];
-      const nomes = {};
-      if(cliIds.length){
-        const { data: cls } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', cliIds);
-        (cls||[]).forEach(c=>{ nomes[c.id] = c.nome_fantasia || c.nome; });
-      }
-      (cobs||[]).forEach(c=>{ credPorCob[c.id] = { id:c.cliente_id, nome: nomes[c.cliente_id] || null }; });
-    }
-    // Precedência: credor_id gravado no lançamento > cliente da cobrança. A coluna
-    // existe porque a cadeia devedor→cobrança→cliente não resolve a maioria dos
-    // repasses importados (239 de 323 em 16/08/2026).
-    const nomesDiretos = {};
     const diretos = [...new Set(lancs.map(l=>l.credor_id).filter(Boolean))];
-    if(diretos.length){
-      const { data: cls2 } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', diretos);
-      (cls2||[]).forEach(c=>{ nomesDiretos[c.id] = c.nome_fantasia || c.nome; });
-    }
+    const [credPorCob, nomesDiretos] = await Promise.all([
+      (async () => {
+        const out = {};
+        if(!cobIds.length) return out;
+        const { data: cobs } = await sb.from('cobrancas').select('id,cliente_id').in('id', cobIds);
+        const cliIds = [...new Set((cobs||[]).map(c=>c.cliente_id).filter(Boolean))];
+        const nomes = {};
+        if(cliIds.length){
+          const { data: cls } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', cliIds);
+          (cls||[]).forEach(c=>{ nomes[c.id] = c.nome_fantasia || c.nome; });
+        }
+        (cobs||[]).forEach(c=>{ out[c.id] = { id:c.cliente_id, nome: nomes[c.cliente_id] || null }; });
+        return out;
+      })(),
+      (async () => {
+        const out = {};
+        if(!diretos.length) return out;
+        const { data: cls2 } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', diretos);
+        (cls2||[]).forEach(c=>{ out[c.id] = c.nome_fantasia || c.nome; });
+        return out;
+      })(),
+    ]);
     return lancs
       .map(l => Object.assign({}, l, {
         credor: l.credor_id ? { id:l.credor_id, nome: nomesDiretos[l.credor_id] || null }
@@ -34917,9 +34923,19 @@ async function _repLoad(){
 }
 async function _repLoadReal(){
   const sb = getSupabase();
-  const r = await sb.from('fin_operacao')
-    .select('id,credor_id,devedor_id,parcela,total_parcelas,valor_recebido,valor_capital,valor_honorario,recebido_em,repasse_status,repasse_efetuado_em,repasse_comprovante_url,lancamento_despesa_id,metadata,criada_em')
-    .order('recebido_em',{ascending:false}).limit(2000);
+  // Os recebíveis (duas idas ao Asaas, acordos sem providência) NÃO seguram a tela: sobem
+  // junto com o núcleo, pousam depois e repintam o painel quando chegam. A fila do Painel
+  // (_montarFilaDecisoes) só precisa de ops/credMap e esperava por eles à toa — a cadeia
+  // inteira era serial: 8,1 s e 15 viagens uma atrás da outra (medido em 13/09/2026).
+  _repState.recebiveisProntos = false;
+  const recebiveis = _repCarregarRecebiveis();
+  // fin_operacao e os repasses importados não dependem um do outro: juntos.
+  const [r, pendRes] = await Promise.all([
+    sb.from('fin_operacao')
+      .select('id,credor_id,devedor_id,parcela,total_parcelas,valor_recebido,valor_capital,valor_honorario,recebido_em,repasse_status,repasse_efetuado_em,repasse_comprovante_url,lancamento_despesa_id,metadata,criada_em')
+      .order('recebido_em',{ascending:false}).limit(2000),
+    finApi.listRepassesAPagar().then(pend => ({ pend }), e => ({ erro: e })),
+  ]);
   if(r.error) throw r.error;
   // Monta a lista numa variável LOCAL e só publica em _repState.ops no fim. Publicar
   // antes do await abaixo abria uma janela em que duas cargas concorrentes zeravam e
@@ -34935,8 +34951,9 @@ async function _repLoadReal(){
   // funcionarem sem saber a diferença. Quem já tem operação fica de fora, senão o valor
   // seria contado duas vezes.
   try{
+    if(pendRes.erro) throw pendRes.erro;
     const jaTemOp = new Set(ops.map(o=>o.lancamento_despesa_id).filter(Boolean));
-    const pend = await finApi.listRepassesAPagar();
+    const pend = pendRes.pend;
     const hojeISO = isoLocal(new Date());
     const elegiveis = (pend||[]).filter(l => l.credor && l.credor.id && !jaTemOp.has(l.id));
     // Só o que JÁ VENCEU. Dos 315 repasses importados, 265 (R$ 108.873,05) vencem depois
@@ -34966,33 +34983,61 @@ async function _repLoadReal(){
   _repState.ops = ops.filter(o=>{ const k=String(o.id); if(vistos.has(k)) return false; vistos.add(k); return true; });
   _repState.credMap = {}; _repState.devMap = {};
   const cIds=[...new Set(_repState.ops.map(o=>o.credor_id).filter(Boolean))];
-  if(cIds.length){
-    // chave_pix é opcional no schema — tenta trazer; se a coluna não existir, cai p/ id,nome.
-    let data=null;
-    try{ const q=await sb.from('clientes').select('id,nome,chave_pix').in('id',cIds); if(q.error) throw q.error; data=q.data; }
-    catch(_){ const q2=await sb.from('clientes').select('id,nome').in('id',cIds); data=q2.data; }
-    (data||[]).forEach(c=>_repState.credMap[c.id]={nome:c.nome, pix:c.chave_pix||null});
-  }
   const dIds=[...new Set(_repState.ops.map(o=>o.devedor_id).filter(Boolean))];
-  if(dIds.length){ const {data}=await sb.from('devedores').select('id,nome').in('id',dIds); (data||[]).forEach(d=>_repState.devMap[d.id]=d.nome); }
+  // Nomes de credores e de devedores: duas listas independentes, juntas.
+  const [creds, devs] = await Promise.all([
+    (async () => {
+      if(!cIds.length) return [];
+      // chave_pix é opcional no schema — tenta trazer; se a coluna não existir, cai p/ id,nome.
+      try{ const q=await sb.from('clientes').select('id,nome,chave_pix').in('id',cIds); if(q.error) throw q.error; return q.data||[]; }
+      catch(_){ const q2=await sb.from('clientes').select('id,nome').in('id',cIds); return q2.data||[]; }
+    })(),
+    (async () => {
+      if(!dIds.length) return [];
+      const {data}=await sb.from('devedores').select('id,nome').in('id',dIds); return data||[];
+    })(),
+  ]);
+  creds.forEach(c=>_repState.credMap[c.id]={nome:c.nome, pix:c.chave_pix||null});
+  devs.forEach(d=>_repState.devMap[d.id]=d.nome);
 
-  // Dados do antigo painel "Recebíveis" (fundido aqui 2026-08-06): cobrança Asaas em
-  // aberto, acordos assinados pendentes de lançar/repassar, inadimplência. Cada um é
-  // best-effort — falha isolada não derruba o carregamento dos repasses.
+  _repState.loaded = true;
+  // Recebíveis pousando depois: repinta o painel de repasses se ele estiver na tela
+  // (a única aba que os desenha). Modais moram fora de #page-repasses e sobrevivem.
+  recebiveis.then(()=>{
+    try{
+      const pg = document.getElementById('page-repasses');
+      if(pg && pg.classList.contains('active') && _repState.tab==='painel' && _repState.loaded) renderRepassesClientes(true);
+    }catch(_){}
+  });
+}
+// Dados do antigo painel "Recebíveis" (fundido aqui 2026-08-06): cobrança Asaas em
+// aberto, acordos assinados pendentes de lançar/repassar, inadimplência. Cada um é
+// best-effort — falha isolada não derruba o carregamento dos repasses. Os três vão
+// juntos (eram três esperas em fila: 1,1 s + 0,9 s + 3,3 s). Geração: uma recarga que
+// suba no meio (loaded=false → _repLoad de novo) não é sobrescrita pela mais velha.
+let _repRecebiveisGer = 0;
+async function _repCarregarRecebiveis(){
+  const ger = ++_repRecebiveisGer;
   _repState.inad = { devList:[], charges:[], oldestAll:null };
   _repState.acordosPend = [];
   _repState.pendenteAsaas = [];
-  try{ _repState.inad = await _loadInadimplentes(); }catch(_){}
-  try{ _repState.acordosPend = await _carregarAcordosPendProvidencia(); }catch(_){}
-  if(DB.config.asaasKey){
-    try{
-      const fim30 = isoLocal(new Date(Date.now()+30*86400000));
-      const rr = await AsaasAPI.req('GET','/payments?limit=100&sort=dueDate&order=asc&status=PENDING').catch(()=>({data:[]}));
-      _repState.pendenteAsaas = (rr?.data||[]).filter(cc=>cc.dueDate && cc.dueDate<=fim30);
-    }catch(_){}
-  }
-
-  _repState.loaded = true;
+  const [inad, acordosPend, pendenteAsaas] = await Promise.all([
+    _loadInadimplentes().catch(()=>null),
+    _carregarAcordosPendProvidencia().catch(()=>[]),
+    (async () => {
+      if(!DB.config.asaasKey) return [];
+      try{
+        const fim30 = isoLocal(new Date(Date.now()+30*86400000));
+        const rr = await AsaasAPI.req('GET','/payments?limit=100&sort=dueDate&order=asc&status=PENDING').catch(()=>({data:[]}));
+        return (rr?.data||[]).filter(cc=>cc.dueDate && cc.dueDate<=fim30);
+      }catch(_){ return []; }
+    })(),
+  ]);
+  if(ger !== _repRecebiveisGer) return;   // carga mais nova já subiu: a dela vale
+  if(inad) _repState.inad = inad;
+  _repState.acordosPend = acordosPend;
+  _repState.pendenteAsaas = pendenteAsaas;
+  _repState.recebiveisProntos = true;
 }
 
 // Agrega fin_operacao por cedente (recebido / honorário / a repassar / último repasse).
@@ -35098,7 +35143,7 @@ function _repRenderPainel(agg){
       <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;width:96px;text-align:right;flex-shrink:0;">${fmtR(a.valorTotal)}</span>
       ${lancBtn}${repBtn}
     </div>`;
-  }).join('') : `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">Nenhum acordo pendente de providência</div></div>`;
+  }).join('') : `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">${_repState.recebiveisProntos ? 'Nenhum acordo pendente de providência' : 'carregando…'}</div></div>`;
   const acordosBloco = `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;margin-bottom:16px;">
     <div style="padding:14px 18px 11px;border-bottom:1px solid #EFEBE0;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
       <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Assinado → lançar → repassar</div>
@@ -35110,7 +35155,7 @@ function _repRenderPainel(agg){
   </div>`;
 
   const inadHtml = !DB.config.asaasKey ? `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">Asaas não configurado</div></div>`
-    : (!inad.devList.length ? `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">Nenhuma parcela em atraso</div></div>`
+    : (!inad.devList.length ? `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">${_repState.recebiveisProntos ? 'Nenhuma parcela em atraso' : 'carregando…'}</div></div>`
     : inad.devList.slice(0,6).map(g=>{
         const dev=g.dev; const dias = g.agg.oldest ? Math.max(0,Math.round((Date.now()-new Date(g.agg.oldest.slice(0,10)+'T00:00:00'))/86400000)) : 0;
         const nome = dev?escHtml(dev.nome):`Cliente Asaas ${escHtml(g.custId)}`;
@@ -35170,8 +35215,8 @@ function _repRenderPainel(agg){
       <div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:16px 18px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#8892A6;margin-bottom:8px;">Clientes com saldo</div><div style="font-family:'JetBrains Mono',monospace;font-size:23px;font-weight:700;color:#0A1530;">${c.nComSaldo}</div><div style="font-size:11px;color:#8892A6;margin-top:3px;">de ${c.cedentes.length} cedente${c.cedentes.length!==1?'s':''} com movimento</div></div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;">
-      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:16px 18px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#8892A6;margin-bottom:8px;">A receber · 30 dias (Asaas)</div><div style="font-family:'JetBrains Mono',monospace;font-size:23px;font-weight:700;color:#0A1530;">${fmtR(kpiAReceber30)}</div><div style="font-size:11px;color:#8892A6;margin-top:3px;">${pendenteAsaas.length} boleto${pendenteAsaas.length!==1?'s':''} ativo${pendenteAsaas.length!==1?'s':''}</div></div>
-      <div style="background:#fff;border:1px solid #E7CFC7;border-radius:10px;padding:16px 18px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#A65A4A;margin-bottom:8px;">Vencido</div><div style="font-family:'JetBrains Mono',monospace;font-size:23px;font-weight:700;color:#A65A4A;">${fmtR(kpiVencido)}</div><div style="font-size:11px;color:#8892A6;margin-top:3px;">${inad.devList.length} devedor${inad.devList.length!==1?'es':''} inadimplente${inad.devList.length!==1?'s':''}</div></div>
+      <div style="background:#fff;border:1px solid #E6E1D2;border-radius:10px;padding:16px 18px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#8892A6;margin-bottom:8px;">A receber · 30 dias (Asaas)</div><div style="font-family:'JetBrains Mono',monospace;font-size:23px;font-weight:700;color:#0A1530;">${_repState.recebiveisProntos ? fmtR(kpiAReceber30) : '—'}</div><div style="font-size:11px;color:#8892A6;margin-top:3px;">${_repState.recebiveisProntos ? `${pendenteAsaas.length} boleto${pendenteAsaas.length!==1?'s':''} ativo${pendenteAsaas.length!==1?'s':''}` : 'carregando…'}</div></div>
+      <div style="background:#fff;border:1px solid #E7CFC7;border-radius:10px;padding:16px 18px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#A65A4A;margin-bottom:8px;">Vencido</div><div style="font-family:'JetBrains Mono',monospace;font-size:23px;font-weight:700;color:#A65A4A;">${_repState.recebiveisProntos ? fmtR(kpiVencido) : '—'}</div><div style="font-size:11px;color:#8892A6;margin-top:3px;">${_repState.recebiveisProntos ? `${inad.devList.length} devedor${inad.devList.length!==1?'es':''} inadimplente${inad.devList.length!==1?'s':''}` : 'carregando…'}</div></div>
     </div>
     ${alerta}
     ${acordosBloco}
@@ -36056,8 +36101,13 @@ async function _carregarAcordosPendProvidencia(){
   const devIds = [...new Set(data.map(a=>a.devedor_id).filter(Boolean))];
   const cobIds = [...new Set(data.map(a=>a.cobranca_id).filter(Boolean))];
   const devMap = {}, cobMap = {};
-  if(devIds.length){ const { data:devs } = await sb.from('devedores').select('id,nome').in('id',devIds); (devs||[]).forEach(d=>devMap[d.id]=d.nome); }
-  if(cobIds.length){ const { data:cobs } = await sb.from('cobrancas').select('id,cliente_id').in('id',cobIds); (cobs||[]).forEach(c=>cobMap[c.id]=c.cliente_id); }
+  // Devedores e cobranças não dependem um do outro: juntos. Só os clientes esperam.
+  const [devs, cobs] = await Promise.all([
+    devIds.length ? sb.from('devedores').select('id,nome').in('id',devIds).then(r=>r.data||[]) : Promise.resolve([]),
+    cobIds.length ? sb.from('cobrancas').select('id,cliente_id').in('id',cobIds).then(r=>r.data||[]) : Promise.resolve([]),
+  ]);
+  devs.forEach(d=>devMap[d.id]=d.nome);
+  cobs.forEach(c=>cobMap[c.id]=c.cliente_id);
   const credIds = [...new Set(Object.values(cobMap).filter(Boolean))];
   const credMap = {};
   if(credIds.length){ const { data:creds } = await sb.from('clientes').select('id,nome,metadata,taxa_honorarios').in('id',credIds); (creds||[]).forEach(c=>credMap[c.id]=c); }
