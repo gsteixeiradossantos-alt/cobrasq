@@ -19,6 +19,7 @@
 <script src="/templates/termo-engine.js"></script>
 <!-- Supabase JS SDK -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" crossorigin="anonymous"></script>
+<script src="/assets/js/esnfs-ponte.js" defer></script>
 <script src="/assets/js/nf.js" defer></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -28350,7 +28351,7 @@ function finDivideCascata(lancamento, valorRecebido, contrato){
 // v2): a função dela — repassar ao credor — virou o botão Repassar de Movimentações.
 // setFinTab() ainda aceita os dois ids e manda para lá, já com o filtro Repasses.
 const FIN_CASCATA_TABS = ['visao','lancamentos','repasses','previsaocredor','receitasjudiciais',
-  'fluxocaixa','conciliacao','fechamento','contas','cartoes','categorias','contatos','centroscusto',
+  'fluxocaixa','faturamento','conciliacao','fechamento','contas','cartoes','categorias','contatos','centroscusto',
   'transferencias','recorrencias','asaas','judicial','relatorios','diagnostico'];
 // Menus suspensos da barra. Só Painel e Lançamentos ficam como aba fixa; o resto vive
 // aqui. "Credores" junta o que trata do dinheiro de terceiro e "Outros" guarda as telas
@@ -28387,7 +28388,7 @@ const FIN_MENU_DE = (()=>{ const m={}; for(const menu of FIN_MENUS) for(const g 
 // Abas cujo conteúdo é recortado pelo seletor de período da faixa escura. Nas demais o
 // seletor não faz nada, então nem é desenhado — antes ele aparecia em todas e ficava
 // inerte, e na Judicial chegava a mostrar um mês diferente do da lista logo abaixo.
-const FIN_TABS_COM_PERIODO = ['visao','lancamentos','receitasjudiciais'];
+const FIN_TABS_COM_PERIODO = ['visao','lancamentos','receitasjudiciais','faturamento'];
 const FIN_PERIODO_KEY = 'cobrasq_fin_periodo_v2';
 // Idade do saldo bancário DECLARADO (fin_conta.bank_balance + bank_balance_at). Toda
 // tela de saldo prefere esse número ao razão, porque ele é o conferido contra o extrato
@@ -28961,6 +28962,9 @@ const FIN_CASCATA_UI_TABS = [
   // Projeção de 12 meses (04/09/2026): quanto sobra para o sócio. Sem contador — é
   // uma leitura, não uma fila.
   {id:'fluxocaixa', label:'Fluxo de caixa'},
+  // Notas emitidas no ESNFS no período + previsão do Simples (13/09/2026). Recortada
+  // pelo seletor de período da faixa escura, como Caixa e Movimentações.
+  {id:'faturamento', label:'Faturamento'},
 ];
 // Último contador conhecido de cada aba. O cabeçalho é remontado a cada troca de aba;
 // sem esta memória, os contadores voltavam a "—" toda vez e só reapareciam depois de
@@ -29417,6 +29421,7 @@ function _finTituloAba(tab){
   // no título ("Movimentações · setembro de 2026"); o resto continua "<aba> de <mês>".
   if(tab === 'visao') return 'Caixa';
   if(tab === 'lancamentos') return 'Movimentações · ' + _finCascataPeriodoBounds().nome;
+  if(tab === 'faturamento') return 'Faturamento · ' + _finCascataPeriodoBounds().nome;
   const mes = new Date().toLocaleDateString('pt-BR', { month:'long' });
   const t = (FIN_CASCATA_UI_TABS.find(x=>x.id===tab) || {}).label
          || (FIN_MENU_DE[tab] && FIN_MENU_DE[tab].label) || 'Financeiro';
@@ -34529,6 +34534,7 @@ function renderFinTab(tab){
   else if(tab==='lancamentos') renderFinLancamentosCascata(el);
   else if(tab==='receitasjudiciais') renderFinReceitasJudiciais(el);
   else if(tab==='fluxocaixa') renderFinFluxoCaixa(el);
+  else if(tab==='faturamento') renderFinFaturamento(el);
   else if(tab==='contas') renderFinContas(el);
   else if(tab==='categorias') renderFinCategorias(el);
   else if(tab==='contatos') renderFinContatos(el);
@@ -40659,6 +40665,195 @@ function _finFluxoGraficos(rows, p){
       plugins:{ legend:{ position:'bottom', labels:{ boxWidth:10, boxHeight:10, font:{ size:11 } } }, tooltip: tip },
       scales:{ x:{ grid:{ display:false }, ticks:{ font:{ size:11 } } }, y:{ grid, beginAtZero:true, ticks:{ callback: tickR, font:{ size:11 } } } } }
   });
+}
+
+// ============================================================
+// FATURAMENTO — notas emitidas no período + previsão do Simples (13/09/2026)
+// ------------------------------------------------------------
+// Fonte: nf_avulsa com nf_status 'emitida' — é onde toda nota entra, seja importada
+// do ESNFS (assets/js/nf.js → "Importar resultado") ou, no passado, pelo Asaas. A
+// data da nota é metadata.emitida_em (a que o Gustavo informa ao importar), com a
+// criação da linha como reserva. Período = seletor da faixa escura (como Caixa).
+//
+// Previsão do Simples = faturamento × alíquota EFETIVA informada em Config (o % do
+// DAS), não a tabela do anexo — decisão do Gustavo em 13/09/2026. O botão "Lançar
+// DAS" cria a saída a pagar no Financeiro (categoria "Simples Nacional - DAS",
+// vencimento dia 20 do mês seguinte), uma por competência: repetir atualiza o valor.
+// ============================================================
+let _finFatCharts = {};
+let _finFatCache = { at:0, rows:null };
+function _finFatAliquota(){ return String((DB.config && DB.config.simplesAliquotaEfetiva) || '').trim(); }
+function _finFatSetAliquota(v){
+  const n = parseFloat(String(v||'').replace(',','.'));
+  DB.config.simplesAliquotaEfetiva = isFinite(n) && n>0 ? String(n).replace('.',',') : '';
+  save();
+  const el = document.getElementById('fin-content');
+  if(el && _finFatCache.rows) _finFatDesenhar(el, _finFatCache.rows);
+}
+async function _finFatCarregar(force){
+  if(!force && _finFatCache.rows && Date.now()-_finFatCache.at < 60000) return _finFatCache.rows;
+  const sb = getSupabase(); if(!sb) throw new Error('Faça login para ver o faturamento.');
+  const { data, error } = await sb.from('nf_avulsa')
+    .select('id,nome,doc,doc_digits,valor,nf_status,nf_url,nf_asaas_id,metadata,criada_em')
+    .order('criada_em',{ascending:false}).limit(3000);
+  if(error) throw error;
+  _finFatCache = { at:Date.now(), rows:data||[] };
+  return _finFatCache.rows;
+}
+async function renderFinFaturamento(el){
+  el.innerHTML = `<div style="text-align:center;padding:40px;color:#8A94A6;">
+    <div class="mv2-spinner" style="margin:0 auto 10px;width:26px;height:26px;border-width:3px;"></div>
+    Buscando as notas emitidas…
+  </div>`;
+  let rows;
+  try{ rows = await _finFatCarregar(); }
+  catch(e){
+    el.innerHTML = `<div style="text-align:center;padding:30px;color:var(--danger);">
+      Erro ao carregar o faturamento: ${escHtml(traduzirErro(e.message||String(e)))}
+      <div style="margin-top:12px;"><button class="btn btn-ghost btn-sm" onclick="renderFinTab('faturamento')">↻ Tentar novamente</button></div>
+    </div>`;
+    return;
+  }
+  _finFatDesenhar(el, rows);
+}
+function _finFatDesenhar(el, rows){
+  const b = _finCascataPeriodoBounds();
+  const lista = faturamentoFiltrar(rows, b.ini, b.fim).sort((x,y)=> (nfDataEmissao(y)+y.criada_em).localeCompare(nfDataEmissao(x)+x.criada_em));
+  const total = +lista.reduce((s,r)=>s+(Number(r.valor)||0),0).toFixed(2);
+  const aliq = _finFatAliquota();
+  const das = simplesPrevisao(total, aliq);
+  const serie = faturamentoSerieMensal(rows, b.fim, 12);
+  const compAM = b.fim.slice(0,7);
+  const mesUnico = b.modo==='mes';
+  const dm = s => s ? s.slice(8,10)+'/'+s.slice(5,7)+'/'+s.slice(0,4) : '—';
+  const kpi=(lb,vl,nt,cor)=>`<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;">
+      <div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-3);">${lb}</div>
+      <div style="font-family:'Fraunces',Georgia,serif;font-size:26px;line-height:1;margin-top:6px;color:${cor||'var(--text)'};">${vl}</div>
+      <div style="font-size:11.5px;color:var(--text-3);margin-top:6px;">${nt}</div>
+    </div>`;
+  const linhas = lista.map(r=>`<tr>
+      <td style="font-family:var(--font-mono);white-space:nowrap;">${dm(nfDataEmissao(r))}</td>
+      <td>${escHtml(r.nome||'—')}</td>
+      <td style="font-family:var(--font-mono);white-space:nowrap;">${escHtml(nfaMaskDoc(nfaDigits(r.doc_digits||r.doc||'')))}</td>
+      <td style="font-family:var(--font-mono);text-align:right;white-space:nowrap;">${fmtR(r.valor)}</td>
+      <td style="font-family:var(--font-mono);white-space:nowrap;">${escHtml(nfNumero(r)||'—')}</td>
+      <td style="font-size:11px;color:var(--text-3);">${(r.metadata&&r.metadata.origem)==='esnfs'?'ESNFS':(r.nf_asaas_id||r.nf_url?'Asaas':'—')}${r.nf_url?` · <a href="${escHtml(r.nf_url)}" target="_blank" rel="noopener">PDF</a>`:''}</td>
+    </tr>`).join('');
+  el.innerHTML = `
+    <style>
+      .fin-fat-tbl{border-collapse:collapse;width:100%;font-size:12.5px;}
+      .fin-fat-tbl th,.fin-fat-tbl td{padding:8px 14px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top;}
+      .fin-fat-tbl th{font-size:11px;font-weight:600;color:var(--text-3);background:rgba(10,21,48,0.03);}
+      .fin-fat-tbl tfoot th{font-size:12.5px;color:var(--text);}
+    </style>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;">
+      ${kpi('Faturamento · '+b.curto, fmtR(total), `${lista.length} ${plural(lista.length,'nota')} emitida${lista.length===1?'':'s'}`)}
+      ${kpi('Notas no período', String(lista.length), lista.length?`ticket médio ${fmtR(total/lista.length)}`:'nenhuma nota no período')}
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;">
+        <div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-3);">Alíquota efetiva do Simples</div>
+        <div style="display:flex;align-items:baseline;gap:6px;margin-top:6px;">
+          <input id="fin-fat-aliq" value="${escHtml(aliq)}" placeholder="ex.: 6,00" inputmode="decimal" onchange="_finFatSetAliquota(this.value)" style="width:90px;font-family:'Fraunces',Georgia,serif;font-size:24px;padding:0 4px;border:0;border-bottom:1px dashed var(--border);background:transparent;color:var(--text);">
+          <span style="font-size:18px;color:var(--text-3);">%</span>
+        </div>
+        <div style="font-size:11.5px;color:var(--text-3);margin-top:6px;">o % efetivo do seu DAS · fica salvo em Config</div>
+      </div>
+      ${kpi('Simples previsto', aliq?fmtR(das):'—', aliq?`${escHtml(aliq)}% sobre ${fmtR(total)} · vence 20/${String(new Date(+compAM.slice(0,4), +compAM.slice(5,7), 1).getMonth()+1).padStart(2,'0')}`:'informe a alíquota ao lado', '#7D3F33')}
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+      <button class="btn btn-primary btn-sm" onclick="_finFatLancarDas()" ${(!aliq||!mesUnico||!(das>0))?'disabled':''} title="${mesUnico?'Cria (ou atualiza) a saída a pagar do DAS desta competência no Financeiro':'Escolha um mês no seletor de período para lançar o DAS'}">＋ Lançar DAS de ${escHtml(compAM.slice(5,7)+'/'+compAM.slice(0,4))} no Financeiro</button>
+      <button class="btn btn-ghost btn-sm" onclick="_finFatExportCsv()">⤓ CSV</button>
+      <button class="btn btn-ghost btn-sm" onclick="_finFatRecarregar()">↻ Atualizar</button>
+      <span style="font-size:11.5px;color:var(--text-3);">Notas novas entram por <a onclick="showPage('nf-avulsa')" style="cursor:pointer;text-decoration:underline;">Emitir NF → Importar resultado do ESNFS</a>.</span>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:16px;">
+      <div style="padding:12px 16px 0;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);">Faturamento mensal · 12 meses até ${escHtml(b.fim.slice(5,7)+'/'+b.fim.slice(0,4))}</div>
+      <div style="position:relative;height:260px;padding:8px 12px 6px;"><canvas id="fin-fat-chart"></canvas></div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:auto;">
+      <table class="fin-fat-tbl">
+        <thead><tr><th>Data</th><th>Tomador</th><th>CPF/CNPJ</th><th style="text-align:right;">Valor</th><th>Nº da nota</th><th>Origem</th></tr></thead>
+        <tbody>${linhas || `<tr><td colspan="6" style="color:#8A94A6;padding:18px;">Nenhuma nota emitida em ${escHtml(b.nome)}.</td></tr>`}</tbody>
+        <tfoot><tr><th></th><th>Total de ${escHtml(b.nome)}</th><th></th><th style="text-align:right;font-family:var(--font-mono);">${fmtR(total)}</th><th></th><th></th></tr></tfoot>
+      </table>
+    </div>`;
+  _finFatGrafico(serie, aliq);
+}
+function _finFatGrafico(serie, aliq){
+  if(typeof Chart === 'undefined') return;
+  try{ Object.values(_finFatCharts).forEach(c=>c&&c.destroy()); }catch(_){}
+  _finFatCharts = {};
+  const c = document.getElementById('fin-fat-chart'); if(!c) return;
+  const labels = serie.map(m=>{ const d=new Date(+m.mes.slice(0,4), +m.mes.slice(5,7)-1, 1); return d.toLocaleDateString('pt-BR',{month:'short'}).replace('.','')+'/'+m.mes.slice(2,4); });
+  const tickR = v => (Math.abs(v) >= 1000 ? (v/1000).toLocaleString('pt-BR',{maximumFractionDigits:0}) + ' mil' : String(v));
+  const datasets = [
+    { type:'bar', label:'Faturamento (notas emitidas)', data: serie.map(m=>m.total), backgroundColor:'#2a78d6', borderRadius:4, borderSkipped:'bottom', maxBarThickness:28 },
+  ];
+  if(aliq) datasets.push({ type:'line', label:'Simples previsto ('+aliq+'%)', data: serie.map(m=>simplesPrevisao(m.total, aliq)), borderColor:'#eb6834', backgroundColor:'#eb6834', borderWidth:2, pointRadius:3, tension:.25, fill:false });
+  _finFatCharts.mensal = new Chart(c, {
+    data: { labels, datasets },
+    options: { responsive:true, maintainAspectRatio:false, interaction:{ mode:'index', intersect:false },
+      plugins:{ legend:{ position:'bottom', labels:{ boxWidth:10, boxHeight:10, font:{ size:11 } } },
+        tooltip:{ callbacks:{ label: x => ` ${x.dataset.label}: ${fmtR(x.parsed.y)}` + (x.datasetIndex===0 ? ` · ${serie[x.dataIndex].notas} ${plural(serie[x.dataIndex].notas,'nota')}` : '') } } },
+      scales:{ x:{ grid:{ display:false }, ticks:{ font:{ size:11 } } }, y:{ grid:{ color:'rgba(10,21,48,.06)' }, beginAtZero:true, ticks:{ callback: tickR, font:{ size:11 } } } } }
+  });
+}
+async function _finFatRecarregar(){
+  _finFatCache = { at:0, rows:null };
+  const el = document.getElementById('fin-content'); if(el) await renderFinFaturamento(el);
+}
+function _finFatExportCsv(){
+  const b = _finCascataPeriodoBounds();
+  const lista = faturamentoFiltrar(_finFatCache.rows||[], b.ini, b.fim);
+  const esc = v => '"'+String(v==null?'':v).replace(/"/g,'""')+'"';
+  const l = [['Data','Tomador','CPF/CNPJ','Valor','Nº da nota','Origem'].map(esc).join(';')];
+  lista.forEach(r=> l.push([nfDataEmissao(r), r.nome||'', nfaMaskDoc(nfaDigits(r.doc_digits||r.doc||'')), String(Number(r.valor)||0).replace('.',','), nfNumero(r), (r.metadata&&r.metadata.origem)==='esnfs'?'ESNFS':'Asaas'].map(esc).join(';')));
+  const blob = new Blob(['﻿'+l.join('\n')], { type:'text/csv;charset=utf-8' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `faturamento_${b.ini}_${b.fim}.csv`; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+}
+// Cria/atualiza a saída do DAS da competência (uma por mês, marcada em raw_payload).
+async function _finFatLancarDas(){
+  const b = _finCascataPeriodoBounds();
+  if(b.modo!=='mes'){ showToast('Escolha um mês no seletor de período para lançar o DAS.','warning'); return; }
+  const rows = _finFatCache.rows||[];
+  const total = +faturamentoFiltrar(rows, b.ini, b.fim).reduce((s,r)=>s+(Number(r.valor)||0),0).toFixed(2);
+  const aliq = _finFatAliquota();
+  const das = simplesPrevisao(total, aliq);
+  if(!(das>0)){ showToast('Sem valor a lançar: informe a alíquota e tenha notas no mês.','warning'); return; }
+  const lanc = simplesLancamento(b.ini.slice(0,7), das);
+  if(!confirm(`Lançar "${lanc.descricao}" — ${fmtR(das)} (${aliq}% de ${fmtR(total)}), vencimento ${_finBR(lanc.data_vencimento)}, a pagar?`)) return;
+  const sb = getSupabase(); if(!sb){ showToast('Faça login.','warning'); return; }
+  try{
+    // categoria "Simples Nacional - DAS" (id 24 em produção) — procura pelo nome para não
+    // depender do id; conta = a do último DAS lançado, se houver.
+    const { data: cats } = await sb.from('fin_categoria').select('id').ilike('descricao','Simples Nacional%DAS%').eq('tipo_movimento',0).limit(1);
+    const catId = cats && cats[0] ? cats[0].id : null;
+    const { data: ex } = await sb.from('fin_lancamento').select('id,status,conta_id')
+      .eq('raw_payload->>origem','faturamento_das').eq('raw_payload->>competencia', lanc.raw_payload.competencia).limit(1);
+    let contaId = null;
+    if(catId){
+      const { data: ult } = await sb.from('fin_lancamento_categoria').select('lancamento_id').eq('categoria_id', catId).order('lancamento_id',{ascending:false}).limit(1);
+      if(ult && ult[0]){
+        const { data: l } = await sb.from('fin_lancamento').select('conta_id').eq('id', ult[0].lancamento_id).limit(1);
+        contaId = l && l[0] ? l[0].conta_id : null;
+      }
+    }
+    let lancId;
+    if(ex && ex[0]){
+      if(ex[0].status===1){ showToast('O DAS desta competência já está PAGO no Financeiro — não alterei.','warning'); return; }
+      const { error } = await sb.from('fin_lancamento').update({ descricao:lanc.descricao, data_competencia:lanc.data_competencia, data_vencimento:lanc.data_vencimento, valor:lanc.valor, atualizada_em:new Date().toISOString() }).eq('id', ex[0].id);
+      if(error) throw error; lancId = ex[0].id;
+    } else {
+      const { data, error } = await sb.from('fin_lancamento').insert(Object.assign({ conta_id: contaId, observacoes:`Previsão: ${aliq}% sobre ${fmtR(total)} de notas emitidas em ${b.nome}.` }, lanc)).select('id').single();
+      if(error) throw error; lancId = data.id;
+    }
+    if(catId){
+      await sb.from('fin_lancamento_categoria').delete().eq('lancamento_id', lancId);
+      await sb.from('fin_lancamento_categoria').insert({ lancamento_id: lancId, categoria_id: catId, valor: Math.abs(lanc.valor) });
+    }
+    _finFinanceiroInvalidaCaches();
+    showToast(`${ex&&ex[0]?'Atualizado':'Lançado'}: ${lanc.descricao} — ${fmtR(das)}, vence ${_finBR(lanc.data_vencimento)}.`,'success');
+  }catch(e){ showToast('Não consegui lançar o DAS: '+traduzirErro(e.message||String(e)),'danger'); }
 }
 
 // ============================================================
@@ -47968,13 +48163,13 @@ async function renderNfAvulsa(){
     <div class="cob-pg-head">
       <div>
         <h1 class="cob-h1">Emitir NF</h1>
-        <div class="cob-h1-sub">Emite nota fiscal de serviço (NFS-e) <b>real</b> pelo Asaas a partir do cadastro do tomador — sem precisar de cobrança. Em lote.</div>
+        <div class="cob-h1-sub">Notas de serviço (NFS-e) emitidas no <b>ESNFS</b> (prefeitura de Dois Vizinhos) pela extensão do Chrome. O painel monta o lote com a base certa; a extensão emite; o resultado volta para cá.</div>
       </div>
-      <button class="btn btn-primary" onclick="nfaAtualizarStatus()">↻ Atualizar status</button>
+      <button class="btn btn-primary" onclick="if(typeof nffImportarResultado==='function') nffImportarResultado()">⤓ Importar resultado do ESNFS</button>
     </div>
 
     <div style="background:#FEF6E7;border:1px solid #F0D89B;border-left:3px solid var(--gold);border-radius:8px;padding:12px 14px;margin-bottom:16px;font-size:12.5px;color:#7a5b10;line-height:1.5;">
-      <b>Atenção:</b> emitir é irreversível (cancelar nota é processo à parte). Cada NF precisa de <b>CPF/CNPJ</b> + endereço completo do tomador (reaproveitado do cadastro no Asaas). Use <b>Validar no Asaas</b> e <b>emita 1 de teste</b> antes do lote.
+      <b>Como funciona:</b> marque os recebimentos → <b>Copiar lote p/ ESNFS</b> → cole no campo CPF da extensão (aba do ESNFS logada) → ao terminar, <b>Importar resultado</b> com o relatório que a extensão copia. Quando o recebimento tem capital do credor, a nota sai <b>só sobre o honorário</b> — o painel já faz essa conta. O relatório do que foi emitido fica em <b>Financeiro → Faturamento</b>.
     </div>
 
     <div style="display:grid;grid-template-columns:minmax(0,1fr) 296px;gap:22px;align-items:start;min-width:1120px;">
@@ -47983,7 +48178,7 @@ async function renderNfAvulsa(){
 
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:16px;">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
-        <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);">Nova emissão</div>
+        <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--text-3);">Lote manual (fora da fila)</div>
         <button class="btn btn-ghost btn-sm" onclick="nfaModalCobrancas()">＋ Gerar de cobranças quitadas</button>
       </div>
       <textarea id="nfa-paste" rows="5" placeholder="Um por linha. Ex.:&#10;Eliseu Juarez Zanin de Campos; 123.456.789-00; 2.429,53; Honorários de cobrança&#10;ou cole de uma planilha (Nome | CPF | Valor | Descrição)" style="width:100%;box-sizing:border-box;font-family:var(--mono,monospace);font-size:12.5px;padding:10px;border:1px solid var(--border);border-radius:8px;resize:vertical;"></textarea>
@@ -47995,8 +48190,8 @@ async function renderNfAvulsa(){
       </div>
       <div id="nfa-tabela" style="margin-top:12px;"></div>
       <div id="nfa-acoes" style="display:none;margin-top:14px;align-items:center;gap:14px;flex-wrap:wrap;">
-        <button class="btn btn-ghost btn-sm" id="nfa-teste-btn" onclick="nfaEmitirTeste()">Emitir 1 de teste</button>
-        <button class="btn btn-primary" id="nfa-emitir-btn" onclick="nfaEmitirLote()">Emitir lote</button>
+        <!-- "Emitir 1 de teste" / "Emitir lote" (rota Asaas) saíram em 13/09/2026: a emissão é no ESNFS. -->
+        <button class="btn btn-primary" id="nfa-emitir-btn" onclick="nfaCopiarLoteEsnfs()">⎘ Copiar lote p/ ESNFS</button>
         <span id="nfa-progresso" style="font-size:12.5px;color:var(--text-3);"></span>
         <label style="margin-left:auto;display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--text-3);cursor:pointer;">
           <span id="nfa-notify-sw">${_nfaSwitch(_nfaNotify,'nfaToggleNotify()')}</span> Enviar PDF ao tomador ao emitir
@@ -48261,7 +48456,31 @@ function nfaRenderRodapeLote(){
   prog.textContent=parts.join(' · ');
 }
 
-// ── confirmação + emissão ────────────────────────────────────────────────────
+// ── lote manual → ESNFS (13/09/2026) ─────────────────────────────────────────
+// As linhas digitadas/coladas aqui vão para a extensão com ref `manual:<ref>`; o
+// "Importar resultado" (assets/js/nf.js) devolve por nfaMarcarManualEmitida.
+function _nfaManualPronta(r){ return !!r && r.status!=='emitida' && nfaLocalReady(r) && !nfaDupOf(r); }
+function nfaLinhasManuaisPendentes(){
+  return _nfaRows.filter(_nfaManualPronta).map(r=>{
+    if(!r.ref){ try{ r.ref=crypto.randomUUID(); }catch(_){ r.ref='m'+Date.now()+Math.random().toString(36).slice(2,6); } }
+    return { ref:'manual:'+r.ref, doc:nfaDigits(r.cpf), valor:nfaParseValor(r.valorRaw)||0, nome:r.nome||'' };
+  });
+}
+async function nfaCopiarLoteEsnfs(){
+  const itens=nfaLinhasManuaisPendentes();
+  if(!itens.length){ showToast('Nenhuma linha completa (nome, CPF válido e valor).','warning'); return; }
+  const txt=esnfsMontarLote(itens);
+  try{ await navigator.clipboard.writeText(txt); }
+  catch(_){ const ta=document.createElement('textarea'); ta.value=txt; ta.style.cssText='position:fixed;opacity:0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+  showToast(`${itens.length} linha(s) copiada(s) — cole no campo CPF da extensão do ESNFS. Depois, "Importar resultado".`,'success');
+}
+function nfaMarcarManualEmitida(ref, nota, nfId){
+  const r=_nfaRows.find(x=>x.ref && 'manual:'+x.ref===ref); if(!r) return;
+  r.status='emitida'; r.nf_url=''; r.erro=''; r.nfId=nfId||''; r.nota=nota||'';
+  nfaDrawTabela();
+}
+
+// ── confirmação + emissão (LEGADO — rota Asaas, sem botão desde 13/09/2026) ──
 function nfaEmitirTeste(){
   const i=_nfaRows.findIndex(nfaEligible);
   if(i<0){ showToast('Nenhuma linha elegível para teste.','warning'); return; }
@@ -48536,6 +48755,10 @@ function nfaDrawHistorico(){
 
 function nfaAcoesHist(r,s){
   const pdf = r.nf_url?`<a href="${escHtml(r.nf_url)}" target="_blank" rel="noopener" class="btn btn-ghost btn-sm" title="Abrir PDF da NFS-e">⤓ PDF</a>`:'';
+  // Emitida no ESNFS (importada da extensão): o PDF e o cancelamento são lá, não no Asaas.
+  if(r.metadata && r.metadata.origem==='esnfs'){
+    return `<span style="font-family:var(--mono,monospace);font-size:11px;color:var(--text-3);" title="Número da nota na prefeitura">ESNFS nº ${escHtml(r.metadata.nf_number||'—')}</span>`;
+  }
   if(s==='emitida'){
     const canal=(r.metadata&&r.metadata.canal);
     return `${pdf}
