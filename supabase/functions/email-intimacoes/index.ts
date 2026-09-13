@@ -64,6 +64,7 @@ Se o e-mail não tiver nenhum ato processual, devolva {"atos":[]}.`;
 // ── Helpers CNJ ──────────────────────────────────────────────────────────────
 // Tribunal pelo segmento J.TR do número CNJ (Res. CNJ 65/2008). Espelha
 // public.cnj_tribunal() (migração 20260912_02). Até 12/09/2026 só conhecia
+// (republicada em 13/09/2026: o deploy do #715 foi pulado pelo CI vermelho).
 // 8.16/8.24/8.21: TRF4, TRT9 e TJMT ficavam com tribunal NULL e sumiam da aba
 // "Urgentes" (que filtra tribunal <> 'TJPR').
 const UF_POR_TR: Record<string, string> = {
