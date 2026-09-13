@@ -174,12 +174,20 @@ existentes: `CRON_INVOKE_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`; o
 o bearer do cron. Enquanto a migração não estiver aplicada, a aba "Só no diário" abre
 com a mensagem "Não foi possível ler o diário" e as outras abas seguem iguais.
 
-## 20260912_03 — `proc_intimacoes` aceita fonte `email`/`djen` + backfill (R-27)
+## 20260913_01 — intimação de fora do PR vira lembrete "Conferir intimação"
 
-**Não aplicada.** Depende só do CHECK antigo (2026-06-23a); é independente da
-`20260912_02`, mas o rollback desta apaga também linhas `djen` se existirem. Amplia o
-CHECK e insere os 309 atos de e-mail vinculados (com devedor existente) como `lida=true`
-— o badge de não-lidas não muda. Dry-run em prod (begin/rollback) em 12/09/2026:
-309 inseridos, INSERT novo com `fonte='email'` passa, rollback restaura o CHECK e zera
-as linhas. Depois de aplicar: **recarregar o painel** (a aba "Andamentos" passa a ter
-a fonte "email" nos chips).
+**Não aplicada.** `20260913_01_intimacoes_prazo_lembrete.sql` (+ `_rollback`). Aditiva: funções
+`dia_util_forense(date)` (seg–sex sem feriado nacional; mesma lista de `feriadosBR()` do painel),
+`somar_dias_uteis(date,int)` e `intimacao_criar_lembrete(...)` (SECURITY DEFINER, REVOKE de
+PUBLIC/anon/authenticated) + triggers AFTER INSERT em `intimacoes_email` e `intimacoes_djen`.
+Toda INTIMAÇÃO de tribunal ≠ TJPR cria um lembrete `manual` às 08:00 do dia útil seguinte
+("Conferir intimação <CNJ> — <ato>", texto com prazo fatal ESTIMADO = 15 dias úteis pelo
+art. 224 CPC, link do documento quando vier do diário); a trigger de `lembretes` enfileira
+véspera 19h / dia 08h / 07:50. Não gera para juntada/conclusão, peticionamento do escritório
+nem TJPR; 1 lembrete por processo a cada 10 dias (e-mail + diário da mesma intimação não
+duplicam). Não cria retroativo. Decisão do gestor em 13/09/2026 (botões: "Conferir + fatal
+estimado", "só intimações", "sem TJPR"). Dry-run R-18 em prod (begin/rollback): feriados
+(07/09, Carnaval, Sexta Santa, Corpus Christi, 20/11) e fins de semana reconhecidos;
+13/08 → fatal estimado 04/09; DJEN TJRS cria, e-mail igual depois não repete, juntada/
+peticionamento/TJPR não criam, TRF4 vinculada cria com `cobranca_id`; 3 avisos enfileirados.
+Rollback pareado (lembretes já criados ficam).
