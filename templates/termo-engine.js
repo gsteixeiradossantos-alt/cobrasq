@@ -132,15 +132,18 @@
   }
   // Complemento da cláusula 2: como os boletos chegam — ou, se tudo é PIX, a
   // chave e o comprovante. Com faixas mistas, as duas frases.
-  function fraseEntregaBoletos(ac, generoCredor) {
+  function fraseEntregaBoletos(ac, generoCredor, jud) {
     const M = generoCredor === "M";
-    const doCred = M ? "do credor" : "da credora", peloCred = M ? "pelo credor" : "pela credora", aoCred = M ? "ao Credor" : "à Credora";
+    const doCred = jud ? "da parte exequente" : (M ? "do credor" : "da credora");
+    const peloCred = jud ? "pela parte exequente" : (M ? "pelo credor" : "pela credora");
+    const aoCred = jud ? "à parte exequente" : (M ? "ao credor" : "à credora");
+    const devedora = jud ? "parte executada" : "parte devedora";
     const chave = String((ac && ac.pixChave) || "").trim();
     const fPix = "O pagamento das parcelas via PIX será feito para a chave <strong>" + escHtml(chave || "____") +
-      "</strong>, de titularidade " + doCred + ", cabendo à parte devedora encaminhar o comprovante " + aoCred +
+      "</strong>, de titularidade " + doCred + ", cabendo à " + devedora + " encaminhar o comprovante " + aoCred +
       " em até 1 dia útil após cada pagamento.";
-    const fBol = "Os boletos serão enviados " + peloCred + " à parte devedora em até 5 dias úteis após a assinatura deste instrumento, " +
-      "por meio do canal indicado no preâmbulo. A parte devedora compromete-se a encaminhar o comprovante de pagamento " + aoCred +
+    const fBol = "Os boletos serão enviados " + peloCred + " à " + devedora + " em até 5 dias úteis após a assinatura deste instrumento, " +
+      "por meio do canal indicado no preâmbulo. A " + devedora + " compromete-se a encaminhar o comprovante de pagamento " + aoCred +
       " em até 1 dia útil após cada quitação, para fins de conferência e baixa, ficando ajustado que a ausência de envio do comprovante " +
       "não descaracteriza o pagamento quando identificado o crédito correspondente na conta recebedora.";
     if (soPix(ac)) return fPix;
@@ -176,10 +179,17 @@
   }
 
   // Preâmbulo: um bloco de parte por devedor (qualificação reusa qualifDevedor).
-  function preambuloDevedores(devs) {
+  // Termos por modo (decisão do Gustavo, 12/09/2026): extrajudicial = credor(a)/devedor(a);
+  // judicial = exequente/executado(a). Minúsculas no corpo; maiúscula só em rótulo.
+  function papelDevedor(dv, jud) {
+    const g = generoDevedorLabel(dv);
+    if (!jud) return g;
+    return g === "devedor" ? "executado" : "executada";
+  }
+  function preambuloDevedores(devs, jud) {
     return (devs || []).map(function (dv) {
-      const g = generoDevedorLabel(dv);
-      const label = g === "devedor" ? "Devedor" : "Devedora";
+      const g = papelDevedor(dv, jud);
+      const label = g.charAt(0).toUpperCase() + g.slice(1);
       return '<div><div class="party-label">' + label + '</div>' +
         '<p>Como ' + g + ', <span class="party-name">' + escHtml(dv.nome || "") + '</span>, ' + qualifDevedor(dv) + '</p></div>';
     }).join("");
@@ -214,10 +224,10 @@
   }
 
   // Assinaturas: um bloco por devedor, com a âncora <<assdevN>> (1-based).
-  function assinaturasDevedores(devs) {
+  function assinaturasDevedores(devs, jud) {
     return (devs || []).map(function (dv, i) {
-      const g = generoDevedorLabel(dv);
-      const role = g === "devedor" ? "Devedor" : "Devedora";
+      const g = papelDevedor(dv, jud);
+      const role = g.charAt(0).toUpperCase() + g.slice(1);
       const nome = dv.assNome || (dv.nome || "").split(" ")[0];
       return '<div class="sig">' +
         '<div class="sig-token">&lt;&lt;assdev' + (i + 1) + '&gt;&gt;</div>' +
@@ -372,7 +382,7 @@
    * JUDICIAL — termo de acordo p/ homologação (art. 515, II, CPC)
    * Mesma base do extrajudicial + placeholders judiciais: endereçamento ao juízo,
    * nº do processo, cláusula 4 variável (Sisbajud | concentração/desistência |
-   * consolidação) e o contato da parte ré (cláusula 7).
+   * consolidação) e o contato da parte executada (cláusula 7).
    * dados.judicial = { numeroProcesso, comarca, foro:'jec'|'vara',
    *   clausula4:{ mode:'desistencia'|'sisbajud'|'consolidacao',
    *               procPrincipal, proc2, comarca2, valorBloqueado } }
@@ -411,7 +421,7 @@
       '<div class="sig-token">&lt;&lt;assadv2&gt;&gt;</div>' +
             '<div class="sig-name">' + escHtml(adv.nome) + '</div>' +
       '<div class="sig-doc">' + escHtml(l2) + '</div>' +
-      '<div class="sig-role">Advogado(a) da parte ré</div></div>';
+      '<div class="sig-role">Advogado(a) da parte executada</div></div>';
   }
 
   function clausula4Judicial(dados) {
@@ -452,14 +462,14 @@
         titulo: "Da concentração do débito e desistência",
         corpo:
           "<p>As partes convencionam concentrar a totalidade da dívida e do presente acordo nestes autos n. " + principal +
-          ", comprometendo-se a parte autora a requerer a desistência da ação que tramita perante a Comarca de " + com2 +
-          " sob os autos n. " + proc2 + ", com o que expressamente anui a parte requerida, respondendo cada parte pelos honorários de seus respectivos patronos naquele feito.</p>"
+          ", comprometendo-se a parte exequente a requerer a desistência da ação que tramita perante a Comarca de " + com2 +
+          " sob os autos n. " + proc2 + ", com o que expressamente anui a parte executada, respondendo cada parte pelos honorários de seus respectivos patronos naquele feito.</p>"
       };
     }
     return {
       titulo: "Da consolidação do débito neste feito",
       corpo:
-        "<p>As partes convencionam que a totalidade da dívida discutida encontra-se consolidada e composta exclusivamente no presente feito, comprometendo-se a parte autora a promover as baixas e comunicações pertinentes após o cumprimento integral do acordo.</p>"
+        "<p>As partes convencionam que a totalidade da dívida discutida encontra-se consolidada e composta exclusivamente no presente feito, comprometendo-se a parte exequente a promover as baixas e comunicações pertinentes após o cumprimento integral do acordo.</p>"
     };
   }
 
@@ -481,7 +491,7 @@
     if (endereco) partes.push("o seguinte endereço: " + escHtml(endereco));
     if (dv.telefone) partes.push("telefone: " + escHtml(dv.telefone));
     const info = partes.length ? partes.join("; ") + "." : "os dados de contato constantes dos autos.";
-    return "A parte ré " + nome + " indica " + info;
+    return "A parte executada " + nome + " indica " + info;
   }
 
   function placeholdersJudicial(dados) {
@@ -494,6 +504,13 @@
     base.clausula4Corpo = c4.corpo;
     base.contatoRe = contatoReJudicial(dados);
     base.assinaturaAdvExec = assinaturaAdvExec(dados.advogadoExec);
+    // modo judicial: exequente / executada no preâmbulo, assinaturas e frase dos boletos
+    const devsJ = (dados.devedores && dados.devedores.length) ? dados.devedores : (dados.devedor ? [dados.devedor] : []);
+    const acJ = dados.acordo || {}, crJ = dados.credor || {};
+    base.generoCredor = "exequente";
+    base.devedoresPreambulo = preambuloDevedores(devsJ, true);
+    base.assinaturasDevedores = assinaturasDevedores(devsJ, true);
+    base.fraseEntregaBoletos = fraseEntregaBoletos(acJ, crJ.genero, true);
     return base;
   }
 
@@ -525,7 +542,7 @@
     extInt, reaisExt, valorCompleto, pctExt, dataExtenso, estadoFrase,
     qualifDevedor, qualifCredor, frasePagamento, fraseEntregaBoletos, placeholders,
     foroDe, comarcaDaQualificacao,
-    preambuloDevedores, assinaturasDevedores, generoDevedorLabel, vistosPageCss,
+    preambuloDevedores, assinaturasDevedores, generoDevedorLabel, papelDevedor, vistosPageCss,
     preencher, carregarTemplate, montarTermoExtrajudicial,
     credorEhCobrasq, timbreDe, carregarTimbreTA, aplicarTimbreTA,
     enderecamentoJudicial, clausula4Judicial, contatoReJudicial, contaFrase, assinaturaAdvExec,
