@@ -201,3 +201,18 @@ estimado", "só intimações", "sem TJPR"). Dry-run R-18 em prod (begin/rollback
 13/08 → fatal estimado 04/09; DJEN TJRS cria, e-mail igual depois não repete, juntada/
 peticionamento/TJPR não criam, TRF4 vinculada cria com `cobranca_id`; 3 avisos enfileirados.
 Rollback pareado (lembretes já criados ficam).
+
+## 20260913_02 — intimação de audiência agenda sozinha em `audiencias`
+
+**Não aplicada.** Depende da `20260913_01`. `20260913_02_intimacoes_audiencia_auto.sql` (+ `_rollback`).
+Funções `intimacao_parse_audiencia` (lê "Agendada para: 26 de outubro de 2026 às 14:00, em <órgão>,
+Modalidade: <x>" do ato cru do PROJUDI, ou "dd/mm/aaaa hh:mm" do ato curado) e
+`intimacao_agendar_audiencia` (INSERT em `audiencias` origem `projudi_import`, comarca do órgão,
+modalidade em `sala`, `cobranca_id` se vinculada; redesignação move a audiência futura do mesmo
+processo; mesma data/hora já cadastrada não mexe; sem data/hora → lembrete "Agendar audiência" via
+`intimacao_criar_lembrete(..., p_forcar=true)`, TJPR incluído). Triggers em `intimacoes_email` e
+`intimacoes_djen`. Retroativo no fim: audiências FUTURAS do TJPR já intimadas que faltavam.
+Decisão do gestor em 13/09/2026 ("TJPR automático + lembrete p/ eproc", "importar as futuras que
+faltam"). Dry-run em prod (begin/rollback) em 13/09/2026: 8 agendadas, 6 já existiam (manuais,
+não duplicadas), "Realizada"/eproc sem data não agendam, redesignação atualiza, 24 avisos
+enfileirados, rollback devolve a `intimacao_criar_lembrete` de 7 parâmetros.
