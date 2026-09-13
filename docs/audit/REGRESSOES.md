@@ -645,3 +645,26 @@ select count(*) from public.asaas_pagamento_orfao o
 
 **A regra, para além deste caso.** "id do devedor = id da cobrança" é atalho válido só para o
 principal. Toda busca que parte de um devedor tem de passar por `cobranca_partes`.
+
+## R-29 · Teste que recorta o `index.html` por um marco que o PR seguinte apaga
+
+**O que acontece.** Os testes F-3x/F-4x que rodam trechos reais do `index.html` (`vm`) recortam
+o código por regex de início/fim (`fatia(inicioRe, fimRe)`). O F-40 usava `const _REP_MESES` como
+fim da fatia do `_repState`; o #738 (retira o menu "Repasses a clientes") apagou essa constante e
+trocou o repinte de `renderRepassesClientes` por `_finComposicaoInadRepintar`, além de dar ao
+`_repCarregarRecebiveis` a guarda de voo `_repRecebiveisEmVoo`. A CI da `main` ficou vermelha
+desde `db55bef` com `não achei o fim de /^let _repState = \{/m` — a asserção mais opaca do teste
+falhava antes de qualquer cenário rodar.
+
+**Teste.** `npm test` verde na `main`; em particular
+`node test/f40_repasses_recebiveis_geracao.test.js`.
+
+**Estado-correto.** Fim de fatia por marco **genérico** (a próxima declaração:
+`/\n(?:const|let|var|function|async function) /`), não por um nome de constante vizinha; e os
+cenários do F-40 descrevem o comportamento atual (recarga no meio compartilha o voo dos
+recebíveis em vez de abrir geração nova — um pouso, dados prontos, repinte do card do Caixa).
+
+**A regra, para além deste caso.** Ao apagar ou renomear qualquer símbolo do `index.html`, rodar
+`grep -rn "<símbolo>" test/` — os testes de recorte dependem de nomes, não só de comportamento.
+E todo PR que mexe no `index.html` tem de passar `npm test` **antes** do merge (o #738 subiu com
+a CI vermelha).
