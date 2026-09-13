@@ -197,3 +197,16 @@ lembrete) e `prazo` (intimação de tribunal ≠ TJPR sem lembrete, com fatal ES
 a skill grava, porque só ela faz tabela + Google Agenda + WhatsApp juntos; a view é a fila que
 `/audiencias-cobrasq` e `/lembretes-cobrasq` leem. Dry-run em prod (begin/rollback) em
 13/09/2026: 8 audiências, 9 prazos, 0 sem data; sem falso positivo do texto longo do PROJUDI.
+
+## 20260913 — busca por nome também na razão social (MEI/EI) (`rf_empresas`)
+
+**Aplicada em 13/09/2026** (psql via pooler; índice com `CREATE INDEX` comum,
+`maintenance_work_mem` 64 MB, sem paralelismo, em compute LARGE — em MEDIUM/NANO a
+VM caiu 4 vezes; ver comentário no arquivo). `20260913_rf_busca_nome_razao_social.sql`
+(+ `_rollback`). Aditiva: índice `idx_rf_empresas_razao_trgm` (GIN trigram em
+`f_unaccent(lower(razao_social))`, 4 min, ~500 MB) e `CREATE OR REPLACE` de
+`buscar_empresas_por_socio`, que passa a unir `rf_socios` com `rf_empresas` cuja razão
+social contém o nome (MEI e empresário individual não têm sócio; a razão é
+"NN.NNN.NNN NOME"). Validada em produção: `buscar_empresas_por_socio('Rafael Marcante')`
+acha 66.840.514/0001-63 (papel `titular`) em 158 ms (37 s sem o índice).
+Rollback = drop do índice + função de `20260727`.
