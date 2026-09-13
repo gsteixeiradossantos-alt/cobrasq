@@ -122,6 +122,11 @@ Deno.serve(async (req) => {
         require_document_photo: true,
         selfie_validation_type: "none",
         signature_placement: "<<assdev" + (i + 1) + ">>",
+        // Visto (rubrica) em todas as páginas: o template imprime <<vistodevN>> na
+        // margem inferior de cada página (TermoEngine.vistosPageCss) e o ZapSign
+        // posiciona a rubrica em cada ocorrência. Mesmo mecanismo da assinatura —
+        // a devedora assina UMA vez; o visto é derivado. Pedido do Gustavo, 12/09/2026.
+        rubrica_placement: "<<vistodev" + (i + 1) + ">>",
       })).concat(advs.map((a: any, i: number) => ({
         name: a.nome || "",
         email: null,
