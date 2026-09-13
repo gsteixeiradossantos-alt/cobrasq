@@ -33,7 +33,8 @@ Colunas de contato/endereço (telefone, e-mail, logradouro, CEP…) entram desde
 migração 20260912_rf_cnpj_contato_endereco.sql — aplicar antes de rodar.
 """
 from __future__ import annotations
-import argparse, csv, io, os, ssl, subprocess, sys, urllib.request, urllib.error, urllib.parse, zipfile
+import argparse
+import json, csv, io, os, ssl, subprocess, sys, urllib.request, urllib.error, urllib.parse, zipfile
 from datetime import date
 from pathlib import Path
 
@@ -254,48 +255,93 @@ def processar(mes: str, ufs: set[str], work: Path, baixar_zips: bool):
     return out_emp, out_est, out_soc
 
 
+COLS_EMP = "cnpj_basico,razao_social,natureza_juridica,porte,atualizado_em,capital_social"
+COLS_EST = ("cnpj_basico,cnpj_ordem,cnpj_dv,matriz_filial,nome_fantasia,situacao,uf,municipio,data_situacao,"
+            "motivo_situacao,data_inicio,cnae,tipo_logradouro,logradouro,numero,complemento,bairro,cep,telefone1,telefone2,email")
+COLS_SOC = "cnpj_basico,identificador,nome_socio,cnpj_cpf_socio,qualificacao,data_entrada"
+RF_TABELAS = ("rf_empresas", "rf_estabelecimentos", "rf_socios")
+
+# Cada comando abaixo é uma sessão psql própria, em autocommit. A carga em
+# transação única (1ª a 3ª tentativas, 12–13/09/2026) falhou três vezes e cada
+# falha jogou fora 2–3 h de COPY: NUL no dump, disco cheio e, por fim, a VM do
+# Supabase caindo inteira durante o CREATE INDEX (compute Nano, ~1 GB de RAM),
+# o que ainda deixou 7,7 GB de arquivos órfãos no disco. Em etapas, o que já
+# foi commitado fica, e rodar de novo retoma de onde parou.
+PSQL_PREFIXO = "set statement_timeout = 0; set lock_timeout = 0; set idle_in_transaction_session_timeout = 0;\n"
+
+
+def _psql(db: str, sql: str, capturar: bool = False) -> str:
+    p = subprocess.run(["psql", db, "-v", "ON_ERROR_STOP=1", "-q", "-At"],
+                       input=PSQL_PREFIXO + sql, text=True,
+                       capture_output=capturar)
+    if p.returncode != 0:
+        if capturar:
+            print(p.stderr, file=sys.stderr)
+        print("❌ psql falhou — veja o erro acima."); sys.exit(1)
+    return (p.stdout or "").strip()
+
+
+def _linhas(csv_path: Path) -> int:
+    with open(csv_path, "rb") as f:
+        return sum(1 for _ in f)
+
+
 def carregar(env: dict, out_emp: Path, out_est: Path, out_soc: Path):
     db = env.get("DATABASE_URL")
     if not db:
         print("\n⚠ DATABASE_URL ausente em .env.local — CSVs gerados, mas NÃO carregados.")
         print("  Rode manualmente no SQL Editor/psql:")
-        print(f"    \\copy public.rf_empresas (cnpj_basico,razao_social,natureza_juridica,porte,atualizado_em,capital_social) from '{out_emp}' csv")
-        print(f"    \\copy public.rf_estabelecimentos (cnpj_basico,cnpj_ordem,cnpj_dv,matriz_filial,nome_fantasia,situacao,uf,municipio,data_situacao,motivo_situacao,data_inicio,cnae,tipo_logradouro,logradouro,numero,complemento,bairro,cep,telefone1,telefone2,email) from '{out_est}' csv")
-        print(f"    \\copy public.rf_socios (cnpj_basico,identificador,nome_socio,cnpj_cpf_socio,qualificacao,data_entrada) from '{out_soc}' csv")
+        print(f"    \\copy public.rf_empresas ({COLS_EMP}) from '{out_emp}' csv")
+        print(f"    \\copy public.rf_estabelecimentos ({COLS_EST}) from '{out_est}' csv")
+        print(f"    \\copy public.rf_socios ({COLS_SOC}) from '{out_soc}' csv")
         return
-    # statement_timeout: o Supabase cancela comando longo por padrão ("canceling
-    # statement due to statement timeout" — aconteceu em 12/09/2026 na linha 670 mil
-    # de rf_empresas, com 12,8 M linhas para copiar). Zerar na sessão é permitido
-    # para o role postgres e vale só para esta conexão.
-    sql = f"""
-\\set ON_ERROR_STOP on
-set statement_timeout = 0;
-set lock_timeout = 0;
-set idle_in_transaction_session_timeout = 0;
-begin;
--- Índices (menos PK) saem antes do COPY e voltam depois: manter 8 índices vivos
--- durante 32 M de inserts foi o que fez a 1ª carga levar >1h só na 1ª tabela.
-create temp table _rf_idx as
-  select indexname, indexdef from pg_indexes
-  where schemaname = 'public' and tablename in ('rf_socios','rf_estabelecimentos','rf_empresas')
-    and indexname not like '%_pkey';
-do $$ declare r record; begin
-  for r in select indexname from _rf_idx loop execute format('drop index public.%I', r.indexname); end loop;
-end $$;
-truncate public.rf_socios, public.rf_estabelecimentos, public.rf_empresas;
-\\copy public.rf_empresas (cnpj_basico,razao_social,natureza_juridica,porte,atualizado_em,capital_social) from '{out_emp}' csv
-\\copy public.rf_estabelecimentos (cnpj_basico,cnpj_ordem,cnpj_dv,matriz_filial,nome_fantasia,situacao,uf,municipio,data_situacao,motivo_situacao,data_inicio,cnae,tipo_logradouro,logradouro,numero,complemento,bairro,cep,telefone1,telefone2,email) from '{out_est}' csv
-\\copy public.rf_socios (cnpj_basico,identificador,nome_socio,cnpj_cpf_socio,qualificacao,data_entrada) from '{out_soc}' csv
-do $$ declare r record; begin
-  for r in select indexdef from _rf_idx loop execute r.indexdef; end loop;
-end $$;
-analyze public.rf_empresas; analyze public.rf_estabelecimentos; analyze public.rf_socios;
-commit;
-"""
-    print("\n⇪ Carregando no Supabase via psql…")
-    p = subprocess.run(["psql", db], input=sql, text=True)
-    if p.returncode != 0:
-        print("❌ psql falhou — veja o erro acima."); sys.exit(1)
+    work = out_emp.parent
+    idx_json = work / "rf_indices.json"
+
+    # 1. Guardar a definição dos índices (menos PK) num arquivo local e derrubá-los.
+    #    Mantê-los vivos durante 32 M de inserts fez a 1ª tabela levar 1h15 sozinha.
+    #    O arquivo sobrevive a uma queda: na rodada seguinte os índices já não
+    #    existem no banco e a definição vem dele.
+    print("\n⇪ Carga no Supabase em etapas (cada uma commitada por si)…")
+    defs = _psql(db, f"""select json_agg(json_build_object('nome', indexname, 'def', indexdef) order by indexname)
+        from pg_indexes where schemaname = 'public' and tablename in {RF_TABELAS!r} and indexname not like '%\\_pkey';""", capturar=True)
+    atuais = json.loads(defs) if defs and defs != "" else []
+    if atuais:
+        idx_json.write_text(json.dumps(atuais, ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"  índices guardados em {idx_json.name}: {len(atuais)}")
+    elif idx_json.exists():
+        atuais = json.loads(idx_json.read_text(encoding="utf-8"))
+        print(f"  índices já derrubados; definição lida de {idx_json.name}: {len(atuais)}")
+    else:
+        sys.exit("❌ Nenhum índice no banco e nenhum rf_indices.json local — não sei o que recriar. Aborto.")
+    for i in atuais:
+        _psql(db, f'drop index if exists public."{i["nome"]}";')
+    print("  índices derrubados.")
+
+    # 2. Uma tabela por vez, TRUNCATE + COPY na mesma transação. Se a contagem
+    #    no banco já bate com o CSV, a tabela foi carregada numa rodada anterior.
+    for tabela, cols, csv_path in (("rf_empresas", COLS_EMP, out_emp),
+                                   ("rf_estabelecimentos", COLS_EST, out_est),
+                                   ("rf_socios", COLS_SOC, out_soc)):
+        esperado = _linhas(csv_path)
+        atual = int(_psql(db, f"select count(*) from public.{tabela};", capturar=True) or 0)
+        if atual == esperado:
+            print(f"  {tabela}: já carregada ({atual:,} linhas) — pulando.")
+            continue
+        print(f"  {tabela}: copiando {esperado:,} linhas…", flush=True)
+        _psql(db, f"begin;\ntruncate public.{tabela};\n\\copy public.{tabela} ({cols}) from '{csv_path}' csv\ncommit;")
+        print(f"  {tabela}: ok.")
+
+    # 3. Índices um a um, sem paralelismo e com memória de manutenção contida —
+    #    foi o CREATE INDEX em lote que derrubou a VM em 13/09/2026.
+    for i in atuais:
+        ddl = i["def"].replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1) \
+                      .replace("CREATE UNIQUE INDEX ", "CREATE UNIQUE INDEX IF NOT EXISTS ", 1)
+        print(f"  índice {i['nome']}…", flush=True)
+        _psql(db, f"set maintenance_work_mem = '128MB'; set max_parallel_maintenance_workers = 0;\n{ddl};")
+    for t in RF_TABELAS:
+        _psql(db, f"analyze public.{t};")
+    idx_json.unlink(missing_ok=True)
     print("✅ Carga concluída.")
 
 
