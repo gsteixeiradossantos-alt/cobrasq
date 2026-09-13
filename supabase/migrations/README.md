@@ -186,7 +186,7 @@ a fonte "email" nos chips).
 
 ## 20260913_01 — fila `vw_intimacoes_agenda_pendente` para as skills de agenda
 
-**Não aplicada.** `20260913_01_intimacoes_agenda_pendente.sql` (+ `_rollback`). Só leitura:
+**Aplicada em 13/09/2026** (psql, após merge do #721). `20260913_01_intimacoes_agenda_pendente.sql` (+ `_rollback`). Só leitura:
 funções `dia_util_forense(date)` (seg–sex sem feriado nacional = `feriadosBR()` do painel),
 `somar_dias_uteis(date,int)`, `intimacao_parse_audiencia(ato, ato_curado)` (lê "Agendada para:
 26 de outubro de 2026 às 14:00, em <órgão>, Modalidade: <x>" do PROJUDI ou "dd/mm/aaaa hh:mm")
