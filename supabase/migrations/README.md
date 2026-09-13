@@ -174,6 +174,16 @@ existentes: `CRON_INVOKE_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`; o
 o bearer do cron. Enquanto a migração não estiver aplicada, a aba "Só no diário" abre
 com a mensagem "Não foi possível ler o diário" e as outras abas seguem iguais.
 
+## 20260912_03 — `proc_intimacoes` aceita fonte `email`/`djen` + backfill (R-27)
+
+**Não aplicada.** Depende só do CHECK antigo (2026-06-23a); é independente da
+`20260912_02`, mas o rollback desta apaga também linhas `djen` se existirem. Amplia o
+CHECK e insere os 309 atos de e-mail vinculados (com devedor existente) como `lida=true`
+— o badge de não-lidas não muda. Dry-run em prod (begin/rollback) em 12/09/2026:
+309 inseridos, INSERT novo com `fonte='email'` passa, rollback restaura o CHECK e zera
+as linhas. Depois de aplicar: **recarregar o painel** (a aba "Andamentos" passa a ter
+a fonte "email" nos chips).
+
 ## 20260913_01 — intimação de fora do PR vira lembrete "Conferir intimação"
 
 **Não aplicada.** `20260913_01_intimacoes_prazo_lembrete.sql` (+ `_rollback`). Aditiva: funções
