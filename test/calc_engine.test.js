@@ -188,5 +188,43 @@ LOG('11) Datas como string equivalem a datas como Date');
   near(semJ.jurosAcumulados, 0, 'sem dataJuros continua sem juros');
 })();
 
+// 12) Capitalizacao anual OPT-IN (Dec. 22.626/33, art. 4o) — desligada por padrao
+LOG('12) Capitalizacao anual: opt-in, aniversario da data de inicio dos juros, nunca < 1 ano');
+(function () {
+  // padrao continua simples: sem a opcao, nada muda e nada e capitalizado
+  var base = E.juridica(1000, D(2024, 0, 1), D(2027, 0, 1), 'IPCA', 0, 0, 1);
+  ok(!base.capitalizacoes.length && base.jurosCapitalizados === 0, 'sem opcao: zero capitalizacoes');
+  var cap = E.juridica(1000, D(2024, 0, 1), D(2027, 0, 1), 'IPCA', 0, 0, 1, { capitalizacaoAnual: true });
+  ok(cap.capitalizacoes.length === 2, '3 anos = 2 aniversarios capitalizados (o 3o cai no fim e nao tem efeito)');
+  ok(cap.capitalizacoes[0].data.getTime() === D(2025, 0, 1).getTime() && cap.capitalizacoes[1].data.getTime() === D(2026, 0, 1).getTime(), 'aniversarios em 01/01/2025 e 01/01/2026 (contados da data dos juros)');
+  ok(cap.total > base.total, 'capitalizado > simples (=' + cap.total.toFixed(2) + ' vs ' + base.total.toFixed(2) + ')');
+  // 1o aniversario incorpora exatamente os juros simples de 12 meses (mesma base corrigida)
+  var ano1 = E.juridica(1000, D(2024, 0, 1), D(2024, 11, 31), 'IPCA', 0, 0, 1);
+  near(cap.capitalizacoes[0].valor, ano1.juros, '1o aniversario incorpora os juros simples do 1o ano', 0.01);
+  // sem anatocismo em periodo < 1 ano: 12 meses exatos = simples
+  var c12 = E.juridica(1000, D(2024, 0, 1), D(2025, 0, 1), 'IPCA', 0, 0, 1, { capitalizacaoAnual: true });
+  var s12 = E.juridica(1000, D(2024, 0, 1), D(2025, 0, 1), 'IPCA', 0, 0, 1);
+  near(c12.total, s12.total, '12 meses exatos: identico ao simples', 1e-9);
+  ok(c12.capitalizacoes.length === 0, '12 meses exatos: nenhuma capitalizacao');
+  // aniversario no meio do mes: juros antes na base antiga, depois na base nova
+  var meio = E.juridica(1000, D(2023, 8, 12), D(2025, 8, 12), 'IPCA', 0, 0, 1, { capitalizacaoAnual: true });
+  ok(meio.capitalizacoes.length === 1 && meio.capitalizacoes[0].data.getTime() === D(2024, 8, 12).getTime(), 'aniversario 12/09/2024 capturado dentro do mes');
+  var lin = meio.linhas.filter(function (l) { return l.tipo === 'mes' && l.ano === 2024 && l.mes === 9; })[0];
+  ok(lin && lin.capitalizado > 0 && Math.abs(lin.capitalizado - meio.capitalizacoes[0].valor) < 1e-9, 'linha do mes registra o valor capitalizado');
+  // termo dos juros != termo da correcao: aniversario conta dos JUROS
+  var tj = E.calcularPrincipal({ valorOriginal: 1000, dataCorrecao: D(2023, 0, 1), dataFim: D(2025, 6, 1), dataJuros: D(2024, 2, 15), indice: 'IPCA', taxaJurosMensal: 1, aplicarMulta: false, eventos: [], capitalizacaoAnual: true });
+  ok(tj.capitalizacoes.length === 1 && tj.capitalizacoes[0].data.getTime() === D(2025, 2, 15).getTime(), 'aniversario conta da data de inicio dos juros (15/03/2025)');
+  // SELIC embute juros: opcao ignorada
+  var sel = E.juridica(1000, D(2022, 0, 1), D(2025, 0, 1), 'SELIC', 0, 0, 0, { capitalizacaoAnual: true });
+  ok(sel.capitalizacoes.length === 0, 'SELIC ignora a capitalizacao');
+  // calcularJudicial propaga para os itens adicionais e soma
+  var jud = E.calcularJudicial({ valorOriginal: 1000, dataCorrecao: D(2022, 0, 15), dataFim: D(2025, 0, 15), dataJuros: D(2022, 0, 15), indice: 'IPCA', taxaJurosMensal: 1, aplicarMulta: false, eventos: [], parcelasExtras: [{ valor: 500, dataCorr: '2023-01-15' }], capitalizacaoAnual: true });
+  ok(jud.capitalizacaoAnual === true, 'calcularJudicial expoe a flag');
+  near(jud.jurosCapitalizadosTotal, jud.principal.jurosCapitalizados + jud.parcelasResultados[0].resultado.jurosCapitalizados, 'jurosCapitalizadosTotal = principal + extras');
+  ok(jud.parcelasResultados[0].resultado.capitalizacoes.length === 1, 'item adicional (2 anos) capitalizou 1 vez');
+  // identidade contabil: total = corrigido (ja com os juros incorporados) + juros do periodo corrente
+  near(cap.total, cap.valorAtualizado + cap.juros, 'total = atualizado + juros correntes', 1e-9);
+})();
+
 LOG(FAIL === 0 ? '\nOK -- ' + RAN + ' assercoes passaram (motor canonico v3).' : '\nFALHOU -- ' + FAIL + '/' + RAN + ' assercao(oes).');
 if (FAIL > 0) { if (typeof process !== 'undefined' && process.exit) process.exit(1); else throw new Error('calc-engine: ' + FAIL + ' falhas'); }

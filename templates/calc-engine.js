@@ -7,6 +7,10 @@
  * Metodologia (regras invioláveis): capitalização SIMPLES (Súmula 121 STF),
  * GARANTIA STJ (fator de correção acumulado nunca < 1), correção PRÓ-RATA-DIE,
  * multa única, eventos com imputação art. 354 CC (juros→multa→principal).
+ * Exceção OPT-IN (`capitalizacaoAnual: true`, desligada por padrão): capitalização
+ * ANUAL pactuada (Dec. 22.626/33, art. 4º) — a cada aniversário da data de início
+ * dos juros, os juros vencidos entram no principal. Nunca em período menor que um
+ * ano; SELIC (juros embutidos) ignora a opção.
  *
  * Índices oficiais embutidos (BCB/SGS, 2000→2026): INPC=188, IPCA=433,
  * IGP-M=189, IGP-DI=190, SELIC=4390. TJPR = média aritmética mensal INPC/IGP-DI
@@ -146,6 +150,12 @@
     let multaJaAplicada = false;                        // multa é única: não pode voltar após um pagamento zerar multaAcumulada
     const linhas = []; let evIdx = 0;
     const dataMulta = params.aplicarMulta ? (params.multaData || params.dataFim) : null;
+    // Capitalização anual (opt-in): aniversários contados da data de início dos juros.
+    // `proxAniv` é a próxima data em que os juros vencidos entram no principal.
+    const capAnual = !!params.capitalizacaoAnual && params.dataJuros instanceof Date;
+    const somaAnos = (d, n) => { const x = new Date(d); x.setFullYear(x.getFullYear() + n); return x; };
+    let proxAniv = capAnual ? somaAnos(params.dataJuros, 1) : null, nAniv = 1;
+    let jurosCapitalizados = 0; const capitalizacoes = [];
 
     for (const s of segs) {
       const ch = chaveMes(s.ano, s.mes);
@@ -160,18 +170,30 @@
       const saldoAntes = saldoCorrigido;
       saldoCorrigido = saldoCorrigido * fatorMes;
 
-      let jurosMes = 0, diasJurosNoSeg = 0, taxaMesAplicada = taxaSeg, viaTaxaLegal = false;
+      let jurosMes = 0, diasJurosNoSeg = 0, taxaMesAplicada = taxaSeg, viaTaxaLegal = false, capitalizadoSeg = 0;
       if (!info.travaJuros && params.dataJuros <= s.dataFimSeg) {
         const iniJ = params.dataJuros > s.dataIniSeg ? params.dataJuros : s.dataIniSeg;
         diasJurosNoSeg = diffDias(iniJ, s.dataFimSeg) + 1;
-        if (info.taxaLegal) {
-          const tl = TAB['TAXA-LEGAL'][ch];
-          if (tl !== undefined) { taxaMesAplicada = tl; viaTaxaLegal = true; jurosMes = saldoCorrigido * (tl / 100) * (diasJurosNoSeg / s.diasMes); }
-          else { jurosMes = saldoCorrigido * (taxaSeg / 100) * (diasJurosNoSeg / 30); }
+        // juros de `dias` sobre `base`, no regime do segmento (taxa legal pró-rata do mês; fixa pró-rata de 30)
+        const tl = info.taxaLegal ? TAB['TAXA-LEGAL'][ch] : undefined;
+        if (tl !== undefined) { taxaMesAplicada = tl; viaTaxaLegal = true; }
+        const jurosDe = (base, dias) => tl !== undefined ? base * (tl / 100) * (dias / s.diasMes) : base * (taxaSeg / 100) * (dias / 30);
+        if (capAnual && proxAniv >= iniJ && proxAniv <= s.dataFimSeg && proxAniv < params.dataFim) {
+          // aniversário cai neste segmento: juros até a véspera na base antiga; no dia, os
+          // vencidos entram no principal; do aniversário em diante, juros na base nova.
+          const diasAntes = diffDias(iniJ, proxAniv);           // iniJ .. véspera do aniversário
+          const jAntes = jurosDe(saldoCorrigido, diasAntes);
+          const incorporado = jurosAcumulados + jAntes;
+          saldoCorrigido += incorporado; jurosCapitalizados += incorporado; capitalizadoSeg = incorporado;
+          capitalizacoes.push({ data: new Date(proxAniv), n: nAniv, valor: incorporado, saldoApos: saldoCorrigido });
+          jurosAcumulados = 0;
+          const jDepois = jurosDe(saldoCorrigido, diasJurosNoSeg - diasAntes);
+          jurosMes = jAntes + jDepois; jurosAcumulados += jDepois;
+          nAniv++; proxAniv = somaAnos(params.dataJuros, nAniv);
         } else {
-          jurosMes = saldoCorrigido * (taxaSeg / 100) * (diasJurosNoSeg / 30);
+          jurosMes = jurosDe(saldoCorrigido, diasJurosNoSeg);
+          jurosAcumulados += jurosMes;
         }
-        jurosAcumulados += jurosMes;
       }
 
       let multaSeg = 0;
@@ -190,6 +212,7 @@
       linhas.push({ tipo: 'mes', ano: s.ano, mes: s.mes, parcial: s.parcial, diasSeg: s.diasSeg, diasMes: s.diasMes,
         indiceTabela: info.tabela, viaTaxaLegal, taxaMesAplicada, varPct, fatorMes, saldoAntes, saldoCorrigido,
         diasJuros: diasJurosNoSeg, jurosMes, jurosAcumulados, multaAplicada: multaSeg, multaAcumulada,
+        capitalizado: capitalizadoSeg,
         saldoTotal: saldoCorrigido + jurosAcumulados + multaAcumulada });
 
       while (evIdx < eventosOrd.length && eventosOrd[evIdx].dataObj <= s.dataFimSeg) {
@@ -213,6 +236,7 @@
       }
     }
     return { linhas, saldoCorrigido, jurosAcumulados, multaAcumulada, aplicouGarantia,
+      capitalizacaoAnual: capAnual, jurosCapitalizados, capitalizacoes,
       eventosAplicados: linhas.filter(l => l.tipo === 'evento').length, _extrapolacao: params._extrapolacao };
   }
 
@@ -265,6 +289,8 @@
     const creditoNaoImputado = creditoCascata.reduce((s, c) => s + c.valor, 0);
     const saldoCorrigidoTotal = principal.saldoCorrigido + saldoExtras;
     const jurosAcumuladosTotal = principal.jurosAcumulados + jurosExtras;
+    const jurosCapitalizadosTotal = (principal.jurosCapitalizados || 0)
+      + parcelasResultados.reduce((s, pr) => s + (pr.resultado.jurosCapitalizados || 0), 0);
     let multaAgregada;
     if (temExtras && params.aplicarMulta) {
       multaAgregada = params.multaTipo === 'FIXO' ? params.multaPct : saldoCorrigidoTotal * (params.multaPct / 100);
@@ -288,6 +314,7 @@
     const totalHonC = honContratual ? honContratual.total : 0;
     const totalGeral = totalPrincipal + totalHonC + totalCustas;
     return { params, principal, parcelasResultados, saldoCorrigidoTotal, jurosAcumuladosTotal, multaAgregada,
+      jurosCapitalizadosTotal, capitalizacaoAnual: !!principal.capitalizacaoAnual,
       honContratual, custasResultados, totalCustas, totalPrincipal, totalHonC, totalGeral, creditoNaoImputado,
       aplicouGarantia: principal.aplicouGarantia };
   }
@@ -363,7 +390,8 @@
       valorOriginal: _num(valorNominal), dataCorrecao: dataIni, dataFim: dataFim, dataJuros: opts.dataJuros || dataIni,
       indice: indice, taxaJurosMensal: taxa, aplicarMulta: _num(multaPct) > 0, multaTipo: opts.multaTipo || 'PCT',
       multaPct: _num(multaPct), multaBase: opts.multaBase || 'CORRIGIDO', multaData: opts.multaData || null,
-      eventos: opts.eventos || [], selicRetro: !!opts.selicRetro, regimesIndice: opts.regimesIndice, regimesJuros: opts.regimesJuros
+      eventos: opts.eventos || [], selicRetro: !!opts.selicRetro, regimesIndice: opts.regimesIndice, regimesJuros: opts.regimesJuros,
+      capitalizacaoAnual: !!opts.capitalizacaoAnual
     }, TABELAS);
     const valorAtualizado = r.saldoCorrigido, juros = r.jurosAcumulados, multa = r.multaAcumulada;
     const honBase = opts.honBase || 'CORRIGIDO_JUROS_MULTA';
@@ -379,6 +407,7 @@
     return {
       valorNominal: _num(valorNominal), indice, valorAtualizado, aplicouGarantiaSTJ: r.aplicouGarantia,
       juros, multa, honorarios, total,
+      jurosCapitalizados: r.jurosCapitalizados || 0, capitalizacoes: r.capitalizacoes || [],
       mesesPRO: Math.round((diffDias(dataIni, dataFim) / 30) * 100) / 100,
       mesesCorrigidos: r.linhas.filter(l => l.tipo === 'mes').length,
       multaPct: _num(multaPct), honPct: _num(honPct), jurosMensalPct: taxa, indice_ate: ultimoMesIndice(indice), linhas: r.linhas
