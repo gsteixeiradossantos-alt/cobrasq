@@ -10557,7 +10557,7 @@ function _montarFilaDecisoesSync(cobrAtivas, sinais){
           grupo:'Dinheiro', tag:'REPASSE', peso: diasP>=10?3:2, devId:'',
           credor: x.nome, devedor:'',
           nome: x.nome, meta:`Repasse ao cedente pendente há ${diasP} dias`,
-          valor: x.aRepassar, acaoLabel:'Repassar', onAcao:`showPage('fin')`
+          valor: x.aRepassar, acaoLabel:'Repassar', onAcao:`showPage('fin');setFinTab('repasses')`
         });
       });
     }catch(_){}
@@ -34911,11 +34911,12 @@ async function _repLoad(){
 }
 async function _repLoadReal(){
   const sb = getSupabase();
-  // Os recebíveis (duas idas ao Asaas, acordos sem providência) NÃO seguram a tela: sobem
-  // junto com o núcleo, pousam depois e repintam o painel quando chegam. A fila do Painel
+  // Os recebíveis (inadimplência + boletos Asaas a vencer) NÃO seguram a tela: sobem
+  // junto com o núcleo, pousam depois e repintam o card quando chegam. A fila do Painel
   // (_montarFilaDecisoes) só precisa de ops/credMap e esperava por eles à toa — a cadeia
   // inteira era serial: 8,1 s e 15 viagens uma atrás da outra (medido em 13/09/2026).
-  _repState.recebiveisProntos = false;
+  // (recebiveisProntos é resetado dentro de _repCarregarRecebiveis, não aqui — assim
+  // vale igual para os dois chamadores, Home e Financeiro.)
   const recebiveis = _repCarregarRecebiveis();
   // fin_operacao e os repasses importados não dependem um do outro: juntos.
   const [r, pendRes] = await Promise.all([
@@ -35000,22 +35001,33 @@ async function _repLoadReal(){
   }, e => console.warn('[repasses] recebíveis:', (e && e.message) || e));
 }
 // Dados do antigo painel "Recebíveis" (fundido aqui 2026-08-06): cobrança Asaas em
-// aberto, acordos assinados pendentes de lançar/repassar, inadimplência. Cada um é
-// best-effort — falha isolada não derruba o carregamento dos repasses. Os três vão
-// juntos (eram três esperas em fila: 1,1 s + ~1,0 s + 3,3 s). Geração: uma recarga que
-// suba no meio (loaded=false → _repLoad de novo) não é sobrescrita pela mais velha.
+// aberto e inadimplência. Cada um é best-effort — falha isolada não derruba o
+// carregamento dos repasses; vão juntos (eram esperas em fila, serial). Geração: uma
+// recarga que suba no meio (loaded=false → _repLoad de novo) não é sobrescrita pela
+// mais velha. (A terceira perna, acordos sem providência, saiu em 09/2026 junto com a
+// tela "Assinado → lançar → repassar" que era a única consumidora do resultado.)
 let _repRecebiveisGer = 0;
-// Devolve true se ESTA geração gravou (false = descartada). Falha isolada de um dos
-// três fica silenciosa na tela (lista vazia), como era antes — só avisa no console.
+// Duas telas pedem os recebíveis de forma independente (Home, ao montar a fila de
+// decisões, e o Financeiro, ao abrir a aba Caixa) — sem esta guarda, abrir uma logo
+// depois da outra disparava a MESMA consulta ao Asaas duas vezes em paralelo.
+let _repRecebiveisEmVoo = null;
 async function _repCarregarRecebiveis(){
+  if(_repRecebiveisEmVoo) return _repRecebiveisEmVoo;
+  _repRecebiveisEmVoo = _repCarregarRecebiveisReal().finally(()=>{ _repRecebiveisEmVoo = null; });
+  return _repRecebiveisEmVoo;
+}
+// Devolve true se ESTA geração gravou (false = descartada). Falha isolada de um dos
+// dois fica silenciosa na tela (lista vazia), como era antes — só avisa no console.
+async function _repCarregarRecebiveisReal(){
   const ger = ++_repRecebiveisGer;
+  // Só agora, não antes: quem já estava olhando o card via a mensagem "carregando…"
+  // em vez de um zero mentiroso enquanto esta carga está em voo.
+  _repState.recebiveisProntos = false;
   _repState.inad = { devList:[], charges:[], oldestAll:null };
-  _repState.acordosPend = [];
   _repState.pendenteAsaas = [];
   try{
-    const [inad, acordosPend, pendenteAsaas] = await Promise.all([
+    const [inad, pendenteAsaas] = await Promise.all([
       _loadInadimplentes().catch(e => { console.warn('[repasses] inadimplência:', (e && e.message) || e); return null; }),
-      _carregarAcordosPendProvidencia().catch(e => { console.warn('[repasses] acordos sem providência:', (e && e.message) || e); return []; }),
       (async () => {
         if(!DB.config.asaasKey) return [];
         try{
@@ -35027,7 +35039,6 @@ async function _repCarregarRecebiveis(){
     ]);
     if(ger !== _repRecebiveisGer) return false;   // carga mais nova já subiu: a dela vale
     if(inad) _repState.inad = inad;
-    _repState.acordosPend = acordosPend;
     _repState.pendenteAsaas = pendenteAsaas;
     return true;
   }finally{
@@ -35487,52 +35498,6 @@ function calcSimuladorRepasse(){
     <div class="panel" style="padding:10px 14px;"><div style="font-size:11px;color:var(--text-3);">Honorário (lucro)</div><div style="font-weight:700;color:#0a7d3b;">${fmtR(honor)} <span style="font-size:11px;color:var(--text-3);">(${pct.toFixed(1)}%)</span></div><div style="font-size:11px;color:var(--text-3);">${fmtR(honor/nParc)} /parcela</div></div>
     <div class="panel" style="padding:10px 14px;"><div style="font-size:11px;color:var(--text-3);">Parcela</div><div style="font-weight:700;">${fmtR(total/nParc)}</div><div style="font-size:11px;color:var(--text-3);">${nParc}x</div></div>
   </div>`;
-}
-
-// ══════════════════════════════════════════════════════════════
-// FINANCEIRO · RECEBÍVEIS — "o dinheiro do cedente" (handoff de reformulação)
-// Consolida a antiga "Inadimplência & Execução" (Asaas) + "A repassar ao cedente"
-// (fin_operacao) numa única aba, com o card novo "Assinado → lançar → repassar".
-// ══════════════════════════════════════════════════════════════
-
-// Acordos assinados que ainda não tiveram as parcelas lançadas em Movimentações
-// e/ou o repasse ao cedente cadastrado. Flags de controle vivem em acordos.metadata
-// (mesmo padrão já usado para boletos_emitidos/whatsapp_ok) — evita duplicar lançamento
-// se o botão for clicado 2×.
-async function _carregarAcordosPendProvidencia(){
-  const sb = getSupabase(); if(!sb) return [];
-  const { data, error } = await sb.from('acordos')
-    .select('id,valor_total,parcelas,devedor_id,cobranca_id,created_at,metadata,status_zapsign')
-    .eq('status_zapsign','assinado').order('created_at',{ascending:false}).limit(200);
-  if(error || !Array.isArray(data)) return [];
-  const devIds = [...new Set(data.map(a=>a.devedor_id).filter(Boolean))];
-  const cobIds = [...new Set(data.map(a=>a.cobranca_id).filter(Boolean))];
-  const devMap = {}, cobMap = {};
-  // Devedores e cobranças não dependem um do outro: juntos. Só os clientes esperam.
-  const [devs, cobs] = await Promise.all([
-    devIds.length ? sb.from('devedores').select('id,nome').in('id',devIds).then(r=>r.data||[]) : Promise.resolve([]),
-    cobIds.length ? sb.from('cobrancas').select('id,cliente_id').in('id',cobIds).then(r=>r.data||[]) : Promise.resolve([]),
-  ]);
-  devs.forEach(d=>devMap[d.id]=d.nome);
-  cobs.forEach(c=>cobMap[c.id]=c.cliente_id);
-  const credIds = [...new Set(Object.values(cobMap).filter(Boolean))];
-  const credMap = {};
-  if(credIds.length){ const { data:creds } = await sb.from('clientes').select('id,nome,metadata,taxa_honorarios').in('id',credIds); (creds||[]).forEach(c=>credMap[c.id]=c); }
-  return data.map(a=>{
-    const parcelas = Array.isArray(a.parcelas) ? a.parcelas : [];
-    const credorId = cobMap[a.cobranca_id];
-    const credor = credMap[credorId];
-    const taxaPct = credor ? (+(credor.metadata?.percentualHonorarios || credor.metadata?.taxaRecuperacao || credor.taxa_honorarios) || 0) : 0;
-    const lancado = !!(a.metadata && a.metadata.parcelasLancadas);
-    const repassado = !!(a.metadata && a.metadata.repasseCadastrado);
-    return {
-      id:a.id, valorTotal:+a.valor_total||0, parcelas, devedorId:a.devedor_id,
-      devedorNome: devMap[a.devedor_id]||'—', credorId, credorNome: credor?credor.nome:'—',
-      taxaPct, repasseEstimado: (+a.valor_total||0) * (1-taxaPct/100),
-      lancado, repassado,
-      status: (lancado && repassado) ? 'completo' : (lancado ? 'falta_repasse' : 'a_lancar'),
-    };
-  }).filter(a=>!(a.lancado && a.repassado)); // some da lista só quando as duas providências já foram feitas
 }
 
 async function renderFinDiagnostico(el){
@@ -36509,8 +36474,7 @@ async function renderFinVisao(el){
   // Composição/Inadimplência: repinta quando os recebíveis do Asaas pousarem.
   pRecebiveis.then(gravou => {
     if(!gravou || gen !== _finVisaoGen) return;
-    const s = el.querySelector('#cx2-composicao-inad');
-    if(s) s.outerHTML = `<div id="cx2-composicao-inad">${_finComposicaoInadHtml()}</div>`;
+    _finComposicaoInadRepintar();
   });
 
   // Ponte: entra quando a base do Fluxo pousar — se esta ainda for a render corrente.
@@ -36635,7 +36599,7 @@ async function _carregarResumoAsaasVisao(){
           <div style="font-size:16px;font-weight:800;color:#b91c1c;margin-top:2px;">${fmtR(overdue)}</div>
         </div>
       </div>
-      <button class="btn btn-ghost btn-sm" style="width:100%;margin-top:10px;font-size:11.5px;" onclick="showPage('fin')">Ver repasses completos →</button>
+      <button class="btn btn-ghost btn-sm" style="width:100%;margin-top:10px;font-size:11.5px;" onclick="showPage('fin');setFinTab('repasses')">Ver repasses completos →</button>
     `;
   } catch(e){
     el.innerHTML = `<span style="color:var(--danger);font-size:12px;">Erro: ${escHtml(traduzirErro(e.message))}</span>
