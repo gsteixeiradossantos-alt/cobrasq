@@ -261,6 +261,8 @@ table.rmem tr.fin td{background:var(--gold-soft);font-weight:600;color:var(--tex
           <label class="lab">Multa contratual</label>
           <div class="ig gold"><input id="j_multaPct" inputmode="decimal" placeholder="0,00"><span class="sfx">%</span></div>
           <div class="hint">Preencha para aplicar · sobre o valor corrigido.</div>
+          <div class="ig" style="margin-top:8px"><input id="j_multaLabel" placeholder="Multa contratual" oninput="agendarRecalc()"></div>
+          <div class="hint">Rótulo da multa no PDF · ex.: Multa do art. 523, § 1º, do CPC (10%).</div>
         </div>
         <div>
           <label class="lab">Honorários</label>
@@ -516,7 +518,7 @@ function calcularJud(silent){
   var honVal=HON_TIPO==='FIXO'?parseValor($('j_honValor').value):parseDec($('j_honValor').value), honOn=honVal>0;
   var params={ valorOriginal:valor, dataCorrecao:dCorr, dataFim:dFim, dataJuros:dJur,
     indice:$('j_indice').value, taxaJurosMensal:taxa, capitalizacaoAnual:isOn('sw_capAnual'),
-    aplicarMulta:multaOn, multaTipo:'PCT', multaPct:multaPct, multaBase:'CORRIGIDO',
+    aplicarMulta:multaOn, multaTipo:'PCT', multaPct:multaPct, multaBase:'CORRIGIDO', multaLabel:($('j_multaLabel').value||'').trim(),
     eventos:evs, parcelasExtras:extras, regimesIndice:ri, regimesJur:rj, regimesJuros:rj, custas:custas,
     honC: honOn?{ativo:true,tipo:HON_TIPO,valor:honVal,base:'CORRIGIDO_JUROS'}:{ativo:false} };
   estado=E.calcularJudicial(params,E.TABELAS); estado.params=params;
@@ -742,11 +744,13 @@ function exportarPDF(){
     + idField('Taxa de juros', r.params.indice==='SELIC'?'Inclusos na SELIC (sem juros à parte)':(N(r.params.taxaJurosMensal,2)+'% a.m. · '+(r.capitalizacaoAnual?'capitalizados anualmente':'simples')))
     + (temExtras?idField('Composição', itens.length+' valores (item 1 + '+(itens.length-1)+' adicional(is))'):'');
 
+  // rótulo da multa: o que o usuário digitou (ex.: art. 523 do CPC) ou o padrão
+  var multaLabel=(r.params.multaLabel||'Multa contratual');
   // ── composição do débito (.sum) ──
   var sumRows=sumRow('Valor nominal da dívida', B(nominalSoma), false)
     + sumRow('Correção monetária ('+r.params.indice+')', B(r.saldoCorrigidoTotal-nominalSoma), true)
     + sumRow('Juros de mora', B(r.jurosAcumuladosTotal), true)
-    + (r.multaAgregada>0?sumRow('Multa contratual'+(temExtras?' (sobre a soma)':''), B(r.multaAgregada), true):'')
+    + (r.multaAgregada>0?sumRow(multaLabel+(temExtras?' (sobre a soma)':''), B(r.multaAgregada), true):'')
     + (r.totalHonC>0?sumRow('Honorários'+(temExtras?' (sobre a soma)':''), B(r.totalHonC), true):'')
     + (r.totalCustas>0?sumRow('Custas judiciais (corrigidas)', B(r.totalCustas), true):'');
 
@@ -770,7 +774,7 @@ function exportarPDF(){
       '<td class="num">'+B(r.jurosAcumuladosTotal)+'</td><td class="tot">'+B(r.saldoCorrigidoTotal+r.jurosAcumuladosTotal)+'</td></tr>'+
       '</tbody></table>';
     var multaTxt=(r.params.aplicarMulta&&r.params.multaTipo==='FIXO')?'valor fixo':(N(r.params.multaPct||0,2)+'%');
-    h+='<div class="compextra"><span>Multa ('+multaTxt+')</span><span class="v">'+B(r.multaAgregada||0)+'</span></div>'+
+    h+='<div class="compextra"><span>'+esc(multaLabel)+' ('+multaTxt+')</span><span class="v">'+B(r.multaAgregada||0)+'</span></div>'+
        '<div class="compextra"><span>Honorários</span><span class="v">'+B(r.totalHonC||0)+'</span></div>';
     if(r.totalCustas>0) h+='<div class="compextra"><span>Custas (corrigidas)</span><span class="v">'+B(r.totalCustas)+'</span></div>';
     return h;
@@ -783,7 +787,7 @@ function exportarPDF(){
     : r.capitalizacaoAnual
     ? 'Atualização monetária pelo índice <strong>'+esc(r.params.indice)+'</strong> · juros de mora de '+N(r.params.taxaJurosMensal,2)+'% a.m., <strong>capitalizados anualmente</strong> conforme pactuado, na forma do <strong>art. 4º do Decreto n. 22.626/1933</strong> — a cada aniversário do termo inicial dos juros, os juros vencidos são incorporados ao principal; dentro de cada ano os juros são simples (sem capitalização em período inferior a um ano — Súmula 121 do STF) · índices oficiais aplicados até '+indAte+'.'
     : 'Atualização monetária pelo índice <strong>'+esc(r.params.indice)+'</strong> · juros de mora <strong>simples</strong> conforme <strong>Súmula 121 do STF</strong> · vedação de anatocismo garantida pela jurisprudência do STJ · índices oficiais aplicados até '+indAte+'.';
-  if(r.aplicouGarantia) metodo += ' <strong>Garantia STJ</strong> aplicada: índice médio negativo no período — valor atualizado mínimo = nominal.';
+  if(r.aplicouGarantia) metodo += ' <strong>Garantia STJ</strong> aplicada: no(s) mês(es) de índice negativo o fator acumulado foi mantido em 1 — o valor atualizado nunca fica abaixo do nominal.';
 
   // ── demonstrativo (single ou por item) ──
   var html_p1_foot='';
@@ -927,7 +931,7 @@ function getCalcSupabase(){ if(_calcSupa)return _calcSupa; if(!window.supabase)r
 async function getCalcUser(){ if(_calcOwnerId)return _calcOwnerId; var s=getCalcSupabase(); if(!s)return null; var d=await s.auth.getUser(); _calcOwnerId=d&&d.data&&d.data.user?d.data.user.id:null; return _calcOwnerId; }
 function calcToast(msg,type){var el=document.createElement('div');el.style.cssText='position:fixed;bottom:20px;right:20px;background:'+(type==='error'?'#9B4A3F':'#0A1530')+';color:#F3F4F6;padding:11px 18px;border-radius:6px;font-size:13px;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.18);max-width:340px';el.textContent=msg;document.body.appendChild(el);setTimeout(function(){el.style.opacity='0';el.style.transition='opacity .3s';},2700);setTimeout(function(){el.remove();},3100);}
 async function autoSalvarCalculo(){ if(!estado)return; try{ var s=getCalcSupabase(); if(!s)return; var owner=await getCalcUser(); if(!owner)return;
-  var p=estado.params; var inputs={valorOriginal:p.valorOriginal,indice:p.indice,dataCorrecao:p.dataCorrecao&&p.dataCorrecao.toISOString?p.dataCorrecao.toISOString():p.dataCorrecao,dataFim:p.dataFim&&p.dataFim.toISOString?p.dataFim.toISOString():p.dataFim,taxaJurosMensal:p.taxaJurosMensal,capitalizacaoAnual:!!p.capitalizacaoAnual,aplicarMulta:p.aplicarMulta,multaPct:p.multaPct};
+  var p=estado.params; var inputs={valorOriginal:p.valorOriginal,indice:p.indice,dataCorrecao:p.dataCorrecao&&p.dataCorrecao.toISOString?p.dataCorrecao.toISOString():p.dataCorrecao,dataFim:p.dataFim&&p.dataFim.toISOString?p.dataFim.toISOString():p.dataFim,taxaJurosMensal:p.taxaJurosMensal,capitalizacaoAnual:!!p.capitalizacaoAnual,aplicarMulta:p.aplicarMulta,multaPct:p.multaPct,multaLabel:p.multaLabel||''};
   var resultado={totalGeral:estado.totalGeral,saldoCorrigido:estado.saldoCorrigidoTotal,jurosAcumulados:estado.jurosAcumuladosTotal,multaAcumulada:estado.multaAgregada};
   var titulo='Cálculo de '+(p.dataFim&&p.dataFim.toLocaleDateString?p.dataFim.toLocaleDateString('pt-BR'):'')+' ('+new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})+')';
   var res=await s.from('calc_calculos').insert({owner_id:owner,titulo:titulo,snapshot_inputs:inputs,snapshot_resultado:resultado}).select().single();
@@ -990,13 +994,14 @@ function aplicarPreset(el,i){
   if(c.taxa!=null) $('j_taxa').value=c.taxa;
   if(c.capAnual!=null && isOn('sw_capAnual')!==!!c.capAnual) toggleSw('sw_capAnual');
   if(c.multa!=null) $('j_multaPct').value=c.multa;
+  if(c.multaLabel!=null) $('j_multaLabel').value=c.multaLabel;
   if(c.hon!=null) $('j_honValor').value=c.hon;
   agendarRecalc();
 }
 function salvarPresetAtual(){
   var nome=prompt('Nome do preset (salva índice, taxa, multa e honorários atuais):'); if(!nome)return;
   var saved=getPresetsSalvos();
-  saved.push({label:nome,cfg:{indice:$('j_indice').value,taxa:$('j_taxa').value,capAnual:isOn('sw_capAnual'),multa:$('j_multaPct').value,hon:$('j_honValor').value}});
+  saved.push({label:nome,cfg:{indice:$('j_indice').value,taxa:$('j_taxa').value,capAnual:isOn('sw_capAnual'),multa:$('j_multaPct').value,multaLabel:$('j_multaLabel').value,hon:$('j_honValor').value}});
   try{localStorage.setItem('calc_presets',JSON.stringify(saved));}catch(e){}
   renderPresets();
 }
