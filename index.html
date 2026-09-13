@@ -6012,7 +6012,7 @@ async function loadRelationalData(){
   const [devedoresRel, clientesRel, cobrancasRel] = await Promise.all([
     loadDevedoresFromSupabase(),
     loadClientesFromSupabase(),
-    loadCobrancasFromSupabase(),
+    ensureCobrancas({ forcar:true }),   // o porteiro atribui DB_cobrancas e carimba
     loadTombstones()
   ]);
   // Fase 3 — modo seguro: se a carga FALHOU (null = erro de RLS/rede; ≠ [] que é
@@ -6054,7 +6054,8 @@ async function loadRelationalData(){
   // vínculo foi setado por fora, ex.: SQL/outra aba). Espelha _syncSnapshot do blob.
   if(Array.isArray(clientesRel)) _clientesRelSnapshot = _snapClientes();
   if(Array.isArray(devedoresRel)) _devedoresRelSnapshot = _snapDevedores();
-  if(Array.isArray(cobrancasRel)) DB_cobrancas = cobrancasRel;
+  // (DB_cobrancas já foi atribuída pelo porteiro em ensureCobrancas; cobrancasRel
+  //  fica só para o teste de modo seguro acima.)
   // FASE C2 (tempo-2): leitores do cliente passam a ver a dívida de cobrancas.
   _mergeDividaFromCobrancas();
   // Valor atualizado sempre corrente: recalcula HOJE em memória (compute-on-read).
@@ -10590,12 +10591,15 @@ const _FILA_CMP = {
 async function renderFilaDecisoes(){
   const el = document.getElementById('page-fila');
   if(!el) return;
-  el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando fila…</div>`;
-
   // Mesma fonte e mesmo recorte do Painel (inclusive os filtros Cliente/Operador):
   // se divergisse, a página mostraria um total diferente do card do Painel.
-  const cobrRows = await loadCobrancasFromSupabase();
-  if(Array.isArray(cobrRows)) DB_cobrancas = cobrRows;
+  // Pinta com o que há em memória; só mostra "Carregando" se não houver nada.
+  if(!cobrancasEmMemoria().length){
+    el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando fila…</div>`;
+    await ensureCobrancas({ forcar:true });
+  } else {
+    revalidarCobrancas(()=>{ if(document.getElementById('page-fila')?.classList.contains('active')) renderFilaDecisoes(); });
+  }
   const _pf = window._painelFiltro || (window._painelFiltro = { cliente:'', operador:'' });
   const cobrAtivas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft
     && !/quitad|pago|liquidad/i.test(c.status||'')
@@ -10719,9 +10723,14 @@ async function renderPainel(){
   }
 
   // ── FONTE DE VERDADE: cobranças (mesmo cache/lógica da tela Cobranças) ───────
-  el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando painel…</div>`;
-  const cobrRows = await loadCobrancasFromSupabase();
-  if(Array.isArray(cobrRows)) DB_cobrancas = cobrRows;
+  // Pinta com o que há em memória; só mostra "Carregando" se não houver nada.
+  // Medido: rebuscar aqui custava 2–4,7 s de tela em branco a cada abertura.
+  if(!cobrancasEmMemoria().length){
+    el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando painel…</div>`;
+    await ensureCobrancas({ forcar:true });
+  } else {
+    revalidarCobrancas(()=>{ if(document.getElementById('page-painel')?.classList.contains('active')) renderPainel(); });
+  }
   // Filtros do painel (Cliente / Operador) — aplicados na fonte p/ consistência entre os quadros.
   const _pf = window._painelFiltro || (window._painelFiltro = { cliente:'', operador:'' });
   // "Carteira ativa" = casos EM ABERTO — exclui quitado/pago/liquidado.
@@ -11334,7 +11343,7 @@ async function checkAlertaCasosAgir(painelEl){
     const old = el.querySelector('#cob-alert-agir'); if(old) old.remove();
     if(typeof cobPendencia!=='function') return;
     let rows = Array.isArray(DB_cobrancas) ? DB_cobrancas : null;
-    if(!rows){ try{ rows = await loadCobrancasFromSupabase(); if(Array.isArray(rows)) DB_cobrancas = rows; }catch(_){ rows=[]; } }
+    if(!rows){ try{ rows = await ensureCobrancas(); }catch(_){ rows=[]; } }
     rows = (rows||[]).filter(c=>!c.arquivado && !c.is_draft);
     if(!rows.length) return;
     const sin = (typeof _cobrSinais!=='undefined' && _cobrSinais) ? _cobrSinais : {};
@@ -11548,9 +11557,7 @@ function abrirBuscaGlobal(){
   const inp = document.getElementById('busca-global-input');
   if(inp){ inp.value = ''; setTimeout(()=>inp.focus(), 60); }
   // Aquece o cache de cobranças para a busca incluir os casos.
-  if(!(DB_cobrancas||[]).length && typeof loadCobrancasFromSupabase==='function'){
-    loadCobrancasFromSupabase().then(rows=>{ if(Array.isArray(rows)) DB_cobrancas = rows; }).catch(()=>{});
-  }
+  if(!cobrancasEmMemoria().length) ensureCobrancas().catch(()=>{});
   renderBuscaGlobal('');
 }
 function renderBuscaGlobal(q){
@@ -19513,6 +19520,60 @@ async function loadCobrancasFromSupabase(){
   }catch(e){ console.warn('[rel] loadCobrancas ex:', e.message); return null; }
 }
 
+// ── DONO da lista de cobranças ────────────────────────────────────────────────
+// Único lugar que atribui DB_cobrancas a partir do servidor. Ninguém mais chama
+// loadCobrancasFromSupabase() diretamente — toda tela pede aqui.
+//
+// Antes, nove pontos do código buscavam a lista inteira por conta própria: Painel,
+// Fila e Cobranças faziam a MESMA viagem de ~1,2 s, cada um para si, bloqueando a
+// tela com "Carregando…" — com os dados já em memória desde o boot. E dois deles
+// (relatório e exportação) buscavam para uma variável local e descartavam.
+//
+// A tentativa anterior (PR #689) foi uma janela de 10 s colada só em renderCobrancas.
+// Reprovou na revisão porque os outros pontos continuavam buscando pelas costas
+// dela, e um carimbava "acabei de buscar" sem atualizar a lista — o carimbo mentia.
+// Aqui isso é impossível por construção: só quem carimba é quem atribui, e só o
+// porteiro atribui.
+//
+// Relógio monotônico (performance.now), não Date.now: relógio de parede anda para
+// trás (NTP após suspender) e deixaria a lista "fresca" pelo tamanho do salto.
+const _cobrDono = { carregadoEm: -Infinity, emVoo: null };
+const COBR_FRESCO_MS = 15000;
+
+// O que há em memória agora. Nunca vai à rede. Pode ser [].
+function cobrancasEmMemoria(){ return Array.isArray(DB_cobrancas) ? DB_cobrancas : []; }
+function _cobrFresca(){ return cobrancasEmMemoria().length > 0 && (performance.now() - _cobrDono.carregadoEm) < COBR_FRESCO_MS; }
+
+// Garante DB_cobrancas carregada e devolve a lista. Devolve null só quando a busca
+// falhou E não havia nada em memória — mesmo contrato do loader, para o boot cair no
+// modo seguro. Com {forcar:true} vai ao servidor mesmo fresca (botão ↻, exportação,
+// relatório: quem pede "atualiza" tem de ver o servidor, não a memória).
+// Chamadas concorrentes dividem a mesma viagem.
+async function ensureCobrancas(opts){
+  const forcar = !!(opts && opts.forcar);
+  if(!forcar && _cobrFresca()) return DB_cobrancas;
+  if(_cobrDono.emVoo) return _cobrDono.emVoo;
+  const tinha = cobrancasEmMemoria().length > 0;
+  _cobrDono.emVoo = (async ()=>{
+    try{
+      const rows = await loadCobrancasFromSupabase();
+      if(Array.isArray(rows)){ DB_cobrancas = rows; _cobrDono.carregadoEm = performance.now(); return DB_cobrancas; }
+      return tinha ? DB_cobrancas : null;
+    }finally{ _cobrDono.emVoo = null; }
+  })();
+  return _cobrDono.emVoo;
+}
+
+// Padrão das telas: PINTA JÁ com a memória e, se ela estiver velha, busca por trás
+// e chama `aoChegar` para repintar. Devolve true se uma busca foi de fato disparada
+// — e só nesse caso agenda o callback. É o que impede o laço infinito: a tela
+// repinta ao receber dado novo, o repintar vê a lista fresca, não dispara nada.
+function revalidarCobrancas(aoChegar){
+  if(_cobrFresca()) return false;
+  ensureCobrancas().then(r=>{ if(Array.isArray(r) && typeof aoChegar==='function') aoChegar(r); }).catch(()=>{});
+  return true;
+}
+
 function _cobrCredorNome(c){
   const cli = (DB.clientes||[]).find(x=>x.id === c.cliente_id);
   return cli ? (cli.nomeFantasia || cli.nome_fantasia || cli.nome) : (c.metadata?.credorOriginal || '—');
@@ -20013,7 +20074,7 @@ function _quitaResultadosPanel(){
   return `<div class="cob-panel" style="padding:16px 18px;margin-bottom:8px;border-left:3px solid #3F6B47;">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
       <div style="font-size:14px;font-weight:700;color:var(--navy,#0A1530);">QuitaFácil — resultados</div>
-      <button class="cob-btn-ghost" style="font-size:11px;padding:3px 9px;" onclick="_quitaResCache=null;renderCobrancas();">↻ Atualizar</button>
+      <button class="cob-btn-ghost" style="font-size:11px;padding:3px 9px;" onclick="_quitaResCache=null;renderCobrancas({forcar:true});">↻ Atualizar</button>
     </div>
     <div style="display:flex;gap:9px;flex-wrap:wrap;">
       ${kpi('Elegíveis', elegiveis, 'na trilha hoje')}
@@ -20379,8 +20440,10 @@ async function renderCobrancas(opts){
       const _pRoster = (typeof carregarRosterAppUsers==='function' && !Array.isArray(_rosterAppUsers))
         ? carregarRosterAppUsers().catch(()=>{}) : Promise.resolve();
       const _pDados = (async ()=>{
-        const rows = await loadCobrancasFromSupabase();
-        if(Array.isArray(rows)) DB_cobrancas = rows;
+        // Pelo porteiro: respeita o frescor (15 s) e divide a viagem com Painel/Fila
+        // se uma já estiver no ar. `forcar` vem do botão ↻ — quem pede "atualiza"
+        // tem de ver o servidor, não a memória (lição da revisão do #689).
+        await ensureCobrancas({ forcar: !!(opts && opts.forcar) });
         await _pRoster;
       })();
       const _pSinais = (async ()=>{
@@ -50388,7 +50451,9 @@ function _relNorm(c){
 async function _relColetarCobrancas(){
   let lista = (typeof DB_cobrancas!=='undefined') ? DB_cobrancas : [];
   if(typeof loadCobrancasFromSupabase==='function'){
-    try{ const f = await loadCobrancasFromSupabase(); if(Array.isArray(f)) lista = f; }catch(_){ }
+    // forcar: relatório ao credor tem de sair do servidor. E agora atualiza a
+    // memória junto — antes buscava para esta variável e descartava.
+    try{ const f = await ensureCobrancas({ forcar:true }); if(Array.isArray(f)) lista = f; }catch(_){ }
   }
   // Quitados entram mesmo arquivados: o relatório ao credor abre com "quanto voltou",
   // e essa é a única linha boa do documento. Os demais arquivados ficam de fora.
@@ -51537,7 +51602,7 @@ ${pa.length?`<section class="secao"><h2 class="sec">Pontos de Atenção — Gest
 async function exportarTodasCobrancas(){
   showToast('Preparando exportação…','info');
   let lista = (typeof DB_cobrancas!=='undefined') ? DB_cobrancas : [];
-  if(typeof loadCobrancasFromSupabase==='function'){ try{ const f=await loadCobrancasFromSupabase(); if(Array.isArray(f)) lista=f; }catch(_){} }
+  try{ const f=await ensureCobrancas({ forcar:true }); if(Array.isArray(f)) lista=f; }catch(_){}
   lista = (lista||[]).filter(c=>!c.arquivado && !c.is_draft);
   const rows = lista.map(c=>{
     const partes=(c.cobranca_partes||[]).slice().sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
@@ -52691,7 +52756,7 @@ async function adVerificarAlertaDiario(){
     if(!_adDeveDisparar()) return;
     if(typeof cobPendencia !== 'function') return;
     let rows = (typeof DB_cobrancas !== 'undefined' && Array.isArray(DB_cobrancas)) ? DB_cobrancas : null;
-    if(!rows && typeof loadCobrancasFromSupabase === 'function'){ try{ rows = await loadCobrancasFromSupabase(); if(Array.isArray(rows)) DB_cobrancas = rows; }catch(_){ rows = []; } }
+    if(!rows){ try{ rows = await ensureCobrancas(); }catch(_){ rows = []; } }
     rows = (rows||[]).filter(c=>!c.arquivado && !c.is_draft);
     const sin = (typeof _cobrSinais !== 'undefined' && _cobrSinais) ? _cobrSinais : {};
     const pendentes = rows.filter(c=>{ const p = cobPendencia(c, sin); return p && p.estado === 'agir'; });
