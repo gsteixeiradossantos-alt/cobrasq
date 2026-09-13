@@ -34881,7 +34881,7 @@ function renderFinTab(tab){
 // Aditivo: a aba antiga "A repassar ao cedente" (renderFinRepasses) continua no
 // Financeiro e lê o MESMO fin_operacao — as duas ficam coerentes.
 // ══════════════════════════════════════════════════════════════
-let _repState = { tab:'painel', ops:[], credMap:{}, devMap:{}, loaded:false };
+let _repState = { tab:'painel', ops:[], credMap:{}, devMap:{}, loaded:false, recebiveisProntos:false };
 try { window._repState = _repState; } catch(_){} // mesma referência (debug/testes); mutações via props
 const _REP_MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 const _repIsPend = o => o.repasse_status==='pendente' || o.repasse_status==='preparado';
@@ -35003,41 +35003,50 @@ async function _repLoadReal(){
   _repState.loaded = true;
   // Recebíveis pousando depois: repinta o painel de repasses se ele estiver na tela
   // (a única aba que os desenha). Modais moram fora de #page-repasses e sobrevivem.
-  recebiveis.then(()=>{
-    try{
-      const pg = document.getElementById('page-repasses');
-      if(pg && pg.classList.contains('active') && _repState.tab==='painel' && _repState.loaded) renderRepassesClientes(true);
-    }catch(_){}
-  });
+  // Não repinta se a geração foi descartada (uma recarga mais nova subiu — a dela
+  // repinta) nem com o núcleo em voo (há um spinner na tela; quem esperava o
+  // _repLoad pinta com os recebíveis já prontos).
+  recebiveis.then(gravou => {
+    if(!gravou || _repLoadEmVoo) return;
+    const pg = document.getElementById('page-repasses');
+    if(pg && pg.classList.contains('active') && _repState.tab==='painel' && _repState.loaded) renderRepassesClientes(true);
+  }, e => console.warn('[repasses] recebíveis:', (e && e.message) || e));
 }
 // Dados do antigo painel "Recebíveis" (fundido aqui 2026-08-06): cobrança Asaas em
 // aberto, acordos assinados pendentes de lançar/repassar, inadimplência. Cada um é
 // best-effort — falha isolada não derruba o carregamento dos repasses. Os três vão
-// juntos (eram três esperas em fila: 1,1 s + 0,9 s + 3,3 s). Geração: uma recarga que
+// juntos (eram três esperas em fila: 1,1 s + ~1,0 s + 3,3 s). Geração: uma recarga que
 // suba no meio (loaded=false → _repLoad de novo) não é sobrescrita pela mais velha.
 let _repRecebiveisGer = 0;
+// Devolve true se ESTA geração gravou (false = descartada). Falha isolada de um dos
+// três fica silenciosa na tela (lista vazia), como era antes — só avisa no console.
 async function _repCarregarRecebiveis(){
   const ger = ++_repRecebiveisGer;
   _repState.inad = { devList:[], charges:[], oldestAll:null };
   _repState.acordosPend = [];
   _repState.pendenteAsaas = [];
-  const [inad, acordosPend, pendenteAsaas] = await Promise.all([
-    _loadInadimplentes().catch(()=>null),
-    _carregarAcordosPendProvidencia().catch(()=>[]),
-    (async () => {
-      if(!DB.config.asaasKey) return [];
-      try{
-        const fim30 = isoLocal(new Date(Date.now()+30*86400000));
-        const rr = await AsaasAPI.req('GET','/payments?limit=100&sort=dueDate&order=asc&status=PENDING').catch(()=>({data:[]}));
-        return (rr?.data||[]).filter(cc=>cc.dueDate && cc.dueDate<=fim30);
-      }catch(_){ return []; }
-    })(),
-  ]);
-  if(ger !== _repRecebiveisGer) return;   // carga mais nova já subiu: a dela vale
-  if(inad) _repState.inad = inad;
-  _repState.acordosPend = acordosPend;
-  _repState.pendenteAsaas = pendenteAsaas;
-  _repState.recebiveisProntos = true;
+  try{
+    const [inad, acordosPend, pendenteAsaas] = await Promise.all([
+      _loadInadimplentes().catch(e => { console.warn('[repasses] inadimplência:', (e && e.message) || e); return null; }),
+      _carregarAcordosPendProvidencia().catch(e => { console.warn('[repasses] acordos sem providência:', (e && e.message) || e); return []; }),
+      (async () => {
+        if(!DB.config.asaasKey) return [];
+        try{
+          const fim30 = isoLocal(new Date(Date.now()+30*86400000));
+          const rr = await AsaasAPI.req('GET','/payments?limit=100&sort=dueDate&order=asc&status=PENDING').catch(()=>({data:[]}));
+          return (rr?.data||[]).filter(cc=>cc.dueDate && cc.dueDate<=fim30);
+        }catch(_){ return []; }
+      })(),
+    ]);
+    if(ger !== _repRecebiveisGer) return false;   // carga mais nova já subiu: a dela vale
+    if(inad) _repState.inad = inad;
+    _repState.acordosPend = acordosPend;
+    _repState.pendenteAsaas = pendenteAsaas;
+    return true;
+  }finally{
+    // Nunca deixa "carregando…" eterno: a geração corrente sempre fecha, mesmo em erro.
+    if(ger === _repRecebiveisGer) _repState.recebiveisProntos = true;
+  }
 }
 
 // Agrega fin_operacao por cedente (recebido / honorário / a repassar / último repasse).
@@ -35147,7 +35156,7 @@ function _repRenderPainel(agg){
   const acordosBloco = `<div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;margin-bottom:16px;">
     <div style="padding:14px 18px 11px;border-bottom:1px solid #EFEBE0;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;">
       <div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Assinado → lançar → repassar</div>
-      <div style="font-size:12.5px;color:#8A94A6;">${acordosPend.length} acordo${acordosPend.length!==1?'s':''} sem providência</div>
+      <div style="font-size:12.5px;color:#8A94A6;">${_repState.recebiveisProntos ? `${acordosPend.length} acordo${acordosPend.length!==1?'s':''} sem providência` : 'carregando…'}</div>
       <a class="cob-link" style="margin-left:auto;" onclick="showPage('cobr')">Ver todos os acordos →</a>
     </div>
     ${acordosHtml}
@@ -35170,11 +35179,11 @@ function _repRenderPainel(agg){
       }).join(''));
   const composicaoBloco = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start;margin-top:16px;">
     <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;padding:16px;">
-      <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:14px;"><div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Composição dos recebíveis</div><span style="font-size:12px;color:#8A94A6;margin-left:auto;">Asaas · tempo real</span></div>
+      <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:14px;"><div style="font-family:'Fraunces',Georgia,serif;font-size:17px;">Composição dos recebíveis</div><span style="font-size:12px;color:#8A94A6;margin-left:auto;">${_repState.recebiveisProntos ? 'Asaas · tempo real' : 'Asaas · carregando…'}</span></div>
       <div style="display:flex;height:10px;border-radius:5px;overflow:hidden;margin-bottom:12px;">
         <div style="width:${Math.round(kpiVencido/composTotal*100)}%;background:#A65A4A;"></div><div style="width:${Math.round(venceEm7/composTotal*100)}%;background:#C9A961;"></div><div style="width:${Math.round(aVencer30/composTotal*100)}%;background:#5E7C58;"></div>
       </div>
-      ${[['Vencido',kpiVencido,'#A65A4A'],['Vence em 7 dias',venceEm7,'#C9A961'],['A vencer (30 dias)',aVencer30,'#5E7C58']].map(([lb,v,cor])=>`<div style="display:flex;align-items:center;gap:9px;padding:7px 0;"><div style="width:7px;height:7px;border-radius:2px;background:${cor};"></div><span style="font-size:12.5px;color:#5A5F66;">${lb}</span><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:600;margin-left:auto;">${fmtR(v)}</span></div>`).join('')}
+      ${[['Vencido',kpiVencido,'#A65A4A'],['Vence em 7 dias',venceEm7,'#C9A961'],['A vencer (30 dias)',aVencer30,'#5E7C58']].map(([lb,v,cor])=>`<div style="display:flex;align-items:center;gap:9px;padding:7px 0;"><div style="width:7px;height:7px;border-radius:2px;background:${cor};"></div><span style="font-size:12.5px;color:#5A5F66;">${lb}</span><span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:600;margin-left:auto;">${_repState.recebiveisProntos ? fmtR(v) : '—'}</span></div>`).join('')}
     </div>
     <div style="background:#fff;border:1px solid #E6E1D2;border-radius:9px;overflow:hidden;">
       <div style="padding:14px 16px 12px;border-bottom:1px solid #EFEBE0;display:flex;align-items:baseline;gap:10px;">
