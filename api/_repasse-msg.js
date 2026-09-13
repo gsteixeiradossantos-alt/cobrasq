@@ -217,15 +217,28 @@ function listarPagadores(partes) {
 // de anuência. Texto do Gustavo, 11/09/2026. Só na 1ª parcela (decisão dele no mesmo
 // dia): repetir a cada parcela viraria ruído para o credor. Pagamento à vista/único
 // (sem número de parcela) conta como primeiro — é o único que haverá.
-const PARAGRAFO_RESTRICOES =
-  'Na hipótese de haver restrições no nome do(s) devedor(es) em SPC, SERASA, Boa Vista/CDL e afins, '
-  + 'solicitamos a retirada com urgência. Havendo PROTESTO, pedimos o envio da carta de anuência em forma eletrônica.';
+//
+// Sem "(s)/(es)": o parágrafo é montado com o NOME de cada parte ("no nome de Elaine
+// Baranoski ou de Sidimar Pruch"), o que resolve número e gênero sem adivinhar nenhum
+// dos dois — o cadastro não tem gênero e a mensagem vai ao cliente (Gustavo, 12/09/2026).
+// Sem nome conhecido, cai em "no nome de quem pagou".
+const RESTRICOES_INICIO = 'Se houver restrição no nome de ';
+const RESTRICOES_FIM =
+  ' em SPC, SERASA, Boa Vista/CDL e afins, solicitamos a retirada com urgência. '
+  + 'Havendo protesto, pedimos o envio da carta de anuência em formato eletrônico.';
+function paragrafoRestricoes(nomes) {
+  const ns = (nomes || []).filter(Boolean);
+  const quem = ns.length ? ns.join(' ou de ') : 'quem pagou';
+  return RESTRICOES_INICIO + quem + RESTRICOES_FIM;
+}
+// Mantido para quem só quer saber se a frase está lá (testes/telas): o trecho fixo.
+const PARAGRAFO_RESTRICOES = RESTRICOES_FIM.trim();
 
 function pedeBaixaRestricoes(parcela) {
   return !parcela || Number(parcela) === 1;
 }
 
-function msgComprovanteCredor({ parcela, devedor, doc, partes }) {
+function msgComprovanteCredor({ parcela, total, devedor, doc, partes }) {
   // Documento entre parênteses quando conhecido — pedido do Gustavo em 17/08/2026, para o
   // credor identificar o devedor sem depender do nome. Devedor sem cadastro não tem doc:
   // a frase sai sem, em vez de com um campo vazio.
@@ -236,16 +249,24 @@ function msgComprovanteCredor({ parcela, devedor, doc, partes }) {
   // segundo. Sem partes, cai no par devedor/doc de antes.
   const docTxt = docPorExtenso(doc);
   const quem = listarPagadores(partes) || (docTxt ? `${devedor} (${docTxt})` : devedor);
+  // Nomes limpos (sem documento) para o parágrafo de restrições.
+  const nomes = (partes || []).filter(p => p && p.nome).map(p => p.nome);
+  if (!nomes.length && devedor) nomes.push(devedor);
+  // Texto do Gustavo (12/09/2026), sem "n." nem "(s)":
+  //  - 1 de 1 (ou sem número) → "do pagamento à vista realizado por X";
+  //  - N de M               → "referente à parcela N de M do acordo firmado por X";
+  //  - só N (sem total)      → "referente à parcela N do acordo firmado por X".
   // Sem devedor identificado (descrição da ponte de recebimento), a frase omite o
-  // "realizado por" em vez de inventar um nome.
-  const ref = quem
-    ? (parcela
-        ? `referente à *parcela n. ${parcela}* do pagamento realizado por *${quem}.*`
-        : `do pagamento realizado por *${quem}.*`)
-    : (parcela ? `referente à *parcela n. ${parcela}*.` : `.`);
+  // "realizado/firmado por" em vez de inventar um nome.
+  const p = Number(parcela) || 0, t = Number(total) || 0;
+  const avista = !p || (p === 1 && t === 1);
+  const qual = avista ? '' : (t ? `parcela ${p} de ${t}` : `parcela ${p}`);
+  let ref;
+  if (avista) ref = quem ? `do pagamento à vista realizado por *${quem}.*` : `do pagamento à vista.`;
+  else ref = quem ? `referente à *${qual}* do acordo firmado por *${quem}.*` : `referente à *${qual}*.`;
   return `*Setor financeiro | COBRASQ:*\n`
     + `Encaminhamos, em anexo, o comprovante de repasse ${ref}\n\n`
-    + (pedeBaixaRestricoes(parcela) ? `${PARAGRAFO_RESTRICOES}\n\n` : '')
+    + (pedeBaixaRestricoes(parcela) ? `${paragrafoRestricoes(nomes)}\n\n` : '')
     + `Qualquer dúvida é só nos comunicar!\n\n`
     + `Atenciosamente,\n`
     + `*COBRASQ Recuperadora de Crédito e Cobrança*`;
@@ -267,14 +288,14 @@ function destinoWhatsapp(credor) {
 //
 // Best-effort por design: o PIX já saiu quando isto roda. Falha aqui vira log, nunca
 // erro do repasse.
-async function enviarComprovanteCredor({ telefone, parcela, devedor, doc, partes, base64, ext, comprovanteUrl, agora }) {
+async function enviarComprovanteCredor({ telefone, parcela, total, devedor, doc, partes, base64, ext, comprovanteUrl, agora }) {
   // Não limpar aqui: o destino pode ser um GRUPO do WhatsApp ("1203634…-group"), que a
   // Z-API trata no mesmo campo. Quem normaliza é o _zapi.js, que sabe distinguir os dois.
   const tel = String(telefone || '').trim();
   const digitos = tel.replace(/\D/g, '');
   if (digitos.length < 10) return { enviado: false, motivo: 'credor sem telefone válido' };
 
-  const msg = msgComprovanteCredor({ parcela, devedor, doc, partes });
+  const msg = msgComprovanteCredor({ parcela, total, devedor, doc, partes });
   // Nome do arquivo = a mesma identificação do extrato do PIX: "1 - Elen Demgenski".
   // O credor arquiva vários comprovantes; assim ele acha pelo nome sem abrir um a um.
   //
@@ -323,4 +344,4 @@ async function enviarComprovanteCredor({ telefone, parcela, devedor, doc, partes
   }
 }
 
-module.exports = { lerDescricaoRepasse, descricaoPix, msgComprovanteCredor, listarPagadores, pedeBaixaRestricoes, PARAGRAFO_RESTRICOES, enviarComprovanteCredor, destinoWhatsapp, docPorExtenso, proximoHorarioComercial, JANELA_COMPROVANTE, ESPACO_MS };
+module.exports = { lerDescricaoRepasse, descricaoPix, msgComprovanteCredor, listarPagadores, pedeBaixaRestricoes, PARAGRAFO_RESTRICOES, paragrafoRestricoes, enviarComprovanteCredor, destinoWhatsapp, docPorExtenso, proximoHorarioComercial, JANELA_COMPROVANTE, ESPACO_MS };

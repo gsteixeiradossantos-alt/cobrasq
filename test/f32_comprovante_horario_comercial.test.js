@@ -90,7 +90,8 @@ global.fetch = async (url, opts) => {
   // Com ".pdf": o worker deriva a extensão do nome e tira ela do fileName. Sem, o credor
   // recebeu "2 - José Lentz.2joslentz" (11/09/2026, 08h).
   assert.strictEqual(row.media_nome, '2 - Fernanda Dambros.pdf');
-  assert.ok(/parcela n\. 2/.test(row.legenda) && /Fernanda Dambros/.test(row.legenda));
+  // Texto de 12/09/2026: "parcela 2" (sem "n.", com "de M" quando há total) + o nome.
+  assert.ok(/\*parcela 2\*/.test(row.legenda) && /Fernanda Dambros/.test(row.legenda) && !/parcela n\./.test(row.legenda), row.legenda);
 
   // ---- Espaçamento anti-spam: cada comprovante entra 30 s depois do último agendado --
   // 11/09/2026: 27 comprovantes em 25 s às 08h. Com dois já na fila (08:00:00 e

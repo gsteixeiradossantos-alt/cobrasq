@@ -124,7 +124,7 @@ module.exports = async function handler(req, res) {
         partesDaCobranca(cobId).catch(() => []),
       ]);
       envio = await enviarComprovanteCredor({
-        telefone: destinoWhatsapp(credor), parcela: op.parcela, devedor: devNome,
+        telefone: destinoWhatsapp(credor), parcela: op.parcela, total: op.total_parcelas || null, devedor: devNome,
         doc: dp && dp.doc, partes,
         base64: pdf, ext: 'pdf', comprovanteUrl,
       });
