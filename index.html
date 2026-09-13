@@ -6023,7 +6023,10 @@ async function loadRelationalData(){
   // cobranças deixava DB_cobrancas com o valor anterior — `[]` num boot. Resultado:
   // tela de Cobranças VAZIA em silêncio, com um console.warn e nada mais. Era
   // exatamente a classe de falha que a paginação foi feita para eliminar.
-  if(devedoresRel === null || clientesRel === null || cobrancasRel === null){
+  // `_cobrDono.ultimoErro`: com memória povoada o porteiro devolve a lista velha em
+  // vez de null (para a tela não ficar vazia), então só o `=== null` não pegaria uma
+  // falha de cobranças nas chamadas internas (import, salvar cobrança).
+  if(devedoresRel === null || clientesRel === null || cobrancasRel === null || _cobrDono.ultimoErro){
     _relReadFailed = true;
     // O motivo vai no aviso porque nem toda falha se resolve com F5: erro de rede é
     // transitório, mas "carga incompleta" por teto do servidor menor que a página se
@@ -10588,17 +10591,20 @@ const _FILA_CMP = {
   cliente: (a,b)=> (a.credor||'').localeCompare(b.credor||'', 'pt-BR') || b.valor-a.valor,
 };
 
+let _filaGen = 0;
 async function renderFilaDecisoes(){
   const el = document.getElementById('page-fila');
   if(!el) return;
   // Mesma fonte e mesmo recorte do Painel (inclusive os filtros Cliente/Operador):
   // se divergisse, a página mostraria um total diferente do card do Painel.
   // Pinta com o que há em memória; só mostra "Carregando" se não houver nada.
+  const _gen = ++_filaGen;
   if(!cobrancasEmMemoria().length){
     el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando fila…</div>`;
     await ensureCobrancas({ forcar:true });
   } else {
-    revalidarCobrancas(()=>{ if(document.getElementById('page-fila')?.classList.contains('active')) renderFilaDecisoes(); });
+    if(!el.innerHTML.trim()) el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando fila…</div>`;
+    revalidarCobrancas(()=>{ if(document.getElementById('page-fila')?.classList.contains('active')) renderFilaDecisoes(); }, 'fila');
   }
   const _pf = window._painelFiltro || (window._painelFiltro = { cliente:'', operador:'' });
   const cobrAtivas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft
@@ -10644,6 +10650,7 @@ async function renderFilaDecisoes(){
     </div>`;
   }).join('');
 
+  if(_gen !== _filaGen) return;   // só a geração mais recente escreve
   el.innerHTML = `
     <style>
       #page-fila .fila-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:16px;}
@@ -10707,6 +10714,7 @@ async function renderFilaDecisoes(){
     </div>`;
 }
 
+let _painelGen = 0;   // geração do render: só a mais recente escreve na tela
 async function renderPainel(){
   const el = document.getElementById('page-painel');
   if(!el) return;
@@ -10725,16 +10733,24 @@ async function renderPainel(){
   // ── FONTE DE VERDADE: cobranças (mesmo cache/lógica da tela Cobranças) ───────
   // Pinta com o que há em memória; só mostra "Carregando" se não houver nada.
   // Medido: rebuscar aqui custava 2–4,7 s de tela em branco a cada abertura.
+  const _gen = ++_painelGen;   // ver guarda antes do innerHTML final
   if(!cobrancasEmMemoria().length){
     el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando painel…</div>`;
     await ensureCobrancas({ forcar:true });
   } else {
-    revalidarCobrancas(()=>{ if(document.getElementById('page-painel')?.classList.contains('active')) renderPainel(); });
+    // A tela nasce vazia no HTML: no primeiro paint pós-boot a memória já está cheia
+    // mas este render ainda espera sinais/acordos/fin_lancamento por 2–4 s — sem isto,
+    // o usuário olharia para o nada até lá.
+    if(!el.innerHTML.trim()) el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando painel…</div>`;
+    revalidarCobrancas(()=>{ if(document.getElementById('page-painel')?.classList.contains('active')) renderPainel(); }, 'painel');
   }
+  // Uma leitura só: a lista era lida em três pontos separados por `await`, e uma
+  // busca pousando no meio misturava carteira velha com situação nova no mesmo paint.
+  const _cobrSnap = cobrancasEmMemoria();
   // Filtros do painel (Cliente / Operador) — aplicados na fonte p/ consistência entre os quadros.
   const _pf = window._painelFiltro || (window._painelFiltro = { cliente:'', operador:'' });
   // "Carteira ativa" = casos EM ABERTO — exclui quitado/pago/liquidado.
-  const cobrAtivas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft
+  const cobrAtivas = _cobrSnap.filter(c=>!c.arquivado && !c.is_draft
     && !/quitad|pago|liquidad/i.test(c.status||'')
     && (!_pf.cliente  || String(c.cliente_id||'')===_pf.cliente)
     && (!_pf.operador || String(c.assigned_to||'')===_pf.operador));
@@ -10911,7 +10927,7 @@ async function renderPainel(){
   // Carteira por situação (valor + qtd): em aberto / em acordo / judicial / quitado.
   const sitDefs = { aberto:0, acordo:0, judicial:0, quitado:0 };
   const sitQtd  = { aberto:0, acordo:0, judicial:0, quitado:0 };
-  (DB_cobrancas||[]).filter(c=>!c.is_draft
+  _cobrSnap.filter(c=>!c.is_draft
     && (!_pf.cliente  || String(c.cliente_id||'')===_pf.cliente)
     && (!_pf.operador || String(c.assigned_to||'')===_pf.operador)).forEach(c=>{
     const v=(+c.valor_atual||+c.valor_orig||0); const s=(c.status||'').toLowerCase();
@@ -10928,7 +10944,7 @@ async function renderPainel(){
   const metaProg   = metaMensal>0 ? Math.min(100, Math.round((totalRecuperado/metaMensal)*100)) : null;
 
   // Opções dos filtros (a partir de TODAS as cobranças ativas, não as já filtradas).
-  const _allCobr   = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft);
+  const _allCobr   = _cobrSnap.filter(c=>!c.arquivado && !c.is_draft);
   const _credorOpts = [...new Set(_allCobr.map(c=>c.cliente_id).filter(Boolean))]
     .map(id=>({ id:String(id), nome:(typeof _cobrCredorNome==='function'?_cobrCredorNome({cliente_id:id}):String(id)) }))
     .sort((a,b)=>a.nome.localeCompare(b.nome));
@@ -11051,6 +11067,10 @@ async function renderPainel(){
              hoje:i===0, temEvento:eventDates7.has(iso), qtd, sel:iso===diaSel };
   });
 
+  // Corrida: o repaint da revalidação pode terminar ANTES de uma execução mais
+  // antiga que ainda estava esperando fin_lancamento — e a antiga pousaria por
+  // último, com dado velho. Quem não é a geração corrente não escreve.
+  if(_gen !== _painelGen) return;
   el.innerHTML = `
     <style>
       #page-painel .pnl-eyebrow{font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent-2);}
@@ -19522,55 +19542,114 @@ async function loadCobrancasFromSupabase(){
 
 // ── DONO da lista de cobranças ────────────────────────────────────────────────
 // Único lugar que atribui DB_cobrancas a partir do servidor. Ninguém mais chama
-// loadCobrancasFromSupabase() diretamente — toda tela pede aqui.
+// loadCobrancasFromSupabase() — toda tela pede aqui. É CONVENÇÃO, não garantia da
+// linguagem: o loader continua global e DB_cobrancas continua `let` mutável; nada
+// impede alguém de escrever `DB_cobrancas = await loadCobrancasFromSupabase()`
+// amanhã — e foi exatamente isso que quebrou a tentativa anterior. Se precisar
+// da lista, use ensureCobrancas. Se precisar invalidar, invalidarCobrancas.
 //
-// Antes, nove pontos do código buscavam a lista inteira por conta própria: Painel,
-// Fila e Cobranças faziam a MESMA viagem de ~1,2 s, cada um para si, bloqueando a
-// tela com "Carregando…" — com os dados já em memória desde o boot. E dois deles
-// (relatório e exportação) buscavam para uma variável local e descartavam.
+// Antes, nove pontos buscavam por conta própria. Painel e Fila faziam a mesma
+// viagem de ~1,2 s que o boot já tinha feito, cada um bloqueando a tela com
+// "Carregando…"; Cobranças já pintava da memória desde o #684. Dois pontos
+// (relatório ao credor, exportação) buscavam para uma variável local e
+// descartavam. E dois (checkAlertaCasosAgir, adVerificarAlertaDiario) eram ramo
+// morto: o `if(!rows)` nunca era verdadeiro.
 //
-// A tentativa anterior (PR #689) foi uma janela de 10 s colada só em renderCobrancas.
-// Reprovou na revisão porque os outros pontos continuavam buscando pelas costas
-// dela, e um carimbava "acabei de buscar" sem atualizar a lista — o carimbo mentia.
-// Aqui isso é impossível por construção: só quem carimba é quem atribui, e só o
-// porteiro atribui.
+// A tentativa anterior (janela de 10 s dentro do PR #689, revertida antes do merge
+// depois da revisão) falhou porque era uma guarda colada em renderCobrancas
+// enquanto os outros pontos seguiam buscando pelas costas dela — e um carimbava
+// "acabei de buscar" sem atualizar a lista. Aqui só quem carimba é quem atribui.
 //
 // Relógio monotônico (performance.now), não Date.now: relógio de parede anda para
 // trás (NTP após suspender) e deixaria a lista "fresca" pelo tamanho do salto.
-const _cobrDono = { carregadoEm: -Infinity, emVoo: null };
+const _cobrDono = {
+  carregadoEm: -Infinity,   // último carimbo de sucesso
+  falhouEm: -Infinity,      // última falha — segura a próxima tentativa (ver abaixo)
+  ultimoErro: null,         // para o modo seguro do boot enxergar falha com memória
+  emVoo: null,              // promise da viagem em curso, ou null
+  cbs: new Map()            // repaints já agendados, por tela (dedupe)
+};
 const COBR_FRESCO_MS = 15000;
+const COBR_ESPERA_APOS_FALHA_MS = 5000;
 
 // O que há em memória agora. Nunca vai à rede. Pode ser [].
 function cobrancasEmMemoria(){ return Array.isArray(DB_cobrancas) ? DB_cobrancas : []; }
 function _cobrFresca(){ return cobrancasEmMemoria().length > 0 && (performance.now() - _cobrDono.carregadoEm) < COBR_FRESCO_MS; }
+function _cobrFalhouHaPouco(){ return (performance.now() - _cobrDono.falhouEm) < COBR_ESPERA_APOS_FALHA_MS; }
 
-// Garante DB_cobrancas carregada e devolve a lista. Devolve null só quando a busca
-// falhou E não havia nada em memória — mesmo contrato do loader, para o boot cair no
-// modo seguro. Com {forcar:true} vai ao servidor mesmo fresca (botão ↻, exportação,
-// relatório: quem pede "atualiza" tem de ver o servidor, não a memória).
-// Chamadas concorrentes dividem a mesma viagem.
+// Quem grava no servidor SEM espelhar em memória chama isto: a próxima tela que
+// abrir vai ao servidor, sem esperar os 15 s. (Ex.: recomputarSaldoCapital muda
+// o status para "Quitado ao cliente" direto no banco.)
+function invalidarCobrancas(){
+  _cobrDono.carregadoEm = -Infinity;
+  // Também solta o backoff de falha: quem invalida está dizendo "o dado mudou", e
+  // isso vale mais que "o servidor falhou há 3 s". Não laça, porque uma falha
+  // depois disto não agenda repaint (ver revalidarCobrancas).
+  _cobrDono.falhouEm = -Infinity;
+}
+
+// Uma viagem. Devolve { ok, lista }. Em falha COM memória devolve a lista velha
+// (ok:false) — sem carimbar — para a tela não ficar vazia; em falha SEM memória,
+// lista:null, que é o contrato que o boot usa para cair no modo seguro.
+function _cobrVoar(){
+  const tinha = cobrancasEmMemoria().length > 0;
+  const voo = (async ()=>{
+    try{
+      const rows = await loadCobrancasFromSupabase();
+      if(Array.isArray(rows)){
+        DB_cobrancas = rows; _cobrDono.carregadoEm = performance.now(); _cobrDono.ultimoErro = null;
+        return { ok:true, lista:DB_cobrancas };
+      }
+      _cobrDono.falhouEm = performance.now(); _cobrDono.ultimoErro = 'carga de cobranças falhou';
+      return { ok:false, lista: tinha ? DB_cobrancas : null };
+    }finally{ if(_cobrDono.emVoo === voo) _cobrDono.emVoo = null; }
+  })();
+  _cobrDono.emVoo = voo;
+  return voo;
+}
+
+// Garante DB_cobrancas carregada e devolve a lista (ou null: falhou e não havia
+// nada). {forcar:true} vai ao servidor mesmo fresca — botão ↻, relatório,
+// exportação, boot: quem pede "atualiza" tem de ver o servidor, não a memória.
+//
+// Concorrência: sem forcar, adere à viagem em curso. COM forcar, se já há uma no
+// ar, espera ela terminar e sobe OUTRA: a que está no ar pode ter tirado o retrato
+// do servidor ANTES da gravação que motivou o pedido, e devolvê-la carimbada como
+// fresca esconderia a própria escrita por 15 s.
+//
+// Falha recente (5 s) sem forcar: devolve a memória sem ir ao servidor. É o que
+// impede martelar um servidor fora do ar a cada repaint — a primeira versão disto
+// laçava (busca falha → repaint → busca → …) 239 vezes em 300 ms na simulação.
 async function ensureCobrancas(opts){
   const forcar = !!(opts && opts.forcar);
   if(!forcar && _cobrFresca()) return DB_cobrancas;
-  if(_cobrDono.emVoo) return _cobrDono.emVoo;
-  const tinha = cobrancasEmMemoria().length > 0;
-  _cobrDono.emVoo = (async ()=>{
-    try{
-      const rows = await loadCobrancasFromSupabase();
-      if(Array.isArray(rows)){ DB_cobrancas = rows; _cobrDono.carregadoEm = performance.now(); return DB_cobrancas; }
-      return tinha ? DB_cobrancas : null;
-    }finally{ _cobrDono.emVoo = null; }
-  })();
-  return _cobrDono.emVoo;
+  if(!forcar && _cobrFalhouHaPouco()) return cobrancasEmMemoria().length ? DB_cobrancas : null;
+  if(_cobrDono.emVoo){
+    if(!forcar) return (await _cobrDono.emVoo).lista;
+    await _cobrDono.emVoo.catch(()=>{});
+    if(_cobrDono.emVoo) return (await _cobrDono.emVoo).lista;   // outro forçado já subiu a próxima
+  }
+  return (await _cobrVoar()).lista;
 }
 
 // Padrão das telas: PINTA JÁ com a memória e, se ela estiver velha, busca por trás
-// e chama `aoChegar` para repintar. Devolve true se uma busca foi de fato disparada
-// — e só nesse caso agenda o callback. É o que impede o laço infinito: a tela
-// repinta ao receber dado novo, o repintar vê a lista fresca, não dispara nada.
-function revalidarCobrancas(aoChegar){
-  if(_cobrFresca()) return false;
-  ensureCobrancas().then(r=>{ if(Array.isArray(r) && typeof aoChegar==='function') aoChegar(r); }).catch(()=>{});
+// e chama `aoChegar` para repintar. `chave` identifica a tela: enquanto houver um
+// repaint dela agendado, chamadas repetidas não agendam outro (senão cada
+// re-render do Painel durante uma viagem empilharia mais um renderPainel).
+//
+// `aoChegar` SÓ dispara se a busca atualizou de fato (carimbo avançou). Falha
+// devolve a lista velha sem carimbar — repintar aí só relançaria a busca, em laço.
+// Devolve true se um repaint está agendado (novo ou já existente).
+function revalidarCobrancas(aoChegar, chave){
+  if(_cobrFresca() || _cobrFalhouHaPouco()) return false;
+  const k = chave || 'default';
+  if(_cobrDono.cbs.has(k)) return true;
+  _cobrDono.cbs.set(k, true);
+  const antes = _cobrDono.carregadoEm;
+  ensureCobrancas().then(()=>{
+    _cobrDono.cbs.delete(k);
+    if(_cobrDono.carregadoEm > antes && typeof aoChegar==='function') aoChegar(DB_cobrancas);
+  }).catch(()=>{ _cobrDono.cbs.delete(k); });
   return true;
 }
 
@@ -20433,7 +20512,10 @@ async function renderCobrancas(opts){
     // || {}`), então nunca mais seguram a primeira pintura.
     const temCache = Array.isArray(DB_cobrancas) && DB_cobrancas.length > 0;
     if(!temCache) el.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text-2);">Carregando cobranças…</div>`;
-    let _rev = _cobrRevalidando;
+    // Com forcar (botão ↻) não adere à revalidação em curso: ela pode ter sido
+    // criada com a lista fresca, sem busca nenhuma, e ficar viva 2,7–4 s por causa
+    // dos sinais — clicar ↻ nessa janela não buscaria nada.
+    let _rev = (opts && opts.forcar) ? null : _cobrRevalidando;
     if(!_rev){
       // Cobranças e roster não dependem um do outro — esperar em série custava uma
       // viagem inteira de latência à toa. Vão juntos.
@@ -21032,7 +21114,11 @@ async function bulkExcluirCobr(){
   await supa.from('devedor_eventos').delete().in('cobranca_id', ids);
   const { error } = await supa.from('cobrancas').delete().in('id', ids);
   if(error){ showToast('Erro: '+error.message,'danger'); return; }
-  if(window.DB_cobrancas) DB_cobrancas = DB_cobrancas.filter(c=>!ids.includes(c.id));
+  // `DB_cobrancas` é `let` de topo de script clássico — NÃO é propriedade de window,
+  // então o antigo `if(window.DB_cobrancas)` era sempre falso e o espelho nunca
+  // rodava. Passava despercebido porque o render seguinte rebuscava; com o frescor
+  // de 15 s, as linhas excluídas ficavam na tela como fantasmas.
+  DB_cobrancas = cobrancasEmMemoria().filter(c=>!ids.includes(c.id));
   selectedCobrIds.clear(); cobSelectionMode = false;
   showToast(`${n} cobrança${n!==1?'s':''} excluída${n!==1?'s':''}.`,'success');
   renderCobrancas();
@@ -22316,6 +22402,10 @@ async function recomputarSaldoCapital(cobId){
     if((cap-enviado)<=0.005 && cob.status!=='Quitado ao cliente'){
       const novaDiv=Object.assign({}, cob.divida||{}, { valorCapital: cap });
       await supa.from('cobrancas').update({ status:'Quitado ao cliente', divida:novaDiv, updated_at:new Date().toISOString() }).eq('id',cobId);
+      // Gravou no servidor sem espelhar em memória: espelha o que dá e invalida o
+      // resto, senão Painel/Fila/Cobranças mostrariam o status antigo por 15 s.
+      try{ const cm = cobrancasEmMemoria().find(c=>c.id===cobId); if(cm){ cm.status='Quitado ao cliente'; cm.divida=novaDiv; } }catch(_){}
+      if(typeof invalidarCobrancas==='function') invalidarCobrancas();
       try{ await supa.from('devedor_eventos').insert({ cobranca_id:cobId, devedor_id:cobId, tipo:'repasse', payload:{ acao_completa:'Capital integralmente repassado ao cliente — status alterado para "Quitado ao cliente".', origem:'repasse' } }); }catch(_){}
       return 'Quitado ao cliente';
     }
