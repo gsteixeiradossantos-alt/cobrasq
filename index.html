@@ -9928,7 +9928,7 @@ async function _recRealCarregar(ano){
   }
   // Os números já foram desenhados com o fallback do blob: redesenha com o real.
   if(_recRealPronto(ano)){
-    try{ if(document.querySelector('#page-painel.active') && typeof renderPainel === 'function') renderPainel(); }catch(_){}
+    try{ if(typeof painelRepintarBg === 'function') painelRepintarBg(); }catch(_){}
   }
 }
 // Verdade sobre este "fallback": ele devolve ZERO, sempre. Auditoria de 27/08/2026 nos
@@ -10495,11 +10495,31 @@ function painelToggleDia(iso){
 // própria, o card e a página passariam a mostrar totais diferentes do mesmo dado.
 // Cada item carrega `credor` e `devedor` separados (além do `nome` já concatenado
 // que o card desenha) — é o que permite ordenar/agrupar por cliente.
-async function _montarFilaDecisoes(cobrAtivas){
-  if(!_cobrSinais){ try{ _cobrSinais = await _carregarSinaisPendencia(cobrAtivas); }catch(_){ _cobrSinais = _cobrSinais || {}; } }
+// Sinais de pendência: uma viagem por vez. O Painel e a Fila (e o Painel consigo
+// mesmo, quando o "recuperado" pousa e repinta) pediam a RPC ao mesmo tempo e ela
+// ia ao banco duas vezes — 1,5 s + 1,2 s, medido em 13/09/2026. Voo em andamento é
+// compartilhado; quem chega depois espera o mesmo resultado.
+let _sinaisEmVoo = null;
+function _garantirSinais(cobrAtivas){
+  if(_cobrSinais) return Promise.resolve(_cobrSinais);
+  if(!_sinaisEmVoo){
+    _sinaisEmVoo = _carregarSinaisPendencia(cobrAtivas)
+      .then(s=>{ _cobrSinais = s; return s; })
+      .catch(()=>{ _cobrSinais = _cobrSinais || {}; return _cobrSinais; })
+      .finally(()=>{ _sinaisEmVoo = null; });
+  }
+  return _sinaisEmVoo;
+}
+
+// Núcleo SÍNCRONO da fila: monta só com o que já está em memória (sinais de
+// pendência e, para o gestor, os repasses já carregados). Não vai ao banco. O
+// Painel usa este direto — pinta com o que há e repinta quando cada carga pousa;
+// a página #/fila usa _montarFilaDecisoes, que espera tudo antes.
+function _montarFilaDecisoesSync(cobrAtivas, sinais){
+  sinais = sinais || {};
   const fila = [];
   cobrAtivas.forEach(c=>{
-    const pend = cobPendencia(c, _cobrSinais);
+    const pend = cobPendencia(c, sinais);
     if(pend.estado !== 'agir') return;
     const parte = (c.cobranca_partes||[]).find(p=>p.principal) || (c.cobranca_partes||[])[0] || {};
     const devId = parte.devedor_id || '';
@@ -10537,9 +10557,9 @@ async function _montarFilaDecisoes(cobrAtivas){
   });
   // Repasses ao cedente pendentes (mesmo dado do módulo #/repasses — fin_operacao).
   // Só gestor: `fin_operacao` é dado agregado de toda a carteira (ADMIN_ONLY_PAGES).
-  if(currentUser?.tipo === 'gestor'){
+  // Só entram se _repState já carregou — quem quer esperar a carga é o chamador.
+  if(currentUser?.tipo === 'gestor' && _repState.loaded){
     try{
-      if(!_repState.loaded) await _repLoad();
       const _aggRep = _repAgg();
       _aggRep.cedentes.filter(x=>x.temPend && x.oldestPend).forEach(x=>{
         const diasP = _repDaysSince(x.oldestPend);
@@ -10555,6 +10575,14 @@ async function _montarFilaDecisoes(cobrAtivas){
   }
   fila.sort((a,b)=> b.peso-a.peso || b.valor-a.valor);
   return fila;
+}
+
+// Versão que ESPERA as cargas (sinais e, para o gestor, repasses) — é o que a
+// página #/fila quer: lista inteira, de uma vez. O Painel não passa por aqui.
+async function _montarFilaDecisoes(cobrAtivas){
+  const sinais = await _garantirSinais(cobrAtivas);
+  if(currentUser?.tipo === 'gestor' && !_repState.loaded){ try{ await _repLoad(); }catch(_){} }
+  return _montarFilaDecisoesSync(cobrAtivas, sinais);
 }
 
 // Cores das etiquetas da fila — mesmas no card do Painel e na página #/fila.
@@ -10715,6 +10743,149 @@ async function renderFilaDecisoes(){
     </div>`;
 }
 
+// ── Pedaços remotos do Painel: uma memória por chave ──────────────────────────
+// O Painel faz sete consultas próprias, em quatro pedaços: agenda dos 7 dias
+// (audiências, boletos, parcelas), acordos do mês com as parcelas lançadas, a
+// receber, e acordos assinados sem boleto. Três delas rodavam em fila indiana —
+// acordos → fin_lancamento → fin_lancamento — e a tela só escrevia no fim; e CADA
+// clique (chip da fila, dia, período, mês, filtro) chamava renderPainel() e
+// refazia todas (1–2,5 s por clique, medido em 13/09/2026).
+// Nenhuma depende das cobranças em memória: dependem só de datas. Então vivem
+// aqui, por chave (a chave carrega a data), no padrão do porteiro das cobranças:
+// fresco por 15 s; depois, pinta com o que há e revalida atrás. Uma pintura nunca
+// espera dado que já se tem, mesmo velho.
+const _pnlRemoto = new Map();   // chave → { em, valor, voo }
+const PNL_REMOTO_FRESCO_MS = 15000;
+function _pnlRemotoLer(chave){
+  const e = _pnlRemoto.get(chave);
+  if(!e || e.valor === undefined) return null;
+  return { valor:e.valor, fresco:(performance.now() - e.em) < PNL_REMOTO_FRESCO_MS };
+}
+// Promessa do valor fresco. Voo em andamento é compartilhado: dois renders ao mesmo
+// tempo (o do boot e o do "recuperado" pousando) pedem uma vez só. Falha não fica
+// em cache — o valor velho (se houver) sobrevive e a próxima render tenta de novo.
+function _pnlRemotoBuscar(chave, carregar){
+  const e = _pnlRemoto.get(chave) || {};
+  if(e.voo) return e.voo;
+  const lido = _pnlRemotoLer(chave);
+  if(lido && lido.fresco) return Promise.resolve(lido.valor);
+  const voo = Promise.resolve().then(carregar).then(valor=>{
+    _pnlRemoto.set(chave, { em:performance.now(), valor, voo:null });
+    return valor;
+  }).catch(err=>{
+    console.warn('[painel] '+chave+':', (err && err.message) || err);
+    const atual = _pnlRemoto.get(chave);
+    if(atual && atual.voo === voo) atual.voo = null;
+    return null;
+  });
+  _pnlRemoto.set(chave, { em:e.em, valor:e.valor, voo });
+  return voo;
+}
+// Quem muda acordos/lançamentos e repinta o Painel chama isto antes — senão o card
+// mostra o de até 15 s atrás.
+function invalidarPainel(){ _pnlRemoto.clear(); }
+
+// Agenda dos 7 dias — o que não está no blob: audiências, boletos vivos e parcelas
+// de acordo. As três vão juntas; qualquer erro derruba o pedaço inteiro (a tela diz
+// que não leu, em vez de mostrar uma agenda pela metade como se fosse inteira).
+async function _pnlCarregarAgenda(todayStr, in7str){
+  const supa = getSupabase(); if(!supa) throw new Error('Supabase indisponível');
+  const [rAud, rBia, rAcd] = await Promise.all([
+    supa.from('audiencias')
+      .select('numero_processo,comarca,tipo_audiencia,data_hora,status,partes')
+      .gte('data_hora', todayStr+'T00:00:00')
+      .lte('data_hora', in7str+'T23:59:59')
+      .neq('status','cancelada'),
+    supa.from('bia_cobranca')
+      .select('nome,valor,venc_atual,status')
+      .gte('venc_atual', todayStr).lte('venc_atual', in7str)
+      .not('status','in','("paga","cancelada")'),
+    supa.from('acordos')
+      .select('id,devedor_id,parcelas,status')
+      .eq('status','ativo').not('parcelas','is',null),
+  ]);
+  const erro = rAud.error || rBia.error || rAcd.error;
+  if(erro) throw erro;
+  return { aud: rAud.data||[], bia: rBia.data||[], acd: rAcd.data||[] };
+}
+// Acordos assinados no mês + parcelas lançadas para eles. A contagem depende dos
+// ids, por isso as duas viagens moram no mesmo pedaço.
+async function _pnlCarregarAcordosMes(ymIni, dNext){
+  const supa = getSupabase(); if(!supa) throw new Error('Supabase indisponível');
+  // Por DATA DE ASSINATURA, não por created_at. O card diz "assinados no mês" e
+  // contava os CRIADOS no mês que por acaso estavam assinados: um acordo criado em
+  // julho e assinado em agosto ficava de fora. Em ago/2026 dava 9 (R$ 30.680,85)
+  // quando os assinados no mês eram 10 (R$ 41.270,85).
+  const r = await supa.from('acordos').select('id,valor_total,data_assinatura')
+    .not('data_assinatura','is',null).gte('data_assinatura', ymIni).lt('data_assinatura', dNext);
+  if(r.error) throw r.error;
+  const rows = r.data || [];
+  // Parcelas geradas saem de fin_lancamento, não de acordos.parcelas: o jsonb está
+  // praticamente vazio (7 no total em ago/2026) enquanto as parcelas reais desses
+  // mesmos acordos eram 120. O número antigo era resíduo, não informação.
+  let parcelas = 0;
+  const ids = rows.map(a=>a.id);
+  if(ids.length){
+    const rp = await supa.from('fin_lancamento').select('id',{count:'exact',head:true}).in('acordo_id', ids);
+    if(rp.error) throw rp.error;
+    parcelas = rp.count || 0;
+  }
+  return { rows, parcelas };
+}
+// "A receber no mês" — receitas pendentes do financeiro (fin_lancamento), não mais
+// o cache de boletos Asaas por devedor (só somava quem já tinha sido aberto nesta
+// sessão do navegador — número incompleto e enganoso, achado em 27/07/2026).
+async function _pnlCarregarAReceber(inicioMes, fimMes){
+  const supa = getSupabase(); if(!supa) throw new Error('Supabase indisponível');
+  const rFin = await supa.from('fin_lancamento').select('valor,data_vencimento', { count:'exact' })
+    .eq('tipo_movimento', 1).eq('status', 0)
+    .gte('data_vencimento', inicioMes).lte('data_vencimento', fimMes).limit(1000);
+  if(rFin.error) throw rFin.error;
+  const linhas = rFin.data || [];
+  // "A receber" incluía o que JÁ VENCEU e não foi pago — em ago/2026, 36 das 55
+  // parcelas (R$ 15.227,08 dos R$ 29.938,53). Metade do card era inadimplência
+  // vestida de expectativa. O total continua o mesmo; o card agora diz quanto
+  // dele já venceu.
+  const _hj = isoLocal(new Date());
+  const venc = linhas.filter(l => (l.data_vencimento||'') < _hj);
+  return {
+    qtd: rFin.count || 0,
+    total: linhas.reduce((s,l)=>s+(+l.valor||0), 0),
+    vencidoQtd: venc.length,
+    vencido: venc.reduce((s,l)=>s+(+l.valor||0), 0),
+  };
+}
+// Acordos assinados (para o alerta de boleto/WhatsApp pendente).
+async function _pnlCarregarAssinados(){
+  const supa = getSupabase(); if(!supa) throw new Error('Supabase indisponível');
+  const { data, error } = await supa.from('acordos').select('id,metadata,status_zapsign').eq('status_zapsign','assinado');
+  if(error) throw error;
+  return Array.isArray(data) ? data : [];
+}
+
+// Foco num controle do Painel (select de filtro aberto, por exemplo): repintar
+// agora fecharia o menu na mão do usuário.
+function _painelFocoOcupado(el){
+  const ativo = document.activeElement;
+  return !!(ativo && el && el.contains(ativo) && /^(SELECT|INPUT|TEXTAREA)$/.test(ativo.tagName));
+}
+// Repintura em SEGUNDO PLANO (cobranças revalidadas, "recuperado" pousando): não
+// é o usuário pedindo, então espera o foco sair — tenta a cada 700 ms, teto ~60 s
+// (mesmo remédio da guarda de foco do Cobranças, #684). Um timer só. Render
+// pedido pelo usuário (clique, filtro) nunca passa por aqui: pinta na hora.
+let _painelBgTimer = null, _painelBgAdiado = 0;
+function painelRepintarBg(){
+  const el = document.getElementById('page-painel');
+  if(!el || !el.classList.contains('active')) return;
+  if(_painelFocoOcupado(el) && _painelBgAdiado < 85){
+    _painelBgAdiado++;
+    if(!_painelBgTimer) _painelBgTimer = setTimeout(()=>{ _painelBgTimer = null; painelRepintarBg(); }, 700);
+    return;
+  }
+  _painelBgAdiado = 0;
+  renderPainel();
+}
+
 let _painelGen = 0;   // geração do render: só a mais recente escreve na tela
 async function renderPainel(){
   const el = document.getElementById('page-painel');
@@ -10734,19 +10905,14 @@ async function renderPainel(){
   // ── FONTE DE VERDADE: cobranças (mesmo cache/lógica da tela Cobranças) ───────
   // Pinta com o que há em memória; só mostra "Carregando" se não houver nada.
   // Medido: rebuscar aqui custava 2–4,7 s de tela em branco a cada abertura.
-  const _gen = ++_painelGen;   // ver guarda antes do innerHTML final
+  const _gen = ++_painelGen;   // ver guarda em repintar()
   if(!cobrancasEmMemoria().length){
     el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando painel…</div>`;
     await ensureCobrancas({ forcar:true });
+    if(_gen !== _painelGen) return;   // outro render começou enquanto esperávamos: ele pinta
   } else {
-    // A tela nasce vazia no HTML: no primeiro paint pós-boot a memória já está cheia
-    // mas este render ainda espera sinais/acordos/fin_lancamento por 2–4 s — sem isto,
-    // o usuário olharia para o nada até lá.
-    // `children.length`, não `innerHTML.trim()`: o #page-painel nasce com um
-    // comentário HTML dentro (<!-- JS will populate -->), que innerHTML serializa —
-    // a primeira versão desta guarda nunca disparava.
-    if(!el.children.length) el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando painel…</div>`;
-    revalidarCobrancas(()=>{ if(document.getElementById('page-painel')?.classList.contains('active')) renderPainel(); }, 'painel');
+    // Com memória a primeira pintura é síncrona, logo abaixo — não há "Carregando".
+    revalidarCobrancas(painelRepintarBg, 'painel');
   }
   // Uma leitura só: a lista era lida em três pontos separados por `await`, e uma
   // busca pousando no meio misturava carteira velha com situação nova no mesmo paint.
@@ -10782,87 +10948,29 @@ async function renderPainel(){
   const in7days = new Date(); in7days.setDate(in7days.getDate()+6);
   const in7str = isoLocal(in7days);
   const todayStr = isoLocal(new Date());
-  const vencItems = [];
+  // O que sai da memória (blob). Audiências, boletos vivos e parcelas de acordo
+  // nunca estiveram no blob: chegam pelo pedaço remoto "agenda", dentro de pintar().
+  const vencBase = [];
   if(!ehColaborador()){
     (DB.lancamentos||[])
       .filter(l=>l.status==='pendente' && l.data >= todayStr && l.data <= in7str)
-      .forEach(l=>vencItems.push({ desc:l.descricao||'Lançamento', data:l.data, valor:+l.valor||0, tipo:'lancamento' }));
+      .forEach(l=>vencBase.push({ desc:l.descricao||'Lançamento', data:l.data, valor:+l.valor||0, tipo:'lancamento' }));
   }
   devs.filter(d=>d.vencimento && d.vencimento >= todayStr && d.vencimento <= in7str)
-    .forEach(d=>vencItems.push({ desc:d.nome, data:d.vencimento, valor:parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0, tipo:'devedor' }));
+    .forEach(d=>vencBase.push({ desc:d.nome, data:d.vencimento, valor:parseValorBR(d.valorAtual)||parseValorBR(d.valorOrig)||0, tipo:'devedor' }));
   (DB.tarefas||[])
     .filter(t=>t.status!=='Concluída' && t.prazo && t.prazo >= todayStr && t.prazo <= in7str)
-    .forEach(t=>vencItems.push({ desc:t.titulo, data:t.prazo, valor:0, tipo:'tarefa' }));
+    .forEach(t=>vencBase.push({ desc:t.titulo, data:t.prazo, valor:0, tipo:'tarefa' }));
   // Cache Asaas por devedor — só existe para quem já teve o drawer de cobranças
   // aberto alguma vez. Cobertura parcial por natureza; a fonte de verdade dos
-  // boletos vivos é bia_cobranca (abaixo), que dedupa contra este cache.
+  // boletos vivos é bia_cobranca (pedaço "agenda"), que dedupa contra este cache.
   devs.forEach(d=>{
     (d.asaasCharges||[])
       .filter(c=>['PENDING','OVERDUE'].includes(c.status) && c.dueDate && c.dueDate >= todayStr && c.dueDate <= in7str)
-      .forEach(c=>vencItems.push({ desc:d.nome, data:c.dueDate, valor:c.value||0, tipo:'asaas' }));
+      .forEach(c=>vencBase.push({ desc:d.nome, data:c.dueDate, valor:c.value||0, tipo:'asaas' }));
   });
-
-  // Fontes relacionais (Supabase). Sem elas o card mostrava "Nada nos próximos 7
-  // dias" mesmo com audiência amanhã: audiências, boletos vivos e parcelas de
-  // acordo nunca estiveram no blob que as linhas acima leem.
-  try{
-    const supa = getSupabase();
-    if(supa){
-      const [rAud, rBia, rAcd] = await Promise.all([
-        supa.from('audiencias')
-          .select('numero_processo,comarca,tipo_audiencia,data_hora,status,partes')
-          .gte('data_hora', todayStr+'T00:00:00')
-          .lte('data_hora', in7str+'T23:59:59')
-          .neq('status','cancelada'),
-        supa.from('bia_cobranca')
-          .select('nome,valor,venc_atual,status')
-          .gte('venc_atual', todayStr).lte('venc_atual', in7str)
-          .not('status','in','("paga","cancelada")'),
-        supa.from('acordos')
-          .select('id,devedor_id,parcelas,status')
-          .eq('status','ativo').not('parcelas','is',null),
-      ]);
-      const nomePorDevedor = new Map(devs.map(d=>[d.id, d.nome]));
-      (rAud.data||[]).forEach(a=>{
-        const dt   = new Date(a.data_hora);
-        const hora = String(dt.getHours()).padStart(2,'0')+':'+String(dt.getMinutes()).padStart(2,'0');
-        const reu  = (Array.isArray(a.partes)?a.partes:[]).find(p=>/r[ée]u|execut/i.test(p.papel||''));
-        vencItems.push({
-          desc: `${hora} · ${reu?reu.nome:(a.numero_processo||'—')}${a.comarca?' — '+a.comarca:''}`,
-          data: isoLocal(dt), valor:0, tipo:'audiencia', rotulo:'AUDIÊNCIA',
-        });
-      });
-      (rBia.data||[]).forEach(b=>{
-        // Não repetir o que o cache do Asaas já trouxe (mesmo nome + mesma data).
-        if(vencItems.some(v=>v.tipo==='asaas' && v.data===b.venc_atual && v.desc===b.nome)) return;
-        vencItems.push({
-          desc:b.nome||'—', data:b.venc_atual, valor:+b.valor||0, tipo:'boleto',
-          rotulo: b.status==='ativa' ? 'BOLETO' : 'BOLETO · '+String(b.status||'').toUpperCase(),
-        });
-      });
-      (rAcd.data||[]).forEach(ac=>{
-        (Array.isArray(ac.parcelas)?ac.parcelas:[]).forEach(p=>{
-          if(p.pago || !p.vencimento) return;
-          if(p.vencimento < todayStr || p.vencimento > in7str) return;
-          const nome = nomePorDevedor.get(ac.devedor_id) || 'Acordo';
-          vencItems.push({ desc:`${nome} — parcela ${p.numero ?? '?'}`, data:p.vencimento, valor:+p.valor||0, tipo:'parcela', rotulo:'PARCELA' });
-        });
-      });
-    }
-  }catch(_){}
-
+  const nomePorDevedor = new Map(devs.map(d=>[d.id, d.nome]));
   const _ordemTipo = { audiencia:0, tarefa:1, parcela:2, boleto:3, asaas:3, devedor:4, lancamento:5 };
-  vencItems.sort((a,b)=> a.data.localeCompare(b.data) || (_ordemTipo[a.tipo]??9)-(_ordemTipo[b.tipo]??9));
-  const eventDates7 = new Set(vencItems.map(v=>v.data));
-
-  // Dia selecionado nas tiras (clique filtra a lista; clicar de novo volta aos 7 dias).
-  // Se a aba ficou aberta e a data saiu da janela, a seleção se desfaz sozinha.
-  let diaSel = window._painelDiaSel || null;
-  if(diaSel && (diaSel < todayStr || diaSel > in7str)){ diaSel = null; window._painelDiaSel = null; }
-  const vencDoDia = diaSel ? vencItems.filter(v=>v.data===diaSel) : vencItems;
-  const VENC_MOSTRAR = diaSel ? 20 : 8;   // filtrado por dia a lista é curta: mostra tudo
-  const vencimentos = vencDoDia.slice(0, VENC_MOSTRAR);
-  const vencOcultos = Math.max(0, vencDoDia.length - VENC_MOSTRAR);
 
   // Greeting
   const hrNow = new Date().getHours();
@@ -10955,80 +11063,13 @@ async function renderPainel(){
   const _respOpts  = [...new Set(_allCobr.map(c=>c.assigned_to).filter(Boolean))]
     .map(id=>({ id:String(id), nome:(typeof _detUserNome==='function'?_detUserNome(id):String(id)) }))
     .sort((a,b)=>a.nome.localeCompare(b.nome));
-
-  // ── Precisa de decisão hoje — mesma régua de pendência da tela Cobranças ──────
-  // A montagem vive em _montarFilaDecisoes() (fonte única com a página #/fila).
-  const _fila = await _montarFilaDecisoes(cobrAtivas);
-  const filaGrupo = window._painelFilaGrupo || 'Tudo';
-  const filaFiltrada = filaGrupo==='Tudo' ? _fila : _fila.filter(f=>f.grupo===filaGrupo);
-  const FILA_MOSTRAR = 7;
-  const filaVisivel = filaFiltrada.slice(0, FILA_MOSTRAR);
-  const filaAtrasados = _fila.filter(f=>f.peso===3).length;
-  try{ navBadge('nav-fila-count', _fila.length); }catch(_){}
   const tagCores = FILA_TAG_CORES;
-
-  // ── Acordos do mês ──────────────────────────────────────────────────────────
-  let acordosMesRows = [];
-  try{
-    const supa = getSupabase();
-    if(supa){
-      const ymIni = ymAtual+'-01';
-      const dNext = isoLocal(new Date(mesRef.getFullYear(), mesRef.getMonth()+1, 1));
-      // Por DATA DE ASSINATURA, não por created_at. O card diz "assinados no mês" e
-      // contava os CRIADOS no mês que por acaso estavam assinados: um acordo criado em
-      // julho e assinado em agosto ficava de fora. Em ago/2026 dava 9 (R$ 30.680,85)
-      // quando os assinados no mês eram 10 (R$ 41.270,85).
-      const r = await supa.from('acordos').select('id,valor_total,parcelas,data_assinatura,status_zapsign')
-        .not('data_assinatura','is',null).gte('data_assinatura', ymIni).lt('data_assinatura', dNext);
-      if(!r.error) acordosMesRows = r.data||[];
-    }
-  }catch(_){}
-  const acordadoNoMes   = acordosMesRows.reduce((s,a)=>s+(+a.valor_total||0),0);
-  // Parcelas geradas saem de fin_lancamento, não de acordos.parcelas: o jsonb está
-  // praticamente vazio (7 no total em ago/2026) enquanto as parcelas reais desses
-  // mesmos acordos eram 120. O número antigo era resíduo, não informação.
-  let parcelasGeradas = 0;
-  try{
-    const supaP = getSupabase();
-    const ids = acordosMesRows.map(a=>a.id);
-    if(supaP && ids.length){
-      const rp = await supaP.from('fin_lancamento').select('id',{count:'exact',head:true}).in('acordo_id', ids);
-      if(!rp.error) parcelasGeradas = rp.count||0;
-    }
-  }catch(_){}
 
   // (removido) "Ações judiciais no mês" não faz parte do card: o handoff v3 §3
   // fecha em 4 métricas — ACORDADO NO MÊS · A RECEBER · META DO MÊS · FECHAR POR
   // DIA ÚTIL. A contagem de iniciais protocoladas (proc_peticionamentos, tipo
   // 'inicial' + status 'protocolado') vive nos Relatórios; a consulta sai daqui
   // junto, que era uma ida ao banco a cada render do Painel.
-
-  // "A receber no mês" — receitas pendentes do financeiro (fin_lancamento), não mais
-  // o cache de boletos Asaas por devedor (só somava quem já tinha sido aberto nesta
-  // sessão do navegador — número incompleto e enganoso, achado em 27/07/2026).
-  const inicioMes = ymAtual+'-01';
-  const fimMes    = isoLocal(new Date(mesRef.getFullYear(), mesRef.getMonth()+1, 0));
-  let aReceberMes = 0, aReceberQtd = 0, aReceberVencido = 0, aReceberVencidoQtd = 0;
-  try{
-    const supaFin = getSupabase();
-    if(supaFin){
-      const rFin = await supaFin.from('fin_lancamento').select('valor,data_vencimento', { count:'exact' })
-        .eq('tipo_movimento', 1).eq('status', 0)
-        .gte('data_vencimento', inicioMes).lte('data_vencimento', fimMes).limit(1000);
-      if(!rFin.error){
-        aReceberQtd = rFin.count || 0;
-        aReceberMes = (rFin.data||[]).reduce((s,l)=>s+(+l.valor||0), 0);
-        // "A receber" incluía o que JÁ VENCEU e não foi pago — em ago/2026, 36 das 55
-        // parcelas (R$ 15.227,08 dos R$ 29.938,53). Metade do card era inadimplência
-        // vestida de expectativa. O total continua o mesmo; o card agora diz quanto
-        // dele já venceu.
-        const _hj = isoLocal(new Date());
-        const venc = (rFin.data||[]).filter(l => (l.data_vencimento||'') < _hj);
-        aReceberVencidoQtd = venc.length;
-        aReceberVencido = venc.reduce((s,l)=>s+(+l.valor||0), 0);
-      }
-    }
-  }catch(_){}
 
   // Dias úteis do mês de referência (seg–sex; sem calendário de feriados). No mês
   // corrente, conta só os que restam (a partir de amanhã) — meta prospectiva; em
@@ -11044,13 +11085,8 @@ async function renderPainel(){
     const d=new Date(mesRef.getFullYear(), mesRef.getMonth(), 1);
     while(d.getMonth()===mesRef.getMonth()){ const dow=d.getDay(); if(dow!==0&&dow!==6) diasUteisRest++; d.setDate(d.getDate()+1); }
   }
-  const faltamMeta       = Math.max(0, metaMensal - totalRecuperado);
-  const fecharPorDiaUtil = _mesOffset===0
-    ? (diasUteisRest>0 ? faltamMeta/diasUteisRest : faltamMeta)
-    : (diasUteisRest>0 ? acordadoNoMes/diasUteisRest : acordadoNoMes);
-  const pctRecComprometido  = metaMensal>0 ? Math.min(100, (totalRecuperado/metaMensal)*100) : 0;
-  const pctAcordComprometido = metaMensal>0 ? Math.min(100-pctRecComprometido, (acordadoNoMes/metaMensal)*100) : 0;
-  const pctMetaComprometido = Math.round(pctRecComprometido+pctAcordComprometido);
+  const faltamMeta = Math.max(0, metaMensal - totalRecuperado);
+  const pctRecComprometido = metaMensal>0 ? Math.min(100, (totalRecuperado/metaMensal)*100) : 0;
   // Recuperado ainda carregando ou falhou: os cards que dependem dele mostram "—" em vez
   // de R$ 0,00. Zero e "não sei" são coisas diferentes e não podem ter a mesma cara.
   const _recIndisp = (typeof recuperadoIndisponivel==='function') && recuperadoIndisponivel(ymAtual);
@@ -11061,207 +11097,351 @@ async function renderPainel(){
   let riscoAsaasValor=0; const riscoAsaasDevs=new Set();
   devs.forEach(d=>{ (d.asaasCharges||[]).filter(c=>c.status==='OVERDUE').forEach(c=>{ riscoAsaasValor+=(+c.value||0); riscoAsaasDevs.add(d.id); }); });
 
-  // ── Próximos 7 dias (tiras de dia + lista de compromissos) ────────────────
-  const diasSemanaCurta = ['DOM','SEG','TER','QUA','QUI','SEX','SÁB'];
-  const dias7 = Array.from({length:7}, (_,i)=>{
-    const d = new Date(now); d.setDate(d.getDate()+i);
-    const iso = isoLocal(d);
-    const qtd = vencItems.filter(v=>v.data===iso).length;
-    return { iso, dow:diasSemanaCurta[d.getDay()], num:String(d.getDate()).padStart(2,'0'),
-             hoje:i===0, temEvento:eventDates7.has(iso), qtd, sel:iso===diaSel };
-  });
+  // ── Pedaços remotos: todos de uma vez, e a tela não espera por eles ──────────
+  // Cada pedaço tem chave própria (com a data que o define). O que já está fresco
+  // em memória entra na primeira pintura; o resto é pedido agora, junto, e cada
+  // chegada repinta. Sinais de pendência e repasses seguem o cache de sessão deles.
+  const inicioMes = ymAtual+'-01';
+  const fimMes    = isoLocal(new Date(mesRef.getFullYear(), mesRef.getMonth()+1, 0));
+  const dNext     = isoLocal(new Date(mesRef.getFullYear(), mesRef.getMonth()+1, 1));
+  const chaveAgenda = 'agenda:'+todayStr, chaveMes = 'acordosMes:'+ymAtual, chaveRec = 'aReceber:'+ymAtual;
+  const carregadores = {
+    [chaveAgenda]: ()=>_pnlCarregarAgenda(todayStr, in7str),
+    [chaveMes]:    ()=>_pnlCarregarAcordosMes(inicioMes, dNext),
+    [chaveRec]:    ()=>_pnlCarregarAReceber(inicioMes, fimMes),
+  };
+  // Estado de cada pedaço nesta render: valor (fresco, velho ou nulo), se já
+  // pousou nesta render e se a busca falhou — a tela distingue "carregando" de
+  // "não foi possível ler".
+  const pecas = {};
+  for(const chave of Object.keys(carregadores)){
+    const lido = _pnlRemotoLer(chave);
+    pecas[chave] = { valor: lido ? lido.valor : null, pronto: !!(lido && lido.fresco), falhou:false };
+  }
+  const repasses = { pronto: !ehGestorView || !!_repState.loaded, falhou:false };
 
-  // Corrida: o repaint da revalidação pode terminar ANTES de uma execução mais
-  // antiga que ainda estava esperando fin_lancamento — e a antiga pousaria por
-  // último, com dado velho. Quem não é a geração corrente não escreve.
-  if(_gen !== _painelGen) return;
-  el.innerHTML = `
-    <style>
-      #page-painel .pnl-eyebrow{font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent-2);}
-      #page-painel .pnl-h1{font-family:var(--font-display);font-size:26px;font-weight:400;letter-spacing:-.01em;color:var(--text);margin-top:4px;}
-      #page-painel .pnl-sub{font-size:13.5px;color:var(--text-2);margin-top:3px;}
-      #page-painel .pnl-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:16px;}
-      #page-painel .pnl-head-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
-      #page-painel .pnl-select{font-family:inherit;font-size:12.5px;color:var(--text-2);background:var(--card);border:1px solid var(--border);border-radius:7px;padding:8px 12px;cursor:pointer;max-width:170px;}
-      #page-painel .pnl-seg{display:flex;border:1px solid var(--border);border-radius:7px;overflow:hidden;background:var(--card);}
-      #page-painel .pnl-seg button{border:0;background:transparent;padding:7px 14px;font-size:12.5px;font-weight:500;cursor:pointer;color:var(--text-2);font-family:inherit;}
-      #page-painel .pnl-seg button.on{background:var(--side-bg);color:#fff;}
-      #page-painel .pnl-alerts:empty{display:none;}
-      #page-painel .pnl-alerts > *{margin-bottom:14px;}
-      #page-painel .pnl-acordos-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px 24px;}
-      #page-painel .pnl-acordos-lb{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-3);}
-      #page-painel .pnl-acordos-lb.hl{color:var(--accent-2);}
-      #page-painel .pnl-acordos-v{font-family:var(--font-mono);font-size:19px;font-weight:600;color:var(--text);margin-top:3px;}
-      #page-painel .pnl-acordos-v.hl{color:var(--accent-2);}
-      #page-painel .pnl-acordos-v.green{color:var(--success);}
-      #page-painel .pnl-acordos-sub{font-size:11.5px;color:var(--text-3);margin-top:2px;}
-      #page-painel .pnl-mes-nav{font-size:15px;color:var(--text-3);cursor:pointer;padding:0 2px;margin:0 5px;user-select:none;line-height:1;}
-      #page-painel .pnl-mes-nav:hover{color:var(--text);}
-      #page-painel .pnl-barwrap{display:flex;flex-direction:column;gap:6px;margin-top:16px;}
-      #page-painel .pnl-bar{height:8px;background:var(--card-2);border-radius:4px;overflow:hidden;display:flex;}
-      #page-painel .pnl-bar-legend{display:flex;gap:14px;font-size:11px;color:var(--text-3);align-items:center;}
-      #page-painel .pnl-bar-legend i{width:7px;height:7px;border-radius:2px;display:inline-block;margin-right:5px;}
-      #page-painel .pnl-grid2{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(320px,1fr);gap:16px;align-items:start;}
-      #page-painel .pnl-col{display:flex;flex-direction:column;gap:16px;min-width:0;}
-      #page-painel .pnl-chips{display:flex;gap:6px;margin-left:auto;flex-wrap:wrap;}
-      #page-painel .pnl-chip{padding:5px 11px;border-radius:20px;font-size:12px;cursor:pointer;border:1px solid var(--border);background:var(--card);color:var(--text-2);}
-      #page-painel .pnl-chip.on{background:var(--side-bg);color:#fff;border-color:var(--side-bg);}
-      #page-painel .pnl-fila-row{display:flex;align-items:center;gap:14px;padding:12px 16px;border-bottom:1px solid var(--border-2);}
-      #page-painel .pnl-fila-row:last-child{border-bottom:0;}
-      #page-painel .pnl-fila-bar{width:3px;height:32px;border-radius:2px;flex-shrink:0;}
-      #page-painel .pnl-fila-nome{font-size:13.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-      #page-painel .pnl-fila-meta{font-size:12px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-      #page-painel .pnl-fila-txt{display:flex;flex-direction:column;gap:2px;min-width:200px;flex:1;}
-      #page-painel .pnl-fila-valor{font-family:var(--font-mono);font-size:13px;font-weight:500;text-align:right;width:110px;flex-shrink:0;color:var(--text);}
-      #page-painel .pnl-fila-tag{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.1em;padding:3px 8px;border-radius:4px;width:94px;text-align:center;flex-shrink:0;}
-      #page-painel .pnl-fila-acao{font-size:12.5px;font-weight:600;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;white-space:nowrap;flex-shrink:0;background:var(--card);}
-      #page-painel .pnl-fila-foot{padding:11px 16px;display:flex;align-items:center;}
-      #page-painel .pnl-sit-bar{display:flex;height:12px;border-radius:6px;overflow:hidden;margin-bottom:14px;}
-      #page-painel .pnl-sit-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;}
-      #page-painel .pnl-sit-lb{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text-2);}
-      #page-painel .pnl-sit-lb i{width:7px;height:7px;border-radius:2px;display:inline-block;}
-      #page-painel .pnl-sit-v{font-family:var(--font-mono);font-size:15px;font-weight:600;color:var(--text);}
-      #page-painel .pnl-sit-c{font-size:11.5px;color:var(--text-3);}
-      #page-painel .pnl-dark, #page-audiencias .pnl-dark, #page-lembretes .pnl-dark{background:var(--side-bg);border-radius:12px;padding:18px;color:#fff;display:flex;flex-direction:column;gap:14px;}
-      #page-painel .pnl-dark-lb, #page-audiencias .pnl-dark-lb, #page-lembretes .pnl-dark-lb{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--side-fg-mute);}
-      #page-painel .pnl-dark-v, #page-audiencias .pnl-dark-v, #page-lembretes .pnl-dark-v{font-family:var(--font-mono);font-size:26px;font-weight:600;letter-spacing:-.01em;color:#fff;}
-      #page-painel .pnl-dark-sub, #page-audiencias .pnl-dark-sub, #page-lembretes .pnl-dark-sub{font-size:12px;color:var(--side-fg-mute);}
-      #page-painel .pnl-dark-hr, #page-audiencias .pnl-dark-hr, #page-lembretes .pnl-dark-hr{height:1px;background:rgba(255,255,255,.12);}
-      #page-painel .pnl-dark-2col, #page-audiencias .pnl-dark-2col, #page-lembretes .pnl-dark-2col{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
-      #page-painel .pnl-dias7{display:flex;gap:5px;margin-bottom:14px;}
-      #page-painel .pnl-dia{flex:1;border:1px solid var(--border);background:var(--card);border-radius:6px;padding:7px 4px;display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;transition:border-color .12s,box-shadow .12s;}
-      #page-painel .pnl-dia:hover{border-color:var(--accent);}
-      #page-painel .pnl-dia.vazio{cursor:default;opacity:.55;}
-      #page-painel .pnl-dia.vazio:hover{border-color:var(--border);}
-      #page-painel .pnl-dia.sel{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);}
-      #page-painel .pnl-dia.hoje{background:var(--side-bg);border-color:var(--side-bg);}
-      #page-painel .pnl-dia .dow{font-family:var(--font-mono);font-size:9px;letter-spacing:.08em;color:var(--text-3);}
-      #page-painel .pnl-dia.hoje .dow{color:var(--side-fg-mute);}
-      #page-painel .pnl-dia .num{font-family:var(--font-mono);font-size:14px;font-weight:600;color:var(--text);}
-      #page-painel .pnl-dia.hoje .num{color:#fff;}
-      #page-painel .pnl-dia .dot{width:5px;height:5px;border-radius:50%;background:var(--border);}
-      #page-painel .pnl-dia .dot.on{background:var(--accent);}
-      #page-painel .pnl-comp{display:flex;gap:10px;padding:9px 0;border-top:1px solid var(--border-2);}
-      #page-painel .pnl-comp:first-child{border-top:0;}
-      #page-painel .pnl-risco-row{display:flex;align-items:center;gap:10px;padding:9px 0;}
-      #page-painel .pnl-risco-hr{height:1px;background:var(--border-2);}
-      #page-painel .pnl-risco-v{font-family:var(--font-mono);font-size:17px;font-weight:600;width:80px;flex-shrink:0;}
-      @media(max-width:1180px){ #page-painel .pnl-acordos-grid{grid-template-columns:repeat(2,1fr);} }
-      @media(max-width:980px){ #page-painel .pnl-grid2,#page-painel .pnl-dark-2col, #page-audiencias .pnl-dark-2col, #page-lembretes .pnl-dark-2col{grid-template-columns:1fr;} #page-painel .pnl-acordos-grid{grid-template-columns:repeat(2,1fr);} .cob-kpis{grid-template-columns:repeat(2,1fr);} }
-    </style>
+  // Repinta no máximo uma vez por rodada de microtarefas (dois pedaços pousando no
+  // mesmo tick pintam uma vez), e só se esta ainda é a geração corrente: o repaint
+  // da revalidação pode terminar ANTES de uma execução mais antiga — a antiga
+  // pousaria por último, com dado velho. Quem não é a geração corrente não escreve.
+  let _repintarAgendado = false, _repintarAdiado = 0, _repintarTimer = null;
+  const repintar = ()=>{
+    if(_gen !== _painelGen || _repintarAgendado || _repintarTimer) return;
+    _repintarAgendado = true;
+    Promise.resolve().then(()=>{
+      _repintarAgendado = false;
+      if(_gen !== _painelGen) return;
+      // Pedaço pousando com um select aberto: espera o foco sair (700 ms, teto ~60 s).
+      // Um timer só: o que pousar enquanto ele corre entra na mesma pintura.
+      if(_painelFocoOcupado(el) && _repintarAdiado < 85){
+        _repintarAdiado++;
+        _repintarTimer = setTimeout(()=>{ _repintarTimer = null; repintar(); }, 700);
+        return;
+      }
+      _repintarAdiado = 0;
+      pintar();
+    });
+  };
 
-    <div class="pnl-head">
-      <div>
-        <div class="pnl-eyebrow">${dataEyebrow}</div>
-        <h1 class="pnl-h1">${saudacao}, ${escHtml(nomeUsuario)}.</h1>
-        <div class="pnl-sub">${_fila.length>0?`<b>${_fila.length}</b> ${_fila.length===1?'item pede':'itens pedem'} decisão hoje${filaAtrasados>0?` — <b>${filaAtrasados}</b> já ${filaAtrasados===1?'está atrasado':'estão atrasados'}.`:'.'}`:'Nenhum item pendente de decisão hoje.'}</div>
-      </div>
-      <div class="pnl-head-actions">
-        ${_credorOpts.length?`<select class="pnl-select" onchange="painelSetFiltro('cliente',this.value)"><option value="">Todos os clientes</option>${_credorOpts.map(o=>`<option value="${escHtml(o.id)}" ${_pf.cliente===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('')}</select>`:''}
-        ${(_respOpts.length && ehGestorView)?`<select class="pnl-select" onchange="painelSetFiltro('operador',this.value)"><option value="">Todos os operadores</option>${_respOpts.map(o=>`<option value="${escHtml(o.id)}" ${_pf.operador===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('')}</select>`:''}
-        <div class="pnl-seg">${[['hoje','Hoje'],['semana','Semana'],['mes','Mês'],['trim','Trim']].map(([k,t])=>`<button class="${_pnlJan.per===k?'on':''}" onclick="painelSetPeriodo('${k}')">${t}</button>`).join('')}</div>
-      </div>
-    </div>
+  const pintar = ()=>{
+    const agenda = pecas[chaveAgenda], mes = pecas[chaveMes], rec = pecas[chaveRec];
+    const sinaisProntos = !!_cobrSinais;
 
-    <div class="pnl-alerts" id="painel-alerts"></div>
+    // Agenda dos 7 dias = memória + o pedaço remoto, quando já há.
+    const vencItems = vencBase.slice();
+    if(agenda.valor){
+      agenda.valor.aud.forEach(a=>{
+        const dt   = new Date(a.data_hora);
+        const hora = String(dt.getHours()).padStart(2,'0')+':'+String(dt.getMinutes()).padStart(2,'0');
+        const reu  = (Array.isArray(a.partes)?a.partes:[]).find(p=>/r[ée]u|execut/i.test(p.papel||''));
+        vencItems.push({
+          desc: `${hora} · ${reu?reu.nome:(a.numero_processo||'—')}${a.comarca?' — '+a.comarca:''}`,
+          data: isoLocal(dt), valor:0, tipo:'audiencia', rotulo:'AUDIÊNCIA',
+        });
+      });
+      agenda.valor.bia.forEach(b=>{
+        // Não repetir o que o cache do Asaas já trouxe (mesmo nome + mesma data).
+        if(vencItems.some(v=>v.tipo==='asaas' && v.data===b.venc_atual && v.desc===b.nome)) return;
+        vencItems.push({
+          desc:b.nome||'—', data:b.venc_atual, valor:+b.valor||0, tipo:'boleto',
+          rotulo: b.status==='ativa' ? 'BOLETO' : 'BOLETO · '+String(b.status||'').toUpperCase(),
+        });
+      });
+      agenda.valor.acd.forEach(ac=>{
+        (Array.isArray(ac.parcelas)?ac.parcelas:[]).forEach(p=>{
+          if(p.pago || !p.vencimento) return;
+          if(p.vencimento < todayStr || p.vencimento > in7str) return;
+          const nome = nomePorDevedor.get(ac.devedor_id) || 'Acordo';
+          vencItems.push({ desc:`${nome} — parcela ${p.numero ?? '?'}`, data:p.vencimento, valor:+p.valor||0, tipo:'parcela', rotulo:'PARCELA' });
+        });
+      });
+    }
+    vencItems.sort((a,b)=> a.data.localeCompare(b.data) || (_ordemTipo[a.tipo]??9)-(_ordemTipo[b.tipo]??9));
+    const eventDates7 = new Set(vencItems.map(v=>v.data));
 
-    ${(() => { const dev=(typeof _relAutoDevidos==='function')?_relAutoDevidos():[]; return dev.length?`<div class="cob-panel" style="padding:12px 16px;margin-bottom:14px;display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:12px;border-left:3px solid var(--accent,#C9A961);">
-      <div style="flex:1;font-size:13px;"><b>${dev.length} relatório${dev.length!==1?'s':''} de andamento a enviar</b> <span style="color:var(--text-3);">— credores com envio automático (30 dias) vencido.</span></div>
-      <button class="cob-btn-primary" onclick="abrirFilaRelatorioAuto()">Revisar e enviar</button>
-    </div>`:''; })()}
+    // Dia selecionado nas tiras (clique filtra a lista; clicar de novo volta aos 7 dias).
+    // Se a aba ficou aberta e a data saiu da janela, a seleção se desfaz sozinha.
+    let diaSel = window._painelDiaSel || null;
+    if(diaSel && (diaSel < todayStr || diaSel > in7str)){ diaSel = null; window._painelDiaSel = null; }
+    const vencDoDia = diaSel ? vencItems.filter(v=>v.data===diaSel) : vencItems;
+    const VENC_MOSTRAR = diaSel ? 20 : 8;   // filtrado por dia a lista é curta: mostra tudo
+    const vencimentos = vencDoDia.slice(0, VENC_MOSTRAR);
+    const vencOcultos = Math.max(0, vencDoDia.length - VENC_MOSTRAR);
+    // Enquanto a agenda remota não chegou (ou falhou), a lista diz isso em vez de
+    // fingir que "nada nos próximos 7 dias".
+    const agendaNota = agenda.valor ? '' : (agenda.falhou
+      ? 'Audiências, boletos e parcelas: não foi possível ler.'
+      : 'Buscando audiências, boletos e parcelas…');
 
-    <div class="cob-panel" style="margin-bottom:16px;">
-      <div class="cob-panel-head">
-        <span class="pnl-mes-nav" onclick="painelSetMes(-1)" title="Mês anterior">‹</span>
-        <span class="cob-panel-title">Acordos de ${mesAtual.toLowerCase()}${_mesAnoDiff?` de ${mesRef.getFullYear()}`:''}</span>
-        <span class="pnl-mes-nav" onclick="painelSetMes(1)" title="Próximo mês">›</span>
-        ${_mesOffset!==0?`<a class="cob-link" style="margin-left:8px;" onclick="painelResetMes()">Hoje</a>`:''}
-        <span class="cob-panel-sub">${acordosMesRows.length} assinado${acordosMesRows.length!==1?'s':''} · ${parcelasGeradas} parcela${parcelasGeradas!==1?'s':''} lançada${parcelasGeradas!==1?'s':''}</span>
-        <a class="cob-link" style="margin-left:auto;" onclick="showPage('cobr')">Ver acordos →</a>
-      </div>
-      <div class="cob-panel-body">
-        <div class="pnl-acordos-grid">
-          <div><div class="pnl-acordos-lb">ACORDADO NO MÊS</div><div class="pnl-acordos-v">${fmtR(acordadoNoMes)}</div><div class="pnl-acordos-sub">${acordosMesRows.length} acordo${acordosMesRows.length!==1?'s':''} assinado${acordosMesRows.length!==1?'s':''}</div></div>
-          <div><div class="pnl-acordos-lb">A RECEBER EM ${mesAtual.toUpperCase()}</div><div class="pnl-acordos-v green">${fmtR(aReceberMes)}</div><div class="pnl-acordos-sub">${aReceberQtd} lançamento${aReceberQtd!==1?'s':''} pendente${aReceberQtd!==1?'s':''}${aReceberVencidoQtd?` · <span style="color:var(--danger);font-weight:600;">${fmtR(aReceberVencido)} já venceu</span>`:''}</div></div>
-          <div><div class="pnl-acordos-lb">META DO MÊS</div><div class="pnl-acordos-v">${fmtR(metaMensal)}</div><div class="pnl-acordos-sub">${_recIndisp?'recuperado — <span style="color:var(--danger);">não foi possível ler</span>':`recuperado ${fmtR(totalRecuperado)}${metaProg!=null?` · ${metaProg}%`:''}`}</div></div>
-          ${_mesOffset===0
-            ? `<div><div class="pnl-acordos-lb hl">FECHAR POR DIA ÚTIL</div><div class="pnl-acordos-v hl">${fmtR(fecharPorDiaUtil)}</div><div class="pnl-acordos-sub">${_recIndisp?`${diasUteisRest} dia${diasUteisRest!==1?'s':''} úteis restantes`:(faltamMeta>0?`faltam ${fmtR(faltamMeta)} em ${diasUteisRest} dia${diasUteisRest!==1?'s':''}`:'meta atingida')}</div></div>`
-            : `<div><div class="pnl-acordos-lb hl">MÉDIA POR DIA ÚTIL</div><div class="pnl-acordos-v hl">${fmtR(fecharPorDiaUtil)}</div><div class="pnl-acordos-sub">${diasUteisRest} dia${diasUteisRest!==1?'s ':' '}${diasUteisRest!==1?'úteis':'útil'} no mês</div></div>`}
+    // ── Precisa de decisão hoje — mesma régua de pendência da tela Cobranças ──────
+    // A montagem vive em _montarFilaDecisoesSync() (fonte única com a página #/fila).
+    // Sem sinais ainda, a fila não é montada: montar sem eles daria uma lista errada
+    // por 1–2 s, e lista errada é pior que "montando".
+    const _fila = sinaisProntos ? _montarFilaDecisoesSync(cobrAtivas, _cobrSinais) : [];
+    const filaGrupo = window._painelFilaGrupo || 'Tudo';
+    const filaFiltrada = filaGrupo==='Tudo' ? _fila : _fila.filter(f=>f.grupo===filaGrupo);
+    const FILA_MOSTRAR = 7;
+    const filaVisivel = filaFiltrada.slice(0, FILA_MOSTRAR);
+    const filaAtrasados = _fila.filter(f=>f.peso===3).length;
+    // O contador do menu só com a fila completa (sinais + repasses) — senão pisca.
+    if(sinaisProntos && repasses.pronto){ try{ navBadge('nav-fila-count', _fila.length); }catch(_){} }
+    const filaNota = !sinaisProntos ? '' : (!repasses.pronto ? ' · repasses a caminho…' : (repasses.falhou ? ' · repasses indisponíveis' : ''));
+
+    // ── Acordos do mês ──────────────────────────────────────────────────────────
+    const acordosMesRows = mes.valor ? mes.valor.rows : [];
+    const parcelasGeradas = mes.valor ? mes.valor.parcelas : 0;
+    const acordadoNoMes   = acordosMesRows.reduce((s,a)=>s+(+a.valor_total||0),0);
+    const aReceberMes = rec.valor ? rec.valor.total : 0, aReceberQtd = rec.valor ? rec.valor.qtd : 0;
+    const aReceberVencido = rec.valor ? rec.valor.vencido : 0, aReceberVencidoQtd = rec.valor ? rec.valor.vencidoQtd : 0;
+    const _mesIndisp = !mes.valor, _aRecIndisp = !rec.valor;
+    const indispTxt = p => p.falhou ? '<span style="color:var(--danger);">não foi possível ler</span>' : 'carregando…';
+    const fecharPorDiaUtil = _mesOffset===0
+      ? (diasUteisRest>0 ? faltamMeta/diasUteisRest : faltamMeta)
+      : (diasUteisRest>0 ? acordadoNoMes/diasUteisRest : acordadoNoMes);
+    const pctAcordComprometido = metaMensal>0 ? Math.min(100-pctRecComprometido, (acordadoNoMes/metaMensal)*100) : 0;
+    const pctMetaComprometido = Math.round(pctRecComprometido+pctAcordComprometido);
+
+    // ── Próximos 7 dias (tiras de dia + lista de compromissos) ────────────────
+    const diasSemanaCurta = ['DOM','SEG','TER','QUA','QUI','SEX','SÁB'];
+    const dias7 = Array.from({length:7}, (_,i)=>{
+      const d = new Date(now); d.setDate(d.getDate()+i);
+      const iso = isoLocal(d);
+      const qtd = vencItems.filter(v=>v.data===iso).length;
+      return { iso, dow:diasSemanaCurta[d.getDay()], num:String(d.getDate()).padStart(2,'0'),
+               hoje:i===0, temEvento:eventDates7.has(iso), qtd, sel:iso===diaSel };
+    });
+    el.innerHTML = `
+      <style>
+        #page-painel .pnl-eyebrow{font-family:var(--font-mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent-2);}
+        #page-painel .pnl-h1{font-family:var(--font-display);font-size:26px;font-weight:400;letter-spacing:-.01em;color:var(--text);margin-top:4px;}
+        #page-painel .pnl-sub{font-size:13.5px;color:var(--text-2);margin-top:3px;}
+        #page-painel .pnl-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:16px;}
+        #page-painel .pnl-head-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+        #page-painel .pnl-select{font-family:inherit;font-size:12.5px;color:var(--text-2);background:var(--card);border:1px solid var(--border);border-radius:7px;padding:8px 12px;cursor:pointer;max-width:170px;}
+        #page-painel .pnl-seg{display:flex;border:1px solid var(--border);border-radius:7px;overflow:hidden;background:var(--card);}
+        #page-painel .pnl-seg button{border:0;background:transparent;padding:7px 14px;font-size:12.5px;font-weight:500;cursor:pointer;color:var(--text-2);font-family:inherit;}
+        #page-painel .pnl-seg button.on{background:var(--side-bg);color:#fff;}
+        #page-painel .pnl-alerts:empty{display:none;}
+        #page-painel .pnl-alerts > *{margin-bottom:14px;}
+        #page-painel .pnl-acordos-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px 24px;}
+        #page-painel .pnl-acordos-lb{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-3);}
+        #page-painel .pnl-acordos-lb.hl{color:var(--accent-2);}
+        #page-painel .pnl-acordos-v{font-family:var(--font-mono);font-size:19px;font-weight:600;color:var(--text);margin-top:3px;}
+        #page-painel .pnl-acordos-v.hl{color:var(--accent-2);}
+        #page-painel .pnl-acordos-v.green{color:var(--success);}
+        #page-painel .pnl-acordos-sub{font-size:11.5px;color:var(--text-3);margin-top:2px;}
+        #page-painel .pnl-mes-nav{font-size:15px;color:var(--text-3);cursor:pointer;padding:0 2px;margin:0 5px;user-select:none;line-height:1;}
+        #page-painel .pnl-mes-nav:hover{color:var(--text);}
+        #page-painel .pnl-barwrap{display:flex;flex-direction:column;gap:6px;margin-top:16px;}
+        #page-painel .pnl-bar{height:8px;background:var(--card-2);border-radius:4px;overflow:hidden;display:flex;}
+        #page-painel .pnl-bar-legend{display:flex;gap:14px;font-size:11px;color:var(--text-3);align-items:center;}
+        #page-painel .pnl-bar-legend i{width:7px;height:7px;border-radius:2px;display:inline-block;margin-right:5px;}
+        #page-painel .pnl-grid2{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(320px,1fr);gap:16px;align-items:start;}
+        #page-painel .pnl-col{display:flex;flex-direction:column;gap:16px;min-width:0;}
+        #page-painel .pnl-chips{display:flex;gap:6px;margin-left:auto;flex-wrap:wrap;}
+        #page-painel .pnl-chip{padding:5px 11px;border-radius:20px;font-size:12px;cursor:pointer;border:1px solid var(--border);background:var(--card);color:var(--text-2);}
+        #page-painel .pnl-chip.on{background:var(--side-bg);color:#fff;border-color:var(--side-bg);}
+        #page-painel .pnl-fila-row{display:flex;align-items:center;gap:14px;padding:12px 16px;border-bottom:1px solid var(--border-2);}
+        #page-painel .pnl-fila-row:last-child{border-bottom:0;}
+        #page-painel .pnl-fila-bar{width:3px;height:32px;border-radius:2px;flex-shrink:0;}
+        #page-painel .pnl-fila-nome{font-size:13.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+        #page-painel .pnl-fila-meta{font-size:12px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+        #page-painel .pnl-fila-txt{display:flex;flex-direction:column;gap:2px;min-width:200px;flex:1;}
+        #page-painel .pnl-fila-valor{font-family:var(--font-mono);font-size:13px;font-weight:500;text-align:right;width:110px;flex-shrink:0;color:var(--text);}
+        #page-painel .pnl-fila-tag{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.1em;padding:3px 8px;border-radius:4px;width:94px;text-align:center;flex-shrink:0;}
+        #page-painel .pnl-fila-acao{font-size:12.5px;font-weight:600;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 12px;cursor:pointer;white-space:nowrap;flex-shrink:0;background:var(--card);}
+        #page-painel .pnl-fila-foot{padding:11px 16px;display:flex;align-items:center;}
+        #page-painel .pnl-sit-bar{display:flex;height:12px;border-radius:6px;overflow:hidden;margin-bottom:14px;}
+        #page-painel .pnl-sit-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;}
+        #page-painel .pnl-sit-lb{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text-2);}
+        #page-painel .pnl-sit-lb i{width:7px;height:7px;border-radius:2px;display:inline-block;}
+        #page-painel .pnl-sit-v{font-family:var(--font-mono);font-size:15px;font-weight:600;color:var(--text);}
+        #page-painel .pnl-sit-c{font-size:11.5px;color:var(--text-3);}
+        #page-painel .pnl-dark, #page-audiencias .pnl-dark, #page-lembretes .pnl-dark{background:var(--side-bg);border-radius:12px;padding:18px;color:#fff;display:flex;flex-direction:column;gap:14px;}
+        #page-painel .pnl-dark-lb, #page-audiencias .pnl-dark-lb, #page-lembretes .pnl-dark-lb{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--side-fg-mute);}
+        #page-painel .pnl-dark-v, #page-audiencias .pnl-dark-v, #page-lembretes .pnl-dark-v{font-family:var(--font-mono);font-size:26px;font-weight:600;letter-spacing:-.01em;color:#fff;}
+        #page-painel .pnl-dark-sub, #page-audiencias .pnl-dark-sub, #page-lembretes .pnl-dark-sub{font-size:12px;color:var(--side-fg-mute);}
+        #page-painel .pnl-dark-hr, #page-audiencias .pnl-dark-hr, #page-lembretes .pnl-dark-hr{height:1px;background:rgba(255,255,255,.12);}
+        #page-painel .pnl-dark-2col, #page-audiencias .pnl-dark-2col, #page-lembretes .pnl-dark-2col{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+        #page-painel .pnl-dias7{display:flex;gap:5px;margin-bottom:14px;}
+        #page-painel .pnl-dia{flex:1;border:1px solid var(--border);background:var(--card);border-radius:6px;padding:7px 4px;display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;transition:border-color .12s,box-shadow .12s;}
+        #page-painel .pnl-dia:hover{border-color:var(--accent);}
+        #page-painel .pnl-dia.vazio{cursor:default;opacity:.55;}
+        #page-painel .pnl-dia.vazio:hover{border-color:var(--border);}
+        #page-painel .pnl-dia.sel{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);}
+        #page-painel .pnl-dia.hoje{background:var(--side-bg);border-color:var(--side-bg);}
+        #page-painel .pnl-dia .dow{font-family:var(--font-mono);font-size:9px;letter-spacing:.08em;color:var(--text-3);}
+        #page-painel .pnl-dia.hoje .dow{color:var(--side-fg-mute);}
+        #page-painel .pnl-dia .num{font-family:var(--font-mono);font-size:14px;font-weight:600;color:var(--text);}
+        #page-painel .pnl-dia.hoje .num{color:#fff;}
+        #page-painel .pnl-dia .dot{width:5px;height:5px;border-radius:50%;background:var(--border);}
+        #page-painel .pnl-dia .dot.on{background:var(--accent);}
+        #page-painel .pnl-comp{display:flex;gap:10px;padding:9px 0;border-top:1px solid var(--border-2);}
+        #page-painel .pnl-comp:first-child{border-top:0;}
+        #page-painel .pnl-risco-row{display:flex;align-items:center;gap:10px;padding:9px 0;}
+        #page-painel .pnl-risco-hr{height:1px;background:var(--border-2);}
+        #page-painel .pnl-risco-v{font-family:var(--font-mono);font-size:17px;font-weight:600;width:80px;flex-shrink:0;}
+        @media(max-width:1180px){ #page-painel .pnl-acordos-grid{grid-template-columns:repeat(2,1fr);} }
+        @media(max-width:980px){ #page-painel .pnl-grid2,#page-painel .pnl-dark-2col, #page-audiencias .pnl-dark-2col, #page-lembretes .pnl-dark-2col{grid-template-columns:1fr;} #page-painel .pnl-acordos-grid{grid-template-columns:repeat(2,1fr);} .cob-kpis{grid-template-columns:repeat(2,1fr);} }
+      </style>
+
+      <div class="pnl-head">
+        <div>
+          <div class="pnl-eyebrow">${dataEyebrow}</div>
+          <h1 class="pnl-h1">${saudacao}, ${escHtml(nomeUsuario)}.</h1>
+          <div class="pnl-sub">${!sinaisProntos?'Montando a fila de decisão…':_fila.length>0?`<b>${_fila.length}</b> ${_fila.length===1?'item pede':'itens pedem'} decisão hoje${filaAtrasados>0?` — <b>${filaAtrasados}</b> já ${filaAtrasados===1?'está atrasado':'estão atrasados'}.`:'.'}`:'Nenhum item pendente de decisão hoje.'}</div>
         </div>
-        <div class="pnl-barwrap">
-          <div class="pnl-bar"><div style="width:${pctRecComprometido}%;background:var(--success);"></div><div style="width:${pctAcordComprometido}%;background:var(--accent);"></div></div>
-          <div class="pnl-bar-legend"><span><i style="background:var(--success);"></i>Recuperado</span><span><i style="background:var(--accent);"></i>Acordado a receber</span><span style="margin-left:auto;font-family:var(--font-mono);">${pctMetaComprometido}% da meta comprometido</span></div>
+        <div class="pnl-head-actions">
+          ${_credorOpts.length?`<select class="pnl-select" onchange="painelSetFiltro('cliente',this.value)"><option value="">Todos os clientes</option>${_credorOpts.map(o=>`<option value="${escHtml(o.id)}" ${_pf.cliente===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('')}</select>`:''}
+          ${(_respOpts.length && ehGestorView)?`<select class="pnl-select" onchange="painelSetFiltro('operador',this.value)"><option value="">Todos os operadores</option>${_respOpts.map(o=>`<option value="${escHtml(o.id)}" ${_pf.operador===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('')}</select>`:''}
+          <div class="pnl-seg">${[['hoje','Hoje'],['semana','Semana'],['mes','Mês'],['trim','Trim']].map(([k,t])=>`<button class="${_pnlJan.per===k?'on':''}" onclick="painelSetPeriodo('${k}')">${t}</button>`).join('')}</div>
         </div>
       </div>
-    </div>
 
-    <div class="pnl-grid2">
-      <div class="pnl-col">
-        <div class="cob-panel">
-          <div class="cob-panel-head"><span class="cob-panel-title">Precisa de decisão hoje</span><span class="cob-panel-sub">${_fila.length} ite${_fila.length!==1?'ns':'m'} · ordenados por risco</span>
-            <div class="pnl-chips">${['Tudo','Cobrança','Dinheiro','Jurídico'].map(g=>`<span class="pnl-chip ${filaGrupo===g?'on':''}" onclick="window._painelFilaGrupo='${g}';renderPainel();">${g}</span>`).join('')}<a class="pnl-chip" href="#/fila" target="_blank" rel="noopener" style="text-decoration:none;" title="Abrir a fila inteira em outra aba do navegador">↗ Nova aba</a></div>
+      <div class="pnl-alerts" id="painel-alerts"></div>
+
+      ${(() => { const dev=(typeof _relAutoDevidos==='function')?_relAutoDevidos():[]; return dev.length?`<div class="cob-panel" style="padding:12px 16px;margin-bottom:14px;display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:12px;border-left:3px solid var(--accent,#C9A961);">
+        <div style="flex:1;font-size:13px;"><b>${dev.length} relatório${dev.length!==1?'s':''} de andamento a enviar</b> <span style="color:var(--text-3);">— credores com envio automático (30 dias) vencido.</span></div>
+        <button class="cob-btn-primary" onclick="abrirFilaRelatorioAuto()">Revisar e enviar</button>
+      </div>`:''; })()}
+
+      <div class="cob-panel" style="margin-bottom:16px;">
+        <div class="cob-panel-head">
+          <span class="pnl-mes-nav" onclick="painelSetMes(-1)" title="Mês anterior">‹</span>
+          <span class="cob-panel-title">Acordos de ${mesAtual.toLowerCase()}${_mesAnoDiff?` de ${mesRef.getFullYear()}`:''}</span>
+          <span class="pnl-mes-nav" onclick="painelSetMes(1)" title="Próximo mês">›</span>
+          ${_mesOffset!==0?`<a class="cob-link" style="margin-left:8px;" onclick="painelResetMes()">Hoje</a>`:''}
+          <span class="cob-panel-sub">${_mesIndisp?indispTxt(mes):`${acordosMesRows.length} assinado${acordosMesRows.length!==1?'s':''} · ${parcelasGeradas} parcela${parcelasGeradas!==1?'s':''} lançada${parcelasGeradas!==1?'s':''}`}</span>
+          <a class="cob-link" style="margin-left:auto;" onclick="showPage('cobr')">Ver acordos →</a>
+        </div>
+        <div class="cob-panel-body">
+          <div class="pnl-acordos-grid">
+            <div><div class="pnl-acordos-lb">ACORDADO NO MÊS</div><div class="pnl-acordos-v">${_mesIndisp?'—':fmtR(acordadoNoMes)}</div><div class="pnl-acordos-sub">${_mesIndisp?indispTxt(mes):`${acordosMesRows.length} acordo${acordosMesRows.length!==1?'s':''} assinado${acordosMesRows.length!==1?'s':''}`}</div></div>
+            <div><div class="pnl-acordos-lb">A RECEBER EM ${mesAtual.toUpperCase()}</div><div class="pnl-acordos-v green">${_aRecIndisp?'—':fmtR(aReceberMes)}</div><div class="pnl-acordos-sub">${_aRecIndisp?indispTxt(rec):`${aReceberQtd} lançamento${aReceberQtd!==1?'s':''} pendente${aReceberQtd!==1?'s':''}${aReceberVencidoQtd?` · <span style="color:var(--danger);font-weight:600;">${fmtR(aReceberVencido)} já venceu</span>`:''}`}</div></div>
+            <div><div class="pnl-acordos-lb">META DO MÊS</div><div class="pnl-acordos-v">${fmtR(metaMensal)}</div><div class="pnl-acordos-sub">${_recIndisp?'recuperado — <span style="color:var(--danger);">não foi possível ler</span>':`recuperado ${fmtR(totalRecuperado)}${metaProg!=null?` · ${metaProg}%`:''}`}</div></div>
+            ${_mesOffset===0
+              ? `<div><div class="pnl-acordos-lb hl">FECHAR POR DIA ÚTIL</div><div class="pnl-acordos-v hl">${fmtR(fecharPorDiaUtil)}</div><div class="pnl-acordos-sub">${_recIndisp?`${diasUteisRest} dia${diasUteisRest!==1?'s':''} úteis restantes`:(faltamMeta>0?`faltam ${fmtR(faltamMeta)} em ${diasUteisRest} dia${diasUteisRest!==1?'s':''}`:'meta atingida')}</div></div>`
+              : `<div><div class="pnl-acordos-lb hl">MÉDIA POR DIA ÚTIL</div><div class="pnl-acordos-v hl">${_mesIndisp?'—':fmtR(fecharPorDiaUtil)}</div><div class="pnl-acordos-sub">${diasUteisRest} dia${diasUteisRest!==1?'s ':' '}${diasUteisRest!==1?'úteis':'útil'} no mês</div></div>`}
           </div>
-          <div>${filaVisivel.length? filaVisivel.map(f=>{ const tc=tagCores[f.tag]||{bg:'var(--card-2)',fg:'var(--text-2)'}; return `<div class="pnl-fila-row">
-              <div class="pnl-fila-bar" style="background:${f.peso===3?'var(--danger)':f.peso===2?'var(--accent)':'var(--info)'};"></div>
-              <div class="pnl-fila-txt"><div class="pnl-fila-nome">${escHtml(f.nome)}</div><div class="pnl-fila-meta">${escHtml(f.meta)}</div></div>
-              <div class="pnl-fila-valor">${fmtR(f.valor)}</div>
-              <div class="pnl-fila-tag" style="background:${tc.bg};color:${tc.fg};">${f.tag}</div>
-              <button class="pnl-fila-acao" onclick="${f.onAcao}">${escHtml(f.acaoLabel)}</button>
-            </div>`; }).join('') : `<div class="cob-empty"><span class="cob-empty-dot"></span> Nenhum item pendente${filaGrupo!=='Tudo'?` em ${filaGrupo}`:''}.</div>`}</div>
-          <div class="pnl-fila-foot"><span style="font-size:12.5px;color:var(--text-3);">Mostrando ${filaVisivel.length} de ${filaFiltrada.length}</span><a class="cob-link" style="margin-left:auto;" onclick="showPage('fila')">Ver a fila inteira →</a></div>
+          <div class="pnl-barwrap">
+            <div class="pnl-bar"><div style="width:${pctRecComprometido}%;background:var(--success);"></div><div style="width:${pctAcordComprometido}%;background:var(--accent);"></div></div>
+            <div class="pnl-bar-legend"><span><i style="background:var(--success);"></i>Recuperado</span><span><i style="background:var(--accent);"></i>Acordado a receber</span><span style="margin-left:auto;font-family:var(--font-mono);">${pctMetaComprometido}% da meta comprometido</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="pnl-grid2">
+        <div class="pnl-col">
+          <div class="cob-panel">
+            <div class="cob-panel-head"><span class="cob-panel-title">Precisa de decisão hoje</span><span class="cob-panel-sub">${!sinaisProntos?'montando…':`${_fila.length} ite${_fila.length!==1?'ns':'m'} · ordenados por risco`}</span>
+              <div class="pnl-chips">${['Tudo','Cobrança','Dinheiro','Jurídico'].map(g=>`<span class="pnl-chip ${filaGrupo===g?'on':''}" onclick="window._painelFilaGrupo='${g}';renderPainel();">${g}</span>`).join('')}<a class="pnl-chip" href="#/fila" target="_blank" rel="noopener" style="text-decoration:none;" title="Abrir a fila inteira em outra aba do navegador">↗ Nova aba</a></div>
+            </div>
+            <div>${!sinaisProntos?`<div class="cob-empty"><span class="cob-empty-dot"></span> Montando a fila…</div>`:filaVisivel.length? filaVisivel.map(f=>{ const tc=tagCores[f.tag]||{bg:'var(--card-2)',fg:'var(--text-2)'}; return `<div class="pnl-fila-row">
+                <div class="pnl-fila-bar" style="background:${f.peso===3?'var(--danger)':f.peso===2?'var(--accent)':'var(--info)'};"></div>
+                <div class="pnl-fila-txt"><div class="pnl-fila-nome">${escHtml(f.nome)}</div><div class="pnl-fila-meta">${escHtml(f.meta)}</div></div>
+                <div class="pnl-fila-valor">${fmtR(f.valor)}</div>
+                <div class="pnl-fila-tag" style="background:${tc.bg};color:${tc.fg};">${f.tag}</div>
+                <button class="pnl-fila-acao" onclick="${f.onAcao}">${escHtml(f.acaoLabel)}</button>
+              </div>`; }).join('') : `<div class="cob-empty"><span class="cob-empty-dot"></span> Nenhum item pendente${filaGrupo!=='Tudo'?` em ${filaGrupo}`:''}.</div>`}</div>
+            <div class="pnl-fila-foot"><span style="font-size:12.5px;color:var(--text-3);">${!sinaisProntos?'Montando a fila…':`Mostrando ${filaVisivel.length} de ${filaFiltrada.length}${filaNota}`}</span><a class="cob-link" style="margin-left:auto;" onclick="showPage('fila')">Ver a fila inteira →</a></div>
+          </div>
+
+          <div class="cob-panel">
+            <div class="cob-panel-head"><span class="cob-panel-title">Carteira por situação</span><span class="cob-panel-sub">${fmtR(sitTotalVal)} · ${sitTotalCasos} casos</span><a class="cob-link" style="margin-left:auto;" onclick="showPage('cobr')">Abrir carteira →</a></div>
+            <div class="cob-panel-body">
+              <div class="pnl-sit-bar">${[['aberto','var(--slate)'],['acordo','var(--accent)'],['judicial','var(--side-bg)'],['quitado','var(--success)']].map(([k,cor])=>`<div style="width:${Math.round((sitDefs[k]/sitTotalVal)*100)}%;background:${cor};"></div>`).join('')}</div>
+              <div class="pnl-sit-grid">
+                ${[['Em aberto','aberto','var(--slate)'],['Em acordo','acordo','var(--accent)'],['Judicial','judicial','var(--side-bg)'],['Quitado','quitado','var(--success)']].map(([lb,k,cor])=>`<div><div class="pnl-sit-lb"><i style="background:${cor};"></i>${lb}</div><div class="pnl-sit-v">${fmtk(sitDefs[k])}</div><div class="pnl-sit-c">${sitQtd[k]} caso${sitQtd[k]!==1?'s':''}</div></div>`).join('')}
+              </div>
+            </div>
+          </div>
         </div>
 
-        <div class="cob-panel">
-          <div class="cob-panel-head"><span class="cob-panel-title">Carteira por situação</span><span class="cob-panel-sub">${fmtR(sitTotalVal)} · ${sitTotalCasos} casos</span><a class="cob-link" style="margin-left:auto;" onclick="showPage('cobr')">Abrir carteira →</a></div>
-          <div class="cob-panel-body">
-            <div class="pnl-sit-bar">${[['aberto','var(--slate)'],['acordo','var(--accent)'],['judicial','var(--side-bg)'],['quitado','var(--success)']].map(([k,cor])=>`<div style="width:${Math.round((sitDefs[k]/sitTotalVal)*100)}%;background:${cor};"></div>`).join('')}</div>
-            <div class="pnl-sit-grid">
-              ${[['Em aberto','aberto','var(--slate)'],['Em acordo','acordo','var(--accent)'],['Judicial','judicial','var(--side-bg)'],['Quitado','quitado','var(--success)']].map(([lb,k,cor])=>`<div><div class="pnl-sit-lb"><i style="background:${cor};"></i>${lb}</div><div class="pnl-sit-v">${fmtk(sitDefs[k])}</div><div class="pnl-sit-c">${sitQtd[k]} caso${sitQtd[k]!==1?'s':''}</div></div>`).join('')}
+        <div class="pnl-col">
+          <div class="pnl-dark">
+            <div><div class="pnl-dark-lb">CARTEIRA ATIVA</div><div class="pnl-dark-v">${fmtR(totalCarteira)}</div><div class="pnl-dark-sub">${totalCasos} caso${totalCasos!==1?'s':''} em aberto · ${totalContatos} cliente${totalContatos!==1?'s':''}</div></div>
+            <div class="pnl-dark-hr"></div>
+            <div class="pnl-dark-2col">
+              <div><div class="pnl-dark-lb">RECUPERADO ${escHtml(_pnlJan.label.toUpperCase())}</div><div class="pnl-dark-v" style="font-size:17px;color:${_recIndisp?'#8E98B0':'#A8C6A0'};" title="${_recIndisp?'não foi possível ler os pagamentos — o valor não é zero, é desconhecido':''}">${_recIndisp?'—':fmtR(recuperadoPeriodo)}</div></div>
+              <div><div class="pnl-dark-lb">A COBRAR</div><div class="pnl-dark-v" style="font-size:17px;color:#E2CE9E;">${fmtR(emNegociacao)}</div><div class="pnl-dark-sub">${emNegRows.length} cobrança${emNegRows.length!==1?'s':''}</div></div>
+            </div>
+            <div>
+              <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--side-fg-mute);margin-bottom:6px;"><span>Meta ${escHtml(_pnlJan.label)}</span><span style="font-family:var(--font-mono);">${metaProgPeriodo!=null?metaProgPeriodo+'%':'—'} de ${fmtR(metaPeriodo)}</span></div>
+              <div style="height:6px;background:rgba(255,255,255,.12);border-radius:3px;overflow:hidden;"><div style="height:100%;width:${metaProgPeriodo||0}%;background:var(--accent);"></div></div>
+            </div>
+          </div>
+
+          <div class="cob-panel">
+            <div class="cob-panel-head"><span class="cob-panel-title">${diaSel? diaSel.slice(8,10)+'/'+diaSel.slice(5,7) : 'Próximos 7 dias'}</span>${diaSel?`<a class="cob-link" style="margin-left:8px;" onclick="painelToggleDia('${diaSel}')">↺ ver os 7 dias</a>`:''}<a class="cob-link" style="margin-left:auto;" onclick="showPage('tarefas')">Agenda completa →</a></div>
+            <div class="cob-panel-body">
+              <div class="pnl-dias7">${dias7.map(d=>`<div class="pnl-dia ${d.hoje?'hoje':''} ${d.sel?'sel':''} ${d.qtd?'':'vazio'}"${d.qtd?` onclick="painelToggleDia('${d.iso}')" title="${d.qtd} ${d.qtd===1?'compromisso':'compromissos'} em ${d.iso.slice(8,10)}/${d.iso.slice(5,7)}"`:' title="nada neste dia"'}><span class="dow">${d.dow}</span><span class="num">${d.num}</span><div class="dot ${d.temEvento?'on':''}"></div></div>`).join('')}</div>
+              ${vencimentos.length? vencimentos.map(v=>`<div class="pnl-comp"><div style="font-family:var(--font-mono);font-size:11.5px;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};width:56px;flex-shrink:0;">${(v.data||'').slice(8,10)}/${(v.data||'').slice(5,7)}</div><div style="min-width:0;">${v.rotulo?`<div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};">${escHtml(v.rotulo)}</div>`:''}<div style="font-size:12.5px;font-weight:500;color:var(--text);">${escHtml(v.desc||'—')}</div>${v.valor?`<div style="font-size:11.5px;color:var(--text-3);">${fmtR(v.valor)}</div>`:''}</div></div>`).join('')+(vencOcultos?`<div style="padding:9px 0 0;font-size:11.5px;color:var(--text-3);">+${vencOcultos} ${vencOcultos===1?'compromisso':'compromissos'} — ver agenda completa</div>`:'') : `<div class="cob-empty"><span class="cob-empty-dot"></span> ${diaSel? 'Nada em '+diaSel.slice(8,10)+'/'+diaSel.slice(5,7)+'.' : 'Nada nos próximos 7 dias.'}</div>`}${agendaNota?`<div style="padding:9px 0 0;font-size:11.5px;color:var(--text-3);">${agendaNota}</div>`:''}
+            </div>
+          </div>
+
+          <div class="cob-panel">
+            <div class="cob-panel-head"><span class="cob-panel-title">Riscos silenciosos</span></div>
+            <div class="cob-panel-body">
+              <div class="pnl-risco-row"><div class="pnl-risco-v" style="color:var(--danger);">${fmtk(carteiraParada90)}</div><div style="font-size:12px;color:var(--text-2);line-height:1.35;">parados há 90+ dias<br><span style="color:var(--text-3);">${carteiraParada90Rows.length} caso${carteiraParada90Rows.length!==1?'s':''} sem interação</span></div><a class="cob-link" style="margin-left:auto;white-space:nowrap;" onclick="showPage('cobr')">Priorizar →</a></div>
+              <div class="pnl-risco-hr"></div>
+              <div class="pnl-risco-row"><div class="pnl-risco-v" style="color:var(--accent-2);">${prescreverRows.length} caso${prescreverRows.length!==1?'s':''}</div><div style="font-size:12px;color:var(--text-2);line-height:1.35;">a prescrever (≤ 6 meses)${prescreverRows[0]?`<br><span style="color:var(--text-3);">${escHtml(_cobrCredorNome(prescreverRows[0]))} · ${fmtR(+prescreverRows[0].valor_atual||+prescreverRows[0].valor_orig||0)}</span>`:''}</div><a class="cob-link" style="margin-left:auto;white-space:nowrap;" onclick="try{cobrFilter.prescrever=true;cobrFilter.etapa='todos';}catch(_){}; showPage('cobr');">Ver →</a></div>
+              <div class="pnl-risco-hr"></div>
+              <div class="pnl-risco-row"><div class="pnl-risco-v" style="color:var(--info);">${fmtk(riscoAsaasValor)}</div><div style="font-size:12px;color:var(--text-2);line-height:1.35;">boletos vencidos no Asaas<br><span style="color:var(--text-3);">${riscoAsaasDevs.size} devedor${riscoAsaasDevs.size!==1?'es':''} inadimplente${riscoAsaasDevs.size!==1?'s':''}</span></div><a class="cob-link" style="margin-left:auto;white-space:nowrap;" onclick="showPage('cobr')">Cobrar →</a></div>
             </div>
           </div>
         </div>
       </div>
+    `;
+    // Alerta visual (gestor): acordos assinados sem boleto emitido — corrente travada/falha.
+    // Onda 2 #9: alerta de casos que precisam de ação hoje (pendência derivada).
+    // Os dois só depois dos sinais: o de casos conta com eles, e sem eles daria um
+    // número que muda 1 s depois. O de boletos passa pela memória por chave (uma
+    // consulta por 15 s, não uma por pintura).
+    if(sinaisProntos){ checkAlertaBoletosPendentes(el); checkAlertaCasosAgir(el); }
+  };
 
-      <div class="pnl-col">
-        <div class="pnl-dark">
-          <div><div class="pnl-dark-lb">CARTEIRA ATIVA</div><div class="pnl-dark-v">${fmtR(totalCarteira)}</div><div class="pnl-dark-sub">${totalCasos} caso${totalCasos!==1?'s':''} em aberto · ${totalContatos} cliente${totalContatos!==1?'s':''}</div></div>
-          <div class="pnl-dark-hr"></div>
-          <div class="pnl-dark-2col">
-            <div><div class="pnl-dark-lb">RECUPERADO ${escHtml(_pnlJan.label.toUpperCase())}</div><div class="pnl-dark-v" style="font-size:17px;color:${_recIndisp?'#8E98B0':'#A8C6A0'};" title="${_recIndisp?'não foi possível ler os pagamentos — o valor não é zero, é desconhecido':''}">${_recIndisp?'—':fmtR(recuperadoPeriodo)}</div></div>
-            <div><div class="pnl-dark-lb">A COBRAR</div><div class="pnl-dark-v" style="font-size:17px;color:#E2CE9E;">${fmtR(emNegociacao)}</div><div class="pnl-dark-sub">${emNegRows.length} cobrança${emNegRows.length!==1?'s':''}</div></div>
-          </div>
-          <div>
-            <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--side-fg-mute);margin-bottom:6px;"><span>Meta ${escHtml(_pnlJan.label)}</span><span style="font-family:var(--font-mono);">${metaProgPeriodo!=null?metaProgPeriodo+'%':'—'} de ${fmtR(metaPeriodo)}</span></div>
-            <div style="height:6px;background:rgba(255,255,255,.12);border-radius:3px;overflow:hidden;"><div style="height:100%;width:${metaProgPeriodo||0}%;background:var(--accent);"></div></div>
-          </div>
-        </div>
-
-        <div class="cob-panel">
-          <div class="cob-panel-head"><span class="cob-panel-title">${diaSel? diaSel.slice(8,10)+'/'+diaSel.slice(5,7) : 'Próximos 7 dias'}</span>${diaSel?`<a class="cob-link" style="margin-left:8px;" onclick="painelToggleDia('${diaSel}')">↺ ver os 7 dias</a>`:''}<a class="cob-link" style="margin-left:auto;" onclick="showPage('tarefas')">Agenda completa →</a></div>
-          <div class="cob-panel-body">
-            <div class="pnl-dias7">${dias7.map(d=>`<div class="pnl-dia ${d.hoje?'hoje':''} ${d.sel?'sel':''} ${d.qtd?'':'vazio'}"${d.qtd?` onclick="painelToggleDia('${d.iso}')" title="${d.qtd} ${d.qtd===1?'compromisso':'compromissos'} em ${d.iso.slice(8,10)}/${d.iso.slice(5,7)}"`:' title="nada neste dia"'}><span class="dow">${d.dow}</span><span class="num">${d.num}</span><div class="dot ${d.temEvento?'on':''}"></div></div>`).join('')}</div>
-            ${vencimentos.length? vencimentos.map(v=>`<div class="pnl-comp"><div style="font-family:var(--font-mono);font-size:11.5px;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};width:56px;flex-shrink:0;">${(v.data||'').slice(8,10)}/${(v.data||'').slice(5,7)}</div><div style="min-width:0;">${v.rotulo?`<div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};">${escHtml(v.rotulo)}</div>`:''}<div style="font-size:12.5px;font-weight:500;color:var(--text);">${escHtml(v.desc||'—')}</div>${v.valor?`<div style="font-size:11.5px;color:var(--text-3);">${fmtR(v.valor)}</div>`:''}</div></div>`).join('')+(vencOcultos?`<div style="padding:9px 0 0;font-size:11.5px;color:var(--text-3);">+${vencOcultos} ${vencOcultos===1?'compromisso':'compromissos'} — ver agenda completa</div>`:'') : `<div class="cob-empty"><span class="cob-empty-dot"></span> ${diaSel? 'Nada em '+diaSel.slice(8,10)+'/'+diaSel.slice(5,7)+'.' : 'Nada nos próximos 7 dias.'}</div>`}
-          </div>
-        </div>
-
-        <div class="cob-panel">
-          <div class="cob-panel-head"><span class="cob-panel-title">Riscos silenciosos</span></div>
-          <div class="cob-panel-body">
-            <div class="pnl-risco-row"><div class="pnl-risco-v" style="color:var(--danger);">${fmtk(carteiraParada90)}</div><div style="font-size:12px;color:var(--text-2);line-height:1.35;">parados há 90+ dias<br><span style="color:var(--text-3);">${carteiraParada90Rows.length} caso${carteiraParada90Rows.length!==1?'s':''} sem interação</span></div><a class="cob-link" style="margin-left:auto;white-space:nowrap;" onclick="showPage('cobr')">Priorizar →</a></div>
-            <div class="pnl-risco-hr"></div>
-            <div class="pnl-risco-row"><div class="pnl-risco-v" style="color:var(--accent-2);">${prescreverRows.length} caso${prescreverRows.length!==1?'s':''}</div><div style="font-size:12px;color:var(--text-2);line-height:1.35;">a prescrever (≤ 6 meses)${prescreverRows[0]?`<br><span style="color:var(--text-3);">${escHtml(_cobrCredorNome(prescreverRows[0]))} · ${fmtR(+prescreverRows[0].valor_atual||+prescreverRows[0].valor_orig||0)}</span>`:''}</div><a class="cob-link" style="margin-left:auto;white-space:nowrap;" onclick="try{cobrFilter.prescrever=true;cobrFilter.etapa='todos';}catch(_){}; showPage('cobr');">Ver →</a></div>
-            <div class="pnl-risco-hr"></div>
-            <div class="pnl-risco-row"><div class="pnl-risco-v" style="color:var(--info);">${fmtk(riscoAsaasValor)}</div><div style="font-size:12px;color:var(--text-2);line-height:1.35;">boletos vencidos no Asaas<br><span style="color:var(--text-3);">${riscoAsaasDevs.size} devedor${riscoAsaasDevs.size!==1?'es':''} inadimplente${riscoAsaasDevs.size!==1?'s':''}</span></div><a class="cob-link" style="margin-left:auto;white-space:nowrap;" onclick="showPage('cobr')">Cobrar →</a></div>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
-
-  // Alerta visual (gestor): acordos assinados sem boleto emitido — corrente travada/falha.
-  checkAlertaBoletosPendentes(el);
-  // Onda 2 #9: alerta de casos que precisam de ação hoje (pendência derivada).
-  checkAlertaCasosAgir(el);
+  // Primeira pintura: agora, com a memória e o que já estava fresco em cache.
+  pintar();
+  // O resto é pedido junto — nada em fila — e cada chegada repinta.
+  const pendentes = [];
+  for(const [chave, carregar] of Object.entries(carregadores)){
+    if(pecas[chave].pronto) continue;
+    pendentes.push(_pnlRemotoBuscar(chave, carregar).then(valor=>{
+      // Falha com valor velho em mãos: fica o velho (é melhor que "não li").
+      pecas[chave] = { valor: (valor === null ? pecas[chave].valor : valor), pronto:true, falhou: valor === null };
+      repintar();
+    }));
+  }
+  if(!_cobrSinais) pendentes.push(_garantirSinais(cobrAtivas).then(repintar));
+  if(!repasses.pronto){
+    pendentes.push(_repLoad().then(
+      ()=>{ repasses.pronto = true; },
+      e=>{ console.warn('[painel] repasses:', (e && e.message) || e); repasses.pronto = true; repasses.falhou = true; }
+    ).then(repintar));
+  }
+  // Resolve quando o último pedaço pousou. Ninguém em produção espera por isto
+  // (showPage não faz await) — serve a testes e a quem quiser encadear.
+  await Promise.allSettled(pendentes);
 }
 
 // ── Painel v3: filtros de Cliente/Operador ────────────────────────────────────
@@ -11333,10 +11513,10 @@ function painelHide(id){
 async function checkAlertaBoletosPendentes(painelEl){
   try{
     if(currentUser?.tipo !== 'gestor') return;
-    const supa = getSupabase(); if(!supa) return;
-    const { data, error } = await supa.from('acordos')
-      .select('id,metadata,status_zapsign').eq('status_zapsign','assinado');
-    if(error || !Array.isArray(data)) return;
+    // Pela memória por chave do Painel: ele repinta a cada pedaço que chega, e cada
+    // pintura chama isto — sem a memória seriam 4–5 consultas iguais por abertura.
+    const data = await _pnlRemotoBuscar('assinados', _pnlCarregarAssinados);
+    if(!Array.isArray(data)) return;
     const emitir   = data.filter(a => !(a.metadata && a.metadata.boletos_emitidos));
     const reenviar = data.filter(a => (a.metadata && a.metadata.boletos_emitidos) && !(a.metadata && a.metadata.whatsapp_ok));
     const total = emitir.length + reenviar.length;
@@ -11415,7 +11595,8 @@ async function resolverBoletosPendentes(){
   }
   if(erros.length) console.warn('[resolver-pendentes]', erros);
   showToast(`Pronto: ${ok} ok${fail?`, ${fail} falha(s) — ver console`:''}.`, fail ? 'warning' : 'success');
-  try{ renderPainel(); }catch(e){}
+  // Os acordos mudaram no servidor: sem invalidar, o alerta repintaria do cache (15 s).
+  try{ invalidarPainel(); renderPainel(); }catch(e){}
 }
 
 function buildMiniCalendar(year, month, eventDates){
