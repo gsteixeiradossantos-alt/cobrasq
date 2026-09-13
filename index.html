@@ -27394,14 +27394,22 @@ window.finApi = (function(){
 
   function _sb(){ const c = getSupabase(); if(!c) throw new Error('Supabase não inicializado — configure em Configurações'); return c; }
 
-  // Voo compartilhado: ao abrir o Financeiro, a shell (aviso de saldo), o agregador do
-  // Caixa e a base do Fluxo pedem as dimensões no mesmo instante com o cache vazio —
-  // eram 3 × 4 consultas iguais (medido em 13/09/2026). `force` sobe um voo novo.
+  // Voo compartilhado: ao abrir o Financeiro, a shell (aviso de saldo) e as duas rodadas
+  // do agregador do Caixa (shell + aba) pediam as dimensões no mesmo instante com o cache
+  // vazio — 3 × 4 consultas iguais (13/09/2026); a base do Fluxo só chegava 1,9 s depois,
+  // já com cache. Agora ela sobe junto (e a cascata dentro dela também pede): sem o voo
+  // seriam quatro. `force` sobe um voo novo; só o voo corrente grava — um voo antigo
+  // pousando depois de um forçado não repõe dado velho.
   let _dimVoo = null;
   async function loadDimensoes(force){
     if(!force && cache.expiresAt > Date.now()) return cache;
     if(!force && _dimVoo) return _dimVoo;
-    const p = _loadDimensoesLer();
+    const p = _loadDimensoesLer().then(d => {
+      if(_dimVoo !== p) return d;   // voo antigo: vale para quem o esperava, não para o cache
+      cache.contas = d.contas; cache.categorias = d.categorias; cache.contatos = d.contatos; cache.centrosCusto = d.centrosCusto;
+      cache.expiresAt = Date.now() + CACHE_TTL;
+      return cache;
+    });
     _dimVoo = p;
     try{ return await p; } finally { if(_dimVoo === p) _dimVoo = null; }
   }
@@ -27413,12 +27421,7 @@ window.finApi = (function(){
       sb.from('fin_contato').select('id,nome,documento,email,telefone,ativo').eq('ativo', true).order('nome'),
       sb.from('fin_centro_custo').select('id,descricao,parent_id,ativo').eq('ativo', true).order('descricao'),
     ]);
-    cache.contas = contas.data || [];
-    cache.categorias = cats.data || [];
-    cache.contatos = contatos.data || [];
-    cache.centrosCusto = centros.data || [];
-    cache.expiresAt = Date.now() + CACHE_TTL;
-    return cache;
+    return { contas: contas.data || [], categorias: cats.data || [], contatos: contatos.data || [], centrosCusto: centros.data || [] };
   }
 
   // IDs de lançamento cuja categoria contém "repasse" (usado pelo filtro TIPO=Repasses,
@@ -28034,7 +28037,7 @@ window.finApi = (function(){
   // -----------------------------
   // CRUD de dimensões
   // -----------------------------
-  function _invalidate(){ cache.expiresAt = 0; }
+  function _invalidate(){ cache.expiresAt = 0; _dimVoo = null; }   // solta o voo: leitura iniciada antes não vale mais
 
   async function saveConta(c){
     const sb = _sb();
@@ -29133,17 +29136,20 @@ async function _finRepasseLiberado(force){
            previstas: retidos + semPar };
 }
 
-// Voo compartilhado (mesma ideia de _finRepassesAbertos): o Caixa e o Fluxo pedem o
-// agregado ao mesmo tempo no primeiro render. O voo mora NO objeto do cache: toda
-// invalidação troca o objeto (_finFinanceiroInvalidaCaches, _finLancRecarregar…), o que
-// solta o voo e impede uma leitura iniciada antes da escrita de repor o número velho.
+// Voo compartilhado (mesma ideia de _finRepassesAbertos, com identidade do objeto no
+// lugar do contador de geração). Chamadores: _finCascataMetricas (pela base do Fluxo)
+// e _finCredoresResumo (Credores) — quem chegar durante o voo do outro compartilha. O voo
+// mora NO objeto do cache: toda invalidação troca o objeto (_finFinanceiroInvalidaCaches,
+// _finFilaAplicarPatch), o que solta o voo e impede uma leitura iniciada antes da escrita
+// de repor o número velho; e só o voo corrente grava (`c.voo === p`) — um `force` no meio
+// de um voo não deixa o retrato antigo pousar por cima do fresco.
 async function _finRepasseAgg(force){
   const c = _finRepasseAggCache;
   if(!force && c.v && (Date.now()-c.at) < 30000) return c.v;
   if(!force && c.voo) return c.voo;
   const p = _finRepasseAggLer();
   c.voo = p;
-  try{ const r = await p; if(_finRepasseAggCache === c) _finRepasseAggCache = { at: Date.now(), v: r }; return r; }
+  try{ const r = await p; if(_finRepasseAggCache === c && c.voo === p) _finRepasseAggCache = { at: Date.now(), v: r }; return r; }
   finally{ if(c.voo === p) c.voo = null; }
 }
 async function _finRepasseAggLer(){
@@ -29244,7 +29250,7 @@ async function _finCascataMetricas(force){
   return m;
   })();
   c.voo = p;
-  try{ const m = await p; if(_finCascataCache === c) _finCascataCache = { at: Date.now(), m }; return m; }
+  try{ const m = await p; if(_finCascataCache === c && c.voo === p) _finCascataCache = { at: Date.now(), m }; return m; }
   finally{ if(c.voo === p) c.voo = null; }
 }
 
@@ -36621,10 +36627,11 @@ async function _finCaixaAgg(force){
 let _finCaixaV2Cache = { at:0, key:'', v:null };
 // Voo compartilhado por período: a shell (frase do cabeçalho) e a aba Caixa pedem o
 // agregado no mesmo instante com o cache vazio — a varredura inteira rodava DUAS vezes
-// por abertura (1,6 s + 1,9 s, medido em 13/09/2026). O voo mora no objeto do cache e
-// a escrita só acontece se ninguém o substituiu durante o voo: toda invalidação troca
-// o objeto (_finFinanceiroInvalidaCaches, _finCaixaSetMetaLucro), então uma leitura
-// iniciada antes de uma escrita não volta a repor o número velho.
+// por abertura (1,6 s e 1,9 s, concorrentes — 13/09/2026). O voo mora no objeto do cache
+// e a escrita só acontece se ninguém o substituiu durante o voo (toda invalidação troca
+// o objeto: _finFinanceiroInvalidaCaches, _finCaixaSetMetaLucro) e se este ainda é o voo
+// corrente (`c.voo === p`: um `force` ou uma troca de período no meio sobe outro voo, e o
+// antigo não grava por cima).
 async function _finCaixaV2Agg(force){
   const b = _finCascataPeriodoBounds();
   const key = b.ini + '|' + b.fim;
@@ -36633,7 +36640,7 @@ async function _finCaixaV2Agg(force){
   if(!force && c.voo && c.vooKey === key) return c.voo;
   const p = _finCaixaV2AggLer(b, force);
   c.voo = p; c.vooKey = key;
-  try{ const v = await p; if(_finCaixaV2Cache === c) _finCaixaV2Cache = { at: Date.now(), key, v }; return v; }
+  try{ const v = await p; if(_finCaixaV2Cache === c && c.voo === p) _finCaixaV2Cache = { at: Date.now(), key, v }; return v; }
   finally{ if(c.voo === p) c.voo = null; }
 }
 async function _finCaixaV2AggLer(b, force){
@@ -36874,7 +36881,7 @@ function _finCaixaPonteEsperaHtml(b){
         <div class="cx2-ponte-nota" style="padding-top:10px;">carregando…</div>
       </section>`;
 }
-let _finVisaoGen = 0;   // só a render mais recente escreve (troca de aba/período no meio)
+let _finVisaoGen = 0;   // só a render mais recente escreve (troca de período/meta no meio; a troca de aba reconstrói a shell e o `el` antigo fica solto)
 async function renderFinVisao(el){
   const gen = ++_finVisaoGen;
   el.innerHTML = `<div style="text-align:center;padding:40px;color:#8A94A6;">
@@ -36882,8 +36889,8 @@ async function renderFinVisao(el){
     Carregando o caixa…
   </div>`;
   // A base do Fluxo (só alimenta a ponte) sobe JUNTO com o agregado do Caixa, não depois:
-  // a aba esperava um e depois o outro (1,9 s + 5,1 s, medido em 13/09/2026) para pintar
-  // uma vez só. Agora pinta quando o Caixa chega; a ponte entra quando a base pousa.
+  // a aba esperava um e depois o outro (1,6–1,9 s e depois 5,1 s, medido em 13/09/2026)
+  // para pintar uma vez só. Agora pinta quando o Caixa chega; a ponte entra quando a base pousa.
   // A ponte é auxiliar: sem ela a aba funciona igual (e o erro fica no console).
   const pBase = _finFluxoCarregarBase().catch(e => { console.warn('ponte do caixa:', e); return null; });
   let A;
@@ -40379,15 +40386,17 @@ function finFluxoProjetar(base, p){
 }
 
 let _finFluxoBaseCache = { at:0, v:null };
-// Voo compartilhado no objeto do cache e escrita só se ninguém o trocou no meio (mesma
-// regra de _finCaixaV2Agg). O Caixa e o Fluxo de caixa pedem a base ao mesmo tempo.
+// Voo compartilhado no objeto do cache e escrita só pelo voo corrente, se ninguém trocou
+// o cache no meio (mesma regra de _finCaixaV2Agg). Caixa (ponte) e Fluxo de caixa leem a
+// mesma base; quem chega durante o voo do outro (troca de aba antes de pousar, re-render
+// por período) compartilha.
 async function _finFluxoCarregarBase(force){
   const c = _finFluxoBaseCache;
   if(!force && c.v && (Date.now() - c.at) < 30000) return c.v;
   if(!force && c.voo) return c.voo;
   const p = _finFluxoCarregarBaseLer(force);
   c.voo = p;
-  try{ const v = await p; if(_finFluxoBaseCache === c) _finFluxoBaseCache = { at: Date.now(), v }; return v; }
+  try{ const v = await p; if(_finFluxoBaseCache === c && c.voo === p) _finFluxoBaseCache = { at: Date.now(), v }; return v; }
   finally{ if(c.voo === p) c.voo = null; }
 }
 async function _finFluxoCarregarBaseLer(force){
@@ -41141,6 +41150,7 @@ function _finFatDesenhar(el, rows){
   _finFatGrafico(serie, aliq);
 }
 function _finFatGrafico(serie, aliq){
+  const plural = (n, s, p) => n === 1 ? s : (p || s+'s');   // idem _finFatDesenhar: o tooltip do gráfico usava sem definir
   if(typeof Chart === 'undefined') return;
   try{ Object.values(_finFatCharts).forEach(c=>c&&c.destroy()); }catch(_){}
   _finFatCharts = {};
