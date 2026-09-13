@@ -31600,10 +31600,28 @@ function _finLancSit(l){
 async function _finLancCascataCarregar(){
   const sb = getSupabase();
   const { ini, fim } = _finCascataPeriodoBounds();
-  const dim = await finApi.loadDimensoes();
+  const termo = (_finLancCascataState.busca||'').trim();
+  // ── Etapa 0: o que não depende das linhas sobe junto ─────────────────────────
+  // Dimensões, o cronograma de repasses liberados e as operações da janela do período.
+  // Eram uma fila de nove viagens, uma esperando a outra (3,2 s medidos em 13/09/2026);
+  // agora são quatro saltos: sondagem das colunas → linhas → o que depende das linhas
+  // → nomes de credores.
+  const OPSEL = 'id,valor_recebido,valor_capital,valor_honorario,repasse_status,repasse_asaas_transfer_id,repasse_comprovante_url,credor_id,recebido_em,lancamento_receita_id,lancamento_despesa_id';
+  const pDim = finApi.loadDimensoes();
+  // Despesas de repasse cuja entrada já caiu. Set de ids; null quando a apuração falha —
+  // e null NÃO é "nenhuma liberada", é "não sei" (ver _finLancEhRepasse).
+  const pLiberadas = (async () => {
+    try{
+      const lib = await _finRepasseLiberado();
+      const liberadas = new Set((lib.itens||[]).map(i=>i.id));
+      return liberadas;
+    }catch(_){ return null; /* auxiliar: sem apuração a tela volta ao comportamento anterior */ }
+  })();
+  const pOpsJanela = sb.from('fin_operacao').select(OPSEL)
+    .gte('recebido_em', ini).lte('recebido_em', fim).limit(2000).then(r => r.data||[]).catch(()=>[]);
+
   const baseSel = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,valor_pago,tipo_movimento,status,conciliado,conta_id,cobranca_id,credor_id,contato_id,numero_parcela,total_parcelas,judicial_liberado_em,fin_conta(descricao,banco_nome),fin_contato(nome)';
   const extra = (await _finTemColunasCascata()) ? ',cedente_id,capital,meu_total,amortizado,repasse_status' : '';
-  const termo = (_finLancCascataState.busca||'').trim();
   const consultaBase = () => sb.from('fin_lancamento').select(baseSel+extra)
     .gte('data_competencia', ini).lte('data_competencia', fim);
   const ordenaLimita = c => c.order('data_competencia',{ascending:_finLancOrdServidorAsc()}).limit(FIN_LANC_LIMITE);
@@ -31617,38 +31635,36 @@ async function _finLancCascataCarregar(){
     ({ data } = await ordenaLimita(consultaBase().ilike('descricao', '%'+termo+'%')));
   }
   const rows = data||[];
+
+  // ── Etapa 2: tudo que depende só das linhas, junto ───────────────────────────
   const cedIds=[...new Set(rows.map(r=>r.cedente_id).filter(Boolean))];
-  let cedMap={};
-  if(cedIds.length){ const {data}=await sb.from('clientes').select('id,nome,nome_fantasia').in('id',cedIds); (data||[]).forEach(c=>cedMap[c.id]=_finNomeCredor(c)); }
-
-  // Despesas de repasse cuja entrada já caiu. Set de ids; null quando a apuração falha —
-  // e null NÃO é "nenhuma liberada", é "não sei" (ver _finLancEhRepasse).
-  let liberadas = null;
-  try{
-    const lib = await _finRepasseLiberado();
-    liberadas = new Set((lib.itens||[]).map(i=>i.id));
-  }catch(_){ /* auxiliar: sem apuração a tela volta ao comportamento anterior */ }
-
-  let opsByLanc = {};
-  try{
-    const OPSEL = 'id,valor_recebido,valor_capital,valor_honorario,repasse_status,repasse_asaas_transfer_id,repasse_comprovante_url,credor_id,recebido_em,lancamento_receita_id,lancamento_despesa_id';
-    const { data } = await sb.from('fin_operacao').select(OPSEL)
-      .gte('recebido_em', ini).lte('recebido_em', fim).limit(2000);
-    const ops = data || [];
+  const ids = rows.map(r=>r.id);
+  const desp = rows.filter(r => r.tipo_movimento === 0).map(r => r.id);
+  const blocos = []; for(let i = 0; i < desp.length; i += 300) blocos.push(desp.slice(i, i+300));
+  // Cobranças de todas as linhas com cobrança (superconjunto do que a carteira precisa —
+  // assim a leitura não espera as operações para saber quais linhas ficaram sem elas).
+  const cobIdsTodas = [...new Set(rows.map(r=>r.cobranca_id).filter(Boolean))];
+  const [dim, liberadas, opsJanela, cedRows, opsDespPartes, cbs, cats] = await Promise.all([
+    pDim, pLiberadas, pOpsJanela,
+    cedIds.length ? sb.from('clientes').select('id,nome,nome_fantasia').in('id',cedIds).then(r=>r.data||[]).catch(()=>[]) : Promise.resolve([]),
     // Operações criadas pelo /api/repassar a partir de um lançamento (repasse importado)
-    // têm recebido_em NULO e não entram na janela acima: sem esta segunda leitura o
+    // têm recebido_em NULO e não entram na janela: sem esta segunda leitura o
     // "preparado"/"efetuado" delas ficava invisível e a linha seguia oferecendo Repassar.
-    const desp = rows.filter(r => r.tipo_movimento === 0).map(r => r.id);
-    const vistos = new Set(ops.map(o => o.id));
-    for(let i = 0; i < desp.length; i += 300){
-      const { data:d2 } = await sb.from('fin_operacao').select(OPSEL).in('lancamento_despesa_id', desp.slice(i, i+300)).limit(2000);
-      for(const o of (d2||[])) if(!vistos.has(o.id)){ vistos.add(o.id); ops.push(o); }
-    }
-    const credIds=[...new Set(ops.map(o=>o.credor_id).filter(Boolean))];
-    let credMap={};
-    if(credIds.length){ const {data:cs}=await sb.from('clientes').select('id,nome,nome_fantasia').in('id',credIds); (cs||[]).forEach(c=>credMap[c.id]=_finNomeCredor(c)); }
-    ops.forEach(o=>{ o._credorNome=credMap[o.credor_id]||null; if(o.lancamento_receita_id) opsByLanc[o.lancamento_receita_id]=o; if(o.lancamento_despesa_id) opsByLanc[o.lancamento_despesa_id]=o; });
-  }catch(_){}
+    Promise.all(blocos.map(bloco => sb.from('fin_operacao').select(OPSEL).in('lancamento_despesa_id', bloco).limit(2000).then(r=>r.data||[]).catch(()=>[]))),
+    cobIdsTodas.length ? sb.from('cobrancas').select('id,cliente_id').in('id', cobIdsTodas).then(r=>r.data||[]).catch(()=>[]) : Promise.resolve([]),
+    // Categoria de cada lançamento visível. Mora no rateio (fin_lancamento_categoria), não
+    // na linha — um lançamento pode ter mais de uma; a lista mostra a de maior valor e
+    // avisa quando há outras.
+    ids.length ? sb.from('fin_lancamento_categoria').select('lancamento_id,valor,fin_categoria(descricao)').in('lancamento_id', ids).limit(4000).then(r=>r.data||[]).catch(()=>[]) : Promise.resolve([]),
+  ]);
+  const cedMap={}; cedRows.forEach(c=>cedMap[c.id]=_finNomeCredor(c));
+
+  const ops = opsJanela.slice();
+  const vistos = new Set(ops.map(o => o.id));
+  for(const parte of opsDespPartes) for(const o of parte) if(!vistos.has(o.id)){ vistos.add(o.id); ops.push(o); }
+  const opsByLanc = {};
+  ops.forEach(o=>{ if(o.lancamento_receita_id) opsByLanc[o.lancamento_receita_id]=o; if(o.lancamento_despesa_id) opsByLanc[o.lancamento_despesa_id]=o; });
+
   // Carteira da linha, quando não há fin_operacao: de quem é esse dinheiro.
   //
   // Nasceu para as SAÍDAS — sem isto a linha não dizia para quem o dinheiro vai, o caso
@@ -31657,56 +31673,46 @@ async function _finLancCascataCarregar(){
   // aponta para Arte Estofados Decor, e a tela não dizia de quem era nenhuma delas —
   // enquanto as 10 despesas de repasse do MESMO caso diziam. São 696 receitas assim.
   // Precedência: credor_id do lançamento, depois cliente da cobrança.
+  const porCob = {}; cbs.forEach(c=>{ if(c.cliente_id) porCob[c.id]=c.cliente_id; });
+  const saidas = rows.filter(r=>!opsByLanc[r.id] && (r.credor_id || r.cobranca_id));
+  // ── Etapa 3: nomes de credores — das operações e das linhas sem operação, numa ida ──
   const credorPorLanc = {};
-  try{
-    const saidas = rows.filter(r=>!opsByLanc[r.id] && (r.credor_id || r.cobranca_id));
-    if(saidas.length){
-      const porCob = {};
-      const cobIds = [...new Set(saidas.map(r=>r.cobranca_id).filter(Boolean))];
-      if(cobIds.length){
-        const { data:cbs } = await sb.from('cobrancas').select('id,cliente_id').in('id', cobIds);
-        (cbs||[]).forEach(c=>{ if(c.cliente_id) porCob[c.id]=c.cliente_id; });
-      }
-      const todos = [...new Set([...saidas.map(r=>r.credor_id).filter(Boolean), ...Object.values(porCob)])];
-      const nomes = {};
-      if(todos.length){
-        const { data:cls } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', todos);
-        (cls||[]).forEach(c=>{ nomes[c.id] = _finNomeCredor(c); });
-      }
-      saidas.forEach(r=>{
-        const cid = r.credor_id || porCob[r.cobranca_id];
-        if(cid && nomes[cid]) credorPorLanc[r.id] = nomes[cid];
-      });
-    }
-  }catch(_){ /* auxiliar: não pode derrubar a tela */ }
+  const todos = [...new Set([
+    ...ops.map(o=>o.credor_id).filter(Boolean),
+    ...saidas.map(r=>r.credor_id || porCob[r.cobranca_id]).filter(Boolean),
+  ])];
+  const nomes = {};
+  if(todos.length){
+    try{
+      const { data:cls } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', todos);
+      (cls||[]).forEach(c=>{ nomes[c.id] = _finNomeCredor(c); });
+    }catch(_){ /* auxiliar: não pode derrubar a tela */ }
+  }
+  ops.forEach(o=>{ o._credorNome = nomes[o.credor_id]||null; });
+  saidas.forEach(r=>{
+    const cid = r.credor_id || porCob[r.cobranca_id];
+    if(cid && nomes[cid]) credorPorLanc[r.id] = nomes[cid];
+  });
 
-  // Categoria de cada lançamento visível. Mora no rateio (fin_lancamento_categoria), não
-  // na linha — um lançamento pode ter mais de uma; a lista mostra a de maior valor e
-  // avisa quando há outras.
   const catPorLanc = {}, judSet = new Set();
-  try{
-    const ids = rows.map(r=>r.id);
-    if(ids.length){
-      const { data:cats } = await sb.from('fin_lancamento_categoria')
-        .select('lancamento_id,valor,fin_categoria(descricao)').in('lancamento_id', ids).limit(4000);
-      const agg = {};
-      for(const c of (cats||[])){
-        const nm = (c.fin_categoria&&c.fin_categoria.descricao)||null; if(!nm) continue;
-        const k = c.lancamento_id;
-        if(!agg[k]) agg[k] = { itens:{}, n:0 };
-        agg[k].itens[nm] = (agg[k].itens[nm]||0) + Math.abs(+c.valor||0);
-        // Origem judicial marcada no MESMO passo: uma consulta só resolve categoria e
-        // "isto é Sisbajud/penhora". Só estas duas — "Acordos Judiciais" é acordo comum
-        // cobrado por boleto e mora em Movimentações, como sempre morou.
-        if(/sisbajud/i.test(nm) || /penhora/i.test(nm)) agg[k].jud = true;
-      }
-      for(const [k,v] of Object.entries(agg)){
-        const ord = Object.entries(v.itens).sort((a,b)=>b[1]-a[1]);
-        catPorLanc[k] = { nome: ord[0][0], extras: ord.length-1, nomes: ord.map(x=>x[0]) };
-        if(v.jud) judSet.add(String(k));
-      }
+  {
+    const agg = {};
+    for(const c of cats){
+      const nm = (c.fin_categoria&&c.fin_categoria.descricao)||null; if(!nm) continue;
+      const k = c.lancamento_id;
+      if(!agg[k]) agg[k] = { itens:{}, n:0 };
+      agg[k].itens[nm] = (agg[k].itens[nm]||0) + Math.abs(+c.valor||0);
+      // Origem judicial marcada no MESMO passo: uma consulta só resolve categoria e
+      // "isto é Sisbajud/penhora". Só estas duas — "Acordos Judiciais" é acordo comum
+      // cobrado por boleto e mora em Movimentações, como sempre morou.
+      if(/sisbajud/i.test(nm) || /penhora/i.test(nm)) agg[k].jud = true;
     }
-  }catch(_){ /* auxiliar: a lista funciona sem categoria */ }
+    for(const [k,v] of Object.entries(agg)){
+      const ord = Object.entries(v.itens).sort((a,b)=>b[1]-a[1]);
+      catPorLanc[k] = { nome: ord[0][0], extras: ord.length-1, nomes: ord.map(x=>x[0]) };
+      if(v.jud) judSet.add(String(k));
+    }
+  }
 
   // ── Judicial pendente sai de Movimentações (Fase 1 do handoff 29/08) ─────────────
   // Sisbajud, penhora de salário e desconto INSS não têm vencimento: dependem de o juízo

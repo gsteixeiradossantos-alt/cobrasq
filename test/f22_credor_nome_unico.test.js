@@ -51,11 +51,16 @@ assert.strictEqual(nome(null), null, 'cliente ausente não explode');
 assert.strictEqual(nome(undefined), null);
 assert.strictEqual(nome({}), null, 'cliente sem nenhum nome devolve null, não "undefined"');
 
-// ── As TRÊS leituras usam o mesmo helper ───────────────────────────────────────────
-// É o ponto do conserto: uma delas divergindo recria o defeito.
+// ── TODAS as leituras usam o mesmo helper ──────────────────────────────────────────
+// É o ponto do conserto: uma delas divergindo recria o defeito. Eram três leituras de
+// `clientes`; desde o PR de Movimentações (13/09/2026) são duas — a dos credores das
+// operações e a das linhas sem operação viraram uma ida só. O que importa é que CADA
+// leitura de `id,nome,nome_fantasia` passe pelo helper: conta-se uma e outra.
 const carregar = corta('async function _finLancCascataCarregar(){', '\n}');
+const leituras = (carregar.match(/select\('id,nome,nome_fantasia'\)/g) || []).length;
 const usos = (carregar.match(/_finNomeCredor\(/g) || []).length;
-assert.strictEqual(usos, 3, `as três leituras de credor têm de passar pelo helper (achei ${usos})`);
+assert.ok(leituras >= 2, `esperava ao menos duas leituras de clientes na aba (achei ${leituras})`);
+assert.strictEqual(usos, leituras, `toda leitura de credor tem de passar pelo helper (leituras ${leituras}, usos ${usos})`);
 
 // E nenhuma delas pode voltar a ler só `nome`.
 assert.ok(!/from\('clientes'\)\.select\('id,nome'\)/.test(carregar),
@@ -65,4 +70,4 @@ assert.ok(!/from\('clientes'\)\.select\('id,nome'\)/.test(carregar),
 assert.ok(HTML.includes('function _finLancCedente(l, ctx){'),
   '_finLancCedente continua sendo a fonte única do nome exibido');
 
-console.log('F-22 ok — nome do credor é o fantasia, pelas três leituras.');
+console.log('F-22 ok — nome do credor é o fantasia, por todas as leituras da aba.');
