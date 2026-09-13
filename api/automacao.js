@@ -28,6 +28,7 @@ const handlers = {
   'criar-cedente': require('./_criar-cedente.js'),
   'mercadopago': require('./_mercadopago.js'),
   'cnpja': require('./_cnpja.js'),
+  'protesto': require('./_protesto.js'),
   // require preguiçoso: o Chromium/puppeteer (pesado) só carrega quando a ação de
   // PDF é chamada — as demais ações não pagam esse custo no cold start.
   'gerar-pdf': (req, res) => require('./_gerar-pdf.js')(req, res),
