@@ -193,8 +193,7 @@
       const nome = dv.assNome || (dv.nome || "").split(" ")[0];
       return '<div class="sig">' +
         '<div class="sig-token">&lt;&lt;assdev' + (i + 1) + '&gt;&gt;</div>' +
-        '<div class="sig-line"></div>' +
-        '<div class="sig-name">' + escHtml(nome) + '</div>' +
+                '<div class="sig-name">' + escHtml(nome) + '</div>' +
         '<div class="sig-doc">' + escHtml(dv.assDoc || "") + '</div>' +
         '<div class="sig-role">' + role + '</div></div>';
     }).join("");
@@ -381,8 +380,7 @@
     const l2 = adv.oab ? (/oab/i.test(adv.oab) ? adv.oab : "OAB " + adv.oab) : "";
     return '<div class="sig">' +
       '<div class="sig-token">&lt;&lt;assadv2&gt;&gt;</div>' +
-      '<div class="sig-line"></div>' +
-      '<div class="sig-name">' + escHtml(adv.nome) + '</div>' +
+            '<div class="sig-name">' + escHtml(adv.nome) + '</div>' +
       '<div class="sig-doc">' + escHtml(l2) + '</div>' +
       '<div class="sig-role">Advogado(a) da parte ré</div></div>';
   }
