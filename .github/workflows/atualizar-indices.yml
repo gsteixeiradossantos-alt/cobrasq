@@ -1,0 +1,57 @@
+name: Índices BCB
+
+# Traz os índices oficiais fechados (BCB/SGS) para templates/calc-engine.js e abre um
+# PR. O merge continua humano. Dias 12 e 16: IPCA/INPC saem ~dia 10; o 16 é a segunda
+# chance se o SGS atrasar. Também roda à mão (workflow_dispatch).
+on:
+  schedule:
+    - cron: '0 12 12,16 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  atualizar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Buscar índices fechados no BCB
+        id: upd
+        run: |
+          node scripts/atualizar-indices.mjs | tee /tmp/relatorio.txt
+          if git diff --quiet -- templates/calc-engine.js; then
+            echo "mudou=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "mudou=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Testes do motor
+        if: steps.upd.outputs.mudou == 'true'
+        run: node test/calc_engine.test.js
+
+      - name: Abrir PR
+        if: steps.upd.outputs.mudou == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          MES="$(date -d "$(date +%Y-%m-01) -1 month" +%Y-%m)"
+          BR="bot/indices-$MES"
+          git config user.name "cobrasq-indices[bot]"
+          git config user.email "indices@cobrasq.com.br"
+          if git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
+            echo "Branch $BR já existe — PR pendente de merge."; exit 0
+          fi
+          git checkout -b "$BR"
+          git add templates/calc-engine.js
+          git commit -m "calc: índices de $MES (BCB/SGS, automático)" \
+                     -m "$(cat /tmp/relatorio.txt)"
+          git push -u origin "$BR"
+          gh pr create --title "calc: índices de $MES (BCB/SGS)" --base main --head "$BR" \
+            --body "$(printf 'Índices fechados trazidos do BCB/SGS por `scripts/atualizar-indices.mjs` (só meses anteriores ao corrente; valores já gravados nunca são sobrescritos — revisões do BCB aparecem no relatório abaixo para conferência).\n\n```\n%s\n```\n\nTestes do motor passaram no workflow. **Conferir os valores contra a fonte antes do merge.**' "$(cat /tmp/relatorio.txt)")"
