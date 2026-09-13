@@ -2,7 +2,8 @@
 //
 // ORIGEM DA FILA (13/09/2026, decisão do Gustavo): os LANÇAMENTOS DE ENTRADA PAGOS do
 // Financeiro que têm cobrança (fin_lancamento tipo 1, status 1, cobranca_id), desde
-// NFF_INICIO. O tomador é o DEVEDOR PRINCIPAL da cobrança (cobrancas.id == devedores.id),
+// NFF_INICIO (01/09/2026 — o que entrou antes foi tratado à mão e fica fora, sem
+// virar 'dispensada'; voltar a data traz de volta). O tomador é o DEVEDOR PRINCIPAL da cobrança (cobrancas.id == devedores.id),
 // nunca o cliente do Asaas — o PIX da Jéssica Milanez veio da empresa do marido, e a
 // fila antiga (webhook) colocaria a empresa como tomadora. Também entra o recebimento
 // baixado à mão, sem Asaas (16 em 13/09 que a fila antiga não via).
@@ -34,7 +35,7 @@
 // (cobrança), fonte 'lanc'|'asaas', nome, cpf_cnpj, valor, origem, recebido_em, customer_id }
 let _nffFila = [];
 let _nffOps = {};             // fin_operacao por chave (asaas_payment_id / 'lanc:<id>') — base fiscal
-const NFF_INICIO = '2026-07-03'; // dia em que a fila nasceu; o que foi pago antes já foi tratado à mão
+const NFF_INICIO = '2026-09-01'; // janela da fila (Gustavo, 13/09/2026): só entradas de 01/09 em diante; o anterior foi tratado à mão
 let _nffSel = new Set();      // ids selecionados p/ lote
 let _nffCarregada = false;    // já buscou ao menos uma vez (badge)
 let _nffEnriquecendo = false; // trava do enriquecimento lazy via Asaas
@@ -124,6 +125,7 @@ async function nffCarregar(){
     // …e o que o webhook gravou sem lançamento pago no Financeiro (2º grupo)
     for(const d of (dec||[])){
       if(d.status!=='pendente' || vistos.has(d.asaas_payment_id)) continue;
+      if(String(d.recebido_em||'').slice(0,10) < NFF_INICIO) continue; // mesma janela dos lançamentos
       fila.push({ id:d.id, key:d.asaas_payment_id, fila_id:d.id, fonte:'asaas', lanc:null, dev:null, cob:null,
         nome:d.nome||'', cpf_cnpj:d.cpf_cnpj||null, valor:Number(d.valor)||0, origem:d.origem, recebido_em:d.recebido_em,
         customer_id:d.customer_id||null, cobranca_id:null, asaas_payment_id:d.asaas_payment_id, endereco_ok:d.endereco_ok });

@@ -158,6 +158,8 @@ const P = require('../assets/js/esnfs-ponte.js');
   assert.ok(/from\('fin_lancamento'\)[\s\S]{0,400}\.eq\('tipo_movimento',1\)\.eq\('status',1\)\.not\('cobranca_id','is',null\)/.test(nf), 'fila nasce dos lançamentos de entrada pagos com cobrança');
   assert.ok(/from\('devedores'\)/.test(nf), 'tomador vem do devedor da cobrança');
   assert.ok(/function nffGarantirLinha/.test(nf), 'linha de decisão criada só ao decidir');
+  assert.ok(/const NFF_INICIO = '2026-09-01'/.test(nf), 'fila só com entradas de 01/09/2026 em diante (Gustavo, 13/09)');
+  assert.ok(/slice\(0,10\) < NFF_INICIO\) continue/.test(nf), 'o grupo do webhook obedece à mesma janela');
 }
 
 console.log('F-38 ok — ponte ESNFS: base fiscal, lote, resultado, faturamento, DAS.');
