@@ -14,7 +14,7 @@
  * Dois Vizinhos" nas outras sete.
  *
  * O critério certo é o FANTASIA — é o que a view `casos` usa para montar a coluna "credor"
- * do CRM. Agora as três leituras passam pelo mesmo helper.
+ * do CRM. Agora todas as leituras passam pelo mesmo helper.
  *
  * Como rodar:
  *   node test/f22_credor_nome_unico.test.js
@@ -54,13 +54,18 @@ assert.strictEqual(nome({}), null, 'cliente sem nenhum nome devolve null, não "
 // ── TODAS as leituras usam o mesmo helper ──────────────────────────────────────────
 // É o ponto do conserto: uma delas divergindo recria o defeito. Eram três leituras de
 // `clientes`; desde o PR de Movimentações (13/09/2026) são duas — a dos credores das
-// operações e a das linhas sem operação viraram uma ida só. O que importa é que CADA
-// leitura de `id,nome,nome_fantasia` passe pelo helper: conta-se uma e outra.
+// operações e a das linhas sem operação viraram uma ida só. O que importa: TODA leitura
+// de `clientes` na aba pede exatamente id,nome,nome_fantasia, passa pelo helper, e
+// ninguém monta o nome à mão. Comentários não contam.
 const carregar = corta('async function _finLancCascataCarregar(){', '\n}');
-const leituras = (carregar.match(/select\('id,nome,nome_fantasia'\)/g) || []).length;
-const usos = (carregar.match(/_finNomeCredor\(/g) || []).length;
+const corpo = carregar.replace(/\/\/.*$/gm, '');
+const leituras = (corpo.match(/\.from\('clientes'\)/g) || []).length;
+const certas   = (corpo.match(/\.from\('clientes'\)\.select\('id,nome,nome_fantasia'\)/g) || []).length;
+const usos     = (corpo.match(/_finNomeCredor\(/g) || []).length;
 assert.ok(leituras >= 2, `esperava ao menos duas leituras de clientes na aba (achei ${leituras})`);
-assert.strictEqual(usos, leituras, `toda leitura de credor tem de passar pelo helper (leituras ${leituras}, usos ${usos})`);
+assert.strictEqual(certas, leituras, `toda leitura de clientes pede exatamente id,nome,nome_fantasia (${certas} de ${leituras})`);
+assert.strictEqual(usos, leituras, `toda leitura de credor passa pelo helper (leituras ${leituras}, usos ${usos})`);
+assert.ok(!/\.nome\b|\.nome_fantasia\b/.test(corpo), 'ninguém monta o nome à mão na aba — só _finNomeCredor lê nome/nome_fantasia');
 
 // E nenhuma delas pode voltar a ler só `nome`.
 assert.ok(!/from\('clientes'\)\.select\('id,nome'\)/.test(carregar),

@@ -31603,11 +31603,13 @@ async function _finLancCascataCarregar(){
   const termo = (_finLancCascataState.busca||'').trim();
   // ── Etapa 0: o que não depende das linhas sobe junto ─────────────────────────
   // Dimensões, o cronograma de repasses liberados e as operações da janela do período.
-  // Eram uma fila de nove viagens, uma esperando a outra (3,2 s medidos em 13/09/2026);
+  // Eram uma fila de dez esperas, uma atrás da outra (3,2 s medidos em 13/09/2026);
   // agora são quatro saltos: sondagem das colunas → linhas → o que depende das linhas
-  // → nomes de credores.
+  // → nomes de credores. As leituras auxiliares nunca rejeitam (o cliente do Supabase
+  // devolve {error}); os .catch abaixo são cinto de segurança, não mudança de regra.
   const OPSEL = 'id,valor_recebido,valor_capital,valor_honorario,repasse_status,repasse_asaas_transfer_id,repasse_comprovante_url,credor_id,recebido_em,lancamento_receita_id,lancamento_despesa_id';
   const pDim = finApi.loadDimensoes();
+  pDim.catch(()=>{});   // só marca como tratada até o Promise.all — a rejeição continua derrubando a função lá
   // Despesas de repasse cuja entrada já caiu. Set de ids; null quando a apuração falha —
   // e null NÃO é "nenhuma liberada", é "não sei" (ver _finLancEhRepasse).
   const pLiberadas = (async () => {
@@ -31620,6 +31622,7 @@ async function _finLancCascataCarregar(){
   const pOpsJanela = sb.from('fin_operacao').select(OPSEL)
     .gte('recebido_em', ini).lte('recebido_em', fim).limit(2000).then(r => r.data||[]).catch(()=>[]);
 
+  // ── Etapa 1: as linhas ──────────────────────────────────────────────────────
   const baseSel = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,valor_pago,tipo_movimento,status,conciliado,conta_id,cobranca_id,credor_id,contato_id,numero_parcela,total_parcelas,judicial_liberado_em,fin_conta(descricao,banco_nome),fin_contato(nome)';
   const extra = (await _finTemColunasCascata()) ? ',cedente_id,capital,meu_total,amortizado,repasse_status' : '';
   const consultaBase = () => sb.from('fin_lancamento').select(baseSel+extra)
@@ -31640,28 +31643,31 @@ async function _finLancCascataCarregar(){
   const cedIds=[...new Set(rows.map(r=>r.cedente_id).filter(Boolean))];
   const ids = rows.map(r=>r.id);
   const desp = rows.filter(r => r.tipo_movimento === 0).map(r => r.id);
-  const blocos = []; for(let i = 0; i < desp.length; i += 300) blocos.push(desp.slice(i, i+300));
+  // Blocos de 300 ids, em paralelo: um `.in()` com as 800 linhas da página passaria de
+  // 25 KB de URL. Cada bloco cobre ids disjuntos, então a junção é só concatenar.
+  const emBlocos = arr => { const o = []; for(let i = 0; i < arr.length; i += 300) o.push(arr.slice(i, i+300)); return o; };
+  const lerBlocos = (blocos, consulta) => Promise.all(blocos.map(b => consulta(b).then(r=>r.data||[]).catch(()=>[]))).then(partes => partes.flat());
   // Cobranças de todas as linhas com cobrança (superconjunto do que a carteira precisa —
   // assim a leitura não espera as operações para saber quais linhas ficaram sem elas).
   const cobIdsTodas = [...new Set(rows.map(r=>r.cobranca_id).filter(Boolean))];
-  const [dim, liberadas, opsJanela, cedRows, opsDespPartes, cbs, cats] = await Promise.all([
+  const [dim, liberadas, opsJanela, cedRows, opsDesp, cbs, cats] = await Promise.all([
     pDim, pLiberadas, pOpsJanela,
-    cedIds.length ? sb.from('clientes').select('id,nome,nome_fantasia').in('id',cedIds).then(r=>r.data||[]).catch(()=>[]) : Promise.resolve([]),
+    lerBlocos(emBlocos(cedIds), b => sb.from('clientes').select('id,nome,nome_fantasia').in('id', b)),
     // Operações criadas pelo /api/repassar a partir de um lançamento (repasse importado)
     // têm recebido_em NULO e não entram na janela: sem esta segunda leitura o
     // "preparado"/"efetuado" delas ficava invisível e a linha seguia oferecendo Repassar.
-    Promise.all(blocos.map(bloco => sb.from('fin_operacao').select(OPSEL).in('lancamento_despesa_id', bloco).limit(2000).then(r=>r.data||[]).catch(()=>[]))),
-    cobIdsTodas.length ? sb.from('cobrancas').select('id,cliente_id').in('id', cobIdsTodas).then(r=>r.data||[]).catch(()=>[]) : Promise.resolve([]),
+    lerBlocos(emBlocos(desp), b => sb.from('fin_operacao').select(OPSEL).in('lancamento_despesa_id', b).limit(2000)),
+    lerBlocos(emBlocos(cobIdsTodas), b => sb.from('cobrancas').select('id,cliente_id').in('id', b)),
     // Categoria de cada lançamento visível. Mora no rateio (fin_lancamento_categoria), não
     // na linha — um lançamento pode ter mais de uma; a lista mostra a de maior valor e
     // avisa quando há outras.
-    ids.length ? sb.from('fin_lancamento_categoria').select('lancamento_id,valor,fin_categoria(descricao)').in('lancamento_id', ids).limit(4000).then(r=>r.data||[]).catch(()=>[]) : Promise.resolve([]),
+    lerBlocos(emBlocos(ids), b => sb.from('fin_lancamento_categoria').select('lancamento_id,valor,fin_categoria(descricao)').in('lancamento_id', b).limit(4000)),
   ]);
   const cedMap={}; cedRows.forEach(c=>cedMap[c.id]=_finNomeCredor(c));
 
   const ops = opsJanela.slice();
   const vistos = new Set(ops.map(o => o.id));
-  for(const parte of opsDespPartes) for(const o of parte) if(!vistos.has(o.id)){ vistos.add(o.id); ops.push(o); }
+  for(const o of opsDesp) if(!vistos.has(o.id)){ vistos.add(o.id); ops.push(o); }
   const opsByLanc = {};
   ops.forEach(o=>{ if(o.lancamento_receita_id) opsByLanc[o.lancamento_receita_id]=o; if(o.lancamento_despesa_id) opsByLanc[o.lancamento_despesa_id]=o; });
 
@@ -31682,12 +31688,8 @@ async function _finLancCascataCarregar(){
     ...saidas.map(r=>r.credor_id || porCob[r.cobranca_id]).filter(Boolean),
   ])];
   const nomes = {};
-  if(todos.length){
-    try{
-      const { data:cls } = await sb.from('clientes').select('id,nome,nome_fantasia').in('id', todos);
-      (cls||[]).forEach(c=>{ nomes[c.id] = _finNomeCredor(c); });
-    }catch(_){ /* auxiliar: não pode derrubar a tela */ }
-  }
+  (await lerBlocos(emBlocos(todos), b => sb.from('clientes').select('id,nome,nome_fantasia').in('id', b)))
+    .forEach(c=>{ nomes[c.id] = _finNomeCredor(c); });   /* auxiliar: bloco que falhar fica sem nome */
   ops.forEach(o=>{ o._credorNome = nomes[o.credor_id]||null; });
   saidas.forEach(r=>{
     const cid = r.credor_id || porCob[r.cobranca_id];
