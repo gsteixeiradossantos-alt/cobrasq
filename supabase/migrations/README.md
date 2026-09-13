@@ -184,35 +184,16 @@ CHECK e insere os 309 atos de e-mail vinculados (com devedor existente) como `li
 as linhas. Depois de aplicar: **recarregar o painel** (a aba "Andamentos" passa a ter
 a fonte "email" nos chips).
 
-## 20260913_01 — intimação de fora do PR vira lembrete "Conferir intimação"
+## 20260913_01 — fila `vw_intimacoes_agenda_pendente` para as skills de agenda
 
-**Não aplicada.** `20260913_01_intimacoes_prazo_lembrete.sql` (+ `_rollback`). Aditiva: funções
-`dia_util_forense(date)` (seg–sex sem feriado nacional; mesma lista de `feriadosBR()` do painel),
-`somar_dias_uteis(date,int)` e `intimacao_criar_lembrete(...)` (SECURITY DEFINER, REVOKE de
-PUBLIC/anon/authenticated) + triggers AFTER INSERT em `intimacoes_email` e `intimacoes_djen`.
-Toda INTIMAÇÃO de tribunal ≠ TJPR cria um lembrete `manual` às 08:00 do dia útil seguinte
-("Conferir intimação <CNJ> — <ato>", texto com prazo fatal ESTIMADO = 15 dias úteis pelo
-art. 224 CPC, link do documento quando vier do diário); a trigger de `lembretes` enfileira
-véspera 19h / dia 08h / 07:50. Não gera para juntada/conclusão, peticionamento do escritório
-nem TJPR; 1 lembrete por processo a cada 10 dias (e-mail + diário da mesma intimação não
-duplicam). Não cria retroativo. Decisão do gestor em 13/09/2026 (botões: "Conferir + fatal
-estimado", "só intimações", "sem TJPR"). Dry-run R-18 em prod (begin/rollback): feriados
-(07/09, Carnaval, Sexta Santa, Corpus Christi, 20/11) e fins de semana reconhecidos;
-13/08 → fatal estimado 04/09; DJEN TJRS cria, e-mail igual depois não repete, juntada/
-peticionamento/TJPR não criam, TRF4 vinculada cria com `cobranca_id`; 3 avisos enfileirados.
-Rollback pareado (lembretes já criados ficam).
-
-## 20260913_02 — intimação de audiência agenda sozinha em `audiencias`
-
-**Não aplicada.** Depende da `20260913_01`. `20260913_02_intimacoes_audiencia_auto.sql` (+ `_rollback`).
-Funções `intimacao_parse_audiencia` (lê "Agendada para: 26 de outubro de 2026 às 14:00, em <órgão>,
-Modalidade: <x>" do ato cru do PROJUDI, ou "dd/mm/aaaa hh:mm" do ato curado) e
-`intimacao_agendar_audiencia` (INSERT em `audiencias` origem `projudi_import`, comarca do órgão,
-modalidade em `sala`, `cobranca_id` se vinculada; redesignação move a audiência futura do mesmo
-processo; mesma data/hora já cadastrada não mexe; sem data/hora → lembrete "Agendar audiência" via
-`intimacao_criar_lembrete(..., p_forcar=true)`, TJPR incluído). Triggers em `intimacoes_email` e
-`intimacoes_djen`. Retroativo no fim: audiências FUTURAS do TJPR já intimadas que faltavam.
-Decisão do gestor em 13/09/2026 ("TJPR automático + lembrete p/ eproc", "importar as futuras que
-faltam"). Dry-run em prod (begin/rollback) em 13/09/2026: 8 agendadas, 6 já existiam (manuais,
-não duplicadas), "Realizada"/eproc sem data não agendam, redesignação atualiza, 24 avisos
-enfileirados, rollback devolve a `intimacao_criar_lembrete` de 7 parâmetros.
+**Não aplicada.** `20260913_01_intimacoes_agenda_pendente.sql` (+ `_rollback`). Só leitura:
+funções `dia_util_forense(date)` (seg–sex sem feriado nacional = `feriadosBR()` do painel),
+`somar_dias_uteis(date,int)`, `intimacao_parse_audiencia(ato, ato_curado)` (lê "Agendada para:
+26 de outubro de 2026 às 14:00, em <órgão>, Modalidade: <x>" do PROJUDI ou "dd/mm/aaaa hh:mm")
+e a view `vw_intimacoes_agenda_pendente` (security_invoker): `audiencia` (PROJUDI com data+hora,
+futura, sem linha igual em `audiencias`), `audiencia_sem_data` (eproc, sem audiência futura nem
+lembrete) e `prazo` (intimação de tribunal ≠ TJPR sem lembrete, com fatal ESTIMADO de 15 dias
+úteis). **Nada entra em `audiencias`/`lembretes` sozinho** — decisão do gestor em 13/09/2026: só
+a skill grava, porque só ela faz tabela + Google Agenda + WhatsApp juntos; a view é a fila que
+`/audiencias-cobrasq` e `/lembretes-cobrasq` leem. Dry-run em prod (begin/rollback) em
+13/09/2026: 8 audiências, 9 prazos, 0 sem data; sem falso positivo do texto longo do PROJUDI.
