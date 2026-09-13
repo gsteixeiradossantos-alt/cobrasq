@@ -62,9 +62,14 @@ Responda SOMENTE com JSON válido, sem texto antes/depois:
 Se o e-mail não tiver nenhum ato processual, devolva {"atos":[]}.`;
 
 // ── Helpers CNJ ──────────────────────────────────────────────────────────────
-const TRIBUNAIS: Record<string, string> = {
-  '16': 'TJPR', '24': 'TJSC', '21': 'TJRS', '26': 'TJSP', '19': 'TJRJ',
-  '13': 'TJMG', '05': 'TJBA', '08': 'TJDF', '17': 'TJES', '09': 'TJCE',
+// Tribunal pelo segmento J.TR do número CNJ (Res. CNJ 65/2008). Espelha
+// public.cnj_tribunal() (migração 20260912_02). Até 12/09/2026 só conhecia
+// 8.16/8.24/8.21: TRF4, TRT9 e TJMT ficavam com tribunal NULL e sumiam da aba
+// "Urgentes" (que filtra tribunal <> 'TJPR').
+const UF_POR_TR: Record<string, string> = {
+  '01':'AC','02':'AL','03':'AP','04':'AM','05':'BA','06':'CE','07':'DF','08':'ES','09':'GO',
+  '10':'MA','11':'MT','12':'MS','13':'MG','14':'PA','15':'PB','16':'PR','17':'PE','18':'PI',
+  '19':'RJ','20':'RN','21':'RS','22':'RO','23':'RR','24':'SC','25':'SE','26':'SP','27':'TO',
 };
 function digitosCNJ(num: string | null): string | null {
   const d = String(num ?? '').replace(/\D/g, '');
@@ -75,7 +80,18 @@ function formatarCNJ(d: string): string {
 }
 function tribunalDe(d: string | null): string | null {
   if (!d) return null;
-  if (d[13] === '8') return TRIBUNAIS[d.slice(14,16)] ?? null; // Justiça Estadual
+  const j = d[13], tr = d.slice(14, 16), n = Number(tr);
+  switch (j) {
+    case '1': return 'STF';
+    case '2': return 'CNJ';
+    case '3': return 'STJ';
+    case '4': return (n >= 1 && n <= 6) ? `TRF${n}` : null;
+    case '5': return tr === '90' ? 'TST' : (n >= 1 && n <= 24) ? `TRT${n}` : null;
+    case '6': return tr === '00' ? 'TSE' : (UF_POR_TR[tr] ? `TRE-${UF_POR_TR[tr]}` : null);
+    case '7': return 'STM';
+    case '8': return UF_POR_TR[tr] ? `TJ${UF_POR_TR[tr]}` : null;
+    case '9': return ({ '13':'TJMMG', '21':'TJMRS', '26':'TJMSP' } as Record<string,string>)[tr] ?? null;
+  }
   return null;
 }
 async function sha1(s: string): Promise<string> {
