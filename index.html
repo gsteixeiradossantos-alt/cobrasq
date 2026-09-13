@@ -5859,7 +5859,7 @@ async function upsertAcordoRelational(devedorId, acordo){
     };
     const { error } = await supa.from('acordos').upsert(row, { onConflict:'id' });
     if(error){ console.warn('[rel] upsertAcordo:', error.message); return { ok:false, error:error.message }; }
-    try{ invalidarPainel(); }catch(_){}   // "Acordos do mês" e agenda do Painel leem esta tabela
+    try{ invalidarPainel('acordosMes:', 'agenda:', 'assinados'); }catch(_){}   // o que o Painel lê desta tabela
     return { ok:true };
   }catch(e){ return { ok:false, error:e.message }; }
 }
@@ -9927,10 +9927,10 @@ async function _recRealCarregar(ano){
   }finally{
     _recRealCache.carregando = false;
   }
-  // Os números já foram desenhados com o fallback do blob: redesenha com o real.
-  if(_recRealPronto(ano)){
-    try{ if(typeof painelRepintarBg === 'function') painelRepintarBg(); }catch(_){}
-  }
+  // Os números já foram desenhados com o fallback do blob: redesenha com o real — ou
+  // com a falha, senão o card ficaria em "carregando…" até o próximo clique. Não
+  // laça: na render seguinte, `falhou && falhouAno === ano` (acima) sai sem buscar.
+  try{ if(typeof painelRepintarBg === 'function') painelRepintarBg(); }catch(_){}
 }
 // Verdade sobre este "fallback": ele devolve ZERO, sempre. Auditoria de 27/08/2026 nos
 // 787 devedores: NENHUM tem a chave `acordos` no metadata, e há 0 parcelas no blob
@@ -10797,12 +10797,18 @@ function _pnlRemotoBuscar(chave, carregar){
   _pnlRemoto.set(chave, { em:e.em, valor:e.valor, voo });
   return voo;
 }
-// Quem muda acordos/lançamentos chama isto (upsertAcordoRelational,
-// _finFinanceiroInvalidaCaches, resolverBoletosPendentes) — senão o Painel mostra o
-// de até 15 s atrás. Envelhece em vez de apagar: a render seguinte pinta com o valor
-// velho na hora e revalida atrás, sem voltar a "carregando…". Solta o voo em curso:
-// ele pousa órfão (não grava) e a próxima busca sobe um novo.
-function invalidarPainel(){ for(const e of _pnlRemoto.values()){ e.em = -Infinity; e.voo = null; } }
+// Três chamadores (upsertAcordoRelational, _finFinanceiroInvalidaCaches,
+// resolverBoletosPendentes); os outros `acordos.update` espalhados confiam nos 15 s.
+// Envelhece em vez de apagar: a render seguinte pinta com o valor velho na hora e
+// revalida atrás, sem voltar a "carregando…". Solta o voo em curso: ele pousa órfão
+// (não grava) e a próxima busca sobe um novo. Com prefixos, só as chaves que começam
+// por um deles ('aReceber:' não precisa refazer a agenda dos 7 dias).
+function invalidarPainel(...prefixos){
+  for(const [chave, e] of _pnlRemoto){
+    if(prefixos.length && !prefixos.some(p=>chave.startsWith(p))) continue;
+    e.em = -Infinity; e.voo = null;
+  }
+}
 
 // Agenda dos 7 dias — o que não está no blob: audiências, boletos vivos e parcelas
 // de acordo. As três vão juntas; qualquer erro derruba o pedaço inteiro — sem valor
@@ -10828,12 +10834,13 @@ async function _pnlCarregarAgenda(todayStr, in7str){
   if(erro) throw erro;
   return { aud: rAud.data||[], bia: rBia.data||[], acd: rAcd.data||[] };
 }
-// Acordos assinados no mês + parcelas lançadas para eles. A contagem depende dos
-// ids, por isso as duas viagens moram no mesmo pedaço.
 // (removido) "Ações judiciais no mês" não faz parte do card: o handoff v3 §3
 // fecha em 4 métricas — ACORDADO NO MÊS · A RECEBER · META DO MÊS · FECHAR POR
 // DIA ÚTIL. A contagem de iniciais protocoladas (proc_peticionamentos, tipo
 // 'inicial' + status 'protocolado') vive nos Relatórios.
+//
+// Acordos assinados no mês + parcelas lançadas para eles. A contagem depende dos
+// ids, por isso as duas viagens moram no mesmo pedaço.
 async function _pnlCarregarAcordosMes(ymIni, dNext){
   const supa = getSupabase(); if(!supa) throw new Error('Supabase indisponível');
   // Por DATA DE ASSINATURA, não por created_at. O card diz "assinados no mês" e
@@ -10890,15 +10897,15 @@ async function _pnlCarregarAssinados(){
 // Foco num controle do Painel (select de filtro aberto, por exemplo): repintar
 // agora fecharia o menu na mão do usuário.
 function _painelFocoOcupado(el){
-  if(document.hidden) return false;   // aba escondida: ninguém está com o menu aberto
+  if(document.hidden || !document.hasFocus()) return false;   // aba escondida / janela sem foco: não há menu aberto
   const ativo = document.activeElement;
   return !!(ativo && el && el.contains(ativo) && /^(SELECT|INPUT|TEXTAREA)$/.test(ativo.tagName));
 }
 // Repintura em SEGUNDO PLANO (cobranças revalidadas, "recuperado" pousando): não
 // é o usuário pedindo, então espera o foco sair — tenta a cada 700 ms, teto ~60 s.
 // Mesma cadência da guarda de foco do Cobranças (#684); ao contrário de lá, no
-// teto repinta mesmo assim (o foco é devolvido ao select pela pintura). Um timer
-// só. Render pedido pelo usuário (clique, filtro) nunca passa por aqui: pinta na hora.
+// teto repinta mesmo assim (soltando o foco). Um timer só. Render pedido pelo
+// usuário (clique, filtro) nunca passa por aqui: pinta na hora.
 let _painelBgTimer = null, _painelBgAdiado = 0;
 function painelRepintarBg(){
   const el = document.getElementById('page-painel');
@@ -10908,11 +10915,15 @@ function painelRepintarBg(){
     if(!_painelBgTimer) _painelBgTimer = setTimeout(()=>{ _painelBgTimer = null; painelRepintarBg(); }, 700);
     return;
   }
+  // No teto, solta o foco antes: a pintura devolve o foco ao select equivalente, e
+  // com ele focado a próxima revalidação adiaria de novo — um render por minuto
+  // enquanto o select ficasse focado.
+  if(_painelBgAdiado >= 85){ try{ document.activeElement.blur(); }catch(_){} }
   _painelBgAdiado = 0;
   renderPainel();
 }
 
-let _painelGen = 0;   // geração do render: só a mais recente escreve o miolo (os banners de alerta são idempotentes)
+let _painelGen = 0;   // geração do render: só a mais recente escreve o miolo (os banners checam a geração depois do await)
 async function renderPainel(){
   const el = document.getElementById('page-painel');
   if(!el) return;
@@ -11374,7 +11385,7 @@ async function renderPainel(){
           </div>
           <div class="pnl-barwrap">
             <div class="pnl-bar"><div style="width:${pctRecComprometido}%;background:var(--success);"></div><div style="width:${pctAcordComprometido}%;background:var(--accent);"></div></div>
-            <div class="pnl-bar-legend"><span><i style="background:var(--success);"></i>Recuperado</span><span><i style="background:var(--accent);"></i>Acordado a receber</span><span style="margin-left:auto;font-family:var(--font-mono);">${_mesIndisp?'—':pctMetaComprometido+'%'} da meta comprometido</span></div>
+            <div class="pnl-bar-legend"><span><i style="background:var(--success);"></i>Recuperado</span><span><i style="background:var(--accent);"></i>Acordado a receber</span><span style="margin-left:auto;font-family:var(--font-mono);">${(_mesIndisp||_recIndisp)?'—':pctMetaComprometido+'%'} da meta comprometido</span></div>
           </div>
         </div>
       </div>
@@ -11560,7 +11571,9 @@ async function checkAlertaBoletosPendentes(painelEl){
     // não um card.
     const velho = _pnlRemotoLer('assinados');
     if(velho && Array.isArray(velho.valor)) _pnlDesenharAlertaBoletos(pgEl, velho.valor);
+    const gen = _painelGen;
     const data = await _pnlRemotoBuscar('assinados', _pnlCarregarAssinados);
+    if(gen !== _painelGen) return;   // outra geração pintou no meio: a chamada dela desenha
     if(!Array.isArray(data)) return;
     if(!velho || velho.valor !== data) _pnlDesenharAlertaBoletos(pgEl, data);
   }catch(e){ /* best-effort: alerta não pode quebrar o painel */ }
@@ -11609,7 +11622,7 @@ async function checkAlertaCasosAgir(painelEl){
       <div><b>${agir}</b> caso${agir!==1?'s':''} precisa${agir!==1?'m':''} de ação${urg?` — <b>${urg}</b> urgente${urg!==1?'s':''}`:''}.</div>
       <button style="margin-left:auto;color:var(--navy);background:var(--gold);border:0;border-radius:8px;padding:8px 14px;font-size:12.5px;font-weight:700;cursor:pointer;white-space:nowrap;" onclick="try{cobrFilter.etapa='todos';cobrFilter.atrasada=true;}catch(_){}; showPage('cobr');">Ver casos →</button>
     </div>`;
-    el.insertAdjacentHTML('beforeend', html);
+    el.insertAdjacentHTML('afterbegin', html);   // sempre em cima; o de boletos entra embaixo (ordem estável entre pinturas)
   }catch(e){ /* best-effort */ }
 }
 
@@ -11619,27 +11632,31 @@ async function checkAlertaCasosAgir(painelEl){
 async function resolverBoletosPendentes(){
   if(currentUser?.tipo !== 'gestor') return;
   if(_resolverProgresso){ showToast('Já está processando — aguarde.','info'); return; }
-  const supa = getSupabase(); if(!supa){ showToast('Supabase indisponível.','danger'); return; }
-  const { data, error } = await supa.from('acordos')
-    .select('id,metadata,status_zapsign,devedor_id').eq('status_zapsign','assinado');
-  if(error){ showToast('Erro ao buscar acordos.','danger'); return; }
-  const emitir   = (data||[]).filter(a => !(a.metadata && a.metadata.boletos_emitidos));
-  const reenviar = (data||[]).filter(a => (a.metadata && a.metadata.boletos_emitidos) && !(a.metadata && a.metadata.whatsapp_ok));
-  const tarefas = [...emitir.map(a=>({id:a.id, resend:false})), ...reenviar.map(a=>({id:a.id, resend:true}))];
-  if(!tarefas.length){ showToast('Nada pendente.','info'); return; }
-  if(!confirm(`Resolver ${tarefas.length} pendência(s)?\n\n${emitir.length} boleto(s) a emitir + ${reenviar.length} link(s) a reenviar por WhatsApp.`)) return;
-  if(_resolverProgresso) return;   // dois confirms abertos ao mesmo tempo: só um segue
+  // Tranca já na entrada: duplo clique no botão não abre dois confirms em sequência.
   // O botão é procurado a cada passo, não capturado: uma repintura no meio o recria
   // (já desabilitado e com o progresso, por _resolverProgresso).
-  _resolverProgresso = { feito:0, total:tarefas.length };
-  const _mostrar = ()=>{ const b=document.getElementById('btn-resolver-pendentes'); if(b){ b.disabled = true; b.textContent = `Processando… ${_resolverProgresso.feito}/${_resolverProgresso.total}`; } };
+  _resolverProgresso = { feito:0, total:0 };
+  const _txtOriginal = (document.getElementById('btn-resolver-pendentes')||{}).textContent || 'Resolver agora →';
+  const _mostrar = ()=>{ const b=document.getElementById('btn-resolver-pendentes'); if(b){ b.disabled = true; b.textContent = _resolverProgresso.total ? `Processando… ${_resolverProgresso.feito}/${_resolverProgresso.total}` : 'Processando…'; } };
   _mostrar();
-  let ok=0, fail=0; const erros=[];
+  let ok=0, fail=0; const erros=[], tarefas=[];
   try{
+    const supa = getSupabase(); if(!supa){ showToast('Supabase indisponível.','danger'); return; }
+    const { data, error } = await supa.from('acordos')
+      .select('id,metadata,status_zapsign,devedor_id').eq('status_zapsign','assinado');
+    if(error){ showToast('Erro ao buscar acordos.','danger'); return; }
+    const emitir   = (data||[]).filter(a => !(a.metadata && a.metadata.boletos_emitidos));
+    const reenviar = (data||[]).filter(a => (a.metadata && a.metadata.boletos_emitidos) && !(a.metadata && a.metadata.whatsapp_ok));
+    tarefas.push(...emitir.map(a=>({id:a.id, resend:false})), ...reenviar.map(a=>({id:a.id, resend:true})));
+    if(!tarefas.length){ showToast('Nada pendente.','info'); return; }
+    if(!confirm(`Resolver ${tarefas.length} pendência(s)?\n\n${emitir.length} boleto(s) a emitir + ${reenviar.length} link(s) a reenviar por WhatsApp.`)) return;
+    _resolverProgresso.total = tarefas.length; _mostrar();
     for(let i=0;i<tarefas.length;i++){
       const t = tarefas[i];
       try{
-        const r = await fetch('/api/emitir-acordo', { method:'POST',
+        // Timeout: um fetch pendurado deixaria a tranca presa (a função na Vercel
+        // tem 60 s de teto).
+        const r = await fetch('/api/emitir-acordo', { method:'POST', signal: AbortSignal.timeout(90000),
           headers:{ 'Content-Type':'application/json', ...(await authHeaders()) },
           body: JSON.stringify(t.resend ? { acordo_id:t.id, resend:true } : { acordo_id:t.id }) });
         const j = await r.json().catch(()=>({}));
@@ -11648,11 +11665,18 @@ async function resolverBoletosPendentes(){
       }catch(e){ fail++; erros.push(e.message); }
       _resolverProgresso.feito = i+1; _mostrar();
     }
-  }finally{ _resolverProgresso = null; }
+  }finally{
+    _resolverProgresso = null;
+    // Saída antes de processar (cancelou, nada pendente, erro): o botão volta ao normal.
+    if(!(ok+fail)){ const b=document.getElementById('btn-resolver-pendentes'); if(b){ b.disabled = false; b.textContent = _txtOriginal; } }
+  }
+  if(!(ok+fail)) return;   // nada processado: sem toast de "Pronto" nem repintura
   if(erros.length) console.warn('[resolver-pendentes]', erros);
   showToast(`Pronto: ${ok} ok${fail?`, ${fail} falha(s) — ver console`:''}.`, fail ? 'warning' : 'success');
   // Os acordos mudaram no servidor: sem invalidar, o alerta repintaria do cache (15 s).
-  try{ invalidarPainel(); renderPainel(); }catch(e){}
+  // 'assinados' sai de vez: aqui sabemos que mudou, e banner velho (com o botão
+  // habilitado de novo) por meio segundo seria pior que banner nenhum.
+  try{ _pnlRemoto.delete('assinados'); invalidarPainel(); renderPainel(); }catch(e){}
 }
 
 function buildMiniCalendar(year, month, eventDates){
@@ -28637,7 +28661,7 @@ const FIN_SALDO_STALE_DIAS = 7;
 // o do vizinho: baixar um repasse atualizava a lista e o card, e o chip da aba continuava
 // com o número velho — o defeito nº 1 do handoff. Quem escreve chama esta função.
 function _finFinanceiroInvalidaCaches(){
-  try{ invalidarPainel(); }catch(_){}   // cards do Painel (a receber, acordos do mês, agenda)
+  try{ invalidarPainel('aReceber:', 'acordosMes:'); }catch(_){}   // cards do Painel que leem fin_lancamento
   try{ _finRepasseAggCache = { at:0, v:null }; }catch(_){}
   try{ _finRepAbertosCache = { at:0, v:null }; _finRepAbertosVoo = null; _finRepAbertosGer++; }catch(_){}
   try{ _finCaixaV2Cache = { at:0, key:'', v:null }; }catch(_){}
