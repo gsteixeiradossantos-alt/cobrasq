@@ -14,7 +14,7 @@
  * Dois Vizinhos" nas outras sete.
  *
  * O critério certo é o FANTASIA — é o que a view `casos` usa para montar a coluna "credor"
- * do CRM. Agora as três leituras passam pelo mesmo helper.
+ * do CRM. Agora todas as leituras passam pelo mesmo helper.
  *
  * Como rodar:
  *   node test/f22_credor_nome_unico.test.js
@@ -51,11 +51,21 @@ assert.strictEqual(nome(null), null, 'cliente ausente não explode');
 assert.strictEqual(nome(undefined), null);
 assert.strictEqual(nome({}), null, 'cliente sem nenhum nome devolve null, não "undefined"');
 
-// ── As TRÊS leituras usam o mesmo helper ───────────────────────────────────────────
-// É o ponto do conserto: uma delas divergindo recria o defeito.
+// ── TODAS as leituras usam o mesmo helper ──────────────────────────────────────────
+// É o ponto do conserto: uma delas divergindo recria o defeito. Eram três leituras de
+// `clientes`; desde o PR de Movimentações (13/09/2026) são duas — a dos credores das
+// operações e a das linhas sem operação viraram uma ida só. O que importa: TODA leitura
+// de `clientes` na aba pede exatamente id,nome,nome_fantasia, passa pelo helper, e
+// ninguém monta o nome à mão. Comentários não contam.
 const carregar = corta('async function _finLancCascataCarregar(){', '\n}');
-const usos = (carregar.match(/_finNomeCredor\(/g) || []).length;
-assert.strictEqual(usos, 3, `as três leituras de credor têm de passar pelo helper (achei ${usos})`);
+const corpo = carregar.replace(/\/\/.*$/gm, '');
+const leituras = (corpo.match(/\.from\('clientes'\)/g) || []).length;
+const certas   = (corpo.match(/\.from\('clientes'\)\.select\('id,nome,nome_fantasia'\)/g) || []).length;
+const usos     = (corpo.match(/_finNomeCredor\(/g) || []).length;
+assert.ok(leituras >= 2, `esperava ao menos duas leituras de clientes na aba (achei ${leituras})`);
+assert.strictEqual(certas, leituras, `toda leitura de clientes pede exatamente id,nome,nome_fantasia (${certas} de ${leituras})`);
+assert.strictEqual(usos, leituras, `toda leitura de credor passa pelo helper (leituras ${leituras}, usos ${usos})`);
+assert.ok(!/\.nome\b|\.nome_fantasia\b/.test(corpo), 'ninguém monta o nome à mão na aba — só _finNomeCredor lê nome/nome_fantasia');
 
 // E nenhuma delas pode voltar a ler só `nome`.
 assert.ok(!/from\('clientes'\)\.select\('id,nome'\)/.test(carregar),
@@ -65,4 +75,4 @@ assert.ok(!/from\('clientes'\)\.select\('id,nome'\)/.test(carregar),
 assert.ok(HTML.includes('function _finLancCedente(l, ctx){'),
   '_finLancCedente continua sendo a fonte única do nome exibido');
 
-console.log('F-22 ok — nome do credor é o fantasia, pelas três leituras.');
+console.log('F-22 ok — nome do credor é o fantasia, por todas as leituras da aba.');
