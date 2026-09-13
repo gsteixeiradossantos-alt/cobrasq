@@ -183,3 +183,17 @@ CHECK e insere os 309 atos de e-mail vinculados (com devedor existente) como `li
 309 inseridos, INSERT novo com `fonte='email'` passa, rollback restaura o CHECK e zera
 as linhas. Depois de aplicar: **recarregar o painel** (a aba "Andamentos" passa a ter
 a fonte "email" nos chips).
+
+## 20260913_01 — fila `vw_intimacoes_agenda_pendente` para as skills de agenda
+
+**Não aplicada.** `20260913_01_intimacoes_agenda_pendente.sql` (+ `_rollback`). Só leitura:
+funções `dia_util_forense(date)` (seg–sex sem feriado nacional = `feriadosBR()` do painel),
+`somar_dias_uteis(date,int)`, `intimacao_parse_audiencia(ato, ato_curado)` (lê "Agendada para:
+26 de outubro de 2026 às 14:00, em <órgão>, Modalidade: <x>" do PROJUDI ou "dd/mm/aaaa hh:mm")
+e a view `vw_intimacoes_agenda_pendente` (security_invoker): `audiencia` (PROJUDI com data+hora,
+futura, sem linha igual em `audiencias`), `audiencia_sem_data` (eproc, sem audiência futura nem
+lembrete) e `prazo` (intimação de tribunal ≠ TJPR sem lembrete, com fatal ESTIMADO de 15 dias
+úteis). **Nada entra em `audiencias`/`lembretes` sozinho** — decisão do gestor em 13/09/2026: só
+a skill grava, porque só ela faz tabela + Google Agenda + WhatsApp juntos; a view é a fila que
+`/audiencias-cobrasq` e `/lembretes-cobrasq` leem. Dry-run em prod (begin/rollback) em
+13/09/2026: 8 audiências, 9 prazos, 0 sem data; sem falso positivo do texto longo do PROJUDI.
