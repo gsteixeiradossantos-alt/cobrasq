@@ -6057,9 +6057,13 @@ async function loadRelationalData(){
   _mergeDividaFromCobrancas();
   // Valor atualizado sempre corrente: recalcula HOJE em memória (compute-on-read).
   _refrescarValorAtualHoje();
-  await loadGruposEconomicos();
-  // Reidrata os acordos da tabela dedicada (abrirAcordo/toggleParcela persistem lá).
-  await _reidratarAcordos(DB.devedores);
+  // Independentes entre si (grupos econômicos não leem/escrevem acordos, e vice-versa) —
+  // rodavam em série (~170ms + ~530ms medidos) sem precisar.
+  await Promise.all([
+    loadGruposEconomicos(),
+    // Reidrata os acordos da tabela dedicada (abrirAcordo/toggleParcela persistem lá).
+    _reidratarAcordos(DB.devedores)
+  ]);
   // F-20 (Fase 2): rebaseia a referência anti-encolhimento ao que ESTE usuário REALMENTE
   // carregou. O blob (cobrasq_data) tem TODOS os devedores (RLS SELECT=true), mas o
   // relacional traz só os do colaborador (RLS por linha). Sem isto, _lastKnownDevCount e
@@ -49575,8 +49579,15 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
       // 3. Sincronizar dados do Supabase antes de mostrar login
       await loadFromSupabase();
-      // 3b. Sobrescreve devedores/clientes com tabelas relacionais (fonte da verdade pós-Fase 2.5)
-      await loadRelationalData();
+      // 3b. Dispara a carga relacional (devedores/clientes/cobranças/acordos — ~3s medidos
+      // em produção) SEM esperar: ela não depende da sessão/perfil que vem a seguir, e as
+      // duas rodavam em série (perfil só começava depois da relacional inteira terminar).
+      // O `await` desta promise foi só ADIADO para o ponto em que currentUser é montado —
+      // continua bloqueando iniciarSessao(), só que agora em paralelo com o passo 4/5.
+      // .catch aqui é rede de segurança para as saídas antecipadas (recovery/invite/conta
+      // ausente) não esperarem por ela; loadRelationalData já trata os próprios erros
+      // internamente (modo seguro), então isto nunca deveria disparar.
+      const _pCargaRelacional = loadRelationalData().catch(e=>{ console.warn('[boot] loadRelationalData:', e && e.message); return null; });
       // 4. Verificar sessão ativa (auto-login)
       const { data: { session } } = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
       if(session){
@@ -49615,6 +49626,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
           document.getElementById('loginScreen').classList.add('active');
           return;
         }
+        // 5. Só agora precisa mesmo dos devedores/clientes/cobranças — junta com a carga
+        // relacional disparada no passo 3b (que já correu em paralelo com os passos 4/4b).
+        await _pCargaRelacional;
         currentUser = montarCurrentUserDeAppUser(appUser, session.user);
         iniciarSessao();
         return;
