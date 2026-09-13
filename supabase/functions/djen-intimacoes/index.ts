@@ -50,7 +50,9 @@ function digitosCNJ(num: unknown): string | null {
 function formatarCNJ(d: string): string {
   return `${d.slice(0,7)}-${d.slice(7,9)}.${d.slice(9,13)}.${d.slice(13,14)}.${d.slice(14,16)}.${d.slice(16,20)}`;
 }
-function isoDate(d: Date): string { return d.toISOString().slice(0, 10); }
+// Data local de Brasília (F-08/F-09: nunca toISOString().slice — à noite dá o dia seguinte).
+const _fmtBR = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' });
+function isoDate(d: Date): string { return _fmtBR.format(d); }
 // "20/08/2026" | "2026-08-20" → "2026-08-20"
 function dataISO(v: unknown): string | null {
   const s = String(v ?? '').trim();
