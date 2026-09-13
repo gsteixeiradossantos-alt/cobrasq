@@ -35,6 +35,10 @@ const P = require('../assets/js/esnfs-ponte.js');
   assert.strictEqual(P.esnfsBaseFiscal(q, { valor_recebido: 4300, valor_capital: 0, repasse_status: 'revisar' }).pronto, false, 'em revisão não emite');
   assert.strictEqual(P.esnfsBaseFiscal({ cpf_cnpj: '', valor: 10 }, null).motivo, 'sem CPF/CNPJ do tomador');
   assert.strictEqual(P.esnfsBaseFiscal(q, { valor_capital: 100, valor_honorario: 0 }).motivo, 'base zero');
+  // recebimento à mão (sem fin_operacao) numa cobrança com capital do credor → revisão
+  assert.strictEqual(P.esnfsBaseFiscal(q, null, { valor_capital: 500 }).pronto, false);
+  assert.ok(/capital do credor/.test(P.esnfsBaseFiscal(q, null, { valor_capital: 500 }).motivo));
+  assert.strictEqual(P.esnfsBaseFiscal(q, null, { valor_capital: 0 }).base, 4300, 'sem capital na cobrança → valor pago');
 }
 
 // 2. lote → extensão (a extensão lê a ref do 4º campo)
@@ -151,6 +155,9 @@ const P = require('../assets/js/esnfs-ponte.js');
   const nf = fs.readFileSync(path.join(__dirname, '..', 'assets', 'js', 'nf.js'), 'utf8');
   assert.ok(!/nffEmitirSel\(\)'/.test(nf) && !/`nffEmitir\(\[/.test(nf), 'fila não chama mais a emissão pelo Asaas');
   assert.ok(nf.includes('nffCopiarLoteSel()') && nf.includes('nffImportarResultado()'), 'fila tem copiar lote e importar resultado');
+  assert.ok(/from\('fin_lancamento'\)[\s\S]{0,400}\.eq\('tipo_movimento',1\)\.eq\('status',1\)\.not\('cobranca_id','is',null\)/.test(nf), 'fila nasce dos lançamentos de entrada pagos com cobrança');
+  assert.ok(/from\('devedores'\)/.test(nf), 'tomador vem do devedor da cobrança');
+  assert.ok(/function nffGarantirLinha/.test(nf), 'linha de decisão criada só ao decidir');
 }
 
 console.log('F-38 ok — ponte ESNFS: base fiscal, lote, resultado, faturamento, DAS.');

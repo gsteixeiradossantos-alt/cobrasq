@@ -1,7 +1,18 @@
 // assets/js/nf.js — Emitir NF v2 · Fila de recebimentos (handoff docs/design_handoff_nf_v2).
-// Todo pagamento RECEBIDO no Asaas cai em nf_fila_analise como 'pendente' (via
-// asaas-webhook) e aparece no card do topo da tela Emitir NF. O usuário decide,
-// item a item ou em lote: manda para o ESNFS ou Dispensa. NADA é emitido sozinho.
+//
+// ORIGEM DA FILA (13/09/2026, decisão do Gustavo): os LANÇAMENTOS DE ENTRADA PAGOS do
+// Financeiro que têm cobrança (fin_lancamento tipo 1, status 1, cobranca_id), desde
+// NFF_INICIO. O tomador é o DEVEDOR PRINCIPAL da cobrança (cobrancas.id == devedores.id),
+// nunca o cliente do Asaas — o PIX da Jéssica Milanez veio da empresa do marido, e a
+// fila antiga (webhook) colocaria a empresa como tomadora. Também entra o recebimento
+// baixado à mão, sem Asaas (16 em 13/09 que a fila antiga não via).
+// nf_fila_analise continua sendo a tabela de DECISÃO (pendente/emitida/dispensada),
+// chaveada por asaas_payment_id — para lançamento sem Asaas a chave é 'lanc:<id>'. A
+// linha de decisão nasce quando o Gustavo decide (nffGarantirLinha), não antes.
+// O que o webhook gravou lá sem lançamento no Financeiro (38 recebimentos, 03/07–18/08)
+// aparece num segundo grupo, com o nome que o Asaas deu, para não sumir sem decisão.
+// O usuário decide item a item ou em lote: manda para o ESNFS ou Dispensa. NADA é
+// emitido sozinho.
 //
 // Desde 13/09/2026 a emissão é no ESNFS (prefeitura de Dois Vizinhos), pela extensão
 // extensao/esnfs/ — a rota pelo Asaas (nffEmitir → api/_emitir-nf-avulso.js) nunca
@@ -18,8 +29,12 @@
 // nfaFmtBRL, nfaMaskDoc, nfaDigits). Funções expostas em window (script clássico).
 
 // ── estado ───────────────────────────────────────────────────────────────────
-let _nffFila = [];            // linhas pendentes de nf_fila_analise
-let _nffOps = {};             // fin_operacao casada por asaas_payment_id (base fiscal)
+// Cada item da fila: { id (chave de tela), key (asaas_payment_id | 'lanc:<id>'), fila_id
+// (nf_fila_analise.id quando já existe), lanc (fin_lancamento), dev (devedor), cob
+// (cobrança), fonte 'lanc'|'asaas', nome, cpf_cnpj, valor, origem, recebido_em, customer_id }
+let _nffFila = [];
+let _nffOps = {};             // fin_operacao por chave (asaas_payment_id / 'lanc:<id>') — base fiscal
+const NFF_INICIO = '2026-07-03'; // dia em que a fila nasceu; o que foi pago antes já foi tratado à mão
 let _nffSel = new Set();      // ids selecionados p/ lote
 let _nffCarregada = false;    // já buscou ao menos uma vez (badge)
 let _nffEnriquecendo = false; // trava do enriquecimento lazy via Asaas
@@ -49,20 +64,73 @@ async function nffCarregar(){
   const supa = (typeof getSupabase==='function') ? getSupabase() : null;
   if(!supa) return;
   try{
-    const { data, error } = await supa.from('nf_fila_analise')
-      .select('*').eq('status','pendente').order('recebido_em',{ascending:false}).limit(200);
-    if(error) throw error;
-    _nffFila = data||[];
-    _nffCarregada = true;
-    // Operação casada por pagamento: é dela que sai a base fiscal (honorário × cheio).
-    _nffOps = {};
-    const pids = _nffFila.map(q=>q.asaas_payment_id).filter(Boolean);
-    for(let i=0;i<pids.length;i+=100){
-      const { data: ops } = await supa.from('fin_operacao')
-        .select('id,asaas_payment_id,valor_recebido,valor_capital,valor_honorario,repasse_status,nf_status,devedor_id,parcela,total_parcelas')
-        .in('asaas_payment_id', pids.slice(i,i+100));
-      (ops||[]).forEach(o=>{ _nffOps[o.asaas_payment_id]=o; });
+    // 1. decisões já tomadas / linhas do webhook
+    const { data: dec, error: e1 } = await supa.from('nf_fila_analise').select('*').order('recebido_em',{ascending:false}).limit(3000);
+    if(e1) throw e1;
+    const decPorChave = {}; (dec||[]).forEach(d=>{ decPorChave[d.asaas_payment_id]=d; });
+    // 2. lançamentos de entrada pagos com cobrança
+    const { data: lancs, error: e2 } = await supa.from('fin_lancamento')
+      .select('id,descricao,valor,valor_pago,data_pagamento,asaas_payment_id,cobranca_id,acordo_id,numero_parcela,total_parcelas,conta_id')
+      .eq('tipo_movimento',1).eq('status',1).not('cobranca_id','is',null).gte('data_pagamento', NFF_INICIO)
+      .order('data_pagamento',{ascending:false}).limit(2000);
+    if(e2) throw e2;
+    // 3. devedor principal (id da cobrança == id do devedor) + capital da cobrança
+    const cobIds=[...new Set((lancs||[]).map(l=>l.cobranca_id))];
+    const devs={}, cobs={};
+    for(let i=0;i<cobIds.length;i+=200){
+      const fatia=cobIds.slice(i,i+200);
+      const [{ data: d }, { data: c }] = await Promise.all([
+        supa.from('devedores').select('id,nome,doc,doc_digits,asaas_customer_id').in('id',fatia),
+        supa.from('cobrancas').select('id,valor_capital,cliente_id').in('id',fatia),
+      ]);
+      (d||[]).forEach(x=>{ devs[x.id]=x; }); (c||[]).forEach(x=>{ cobs[x.id]=x; });
     }
+    // 4. fin_operacao: por lançamento de receita e por pagamento
+    _nffOps = {};
+    const lIds=(lancs||[]).map(l=>l.id);
+    for(let i=0;i<lIds.length;i+=200){
+      const { data: ops } = await supa.from('fin_operacao')
+        .select('id,asaas_payment_id,lancamento_receita_id,valor_recebido,valor_capital,valor_honorario,repasse_status,nf_status,devedor_id,parcela,total_parcelas,metadata')
+        .in('lancamento_receita_id', lIds.slice(i,i+200));
+      (ops||[]).forEach(o=>{ _nffOps['lanc:'+o.lancamento_receita_id]=o; if(o.asaas_payment_id) _nffOps[o.asaas_payment_id]=o; });
+    }
+    const pids=(lancs||[]).map(l=>l.asaas_payment_id).filter(Boolean).concat((dec||[]).filter(d=>d.status==='pendente').map(d=>d.asaas_payment_id));
+    const faltam=[...new Set(pids)].filter(pid=>!_nffOps[pid] && !/^lanc:/.test(pid));
+    for(let i=0;i<faltam.length;i+=200){
+      const { data: ops } = await supa.from('fin_operacao')
+        .select('id,asaas_payment_id,lancamento_receita_id,valor_recebido,valor_capital,valor_honorario,repasse_status,nf_status,devedor_id,parcela,total_parcelas,metadata')
+        .in('asaas_payment_id', faltam.slice(i,i+200));
+      (ops||[]).forEach(o=>{ _nffOps[o.asaas_payment_id]=o; if(o.lancamento_receita_id) _nffOps['lanc:'+o.lancamento_receita_id]=o; });
+    }
+    // 5. monta a fila: lançamentos pagos ainda sem decisão…
+    const fila=[]; const vistos=new Set();
+    for(const l of (lancs||[])){
+      const key = l.asaas_payment_id || ('lanc:'+l.id);
+      const d = decPorChave[key];
+      if(d && d.status!=='pendente') continue;      // já emitida/dispensada
+      const dev=devs[l.cobranca_id]||{}, cob=cobs[l.cobranca_id]||{};
+      vistos.add(key);
+      fila.push({
+        id: d ? d.id : key, key, fila_id: d ? d.id : null, fonte:'lanc', lanc:l, dev, cob,
+        nome: dev.nome || (d&&d.nome) || l.descricao || '',
+        cpf_cnpj: dev.doc_digits || dev.doc || (d&&d.cpf_cnpj) || null,
+        valor: Number(l.valor_pago!=null ? l.valor_pago : l.valor) || 0,
+        origem: d ? d.origem : (l.asaas_payment_id ? 'OUTRO' : 'MANUAL'),
+        recebido_em: (d&&d.recebido_em) || (l.data_pagamento ? l.data_pagamento+'T12:00:00' : null),
+        customer_id: (d&&d.customer_id) || dev.asaas_customer_id || null,
+        cobranca_id: l.cobranca_id, asaas_payment_id: l.asaas_payment_id || null,
+      });
+    }
+    // …e o que o webhook gravou sem lançamento pago no Financeiro (2º grupo)
+    for(const d of (dec||[])){
+      if(d.status!=='pendente' || vistos.has(d.asaas_payment_id)) continue;
+      fila.push({ id:d.id, key:d.asaas_payment_id, fila_id:d.id, fonte:'asaas', lanc:null, dev:null, cob:null,
+        nome:d.nome||'', cpf_cnpj:d.cpf_cnpj||null, valor:Number(d.valor)||0, origem:d.origem, recebido_em:d.recebido_em,
+        customer_id:d.customer_id||null, cobranca_id:null, asaas_payment_id:d.asaas_payment_id, endereco_ok:d.endereco_ok });
+    }
+    fila.sort((a,b)=>String(b.recebido_em||'').localeCompare(String(a.recebido_em||'')));
+    _nffFila = fila;
+    _nffCarregada = true;
   }catch(e){
     const box=document.getElementById('nff-fila');
     if(box) box.innerHTML = `<div style="font-size:12.5px;color:${NFF_C.vermelho};">Fila de recebimentos indisponível: ${escHtml(traduzirErro(e.message||String(e)))}</div>`;
@@ -70,9 +138,27 @@ async function nffCarregar(){
   }
   nffDraw();
   if(typeof nfaUpdateNavBadge==='function') nfaUpdateNavBadge();
-  // Enriquecimento lazy SÓ com a tela aberta (consulta o customer no Asaas).
+  // Enriquecimento lazy SÓ com a tela aberta (consulta o customer no Asaas) — só para o
+  // grupo do webhook, que não tem lançamento/devedor por trás.
   const pg=document.getElementById('page-nf-avulsa');
   if(pg && pg.classList.contains('active')) nffEnriquecer();
+}
+
+// Garante a linha de decisão em nf_fila_analise para um item vindo do lançamento (que
+// ainda não a tem) e devolve o id. Chave: asaas_payment_id ou 'lanc:<id>'.
+async function nffGarantirLinha(q){
+  if(q.fila_id) return q.fila_id;
+  const supa=getSupabase();
+  const row={ asaas_payment_id:q.key, customer_id:q.customer_id||null, nome:q.nome||null, cpf_cnpj:q.cpf_cnpj||null,
+    valor:q.valor||0, origem:['PIX','BOLETO','CARTAO'].includes(q.origem)?q.origem:'OUTRO',
+    recebido_em:q.recebido_em?new Date(q.recebido_em).toISOString():new Date().toISOString(), endereco_ok:true };
+  let { data, error }=await supa.from('nf_fila_analise').insert(row).select('id').single();
+  if(error && /duplicate|unique/i.test(error.message||'')){
+    ({ data, error }=await supa.from('nf_fila_analise').select('id').eq('asaas_payment_id', q.key).single());
+  }
+  if(error) throw error;
+  q.fila_id=data.id;
+  return data.id;
 }
 
 // Badge no menu já no load do app (sem precisar abrir a tela): espera a sessão.
@@ -90,7 +176,7 @@ async function nffCarregar(){
 // sem devedor casado) e endereco_ok (city + postalCode presentes no Asaas).
 async function nffEnriquecer(){
   if(_nffEnriquecendo) return;
-  const alvos = _nffFila.filter(q => q.customer_id && (q.endereco_ok==null || !q.nome));
+  const alvos = _nffFila.filter(q => q.fonte==='asaas' && q.customer_id && !q.nome);
   if(!alvos.length) return;
   _nffEnriquecendo = true;
   const supa = getSupabase();
@@ -107,7 +193,7 @@ async function nffEnriquecer(){
           endereco_ok: !!(c.city && c.postalCode)
         };
         Object.assign(q, upd);
-        if(supa) await supa.from('nf_fila_analise').update(upd).eq('id', q.id);
+        if(supa && q.fila_id) await supa.from('nf_fila_analise').update(upd).eq('id', q.fila_id);
       }catch(_){/* best-effort por item */}
     }
   } finally {
@@ -142,7 +228,7 @@ function _nffBtn(label, onclick, kind, title){
 //   sem_id        nem documento tem — o tomador não está identificado
 // O endereço do Asaas deixou de barrar: no ESNFS o cadastro do tomador é o da
 // prefeitura, e a extensão completa o que faltar.
-function nffBase(q){ return esnfsBaseFiscal(q, q && _nffOps[q.asaas_payment_id]); }
+function nffBase(q){ return esnfsBaseFiscal(q, q && (_nffOps[q.key] || _nffOps[q.asaas_payment_id]), q && q.cob); }
 function nffProntidao(q){
   if(!q || !q.cpf_cnpj || !nfaDigits(q.cpf_cnpj)) return 'sem_id';
   return nffBase(q).pronto ? 'pronto' : 'revisar';
@@ -187,16 +273,20 @@ function nffDraw(){
     const pronto=nffPronto(q);
     const st=nffProntidao(q);
     const b=nffBase(q);
-    const op=_nffOps[q.asaas_payment_id];
-    const parc = op && op.parcela ? ` · parcela ${op.parcela}${op.total_parcelas?'/'+op.total_parcelas:''}` : '';
+    const op=_nffOps[q.key]||_nffOps[q.asaas_payment_id];
+    const np = (op&&op.parcela) || (q.lanc&&q.lanc.numero_parcela) || null;
+    const tp = (op&&op.total_parcelas) || (q.lanc&&q.lanc.total_parcelas) || null;
+    const parc = np ? ` · parcela ${np}${tp?'/'+tp:''}` : '';
     const endTxt = st==='pronto'
       ? (b.tipo==='honorario'
           ? `<span style="color:${NFF_C.verde};">nota sobre o honorário: <b>${nfaFmtBRL(b.base)}</b></span> <span style="color:rgba(10,21,48,0.45);">(capital ${nfaFmtBRL(op.valor_capital)} é do credor${parc})</span>`
           : `<span style="color:${NFF_C.verde};">nota sobre o valor cheio</span>${parc?`<span style="color:rgba(10,21,48,0.45);">${parc}</span>`:''}`)
-      : st==='revisar' ? `<span style="color:#7A6428;font-weight:600;">${escHtml(b.motivo)}</span> <span style="color:rgba(10,21,48,0.45);">— resolva na Fila do Financeiro</span>`
+      : st==='revisar' ? `<span style="color:#7A6428;font-weight:600;">${escHtml(b.motivo)}</span>${/capital do credor/.test(b.motivo)?` <span style="color:rgba(10,21,48,0.45);">— capital do caso ${nfaFmtBRL(q.cob&&q.cob.valor_capital)}; informe a base ao copiar</span>`:` <span style="color:rgba(10,21,48,0.45);">— resolva na Fila do Financeiro</span>`}`
       : `<span style="color:${NFF_C.vermelho};font-weight:600;">tomador sem CPF/CNPJ</span>`;
     const acoes = st==='pronto'
       ? `${_nffBtn('⎘ ESNFS', `nffCopiarLote(['${q.id}'])`, 'primary', 'Copiar só esta linha para a extensão do ESNFS')} ${_nffBtn('Dispensar', `nffDispensar(['${q.id}'])`, 'ghost')}`
+      : st==='revisar' && /capital do credor/.test(b.motivo)
+      ? `${_nffBtn('⎘ ESNFS (base manual)', `nffCopiarLoteBase('${q.id}')`, 'gold', 'Você informa quanto do valor pago é honorário; a nota sai sobre esse valor')} ${_nffBtn('Dispensar', `nffDispensar(['${q.id}'])`, 'ghost')}`
       : st==='sem_id'
       ? `${_nffBtn('Asaas ↗', `nffAbrirAsaas('${q.id}')`, 'gold', 'Abrir o cadastro no Asaas para completar o CPF')} ${_nffBtn('🔎', `nffRevalidar('${q.id}')`, 'ghost', 'Reconsultar o cadastro no Asaas')} ${_nffBtn('Dispensar', `nffDispensar(['${q.id}'])`, 'ghost')}`
       : `${_nffBtn('Dispensar', `nffDispensar(['${q.id}'])`, 'ghost')}`;
@@ -210,7 +300,7 @@ function nffDraw(){
         <div style="font-family:${NFF_C.mono};font-size:11px;color:rgba(10,21,48,0.55);">${escHtml(doc)} · ${endTxt}</div>
       </div>
       <div style="font-family:${NFF_C.mono};font-size:12.5px;font-weight:600;text-align:right;color:${NFF_C.ink};" title="${st==='pronto'&&b.tipo==='honorario'?'recebido '+escHtml(nfaFmtBRL(q.valor))+' · nota sobre '+escHtml(nfaFmtBRL(b.base)):'recebido'}">${st==='pronto'&&b.tipo==='honorario'?`<span style="color:rgba(10,21,48,0.4);font-weight:400;text-decoration:line-through;">${nfaFmtBRL(q.valor)}</span><br>${nfaFmtBRL(b.base)}`:nfaFmtBRL(q.valor)}</div>
-      <div style="font-family:${NFF_C.mono};font-size:10px;font-weight:600;text-transform:uppercase;text-align:center;background:rgba(10,21,48,0.06);border-radius:100px;padding:3px 0;color:${NFF_C.ink};">${escHtml(q.origem||'—')}</div>
+      <div style="font-family:${NFF_C.mono};font-size:10px;font-weight:600;text-transform:uppercase;text-align:center;background:rgba(10,21,48,0.06);border-radius:100px;padding:3px 0;color:${NFF_C.ink};" title="${q.fonte==='lanc'?'lançamento pago no Financeiro'+(q.lanc&&q.lanc.id?' #'+q.lanc.id:''):'recebido no Asaas, sem lançamento pago no Financeiro'}">${escHtml(q.fonte==='lanc'?(q.origem==='MANUAL'?'manual':(q.origem||'—')):'asaas*')}</div>
       <div style="font-family:${NFF_C.mono};font-size:11px;color:rgba(10,21,48,0.55);">${escHtml(nffQuando(q.recebido_em))}</div>
       <div style="display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap;">${acoes}</div>
     </div>`;
@@ -223,7 +313,8 @@ function nffDraw(){
       <span style="margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">${_nffFila.length?headerDir:''}</span>
     </div>
     ${_nffFila.length
-      ? _nffFila.map(linha).join('')
+      ? _nffFila.filter(q=>q.fonte==='lanc').map(linha).join('')
+        + (_nffFila.some(q=>q.fonte==='asaas') ? `<div style="padding:10px 20px 4px;font-family:${NFF_C.mono};font-size:10px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:#7A6428;background:rgba(201,169,97,0.06);border-top:0.5px solid rgba(201,169,97,0.35);" title="O webhook do Asaas gravou o recebimento, mas não há lançamento pago no Financeiro para ele. O nome é o do cliente Asaas (quem pagou).">asaas* · recebidos sem lançamento pago no Financeiro — nome de quem pagou, confira antes de emitir</div>` + _nffFila.filter(q=>q.fonte==='asaas').map(linha).join('') : '')
       : `<div style="padding:26px 20px;font-family:'Instrument Serif',Georgia,serif;font-style:italic;font-size:16px;color:rgba(10,21,48,0.5);">Nenhum recebimento aguardando nota. Quando alguém pagar no Asaas, aparece aqui.</div>`}
   </div>`;
   if(typeof nffRenderRail==='function') nffRenderRail();
@@ -303,11 +394,13 @@ async function nffDispensar(ids){
   ids=(ids||[]).filter(Boolean); if(!ids.length) return;
   const supa=getSupabase(); if(!supa){ showToast('Faça login para decidir a fila.','warning'); return; }
   let uid=null; try{ const { data }=await supa.auth.getUser(); uid=data&&data.user&&data.user.id||null; }catch(_){}
-  const nomes=ids.map(id=>{ const q=_nffFila.find(x=>x.id===id); return q&&q.nome||''; }).filter(Boolean);
+  const itens=ids.map(id=>_nffFila.find(x=>x.id===id)).filter(Boolean);
+  const nomes=itens.map(q=>q.nome||'').filter(Boolean);
   try{
+    const filaIds=[]; for(const q of itens) filaIds.push(await nffGarantirLinha(q));
     const { error }=await supa.from('nf_fila_analise')
       .update({ status:'dispensada', decidido_em:new Date().toISOString(), decidido_por:uid })
-      .in('id', ids).eq('status','pendente');
+      .in('id', filaIds).eq('status','pendente');
     if(error) throw error;
   }catch(e){ showToast('Falha ao dispensar: '+traduzirErro(e.message||String(e)),'danger'); return; }
   _nffFila=_nffFila.filter(q=>!ids.includes(q.id));
@@ -336,7 +429,7 @@ async function nffRevalidar(id){
     if(!r.ok||!c||!c.id) throw new Error(c?.errors?.[0]?.description||c?.error||('HTTP '+r.status));
     const upd={ nome:q.nome||c.name||null, cpf_cnpj:q.cpf_cnpj||c.cpfCnpj||null, endereco_ok:!!(c.city&&c.postalCode) };
     Object.assign(q,upd);
-    const supa=getSupabase(); if(supa) await supa.from('nf_fila_analise').update(upd).eq('id',q.id);
+    const supa=getSupabase(); if(supa && q.fila_id) await supa.from('nf_fila_analise').update(upd).eq('id',q.fila_id);
     showToast(upd.endereco_ok?'Endereço encontrado no Asaas — pronto para emitir. ✓':'Ainda sem cidade+CEP no Asaas — complete o cadastro e revalide.', upd.endereco_ok?'success':'warning');
   }catch(e){ showToast('Falha ao revalidar: '+traduzirErro(e.message||String(e)),'danger'); }
   nffDraw();
@@ -358,6 +451,21 @@ async function nffCopiarLote(ids){
   catch(_){ const ta=document.createElement('textarea'); ta.value=txt; ta.style.cssText='position:fixed;opacity:0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
   const total=itens.reduce((s,i)=>s+i.valor,0);
   showToast(`${itens.length} linha(s) copiada(s) — ${nfaFmtBRL(total)}. Cole no campo CPF da extensão do ESNFS.`,'success');
+}
+
+// Recebimento numa cobrança com capital do credor e sem rateio automático: o Gustavo
+// informa a base (a parte que é honorário) na hora de copiar. Não fica gravado — o
+// valor definitivo é o que o ESNFS emitir e voltar no "Importar resultado".
+async function nffCopiarLoteBase(id){
+  const q=_nffFila.find(x=>x.id===id); if(!q) return;
+  const digitado=prompt(`Base da nota de ${q.nome||'—'} (honorário — o que NÃO é capital do credor).\nValor pago: ${nfaFmtBRL(q.valor)}${q.cob&&q.cob.valor_capital?` · capital do caso: ${nfaFmtBRL(q.cob.valor_capital)}`:''}`, String(q.valor).replace('.',','));
+  if(digitado==null) return;
+  const base=esnfsParseValor(digitado);
+  if(!(base>0)||base>q.valor+0.005){ showToast('Base inválida: precisa ser maior que zero e no máximo o valor pago.','warning'); return; }
+  const txt=esnfsMontarLote([{ nome:q.nome||'', doc:nfaDigits(q.cpf_cnpj), valor:base, ref:'fila:'+q.id }]);
+  try{ await navigator.clipboard.writeText(txt); }
+  catch(_){ const ta=document.createElement('textarea'); ta.value=txt; ta.style.cssText='position:fixed;opacity:0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+  showToast(`Linha copiada com base ${nfaFmtBRL(base)}. Cole no campo CPF da extensão do ESNFS.`,'success');
 }
 
 // Importa o relatório da extensão. Preview antes de gravar: nada é marcado sem OK.
@@ -388,7 +496,7 @@ function nffImportarPreview(){
   const r=esnfsParseResultado(txt);
   if(!r.itens.length){ box.innerHTML=`<div style="font-size:12.5px;color:${NFF_C.vermelho};">Não encontrei nenhuma nota no texto colado.</div>`; ok.disabled=true; _nffImpCasado=[]; return; }
   // Pendentes: a fila (fila:<id>) e as linhas manuais da tela (manual:<ref>), se houver.
-  const pend=_nffFila.map(q=>({ ref:'fila:'+q.id, doc:nfaDigits(q.cpf_cnpj), valor:nffBase(q).base, nome:q.nome||'', fila:q }));
+  const pend=_nffFila.map(q=>({ ref:'fila:'+q.id, doc:nfaDigits(q.cpf_cnpj), valor:nffBase(q).base||q.valor, nome:q.nome||'', fila:q }));
   const manuais=(typeof nfaLinhasManuaisPendentes==='function')?nfaLinhasManuaisPendentes():[];
   _nffImpCasado=esnfsCasarResultado(r.itens, pend.concat(manuais));
   const emit=_nffImpCasado.filter(c=>c.resultado.status==='ok'&&c.pendente);
@@ -416,18 +524,21 @@ async function nffImportarConfirmar(){
   let uid=null; try{ const { data:u }=await supa.auth.getUser(); uid=u&&u.user&&u.user.id||null; }catch(_){}
   let ok=0, fail=0;
   for(const c of alvo){
-    const r=c.resultado, p=c.pendente, q=p&&p.fila, op=q&&_nffOps[q.asaas_payment_id];
+    const r=c.resultado, p=c.pendente, q=p&&p.fila, op=q&&(_nffOps[q.key]||_nffOps[q.asaas_payment_id]);
     try{
       const meta={ origem:'esnfs', nf_number:r.nota||null, emitida_em:data, ref:p?p.ref:('esnfs:'+r.doc+':'+r.valor+':'+data),
-        fila_id:q?q.id:null, operacao_id:op?op.id:null, asaas_payment_id:q?q.asaas_payment_id:null,
+        fila_id:null, fila_key:q?q.key:null, lancamento_id:q&&q.lanc?q.lanc.id:null, cobranca_id:q?q.cobranca_id:null,
+        operacao_id:op?op.id:null, asaas_payment_id:q?q.asaas_payment_id:null,
         nf_base_tipo:q?nffBase(q).tipo:null, competencia:data.slice(5,7)+'/'+data.slice(0,4), obs:r.obs||null };
       const { data:nf, error }=await supa.from('nf_avulsa').insert({
-        nome:r.nome||(p&&p.nome)||null, doc:nfaMaskDoc(r.doc), doc_digits:r.doc, valor:r.valor,
+        nome:(q&&q.nome)||r.nome||(p&&p.nome)||null, doc:nfaMaskDoc(r.doc), doc_digits:r.doc, valor:r.valor,
         descricao:'Honorários de cobrança', nf_status:'emitida', metadata:meta, criada_por:uid,
         asaas_customer_id:q&&q.customer_id||null }).select('id').single();
       if(error) throw error;
       if(q){
-        await supa.from('nf_fila_analise').update({ status:'emitida', decidido_em:new Date().toISOString(), decidido_por:uid, nf_avulsa_id:nf.id }).eq('id',q.id).eq('status','pendente');
+        const fid=await nffGarantirLinha(q);
+        await supa.from('nf_fila_analise').update({ status:'emitida', decidido_em:new Date().toISOString(), decidido_por:uid, nf_avulsa_id:nf.id }).eq('id',fid).eq('status','pendente');
+        await supa.from('nf_avulsa').update({ metadata:Object.assign({}, meta, { fila_id:fid }) }).eq('id', nf.id);
         _nffFila=_nffFila.filter(x=>x.id!==q.id); _nffSel.delete(q.id);
       }
       if(op){

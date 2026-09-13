@@ -82,7 +82,11 @@ produção** — ele **não está** em `supabase/migrations/`. Armadilhas conhec
 - **Corrente do acordo**: assinatura ZapSign → boleto Asaas → aviso Z-API
   (`AUTO_EMIT_ACORDO` **ligado**).
 - **NFS-e**: emitida no **ESNFS** (prefeitura de Dois Vizinhos) pela extensão do Chrome
-  em `extensao/esnfs/`, com ponte por área de transferência (`assets/js/esnfs-ponte.js`):
+  em `extensao/esnfs/`, com ponte por área de transferência (`assets/js/esnfs-ponte.js`).
+  A fila de Emitir NF nasce dos **lançamentos de entrada pagos com cobrança**
+  (`fin_lancamento` tipo 1/status 1/`cobranca_id`, desde 03/07/2026); o **tomador é o
+  devedor da cobrança**, nunca o cliente Asaas (quem pagou). `nf_fila_analise` é só a
+  decisão (chave `asaas_payment_id` ou `lanc:<id>`), criada ao decidir.
   Emitir NF → "Copiar lote p/ ESNFS" (base = honorário quando há capital do credor) →
   extensão emite → "Importar resultado" grava em `nf_avulsa` (metadata.origem `esnfs`,
   `nf_number`, `emitida_em`) e marca fila/`fin_operacao`. A rota pelo Asaas

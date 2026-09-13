@@ -47,12 +47,16 @@
   // (repasse ao credor), a nota é só sobre o HONORÁRIO; sem repasse, o valor cheio.
   // A extensão recebe um número por linha e não sabe disso — quem sabe é o painel.
   //   q  = linha de nf_fila_analise (cpf_cnpj, valor)
-  //   op = fin_operacao casada por asaas_payment_id (pode não existir: 38 das 122 da
-  //        fila em 13/09/2026 não tinham operação)
-  function esnfsBaseFiscal(q, op) {
+  //   op = fin_operacao casada (pelo lançamento de receita ou pelo pagamento Asaas);
+  //        pode não existir — recebimento baixado à mão, ou anterior ao pipeline
+  //   cob = cobrança do lançamento (valor_capital = capital do credor no caso). Sem
+  //        operação e com capital na cobrança, não dá para saber quanto do pago é
+  //        honorário: fica em revisão em vez de emitir sobre o valor cheio.
+  function esnfsBaseFiscal(q, op, cob) {
     const doc = onlyDigits(q && q.cpf_cnpj);
     if (doc.length !== 11 && doc.length !== 14) return { pronto: false, base: 0, tipo: null, motivo: 'sem CPF/CNPJ do tomador' };
     if (op && op.repasse_status === 'revisar') return { pronto: false, base: 0, tipo: null, motivo: 'rateio capital/honorário em revisão' };
+    if (!op && cob && Number(cob.valor_capital) > 0) return { pronto: false, base: 0, tipo: null, motivo: 'cobrança com capital do credor e sem rateio — confira o repasse' };
     let base, tipo;
     if (op && Number(op.valor_capital) > 0) { base = round2(op.valor_honorario); tipo = 'honorario'; }
     else if (op) { base = round2(op.valor_recebido); tipo = 'valor_cheio'; }
