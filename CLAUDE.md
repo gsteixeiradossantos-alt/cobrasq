@@ -81,6 +81,15 @@ produção** — ele **não está** em `supabase/migrations/`. Armadilhas conhec
   após importar devedores).
 - **Corrente do acordo**: assinatura ZapSign → boleto Asaas → aviso Z-API
   (`AUTO_EMIT_ACORDO` **ligado**).
+- **NFS-e**: emitida no **ESNFS** (prefeitura de Dois Vizinhos) pela extensão do Chrome
+  em `extensao/esnfs/`, com ponte por área de transferência (`assets/js/esnfs-ponte.js`):
+  Emitir NF → "Copiar lote p/ ESNFS" (base = honorário quando há capital do credor) →
+  extensão emite → "Importar resultado" grava em `nf_avulsa` (metadata.origem `esnfs`,
+  `nf_number`, `emitida_em`) e marca fila/`fin_operacao`. A rota pelo Asaas
+  (`api/_emitir-nf*.js`) **nunca emitiu em produção** e saiu da tela em 13/09/2026 —
+  código mantido, sem botão. Relatório: Financeiro → **Faturamento** (previsão do
+  Simples = faturamento × `DB.config.simplesAliquotaEfetiva`; "Lançar DAS" cria a saída
+  na categoria "Simples Nacional - DAS", vencimento dia 20 do mês seguinte).
 
 ## CRM — estado client-side (atenção em mudanças de origem)
 O CRM usa chaves de `localStorage` (`cobrasq_checklist_tel_*` é só local, sem backing no
