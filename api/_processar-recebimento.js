@@ -265,8 +265,18 @@ module.exports = async function handler(req, res) {
         let existente = null;
         let comoCasou = null;
         if (devedor && devedor.id) {
+          // 13/09/2026 (órfão #5, Cleves Devens): `cobranca_id = devedor.id` só vale para o
+          // devedor PRINCIPAL (invariante 1:1). Co-devedor com asaas_customer_id próprio
+          // (litisconsórcio: Jean Carlos Serpa + Cleves + Flávia, cobrança 310887ed) não
+          // achava a própria parcela e o pagamento ia para a fila de órfãos com a parcela
+          // existindo, até com o asaas_payment_id gravado. Agora: todas as cobranças de que
+          // o devedor é parte (cobranca_partes) + a dele mesmo.
+          const partes = await sbFetch(
+            `cobranca_partes?devedor_id=eq.${devedor.id}&select=cobranca_id`
+          ).catch(() => []);
+          const cobrancaIds = Array.from(new Set([devedor.id, ...(partes || []).map(p => p.cobranca_id).filter(Boolean)]));
           const candidatos = await sbFetch(
-            `fin_lancamento?tipo_movimento=eq.1&status=in.(0,1)&cobranca_id=eq.${devedor.id}` +
+            `fin_lancamento?tipo_movimento=eq.1&status=in.(0,1)&cobranca_id=in.(${cobrancaIds.join(',')})` +
             `&select=id,valor,status,observacoes,data_vencimento,asaas_payment_id&order=data_vencimento.asc`
           ).catch(() => []);
           const lista = candidatos || [];

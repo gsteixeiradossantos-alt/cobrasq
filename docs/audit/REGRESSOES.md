@@ -623,3 +623,25 @@ dos 309 como `lida=true` (histórico não vira alerta).
 teste que prove que ele **consegue** acontecer pelo menos uma vez (companheiro do R-18:
 o caminho da tela é outro). CHECK de domínio é contrato: toda fonte nova que o código
 grava tem de entrar no CHECK **na mesma migração** que cria o gravador.
+
+## R-28 · Casamento do pagamento assume que o pagador é o devedor PRINCIPAL
+
+**O que acontece.** `_processar-recebimento.js` busca as parcelas candidatas com
+`fin_lancamento.cobranca_id = devedor.id`. Isso só vale para o devedor principal (invariante
+1:1 `cobranca.id = devedor principal`). Num litisconsórcio em que o **co-devedor** tem o
+`asaas_customer_id` (Cleves Devens, caso Jean Carlos Serpa + Cleves + Flávia, cobrança
+`310887ed…`), a parcela existia — com o próprio `asaas_payment_id` já gravado — e mesmo assim
+o pagamento de R$ 726 (10/09/2026) caiu em `asaas_pagamento_orfao` como `sem_lancamento`.
+
+**Teste (SQL).** Tem de dar zero:
+```sql
+select count(*) from public.asaas_pagamento_orfao o
+  join public.fin_lancamento f on f.asaas_payment_id = o.asaas_payment_id
+ where o.resolvido_em is null;   -- órfão cuja parcela existe = casamento errou
+```
+
+**Estado-correto.** Candidatas = parcelas de TODAS as cobranças de que o devedor é parte
+(`cobranca_partes`) + a dele mesmo (commit deste R-28).
+
+**A regra, para além deste caso.** "id do devedor = id da cobrança" é atalho válido só para o
+principal. Toda busca que parte de um devedor tem de passar por `cobranca_partes`.
