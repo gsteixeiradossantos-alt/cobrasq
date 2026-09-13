@@ -6032,7 +6032,7 @@ async function loadRelationalData(){
     // transitório, mas "carga incompleta" por teto do servidor menor que a página se
     // repete em toda recarga, e sem o motivo na tela o usuário fica apertando F5 sem
     // saber que é problema de configuração. O detalhe exato sai no console.
-    const _quais = [devedoresRel===null?'devedores':null, clientesRel===null?'credores':null, cobrancasRel===null?'cobranças':null].filter(Boolean).join(', ');
+    const _quais = [devedoresRel===null?'devedores':null, clientesRel===null?'credores':null, (cobrancasRel===null || _cobrDono.ultimoErro)?'cobranças':null].filter(Boolean).join(', ');
     try{ showToast('Modo seguro: não consegui carregar ' + _quais + ' do servidor. Recarregue (F5) antes de salvar — não vou gravar por cima do servidor. Se repetir, veja o console e chame o suporte.', 'danger'); }catch(_){}
   } else {
     _relReadFailed = false;
@@ -10603,7 +10603,7 @@ async function renderFilaDecisoes(){
     el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando fila…</div>`;
     await ensureCobrancas({ forcar:true });
   } else {
-    if(!el.innerHTML.trim()) el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando fila…</div>`;
+    if(!el.children.length) el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando fila…</div>`;
     revalidarCobrancas(()=>{ if(document.getElementById('page-fila')?.classList.contains('active')) renderFilaDecisoes(); }, 'fila');
   }
   const _pf = window._painelFiltro || (window._painelFiltro = { cliente:'', operador:'' });
@@ -10741,7 +10741,10 @@ async function renderPainel(){
     // A tela nasce vazia no HTML: no primeiro paint pós-boot a memória já está cheia
     // mas este render ainda espera sinais/acordos/fin_lancamento por 2–4 s — sem isto,
     // o usuário olharia para o nada até lá.
-    if(!el.innerHTML.trim()) el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando painel…</div>`;
+    // `children.length`, não `innerHTML.trim()`: o #page-painel nasce com um
+    // comentário HTML dentro (<!-- JS will populate -->), que innerHTML serializa —
+    // a primeira versão desta guarda nunca disparava.
+    if(!el.children.length) el.innerHTML = `<div style="padding:48px;text-align:center;color:var(--text-2);">Carregando painel…</div>`;
     revalidarCobrancas(()=>{ if(document.getElementById('page-painel')?.classList.contains('active')) renderPainel(); }, 'painel');
   }
   // Uma leitura só: a lista era lida em três pontos separados por `await`, e uma
@@ -19567,6 +19570,7 @@ const _cobrDono = {
   falhouEm: -Infinity,      // última falha — segura a próxima tentativa (ver abaixo)
   ultimoErro: null,         // para o modo seguro do boot enxergar falha com memória
   emVoo: null,              // promise da viagem em curso, ou null
+  geracao: 0,               // invalidarCobrancas() avança; voo mais velho que ela não vale
   cbs: new Map()            // repaints já agendados, por tela (dedupe)
 };
 const COBR_FRESCO_MS = 15000;
@@ -19586,6 +19590,11 @@ function invalidarCobrancas(){
   // isso vale mais que "o servidor falhou há 3 s". Não laça, porque uma falha
   // depois disto não agenda repaint (ver revalidarCobrancas).
   _cobrDono.falhouEm = -Infinity;
+  // E torna obsoleto qualquer voo já no ar: ele tirou o retrato do servidor ANTES
+  // da gravação que motivou a invalidação. Se pousasse normalmente, sobrescreveria
+  // o espelho feito em memória (ex.: cm.status='Quitado ao cliente') com o valor
+  // antigo e ainda recarimbaria a lista como fresca por 15 s.
+  _cobrDono.geracao++;
 }
 
 // Uma viagem. Devolve { ok, lista }. Em falha COM memória devolve a lista velha
@@ -19593,10 +19602,19 @@ function invalidarCobrancas(){
 // lista:null, que é o contrato que o boot usa para cair no modo seguro.
 function _cobrVoar(){
   const tinha = cobrancasEmMemoria().length > 0;
+  const geracaoAoSubir = _cobrDono.geracao;
   const voo = (async ()=>{
     try{
-      const rows = await loadCobrancasFromSupabase();
+      let rows = null;
+      try{ rows = await loadCobrancasFromSupabase(); }
+      catch(e){ rows = null; }   // loader rejeitando (getSupabase lançou) conta como falha
       if(Array.isArray(rows)){
+        if(_cobrDono.geracao !== geracaoAoSubir){
+          // Invalidaram durante o voo: o retrato é anterior à gravação. Não atribui
+          // (preserva o espelho em memória) e não carimba (a próxima tela vai ao
+          // servidor de novo). Devolve o que há.
+          return { ok:true, obsoleto:true, lista: cobrancasEmMemoria() };
+        }
         DB_cobrancas = rows; _cobrDono.carregadoEm = performance.now(); _cobrDono.ultimoErro = null;
         return { ok:true, lista:DB_cobrancas };
       }
