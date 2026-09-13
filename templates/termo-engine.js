@@ -113,10 +113,39 @@
   }
 
   // Descreve uma única faixa (nº de parcelas × valor uniforme dentro dela).
-  function fraseFaixa(qtd, valor) {
-    if (qtd === 1) return "1 (uma) parcela mensal no valor de <strong>" + valorCompleto(valor) + "</strong>";
+  // meio === "pix" acrescenta "via PIX" à faixa; a chave vem uma vez só, no fim
+  // da frase (frasePagamento), para não repetir em cada faixa.
+  function fraseFaixa(qtd, valor, meio) {
+    const via = meio === "pix" ? ", via PIX" : "";
+    if (qtd === 1) return "1 (uma) parcela mensal no valor de <strong>" + valorCompleto(valor) + "</strong>" + via;
     return qtd + " (" + extInt(qtd, true) + ") parcelas mensais e sucessivas no valor de <strong>" +
-      valorCompleto(valor) + "</strong> cada";
+      valorCompleto(valor) + "</strong> cada" + via;
+  }
+
+  function temPix(ac) {
+    const faixas = Array.isArray(ac && ac.faixas) ? ac.faixas : [];
+    return faixas.some(function (f) { return f && f.meio === "pix" && f.qtd > 0 && f.valor > 0; });
+  }
+  function soPix(ac) {
+    const faixas = Array.isArray(ac && ac.faixas) ? ac.faixas.filter(function (f) { return f && f.qtd > 0 && f.valor > 0; }) : [];
+    return faixas.length > 0 && faixas.every(function (f) { return f.meio === "pix"; });
+  }
+  // Complemento da cláusula 2: como os boletos chegam — ou, se tudo é PIX, a
+  // chave e o comprovante. Com faixas mistas, as duas frases.
+  function fraseEntregaBoletos(ac, generoCredor) {
+    const M = generoCredor === "M";
+    const doCred = M ? "do credor" : "da credora", peloCred = M ? "pelo credor" : "pela credora", aoCred = M ? "ao Credor" : "à Credora";
+    const chave = String((ac && ac.pixChave) || "").trim();
+    const fPix = "O pagamento das parcelas via PIX será feito para a chave <strong>" + escHtml(chave || "____") +
+      "</strong>, de titularidade " + doCred + ", cabendo à parte devedora encaminhar o comprovante " + aoCred +
+      " em até 1 dia útil após cada pagamento.";
+    const fBol = "Os boletos serão enviados " + peloCred + " à parte devedora em até 5 dias úteis após a assinatura deste instrumento, " +
+      "por meio do canal indicado no preâmbulo. A parte devedora compromete-se a encaminhar o comprovante de pagamento " + aoCred +
+      " em até 1 dia útil após cada quitação, para fins de conferência e baixa, ficando ajustado que a ausência de envio do comprovante " +
+      "não descaracteriza o pagamento quando identificado o crédito correspondente na conta recebedora.";
+    if (soPix(ac)) return fPix;
+    if (temPix(ac)) return fBol + " " + fPix;
+    return fBol;
   }
 
   function frasePagamento(ac) {
@@ -126,9 +155,10 @@
     // parcelamento uniforme.
     const faixas = Array.isArray(ac.faixas) ? ac.faixas.filter((f) => f && f.qtd > 0 && f.valor > 0) : [];
     const usaFaixas = faixas.length > 1;
+    const f0 = faixas[0] || {};
     const corpo = usaFaixas
-      ? faixas.map((f) => fraseFaixa(f.qtd, f.valor)).join(", seguidas de ")
-      : (ac.parcelas === 1 ? fraseFaixa(1, ac.valorParcela) : fraseFaixa(ac.parcelas, ac.valorParcela));
+      ? faixas.map((f) => fraseFaixa(f.qtd, f.valor, f.meio)).join(", seguidas de ")
+      : (ac.parcelas === 1 ? fraseFaixa(1, ac.valorParcela, f0.meio) : fraseFaixa(ac.parcelas, ac.valorParcela, f0.meio));
     if (ac.entrada && ac.entrada.valor) {
       const ent = "<strong>" + valorCompleto(ac.entrada.valor) + "</strong>";
       const entVenc = ac.entrada.vencimento ? ", com vencimento em <strong>" + dataExtenso(ac.entrada.vencimento) + "</strong>," : "";
@@ -163,8 +193,7 @@
       const nome = dv.assNome || (dv.nome || "").split(" ")[0];
       return '<div class="sig">' +
         '<div class="sig-token">&lt;&lt;assdev' + (i + 1) + '&gt;&gt;</div>' +
-        '<div class="sig-line"></div>' +
-        '<div class="sig-name">' + escHtml(nome) + '</div>' +
+                '<div class="sig-name">' + escHtml(nome) + '</div>' +
         '<div class="sig-doc">' + escHtml(dv.assDoc || "") + '</div>' +
         '<div class="sig-role">' + role + '</div></div>';
     }).join("");
@@ -209,6 +238,7 @@
       assinaturasDevedores: assinaturasDevedores(devs),
       valorDivida: valorCompleto(ac.total),
       frasePagamento: frasePagamento(ac),
+      fraseEntregaBoletos: fraseEntregaBoletos(ac, cr.genero),
       multaBoleto: pctExt(ac.multa != null ? ac.multa : 10),
       clausulaPenal: pctExt(ac.penal != null ? ac.penal : 50),
       dataAcordo: dataExtenso(dados.dataAcordo),
@@ -350,8 +380,7 @@
     const l2 = adv.oab ? (/oab/i.test(adv.oab) ? adv.oab : "OAB " + adv.oab) : "";
     return '<div class="sig">' +
       '<div class="sig-token">&lt;&lt;assadv2&gt;&gt;</div>' +
-      '<div class="sig-line"></div>' +
-      '<div class="sig-name">' + escHtml(adv.nome) + '</div>' +
+            '<div class="sig-name">' + escHtml(adv.nome) + '</div>' +
       '<div class="sig-doc">' + escHtml(l2) + '</div>' +
       '<div class="sig-role">Advogado(a) da parte ré</div></div>';
   }
@@ -442,7 +471,7 @@
   // preenche já permitindo HTML nos valores de cláusula 4 / contato (não escapa esses)
   function preencherJudicial(templateHtml, dados) {
     const map = placeholdersJudicial(dados);
-    const rawHtml = { clausula4Corpo: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1, frasePagamento: 1, credorQualificacao: 1 };
+    const rawHtml = { clausula4Corpo: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1, frasePagamento: 1, fraseEntregaBoletos: 1, credorQualificacao: 1 };
     return templateHtml.replace(/\{\{(\w+)\}\}/g, function (m, k) {
       if (!Object.prototype.hasOwnProperty.call(map, k)) return m;
       return rawHtml[k] ? String(map[k] == null ? "" : map[k]) : escAttr(map[k]);
@@ -465,7 +494,7 @@
 
   global.TermoEngine = {
     extInt, reaisExt, valorCompleto, pctExt, dataExtenso, estadoFrase,
-    qualifDevedor, qualifCredor, frasePagamento, placeholders,
+    qualifDevedor, qualifCredor, frasePagamento, fraseEntregaBoletos, placeholders,
     foroDe, comarcaDaQualificacao,
     preambuloDevedores, assinaturasDevedores, generoDevedorLabel,
     preencher, carregarTemplate, montarTermoExtrajudicial,

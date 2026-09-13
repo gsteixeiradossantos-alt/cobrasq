@@ -544,3 +544,82 @@ resolvidas pela RLS de `cobrancas`, restritas a staff.
 quem grava o path. Quem cria um prefixo novo no bucket (`cobrancas/`, `_lixeira/`…)
 tem que abrir a policy junto — e testar o upload **como colaborador**, não como
 proprietário, porque o proprietário passa por qualquer predicado.
+
+## R-25 · Filtro `<> 'TJPR'` esconde exatamente o que deveria gritar (NULL some do "Urgentes")
+
+**O que acontece.** O worker `email-intimacoes` derivava `intimacoes_email.tribunal`
+de uma tabela com só 8.16/8.24/8.21: qualquer processo do TRF4 (4.04), TRT9 (5.09) ou
+TJMT (8.11) ficava com `tribunal = NULL`. A aba "Urgentes — fora do Paraná" filtra
+`.neq('tribunal','TJPR')`, e em SQL `NULL <> 'TJPR'` é NULL — a linha é descartada.
+Resultado: os atos de fora do PR **que não são da Justiça Estadual** (os mais urgentes
+de todos, porque nada mais os monitora) não apareciam em "Urgentes"; só na fila geral
+"A vincular", misturados a 744 do TJPR. Descoberto em 12/09/2026: 19 linhas
+(12 TRF4, 5 TRT9, 1 TJMT, 1 sem número), 18 `a_vincular`.
+
+**Teste (SQL).** Tem de dar zero:
+```sql
+select count(*) from public.intimacoes_email
+ where tribunal is null and public.cnj_tribunal(coalesce(digitos, numero_processo)) is not null;
+```
+
+**Estado-correto.** Migração `20260912_02`: função `cnj_tribunal()` com a tabela
+J.TR completa (Res. CNJ 65/2008) + backfill; o worker ganhou a mesma tabela.
+
+**A regra, para além deste caso.** Filtro negativo (`<>`, `not in`, `.neq`) em coluna
+que pode ser NULL **exclui o NULL em silêncio**. Quando o NULL é justamente o caso
+desconhecido/anômalo — que deveria aparecer, não sumir — o filtro tem de ser
+`coalesce(col,'') <> 'X'` ou `col is distinct from 'X'`, ou a coluna tem de ser
+preenchida sempre (o que se fez aqui). Companheiro do R-21 (a lista esconde e não avisa).
+
+## R-26 · Ato publicado só no diário não gera e-mail (o "prazo decorrido" chega antes da intimação)
+
+**O que acontece.** No eproc do TJRS, ato ordinatório publicado no DJEN (meio "D") não
+dispara e-mail do sistema. O escritório só soube dos atos de 5001563-63.2026.8.21.0133
+(13/08/2026, recolher condução do oficial) e 5016566-68.2025.8.21.0141 (14/08/2026,
+audiência designada) pelo e-mail de "prazo decorrido" de 19/08. Não é bug de código:
+é uma **fonte que faltava**. No TJPR (PROJUDI) o diário sai ~9 dias depois do movimento,
+então cruzar DJEN × e-mail pela data de publicação ± 3 dias deixava 84 de 96 publicações
+sem par; cruzando pela data do ato citada no texto ("… (11/08/2026)") sobram 38 — os
+que realmente não têm ato correspondente em `intimacoes_email`.
+
+**Teste (SQL).** Depois de o cron rodar, as duas publicações do TJRS têm de estar em
+`vw_intimacoes_so_diario`; e nenhuma linha do DJEN pode casar com e-mail de outro CNJ:
+```sql
+select count(*) from public.intimacoes_djen d join public.intimacoes_email e on e.id = d.intimacao_email_id
+ where e.digitos <> d.digitos;  -- 0
+```
+
+**Estado-correto.** Migração `20260912_02` + Edge Function `djen-intimacoes` (pg_cron
+`0 11 * * *`): API pública do DJEN por OAB (112743/PR e 119424/PR) → `intimacoes_djen`,
+dedup por sha1(cnj:data:texto), cruzamento `intimacoes_djen_cruzar()`, aba "Só no diário".
+
+**A regra, para além deste caso.** Monitoramento por e-mail cobre o que o tribunal
+resolve mandar por e-mail. A fonte de verdade da intimação é o diário; quando um ato
+"não chegou", a pergunta certa é "por qual canal ele saiu?", não "por que o parser
+não pegou?".
+
+## R-27 · INSERT "best-effort" que falha sempre (a aba "Andamentos" nunca recebe o e-mail)
+
+**O que acontece.** O worker `email-intimacoes` e o botão "Vincular" (`ivVincular`)
+gravam cada ato vinculado também em `proc_intimacoes` com `fonte='email'` — é o que
+alimenta a aba "Andamentos" e o badge de não-lidas. O CHECK de `fonte` só aceitava
+escavador/jusbrasil/codilo/datajud/manual: o INSERT falha **desde 07/2026**, o código
+engole o erro (`catch(_){}` / "best-effort") e ninguém vê. Em 12/09/2026: 328 atos
+de e-mail vinculados, **0** em `proc_intimacoes`. Dos 328, 19 apontam para cobrança
+sem linha em `devedores` (FK) — esses falhariam de qualquer jeito.
+
+**Teste (SQL).** Tem de dar zero:
+```sql
+select count(*) from public.intimacoes_email e
+ where e.status = 'vinculada' and e.dedup is not null
+   and exists (select 1 from public.devedores d where d.id = e.cobranca_id)
+   and not exists (select 1 from public.proc_intimacoes p where p.dedup_key = 'email:' || e.dedup);
+```
+
+**Estado-correto.** Migração `20260912_03`: CHECK aceita `'email'` e `'djen'`; backfill
+dos 309 como `lida=true` (histórico não vira alerta).
+
+**A regra, para além deste caso.** Um insert marcado como "best-effort" precisa de um
+teste que prove que ele **consegue** acontecer pelo menos uma vez (companheiro do R-18:
+o caminho da tela é outro). CHECK de domínio é contrato: toda fonte nova que o código
+grava tem de entrar no CHECK **na mesma migração** que cria o gravador.

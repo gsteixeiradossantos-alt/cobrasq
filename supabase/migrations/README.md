@@ -133,3 +133,53 @@ Rollback pareado.
 REPLACE` de `resumo_diario_agenda()`: os três `left(numero_processo, 10)` viram o número inteiro,
 porque o Gustavo pesquisa pelo CNJ completo (mesma decisão do título dos eventos na agenda).
 Rollback = reaplicar a função de `20260910_04`.
+
+## 20260912 — base da Receita: contato/endereço + busca reversa (`rf_*`)
+
+**Aplicada em 12/09/2026** (MCP, `rf_cnpj_contato_endereco`). `20260912_rf_cnpj_contato_endereco.sql` (+ `_rollback`). Aditiva:
+colunas de contato/endereço em `rf_estabelecimentos`, `capital_social` em
+`rf_empresas`, índices, e as RPCs `buscar_empresas_por_telefone`,
+`buscar_empresas_por_endereco`, `buscar_empresas_por_email` e `rf_base_status`.
+Validada em 12/09/2026 num `begin … rollback` em produção (compila; com uma linha
+sintética, telefone/endereço/e-mail acham a COBRASQ e rua errada no mesmo CEP+nº → 0).
+
+Ordem: **aplicar a migração → rodar `scripts/import_cnpj_rf.py --uf PR,SC,RS`**
+(precisa de `scripts/.env.local` com `DATABASE_URL`; baixa ~7,6 GB do WebDAV da
+Receita; a carga faz TRUNCATE + COPY das 3 tabelas numa transação). Enquanto a base
+está vazia, `api/_cnpja.js` responde "indisponível" + link manual (F-35) em vez do
+falso "nenhuma empresa".
+
+## 20260912_02 — tribunal pelo segmento do CNJ + intimações do DJEN
+
+**Não aplicada.** `20260912_02_intimacoes_djen.sql` (+ `_rollback`). Aditiva:
+função `cnj_tribunal(text)` (tabela J.TR completa da Res. CNJ 65/2008) + backfill de
+`intimacoes_email.tribunal` onde era NULL (R-25: 18 linhas em prod — TRF4/TRT9/TJMT,
+que sumiam da aba "Urgentes"); tabela `intimacoes_djen` (RLS = `intimacoes_email`:
+staff lê, proprietário escreve), função `intimacoes_djen_cruzar(p_dias)` (SECURITY
+DEFINER, REVOKE de PUBLIC/anon/authenticated — só o worker chama), view
+`vw_intimacoes_so_diario` (security_invoker), índice `uq_dev_eventos_djen_dedup` e
+cron `djen-intimacoes` às `0 11 * * *` (08:00 BRT) chamando a Edge Function nova.
+
+Dry-run em prod (begin/rollback) em 12/09/2026: compila; `cnj_tribunal` devolve
+TRF4/TRT9/TJMT/TJPR/TJRS/TRE-PR/TJMSP e NULL p/ lixo; backfill acerta 18/19 (a 19ª não
+tem número); com as 107 comunicações reais de 10–20/08 inseridas, o cruzamento casa 13
+pela publicação ± 3 e 58 pela data do ato citada no texto — sobram 38 TJPR + as 2 do
+TJRS "só no diário". RLS (R-18): cedente 0 linhas e INSERT/UPDATE negados; colaborador
+lê 1 e não escreve; proprietário tudo; `authenticated` sem EXECUTE na RPC.
+
+**Ordem:** aplicar a migração → `supabase functions deploy djen-intimacoes` (secrets já
+existentes: `CRON_INVOKE_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`; opcional
+`DJEN_OABS`) → `supabase functions deploy email-intimacoes` (tabela de tribunais nova)
+→ backfill manual `POST /djen-intimacoes {"inicio":"2026-08-01","fim":"<hoje>"}` com
+o bearer do cron. Enquanto a migração não estiver aplicada, a aba "Só no diário" abre
+com a mensagem "Não foi possível ler o diário" e as outras abas seguem iguais.
+
+## 20260912_03 — `proc_intimacoes` aceita fonte `email`/`djen` + backfill (R-27)
+
+**Não aplicada.** Depende só do CHECK antigo (2026-06-23a); é independente da
+`20260912_02`, mas o rollback desta apaga também linhas `djen` se existirem. Amplia o
+CHECK e insere os 309 atos de e-mail vinculados (com devedor existente) como `lida=true`
+— o badge de não-lidas não muda. Dry-run em prod (begin/rollback) em 12/09/2026:
+309 inseridos, INSERT novo com `fonte='email'` passa, rollback restaura o CHECK e zera
+as linhas. Depois de aplicar: **recarregar o painel** (a aba "Andamentos" passa a ter
+a fonte "email" nos chips).
