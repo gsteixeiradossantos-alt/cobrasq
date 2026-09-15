@@ -73,3 +73,14 @@ extensão preenche o que dá e avisa para avançar via **"Próxima"** até a eta
 - Deploy da edge function `gerar-peticao-pdf` (opcional — só se for gerar o PDF a partir de
   petição montada no app; o fluxo atual aceita upload de PDF pronto). Reusa `GOTENBERG_URL`.
 - O endpoint `/api/eproc-peticionamento` já sobe junto com o app (Vercel).
+
+## Pendências / ideias futuras (não fazer sem revisar com o Gustavo)
+
+- **Sondagem mais rápida em `esperar()`** (content-projudi.js / content-eproc.js): o passo
+  padrão entre verificações é 300ms (`passoMs || 300`); dá pra baixar para ~150ms nos usos
+  que não passam `passoMs` explícito, ganhando até metade do intervalo de detecção sem mudar
+  a lógica de conferência. Risco baixo (só frequência de checagem), mas não é o gargalo real
+  — a maior parte do tempo de protocolo é servidor (upload/assinatura/gravação) e os
+  `setTimeout` fixos de "deixa assentar" (400-900ms) foram cada um resposta a um bug de
+  corrida específico já reportado (falso sucesso, clique no vazio, tipo de documento errado)
+  — não cortar esses sem motivo forte.
