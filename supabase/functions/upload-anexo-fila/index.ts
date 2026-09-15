@@ -31,7 +31,7 @@ const BUCKET = 'documentos';
 const MAX_BYTES = 15 * 1024 * 1024; // mesmo teto de anexo do WhatsApp via Z-API
 
 Deno.serve(async (req) => {
-  if (req.method !== 'POST') {
+  if (req.method !== 'POST' && req.method !== 'DELETE') {
     return new Response(JSON.stringify({ error: 'method not allowed' }), { status: 405 });
   }
 
@@ -39,6 +39,22 @@ Deno.serve(async (req) => {
   if (!expected) return new Response(JSON.stringify({ error: 'CRON_INVOKE_SECRET não configurado' }), { status: 500 });
   const provided = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
   if (provided !== expected) return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 });
+
+  // DELETE: limpeza de arquivo de teste/obsoleto — só dentro de manual/fila-whatsapp/,
+  // mesma pasta que o POST usa. Não é uso de rotina (a fila não apaga anexo enviado);
+  // existe para não deixar lixo de teste no bucket.
+  if (req.method === 'DELETE') {
+    let body: any;
+    try { body = await req.json(); } catch { return new Response(JSON.stringify({ error: 'body inválido: esperado JSON' }), { status: 400 }); }
+    const path = String(body?.path || '');
+    if (!path.startsWith('manual/fila-whatsapp/')) {
+      return new Response(JSON.stringify({ error: 'só apaga dentro de manual/fila-whatsapp/' }), { status: 400 });
+    }
+    const sbDel = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
+    const { error: delErr } = await sbDel.storage.from(BUCKET).remove([path]);
+    if (delErr) return new Response(JSON.stringify({ error: 'delete falhou: ' + delErr.message }), { status: 500 });
+    return new Response(JSON.stringify({ deleted: path }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
 
   let payload: any;
   try {
