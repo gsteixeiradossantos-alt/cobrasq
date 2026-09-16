@@ -2,8 +2,9 @@
 
 ## O que esta primeira versão faz
 
-O botão **Iniciar Investigação Patrimonial** na ficha do devedor cria uma fila
-em `investigacoes_patrimoniais` e uma entidade-raiz (pessoa ou empresa). O
+O botão **Iniciar Investigação Patrimonial** na ficha do devedor cria uma
+investigação em `investigacoes_patrimoniais`, uma entidade-raiz (pessoa ou
+empresa) e processa na hora as fontes públicas disponíveis. O
 resultado é um grafo auditável de entidades, vínculos, fontes e evidências.
 Cada achado deve conter fonte, data da consulta, confiança e uma justificativa.
 O relatório baixado pelo CRM consolida essas informações e os fatores do score.
@@ -17,23 +18,22 @@ credenciais legitimamente obtidas pelo escritório e para uso autorizado.
 1. Revise e aplique manualmente `supabase/migrations/20260916_01_investigacao_patrimonial.sql` no projeto `jokbxzhcctcwnbhkhgru`. Não execute `supabase db push` em lote.
 2. Recarregue o painel. Abra uma ficha de devedor: o botão ficará na seção
    **Investigação patrimonial**.
-3. Publique a Edge Function `investigacao-patrimonial-worker`, defina o segredo
-   `INVESTIGACAO_WORKER_INVOKE_SECRET` e importe
-   `docs/n8n/investigacao-patrimonial.json` no n8n. O fluxo chama somente o
-   worker de Receita/base CNPJ e BrasilAPI; os conectores pagos seguem desligados.
+3. Publique a Edge Function `investigacao-patrimonial-worker`. Ela exige a
+   sessão autenticada do CRM e confere pela RLS se o usuário pode acessar aquela
+   investigação. Não há n8n, cron nem segredo adicional para configurar.
 4. Teste primeiro com um cadastro de homologação. Confirme que o registro aparece
    na investigação, que o relatório baixa e que cedente/devedor não têm acesso.
 
 ## Credenciais e limites
 
-As credenciais ficam exclusivamente no n8n/Edge Function (ou no cofre deles), nunca no
+As credenciais de fontes profissionais ficam exclusivamente na Edge Function
+(ou no cofre dela), nunca no
 frontend nem em `investigacao_fontes`.
 
-| Variável n8n | Uso | Obrigatória |
+| Variável | Uso | Obrigatória |
 | --- | --- | --- |
 | `SUPABASE_URL` | URL do projeto Supabase | Sim |
-| `SUPABASE_SERVICE_ROLE_KEY` | Worker: lê fila e grava resultado | Sim, secreta |
-| `INVESTIGACAO_WORKER_INVOKE_SECRET` | Autoriza n8n a disparar a Edge Function | Sim, secreta |
+| `SUPABASE_SERVICE_ROLE_KEY` | Worker: grava resultados após validar a sessão | Sim, secreta |
 | `CNPJA_TOKEN` | Consulta profissional por sócio, se contratada | Não |
 | `PORTAL_TRANSPARENCIA_TOKEN` | API federal, se usada | Não |
 | `ESCAVADOR_TOKEN` | API/monitoramento Escavador, se contratado | Não |
@@ -44,9 +44,10 @@ custo por chamada e fundamento de acesso. Fontes marcadas como `judicial` ou
 `restrita` exigem também autorização explícita do responsável; não devem ser
 agendadas por padrão.
 
-## Contrato de entrada/saída do n8n
+## Processamento direto pelo CRM
 
-O worker busca `status=pendente`, atualiza para `em_andamento`, respeita
+O botão chama a Edge Function para a investigação que acabou de criar (ou o
+botão **Processar agora** para uma pendente), atualiza para `em_andamento`, respeita
 `profundidade_maxima` e `entidades_maximas`, e conclui com `concluida`,
 `aguardando_acesso` ou `falhou`.
 

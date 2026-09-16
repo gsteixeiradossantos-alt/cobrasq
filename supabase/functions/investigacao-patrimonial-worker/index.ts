@@ -5,11 +5,9 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const sb = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
-const INVOKE_SECRET = Deno.env.get('INVESTIGACAO_WORKER_INVOKE_SECRET') ?? '';
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type':'application/json' } });
 const dig = (v: unknown) => String(v ?? '').replace(/\D/g, '');
 const key = (v: unknown) => String(v ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
-async function safeEqual(a: string, b: string) { const enc=new TextEncoder(); const [x,y]=await Promise.all([crypto.subtle.digest('SHA-256',enc.encode(a)),crypto.subtle.digest('SHA-256',enc.encode(b))]); const aa=new Uint8Array(x),bb=new Uint8Array(y); let d=aa.length^bb.length; for(let i=0;i<Math.max(aa.length,bb.length);i++) d|=(aa[i]??0)^(bb[i]??0); return d===0; }
 async function hash(v: string) { const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(v)); return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join(''); }
 async function evento(id: string, tipo: string, mensagem: string, dados = {}) { await sb.from('investigacao_eventos').insert({investigacao_id:id,tipo,mensagem,dados}); }
 async function evidencia(inv: string, entidade: string, fonte: string, titulo: string, trecho: string, url = '') { const h=await hash([fonte,titulo,trecho,url].join('|')); await sb.from('investigacao_evidencias').upsert({investigacao_id:inv,entidade_id:entidade,fonte_codigo:fonte,titulo,trecho,url:url||null,confianca:fonte==='receita_rf'?85:75,hash_conteudo:h},{onConflict:'investigacao_id,fonte_codigo,hash_conteudo'}); }
@@ -84,11 +82,17 @@ async function processar(inv: any) {
 Deno.serve(async req => {
   if(req.method==='OPTIONS') return new Response('ok');
   if(req.method!=='POST') return json({error:'Method not allowed'},405);
-  const token=(req.headers.get('authorization')||'').replace(/^Bearer\s+/i,'').trim();
-  if(!INVOKE_SECRET || !token || !(await safeEqual(token,INVOKE_SECRET))) return json({error:'unauthorized'},401);
-  const body=await req.json().catch(()=>({})); const limit=Math.max(1,Math.min(Number(body.limit)||5,10));
-  const {data:pendentes,error}=await sb.from('investigacoes_patrimoniais').select('*').eq('status','pendente').order('created_at').limit(limit);
-  if(error) return json({error:error.message},500);
-  const resultados=[]; for(const inv of pendentes||[]) { try{resultados.push(await processar(inv));}catch(e){const msg=e instanceof Error?e.message:String(e); await sb.from('investigacoes_patrimoniais').update({status:'falhou',resumo:{erro:msg}}).eq('id',inv.id); await evento(inv.id,'status','Falha na coleta: '+msg); resultados.push({id:inv.id,erro:msg});} }
-  return json({ok:true,processadas:resultados.length,resultados});
+  const authorization=req.headers.get('authorization')||'';
+  const userClient=createClient(Deno.env.get('SUPABASE_URL') ?? '',Deno.env.get('SUPABASE_ANON_KEY') ?? '',{global:{headers:{Authorization:authorization}}});
+  const {data:{user},error:authError}=await userClient.auth.getUser();
+  if(authError || !user) return json({error:'unauthorized'},401);
+  const body=await req.json().catch(()=>({})); const id=String(body.investigacao_id||'');
+  if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) return json({error:'investigacao_id inválido'},400);
+  // A consulta usa a sessão do CRM e a RLS: o service role só entra depois de
+  // comprovar que este usuário pode ler exatamente esta investigação.
+  const {data:inv,error}=await userClient.from('investigacoes_patrimoniais').select('*').eq('id',id).single();
+  if(error || !inv) return json({error:'investigação não encontrada ou sem acesso'},404);
+  if(!['pendente','falhou','aguardando_acesso'].includes(inv.status)) return json({ok:true,id,status:inv.status,mensagem:'Investigação já processada.'});
+  try { return json({ok:true,resultado:await processar(inv)}); }
+  catch(e) { const msg=e instanceof Error?e.message:String(e); await sb.from('investigacoes_patrimoniais').update({status:'falhou',resumo:{erro:msg}}).eq('id',id); await evento(id,'status','Falha na coleta: '+msg); return json({error:msg},500); }
 });
