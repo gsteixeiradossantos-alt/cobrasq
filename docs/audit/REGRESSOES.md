@@ -668,3 +668,22 @@ recebíveis em vez de abrir geração nova — um pouso, dados prontos, repinte 
 `grep -rn "<símbolo>" test/` — os testes de recorte dependem de nomes, não só de comportamento.
 E todo PR que mexe no `index.html` tem de passar `npm test` **antes** do merge (o #738 subiu com
 a CI vermelha).
+
+## R-30 · Acordo parcelado em boleto gravado com `forma='avista'`
+
+**O que acontece.** O "Novo Acordo" (drawer) cria a linha em `acordos` com `forma:'avista'` fixo
+e `num_parcelas:0` — as parcelas só entram depois, no Termo (`_tajFecharAcordo`). Mas o Termo,
+no fluxo normal (acordo já vinculado, `!isNovo`), fazia `update` só de `parcelas`, `valor_total`,
+`num_parcelas`, `data_primeiro_venc` e `metadata` — `forma` nunca era regravada. Resultado: acordo
+15× boleto (Paulo Ricardo, `6927342a…`, 18/09/2026) ficou `forma='avista'`. No caminho defensivo
+`isNovo` o valor era `numParc>1?'outro':'avista'` — também nunca `'boleto'`.
+`api/_emitir-acordo.js` não lê `forma` (emite pelo `num_parcelas`/`blocos`), então o Asaas saiu
+certo; o erro é de dado, e engana quem consulta a tabela.
+
+**Teste.** `select id, forma, num_parcelas from acordos where num_parcelas > 1 and forma = 'avista'`
+— deve vir vazio para acordos fechados depois deste PR.
+
+**Estado-correto.** `forma` derivada das faixas do Termo (`_formaAcordoDasFaixas`): qualquer faixa
+em boleto → `'boleto'`; só PIX em 1 parcela → `'avista'`; PIX parcelado → `'outro'`. Gravada nos
+dois caminhos (`upsert` quando novo, `update` quando já existe) e no blob local (`acLocal.forma`).
+O `'avista'` do "Novo Acordo" fica como provisório e anotado como tal.

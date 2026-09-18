@@ -18419,7 +18419,7 @@ function abrirAcordo(devId){
   // (forma ∈ avista/boleto/cartao/outro; status ∈ ativo/encerrado/cancelado).
   upsertAcordoRelational(devId, {
     id: acordo.id,
-    forma: 'avista',
+    forma: 'avista', // provisório — _tajFecharAcordo regrava a partir das faixas do Termo
     status: 'ativo',
     parcelas: [],
     valorTotal: 0,
@@ -46203,6 +46203,16 @@ function _tajDados(){
 // já está dentro das faixas como a 1ª (1 parcela) — mantê-la também em
 // valor_entrada faria api/_emitir-acordo.js subtraí-la do total DE NOVO antes
 // de montar as séries do Asaas (R-19), cobrando a menos.
+// forma (acordos.forma ∈ avista/boleto/cartao/outro) derivada das faixas: qualquer
+// faixa em boleto → 'boleto' (é o que _emitir-acordo.js manda ao Asaas); só PIX em
+// 1 parcela → 'avista'; PIX parcelado → 'outro'. Antes o painel gravava 'avista'
+// fixo no "Novo Acordo" e o Termo não regravava — acordo 15× boleto ficava 'avista'.
+function _formaAcordoDasFaixas(faixas){
+  const temBoleto = faixas.some(b=>(b.meio||'boleto')!=='pix');
+  if(temBoleto) return 'boleto';
+  const numParc = faixas.reduce((s,b)=>s+b.qtd,0);
+  return numParc>1 ? 'outro' : 'avista';
+}
 async function _tajFecharAcordo(faixas, venc1){
   const devId = _tajState.devId;
   const dev = (DB.devedores||[]).find(d=>d.id===devId);
@@ -46210,6 +46220,7 @@ async function _tajFecharAcordo(faixas, venc1){
 
   const numParc = faixas.reduce((s,b)=>s+b.qtd,0);
   const valorTotal = round2(faixas.reduce((s,b)=>s+b.qtd*b.valor,0));
+  const forma = _formaAcordoDasFaixas(faixas);
   const [y,m,d] = venc1.split('-').map(Number);
   const parcelas = [];
   let mesOffset=0, seq=0;
@@ -46234,7 +46245,7 @@ async function _tajFecharAcordo(faixas, venc1){
     _tajState.acordoId = acordoId;
   }
   acLocal.parcelas = parcelas; acLocal.blocos = faixas; acLocal.numParc = numParc;
-  acLocal.valorTotal = valorTotal; acLocal.entrada = 0; acLocal.venc1 = venc1;
+  acLocal.valorTotal = valorTotal; acLocal.entrada = 0; acLocal.venc1 = venc1; acLocal.forma = forma;
   dev.status = 'Acordo'; dev.updatedAt = hoje();
   save();
   if(currentDevId===devId) renderDrawerBody(devId);
@@ -46242,7 +46253,7 @@ async function _tajFecharAcordo(faixas, venc1){
 
   if(isNovo){
     const res = await upsertAcordoRelational(devId, {
-      id: acordoId, forma: numParc>1?'outro':'avista', status:'ativo', parcelas,
+      id: acordoId, forma, status:'ativo', parcelas,
       valorTotal, valorEntrada:0, numParcelas:numParc, dataPrimeiroVenc:venc1,
       metadata: { obs: acLocal.obs||'', blocos: faixas }
     });
@@ -46258,7 +46269,7 @@ async function _tajFecharAcordo(faixas, venc1){
     const { data: cur } = await supa.from('acordos').select('metadata').eq('id', acordoId).maybeSingle();
     const metadata = { ...(cur && cur.metadata || {}), blocos: faixas };
     const { error } = await supa.from('acordos').update({
-      parcelas, valor_total: valorTotal, valor_entrada: 0, num_parcelas: numParc,
+      forma, parcelas, valor_total: valorTotal, valor_entrada: 0, num_parcelas: numParc,
       data_primeiro_venc: venc1, metadata
     }).eq('id', acordoId);
     if(error){ console.warn('[taj] fecharAcordo:', error.message); return false; }
