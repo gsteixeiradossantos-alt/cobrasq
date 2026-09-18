@@ -28,6 +28,21 @@
 // Para anexar a uma cobrança, acrescentar ao body: 'cobranca_id', '<uuid>',
 // 'categoria', 'devolucao-documento' (lista do painel), opcionalmente 'uploaded_by'
 // (uuid do usuário) e 'obs'. A resposta traz também { documento_id }.
+//
+// 18/09/2026 — modo "enviar" (opcional, retrocompatível). Se o body trouxer `telefone`,
+// a função faz o ciclo inteiro que antes exigia 3 SQLs manuais em produção (insert na
+// fila → net.http_post no worker → select de conferência): grava a linha em
+// `crm_mensagens_agendadas` (tipo='documento', origem 'manual_<origem>'), invoca
+// `cron-mensagens-agendadas` na hora e devolve o status REAL da linha depois do run.
+// Motivo: cada um daqueles SQLs é uma chamada em produção que uma sessão de IA pode
+// ter negada; com tudo aqui dentro, mandar um PDF vira UMA chamada HTTP autenticada
+// pelo mesmo CRON_INVOKE_SECRET (script whatsapp-cobrasq/scripts/enviar-pdf.sh).
+//   body: { base64, filename, telefone, legenda?, origem?, caso_id?, enviar?: true }
+//   resposta: { path, bytes, id, status, enviada_em, erro, tentativas, lote }
+// `status` é a coluna da fila após o run: 'enviada' é a única prova de entrega —
+// 'pendente' com `erro` preenchido = o worker tentou e a Z-API recusou (vai repetir
+// no cron); 'pendente' sem erro = o worker não pegou (lote cheio/adiada) — consultar
+// depois com body { consultar: <id> }.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
@@ -66,6 +81,20 @@ Deno.serve(async (req) => {
     payload = await req.json();
   } catch {
     return new Response(JSON.stringify({ error: 'body inválido: esperado JSON' }), { status: 400 });
+  }
+
+  const json = (obj: unknown, status = 200) =>
+    new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json' } });
+  const COLS = 'id, status, enviada_em, erro, tentativas, telefone, media_nome, origem';
+
+  // { consultar: <id> } — só lê o status de uma linha da fila (para conferir depois um
+  // envio que ficou 'pendente' na resposta do POST). Não exige base64.
+  if (payload?.consultar) {
+    const sbQ = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
+    const { data, error: qErr } = await sbQ.from('crm_mensagens_agendadas').select(COLS).eq('id', payload.consultar).maybeSingle();
+    if (qErr) return json({ error: 'consulta falhou: ' + qErr.message }, 500);
+    if (!data) return json({ error: 'linha não encontrada' }, 404);
+    return json(data);
   }
 
   const base64 = String(payload?.base64 || '');
@@ -163,8 +192,52 @@ Deno.serve(async (req) => {
     documentoId = doc?.id ?? null;
   }
 
-  return new Response(JSON.stringify({ path, bytes: bytes.byteLength, documento_id: documentoId }), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' },
-  });
+  const telefoneIn = String(payload?.telefone || '').replace(/\D/g, '');
+  if (!telefoneIn) return json({ path, bytes: bytes.byteLength, documento_id: documentoId });
+
+  // === modo enviar ===
+  // Telefone no formato da fila (55 + DDD + número). O worker resolve com/sem o nono
+  // dígito via phone-exists; a única armadilha real era a comparação com
+  // vw_conversas_pendentes, e origem 'manual_*' não cede a vez (worker, 21/08/2026).
+  if (telefoneIn.length < 10 || telefoneIn.length > 13) {
+    await sb.storage.from(BUCKET).remove([path]);
+    return json({ error: 'telefone inválido: ' + telefoneIn }, 400);
+  }
+  const telefone = telefoneIn.length <= 11 ? '55' + telefoneIn : telefoneIn;
+  const legenda = String(payload?.legenda ?? '');
+  const origemSlug = String(payload?.origem || 'anexo').replace(/^manual_/, '').replace(/[^a-z0-9_]+/gi, '_').toLowerCase().slice(0, 40) || 'anexo';
+  const origem = 'manual_' + origemSlug;
+  const mediaNome = safeName + '.pdf'; // com extensão — sem ela o nome chega cortado ao contato
+
+  const linha: Record<string, unknown> = {
+    telefone, tipo: 'documento', media_path: path, media_nome: mediaNome, media_mime: 'application/pdf',
+    legenda, mensagem: legenda, agendada_para: new Date().toISOString(), status: 'pendente', origem,
+  };
+  if (payload?.caso_id) linha.caso_id = payload.caso_id;
+
+  const { data: ins, error: insErr } = await sb.from('crm_mensagens_agendadas').insert(linha).select('id').single();
+  if (insErr || !ins) {
+    await sb.storage.from(BUCKET).remove([path]);
+    return json({ error: 'insert na fila falhou: ' + (insErr?.message || 'desconhecido') }, 500);
+  }
+
+  // Dispara o worker agora (mesma chamada que o cron faz a cada minuto). Se `enviar`
+  // vier false, só deixa na fila e o cron pega no próximo minuto.
+  let lote: unknown = null;
+  if (payload?.enviar !== false) {
+    try {
+      const r = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/cron-mensagens-agendadas`, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + expected, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(50000),
+      });
+      lote = await r.json().catch(() => ({ status: r.status }));
+    } catch (e) {
+      lote = { error: 'worker: ' + (e instanceof Error ? e.message : String(e)) };
+    }
+  }
+
+  const { data: row } = await sb.from('crm_mensagens_agendadas').select(COLS).eq('id', ins.id).maybeSingle();
+  return json({ path, bytes: bytes.byteLength, documento_id: documentoId, ...(row || { id: ins.id, status: 'pendente' }), lote });
 });
