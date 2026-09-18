@@ -5907,8 +5907,11 @@ async function _reidratarAcordos(devs){
     // chunks seguintes de serem sequer disparados; agora todos vão. São
     // ceil(devedores/200) requisições simultâneas — 5 hoje, com ~890 devedores.
     //
-    // NO BOOT elas voam sozinhas: o Promise.all das quatro queries e o
-    // loadGruposEconomicos() já foram aguardados quando esta função roda. Mas
+    // NO BOOT elas voam ao lado de mais duas coisas: o Promise.all das quatro
+    // queries já foi aguardado quando esta função roda, mas loadGruposEconomicos()
+    // dispara no MESMO instante (as duas entraram num Promise.all — não têm estado
+    // em comum, só corrida de rede).
+    //
     // loadRelationalData tem outros 5 chamadores DENTRO do app (login gestor e
     // cedente, import, atender solicitação, salvar cobrança), e nesses o pico é
     // maior: salvar uma cobrança com a tela Cobranças aberta faz estes chunks
@@ -6059,9 +6062,13 @@ async function loadRelationalData(){
   _mergeDividaFromCobrancas();
   // Valor atualizado sempre corrente: recalcula HOJE em memória (compute-on-read).
   _refrescarValorAtualHoje();
-  await loadGruposEconomicos();
-  // Reidrata os acordos da tabela dedicada (abrirAcordo/toggleParcela persistem lá).
-  await _reidratarAcordos(DB.devedores);
+  // Independentes entre si (grupos econômicos não leem/escrevem acordos, e vice-versa) —
+  // rodavam em série (~170ms + ~530ms medidos) sem precisar.
+  await Promise.all([
+    loadGruposEconomicos(),
+    // Reidrata os acordos da tabela dedicada (abrirAcordo/toggleParcela persistem lá).
+    _reidratarAcordos(DB.devedores)
+  ]);
   // F-20 (Fase 2): rebaseia a referência anti-encolhimento ao que ESTE usuário REALMENTE
   // carregou. O blob (cobrasq_data) tem TODOS os devedores (RLS SELECT=true), mas o
   // relacional traz só os do colaborador (RLS por linha). Sem isto, _lastKnownDevCount e
@@ -49785,6 +49792,11 @@ document.addEventListener('DOMContentLoaded', ()=>{
         try{ showToast('Seu link expirou. Entre com CPF e data de nascimento.','info'); }catch(_){}
       }
     } catch(_){ /* segue o boot normal */ }
+    // Declarada aqui (fora do `if(supa)`) para o fallback "sem sessão" no fim da função
+    // também conseguir aguardá-la — senão ficaria fora de escopo lá e a carga relacional
+    // (quando chega a ser disparada, ver passo 3b) ficaria voando sem que NENHUMA saída
+    // da função a aguardasse nesse caminho específico.
+    let _pCargaRelacional = null;
     if(supa){
       // 2. Registra listener de eventos de autenticação (inclui PASSWORD_RECOVERY)
       supa.auth.onAuthStateChange((event, session)=>{
@@ -49802,8 +49814,28 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
       // 3. Sincronizar dados do Supabase antes de mostrar login
       await loadFromSupabase();
-      // 3b. Sobrescreve devedores/clientes com tabelas relacionais (fonte da verdade pós-Fase 2.5)
-      await loadRelationalData();
+      // 3b. Dispara a carga relacional (devedores/clientes/cobranças/acordos — ~3s medidos
+      // em produção) SEM esperar: ela não depende da sessão/perfil que vem a seguir, e as
+      // duas rodavam em série (perfil só começava depois da relacional inteira terminar).
+      // O `await` desta promise foi só ADIADO para o ponto em que currentUser é montado —
+      // continua bloqueando iniciarSessao(), só que agora em paralelo com o passo 4/5.
+      // .catch aqui é rede de segurança: loadRelationalData já trata suas falhas de rede/RLS
+      // internamente (modo seguro, ver comentário lá dentro), mas se algo mesmo assim escapar
+      // (ex.: dado malformado estourando no meio da função, antes do rebase da trava F-20),
+      // cai no MESMO modo seguro em vez de travar o boot em silêncio — que era o efeito de um
+      // reject não tratado aqui antes desta mudança (a promise ficava direto no await).
+      _pCargaRelacional = loadRelationalData().catch(e=>{
+        console.warn('[boot] loadRelationalData:', e && e.message);
+        _relReadFailed = true;
+        try{ showToast('Não consegui carregar os dados completos do servidor. Recarregue (F5) antes de salvar.', 'danger'); }catch(_){}
+        return null;
+      });
+      // Toda saída do bloco abaixo (recovery/invite/conta ausente/perfil com erro/conta
+      // desativada, e o caminho de sucesso) precisa aguardar esta carga antes de sair — senão
+      // ela fica voando sozinha e pode colidir com um loadRelationalData() de um login manual
+      // logo em seguida (doLogin), cada um escrevendo por cima do outro em DB.devedores/
+      // DB.clientes/_lastKnownDevCount/_syncSnapshot (não tem porteiro nestes, ao contrário de
+      // DB_cobrancas). `.catch` acima garante que este await nunca rejeita.
       // 4. Verificar sessão ativa (auto-login)
       const { data: { session } } = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
       if(session){
@@ -49811,10 +49843,12 @@ document.addEventListener('DOMContentLoaded', ()=>{
         // casos não auto-loga; mostra form de definir/criar senha.
         const hash = window.location.hash || '';
         if(hash.includes('type=recovery')){
+          await _pCargaRelacional;
           mostrarRecuperacao('recovery');
           return;
         }
         if(hash.includes('type=invite') || hash.includes('type=signup')){
+          await _pCargaRelacional;
           mostrarRecuperacao('invite');
           return;
         }
@@ -49823,6 +49857,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
         // (rede/token renovando no refresh) NÃO pode deslogar — antes derrubava o app no F5.
         const appUserRes = await carregarAppUserComRetry(supa, session.user.id);
         if(appUserRes.status === 'absent'){
+          await _pCargaRelacional;
           await supa.auth.signOut();
           showToast('Sua conta não está cadastrada como usuário interno. Contate o gestor.','danger');
           document.getElementById('loginScreen').classList.add('active');
@@ -49831,23 +49866,33 @@ document.addEventListener('DOMContentLoaded', ()=>{
         if(appUserRes.status === 'error'){
           // Não conseguimos ler o perfil agora (e nem após 1 retry). PRESERVA a sessão
           // (sem signOut) e pede recarregar — um F5 normalmente resolve quando o token assenta.
+          await _pCargaRelacional;
           showToast('Não consegui carregar seu perfil agora (falha temporária). Recarregue a página.','warning');
           document.getElementById('loginScreen').classList.add('active');
           return;
         }
         const appUser = appUserRes.user;
         if(appUser.ativo === false){
+          await _pCargaRelacional;
           await supa.auth.signOut();
           showToast('Sua conta foi desativada. Contate o gestor.','danger');
           document.getElementById('loginScreen').classList.add('active');
           return;
         }
+        // 5. Só agora precisa mesmo dos devedores/clientes/cobranças — junta com a carga
+        // relacional disparada no passo 3b (que já correu em paralelo com os passos 4/4b).
+        await _pCargaRelacional;
         currentUser = montarCurrentUserDeAppUser(appUser, session.user);
         iniciarSessao();
         return;
       }
     }
-    // Sem Supabase ou sem sessão: verifica hash manual (fallback)
+    // Sem Supabase ou sem sessão: verifica hash manual (fallback). Se a carga relacional
+    // chegou a ser disparada (supa existe, mas a sessão não — caso comum: visita normal à
+    // tela de login), ela mesma já retorna quase na hora (loadRelationalData confere sessão
+    // e sai sem tocar em DB.* se não houver uma) — mas aguardamos assim mesmo para fechar
+    // o mesmo risco de carga-órfã-colidindo-com-login-manual dos outros caminhos.
+    if(_pCargaRelacional) await _pCargaRelacional;
     const _h = window.location.hash || '';
     if(_h.includes('type=recovery') && getSupabase()){
       mostrarRecuperacao('recovery');
