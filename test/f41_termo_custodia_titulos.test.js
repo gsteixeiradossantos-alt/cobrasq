@@ -9,6 +9,7 @@
  * (CC 360/361), reconhecimento do débito (CC 202, VI), garantias de fiadores/avalistas
  * preservadas, promessa de não apresentar/protestar enquanto adimplente, escolha da via
  * de cobrança no vencimento antecipado, devolução em 10 dias úteis após a quitação
+ * (estrutura fechada pelo Dr. Gustavo em 18/09/2026: caput + §§ 1º a 4º)
  * (custo de envio informado antes; comprovante a pedido) e inutilização por
  * cancelamento visível ("PAGO", rasura, corte) após 30 dias.
  *
@@ -80,30 +81,32 @@ const dados = {
       assert.ok(/custo do envio será informado previamente/.test(c));
       assert.ok(/emitirá comprovante da entrega ou da inutilização/.test(c));
     });
-    checa(nome + ': inutilização por cancelamento visível após 30 dias', () => {
+    checa(nome + ': inutilização por cancelamento visível após 30 dias; numeração fecha no § 4º', () => {
+      assert.ok(/§ 4º Decorridos/.test(c) && !/§ 5º/.test(c));
       assert.ok(/30 \(trinta\) dias/.test(c));
-      assert.ok(/cancelamento visível/.test(c) && /carimbo "PAGO", rasura, corte/.test(c));
+      assert.ok(/cancelamento visível, aposição de carimbo "PAGO", rasura, corte/.test(c));
     });
     checa(nome + ': nenhum placeholder {{...}} sem preencher', () => assert.ok(!/\{\{\w+\}\}/.test(c)));
   }
 
-  checa('extrajudicial cl. 05: não novação (CC 360/361), reconhecimento (CC 202, VI), garantias de fiadores/avalistas preservadas', () => {
+  checa('extrajudicial cl. 05: caput = não novação (CC 360/361), reconhecimento (CC 202, VI), garantias de fiadores/avalistas preservadas', () => {
+    assert.ok(/^[^§]*não configura novação/.test(c5.replace(/^.*?clause-body/, '')) || /não configura novação[^§]*§ 1º/.test(c5), 'não novação deve vir antes do § 1º');
     assert.ok(/não configura novação \(arts\. 360 e 361 do Código Civil\)/.test(c5));
     assert.ok(/art\. 202, VI, do Código Civil/.test(c5));
     assert.ok(/fiadores, avalistas, coobrigados ou terceiros garantidores/.test(c5));
     assert.ok(/somente se extinguindo com a quitação integral/.test(c5));
   });
-  checa('extrajudicial cl. 05: remete ao vencimento antecipado da cláusula 04 "b"; partes = credora/devedora', () => {
-    assert.ok(/\(cláusula 04, alínea "b"\)/.test(c5));
+  checa('extrajudicial cl. 05: remete ao vencimento antecipado da cláusula 04; partes = credora/devedora', () => {
+    assert.ok(/\(cláusula 04\)/.test(c5));
     assert.ok(/parte devedora/.test(c5) && /credora/.test(c5) && !/exequente|executad/.test(c5));
   });
   checa('extrajudicial cl. 10: quitação com devolução dos títulos na forma da cláusula 05', () => {
     assert.ok(/com a devolução dos títulos na forma da cláusula 05/.test(clausula(extra, '10')));
   });
 
-  checa('judicial cl. 8: sem § 1º (a cláusula 6 já afasta a novação); remete ao vencimento antecipado da cláusula 5 "b"', () => {
-    assert.ok(!/§ 1º/.test(c8) && /§ 2º/.test(c8));
-    assert.ok(/\(cláusula 5, alínea "b"\)/.test(c8));
+  checa('judicial cl. 8: sem caput de novação (a cláusula 6 já a afasta); §§ 1º a 4º; remete ao vencimento antecipado da cláusula 5', () => {
+    assert.ok(!/não configura novação/.test(c8) && /§ 1º Os títulos/.test(c8) && /§ 4º/.test(c8) && !/§ 5º/.test(c8));
+    assert.ok(/\(cláusula 5\)/.test(c8));
     assert.ok(/não configura novação/.test(clausula(jud, '6')));
   });
   checa('judicial cl. 8: partes = exequente/executada (sem credora/devedora)', () => {
