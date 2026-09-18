@@ -42,6 +42,14 @@ teve a `crm-cobrasq-auth` removida no merge). Não é preciso `sso_token` entre 
 - A view `casos`/`view_casos` é **fonte única aqui**. Toda redefinição deve re-declarar
   `WITH (security_invoker = true)` (guarda anti-drift F-04 — ver
   `supabase/migrations/README.md`).
+- `cobrancas.fora_crm=true` tira o caso da view `casos` (não é arquivamento nem
+  encerramento, ver comentário da coluna). Lido em produção por `bia-atendimento`,
+  `beatriz-msg` e `peticao-assistente` via `.from('casos')` — um `fora_crm` indevido faz
+  a Bia responder ao credor "não encontrei esse caso" mesmo ele existindo, ou bloqueia
+  (403) petição/sugestão de resposta pra aquele caso. Só marcar quando bater com o
+  critério da coluna (judicial protocolado, acordo assinado, concluído, acordo firmado
+  fora) — achado em 18/09/2026 (caso "Paulo Cesar de Souza Valente" estava com `fora_crm`
+  sem nenhum desses motivos; corrigido).
 - Edge functions já implantadas; não redeployar sem necessidade.
 
 ## Dual-write blob + relacional (armadilha nº 1)
@@ -49,8 +57,12 @@ O app ainda **lê o blob** (`DB.*`) e escreve **blob + tabelas relacionais**. Co
 - **Dono do caso vive em dois lugares**: `assigned_to` (relacional, UUID) e nome no
   blob/metadata. Transferência tem que sincronizar **ambos** — usar
   `scripts/transferir-responsavel.sql`.
-- `devedores` e `cobrancas` compartilham o **mesmo id** (1:1); a view `casos` é a fonte
-  única do CRM.
+- `devedores` e `cobrancas` compartilham o **mesmo id** só nos casos legado (1:1). O
+  caminho atual e correto pra achar o devedor de uma cobrança é `cobrancas.id →
+  cobranca_partes.cobranca_id (principal=true) → devedores.id` — é o que a própria view
+  `casos` usa, e sustenta múltiplos devedores/corresponsáveis por cobrança. Join direto
+  por id sem passar por `cobranca_partes` já deixou ~5 de 86 casos de fora numa consulta
+  (18/09/2026). A view `casos` é a fonte única do CRM.
 - Import só relacional **não aparece no portal do cedente** (que lê `DB.devedores` do
   blob) sem backfill no blob.
 - Rascunhos: `metadata.isDraft` existe em `devedores` **e** `cobrancas`; a coluna
