@@ -197,8 +197,16 @@ async function varrerIMAP(opts: { dias?: number; limit?: number; from?: string }
   let emails = 0, atos = 0;
   const cobrMap = await carregarCobrancasMap();
   // Pré-carrega UIDs já processados (evita query por e-mail e re-custo de IA).
-  const { data: procData } = await sb.from('email_msgs_processadas').select('uid').limit(50000);
-  const processados = new Set((procData || []).map((x: any) => x.uid));
+  // Paginado: o PostgREST devolve no máximo 1000 linhas por consulta, ignorando
+  // `.limit()` maior — com >1000 uids a lista ficava truncada e os e-mails de fora
+  // iam para a IA de novo a cada run (1,1 M tokens Haiku em 18/09/2026).
+  const processados = new Set<string>();
+  for (let de = 0; ; de += 1000) {
+    const { data: pag, error: ePag } = await sb.from('email_msgs_processadas').select('uid').range(de, de + 999);
+    if (ePag) throw new Error('email_msgs_processadas: ' + ePag.message);
+    for (const x of (pag || [])) processados.add(x.uid);
+    if (!pag || pag.length < 1000) break;
+  }
   await client.connect();
   const lock = await client.getMailboxLock('INBOX');
   try {
@@ -221,7 +229,8 @@ async function varrerIMAP(opts: { dias?: number; limit?: number; from?: string }
       const n = await processarEmail({ uid: msgId, from, subject, date, body }, cobrMap);
       atos += n; emails++;
       processados.add(msgId);
-      await sb.from('email_msgs_processadas').insert({ uid: msgId, assunto: subject, remetente: from, recebido_em: date, atos_extraidos: n });
+      const { error: eProc } = await sb.from('email_msgs_processadas').insert({ uid: msgId, assunto: subject, remetente: from, recebido_em: date, atos_extraidos: n });
+      if (eProc) console.error('[intim-email] email_msgs_processadas', eProc.message);
     }
   } finally {
     lock.release();
