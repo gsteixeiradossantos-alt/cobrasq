@@ -64,8 +64,30 @@ extensão preenche o que dá e avisa para avançar via **"Próxima"** até a eta
 - `content-app.js` — no app: lê o token de sessão e envia ao background.
 - `background.js` — guarda o token (sessão), fala com `/api/eproc-peticionamento`, baixa o PDF.
 - `content-eproc.js` — no eproc: preenche o formulário, para no Protocolar, painel de revisão.
+- `content-projudi.js` — no Projudi TJPR: motor completo (ver seção própria abaixo).
+- `content-pje.js` — no PJe: **só detecção + botão de captura de tela, ainda sem preencher
+  nada** (ver § PJe abaixo).
 - `selectors.js` — **seletores do eproc (ponto frágil — validar)**.
 - `popup.html` / `popup.js` — lista os jobs e dispara o preenchimento.
+
+## PJe — em fase de calibração (sem automação ainda)
+
+`content-pje.js` roda em domínios `pje*.<algo>.jus.br` (ex.: `pje.tjmt.jus.br`,
+`pje1g.trf1.jus.br`) e **não preenche nem clica em nada** — só mostra um painel avisando
+que a automação ainda não existe e injeta o botão **📋 HTML (PJe)** para capturar a tela.
+
+Tribunais em PJe usados pelo Gustavo (levantado em 2026-09-19): **TJMT**, **TRF** (Justiça
+Federal) e mais algum TJ estadual em PJe (a confirmar qual). Calibração escolhida: **com
+capturas reais** (mesmo caminho que funcionou para o Projudi — nunca escrever seletor
+"no escuro" contra manual, porque protocolo é irreversível).
+
+Para avançar, precisamos — por tela, com print + o HTML do botão 📋 — de: (1) busca do
+processo, (2) petição intercorrente (juntar documento em processo existente), (3) petição
+inicial/distribuição (se usada), (4) seleção de tipo de documento, (5) upload de arquivo,
+(6) confirmação de protocolo/tela de sucesso. Cada uma vira um `telaX()` em
+`content-pje.js`, no mesmo padrão fail-closed do Projudi (confere o número do processo na
+tela antes de agir, pausa quando não reconhece, nunca clica no botão final sozinho sem o
+toggle de auto-conclusão).
 
 ## Dependências no servidor (Gustavo)
 
