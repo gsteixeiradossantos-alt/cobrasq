@@ -402,10 +402,10 @@
    * JUDICIAL — termo de acordo p/ homologação (art. 515, II, CPC)
    * Mesma base do extrajudicial + placeholders judiciais: endereçamento ao juízo,
    * nº do processo, cláusula 4 variável (Sisbajud | concentração/desistência |
-   * consolidação) e o contato da parte executada (cláusula 7).
+   * nenhuma) e o contato da parte executada.
    * dados.judicial = { numeroProcesso, comarca, foro:'jec'|'vara',
  *   rito:'execucao'|'conhecimento' (default execucao — ver papeisRito),
-   *   clausula4:{ mode:'desistencia'|'sisbajud'|'consolidacao',
+   *   clausula4:{ mode:''|'desistencia'|'sisbajud',
    *               procPrincipal, proc2, comarca2, valorBloqueado } }
    * ======================================================================== */
   function enderecamentoJudicial(j) {
@@ -449,7 +449,7 @@
   function clausula4Judicial(dados) {
     const j = dados.judicial || {};
     const c4 = j.clausula4 || {};
-    const mode = c4.mode || "consolidacao";
+    const mode = c4.mode || "";
     const pj = papeisRito(ritoJudicial(j));
     const PC = pj.parteCredor, PD = pj.parteDevedor;
     if (mode === "sisbajud") {
@@ -490,11 +490,7 @@
           " sob os autos n. " + proc2 + ", com o que expressamente anui a " + PD + ", respondendo cada parte pelos honorários de seus respectivos patronos naquele feito.</p>"
       };
     }
-    return {
-      titulo: "Da consolidação do débito neste feito",
-      corpo:
-        "<p>As partes convencionam que a totalidade da dívida discutida encontra-se consolidada e composta exclusivamente no presente feito, comprometendo-se a " + PC + " a promover as baixas e comunicações pertinentes após o cumprimento integral do acordo.</p>"
-    };
+    return null;
   }
 
   function contatoReJudicial(dados) {
@@ -524,8 +520,10 @@
     const c4 = clausula4Judicial(dados);
     base.enderecamento = enderecamentoJudicial(j);
     base.numeroProcesso = escAttr(j.numeroProcesso || "");
-    base.clausula4Titulo = c4.titulo;
-    base.clausula4Corpo = c4.corpo;
+    base.clausula4Titulo = c4 ? c4.titulo : "";
+    base.clausula4Corpo = c4 ? c4.corpo : "";
+    // sem cláusula 4 variável, o vencimento antecipado vira a cláusula 4
+    base.clVenc = c4 ? "5" : "4";
     const rito = ritoJudicial(j);
     const pj = papeisRito(rito);
     base.contatoRe = contatoReJudicial(dados);
@@ -546,9 +544,23 @@
     return base;
   }
 
+  // renumera as cláusulas em sequência (o slot variável pode ter sido removido)
+  function renumerarClausulas(html) {
+    let n = 0;
+    return html.replace(/(<span class="clause-num">)\d+(<\/span>)/g, function (m, a, b) {
+      n += 1;
+      return a + n + b;
+    });
+  }
+
   // preenche já permitindo HTML nos valores de cláusula 4 / contato (não escapa esses)
   function preencherJudicial(templateHtml, dados) {
     const map = placeholdersJudicial(dados);
+    if (!map.clausula4Titulo) {
+      // nenhum conteúdo para o slot variável: remove o bloco inteiro
+      templateHtml = templateHtml.replace(/<!--c4-->[\s\S]*?<!--\/c4-->\s*/, "");
+    }
+    templateHtml = renumerarClausulas(templateHtml);
     const rawHtml = { clausula4Corpo: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1, frasePagamento: 1, fraseEntregaBoletos: 1, credorQualificacao: 1, vistosPageCss: 1 };
     return templateHtml.replace(/\{\{(\w+)\}\}/g, function (m, k) {
       if (!Object.prototype.hasOwnProperty.call(map, k)) return m;
