@@ -283,6 +283,33 @@
     return comarcaDaQualificacao(cr.qualificacao) || FORO_PADRAO;
   }
 
+  // Cláusula 1: quando o acordo é abatimento sobre uma dívida já atualizada, o
+  // termo diz de quanto era o débito e que o desconto é liberalidade das partes.
+  // Sem dados.acordo.valorAtualizado, sai a redação de sempre.
+  function fraseReconhecimentoDivida(dados, contexto) {
+    const ac = dados.acordo || {};
+    const q = ac.quitacao || {};
+    const atual = ac.valorAtualizado || q.valorAtualizado;
+    const dtAtual = ac.dataAtualizacao || q.dataAtualizacao;
+    const total = "<strong>" + valorCompleto(ac.total || 0) + "</strong>";
+    const jud = contexto === "judicial";
+    const quem = jud ? papeisRito(ritoJudicial(dados.judicial)).parteDevedor : "parte devedora";
+    const ondeDebito = jud ? "discutido nestes autos" : "descrito neste instrumento";
+    if (atual) {
+      const oque = jud ? "do presente feito" : "do presente débito";
+      const em = dtAtual ? " para " + dataExtenso(dtAtual) : "";
+      return "O valor atual " + oque + " está atualizado em <strong>" + valorCompleto(atual) +
+        "</strong>" + em + ", do qual a " + quem + " reconhece, de forma expressa, a existência, liquidez e " +
+        "exigibilidade do débito " + ondeDebito + ". No entanto, por mera liberalidade das partes, essas " +
+        "acordaram o pagamento do valor para quitação total do débito, no valor total de " + total + ".";
+    }
+    const consolid = jud
+      ? ", valor este que representa a consolidação integral do débito até a presente data, já considerados os encargos incidentes até este ato, conforme composição aceita pelas partes."
+      : ", valor este que representa a consolidação do montante devido até a data da assinatura, já considerados os encargos incidentes até então, conforme ajuste entre as partes.";
+    return "A " + quem + " reconhece, de forma expressa, a existência, liquidez e exigibilidade do débito " +
+      ondeDebito + ", no valor total de " + total + consolid;
+  }
+
   // Mapa placeholder → valor
   function placeholders(dados) {
     const cr = dados.credor || {}, ac = dados.acordo || {};
@@ -296,6 +323,7 @@
       assinaturasDevedores: assinaturasDevedores(devs),
       vistosPageCss: vistosPageCss(devs.length),
       valorDivida: valorCompleto(ac.total),
+      fraseReconhecimentoDivida: fraseReconhecimentoDivida(dados, "extrajudicial"),
       frasePagamento: frasePagamento(ac),
       fraseEntregaBoletos: fraseEntregaBoletos(ac, cr.genero),
       multaBoleto: pctExt(ac.multa != null ? ac.multa : 10),
@@ -526,6 +554,7 @@
     base.clVenc = c4 ? "5" : "4";
     const rito = ritoJudicial(j);
     const pj = papeisRito(rito);
+    base.fraseReconhecimentoDivida = fraseReconhecimentoDivida(dados, "judicial");
     base.contatoRe = contatoReJudicial(dados);
     base.assinaturaAdvExec = assinaturaAdvExec(dados.advogadoExec, rito);
     // modo judicial: exequente/executada (execução) ou autora/requerida
@@ -561,7 +590,7 @@
       templateHtml = templateHtml.replace(/<!--c4-->[\s\S]*?<!--\/c4-->\s*/, "");
     }
     templateHtml = renumerarClausulas(templateHtml);
-    const rawHtml = { clausula4Corpo: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1, frasePagamento: 1, fraseEntregaBoletos: 1, credorQualificacao: 1, vistosPageCss: 1 };
+    const rawHtml = { fraseReconhecimentoDivida: 1, clausula4Corpo: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1, frasePagamento: 1, fraseEntregaBoletos: 1, credorQualificacao: 1, vistosPageCss: 1 };
     return templateHtml.replace(/\{\{(\w+)\}\}/g, function (m, k) {
       if (!Object.prototype.hasOwnProperty.call(map, k)) return m;
       return rawHtml[k] ? String(map[k] == null ? "" : map[k]) : escAttr(map[k]);
@@ -604,9 +633,11 @@
     const q = ac.quitacao || {};
     const pj = papeisRito(ritoJudicial(dados.judicial));
     const total = "<strong>" + valorCompleto(ac.total || 0) + "</strong>";
-    if (q.valorAtualizado) {
-      const em = q.dataAtualizacao ? " para " + dataExtenso(q.dataAtualizacao) : "";
-      return "O valor atual do presente feito está atualizado em <strong>" + valorCompleto(q.valorAtualizado) +
+    const atual = ac.valorAtualizado || q.valorAtualizado;
+    const dtAtual = ac.dataAtualizacao || q.dataAtualizacao;
+    if (atual) {
+      const em = dtAtual ? " para " + dataExtenso(dtAtual) : "";
+      return "O valor atual do presente feito está atualizado em <strong>" + valorCompleto(atual) +
         "</strong>" + em + ", do qual a " + pj.parteDevedor + " reconhece, de forma expressa, a existência, liquidez e " +
         "exigibilidade do débito discutido nestes autos. No entanto, por mera liberalidade das partes, essas acordaram " +
         "o pagamento do valor para quitação total do débito, no valor total de " + total + ".";
@@ -680,6 +711,7 @@
   }
 
   global.TermoEngine = {
+    fraseReconhecimentoDivida,
     extInt, reaisExt, valorCompleto, pctExt, dataExtenso, estadoFrase,
     qualifDevedor, qualifCredor, frasePagamento, fraseEntregaBoletos, placeholders,
     foroDe, comarcaDaQualificacao,
