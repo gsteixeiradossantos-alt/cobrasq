@@ -582,6 +582,103 @@
     return preencherJudicial(tpl, dados);
   }
 
+  /* ═══════════ Termo de acordo com QUITAÇÃO JÁ REALIZADA ═══════════
+   * O valor já entrou. Por isso este termo NÃO tem encargos por atraso,
+   * vencimento antecipado, cláusula penal, custódia dos títulos em garantia
+   * nem manutenção das penhoras — a cláusula das constrições é de LIBERAÇÃO
+   * (arts. 924, II, e 925 do CPC). Se o débito ainda será pago, o termo certo
+   * é o de parcelamento (montarTermoJudicial).
+   *
+   * Reaproveita a casca do acordo-judicial.html (cabeçalho, preâmbulo, fecho,
+   * assinaturas e as fontes embutidas) e troca só o miolo da
+   * <section class="clauses"> pelo fragmento acordo-quitacao-clausulas.html —
+   * assim as fontes base64 não são duplicadas num segundo arquivo.
+   *
+   * Campos extras em dados.acordo.quitacao:
+   *   valorAtualizado   (number, opcional) — dívida atualizada antes do desconto
+   *   dataAtualizacao   (ISO, opcional)    — data dessa atualização
+   *   dataPagamento     (ISO)              — quando o valor entrou
+   */
+  function fraseReconhecimento(dados) {
+    const ac = dados.acordo || {};
+    const q = ac.quitacao || {};
+    const pj = papeisRito(ritoJudicial(dados.judicial));
+    const total = "<strong>" + valorCompleto(ac.total || 0) + "</strong>";
+    if (q.valorAtualizado) {
+      const em = q.dataAtualizacao ? " para " + dataExtenso(q.dataAtualizacao) : "";
+      return "O valor atual do presente feito está atualizado em <strong>" + valorCompleto(q.valorAtualizado) +
+        "</strong>" + em + ", do qual a " + pj.parteDevedor + " reconhece, de forma expressa, a existência, liquidez e " +
+        "exigibilidade do débito discutido nestes autos. No entanto, por mera liberalidade das partes, essas acordaram " +
+        "o pagamento do valor para quitação total do débito, no valor total de " + total + ".";
+    }
+    return "A " + pj.parteDevedor + " reconhece, de forma expressa, a existência, liquidez e exigibilidade do débito " +
+      "discutido nestes autos. Por mera liberalidade das partes, essas acordaram o pagamento do valor de " + total +
+      " para quitação total do débito.";
+  }
+
+  function frasePagamentoRealizado(dados) {
+    const ac = dados.acordo || {};
+    const q = ac.quitacao || {};
+    const pj = papeisRito(ritoJudicial(dados.judicial));
+    const total = "<strong>" + valorCompleto(ac.total || 0) + "</strong>";
+    const dt = q.dataPagamento || ac.vencimento;
+    const quando = dt ? ", em <strong>" + dataExtenso(dt) + "</strong>" : "";
+    const chave = String(ac.pixChave || "").trim();
+    const via = chave ? ", via Pix" : "";
+    let out = "O pagamento do valor total da dívida, ou seja, de " + total + ", foi realizado em parcela única" +
+      via + quando + ".";
+    if (chave) {
+      out += " O pagamento via Pix foi feito para a chave <strong>" + escHtml(chave) + "</strong>, de titularidade da " +
+        pj.parteCredor + ".";
+    }
+    return out;
+  }
+
+  function placeholdersQuitacao(dados) {
+    const base = placeholdersJudicial(dados);
+    base.fraseReconhecimento = fraseReconhecimento(dados);
+    base.frasePagamentoRealizado = frasePagamentoRealizado(dados);
+    // o termo de quitação não tem slot de cláusula variável nem cláusula de
+    // vencimento antecipado — zera para o bloco <!--c4--> ser removido
+    base.clausula4Titulo = "";
+    base.clausula4Corpo = "";
+    return base;
+  }
+
+  // troca o miolo da <section class="clauses"> da casca judicial pelo fragmento
+  function aplicarClausulasQuitacao(tplJud, clausulas) {
+    // o comentário de cabeçalho do fragmento é documentação do repo: fora do termo
+    clausulas = String(clausulas).replace(/<!--[\s\S]*?-->/g, "").trim();
+    const re = /(<section class="clauses">)[\s\S]*?(<\/section>)/;
+    if (!re.test(tplJud)) throw new Error("Casca do termo judicial sem <section class=\"clauses\">");
+    return tplJud.replace(re, function (m, a, b) { return a + "\n" + clausulas + "\n  " + b; });
+  }
+
+  function preencherQuitacao(templateHtml, dados) {
+    const map = placeholdersQuitacao(dados);
+    const rawHtml = { contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1,
+      credorQualificacao: 1, vistosPageCss: 1, fraseReconhecimento: 1, frasePagamentoRealizado: 1 };
+    return templateHtml.replace(/\{\{(\w+)\}\}/g, function (m, k) {
+      if (!Object.prototype.hasOwnProperty.call(map, k)) return m;
+      return rawHtml[k] ? String(map[k] == null ? "" : map[k]) : escAttr(map[k]);
+    });
+  }
+
+  let _tplQuit = null;
+  async function carregarClausulasQuitacao() {
+    if (_tplQuit) return _tplQuit;
+    const r = await fetch("/templates/acordo-quitacao-clausulas.html", { cache: "force-cache" });
+    if (!r.ok) throw new Error("Falha ao carregar as cláusulas do termo de quitação (HTTP " + r.status + ")");
+    _tplQuit = await r.text();
+    return _tplQuit;
+  }
+
+  async function montarTermoQuitacao(dados) {
+    const casca = await carregarTemplateJudicial();
+    const clausulas = await carregarClausulasQuitacao();
+    return preencherQuitacao(aplicarClausulasQuitacao(casca, clausulas), dados);
+  }
+
   global.TermoEngine = {
     extInt, reaisExt, valorCompleto, pctExt, dataExtenso, estadoFrase,
     qualifDevedor, qualifCredor, frasePagamento, fraseEntregaBoletos, placeholders,
@@ -591,6 +688,8 @@
     credorEhCobrasq, timbreDe, carregarTimbreTA, aplicarTimbreTA,
     ritoJudicial, papeisRito,
     enderecamentoJudicial, clausula4Judicial, contatoReJudicial, contaFrase, assinaturaAdvExec,
-    placeholdersJudicial, preencherJudicial, carregarTemplateJudicial, montarTermoJudicial
+    placeholdersJudicial, preencherJudicial, carregarTemplateJudicial, montarTermoJudicial,
+    fraseReconhecimento, frasePagamentoRealizado, placeholdersQuitacao, aplicarClausulasQuitacao,
+    preencherQuitacao, carregarClausulasQuitacao, montarTermoQuitacao
   };
 })(typeof window !== "undefined" ? window : globalThis);
