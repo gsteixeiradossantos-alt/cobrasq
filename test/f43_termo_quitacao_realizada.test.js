@@ -66,8 +66,9 @@ const dados = {
   checa('penhoras são LIBERADAS, não mantidas', () => {
     assert.ok(titulos.includes('Liberação das penhoras e constrições'), 'títulos: ' + titulos.join(' | '));
     assert.ok(!/Manutenção das penhoras/i.test(html), 'sobrou a cláusula de manutenção das penhoras');
-    assert.ok(/anuência ao levantamento/i.test(t));
-  });
+    assert.ok(/bloqueios, serasajud e constrições/.test(t), 'serasajud não entrou na liberação');
+    assert.ok(/anuência ao levantamento, com urgência/.test(t), 'pedido de urgência não saiu');
+});
 
   checa('sem cláusulas de dívida a vencer', () => {
     ['Encargos por atraso', 'vencimento antecipado', 'cláusula penal', 'custódia', 'Novação',
