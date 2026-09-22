@@ -45662,7 +45662,7 @@ const _TAJ_STATUS_ENVIADO = 'Acordo enviado';
 // caso do funil judicial e some com ele das telas de processo (Gustavo, 28/08).
 // Já em acordo, quitado, devolvido ou encerrado também não volta atrás.
 function _tajPodeMarcarEnviado(statusAtual, tipoTermo){
-  if(tipoTermo==='judicial') return false;
+  if(tipoTermo==='judicial'||tipoTermo==='quitacao') return false;
   const st=String(statusAtual||'').trim();
   if(!st) return true;                                   // sem situação = ninguém cuidou
   if(st===_TAJ_STATUS_ENVIADO) return false;             // já está lá
@@ -45821,6 +45821,7 @@ function abrirTermoAcordoJ(devId){
   const _tajVencEl = document.getElementById('tajVenc'); if(_tajVencEl) _tajVencEl.value = temEntradaAc ? entradaVenc : venc1;
   _tajAoTrocarCredor();
   const rExt=document.querySelector('input[name="tajTipo"][value="extrajudicial"]'); if(rExt) rExt.checked=true;
+  ['tajQuitData','tajQuitValorAtual','tajQuitDataAtual'].forEach(function(id){ const el=document.getElementById(id); if(el) el.value=''; });
   _tajOnTipoChange();
   _tajRecalcTotal();
   document.getElementById('taj-modal').style.display='flex';
@@ -46037,9 +46038,15 @@ function _tajAtualizarForo(nome){
 // 1ª faixa, com 1 parcela.
 function _tajRecalcTotal(){ recalcAcordoBlocos('taj-blocos'); }
 function _tajOnTipoChange(){
-  const jud=_tajTipoAtual()==='judicial';
+  const tipo=_tajTipoAtual();
+  const quit=tipo==='quitacao';
+  // quitação já paga também é termo judicial: usa os mesmos dados do processo
+  const jud=tipo==='judicial'||quit;
   const box=document.getElementById('tajJudFields'); if(box) box.style.display=jud?'grid':'none';
-  const tit=document.getElementById('taj-titulo'); if(tit) tit.textContent='Gerar termo de acordo'+(jud?' (judicial)':' (extrajudicial)');
+  const tit=document.getElementById('taj-titulo'); if(tit) tit.textContent='Gerar termo de acordo'+(quit?' (quitação já paga)':(jud?' (judicial)':' (extrajudicial)'));
+  const qbox=document.getElementById('tajQuitFields'); if(qbox) qbox.style.display=quit?'grid':'none';
+  // sem parcelas a vencer: a cláusula 4 variável (Sisbajud/desistência) não entra no termo de quitação
+  const cl4=document.getElementById('tajJudCl4Wrap'); if(cl4) cl4.style.display=quit?'none':'';
   // Foro de eleição é cláusula do EXTRAjudicial (cláusula 9). O termo judicial
   // vai ao juízo do processo — o template acordo-judicial.html nem tem o
   // placeholder {{foroComarca}} — então o campo some pra não confundir.
@@ -46242,7 +46249,8 @@ function _tajDados(){
     cedente:{ nome:cedenteNome },
     devedores, devedor:principal,
     advogadoExec, advogados:advogadoExec?[advogadoExec]:[],
-    acordo:{ total:num('tajTotal'), parcelas:_tajNParcTotal, valorParcela:(_tajFaixas[0]&&_tajFaixas[0].valor)||0, faixas:_tajFaixas, vencimento:v('tajVenc'), multa:num('tajMulta'), penal:num('tajPenal'), entrada:null, pixChave:v('tajPix').trim() },
+    acordo:{ total:num('tajTotal'), parcelas:_tajNParcTotal, valorParcela:(_tajFaixas[0]&&_tajFaixas[0].valor)||0, faixas:_tajFaixas, vencimento:v('tajVenc'), multa:num('tajMulta'), penal:num('tajPenal'), entrada:null, pixChave:v('tajPix').trim(),
+      quitacao:{ dataPagamento:v('tajQuitData'), valorAtualizado:num('tajQuitValorAtual'), dataAtualizacao:v('tajQuitDataAtual') } },
     foroComarca:v('tajForo').trim(),
     dataAcordo:v('tajData'), tipo:_tajTipoAtual(),
     judicial:{ numeroProcesso:v('tajJudProcesso'), comarca:v('tajJudComarca'), foro:v('tajJudForo')||'jec', rito:v('tajJudRito')||'execucao',
@@ -46337,21 +46345,31 @@ async function tajGerarPreview(){
   const btn=document.getElementById('taj-gerar'); if(btn){ btn.disabled=true; btn.textContent='Gerando…'; }
   try{
     const dados=_tajDados();
-    if(!dados.acordo.faixas.length){ showToast('Preencha ao menos uma faixa de parcelas.','danger'); return; }
+    const ehQuit = dados.tipo==='quitacao';
+    // Quitação já paga: o valor entrou, não há parcela a vencer nem boleto a
+    // emitir — as validações de faixa/vencimento não se aplicam; o que se exige
+    // é o valor recebido e a data em que ele entrou.
+    if(!ehQuit && !dados.acordo.faixas.length){ showToast('Preencha ao menos uma faixa de parcelas.','danger'); return; }
     if(!dados.acordo.total){ showToast('Informe o valor total.','danger'); return; }
-    if(!dados.acordo.vencimento){ showToast('Informe o 1º vencimento.','danger'); return; }
-    if(_tajState.boletosEmitidos){ showToast('Este acordo já teve boleto emitido no Asaas — mudar as faixas aqui não muda o que já foi cobrado. Ajuste um valor pontual pela gaveta do devedor em vez disso.','warning'); return; }
-    if(dados.tipo==='judicial'){
+    if(!ehQuit && !dados.acordo.vencimento){ showToast('Informe o 1º vencimento.','danger'); return; }
+    if(ehQuit && !dados.acordo.quitacao.dataPagamento){ showToast('Informe a data do pagamento.','danger'); return; }
+    if(!ehQuit && _tajState.boletosEmitidos){ showToast('Este acordo já teve boleto emitido no Asaas — mudar as faixas aqui não muda o que já foi cobrado. Ajuste um valor pontual pela gaveta do devedor em vez disso.','warning'); return; }
+    if(dados.tipo==='judicial'||ehQuit){
       if(!dados.judicial.numeroProcesso){ showToast('Informe o nº do processo.','danger'); return; }
       if(!dados.judicial.comarca){ showToast('Informe a comarca.','danger'); return; }
       _tajComarcaAprender(dados.judicial.comarca);
       _tajComarcaAprender(dados.judicial.clausula4 && dados.judicial.clausula4.comarca2);
       _tajRenderComarcas();
-      if(dados.judicial.clausula4.mode==='desistencia' && !dados.judicial.clausula4.proc2){ showToast('Informe os autos a desistir (cláusula 4).','danger'); return; }
+      if(!ehQuit && dados.judicial.clausula4.mode==='desistencia' && !dados.judicial.clausula4.proc2){ showToast('Informe os autos a desistir (cláusula 4).','danger'); return; }
     }
-    const fechou = await _tajFecharAcordo(dados.acordo.faixas, dados.acordo.vencimento, dados.tipo==='judicial' ? dados.judicial.rito : null);
-    if(!fechou){ showToast('Falha ao salvar as parcelas do acordo no servidor. Tente de novo.','danger'); return; }
-    _tajState.html = dados.tipo==='judicial' ? await TermoEngine.montarTermoJudicial(dados) : await TermoEngine.montarTermoExtrajudicial(dados);
+    // Na quitação já paga não se regravam parcelas: o acordo já foi cumprido e
+    // reescrever as faixas aqui criaria cronograma para dívida que não existe mais.
+    if(!ehQuit){
+      const fechou = await _tajFecharAcordo(dados.acordo.faixas, dados.acordo.vencimento, dados.tipo==='judicial' ? dados.judicial.rito : null);
+      if(!fechou){ showToast('Falha ao salvar as parcelas do acordo no servidor. Tente de novo.','danger'); return; }
+    }
+    _tajState.html = ehQuit ? await TermoEngine.montarTermoQuitacao(dados)
+      : (dados.tipo==='judicial' ? await TermoEngine.montarTermoJudicial(dados) : await TermoEngine.montarTermoExtrajudicial(dados));
     document.getElementById('taj-frame').srcdoc=_tajState.html;
     _tajState.editando=false; document.getElementById('taj-editar').textContent='Editar texto';
     document.getElementById('taj-modal').style.display='none';
@@ -46446,6 +46464,7 @@ function _tajEnsureModals(){
         <div style="display:flex;gap:8px;margin-bottom:12px;">
           <label style="flex:1;border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:13px;cursor:pointer;color:var(--text);"><input type="radio" name="tajTipo" value="extrajudicial" checked onchange="_tajOnTipoChange()"> <strong>Extrajudicial</strong><div style="font-size:11px;color:var(--text-3);">Confissão de dívida (CPC 784)</div></label>
           <label style="flex:1;border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:13px;cursor:pointer;color:var(--text);"><input type="radio" name="tajTipo" value="judicial" onchange="_tajOnTipoChange()"> <strong>⚖ Judicial</strong><div style="font-size:11px;color:var(--text-3);">Homologação em juízo (CPC 515, II)</div></label>
+          <label style="flex:1;border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:13px;cursor:pointer;color:var(--text);"><input type="radio" name="tajTipo" value="quitacao" onchange="_tajOnTipoChange()"> <strong>⚖ Quitação já paga</strong><div style="font-size:11px;color:var(--text-3);">Valor já recebido — extinção (CPC 924, II)</div></label>
         </div>
         <div id="tajJudFields" style="display:none;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;padding:10px;border:1px dashed var(--border);border-radius:6px;">
           <div style="grid-column:1/3;font-size:11px;color:var(--gold-dark,#9C7F40);text-transform:uppercase;letter-spacing:.08em;">⚖ Dados do processo</div>
@@ -46453,7 +46472,7 @@ function _tajEnsureModals(){
           <div><label ${lbl}>Comarca</label><input id="tajJudComarca" list="tajComarcaLista" autocomplete="off" ${inp}><datalist id="tajComarcaLista"></datalist></div>
           <div><label ${lbl}>Foro</label><select id="tajJudForo" ${inp}><option value="jec">Juizado Especial Cível</option><option value="vara">Vara Cível</option></select></div>
           <div><label ${lbl}>Rito (como o termo trata as partes)</label><select id="tajJudRito" ${inp}><option value="execucao">Execução / cumprimento de sentença — exequente e executada</option><option value="conhecimento">Ação de conhecimento — parte autora e parte requerida</option></select></div>
-          <div><label ${lbl}>Cláusula 4 (variável)</label><select id="tajJudClausula4" onchange="_tajOnClausula4()" ${inp}><option value="">Nenhuma</option><option value="desistencia">Concentração + desistência de outro processo</option><option value="sisbajud">Sisbajud (liberação de bloqueio)</option></select></div>
+          <div id="tajJudCl4Wrap"><label ${lbl}>Cláusula 4 (variável)</label><select id="tajJudClausula4" onchange="_tajOnClausula4()" ${inp}><option value="">Nenhuma</option><option value="desistencia">Concentração + desistência de outro processo</option><option value="sisbajud">Sisbajud (liberação de bloqueio)</option></select></div>
           <div id="tajJudDesistWrap" style="display:none;grid-column:1/3;grid-template-columns:1fr 1fr;gap:10px;">
             <div><label ${lbl}>Autos a desistir (nº)</label><input id="tajJudProc2" placeholder="0000000-00.0000.8.16.0000" ${inp}></div>
             <div><label ${lbl}>Comarca do processo a desistir</label><input id="tajJudComarca2" list="tajComarcaLista" autocomplete="off" ${inp}></div></div>
@@ -46485,6 +46504,14 @@ function _tajEnsureModals(){
             <div><label ${lbl}>Telefone (WhatsApp p/ link)</label><input id="tajAdvTel" ${inp}></div>
             <div><label ${lbl}>CPF (opcional)</label><input id="tajAdvDoc" ${inp}></div>
           </div>
+        </div>
+        <div id="tajQuitFields" style="display:none;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;padding:10px;border:1px dashed var(--border);border-radius:6px;">
+          <div style="grid-column:1/3;font-size:11px;color:var(--gold-dark,#9C7F40);text-transform:uppercase;letter-spacing:.08em;">✔ Quitação já realizada</div>
+          <div style="grid-column:1/3;font-size:11px;color:var(--text-3);">O valor do acordo (campo "Total") é o que JÁ entrou. As faixas de parcelas não são usadas neste termo.</div>
+          <div><label ${lbl}>Data do pagamento</label><input id="tajQuitData" type="date" ${inp}></div>
+          <div></div>
+          <div><label ${lbl}>Dívida atualizada antes do desconto (R$, opcional)</label><input id="tajQuitValorAtual" type="number" step="0.01" placeholder="0,00" ${inp}></div>
+          <div><label ${lbl}>Atualizada em (opcional)</label><input id="tajQuitDataAtual" type="date" ${inp}></div>
         </div>
         <div id="taj-campos" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;"></div>
       </div>
