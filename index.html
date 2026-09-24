@@ -23075,7 +23075,7 @@ async function renderClienteDetalhe(){
     const { data:cc } = await supa.from('clientes').select('*').eq('id',id).maybeSingle();
     cli=cc||null;
     const { data:co } = await supa.from('cobrancas')
-      .select('id,valor_orig,valor_atual,status,vencimento,tipo_documento,divida, cobranca_partes(devedor_id,principal,devedores(nome,doc))')
+      .select('id,valor_orig,valor_atual,status,vencimento,tipo_documento,tipo_cobranca,divida, cobranca_partes(devedor_id,principal,devedores(nome,doc))')
       .eq('cliente_id',id).eq('arquivado',false);
     cobr=co||[];
     const { data:dd } = await supa.from('cliente_documentos').select('*').eq('cliente_id',id).eq('ativo',true).order('uploaded_at',{ascending:false});
@@ -23201,11 +23201,12 @@ function _detCarteiraTable(){
   const seta=k=>key===k?`<span style="font-size:9px;">${dir>0?'▲':'▼'}</span>`:'';
   const th=(k,label,cls)=>`<th class="${cls||''}" style="cursor:pointer;user-select:none;" title="Ordenar por ${label.toLowerCase()}" onclick="ordenarCarteiraCli('${k}')">${label} ${seta(k)}</th>`;
   const linhas=cobr.map(c=>{ const pr=(c.cobranca_partes||[]).find(p=>p.principal)||(c.cobranca_partes||[])[0]; const dv=pr?.devedores||{};
-    const doc=c.tipo_documento||c.divida?.titulo||c.divida?.descricao||'—';
+    const d=String(dv.doc||'').replace(/\D/g,''); const doc=d.length===11?mascaraCPF(d):(d.length===14?mascaraCNPJ(d):(dv.doc||'—'));
+    const tipo=c.tipo_cobranca==='fisica'?'Física':(c.tipo_cobranca==='digital'?'Digital':'—');
     return `<tr class="cob-tr-click" onclick="verCobranca('${c.id}')">
-      <td class="strong">${escHtml(dv.nome||'—')}</td><td>${escHtml(doc)}</td>
+      <td class="strong">${escHtml(dv.nome||'—')}</td><td class="mono">${escHtml(doc)}</td><td>${tipo}</td>
       <td class="num mono">${fmtR(+c.valor_atual||+c.valor_orig||0)}</td><td>${cobStatusPill(c.status)}</td></tr>`; }).join('');
-  return cobr.length?`<table class="cob-table" style="margin-top:8px;"><thead><tr>${th('nome','Devedor')}<th>Documento</th>${th('valor','Valor','num')}${th('status','Status')}</tr></thead><tbody>${linhas}</tbody></table>`:_detEmpty('Nenhuma cobrança ativa deste credor.');
+  return cobr.length?`<table class="cob-table" style="margin-top:8px;"><thead><tr>${th('nome','Devedor')}<th>CPF/CNPJ</th><th>Tipo</th>${th('valor','Valor','num')}${th('status','Status')}</tr></thead><tbody>${linhas}</tbody></table>`:_detEmpty('Nenhuma cobrança ativa deste credor.');
 }
 function ordenarCarteiraCli(key){
   _detCliSort=_detCliSort.key===key?{key,dir:-_detCliSort.dir}:{key,dir:1};
@@ -47125,27 +47126,19 @@ async function abrirAnexoICliente(clienteId, modo){
   const cli=cc||(DB.clientes||[]).find(c=>c.id===clienteId);
   if(!cli){ showToast('Cliente não encontrado.','danger'); return; }
   const { data:co } = await supa.from('cobrancas')
-    .select('id,valor_orig,valor_atual,status,tipo_documento,divida,is_draft, cobranca_partes(principal,devedores(nome,doc))')
+    .select('id,valor_orig,valor_atual,status,tipo_documento,divida,is_draft,created_at, cobranca_partes(principal,devedores(nome,doc))')
     .eq('cliente_id',clienteId).eq('arquivado',false);
   const creditos=(co||[]).filter(c=>!c.is_draft).map(c=>{
     const p=(c.cobranca_partes||[]).find(x=>x.principal)||(c.cobranca_partes||[])[0]||{};
     return { id:c.id, nome:p.devedores?.nome||'—', doc:p.devedores?.doc||'',
       titulo:c.tipo_documento||c.divida?.titulo||c.divida?.descricao||'Cobrança',
-      nominal:(+c.valor_orig||+c.valor_atual||0), status:statusLabel(c.status)||'—',
+      nominal:(+c.valor_orig||+c.valor_atual||0), status:statusLabel(c.status)||'—', statusRaw:c.status||'',
+      cadastro:(c.created_at||'').slice(0,10),
       encerrada:/quitad|devolvid/i.test(c.status||'') };
   }).sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR'));
   if(!creditos.length){ showToast('Esse cliente não tem cobranças para listar.','warning'); return; }
   _anexo1Fechar();
-  _anexo1Ctx={ cli, creditos };
-  const linhas=creditos.map((k,i)=>`
-    <label style="display:flex;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer;">
-      <input type="checkbox" class="anexo1-chk" data-i="${i}" ${k.encerrada?'':'checked'} onchange="_anexo1Atualizar()" style="width:15px;height:15px;flex-shrink:0;">
-      <span style="flex:1;min-width:0;">
-        <span style="display:block;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(k.nome)}</span>
-        <span style="display:block;font-size:10.5px;color:var(--text-3);">${escHtml(_mascararDocLgpd(k.doc))} · ${escHtml(k.titulo)} · ${escHtml(k.status)}</span>
-      </span>
-      <span style="font-size:12px;font-weight:600;white-space:nowrap;">${fmtR(k.nominal)}</span>
-    </label>`).join('');
+  _anexo1Ctx={ cli, creditos, ordem:'nome', marcados:new Set(creditos.map((k,i)=>k.encerrada?null:i).filter(i=>i!==null)) };
   const ov=document.createElement('div');
   ov.id='anexo1-overlay';
   ov.style.cssText='position:fixed;inset:0;background:rgba(10,21,48,.45);z-index:9000;display:flex;align-items:center;justify-content:center;';
@@ -47157,11 +47150,20 @@ async function abrirAnexoICliente(clienteId, modo){
       <label style="font-size:12px;color:var(--text-2,#444);white-space:nowrap;">Data do documento (= data do contrato):</label>
       <input type="date" id="anexo1-data" value="${hoje()}" style="padding:6px 8px;border:1px solid var(--border,#ddd);border-radius:8px;font-size:12.5px;background:var(--surface,#fff);color:var(--text,#222);">
     </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-      <button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.anexo1-chk').forEach(c=>c.checked=true);_anexo1Atualizar();">Marcar todas</button>
-      <button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.anexo1-chk').forEach(c=>c.checked=false);_anexo1Atualizar();">Desmarcar todas</button>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+      <span style="display:flex;gap:6px;">
+        <button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.anexo1-chk').forEach(c=>c.checked=true);_anexo1Atualizar();">Marcar todas</button>
+        <button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.anexo1-chk').forEach(c=>c.checked=false);_anexo1Atualizar();">Desmarcar todas</button>
+      </span>
+      <label style="font-size:12px;color:var(--text-2,#444);display:flex;align-items:center;gap:6px;">Organizar por
+        <select id="anexo1-ordem" onchange="_anexo1Ordenar(this.value)" style="padding:5px 8px;border:1px solid var(--border,#ddd);border-radius:8px;font-size:12px;background:var(--surface,#fff);color:var(--text,#222);">
+          <option value="nome">Nome</option>
+          <option value="cadastro">Data de cadastro</option>
+          <option value="status">Status</option>
+        </select>
+      </label>
     </div>
-    <div style="overflow-y:auto;flex:1;min-height:0;">${linhas}</div>
+    <div id="anexo1-lista" style="overflow-y:auto;flex:1;min-height:0;"></div>
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px;padding-top:12px;border-top:1px solid var(--border,#ddd);">
       <span id="anexo1-resumo" style="font-size:12px;color:var(--text-2,#444);"></span>
       <span style="display:flex;gap:8px;">
@@ -47172,6 +47174,46 @@ async function abrirAnexoICliente(clienteId, modo){
   </div>`;
   ov.addEventListener('click',e=>{ if(e.target===ov) _anexo1Fechar(); });
   document.body.appendChild(ov);
+  _anexo1Render();
+}
+// Lista do Anexo I organizada por nome, data de cadastro (agrupada por mês, mais recente
+// primeiro) ou status (agrupado, na ordem da régua). data-i continua apontando para
+// _anexo1Ctx.creditos, então a ordem exibida não altera a seleção nem o PDF.
+function _anexo1Ordenar(ordem){
+  if(!_anexo1Ctx) return;
+  _anexo1Ctx.marcados=new Set([...document.querySelectorAll('.anexo1-chk:checked')].map(c=>+c.dataset.i));
+  _anexo1Ctx.ordem=ordem;
+  _anexo1Render();
+}
+function _anexo1Render(){
+  const el=document.getElementById('anexo1-lista');
+  if(!_anexo1Ctx||!el) return;
+  const { creditos, ordem, marcados }=_anexo1Ctx;
+  const idx=creditos.map((k,i)=>i);
+  const nome=(a,b)=>creditos[a].nome.localeCompare(creditos[b].nome,'pt-BR');
+  let grupoDe=null;
+  if(ordem==='cadastro'){
+    idx.sort((a,b)=>(creditos[b].cadastro||'').localeCompare(creditos[a].cadastro||'')||nome(a,b));
+    grupoDe=k=>{ const d=k.cadastro; if(!d) return 'Sem data de cadastro'; const [y,m]=d.split('-'); return `${['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][+m-1]} de ${y}`; };
+  } else if(ordem==='status'){
+    idx.sort((a,b)=>String(creditos[a].statusRaw).localeCompare(String(creditos[b].statusRaw),'pt-BR',{numeric:true,sensitivity:'base'})||nome(a,b));
+    grupoDe=k=>k.status;
+  } else idx.sort(nome);
+  const cont={}; if(grupoDe) idx.forEach(i=>{ const g=grupoDe(creditos[i]); cont[g]=(cont[g]||0)+1; });
+  let atual=null;
+  el.innerHTML=idx.map(i=>{ const k=creditos[i];
+    let cab='';
+    if(grupoDe){ const g=grupoDe(k); if(g!==atual){ atual=g; cab=`<div style="font-size:10.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin:${i===idx[0]?'0':'12px'} 0 6px;">${escHtml(g)} · ${cont[g]}</div>`; } }
+    const dt=k.cadastro?k.cadastro.split('-').reverse().join('/'):'';
+    return `${cab}
+    <label style="display:flex;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer;">
+      <input type="checkbox" class="anexo1-chk" data-i="${i}" ${marcados.has(i)?'checked':''} onchange="_anexo1Atualizar()" style="width:15px;height:15px;flex-shrink:0;">
+      <span style="flex:1;min-width:0;">
+        <span style="display:block;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(k.nome)}</span>
+        <span style="display:block;font-size:10.5px;color:var(--text-3);">${escHtml(_mascararDocLgpd(k.doc))} · ${escHtml(k.titulo)} · ${escHtml(k.status)}${dt?' · cadastro '+dt:''}</span>
+      </span>
+      <span style="font-size:12px;font-weight:600;white-space:nowrap;">${fmtR(k.nominal)}</span>
+    </label>`; }).join('');
   _anexo1Atualizar();
 }
 function _anexo1Atualizar(){
@@ -47226,7 +47268,7 @@ table.a1 tr{page-break-inside:avoid}
 async function gerarAnexoICliente(){
   if(!_anexo1Ctx) return;
   const { cli, creditos }=_anexo1Ctx;
-  const sel=[...document.querySelectorAll('.anexo1-chk:checked')].map(c=>creditos[+c.dataset.i]);
+  const sel=[...document.querySelectorAll('.anexo1-chk:checked')].map(c=>+c.dataset.i).sort((x,y)=>x-y).map(i=>creditos[i]); // PDF sempre em ordem alfabética (creditos já vem por nome), qualquer que seja a organização da tela
   if(!sel.length){ showToast('Marque ao menos um crédito.','warning'); return; }
   const dataDoc=document.getElementById('anexo1-data')?.value||hoje();
   _anexo1Fechar();
@@ -47493,7 +47535,7 @@ function _loteAnexoSelecionar(){
 function _anexo1UsarNoLote(){
   if(!_anexo1Ctx) return;
   const { cli, creditos }=_anexo1Ctx;
-  const sel=[...document.querySelectorAll('.anexo1-chk:checked')].map(c=>creditos[+c.dataset.i]);
+  const sel=[...document.querySelectorAll('.anexo1-chk:checked')].map(c=>+c.dataset.i).sort((x,y)=>x-y).map(i=>creditos[i]); // PDF sempre em ordem alfabética (creditos já vem por nome), qualquer que seja a organização da tela
   if(!sel.length){ showToast('Marque ao menos um crédito.','warning'); return; }
   const dataDoc=document.getElementById('anexo1-data')?.value||hoje();
   _anexo1Fechar();
