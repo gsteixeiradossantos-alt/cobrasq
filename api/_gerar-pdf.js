@@ -134,6 +134,10 @@ module.exports = async function handler(req, res) {
       margin: { top: '0mm', right: '0mm', bottom: '0mm', left: '0mm' },
     };
     if (comRodape) {
+      // Referência opcional no rodapé (ex.: "Contrato nº CQ-2026-001"), via
+      // <meta name="pdf-footer-ref" content="...">. Escapada: vai direto no template.
+      const refM = html.match(/<meta name=["']pdf-footer-ref["'] content=["']([^"']{1,80})["']/);
+      const ref = refM ? refM[1].replace(/[<>&]/g, '') : '';
       pdfOpts.displayHeaderFooter = true;
       pdfOpts.headerTemplate = '<span style="display:none"></span>';
       pdfOpts.footerTemplate =
@@ -142,6 +146,7 @@ module.exports = async function handler(req, res) {
         "font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;" +
         'font-size:6.8pt;line-height:1.7;letter-spacing:.06em;text-transform:uppercase;text-align:center;padding:8px 0 9px;">' +
         'cobrasq.com.br&nbsp;·&nbsp;contato@cobrasq.com.br&nbsp;·&nbsp;WhatsApp (46)&nbsp;98822-6533<br>Documento confidencial.' +
+        (ref ? '&nbsp;·&nbsp;' + ref : '') +
         '</div></div>';
     } else if (comRodapeRel) {
       pdfOpts.displayHeaderFooter = true;

@@ -45410,7 +45410,7 @@ async function reconciliarDocsClienteZapSign(clienteId, btn){
         let det=null; try{ det=await ZapSignAPI.getDoc(r.zapsign_doc_id); }catch(_){ continue; }
         if(!det) continue;
         porToken[r.zapsign_doc_id]=det;
-        for(const ex of (det.extra_docs||[])) if(ex&&ex.token) porToken[ex.token]={ status:det.status, signed_file:ex.signed_file, original_file:ex.original_file };
+        for(const ex of (det.extra_docs||[])) if(ex&&ex.token) porToken[ex.token]={ status:det.status, signers:det.signers, signed_file:ex.signed_file, original_file:ex.original_file };
         if(pend.filter(p=>p.signer_link===g).every(p=>porToken[p.zapsign_doc_id])) break;
       }
     }
@@ -45425,7 +45425,9 @@ async function reconciliarDocsClienteZapSign(clienteId, btn){
                    : 'enviado';
         const update={ zapsign_status:novo };
         if(novo==='assinado'){
-          update.zapsign_signed_at=new Date().toISOString();
+          // Data real: o último signed_at dos signatários (a ZapSign devolve por signatário).
+          const sAts=(det?.signers||[]).map(x=>Date.parse(x?.signed_at||'')).filter(x=>!isNaN(x));
+          update.zapsign_signed_at=sAts.length?new Date(Math.max(...sAts)).toISOString():new Date().toISOString();
           const fileUrl=det?.signed_file||det?.original_file||null;
           if(fileUrl && !d.assinado_storage_path){
             const fr=await fetch('/api/zapsign?fileUrl='+encodeURIComponent(fileUrl), { headers:{ ...(await authHeaders()) } });
@@ -46964,7 +46966,7 @@ function _docClienteShell(titulo, fichaItems, corpoHtml, assinaturas, opts){
   // assinado. Arial de propósito (ver .sig-token em templates/acordo-judicial.html).
   const _anc={'Cessionária':'asscobrasq','Cedente':'asscedente'};
   const ass=(assinaturas||[]).map(a=>`<div class="ass">${_anc[a[1]]?`<div class="sig-token">&lt;&lt;${_anc[a[1]]}&gt;&gt;</div>`:''}<div class="ass-linha"></div><div class="ass-nome">${escHtml(a[0])}</div><div class="ass-cargo">${escHtml(a[1])}</div></div>`).join('');
-  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="pdf-footer-band" content="1"><title>${escHtml(titulo)} — COBRASQ</title>
+  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="pdf-footer-band" content="1">${(opts&&opts.ref)?`<meta name="pdf-footer-ref" content="${escHtml(String(opts.ref).replace(/["'<>]/g,''))}">`:''}<title>${escHtml(titulo)} — COBRASQ</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600&family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -47025,6 +47027,128 @@ body{font-family:var(--sans);color:var(--ct);background:#E8E8E8;line-height:1.62
   </main>
 </div></body></html>`;
 }
+// Qualificação complementar da Cedente PJ: porte (microempresa / EPP) e quem assina
+// por ela. Vem de d.contrato (preenchido na modal "Dados do contrato" antes do envio);
+// sem ele, o texto sai como antes, sem porte e sem representante.
+function _cedenteQualif(q, isPJ){
+  const porte=(isPJ&&q&&q.porte)?`, enquadrada como ${escHtml(q.porte)}`:'';
+  const rep=(isPJ&&q&&q.repNome)?`, neste ato representada pelo seu sócio administrador, ${escHtml(q.repTrat||'Sr.')} <strong>${escHtml(q.repNome)}</strong>`:'';
+  return { porte, rep };
+}
+// ── Dados do contrato de cessão (nº, novo/renovação, porte, representante) ──────
+// Perguntados uma vez por envio, antes de gerar/editar o contrato; ficam em
+// _contratoCtx e entram no HTML via d.contrato. Sem migração: o nº CQ-AAAA-NNN vai no
+// NOME do registro em cliente_documentos ("Contrato de cessão nº CQ-2026-001 — …"),
+// e é de lá que saem o próximo nº do ano e o último contrato assinado do cliente.
+let _contratoCtx=null;
+const _CQ_RE=/CQ-(\d{4})-(\d{3,})/;
+async function _contratoProximoNumero(ano){
+  const supa=getSupabase(); if(!supa) return '';
+  const { data, error }=await supa.from('cliente_documentos').select('nome').ilike('nome',`%CQ-${ano}-%`);
+  if(error) return '';
+  const max=(data||[]).reduce((m,r)=>{ const x=String(r.nome||'').match(_CQ_RE); return x&&+x[1]===ano?Math.max(m,+x[2]):m; },0);
+  return `CQ-${ano}-${String(max+1).padStart(3,'0')}`;
+}
+// Último contrato de cessão ASSINADO do cliente: nº (se o nome tiver) e data da assinatura.
+async function _contratoUltimoAssinado(clienteId){
+  const supa=getSupabase(); if(!supa||!clienteId) return null;
+  const { data, error }=await supa.from('cliente_documentos')
+    .select('nome,zapsign_signed_at,created_at').eq('cliente_id',clienteId).eq('zapsign_status','assinado')
+    .ilike('nome','Contrato de cessão%').order('zapsign_signed_at',{ascending:false,nullsFirst:false}).limit(1);
+  if(error||!data||!data.length) return null;
+  const r=data[0], m=String(r.nome||'').match(_CQ_RE);
+  return { numero:m?m[0]:'', data:String(r.zapsign_signed_at||'').slice(0,10) };
+}
+// Porte e sócios administradores pela Receita (BrasilAPI; sócios com fallback CNPJá).
+async function _cedenteReceita(doc){
+  const cnpj=String(doc||'').replace(/\D/g,''); if(cnpj.length!==14) return { porte:'', socios:[] };
+  const [rc, rs]=await Promise.all([cnpjLookupReceita(cnpj).catch(()=>null), cnpjSociosLookup(cnpj).catch(()=>null)]);
+  const pRaw=String(rc?.data?.porte||rc?.data?.descricao_porte||'').toUpperCase();
+  const porte=/MICRO/.test(pRaw)?'microempresa':/PEQUENO/.test(pRaw)?'empresa de pequeno porte':'';
+  const socios=(rs?.ok?rs.socios:[]).filter(x=>/administrador/i.test(String(x.papel||'')));
+  return { porte, socios };
+}
+// Modal. Resolve com o contexto ou null se cancelar. Renovação sem nº/data anterior bloqueia.
+async function _contratoDadosModal(d, clienteId){
+  const isPJ=String(d.doc||'').replace(/\D/g,'').length>11;
+  showToast('Buscando nº do contrato e dados da Receita…','info');
+  const [proximo, ultimo, rf]=await Promise.all([
+    _contratoProximoNumero(new Date().getFullYear()).catch(()=>''),
+    _contratoUltimoAssinado(clienteId).catch(()=>null),
+    isPJ?_cedenteReceita(d.doc).catch(()=>({porte:'',socios:[]})):Promise.resolve({porte:'',socios:[]}) ]);
+  const lbl='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);display:block;margin:14px 0 5px;';
+  const inp='padding:6px 8px;border:1px solid var(--border);border-radius:var(--radius-sm);font:inherit;font-size:12.5px;background:var(--surface-2);color:var(--text);';
+  const socioOpts=rf.socios.map(x=>`<option value="${escHtml(x.nome)}">${escHtml(x.nome)}</option>`).join('');
+  document.getElementById('dContratoModal')?.remove();
+  const ov=document.createElement('div');
+  ov.id='dContratoModal';
+  ov.style.cssText='position:fixed;inset:0;z-index:1350;background:rgba(10,21,48,.42);display:flex;align-items:center;justify-content:center;padding:24px;';
+  ov.innerHTML=`<div style="width:500px;max-width:100%;max-height:92vh;overflow-y:auto;background:var(--surface);border-radius:14px;box-shadow:var(--shadow-lg,0 12px 40px rgba(0,0,0,.25));">
+    <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+      <div style="font-size:15px;font-weight:600;">Dados do contrato de cessão</div>
+      <button data-x="cancel" style="border:0;background:transparent;font-size:16px;cursor:pointer;color:var(--text-2);">✕</button>
+    </div>
+    <div style="padding:6px 20px 16px;">
+      <label style="${lbl}">Este contrato é</label>
+      <div style="display:flex;gap:18px;font-size:12.5px;">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="radio" name="dct-tipo" id="dct-novo" checked> Novo</label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="radio" name="dct-tipo" id="dct-renov"> Renovação (substitui o anterior)</label>
+      </div>
+      <div id="dct-renov-box" style="display:none;margin-top:8px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);">
+        <div style="font-size:11.5px;color:var(--text-3);margin-bottom:8px;">${ultimo?'Preenchido com o último contrato assinado deste cliente. Confira.':'Nenhum contrato assinado deste cliente foi achado no sistema. Informe o nº e a data do contrato anterior.'}</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <label style="font-size:12px;">Nº do contrato anterior<br><input id="dct-ant-num" value="${escHtml(ultimo?.numero||'')}" placeholder="CQ-2025-004" style="${inp}width:150px;"></label>
+          <label style="font-size:12px;">Assinado em<br><input type="date" id="dct-ant-data" value="${escHtml(ultimo?.data||'')}" style="${inp}"></label>
+        </div>
+      </div>
+      <label style="${lbl}">Nº deste contrato</label>
+      <input id="dct-num" value="${escHtml(proximo)}" placeholder="CQ-${new Date().getFullYear()}-001" style="${inp}width:160px;">
+      <div style="font-size:10.5px;color:var(--text-3);margin-top:3px;">Próximo nº do ano, calculado pelos contratos já enviados. Pode alterar.</div>
+      ${isPJ?`<label style="${lbl}">Porte da Cedente</label>
+      <select id="dct-porte" style="${inp}">
+        <option value="microempresa" ${rf.porte==='microempresa'?'selected':''}>Microempresa</option>
+        <option value="empresa de pequeno porte" ${rf.porte==='empresa de pequeno porte'?'selected':''}>Empresa de pequeno porte</option>
+        <option value="" ${rf.porte?'':'selected'}>Não mencionar</option>
+      </select>
+      <div style="font-size:10.5px;color:var(--text-3);margin-top:3px;">${rf.porte?'Conforme a Receita Federal.':'A Receita não informou o porte (ou a consulta falhou). Escolha.'}</div>
+      <label style="${lbl}">Representante (sócio administrador)</label>
+      ${rf.socios.length>1?`<div style="font-size:11.5px;color:var(--warning);margin-bottom:5px;">A Receita lista ${rf.socios.length} sócios administradores. Escolha quem assina.</div>`:''}
+      ${socioOpts?`<select id="dct-rep-sel" style="${inp}width:100%;margin-bottom:6px;"><option value="">— escolher —</option>${socioOpts}<option value="__outro">Outro (digitar)</option></select>`:''}
+      <div style="display:flex;gap:6px;">
+        <select id="dct-rep-trat" style="${inp}"><option>Sr.</option><option>Sra.</option></select>
+        <input id="dct-rep-nome" value="${rf.socios.length===1?escHtml(rf.socios[0].nome):''}" placeholder="Nome completo" style="${inp}flex:1;">
+      </div>
+      <div style="font-size:10.5px;color:var(--text-3);margin-top:3px;">${rf.socios.length?'Sócios administradores conforme a Receita Federal.':'A Receita não trouxe sócio administrador (ou a consulta falhou). Digite o nome, ou deixe em branco para não constar.'}</div>`:''}
+    </div>
+    <div style="padding:12px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px;">
+      <button class="btn btn-ghost" data-x="cancel">Cancelar</button>
+      <button class="btn btn-primary" data-x="ok">Continuar</button>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+  const $=id=>document.getElementById(id);
+  const tog=()=>{ $('dct-renov-box').style.display=$('dct-renov').checked?'block':'none'; };
+  $('dct-novo').addEventListener('change',tog); $('dct-renov').addEventListener('change',tog);
+  $('dct-rep-sel')?.addEventListener('change',e=>{ const v=e.target.value; if(v&&v!=='__outro') $('dct-rep-nome').value=v; else if(v==='__outro'){ $('dct-rep-nome').value=''; $('dct-rep-nome').focus(); } });
+  if(rf.socios.length===1&&$('dct-rep-sel')) $('dct-rep-sel').value=rf.socios[0].nome;
+  return new Promise(resolve=>{
+    ov.addEventListener('click',e=>{
+      const x=e.target.closest('[data-x]')?.dataset.x; if(!x) return;
+      if(x==='cancel'){ ov.remove(); resolve(null); return; }
+      const numero=($('dct-num').value||'').trim();
+      if(!numero){ showToast('Informe o nº deste contrato.','warning'); return; }
+      let renov=null;
+      if($('dct-renov').checked){
+        const n=($('dct-ant-num').value||'').trim(), dt=$('dct-ant-data').value||'';
+        if(!n||!dt){ showToast('Renovação: informe o nº e a data do contrato anterior.','warning'); return; }
+        renov={ numero:n, data:dt };
+      }
+      const ctx={ numero, renov };
+      if(isPJ){ ctx.porte=$('dct-porte').value||''; ctx.repNome=($('dct-rep-nome').value||'').trim(); ctx.repTrat=$('dct-rep-trat').value||'Sr.'; }
+      ov.remove(); resolve(ctx);
+    });
+  });
+}
 function _docClienteHtml(tipo, d){
   // Modelos OFICIAIS do escritório (Drive ccobrasq) com merge dos dados do cliente.
   const COBRASQ='COBRASQ Recuperadora de Crédito e Cobrança Ltda';
@@ -47038,7 +47162,8 @@ function _docClienteHtml(tipo, d){
   const nm = escHtml(d.nome||'—');
   // Preâmbulo da parte (cedente/outorgante) reutilizado nos 3 documentos.
   const endClause = (end && end!=='—') ? `, com endereço na ${escHtml(end)}` : '';
-  const parteCli = `<strong>${nm}</strong>, ${natureza}, ${inscr} no <strong>${escHtml(docCli)}</strong>${endClause}`;
+  const qf = _cedenteQualif(d.contrato, isPJ);
+  const parteCli = `<strong>${nm}</strong>, ${natureza}${qf.porte}, ${inscr} no <strong>${escHtml(docCli)}</strong>${endClause}${qf.rep}`;
   const COBRASQ_PRE = `<strong>COBRASQ Recuperadora de Crédito e Cobrança Ltda</strong>, sociedade empresária limitada, inscrita no CNPJ sob o n. 34.626.848/0001-42, com sede na Av. Rio Grande do Sul, n. 380, sala 201, Ed. Mara, centro, CEP.: 85660–000, município de Dois Vizinhos, Estado do Paraná, neste ato representada por seu sócio administrador, Sr. <strong>Gustavo Souza Teixeira dos Santos</strong>, CPF sob o n. 103.513.639-20, doravante denominada de <strong>Cessionária</strong>.`;
 
   if(tipo==='declaracao'){
@@ -47053,9 +47178,18 @@ function _docClienteHtml(tipo, d){
       corpo, [[COBRASQ,'Cessionária'],[d.nome||'Cedente','Cedente']]);
   }
   if(tipo==='cessao'){
+    const ct=d.contrato||{};
+    // Renovação: o contrato novo inteiro + a cláusula 0 (texto aprovado em 24/09/2026).
+    const rv=ct.renov;
+    const clausula0 = rv ? `<h2>0. Substituição e ratificação</h2>
+<p>0.1. Este contrato substitui integralmente, a partir da data de sua assinatura, o Contrato-Quadro de Cessão de Créditos nº ${escHtml(rv.numero)}, assinado em ${escHtml(_brData(rv.data))}, e quaisquer outros instrumentos de cessão de créditos anteriormente firmados entre as partes (contratos anteriores).</p>
+<p>0.2. As partes ratificam todas as cessões de créditos realizadas com base nos contratos anteriores, que permanecem válidas e eficazes desde as respectivas datas, sem interrupção. A partir da assinatura deste contrato, esses créditos passam a ser regidos exclusivamente por ele, juntamente com os créditos que vierem a ser cedidos por novos Termos de Cessão.</p>
+<p>0.3. Os créditos cedidos com base nos contratos anteriores continuam identificados pelos respectivos termos, anexos ou relações de cessão, que integram este contrato para todos os fins.</p>
+<p>0.4. A substituição não constitui novação e não afeta os pagamentos, repasses e acertos já realizados até a data de assinatura deste contrato. Os valores eventualmente pendentes de repasse nessa data serão apurados e pagos na forma deste contrato.</p>
+` : '';
     const corpo=`<p>${parteCli}, doravante ${denom} de <strong>Cedente</strong>.</p>
 <p>${COBRASQ_PRE}</p>
-<h2>1. Definições</h2>
+${clausula0}<h2>1. Definições</h2>
 <p><strong>1.1. Créditos cedidos:</strong> os créditos individualizados, um a um, nos Termos de Cessão emitidos com base neste contrato, com seus respectivos valores, origem, vencimentos, documentos e demais elementos de identificação.</p>
 <p><strong>1.2. Valor principal ou valor capital:</strong> o valor nominal principal de cada crédito cedido, descontado eventuais pagamentos, sem o acréscimo de acessórios, consectários legais e afins.</p>
 <p><strong>1.3. Valores realizados:</strong> quaisquer valores efetivamente recebidos de devedores relacionados aos créditos cedidos, por acordo, pagamento espontâneo ou qualquer outro meio lícito.</p>
@@ -47120,8 +47254,9 @@ function _docClienteHtml(tipo, d){
 <p>13.1. Nenhuma tolerância implicará novação ou renúncia de direitos; a nulidade de qualquer cláusula não afetará as demais.</p>
 <p>13.2. As partes elegem o foro da Comarca de <strong>Dois Vizinhos/PR</strong> para dirimir quaisquer controvérsias oriundas deste Contrato, com renúncia de qualquer outro, por mais privilegiado que seja.</p>`;
     return _docClienteShell('Contrato-Quadro de Cessão de Créditos e Outras Avenças',
-      [['Cedente', d.nome||'—'],['CNPJ / CPF', docCli],['Cessionária', COBRASQ],['Termos de Cessão','À parte, com Tabela de Preço reservada']],
-      corpo, [[COBRASQ,'Cessionária'],[d.nome||'Cedente','Cedente']]);
+      [ct.numero?['Contrato nº', ct.numero]:null,['Cedente', d.nome||'—'],['CNPJ / CPF', docCli],['Cessionária', COBRASQ],['Termos de Cessão','À parte, com Tabela de Preço reservada'],
+       rv?['Substitui', `Contrato nº ${rv.numero}, de ${_brData(rv.data)}`]:null],
+      corpo, [[COBRASQ,'Cessionária'],[d.nome||'Cedente','Cedente']], ct.numero?{ref:'Contrato nº '+ct.numero}:undefined);
   }
   return null;
 }
@@ -47159,11 +47294,13 @@ async function abrirAnexoICliente(clienteId, modo){
       numDoc:c.numero_documento||'', descricao:c.divida?.descricao||'',
       vencimento:String(c.vencimento||c.divida?.vencimento||'').slice(0,10),
       nominal:(+c.valor_orig||+c.valor_atual||0), status:statusLabel(c.status)||'—', statusRaw:c.status||'',
-      cadastro:(c.created_at||'').slice(0,10), pct:null,
+      cadastro:(c.created_at||'').slice(0,10), pct:100,
       encerrada:/quitad|devolvid/i.test(c.status||'') };
   }).sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR'));
   if(!creditos.length){ showToast('Esse cliente não tem cobranças para listar.','warning'); return; }
   _anexo1Fechar();
+  // Contrato-quadro citado nos termos: o último assinado do cliente (nº e data), editável.
+  const ultC=await _contratoUltimoAssinado(clienteId).catch(()=>null);
   _anexo1Ctx={ cli, creditos, ordem:'nome', marcados:new Set(creditos.map((k,i)=>k.encerrada?null:i).filter(i=>i!==null)) };
   const ov=document.createElement('div');
   ov.id='anexo1-overlay';
@@ -47171,14 +47308,19 @@ async function abrirAnexoICliente(clienteId, modo){
   ov.innerHTML=`
   <div style="background:var(--surface,#fff);border-radius:14px;padding:24px 26px;width:min(520px,94vw);max-height:86vh;display:flex;flex-direction:column;box-shadow:0 18px 60px rgba(0,0,0,.25);">
     <div style="font-family:var(--font-display,serif);font-size:19px;font-weight:700;color:var(--navy,#0A1530);">Termo de cessão — ${escHtml(cli.nome_fantasia||cli.nomeFantasia||cli.nome||'')}</div>
-    <div style="font-size:12.5px;color:var(--text-3,#666);margin:4px 0 12px;">Marque os créditos e preencha o % do preço de cada um (obrigatório, sobre o valor principal). Sai um termo de cessão para cada crédito, sem preço (é o que se junta ao processo daquele devedor), e uma tabela de preço única, reservada. Todos ficam salvos na pasta do cliente.</div>
+    <div style="font-size:12.5px;color:var(--text-3,#666);margin:4px 0 12px;">Marque os créditos e confira o % do preço de cada um (vem 100%, sobre o valor principal; altere quando for o caso). Sai um termo de cessão para cada crédito, sem preço (é o que se junta ao processo daquele devedor), e uma tabela de preço única, reservada. Todos ficam salvos na pasta do cliente.</div>
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap;">
       <label style="font-size:12px;color:var(--text-2,#444);white-space:nowrap;min-width:150px;">Data do termo:</label>
       <input type="date" id="anexo1-data" value="${hoje()}" onchange="_anexo1Atualizar()" style="padding:6px 8px;border:1px solid var(--border,#ddd);border-radius:8px;font-size:12.5px;background:var(--surface,#fff);color:var(--text,#222);">
     </div>
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
       <label style="font-size:12px;color:var(--text-2,#444);white-space:nowrap;min-width:150px;">Data do contrato-quadro:</label>
-      <input type="date" id="anexo1-data-contrato" value="${hoje()}" style="padding:6px 8px;border:1px solid var(--border,#ddd);border-radius:8px;font-size:12.5px;background:var(--surface,#fff);color:var(--text,#222);">
+      <input type="date" id="anexo1-data-contrato" value="${escHtml(ultC?.data||hoje())}" style="padding:6px 8px;border:1px solid var(--border,#ddd);border-radius:8px;font-size:12.5px;background:var(--surface,#fff);color:var(--text,#222);">
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
+      <label style="font-size:12px;color:var(--text-2,#444);white-space:nowrap;min-width:150px;">Nº do contrato-quadro:</label>
+      <input type="text" id="anexo1-num-contrato" value="${escHtml(ultC?.numero||'')}" placeholder="CQ-2026-001" style="padding:6px 8px;border:1px solid var(--border,#ddd);border-radius:8px;font-size:12.5px;width:140px;background:var(--surface,#fff);color:var(--text,#222);">
+      <span style="font-size:11px;color:var(--text-3,#666);">${ultC?'Do último contrato assinado. Confira.':'Nenhum contrato assinado achado; se vier junto no envio em lote, sai o nº dele.'}</span>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
       <span style="display:flex;gap:6px;">
@@ -47251,7 +47393,8 @@ function _anexo1Render(){
 }
 // % do preço por crédito (cláusula 1.5 do contrato): fica no próprio objeto do
 // crédito, então segue junto na seleção para o PDF e para o envio em lote.
-// Não há padrão: vazio = null, e a geração é bloqueada até preencher.
+// Padrão 100% (cada crédito já vem preenchido); se apagarem o campo, vira null
+// e a geração é bloqueada até preencher.
 function _anexo1Pct(i, v){
   if(!_anexo1Ctx?.creditos[i]) return;
   const n=parseFloat(String(v).replace(',','.'));
@@ -47285,20 +47428,21 @@ function _anexo1Selecao(){
   if(!sel.length){ showToast('Marque ao menos um crédito.','warning'); return null; }
   const dataDoc=document.getElementById('anexo1-data')?.value||hoje();
   const dataContrato=document.getElementById('anexo1-data-contrato')?.value||'';
+  const numContrato=(document.getElementById('anexo1-num-contrato')?.value||'').trim();
   const erro=_termosValidar(sel, dataDoc);
   if(erro){ showToast(erro,'warning'); return null; }
-  return { sel, dataDoc, dataContrato };
+  return { sel, dataDoc, dataContrato, numContrato };
 }
 // Número do termo: data do termo + hora da emissão (dois termos no mesmo dia não colidem).
 function _termoNumero(dataDoc){ const h=new Date(); return String(dataDoc||hoje()).slice(0,10).replace(/-/g,'')+'-'+String(h.getHours()).padStart(2,'0')+String(h.getMinutes()).padStart(2,'0'); }
-function _termoPartes(cli){
+function _termoPartes(cli, q){
   const d={ nome:cli.nome, doc:cli.doc, rua:_gv(cli,'rua'), numero:_gv(cli,'numero'), complemento:_gv(cli,'complemento'),
     bairro:_gv(cli,'bairro'), cidade:_gv(cli,'cidade'), uf:_gv(cli,'uf'), cep:_gv(cli,'cep') };
   const end=_docClienteEndereco(d);
   const isPJ=(d.doc||'').replace(/\D/g,'').length>11;
   const endClause=(end&&end!=='—')?`, com endereço na ${escHtml(end)}`:'';
   return {
-    cedente:`<strong>${escHtml(d.nome||'—')}</strong>, ${isPJ?'sociedade empresária limitada':'pessoa física'}, ${isPJ?'inscrita':'inscrito(a)'} no <strong>${escHtml(d.doc||'____________')}</strong>${endClause}, doravante denominad${isPJ?'a':'o(a)'} de <strong>Cedente</strong>.`,
+    cedente:`<strong>${escHtml(d.nome||'—')}</strong>, ${isPJ?'sociedade empresária limitada':'pessoa física'}${_cedenteQualif(q,isPJ).porte}, ${isPJ?'inscrita':'inscrito(a)'} no <strong>${escHtml(d.doc||'____________')}</strong>${endClause}${_cedenteQualif(q,isPJ).rep}, doravante denominad${isPJ?'a':'o(a)'} de <strong>Cedente</strong>.`,
     cessionaria:`<strong>COBRASQ Recuperadora de Crédito e Cobrança Ltda</strong>, sociedade empresária limitada, inscrita no CNPJ sob o n. 34.626.848/0001-42, com sede na Av. Rio Grande do Sul, n. 380, sala 201, Ed. Mara, centro, CEP.: 85660–000, município de Dois Vizinhos, Estado do Paraná, neste ato representada por seu sócio administrador, Sr. <strong>Gustavo Souza Teixeira dos Santos</strong>, CPF sob o n. 103.513.639-20, doravante denominada de <strong>Cessionária</strong>.` };
 }
 const _TERMO_CSS=`<style>
@@ -47319,14 +47463,14 @@ const _brData=v=>v?String(v).slice(0,10).split('-').reverse().join('/'):'—';
 // com todos os créditos exporia dados de terceiros em cada processo, e tarjar o PDF
 // assinado quebra a verificação da assinatura). Assinam Cedente e Cessionária
 // (CC art. 288 c/c 654 §1º: instrumento particular assinado identificando o crédito).
-function _termoCessaoHtml(cli, k, numero, dataDoc, dataContrato){
-  const pt=_termoPartes(cli);
+function _termoCessaoHtml(cli, k, numero, dataDoc, dataContrato, numContrato, q){
+  const pt=_termoPartes(cli, q);
   const origem=[k.titulo, k.numDoc?`nº ${k.numDoc}`:'', (k.descricao&&k.descricao!==k.titulo)?`(${k.descricao})`:''].filter(Boolean).join(' ');
   const contrato=dataContrato?`firmado em ${_brData(dataContrato)}`:'firmado entre as partes';
   const corpo=`${_TERMO_CSS}
 <p><strong>Cedente:</strong> ${pt.cedente}</p>
 <p><strong>Cessionária:</strong> ${pt.cessionaria}</p>
-<p>Pelo presente termo, emitido com base no Contrato-Quadro de Cessão de Créditos ${contrato}, a Cedente cede à Cessionária, em caráter definitivo, o crédito abaixo descrito, com todos os seus acessórios (Código Civil, art. 287):</p>
+<p>Pelo presente termo, emitido com base no Contrato-Quadro de Cessão de Créditos${numContrato?' nº '+escHtml(numContrato):''} ${contrato}, a Cedente cede à Cessionária, em caráter definitivo, o crédito abaixo descrito, com todos os seus acessórios (Código Civil, art. 287):</p>
 <table class="a1">
   <thead><tr><th>Devedor</th><th>CPF/CNPJ</th><th>Origem do crédito</th><th>Vencimento</th><th style="text-align:right;">Valor principal</th></tr></thead>
   <tbody><tr>
@@ -47339,13 +47483,13 @@ function _termoCessaoHtml(cli, k, numero, dataDoc, dataContrato){
 </table>
 <p style="margin-top:14px;">A Cedente declara que o crédito acima já existia na data deste termo e ratifica, quanto a ele, as declarações e garantias do contrato-quadro. O preço do crédito consta da Tabela de Preço vinculada a este termo, de caráter reservado entre as partes.</p>`;
   return _docClienteShell('Termo de Cessão de Crédito',
-    [['Termo nº', numero],['Devedor', k.nome||'—'],['Cedente', cli.nome||'—'],['Cessionária','COBRASQ Recuperadora de Crédito e Cobrança Ltda']],
-    corpo, [['COBRASQ Recuperadora de Crédito e Cobrança Ltda','Cessionária'],[cli.nome||'Cedente','Cedente']], { data: dataDoc });
+    [['Termo nº', numero],numContrato?['Contrato nº', numContrato]:null,['Devedor', k.nome||'—'],['Cedente', cli.nome||'—'],['Cessionária','COBRASQ Recuperadora de Crédito e Cobrança Ltda']],
+    corpo, [['COBRASQ Recuperadora de Crédito e Cobrança Ltda','Cessionária'],[cli.nome||'Cedente','Cedente']], { data: dataDoc, ref: numContrato?'Contrato nº '+numContrato:'' });
 }
 // TABELA DE PREÇO — uma só para todos os termos do lote; reservada, não vai ao processo.
 // CPF/CNPJ mascarado (LGPD). Cada linha aponta o nº do termo do crédito.
-function _tabelaPrecoHtml(cli, itens, lote, dataDoc){
-  const pt=_termoPartes(cli);
+function _tabelaPrecoHtml(cli, itens, lote, dataDoc, numContrato, q){
+  const pt=_termoPartes(cli, q);
   const creditos=itens.map(t=>t.k);
   const total=creditos.reduce((s,k)=>s+k.nominal,0), totalPreco=creditos.reduce((s,k)=>s+_anexo1Preco(k),0);
   const linhas=itens.map(({k,numero})=>`<tr>
@@ -47367,17 +47511,17 @@ function _tabelaPrecoHtml(cli, itens, lote, dataDoc){
 </table>
 <p style="font-size:9pt;margin-top:14px;">O preço de cada crédito é o valor principal multiplicado pelo percentual indicado e é pago somente com os valores realizados daquele crédito, após o reembolso das despesas de realização e a remuneração da Cessionária (cláusula 3.5), nas datas de repasse da cláusula 4.4.</p>`;
   return _docClienteShell(`Tabela de Preço — Termos ${lote}`,
-    [['Cedente', cli.nome||'—'],['CNPJ / CPF', cli.doc||'—'],['Cessionária','COBRASQ Recuperadora de Crédito e Cobrança Ltda'],['Documento','Reservado entre as partes']],
-    corpo, [['COBRASQ Recuperadora de Crédito e Cobrança Ltda','Cessionária'],[cli.nome||'Cedente','Cedente']], { data: dataDoc });
+    [['Cedente', cli.nome||'—'],['CNPJ / CPF', cli.doc||'—'],['Cessionária','COBRASQ Recuperadora de Crédito e Cobrança Ltda'],['Documento','Reservado entre as partes'],numContrato?['Contrato nº', numContrato]:null],
+    corpo, [['COBRASQ Recuperadora de Crédito e Cobrança Ltda','Cessionária'],[cli.nome||'Cedente','Cedente']], { data: dataDoc, ref: numContrato?'Contrato nº '+numContrato:'' });
 }
 // Devolve a tabela de preço (1ª) e um termo por crédito, no formato usado pela geração e
 // pelo lote. Nº do termo = lote (data+hora) + sequencial: 20260924-1530-001.
-function _termosCessaoLista(cli, creditos, dataDoc, dataContrato){
+function _termosCessaoLista(cli, creditos, dataDoc, dataContrato, numContrato, q){
   const lote=_termoNumero(dataDoc);
   const itens=creditos.map((k,i)=>({ k, numero:`${lote}-${String(i+1).padStart(3,'0')}` }));
   return [
-    { tipo:'tabela', numero:lote, nome:`Tabela de preço — termos ${lote}`, html:_tabelaPrecoHtml(cli,itens,lote,dataDoc) },
-    ...itens.map(({k,numero})=>({ tipo:'termo', numero, nome:`Termo de cessão nº ${numero} — ${k.nome}`, html:_termoCessaoHtml(cli,k,numero,dataDoc,dataContrato) })),
+    { tipo:'tabela', numero:lote, nome:`Tabela de preço — termos ${lote}`, html:_tabelaPrecoHtml(cli,itens,lote,dataDoc,numContrato,q) },
+    ...itens.map(({k,numero})=>({ tipo:'termo', numero, nome:`Termo de cessão nº ${numero} — ${k.nome}`, html:_termoCessaoHtml(cli,k,numero,dataDoc,dataContrato,numContrato,q) })),
   ];
 }
 // Pré-visualização do termo e da tabela numa janela só (somente leitura).
@@ -47392,7 +47536,7 @@ async function gerarAnexoICliente(){
   const { cli }=_anexo1Ctx;
   const v=_anexo1Selecao(); if(!v) return;
   _anexo1Fechar();
-  const lista=_termosCessaoLista(cli, v.sel, v.dataDoc, v.dataContrato);
+  const lista=_termosCessaoLista(cli, v.sel, v.dataDoc, v.dataContrato, v.numContrato);
   _termosPreview(lista);
   showToast(`Gerando ${lista.length-1} termo(s) e a tabela de preço…`,'info');
   let salvos=0;
@@ -47557,6 +47701,9 @@ async function enviarDocClienteZapSign(tipo){
   const d=_docClienteDados();
   if(!d.nome){ showToast('Informe a razão social do cliente.','warning'); return; }
   if(!DB.config.zapsignToken){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
+  // Contrato: nº, novo/renovação, porte e representante antes de conferir/editar.
+  _contratoCtx=null;
+  if(tipo==='cessao' && !(await _contratoGarantir(d))) return;
   // Conferir/editar o documento, a mensagem e escolher quando enviar (mesma regra do lote).
   const cfg=await _envioDocAvulsoConfig(tipo,d); if(!cfg) return;
   if(!d.tel) d.tel=await _telClienteRelacional(_docClienteId());
@@ -47570,7 +47717,7 @@ async function enviarDocClienteZapSign(tipo){
   try{
     const html=_loteDocHtml(tipo,d);
     const base64Pdf=await _htmlParaPdfBase64(html,{filename:'doc.pdf'});
-    const nomeDoc=`${tipoNome} — ${d.nome} — ${new Date().toLocaleDateString('pt-BR')}`;
+    const nomeDoc=`${tipoNome}${tipo==='cessao'&&_contratoCtx?.numero?' nº '+_contratoCtx.numero:''} — ${d.nome} — ${new Date().toLocaleDateString('pt-BR')}`;
     const tel=telSel;
     const signers=[{name:d.nome,email:d.email||'',phone_country:'55',phone_number:tel,
         send_automatic_email:false,send_automatic_whatsapp:false,auth_mode:'tokenSms',signature_placement:'<<asscedente>>'}];
@@ -47709,6 +47856,7 @@ function abrirModalDocLote(){
   // Termos de cessão entram desmarcados: só fazem sentido depois de escolher os créditos.
   _loteAnexoSel=null;
   _loteDocEdit={};
+  _contratoCtx=null;
   const cbA=document.getElementById('dlote-anexo'); if(cbA) cbA.checked=false;
   _loteAnexoInfo();
   const ta=document.getElementById('dlote-msg'); if(ta) ta.value=_loteMsgPadrao(_docClienteDados());
@@ -47768,10 +47916,19 @@ function _loteQuandoUI(){
 }
 function _loteDocHtml(t,d){
   if(_loteDocEdit[t]) return _loteDocEdit[t];
-  return _docClienteHtml(t,d);
+  return _docClienteHtml(t, _contratoCtx?{...d, contrato:_contratoCtx}:d);
 }
-function _loteDocEditar(t){
+// Garante os dados do contrato (nº, novo/renovação, porte, representante) antes de
+// gerar/editar o contrato. false = usuário cancelou.
+async function _contratoGarantir(d){
+  if(_contratoCtx) return true;
+  const ctx=await _contratoDadosModal(d||_docClienteDados(), _docClienteId());
+  if(!ctx) return false;
+  _contratoCtx=ctx; return true;
+}
+async function _loteDocEditar(t){
   const d=_docClienteDados();
+  if(t==='cessao' && !(await _contratoGarantir(d))) return;
   const html=_loteDocHtml(t,d);
   if(!html){ showToast('Tipo de documento desconhecido.','danger'); return; }
   const titulos={cessao:'Contrato de cessão',procuracao:'Procuração',declaracao:'Declaração de cessão'};
@@ -47835,7 +47992,9 @@ function _loteAnexoToggle(cb){
 }
 function _loteTermosVer(){
   if(!_loteAnexoSel?.creditos?.length){ showToast('Selecione primeiro os créditos dos termos de cessão.','warning'); return; }
-  _termosPreview(_termosCessaoLista(_loteAnexoSel.cli, _loteAnexoSel.creditos, _loteAnexoSel.dataDoc, _loteAnexoSel.dataContrato));
+  const cOk=document.getElementById('dlote-cessao')?.checked&&_contratoCtx;
+  _termosPreview(_termosCessaoLista(_loteAnexoSel.cli, _loteAnexoSel.creditos, _loteAnexoSel.dataDoc,
+    cOk?'':_loteAnexoSel.dataContrato, cOk?_contratoCtx.numero:_loteAnexoSel.numContrato, _contratoCtx));
 }
 function _loteAnexoSelecionar(){
   const cli=(typeof _docSrcCli!=='undefined'&&_docSrcCli)||_detCliObj;
@@ -47848,7 +48007,7 @@ function _anexo1UsarNoLote(){
   const { cli }=_anexo1Ctx;
   const v=_anexo1Selecao(); if(!v) return;
   _anexo1Fechar();
-  _loteAnexoSel={ cli, creditos:v.sel, dataDoc:v.dataDoc, dataContrato:v.dataContrato };
+  _loteAnexoSel={ cli, creditos:v.sel, dataDoc:v.dataDoc, dataContrato:v.dataContrato, numContrato:v.numContrato };
   const cb=document.getElementById('dlote-anexo'); if(cb) cb.checked=true;
   _loteAnexoInfo();
 }
@@ -47868,8 +48027,9 @@ async function enviarLoteDocClienteZapSign(){
     if(agendarPara<=new Date()){ showToast('A data do agendamento precisa ser no futuro.','warning'); return; }
   }
   if(!d.tel) d.tel=await _telClienteRelacional(_docClienteId());
+  if(tipos.includes('cessao') && !(await _contratoGarantir(d))) return;
   const telSel=await promptTelefoneEnvio(d.tel); if(telSel===null) return;
-  const titulos={cessao:'Contrato de cessão',procuracao:'Procuração',declaracao:'Declaração de cessão',anexo:'Termo de cessão'};
+  const titulos={cessao:'Contrato de cessão'+(_contratoCtx?.numero?' nº '+_contratoCtx.numero:''),procuracao:'Procuração',declaracao:'Declaração de cessão',anexo:'Termo de cessão'};
   // Termo de cessão e contrato são assinados também pela Cessionária (COBRASQ).
   const emailCessionaria=String(DB.config.zapsignEmailCessionaria||DB.config.email||'').trim();
   if((tipos.includes('anexo')||tipos.includes('cessao')) && !emailCessionaria){ showToast('Informe o e-mail da COBRASQ (Configurações → Perfil) para ela assinar os termos no ZapSign.','warning'); return; }
@@ -47891,7 +48051,9 @@ async function enviarLoteDocClienteZapSign(){
     for(const t of tipos){
       // Termos de cessão: tabela de preço reservada + um termo por crédito.
       if(t==='anexo'){
-        for(const tc of _termosCessaoLista(_loteAnexoSel.cli, _loteAnexoSel.creditos, _loteAnexoSel.dataDoc, _loteAnexoSel.dataContrato)){
+        // Contrato no mesmo envio: os termos citam o nº dele (a data ainda não existe).
+        const refC=(tipos.includes('cessao')&&_contratoCtx)?{ numero:_contratoCtx.numero, data:'' }:{ numero:_loteAnexoSel.numContrato||'', data:_loteAnexoSel.dataContrato };
+        for(const tc of _termosCessaoLista(_loteAnexoSel.cli, _loteAnexoSel.creditos, _loteAnexoSel.dataDoc, refC.data, refC.numero, _contratoCtx)){
           const b64=await _htmlParaPdfBase64(tc.html,{filename:tc.nome.replace(/[^\w-]+/g,'-')+'.pdf'});
           pdfs.push({tipo:'anexo', nome:tc.nome, base64:b64}); nPdf++; _prog();
         }
