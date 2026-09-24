@@ -47452,6 +47452,8 @@ async function enviarDocClienteZapSign(tipo){
   const d=_docClienteDados();
   if(!d.nome){ showToast('Informe a razão social do cliente.','warning'); return; }
   if(!DB.config.zapsignToken){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
+  // Conferir/editar o documento, a mensagem e escolher quando enviar (mesma regra do lote).
+  const cfg=await _envioDocAvulsoConfig(tipo,d); if(!cfg) return;
   if(!d.tel) d.tel=await _telClienteRelacional(_docClienteId());
   const telSel=await promptTelefoneEnvio(d.tel); if(telSel===null) return;
   const titulos={cessao:'Contrato de cessão',procuracao:'Procuração',declaracao:'Declaração de cessão'};
@@ -47461,7 +47463,7 @@ async function enviarDocClienteZapSign(tipo){
   document.getElementById('mzs-footer').innerHTML='';
   openModal('modal-zapsign-status');
   try{
-    const html=_docClienteHtml(tipo,d);
+    const html=_loteDocHtml(tipo,d);
     const base64Pdf=await _htmlParaPdfBase64(html,{filename:'doc.pdf'});
     const nomeDoc=`${tipoNome} — ${d.nome} — ${new Date().toLocaleDateString('pt-BR')}`;
     const tel=telSel;
@@ -47473,10 +47475,12 @@ async function enviarDocClienteZapSign(tipo){
     });
     const signerToken=result.signers?.[0]?.token;
     const signerLink=result.signers?.[0]?.sign_url||`https://app.zapsign.com.br/verificar/${signerToken}`;
-    const nome=d.fantasia||d.nome;
-    const msg=`${nome}, segue acima o link para assinatura da documentação digital. Para assinar é bem tranquilo. Siga os seguintes passos:\n\n1) Clique no link acima;\n2) Confira o documento e clique em assinar;\n3) Preencha os seus dados;\n4) Assine na tela com o seu dedo. Pode ser apenas a sua inicial;\n5) Digite o código recebido por SMS;\n5) Confirme e sua documentação estará assinada.\n\n_ Em caso de dúvidas, nos informe.`;
-    if(DB.config.zapiInstanceId) await ZApiAPI.sendLink(tel,msg,signerLink,`Assinar — ${tipoNome}`);
-    logAtividade('Enviou doc cliente para ZapSign',`${tipoNome} — ${d.nome}`);
+    let agendouMsg=false, erroAgenda=null;
+    if(cfg.agendarPara){
+      erroAgenda=await _agendarMsgDocCliente(tel, signerLink, cfg.msg, cfg.agendarPara);
+      agendouMsg=!erroAgenda;
+    }else if(DB.config.zapiInstanceId) await ZApiAPI.sendLink(tel,cfg.msg,signerLink,`Assinar — ${tipoNome}`);
+    logAtividade(agendouMsg?'Agendou envio de doc cliente (ZapSign)':'Enviou doc cliente para ZapSign',`${tipoNome} — ${d.nome}${agendouMsg?' — mensagem em '+cfg.agendarPara.toLocaleString('pt-BR'):''}`);
     // Registra no cadastro do cliente (o webhook casa o assinado de volta pelo token).
     const _cid=_docClienteId();
     await _registrarDocClienteZapSign({ clienteId:_cid,
@@ -47485,7 +47489,7 @@ async function enviarDocClienteZapSign(tipo){
     document.getElementById('mzs-body').innerHTML=`
       <div style="padding:16px 0 20px;">
         <div style="font-size:13px;font-weight:700;color:var(--success);margin-bottom:4px;">
-          Documento enviado${DB.config.zapiInstanceId?' e link disparado via WhatsApp.':' com sucesso.'}</div>
+          Documento enviado${erroAgenda?' ao ZapSign, mas o AGENDAMENTO da mensagem falhou ('+escHtml(erroAgenda)+'). Copie o link abaixo e envie manualmente.':agendouMsg?' ao ZapSign. Mensagem com o link agendada para '+escHtml(cfg.agendarPara.toLocaleString('pt-BR',{weekday:'short',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}))+'.':(DB.config.zapiInstanceId?' e link disparado via WhatsApp.':' com sucesso.')}</div>
         <div style="font-size:12.5px;color:var(--text-2);margin-bottom:18px;">
           <strong>${escHtml(d.nome)}</strong> receberá o link de assinatura.</div>
         <div style="background:var(--surface-2);border-radius:var(--radius-sm);padding:12px;">
@@ -47510,6 +47514,86 @@ async function enviarDocClienteZapSign(tipo){
       </div>`;
     document.getElementById('mzs-footer').innerHTML=`<button class="btn btn-ghost" onclick="closeModal('modal-zapsign-status')">Fechar</button>`;
   }
+}
+// Envio AVULSO (um documento): mesma conferência do lote — abrir/editar o
+// documento, editar a mensagem e escolher agora/agendar. Resolve com
+// { msg, agendarPara:Date|null } ou null se cancelar. Usa o mesmo editor do lote
+// (_loteDocEdit/_loteDocEditar), zerado a cada envio.
+function _envioDocAvulsoConfig(tipo,d){
+  _loteDocEdit={};
+  const titulos={cessao:'Contrato de cessão',procuracao:'Procuração',declaracao:'Declaração de cessão'};
+  const agora=new Date(), dentro=_docJanelaEnvio(agora);
+  document.getElementById('dAvulsoModal')?.remove();
+  const ov=document.createElement('div');
+  ov.id='dAvulsoModal';
+  ov.style.cssText='position:fixed;inset:0;z-index:1300;background:rgba(10,21,48,.42);display:flex;align-items:center;justify-content:center;padding:24px;';
+  ov.innerHTML=`<div style="width:480px;max-width:100%;max-height:92vh;overflow-y:auto;background:var(--surface);border-radius:14px;box-shadow:var(--shadow-lg,0 12px 40px rgba(0,0,0,.25));">
+    <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+      <div style="font-size:15px;font-weight:600;">Enviar para assinatura — ${escHtml(titulos[tipo]||'Documento')}</div>
+      <button data-x="cancel" style="border:0;background:transparent;font-size:16px;cursor:pointer;color:var(--text-2);">✕</button>
+    </div>
+    <div style="padding:16px 20px;">
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);">
+        <span style="flex:1;font-size:13px;font-weight:500;">${escHtml(titulos[tipo]||'Documento')}</span>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="_loteDocEditar('${tipo}')">Abrir / editar</button>
+      </div>
+      <label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);display:block;margin:16px 0 5px;">Mensagem do WhatsApp</label>
+      <textarea id="davulso-msg" rows="6" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);font:inherit;font-size:12px;line-height:1.45;resize:vertical;background:var(--surface-2);color:var(--text);">${escHtml(_loteMsgPadrao(d))}</textarea>
+      <div style="font-size:10.5px;color:var(--text-3);margin-top:3px;">O link de assinatura vai junto com esta mensagem.</div>
+      <label style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);display:block;margin:16px 0 6px;">Quando enviar ao cliente</label>
+      <div style="display:flex;flex-direction:column;gap:6px;font-size:12.5px;">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="radio" name="davulso-quando" id="davulso-agora" ${dentro?'checked':''}> Agora</label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="radio" name="davulso-quando" id="davulso-agendar" ${dentro?'':'checked'}> Agendar para
+          <input type="datetime-local" id="davulso-dt" value="${paraDatetimeLocal(_docProximoEnvio(agora))}" style="padding:5px 8px;border:1px solid var(--border);border-radius:var(--radius-sm);font:inherit;font-size:12px;background:var(--surface-2);color:var(--text);"></label>
+      </div>
+      <div id="davulso-info" style="font-size:10.5px;margin-top:5px;"></div>
+    </div>
+    <div style="padding:12px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px;">
+      <button class="btn btn-ghost" data-x="cancel">Cancelar</button>
+      <button class="btn btn-primary" data-x="ok">✍ Enviar</button>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+  const $=id=>document.getElementById(id);
+  const info=()=>{
+    const el=$('davulso-info'), ag=$('davulso-agendar').checked;
+    $('davulso-dt').disabled=!ag;
+    const dt=ag ? new Date($('davulso-dt').value) : new Date();
+    if(ag && (isNaN(dt.getTime()) || dt<=new Date())){ el.textContent='Informe uma data e hora no futuro.'; el.style.color='var(--danger)'; return; }
+    const ok=_docJanelaEnvio(dt);
+    el.textContent=ok ? (ag?'O documento vai para o ZapSign agora; a mensagem com o link sai no horário marcado.':'Envia assim que clicar em Enviar.')
+      : '⚠ Fora do horário de envio (seg–sex 8h30–18h, sáb 8h30–12h). Vai sair assim mesmo.';
+    el.style.color=ok ? 'var(--text-3)' : 'var(--warning)';
+  };
+  ['davulso-agora','davulso-agendar','davulso-dt'].forEach(id=>$(id).addEventListener('change',info));
+  info();
+  return new Promise(resolve=>{
+    ov.addEventListener('click',e=>{
+      const x=e.target.closest('[data-x]')?.dataset.x; if(!x) return;
+      if(x==='cancel'){ ov.remove(); resolve(null); return; }
+      let agendarPara=null;
+      if($('davulso-agendar').checked){
+        agendarPara=new Date($('davulso-dt').value);
+        if(isNaN(agendarPara.getTime())){ showToast('Informe data e hora do envio.','warning'); return; }
+        if(agendarPara<=new Date()){ showToast('A data do agendamento precisa ser no futuro.','warning'); return; }
+      }
+      const msg=($('davulso-msg').value||'').trim()||_loteMsgPadrao(d);
+      ov.remove(); resolve({ msg, agendarPara });
+    });
+  });
+}
+// Enfileira a mensagem com o link em crm_mensagens_agendadas (o worker
+// cron-mensagens-agendadas envia no horário). Link no topo: o texto diz "segue acima".
+// Retorna null se deu certo ou a mensagem de erro.
+async function _agendarMsgDocCliente(tel, signerLink, msg, quando){
+  try{
+    const supa=getSupabase(); if(!supa) return 'Supabase indisponível';
+    const { data:auth }=await supa.auth.getUser();
+    const { error }=await supa.from('crm_mensagens_agendadas').insert({
+      operador_id:auth?.user?.id||null, telefone:String(tel).replace(/\D/g,''), tipo:'texto',
+      mensagem:`${signerLink}\n\n${msg}`, agendada_para:quando.toISOString(), status:'pendente', origem:'manual_doc_cliente' });
+    return error ? (error.message||String(error)) : null;
+  }catch(e){ return (e&&e.message)||String(e); }
 }
 function abrirModalDocLote(){
   if(!DB.config?.zapsignToken){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
