@@ -291,20 +291,23 @@ Deno.serve(async (req) => {
     console.warn('[asaas-webhook] nf_fila_analise upsert falhou: ' + String((e as Error)?.message || e));
   }
 
-  // Baixa best-effort na cobrança quando o externalReference é um uuid de cobranca
-  // (o vínculo forte é gravado na emissão — PR2; aqui é defensivo).
+  // Vincula o pagamento à cobrança quando o externalReference é um uuid de cobranca
+  // (o vínculo forte é gravado na emissão — PR2; aqui é defensivo). SÓ LÊ: até
+  // 24/09/2026 isto gravava cobrancas.status='paga' em QUALQUER pagamento — inclusive a
+  // 1ª parcela de acordo parcelado. Foi o que tirou o Michel Antonio Fin (Arte Estofados,
+  // 1 de 14 parcelas paga em 10/09) de "Acordo" e o levou a "Quitado". Quitação é
+  // decisão do fluxo de recebimento/acordo, não de um pagamento isolado.
   let cobrancaId: string | null = null;
   const extRef = payment.externalReference ? String(payment.externalReference) : '';
   if (UUID_RE.test(extRef)) {
     try {
       const { data: cob } = await sb
         .from('cobrancas')
-        .update({ status: 'paga' })
-        .eq('id', extRef)
         .select('id')
+        .eq('id', extRef)
         .limit(1);
       if (cob && cob[0]) cobrancaId = cob[0].id;
-    } catch {/* ignore — status/regra de baixa real refinada na PR3 */}
+    } catch {/* ignore — vínculo é defensivo */}
   }
 
   // BUG CRÍTICO até 2026-08-07: sem devedor casado, a function parava AQUI — devolvia

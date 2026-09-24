@@ -1,20 +1,21 @@
 // Supabase Edge Function: gerar-acordo-termo
 // Fase 2 / recorte 1 (extrajudicial). Recebe o HTML do termo (montado no CRM),
-// renderiza em PDF via Gotenberg, cria o documento no ZapSign (base64_pdf) e
+// renderiza em PDF via /api/gerar-pdf (Chromium na Vercel), cria o documento no ZapSign (base64_pdf) e
 // grava/vincula em `acordos` via RPC. Substitui o caminho planilha→n8n→Google Doc
 // para o acordo extrajudicial. O n8n só permanece no pós-assinatura.
 //
 // Secrets (supabase secrets set ...):
-//   GOTENBERG_URL=https://...up.railway.app
+//   APP_BASE_URL=https://painel.cobrasq.com.br  (onde mora /api/gerar-pdf)
+//   EMIT_ACORDO_SECRET=<o mesmo da Vercel>      (auth server-to-server, header x-emit-secret)
 //   ZAPSIGN_TOKEN=<token da API do ZapSign>
-//   GOTENBERG_USER / GOTENBERG_PASS  (opcional — basic auth do Gotenberg)
 //   SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY  (injetados pela plataforma)
+// Até 09/2026 o PDF saía de um Gotenberg hospedado no Railway (GOTENBERG_URL); trocado
+// pelo gerador que já existia na Vercel, para não manter um serviço à parte.
 //
 // Body: { casoId, html, dados }  (dados = shape do TermoEngine; dados.devedores = N signatários)
 // Resp: { ok:true, token, link, signers:[{nome,phone,link}] } | { error: '...' , detalhes? }
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { encodeBase64 } from "jsr:@std/encoding@1/base64";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const cors = {
@@ -47,30 +48,25 @@ Deno.serve(async (req) => {
     if (!html || typeof html !== "string") return json({ error: 'Campo "html" obrigatório.' }, 400);
     if (!dados || !dados.devedor) return json({ error: 'Campo "dados" obrigatório.' }, 400);
 
-    const GOTENBERG_URL = (Deno.env.get("GOTENBERG_URL") || "").replace(/\/+$/, "");
+    const APP_BASE_URL = (Deno.env.get("APP_BASE_URL") || "").replace(/\/+$/, "");
+    const EMIT_SECRET = Deno.env.get("EMIT_ACORDO_SECRET");
     const ZAPSIGN_TOKEN = Deno.env.get("ZAPSIGN_TOKEN");
-    if (!GOTENBERG_URL || !ZAPSIGN_TOKEN) {
-      return json({ error: "GOTENBERG_URL ou ZAPSIGN_TOKEN não configurados nos secrets." }, 500);
+    if (!APP_BASE_URL || !EMIT_SECRET || !ZAPSIGN_TOKEN) {
+      return json({ error: "APP_BASE_URL, EMIT_ACORDO_SECRET ou ZAPSIGN_TOKEN não configurados nos secrets." }, 500);
     }
-    const gUser = Deno.env.get("GOTENBERG_USER");
-    const gPass = Deno.env.get("GOTENBERG_PASS");
-    const gHeaders: Record<string, string> = {};
-    if (gUser && gPass) gHeaders["Authorization"] = "Basic " + btoa(`${gUser}:${gPass}`);
 
-    // 1) HTML -> PDF (Gotenberg / Chromium)
-    const fd = new FormData();
-    fd.append("files", new File([html], "index.html", { type: "text/html" }));
-    fd.append("preferCssPageSize", "true");
-    fd.append("printBackground", "true");
-    const gResp = await fetch(`${GOTENBERG_URL}/forms/chromium/convert/html`, {
-      method: "POST", body: fd, headers: gHeaders, signal: AbortSignal.timeout(60000),
+    // 1) HTML -> PDF (/api/gerar-pdf na Vercel — Chromium headless, devolve { base64 })
+    const gResp = await fetch(`${APP_BASE_URL}/api/gerar-pdf`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-emit-secret": EMIT_SECRET },
+      body: JSON.stringify({ html }),
+      signal: AbortSignal.timeout(60000),
     });
-    if (!gResp.ok) {
-      const t = await gResp.text().catch(() => "");
-      return json({ error: `Gotenberg falhou (HTTP ${gResp.status})`, detalhes: t.slice(0, 500) }, 502);
+    const gJson = await gResp.json().catch(() => ({} as Record<string, unknown>));
+    if (!gResp.ok || !gJson?.base64) {
+      return json({ error: `Geração do PDF falhou (HTTP ${gResp.status})`, detalhes: String(gJson?.error || "").slice(0, 500) }, 502);
     }
-    const pdfBytes = new Uint8Array(await gResp.arrayBuffer());
-    const base64_pdf = encodeBase64(pdfBytes);
+    const base64_pdf = String(gJson.base64);
 
     // 2) Cria o documento no ZapSign (mesmos campos do nó n8n; url_pdf -> base64_pdf)
     const devs = (Array.isArray(dados.devedores) && dados.devedores.length)

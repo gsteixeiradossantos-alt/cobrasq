@@ -130,14 +130,32 @@
     const faixas = Array.isArray(ac && ac.faixas) ? ac.faixas.filter(function (f) { return f && f.qtd > 0 && f.valor > 0; }) : [];
     return faixas.length > 0 && faixas.every(function (f) { return f.meio === "pix"; });
   }
+  /* Rito do termo judicial (decisão do Gustavo, 18/09/2026): só execução e
+   * cumprimento de sentença tratam as partes por exequente/executada; na ação
+   * de conhecimento (cobrança, monitória, locupletamento) é parte autora/parte
+   * requerida. `jud` nas funções abaixo aceita false (extrajudicial), true
+   * (judicial, rito execução — compatibilidade) ou o próprio rito
+   * ('execucao' | 'conhecimento'). */
+  function ritoJudicial(j) {
+    return (j && j.rito) === "conhecimento" ? "conhecimento" : "execucao";
+  }
+  function papeisRito(jud) {
+    if (jud === "conhecimento") {
+      return { credorLabel: "Autora", credorTermo: "autora", parteCredor: "parte autora",
+        devedorTermo: "requerida", parteDevedor: "parte requerida", devedorM: "requerido", devedorF: "requerida" };
+    }
+    return { credorLabel: "Exequente", credorTermo: "exequente", parteCredor: "parte exequente",
+      devedorTermo: "executada", parteDevedor: "parte executada", devedorM: "executado", devedorF: "executada" };
+  }
   // Complemento da cláusula 2: como os boletos chegam — ou, se tudo é PIX, a
   // chave e o comprovante. Com faixas mistas, as duas frases.
   function fraseEntregaBoletos(ac, generoCredor, jud) {
     const M = generoCredor === "M";
-    const doCred = jud ? "da parte exequente" : (M ? "do credor" : "da credora");
-    const peloCred = jud ? "pela parte exequente" : (M ? "pelo credor" : "pela credora");
-    const aoCred = jud ? "à parte exequente" : (M ? "ao credor" : "à credora");
-    const devedora = jud ? "parte executada" : "parte devedora";
+    const pj = jud ? papeisRito(jud) : null;
+    const doCred = pj ? "da " + pj.parteCredor : (M ? "do credor" : "da credora");
+    const peloCred = pj ? "pela " + pj.parteCredor : (M ? "pelo credor" : "pela credora");
+    const aoCred = pj ? "à " + pj.parteCredor : (M ? "ao credor" : "à credora");
+    const devedora = pj ? pj.parteDevedor : "parte devedora";
     const chave = String((ac && ac.pixChave) || "").trim();
     const fPix = "O pagamento das parcelas via PIX será feito para a chave <strong>" + escHtml(chave || "____") +
       "</strong>, de titularidade " + doCred + ", cabendo à " + devedora + " encaminhar o comprovante " + aoCred +
@@ -180,11 +198,13 @@
 
   // Preâmbulo: um bloco de parte por devedor (qualificação reusa qualifDevedor).
   // Termos por modo (decisão do Gustavo, 12/09/2026): extrajudicial = credor(a)/devedor(a);
-  // judicial = exequente/executado(a). Minúsculas no corpo; maiúscula só em rótulo.
+  // judicial = exequente/executado(a) na execução, autora/requerido(a) no
+  // conhecimento (ver papeisRito). Minúsculas no corpo; maiúscula só em rótulo.
   function papelDevedor(dv, jud) {
     const g = generoDevedorLabel(dv);
     if (!jud) return g;
-    return g === "devedor" ? "executado" : "executada";
+    const pj = papeisRito(jud);
+    return g === "devedor" ? pj.devedorM : pj.devedorF;
   }
   function preambuloDevedores(devs, jud) {
     return (devs || []).map(function (dv) {
@@ -263,6 +283,33 @@
     return comarcaDaQualificacao(cr.qualificacao) || FORO_PADRAO;
   }
 
+  // Cláusula 1: quando o acordo é abatimento sobre uma dívida já atualizada, o
+  // termo diz de quanto era o débito e que o desconto é liberalidade das partes.
+  // Sem dados.acordo.valorAtualizado, sai a redação de sempre.
+  function fraseReconhecimentoDivida(dados, contexto) {
+    const ac = dados.acordo || {};
+    const q = ac.quitacao || {};
+    const atual = ac.valorAtualizado || q.valorAtualizado;
+    const dtAtual = ac.dataAtualizacao || q.dataAtualizacao;
+    const total = "<strong>" + valorCompleto(ac.total || 0) + "</strong>";
+    const jud = contexto === "judicial";
+    const quem = jud ? papeisRito(ritoJudicial(dados.judicial)).parteDevedor : "parte devedora";
+    const ondeDebito = jud ? "discutido nestes autos" : "descrito neste instrumento";
+    if (atual) {
+      const oque = jud ? "do presente feito" : "do presente débito";
+      const em = dtAtual ? " para " + dataExtenso(dtAtual) : "";
+      return "O valor atual " + oque + " está atualizado em <strong>" + valorCompleto(atual) +
+        "</strong>" + em + ", do qual a " + quem + " reconhece, de forma expressa, a existência, liquidez e " +
+        "exigibilidade do débito " + ondeDebito + ". No entanto, por mera liberalidade das partes, essas " +
+        "acordaram o pagamento do valor para quitação total do débito, no valor total de " + total + ".";
+    }
+    const consolid = jud
+      ? ", valor este que representa a consolidação integral do débito até a presente data, já considerados os encargos incidentes até este ato, conforme composição aceita pelas partes."
+      : ", valor este que representa a consolidação do montante devido até a data da assinatura, já considerados os encargos incidentes até então, conforme ajuste entre as partes.";
+    return "A " + quem + " reconhece, de forma expressa, a existência, liquidez e exigibilidade do débito " +
+      ondeDebito + ", no valor total de " + total + consolid;
+  }
+
   // Mapa placeholder → valor
   function placeholders(dados) {
     const cr = dados.credor || {}, ac = dados.acordo || {};
@@ -276,6 +323,7 @@
       assinaturasDevedores: assinaturasDevedores(devs),
       vistosPageCss: vistosPageCss(devs.length),
       valorDivida: valorCompleto(ac.total),
+      fraseReconhecimentoDivida: fraseReconhecimentoDivida(dados, "extrajudicial"),
       frasePagamento: frasePagamento(ac),
       fraseEntregaBoletos: fraseEntregaBoletos(ac, cr.genero),
       multaBoleto: pctExt(ac.multa != null ? ac.multa : 10),
@@ -382,9 +430,10 @@
    * JUDICIAL — termo de acordo p/ homologação (art. 515, II, CPC)
    * Mesma base do extrajudicial + placeholders judiciais: endereçamento ao juízo,
    * nº do processo, cláusula 4 variável (Sisbajud | concentração/desistência |
-   * consolidação) e o contato da parte executada (cláusula 7).
+   * nenhuma) e o contato da parte executada.
    * dados.judicial = { numeroProcesso, comarca, foro:'jec'|'vara',
-   *   clausula4:{ mode:'desistencia'|'sisbajud'|'consolidacao',
+ *   rito:'execucao'|'conhecimento' (default execucao — ver papeisRito),
+   *   clausula4:{ mode:''|'desistencia'|'sisbajud',
    *               procPrincipal, proc2, comarca2, valorBloqueado } }
    * ======================================================================== */
   function enderecamentoJudicial(j) {
@@ -413,21 +462,24 @@
     if (c.doc) p.push(c.doc);
     return p.length ? escHtml(p.join(", ")) : "____";
   }
-  // Bloco de assinatura opcional do advogado da parte executada (âncora ZapSign <<assadv2>>).
-  function assinaturaAdvExec(adv) {
+  // Bloco de assinatura opcional do advogado da parte executada/requerida (âncora ZapSign <<assadv2>>).
+  function assinaturaAdvExec(adv, jud) {
     if (!adv || !adv.nome) return "";
+    const pj = papeisRito(jud);
     const l2 = adv.oab ? (/oab/i.test(adv.oab) ? adv.oab : "OAB " + adv.oab) : "";
     return '<div class="sig">' +
       '<div class="sig-token">&lt;&lt;assadv2&gt;&gt;</div>' +
             '<div class="sig-name">' + escHtml(adv.nome) + '</div>' +
       '<div class="sig-doc">' + escHtml(l2) + '</div>' +
-      '<div class="sig-role">Advogado(a) da parte executada</div></div>';
+      '<div class="sig-role">Advogado(a) da ' + pj.parteDevedor + '</div></div>';
   }
 
   function clausula4Judicial(dados) {
     const j = dados.judicial || {};
     const c4 = j.clausula4 || {};
-    const mode = c4.mode || "consolidacao";
+    const mode = c4.mode || "";
+    const pj = papeisRito(ritoJudicial(j));
+    const PC = pj.parteCredor, PD = pj.parteDevedor;
     if (mode === "sisbajud") {
       const total = c4.valorBloqueado ? valorCompleto(c4.valorBloqueado) : "____";
       const nExeq = Number(c4.levExequente) || 0;
@@ -438,19 +490,19 @@
       const cExec = c4.contaExecutado || {};
       const contaExec = (cExec.conta || cExec.pix) ? contaFrase(cExec) : null;
       const itens = [];
-      if (vExeq) itens.push("a quantia de <strong>" + vExeq + "</strong> será levantada em favor da parte <strong>exequente</strong>, a título de amortização do débito ora reconhecido, mediante expedição do competente alvará ou transferência para a conta adiante indicada");
-      if (vExec) itens.push("a quantia de <strong>" + vExec + "</strong> será liberada em favor da parte <strong>executada</strong>" + (contaExec ? ", para a conta bancária adiante indicada" : ", mediante manifestação posterior nos autos, na qual indicará os dados bancários de sua titularidade"));
-      let corpo = "<p>A parte executada informou que houve o bloqueio do valor de <strong>" + total + "</strong>, por meio do Sistema Sisbajud nestes autos.</p>";
+      if (vExeq) itens.push("a quantia de <strong>" + vExeq + "</strong> será levantada em favor da <strong>" + PC + "</strong>, a título de amortização do débito ora reconhecido, mediante expedição do competente alvará ou transferência para a conta adiante indicada");
+      if (vExec) itens.push("a quantia de <strong>" + vExec + "</strong> será liberada em favor da <strong>" + PD + "</strong>" + (contaExec ? ", para a conta bancária adiante indicada" : ", mediante manifestação posterior nos autos, na qual indicará os dados bancários de sua titularidade"));
+      let corpo = "<p>A " + PD + " informou que houve o bloqueio do valor de <strong>" + total + "</strong>, por meio do Sistema Sisbajud nestes autos.</p>";
       if (itens.length) {
         const rot = ["i", "ii"];
         corpo += "<p>As partes convencionam a seguinte destinação do valor bloqueado: " +
           itens.map(function (t, i) { return "(" + (rot[i] || (i + 1)) + ") " + t; }).join("; ") +
-          ". Eventual saldo bloqueado remanescente, não abrangido por esta cláusula, será liberado em favor da parte executada mediante manifestação posterior nos autos.</p>";
+          ". Eventual saldo bloqueado remanescente, não abrangido por esta cláusula, será liberado em favor da " + PD + " mediante manifestação posterior nos autos.</p>";
       } else {
-        corpo += "<p>As partes ajustam que o valor bloqueado será destinado ao levantamento pela parte exequente, no montante correspondente ao débito ora reconhecido, para a conta adiante indicada, liberando-se o remanescente em favor da parte executada mediante manifestação posterior nos autos.</p>";
+        corpo += "<p>As partes ajustam que o valor bloqueado será destinado ao levantamento pela " + PC + ", no montante correspondente ao débito ora reconhecido, para a conta adiante indicada, liberando-se o remanescente em favor da " + PD + " mediante manifestação posterior nos autos.</p>";
       }
-      corpo += "<p class=\"dados-conta\"><strong>Dados bancários para levantamento da parte exequente:</strong> " + contaEx + ".</p>";
-      if (contaExec) corpo += "<p class=\"dados-conta\"><strong>Dados bancários para levantamento da parte executada:</strong> " + contaExec + ".</p>";
+      corpo += "<p class=\"dados-conta\"><strong>Dados bancários para levantamento da " + PC + ":</strong> " + contaEx + ".</p>";
+      if (contaExec) corpo += "<p class=\"dados-conta\"><strong>Dados bancários para levantamento da " + PD + ":</strong> " + contaExec + ".</p>";
       corpo += "<p>Fica pactuado que, caso posteriormente seja constatado bloqueio de valores realizado em data anterior à assinatura deste acordo, em montante superior ao descrito nesta cláusula, as partes deverão protocolar contrato aditivo no prazo de 5 (cinco) dias, a fim de definir a destinação do valor remanescente.</p>";
       return { titulo: "Do Sisbajud e destinação dos valores bloqueados", corpo: corpo };
     }
@@ -462,15 +514,11 @@
         titulo: "Da concentração do débito e desistência",
         corpo:
           "<p>As partes convencionam concentrar a totalidade da dívida e do presente acordo nestes autos n. " + principal +
-          ", comprometendo-se a parte exequente a requerer a desistência da ação que tramita perante a Comarca de " + com2 +
-          " sob os autos n. " + proc2 + ", com o que expressamente anui a parte executada, respondendo cada parte pelos honorários de seus respectivos patronos naquele feito.</p>"
+          ", comprometendo-se a " + PC + " a requerer a desistência da ação que tramita perante a Comarca de " + com2 +
+          " sob os autos n. " + proc2 + ", com o que expressamente anui a " + PD + ", respondendo cada parte pelos honorários de seus respectivos patronos naquele feito.</p>"
       };
     }
-    return {
-      titulo: "Da consolidação do débito neste feito",
-      corpo:
-        "<p>As partes convencionam que a totalidade da dívida discutida encontra-se consolidada e composta exclusivamente no presente feito, comprometendo-se a parte exequente a promover as baixas e comunicações pertinentes após o cumprimento integral do acordo.</p>"
-    };
+    return null;
   }
 
   function contatoReJudicial(dados) {
@@ -491,7 +539,7 @@
     if (endereco) partes.push("o seguinte endereço: " + escHtml(endereco));
     if (dv.telefone) partes.push("telefone: " + escHtml(dv.telefone));
     const info = partes.length ? partes.join("; ") + "." : "os dados de contato constantes dos autos.";
-    return "A parte executada " + nome + " indica " + info;
+    return "A " + papeisRito(ritoJudicial(dados.judicial)).parteDevedor + " " + nome + " indica " + info;
   }
 
   function placeholdersJudicial(dados) {
@@ -500,24 +548,49 @@
     const c4 = clausula4Judicial(dados);
     base.enderecamento = enderecamentoJudicial(j);
     base.numeroProcesso = escAttr(j.numeroProcesso || "");
-    base.clausula4Titulo = c4.titulo;
-    base.clausula4Corpo = c4.corpo;
+    base.clausula4Titulo = c4 ? c4.titulo : "";
+    base.clausula4Corpo = c4 ? c4.corpo : "";
+    // sem cláusula 4 variável, o vencimento antecipado vira a cláusula 4
+    base.clVenc = c4 ? "5" : "4";
+    const rito = ritoJudicial(j);
+    const pj = papeisRito(rito);
+    base.fraseReconhecimentoDivida = fraseReconhecimentoDivida(dados, "judicial");
     base.contatoRe = contatoReJudicial(dados);
-    base.assinaturaAdvExec = assinaturaAdvExec(dados.advogadoExec);
-    // modo judicial: exequente / executada no preâmbulo, assinaturas e frase dos boletos
+    base.assinaturaAdvExec = assinaturaAdvExec(dados.advogadoExec, rito);
+    // modo judicial: exequente/executada (execução) ou autora/requerida
+    // (conhecimento) no preâmbulo, assinaturas, corpo e frase dos boletos
     const devsJ = (dados.devedores && dados.devedores.length) ? dados.devedores : (dados.devedor ? [dados.devedor] : []);
     const acJ = dados.acordo || {}, crJ = dados.credor || {};
-    base.generoCredor = "exequente";
-    base.devedoresPreambulo = preambuloDevedores(devsJ, true);
-    base.assinaturasDevedores = assinaturasDevedores(devsJ, true);
-    base.fraseEntregaBoletos = fraseEntregaBoletos(acJ, crJ.genero, true);
+    base.generoCredor = pj.credorTermo;
+    base.credorLabel = pj.credorLabel;
+    base.credorTermo = pj.credorTermo;
+    base.parteCredor = pj.parteCredor;
+    base.devedorTermo = pj.devedorTermo;
+    base.parteDevedor = pj.parteDevedor;
+    base.devedoresPreambulo = preambuloDevedores(devsJ, rito);
+    base.assinaturasDevedores = assinaturasDevedores(devsJ, rito);
+    base.fraseEntregaBoletos = fraseEntregaBoletos(acJ, crJ.genero, rito);
     return base;
+  }
+
+  // renumera as cláusulas em sequência (o slot variável pode ter sido removido)
+  function renumerarClausulas(html) {
+    let n = 0;
+    return html.replace(/(<span class="clause-num">)\d+(<\/span>)/g, function (m, a, b) {
+      n += 1;
+      return a + n + b;
+    });
   }
 
   // preenche já permitindo HTML nos valores de cláusula 4 / contato (não escapa esses)
   function preencherJudicial(templateHtml, dados) {
     const map = placeholdersJudicial(dados);
-    const rawHtml = { clausula4Corpo: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1, frasePagamento: 1, fraseEntregaBoletos: 1, credorQualificacao: 1, vistosPageCss: 1 };
+    if (!map.clausula4Titulo) {
+      // nenhum conteúdo para o slot variável: remove o bloco inteiro
+      templateHtml = templateHtml.replace(/<!--c4-->[\s\S]*?<!--\/c4-->\s*/, "");
+    }
+    templateHtml = renumerarClausulas(templateHtml);
+    const rawHtml = { fraseReconhecimentoDivida: 1, clausula4Corpo: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1, frasePagamento: 1, fraseEntregaBoletos: 1, credorQualificacao: 1, vistosPageCss: 1 };
     return templateHtml.replace(/\{\{(\w+)\}\}/g, function (m, k) {
       if (!Object.prototype.hasOwnProperty.call(map, k)) return m;
       return rawHtml[k] ? String(map[k] == null ? "" : map[k]) : escAttr(map[k]);
@@ -538,14 +611,117 @@
     return preencherJudicial(tpl, dados);
   }
 
+  /* ═══════════ Termo de acordo com QUITAÇÃO JÁ REALIZADA ═══════════
+   * O valor já entrou. Por isso este termo NÃO tem encargos por atraso,
+   * vencimento antecipado, cláusula penal, custódia dos títulos em garantia
+   * nem manutenção das penhoras — a cláusula das constrições é de LIBERAÇÃO
+   * (arts. 924, II, e 925 do CPC). Se o débito ainda será pago, o termo certo
+   * é o de parcelamento (montarTermoJudicial).
+   *
+   * Reaproveita a casca do acordo-judicial.html (cabeçalho, preâmbulo, fecho,
+   * assinaturas e as fontes embutidas) e troca só o miolo da
+   * <section class="clauses"> pelo fragmento acordo-quitacao-clausulas.html —
+   * assim as fontes base64 não são duplicadas num segundo arquivo.
+   *
+   * Campos extras em dados.acordo.quitacao:
+   *   valorAtualizado   (number, opcional) — dívida atualizada antes do desconto
+   *   dataAtualizacao   (ISO, opcional)    — data dessa atualização
+   *   dataPagamento     (ISO)              — quando o valor entrou
+   */
+  function fraseReconhecimento(dados) {
+    const ac = dados.acordo || {};
+    const q = ac.quitacao || {};
+    const pj = papeisRito(ritoJudicial(dados.judicial));
+    const total = "<strong>" + valorCompleto(ac.total || 0) + "</strong>";
+    const atual = ac.valorAtualizado || q.valorAtualizado;
+    const dtAtual = ac.dataAtualizacao || q.dataAtualizacao;
+    if (atual) {
+      const em = dtAtual ? " para " + dataExtenso(dtAtual) : "";
+      return "O valor atual do presente feito está atualizado em <strong>" + valorCompleto(atual) +
+        "</strong>" + em + ", do qual a " + pj.parteDevedor + " reconhece, de forma expressa, a existência, liquidez e " +
+        "exigibilidade do débito discutido nestes autos. No entanto, por mera liberalidade das partes, essas acordaram " +
+        "o pagamento do valor para quitação total do débito, no valor total de " + total + ".";
+    }
+    return "A " + pj.parteDevedor + " reconhece, de forma expressa, a existência, liquidez e exigibilidade do débito " +
+      "discutido nestes autos. Por mera liberalidade das partes, essas acordaram o pagamento do valor de " + total +
+      " para quitação total do débito.";
+  }
+
+  function frasePagamentoRealizado(dados) {
+    const ac = dados.acordo || {};
+    const q = ac.quitacao || {};
+    const pj = papeisRito(ritoJudicial(dados.judicial));
+    const total = "<strong>" + valorCompleto(ac.total || 0) + "</strong>";
+    const dt = q.dataPagamento || ac.vencimento;
+    const quando = dt ? ", em <strong>" + dataExtenso(dt) + "</strong>" : "";
+    const chave = String(ac.pixChave || "").trim();
+    const via = chave ? ", via Pix" : "";
+    let out = "O pagamento do valor total da dívida, ou seja, de " + total + ", foi realizado em parcela única" +
+      via + quando + ".";
+    if (chave) {
+      out += " O pagamento via Pix foi feito para a chave <strong>" + escHtml(chave) + "</strong>, de titularidade da " +
+        pj.parteCredor + ".";
+    }
+    return out;
+  }
+
+  function placeholdersQuitacao(dados) {
+    const base = placeholdersJudicial(dados);
+    base.fraseReconhecimento = fraseReconhecimento(dados);
+    base.frasePagamentoRealizado = frasePagamentoRealizado(dados);
+    // o termo de quitação não tem slot de cláusula variável nem cláusula de
+    // vencimento antecipado — zera para o bloco <!--c4--> ser removido
+    base.clausula4Titulo = "";
+    base.clausula4Corpo = "";
+    return base;
+  }
+
+  // troca o miolo da <section class="clauses"> da casca judicial pelo fragmento
+  function aplicarClausulasQuitacao(tplJud, clausulas) {
+    // o comentário de cabeçalho do fragmento é documentação do repo: fora do termo
+    clausulas = String(clausulas).replace(/<!--[\s\S]*?-->/g, "").trim();
+    const re = /(<section class="clauses">)[\s\S]*?(<\/section>)/;
+    if (!re.test(tplJud)) throw new Error("Casca do termo judicial sem <section class=\"clauses\">");
+    return tplJud.replace(re, function (m, a, b) { return a + "\n" + clausulas + "\n  " + b; });
+  }
+
+  function preencherQuitacao(templateHtml, dados) {
+    const map = placeholdersQuitacao(dados);
+    const rawHtml = { contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1,
+      credorQualificacao: 1, vistosPageCss: 1, fraseReconhecimento: 1, frasePagamentoRealizado: 1 };
+    return templateHtml.replace(/\{\{(\w+)\}\}/g, function (m, k) {
+      if (!Object.prototype.hasOwnProperty.call(map, k)) return m;
+      return rawHtml[k] ? String(map[k] == null ? "" : map[k]) : escAttr(map[k]);
+    });
+  }
+
+  let _tplQuit = null;
+  async function carregarClausulasQuitacao() {
+    if (_tplQuit) return _tplQuit;
+    const r = await fetch("/templates/acordo-quitacao-clausulas.html", { cache: "force-cache" });
+    if (!r.ok) throw new Error("Falha ao carregar as cláusulas do termo de quitação (HTTP " + r.status + ")");
+    _tplQuit = await r.text();
+    return _tplQuit;
+  }
+
+  async function montarTermoQuitacao(dados) {
+    const casca = await carregarTemplateJudicial();
+    const clausulas = await carregarClausulasQuitacao();
+    return preencherQuitacao(aplicarClausulasQuitacao(casca, clausulas), dados);
+  }
+
   global.TermoEngine = {
+    fraseReconhecimentoDivida,
     extInt, reaisExt, valorCompleto, pctExt, dataExtenso, estadoFrase,
     qualifDevedor, qualifCredor, frasePagamento, fraseEntregaBoletos, placeholders,
     foroDe, comarcaDaQualificacao,
     preambuloDevedores, assinaturasDevedores, generoDevedorLabel, papelDevedor, vistosPageCss,
     preencher, carregarTemplate, montarTermoExtrajudicial,
     credorEhCobrasq, timbreDe, carregarTimbreTA, aplicarTimbreTA,
+    ritoJudicial, papeisRito,
     enderecamentoJudicial, clausula4Judicial, contatoReJudicial, contaFrase, assinaturaAdvExec,
-    placeholdersJudicial, preencherJudicial, carregarTemplateJudicial, montarTermoJudicial
+    placeholdersJudicial, preencherJudicial, carregarTemplateJudicial, montarTermoJudicial,
+    fraseReconhecimento, frasePagamentoRealizado, placeholdersQuitacao, aplicarClausulasQuitacao,
+    preencherQuitacao, carregarClausulasQuitacao, montarTermoQuitacao
   };
 })(typeof window !== "undefined" ? window : globalThis);

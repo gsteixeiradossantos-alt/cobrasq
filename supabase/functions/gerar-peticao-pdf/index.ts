@@ -1,5 +1,5 @@
 // Supabase Edge Function: gerar-peticao-pdf
-// Converte o HTML de uma petição em PDF via Gotenberg (Chromium) e devolve o PDF
+// Converte o HTML de uma petição em PDF via /api/gerar-pdf (Chromium na Vercel) e devolve o PDF
 // em base64. O eproc exige PDF; o app hoje salva a peça como HTML (petSalvar) —
 // esta função produz o PDF "de verdade" para o peticionamento (Fase 2 eproc).
 //
@@ -8,15 +8,14 @@
 // `peticao_geradas`/`proc_peticionamentos` seguem no cliente (mantém a RLS de
 // storage com a sessão do usuário, reusando a lógica de petSalvar).
 //
-// Secrets (já existentes p/ gerar-acordo-termo):
-//   GOTENBERG_URL=https://...   ·   GOTENBERG_USER / GOTENBERG_PASS (opcional)
+// Secrets (já existentes p/ gerar-acordo-termo e asaas-webhook):
+//   APP_BASE_URL (onde mora /api/gerar-pdf) · EMIT_ACORDO_SECRET (header x-emit-secret)
 //   SUPABASE_URL / SUPABASE_ANON_KEY (injetados pela plataforma)
 //
 // verify_jwt: true. Body: { html: string }. Resp: { ok:true, base64_pdf, size }.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
-import { encodeBase64 } from "jsr:@std/encoding@1/base64";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -47,27 +46,25 @@ Deno.serve(async (req) => {
   const html = body?.html;
   if (!html || typeof html !== "string") return json({ error: 'Campo "html" obrigatório.' }, 400);
 
-  const GOTENBERG_URL = (Deno.env.get("GOTENBERG_URL") || "").replace(/\/+$/, "");
-  if (!GOTENBERG_URL) return json({ error: "GOTENBERG_URL não configurado nos secrets." }, 500);
-  const gUser = Deno.env.get("GOTENBERG_USER");
-  const gPass = Deno.env.get("GOTENBERG_PASS");
-  const gHeaders: Record<string, string> = {};
-  if (gUser && gPass) gHeaders["Authorization"] = "Basic " + btoa(`${gUser}:${gPass}`);
+  const APP_BASE_URL = (Deno.env.get("APP_BASE_URL") || "").replace(/\/+$/, "");
+  const EMIT_SECRET = Deno.env.get("EMIT_ACORDO_SECRET");
+  if (!APP_BASE_URL || !EMIT_SECRET) return json({ error: "APP_BASE_URL ou EMIT_ACORDO_SECRET não configurados nos secrets." }, 500);
 
   try {
-    const fd = new FormData();
-    fd.append("files", new File([html], "index.html", { type: "text/html" }));
-    fd.append("preferCssPageSize", "true");
-    fd.append("printBackground", "true");
-    const gResp = await fetch(`${GOTENBERG_URL}/forms/chromium/convert/html`, {
-      method: "POST", body: fd, headers: gHeaders, signal: AbortSignal.timeout(60000),
+    const gResp = await fetch(`${APP_BASE_URL}/api/gerar-pdf`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-emit-secret": EMIT_SECRET },
+      body: JSON.stringify({ html }),
+      signal: AbortSignal.timeout(60000),
     });
-    if (!gResp.ok) {
-      const t = await gResp.text().catch(() => "");
-      return json({ error: `Gotenberg falhou (HTTP ${gResp.status})`, detalhes: t.slice(0, 500) }, 502);
+    const gJson = await gResp.json().catch(() => ({} as Record<string, unknown>));
+    if (!gResp.ok || !gJson?.base64) {
+      return json({ error: `Geração do PDF falhou (HTTP ${gResp.status})`, detalhes: String(gJson?.error || "").slice(0, 500) }, 502);
     }
-    const pdfBytes = new Uint8Array(await gResp.arrayBuffer());
-    return json({ ok: true, base64_pdf: encodeBase64(pdfBytes), size: pdfBytes.length });
+    const base64_pdf = String(gJson.base64);
+    // size = bytes do PDF (base64 → 3/4, descontando o padding)
+    const size = Math.floor(base64_pdf.length * 3 / 4) - (base64_pdf.endsWith("==") ? 2 : base64_pdf.endsWith("=") ? 1 : 0);
+    return json({ ok: true, base64_pdf, size });
   } catch (e) {
     return json({ error: "Falha ao gerar PDF: " + (e instanceof Error ? e.message : String(e)) }, 502);
   }

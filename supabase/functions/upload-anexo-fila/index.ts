@@ -1,8 +1,10 @@
 // Supabase Edge Function: upload-anexo-fila
 //
-// Só faz UMA coisa: recebe um PDF em base64 e grava no bucket `documentos`, pronto
-// para uma linha de `crm_mensagens_agendadas` (tipo='documento', media_path=<path
-// devolvido>) apontar para ele. Existe porque o upload direto ao Storage via REST
+// Recebe um PDF em base64 e grava no bucket `documentos`: por padrão em
+// `manual/fila-whatsapp/`, pronto para uma linha de `crm_mensagens_agendadas`
+// (tipo='documento', media_path=<path devolvido>) apontar para ele; com
+// `cobranca_id` + `categoria`, em `cobrancas/<id>/<categoria>/` + linha em
+// `public.documentos` (o anexo aparece em "Documentos do caso" no painel). Existe porque o upload direto ao Storage via REST
 // exige a `service_role` (a RLS de `storage.objects` não libera `anon` nem
 // `authenticated` sem sessão de login para os caminhos que a fila usa — ver
 // whatsapp-cobrasq §4), e essa chave está marcada "Sensitive" no Vercel do
@@ -23,6 +25,24 @@
 //   );
 // A resposta traz { path: 'manual/fila-whatsapp/<timestamp>-<nome>.pdf' } — esse é o
 // valor que vai em `crm_mensagens_agendadas.media_path`.
+// Para anexar a uma cobrança, acrescentar ao body: 'cobranca_id', '<uuid>',
+// 'categoria', 'devolucao-documento' (lista do painel), opcionalmente 'uploaded_by'
+// (uuid do usuário) e 'obs'. A resposta traz também { documento_id }.
+//
+// 18/09/2026 — modo "enviar" (opcional, retrocompatível). Se o body trouxer `telefone`,
+// a função faz o ciclo inteiro que antes exigia 3 SQLs manuais em produção (insert na
+// fila → net.http_post no worker → select de conferência): grava a linha em
+// `crm_mensagens_agendadas` (tipo='documento', origem 'manual_<origem>'), invoca
+// `cron-mensagens-agendadas` na hora e devolve o status REAL da linha depois do run.
+// Motivo: cada um daqueles SQLs é uma chamada em produção que uma sessão de IA pode
+// ter negada; com tudo aqui dentro, mandar um PDF vira UMA chamada HTTP autenticada
+// pelo mesmo CRON_INVOKE_SECRET (script whatsapp-cobrasq/scripts/enviar-pdf.sh).
+//   body: { base64, filename, telefone, legenda?, origem?, caso_id?, enviar?: true }
+//   resposta: { path, bytes, id, status, enviada_em, erro, tentativas, lote }
+// `status` é a coluna da fila após o run: 'enviada' é a única prova de entrega —
+// 'pendente' com `erro` preenchido = o worker tentou e a Z-API recusou (vai repetir
+// no cron); 'pendente' sem erro = o worker não pegou (lote cheio/adiada) — consultar
+// depois com body { consultar: <id> }.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
@@ -63,11 +83,59 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({ error: 'body inválido: esperado JSON' }), { status: 400 });
   }
 
+  const json = (obj: unknown, status = 200) =>
+    new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json' } });
+  const COLS = 'id, status, enviada_em, erro, tentativas, telefone, media_nome, origem';
+
+  // { consultar: <id> } — só lê o status de uma linha da fila (para conferir depois um
+  // envio que ficou 'pendente' na resposta do POST). Não exige base64.
+  if (payload?.consultar) {
+    const sbQ = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
+    const { data, error: qErr } = await sbQ.from('crm_mensagens_agendadas').select(COLS).eq('id', payload.consultar).maybeSingle();
+    if (qErr) return json({ error: 'consulta falhou: ' + qErr.message }, 500);
+    if (!data) return json({ error: 'linha não encontrada' }, 404);
+    return json(data);
+  }
+
   const base64 = String(payload?.base64 || '');
   const filenameIn = String(payload?.filename || 'documento.pdf');
-  // Prefixo livre, mas preso a `manual/` — não deixa a função virar upload genérico
-  // para qualquer caminho do bucket.
-  const prefix = 'manual/fila-whatsapp';
+
+  // Dois destinos possíveis, nenhum livre — a função não vira upload genérico para
+  // qualquer caminho do bucket:
+  //   (a) sem `cobranca_id`: fila do WhatsApp, `manual/fila-whatsapp/` (comportamento
+  //       original);
+  //   (b) com `cobranca_id` + `categoria`: "Documentos do caso" de uma cobrança,
+  //       `cobrancas/<id>/<categoria>/` — o mesmo caminho e a mesma linha em
+  //       `public.documentos` que `uploadAnexoCobranca()` (index.html) grava a partir
+  //       do painel. Existe para anexar a uma cobrança sem sessão de login (ex.: termo
+  //       de devolução escaneado, subido a partir de uma sessão com Supabase MCP).
+  //       Só aceita cobrança que exista e categoria da lista do painel.
+  const cobrancaId = String(payload?.cobranca_id || '');
+  const categoria = String(payload?.categoria || '');
+  const CATEGORIAS = ['contrato','nota-promissoria','comprovante','repasse','acordo-assinado',
+    'peticao','procuracao','calculo','devolucao-documento','outros'];
+  const sb = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
+
+  let prefix = 'manual/fila-whatsapp';
+  let devedor: { id: string; doc: string | null } | null = null;
+  if (cobrancaId) {
+    if (!/^[0-9a-f-]{36}$/i.test(cobrancaId)) {
+      return new Response(JSON.stringify({ error: 'cobranca_id inválido' }), { status: 400 });
+    }
+    if (!CATEGORIAS.includes(categoria)) {
+      return new Response(JSON.stringify({ error: 'categoria inválida: ' + CATEGORIAS.join(', ') }), { status: 400 });
+    }
+    // Devedor principal da cobrança — `cobrancas` não tem devedor_id; o vínculo é
+    // `cobranca_partes`. Sem parte principal, usa a primeira.
+    const { data: partes, error: pErr } = await sb.from('cobranca_partes')
+      .select('devedor_id, principal, devedores(id, doc)')
+      .eq('cobranca_id', cobrancaId).order('principal', { ascending: false }).limit(1);
+    if (pErr) return new Response(JSON.stringify({ error: 'consulta falhou: ' + pErr.message }), { status: 500 });
+    const parte: any = partes && partes[0];
+    if (!parte) return new Response(JSON.stringify({ error: 'cobrança não encontrada (sem partes)' }), { status: 404 });
+    devedor = { id: String(parte.devedor_id), doc: parte.devedores?.doc ?? null };
+    prefix = `cobrancas/${cobrancaId}/${categoria}`;
+  }
 
   if (!base64) return new Response(JSON.stringify({ error: 'campo base64 ausente' }), { status: 400 });
 
@@ -93,19 +161,83 @@ Deno.serve(async (req) => {
   }
 
   const safeName = filenameIn.replace(/[^A-Za-z0-9_.-]+/g, '_').slice(0, 80).replace(/\.pdf$/i, '') || 'documento';
-  const path = `${prefix}/${Date.now()}-${safeName}.pdf`;
+  // Na cobrança, mesmo formato de nome que o painel (`<timestamp>_<nome>`); na fila, o
+  // formato original (`<timestamp>-<nome>`).
+  const path = devedor ? `${prefix}/${Date.now()}_${safeName}.pdf` : `${prefix}/${Date.now()}-${safeName}.pdf`;
 
-  const sb = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
   const { error } = await sb.storage.from(BUCKET).upload(path, bytes, {
     contentType: 'application/pdf',
-    upsert: true,
+    upsert: !devedor,
   });
   if (error) {
     return new Response(JSON.stringify({ error: 'upload falhou: ' + error.message }), { status: 500 });
   }
 
-  return new Response(JSON.stringify({ path, bytes: bytes.byteLength }), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' },
-  });
+  let documentoId: string | null = null;
+  if (devedor) {
+    // Mesma linha que o painel insere; sem ela o arquivo não aparece em "Documentos
+    // do caso". Se o insert falhar, o arquivo vai para _lixeira/ como no painel.
+    const uploadedBy = payload?.uploaded_by ? String(payload.uploaded_by) : null;
+    const { data: doc, error: insErr } = await sb.from('documentos').insert({
+      devedor_doc: (devedor.doc || '').replace(/\D/g, '') || ('id-' + devedor.id),
+      devedor_id: devedor.id, cobranca_id: cobrancaId,
+      categoria, nome: filenameIn, storage_path: path,
+      mime_type: 'application/pdf', size_bytes: bytes.byteLength,
+      uploaded_by: uploadedBy, obs: payload?.obs ? String(payload.obs) : null,
+    }).select('id').single();
+    if (insErr) {
+      await sb.storage.from(BUCKET).move(path, '_lixeira/' + path).catch(() => {});
+      return new Response(JSON.stringify({ error: 'insert em documentos falhou: ' + insErr.message }), { status: 500 });
+    }
+    documentoId = doc?.id ?? null;
+  }
+
+  const telefoneIn = String(payload?.telefone || '').replace(/\D/g, '');
+  if (!telefoneIn) return json({ path, bytes: bytes.byteLength, documento_id: documentoId });
+
+  // === modo enviar ===
+  // Telefone no formato da fila (55 + DDD + número). O worker resolve com/sem o nono
+  // dígito via phone-exists; a única armadilha real era a comparação com
+  // vw_conversas_pendentes, e origem 'manual_*' não cede a vez (worker, 21/08/2026).
+  if (telefoneIn.length < 10 || telefoneIn.length > 13) {
+    await sb.storage.from(BUCKET).remove([path]);
+    return json({ error: 'telefone inválido: ' + telefoneIn }, 400);
+  }
+  const telefone = telefoneIn.length <= 11 ? '55' + telefoneIn : telefoneIn;
+  const legenda = String(payload?.legenda ?? '');
+  const origemSlug = String(payload?.origem || 'anexo').replace(/^manual_/, '').replace(/[^a-z0-9_]+/gi, '_').toLowerCase().slice(0, 40) || 'anexo';
+  const origem = 'manual_' + origemSlug;
+  const mediaNome = safeName + '.pdf'; // com extensão — sem ela o nome chega cortado ao contato
+
+  const linha: Record<string, unknown> = {
+    telefone, tipo: 'documento', media_path: path, media_nome: mediaNome, media_mime: 'application/pdf',
+    legenda, mensagem: legenda, agendada_para: new Date().toISOString(), status: 'pendente', origem,
+  };
+  if (payload?.caso_id) linha.caso_id = payload.caso_id;
+
+  const { data: ins, error: insErr } = await sb.from('crm_mensagens_agendadas').insert(linha).select('id').single();
+  if (insErr || !ins) {
+    await sb.storage.from(BUCKET).remove([path]);
+    return json({ error: 'insert na fila falhou: ' + (insErr?.message || 'desconhecido') }, 500);
+  }
+
+  // Dispara o worker agora (mesma chamada que o cron faz a cada minuto). Se `enviar`
+  // vier false, só deixa na fila e o cron pega no próximo minuto.
+  let lote: unknown = null;
+  if (payload?.enviar !== false) {
+    try {
+      const r = await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/cron-mensagens-agendadas`, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + expected, 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(50000),
+      });
+      lote = await r.json().catch(() => ({ status: r.status }));
+    } catch (e) {
+      lote = { error: 'worker: ' + (e instanceof Error ? e.message : String(e)) };
+    }
+  }
+
+  const { data: row } = await sb.from('crm_mensagens_agendadas').select(COLS).eq('id', ins.id).maybeSingle();
+  return json({ path, bytes: bytes.byteLength, documento_id: documentoId, ...(row || { id: ins.id, status: 'pendente' }), lote });
 });
