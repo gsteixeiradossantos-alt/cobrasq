@@ -4884,10 +4884,9 @@ const STATUS_CFG = {
   'Fazer ação':{dot:'#C47A00',badge:'b-yellow',cls:'s-facao'},
   'Ação judicial':{dot:'#1A5FB4',badge:'b-blue',cls:'s-judicial'},
   'Quitado':{dot:'#00796B',badge:'b-teal',cls:'s-quitado'},
-  // Cor própria (âmbar, não verde): capital repassado ao credor, mas o saldo
-  // que sobra com o devedor (juros/multa/honorários) ainda pode estar em aberto —
-  // não é o mesmo que "Quitado" (dívida 100% paga). Decisão de seguir cobrando
-  // ou não é manual, caso a caso; a cor só evita que pareça encerrado de cara.
+  // LEGADO: unificado em "Quitado" em 24/09/2026 (decisão do Gustavo; os 118 casos
+  // foram migrados por SQL). Nada grava mais este status — a entrada fica só para
+  // dado antigo que reapareça (backup, aba velha) não ficar sem cor.
   'Quitado ao cliente':{dot:'#C47A00',badge:'b-yellow',cls:'s-repassado'},
   // Devedor pagou direto ao credor (sem repasse pela COBRASQ). 24/09/2026.
   'Quitado direto ao credor':{dot:'#C47A00',badge:'b-yellow',cls:'s-repassado'},
@@ -8070,7 +8069,7 @@ let _impRows = [];
 let _impSel = new Set();
 const _impEsc = (s)=> String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const _impPrompt = (t,l,cb,o)=>{ if(typeof promptModal==='function') return promptModal(t,l,cb,o); const v=prompt(l); if(v!=null) cb(v); };
-const _impStatusOpts = ['Cobrar','Automatizar','Em contato','Em negociação','Acordo','Recebido','Fazer ação','Quitado','Quitado ao cliente','Quitado direto ao credor','Devolvida','Sem êxito'];
+const _impStatusOpts = ['Cobrar','Automatizar','Em contato','Em negociação','Acordo','Recebido','Fazer ação','Quitado','Quitado direto ao credor','Devolvida','Sem êxito'];
 const _IMP_PAPEIS = { emitente:'Emitente', endossante:'Endossante', avalista:'Avalista', fiador:'Fiador', devedor_solidario:'Devedor solidário' };
 
 function _impDocOk(doc){ const d=String(doc||'').replace(/\D/g,''); return d.length===11||d.length===14; }
@@ -16470,7 +16469,8 @@ const _ETIQUETAS_DEFAULT = [
   'Ação de Cobrança', 'Ação de locupletamento ilícito', 'Ação Monitória',
   'Acordo Extrajudicial', 'Acordo Judicial', 'Cumprimento de Sentença',
   'Ação de Execução de Título Extrajudicial', 'Automatizar Micro',
-  'Quitado', 'Quitado direto ao credor', 'Quitado ao cliente',
+  // "Quitado ao cliente" saiu em 24/09/2026: unificado em "Quitado" (decisão do Gustavo).
+  'Quitado', 'Quitado direto ao credor',
   'Baixados', 'Reajuizar', 'Reajuizar - Cessão', 'Devolvida', 'Encerrada',
   'Análise', 'Cobrar', 'Baixar', 'Em andamento', 'Para protocolar', 'Corrigir ação', 'Fazer ação',
   'Telefone inválido',
@@ -16480,9 +16480,14 @@ const _ETIQUETAS_DEFAULT = [
   'Devolver'
 ];
 // Editável em Configurações → Etiquetas (DB.config.etiquetas). Fallback: lista padrão.
+// Status que não se grava mais: somem da lista mesmo que a config salva ainda os traga
+// ("Quitado ao cliente" foi unificado em "Quitado" em 24/09/2026). Salvar as etiquetas
+// em Configurações já grava a lista sem eles.
+const _ETIQUETAS_APOSENTADAS = new Set(['Quitado ao cliente']);
 function _etiquetas(){
   const c = DB.config && DB.config.etiquetas;
-  return (Array.isArray(c) && c.length) ? c : _ETIQUETAS_DEFAULT;
+  const l = (Array.isArray(c) && c.length) ? c : _ETIQUETAS_DEFAULT;
+  return l.filter(e=>!_ETIQUETAS_APOSENTADAS.has(String(e||'').trim()));
 }
 // Etiquetas de natureza judicial → fase='judicial'; as demais → 'extrajudicial'.
 const _ETIQUETAS_JUDICIAIS = new Set([
@@ -16545,9 +16550,8 @@ const _STATUS_JUD_EM_CURSO = new Set([
   '1.2. Ação Monitória', '3. Cumprimento de Sentença',
   '4. Ação de Execução de Título Extrajudicial', '4. Ação Monitória',
 ]);
-// Encerrados. ehForaRegua() cobre quase tudo, menos "Quitado ao cliente" — que é
-// quitado E já repassado, ainda mais encerrado que os outros (ver a distinção entre
-// "Quitado" e "Quitado ao cliente" no módulo de repasses).
+// Encerrados. ehForaRegua() cobre quase tudo; o /quitad/ pega também o legado
+// "Quitado ao cliente" (unificado em "Quitado" em 24/09/2026) e "Quitado direto ao credor".
 function _pnlEncerrado(status){
   const st = String(status||'').trim();
   return ehForaRegua(st) || /quitad/i.test(st) || /sem\s*[êe]xito/i.test(st);
@@ -19869,7 +19873,7 @@ function _cobrFalhouHaPouco(){ return (performance.now() - _cobrDono.falhouEm) <
 
 // Quem grava no servidor SEM espelhar em memória chama isto: a próxima tela que
 // abrir vai ao servidor, sem esperar os 15 s. (Ex.: recomputarSaldoCapital muda
-// o status para "Quitado ao cliente" direto no banco.)
+// o status para "Quitado" direto no banco.)
 function invalidarCobrancas(){
   _cobrDono.carregadoEm = -Infinity;
   // Também solta o backoff de falha: quem invalida está dizendo "o dado mudou", e
@@ -19878,7 +19882,7 @@ function invalidarCobrancas(){
   _cobrDono.falhouEm = -Infinity;
   // E torna obsoleto qualquer voo já no ar: ele tirou o retrato do servidor ANTES
   // da gravação que motivou a invalidação. Se pousasse normalmente, sobrescreveria
-  // o espelho feito em memória (ex.: cm.status='Quitado ao cliente') com o valor
+  // o espelho feito em memória (ex.: cm.status='Quitado') com o valor
   // antigo e ainda recarimbaria a lista como fresca por 15 s.
   _cobrDono.geracao++;
 }
@@ -20044,10 +20048,8 @@ function cobMacroGrupo(status, fase, numeroProcesso){
   // Status oficial "Quita Fácil" (movido manualmente ou por confirmação) — mesma
   // coluna dos casos elegíveis computados por cobMacroGrupoView (cobElegivelQuita).
   if(/^quita\s*f[aá]cil/i.test(s)) return 'quita';
-  // "Quitado ao cliente" (capital todo repassado ao credor) cai em Encerrados pelo
-  // /quitad/ abaixo. Até 24/09/2026 ia para "A agir" e o chip da lista dizia "Cobrar" —
-  // foi isso que levou à troca em massa para "5. Quitado" em 15/09. Pedido do Gustavo,
-  // 24/09/2026: o chip mostra "Quitado ao cliente" (ver cobEtapaChip).
+  // "Quitado ao cliente" (legado — unificado em "Quitado" em 24/09/2026; o repasse
+  // integral do capital agora grava "Quitado") cai em Encerrados pelo /quitad/ abaixo.
   if((typeof ehForaRegua==='function' && ehForaRegua(s)) || /encerrad|baixad|devolv|quitad|sem ?[êe]xito|recebido/i.test(s)) return 'encerrados';
   if(typeof ehAcordo==='function' && ehAcordo(s)) return 'acordos';
   // "Preparar ação" / "Reajuizar" (falta (re)ajuizar) contam como algo a fazer → A agir,
@@ -21915,7 +21917,7 @@ async function renderCobrancaDetalhe(){
       <div class="det2-panel-tt" style="margin:0;">Valores da dívida</div>
       ${quitadoCliente?'<span class="cob-pill st-repassado">✓ Capital repassado ao cliente</span>':''}
       ${diretoCredor?'<span class="cob-pill st-repassado">✓ Recebido direto pelo credor</span>':''}
-      ${(quitadoCliente && (cob.status||'').trim()!=='Quitado ao cliente' && currentUser?.tipo==='gestor')?`<button class="cob-btn-ghost" title="Os repasses já cobrem o capital, mas a situação do caso está &quot;${escHtml(statusLabel(cob.status||'')||'—')}&quot;." onclick="_setStatusCobrancaReal('${cob.id}','Quitado ao cliente')">Marcar “Quitado ao cliente”</button>`:''}
+      ${(quitadoCliente && !/^quitado( ao cliente)?$/i.test((cob.status||'').trim()) && currentUser?.tipo==='gestor')?`<button class="cob-btn-ghost" title="Os repasses já cobrem o capital, mas a situação do caso está &quot;${escHtml(statusLabel(cob.status||'')||'—')}&quot;." onclick="_setStatusCobrancaReal('${cob.id}','Quitado')">Marcar “Quitado”</button>`:''}
     </div>
     ${_ehUnif?`<div style="margin-top:12px;padding:10px 14px;border:1px solid var(--d-border);border-radius:var(--d-radius-lg);background:var(--d-ink);color:#fff;display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;">
       <div>
@@ -22752,7 +22754,7 @@ async function _repIAConfirmar(){
     if(dup) msg+=` ${dup} já existia(m).`;
     if(fail) msg+=` ${fail} falhou(aram).`;
     if(semDoc) msg+=` ${semDoc} sem comprovante anexado (veja o console).`;
-    if(novoStatus==='Quitado ao cliente') msg+=' Capital zerado → status "Quitado ao cliente".';
+    if(novoStatus==='Quitado') msg+=' Capital zerado → status "Quitado".';
     showToast(msg, (fail||semDoc)?'warning':'success');
     renderCobrancaDetalhe();
   }catch(e){
@@ -22760,7 +22762,10 @@ async function _repIAConfirmar(){
     if(btn){ btn.disabled=false; btn.textContent='Confirmar e abater'; }
   }
 }
-// Soma os repasses, calcula o saldo do capital; zerou -> status "Quitado ao cliente".
+// Soma os repasses, calcula o saldo do capital; zerou -> status "Quitado".
+// Até 24/09/2026 gravava "Quitado ao cliente"; o Gustavo unificou os dois em "Quitado"
+// (os 118 casos antigos foram migrados por SQL no mesmo dia). "Quitado direto ao credor"
+// continua separado. Não regrava quando o caso já está "Quitado" (nem no legado).
 async function recomputarSaldoCapital(cobId){
   const supa=getSupabase(); if(!supa||!cobId) return null;
   try{
@@ -22779,24 +22784,25 @@ async function recomputarSaldoCapital(cobId){
     }
     const { data: rps }=await supa.from('repasses_cliente').select('valor').eq('cobranca_id',cobId);
     const enviado=(rps||[]).reduce((s,r)=>s+(+r.valor||0),0);
-    if((cap-enviado)<=0.005 && cob.status!=='Quitado ao cliente'){
+    const stAtual=String(cob.status||'').trim();
+    if((cap-enviado)<=0.005 && stAtual!=='Quitado' && stAtual!=='Quitado ao cliente'){
       const novaDiv=Object.assign({}, cob.divida||{}, { valorCapital: cap });
-      const { error: upErr }=await supa.from('cobrancas').update({ status:'Quitado ao cliente', divida:novaDiv, updated_at:new Date().toISOString() }).eq('id',cobId);
+      const { error: upErr }=await supa.from('cobrancas').update({ status:'Quitado', divida:novaDiv, updated_at:new Date().toISOString() }).eq('id',cobId);
       if(upErr){
         // RLS ou outra recusa: não fingir que virou — avisa e registra no histórico.
-        try{ await supa.from('devedor_eventos').insert({ cobranca_id:cobId, devedor_id:cobId, tipo:'repasse', payload:{ acao_completa:'Capital integralmente repassado, mas a mudança para "Quitado ao cliente" foi recusada: '+(upErr.message||'erro'), origem:'repasse' } }); }catch(_){}
-        if(typeof showToast==='function') showToast('Repasse gravado, mas não consegui mudar o status para "Quitado ao cliente": '+(upErr.message||'erro'),'warning');
+        try{ await supa.from('devedor_eventos').insert({ cobranca_id:cobId, devedor_id:cobId, tipo:'repasse', payload:{ acao_completa:'Capital integralmente repassado, mas a mudança para "Quitado" foi recusada: '+(upErr.message||'erro'), origem:'repasse' } }); }catch(_){}
+        if(typeof showToast==='function') showToast('Repasse gravado, mas não consegui mudar o status para "Quitado": '+(upErr.message||'erro'),'warning');
         return cob.status;
       }
       // Gravou no servidor sem espelhar em memória: espelha o que dá e invalida o
       // resto, senão Painel/Fila/Cobranças mostrariam o status antigo por 15 s.
-      try{ const cm = cobrancasEmMemoria().find(c=>c.id===cobId); if(cm){ cm.status='Quitado ao cliente'; cm.divida=novaDiv; } }catch(_){}
+      try{ const cm = cobrancasEmMemoria().find(c=>c.id===cobId); if(cm){ cm.status='Quitado'; cm.divida=novaDiv; } }catch(_){}
       // Blob também: sem isto DB.devedores[].status fica no status antigo e o próximo
       // save do devedor (syncDevedorCobranca faz upsert com d.status) desfaz a mudança.
-      try{ _syncStatusBlob(cobId, 'Quitado ao cliente'); }catch(_){}
+      try{ _syncStatusBlob(cobId, 'Quitado'); }catch(_){}
       if(typeof invalidarCobrancas==='function') invalidarCobrancas();
-      try{ await supa.from('devedor_eventos').insert({ cobranca_id:cobId, devedor_id:cobId, tipo:'repasse', payload:{ acao_completa:'Capital integralmente repassado ao cliente — status alterado para "Quitado ao cliente".', origem:'repasse' } }); }catch(_){}
-      return 'Quitado ao cliente';
+      try{ await supa.from('devedor_eventos').insert({ cobranca_id:cobId, devedor_id:cobId, tipo:'repasse', payload:{ acao_completa:'Capital integralmente repassado ao cliente — status alterado para "Quitado".', origem:'repasse' } }); }catch(_){}
+      return 'Quitado';
     }
     return cob.status;
   }catch(e){ return null; }
@@ -22807,10 +22813,11 @@ async function removerRepasse(id){
   if(!confirm('Remover este repasse? O valor volta para o saldo do capital.')) return;
   const { error }=await supa.from('repasses_cliente').delete().eq('id',id);
   if(error){ showToast('Falha ao remover: '+error.message,'danger'); return; }
-  // Não reverte a situação sozinho: não há como saber qual era antes do "Quitado ao cliente".
+  // Não reverte a situação sozinho: não há como saber qual era antes do "Quitado"
+  // (legado: "Quitado ao cliente", unificado em "Quitado" em 24/09/2026).
   let stAtual='';
   try{ const { data: cAt }=await supa.from('cobrancas').select('status').eq('id',_detCobrId).maybeSingle(); stAtual=((cAt&&cAt.status)||'').trim(); }catch(_){}
-  if(stAtual==='Quitado ao cliente') showToast('Repasse removido. O caso continua como "Quitado ao cliente" — se o capital deixou de estar coberto, ajuste a situação.','warning');
+  if(stAtual==='Quitado' || stAtual==='Quitado ao cliente') showToast('Repasse removido. O caso continua como "'+stAtual+'" — se o capital deixou de estar coberto, ajuste a situação.','warning');
   else showToast('Repasse removido.','success');
   renderCobrancaDetalhe();
 }
@@ -25860,7 +25867,7 @@ function cpCasos(){
   });
 }
 // Êxito do PONTO DE VISTA DO CLIENTE (portal do cedente): conta quando o capital já
-// voltou 100% pra ele — inclui "Quitado ao cliente", mesmo que a COBRASQ ainda cobre
+// voltou 100% pra ele — inclui "Quitado ao cliente" (legado, hoje unificado em "Quitado"), mesmo que a COBRASQ ainda cobre
 // o devedor pelo saldo (juros/multa/honorários viram lucro da COBRASQ, não repasse).
 // Não usar fora do portal: comissão de colaborador e a régua interna usam ehRecuperado()
 // puro, que propositalmente NÃO inclui "Quitado ao cliente" (ver PR #502).
@@ -50857,7 +50864,7 @@ function bulkAltStatus(){
   closeBulkDropdown();
   if(!selectedDevIds.size) return;
   const n = selectedDevIds.size;
-  const opts = Object.keys(STATUS_CFG).join(', ');
+  const opts = Object.keys(STATUS_CFG).filter(k=>!_ETIQUETAS_APOSENTADAS.has(k)).join(', ');
   promptModal(`Alterar status em lote`,`Novo status para ${n} cobrança${n>1?'s':''}:`,(val)=>{
     if(!val) return;
     _bulkApply(d=>{ d.status=val; });
