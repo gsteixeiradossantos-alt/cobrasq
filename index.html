@@ -21882,6 +21882,7 @@ async function renderCobrancaDetalhe(){
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
       <div class="det2-panel-tt" style="margin:0;">Valores da dívida</div>
       ${quitadoCliente?'<span class="cob-pill st-repassado">✓ Capital repassado ao cliente</span>':''}
+      ${(quitadoCliente && (cob.status||'').trim()!=='Quitado ao cliente' && currentUser?.tipo==='gestor')?`<button class="cob-btn-ghost" title="Os repasses já cobrem o capital, mas a situação do caso está &quot;${escHtml(statusLabel(cob.status||'')||'—')}&quot;." onclick="_setStatusCobrancaReal('${cob.id}','Quitado ao cliente')">Marcar “Quitado ao cliente”</button>`:''}
     </div>
     ${_ehUnif?`<div style="margin-top:12px;padding:10px 14px;border:1px solid var(--d-border);border-radius:var(--d-radius-lg);background:var(--d-ink);color:#fff;display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;">
       <div>
@@ -22757,6 +22758,9 @@ async function recomputarSaldoCapital(cobId){
       // Gravou no servidor sem espelhar em memória: espelha o que dá e invalida o
       // resto, senão Painel/Fila/Cobranças mostrariam o status antigo por 15 s.
       try{ const cm = cobrancasEmMemoria().find(c=>c.id===cobId); if(cm){ cm.status='Quitado ao cliente'; cm.divida=novaDiv; } }catch(_){}
+      // Blob também: sem isto DB.devedores[].status fica no status antigo e o próximo
+      // save do devedor (syncDevedorCobranca faz upsert com d.status) desfaz a mudança.
+      try{ _syncStatusBlob(cobId, 'Quitado ao cliente'); }catch(_){}
       if(typeof invalidarCobrancas==='function') invalidarCobrancas();
       try{ await supa.from('devedor_eventos').insert({ cobranca_id:cobId, devedor_id:cobId, tipo:'repasse', payload:{ acao_completa:'Capital integralmente repassado ao cliente — status alterado para "Quitado ao cliente".', origem:'repasse' } }); }catch(_){}
       return 'Quitado ao cliente';
@@ -22770,7 +22774,11 @@ async function removerRepasse(id){
   if(!confirm('Remover este repasse? O valor volta para o saldo do capital.')) return;
   const { error }=await supa.from('repasses_cliente').delete().eq('id',id);
   if(error){ showToast('Falha ao remover: '+error.message,'danger'); return; }
-  showToast('Repasse removido. Confira o status se o capital deixou de estar quitado.','success');
+  // Não reverte a situação sozinho: não há como saber qual era antes do "Quitado ao cliente".
+  let stAtual='';
+  try{ const { data: cAt }=await supa.from('cobrancas').select('status').eq('id',_detCobrId).maybeSingle(); stAtual=((cAt&&cAt.status)||'').trim(); }catch(_){}
+  if(stAtual==='Quitado ao cliente') showToast('Repasse removido. O caso continua como "Quitado ao cliente" — se o capital deixou de estar coberto, ajuste a situação.','warning');
+  else showToast('Repasse removido.','success');
   renderCobrancaDetalhe();
 }
 // Nota manual no histórico: qualquer usuário pode registrar anotações no caso.
