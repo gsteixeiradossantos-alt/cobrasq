@@ -169,14 +169,15 @@ async function tratarDocClienteAssinado(
   sb: ReturnType<typeof createClient>,
   docId: string,
   novoStatus: string,
-  signedUrl: string | null
+  signedUrl: string | null,
+  dataAssinatura: string | null = null
 ): Promise<{ encontrado: boolean; arquivo?: { salvo: boolean; detalhe: string } }> {
   const { data: docs, error } = await sb.from('cliente_documentos')
     .select('id, cliente_id, zapsign_status').eq('zapsign_doc_id', docId).limit(1);
   if (error || !docs || docs.length === 0) return { encontrado: false };
   const doc = docs[0] as { id: string; cliente_id: string };
   const update: Record<string, unknown> = { zapsign_status: novoStatus };
-  if (novoStatus === 'assinado') update.zapsign_signed_at = new Date().toISOString();
+  if (novoStatus === 'assinado') update.zapsign_signed_at = dataAssinatura || new Date().toISOString();
   let arquivo: { salvo: boolean; detalhe: string } | undefined;
   if (novoStatus === 'assinado' && signedUrl) {
     arquivo = await salvarClienteAssinadoNaPasta(sb, String(doc.cliente_id), docId, signedUrl);
@@ -454,7 +455,13 @@ Deno.serve(async (req) => {
 
   const novoStatus = mapEvento(body.event_type, doc.status);
   const signedUrl = doc.signed_file || doc.url || null;
-  const dataAssinatura = novoStatus === 'assinado' ? new Date().toISOString() : null;
+  // Data real da assinatura: o último signed_at dos signatários (o documento só
+  // fica assinado quando o último assina). Sem signed_at no payload, cai no agora.
+  const signedAts = (Array.isArray(body?.signers) ? body.signers : Array.isArray(doc?.signers) ? doc.signers : [])
+    .map((s: { signed_at?: string }) => s?.signed_at).filter((x: unknown) => typeof x === 'string' && !isNaN(Date.parse(x as string))) as string[];
+  const dataAssinatura = novoStatus === 'assinado'
+    ? (signedAts.length ? new Date(Math.max(...signedAts.map((x) => Date.parse(x)))).toISOString() : new Date().toISOString())
+    : null;
 
   // F-18: casa o acordo SÓ por zapsign_doc_id exato. O match antigo incluía
   // link_zapsign.ilike.%docId% — um docId curto/parcial podia casar o acordo
@@ -472,7 +479,7 @@ Deno.serve(async (req) => {
   }
   if (!acordos || acordos.length === 0) {
     // Não é acordo de devedor — pode ser documento de CLIENTE (cessão/procuração/etc).
-    const cli = await tratarDocClienteAssinado(sb, docId, novoStatus, signedUrl);
+    const cli = await tratarDocClienteAssinado(sb, docId, novoStatus, signedUrl, dataAssinatura);
     if (cli.encontrado) {
       return new Response(JSON.stringify({ ok: true, tipo: 'cliente', status: novoStatus, doc_id: docId, arquivo: cli.arquivo }), {
         status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
