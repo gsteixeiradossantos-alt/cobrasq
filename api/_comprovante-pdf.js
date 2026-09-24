@@ -89,7 +89,7 @@ td.v.mono{font-family:'JetBrains Mono',monospace;font-size:11.5px;font-weight:40
   <table>${linhas.map(([k, v]) => `<tr><td class="k">${escapeHtml(k)}</td><td class="v${/Identificador|Chave/.test(k) ? ' mono' : ''}">${escapeHtml(v)}</td></tr>`).join('')}</table>
   <div class="pd">Dois Vizinhos/PR, ${dataExtenso(d.dataISO)}.</div>
 </div>
-<div class="foot"><span>contato@cobrasq.com.br · (46) 98822-6533</span><span>cobrasq.com.br · @ccobrasq</span></div>
+<div class="foot"><span>ccobrasq@gmail.com · (46) 98822-6533</span><span>cobrasq.com.br · @ccobrasq</span></div>
 </body></html>`;
 }
 

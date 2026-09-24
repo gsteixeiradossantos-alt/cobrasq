@@ -94,7 +94,7 @@ body{width:210mm;height:297mm;background:#fff;font-family:'Inter Tight',sans-ser
   <div class="pd">Dois Vizinhos/PR, ${dataExtenso(d.dataISO)}.</div>
   <div class="sign"><div class="rub">Gustavo Teixeira</div><div class="line"></div><div class="nm">Gustavo Teixeira</div><div class="rl">Proprietário · COBRASQ</div></div>
 </div>
-<div class="foot"><span>contato@cobrasq.com.br · (46) 98822-6533</span><span>cobrasq.com.br · @ccobrasq</span></div>
+<div class="foot"><span>ccobrasq@gmail.com · (46) 98822-6533</span><span>cobrasq.com.br · @ccobrasq</span></div>
 </body></html>`;
 }
 

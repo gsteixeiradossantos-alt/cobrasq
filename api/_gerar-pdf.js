@@ -145,7 +145,7 @@ module.exports = async function handler(req, res) {
         '<div style="background:#0A1530;border-top:1.4px solid #C9A961;color:#B9C0CE;' +
         "font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;" +
         'font-size:6.8pt;line-height:1.7;letter-spacing:.06em;text-transform:uppercase;text-align:center;padding:8px 0 9px;">' +
-        'cobrasq.com.br&nbsp;·&nbsp;contato@cobrasq.com.br&nbsp;·&nbsp;WhatsApp (46)&nbsp;98822-6533<br>Documento confidencial.' +
+        'cobrasq.com.br&nbsp;·&nbsp;ccobrasq@gmail.com&nbsp;·&nbsp;WhatsApp (46)&nbsp;98822-6533<br>Documento confidencial.' +
         (ref ? '&nbsp;·&nbsp;' + ref : '') +
         '</div></div>';
     } else if (comRodapeRel) {
@@ -159,7 +159,7 @@ module.exports = async function handler(req, res) {
         '<div style="flex:1;min-width:0;"><div style="font-family:\'JetBrains Mono\',ui-monospace,monospace;font-size:6.2pt;letter-spacing:.14em;text-transform:uppercase;color:#C9A961;margin-bottom:3px;">COBRASQ — Sede</div>' +
         '<div style="font-size:7.2pt;line-height:1.5;opacity:.92;">Av. Rio Grande do Sul, n.º 380, Sala 201, Edifício Mara — Centro, Dois Vizinhos/PR &nbsp;·&nbsp; CNPJ 34.626.848/0001-42</div></div>' +
         '<div style="flex:0 0 auto;max-width:2.3in;text-align:right;"><div style="font-family:\'JetBrains Mono\',ui-monospace,monospace;font-size:6.2pt;letter-spacing:.14em;text-transform:uppercase;color:#C9A961;margin-bottom:3px;">Atendimento</div>' +
-        '<div style="font-size:7.2pt;line-height:1.5;opacity:.92;">WhatsApp (46) 98822-6533 &nbsp;·&nbsp; contato@cobrasq.com.br &nbsp;·&nbsp; cobrasq.com.br</div></div>' +
+        '<div style="font-size:7.2pt;line-height:1.5;opacity:.92;">WhatsApp (46) 98822-6533 &nbsp;·&nbsp; ccobrasq@gmail.com &nbsp;·&nbsp; cobrasq.com.br</div></div>' +
         '</div></div>';
     }
     const pdfBuffer = await page.pdf(pdfOpts);
