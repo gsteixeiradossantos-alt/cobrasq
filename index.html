@@ -21910,7 +21910,7 @@ async function renderCobrancaDetalhe(){
       <div class="det2-panel-tt" style="margin:0;">Valores da dívida</div>
       ${quitadoCliente?'<span class="cob-pill st-repassado">✓ Capital repassado ao cliente</span>':''}
       ${diretoCredor?'<span class="cob-pill st-repassado">✓ Recebido direto pelo credor</span>':''}
-      ${(quitadoCliente && (cob.status||'').trim()!=='Quitado ao cliente' && currentUser?.tipo==='gestor')?`<button class="cob-btn-ghost" title="Os repasses já cobrem o capital, mas a situação do caso está &quot;${escHtml(statusLabel(cob.status||'')||'—')}&quot;." onclick="_setStatusCobrancaReal('${cob.id}','Quitado ao cliente')">Marcar “Quitado ao cliente”</button>`:''}
+      ${(quitadoCliente && (cob.status||'').trim()!=='Quitado' && currentUser?.tipo==='gestor')?`<button class="cob-btn-ghost" title="Os repasses já cobrem o capital, mas a situação do caso está &quot;${escHtml(statusLabel(cob.status||'')||'—')}&quot;." onclick="_setStatusCobrancaReal('${cob.id}','Quitado')">Marcar “Quitado”</button>`:''}
     </div>
     ${_ehUnif?`<div style="margin-top:12px;padding:10px 14px;border:1px solid var(--d-border);border-radius:var(--d-radius-lg);background:var(--d-ink);color:#fff;display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap;">
       <div>
@@ -22747,7 +22747,7 @@ async function _repIAConfirmar(){
     if(dup) msg+=` ${dup} já existia(m).`;
     if(fail) msg+=` ${fail} falhou(aram).`;
     if(semDoc) msg+=` ${semDoc} sem comprovante anexado (veja o console).`;
-    if(novoStatus==='Quitado ao cliente') msg+=' Capital zerado → status "Quitado ao cliente".';
+    if(novoStatus==='Quitado') msg+=' Capital zerado → status "Quitado".';
     showToast(msg, (fail||semDoc)?'warning':'success');
     renderCobrancaDetalhe();
   }catch(e){
@@ -22755,7 +22755,8 @@ async function _repIAConfirmar(){
     if(btn){ btn.disabled=false; btn.textContent='Confirmar e abater'; }
   }
 }
-// Soma os repasses, calcula o saldo do capital; zerou -> status "Quitado ao cliente".
+// Soma os repasses, calcula o saldo do capital; zerou -> status "Quitado".
+// ("Quitado ao cliente" foi extinto e unificado em "Quitado" em 24/09/2026.)
 async function recomputarSaldoCapital(cobId){
   const supa=getSupabase(); if(!supa||!cobId) return null;
   try{
@@ -22774,24 +22775,24 @@ async function recomputarSaldoCapital(cobId){
     }
     const { data: rps }=await supa.from('repasses_cliente').select('valor').eq('cobranca_id',cobId);
     const enviado=(rps||[]).reduce((s,r)=>s+(+r.valor||0),0);
-    if((cap-enviado)<=0.005 && cob.status!=='Quitado ao cliente'){
+    if((cap-enviado)<=0.005 && cob.status!=='Quitado'){
       const novaDiv=Object.assign({}, cob.divida||{}, { valorCapital: cap });
-      const { error: upErr }=await supa.from('cobrancas').update({ status:'Quitado ao cliente', divida:novaDiv, updated_at:new Date().toISOString() }).eq('id',cobId);
+      const { error: upErr }=await supa.from('cobrancas').update({ status:'Quitado', divida:novaDiv, updated_at:new Date().toISOString() }).eq('id',cobId);
       if(upErr){
         // RLS ou outra recusa: não fingir que virou — avisa e registra no histórico.
-        try{ await supa.from('devedor_eventos').insert({ cobranca_id:cobId, devedor_id:cobId, tipo:'repasse', payload:{ acao_completa:'Capital integralmente repassado, mas a mudança para "Quitado ao cliente" foi recusada: '+(upErr.message||'erro'), origem:'repasse' } }); }catch(_){}
-        if(typeof showToast==='function') showToast('Repasse gravado, mas não consegui mudar o status para "Quitado ao cliente": '+(upErr.message||'erro'),'warning');
+        try{ await supa.from('devedor_eventos').insert({ cobranca_id:cobId, devedor_id:cobId, tipo:'repasse', payload:{ acao_completa:'Capital integralmente repassado, mas a mudança para "Quitado" foi recusada: '+(upErr.message||'erro'), origem:'repasse' } }); }catch(_){}
+        if(typeof showToast==='function') showToast('Repasse gravado, mas não consegui mudar o status para "Quitado": '+(upErr.message||'erro'),'warning');
         return cob.status;
       }
       // Gravou no servidor sem espelhar em memória: espelha o que dá e invalida o
       // resto, senão Painel/Fila/Cobranças mostrariam o status antigo por 15 s.
-      try{ const cm = cobrancasEmMemoria().find(c=>c.id===cobId); if(cm){ cm.status='Quitado ao cliente'; cm.divida=novaDiv; } }catch(_){}
+      try{ const cm = cobrancasEmMemoria().find(c=>c.id===cobId); if(cm){ cm.status='Quitado'; cm.divida=novaDiv; } }catch(_){}
       // Blob também: sem isto DB.devedores[].status fica no status antigo e o próximo
       // save do devedor (syncDevedorCobranca faz upsert com d.status) desfaz a mudança.
-      try{ _syncStatusBlob(cobId, 'Quitado ao cliente'); }catch(_){}
+      try{ _syncStatusBlob(cobId, 'Quitado'); }catch(_){}
       if(typeof invalidarCobrancas==='function') invalidarCobrancas();
-      try{ await supa.from('devedor_eventos').insert({ cobranca_id:cobId, devedor_id:cobId, tipo:'repasse', payload:{ acao_completa:'Capital integralmente repassado ao cliente — status alterado para "Quitado ao cliente".', origem:'repasse' } }); }catch(_){}
-      return 'Quitado ao cliente';
+      try{ await supa.from('devedor_eventos').insert({ cobranca_id:cobId, devedor_id:cobId, tipo:'repasse', payload:{ acao_completa:'Capital integralmente repassado ao cliente — status alterado para "Quitado".', origem:'repasse' } }); }catch(_){}
+      return 'Quitado';
     }
     return cob.status;
   }catch(e){ return null; }
