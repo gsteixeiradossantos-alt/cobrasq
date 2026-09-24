@@ -47078,7 +47078,9 @@ body{font-family:var(--sans);color:var(--ct);background:#E8E8E8;line-height:1.62
 function _cedenteQualif(q, isPJ){
   const porte=(isPJ&&q&&q.porte)?`, enquadrada como ${escHtml(q.porte)}`:'';
   const sra=q&&q.repTrat==='Sra.';
-  const rep=(isPJ&&q&&q.repNome)?`, neste ato representada ${sra?'pela sua sócia administradora, Sra.':'pelo seu sócio administrador, Sr.'} <strong>${escHtml(q.repNome)}</strong>`:'';
+  // Empresário individual não tem sócio: quem assina é o(a) titular.
+  const papel=(q&&q.repPapel==='titular')?(sra?'pela sua titular, Sra.':'pelo seu titular, Sr.'):(sra?'pela sua sócia administradora, Sra.':'pelo seu sócio administrador, Sr.');
+  const rep=(isPJ&&q&&q.repNome)?`, neste ato representada ${papel} <strong>${escHtml(q.repNome)}</strong>`:'';
   return { porte, rep };
 }
 // ── Dados do contrato de cessão (nº, novo/renovação, porte, representante) ──────
@@ -47087,6 +47089,13 @@ function _cedenteQualif(q, isPJ){
 // NOME do registro em cliente_documentos ("Contrato de cessão nº CQ-2026-001 — …"),
 // e é de lá que saem o próximo nº do ano e o último contrato assinado do cliente.
 let _contratoCtx=null;
+// Contrato(s) anterior(es) da renovação: nº opcional (os antigos não têm) e uma ou duas datas.
+const _renovDatas=rv=>(rv.datas&&rv.datas.length)?rv.datas:[rv.data].filter(Boolean);
+function _renovRef(rv){
+  const ds=_renovDatas(rv).map(x=>escHtml(_brData(x))), num=rv.numero?` nº ${escHtml(rv.numero)}`:'';
+  if(ds.length>1) return `os Contratos-Quadro de Cessão de Créditos assinados em ${ds.slice(0,-1).join(', em ')} e em ${ds[ds.length-1]}${num?` (o último sob o${num})`:''}`;
+  return `o Contrato-Quadro de Cessão de Créditos${num}${num?',':''} assinado em ${ds[0]}`;
+}
 // Porte/representante da Cedente quando só os termos de cessão são gerados/enviados (sem o contrato).
 let _qualifCtx=null;
 const _CQ_RE=/CQ-(\d{4})-(\d{3,})/;
@@ -47101,7 +47110,7 @@ async function _contratoProximoNumero(ano){
 async function _contratoUltimoAssinado(clienteId){
   const supa=getSupabase(); if(!supa||!clienteId) return null;
   const { data, error }=await supa.from('cliente_documentos')
-    .select('nome,zapsign_signed_at,created_at').eq('cliente_id',clienteId).eq('zapsign_status','assinado')
+    .select('nome,zapsign_signed_at').eq('cliente_id',clienteId).eq('zapsign_status','assinado')
     .ilike('nome','Contrato de cessão%').order('zapsign_signed_at',{ascending:false,nullsFirst:false}).limit(1);
   if(error||!data||!data.length) return null;
   const r=data[0], m=String(r.nome||'').match(_CQ_RE);
@@ -47145,10 +47154,11 @@ async function _contratoDadosModal(d, clienteId, soQualif){
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="radio" name="dct-tipo" id="dct-renov"> Renovação (substitui o anterior)</label>
       </div>
       <div id="dct-renov-box" style="display:none;margin-top:8px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);">
-        <div style="font-size:11.5px;color:var(--text-3);margin-bottom:8px;">${ultimo?'Preenchido com o último contrato assinado deste cliente. Confira.':'Nenhum contrato assinado deste cliente foi achado no sistema. Informe o nº e a data do contrato anterior.'}</div>
+        <div style="font-size:11.5px;color:var(--text-3);margin-bottom:8px;">${ultimo?'Preenchido com o último contrato assinado deste cliente. Confira.':'Nenhum contrato assinado deste cliente foi achado no sistema. Informe a data do contrato anterior (o nº, se ele tiver).'}</div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;">
-          <label style="font-size:12px;">Nº do contrato anterior<br><input id="dct-ant-num" value="${escHtml(ultimo?.numero||'')}" placeholder="CQ-2025-004" style="${inp}width:150px;"></label>
+          <label style="font-size:12px;">Nº do contrato anterior <span style="color:var(--text-3);">(se tiver)</span><br><input id="dct-ant-num" value="${escHtml(ultimo?.numero||'')}" placeholder="CQ-2025-004" style="${inp}width:150px;"></label>
           <label style="font-size:12px;">Assinado em<br><input type="date" id="dct-ant-data" value="${escHtml(ultimo?.data||'')}" style="${inp}"></label>
+          <label style="font-size:12px;">Outro contrato anterior, assinado em <span style="color:var(--text-3);">(se houver)</span><br><input type="date" id="dct-ant-data2" style="${inp}"></label>
         </div>
       </div>
       <label style="${lbl}">Nº deste contrato</label>
@@ -47162,10 +47172,11 @@ async function _contratoDadosModal(d, clienteId, soQualif){
         <option value="" ${rf.porte?'':'selected'}>Não mencionar</option>
       </select>
       <div style="font-size:10.5px;color:var(--text-3);margin-top:3px;">${rf.porte?'Conforme a Receita Federal.':'A Receita não informou o porte (ou a consulta falhou). Escolha.'}</div>
-      <label style="${lbl}">Representante (sócio administrador)</label>
+      <label style="${lbl}">Representante (sócio administrador ou titular)</label>
       ${rf.socios.length>1?`<div style="font-size:11.5px;color:var(--warning);margin-bottom:5px;">A Receita lista ${rf.socios.length} sócios administradores. Escolha quem assina.</div>`:''}
       ${socioOpts?`<select id="dct-rep-sel" style="${inp}width:100%;margin-bottom:6px;"><option value="">— escolher —</option>${socioOpts}<option value="__outro">Outro (digitar)</option></select>`:''}
       <div style="display:flex;gap:6px;">
+        <select id="dct-rep-papel" style="${inp}"><option value="socio">Sócio(a) administrador(a)</option><option value="titular" ${rf.socios.length?'':'selected'}>Titular (empresa individual)</option></select>
         <select id="dct-rep-trat" style="${inp}"><option>Sr.</option><option>Sra.</option></select>
         <input id="dct-rep-nome" value="${rf.socios.length===1?escHtml(rf.socios[0].nome):''}" placeholder="Nome completo" style="${inp}flex:1;">
       </div>
@@ -47187,19 +47198,19 @@ async function _contratoDadosModal(d, clienteId, soQualif){
       const x=e.target.closest('[data-x]')?.dataset.x; if(!x) return;
       if(x==='cancel'){ ov.remove(); resolve(null); return; }
       if(soQualif){
-        const q={ porte:$('dct-porte').value||'', repNome:($('dct-rep-nome').value||'').trim(), repTrat:$('dct-rep-trat').value||'Sr.' };
+        const q={ porte:$('dct-porte').value||'', repNome:($('dct-rep-nome').value||'').trim(), repTrat:$('dct-rep-trat').value||'Sr.', repPapel:$('dct-rep-papel').value||'socio' };
         ov.remove(); resolve(q); return;
       }
       const numero=($('dct-num').value||'').trim();
       if(!numero){ showToast('Informe o nº deste contrato.','warning'); return; }
       let renov=null;
       if($('dct-renov').checked){
-        const n=($('dct-ant-num').value||'').trim(), dt=$('dct-ant-data').value||'';
-        if(!n||!dt){ showToast('Renovação: informe o nº e a data do contrato anterior.','warning'); return; }
-        renov={ numero:n, data:dt };
+        const n=($('dct-ant-num').value||'').trim(), dt=$('dct-ant-data').value||'', dt2=$('dct-ant-data2').value||'';
+        if(!dt){ showToast('Renovação: informe a data do contrato anterior.','warning'); return; }
+        renov={ numero:n, data:dt, datas:[dt,dt2].filter(Boolean).sort() };
       }
       const ctx={ numero, renov };
-      if(isPJ){ ctx.porte=$('dct-porte').value||''; ctx.repNome=($('dct-rep-nome').value||'').trim(); ctx.repTrat=$('dct-rep-trat').value||'Sr.'; }
+      if(isPJ){ ctx.porte=$('dct-porte').value||''; ctx.repNome=($('dct-rep-nome').value||'').trim(); ctx.repTrat=$('dct-rep-trat').value||'Sr.'; ctx.repPapel=$('dct-rep-papel').value||'socio'; }
       ov.remove(); resolve(ctx);
     });
   });
@@ -47237,7 +47248,7 @@ function _docClienteHtml(tipo, d){
     // Renovação: o contrato novo inteiro + a cláusula 0 (texto aprovado em 24/09/2026).
     const rv=ct.renov;
     const clausula0 = rv ? `<h2>0. Substituição e ratificação</h2>
-<p>0.1. Este contrato substitui integralmente, a partir da data de sua assinatura, o Contrato-Quadro de Cessão de Créditos nº ${escHtml(rv.numero)}, assinado em ${escHtml(_brData(rv.data))}, e quaisquer outros instrumentos de cessão de créditos anteriormente firmados entre as partes (contratos anteriores).</p>
+<p>0.1. Este contrato substitui integralmente, a partir da data de sua assinatura, ${_renovRef(rv)}, e quaisquer outros instrumentos de cessão de créditos anteriormente firmados entre as partes (contratos anteriores).</p>
 <p>0.2. As partes ratificam todas as cessões de créditos realizadas com base nos contratos anteriores, que permanecem válidas e eficazes desde as respectivas datas, sem interrupção. A partir da assinatura deste contrato, esses créditos passam a ser regidos exclusivamente por ele, juntamente com os créditos que vierem a ser cedidos por novos Termos de Cessão.</p>
 <p>0.3. Os créditos cedidos com base nos contratos anteriores continuam identificados pelos respectivos termos, anexos ou relações de cessão, que integram este contrato para todos os fins.</p>
 <p>0.4. A substituição não constitui novação e não afeta os pagamentos, repasses e acertos já realizados até a data de assinatura deste contrato. Os valores eventualmente pendentes de repasse nessa data serão apurados e pagos na forma deste contrato.</p>
@@ -47310,7 +47321,7 @@ ${clausula0}<h2>1. Definições</h2>
 <p>13.2. As partes elegem o foro da Comarca de <strong>Dois Vizinhos/PR</strong> para dirimir quaisquer controvérsias oriundas deste Contrato, com renúncia de qualquer outro, por mais privilegiado que seja.</p>`;
     return _docClienteShell('Contrato-Quadro de Cessão de Créditos e Outras Avenças',
       [ct.numero?['Contrato nº', ct.numero]:null,['Cedente', d.nome||'—'],['CNPJ / CPF', docCli],['Cessionária', COBRASQ],['Termos de Cessão','À parte, com Tabela de Preço reservada'],
-       rv?['Substitui', `Contrato nº ${rv.numero}, de ${_brData(rv.data)}`]:null],
+       rv?['Substitui', _renovDatas(rv).length>1?`Contratos de ${_renovDatas(rv).map(_brData).join(' e ')}`:`Contrato ${rv.numero?'nº '+rv.numero+', ':''}de ${_brData(rv.data)}`]:null],
       corpo, [[COBRASQ,'Cessionária'],[d.nome||'Cedente','Cedente']], ct.numero?{ref:'Contrato nº '+ct.numero}:undefined);
   }
   return null;
