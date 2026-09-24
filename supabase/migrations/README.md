@@ -210,3 +210,13 @@ social contém o nome (MEI e empresário individual não têm sócio; a razão �
 "NN.NNN.NNN NOME"). Validada em produção: `buscar_empresas_por_socio('Rafael Marcante')`
 acha 66.840.514/0001-63 (papel `titular`) em 158 ms (37 s sem o índice).
 Rollback = drop do índice + função de `20260727`.
+
+## 20260924d — etapa: "Quitado ao cliente" deixa de ter ramo próprio
+
+**Não aplicada.** Depende de `20260924c_cobrancas_etapa_trigger`. Só `CREATE OR REPLACE`
+de `cobrancas_etapa_de_status()`: sai o ramo que mandava "Quitado ao cliente" para
+`cobrar`/`em_acao`; o texto, se reaparecer, cai em `quitado`. Decisão do Gustavo em
+24/09/2026 — "Quitado ao cliente" foi unificado em "Quitado" (118 casos migrados por
+SQL no mesmo dia); "Quitado direto ao credor" segue separado. Sem backfill (conferir
+antes: `count(*)` de status "Quitado ao cliente" = 0). Rollback = reaplicar a função
+de `20260924c`.

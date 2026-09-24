@@ -43,7 +43,8 @@ async function subirNaPastaDaCobranca(cobrancaId, transferId, comprovante) {
 }
 
 // Espelha recomputarSaldoCapital() do index.html: capital integralmente repassado vira
-// status "Quitado ao cliente". Sem isto, o abatimento apareceria na aba mas o caso
+// status "Quitado" (até 24/09/2026 era "Quitado ao cliente", unificado em "Quitado" por
+// decisão do Gustavo; "Quitado direto ao credor" segue separado). Sem isto, o abatimento apareceria na aba mas o caso
 // continuaria em cobrança.
 async function recomputarCapital(cobrancaId) {
   const cobs = await sbFetch(`cobrancas?id=eq.${cobrancaId}&select=valor_capital,status,divida&limit=1`);
@@ -54,11 +55,12 @@ async function recomputarCapital(cobrancaId) {
   if (cap == null || !(cap > 0)) return cob.status;
   const rps = await sbFetch(`repasses_cliente?cobranca_id=eq.${cobrancaId}&select=valor`);
   const enviado = (rps || []).reduce((s, r) => s + (Number(r.valor) || 0), 0);
-  if (cap - enviado > 0.005 || cob.status === 'Quitado ao cliente') return cob.status;
+  const stAtual = String(cob.status || '').trim();
+  if (cap - enviado > 0.005 || stAtual === 'Quitado' || stAtual === 'Quitado ao cliente') return cob.status;
   await sbFetch(`cobrancas?id=eq.${cobrancaId}`, {
     method: 'PATCH', prefer: 'return=minimal',
     body: JSON.stringify({
-      status: 'Quitado ao cliente',
+      status: 'Quitado',
       divida: { ...(cob.divida || {}), valorCapital: cap },
       updated_at: new Date().toISOString(),
     }),
@@ -67,10 +69,10 @@ async function recomputarCapital(cobrancaId) {
     method: 'POST', prefer: 'return=minimal',
     body: JSON.stringify({
       cobranca_id: cobrancaId, devedor_id: cobrancaId, tipo: 'repasse',
-      payload: { acao_completa: 'Capital integralmente repassado ao cliente — status alterado para "Quitado ao cliente".', origem: 'repasse-pix' },
+      payload: { acao_completa: 'Capital integralmente repassado ao cliente — status alterado para "Quitado".', origem: 'repasse-pix' },
     }),
   }).catch(() => {});
-  return 'Quitado ao cliente';
+  return 'Quitado';
 }
 
 // Qual cobrança recebe este repasse. NUNCA usar op.devedor_id como se fosse o id da
