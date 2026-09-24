@@ -177,7 +177,7 @@ async function gerarReciboPdfBase64(d: { nome: string; valorNum: number; valorFm
   page.drawText('PROPRIETÁRIO · COBRASQ', { x: M, y: y - 34, size: 8, font: mono, color: gray });
   // Rodapé
   page.drawLine({ start: { x: M, y: 70 }, end: { x: W - M, y: 70 }, thickness: 0.8, color: gold });
-  page.drawText('cobrasq.com.br  ·  contato@cobrasq.com.br  ·  (46) 98822-6533', { x: M, y: 54, size: 8, font: mono, color: gray });
+  page.drawText('cobrasq.com.br  ·  ccobrasq@gmail.com  ·  (46) 98822-6533', { x: M, y: 54, size: 8, font: mono, color: gray });
   const bytes = await pdf.save();
   let bin = ''; const arr = new Uint8Array(bytes);
   for (let i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
@@ -275,7 +275,7 @@ body{width:210mm;height:297mm;background:#fff;font-family:'Inter Tight',sans-ser
   <div class="pd">Dois Vizinhos/PR, ${dataExtenso(d.dataISO)}.</div>
   <div class="sign"><div class="rub">Gustavo Teixeira</div><div class="line"></div><div class="nm">Gustavo Teixeira</div><div class="rl">Proprietário · COBRASQ</div></div>
 </div>
-<div class="foot"><span>contato@cobrasq.com.br · (46) 98822-6533</span><span>cobrasq.com.br · @ccobrasq</span></div>
+<div class="foot"><span>ccobrasq@gmail.com · (46) 98822-6533</span><span>cobrasq.com.br · @ccobrasq</span></div>
 </body></html>`;
 }
 // Gera o recibo PDF exato (marca) via Chrome headless do projeto (/api/gerar-pdf, auth server-to-server).
