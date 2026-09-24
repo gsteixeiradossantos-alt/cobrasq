@@ -1,5 +1,5 @@
 -- 20260924d_etapa_quitado_unificado
--- NÃO APLICADA (gated). Depende de 20260924c_cobrancas_etapa_trigger (a função e o
+-- APLICADA em produção em 24/09/2026 (com SET search_path, igual à função anterior). Depende de 20260924c_cobrancas_etapa_trigger (a função e o
 -- trigger precisam existir).
 --
 -- DECISÃO (Gustavo, 24/09/2026): o status "Quitado ao cliente" foi UNIFICADO em
@@ -18,7 +18,7 @@
 -- Rollback: reaplicar a função de 20260924c_cobrancas_etapa_trigger.sql.
 
 CREATE OR REPLACE FUNCTION public.cobrancas_etapa_de_status(p_status text, p_processo text)
-RETURNS text LANGUAGE plpgsql IMMUTABLE AS $fn$
+RETURNS text LANGUAGE plpgsql IMMUTABLE SET search_path TO 'public' AS $fn$
 DECLARE s text := btrim(coalesce(p_status,'')); tem_proc boolean := btrim(coalesce(p_processo,'')) <> '';
 BEGIN
   IF s = '' THEN RETURN 'cobrar'; END IF;
