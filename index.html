@@ -12341,8 +12341,9 @@ function renderDevedores(){
   const pendentes = devs.filter(d=>d.status==='Pendente aprovação'||d.status==='pendente_ajuste');
 
   let list = devs.filter(d=>{
-    if(d.arquivado) return false;
-    if(d.isDraft) return false; // IMPLEMENTADO S12: oculta rascunhos da lista principal
+    // Nada some (pedido do Gustavo, 24/09/2026): arquivado e rascunho CONTINUAM na lista,
+    // marcados com selo na linha. Antes sumiam sem aviso (S12 ocultava rascunho).
+
     // Funcionário só vê a própria carteira (mesma regra do CRM: gestor + responsável).
     // Sem isso, qualquer funcionário enxergava todas as cobranças do blob compartilhado.
     if(currentUser?.tipo === 'funcionario' && !devEhDoUsuario(d)) return false;
@@ -12579,7 +12580,7 @@ function renderDevedores(){
                       <div class="cob-dev-cell">
                         <span class="cob-av">${initials||'?'}</span>
                         <div>
-                          <div class="cob-dev-nm">${escHtml(d.nome||'—')}</div>
+                          <div class="cob-dev-nm">${escHtml(d.nome||'—')}${(d.arquivado||d.isDraft)?` <span class="det-chip" style="background:var(--surface-2);color:var(--text-3);font-weight:500;">${d.arquivado?'arquivado':''}${(d.arquivado&&d.isDraft)?' · ':''}${d.isDraft?'rascunho':''}</span>`:''}</div>
                           <div class="cob-dev-tipo${faseDaEtiqueta(d.status,d.fase)==='judicial'?' jud':''}">${escHtml(statusLabel(d.status)||'—')}${d.etapa?` · ${escHtml(d.etapa)}`:''}</div>
                         </div>
                       </div>
@@ -12607,7 +12608,7 @@ function renderDevedores(){
             </tbody>
           </table>
           <div class="cob-table-foot">
-            <span>Mostrando <b style="color:var(--text);font-family:var(--font-mono);">${list.length.toLocaleString('pt-BR')}</b> de <b style="color:var(--text);font-family:var(--font-mono);">${devs.filter(d=>!d.arquivado && !d.isDraft).length.toLocaleString('pt-BR')}</b> registros</span>
+            <span>Mostrando <b style="color:var(--text);font-family:var(--font-mono);">${list.length.toLocaleString('pt-BR')}</b> de <b style="color:var(--text);font-family:var(--font-mono);">${devs.length.toLocaleString('pt-BR')}</b> registros</span>
             ${selectedDevIds.size>0?`<span style="color:var(--accent-2);font-weight:600;">${selectedDevIds.size} selecionado${selectedDevIds.size>1?'s':''}</span>`:''}
           </div>
         </div>`
@@ -20899,7 +20900,10 @@ async function renderCobrancas(opts){
     if(!temCache) await _rev.dados;
   }
 
-  const todas = (DB_cobrancas||[]).filter(c=>!c.arquivado && !c.is_draft);
+  // Nada some (pedido do Gustavo, 24/09/2026): arquivada e rascunho CONTINUAM na lista,
+  // marcadas com selo por _cobrSeloOculto. Antes sumiam sem aviso — o mesmo esconderijo
+  // que a view `casos` tinha no banco e saiu em 20260924e_casos_sem_ocultacao.sql.
+  const todas = (DB_cobrancas||[]).slice();
   const q = txtNorm(cobrFilter.q);
   const qDigits = docSoDigitos(q);
   // Filtro por GRUPO econômico: o dropdown Credor pode trazer "grp:<id>" (todas as empresas
@@ -21023,6 +21027,15 @@ async function renderCobrancas(opts){
     .map(o=>`<option value="${escHtml(o.id)}" ${cobrFilter.responsavel===o.id?'selected':''}>${escHtml(o.nome)}</option>`).join('');
 
   // ── Linha da tabela ────────────────────────────────────────────────────────
+  // Selo de cobranca que ANTES era escondida da lista (arquivada / rascunho / fora do CRM).
+  const _cobrSeloOculto = (c)=>{
+    const t = [];
+    if(c.arquivado) t.push('arquivada');
+    if(c.is_draft)  t.push('rascunho');
+    if(c.fora_crm)  t.push('fora do CRM');
+    return t.length ? ` <span class="det-chip" style="background:var(--surface-2);color:var(--text-3);font-weight:500;">${t.join(' · ')}</span>` : '';
+  };
+
   const linhaTabela = (c)=>{
     const partes = (c.cobranca_partes||[]).slice().sort((a,b)=> (b.principal?1:0)-(a.principal?1:0));
     const princ = partes.find(p=>p.principal) || partes[0] || null;
@@ -21041,7 +21054,7 @@ async function renderCobrancas(opts){
     return `<div class="cob-tab-row${isSel?' sel':''}" onclick="verCobranca('${c.id}')">
       <label onclick="event.stopPropagation()" style="display:flex;"><input type="checkbox" ${isSel?'checked':''} onchange="toggleCobrSelection('${c.id}',this.checked)" style="width:16px;height:16px;cursor:pointer;"></label>
       <div class="cob-tab-dev" style="--risco:${risco};">
-        <div class="nm">${escHtml(princNome)}${extra}${princPapel?`<span class="papel">${escHtml(princPapel)}</span>`:''}</div>
+        <div class="nm">${escHtml(princNome)}${extra}${princPapel?`<span class="papel">${escHtml(princPapel)}</span>`:''}${_cobrSeloOculto(c)}</div>
         <div class="sub">${escHtml(sub)}</div>
       </div>
       <div class="cob-tab-cel">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}</div>
@@ -21063,7 +21076,7 @@ async function renderCobrancas(opts){
     const cor=_etiquetaCor(c.status);
     const aging=_cobrAgingDias(c); const agingOld=(aging!=null && aging>=365);
     return `<div class="cob-panel cob-card cob-tr-click" style="--cor:${cor};padding:14px;cursor:pointer;" onclick="verCobranca('${c.id}')">
-      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;"><div class="strong" style="font-size:14px;font-weight:700;">${escHtml(princ?.devedores?.nome||'—')}${extra}${_telInvalidoCob(c)?` <span class="det-chip" style="background:#FBF6E6;color:#9C7F40;border:1px solid #E0D3A8;" title="Telefone inválido — buscando novo número">📵</span>`:''}</div>${cobStatusBadge(c)}</div>
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;"><div class="strong" style="font-size:14px;font-weight:700;">${escHtml(princ?.devedores?.nome||'—')}${extra}${_cobrSeloOculto(c)}${_telInvalidoCob(c)?` <span class="det-chip" style="background:#FBF6E6;color:#9C7F40;border:1px solid #E0D3A8;" title="Telefone inválido — buscando novo número">📵</span>`:''}</div>${cobStatusBadge(c)}</div>
       <div style="margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">${cobEtapaChip(c._etapa, c)}${cobAlertaPill(c)}${cobPrescricaoSelo(c)}${cobNegSelo(c)}${cobQuitaSelo(c)}${cobMicroSelo(c)}${cobDevTagsChips(c)}${cronRenderBadge(c)}</div>
       <div style="font-size:12.5px;color:var(--text-2);margin-top:4px;">${escHtml(_cobrDocLabel(c))}</div>
       <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">${c._unif? escHtml(c._unif.credores.join(' + ')) : escHtml(_cobrCredorNome(c))}</div>
