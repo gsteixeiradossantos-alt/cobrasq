@@ -186,10 +186,10 @@ const MAPA_EVENTO = {
   peticao: 'Petição',
   peticaoinicial: 'Petição Inicial',
   inicial: 'Petição Inicial',
-  // nome exato do tipo no Projudi (Gustavo, 25/09/2026)
-  emendaainicial: 'Petição - Emenda à Petição Inicial',
-  emendaapeticaoinicial: 'Petição - Emenda à Petição Inicial',
-  emenda: 'Petição - Emenda à Petição Inicial',
+  // só "Emenda": a busca da lupa do Projudi acha "Petição - Emenda à Petição Inicial" (Gustavo, 25/09/2026)
+  emendaainicial: 'Emenda',
+  emendaapeticaoinicial: 'Emenda',
+  emenda: 'Emenda',
   contestacao: 'Contestação',
   impugnacao: 'Impugnação',
   replica: 'Réplica',
