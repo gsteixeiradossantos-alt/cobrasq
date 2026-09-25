@@ -208,8 +208,8 @@ const MAPA_EVENTO = {
   agravo: 'Agravo',
   contrarrazoes: 'Contrarrazões',
   // Execução / cumprimento
-  cumprimentodesentenca: 'Cumprimento de Sentença',
-  cumpsentenca: 'Cumprimento de Sentença',
+  cumprimentodesentenca: 'Solicitação a Execução',
+  cumpsentenca: 'Solicitação a Execução',
   cumprimento: 'Cumprimento de intimação',
   solicexecucao: 'Solicitação a Execução',
   execucao: 'Execução',
