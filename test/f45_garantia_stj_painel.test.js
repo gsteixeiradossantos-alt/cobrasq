@@ -53,7 +53,7 @@ let f = 1; meses.forEach(m => { f *= 1 + T[m] / 100; });
 const r = ctx.calcDividaAtualizada(1000, '2022-07-01');
 ok('atualizado = nominal × fator acumulado real', perto(r.atualizado, 1000 * Math.max(f, 1)),
   `atualizado=${r.atualizado.toFixed(4)} esperado=${(1000 * Math.max(f, 1)).toFixed(4)}`);
-ok('não compõe a partir do piso (bug: ~1015,50)', r.atualizado < 1005, `atualizado=${r.atualizado.toFixed(2)}`);
+ok('não compõe a partir do piso (bug: 1015,48)', r.atualizado < 1005, `atualizado=${r.atualizado.toFixed(2)}`);
 
 // Juros sobre o saldo com piso: jul–set segurados em 1000.
 let saldo = 1000, fa = 1, juros = 0;
