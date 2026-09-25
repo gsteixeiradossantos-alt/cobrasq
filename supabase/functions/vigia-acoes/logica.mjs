@@ -142,7 +142,7 @@ function dataISO(v) {
 // Itens da API para UM devedor → achados agrupados por processo.
 // `uf` (opcional): UF de referência (ufReferencia) — achado de outro tribunal cai.
 // Devolve { achados: [...], descartados: { nome_diferente, nosso, sem_cnj, fora_da_uf, outro_ramo } }.
-export function agruparAchados(itens, nomeDevedor, cnjsNossos, uf = null) {
+export function agruparAchados(itens, nomeDevedor, cnjsNossos, uf = null, doc = null) {
   const chave = chaveNome(nomeDeBusca(nomeDevedor).busca || nomeDevedor);
   const porProc = new Map();
   const desc = { nome_diferente: 0, nosso: 0, sem_cnj: 0, fora_da_uf: 0, outro_ramo: 0 };
@@ -163,7 +163,7 @@ export function agruparAchados(itens, nomeDevedor, cnjsNossos, uf = null) {
         nome_encontrado: meu[0].nome,
         tribunal: it.siglaTribunal || null, classe: it.nomeClasse || null, orgao: it.nomeOrgao || null,
         link: it.link || null, primeira_data: data, ultima_data: data,
-        comunicacoes: [], partes: [], advogados: [], ultimo_texto: null,
+        comunicacoes: [], partes: [], advogados: [], ultimo_texto: null, cpf_confere: false,
       };
       porProc.set(dig, a);
     }
@@ -174,6 +174,7 @@ export function agruparAchados(itens, nomeDevedor, cnjsNossos, uf = null) {
       a.link = it.link || a.link;
       a.ultimo_texto = String(it.texto || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1200) || a.ultimo_texto;
     }
+    if (!a.cpf_confere && docConfere(it.texto, doc)) a.cpf_confere = true;
     if (it.id != null && !a.comunicacoes.includes(String(it.id))) a.comunicacoes.push(String(it.id));
     for (const d of dests) {
       if (!a.partes.some(p => p.nome === d.nome && p.polo === d.polo)) a.partes.push({ nome: d.nome, polo: d.polo });
@@ -198,14 +199,15 @@ export function nomesExecutados(campo) {
 // Linhas de vw_vigia_acoes_universo → alvos de busca (1 por pessoa).
 //   cobrasq    → alvo 'dev:<devedor_id>', UF por ufReferencia (CNJ → devedor → credor → PR)
 //   escritorio → o campo executado ("A; B") vira um alvo por nome, 'esc:<chave>',
-//                UF(s) do CNJ dos nossos processos; quem já é devedor COBRASQ fica só lá.
+//                UF(s) do CNJ dos nossos processos; quem já é devedor COBRASQ fica só lá;
+//                banco, seguradora e ente público ficam fora (ehInstituicao).
 export function montarAlvos(linhas) {
   const alvos = new Map(); const chavesCob = new Set();
   for (const r of (linhas || []).filter(r => r.origem !== 'escritorio')) {
     const ref = ufReferencia({ cnj: r.processo_ref, ufDevedor: r.uf_devedor, ufCredor: r.uf_credor });
     alvos.set('dev:' + r.devedor_id, { alvo: 'dev:' + r.devedor_id, origem: 'cobrasq', devedor_id: r.devedor_id,
       cobranca_id: r.cobranca_id || null, nome: r.nome, processo_ref: soDigitos(r.processo_ref).length === 20 ? formatarCNJ(soDigitos(r.processo_ref)) : null,
-      ufs: [ref.uf], uf_fonte: ref.fonte });
+      ufs: [ref.uf], uf_fonte: ref.fonte, doc: soDigitos(r.doc) || null });
     chavesCob.add(chaveNome(nomeDeBusca(r.nome).busca || r.nome));
   }
   for (const r of (linhas || []).filter(r => r.origem === 'escritorio')) {
@@ -214,13 +216,61 @@ export function montarAlvos(linhas) {
     const ufs = ufsProc.length === 1 ? ufsProc : ['PR'];
     for (const nome of nomesExecutados(r.nome)) {
       const chave = chaveNome(nomeDeBusca(nome).busca || nome);
-      if (!chave || chavesCob.has(chave)) continue;
+      if (!chave || chavesCob.has(chave) || ehInstituicao(nome)) continue;
       const k = 'esc:' + chave;
       const a = alvos.get(k);
       if (a) { for (const u of ufs) if (!a.ufs.includes(u)) a.ufs.push(u); continue; }
       alvos.set(k, { alvo: k, origem: 'escritorio', devedor_id: null, cobranca_id: null, nome,
-        processo_ref: dig.length === 20 ? formatarCNJ(dig) : null, ufs: [...ufs], uf_fonte: 'cnj' });
+        processo_ref: dig.length === 20 ? formatarCNJ(dig) : null, ufs: [...ufs], uf_fonte: 'cnj', doc: null });
     }
   }
   return [...alvos.values()];
+}
+
+// Banco, seguradora, cooperativa de crédito e ente público entre os executados do
+// escritório: aparecem em centenas de processos por dia e nunca são o alvo da vigia
+// (decisão do Gustavo, 25/09/2026 — no dry-run, 282 dos 402 achados do escritório).
+// Só vale para origem 'escritorio'; devedor COBRASQ é sempre vigiado.
+const RE_INSTITUICAO = new RegExp([
+  '\\bBANCO\\b', '\\bSEGUR(O|OS|ADORA)\\b', '\\bCOOPERATIVA DE CREDITO\\b', '\\bCAIXA ECONOMICA\\b',
+  '^UNIAO\\b', 'ADVOCACIA GERAL DA UNIAO', 'INSTITUTO NACIONAL DO SEGURO SOCIAL', '\\bINSS\\b',
+  '\\bDETRAN\\b', 'DEPARTAMENTO DE TRANSITO', '^ESTADO D[OAE]\\b', '^MUNICIPIO D[OAE]\\b', '\\bPREFEITURA\\b',
+  '\\bFAZENDA (NACIONAL|PUBLICA|ESTADUAL|MUNICIPAL)\\b',
+].join('|'));
+export function ehInstituicao(nome) { return RE_INSTITUICAO.test(normalizar(nome)); }
+
+// CPF/CNPJ do devedor escrito no texto da comunicação → selo "CPF confere".
+// O diário quase nunca traz documento (16 de 431 textos no dry-run); só marca quando bate.
+export function docConfere(texto, doc) {
+  const d = soDigitos(doc);
+  if (d.length !== 11 && d.length !== 14) return false;
+  const t = String(texto ?? '');
+  const re = d.length === 11 ? /\d{3}\.?\d{3}\.?\d{3}-?\d{2}/g : /\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}/g;
+  return (t.match(re) || []).some(m => soDigitos(m) === d);
+}
+
+// Teto por alvo (decisão do Gustavo, 25/09/2026): mais de TETO_ACHADOS processos na
+// mesma busca (empresa grande, nome comum — Embracon deu 356 em 3 dias) vira UM aviso
+// "Vários processos (N)", com a lista em `processos`. digitos = 20 zeros (chave fixa:
+// as buscas seguintes atualizam o mesmo aviso, e "Descartar" vale para ele).
+export const TETO_ACHADOS = 5;
+export const DIGITOS_VARIOS = '0'.repeat(20);
+export function resumirMuitos(achados, teto = TETO_ACHADOS) {
+  if (!Array.isArray(achados) || achados.length <= teto) return achados || [];
+  const datas = (k) => achados.map(a => a[k]).filter(Boolean).sort();
+  const processos = achados
+    .slice().sort((a, b) => (a.polo === 'A' ? 0 : 1) - (b.polo === 'A' ? 0 : 1) || String(b.ultima_data || '').localeCompare(String(a.ultima_data || '')))
+    .map(a => ({ numero_processo: a.numero_processo, polo: a.polo, tribunal: a.tribunal, orgao: a.orgao, classe: a.classe,
+                 ultima_data: a.ultima_data, link: a.link, nome_encontrado: a.nome_encontrado, cpf_confere: !!a.cpf_confere }));
+  return [{
+    digitos: DIGITOS_VARIOS, numero_processo: `Vários processos (${achados.length})`,
+    polo: achados.some(a => a.polo === 'A') ? 'A' : (achados.some(a => a.polo === 'P') ? 'P' : null),
+    nome_encontrado: achados[0].nome_encontrado,
+    tribunal: [...new Set(achados.map(a => a.tribunal).filter(Boolean))].join(', ') || null,
+    classe: null, orgao: null, link: null,
+    primeira_data: datas('primeira_data')[0] || null, ultima_data: datas('ultima_data').pop() || null,
+    comunicacoes: [...new Set(achados.flatMap(a => a.comunicacoes || []))],
+    partes: [], advogados: [], ultimo_texto: null,
+    cpf_confere: achados.some(a => a.cpf_confere), processos,
+  }];
 }

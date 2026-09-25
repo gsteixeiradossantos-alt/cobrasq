@@ -35,7 +35,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
-import { nomeDeBusca, agruparAchados, montarAlvos } from './logica.mjs';
+import { nomeDeBusca, agruparAchados, montarAlvos, resumirMuitos } from './logica.mjs';
 
 const API = 'https://comunicaapi.pje.jus.br/api/v1/comunicacao';
 const DIAS_JANELA = 3;          // olha 3 dias para trás: atraso de 1–2 dias não perde nada
@@ -130,7 +130,7 @@ async function carregarCnjsNossos(): Promise<Set<string>> {
 
 async function gravarAchado(dev: any, a: any): Promise<'novo' | 'atualizado' | 'erro'> {
   const { data: exist, error: eSel } = await sb.from('vigia_acoes')
-    .select('id, comunicacoes, primeira_data, ultima_data, polo').eq('alvo', dev.alvo).eq('digitos', a.digitos).maybeSingle();
+    .select('id, comunicacoes, primeira_data, ultima_data, polo, cpf_confere').eq('alvo', dev.alvo).eq('digitos', a.digitos).maybeSingle();
   if (eSel) { console.error('[vigia] select', eSel.message); return 'erro'; }
   if (!exist) {
     const { error } = await sb.from('vigia_acoes').insert({
@@ -142,6 +142,7 @@ async function gravarAchado(dev: any, a: any): Promise<'novo' | 'atualizado' | '
       primeira_data: a.primeira_data, ultima_data: a.ultima_data,
       comunicacoes: a.comunicacoes, qtd_comunicacoes: a.comunicacoes.length,
       partes: a.partes, advogados: a.advogados, ultimo_texto: a.ultimo_texto,
+      cpf_confere: !!a.cpf_confere, processos: a.processos ?? null,
     });
     if (error && !String(error.message).includes('duplicate')) { console.error('[vigia] insert', error.message); return 'erro'; }
     return 'novo';
@@ -153,7 +154,10 @@ async function gravarAchado(dev: any, a: any): Promise<'novo' | 'atualizado' | '
     primeira_data: (!exist.primeira_data || (a.primeira_data && a.primeira_data < exist.primeira_data)) ? a.primeira_data : exist.primeira_data,
     polo: (exist.polo === 'A' || a.polo === 'A') ? 'A' : (exist.polo || a.polo),
     partes: a.partes, advogados: a.advogados, atualizado_em: new Date().toISOString(),
+    cpf_confere: !!(exist.cpf_confere || a.cpf_confere),
   };
+  // Linha "Vários processos": a lista e a contagem são as da busca mais recente.
+  if (a.processos) Object.assign(upd, { processos: a.processos, numero_processo: a.numero_processo, tribunal: a.tribunal, nome_encontrado: a.nome_encontrado });
   if (maisNovo) Object.assign(upd, { ultima_data: a.ultima_data, link: a.link, ultimo_texto: a.ultimo_texto });
   const { error } = await sb.from('vigia_acoes').update(upd).eq('id', exist.id);
   if (error) { console.error('[vigia] update', error.message); return 'erro'; }
@@ -180,7 +184,7 @@ Deno.serve(async (req) => {
 
     // Universo → alvos
     const { data: linhas, error: eU } = await sb.from('vw_vigia_acoes_universo')
-      .select('origem, devedor_id, cobranca_id, nome, processo_ref, uf_devedor, uf_credor').limit(10000);
+      .select('origem, devedor_id, cobranca_id, nome, processo_ref, uf_devedor, uf_credor, doc').limit(10000);
     if (eU) throw new Error('universo: ' + eU.message);
     let universo = montarAlvos(linhas || []);
     if (Array.isArray(body?.alvos) && body.alvos.length) universo = universo.filter((d: any) => body.alvos.includes(d.alvo));
@@ -214,13 +218,14 @@ Deno.serve(async (req) => {
       } else {
         try {
           const { itens, total, truncado } = await buscarNome(busca, inicio, fim);
-          const { achados, descartados } = agruparAchados(itens, dev.nome, cnjsNossos, dev.ufs);
+          const { achados: todos, descartados } = agruparAchados(itens, dev.nome, cnjsNossos, dev.ufs, dev.doc);
+          const achados = resumirMuitos(todos);   // > 5 processos → 1 aviso "Vários processos (N)"
           res.comunicacoes += total;
           if (truncado) res.truncados++;
           for (const k of Object.keys(descartados) as (keyof typeof descartados)[]) res.descartados[k] += descartados[k];
-          registro = { ...registro, comunicacoes: total, achados: achados.length, motivo: truncado ? 'truncado' : null };
+          registro = { ...registro, comunicacoes: total, achados: todos.length, motivo: truncado ? 'truncado' : null };
           for (const a of achados) {
-            if (dryRun) { res.achados.push({ alvo: dev.alvo, devedor: dev.nome, uf: dev.ufs.join('/'), ...a, ultimo_texto: undefined }); continue; }
+            if (dryRun) { res.achados.push({ alvo: dev.alvo, devedor: dev.nome, uf: dev.ufs.join('/'), ...a, ultimo_texto: undefined, doc: undefined }); continue; }
             const r = await gravarAchado(dev, a);
             if (r === 'novo') res.novos++; else if (r === 'atualizado') res.atualizados++; else res.erros++;
           }

@@ -137,5 +137,48 @@ const item = (o) => Object.assign({
     assert.deepStrictEqual(alvos.find(a => a.alvo === 'dev:d1').ufs, ['SC']);
   });
 
+  // ── Decisões de 25/09/2026: instituições fora, teto de 5, CPF confere
+  ok('banco, seguradora, cooperativa e ente público não viram alvo do escritório', () => {
+    for (const n of ['BANCO BRADESCO S/A', 'UNIÃO - ADVOCACIA GERAL DA UNIÃO', 'Porto Seguro Companhia de Seguros Gerais',
+                     'INSTITUTO NACIONAL DO SEGURO SOCIAL - INSS', 'DEPARTAMENTO DE TRÂNSITO DO ESTADO DO PARANÁ - DETRAN/PR',
+                     'Cooperativa de Crédito Sicredi', 'Estado do Paraná', 'Município de Cascavel', 'Caixa Econômica Federal'])
+      assert.ok(L.ehInstituicao(n), n);
+    for (const n of ['Wesley Cechin Gobatto', 'Braspress Transportes Urgentes Ltda', 'Silvano Martins José Vieira'])
+      assert.ok(!L.ehInstituicao(n), n);
+    const alvos = L.montarAlvos([
+      { origem: 'escritorio', nome: 'BANCO BRADESCO S/A; Wesley Cechin Gobatto', processo_ref: '00055698220258160131' },
+      { origem: 'escritorio', nome: 'UNIÃO - ADVOCACIA GERAL DA UNIÃO', processo_ref: '00001231220254047000' },
+    ]);
+    assert.deepStrictEqual(alvos.map(a => a.alvo), ['esc:WESLEY CECHIN GOBATTO']);
+  });
+  ok('CPF/CNPJ do devedor no texto do diário marca cpf_confere (formatado ou não)', () => {
+    assert.ok(L.docConfere('executado FULANO, CPF 123.456.789-09, residente', '12345678909'));
+    assert.ok(L.docConfere('CPF: 12345678909', '123.456.789-09'));
+    assert.ok(L.docConfere('CNPJ nº 12.345.678/0001-95', '12345678000195'));
+    assert.ok(!L.docConfere('CPF 111.222.333-44', '12345678909'));
+    assert.ok(!L.docConfere('CPF 123.456.789-09', null));
+    const r = L.agruparAchados([item({ texto: 'Autor WESLEY CECHIN GOBATTO, CPF 123.456.789-09' })], 'Wesley Cechin Gobatto', new Set(), ['PR'], '12345678909');
+    assert.strictEqual(r.achados[0].cpf_confere, true);
+    assert.strictEqual(L.agruparAchados([item()], 'Wesley Cechin Gobatto', new Set(), ['PR'], '12345678909').achados[0].cpf_confere, false);
+  });
+  ok('mais de 5 processos na mesma busca viram 1 aviso "Vários processos (N)" sem perder nenhum', () => {
+    const mk = (i, polo) => ({ digitos: String(i).padStart(20, '1'), numero_processo: 'P' + i, polo, tribunal: i % 2 ? 'TJPR' : 'TRT9',
+      primeira_data: '2026-09-2' + i, ultima_data: '2026-09-2' + i, comunicacoes: ['c' + i], cpf_confere: i === 3 });
+    const cinco = [1, 2, 3, 4, 5].map(i => mk(i, 'P'));
+    assert.strictEqual(L.resumirMuitos(cinco), cinco);   // até 5: um aviso por processo
+    const seis = [...cinco, mk(6, 'A')];
+    const [v, ...resto] = L.resumirMuitos(seis);
+    assert.strictEqual(resto.length, 0);
+    assert.strictEqual(v.digitos, '00000000000000000000');
+    assert.strictEqual(v.numero_processo, 'Vários processos (6)');
+    assert.strictEqual(v.polo, 'A');
+    assert.strictEqual(v.processos.length, 6);
+    assert.strictEqual(v.processos[0].polo, 'A');          // autor primeiro na lista
+    assert.strictEqual(v.comunicacoes.length, 6);
+    assert.strictEqual(v.cpf_confere, true);
+    assert.strictEqual(v.primeira_data, '2026-09-21'); assert.strictEqual(v.ultima_data, '2026-09-26');
+    assert.deepStrictEqual(v.tribunal.split(', ').sort(), ['TJPR', 'TRT9']);
+  });
+
   console.log(`\nF-47 · ${n} verificações ok.`);
 })().catch(e => { console.error('  FALHOU', e.message); process.exit(1); });

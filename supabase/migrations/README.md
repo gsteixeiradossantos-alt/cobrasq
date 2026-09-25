@@ -246,6 +246,18 @@ instituições (União/AGU 137, Porto Seguro 39, Bradesco 34, Itaú Seguros 27, 
 nomes comuns). Wesley entra como `esc:WESLEY CECHIN GOBATTO` (UF PR, pelo CNJ do
 0005569-82.2025.8.16.0131) e é achado de novo como autor no 0002110-19.2025.8.16.0181.
 
+Decisões do Gustavo (25/09/2026), já no código: (1) banco, seguradora, cooperativa de
+crédito e ente público (União/AGU, INSS, DETRAN, Estado, Município, Fazenda) executados
+pelo escritório ficam fora (`ehInstituicao`); (2) teto de 5 processos por alvo em cada
+busca — acima disso vira UMA linha "Vários processos (N)" (`digitos` = 20 zeros, lista em
+`processos`), nada se perde; (3) CPF/CNPJ do devedor (`devedores.doc_digits`) escrito no
+texto do diário marca `cpf_confere` (selo "✓ CPF confere"; só marca, não esconde);
+(4) autor e réu continuam, autor em cima. Refeita a conta sobre os mesmos dry-runs:
+escritório 402 achados → 267 de instituições saem → **57 avisos** (4 agrupados: Silvano
+Martins José Vieira 45, Braspress 15, Leandro dos Santos 12, Claudinei dos Santos 10);
+COBRASQ 1.153 achados crus (antes do filtro por UF) → **154 avisos** (25 agrupados;
+Embracon 481 e Maria Aparecida dos Santos 204 viram 1 aviso cada).
+
 **Ordem:** aplicar a migração → merge (o CI implanta a Edge Function `vigia-acoes`;
 secrets já existentes `CRON_INVOKE_SECRET`, `SUPABASE_URL`,
 `SUPABASE_SERVICE_ROLE_KEY`) → opcional `POST /vigia-acoes {"forcar":true}` com o

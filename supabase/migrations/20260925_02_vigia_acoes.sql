@@ -12,7 +12,13 @@
 --     escritório (intimacoes_email.executado, processo sem cobrança vinculada);
 --   * só vale achado nos tribunais da UF do NOSSO processo ("nosso processo for no
 --     Paraná, corta por Paraná"): TJ, TRT e TRF daquela UF. UF = J.TR do CNJ; sem
---     CNJ, UF do devedor → do credor → PR. Regra em logica.mjs (ufReferencia).
+--     CNJ, UF do devedor → do credor → PR. Regra em logica.mjs (ufReferencia);
+--   * executados do escritório que são banco, seguradora, cooperativa de crédito
+--     ou ente público (União, INSS, DETRAN, Estado, Município) ficam FORA
+--     (logica.mjs, ehInstituicao) — eram 282 dos 402 achados no dry-run;
+--   * teto de 5 processos por alvo em cada busca: acima disso vira UMA linha
+--     "Vários processos (N)" com digitos = 20 zeros e a lista em `processos`;
+--   * CPF/CNPJ do devedor escrito no texto do diário → cpf_confere = true (só marca).
 --
 --   vigia_acoes          achados, 1 linha por (alvo, processo); status da tela.
 --                        alvo = 'dev:<devedor_id>' (COBRASQ) ou 'esc:<nome normalizado>'
@@ -62,6 +68,8 @@ CREATE TABLE IF NOT EXISTS public.vigia_acoes (
   partes           jsonb NOT NULL DEFAULT '[]',
   advogados        jsonb NOT NULL DEFAULT '[]',
   ultimo_texto     text,
+  cpf_confere      boolean NOT NULL DEFAULT false,  -- CPF/CNPJ do devedor aparece no texto
+  processos        jsonb,                -- só na linha "Vários processos": lista dos processos
   status           text NOT NULL DEFAULT 'novo' CHECK (status IN ('novo','visto','descartado')),
   nota             text,
   visto_por        text,
@@ -126,7 +134,8 @@ SELECT * FROM (
     d.nome,
     nullif(regexp_replace(coalesce(c.numero_processo, ''), '\D', '', 'g'), '') AS processo_ref,
     d.uf            AS uf_devedor,
-    cl.uf           AS uf_credor
+    cl.uf           AS uf_credor,
+    d.doc_digits    AS doc
   FROM public.cobrancas c
   JOIN public.cobranca_partes cp ON cp.cobranca_id = c.id
   JOIN public.devedores d        ON d.id = cp.devedor_id
@@ -148,7 +157,7 @@ SELECT * FROM (
   -- `nome` aqui é o campo executado inteiro ("A; B"): a função separa.
   SELECT DISTINCT ON (e.digitos)
     'escritorio'::text, NULL::uuid, NULL::uuid,
-    e.executado, e.digitos, NULL::text, NULL::text
+    e.executado, e.digitos, NULL::text, NULL::text, NULL::text
   FROM public.intimacoes_email e
   WHERE e.digitos ~ '^\d{20}$'
     AND nullif(trim(e.executado), '') IS NOT NULL
