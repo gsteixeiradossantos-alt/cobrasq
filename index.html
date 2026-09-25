@@ -11662,7 +11662,7 @@ async function checkAlertaCasosAgir(painelEl){
   }catch(e){ /* best-effort */ }
 }
 
-// Vigia de ações (F-46): devedor ativo apareceu como parte num processo do DJEN
+// Vigia de ações (F-47): devedor ativo apareceu como parte num processo do DJEN
 // que não é nosso. Conta os achados 'novo'; polo A (devedor é AUTOR = crédito a
 // penhorar) ganha destaque. Memória de 60 s: o painel pinta várias vezes por
 // abertura e isto não precisa de uma consulta a cada pintura. Best-effort.
@@ -12221,6 +12221,37 @@ function calcDividaCobranca(valorOrig, vencStr){
     taxa: r.taxa, subtotal: r.subtotal, total: r.total, diasAtraso, meses: r.meses };
 }
 
+// ── Vários títulos com vencimentos próprios (cobrancas.divida.titulos) ────────
+// Quando o documento detalha cada cheque/parcela, cada título corre do SEU
+// vencimento e os resultados são somados (ceil só no total). Lista vazia ou com
+// menos de 2 títulos válidos = conta antiga (valor original + vencimento único).
+// Formato: [{ numero, valor (número), vencimento 'AAAA-MM-DD' }].
+function _titulosValidos(divida){
+  const arr = divida && Array.isArray(divida.titulos) ? divida.titulos : [];
+  const ok = arr.map(t=>({ numero: String((t&&t.numero)||'').trim(), valor: parseValorBR(t&&t.valor)||0,
+    vencimento: String((t&&t.vencimento)||'').trim().slice(0,10) }))
+    .filter(t=>t.valor>0 && /^\d{4}-\d{2}-\d{2}$/.test(t.vencimento));
+  return ok.length >= 2 ? ok : [];
+}
+// Mesmo retorno de calcDividaCobranca + itens[] (um por título, com o detalhe de cada).
+function calcDividaCobrancaTitulos(titulos){
+  const p = getCalcParams();
+  const hoje = new Date(); hoje.setHours(0,0,0,0);
+  const itens = titulos.map(t=>{
+    const dias = Math.max(0, Math.round((hoje - new Date(t.vencimento + 'T00:00:00')) / 86400000));
+    return Object.assign({}, t, { diasAtraso: dias, meses: dias / COBRANCA_DIAS_MES });
+  });
+  const r = CalcEngine.cobrancaTitulos(itens, { correcaoMensal: COBRANCA_CORRECAO_MENSAL, jurosMensal: p.juros,
+    multaPct: p.multa, taxaServico: COBRANCA_TAXA_SERVICO, aplicarMulta: true, aplicarTaxa: true });
+  // Título ainda não vencido não corre (igual ao zero de calcDividaCobranca).
+  r.itens.forEach(i=>{ if(!(i.diasAtraso>0)){ Object.assign(i,{ correcao:0, valorCorrigido:i.valor, juros:0, multa:0, subtotal:i.valor, taxa:0 }); } });
+  const soma = k => r.itens.reduce((a,i)=>a+i[k],0);
+  const subtotal = soma('subtotal'), taxa = soma('taxa');
+  return { atualizado: soma('valorCorrigido'), correcao: soma('correcao'), juros: soma('juros'), multa: soma('multa'),
+    taxa, subtotal, total: Math.ceil(subtotal + taxa), valorOrig: r.valorOriginal,
+    diasAtraso: Math.max(...itens.map(i=>i.diasAtraso)), meses: Math.max(...itens.map(i=>i.meses)), itens: r.itens };
+}
+
 // ── Valor atualizado HOJE (compute-on-read) ──────────────────────────────────
 // Fonte única de verdade para exibir/somar a dívida nas listas, cards e totais.
 // Deriva de valorOrig + vencimento pela MESMA régua do modal/cobrança
@@ -12243,6 +12274,14 @@ function dividaAtualHoje(d){
   // Só ACORDO ACEITO congela o valor atualizado (montante renegociado/fixo).
   // Judicial NÃO congela: a dívida segue correndo pela régua até quitar.
   if(acordo) return parseValorBR(rawAtual) || orig;
+  const tits = _titulosValidos(d.divida);
+  if(tits.length){
+    const kT = 'T|' + JSON.stringify(tits) + '|' + isoLocal(new Date());
+    if(_dividaCache.has(kT)) return _dividaCache.get(kT);
+    const tt = calcDividaCobrancaTitulos(tits).total || orig;
+    _dividaCache.set(kT, tt);
+    return tt;
+  }
   const venc = String(d.vencimento || '').trim();
   if(!venc) return parseValorBR(rawAtual) || orig;
   const hojeKey = isoLocal(new Date());
@@ -12273,6 +12312,15 @@ function _refrescarValorAtualHoje(){
 function _fmtR(n){ return 'R$ ' + (Number(n)||0).toLocaleString('pt-BR', { minimumFractionDigits:2, maximumFractionDigits:2 }); }
 function _fmtPct(p){ return (p*100).toLocaleString('pt-BR', { minimumFractionDigits:2, maximumFractionDigits:2 }) + '%'; }
 
+// Títulos (divida.titulos) do devedor aberto no modal mdev — [] se não houver.
+function _mdevTitulos(){
+  const id = (document.getElementById('mdev-id')?.value||'').trim();
+  if(!id) return [];
+  const dev = (DB.devedores||[]).find(x=>x.id===id);
+  const cob = (DB_cobrancas||[]).find(x=>x.id===id);
+  return _titulosValidos((dev && dev.divida) || (cob && cob.divida));
+}
+
 function abrirVerificarCalculo(){
   const valorOrigStr = (document.getElementById('mdev-valor-orig')?.value||'').trim();
   const vencStr      = (document.getElementById('mdev-vencimento')?.value||'').trim();
@@ -12285,7 +12333,8 @@ function abrirVerificarCalculo(){
 
   const hoje = new Date(); hoje.setHours(0,0,0,0);
   const p = getCalcParams();
-  const r = calcDividaCobranca(valorOrig, vencStr);
+  const _tits = _mdevTitulos();
+  const r = _tits.length ? calcDividaCobrancaTitulos(_tits) : calcDividaCobranca(valorOrig, vencStr);
   const diasAtraso = r.diasAtraso;
   const meses = r.meses;
   const correcao = r.correcao;
@@ -12321,6 +12370,8 @@ function abrirVerificarCalculo(){
       <tr><td style="padding:8px 0;font-weight:700;color:var(--navy);font-size:13.5px;">Total (modo cobrança — vai pro devedor)</td>
           <td style="padding:8px 0;text-align:right;font-family:var(--font-mono);font-weight:800;color:var(--navy);font-size:15px;">${_fmtR(total)}</td></tr>
     </table>
+    ${_tits.length ? `<div style="margin-top:10px;font-size:11.5px;color:var(--text-2);">Cada título corre desde o seu vencimento; o total é a soma:</div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:4px;">${r.itens.map(i=>`<tr><td style="padding:3px 0;">${escHtml(i.numero||'—')} · venc. ${new Date(i.vencimento+'T00:00:00').toLocaleDateString('pt-BR')} · ${_fmtR(i.valor)}</td><td style="padding:3px 0;text-align:right;font-family:var(--font-mono);">${_fmtR(i.subtotal+i.taxa)}</td></tr>`).join('')}</table>` : ''}
   `;
   const el = document.getElementById('calc-divida-body');
   if(el) el.innerHTML = body;
@@ -16776,7 +16827,8 @@ function mdevRecalcularValorAtualizado(){
     maskMoneyBR(out);
     return;
   }
-  const total = calcDividaCobranca(valorOrig, vencStr).total;
+  const _tits = _mdevTitulos();
+  const total = _tits.length ? calcDividaCobrancaTitulos(_tits).total : calcDividaCobranca(valorOrig, vencStr).total;
   out.value = String(Math.round(total * 100));
   maskMoneyBR(out);
 }
@@ -19225,7 +19277,7 @@ async function renderIntimDiario(){
   el.innerHTML = head + rowsHtml;
 }
 
-// ── Aba "Vigia de ações" (F-46) ─────────────────────────────────────────────
+// ── Aba "Vigia de ações" (F-47) ─────────────────────────────────────────────
 // A Edge Function vigia-acoes procura, todo dia, cada devedor de cobrança ativa
 // e cada executado dos processos do escritório (origem 'escritorio') no DJEN e grava aqui os processos em que ele aparece como parte (fora os
 // nossos). O DJEN não traz CPF: nome igual NÃO prova que é a mesma pessoa —
@@ -21954,6 +22006,20 @@ async function removerAnexoCobranca(docId){
 
 function _detSetLayout(l){ try{ localStorage.setItem('cobrasq-detalhe-layout', l); }catch(_){ } renderCobrancaDetalhe(); }
 
+// Motivo do encerramento (cobrancas.encerramento = {tipo, motivo, quando, ...}):
+// gravado pelo CRM, pelo zapsign-webhook e por cadastro de caso já encerrado.
+function _detEncerramentoHTML(enc){
+  if(!enc || typeof enc!=='object' || !(enc.motivo||enc.tipo)) return '';
+  let quando='';
+  if(enc.quando){
+    const q=String(enc.quando);
+    const dt=/^\d{4}-\d{2}-\d{2}$/.test(q) ? new Date(q+'T12:00:00') : new Date(q);
+    if(!isNaN(dt)) quando=dt.toLocaleDateString('pt-BR');
+  }
+  const tipo=enc.tipo ? String(enc.tipo).charAt(0).toUpperCase()+String(enc.tipo).slice(1) : '';
+  const tt=['Encerramento', tipo, quando].filter(Boolean).join(' · ');
+  return `<div style="margin-top:12px;padding-top:12px;border-top:1px solid #F1EFE8;"><div style="font-size:11px;font-weight:700;color:var(--d-text-2);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">${escHtml(tt)}</div>${enc.motivo?`<div style="font-size:12.5px;color:var(--d-text-2);white-space:pre-wrap;">${escHtml(String(enc.motivo))}</div>`:''}</div>`;
+}
 async function renderCobrancaDetalhe(){
   const id=_detCobrId, el=document.getElementById('page-cobranca-detalhe');
   if(!el) return;
@@ -22151,6 +22217,8 @@ async function renderCobrancaDetalhe(){
     </div>
     ${(isJud && cob.numero_processo)?`<div style="margin-top:12px;padding-top:12px;border-top:1px solid #F1EFE8;"><label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" ${cob.monitorar_datajud!==false?'checked':''} onchange="toggleMonitorarDataJud('${cob.id}', this.checked)" style="width:15px;height:15px;margin:0;cursor:pointer;"/><span style="font-size:11.5px;color:var(--d-text-3);">Andamentos (DataJud)</span> <span id="mon-dj-lbl-${cob.id}" style="font-size:12px;font-weight:600;color:${cob.monitorar_datajud!==false?'var(--d-success)':'var(--d-text-3)'};">${cob.monitorar_datajud!==false?'Monitorando':'Pausado'}</span></label></div>`:''}
     ${cob.observacoes?`<div style="margin-top:12px;font-size:12.5px;color:var(--d-text-2);white-space:pre-wrap;">${escHtml(cob.observacoes)}</div>`:''}
+    ${_detEncerramentoHTML(cob.encerramento)}
+    ${_detTitulosHTML(d, !!cob.acordo_final)}
   </div>`;
 
   const devRow=(p)=>{ const dv=p.devedores||{};
@@ -23663,6 +23731,14 @@ function abrirCobrancaModal(cob){
           <div><label style="font-size:12px;font-weight:600;color:var(--text-2);">Vencimento</label>
             <input id="cobr-venc" type="date" value="${venc}" onchange="cobrRecalcValorAtual()" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;margin-top:4px;"/></div>
         </div>
+        <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-top:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+            <label style="font-size:12px;font-weight:600;color:var(--text-2);">Títulos com vencimentos diferentes <span style="font-weight:400;color:var(--text-3);">(cheques, parcelas — opcional)</span></label>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('cobr-titulos-list').insertAdjacentHTML('beforeend', _cobrTituloRowHTML({}));cobrRecalcValorAtual()">+ Adicionar título</button>
+          </div>
+          <div id="cobr-titulos-list">${_titulosDoForm(d).map(_cobrTituloRowHTML).join('')}</div>
+          <div id="cobr-titulos-info" style="font-size:11px;color:var(--text-3);margin-top:5px;">Com 2 ou mais títulos, cada um é atualizado desde o seu vencimento e os valores são somados. O capital vira a soma e o vencimento, o mais antigo.</div>
+        </div>
         <div style="font-size:11.5px;color:var(--text-3);margin-top:8px;display:flex;gap:6px;align-items:flex-start;">
           <span style="color:var(--accent);">●</span><span>Dívida <strong>solidária</strong>: o valor é único da cobrança, sem rateio por devedor — todos os responsáveis respondem pelo total.</span>
         </div>
@@ -23794,10 +23870,56 @@ Retorne SOMENTE o JSON, sem markdown.`});
 // Recalcula o "Valor atual" ao alterar o capital ou o vencimento — mesma conta
 // do modo cobrança que vai pro devedor (calcDividaCobranca: correção 8% a.a. +
 // juros + multa + taxa COBRASQ). Campo continua editável para ajuste manual.
+function _titulosDoForm(divida){
+  return (divida && Array.isArray(divida.titulos)) ? divida.titulos : [];
+}
+// Detalhe do caso: tabela dos títulos, cada um atualizado desde o seu vencimento.
+function _detTitulosHTML(divida, congelado){
+  const tits = _titulosValidos(divida);
+  if(!tits.length) return '';
+  const r = calcDividaCobrancaTitulos(tits);
+  const th = 'text-align:left;font-weight:600;color:var(--d-text-3);padding:4px 6px;';
+  const td = 'padding:4px 6px;border-top:1px solid #F1EFE8;';
+  const lin = r.itens.map(i=>`<tr><td style="${td}">${escHtml(i.numero||'—')}</td><td style="${td}">${escHtml(_detData(i.vencimento))}</td><td style="${td}text-align:right;">${fmtR(i.valor)}</td><td style="${td}text-align:right;">${fmtR(i.subtotal+i.taxa)}</td></tr>`).join('');
+  return `<div style="margin-top:12px;padding-top:12px;border-top:1px solid #F1EFE8;">
+    <div style="font-size:11.5px;color:var(--d-text-3);margin-bottom:4px;">Títulos — cada um atualizado desde o seu vencimento${congelado?' (valor do caso congelado pelo acordo)':''}</div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px;"><thead><tr><th style="${th}">Nº</th><th style="${th}">Vencimento</th><th style="${th}text-align:right;">Valor</th><th style="${th}text-align:right;">Atualizado hoje</th></tr></thead>
+    <tbody>${lin}<tr><td style="${td}font-weight:600;" colspan="2">Total</td><td style="${td}text-align:right;font-weight:600;">${fmtR(r.valorOrig)}</td><td style="${td}text-align:right;font-weight:600;">${fmtR(r.total)}</td></tr></tbody></table>
+  </div>`;
+}
+function _cobrTituloRowHTML(t){
+  const inp = 'padding:7px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;';
+  return `<div class="cobr-titulo-row" style="display:grid;grid-template-columns:1.2fr 1fr 1.1fr auto;gap:6px;margin-top:6px;">
+    <input class="cobr-tit-num" value="${escHtml((t&&t.numero)||'')}" placeholder="Nº (ex.: UA-000053)" style="${inp}"/>
+    <input class="cobr-tit-valor" value="${escHtml(t&&t.valor!=null&&t.valor!==''?_cobrFmtNum(parseValorBR(t.valor)):'')}" placeholder="0,00" oninput="cobrRecalcValorAtual()" style="${inp}"/>
+    <input class="cobr-tit-venc" type="date" value="${escHtml((t&&t.vencimento)||'')}" onchange="cobrRecalcValorAtual()" style="${inp}"/>
+    <button type="button" class="btn btn-ghost btn-sm" title="Remover título" onclick="this.parentElement.remove();cobrRecalcValorAtual()">✕</button>
+  </div>`;
+}
+// Lê as linhas do editor. Linhas totalmente vazias são ignoradas; o resto vai
+// como está (validação no save).
+function _cobrLerTitulos(){
+  return [...document.querySelectorAll('#cobr-titulos-list .cobr-titulo-row')].map(r=>({
+    numero: (r.querySelector('.cobr-tit-num')?.value||'').trim(),
+    valorTxt: (r.querySelector('.cobr-tit-valor')?.value||'').trim(),
+    vencimento: (r.querySelector('.cobr-tit-venc')?.value||'').trim()
+  })).filter(t=>t.numero||t.valorTxt||t.vencimento)
+    .map(t=>({ numero: t.numero, valor: parseValorBR(t.valorTxt)||0, vencimento: t.vencimento }));
+}
+
 function cobrRecalcValorAtual(){
   const capEl = document.getElementById('cobr-valor-capital');
   const outEl = document.getElementById('cobr-valor-atual');
   if(!capEl || !outEl) return;
+  const tits = _titulosValidos({ titulos: _cobrLerTitulos() });
+  if(tits.length){
+    const r = calcDividaCobrancaTitulos(tits);
+    if(!capEl.disabled) capEl.value = _cobrFmtNum(r.valorOrig);
+    const vEl = document.getElementById('cobr-venc');
+    if(vEl) vEl.value = tits.map(t=>t.vencimento).sort()[0];
+    outEl.value = _cobrFmtNum(r.total);
+    return;
+  }
   const cap = parseValorBR(capEl.value) || 0;
   if(!(cap>0)){ return; }
   const venc = document.getElementById('cobr-venc')?.value || '';
@@ -23823,6 +23945,14 @@ async function salvarCobranca(){
     return;
   }
   window._capitalConfirmOK=false;
+  const titulosForm = _cobrLerTitulos();
+  if(titulosForm.length){
+    const ruim = titulosForm.find(t=>!(t.valor>0) || !/^\d{4}-\d{2}-\d{2}$/.test(t.vencimento));
+    if(ruim){ showToast('Título '+(ruim.numero||'sem número')+': preencha valor e vencimento (ou remova a linha).','danger'); return; }
+    if(titulosForm.length===1){ showToast('Com um título só, use o valor capital e o vencimento acima (remova a linha do título).','danger'); return; }
+    const somaTit = titulosForm.reduce((a,t)=>a+t.valor,0);
+    if(Math.abs(somaTit-(valorCapital||0))>0.005){ showToast('A soma dos títulos ('+fmtR(somaTit)+') difere do valor capital ('+fmtR(valorCapital||0)+').','danger'); return; }
+  }
   const venc       = document.getElementById('cobr-venc').value || null;
   const desc       = document.getElementById('cobr-desc').value.trim();
   // FASE C — campos de documento/fase (colunas próprias de cobrancas)
@@ -23946,6 +24076,7 @@ async function salvarCobranca(){
     }
 
     const divida = { valorOriginal: valorOrig, totalAvista: valorAtual, vencimento: venc, descricao: desc, valorCapital: (valorCapital||null) };
+    if(titulosForm.length) divida.titulos = titulosForm;
     const assignedTo = responsavelId || uidUser;
     let cobId;
 

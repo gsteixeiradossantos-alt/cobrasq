@@ -1,5 +1,5 @@
 /*
- * Teste F-46 — vigia de ações (supabase/functions/vigia-acoes/logica.mjs).
+ * Teste F-47 — vigia de ações (supabase/functions/vigia-acoes/logica.mjs).
  *
  * O devedor Wesley Cechin Gobatto (executado por nós no 0005569-82.2025.8.16.0131)
  * era AUTOR do 0002110-19.2025.8.16.0181 (JEC Marmeleiro) e levantou ~R$ 4.600 sem
@@ -10,7 +10,7 @@
  *   3) processo nosso (OAB do escritório, parte COBRASQ, CNJ já cadastrado) não é alerta.
  *
  * Como rodar:
- *   node test/f46_vigia_acoes_logica.test.js
+ *   node test/f47_vigia_acoes_logica.test.js
  */
 'use strict';
 
@@ -29,7 +29,7 @@ const item = (o) => Object.assign({
 (async () => {
   const L = await import(pathToFileURL(path.join(__dirname, '..', 'supabase', 'functions', 'vigia-acoes', 'logica.mjs')).href);
   let n = 0; const ok = (nome, fn) => { fn(); n++; console.log('  ok  ' + nome); };
-  console.log('\nF-46 · vigia de ações — lógica de casamento.\n');
+  console.log('\nF-47 · vigia de ações — lógica de casamento.\n');
 
   ok('nome sujo de MEI vira nome de busca limpo', () => {
     assert.deepStrictEqual(L.nomeDeBusca('50.677.114 Jeferson Luciano Pereira (MEI)'), { busca: 'Jeferson Luciano Pereira', motivo: null });
@@ -137,5 +137,5 @@ const item = (o) => Object.assign({
     assert.deepStrictEqual(alvos.find(a => a.alvo === 'dev:d1').ufs, ['SC']);
   });
 
-  console.log(`\nF-46 · ${n} verificações ok.`);
+  console.log(`\nF-47 · ${n} verificações ok.`);
 })().catch(e => { console.error('  FALHOU', e.message); process.exit(1); });

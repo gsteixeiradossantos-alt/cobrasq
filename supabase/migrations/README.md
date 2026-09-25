@@ -221,7 +221,7 @@ SQL no mesmo dia); "Quitado direto ao credor" segue separado. Sem backfill (conf
 antes: `count(*)` de status "Quitado ao cliente" = 0). Rollback = reaplicar a função
 de `20260924c`.
 
-## 20260925_02 — vigia de ações (devedor nosso como parte em outro processo, F-46)
+## 20260925_02 — vigia de ações (devedor nosso como parte em outro processo, F-47)
 
 **Não aplicada.** `20260925_02_vigia_acoes.sql` (+ `_rollback`). Aditiva: tabelas
 `vigia_acoes` (achados, 1 linha por alvo × processo, status novo/visto/descartado) e

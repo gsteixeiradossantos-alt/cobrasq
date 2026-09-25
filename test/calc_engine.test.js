@@ -241,5 +241,20 @@ LOG('12) Capitalizacao anual: opt-in, aniversario da data de inicio dos juros, n
   near(cap.total, cap.valorAtualizado + cap.juros, 'total = atualizado + juros correntes', 1e-9);
 })();
 
+// cobrancaTitulos: cada titulo corre do seu vencimento; ceil so no total
+(function () {
+  var O = { correcaoMensal: 0.08 / 12, jurosMensal: 0.01, multaPct: 0.02, taxaServico: 0.30 };
+  var ts = [{ valor: 751, meses: 69.2 }, { valor: 623.8, meses: 68.3 }, { valor: 550, meses: 67.7 }];
+  var r = E.cobrancaTitulos(ts, O);
+  var bruto = ts.reduce(function (a, t) { var x = E.cobranca(Object.assign({}, O, { valorOriginal: t.valor, meses: t.meses })); return a + x.subtotal + x.taxa; }, 0);
+  ok(r.total === Math.ceil(bruto), 'titulos: total = ceil(soma sem arredondar)');
+  near(r.valorOriginal, 1924.8, 'titulos: valorOriginal = soma dos titulos');
+  ok(r.itens.length === 3 && r.itens[1].valor === 623.8, 'titulos: itens preservam os dados');
+  var um = E.cobrancaTitulos([{ valor: 1000, meses: 12 }], O);
+  ok(um.total === E.cobranca(Object.assign({}, O, { valorOriginal: 1000, meses: 12 })).total, 'titulo unico = cobranca()');
+  var mesmo = E.cobranca(Object.assign({}, O, { valorOriginal: 1924.8, meses: 69.2 }));
+  ok(r.total < mesmo.total, 'titulos mais novos rendem menos que tudo no vencimento mais antigo');
+})();
+
 LOG(FAIL === 0 ? '\nOK -- ' + RAN + ' assercoes passaram (motor canonico v3).' : '\nFALHOU -- ' + FAIL + '/' + RAN + ' assercao(oes).');
 if (FAIL > 0) { if (typeof process !== 'undefined' && process.exit) process.exit(1); else throw new Error('calc-engine: ' + FAIL + ' falhas'); }
