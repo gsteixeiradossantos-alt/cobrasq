@@ -1,3 +1,4 @@
+import { parseValorBR } from './valor-br.ts';
 // Porta fiel do motor de cálculo "modo cobrança" usado em templates/calc-engine.js
 // e crm.html (_calcCobrancaSimples) — mesma fórmula, mesmas constantes padrão.
 //
@@ -120,17 +121,10 @@ export function calcularCobranca(valorOriginal: number, vencimentoISO: string, h
 // pelo valor puro (sem multa/taxa), igual ao painel.
 export interface TituloCobranca { numero?: string; valor: number; vencimento: string; }
 
-function numBR(v: unknown): number {
-  if (typeof v === 'number') return v;
-  const s = String(v ?? '').replace(/[^\d,.-]/g, '');
-  const n = s.includes(',') ? Number(s.replace(/\./g, '').replace(',', '.')) : Number(s);
-  return isFinite(n) ? n : 0;
-}
-
 export function titulosValidos(divida: any): TituloCobranca[] {
   const arr = divida && Array.isArray(divida.titulos) ? divida.titulos : [];
   const ok = arr
-    .map((t: any) => ({ numero: String(t?.numero ?? '').trim(), valor: numBR(t?.valor), vencimento: String(t?.vencimento ?? '').trim().slice(0, 10) }))
+    .map((t: any) => ({ numero: String(t?.numero ?? '').trim(), valor: parseValorBR(t?.valor), vencimento: String(t?.vencimento ?? '').trim().slice(0, 10) }))
     .filter((t: TituloCobranca) => t.valor > 0 && /^\d{4}-\d{2}-\d{2}$/.test(t.vencimento));
   return ok.length >= 2 ? ok : [];
 }

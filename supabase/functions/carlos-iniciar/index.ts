@@ -15,6 +15,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { calcularCobranca, calcularCobrancaTitulos, titulosValidos, valorFixo } from '../_shared/calc-cobranca.ts';
+import { parseValorBR } from '../_shared/valor-br.ts';
 
 // CORS: esta function é chamada pelo BOTÃO do painel, ou seja, de um browser em
 // outra origem. Sem responder o preflight, o navegador nunca chega a mandar o
@@ -81,9 +82,9 @@ Deno.serve(async (req: Request) => {
     : { data: null };
   const credorNome = cli?.nome_fantasia || cli?.nome || 'nosso cliente';
 
-  const valorOriginal = Number(co.divida?.valorOriginal || 0);
+  const valorOriginal = parseValorBR(co.divida?.valorOriginal);
   const vencimento = co.divida?.vencimento || null;
-  const totalAvistaSalvo = Number(co.divida?.totalAvista || 0);
+  const totalAvistaSalvo = parseValorBR(co.divida?.totalAvista);
   // VALOR FIXO: sem vencimento mas com valor já definido = dívida "madura"/já
   // virou ação judicial (cumprimento de sentença, execução) — segue cálculo
   // judicial próprio, não a fórmula de cobrança extrajudicial daqui. Não

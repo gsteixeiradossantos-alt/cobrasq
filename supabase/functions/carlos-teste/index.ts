@@ -12,6 +12,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { MODELO, CARLOS_SYSTEM, extrairJson } from '../_shared/carlos-system.ts';
 import { calcularCobranca, calcularCobrancaTitulos, titulosValidos, valorFixo } from '../_shared/calc-cobranca.ts';
+import { parseValorBR } from '../_shared/valor-br.ts';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -63,9 +64,9 @@ Deno.serve(async (req: Request) => {
 
     devedorNome = (pp as any)?.devedores?.nome || 'Devedor';
     credorNome = cli?.nome_fantasia || cli?.nome || 'credor';
-    const valorOriginal = Number(co.divida?.valorOriginal || 0);
+    const valorOriginal = parseValorBR(co.divida?.valorOriginal);
     const vencimento = co.divida?.vencimento || null;
-    const totalAvistaSalvo = Number(co.divida?.totalAvista || 0);
+    const totalAvistaSalvo = parseValorBR(co.divida?.totalAvista);
     faseJudicial = !vencimento && totalAvistaSalvo > 0;
     const titulos = titulosValidos(co.divida);
     if (titulos.length) {
