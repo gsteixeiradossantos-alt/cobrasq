@@ -106,8 +106,12 @@ async function zapiSendText(phone, message) {
   const headers = { 'Content-Type': 'application/json' };
   if (clientTk) headers['Client-Token'] = clientTk;
   // Normaliza p/ o formato que a Z-API espera (DDI 55), igual ao waTel55 do front.
-  let fone = String(phone).replace(/\D/g, '');
-  if (fone && fone.length <= 11 && !fone.startsWith('55')) fone = '55' + fone;
+  // Grupo ("120363…-group") vai como está; telefone é normalizado.
+  let fone = String(phone).trim();
+  if (!/^\d+-group$/.test(fone)) {
+    fone = fone.replace(/\D/g, '');
+    if (fone && fone.length <= 11 && !fone.startsWith('55')) fone = '55' + fone;
+  }
   const r = await fetch(url, {
     method: 'POST', headers,
     body: JSON.stringify({ phone: fone, message }),
@@ -354,93 +358,107 @@ async function processarCalendarPendingDeletes() {
   return out;
 }
 
-// PR7: notificações pessoais de CONTAS A PAGAR PRÓPRIAS. Avisa o gestor (WhatsApp +
-// e-mail) sobre despesas de fin_lancamento vencendo/atrasadas e ainda não pagas, até
-// que o pagamento seja confirmado. Destino: CONTAS_PAGAR_PHONE/CONTAS_PAGAR_EMAIL
-// (ou DB.config.contasPagarTelefone/Email). Roda no cron diário (uma msg-resumo/dia).
-async function processarContasPagarProprias(DB) {
-  const out = { vencendo: 0, notificado: false, canais: [] };
-  const hoje = hojeBR();
-  let rows;
-  try {
-    rows = await sbFetch(
-      `fin_lancamento?select=id,descricao,valor,data_vencimento,status` +
-      `&tipo_movimento=eq.0&status=in.(0,2)&data_vencimento=lte.${hoje}` +
-      `&order=data_vencimento.asc&limit=100`
-    );
-  } catch (e) { return { ...out, error: e.message }; }
-  if (!Array.isArray(rows) || rows.length === 0) return out;
-  out.vencendo = rows.length;
-
-  const destTel = String(process.env.CONTAS_PAGAR_PHONE || DB.config?.contasPagarTelefone || '').replace(/\D/g, '');
-  const destEmail = process.env.CONTAS_PAGAR_EMAIL || DB.config?.contasPagarEmail || '';
-  if (!destTel && !destEmail) return { ...out, skipped: 'sem destino (CONTAS_PAGAR_PHONE/EMAIL)' };
-
-  const linhas = rows.map(r => {
-    const venc = String(r.data_vencimento || '').split('-').reverse().join('/');
-    const atras = (r.data_vencimento && r.data_vencimento < hoje) ? ' (atrasada)' : '';
-    return `• ${r.descricao || '—'} — ${fmtR(Math.abs(Number(r.valor)) || 0)} — vence ${venc}${atras}`;
-  });
-  const total = rows.reduce((s, r) => s + Math.abs(Number(r.valor) || 0), 0);
-  const corpo = `Contas a pagar (vencendo/atrasadas) — ${rows.length} item(ns), total ${fmtR(total)}:\n\n` +
-    `${linhas.join('\n')}\n\nConfirme o pagamento no sistema para parar os lembretes.`;
-
-  try { if (destTel) { await zapiSendText(destTel, '🔔 ' + corpo); out.canais.push('whatsapp'); } }
-  catch (e) { out.whatsapp_error = e.message; }
-  try { if (destEmail && emailDisponivel()) { await sendEmail({ to: destEmail, subject: 'Cobrasq — Contas a pagar', text: corpo }); out.canais.push('email'); } }
-  catch (e) { out.email_error = e.message; }
-  out.notificado = out.canais.length > 0;
-  return out;
-}
-
-// Par do aviso acima, do lado de ENTRADA: parcelas de acordo que o devedor não pagou.
-// Pedido do Gustavo em 25/09/2026 — mensagem separada, mesmo destino, só as JÁ
-// atrasadas (vencimento < hoje: pagamento do dia pode compensar depois do aviso) e
-// só acordos: penhora/Sisbajud/INSS não é o devedor pagando, é o juízo liberando, e
-// já tem fila própria (aba Judicial). Critério igual ao de _finJudCarregar no
-// index.html: categoria com "sisbajud" ou "penhora" = judicial ("Acordos Judiciais"
-// fica, é acordo cobrado por boleto/Pix).
+// PR7 + 25/09/2026: aviso financeiro diário do escritório — UMA mensagem em 3 blocos
+// (opção B aprovada pelo Gustavo):
+//   🔗 mesmo caso — entrada não recebida E saída não paga (vínculo por cobranca_id);
+//   🔔 só a pagar — despesas vencendo hoje ou atrasadas;
+//   💰 só a receber — parcelas de acordo JÁ atrasadas (vencimento < hoje: pagamento do
+//      dia pode compensar depois do aviso).
+// Receber exclui penhora/Sisbajud/INSS: não é o devedor pagando, é o juízo liberando, e
+// já tem fila própria (aba Judicial). Critério igual ao de _finJudCarregar no index.html:
+// categoria com "sisbajud" ou "penhora" = judicial ("Acordos Judiciais" fica).
+// Destino: grupo de WhatsApp (FINANCEIRO_GRUPO_WHATSAPP / DB.config.financeiroGrupoWhatsapp,
+// id "…-group") quando configurado; senão o telefone CONTAS_PAGAR_PHONE /
+// DB.config.contasPagarTelefone. E-mail: CONTAS_PAGAR_EMAIL / DB.config.contasPagarEmail.
 const RE_RECEBER_JUDICIAL = /sisbajud|penhora/i;
-async function processarParcelasReceberAtrasadas(DB) {
-  const out = { atrasadas: 0, judiciais_fora: 0, notificado: false, canais: [] };
+function destinoFinanceiroWhatsapp(DB) {
+  const grupo = String(process.env.FINANCEIRO_GRUPO_WHATSAPP || DB.config?.financeiroGrupoWhatsapp || '').trim();
+  if (/^\d+-group$/.test(grupo)) return grupo;
+  return String(process.env.CONTAS_PAGAR_PHONE || DB.config?.contasPagarTelefone || '').replace(/\D/g, '');
+}
+async function processarFinanceiroDoDia(DB) {
+  const contasPagar = { vencendo: 0, notificado: false, canais: [] };
+  const receberAtrasadas = { atrasadas: 0, judiciais_fora: 0, casos_vinculados: 0 };
   const hoje = hojeBR();
-  let rows;
+  let pagar, receberRaw;
   try {
-    rows = await sbFetch(
-      `fin_lancamento?select=id,descricao,valor,data_vencimento,` +
-      `cats:fin_lancamento_categoria(categoria:fin_categoria(descricao))` +
-      `&tipo_movimento=eq.1&status=in.(0,2)&data_vencimento=lt.${hoje}` +
-      `&order=data_vencimento.asc&limit=300`
-    );
-  } catch (e) { return { ...out, error: e.message }; }
-  if (!Array.isArray(rows)) return out;
+    [pagar, receberRaw] = await Promise.all([
+      sbFetch(
+        `fin_lancamento?select=id,descricao,valor,data_vencimento,cobranca_id` +
+        `&tipo_movimento=eq.0&status=in.(0,2)&data_vencimento=lte.${hoje}` +
+        `&order=data_vencimento.asc&limit=100`
+      ),
+      sbFetch(
+        `fin_lancamento?select=id,descricao,valor,data_vencimento,cobranca_id,` +
+        `cats:fin_lancamento_categoria(categoria:fin_categoria(descricao))` +
+        `&tipo_movimento=eq.1&status=in.(0,2)&data_vencimento=lt.${hoje}` +
+        `&order=data_vencimento.asc&limit=300`
+      ),
+    ]);
+  } catch (e) { return { contasPagar: { ...contasPagar, error: e.message }, receberAtrasadas }; }
+  pagar = Array.isArray(pagar) ? pagar : [];
+  receberRaw = Array.isArray(receberRaw) ? receberRaw : [];
   const ehJudicial = (r) => {
     const cats = (r.cats || []).map(c => c?.categoria?.descricao || '').filter(Boolean);
     return cats.length ? cats.some(c => RE_RECEBER_JUDICIAL.test(c)) : RE_RECEBER_JUDICIAL.test(r.descricao || '');
   };
-  const acordos = rows.filter(r => !ehJudicial(r));
-  out.judiciais_fora = rows.length - acordos.length;
-  out.atrasadas = acordos.length;
-  if (acordos.length === 0) return out;
+  const receber = receberRaw.filter(r => !ehJudicial(r));
+  contasPagar.vencendo = pagar.length;
+  receberAtrasadas.atrasadas = receber.length;
+  receberAtrasadas.judiciais_fora = receberRaw.length - receber.length;
+  if (pagar.length === 0 && receber.length === 0) return { contasPagar, receberAtrasadas };
 
-  const destTel = String(process.env.CONTAS_PAGAR_PHONE || DB.config?.contasPagarTelefone || '').replace(/\D/g, '');
+  const destTel = destinoFinanceiroWhatsapp(DB);
   const destEmail = process.env.CONTAS_PAGAR_EMAIL || DB.config?.contasPagarEmail || '';
-  if (!destTel && !destEmail) return { ...out, skipped: 'sem destino (CONTAS_PAGAR_PHONE/EMAIL)' };
+  if (!destTel && !destEmail) return { contasPagar: { ...contasPagar, skipped: 'sem destino (FINANCEIRO_GRUPO_WHATSAPP/CONTAS_PAGAR_PHONE/EMAIL)' }, receberAtrasadas };
 
-  const linhas = acordos.map(r => {
-    const venc = String(r.data_vencimento || '').split('-').reverse().join('/');
-    return `• ${r.descricao || '—'} — ${fmtR(Math.abs(Number(r.valor)) || 0)} — venceu ${venc}`;
-  });
-  const total = acordos.reduce((s, r) => s + Math.abs(Number(r.valor) || 0), 0);
-  const corpo = `Parcelas a receber em atraso — ${acordos.length} item(ns), total ${fmtR(total)}:\n\n` +
-    `${linhas.join('\n')}\n\nDê baixa no sistema quando o pagamento entrar para parar os lembretes.`;
+  const valor = (r) => Math.abs(Number(r.valor) || 0);
+  const soma = (rs) => rs.reduce((s, r) => s + valor(r), 0);
+  const data = (d) => String(d || '').split('-').reverse().join('/');
+  const atras = (r) => (r.data_vencimento && r.data_vencimento < hoje) ? ' (atrasada)' : '';
+  // "Fernanda Dambros 9/10 · verificar" → título "Fernanda Dambros", parcela "9/10".
+  const parcela = (r) => (String(r.descricao || '').match(/\s(\d+\/\d+)(?:\s*·\s*verificar)?\s*$/) || [])[1] || '';
+  const titulo = (r) => String(r.descricao || '—').replace(/\s*·\s*verificar\s*$/i, '').replace(/\s+\d+\/\d+\s*$/, '').trim() || '—';
 
-  try { if (destTel) { await zapiSendText(destTel, '💰 ' + corpo); out.canais.push('whatsapp'); } }
-  catch (e) { out.whatsapp_error = e.message; }
-  try { if (destEmail && emailDisponivel()) { await sendEmail({ to: destEmail, subject: 'Cobrasq — Parcelas a receber em atraso', text: corpo }); out.canais.push('email'); } }
-  catch (e) { out.email_error = e.message; }
-  out.notificado = out.canais.length > 0;
-  return out;
+  const idsPagar = new Set(pagar.map(r => r.cobranca_id).filter(Boolean));
+  const idsReceber = new Set(receber.map(r => r.cobranca_id).filter(Boolean));
+  const vinculados = [...idsReceber].filter(id => idsPagar.has(id));
+  const setVinc = new Set(vinculados);
+  receberAtrasadas.casos_vinculados = vinculados.length;
+  const soPagar = pagar.filter(r => !setVinc.has(r.cobranca_id));
+  const soReceber = receber.filter(r => !setVinc.has(r.cobranca_id));
+
+  const blocos = [];
+  if (vinculados.length) {
+    const casos = vinculados.map(id => {
+      const rs = receber.filter(r => r.cobranca_id === id);
+      const ps = pagar.filter(r => r.cobranca_id === id);
+      const linhas = [
+        ...rs.map(r => `   Receber${parcela(r) ? ' ' + parcela(r) : ''}: ${fmtR(valor(r))} — venceu ${data(r.data_vencimento)}`),
+        ...ps.map(r => `   Pagar${parcela(r) ? ' ' + parcela(r) : ''}: ${fmtR(valor(r))} — vence ${data(r.data_vencimento)}${atras(r)}`),
+      ];
+      return `• ${titulo(rs[0] || ps[0])}\n${linhas.join('\n')}`;
+    });
+    blocos.push(`🔗 *MESMO CASO — entrada não recebida e saída não paga* (${vinculados.length} caso(s))\n${casos.join('\n')}`);
+  }
+  if (soPagar.length) {
+    blocos.push(`🔔 *SÓ A PAGAR* — ${soPagar.length} item(ns), ${fmtR(soma(soPagar))}\n` +
+      soPagar.map(r => `• ${r.descricao || '—'} — ${fmtR(valor(r))} — vence ${data(r.data_vencimento)}${atras(r)}`).join('\n'));
+  }
+  if (soReceber.length) {
+    blocos.push(`💰 *SÓ A RECEBER* — ${soReceber.length} item(ns), ${fmtR(soma(soReceber))}\n` +
+      soReceber.map(r => `• ${r.descricao || '—'} — ${fmtR(valor(r))} — venceu ${data(r.data_vencimento)}`).join('\n'));
+  }
+  const corpo = `📊 Financeiro do dia — a pagar ${fmtR(soma(pagar))} · a receber em atraso ${fmtR(soma(receber))}\n\n` +
+    `${blocos.join('\n\n')}\n\nConfirme no sistema o que for pago ou recebido para parar os lembretes.`;
+
+  try { if (destTel) { await zapiSendText(destTel, corpo); contasPagar.canais.push('whatsapp'); } }
+  catch (e) { contasPagar.whatsapp_error = e.message; }
+  try { if (destEmail && emailDisponivel()) { await sendEmail({ to: destEmail, subject: 'Cobrasq — Financeiro do dia', text: corpo }); contasPagar.canais.push('email'); } }
+  catch (e) { contasPagar.email_error = e.message; }
+  contasPagar.notificado = contasPagar.canais.length > 0;
+  contasPagar.destino = destTel.endsWith('-group') ? 'grupo' : (destTel ? 'telefone' : 'só e-mail');
+  return { contasPagar, receberAtrasadas };
 }
 
 // ── Fase 3 (sombra) — fonte relacional da lista de devedores ────────
@@ -1207,8 +1225,7 @@ module.exports = async function handler(req, res) {
                       : (String(process.env.REGUA_SOURCE || '').toLowerCase() === 'blob' ? 'blob' : 'relacional');
 
     // PR7: contas a pagar próprias — independe da régua de cobrança estar ativa.
-    const contasPagar = dry ? null : await processarContasPagarProprias(DB);
-    const receberAtrasadas = dry ? null : await processarParcelasReceberAtrasadas(DB);
+    const { contasPagar = null, receberAtrasadas = null } = dry ? {} : await processarFinanceiroDoDia(DB);
 
     if (DB.config?.reguaAtiva === false) {
       const calendarStats = dry ? null : await processarCalendarPendingDeletes();
