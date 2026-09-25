@@ -27127,11 +27127,11 @@ function renderCofre(){
 
   const painelUpload = gestor ? `
     <div class="cob-panel" style="padding:14px 16px;margin-bottom:14px;">
-      <div style="font-size:12.5px;font-weight:700;color:var(--text);margin-bottom:10px;">Guardar um arquivo</div>
+      <div style="font-size:12.5px;font-weight:700;color:var(--text);margin-bottom:10px;">Guardar arquivos</div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
         <div style="display:flex;flex-direction:column;gap:4px;min-width:200px;flex:1;">
-          <label style="font-size:11px;color:var(--text-3);">Arquivo (até ${COFRE_MAX_MB} MB)</label>
-          <input type="file" id="cofre-up-file" style="font-size:12.5px;color:var(--text);">
+          <label style="font-size:11px;color:var(--text-3);">Arquivos — pode escolher vários (até ${COFRE_MAX_MB} MB cada)</label>
+          <input type="file" id="cofre-up-file" multiple style="font-size:12.5px;color:var(--text);">
         </div>
         <div style="display:flex;flex-direction:column;gap:4px;min-width:170px;">
           <label style="font-size:11px;color:var(--text-3);">Pasta</label>
@@ -27141,7 +27141,7 @@ function renderCofre(){
         </div>
         <div style="display:flex;flex-direction:column;gap:4px;min-width:220px;flex:1;">
           <label style="font-size:11px;color:var(--text-3);">Observação (opcional)</label>
-          <input type="text" id="cofre-up-obs" placeholder="O que é este documento"
+          <input type="text" id="cofre-up-obs" placeholder="Vale para todos os arquivos escolhidos"
             style="border:1px solid var(--border-2);border-radius:6px;padding:7px 10px;font-size:12.5px;font-family:inherit;background:var(--bg);color:var(--text);">
         </div>
         <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-2);padding-bottom:8px;white-space:nowrap;">
@@ -27240,48 +27240,65 @@ function cofreSetBusca(v){
 async function cofreUpload(){
   if(!cofreEhGestor()){ showToast('Só o gestor guarda arquivos no cofre.','warning'); return; }
   const inp = document.getElementById('cofre-up-file');
-  const file = inp && inp.files && inp.files[0];
-  if(!file){ showToast('Escolha um arquivo.','warning'); return; }
-  if(file.size > COFRE_MAX_MB*1024*1024){ showToast(`Arquivo acima de ${COFRE_MAX_MB} MB.`,'warning'); inp.value=''; return; }
+  const todos = inp && inp.files ? Array.from(inp.files) : [];
+  if(!todos.length){ showToast('Escolha pelo menos um arquivo.','warning'); return; }
+  // Arquivo grande demais não trava os outros: fica de fora e é avisado no fim.
+  const grandes = todos.filter(f => f.size > COFRE_MAX_MB*1024*1024);
+  const files   = todos.filter(f => f.size <= COFRE_MAX_MB*1024*1024);
+  if(!files.length){ showToast(`Todos acima de ${COFRE_MAX_MB} MB — nada foi guardado.`,'warning'); inp.value=''; return; }
   const supa = getSupabase();
   if(!supa){ showToast('Sem conexão com o banco.','danger'); return; }
 
   const pasta = ((document.getElementById('cofre-up-pasta')||{}).value || 'Geral').trim() || 'Geral';
   const obs   = ((document.getElementById('cofre-up-obs')||{}).value || '').trim() || null;
   const colab = !!(document.getElementById('cofre-up-colab')||{}).checked;
-  const path  = `${cofreSlug(pasta)}/${Date.now()}_${cofreSlug(file.name)}`;
 
   const btn = document.getElementById('cofre-up-btn');
-  if(btn){ btn.disabled = true; btn.textContent = 'Enviando…'; }
+  if(btn) btn.disabled = true;
+  const { data: udata } = await supa.auth.getUser();
+  const uid = udata && udata.user ? udata.user.id : null;
+  const ok = [], falhas = [];
   try{
-    const { error: upErr } = await supa.storage.from('cofre')
-      .upload(path, file, { contentType: file.type || 'application/octet-stream', upsert:false });
-    if(upErr) throw upErr;
-    const { data: udata } = await supa.auth.getUser();
-    const { error: insErr } = await supa.from('cofre_arquivos').insert({
-      pasta, nome: file.name, storage_path: path,
-      mime_type: file.type || null, size_bytes: file.size,
-      obs, visivel_colaborador: colab,
-      uploaded_by: udata && udata.user ? udata.user.id : null
-    });
-    if(insErr){
-      // Sem metadado o arquivo vira órfão e some da tela — tira do caminho.
-      await supa.storage.from('cofre').remove([path]).catch(()=>{});
-      throw insErr;
+    // Um por vez: a ordem de "Guardado em" segue a da escolha e a falha de um não derruba os outros.
+    for(let i=0;i<files.length;i++){
+      const file = files[i];
+      if(btn) btn.textContent = files.length>1 ? `Enviando ${i+1}/${files.length}…` : 'Enviando…';
+      const path = `${cofreSlug(pasta)}/${Date.now()}_${i}_${cofreSlug(file.name)}`;
+      try{
+        const { error: upErr } = await supa.storage.from('cofre')
+          .upload(path, file, { contentType: file.type || 'application/octet-stream', upsert:false });
+        if(upErr) throw upErr;
+        const { error: insErr } = await supa.from('cofre_arquivos').insert({
+          pasta, nome: file.name, storage_path: path,
+          mime_type: file.type || null, size_bytes: file.size,
+          obs, visivel_colaborador: colab, uploaded_by: uid
+        });
+        if(insErr){
+          // Sem metadado o arquivo vira órfão e some da tela — tira do caminho.
+          await supa.storage.from('cofre').remove([path]).catch(()=>{});
+          throw insErr;
+        }
+        ok.push(file.name);
+      }catch(e){
+        const msg = String(e && e.message || e);
+        falhas.push(`${file.name} (${/security|policy|denied|violates/i.test(msg) ? 'sem permissão' : msg})`);
+      }
     }
-    showToast('Arquivo guardado no cofre.','success');
-    if(inp) inp.value='';
-    const o=document.getElementById('cofre-up-obs'); if(o) o.value='';
-    const c=document.getElementById('cofre-up-colab'); if(c) c.checked=false;
-    await cofreCarregar(true);
-    renderCofre();
-  }catch(e){
-    const msg = String(e && e.message || e);
-    showToast(/security|policy|denied|violates/i.test(msg)
-      ? 'Sem permissão: o cofre é do gestor.'
-      : 'Falha ao guardar: '+msg, 'danger');
+    const partes = [];
+    if(ok.length) partes.push(ok.length===1 ? '1 arquivo guardado' : `${ok.length} arquivos guardados`);
+    if(grandes.length) partes.push(`fora por passar de ${COFRE_MAX_MB} MB: ${grandes.map(f=>f.name).join(', ')}`);
+    if(falhas.length) partes.push(`falharam: ${falhas.join('; ')}`);
+    showToast(partes.join(' · ') + '.', falhas.length ? 'danger' : (grandes.length ? 'warning' : 'success'));
+    if(ok.length){
+      if(inp) inp.value='';
+      const o=document.getElementById('cofre-up-obs'); if(o) o.value='';
+      const c=document.getElementById('cofre-up-colab'); if(c) c.checked=false;
+      await cofreCarregar(true);
+      renderCofre();
+    }
   }finally{
-    if(btn){ btn.disabled = false; btn.innerHTML = ico('upload',14)+' Guardar'; }
+    const b=document.getElementById('cofre-up-btn');
+    if(b){ b.disabled = false; b.innerHTML = ico('upload',14)+' Guardar'; }
   }
 }
 
