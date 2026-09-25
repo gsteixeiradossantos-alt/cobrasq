@@ -82,7 +82,7 @@
   }
   async function esperar(cond, timeoutMs, passoMs) {
     const fim = Date.now() + (timeoutMs || 15000);
-    while (Date.now() < fim) { const v = cond(); if (v) return v; await new Promise(r => setTimeout(r, passoMs || 300)); }
+    while (Date.now() < fim) { const v = cond(); if (v) return v; await new Promise(r => setTimeout(r, passoMs || 150)); }
     return null;
   }
   function escHtml(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch])); }
