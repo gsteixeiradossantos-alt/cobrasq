@@ -78,6 +78,10 @@ function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 // (pedido 2026-08-06), independente do devedor ter telefone cadastrado ou não. Só o PDF,
 // sem a mensagem de texto que vai pro devedor.
 const NUMERO_MONITORAMENTO = '46999223332';
+// Desde 25/09/2026 a cópia vai também ao grupo "Financeiros 💵" (pedido do Gustavo) —
+// o mesmo grupo do "Financeiro do dia" (api/cron-regua.js).
+const GRUPO_FINANCEIRO = String(process.env.FINANCEIRO_GRUPO_WHATSAPP || '').trim().match(/^\d+-group$/)
+  ? process.env.FINANCEIRO_GRUPO_WHATSAPP.trim() : '120363410150576066-group';
 
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -481,8 +485,10 @@ module.exports = async function handler(req, res) {
     }
 
     let monitorEnviado = false;
+    let grupoEnviado = false;
     if (b64) {
       try { monitorEnviado = await zapiSendDocumentPdf(NUMERO_MONITORAMENTO, b64, `Recibo COBRASQ - ${nomeCompleto}.pdf`); } catch (e) { monitorEnviado = false; }
+      try { grupoEnviado = await zapiSendDocumentPdf(GRUPO_FINANCEIRO, b64, `Recibo COBRASQ - ${nomeCompleto}.pdf`); } catch (e) { grupoEnviado = false; }
     }
 
     // Falha do recibo vira evento na ficha do devedor. Antes era silenciosa: o retorno
@@ -541,6 +547,7 @@ module.exports = async function handler(req, res) {
       recibo_pdf_enviado: pdfEnviado,
       recibo_enviado: !!(zap && zap.messageId),
       recibo_monitoramento_enviado: monitorEnviado,
+      recibo_grupo_enviado: grupoEnviado,
       nf,
     });
   } catch (e) {
