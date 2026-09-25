@@ -2396,6 +2396,12 @@ body.viewas-readonly select {
       <div class="nav-item" data-page="docs" id="nav-docs">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span><span>Documentos</span>
       </div>
+      <!-- Cofre: documentos da EMPRESA (contratos, papeis internos), sem vinculo
+           com devedor. Privado do gestor; colaborador so ve o que for liberado
+           arquivo a arquivo. Cedente/devedor nunca veem — nav some e showPage barra. -->
+      <div class="nav-item" data-page="cofre" id="nav-cofre" style="display:none;">
+        <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span><span>Cofre</span>
+      </div>
       <!-- IMPORTACAO TEMP START -->
       <div class="nav-item" data-page="importacao" id="nav-importacao" style="display:none;">
         <span class="nav-icon"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span><span>Importação</span><span class="nav-badge" id="nav-importacao-count" style="display:none;">0</span>
@@ -2590,6 +2596,11 @@ body.viewas-readonly select {
     <!-- PAGE: EMITIR NF (avulsa/lote via Asaas) -->
     <div id="page-nf-avulsa" class="page-content">
       <!-- renderNfAvulsa() -->
+    </div>
+
+    <!-- PAGE: COFRE (documentos da empresa) -->
+    <div id="page-cofre" class="page-content">
+      <!-- renderCofre() -->
     </div>
 
     <!-- PAGE: WHATSAPP -->
@@ -7675,6 +7686,12 @@ function iniciarSessao(){
   // Pipeline oculto do menu para todos (2026-07-03) — página segue acessível por rota direta.
   const navPipeline = document.getElementById('nav-pipeline');
   if(navPipeline) navPipeline.style.display = 'none';
+  // Cofre (documentos da empresa): gestor e colaborador. O colaborador vê o menu
+  // porque pode receber arquivos liberados um a um — a lista vem vazia se não
+  // houver nenhum. Cedente/devedor não veem.
+  const navCofre = document.getElementById('nav-cofre');
+  if(navCofre) navCofre.style.display = (tipoUser === 'gestor' || tipoUser === 'funcionario') ? '' : 'none';
+
   // IMPORTACAO TEMP: menu de importação Astrea — só gestor
   const navImportacao = document.getElementById('nav-importacao');
   if(navImportacao) navImportacao.style.display = (tipoUser === 'gestor') ? '' : 'none';
@@ -7806,6 +7823,7 @@ const PAGE_BREADCRUMBS = {
   relat:     ['Dinheiro','Relatórios'],
   wa:        ['Canais','WhatsApp'],
   docs:      ['Canais','Documentos'],
+  cofre:     ['Canais','Cofre'],
   importacao:['Canais','Importação'], /* IMPORTACAO TEMP */
   config:    ['Sistema','Configurações'],
   calc:      ['Sistema','Calculadora Jurídica'],
@@ -7823,6 +7841,7 @@ const PAGE_RENDERERS = {
   pipeline: ()=>renderCrm(),
   clientes: ()=>renderClientes(),
   docs: ()=>renderDocs(),
+  cofre: ()=>renderCofre(),
   fin: ()=>renderFinanceiro(),
   relat: ()=>renderRelatorios(),
   'nf-avulsa': ()=>renderNfAvulsa(),
@@ -7914,6 +7933,12 @@ document.addEventListener('click', function(ev){ const m=document.getElementById
 function showPage(p){
   // Guarda de papel: colaborador não acessa páginas admin-only nem por chamada direta/URL.
   if(ADMIN_ONLY_PAGES.has(p) && (currentUser?.tipo !== 'gestor')){
+    if(p !== 'painel') return showPage('painel');
+    return;
+  }
+  // Cofre: staff-only. Gestor entra; colaborador entra mas só enxerga o que foi
+  // liberado (a RLS decide, não a tela). Cedente e devedor não entram nem por URL.
+  if(p === 'cofre' && !['gestor','funcionario'].includes(currentUser?.tipo||'')){
     if(p !== 'painel') return showPage('painel');
     return;
   }
@@ -27029,6 +27054,265 @@ async function renderPortalDevedor(){
 }
 
 // ── PLACEHOLDER RENDERERS (Part 2 will fill these) ───────────
+/* ══════════════════════════════════════════════════════════════════════════
+   COFRE — documentos da EMPRESA (contratos, papéis internos)
+
+   Por que existe separado da página Documentos: aquela lê a tabela
+   `public.documentos`, que exige `devedor_doc NOT NULL` — é o arquivo DO CASO.
+   Contrato com cliente, contrato social, procuração do escritório não têm
+   devedor, e não cabiam ali.
+
+   Fonte: tabela `public.cofre_arquivos` + bucket privado `cofre`.
+   Quem vê o quê é decidido pela RLS, não por esta tela: o gestor lê tudo; o
+   colaborador só recebe as linhas com `visivel_colaborador = true`. A tela
+   apenas esconde os botões de escrita para quem não é gestor — se alguém
+   contornar isso, o banco recusa.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const COFRE_MAX_MB = 25;
+
+function cofreEhGestor(){ return currentUser?.tipo === 'gestor'; }
+
+function cofreFmtTamanho(b){
+  if(!b && b!==0) return '—';
+  if(b < 1024) return b + ' B';
+  if(b < 1024*1024) return (b/1024).toFixed(0) + ' KB';
+  return (b/(1024*1024)).toFixed(1) + ' MB';
+}
+
+// Nome de arquivo no storage: sem acento/espaço, com timestamp para não colidir.
+function cofreSlug(s){
+  return String(s||'')
+    .normalize('NFD').replace(/[̀-ͯ]/g,'')
+    .replace(/[^a-zA-Z0-9._-]/g,'_')
+    .replace(/_+/g,'_')
+    .slice(0,120) || 'arquivo';
+}
+
+async function cofreCarregar(force){
+  const supa = getSupabase();
+  if(!supa){ window._cofreCache = []; return; }
+  if(!force && window._cofreAt && Date.now() - window._cofreAt < 15000) return;
+  const { data, error } = await supa.from('cofre_arquivos')
+    .select('*').eq('ativo', true).order('uploaded_at', { ascending:false });
+  if(error){ console.warn('cofre:', error.message); window._cofreErro = error.message; return; }
+  window._cofreErro = null;
+  window._cofreAt = Date.now();
+  window._cofreCache = data || [];
+}
+
+function renderCofre(){
+  const el = document.getElementById('page-cofre');
+  if(!el) return;
+  const gestor = cofreEhGestor();
+  const arquivos = window._cofreCache || [];
+
+  // Pastas saem dos próprios arquivos — não há cadastro de pasta.
+  const pastas = [...new Set(arquivos.map(a=>(a.pasta||'Geral').trim()).filter(Boolean))]
+    .sort((a,b)=>a.localeCompare(b,'pt-BR'));
+  const pastaAtual = window._cofrePasta || 'Todas';
+  const busca = (window._cofreBusca||'').toLowerCase().trim();
+
+  const filtrados = arquivos.filter(a=>{
+    if(pastaAtual !== 'Todas' && (a.pasta||'Geral').trim() !== pastaAtual) return false;
+    if(!busca) return true;
+    return (a.nome||'').toLowerCase().includes(busca)
+        || (a.obs||'').toLowerCase().includes(busca)
+        || (a.pasta||'').toLowerCase().includes(busca);
+  });
+
+  const chips = ['Todas', ...pastas].map(p=>
+    `<button class="cob-chip ${pastaAtual===p?'on':''}" onclick="cofreSelPasta('${escHtml(p).replace(/'/g,"\\'")}')">${escHtml(p)}${p!=='Todas'?` <span style="opacity:.6;">${arquivos.filter(a=>(a.pasta||'Geral').trim()===p).length}</span>`:''}</button>`
+  ).join('');
+
+  const painelUpload = gestor ? `
+    <div class="cob-panel" style="padding:14px 16px;margin-bottom:14px;">
+      <div style="font-size:12.5px;font-weight:700;color:var(--text);margin-bottom:10px;">Guardar um arquivo</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+        <div style="display:flex;flex-direction:column;gap:4px;min-width:200px;flex:1;">
+          <label style="font-size:11px;color:var(--text-3);">Arquivo (até ${COFRE_MAX_MB} MB)</label>
+          <input type="file" id="cofre-up-file" style="font-size:12.5px;color:var(--text);">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;min-width:170px;">
+          <label style="font-size:11px;color:var(--text-3);">Pasta</label>
+          <input type="text" id="cofre-up-pasta" list="cofre-pastas-dl" placeholder="Ex.: Contratos clientes"
+            style="border:1px solid var(--border-2);border-radius:6px;padding:7px 10px;font-size:12.5px;font-family:inherit;background:var(--bg);color:var(--text);">
+          <datalist id="cofre-pastas-dl">${pastas.map(p=>`<option value="${escHtml(p)}">`).join('')}</datalist>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;min-width:220px;flex:1;">
+          <label style="font-size:11px;color:var(--text-3);">Observação (opcional)</label>
+          <input type="text" id="cofre-up-obs" placeholder="O que é este documento"
+            style="border:1px solid var(--border-2);border-radius:6px;padding:7px 10px;font-size:12.5px;font-family:inherit;background:var(--bg);color:var(--text);">
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-2);padding-bottom:8px;white-space:nowrap;">
+          <input type="checkbox" id="cofre-up-colab"> Colaborador pode ver
+        </label>
+        <button class="cob-btn-primary" id="cofre-up-btn" onclick="cofreUpload()" style="padding-bottom:8px;">${ico('upload',14)} Guardar</button>
+      </div>
+    </div>` : `
+    <div class="cob-panel" style="padding:12px 16px;margin-bottom:14px;color:var(--text-3);font-size:12.5px;">
+      Você vê aqui apenas os documentos que o gestor liberou. Só o gestor guarda, edita ou apaga arquivos no cofre.
+    </div>`;
+
+  const linhas = filtrados.map(a=>`
+    <tr>
+      <td>
+        <div style="font-weight:600;">${escHtml(a.nome)}</div>
+        ${a.obs?`<div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">${escHtml(a.obs)}</div>`:''}
+      </td>
+      <td>${escHtml(a.pasta||'Geral')}</td>
+      <td>${cofreFmtTamanho(a.size_bytes)}</td>
+      <td>${a.uploaded_at ? new Date(a.uploaded_at).toLocaleDateString('pt-BR') : '—'}</td>
+      <td>${gestor
+        ? `<button class="cob-chip ${a.visivel_colaborador?'on':''}" style="font-size:11px;padding:2px 9px;"
+             onclick="cofreToggleColab('${a.id}', ${a.visivel_colaborador?'true':'false'})"
+             title="${a.visivel_colaborador?'O colaborador vê este arquivo. Clique para tornar privado.':'Privado do gestor. Clique para liberar ao colaborador.'}">${a.visivel_colaborador?'Colaborador vê':'Só gestor'}</button>`
+        : ''}</td>
+      <td class="num">
+        <button class="cob-row-act" title="Baixar" onclick="cofreBaixar('${a.id}')">${ico('download',14)}</button>
+        ${gestor?`<button class="cob-row-act" title="Excluir" style="color:var(--danger);" onclick="cofreExcluir('${a.id}')">${ico('trash',13)}</button>`:''}
+      </td>
+    </tr>`).join('');
+
+  el.innerHTML = `
+    <div class="cob-pg-head">
+      <div>
+        <h1 class="cob-h1">Cofre</h1>
+        <div class="cob-h1-sub">${arquivos.length} arquivo${arquivos.length!==1?'s':''}${pastas.length?` · ${pastas.length} pasta${pastas.length!==1?'s':''}`:''}${gestor?' · privado do gestor':''}</div>
+      </div>
+    </div>
+
+    ${painelUpload}
+
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+      <div style="display:flex;align-items:center;gap:9px;background:var(--card-2);border:1px solid var(--border);border-radius:9px;padding:9px 13px;min-width:240px;color:var(--text-3);">
+        ${ico('search',14)}
+        <input type="text" id="cofre-busca" placeholder="Buscar arquivo, pasta ou observação…" value="${escHtml(window._cofreBusca||'')}"
+          oninput="cofreSetBusca(this.value)" style="border:0;outline:none;background:transparent;font-size:13px;color:var(--text);flex:1;"/>
+      </div>
+    </div>
+    ${pastas.length?`<div class="cob-chiprow">${chips}</div>`:''}
+
+    <div class="cob-panel">
+      ${window._cofreErro
+        ? `<div class="cob-empty-big"><div class="cob-empty-ic">${ico('folder',26)}</div><div class="cob-empty-tt">Não consegui ler o cofre</div><div class="cob-empty-ds">${escHtml(window._cofreErro)}</div></div>`
+        : filtrados.length===0
+        ? `<div class="cob-empty-big"><div class="cob-empty-ic">${ico('folder',26)}</div><div class="cob-empty-tt">${arquivos.length?'Nada nesta pasta':'Cofre vazio'}</div><div class="cob-empty-ds">${gestor?'Suba um contrato ou documento no painel acima. Ele nasce privado — só você vê até liberar.':'Nenhum documento foi liberado para você ainda.'}</div></div>`
+        : `<table class="cob-table">
+            <thead><tr><th>Arquivo</th><th>Pasta</th><th>Tamanho</th><th>Guardado em</th><th>${gestor?'Visibilidade':''}</th><th class="num"></th></tr></thead>
+            <tbody>${linhas}</tbody>
+          </table>`}
+    </div>
+  `;
+
+  // Primeira entrada na página: busca do banco e redesenha quando chegar.
+  if(!window._cofreAt){
+    cofreCarregar().then(()=>{
+      const pg = document.getElementById('page-cofre');
+      if(pg && pg.classList.contains('active')) renderCofre();
+    });
+  }
+}
+
+function cofreSelPasta(p){ window._cofrePasta = p; renderCofre(); }
+
+let _cofreBuscaT = null;
+function cofreSetBusca(v){
+  window._cofreBusca = v;
+  clearTimeout(_cofreBuscaT);
+  _cofreBuscaT = setTimeout(()=>{
+    renderCofre();
+    const i = document.getElementById('cofre-busca');
+    if(i){ i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
+  }, 220);
+}
+
+async function cofreUpload(){
+  if(!cofreEhGestor()){ showToast('Só o gestor guarda arquivos no cofre.','warning'); return; }
+  const inp = document.getElementById('cofre-up-file');
+  const file = inp && inp.files && inp.files[0];
+  if(!file){ showToast('Escolha um arquivo.','warning'); return; }
+  if(file.size > COFRE_MAX_MB*1024*1024){ showToast(`Arquivo acima de ${COFRE_MAX_MB} MB.`,'warning'); inp.value=''; return; }
+  const supa = getSupabase();
+  if(!supa){ showToast('Sem conexão com o banco.','danger'); return; }
+
+  const pasta = ((document.getElementById('cofre-up-pasta')||{}).value || 'Geral').trim() || 'Geral';
+  const obs   = ((document.getElementById('cofre-up-obs')||{}).value || '').trim() || null;
+  const colab = !!(document.getElementById('cofre-up-colab')||{}).checked;
+  const path  = `${cofreSlug(pasta)}/${Date.now()}_${cofreSlug(file.name)}`;
+
+  const btn = document.getElementById('cofre-up-btn');
+  if(btn){ btn.disabled = true; btn.textContent = 'Enviando…'; }
+  try{
+    const { error: upErr } = await supa.storage.from('cofre')
+      .upload(path, file, { contentType: file.type || 'application/octet-stream', upsert:false });
+    if(upErr) throw upErr;
+    const { data: udata } = await supa.auth.getUser();
+    const { error: insErr } = await supa.from('cofre_arquivos').insert({
+      pasta, nome: file.name, storage_path: path,
+      mime_type: file.type || null, size_bytes: file.size,
+      obs, visivel_colaborador: colab,
+      uploaded_by: udata && udata.user ? udata.user.id : null
+    });
+    if(insErr){
+      // Sem metadado o arquivo vira órfão e some da tela — tira do caminho.
+      await supa.storage.from('cofre').remove([path]).catch(()=>{});
+      throw insErr;
+    }
+    showToast('Arquivo guardado no cofre.','success');
+    if(inp) inp.value='';
+    const o=document.getElementById('cofre-up-obs'); if(o) o.value='';
+    const c=document.getElementById('cofre-up-colab'); if(c) c.checked=false;
+    await cofreCarregar(true);
+    renderCofre();
+  }catch(e){
+    const msg = String(e && e.message || e);
+    showToast(/security|policy|denied|violates/i.test(msg)
+      ? 'Sem permissão: o cofre é do gestor.'
+      : 'Falha ao guardar: '+msg, 'danger');
+  }finally{
+    if(btn){ btn.disabled = false; btn.innerHTML = ico('upload',14)+' Guardar'; }
+  }
+}
+
+async function cofreBaixar(id){
+  const supa = getSupabase();
+  if(!supa) return;
+  const { data, error } = await supa.from('cofre_arquivos').select('storage_path').eq('id', id).single();
+  if(error || !data){ showToast('Arquivo não encontrado.','warning'); return; }
+  const { data: signed, error: sErr } = await supa.storage.from('cofre').createSignedUrl(data.storage_path, 120);
+  if(sErr || !signed || !signed.signedUrl){ showToast('Não foi possível gerar o link.','danger'); return; }
+  window.open(signed.signedUrl, '_blank');
+}
+
+async function cofreToggleColab(id, atual){
+  if(!cofreEhGestor()) return;
+  const supa = getSupabase();
+  if(!supa) return;
+  const novo = !atual;
+  const { error } = await supa.from('cofre_arquivos').update({ visivel_colaborador: novo }).eq('id', id);
+  if(error){ showToast('Não consegui mudar a visibilidade: '+error.message,'danger'); return; }
+  showToast(novo ? 'Arquivo liberado para o colaborador.' : 'Arquivo voltou a ser só do gestor.','success');
+  await cofreCarregar(true);
+  renderCofre();
+}
+
+function cofreExcluir(id){
+  if(!cofreEhGestor()) return;
+  const a = (window._cofreCache||[]).find(x=>x.id===id);
+  confirmDel(async ()=>{
+    const supa = getSupabase();
+    if(!supa) return;
+    // Baixa lógica primeiro: some da tela e da RLS mesmo se o storage falhar.
+    const { error } = await supa.from('cofre_arquivos').update({ ativo:false }).eq('id', id);
+    if(error){ showToast('Não consegui excluir: '+error.message,'danger'); return; }
+    if(a && a.storage_path) await supa.storage.from('cofre').remove([a.storage_path]).catch(()=>{});
+    showToast('Arquivo removido do cofre.','success');
+    await cofreCarregar(true);
+    renderCofre();
+  }, a ? `Excluir “${a.nome}” do cofre? Não dá para desfazer.` : undefined);
+}
+
 function renderDocs(){
   const el = document.getElementById('page-docs');
   if(!el) return;
