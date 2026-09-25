@@ -115,6 +115,15 @@ module.exports = async function handler(req, res) {
       ).catch(() => { /* segue e imprime o que houver */ });
     } else {
       await page.setContent(html, { waitUntil: 'networkidle0', timeout: 25000 });
+      // Documentos do cliente (contrato, declaração, tabela, termos) se paginam sozinhos
+      // no navegador (folhas A4 com rodapé e "Página X de Y"); só imprimir depois disso.
+      if (/data-paginar=["']1["']/.test(html)) {
+        await page.waitForFunction(
+          // eslint-disable-next-line no-undef -- roda no contexto do browser, não no Node
+          () => document.body && document.body.getAttribute('data-paginado') === '1',
+          { timeout: 10000 },
+        ).catch(() => { /* segue: sem paginação, imprime o texto corrido */ });
+      }
     }
 
     // Rodapé DE PÁGINA (footerTemplate) só p/ os documentos do cliente, que sinalizam via
