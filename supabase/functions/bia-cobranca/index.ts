@@ -509,20 +509,20 @@ Deno.serve(async (req) => {
       blocos = [
         `${ola} Você tinha se comprometido a pagar a parcela de R$ ${val} até ${brDate(c.data_prometida)}, e o pagamento não entrou.`,
         `Isso deixa o acordo descumprido.${multi}`,
-        `Regularize hoje pra gente evitar o encaminhamento pra cobrança judicial e a negativação do seu nome:\n${url}`,
+        `Regularize hoje pra gente evitar a negativação do seu nome e o protesto:\n${url}`,
         `Se aconteceu algum imprevisto, me chama agora.`,
       ];
     } else if (pertoAcao) {
       blocos = [
         `${ola} Vou precisar ser bem direta com você agora.`,
         `Sua parcela de R$ ${val} está vencida desde ${brDate(venc)} e continua em aberto.${multi}`,
-        `Vou te dar um prazo final de 48 horas. Passando disso sem pagamento, o caso vai pra protesto em cartório, negativação (SPC/Serasa) e cobrança judicial, com custas e honorários.`,
+        `Vou te dar um prazo final de 48 horas. Passando disso sem pagamento, o caso vai pra protesto em cartório e negativação (SPC/Serasa).`,
         `Ainda dá tempo de resolver por aqui:\n${url}`,
       ];
     } else if (jaCobrado && diasVencAtual >= 7) {
       blocos = [
         `${ola} Sua parcela de R$ ${val} está vencida desde ${brDate(venc)} e ainda não foi paga.${multi}`,
-        `Preciso que você regularize com urgência. Continuando sem pagamento, o caso vai ser encaminhado pra cobrança judicial e negativação.`,
+        `Preciso que você regularize com urgência. Continuando sem pagamento, o caso vai ser encaminhado pra negativação e protesto.`,
         `Dá pra resolver por aqui:\n${url}`,
         `Se precisar acertar uma data, me chama.`,
       ];
