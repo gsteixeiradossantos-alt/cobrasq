@@ -107,7 +107,9 @@ tipo do movimento:
     0001220-30.2024.8.16.0209_3_Comprovante.pdf
 
 Número depois do tipo (`_Manifestacao_1`, `_Anexo_2`) ordena errado. O tipo continua
-editável em "Tipo da petição" na revisão. (Até a v0.10.27 o grupo saía com movimento
+editável em "Tipo da petição" na revisão. Nos anexos (2º, 3º…) a extensão escolhe
+**Outros** e escreve na caixa de texto o que vem depois do número (`_2_Calculo` → "Calculo").
+Se não achar a caixa, pausa uma vez pedindo para você preencher. (Até a v0.10.27 o grupo saía com movimento
 "Documentos"; corrigido na v0.10.28.)
 
 ## Pendências / ideias futuras (não fazer sem revisar com o Gustavo)
