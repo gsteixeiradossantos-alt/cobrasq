@@ -331,13 +331,16 @@ function casoProjudiUnico(nomeBase, docs) {
 function novoCasoProjudi(nome, docs) {
   docs.forEach((d, i) => d.principal = (i === 0));
   const numero = acharCnj(nome) || acharCnj(docs.map(d => d.nome).join(' '));
+  // Nome gerado pelo agrupamento ("cnj — N documentos") não é tipo: sem este corte,
+  // tipoEventoDoNome humanizava "documentos" e o grupo saía como movimento "Documentos".
+  const nomeGerado = / — \d+ documentos?$/.test(nome);
   return {
     id: 'caso-' + Math.random().toString(36).slice(2, 9), nome, docs,
     sistema: 'projudi',
     numero_processo: numero,
     // Tipo do evento: do nome do caso; num grupo ("cnj — N documentos") o nome não
     // carrega o tipo — cai no nome do 1º arquivo (a peça principal do grupo).
-    tipo_peticao: tipoEventoDoNome(nome) || tipoEventoDoNome(docs[0] && docs[0].nome) || 'Manifestação da Parte',
+    tipo_peticao: (!nomeGerado && tipoEventoDoNome(nome)) || tipoEventoDoNome(docs[0] && docs[0].nome) || 'Manifestação da Parte',
     dados: {},
     extracao: 'ok', status: 'aguardando', numero: null, statusTexto: '',
   };
