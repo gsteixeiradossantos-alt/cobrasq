@@ -96,6 +96,20 @@ toggle de auto-conclusão).
   petição montada no app; o fluxo atual aceita upload de PDF pronto). Reusa `GOTENBERG_URL`.
 - O endpoint `/api/eproc-peticionamento` já sobe junto com o app (Vercel).
 
+## Intercorrentes Projudi — vários arquivos no mesmo processo
+
+PDFs soltos com o mesmo CNJ no nome viram **uma** juntada. A ordem é a do nome
+(ordenação numérica), então numere logo depois do CNJ — o 1º é o principal e dá o
+tipo do movimento:
+
+    0001220-30.2024.8.16.0209_1_Manifestacao.pdf   ← principal, movimento "Manifestação"
+    0001220-30.2024.8.16.0209_2_Calculo.pdf
+    0001220-30.2024.8.16.0209_3_Comprovante.pdf
+
+Número depois do tipo (`_Manifestacao_1`, `_Anexo_2`) ordena errado. O tipo continua
+editável em "Tipo da petição" na revisão. (Até a v0.10.27 o grupo saía com movimento
+"Documentos"; corrigido na v0.10.28.)
+
 ## Pendências / ideias futuras (não fazer sem revisar com o Gustavo)
 
 - ~~Sondagem mais rápida em `esperar()`~~ — **feito na v0.10.27**: o passo padrão caiu de
