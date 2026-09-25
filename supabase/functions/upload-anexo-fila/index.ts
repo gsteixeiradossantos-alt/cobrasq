@@ -160,7 +160,8 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({ error: 'conteúdo não começa com %PDF' }), { status: 400 });
   }
 
-  const safeName = filenameIn.replace(/[^A-Za-z0-9_.-]+/g, '_').slice(0, 80).replace(/\.pdf$/i, '') || 'documento';
+  // No storage, só ASCII (acento vira a letra sem acento, não '_').
+  const safeName = filenameIn.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Za-z0-9_.-]+/g, '_').slice(0, 80).replace(/\.pdf$/i, '') || 'documento';
   // Na cobrança, mesmo formato de nome que o painel (`<timestamp>_<nome>`); na fila, o
   // formato original (`<timestamp>-<nome>`).
   const path = devedor ? `${prefix}/${Date.now()}_${safeName}.pdf` : `${prefix}/${Date.now()}-${safeName}.pdf`;
@@ -207,7 +208,11 @@ Deno.serve(async (req) => {
   const legenda = String(payload?.legenda ?? '');
   const origemSlug = String(payload?.origem || 'anexo').replace(/^manual_/, '').replace(/[^a-z0-9_]+/gi, '_').toLowerCase().slice(0, 40) || 'anexo';
   const origem = 'manual_' + origemSlug;
-  const mediaNome = safeName + '.pdf'; // com extensão — sem ela o nome chega cortado ao contato
+  // Nome que o contato vê: o original, com acento e espaço (antes ia o safeName e o
+  // credor recebia "Relat_rio_de_Andamento_-_Cl_nica_Soluti", 25/09/2026). Só tira o
+  // que o sistema de arquivos do celular recusa. Com extensão: sem ela o nome chega cortado.
+  const nomeVisivel = filenameIn.normalize('NFC').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().replace(/\.pdf$/i, '').slice(0, 120) || safeName;
+  const mediaNome = nomeVisivel + '.pdf';
 
   const linha: Record<string, unknown> = {
     telefone, tipo: 'documento', media_path: path, media_nome: mediaNome, media_mime: 'application/pdf',
