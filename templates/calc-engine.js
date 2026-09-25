@@ -434,12 +434,26 @@
     return { meses, correcao, valorCorrigido, juros, multa, subtotal, taxa, total: Math.ceil(subtotal + taxa) };
   }
 
+  // Vários títulos (cheques, parcelas) com vencimentos próprios: cada um corre
+  // do seu vencimento; soma as parcelas sem arredondar e arredonda (ceil) só o total.
+  // titulos: [{ valor, meses, ...extras }] — opts iguais aos de cobranca().
+  function cobrancaTitulos(titulos, opts) {
+    const itens = (titulos || []).map(t => Object.assign({}, t, cobranca(Object.assign({}, opts, { valorOriginal: t.valor, meses: t.meses }))));
+    const soma = k => itens.reduce((a, i) => a + i[k], 0);
+    const subtotal = soma('subtotal'), taxa = soma('taxa');
+    return {
+      itens, valorOriginal: itens.reduce((a, i) => a + _num(i.valor), 0),
+      correcao: soma('correcao'), valorCorrigido: soma('valorCorrigido'), juros: soma('juros'),
+      multa: soma('multa'), subtotal, taxa, total: Math.ceil(subtotal + taxa)
+    };
+  }
+
   const CalcEngine = {
     TABELAS, INDICES_ATE, ultimoMesIndice, LEI_14905_VIGENCIA, BCB_SERIES,
     fmtBRL, fmtNum, fmtData, fmtMesAno, fmtMesAnoLong, chaveMes, diasNoMes, parseDataLocal, diffDias, parseValor, parseDec,
     segmentarPorMes, getIndiceParaSegmento, calcularPrincipal, calcularHonorario, calcularJudicial, calcularCobranca,
     taxaEfetivaMensal, analisarFinanciamento, fetchBCBSerie,
-    correcaoMensal, juridica, cobranca,
+    correcaoMensal, juridica, cobranca, cobrancaTitulos,
     _version: '3.0.0'
   };
 

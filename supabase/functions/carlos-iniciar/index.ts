@@ -14,7 +14,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
-import { calcularCobranca, valorFixo } from '../_shared/calc-cobranca.ts';
+import { calcularCobranca, calcularCobrancaTitulos, titulosValidos, valorFixo } from '../_shared/calc-cobranca.ts';
 
 // CORS: esta function é chamada pelo BOTÃO do painel, ou seja, de um browser em
 // outra origem. Sem responder o preflight, o navegador nunca chega a mandar o
@@ -92,7 +92,10 @@ Deno.serve(async (req: Request) => {
   if (!faseJudicial && (!(valorOriginal > 0) || !vencimento)) return json({ error: 'dívida não calculada — edite o caso e informe valor/vencimento (ou o valor atualizado, se for caso judicial) antes de ativar o Carlos' }, 400);
 
   const hoje = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-  const calc = faseJudicial ? valorFixo(totalAvistaSalvo) : calcularCobranca(valorOriginal, vencimento!, hoje);
+  // Vários títulos com vencimentos próprios (divida.titulos): cada um corre do seu vencimento.
+  const titulos = titulosValidos(co.divida);
+  const calc = titulos.length ? calcularCobrancaTitulos(titulos, hoje)
+    : faseJudicial ? valorFixo(totalAvistaSalvo) : calcularCobranca(valorOriginal, vencimento!, hoje);
   if (!calc) return json({ error: 'não consegui calcular a dívida (valor/vencimento inválido)' }, 400);
 
   // telefone de destino: respeita o modo de teste global, se ligado (mesma
