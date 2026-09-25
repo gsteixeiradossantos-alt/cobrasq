@@ -47205,12 +47205,21 @@ ${opts.v3?'p{hyphens:manual}':''}
 // Qualificação complementar da Cedente PJ: porte (microempresa / EPP) e quem assina
 // por ela. Vem de d.contrato (preenchido na modal "Dados do contrato" antes do envio);
 // sem ele, o texto sai como antes, sem porte e sem representante.
+// Natureza jurídica da Cedente. PJ é "sociedade empresária limitada" por padrão; o
+// empresário individual (q.natureza==='ei', ex.: Casa das Baterias, 25/09/2026) é
+// pessoa natural com CNPJ e leva o masculino (inscrito, representado, denominado).
+function _cedenteNat(q, isPJ){
+  if(!isPJ) return { nat:'pessoa física', inscr:'inscrito(a)', denom:'denominado(a)', g:'a' };
+  if(q&&q.natureza==='ei') return { nat:'empresário individual', inscr:'inscrito', denom:'denominado', g:'o' };
+  return { nat:'sociedade empresária limitada', inscr:'inscrita', denom:'denominada', g:'a' };
+}
 function _cedenteQualif(q, isPJ){
-  const porte=(isPJ&&q&&q.porte)?`, enquadrada como ${escHtml(q.porte)}`:'';
+  const g=_cedenteNat(q,isPJ).g;
+  const porte=(isPJ&&q&&q.porte)?`, enquadrad${g} como ${escHtml(q.porte)}`:'';
   const sra=q&&q.repTrat==='Sra.';
   // Empresário individual não tem sócio: quem assina é o(a) titular.
   const papel=(q&&q.repPapel==='titular')?(sra?'pela sua titular, Sra.':'pelo seu titular, Sr.'):(sra?'pela sua sócia administradora, Sra.':'pelo seu sócio administrador, Sr.');
-  const rep=(isPJ&&q&&q.repNome)?`, neste ato representada ${papel} <strong>${escHtml(q.repNome)}</strong>`:'';
+  const rep=(isPJ&&q&&q.repNome)?`, neste ato representad${g} ${papel} <strong>${escHtml(q.repNome)}</strong>`:'';
   return { porte, rep };
 }
 // ── Dados do contrato de cessão (nº, novo/renovação, porte, representante) ──────
@@ -47253,7 +47262,9 @@ async function _cedenteReceita(doc){
   const pRaw=String(rc?.data?.porte||rc?.data?.descricao_porte||'').toUpperCase();
   const porte=/MICRO/.test(pRaw)?'microempresa':/PEQUENO/.test(pRaw)?'empresa de pequeno porte':'';
   const socios=(rs?.ok?rs.socios:[]).filter(x=>/administrador/i.test(String(x.papel||'')));
-  return { porte, socios };
+  const nj=rc?.data?.natureza_juridica, cod=String(rc?.data?.codigo_natureza_juridica||nj?.id||'').replace(/\D/g,'');
+  const natureza=(cod==='2135'||/empres[aá]rio\s*\(?individual/i.test(String(nj?.descricao||nj||'')))?'ei':(rc?.ok?'ltda':'');
+  return { porte, socios, natureza };
 }
 // Modal. Resolve com o contexto ou null se cancelar. Renovação sem nº/data anterior bloqueia.
 async function _contratoDadosModal(d, clienteId, soQualif){
@@ -47263,7 +47274,7 @@ async function _contratoDadosModal(d, clienteId, soQualif){
   const [proximo, ultimo, rf]=await Promise.all([
     soQualif?Promise.resolve(''):_contratoProximoNumero(new Date().getFullYear()).catch(()=>''),
     soQualif?Promise.resolve(null):_contratoUltimoAssinado(clienteId).catch(()=>null),
-    isPJ?_cedenteReceita(d.doc).catch(()=>({porte:'',socios:[]})):Promise.resolve({porte:'',socios:[]}) ]);
+    isPJ?_cedenteReceita(d.doc).catch(()=>({porte:'',socios:[],natureza:''})):Promise.resolve({porte:'',socios:[],natureza:''}) ]);
   const lbl='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);display:block;margin:14px 0 5px;';
   const inp='padding:6px 8px;border:1px solid var(--border);border-radius:var(--radius-sm);font:inherit;font-size:12.5px;background:var(--surface-2);color:var(--text);';
   const socioOpts=rf.socios.map(x=>`<option value="${escHtml(x.nome)}">${escHtml(x.nome)}</option>`).join('');
@@ -47295,7 +47306,13 @@ async function _contratoDadosModal(d, clienteId, soQualif){
       <input id="dct-num" value="${escHtml(proximo)}" placeholder="CQ-${new Date().getFullYear()}-001" style="${inp}width:160px;">
       <div style="font-size:10.5px;color:var(--text-3);margin-top:3px;">Próximo nº do ano, calculado pelos contratos já enviados. Pode alterar.</div>
       </div>
-      ${isPJ?`<label style="${lbl}">Porte da Cedente</label>
+      ${isPJ?`<label style="${lbl}">Natureza jurídica da Cedente</label>
+      <select id="dct-nat" style="${inp}">
+        <option value="ltda" ${rf.natureza==='ei'?'':'selected'}>Sociedade empresária limitada</option>
+        <option value="ei" ${rf.natureza==='ei'?'selected':''}>Empresário individual</option>
+      </select>
+      <div style="font-size:10.5px;color:var(--text-3);margin-top:3px;">${rf.natureza?'Conforme a Receita Federal.':'A Receita não informou a natureza (ou a consulta falhou). Escolha.'}</div>
+      <label style="${lbl}">Porte da Cedente</label>
       <select id="dct-porte" style="${inp}">
         <option value="microempresa" ${rf.porte==='microempresa'?'selected':''}>Microempresa</option>
         <option value="empresa de pequeno porte" ${rf.porte==='empresa de pequeno porte'?'selected':''}>Empresa de pequeno porte</option>
@@ -47328,7 +47345,7 @@ async function _contratoDadosModal(d, clienteId, soQualif){
       const x=e.target.closest('[data-x]')?.dataset.x; if(!x) return;
       if(x==='cancel'){ ov.remove(); resolve(null); return; }
       if(soQualif){
-        const q={ porte:$('dct-porte').value||'', repNome:($('dct-rep-nome').value||'').trim(), repTrat:$('dct-rep-trat').value||'Sr.', repPapel:$('dct-rep-papel').value||'socio' };
+        const q={ natureza:$('dct-nat').value||'ltda', porte:$('dct-porte').value||'', repNome:($('dct-rep-nome').value||'').trim(), repTrat:$('dct-rep-trat').value||'Sr.', repPapel:$('dct-rep-papel').value||'socio' };
         ov.remove(); resolve(q); return;
       }
       const numero=($('dct-num').value||'').trim();
@@ -47340,7 +47357,7 @@ async function _contratoDadosModal(d, clienteId, soQualif){
         renov={ numero:n, data:dt, datas:[dt,dt2].filter(Boolean).sort() };
       }
       const ctx={ numero, renov };
-      if(isPJ){ ctx.porte=$('dct-porte').value||''; ctx.repNome=($('dct-rep-nome').value||'').trim(); ctx.repTrat=$('dct-rep-trat').value||'Sr.'; ctx.repPapel=$('dct-rep-papel').value||'socio'; }
+      if(isPJ){ ctx.natureza=$('dct-nat').value||'ltda'; ctx.porte=$('dct-porte').value||''; ctx.repNome=($('dct-rep-nome').value||'').trim(); ctx.repTrat=$('dct-rep-trat').value||'Sr.'; ctx.repPapel=$('dct-rep-papel').value||'socio'; }
       ov.remove(); resolve(ctx);
     });
   });
@@ -47352,9 +47369,7 @@ function _docClienteHtml(tipo, d){
   const docCli=d.doc||'____________';
   const digits=(d.doc||'').replace(/\D/g,'');
   const isPJ = digits.length>11;
-  const natureza = isPJ ? 'sociedade empresária limitada' : 'pessoa física';
-  const inscr = isPJ ? 'inscrita' : 'inscrito(a)';
-  const denom = isPJ ? 'denominada' : 'denominado(a)';
+  const { nat:natureza, inscr, denom } = _cedenteNat(d.contrato, isPJ);
   const nm = escHtml(d.nome||'—');
   // Preâmbulo da parte (cedente/outorgante) reutilizado nos 3 documentos.
   const endClause = (end && end!=='—') ? `, com endereço na ${escHtml(end)}` : '';
@@ -47663,8 +47678,9 @@ function _termoPartes(cli, q, estilo){
   const end=_docClienteEndereco(d);
   const isPJ=(d.doc||'').replace(/\D/g,'').length>11;
   const endClause=(end&&end!=='—')?`, com endereço na ${escHtml(end)}`:'';
+  const cn=_cedenteNat(q,isPJ);
   const r={
-    cedente:`<strong>${escHtml(d.nome||'—')}</strong>, ${isPJ?'sociedade empresária limitada':'pessoa física'}${_cedenteQualif(q,isPJ).porte}, ${isPJ?'inscrita':'inscrito(a)'} no ${isPJ?'CNPJ':'CPF'} sob o n. <strong>${escHtml(d.doc||'____________')}</strong>${endClause}${_cedenteQualif(q,isPJ).rep}, doravante denominad${isPJ?'a':'o(a)'} de <strong>Cedente</strong>.`,
+    cedente:`<strong>${escHtml(d.nome||'—')}</strong>, ${cn.nat}${_cedenteQualif(q,isPJ).porte}, ${cn.inscr} no ${isPJ?'CNPJ':'CPF'} sob o n. <strong>${escHtml(d.doc||'____________')}</strong>${endClause}${_cedenteQualif(q,isPJ).rep}, doravante ${cn.denom} de <strong>Cedente</strong>.`,
     cessionaria:`<strong>COBRASQ Recuperadora de Crédito e Cobrança Ltda</strong>, sociedade empresária limitada, inscrita no CNPJ sob o n. 34.626.848/0001-42, com sede na Av. Rio Grande do Sul, n. 380, sala 201, Ed. Mara, centro, CEP.: 85660–000, município de Dois Vizinhos, Estado do Paraná, neste ato representada por seu sócio administrador, Sr. <strong>Gustavo Souza Teixeira dos Santos</strong>, CPF sob o n. 103.513.639-20, doravante denominada de <strong>Cessionária</strong>.` };
   // estilo 'v3' (canvas aprovado em 24/09/2026, termo e declaração): razão social em
   // peso 600, sem itálico (pedido de 25/09/2026), representante em itálico, papel em negrito itálico, nº sem
@@ -47672,10 +47688,10 @@ function _termoPartes(cli, q, estilo){
   if(estilo==='v3'){
     const q2=_cedenteQualif(q,isPJ), sra=q&&q.repTrat==='Sra.';
     const papel=(q&&q.repPapel==='titular')?(sra?'pela sua titular':'pelo seu titular'):(sra?'pela sua sócia administradora':'pelo seu sócio administrador');
-    const rep=(isPJ&&q&&q.repNome)?`, neste ato representada ${papel},<i> ${sra?'Sra.':'Sr.'} ${escHtml(q.repNome)},</i>`:',';
+    const rep=(isPJ&&q&&q.repNome)?`, neste ato representad${cn.g} ${papel},<i> ${sra?'Sra.':'Sr.'} ${escHtml(q.repNome)},</i>`:',';
     const nome=`<span style="font-weight:600;color:var(--ink)">${escHtml(d.nome||'—')}</span>,`;
     return {
-      cedente:`${nome} ${isPJ?'sociedade empresária limitada':'pessoa física'}${q2.porte}, ${isPJ?'inscrita':'inscrito(a)'} no ${isPJ?'CNPJ':'CPF'} sob o n. ${escHtml(d.doc||'____________')}${endClause}${rep} doravante denominad${isPJ?'a':'o(a)'} de <b><i>Cedente</i></b>.`,
+      cedente:`${nome} ${cn.nat}${q2.porte}, ${cn.inscr} no ${isPJ?'CNPJ':'CPF'} sob o n. ${escHtml(d.doc||'____________')}${endClause}${rep} doravante ${cn.denom} de <b><i>Cedente</i></b>.`,
       cessionaria:`<span style="font-weight:600;color:var(--ink)">COBRASQ Recuperadora de Crédito e Cobrança Ltda</span>, sociedade empresária limitada, inscrita no CNPJ sob o n. 34.626.848/0001-42, com sede na Av. Rio Grande do Sul, n. 380, sala 201, Ed. Mara, centro, CEP.: 85660–000, município de Dois Vizinhos, Estado do Paraná, neste ato representada por seu sócio administrador, <i>Sr. Gustavo Souza Teixeira dos Santos</i>, doravante denominada de <i><b>Cessionária</b></i>.` };
   }
   if(estilo!=='termo') return r;
