@@ -106,8 +106,12 @@ async function zapiSendText(phone, message) {
   const headers = { 'Content-Type': 'application/json' };
   if (clientTk) headers['Client-Token'] = clientTk;
   // Normaliza p/ o formato que a Z-API espera (DDI 55), igual ao waTel55 do front.
-  let fone = String(phone).replace(/\D/g, '');
-  if (fone && fone.length <= 11 && !fone.startsWith('55')) fone = '55' + fone;
+  // Grupo ("120363…-group") vai como está; telefone é normalizado.
+  let fone = String(phone).trim();
+  if (!/^\d+-group$/.test(fone)) {
+    fone = fone.replace(/\D/g, '');
+    if (fone && fone.length <= 11 && !fone.startsWith('55')) fone = '55' + fone;
+  }
   const r = await fetch(url, {
     method: 'POST', headers,
     body: JSON.stringify({ phone: fone, message }),
@@ -354,43 +358,130 @@ async function processarCalendarPendingDeletes() {
   return out;
 }
 
-// PR7: notificações pessoais de CONTAS A PAGAR PRÓPRIAS. Avisa o gestor (WhatsApp +
-// e-mail) sobre despesas de fin_lancamento vencendo/atrasadas e ainda não pagas, até
-// que o pagamento seja confirmado. Destino: CONTAS_PAGAR_PHONE/CONTAS_PAGAR_EMAIL
-// (ou DB.config.contasPagarTelefone/Email). Roda no cron diário (uma msg-resumo/dia).
-async function processarContasPagarProprias(DB) {
-  const out = { vencendo: 0, notificado: false, canais: [] };
+// PR7 + 25/09/2026: aviso financeiro diário do escritório — UMA mensagem em 3 blocos
+// (opção B aprovada pelo Gustavo):
+//   🔗 mesmo caso — entrada não recebida E saída não paga (vínculo por cobranca_id);
+//   🔔 só a pagar — despesas vencendo hoje ou atrasadas;
+//   💰 só a receber — parcelas de acordo vencidas ou vencendo hoje (25/09/2026: o
+//      Gustavo quer ver também as de hoje, como já acontece com o a pagar).
+// Receber exclui penhora/Sisbajud/INSS: não é o devedor pagando, é o juízo liberando, e
+// já tem fila própria (aba Judicial). Critério igual ao de _finJudCarregar no index.html:
+// categoria com "sisbajud" ou "penhora" = judicial ("Acordos Judiciais" fica).
+// Destino (25/09/2026): só o grupo de WhatsApp "Financeiros 💵" — sem e-mail, sem
+// telefone pessoal. FINANCEIRO_GRUPO_WHATSAPP / DB.config.financeiroGrupoWhatsapp
+// trocam o grupo sem deploy; o número da COBRASQ tem que ser membro dele.
+const RE_RECEBER_JUDICIAL = /sisbajud|penhora/i;
+const FINANCEIRO_GRUPO_PADRAO = '120363410150576066-group'; // "Financeiros 💵"
+function destinoFinanceiroWhatsapp(DB) {
+  const grupo = String(process.env.FINANCEIRO_GRUPO_WHATSAPP || DB.config?.financeiroGrupoWhatsapp || '').trim();
+  return /^\d+-group$/.test(grupo) ? grupo : FINANCEIRO_GRUPO_PADRAO;
+}
+async function processarFinanceiroDoDia(DB) {
+  const contasPagar = { vencendo: 0, notificado: false, canais: [] };
+  const receberAtrasadas = { atrasadas: 0, judiciais_fora: 0, casos_vinculados: 0 };
   const hoje = hojeBR();
-  let rows;
+  let pagar, receberRaw;
   try {
-    rows = await sbFetch(
-      `fin_lancamento?select=id,descricao,valor,data_vencimento,status` +
-      `&tipo_movimento=eq.0&status=in.(0,2)&data_vencimento=lte.${hoje}` +
-      `&order=data_vencimento.asc&limit=100`
-    );
-  } catch (e) { return { ...out, error: e.message }; }
-  if (!Array.isArray(rows) || rows.length === 0) return out;
-  out.vencendo = rows.length;
+    [pagar, receberRaw] = await Promise.all([
+      sbFetch(
+        `fin_lancamento?select=id,descricao,valor,data_vencimento,cobranca_id` +
+        `&tipo_movimento=eq.0&status=in.(0,2)&data_vencimento=lte.${hoje}` +
+        `&order=data_vencimento.asc&limit=100`
+      ),
+      sbFetch(
+        `fin_lancamento?select=id,descricao,valor,data_vencimento,cobranca_id,` +
+        `cats:fin_lancamento_categoria(categoria:fin_categoria(descricao))` +
+        `&tipo_movimento=eq.1&status=in.(0,2)&data_vencimento=lte.${hoje}` +
+        `&order=data_vencimento.asc&limit=300`
+      ),
+    ]);
+  } catch (e) { return { contasPagar: { ...contasPagar, error: e.message }, receberAtrasadas }; }
+  pagar = Array.isArray(pagar) ? pagar : [];
+  receberRaw = Array.isArray(receberRaw) ? receberRaw : [];
+  const ehJudicial = (r) => {
+    const cats = (r.cats || []).map(c => c?.categoria?.descricao || '').filter(Boolean);
+    return cats.length ? cats.some(c => RE_RECEBER_JUDICIAL.test(c)) : RE_RECEBER_JUDICIAL.test(r.descricao || '');
+  };
+  const receber = receberRaw.filter(r => !ehJudicial(r));
+  contasPagar.vencendo = pagar.length;
+  receberAtrasadas.atrasadas = receber.length;
+  receberAtrasadas.judiciais_fora = receberRaw.length - receber.length;
+  const destTel = destinoFinanceiroWhatsapp(DB);
+  contasPagar.destino = destTel;
 
-  const destTel = String(process.env.CONTAS_PAGAR_PHONE || DB.config?.contasPagarTelefone || '').replace(/\D/g, '');
-  const destEmail = process.env.CONTAS_PAGAR_EMAIL || DB.config?.contasPagarEmail || '';
-  if (!destTel && !destEmail) return { ...out, skipped: 'sem destino (CONTAS_PAGAR_PHONE/EMAIL)' };
+  // Gustavo (25/09/2026): manda todo dia — sem pendência, avisa que não há nada.
+  if (pagar.length === 0 && receber.length === 0) {
+    try { await zapiSendText(destTel, '📊 *Financeiro do dia* — nada a pagar nem a receber.'); contasPagar.canais.push('whatsapp'); }
+    catch (e) { contasPagar.whatsapp_error = e.message; }
+    contasPagar.notificado = contasPagar.canais.length > 0;
+    return { contasPagar, receberAtrasadas };
+  }
 
-  const linhas = rows.map(r => {
-    const venc = String(r.data_vencimento || '').split('-').reverse().join('/');
-    const atras = (r.data_vencimento && r.data_vencimento < hoje) ? ' (atrasada)' : '';
-    return `• ${r.descricao || '—'} — ${fmtR(Math.abs(Number(r.valor)) || 0)} — vence ${venc}${atras}`;
-  });
-  const total = rows.reduce((s, r) => s + Math.abs(Number(r.valor) || 0), 0);
-  const corpo = `Contas a pagar (vencendo/atrasadas) — ${rows.length} item(ns), total ${fmtR(total)}:\n\n` +
-    `${linhas.join('\n')}\n\nConfirme o pagamento no sistema para parar os lembretes.`;
+  const valor = (r) => Math.abs(Number(r.valor) || 0);
+  const soma = (rs) => rs.reduce((s, r) => s + valor(r), 0);
+  const data = (d) => String(d || '').split('-').reverse().join('/');
+  const venceuRec = (r) => (r.data_vencimento && r.data_vencimento < hoje) ? `venceu ${data(r.data_vencimento)}` : 'vence hoje';
+  const atras = (r) => (r.data_vencimento && r.data_vencimento < hoje) ? ' (atrasada)' : '';
+  // "Fernanda Dambros 9/10 · verificar" → título "Fernanda Dambros", parcela "9/10".
+  const parcela = (r) => (String(r.descricao || '').match(/\s(\d+\/\d+)(?:\s*·\s*verificar)?\s*$/) || [])[1] || '';
+  const titulo = (r) => String(r.descricao || '—').replace(/\s*·\s*verificar\s*$/i, '').replace(/\s+\d+\/\d+\s*$/, '').trim() || '—';
+  // Formato do Gustavo (25/09/2026): nome em negrito, complemento fora dele —
+  // "Elizane Vieira - pagar 1/1" → "*• Elizane Vieira* - pagar 1/1".
+  const item = (r) => {
+    const [, nome, resto = ''] = String(r.descricao || '—').match(/^(.*?)((?:\s-\s|\s\d+\/\d+).*)?$/) || [];
+    return `*• ${(nome || '—').trim()}*${resto}`;
+  };
 
-  try { if (destTel) { await zapiSendText(destTel, '🔔 ' + corpo); out.canais.push('whatsapp'); } }
-  catch (e) { out.whatsapp_error = e.message; }
-  try { if (destEmail && emailDisponivel()) { await sendEmail({ to: destEmail, subject: 'Cobrasq — Contas a pagar', text: corpo }); out.canais.push('email'); } }
-  catch (e) { out.email_error = e.message; }
-  out.notificado = out.canais.length > 0;
-  return out;
+  const idsPagar = new Set(pagar.map(r => r.cobranca_id).filter(Boolean));
+  const idsReceber = new Set(receber.map(r => r.cobranca_id).filter(Boolean));
+  const vinculados = [...idsReceber].filter(id => idsPagar.has(id));
+  const setVinc = new Set(vinculados);
+  receberAtrasadas.casos_vinculados = vinculados.length;
+  const soPagar = pagar.filter(r => !setVinc.has(r.cobranca_id));
+  const soReceber = receber.filter(r => !setVinc.has(r.cobranca_id));
+
+  const blocos = [];
+  if (vinculados.length) {
+    const casos = vinculados.map(id => {
+      const rs = receber.filter(r => r.cobranca_id === id);
+      const ps = pagar.filter(r => r.cobranca_id === id);
+      const linhas = [
+        ...rs.map(r => `   Receber${parcela(r) ? ' ' + parcela(r) : ''}: ${fmtR(valor(r))} — ${venceuRec(r)}`),
+        ...ps.map(r => `   Pagar${parcela(r) ? ' ' + parcela(r) : ''}: ${fmtR(valor(r))} — vence ${data(r.data_vencimento)}${atras(r)}`),
+      ];
+      return `*• ${titulo(rs[0] || ps[0])}*\n${linhas.join('\n')}`;
+    });
+    blocos.push(`🔗 *MESMO CASO — entrada não recebida e saída não paga* (${vinculados.length} caso(s))\n${casos.join('\n\n')}`);
+  }
+  if (soPagar.length) {
+    // Repasse ao credor = saída com caso vinculado; o resto (custas, impostos…) é "Outros".
+    const linhaPagar = (r) => `${item(r)} — ${fmtR(valor(r))} — vence ${data(r.data_vencimento)}${atras(r)}`;
+    const repasses = soPagar.filter(r => r.cobranca_id);
+    const outros = soPagar.filter(r => !r.cobranca_id);
+    const sub = [];
+    if (repasses.length) sub.push(`*— Repasses*\n${repasses.map(linhaPagar).join('\n')}`);
+    if (outros.length) sub.push(`*— Outros*\n${outros.map(linhaPagar).join('\n')}`);
+    blocos.push(`🔔 *SÓ A PAGAR — ${soPagar.length} item(ns), ${fmtR(soma(soPagar))}*\n\n${sub.join('\n\n')}`);
+  }
+  if (soReceber.length) {
+    blocos.push(`💰 *SÓ A RECEBER — ${soReceber.length} item(ns), ${fmtR(soma(soReceber))}*\n` +
+      soReceber.map(r => `${item(r)} — ${fmtR(valor(r))} — ${venceuRec(r)}`).join('\n'));
+  }
+  // Gustavo (25/09/2026): cada bloco numa mensagem própria; o título vai no
+  // primeiro e o rodapé no último.
+  blocos[0] = `📊 *Financeiro do dia* — a pagar ${fmtR(soma(pagar))} · a receber ${fmtR(soma(receber))}\n\n${blocos[0]}`;
+  blocos[blocos.length - 1] += '\n\nConfirme no sistema o que for pago ou recebido para parar os lembretes.';
+
+  const erros = [];
+  for (const msg of blocos) {
+    try { await zapiSendText(destTel, msg); }
+    catch (e) { erros.push(e.message); }
+  }
+  if (erros.length < blocos.length) contasPagar.canais.push('whatsapp');
+  if (erros.length) contasPagar.whatsapp_error = erros.join(' | ');
+  contasPagar.mensagens = blocos.length;
+  contasPagar.notificado = contasPagar.canais.length > 0;
+  return { contasPagar, receberAtrasadas };
 }
 
 // ── Fase 3 (sombra) — fonte relacional da lista de devedores ────────
@@ -1157,11 +1248,11 @@ module.exports = async function handler(req, res) {
                       : (String(process.env.REGUA_SOURCE || '').toLowerCase() === 'blob' ? 'blob' : 'relacional');
 
     // PR7: contas a pagar próprias — independe da régua de cobrança estar ativa.
-    const contasPagar = dry ? null : await processarContasPagarProprias(DB);
+    const { contasPagar = null, receberAtrasadas = null } = dry ? {} : await processarFinanceiroDoDia(DB);
 
     if (DB.config?.reguaAtiva === false) {
       const calendarStats = dry ? null : await processarCalendarPendingDeletes();
-      return res.status(200).json({ ok: true, msg: 'Régua pausada globalmente.', calendar: calendarStats, contasPagar });
+      return res.status(200).json({ ok: true, msg: 'Régua pausada globalmente.', calendar: calendarStats, contasPagar, receberAtrasadas });
     }
 
     // ===== RÉGUA C — QUITAFÁCIL (independe das outras réguas). Duplo gate:
@@ -1189,7 +1280,7 @@ module.exports = async function handler(req, res) {
 
     if (reguaCobranca.length === 0 && reguaAcordo.length === 0) {
       const calendarStats = dry ? null : await processarCalendarPendingDeletes();
-      return res.status(200).json({ ok: true, msg: 'Nenhum passo configurado nas réguas clássicas.', calendar: calendarStats, contasPagar, quita, negativacao, recalculo });
+      return res.status(200).json({ ok: true, msg: 'Nenhum passo configurado nas réguas clássicas.', calendar: calendarStats, contasPagar, receberAtrasadas, quita, negativacao, recalculo });
     }
 
     const credor = DB.config?.empresa || 'COBRASQ';
@@ -1396,7 +1487,7 @@ module.exports = async function handler(req, res) {
     try { zapsign = await processarLembretesZapSign({ dry: dry || !zapsignLive }); }
     catch (e) { zapsign = { error: e.message }; }
 
-    res.status(200).json({ ok: true, hoje: hojeBR(), ...resultado, calendar, contasPagar, zapsign, zapsign_live: zapsignLive, quita, negativacao, recalculo });
+    res.status(200).json({ ok: true, hoje: hojeBR(), ...resultado, calendar, contasPagar, receberAtrasadas, zapsign, zapsign_live: zapsignLive, quita, negativacao, recalculo });
   } catch (err) {
     console.error('[cron-regua]', err);
     res.status(500).json({ ok: false, error: err.message });
