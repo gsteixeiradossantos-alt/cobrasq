@@ -367,14 +367,14 @@ async function processarCalendarPendingDeletes() {
 // Receber exclui penhora/Sisbajud/INSS: não é o devedor pagando, é o juízo liberando, e
 // já tem fila própria (aba Judicial). Critério igual ao de _finJudCarregar no index.html:
 // categoria com "sisbajud" ou "penhora" = judicial ("Acordos Judiciais" fica).
-// Destino: grupo de WhatsApp (FINANCEIRO_GRUPO_WHATSAPP / DB.config.financeiroGrupoWhatsapp,
-// id "…-group") quando configurado; senão o telefone CONTAS_PAGAR_PHONE /
-// DB.config.contasPagarTelefone. E-mail: CONTAS_PAGAR_EMAIL / DB.config.contasPagarEmail.
+// Destino (25/09/2026): só o grupo de WhatsApp "Financeiros 💵" — sem e-mail, sem
+// telefone pessoal. FINANCEIRO_GRUPO_WHATSAPP / DB.config.financeiroGrupoWhatsapp
+// trocam o grupo sem deploy; o número da COBRASQ tem que ser membro dele.
 const RE_RECEBER_JUDICIAL = /sisbajud|penhora/i;
+const FINANCEIRO_GRUPO_PADRAO = '120363410150576066-group'; // "Financeiros 💵"
 function destinoFinanceiroWhatsapp(DB) {
   const grupo = String(process.env.FINANCEIRO_GRUPO_WHATSAPP || DB.config?.financeiroGrupoWhatsapp || '').trim();
-  if (/^\d+-group$/.test(grupo)) return grupo;
-  return String(process.env.CONTAS_PAGAR_PHONE || DB.config?.contasPagarTelefone || '').replace(/\D/g, '');
+  return /^\d+-group$/.test(grupo) ? grupo : FINANCEIRO_GRUPO_PADRAO;
 }
 async function processarFinanceiroDoDia(DB) {
   const contasPagar = { vencendo: 0, notificado: false, canais: [] };
@@ -409,8 +409,6 @@ async function processarFinanceiroDoDia(DB) {
   if (pagar.length === 0 && receber.length === 0) return { contasPagar, receberAtrasadas };
 
   const destTel = destinoFinanceiroWhatsapp(DB);
-  const destEmail = process.env.CONTAS_PAGAR_EMAIL || DB.config?.contasPagarEmail || '';
-  if (!destTel && !destEmail) return { contasPagar: { ...contasPagar, skipped: 'sem destino (FINANCEIRO_GRUPO_WHATSAPP/CONTAS_PAGAR_PHONE/EMAIL)' }, receberAtrasadas };
 
   const valor = (r) => Math.abs(Number(r.valor) || 0);
   const soma = (rs) => rs.reduce((s, r) => s + valor(r), 0);
@@ -452,12 +450,10 @@ async function processarFinanceiroDoDia(DB) {
   const corpo = `📊 Financeiro do dia — a pagar ${fmtR(soma(pagar))} · a receber em atraso ${fmtR(soma(receber))}\n\n` +
     `${blocos.join('\n\n')}\n\nConfirme no sistema o que for pago ou recebido para parar os lembretes.`;
 
-  try { if (destTel) { await zapiSendText(destTel, corpo); contasPagar.canais.push('whatsapp'); } }
+  try { await zapiSendText(destTel, corpo); contasPagar.canais.push('whatsapp'); }
   catch (e) { contasPagar.whatsapp_error = e.message; }
-  try { if (destEmail && emailDisponivel()) { await sendEmail({ to: destEmail, subject: 'Cobrasq — Financeiro do dia', text: corpo }); contasPagar.canais.push('email'); } }
-  catch (e) { contasPagar.email_error = e.message; }
   contasPagar.notificado = contasPagar.canais.length > 0;
-  contasPagar.destino = destTel.endsWith('-group') ? 'grupo' : (destTel ? 'telefone' : 'só e-mail');
+  contasPagar.destino = destTel;
   return { contasPagar, receberAtrasadas };
 }
 
