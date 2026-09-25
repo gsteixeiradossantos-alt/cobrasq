@@ -197,6 +197,7 @@ const MAPA_EVENTO = {
   // Recursos
   embargosdedeclaracao: 'Embargos de Declaração',
   embargosdeclaratorios: 'Embargos de Declaração',
+  embdeclaracao: 'Embargos de Declaração',
   embargos: 'Embargos',
   apelacao: 'Apelação',
   recursoinominado: 'Recurso Inominado',
@@ -206,6 +207,9 @@ const MAPA_EVENTO = {
   contrarrazoes: 'Contrarrazões',
   // Execução / cumprimento
   cumprimentodesentenca: 'Cumprimento de Sentença',
+  cumpsentenca: 'Cumprimento de Sentença',
+  cumprimento: 'Cumprimento de intimação',
+  solicexecucao: 'Solicitação a Execução',
   execucao: 'Execução',
   penhora: 'Penhora',
   pedidodepenhora: 'Pedido de Penhora',
