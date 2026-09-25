@@ -24,6 +24,7 @@ import fontkit from 'https://esm.sh/@pdf-lib/fontkit@1.1.1';
 import { MODELO, BIA_SYSTEM, extrairJson } from '../_shared/bia-system.ts';
 import { CARLOS_SYSTEM, extrairJson as extrairJsonCarlos } from '../_shared/carlos-system.ts';
 import { calcularCobranca, calcularCobrancaTitulos, titulosValidos, valorFixo } from '../_shared/calc-cobranca.ts';
+import { parseValorBR } from '../_shared/valor-br.ts';
 
 const MAX_CONVERSAS_POR_RUN = 15;
 // Só atende mensagens RECENTES. Protege contra "backlog": mensagens antigas
@@ -769,9 +770,9 @@ Deno.serve(async (req) => {
       // testada. Se o caso não estiver com carlos_ativo, cai no fluxo normal
       // (Bia) logo abaixo, sem nenhuma mudança de comportamento.
       if (caso && caso.carlos_ativo && !caso.acordo_final && !caso.encerrado) {
-        const valorOriginalC = Number(caso.divida?.valorOriginal || 0);
+        const valorOriginalC = parseValorBR(caso.divida?.valorOriginal);
         const vencimentoC = caso.divida?.vencimento || null;
-        const totalAvistaSalvoC = Number(caso.divida?.totalAvista || 0);
+        const totalAvistaSalvoC = parseValorBR(caso.divida?.totalAvista);
         // VALOR FIXO: sem vencimento mas com valor definido = dívida já em fase
         // judicial (cumprimento de sentença, execução) — mesmo critério do
         // carlos-iniciar. Não recalcula com a fórmula extrajudicial.
