@@ -406,9 +406,16 @@ async function processarFinanceiroDoDia(DB) {
   contasPagar.vencendo = pagar.length;
   receberAtrasadas.atrasadas = receber.length;
   receberAtrasadas.judiciais_fora = receberRaw.length - receber.length;
-  if (pagar.length === 0 && receber.length === 0) return { contasPagar, receberAtrasadas };
-
   const destTel = destinoFinanceiroWhatsapp(DB);
+  contasPagar.destino = destTel;
+
+  // Gustavo (25/09/2026): manda todo dia — sem pendência, avisa que não há nada.
+  if (pagar.length === 0 && receber.length === 0) {
+    try { await zapiSendText(destTel, '📊 *Financeiro do dia* — nada a pagar nem a receber.'); contasPagar.canais.push('whatsapp'); }
+    catch (e) { contasPagar.whatsapp_error = e.message; }
+    contasPagar.notificado = contasPagar.canais.length > 0;
+    return { contasPagar, receberAtrasadas };
+  }
 
   const valor = (r) => Math.abs(Number(r.valor) || 0);
   const soma = (rs) => rs.reduce((s, r) => s + valor(r), 0);
@@ -460,13 +467,20 @@ async function processarFinanceiroDoDia(DB) {
     blocos.push(`💰 *SÓ A RECEBER — ${soReceber.length} item(ns), ${fmtR(soma(soReceber))}*\n` +
       soReceber.map(r => `${item(r)} — ${fmtR(valor(r))} — ${venceuRec(r)}`).join('\n'));
   }
-  const corpo = `📊 *Financeiro do dia* — a pagar ${fmtR(soma(pagar))} · a receber ${fmtR(soma(receber))}\n\n` +
-    `${blocos.join('\n\n')}\n\nConfirme no sistema o que for pago ou recebido para parar os lembretes.`;
+  // Gustavo (25/09/2026): cada bloco numa mensagem própria; o título vai no
+  // primeiro e o rodapé no último.
+  blocos[0] = `📊 *Financeiro do dia* — a pagar ${fmtR(soma(pagar))} · a receber ${fmtR(soma(receber))}\n\n${blocos[0]}`;
+  blocos[blocos.length - 1] += '\n\nConfirme no sistema o que for pago ou recebido para parar os lembretes.';
 
-  try { await zapiSendText(destTel, corpo); contasPagar.canais.push('whatsapp'); }
-  catch (e) { contasPagar.whatsapp_error = e.message; }
+  const erros = [];
+  for (const msg of blocos) {
+    try { await zapiSendText(destTel, msg); }
+    catch (e) { erros.push(e.message); }
+  }
+  if (erros.length < blocos.length) contasPagar.canais.push('whatsapp');
+  if (erros.length) contasPagar.whatsapp_error = erros.join(' | ');
+  contasPagar.mensagens = blocos.length;
   contasPagar.notificado = contasPagar.canais.length > 0;
-  contasPagar.destino = destTel;
   return { contasPagar, receberAtrasadas };
 }
 
