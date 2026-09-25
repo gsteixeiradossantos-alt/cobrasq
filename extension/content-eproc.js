@@ -492,7 +492,7 @@
   }
   async function esperar(cond, timeoutMs, passoMs) {
     const fim = Date.now() + (timeoutMs || 15000);
-    while (Date.now() < fim) { const v = cond(); if (v) return v; await new Promise(r => setTimeout(r, passoMs || 300)); }
+    while (Date.now() < fim) { const v = cond(); if (v) return v; await new Promise(r => setTimeout(r, passoMs || 150)); }
     return null;
   }
   function temLogin() { const p = document.querySelector('input[type="password"]'); return !!(p && visivel(p)); }

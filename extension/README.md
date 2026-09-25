@@ -98,11 +98,7 @@ toggle de auto-conclusão).
 
 ## Pendências / ideias futuras (não fazer sem revisar com o Gustavo)
 
-- **Sondagem mais rápida em `esperar()`** (content-projudi.js / content-eproc.js): o passo
-  padrão entre verificações é 300ms (`passoMs || 300`); dá pra baixar para ~150ms nos usos
-  que não passam `passoMs` explícito, ganhando até metade do intervalo de detecção sem mudar
-  a lógica de conferência. Risco baixo (só frequência de checagem), mas não é o gargalo real
-  — a maior parte do tempo de protocolo é servidor (upload/assinatura/gravação) e os
-  `setTimeout` fixos de "deixa assentar" (400-900ms) foram cada um resposta a um bug de
-  corrida específico já reportado (falso sucesso, clique no vazio, tipo de documento errado)
-  — não cortar esses sem motivo forte.
+- ~~Sondagem mais rápida em `esperar()`~~ — **feito na v0.10.27**: o passo padrão caiu de
+  300ms para 150ms (`passoMs || 150`) em content-projudi.js e content-eproc.js. Os
+  `setTimeout` fixos de "deixa assentar" (400-900ms) **não** foram tocados — cada um responde
+  a um bug de corrida já reportado (falso sucesso, clique no vazio, tipo de documento errado).
