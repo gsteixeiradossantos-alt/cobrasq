@@ -362,8 +362,8 @@ async function processarCalendarPendingDeletes() {
 // (opção B aprovada pelo Gustavo):
 //   🔗 mesmo caso — entrada não recebida E saída não paga (vínculo por cobranca_id);
 //   🔔 só a pagar — despesas vencendo hoje ou atrasadas;
-//   💰 só a receber — parcelas de acordo JÁ atrasadas (vencimento < hoje: pagamento do
-//      dia pode compensar depois do aviso).
+//   💰 só a receber — parcelas de acordo vencidas ou vencendo hoje (25/09/2026: o
+//      Gustavo quer ver também as de hoje, como já acontece com o a pagar).
 // Receber exclui penhora/Sisbajud/INSS: não é o devedor pagando, é o juízo liberando, e
 // já tem fila própria (aba Judicial). Critério igual ao de _finJudCarregar no index.html:
 // categoria com "sisbajud" ou "penhora" = judicial ("Acordos Judiciais" fica).
@@ -391,7 +391,7 @@ async function processarFinanceiroDoDia(DB) {
       sbFetch(
         `fin_lancamento?select=id,descricao,valor,data_vencimento,cobranca_id,` +
         `cats:fin_lancamento_categoria(categoria:fin_categoria(descricao))` +
-        `&tipo_movimento=eq.1&status=in.(0,2)&data_vencimento=lt.${hoje}` +
+        `&tipo_movimento=eq.1&status=in.(0,2)&data_vencimento=lte.${hoje}` +
         `&order=data_vencimento.asc&limit=300`
       ),
     ]);
@@ -413,10 +413,17 @@ async function processarFinanceiroDoDia(DB) {
   const valor = (r) => Math.abs(Number(r.valor) || 0);
   const soma = (rs) => rs.reduce((s, r) => s + valor(r), 0);
   const data = (d) => String(d || '').split('-').reverse().join('/');
+  const venceuRec = (r) => (r.data_vencimento && r.data_vencimento < hoje) ? `venceu ${data(r.data_vencimento)}` : 'vence hoje';
   const atras = (r) => (r.data_vencimento && r.data_vencimento < hoje) ? ' (atrasada)' : '';
   // "Fernanda Dambros 9/10 · verificar" → título "Fernanda Dambros", parcela "9/10".
   const parcela = (r) => (String(r.descricao || '').match(/\s(\d+\/\d+)(?:\s*·\s*verificar)?\s*$/) || [])[1] || '';
   const titulo = (r) => String(r.descricao || '—').replace(/\s*·\s*verificar\s*$/i, '').replace(/\s+\d+\/\d+\s*$/, '').trim() || '—';
+  // Formato do Gustavo (25/09/2026): nome em negrito, complemento fora dele —
+  // "Elizane Vieira - pagar 1/1" → "*• Elizane Vieira* - pagar 1/1".
+  const item = (r) => {
+    const [, nome, resto = ''] = String(r.descricao || '—').match(/^(.*?)((?:\s-\s|\s\d+\/\d+).*)?$/) || [];
+    return `*• ${(nome || '—').trim()}*${resto}`;
+  };
 
   const idsPagar = new Set(pagar.map(r => r.cobranca_id).filter(Boolean));
   const idsReceber = new Set(receber.map(r => r.cobranca_id).filter(Boolean));
@@ -432,22 +439,28 @@ async function processarFinanceiroDoDia(DB) {
       const rs = receber.filter(r => r.cobranca_id === id);
       const ps = pagar.filter(r => r.cobranca_id === id);
       const linhas = [
-        ...rs.map(r => `   Receber${parcela(r) ? ' ' + parcela(r) : ''}: ${fmtR(valor(r))} — venceu ${data(r.data_vencimento)}`),
+        ...rs.map(r => `   Receber${parcela(r) ? ' ' + parcela(r) : ''}: ${fmtR(valor(r))} — ${venceuRec(r)}`),
         ...ps.map(r => `   Pagar${parcela(r) ? ' ' + parcela(r) : ''}: ${fmtR(valor(r))} — vence ${data(r.data_vencimento)}${atras(r)}`),
       ];
-      return `• ${titulo(rs[0] || ps[0])}\n${linhas.join('\n')}`;
+      return `*• ${titulo(rs[0] || ps[0])}*\n${linhas.join('\n')}`;
     });
-    blocos.push(`🔗 *MESMO CASO — entrada não recebida e saída não paga* (${vinculados.length} caso(s))\n${casos.join('\n')}`);
+    blocos.push(`🔗 *MESMO CASO — entrada não recebida e saída não paga* (${vinculados.length} caso(s))\n${casos.join('\n\n')}`);
   }
   if (soPagar.length) {
-    blocos.push(`🔔 *SÓ A PAGAR* — ${soPagar.length} item(ns), ${fmtR(soma(soPagar))}\n` +
-      soPagar.map(r => `• ${r.descricao || '—'} — ${fmtR(valor(r))} — vence ${data(r.data_vencimento)}${atras(r)}`).join('\n'));
+    // Repasse ao credor = saída com caso vinculado; o resto (custas, impostos…) é "Outros".
+    const linhaPagar = (r) => `${item(r)} — ${fmtR(valor(r))} — vence ${data(r.data_vencimento)}${atras(r)}`;
+    const repasses = soPagar.filter(r => r.cobranca_id);
+    const outros = soPagar.filter(r => !r.cobranca_id);
+    const sub = [];
+    if (repasses.length) sub.push(`*— Repasses*\n${repasses.map(linhaPagar).join('\n')}`);
+    if (outros.length) sub.push(`*— Outros*\n${outros.map(linhaPagar).join('\n')}`);
+    blocos.push(`🔔 *SÓ A PAGAR — ${soPagar.length} item(ns), ${fmtR(soma(soPagar))}*\n${sub.join('\n\n')}`);
   }
   if (soReceber.length) {
-    blocos.push(`💰 *SÓ A RECEBER* — ${soReceber.length} item(ns), ${fmtR(soma(soReceber))}\n` +
-      soReceber.map(r => `• ${r.descricao || '—'} — ${fmtR(valor(r))} — venceu ${data(r.data_vencimento)}`).join('\n'));
+    blocos.push(`💰 *SÓ A RECEBER — ${soReceber.length} item(ns), ${fmtR(soma(soReceber))}*\n` +
+      soReceber.map(r => `${item(r)} — ${fmtR(valor(r))} — ${venceuRec(r)}`).join('\n'));
   }
-  const corpo = `📊 Financeiro do dia — a pagar ${fmtR(soma(pagar))} · a receber em atraso ${fmtR(soma(receber))}\n\n` +
+  const corpo = `📊 Financeiro do dia — a pagar ${fmtR(soma(pagar))} · a receber ${fmtR(soma(receber))}\n\n` +
     `${blocos.join('\n\n')}\n\nConfirme no sistema o que for pago ou recebido para parar os lembretes.`;
 
   try { await zapiSendText(destTel, corpo); contasPagar.canais.push('whatsapp'); }
