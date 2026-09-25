@@ -393,6 +393,56 @@ async function processarContasPagarProprias(DB) {
   return out;
 }
 
+// Par do aviso acima, do lado de ENTRADA: parcelas de acordo que o devedor não pagou.
+// Pedido do Gustavo em 25/09/2026 — mensagem separada, mesmo destino, só as JÁ
+// atrasadas (vencimento < hoje: pagamento do dia pode compensar depois do aviso) e
+// só acordos: penhora/Sisbajud/INSS não é o devedor pagando, é o juízo liberando, e
+// já tem fila própria (aba Judicial). Critério igual ao de _finJudCarregar no
+// index.html: categoria com "sisbajud" ou "penhora" = judicial ("Acordos Judiciais"
+// fica, é acordo cobrado por boleto/Pix).
+const RE_RECEBER_JUDICIAL = /sisbajud|penhora/i;
+async function processarParcelasReceberAtrasadas(DB) {
+  const out = { atrasadas: 0, judiciais_fora: 0, notificado: false, canais: [] };
+  const hoje = hojeBR();
+  let rows;
+  try {
+    rows = await sbFetch(
+      `fin_lancamento?select=id,descricao,valor,data_vencimento,` +
+      `cats:fin_lancamento_categoria(categoria:fin_categoria(descricao))` +
+      `&tipo_movimento=eq.1&status=in.(0,2)&data_vencimento=lt.${hoje}` +
+      `&order=data_vencimento.asc&limit=300`
+    );
+  } catch (e) { return { ...out, error: e.message }; }
+  if (!Array.isArray(rows)) return out;
+  const ehJudicial = (r) => {
+    const cats = (r.cats || []).map(c => c?.categoria?.descricao || '').filter(Boolean);
+    return cats.length ? cats.some(c => RE_RECEBER_JUDICIAL.test(c)) : RE_RECEBER_JUDICIAL.test(r.descricao || '');
+  };
+  const acordos = rows.filter(r => !ehJudicial(r));
+  out.judiciais_fora = rows.length - acordos.length;
+  out.atrasadas = acordos.length;
+  if (acordos.length === 0) return out;
+
+  const destTel = String(process.env.CONTAS_PAGAR_PHONE || DB.config?.contasPagarTelefone || '').replace(/\D/g, '');
+  const destEmail = process.env.CONTAS_PAGAR_EMAIL || DB.config?.contasPagarEmail || '';
+  if (!destTel && !destEmail) return { ...out, skipped: 'sem destino (CONTAS_PAGAR_PHONE/EMAIL)' };
+
+  const linhas = acordos.map(r => {
+    const venc = String(r.data_vencimento || '').split('-').reverse().join('/');
+    return `• ${r.descricao || '—'} — ${fmtR(Math.abs(Number(r.valor)) || 0)} — venceu ${venc}`;
+  });
+  const total = acordos.reduce((s, r) => s + Math.abs(Number(r.valor) || 0), 0);
+  const corpo = `Parcelas a receber em atraso — ${acordos.length} item(ns), total ${fmtR(total)}:\n\n` +
+    `${linhas.join('\n')}\n\nDê baixa no sistema quando o pagamento entrar para parar os lembretes.`;
+
+  try { if (destTel) { await zapiSendText(destTel, '💰 ' + corpo); out.canais.push('whatsapp'); } }
+  catch (e) { out.whatsapp_error = e.message; }
+  try { if (destEmail && emailDisponivel()) { await sendEmail({ to: destEmail, subject: 'Cobrasq — Parcelas a receber em atraso', text: corpo }); out.canais.push('email'); } }
+  catch (e) { out.email_error = e.message; }
+  out.notificado = out.canais.length > 0;
+  return out;
+}
+
 // ── Fase 3 (sombra) — fonte relacional da lista de devedores ────────
 // Hoje a régua lê os devedores do blob `cobrasq_data` (DB.devedores). A cura da
 // Fase 3 é ler do relacional: `cobrancas` é a fonte única pós-Fase C. Esta função
@@ -1158,10 +1208,11 @@ module.exports = async function handler(req, res) {
 
     // PR7: contas a pagar próprias — independe da régua de cobrança estar ativa.
     const contasPagar = dry ? null : await processarContasPagarProprias(DB);
+    const receberAtrasadas = dry ? null : await processarParcelasReceberAtrasadas(DB);
 
     if (DB.config?.reguaAtiva === false) {
       const calendarStats = dry ? null : await processarCalendarPendingDeletes();
-      return res.status(200).json({ ok: true, msg: 'Régua pausada globalmente.', calendar: calendarStats, contasPagar });
+      return res.status(200).json({ ok: true, msg: 'Régua pausada globalmente.', calendar: calendarStats, contasPagar, receberAtrasadas });
     }
 
     // ===== RÉGUA C — QUITAFÁCIL (independe das outras réguas). Duplo gate:
@@ -1189,7 +1240,7 @@ module.exports = async function handler(req, res) {
 
     if (reguaCobranca.length === 0 && reguaAcordo.length === 0) {
       const calendarStats = dry ? null : await processarCalendarPendingDeletes();
-      return res.status(200).json({ ok: true, msg: 'Nenhum passo configurado nas réguas clássicas.', calendar: calendarStats, contasPagar, quita, negativacao, recalculo });
+      return res.status(200).json({ ok: true, msg: 'Nenhum passo configurado nas réguas clássicas.', calendar: calendarStats, contasPagar, receberAtrasadas, quita, negativacao, recalculo });
     }
 
     const credor = DB.config?.empresa || 'COBRASQ';
@@ -1396,7 +1447,7 @@ module.exports = async function handler(req, res) {
     try { zapsign = await processarLembretesZapSign({ dry: dry || !zapsignLive }); }
     catch (e) { zapsign = { error: e.message }; }
 
-    res.status(200).json({ ok: true, hoje: hojeBR(), ...resultado, calendar, contasPagar, zapsign, zapsign_live: zapsignLive, quita, negativacao, recalculo });
+    res.status(200).json({ ok: true, hoje: hojeBR(), ...resultado, calendar, contasPagar, receberAtrasadas, zapsign, zapsign_live: zapsignLive, quita, negativacao, recalculo });
   } catch (err) {
     console.error('[cron-regua]', err);
     res.status(500).json({ ok: false, error: err.message });
