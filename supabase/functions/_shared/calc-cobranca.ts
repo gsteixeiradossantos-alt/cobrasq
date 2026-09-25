@@ -112,3 +112,48 @@ export function calcularCobranca(valorOriginal: number, vencimentoISO: string, h
 
   return { valorOriginal, totalAvista: total, boletoOptions, boleto12, cartao12Total, cartao12Parcela };
 }
+
+// Vários títulos com vencimentos próprios (cobrancas.divida.titulos, ≥2 válidos):
+// cada um corre do SEU vencimento e as parcelas são somadas sem arredondar;
+// ceil só no total — mesma conta de templates/calc-engine.js#cobrancaTitulos e
+// de calcDividaCobrancaTitulos (index.html). Título ainda não vencido entra
+// pelo valor puro (sem multa/taxa), igual ao painel.
+export interface TituloCobranca { numero?: string; valor: number; vencimento: string; }
+
+function numBR(v: unknown): number {
+  if (typeof v === 'number') return v;
+  const s = String(v ?? '').replace(/[^\d,.-]/g, '');
+  const n = s.includes(',') ? Number(s.replace(/\./g, '').replace(',', '.')) : Number(s);
+  return isFinite(n) ? n : 0;
+}
+
+export function titulosValidos(divida: any): TituloCobranca[] {
+  const arr = divida && Array.isArray(divida.titulos) ? divida.titulos : [];
+  const ok = arr
+    .map((t: any) => ({ numero: String(t?.numero ?? '').trim(), valor: numBR(t?.valor), vencimento: String(t?.vencimento ?? '').trim().slice(0, 10) }))
+    .filter((t: TituloCobranca) => t.valor > 0 && /^\d{4}-\d{2}-\d{2}$/.test(t.vencimento));
+  return ok.length >= 2 ? ok : [];
+}
+
+export function calcularCobrancaTitulos(titulos: TituloCobranca[], hojeISO: string): CalcCobranca | null {
+  const dH = parseDataLocal(hojeISO);
+  if (!dH || !titulos.length) return null;
+  let bruto = 0, valorOriginal = 0;
+  for (const t of titulos) {
+    const dV = parseDataLocal(t.vencimento);
+    if (!dV || !(t.valor > 0)) return null;
+    valorOriginal += t.valor;
+    const dias = Math.round((dH.getTime() - dV.getTime()) / 86400000);
+    if (dias <= 0) { bruto += t.valor; continue; }
+    const meses = mesesEntre(dV, dH);
+    const valorCorrigido = t.valor + t.valor * COB.correcaoMensal * meses;
+    const subtotal = valorCorrigido + valorCorrigido * COB.jurosMensal * meses + valorCorrigido * COB.multaPct;
+    bruto += subtotal + subtotal * COB.taxaServ;
+  }
+  const total = Math.ceil(bruto);
+  const boletoOptions = gerarBoletoOptions(total);
+  const boleto12 = boletoOptions.find((o) => o.n === 12) || boletoOptions[boletoOptions.length - 1] || null;
+  const cartao12Total = Math.ceil(total * COB.cartaoMult);
+  const cartao12Parcela = Math.ceil(cartao12Total / 12);
+  return { valorOriginal, totalAvista: total, boletoOptions, boleto12, cartao12Total, cartao12Parcela };
+}

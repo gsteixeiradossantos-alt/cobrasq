@@ -13,6 +13,7 @@ vale em todo lugar.** As telas viraram "filiais" finas que só chamam o motor.
 | `CalcEngine.correcaoMensal(valorIni, dataIni, dataFim, indice)` | Correção monetária composta, mês fechado → `{valorCorrigido, mesesAplicados}`. |
 | `CalcEngine.juridica(valor, dataIni, dataFim, indice, multaPct, honPct, jurosMensalPct)` | Conta da **peça/memorial**: correção + juros pró-rata + multa + honorários + garantia STJ. |
 | `CalcEngine.cobranca({valorOriginal, meses, correcaoMensal, jurosMensal, multaPct, taxaServico, aplicarMulta, aplicarTaxa})` | **Núcleo extrajudicial**: correção + juros + multa + taxa de serviço, total arredondado pra cima. O chamador passa `meses` e os parâmetros (preserva o número de cada origem). |
+| `CalcEngine.cobrancaTitulos(titulos, opts)` | **Vários títulos com vencimentos próprios** (`cobrancas.divida.titulos = [{numero, valor, vencimento}]`, ≥2 válidos): roda `cobranca()` por título com os `meses` de cada um, soma as parcelas sem arredondar e aplica o `ceil` só no total. No painel: `calcDividaCobrancaTitulos` / `dividaAtualHoje`; nas edge: `_shared/calc-cobranca.ts#calcularCobrancaTitulos` (Bia/Carlos). Título ainda não vencido entra pelo valor puro. |
 
 Módulo **puro** (sem DOM/rede), dual-mode (global no browser + CommonJS nos testes),
 servido de `templates/` para **não** cair no rewrite catch-all do `vercel.json`
