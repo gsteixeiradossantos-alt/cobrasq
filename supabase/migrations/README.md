@@ -223,7 +223,7 @@ de `20260924c`.
 
 ## 20260925_02 — vigia de ações (devedor nosso como parte em outro processo, F-47)
 
-**Não aplicada.** `20260925_02_vigia_acoes.sql` (+ `_rollback`). Aditiva: tabelas
+**Aplicada em prod em 25/09/2026** (via MCP; conferido: universo 846, sendo 581 COBRASQ todos com `doc`; cron `vigia-acoes` `*/3 6-8 * * *` ativo; view com `security_invoker=true`). `20260925_02_vigia_acoes.sql` (+ `_rollback`). Aditiva: tabelas
 `vigia_acoes` (achados, 1 linha por alvo × processo, status novo/visto/descartado) e
 `vigia_acoes_busca` (fila diária), view `vw_vigia_acoes_universo` (security_invoker) e
 cron `vigia-acoes` a cada 3 min das 06:00 às 08:57 UTC. RLS: staff lê e marca
