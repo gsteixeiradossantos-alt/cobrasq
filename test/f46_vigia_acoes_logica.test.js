@@ -90,5 +90,52 @@ const item = (o) => Object.assign({
     assert.strictEqual(r.achados[0].polo, 'A');
   });
 
+  // ── Filtro por UF (decisão do Gustavo, 25/09/2026: "nosso processo no Paraná, corta por Paraná")
+  ok('UF do CNJ: TJPR, TRT9 e TRF4 (região com várias UFs)', () => {
+    assert.deepStrictEqual(L.ufsDoCNJ('00055698220258160131'), ['PR']);       // 8.16 = TJPR
+    assert.deepStrictEqual(L.ufsDoCNJ('00001231220255090001'), ['PR']);       // 5.09 = TRT9
+    assert.ok(L.ufsDoCNJ('50001231220254047000').includes('PR'));             // 4.04 = TRF4
+    assert.ok(L.ufsDoCNJ('50001231220254047000').includes('SC'));
+    assert.deepStrictEqual(L.ufsDoCNJ('123'), []);
+  });
+  ok('UF de referência: CNJ → devedor → credor → PR', () => {
+    assert.deepStrictEqual(L.ufReferencia({ cnj: '00055698220258160131', ufDevedor: 'SC' }), { uf: 'PR', fonte: 'cnj' });
+    assert.deepStrictEqual(L.ufReferencia({ cnj: null, ufDevedor: 'sc', ufCredor: 'PR' }), { uf: 'SC', fonte: 'devedor' });
+    assert.deepStrictEqual(L.ufReferencia({ cnj: null, ufDevedor: null, ufCredor: 'MT' }), { uf: 'MT', fonte: 'credor' });
+    assert.deepStrictEqual(L.ufReferencia({}), { uf: 'PR', fonte: 'padrao' });
+  });
+  ok('achado em TJSP é cortado quando o nosso processo é no PR; TRF4 fica', () => {
+    const sp = item({ numero_processo: '10001231220258260100', siglaTribunal: 'TJSP' });
+    const r = L.agruparAchados([sp], 'Wesley Cechin Gobatto', new Set(), ['PR']);
+    assert.strictEqual(r.achados.length, 0); assert.strictEqual(r.descartados.fora_da_uf, 1);
+    const trf = item({ numero_processo: '50001231220254047000', siglaTribunal: 'TRF4' });
+    assert.strictEqual(L.agruparAchados([trf], 'Wesley Cechin Gobatto', new Set(), ['PR']).achados.length, 1);
+    const seeu = item({ numero_processo: '00001231220258160001', siglaTribunal: 'SEEU' });
+    assert.strictEqual(L.agruparAchados([seeu], 'Wesley Cechin Gobatto', new Set(), ['PR']).descartados.outro_ramo, 1);
+    assert.strictEqual(L.agruparAchados([item()], 'Wesley Cechin Gobatto', new Set(), ['PR']).achados.length, 1);
+  });
+
+  // ── Executados dos processos do escritório
+  ok('campo executado: separa "A; B" e "A, B" sem quebrar "Ltda, ME"; tira COBRASQ', () => {
+    assert.deepStrictEqual(L.nomesExecutados('Creative Soluções Visuais Ltda; Wesley Cechin Gobatto'), ['Creative Soluções Visuais Ltda', 'Wesley Cechin Gobatto']);
+    assert.deepStrictEqual(L.nomesExecutados('Fulano Ltda, ME'), ['Fulano Ltda, ME']);
+    assert.deepStrictEqual(L.nomesExecutados('A Silva, B Souza, C Lima'), ['A Silva', 'B Souza', 'C Lima']);
+    assert.deepStrictEqual(L.nomesExecutados('COBRASQ RECUPERACAO DE CREDITO LTDA; Beltrano'), ['Beltrano']);
+  });
+  ok('Wesley entra como executado do escritório (0005569-82.2025.8.16.0131, UF PR)', () => {
+    const alvos = L.montarAlvos([
+      { origem: 'cobrasq', devedor_id: 'd1', cobranca_id: 'c1', nome: 'Ciclano de Tal', processo_ref: null, uf_devedor: 'SC', uf_credor: 'PR' },
+      { origem: 'escritorio', nome: 'Creative Soluções Visuais Ltda; Wesley Cechin Gobatto', processo_ref: '00055698220258160131' },
+      { origem: 'escritorio', nome: 'CICLANO DE TAL', processo_ref: '00001231220258160001' },   // já é devedor COBRASQ
+    ]);
+    const w = alvos.find(a => /Wesley/.test(a.nome));
+    assert.strictEqual(w.alvo, 'esc:WESLEY CECHIN GOBATTO');
+    assert.strictEqual(w.origem, 'escritorio');
+    assert.strictEqual(w.processo_ref, '0005569-82.2025.8.16.0131');
+    assert.deepStrictEqual(w.ufs, ['PR']);
+    assert.strictEqual(alvos.filter(a => /ciclano/i.test(a.nome)).length, 1);   // sem alvo duplicado
+    assert.deepStrictEqual(alvos.find(a => a.alvo === 'dev:d1').ufs, ['SC']);
+  });
+
   console.log(`\nF-46 · ${n} verificações ok.`);
 })().catch(e => { console.error('  FALHOU', e.message); process.exit(1); });

@@ -7,15 +7,27 @@
 -- procura cada devedor ativo no DJEN (comunicaapi.pje.jus.br, busca por nome) e
 -- grava aqui o que achar em processo que NÃO é nosso.
 --
---   vigia_acoes          achados, 1 linha por (devedor, processo); status da tela
---   vigia_acoes_busca    quando cada devedor foi buscado pela última vez (fila diária)
---   vw_vigia_acoes_universo  devedores de cobranças ATIVAS (mesmo critério do painel,
---                        `_pnlEncerrado`/`_STATUS_FORA_REGUA` no index.html): 581 em
---                        25/09/2026. fora_crm NÃO tira da vigia (acordo assinado
---                        continua sendo crédito a proteger).
+-- Decisões do Gustavo (25/09/2026):
+--   * universo = devedores de cobranças ativas + executados dos processos do
+--     escritório (intimacoes_email.executado, processo sem cobrança vinculada);
+--   * só vale achado nos tribunais da UF do NOSSO processo ("nosso processo for no
+--     Paraná, corta por Paraná"): TJ, TRT e TRF daquela UF. UF = J.TR do CNJ; sem
+--     CNJ, UF do devedor → do credor → PR. Regra em logica.mjs (ufReferencia).
+--
+--   vigia_acoes          achados, 1 linha por (alvo, processo); status da tela.
+--                        alvo = 'dev:<devedor_id>' (COBRASQ) ou 'esc:<nome normalizado>'
+--                        (executado do escritório, sem cadastro de devedor).
+--   vigia_acoes_busca    quando cada alvo foi buscado pela última vez (fila diária)
+--   vw_vigia_acoes_universo  (a) devedores de cobranças ATIVAS (mesmo critério do
+--                        painel, `_pnlEncerrado`/`_STATUS_FORA_REGUA` no index.html):
+--                        581 em 25/09/2026. fora_crm NÃO tira da vigia (acordo
+--                        assinado continua sendo crédito a proteger);
+--                        (b) executados dos processos do escritório sem cobrança
+--                        (265 processos em 25/09/2026). A Edge Function separa os
+--                        nomes ("A; B") e tira quem já está em (a).
 --   cron `vigia-acoes`   a cada 3 min das 06:00 às 08:57 UTC (03:00–05:57 BRT),
---                        ~35 devedores por chamada → 60 chamadas/dia dão folga
---                        para os 581 (1 req/1,1 s; limite medido 20 req/~5 s).
+--                        ~35 alvos por chamada → 60 chamadas/dia = 2.100 vagas para
+--                        ~1.100 alvos (1 req/1,1 s; limite medido 20 req/~5 s).
 --
 -- Aditiva (2 tabelas, 1 view, 1 job). Rollback pareado. Nada sai para terceiros.
 -- NÃO rodar `supabase db push` cego — aplicar via SQL Editor/MCP após review.
@@ -28,8 +40,12 @@ begin;
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.vigia_acoes (
   id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  devedor_id       uuid NOT NULL REFERENCES public.devedores(id) ON DELETE CASCADE,
+  alvo             text NOT NULL,        -- 'dev:<uuid>' | 'esc:<nome normalizado>'
+  origem           text NOT NULL DEFAULT 'cobrasq' CHECK (origem IN ('cobrasq','escritorio')),
+  devedor_id       uuid REFERENCES public.devedores(id) ON DELETE CASCADE,  -- NULL = executado do escritório
   cobranca_id      uuid REFERENCES public.cobrancas(id) ON DELETE SET NULL,
+  processo_ref     text,                 -- NOSSO processo contra ele (CNJ formatado), se houver
+  uf_ref           text,                 -- UF que filtrou os tribunais
   nome_devedor     text,                 -- nome do cadastro na hora da busca
   nome_encontrado  text,                 -- como veio no diário (conferir homônimo)
   numero_processo  text NOT NULL,        -- CNJ formatado, sempre completo
@@ -52,12 +68,12 @@ CREATE TABLE IF NOT EXISTS public.vigia_acoes (
   visto_em         timestamptz,
   criado_em        timestamptz NOT NULL DEFAULT now(),
   atualizado_em    timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT uq_vigia_acoes_dev_proc UNIQUE (devedor_id, digitos)
+  CONSTRAINT uq_vigia_acoes_alvo_proc UNIQUE (alvo, digitos)
 );
 CREATE INDEX IF NOT EXISTS ix_vigia_acoes_status ON public.vigia_acoes (status, polo, ultima_data DESC);
 
 COMMENT ON TABLE public.vigia_acoes IS
-  'Vigia de ações (Edge Function vigia-acoes): devedor de cobrança ativa encontrado no DJEN em processo que não é nosso. polo A = devedor autor (crédito a penhorar), P = réu de outro credor. A API não traz CPF: status descartado = homônimo/irrelevante, decidido na tela.';
+  'Vigia de ações (Edge Function vigia-acoes): devedor de cobrança ativa (origem cobrasq) ou executado de processo do escritório (origem escritorio) encontrado no DJEN, nos tribunais da UF do nosso processo, em processo que não é nosso. polo A = devedor autor (crédito a penhorar), P = réu de outro credor. A API não traz CPF: status descartado = homônimo/irrelevante, decidido na tela.';
 
 ALTER TABLE public.vigia_acoes ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS vigia_acoes_staff_select ON public.vigia_acoes;
@@ -77,12 +93,14 @@ CREATE POLICY vigia_acoes_owner_write ON public.vigia_acoes
 -- 2) Fila diária
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.vigia_acoes_busca (
-  devedor_id   uuid PRIMARY KEY REFERENCES public.devedores(id) ON DELETE CASCADE,
+  alvo         text PRIMARY KEY,   -- mesma chave de vigia_acoes.alvo
+  devedor_id   uuid REFERENCES public.devedores(id) ON DELETE CASCADE,
   nome_busca   text,          -- texto enviado à API (nome limpo); NULL = não buscável
   buscado_em   date,          -- dia (BRT) da última busca concluída; NULL após erro
   buscado_ts   timestamptz,
   comunicacoes integer,       -- total que a API devolveu (antes do filtro por nome exato)
   achados      integer,
+  uf_ref       text,
   motivo       text,          -- nome_curto | truncado | NULL
   erro         text
 );
@@ -96,26 +114,48 @@ CREATE POLICY vigia_busca_owner_write ON public.vigia_acoes_busca
           WITH CHECK (public.current_user_papel() = 'proprietario');
 
 -- ----------------------------------------------------------------------------
--- 3) Universo: devedores (todas as partes) de cobranças ativas
+-- 3) Universo — (a) devedores de cobranças ativas; (b) executados do escritório
 -- ----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW public.vw_vigia_acoes_universo
 WITH (security_invoker = true) AS
-SELECT DISTINCT ON (d.id)
-  d.id   AS devedor_id,
-  d.nome,
-  c.id   AS cobranca_id
-FROM public.cobrancas c
-JOIN public.cobranca_partes cp ON cp.cobranca_id = c.id
-JOIN public.devedores d        ON d.id = cp.devedor_id
-WHERE coalesce(c.is_draft, false) = false
-  AND coalesce(c.arquivado, false) = false
-  AND coalesce(d.is_draft, false) = false
-  AND coalesce(c.status, '') NOT IN ('Quitado','Devolvida','Sem êxito','Recebido','Baixados','Encerrada',
-                                     '5. Quitado','6. Baixados','8. Devolvida','9. Encerrada','Devolver')
-  AND coalesce(c.status, '') !~* 'quitad'
-  AND coalesce(c.status, '') !~* 'sem\s*[êe]xito'
-  AND nullif(trim(d.nome), '') IS NOT NULL
-ORDER BY d.id, cp.principal DESC NULLS LAST, c.created_at DESC;
+SELECT * FROM (
+  SELECT DISTINCT ON (d.id)
+    'cobrasq'::text AS origem,
+    d.id            AS devedor_id,
+    c.id            AS cobranca_id,
+    d.nome,
+    nullif(regexp_replace(coalesce(c.numero_processo, ''), '\D', '', 'g'), '') AS processo_ref,
+    d.uf            AS uf_devedor,
+    cl.uf           AS uf_credor
+  FROM public.cobrancas c
+  JOIN public.cobranca_partes cp ON cp.cobranca_id = c.id
+  JOIN public.devedores d        ON d.id = cp.devedor_id
+  LEFT JOIN public.clientes cl   ON cl.id = c.cliente_id
+  WHERE coalesce(c.is_draft, false) = false
+    AND coalesce(c.arquivado, false) = false
+    AND coalesce(d.is_draft, false) = false
+    AND coalesce(c.status, '') NOT IN ('Quitado','Devolvida','Sem êxito','Recebido','Baixados','Encerrada',
+                                       '5. Quitado','6. Baixados','8. Devolvida','9. Encerrada','Devolver')
+    AND coalesce(c.status, '') !~* 'quitad'
+    AND coalesce(c.status, '') !~* 'sem\s*[êe]xito'
+    AND nullif(trim(d.nome), '') IS NOT NULL
+  ORDER BY d.id, cp.principal DESC NULLS LAST, (c.numero_processo IS NOT NULL) DESC, c.created_at DESC
+) a
+UNION ALL
+SELECT * FROM (
+  -- Processo do escritório (intimação por e-mail nas nossas OABs) SEM cobrança
+  -- vinculada: com cobrança, quem manda é a cobrança (quitada = fora da vigia).
+  -- `nome` aqui é o campo executado inteiro ("A; B"): a função separa.
+  SELECT DISTINCT ON (e.digitos)
+    'escritorio'::text, NULL::uuid, NULL::uuid,
+    e.executado, e.digitos, NULL::text, NULL::text
+  FROM public.intimacoes_email e
+  WHERE e.digitos ~ '^\d{20}$'
+    AND nullif(trim(e.executado), '') IS NOT NULL
+    AND NOT EXISTS (SELECT 1 FROM public.cobrancas c2
+                    WHERE regexp_replace(coalesce(c2.numero_processo, ''), '\D', '', 'g') = e.digitos)
+  ORDER BY e.digitos, e.recebido_em DESC NULLS LAST
+) b;
 
 -- ----------------------------------------------------------------------------
 -- 4) Cron — a Edge Function anda a fila; quem já foi buscado hoje é pulado.

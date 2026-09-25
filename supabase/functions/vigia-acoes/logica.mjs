@@ -64,6 +64,54 @@ export function destinatarioCasa(nomeDest, chaveDevedor) {
 
 function soDigitos(v) { return String(v ?? '').replace(/\D/g, ''); }
 
+// ---------------------------------------------------------------------------
+// Filtro por UF (decisão do Gustavo, 25/09/2026): "nosso processo for no
+// Paraná, corta por Paraná". A UF do NOSSO processo (J.TR do CNJ; sem CNJ, a UF
+// do cadastro do devedor, depois a do credor, depois PR) define quais tribunais
+// valem: o TJ, o(s) TRT e o TRF daquela UF. Achado fora deles é descartado
+// (`fora_da_uf`); SEEU, STF, STJ, TST, eleitoral e militar também (`outro_ramo`).
+// ---------------------------------------------------------------------------
+const UF_TJ = ['', 'AC','AL','AP','AM','BA','CE','DF','ES','GO','MA','MT','MS','MG','PA','PB','PR',
+               'PE','PI','RJ','RN','RS','RO','RR','SC','SE','SP','TO']; // J=8, TR 01..27
+const UF_TRT = { 1:['RJ'], 2:['SP'], 3:['MG'], 4:['RS'], 5:['BA'], 6:['PE'], 7:['CE'], 8:['PA','AP'],
+  9:['PR'], 10:['DF','TO'], 11:['AM','RR'], 12:['SC'], 13:['PB'], 14:['RO','AC'], 15:['SP'], 16:['MA'],
+  17:['ES'], 18:['GO'], 19:['AL'], 20:['SE'], 21:['RN'], 22:['PI'], 23:['MT'], 24:['MS'] };
+const UF_TRF = { 1:['AC','AM','AP','BA','DF','GO','MA','PA','PI','RO','RR','TO'], 2:['RJ','ES'],
+  3:['SP','MS'], 4:['RS','SC','PR'], 5:['PE','AL','CE','PB','RN','SE'], 6:['MG'] };
+export const UFS = new Set(UF_TJ.filter(Boolean));
+
+// UFs abrangidas pelo tribunal do CNJ (20 dígitos). [] = ramo que não vigiamos.
+export function ufsDoCNJ(dig) {
+  const d = soDigitos(dig);
+  if (d.length !== 20) return [];
+  const j = d[13], tr = Number(d.slice(14, 16));
+  if (j === '8') return UF_TJ[tr] ? [UF_TJ[tr]] : [];
+  if (j === '5') return UF_TRT[tr] || [];      // TR 00 = TST
+  if (j === '4') return UF_TRF[tr] || [];
+  return [];                                    // 1 STF, 3 STJ, 6 eleitoral, 7/9 militar
+}
+
+// UF do nosso processo, na ordem: CNJ (se aponta UMA UF) → devedor → credor → PR.
+export function ufReferencia({ cnj, ufDevedor, ufCredor } = {}) {
+  const u = ufsDoCNJ(cnj);
+  if (u.length === 1) return { uf: u[0], fonte: 'cnj' };
+  for (const [v, fonte] of [[ufDevedor, 'devedor'], [ufCredor, 'credor']]) {
+    const x = String(v ?? '').trim().toUpperCase();
+    if (UFS.has(x)) return { uf: x, fonte };
+  }
+  return { uf: 'PR', fonte: 'padrao' };
+}
+
+// O achado (CNJ + sigla do tribunal) está na UF de referência?
+// `uf`: uma UF ou lista (executado do escritório com processos em mais de uma UF).
+export function motivoForaDaUF(digAchado, siglaTribunal, uf) {
+  if (/^(SEEU|STF|STJ|TST|TSE|STM)$/i.test(String(siglaTribunal || '').trim())) return 'outro_ramo';
+  const ufs = ufsDoCNJ(digAchado);
+  if (!ufs.length) return 'outro_ramo';
+  const ref = Array.isArray(uf) ? uf : [uf];
+  return ufs.some(u => ref.includes(u)) ? null : 'fora_da_uf';
+}
+
 // Processo da casa? (advogado nosso, parte COBRASQ/T&A, ou CNJ já cadastrado em cobrancas)
 export function ehProcessoNosso(item, cnjsNossos) {
   const dig = soDigitos(item?.numero_processo || item?.numeroprocessocommascara);
@@ -92,11 +140,12 @@ function dataISO(v) {
 }
 
 // Itens da API para UM devedor → achados agrupados por processo.
-// Devolve { achados: [...], descartados: { nome_diferente, nosso, sem_cnj } }.
-export function agruparAchados(itens, nomeDevedor, cnjsNossos) {
+// `uf` (opcional): UF de referência (ufReferencia) — achado de outro tribunal cai.
+// Devolve { achados: [...], descartados: { nome_diferente, nosso, sem_cnj, fora_da_uf, outro_ramo } }.
+export function agruparAchados(itens, nomeDevedor, cnjsNossos, uf = null) {
   const chave = chaveNome(nomeDeBusca(nomeDevedor).busca || nomeDevedor);
   const porProc = new Map();
-  const desc = { nome_diferente: 0, nosso: 0, sem_cnj: 0 };
+  const desc = { nome_diferente: 0, nosso: 0, sem_cnj: 0, fora_da_uf: 0, outro_ramo: 0 };
   for (const it of (itens || [])) {
     const dests = Array.isArray(it?.destinatarios) ? it.destinatarios : [];
     const meu = dests.filter(d => destinatarioCasa(d?.nome, chave));
@@ -104,6 +153,7 @@ export function agruparAchados(itens, nomeDevedor, cnjsNossos) {
     if (ehProcessoNosso(it, cnjsNossos)) { desc.nosso++; continue; }
     const dig = soDigitos(it.numero_processo || it.numeroprocessocommascara);
     if (dig.length !== 20) { desc.sem_cnj++; continue; }
+    if (uf && uf.length) { const m = motivoForaDaUF(dig, it.siglaTribunal, uf); if (m) { desc[m]++; continue; } }
     const data = dataISO(it.data_disponibilizacao) || dataISO(it.datadisponibilizacao);
     const polo = meu.some(d => d.polo === 'A') ? 'A' : (meu.some(d => d.polo === 'P') ? 'P' : null);
     let a = porProc.get(dig);
@@ -135,4 +185,42 @@ export function agruparAchados(itens, nomeDevedor, cnjsNossos) {
     }
   }
   return { achados: [...porProc.values()], descartados: desc };
+}
+
+// "Creative Soluções Visuais Ltda; Wesley Cechin Gobatto" (intimacoes_email.executado)
+// → um nome por pessoa; parte da casa (COBRASQ/T&A) fica de fora.
+export function nomesExecutados(campo) {
+  return String(campo ?? '').split(/;|,(?!\s*(?:S\.?\s*A|ME|EPP|LTDA)\b)/i)
+    .map(x => x.replace(/\s+/g, ' ').trim())
+    .filter(x => x && !RE_NOSSA_PARTE.test(normalizar(x)));
+}
+
+// Linhas de vw_vigia_acoes_universo → alvos de busca (1 por pessoa).
+//   cobrasq    → alvo 'dev:<devedor_id>', UF por ufReferencia (CNJ → devedor → credor → PR)
+//   escritorio → o campo executado ("A; B") vira um alvo por nome, 'esc:<chave>',
+//                UF(s) do CNJ dos nossos processos; quem já é devedor COBRASQ fica só lá.
+export function montarAlvos(linhas) {
+  const alvos = new Map(); const chavesCob = new Set();
+  for (const r of (linhas || []).filter(r => r.origem !== 'escritorio')) {
+    const ref = ufReferencia({ cnj: r.processo_ref, ufDevedor: r.uf_devedor, ufCredor: r.uf_credor });
+    alvos.set('dev:' + r.devedor_id, { alvo: 'dev:' + r.devedor_id, origem: 'cobrasq', devedor_id: r.devedor_id,
+      cobranca_id: r.cobranca_id || null, nome: r.nome, processo_ref: soDigitos(r.processo_ref).length === 20 ? formatarCNJ(soDigitos(r.processo_ref)) : null,
+      ufs: [ref.uf], uf_fonte: ref.fonte });
+    chavesCob.add(chaveNome(nomeDeBusca(r.nome).busca || r.nome));
+  }
+  for (const r of (linhas || []).filter(r => r.origem === 'escritorio')) {
+    const dig = soDigitos(r.processo_ref);
+    const ufsProc = ufsDoCNJ(dig);
+    const ufs = ufsProc.length === 1 ? ufsProc : ['PR'];
+    for (const nome of nomesExecutados(r.nome)) {
+      const chave = chaveNome(nomeDeBusca(nome).busca || nome);
+      if (!chave || chavesCob.has(chave)) continue;
+      const k = 'esc:' + chave;
+      const a = alvos.get(k);
+      if (a) { for (const u of ufs) if (!a.ufs.includes(u)) a.ufs.push(u); continue; }
+      alvos.set(k, { alvo: k, origem: 'escritorio', devedor_id: null, cobranca_id: null, nome,
+        processo_ref: dig.length === 20 ? formatarCNJ(dig) : null, ufs: [...ufs], uf_fonte: 'cnj' });
+    }
+  }
+  return [...alvos.values()];
 }

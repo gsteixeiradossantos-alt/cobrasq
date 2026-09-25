@@ -1,6 +1,7 @@
 // Supabase Edge Function: vigia-acoes
-// Procura, no DJEN, os devedores de cobranças ATIVAS como parte de processo
-// judicial que NÃO é nosso — e grava o achado em `vigia_acoes` para a tela.
+// Procura, no DJEN, os devedores de cobranças ATIVAS e os executados dos
+// processos do escritório como parte de processo judicial que NÃO é nosso — só
+// nos tribunais da UF do nosso processo — e grava o achado em `vigia_acoes`.
 //
 // Por quê (25/09/2026): o devedor Wesley Cechin Gobatto, executado por nós no
 // 0005569-82.2025.8.16.0131, era AUTOR do 0002110-19.2025.8.16.0181 (JEC
@@ -11,27 +12,30 @@
 //
 // Fluxo (pg_cron a cada 3 min das 06:00 às 08:57 UTC, ver migração
 // 20260925_02_vigia_acoes.sql; cada chamada anda um pedaço da fila):
-//   1) universo = vw_vigia_acoes_universo (devedores de cobranças ativas);
+//   1) universo = vw_vigia_acoes_universo → montarAlvos (1 alvo por pessoa):
+//      'dev:<devedor_id>' (cobrança ativa) e 'esc:<nome>' (executado do escritório);
 //   2) pega quem ainda não foi buscado HOJE (vigia_acoes_busca), mais antigos primeiro;
 //   3) GET comunicaapi.pje.jus.br/api/v1/comunicacao?nomeParte=… na janela dos
 //      últimos DIAS_JANELA dias, 1 requisição a cada ESPACO_MS;
 //   4) refiltra pelo nome EXATO (a API casa por prefixo), tira processo nosso
-//      (OAB do escritório, parte COBRASQ, CNJ já cadastrado/intimado) e agrupa por CNJ;
-//   5) upsert em vigia_acoes, dedup (devedor_id, digitos). Status novo/visto/descartado
+//      (OAB do escritório, parte COBRASQ, CNJ já cadastrado/intimado), tira tribunal
+//      fora da UF do nosso processo (TJ/TRT/TRF da UF; decisão de 25/09/2026) e
+//      agrupa por CNJ;
+//   5) upsert em vigia_acoes, dedup (alvo, digitos). Status novo/visto/descartado
 //      é da tela — o worker nunca reabre um "descartado" nem um "visto".
 //
 // Ritmo medido em 25/09/2026 (evidência no PR): x-ratelimit-limit 20; a 21ª
 // chamada seguida devolve 429 com retry-after 2 e o contador volta ~5 s depois.
 // ESPACO_MS = 1100 fica ~5x abaixo do teto; 429 respeita o retry-after.
 //
-// Manual: POST { dias, limite, devedor_ids:[…], inicio, fim, dry_run:true, forcar:true }
+// Manual: POST { dias, limite, alvos:['dev:…','esc:…'], nome:'trecho', inicio, fim, dry_run:true, forcar:true }
 //   dry_run → não grava nada, devolve os achados; forcar → ignora "já buscado hoje".
 // Auth: Authorization: Bearer <CRON_INVOKE_SECRET>.
 // Secrets: CRON_INVOKE_SECRET, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
-import { nomeDeBusca, agruparAchados } from './logica.mjs';
+import { nomeDeBusca, agruparAchados, montarAlvos } from './logica.mjs';
 
 const API = 'https://comunicaapi.pje.jus.br/api/v1/comunicacao';
 const DIAS_JANELA = 3;          // olha 3 dias para trás: atraso de 1–2 dias não perde nada
@@ -98,7 +102,7 @@ async function buscarNome(nome: string, inicio: string, fim: string): Promise<{ 
   return { itens, total, truncado: itens.length < total };
 }
 
-// CNJs "da casa": toda cobrança com processo + tudo o que já saiu no DJEN nas nossas OABs.
+// CNJs "da casa": toda cobrança com processo + tudo o que já saiu no DJEN ou no e-mail nas nossas OABs.
 async function carregarCnjsNossos(): Promise<Set<string>> {
   const s = new Set<string>();
   const add = (v: unknown) => { const d = String(v ?? '').replace(/\D/g, ''); if (d.length === 20) s.add(d); };
@@ -114,16 +118,24 @@ async function carregarCnjsNossos(): Promise<Set<string>> {
     (data || []).forEach((r: any) => add(r.digitos));
     if (!data || data.length < 1000) break;
   }
+  // Processos do escritório que só chegaram por e-mail (base dos alvos 'esc:').
+  for (let de = 0; ; de += 1000) {
+    const { data, error } = await sb.from('intimacoes_email').select('digitos').not('digitos', 'is', null).range(de, de + 999);
+    if (error) break;
+    (data || []).forEach((r: any) => add(r.digitos));
+    if (!data || data.length < 1000) break;
+  }
   return s;
 }
 
 async function gravarAchado(dev: any, a: any): Promise<'novo' | 'atualizado' | 'erro'> {
   const { data: exist, error: eSel } = await sb.from('vigia_acoes')
-    .select('id, comunicacoes, primeira_data, ultima_data, polo').eq('devedor_id', dev.devedor_id).eq('digitos', a.digitos).maybeSingle();
+    .select('id, comunicacoes, primeira_data, ultima_data, polo').eq('alvo', dev.alvo).eq('digitos', a.digitos).maybeSingle();
   if (eSel) { console.error('[vigia] select', eSel.message); return 'erro'; }
   if (!exist) {
     const { error } = await sb.from('vigia_acoes').insert({
-      devedor_id: dev.devedor_id, cobranca_id: dev.cobranca_id,
+      alvo: dev.alvo, origem: dev.origem, devedor_id: dev.devedor_id, cobranca_id: dev.cobranca_id,
+      processo_ref: dev.processo_ref, uf_ref: dev.ufs.join('/'),
       nome_devedor: dev.nome, nome_encontrado: a.nome_encontrado,
       numero_processo: a.numero_processo, digitos: a.digitos, polo: a.polo,
       tribunal: a.tribunal, classe: a.classe, orgao: a.orgao, link: a.link,
@@ -166,42 +178,49 @@ Deno.serve(async (req) => {
     const fim = dataISO(body?.fim) || hoje;
     const inicio = dataISO(body?.inicio) || menosDias(fim, dias);
 
-    // Universo
-    let q = sb.from('vw_vigia_acoes_universo').select('devedor_id, nome, cobranca_id');
-    if (Array.isArray(body?.devedor_ids) && body.devedor_ids.length) q = q.in('devedor_id', body.devedor_ids);
-    const { data: universo, error: eU } = await q.limit(5000);
+    // Universo → alvos
+    const { data: linhas, error: eU } = await sb.from('vw_vigia_acoes_universo')
+      .select('origem, devedor_id, cobranca_id, nome, processo_ref, uf_devedor, uf_credor').limit(10000);
     if (eU) throw new Error('universo: ' + eU.message);
+    let universo = montarAlvos(linhas || []);
+    if (Array.isArray(body?.alvos) && body.alvos.length) universo = universo.filter((d: any) => body.alvos.includes(d.alvo));
+    if (typeof body?.nome === 'string' && body.nome.trim()) {
+      const t = body.nome.trim().toUpperCase();
+      universo = universo.filter((d: any) => String(d.nome).toUpperCase().includes(t));
+    }
 
     // Quem já foi buscado hoje (e quando foi a última vez dos demais)
-    const { data: estado } = await sb.from('vigia_acoes_busca').select('devedor_id, buscado_em, buscado_ts').limit(10000);
-    const est = new Map((estado || []).map((r: any) => [r.devedor_id, r]));
-    const fila = (universo || [])
-      .filter((d: any) => forcar || est.get(d.devedor_id)?.buscado_em !== hoje)
-      .sort((a: any, b: any) => String(est.get(a.devedor_id)?.buscado_ts || '').localeCompare(String(est.get(b.devedor_id)?.buscado_ts || '')))
+    const { data: estado } = await sb.from('vigia_acoes_busca').select('alvo, buscado_em, buscado_ts').limit(10000);
+    const est = new Map((estado || []).map((r: any) => [r.alvo, r]));
+    const fila = universo
+      .filter((d: any) => forcar || est.get(d.alvo)?.buscado_em !== hoje)
+      .sort((a: any, b: any) => String(est.get(a.alvo)?.buscado_ts || '').localeCompare(String(est.get(b.alvo)?.buscado_ts || '')))
       .slice(0, limite);
 
     const cnjsNossos = await carregarCnjsNossos();
-    const res = { inicio, fim, dry_run: dryRun, universo: (universo || []).length, pendentes_hoje: 0, processados: 0,
+    const res = { inicio, fim, dry_run: dryRun, universo: universo.length,
+                  universo_escritorio: universo.filter((d: any) => d.origem === 'escritorio').length,
+                  pendentes_hoje: 0, processados: 0,
                   pulados_nome: 0, comunicacoes: 0, novos: 0, atualizados: 0, erros: 0, truncados: 0,
-                  descartados: { nome_diferente: 0, nosso: 0, sem_cnj: 0 }, achados: [] as any[] };
-    res.pendentes_hoje = (universo || []).filter((d: any) => est.get(d.devedor_id)?.buscado_em !== hoje).length;
+                  descartados: { nome_diferente: 0, nosso: 0, sem_cnj: 0, fora_da_uf: 0, outro_ramo: 0 }, achados: [] as any[] };
+    res.pendentes_hoje = universo.filter((d: any) => est.get(d.alvo)?.buscado_em !== hoje).length;
 
     for (const dev of fila) {
       if (Date.now() - t0 > orcamento) break;
       const { busca, motivo } = nomeDeBusca(dev.nome);
-      let registro: Record<string, unknown> = { devedor_id: dev.devedor_id, nome_busca: busca, buscado_em: hoje, buscado_ts: new Date().toISOString(), motivo, erro: null, comunicacoes: 0, achados: 0 };
+      let registro: Record<string, unknown> = { alvo: dev.alvo, devedor_id: dev.devedor_id, uf_ref: dev.ufs.join('/'), nome_busca: busca, buscado_em: hoje, buscado_ts: new Date().toISOString(), motivo, erro: null, comunicacoes: 0, achados: 0 };
       if (!busca) {
         res.pulados_nome++;
       } else {
         try {
           const { itens, total, truncado } = await buscarNome(busca, inicio, fim);
-          const { achados, descartados } = agruparAchados(itens, dev.nome, cnjsNossos);
+          const { achados, descartados } = agruparAchados(itens, dev.nome, cnjsNossos, dev.ufs);
           res.comunicacoes += total;
           if (truncado) res.truncados++;
           for (const k of Object.keys(descartados) as (keyof typeof descartados)[]) res.descartados[k] += descartados[k];
           registro = { ...registro, comunicacoes: total, achados: achados.length, motivo: truncado ? 'truncado' : null };
           for (const a of achados) {
-            if (dryRun) { res.achados.push({ devedor: dev.nome, ...a, ultimo_texto: undefined }); continue; }
+            if (dryRun) { res.achados.push({ alvo: dev.alvo, devedor: dev.nome, uf: dev.ufs.join('/'), ...a, ultimo_texto: undefined }); continue; }
             const r = await gravarAchado(dev, a);
             if (r === 'novo') res.novos++; else if (r === 'atualizado') res.atualizados++; else res.erros++;
           }
@@ -212,7 +231,7 @@ Deno.serve(async (req) => {
         }
       }
       if (!dryRun) {
-        const { error } = await sb.from('vigia_acoes_busca').upsert(registro, { onConflict: 'devedor_id' });
+        const { error } = await sb.from('vigia_acoes_busca').upsert(registro, { onConflict: 'alvo' });
         if (error) console.error('[vigia] busca upsert', error.message);
       }
       res.processados++;
