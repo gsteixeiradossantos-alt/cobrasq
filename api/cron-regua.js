@@ -454,13 +454,13 @@ async function processarFinanceiroDoDia(DB) {
     const sub = [];
     if (repasses.length) sub.push(`*— Repasses*\n${repasses.map(linhaPagar).join('\n')}`);
     if (outros.length) sub.push(`*— Outros*\n${outros.map(linhaPagar).join('\n')}`);
-    blocos.push(`🔔 *SÓ A PAGAR — ${soPagar.length} item(ns), ${fmtR(soma(soPagar))}*\n${sub.join('\n\n')}`);
+    blocos.push(`🔔 *SÓ A PAGAR — ${soPagar.length} item(ns), ${fmtR(soma(soPagar))}*\n\n${sub.join('\n\n')}`);
   }
   if (soReceber.length) {
     blocos.push(`💰 *SÓ A RECEBER — ${soReceber.length} item(ns), ${fmtR(soma(soReceber))}*\n` +
       soReceber.map(r => `${item(r)} — ${fmtR(valor(r))} — ${venceuRec(r)}`).join('\n'));
   }
-  const corpo = `📊 Financeiro do dia — a pagar ${fmtR(soma(pagar))} · a receber ${fmtR(soma(receber))}\n\n` +
+  const corpo = `📊 *Financeiro do dia* — a pagar ${fmtR(soma(pagar))} · a receber ${fmtR(soma(receber))}\n\n` +
     `${blocos.join('\n\n')}\n\nConfirme no sistema o que for pago ou recebido para parar os lembretes.`;
 
   try { await zapiSendText(destTel, corpo); contasPagar.canais.push('whatsapp'); }
