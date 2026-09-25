@@ -883,18 +883,62 @@
       if (!subiu) return pausar(c, 'anexei o(s) PDF(s), mas o envio não concluiu (' + linhasUpload() + '/' + c.docs.length + ') — confira e clique Continuar.');
       if (linhasUpload() < c.docs.length) return; // recarregou: retoma na próxima passada
     }
-    // tipo POR ARQUIVO (selects tipoN/name="tipos" da resultTable) — só se veio vazio.
+    // tipo POR ARQUIVO (selects tipoN/name="tipos" da resultTable).
+    //  • arquivo 1 (principal): tipo do movimento — só se o Projudi deixou vazio.
+    //  • anexos 2, 3, 4…: SEMPRE "Outros" + a caixa de texto da linha com o que vem
+    //    depois do número no nome ("<CNJ>_2_Calculo.pdf" → "Calculo"). Pedido do Gustavo.
     const alvoTipo = norm(c.tipo_peticao || 'peticao');
-    for (const sel of Array.from(document.querySelectorAll(
-      '#fileUploadForm .resultTable select[name="tipos"], #fileUploadForm .resultTable select[id^="tipo"]')).filter(visivel)) {
+    const alnumU = (s) => norm(s).replace(/[^a-z0-9]/g, '');
+    const semExtU = (s) => String(s || '').replace(/\.(pdf\.p7s|p7s|pdf)$/i, '');
+    const docDaLinha = (tr, i) => {
+      const t = alnumU(tr.textContent || '');
+      const casa = (c.docs || []).filter(d => { const k = alnumU(semExtU(d.nome)); return k && (t.includes(k) || (k.length > 24 && t.includes(k.slice(0, 24)))); });
+      if (casa.length === 1) return casa[0];
+      return (c.docs || [])[i] || null; // fallback: ordem do envio (1 DataTransfer, na ordem dos docs)
+    };
+    const descricaoAnexo = (nome) => {
+      let b = semExtU(nome).replace(/[ _.-]+v\d+$/i, '');                  // tira "_v1"
+      b = b.replace(/^.*?\d{7}-?\d{2}\.?\d{4}\.?8\.?16\.?\d{4}/, '');       // tira o CNJ
+      b = b.replace(/^[ _.-]*\d+[ _.-]+/, '');                             // tira o "2_"
+      return b.replace(/[_]+/g, ' ').trim() || semExtU(nome);
+    };
+    const val = (o) => o.value && o.value !== '0';
+    const faltaTexto = [];
+    const linhas = Array.from(document.querySelectorAll(
+      '#fileUploadForm .resultTable tbody tr, form[name="fileUploadForm"] .resultTable tbody tr'))
+      .filter(tr => tr.querySelector('select[name="tipos"], select[id^="tipo"]'));
+    for (let i = 0; i < linhas.length; i++) {
+      const tr = linhas[i];
+      const sel = tr.querySelector('select[name="tipos"], select[id^="tipo"]');
+      if (!sel || !visivel(sel)) continue;
+      const d = docDaLinha(tr, i);
+      const ehPrincipal = d ? (d.principal != null ? !!d.principal : (c.docs || [])[0] === d) : i === 0;
+      if (!ehPrincipal && (c.docs || []).length > 1) {
+        const outros = Array.from(sel.options).find(o => val(o) && norm(o.textContent) === 'outros') ||
+                       Array.from(sel.options).find(o => val(o) && norm(o.textContent).includes('outros'));
+        const desc = descricaoAnexo(d ? d.nome : '');
+        if (!outros) { faltaTexto.push(desc); continue; }
+        if (sel.value !== outros.value) { sel.value = outros.value; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+        // a caixa de texto pode aparecer/habilitar só depois de escolher "Outros"
+        const caixa = await esperar(() => Array.from(tr.querySelectorAll('input[type="text"],input:not([type]),textarea'))
+          .find(el => visivel(el) && !el.disabled && !el.readOnly), 3000, 150);
+        if (!caixa) { faltaTexto.push(desc); continue; }
+        if (!String(caixa.value || '').trim()) setInput(caixa, desc);
+        continue;
+      }
       if (sel.value && sel.value !== '0') continue; // já preenchido pela detecção do nome
-      const val = (o) => o.value && o.value !== '0';
       const opt = Array.from(sel.options).find(o => val(o) && norm(o.textContent) === alvoTipo) ||
                   Array.from(sel.options).find(o => val(o) && norm(o.textContent).includes(alvoTipo)) ||
                   Array.from(sel.options).find(o => val(o) && norm(o.textContent) === 'peticao') || // "Petição"
                   Array.from(sel.options).find(o => val(o) && norm(o.textContent).includes('peticao') && !norm(o.textContent).includes('inicial')) ||
                   Array.from(sel.options).find(o => val(o) && norm(o.textContent).includes('outros'));
       if (opt) { sel.value = opt.value; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+    }
+    if (faltaTexto.length && !c.descAnexosPausou) {
+      // pausa UMA vez: no Continuar segue mesmo que a caixa não seja achável pelo script
+      c.descAnexosPausou = true; await casoSalvar(c);
+      return pausar(c, 'nos anexos, não consegui marcar <b>Outros</b> e escrever a descrição sozinho. Faça você: ' +
+        faltaTexto.map(t => '<b>' + escHtml(t) + '</b>').join(', ') + ' — e clique <b>Continuar</b>.');
     }
     c.uploadFeito = true; await casoSalvar(c);
     await new Promise(r => setTimeout(r, 300));
