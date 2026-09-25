@@ -784,7 +784,7 @@ Deno.serve(async (req) => {
         const ctxC = [
           `Hoje é ${hojeC}.`,
           `Devedor: ${caso.devedor || '?'}. Credor original: ${caso.credor || '?'}.`,
-          faseJudicialC ? 'CASO JÁ EM FASE JUDICIAL (cumprimento de sentença/execução) — NÃO diga "pode virar processo", já é processo, representado pelo Teixeira e Azzolin.' : '',
+          faseJudicialC ? 'CASO JÁ EM FASE JUDICIAL (cumprimento de sentença/execução) — NÃO diga "pode virar processo" e não fale do processo, de advogado nem de escritório: só apresente os valores para quitar. Se a pessoa trouxer o processo ou disser que tem advogado, acao "handoff".' : '',
           calc
             ? (calc.fixo
                 ? [

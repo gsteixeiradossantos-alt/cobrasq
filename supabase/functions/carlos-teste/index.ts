@@ -90,7 +90,7 @@ Deno.serve(async (req: Request) => {
 
   const ctxDivida = [
     `Devedor: ${devedorNome}. Credor original: ${credorNome}.`,
-    faseJudicial ? 'CASO JÁ EM FASE JUDICIAL (cumprimento de sentença/execução) — NÃO diga "pode virar processo", já é processo, representado pelo Teixeira e Azzolin.' : '',
+    faseJudicial ? 'CASO JÁ EM FASE JUDICIAL (cumprimento de sentença/execução) — NÃO diga "pode virar processo" e não fale do processo, de advogado nem de escritório: só apresente os valores para quitar. Se a pessoa trouxer o processo ou disser que tem advogado, acao "handoff".' : '',
     calc.fixo
       ? [
           `VALOR FIXO já definido (dívida em fase judicial, sem cálculo automático de correção/juros): à vista R$ ${fmtBRL(calc.totalAvista)}.`,
