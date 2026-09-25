@@ -220,3 +220,34 @@ de `cobrancas_etapa_de_status()`: sai o ramo que mandava "Quitado ao cliente" pa
 SQL no mesmo dia); "Quitado direto ao credor" segue separado. Sem backfill (conferir
 antes: `count(*)` de status "Quitado ao cliente" = 0). Rollback = reaplicar a função
 de `20260924c`.
+
+## 20260925_02 — vigia de ações (devedor nosso como parte em outro processo, F-46)
+
+**Não aplicada.** `20260925_02_vigia_acoes.sql` (+ `_rollback`). Aditiva: tabelas
+`vigia_acoes` (achados, 1 linha por alvo × processo, status novo/visto/descartado) e
+`vigia_acoes_busca` (fila diária), view `vw_vigia_acoes_universo` (security_invoker) e
+cron `vigia-acoes` a cada 3 min das 06:00 às 08:57 UTC. RLS: staff lê e marca
+visto/descartado; inserir/apagar só proprietário e o worker (service role).
+
+Universo (25/09/2026): 581 devedores de cobranças ativas + 265 processos do escritório
+sem cobrança (`intimacoes_email.executado`, 311 nomes depois de separar "A; B"). Só
+vale achado em tribunal da UF do nosso processo (J.TR do CNJ; sem CNJ, UF do devedor
+→ do credor → PR). O SELECT da view foi conferido em prod (somente leitura).
+
+Evidência da API do DJEN (comunicaapi.pje.jus.br): limite medido de 20 req/~5 s (429
+com `retry-after: 2`); a função espaça 1 req/1,1 s. Dry-run completo dos 578 nomes da
+COBRASQ em 25/09/2026: 632 requisições, 0 × 429, 0 erro; o filtro por UF reduz os
+1.153 achados crus para 481 (356 são um único devedor, Embracon, no TJSP). Wesley
+Cechin Gobatto aparece como AUTOR no 0002110-19.2025.8.16.0181.
+Dry-run dos 311 executados do escritório (mesma janela, com filtro por UF): 360
+requisições, 0 × 429, 0 erro; 402 achados (191 autor), dos quais 282 são de 8
+instituições (União/AGU 137, Porto Seguro 39, Bradesco 34, Itaú Seguros 27, Banco Pan
+17, Braspress 15, Santander 9, INSS 4) e 9 buscas truncadas (bancos, INSS, DETRAN/PR,
+nomes comuns). Wesley entra como `esc:WESLEY CECHIN GOBATTO` (UF PR, pelo CNJ do
+0005569-82.2025.8.16.0131) e é achado de novo como autor no 0002110-19.2025.8.16.0181.
+
+**Ordem:** aplicar a migração → merge (o CI implanta a Edge Function `vigia-acoes`;
+secrets já existentes `CRON_INVOKE_SECRET`, `SUPABASE_URL`,
+`SUPABASE_SERVICE_ROLE_KEY`) → opcional `POST /vigia-acoes {"forcar":true}` com o
+bearer do cron para a primeira rodada. Enquanto a migração não estiver aplicada, a aba
+"Vigia de ações" mostra "Não foi possível ler o vigia" e o painel não mostra alerta.
