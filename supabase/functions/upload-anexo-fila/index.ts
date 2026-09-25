@@ -49,6 +49,7 @@ import { createClient } from 'jsr:@supabase/supabase-js@2';
 
 const BUCKET = 'documentos';
 const MAX_BYTES = 15 * 1024 * 1024; // mesmo teto de anexo do WhatsApp via Z-API
+const COFRE_MAX_BYTES = 25 * 1024 * 1024; // modo cofre: mesmo teto da tela (COFRE_MAX_MB)
 
 Deno.serve(async (req) => {
   if (req.method !== 'POST' && req.method !== 'DELETE') {
@@ -149,8 +150,11 @@ Deno.serve(async (req) => {
   }
 
   if (bytes.byteLength === 0) return new Response(JSON.stringify({ error: 'arquivo vazio' }), { status: 400 });
-  if (bytes.byteLength > MAX_BYTES) {
-    return new Response(JSON.stringify({ error: `arquivo maior que ${MAX_BYTES} bytes` }), { status: 400 });
+  const cofre = payload?.cofre === true;
+  // No cofre o teto é o mesmo da tela (COFRE_MAX_MB no index.html); 15 MB é limite da Z-API.
+  const teto = cofre ? COFRE_MAX_BYTES : MAX_BYTES;
+  if (bytes.byteLength > teto) {
+    return new Response(JSON.stringify({ error: `arquivo maior que ${teto} bytes` }), { status: 400 });
   }
 
   // Só PDF de verdade — mesma barreira que _repasse-msg.js usa, para não anexar HTML
@@ -158,6 +162,41 @@ Deno.serve(async (req) => {
   const header = new TextDecoder('latin1').decode(bytes.slice(0, 4));
   if (header !== '%PDF') {
     return new Response(JSON.stringify({ error: 'conteúdo não começa com %PDF' }), { status: 400 });
+  }
+
+  // 25/09/2026 — modo "cofre": documento da EMPRESA (contrato, papel interno), fora de
+  // cobrança. Grava no bucket privado `cofre` + linha em `public.cofre_arquivos`, o mesmo
+  // par que `cofreUpload()` do index.html grava pela tela. Nasce privado do gestor:
+  // `visivel_colaborador` só vira true se vier explicitamente no body. Não combina com
+  // cobrança nem com envio por WhatsApp — arquivo do cofre não sai por aqui.
+  //   body: { cofre: true, base64, filename, pasta?, obs?, visivel_colaborador?, uploaded_by? }
+  //   resposta: { path, bytes, cofre_id }
+  if (cofre) {
+    if (cobrancaId || payload?.telefone) {
+      return json({ error: 'modo cofre não aceita cobranca_id nem telefone' }, 400);
+    }
+    const pasta = String(payload?.pasta || '').trim() || 'Geral';
+    // Mesmo slug de cofreSlug() no index.html, para o caminho sair igual ao da tela.
+    const slug = (s: string) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .replace(/[^a-zA-Z0-9._-]/g, '_').replace(/_+/g, '_').slice(0, 120) || 'arquivo';
+    const cofrePath = `${slug(pasta)}/${Date.now()}_0_${slug(filenameIn)}`;
+    const { error: upErr } = await sb.storage.from('cofre').upload(cofrePath, bytes, {
+      contentType: 'application/pdf', upsert: false,
+    });
+    if (upErr) return json({ error: 'upload no cofre falhou: ' + upErr.message }, 500);
+    const { data: row, error: cErr } = await sb.from('cofre_arquivos').insert({
+      pasta, nome: filenameIn, storage_path: cofrePath,
+      mime_type: 'application/pdf', size_bytes: bytes.byteLength,
+      obs: payload?.obs ? String(payload.obs) : null,
+      visivel_colaborador: payload?.visivel_colaborador === true,
+      uploaded_by: payload?.uploaded_by ? String(payload.uploaded_by) : null,
+    }).select('id').single();
+    if (cErr) {
+      // Sem a linha o arquivo não aparece para ninguém: não deixa órfão no bucket.
+      await sb.storage.from('cofre').remove([cofrePath]).catch(() => {});
+      return json({ error: 'insert em cofre_arquivos falhou: ' + cErr.message }, 500);
+    }
+    return json({ path: cofrePath, bytes: bytes.byteLength, cofre_id: row?.id ?? null });
   }
 
   // No storage, só ASCII (acento vira a letra sem acento, não '_').
