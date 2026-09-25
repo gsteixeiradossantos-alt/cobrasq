@@ -74,10 +74,13 @@ function timingSafeEq(a, b) {
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 
-// Cópia de monitoramento: o Gustavo recebe o PDF do recibo de TODO recebimento confirmado
-// (pedido 2026-08-06), independente do devedor ter telefone cadastrado ou não. Só o PDF,
-// sem a mensagem de texto que vai pro devedor.
-const NUMERO_MONITORAMENTO = '46999223332';
+// Cópia de monitoramento: o PDF do recibo de TODO recebimento confirmado (pedido
+// 2026-08-06), independente do devedor ter telefone cadastrado ou não. Só o PDF, sem a
+// mensagem de texto que vai pro devedor. Até 25/09/2026 ia ao 46999223332; desde então
+// vai SÓ ao grupo "Financeiros 💵" (pedido do Gustavo) — o mesmo do "Financeiro do dia"
+// (api/cron-regua.js).
+const GRUPO_FINANCEIRO = String(process.env.FINANCEIRO_GRUPO_WHATSAPP || '').trim().match(/^\d+-group$/)
+  ? process.env.FINANCEIRO_GRUPO_WHATSAPP.trim() : '120363410150576066-group';
 
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -482,7 +485,7 @@ module.exports = async function handler(req, res) {
 
     let monitorEnviado = false;
     if (b64) {
-      try { monitorEnviado = await zapiSendDocumentPdf(NUMERO_MONITORAMENTO, b64, `Recibo COBRASQ - ${nomeCompleto}.pdf`); } catch (e) { monitorEnviado = false; }
+      try { monitorEnviado = await zapiSendDocumentPdf(GRUPO_FINANCEIRO, b64, `Recibo COBRASQ - ${nomeCompleto}.pdf`); } catch (e) { monitorEnviado = false; }
     }
 
     // Falha do recibo vira evento na ficha do devedor. Antes era silenciosa: o retorno
