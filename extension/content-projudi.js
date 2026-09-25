@@ -339,15 +339,34 @@
       const h = a.getAttribute('href') || '';
       return /intimacao\.do/i.test(h) && !/cumprir/i.test(h);
     };
-    const linhas = new Set(), out = [];
+    // "Pronta" = a linha JÁ tem link direto de Cumprir Prazo (cumprirIntimacao.do) — ou
+    // seja, já foi lida e o prazo está correndo, pronta pra cumprir agora. Uma linha só
+    // com "Ver Intimação" (sem esse link) ainda NÃO foi lida — abrir "Ver Intimação"
+    // nela INICIA o prazo legal, decisão do humano, não da extensão.
+    const ehCumprir = a => /cumpririntimacao\.do/i.test(a.getAttribute('href') || '');
+    const linhas = new Map();
     Array.from(quadro.querySelectorAll('a[href]')).forEach(a => {
-      if (!visivel(a) || !ehVer(a)) return;
+      if (!visivel(a)) return;
+      const ver = ehVer(a), cumprir = ehCumprir(a);
+      if (!ver && !cumprir) return;
       const linha = a.closest('tr') || a.parentElement || a;
-      if (linhas.has(linha)) return;
-      linhas.add(linha);
-      const txt = String((linha.innerText || linha.textContent || a.textContent || ''))
+      let info = linhas.get(linha);
+      if (!info) { info = { linha, verLink: null, cumprirLink: null }; linhas.set(linha, info); }
+      if (ver) info.verLink = a;
+      if (cumprir) info.cumprirLink = a;
+    });
+    const out = [];
+    linhas.forEach(info => {
+      const ref = info.verLink || info.cumprirLink;
+      const txt = String((info.linha.innerText || info.linha.textContent || (ref && ref.textContent) || ''))
         .replace(/\s+/g, ' ').replace(/\s*(ver intima[cç][aã]o|cumprir prazo)\s*/gi, ' ').trim();
-      out.push({ link: a, texto: txt.slice(0, 180) || 'prazo pendente' });
+      out.push({
+        link: info.verLink || info.cumprirLink, // compat: mesmo comportamento de antes p/ quem só lê "link"
+        verLink: info.verLink,
+        cumprirLink: info.cumprirLink,
+        pronta: !!info.cumprirLink,
+        texto: txt.slice(0, 180) || 'prazo pendente',
+      });
     });
     return out;
   }
@@ -437,6 +456,26 @@
     // lista de intimações → marcar os prazos deste processo → cumprir TODOS na mesma
     // juntada (cumprirIntimacaoEmLote.do), com um único documento.
     const pend = pendenciasIntimacao();
+    // MISTURA: um (ou mais) prazo já ABERTO pra cumprir ao lado de outro(s) ainda NÃO
+    // LIDO(S). Ler o não lido é decisão do humano (inicia o prazo dele) — então aqui só
+    // mexe no(s) já pronto(s) e não toca no resto. Caso relatado pelo Gustavo: um prazo
+    // em "Ver Intimação" ao lado de outro já em "Cumprir Prazo" — deve clicar Cumprir Prazo.
+    const prontas = pend.filter(p => p.pronta);
+    const naoLidas = pend.filter(p => !p.pronta);
+    if (prontas.length && naoLidas.length) {
+      if (prontas.length === 1) {
+        progresso(c, naoLidas.length + ' prazo(s) ainda não lido(s) ao lado (não mexo) — este já está aberto → Cumprir Prazo');
+        clicar(prontas[0].cumprirLink);
+        setTimeout(() => runCentral().catch(() => {}), 2500);
+        return;
+      }
+      // 2+ já prontos JUNTO com não lido: combinação sem captura real ainda — pausa em
+      // vez de arriscar tocar no não lido ao marcar a lista em lote (que seleciona por
+      // número do processo, não por já-lido/não-lido).
+      prontas.forEach(p => { try { destacar(p.cumprirLink, '#1a7f37'); } catch (_) {} });
+      naoLidas.forEach(p => { try { destacar(p.verLink, '#fab005'); } catch (_) {} });
+      return pausar(c, 'este processo tem <b>' + prontas.length + ' prazo(s) já abertos</b> pra cumprir (verde) e <b>' + naoLidas.length + ' ainda não lido(s)</b> (amarelo) — não vou ler o(s) não lido(s) sozinho (isso inicia o prazo dele). Cumpra você os prazos certos e clique <b>Continuar</b>.');
+    }
     if (pend.length > 1) {
       const btnLote = document.getElementById('cumprirButton') ||
         acharControle(['cumprir prazo', 'cumprir'], 'input[type=submit],input[type=button],button,a');
