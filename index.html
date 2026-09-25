@@ -47001,76 +47001,206 @@ function _docClienteEndereco(d){
   return [d.rua, d.numero&&('nº '+d.numero), d.complemento, d.bairro,
     (d.cidade&&d.uf)?(d.cidade+'/'+d.uf):(d.cidade||d.uf), d.cep&&('CEP '+d.cep)].filter(Boolean).join(', ') || '—';
 }
+// Layout dos documentos do cliente (contrato, declaração, tabela de preço e termos) —
+// aprovado em 24/09/2026 no design "Contrato COBRASQ": cabeçalho branco com o logo e
+// "Desde 2019", EB Garamond no corpo, nº de seção/cláusula na margem, rodapé com
+// endereço na 1ª e na última página e rodapé centralizado nas do meio, "Página X de Y",
+// e todas as páginas terminando na mesma linha.
+// O documento leva o texto corrido em #doc-fonte e o paginador (_docPaginador) monta as
+// folhas A4 em #doc-paginas no próprio navegador que renderiza — o Chromium do
+// /api/gerar-pdf espera o data-paginado="1" antes de imprimir. No editor do envio em
+// lote (designMode) o paginador não roda: edita-se o texto corrido.
+const _DOC_VERSAO='VERSÃO SET/2026';
+// <h2>N. Título</h2> e <p>N.N. texto</p> → seção/cláusula com o número na margem.
+function _docClausulas(h){
+  return String(h||'')
+    .replace(/<h2>(\d+)\.\s*([\s\S]*?)<\/h2>/g,(m,n,t)=>`<div class="sec"><span class="sn">${String(n).padStart(2,'0')}</span><h2>${t}</h2></div>`)
+    .replace(/<p><strong>(\d+(?:\.\d+)+)\.\s*<\/strong>\s*([\s\S]*?)<\/p>/g,(m,n,r)=>`<div class="cl"><span class="num">${n}</span><p>${r}</p></div>`)
+    .replace(/<p><strong>(\d+(?:\.\d+)+)\.\s+([\s\S]*?)<\/p>/g,(m,n,r)=>`<div class="cl"><span class="num">${n}</span><p><strong>${r}</p></div>`)
+    .replace(/<p>(\d+(?:\.\d+)+)\.\s+([\s\S]*?)<\/p>/g,(m,n,r)=>`<div class="cl"><span class="num">${n}</span><p>${r}</p></div>`)
+    .replace(/<p><strong>([a-z])\.<\/strong>\s*([\s\S]*?)<\/p>/g,(m,n,r)=>`<div class="cl"><span class="num">${n})</span><p>${r}</p></div>`);
+}
+// Roda DENTRO do documento (serializado com toString): não pode usar nada de fora.
+function _docPaginador(){
+  // px do topo da folha: linha onde todo corpo termina (rodapé em 1045/1050; paisagem: 691, rodapé em 716/721)
+  const LIMITE=+document.body.getAttribute('data-limite')||1020;
+  const fonte=document.getElementById('doc-fonte'), saida=document.getElementById('doc-paginas');
+  if(!fonte||!saida) return;
+  try{ if(window.frameElement&&window.frameElement.id==='dloteEditorFrame') return; }catch(_){}
+  const esc=s=>String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const rodar=()=>{
+    saida.innerHTML=''; fonte.style.display='none';
+    const cab=fonte.querySelector('.cab'), head=fonte.querySelector('.head'), ficha=fonte.querySelector('.ficha');
+    const blocos=[...fonte.querySelector('.corpo').children].filter(n=>n.tagName!=='STYLE').map(n=>n.cloneNode(true));
+    const pags=[]; let pg=null, corpo=null;
+    const nova=primeira=>{
+      pg=document.createElement('div'); pg.className='pg';
+      const w=document.createElement('div'); w.className='wrap'+(primeira?'':' seguinte');
+      if(primeira) [cab,head,ficha].forEach(x=>{ if(x) w.appendChild(x.cloneNode(true)); });
+      corpo=document.createElement('div'); corpo.className='corpo'; w.appendChild(corpo); pg.appendChild(w);
+      saida.appendChild(pg); pags.push(pg);
+    };
+    const fundo=el=>el.getBoundingClientRect().bottom-pg.getBoundingClientRect().top;
+    const cabe=()=>!corpo.lastElementChild||fundo(corpo.lastElementChild)<=LIMITE;
+    const paragrafo=b=>b.tagName==='P'?b:(b.classList.contains('cl')?b.querySelector(':scope > p'):null);
+    const presoAoProximo=b=>b&&(b.classList.contains('sec')||b.classList.contains('rotulo'));
+    const inicios=p=>{ const r=[],tw=document.createTreeWalker(p,NodeFilter.SHOW_TEXT); let t;
+      while((t=tw.nextNode())){ const s=t.data; for(let i=0;i<s.length;i++) if(!/\s/.test(s[i])&&(i===0||/\s/.test(s[i-1]))) r.push([t,i]); }
+      return r; };
+    // Parte o parágrafo na última linha que cabe; devolve o resto (sem o nº) ou null.
+    const divideP=b=>{
+      const p=paragrafo(b); if(!p) return null;
+      const orig=p.innerHTML; let ws=inicios(p);
+      let k=ws.findIndex(([t,i])=>{ const r=document.createRange(); r.setStart(t,i); r.setEnd(t,i+1); const q=r.getClientRects()[0]; return q&&q.bottom-pg.getBoundingClientRect().top>LIMITE; });
+      while(k>0){
+        const [t,i]=ws[k];
+        const r1=document.createRange(); r1.setStart(p,0); r1.setEnd(t,i);
+        const r2=document.createRange(); r2.setStart(t,i); r2.setEnd(p,p.childNodes.length);
+        const f1=r1.cloneContents(), f2=r2.cloneContents();
+        p.innerHTML=''; p.appendChild(f1); p.classList.add('parte-a');
+        if(fundo(p)<=LIMITE){
+          const nb=b.cloneNode(true), np=paragrafo(nb);
+          np.classList.remove('parte-a'); np.innerHTML=''; np.appendChild(f2);
+          const num=nb.querySelector(':scope > .num'); if(num) num.remove();
+          return nb;
+        }
+        p.innerHTML=orig; p.classList.remove('parte-a'); ws=inicios(p); k--;
+      }
+      return null;
+    };
+    // Tabela longa: as linhas que não cabem vão para uma cópia (com cabeçalho) na folha seguinte.
+    const divideTab=b=>{
+      const tb=b.tBodies[0]; if(!tb||!tb.rows.length) return null;
+      const t2=b.cloneNode(true); t2.tBodies[0].innerHTML='';
+      const tf=b.tFoot; if(tf) tf.remove();
+      const movidas=[];
+      while(tb.rows.length>1&&fundo(b)>LIMITE){ const r=tb.rows[tb.rows.length-1]; r.remove(); movidas.unshift(r); }
+      if(fundo(b)>LIMITE){ movidas.forEach(r=>tb.appendChild(r)); if(tf) b.appendChild(tf); return null; }
+      if(!t2.tFoot&&!movidas.length) return null;
+      movidas.forEach(r=>t2.tBodies[0].appendChild(r)); return t2;
+    };
+    nova(true);
+    const fila=blocos;
+    while(fila.length){
+      const b=fila.shift(); corpo.appendChild(b);
+      if(cabe()) continue;
+      const resto=b.tagName==='TABLE'?divideTab(b):divideP(b);
+      if(resto){ nova(false); fila.unshift(resto); continue; }
+      if(corpo.children.length===1) continue; // sozinho numa folha e sem como partir: fica
+      b.remove(); const mover=[b];
+      while(presoAoProximo(corpo.lastElementChild)){ const x=corpo.lastElementChild; x.remove(); mover.unshift(x); }
+      if(!corpo.children.length){ fila.unshift(...mover.slice(1)); corpo.appendChild(mover[0]); continue; }
+      nova(false); fila.unshift(...mover);
+    }
+    const ref=document.body.getAttribute('data-ref')||'', versao=document.body.getAttribute('data-versao')||'';
+    const n=pags.length;
+    pags.forEach((p,i)=>{
+      const linhas=[ref,versao,`Página ${i+1} de ${n}`].filter(Boolean).map(esc).join('<br>');
+      // Rodapé "v3" (canvas aprovado em 24/09/2026 — por ora só termo e declaração): sem CEP.
+      const rodEnd=document.body.getAttribute('data-rod')==='v3'
+        ?'COBRASQ · Desde 2019.<br>Av. Rio Grande do Sul, 380, sala 201, Centro, Dois Vizinhos/PR<br>www.cobrasq.com.br · ccobrasq@gmail.com · (46) 98822-6533'
+        :'COBRASQ · cobrasq.com.br<br>Av. Rio Grande do Sul, 380, sala 201, Centro, Dois Vizinhos/PR<br>CEP 85660-000 · ccobrasq@gmail.com · (46) 98822-6533';
+      if(i===0||i===n-1) p.insertAdjacentHTML('beforeend',
+        `<div class="rod rod-end">${rodEnd}</div>`+
+        `<div class="rod rod-ctr">${linhas}</div>`);
+      else p.insertAdjacentHTML('beforeend',`<div class="rod rod-meio">${linhas}</div>`);
+    });
+  };
+  const fontes=['400 16px "EB Garamond"','italic 400 16px "EB Garamond"','500 16px "EB Garamond"','600 16px "EB Garamond"','300 16px Fraunces','400 16px Fraunces','500 16px Fraunces','italic 16px "Instrument Serif"','400 16px "JetBrains Mono"','500 16px "JetBrains Mono"'];
+  const esperar=document.fonts?Promise.all(fontes.map(f=>document.fonts.load(f))).then(()=>document.fonts.ready):Promise.resolve();
+  Promise.race([esperar,new Promise(r=>setTimeout(r,6000))]).catch(()=>{}).then(()=>{
+    try{ rodar(); }catch(e){ saida.innerHTML=''; fonte.style.display=''; console.error('[paginador]',e); }
+    document.body.setAttribute('data-paginado','1');
+  });
+}
 function _docClienteShell(titulo, fichaItems, corpoHtml, assinaturas, opts){
+  opts=opts||{};
   const meses=['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
-  const dt=(opts&&opts.data)?new Date(String(opts.data).slice(0,10)+'T12:00:00'):new Date();
+  const dt=opts.data?new Date(String(opts.data).slice(0,10)+'T12:00:00'):new Date();
   const dataExt=dt.getDate()+' de '+meses[dt.getMonth()]+' de '+dt.getFullYear();
+  const dataCab=dt.getDate()+' '+meses[dt.getMonth()].slice(0,3)+'. '+dt.getFullYear();
   const ficha=(fichaItems||[]).filter(Boolean).map(a=>`<div class="item"><span class="rot">${escHtml(a[0])}</span><span class="val">${escHtml(a[1])}</span></div>`).join('');
   // Âncora do ZapSign (signature_placement) pelo papel de quem assina: <<asscobrasq>> e
   // <<asscedente>>. Texto real no PDF, 3pt e quase branco — some se o documento não for
   // assinado. Arial de propósito (ver .sig-token em templates/acordo-judicial.html).
+  // Sem linha de assinatura (decisão de 24/09/2026): a âncora fica no espaço em branco.
   const _anc={'Cessionária':'asscobrasq','Cedente':'asscedente'};
-  const ass=(assinaturas||[]).map(a=>`<div class="ass">${_anc[a[1]]?`<div class="sig-token">&lt;&lt;${_anc[a[1]]}&gt;&gt;</div>`:''}<div class="ass-linha"></div><div class="ass-nome">${escHtml(a[0])}</div><div class="ass-cargo">${escHtml(a[1])}</div></div>`).join('');
-  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="pdf-footer-band" content="1">${(opts&&opts.ref)?`<meta name="pdf-footer-ref" content="${escHtml(String(opts.ref).replace(/["'<>]/g,''))}">`:''}<title>${escHtml(titulo)} — COBRASQ</title>
+  const ass=(assinaturas||[]).map(a=>`<div class="ass"><div class="ass-linha">${_anc[a[1]]?`<span class="sig-token">&lt;&lt;${_anc[a[1]]}&gt;&gt;</span>`:''}</div><div class="ass-nome">${escHtml(a[0])}</div><div class="ass-cargo">${escHtml(a[1])}</div></div>`).join('');
+  const ref=opts.ref?escHtml(String(opts.ref).replace(/["'<>]/g,'')):'';
+  return `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>${escHtml(titulo)} — COBRASQ</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600&family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600&family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-:root{--ink:#0A1530;--graphite:#15224A;--accent:#C9A961;--accent-2:#9C7F40;--paper:#EFEAD9;--ct:#26241F;--line:rgba(10,21,48,.12);
-  --serif:"Fraunces","Times New Roman",serif;--serif-edit:"Instrument Serif",serif;--sans:"Inter Tight",-apple-system,system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace}
+:root{--ink:#0A1530;--graphite:#15224A;--accent:#C9A961;--accent-2:#9C7F40;--paper:#EFEAD9;--ct:#26241F;--line:rgba(10,21,48,.14);--mute:#6B7080;
+  --serif:"Fraunces","Times New Roman",serif;--text:"EB Garamond",Garamond,serif;--sans:"Inter Tight",system-ui,sans-serif;--mono:"JetBrains Mono",ui-monospace,monospace}
 *{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-body{font-family:var(--sans);color:var(--ct);background:#E8E8E8;line-height:1.62;font-size:10.5pt}
-.pagina{width:210mm;min-height:297mm;margin:20px auto;background:#fff;box-shadow:0 4px 20px rgba(0,0,0,.1);overflow:visible}
-.band{background:var(--ink);color:var(--paper);position:relative;display:flex;justify-content:space-between;align-items:center;gap:18px;padding:16px 40px 15px}
-.band::after{content:'';position:absolute;left:0;right:0;bottom:0;height:1.4px;background:var(--accent)}
-.lockup{display:flex;align-items:center;gap:13px}
-.lockup .dot{width:24px;height:24px;border-radius:50%;background:var(--accent);flex-shrink:0}
-.lockup .wm{font-family:var(--serif);font-weight:300;font-size:26px;line-height:1;text-transform:lowercase;color:var(--paper)}
-.lockup .wm .p{color:var(--accent)}
-.band-meta{text-align:right;font-family:var(--mono);font-size:6.6pt;line-height:1.6;letter-spacing:.08em;text-transform:uppercase;color:rgba(239,234,217,.72)}
-.band-meta strong{font-weight:500;color:rgba(239,234,217,.94)}
-.head{padding:30px 46px 0;text-align:center}
-.head .eyebrow{font-family:var(--mono);font-size:7.6pt;letter-spacing:.24em;text-transform:uppercase;color:var(--accent-2);margin-bottom:11px}
-.head h1{font-family:var(--serif);font-weight:400;font-size:23pt;line-height:1.1;letter-spacing:-.012em;color:var(--ink)}
-.corpo{padding:26px 46px 30px}
-.ficha{border:.8px solid var(--line);border-left:2.5px solid var(--accent);background:#FAF8F4;padding:16px 20px;margin-bottom:22px;display:grid;grid-template-columns:1fr 1fr;gap:9px 28px}
-.ficha .item{display:flex;flex-direction:column}
-.ficha .rot{font-family:var(--mono);font-size:6.8pt;text-transform:uppercase;letter-spacing:.1em;color:var(--accent-2);margin-bottom:2px}
-.ficha .val{color:var(--ink);font-weight:600;font-size:10pt}
-.corpo p{margin-bottom:11px;text-align:justify}
-.corpo p strong{color:var(--ink);font-weight:600}
-.corpo h2{font-family:var(--mono);font-size:9pt;font-weight:500;text-transform:uppercase;letter-spacing:.1em;color:var(--ink);margin:18px 0 8px;padding-bottom:5px;border-bottom:.8px solid var(--line)}
-.fecho-local{text-align:center;font-family:var(--serif-edit);font-style:italic;color:var(--graphite);font-size:12pt;margin-top:30px}
-.ass-grid{display:flex;gap:40px;justify-content:center;margin-top:30px;flex-wrap:wrap}
-.ass{margin-top:0;text-align:center;flex:1;min-width:230px}
-.ass-linha{width:100%;max-width:300px;border-top:.9px solid var(--ink);margin:0 auto 8px}
-.ass-nome{font-family:var(--serif);font-weight:500;color:var(--ink);font-size:12pt}
-.ass-cargo{font-family:var(--mono);font-size:7.4pt;letter-spacing:.06em;text-transform:uppercase;color:var(--accent-2);margin-top:3px}
-.bloco-fecho{break-inside:avoid;page-break-inside:avoid}
-.bloco-fecho .fecho-local{margin-top:40px}
-.bloco-fecho .ass-linha{margin-top:0}
-.sig-token{font-family:Arial,Helvetica,sans-serif;font-size:3pt;line-height:1;letter-spacing:0;color:#e6e6e3;height:38px;display:flex;align-items:flex-end;justify-content:center;padding-bottom:2px}
-@media print{body{background:#fff}.pagina{box-shadow:none;margin:0;width:100%;min-height:0}}
-/* Rodapé é renderizado como rodapé DE PÁGINA pelo motor do PDF (footerTemplate no
-   /api/gerar-pdf), sinalizado pelo <meta name="pdf-footer-band">. A margem inferior
-   reserva espaço p/ ele em toda página. */
-@page{size:A4;margin:14mm 0 18mm}
-@page:first{margin-top:0}
-</style></head><body>
-<div class="pagina">
-  <header class="band">
-    <div class="lockup"><span class="dot"></span><span class="wm">cobrasq<span class="p">.</span></span></div>
-    <div class="band-meta"><strong>COBRASQ Recuperadora de Crédito e Cobrança Ltda.</strong><br>CNPJ 34.626.848/0001-42 · Dois Vizinhos · PR</div>
-  </header>
-  <div class="head"><div class="eyebrow">Documento COBRASQ</div><h1>${escHtml(titulo)}</h1></div>
-  <main class="corpo">
-    ${ficha?`<div class="ficha">${ficha}</div>`:''}
-    ${corpoHtml}
+body{font-family:var(--text);color:var(--ct);background:#E8E8E8;font-size:11.6pt;line-height:1.5}
+#doc-fonte{width:210mm;margin:20px auto;background:#fff;box-shadow:0 4px 20px rgba(0,0,0,.1);padding-bottom:25mm}
+.pg{width:210mm;height:297mm;position:relative;background:#fff;margin:20px auto;box-shadow:0 4px 20px rgba(0,0,0,.1)}
+@page{size:A4${opts.paisagem?' landscape':''};margin:0}
+@media print{body{background:#fff}#doc-fonte{box-shadow:none;margin:0}.pg{margin:0;box-shadow:none;break-after:page;page-break-after:always}.pg:last-child{break-after:auto;page-break-after:auto}}
+.wrap{padding:0 25mm 0 32mm}
+.wrap.seguinte{padding-top:60.5px}
+.cab{position:relative;display:flex;justify-content:space-between;align-items:center;padding:62px 0 16px;border-bottom:1.2px solid var(--accent)}
+.cab-logo{display:flex;align-items:center;gap:13px}
+.cab-dot{width:26px;height:26px;border-radius:50%;background:var(--accent);flex:none}
+.cab-sep{width:1px;height:30px;background:rgba(10,21,48,.28)}
+.cab-wm{font-family:var(--serif);font-weight:300;font-size:30px;line-height:1;letter-spacing:.01em;color:var(--ink)}
+.cab-wm .p{color:var(--accent)}
+.cab-meta{font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:rgba(10,21,48,.6);text-align:right;line-height:1.9}
+.desde19{position:absolute;top:92px;left:170px;font-family:"Instrument Serif",serif;font-style:italic;font-size:14px;line-height:1;color:var(--accent);white-space:nowrap}
+.head{padding-top:20px}
+.eyebrow{font-family:var(--mono);font-size:6.8pt;letter-spacing:.3em;text-transform:uppercase;color:var(--mute);margin-bottom:9px}
+h1{font-family:var(--serif);font-weight:300;font-size:23pt;line-height:1.12;letter-spacing:-.015em;color:var(--ink)}
+h1 em{font-family:"Instrument Serif",serif;font-style:italic;font-weight:400;font-size:1.08em;color:var(--accent)}
+.ficha{display:grid;grid-template-columns:1.6fr 1fr .8fr;gap:0 24px;margin:8mm 0 7mm;border-top:.8px solid var(--line)}
+.ficha .item{display:flex;flex-direction:column;padding:8px 0 7px;border-bottom:.8px solid var(--line)}
+.ficha .rot{font-family:var(--mono);font-size:6.2pt;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);margin-bottom:2px}
+.ficha .val{font-family:var(--serif);font-size:10.5pt;color:var(--ink)}
+.h1-num{font-family:var(--mono);font-size:10pt;letter-spacing:.08em;color:var(--mute)}
+.head+.corpo{margin-top:4mm}
+.rotulo{font-family:var(--mono);font-size:7pt;letter-spacing:.24em;text-transform:uppercase;color:var(--ink);margin-bottom:8px}
+p{text-align:justify;hyphens:auto;margin-bottom:8px}
+p strong{font-weight:600;color:var(--ink)}
+p.pre{margin-bottom:10px}
+p.parte-a{text-align-last:justify;margin-bottom:0}
+.sec{position:relative;margin:9mm 0 4mm}
+.sec .sn{position:absolute;left:-17mm;top:3px;font-family:var(--mono);font-size:8.5pt;color:var(--accent);letter-spacing:.04em}
+.sec h2{font-family:var(--serif);font-weight:400;font-size:13pt;color:var(--ink);letter-spacing:-.005em;padding-bottom:5px;border-bottom:.8px solid var(--line)}
+.cl{position:relative}
+.cl .num{position:absolute;left:-17mm;top:1.5px;width:14mm;font-family:var(--mono);font-size:7.8pt;color:var(--accent);font-weight:500}
+.corpo>.sec:first-child,.corpo>.rotulo:first-child{margin-top:0}
+.fecho-local{text-align:center;font-style:italic;color:var(--graphite);margin-top:9mm}
+.corpo>.bloco-fecho:first-child .fecho-local{margin-top:0}
+.ass-grid{display:flex;gap:14mm;justify-content:space-between}
+.ass{flex:1;min-width:0;text-align:center}
+.ass-linha{height:18mm;margin:0 0 7px;display:flex;align-items:flex-end;justify-content:center}
+.ass-nome{font-family:var(--serif);font-weight:500;font-size:10.3pt;line-height:1.3;color:var(--ink)}
+.ass-cargo{font-family:var(--mono);font-size:6.4pt;letter-spacing:.2em;text-transform:uppercase;color:var(--mute);margin-top:5px}
+.sig-token{font-family:Arial,Helvetica,sans-serif;font-size:3pt;line-height:1;letter-spacing:0;color:#e6e6e3}
+.rod{position:absolute;top:1050px;font-family:var(--mono);font-size:6.2pt;line-height:1.7;color:var(--mute);letter-spacing:.03em;white-space:nowrap}
+.rod-end{left:121px}.rod-ctr{right:94.5px;text-align:right}
+.rod-meio{left:0;right:0;top:1045px;text-align:center}
+.paisagem #doc-fonte{width:297mm}
+.paisagem .pg{width:297mm;height:210mm}
+.paisagem .rod{top:721px}.paisagem .rod-meio{top:716px}
+${opts.v3?'p{hyphens:manual}':''}
+</style></head><body${opts.paisagem?' class="paisagem" data-limite="691"':''}${opts.v3?' data-rod="v3"':''} data-paginar="1" data-ref="${ref}" data-versao="${escHtml(_DOC_VERSAO)}">
+<div id="doc-fonte"><div class="wrap">
+  <header class="cab"><div class="cab-logo"><span class="cab-dot"></span><span class="cab-sep"></span><span class="cab-wm">cobrasq<span class="p">.</span></span></div><div class="cab-meta">Dois Vizinhos · PR<br>Emitido ${opts.v3?'em ':''}${escHtml(dataCab)}</div><div class="desde19">Desde 2019</div></header>
+  <div class="head"><div class="eyebrow">${opts.eyebrowHtml||escHtml(opts.eyebrow||'Instrumento particular')}</div><h1>${opts.tituloHtml||escHtml(titulo)}</h1></div>
+  ${(ficha||opts.fichaVazia)?`<div class="ficha">${ficha}</div>`:''}
+  <div class="corpo">
+    ${_docClausulas(corpoHtml)}
     <div class="bloco-fecho">
-      <div class="fecho-local">Dois Vizinhos, Estado do Paraná, ${dataExt}.</div>
+      <div class="fecho-local">Dois Vizinhos, Estado do Paraná, ${dataExt}.${opts.fechoApos||''}</div>
       <div class="ass-grid">${ass}</div>
     </div>
-  </main>
-</div></body></html>`;
+  </div>
+</div></div>
+<div id="doc-paginas"></div>
+<script>(${_docPaginador.toString()})();<\/script>
+</body></html>`;
 }
 // Qualificação complementar da Cedente PJ: porte (microempresa / EPP) e quem assina
 // por ela. Vem de d.contrato (preenchido na modal "Dados do contrato" antes do envio);
@@ -47233,15 +47363,21 @@ function _docClienteHtml(tipo, d){
   const COBRASQ_PRE = `<strong>COBRASQ Recuperadora de Crédito e Cobrança Ltda</strong>, sociedade empresária limitada, inscrita no CNPJ sob o n. 34.626.848/0001-42, com sede na Av. Rio Grande do Sul, n. 380, sala 201, Ed. Mara, centro, CEP.: 85660–000, município de Dois Vizinhos, Estado do Paraná, neste ato representada por seu sócio administrador, Sr. <strong>Gustavo Souza Teixeira dos Santos</strong>, CPF sob o n. 103.513.639-20, doravante denominada de <strong>Cessionária</strong>.`;
 
   if(tipo==='declaracao'){
-    const corpo=`<p>${parteCli}, doravante ${denom} de cedente.</p>
-<p><strong>COBRASQ Recuperadora de Crédito e Cobrança Ltda</strong>, sociedade empresária limitada, inscrita no CNPJ/MF sob o n. 34.626.848/0001-42, com sede na Av. Rio Grande do Sul, n. 380, sala 201, Ed. Mara, centro, CEP.: 85660–000, município de Dois Vizinhos, Estado do Paraná, doravante denominada de cessionária.</p>
+    // Canvas aprovado em 24/09/2026: partes no estilo v3, sem ficha (fica só o filete),
+    // "Cedente"/"Cessionária" como no termo.
+    const pt=_termoPartes({ nome:d.nome, doc:d.doc, rua:d.rua, numero:d.numero, complemento:d.complemento, bairro:d.bairro, cidade:d.cidade, uf:d.uf, cep:d.cep }, d.contrato, 'v3');
+    const corpo=`<div class="rotulo">Partes</div>
+<p class="pre">${pt.cedente}</p>
+<p class="pre">${pt.cessionaria}</p>
 <p>Declaram, para os fins dos Art. 286 a 289 do Código Civil, bem como dos Art. 127, I, e 129, § 9º da Lei n. 6.015/1973, que:</p>
 <p><strong>a.</strong> A cedente transfere à cessionária, de forma plena, todos os direitos creditórios descritos nos Termos de Cessão assinados entre as partes, incluindo principal, juros, multas, encargos e demais acessórios.</p>
 <p><strong>b.</strong> A cedente declara que os créditos são válidos, líquidos, exigíveis e livres de litígios, vícios ou acordos paralelos, respondendo por quaisquer informações inverídicas.</p>
 <p><strong>c.</strong> O instrumento de cessão contém dados de terceiros e condições comerciais reservadas, e será exibido à autoridade que o exigir, com as cautelas de sigilo cabíveis.</p>`;
-    return _docClienteShell('Termo de Declaração de Cessão',
-      [['Cedente', d.nome||'—'],['CNPJ / CPF', docCli],['Cessionária', COBRASQ]],
-      corpo, [[COBRASQ,'Cessionária'],[d.nome||'Cedente','Cedente']]);
+    const numDecl=d.contrato&&d.contrato.numero;
+    return _docClienteShell('Termo de Declaração de Cessão', null,
+      corpo, [[COBRASQ,'Cessionária'],[d.nome||'Cedente','Cedente']],
+      { tituloHtml:'Termo de Declaração <em>de Cessão</em>', ref:numDecl?'Contrato nº '+numDecl:'', v3:true,
+        eyebrowHtml:'<br>Instrumento particular', fichaVazia:true, fechoApos:'<br><br><br>' });
   }
   if(tipo==='cessao'){
     const ct=d.contrato||{};
@@ -47253,8 +47389,9 @@ function _docClienteHtml(tipo, d){
 <p>0.3. Os créditos cedidos com base nos contratos anteriores continuam identificados pelos respectivos termos, anexos ou relações de cessão, que integram este contrato para todos os fins.</p>
 <p>0.4. A substituição não constitui novação e não afeta os pagamentos, repasses e acertos já realizados até a data de assinatura deste contrato. Os valores eventualmente pendentes de repasse nessa data serão apurados e pagos na forma deste contrato.</p>
 ` : '';
-    const corpo=`<p>${parteCli}, doravante ${denom} de <strong>Cedente</strong>.</p>
-<p>${COBRASQ_PRE}</p>
+    const corpo=`<div class="rotulo">Partes</div>
+<p class="pre">${parteCli}, doravante ${denom} de <strong>Cedente</strong>.</p>
+<p class="pre">${COBRASQ_PRE}</p>
 ${clausula0}<h2>1. Definições</h2>
 <p><strong>1.1. Créditos cedidos:</strong> os créditos individualizados, um a um, nos Termos de Cessão emitidos com base neste contrato, com seus respectivos valores, origem, vencimentos, documentos e demais elementos de identificação.</p>
 <p><strong>1.2. Valor principal ou valor capital:</strong> o valor nominal principal de cada crédito cedido, descontado eventuais pagamentos, sem o acréscimo de acessórios, consectários legais e afins.</p>
@@ -47320,9 +47457,9 @@ ${clausula0}<h2>1. Definições</h2>
 <p>13.1. Nenhuma tolerância implicará novação ou renúncia de direitos; a nulidade de qualquer cláusula não afetará as demais.</p>
 <p>13.2. As partes elegem o foro da Comarca de <strong>Dois Vizinhos/PR</strong> para dirimir quaisquer controvérsias oriundas deste Contrato, com renúncia de qualquer outro, por mais privilegiado que seja.</p>`;
     return _docClienteShell('Contrato-Quadro de Cessão de Créditos e Outras Avenças',
-      [ct.numero?['Contrato nº', ct.numero]:null,['Cedente', d.nome||'—'],['CNPJ / CPF', docCli],['Cessionária', COBRASQ],['Termos de Cessão','À parte, com Tabela de Preço reservada'],
-       rv?['Substitui', _renovDatas(rv).length>1?`Contratos de ${_renovDatas(rv).map(_brData).join(' e ')}`:`Contrato ${rv.numero?'nº '+rv.numero+', ':''}de ${_brData(rv.data)}`]:null],
-      corpo, [[COBRASQ,'Cessionária'],[d.nome||'Cedente','Cedente']], ct.numero?{ref:'Contrato nº '+ct.numero}:undefined);
+      [['Cedente', d.nome||'—'],['CNPJ / CPF', docCli],ct.numero?['Contrato nº', ct.numero]:null],
+      corpo, [[COBRASQ,'Cessionária'],[d.nome||'Cedente','Cedente']],
+      { tituloHtml:'Contrato-Quadro de Cessão de <em>Créditos e Outras Avenças</em>', ref:ct.numero?'Contrato nº '+ct.numero:'' });
   }
   return null;
 }
@@ -47359,6 +47496,7 @@ async function abrirAnexoICliente(clienteId, modo){
       titulo:c.tipo_documento||c.divida?.titulo||c.divida?.descricao||'Cobrança',
       numDoc:c.numero_documento||'', descricao:c.divida?.descricao||'',
       vencimento:String(c.vencimento||c.divida?.vencimento||'').slice(0,10),
+      parcelas:(+c.divida?.parcelas>1)?+c.divida.parcelas:null, // crédito em várias parcelas/pedidos: 1º vencimento + "(N parcelas)"
       nominal:(+c.valor_orig||+c.valor_atual||0), status:statusLabel(c.status)||'—', statusRaw:c.status||'',
       cadastro:(c.created_at||'').slice(0,10), pct:100,
       encerrada:/quitad|devolvid/i.test(c.status||'') };
@@ -47367,7 +47505,7 @@ async function abrirAnexoICliente(clienteId, modo){
   _anexo1Fechar();
   // Contrato-quadro citado nos termos: o último assinado do cliente (nº e data), editável.
   const ultC=await _contratoUltimoAssinado(clienteId).catch(()=>null);
-  _anexo1Ctx={ cli, creditos, ordem:'nome', marcados:new Set(creditos.map((k,i)=>k.encerrada?null:i).filter(i=>i!==null)) };
+  _anexo1Ctx={ cli, creditos, ordem:'nome', marcados:new Set(creditos.map((k,i)=>(k.encerrada||_termoPendencias(k).length)?null:i).filter(i=>i!==null)) };
   const ov=document.createElement('div');
   ov.id='anexo1-overlay';
   ov.style.cssText='position:fixed;inset:0;background:rgba(10,21,48,.45);z-index:9000;display:flex;align-items:center;justify-content:center;';
@@ -47390,7 +47528,7 @@ async function abrirAnexoICliente(clienteId, modo){
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
       <span style="display:flex;gap:6px;">
-        <button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.anexo1-chk').forEach(c=>c.checked=true);_anexo1Atualizar();">Marcar todas</button>
+        <button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.anexo1-chk:not(:disabled)').forEach(c=>c.checked=true);_anexo1Atualizar();">Marcar todas</button>
         <button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.anexo1-chk').forEach(c=>c.checked=false);_anexo1Atualizar();">Desmarcar todas</button>
       </span>
       <label style="font-size:12px;color:var(--text-2,#444);display:flex;align-items:center;gap:6px;">Organizar por
@@ -47443,12 +47581,14 @@ function _anexo1Render(){
     let cab='';
     if(grupoDe){ const g=grupoDe(k); if(g!==atual){ atual=g; cab=`<div style="font-size:10.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin:${i===idx[0]?'0':'12px'} 0 6px;">${escHtml(g)} · ${cont[g]}</div>`; } }
     const dt=k.cadastro?k.cadastro.split('-').reverse().join('/'):'';
+    const pend=_termoPendencias(k);
     return `${cab}
-    <label style="display:flex;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;cursor:pointer;">
-      <input type="checkbox" class="anexo1-chk" data-i="${i}" ${marcados.has(i)?'checked':''} onchange="_anexo1Atualizar()" style="width:15px;height:15px;flex-shrink:0;">
+    <label style="display:flex;gap:10px;align-items:center;padding:8px 10px;border:1px solid ${pend.length?'var(--danger,#b00)':'var(--border)'};border-radius:8px;margin-bottom:6px;cursor:${pend.length?'not-allowed':'pointer'};${pend.length?'opacity:.85;':''}">
+      <input type="checkbox" class="anexo1-chk" data-i="${i}" ${marcados.has(i)&&!pend.length?'checked':''} ${pend.length?'disabled':''} onchange="_anexo1Atualizar()" style="width:15px;height:15px;flex-shrink:0;">
       <span style="flex:1;min-width:0;">
         <span style="display:block;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(k.nome)}</span>
         <span style="display:block;font-size:10.5px;color:var(--text-3);">${escHtml(_mascararDocLgpd(k.doc))} · ${escHtml(k.titulo)} · ${escHtml(k.status)}${dt?' · cadastro '+dt:''}</span>
+        ${pend.length?`<span style="display:block;font-size:10.5px;font-weight:600;color:var(--danger,#b00);">Pendente: ${escHtml(pend.join(' e '))}. Não entra no termo.</span>`:''}
       </span>
       <span style="font-size:12px;font-weight:600;white-space:nowrap;">${fmtR(k.nominal)}</span>
       <span onclick="event.preventDefault();event.stopPropagation();" style="display:flex;align-items:center;gap:3px;flex-shrink:0;" title="% do valor principal pago à cedente como preço">
@@ -47479,12 +47619,26 @@ function _anexo1Atualizar(){
 }
 // Bloqueios antes de gerar/usar os termos: % obrigatório e crédito posterior à
 // data do termo (só se cede crédito que já existia na data do termo — cláusula 2.3).
+// Origem vazia ou só o rótulo genérico do Astrea ("Cobrança") não identifica o crédito
+// cedido (CC art. 288): o termo não é emitido assim (decisão de 24/09/2026).
+function _termoPendencias(k){
+  const p=[];
+  if(_termoOrigemGenerica(k)) p.push('falta a origem do crédito (serviço/venda e nº do documento)');
+  if(!k.vencimento) p.push('falta a data de vencimento');
+  return p;
+}
+function _termoOrigemGenerica(k){
+  const t=[k.titulo,k.numDoc,k.descricao].map(x=>String(x||'').trim()).filter(Boolean);
+  return !t.length || t.every(x=>/^cobran[çc]a$/i.test(x));
+}
 function _termosValidar(sel, dataDoc){
   const semPct=sel.filter(k=>k.pct==null);
   if(semPct.length) return `Preencha o % do preço de: ${semPct.slice(0,3).map(k=>k.nome).join(', ')}${semPct.length>3?` e mais ${semPct.length-3}`:''}.`;
   const d=String(dataDoc||'').slice(0,10);
   const depois=sel.filter(k=>k.cadastro && k.cadastro>d);
   if(depois.length) return `A data do termo (${d.split('-').reverse().join('/')}) é anterior ao cadastro de: ${depois.slice(0,3).map(k=>k.nome).join(', ')}${depois.length>3?` e mais ${depois.length-3}`:''}. Só entra no termo crédito que já existia na data dele.`;
+  const pend=sel.filter(k=>_termoPendencias(k).length);
+  if(pend.length) return `Crédito com pendência não entra no termo: ${pend.slice(0,3).map(k=>k.nome+' ('+_termoPendencias(k).join(' e ')+')').join('; ')}${pend.length>3?` e mais ${pend.length-3}`:''}. Complete o cadastro da cobrança.`;
   return null;
 }
 function _anexo1Selecao(){
@@ -47501,18 +47655,37 @@ function _anexo1Selecao(){
 }
 // Número do termo: data do termo + hora da emissão (dois termos no mesmo dia não colidem).
 function _termoNumero(dataDoc){ const h=new Date(); return String(dataDoc||hoje()).slice(0,10).replace(/-/g,'')+'-'+String(h.getHours()).padStart(2,'0')+String(h.getMinutes()).padStart(2,'0'); }
-function _termoPartes(cli, q){
+// estilo 'termo': nomes, papéis e representantes em itálico, sem negrito, e nº do
+// documento sem destaque (pedido de 24/09/2026 — por ora só no termo).
+function _termoPartes(cli, q, estilo){
   const d={ nome:cli.nome, doc:cli.doc, rua:_gv(cli,'rua'), numero:_gv(cli,'numero'), complemento:_gv(cli,'complemento'),
     bairro:_gv(cli,'bairro'), cidade:_gv(cli,'cidade'), uf:_gv(cli,'uf'), cep:_gv(cli,'cep') };
   const end=_docClienteEndereco(d);
   const isPJ=(d.doc||'').replace(/\D/g,'').length>11;
   const endClause=(end&&end!=='—')?`, com endereço na ${escHtml(end)}`:'';
-  return {
+  const r={
     cedente:`<strong>${escHtml(d.nome||'—')}</strong>, ${isPJ?'sociedade empresária limitada':'pessoa física'}${_cedenteQualif(q,isPJ).porte}, ${isPJ?'inscrita':'inscrito(a)'} no ${isPJ?'CNPJ':'CPF'} sob o n. <strong>${escHtml(d.doc||'____________')}</strong>${endClause}${_cedenteQualif(q,isPJ).rep}, doravante denominad${isPJ?'a':'o(a)'} de <strong>Cedente</strong>.`,
     cessionaria:`<strong>COBRASQ Recuperadora de Crédito e Cobrança Ltda</strong>, sociedade empresária limitada, inscrita no CNPJ sob o n. 34.626.848/0001-42, com sede na Av. Rio Grande do Sul, n. 380, sala 201, Ed. Mara, centro, CEP.: 85660–000, município de Dois Vizinhos, Estado do Paraná, neste ato representada por seu sócio administrador, Sr. <strong>Gustavo Souza Teixeira dos Santos</strong>, CPF sob o n. 103.513.639-20, doravante denominada de <strong>Cessionária</strong>.` };
+  // estilo 'v3' (canvas aprovado em 24/09/2026, termo e declaração): razão social em
+  // itálico e peso 600, representante em itálico, papel em negrito itálico, nº sem
+  // destaque e sem o CPF do sócio da COBRASQ.
+  if(estilo==='v3'){
+    const q2=_cedenteQualif(q,isPJ), sra=q&&q.repTrat==='Sra.';
+    const papel=(q&&q.repPapel==='titular')?(sra?'pela sua titular':'pelo seu titular'):(sra?'pela sua sócia administradora':'pelo seu sócio administrador');
+    const rep=(isPJ&&q&&q.repNome)?`, neste ato representada ${papel},<i> ${sra?'Sra.':'Sr.'} ${escHtml(q.repNome)},</i>`:',';
+    const nome=`<i><span style="font-weight:600;color:var(--ink)">${escHtml(d.nome||'—')}</span>,</i>`;
+    return {
+      cedente:`${nome} ${isPJ?'sociedade empresária limitada':'pessoa física'}${q2.porte}, ${isPJ?'inscrita':'inscrito(a)'} no ${isPJ?'CNPJ':'CPF'} sob o n. ${escHtml(d.doc||'____________')}${endClause}${rep} doravante denominad${isPJ?'a':'o(a)'} de <b><i>Cedente</i></b>.`,
+      cessionaria:`<span style="font-weight:600;color:var(--ink)"><i>COBRASQ Recuperadora de Crédito e Cobrança Ltda</i></span>, sociedade empresária limitada, inscrita no CNPJ sob o n. 34.626.848/0001-42, com sede na Av. Rio Grande do Sul, n. 380, sala 201, Ed. Mara, centro, CEP.: 85660–000, município de Dois Vizinhos, Estado do Paraná, neste ato representada por seu sócio administrador, <i>Sr. Gustavo Souza Teixeira dos Santos</i>, doravante denominada de <i><b>Cessionária</b></i>.` };
+  }
+  if(estilo!=='termo') return r;
+  const it=h=>h.replace(/(Sra?\.) <strong>([^<]*)<\/strong>/g,'<em>$1 $2</em>')
+    .replace(/(n\. )<strong>([^<]*)<\/strong>/g,'$1$2')
+    .replace(/<strong>([^<]*)<\/strong>/g,'<em>$1</em>');
+  return { cedente:it(r.cedente), cessionaria:it(r.cessionaria) };
 }
 const _TERMO_CSS=`<style>
-table.a1{width:100%;border-collapse:collapse;margin-top:18px;font-size:9pt}
+table.a1{width:100%;border-collapse:collapse;margin:14px 0 4px;font-size:10.2pt;line-height:1.35}
 table.a1 th{font-family:var(--mono);font-size:7pt;font-weight:500;text-transform:uppercase;letter-spacing:.1em;color:var(--accent-2);text-align:left;padding:7px 6px;border-bottom:1.2px solid var(--ink)}
 table.a1 td{padding:7px 6px;border-bottom:.7px solid var(--line);vertical-align:top}
 table.a1 .a1-num{font-family:var(--mono);font-size:8pt;color:var(--accent-2);white-space:nowrap}
@@ -47530,29 +47703,32 @@ const _brData=v=>v?String(v).slice(0,10).split('-').reverse().join('/'):'—';
 // assinado quebra a verificação da assinatura). Assinam Cedente e Cessionária
 // (CC art. 288 c/c 654 §1º: instrumento particular assinado identificando o crédito).
 function _termoCessaoHtml(cli, k, numero, dataDoc, dataContrato, numContrato, q){
-  const pt=_termoPartes(cli, q);
+  const pt=_termoPartes(cli, q, 'v3');
   const origem=[k.titulo, k.numDoc?`nº ${k.numDoc}`:'', (k.descricao&&k.descricao!==k.titulo)?`(${k.descricao})`:''].filter(Boolean).join(' ');
   const contrato=dataContrato?`firmado em ${_brData(dataContrato)}`:'firmado entre as partes';
   const corpo=`${_TERMO_CSS}
-<p><strong>Cedente:</strong> ${pt.cedente}</p>
-<p><strong>Cessionária:</strong> ${pt.cessionaria}</p>
+<div class="rotulo"><br>Partes</div>
+<p class="pre">${pt.cedente}</p>
+<p class="pre">${pt.cessionaria}</p>
 <p>Pelo presente termo, emitido com base no Contrato-Quadro de Cessão de Créditos${numContrato?' nº '+escHtml(numContrato):''} ${contrato}, a Cedente cede à Cessionária, em caráter definitivo, o crédito abaixo descrito, com todos os seus acessórios (Código Civil, art. 287):</p>
 <table class="a1">
-  <thead><tr><th>Devedor</th><th>CPF/CNPJ</th><th>Origem do crédito</th><th>Vencimento</th><th style="text-align:right;">Valor principal</th></tr></thead>
+  <thead><tr><th>Devedor</th><th>CPF/CNPJ</th><th>Origem do crédito</th><th>Vencimento</th><th style="text-align:right;">Valor capital</th></tr></thead>
   <tbody><tr>
-    <td>${escHtml(k.nome)}</td>
+    <td><i>${escHtml(k.nome)}</i></td>
     <td class="a1-doc">${escHtml(k.doc||'—')}</td>
     <td>${escHtml(origem||'—')}</td>
-    <td class="a1-doc">${escHtml(_brData(k.vencimento))}</td>
+    <td class="a1-doc">${escHtml(_brData(k.vencimento))}${k.parcelas?`<br>(${k.parcelas} parcelas)`:''}</td>
     <td class="a1-val">${fmtR(k.nominal)}</td>
   </tr></tbody>
-</table>
-<p style="margin-top:14px;">A Cedente declara que o crédito acima já existia na data deste termo e ratifica, quanto a ele, as declarações e garantias do contrato-quadro. O preço do crédito consta da Tabela de Preço vinculada a este termo, de caráter reservado entre as partes.</p>`;
-  return _docClienteShell('Termo de Cessão de Crédito',
-    [['Termo nº', numero],numContrato?['Contrato nº', numContrato]:null,['Devedor', k.nome||'—'],['Cedente', cli.nome||'—'],['Cessionária','COBRASQ Recuperadora de Crédito e Cobrança Ltda']],
-    corpo, [['COBRASQ Recuperadora de Crédito e Cobrança Ltda','Cessionária'],[cli.nome||'Cedente','Cedente']], { data: dataDoc, ref: numContrato?'Contrato nº '+numContrato:'' });
+</table>`;
+  // Sem a frase de ratificação/preço: o contrato-quadro já cobre (cl. 2.3, 1.5 e 3.4) — 24/09/2026.
+  // Sem ficha (Devedor/Termo/Contrato já estão no título e no corpo — 24/09/2026).
+  return _docClienteShell(`Termo de Cessão de Crédito nº ${numero}`, null,
+    corpo, [['COBRASQ Recuperadora de Crédito e Cobrança Ltda','Cessionária'],[cli.nome||'Cedente','Cedente']],
+    { data: dataDoc, ref: numContrato?'Contrato nº '+numContrato:'', v3:true, tituloHtml:`Termo de Cessão <em>de Crédito</em><br><span class="h1-num">nº ${escHtml(numero)}</span>` });
 }
 // TABELA DE PREÇO — uma só para todos os termos do lote; reservada, não vai ao processo.
+// Folha em paisagem (pedido de 24/09/2026): a tabela tem 6 colunas.
 // CPF/CNPJ mascarado (LGPD). Cada linha aponta o nº do termo do crédito.
 function _tabelaPrecoHtml(cli, itens, lote, dataDoc, numContrato, q){
   const pt=_termoPartes(cli, q);
@@ -47567,8 +47743,9 @@ function _tabelaPrecoHtml(cli, itens, lote, dataDoc, numContrato, q){
     <td class="a1-val">${fmtR(_anexo1Preco(k))}</td>
   </tr>`).join('');
   const corpo=`${_TERMO_CSS}
-<p><strong>Cedente:</strong> ${pt.cedente}</p>
-<p><strong>Cessionária:</strong> ${pt.cessionaria}</p>
+<div class="rotulo">Partes</div>
+<p class="pre"><strong>Cedente:</strong> ${pt.cedente}</p>
+<p class="pre"><strong>Cessionária:</strong> ${pt.cessionaria}</p>
 <p>As partes ajustam o percentual do preço de cada crédito cedido pelos Termos de Cessão de Crédito abaixo indicados, na forma das cláusulas 1.5, 3.4 e 3.5 do contrato-quadro. Esta tabela tem caráter reservado entre as partes e não integra a prova da cessão perante o devedor ou terceiros.</p>
 <table class="a1">
   <thead><tr><th>Termo nº</th><th>Devedor</th><th>CPF/CNPJ</th><th style="text-align:right;">Valor principal</th><th style="text-align:right;">% do preço</th><th style="text-align:right;">Preço</th></tr></thead>
@@ -47577,8 +47754,9 @@ function _tabelaPrecoHtml(cli, itens, lote, dataDoc, numContrato, q){
 </table>
 <p style="font-size:9pt;margin-top:14px;">O preço de cada crédito é o valor principal multiplicado pelo percentual indicado e é pago somente com os valores realizados daquele crédito, após o reembolso das despesas de realização e a remuneração da Cessionária (cláusula 3.5), nas datas de repasse da cláusula 4.4.</p>`;
   return _docClienteShell(`Tabela de Preço — Termos ${lote}`,
-    [['Cedente', cli.nome||'—'],['CNPJ / CPF', cli.doc||'—'],['Cessionária','COBRASQ Recuperadora de Crédito e Cobrança Ltda'],['Documento','Reservado entre as partes'],numContrato?['Contrato nº', numContrato]:null],
-    corpo, [['COBRASQ Recuperadora de Crédito e Cobrança Ltda','Cessionária'],[cli.nome||'Cedente','Cedente']], { data: dataDoc, ref: numContrato?'Contrato nº '+numContrato:'' });
+    [['Cedente', cli.nome||'—'],['Termos', lote],numContrato?['Contrato nº', numContrato]:null],
+    corpo, [['COBRASQ Recuperadora de Crédito e Cobrança Ltda','Cessionária'],[cli.nome||'Cedente','Cedente']],
+    { data: dataDoc, ref: numContrato?'Contrato nº '+numContrato:'', tituloHtml:'Tabela de <em>Preço</em>', eyebrow:'Reservado entre as partes', paisagem:true });
 }
 // Devolve a tabela de preço (1ª) e um termo por crédito, no formato usado pela geração e
 // pelo lote. Nº do termo = lote (data+hora) + sequencial: 20260924-1530-001.
