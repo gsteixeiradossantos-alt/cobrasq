@@ -164,11 +164,18 @@
       const info = getIndiceParaSegmento(indSeg, s.dataFimSeg, params.selicRetro);
       let varPct = TAB[info.tabela][ch]; if (varPct === undefined) varPct = 0;
       const varEf = (varPct / 100) * (s.diasSeg / s.diasMes);
-      let fatorMes = 1 + varEf;
-      const novo = fatorAcum * fatorMes;                 // garantia STJ: fator acumulado nunca < 1
-      if (novo < 1) { fatorMes = fatorAcum > 0 ? (1 / fatorAcum) : 1; fatorAcum = 1; aplicouGarantia = true; } else { fatorAcum = novo; }
+      // Garantia STJ: o piso de 1 vale para o fator EXIBIDO, nunca para o fator acumulado.
+      // `fatorAcum` segue o índice real (pode ficar < 1); o saldo usa max(fatorAcum, 1).
+      // Travar o acumulado em 1 fazia os meses positivos seguintes comporem a partir do
+      // piso: IGP-M jun/25–ago/26 sobre R$ 3.180 dava R$ 3.260,97 em vez de R$ 3.181,82.
+      // Os juros do mês incidem sobre o saldo COM piso (decisão do Gustavo, 25/09/2026).
+      const efAntes = Math.max(fatorAcum, 1);
+      fatorAcum = fatorAcum * (1 + varEf);
+      const efDepois = Math.max(fatorAcum, 1);
+      const fatorMes = efDepois / efAntes;
       const saldoAntes = saldoCorrigido;
       saldoCorrigido = saldoCorrigido * fatorMes;
+      if (fatorAcum < 1) aplicouGarantia = true;        // saldo segurado no nominal em algum mês
 
       let jurosMes = 0, diasJurosNoSeg = 0, taxaMesAplicada = taxaSeg, viaTaxaLegal = false, capitalizadoSeg = 0;
       if (!info.travaJuros && params.dataJuros <= s.dataFimSeg) {

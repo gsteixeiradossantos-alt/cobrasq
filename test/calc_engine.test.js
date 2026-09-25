@@ -43,6 +43,21 @@ LOG('2) Garantia STJ: correcao nunca reduz abaixo do nominal');
   ok(g.aplicouGarantiaSTJ === true, 'aplicouGarantiaSTJ=true em serie negativa');
   var n = E.juridica(1000, D(2024, 0, 10), D(2025, 0, 10), 'INPC', 0, 0, 0); // INPC positivo no periodo
   ok(n.valorAtualizado > 1000, 'serie positiva: atualizado > nominal');
+  // Piso no fator EXIBIDO, nao no acumulado: IGP-M jun/25 (-1,67) e jul/25 (-0,77) seguram o
+  // saldo em 3180, mas ago/25 em diante compoe a partir do fator real. Produto jun/25-ago/26
+  // = 1,000571 -> R$ 3.181,82 (o piso travando o acumulado dava R$ 3.260,97).
+  var ig = E.juridica(3180, '2025-06-01', '2026-09-25', 'IGP-M', 0, 0, 1);
+  var fIg = 1; Object.keys(E.TABELAS['IGP-M']).forEach(function (k) { if (k >= '2025-06' && k <= '2026-08') fIg *= 1 + E.TABELAS['IGP-M'][k] / 100; });
+  near(fIg, 1.000571, 'IGP-M jun/25-ago/26 acumulado = 1,000571', 1e-6);
+  near(ig.valorAtualizado, 3180 * fIg, 'atualizado = nominal x fator acumulado real (' + ig.valorAtualizado.toFixed(2) + ')', 1e-6);
+  near(Math.round(ig.valorAtualizado * 100) / 100, 3181.82, 'IGP-M 3180 jun/25 -> R$ 3.181,82 (nao 3.260,97)', 1e-9);
+  var igL = ig.linhas.filter(function (l) { return l.tipo === 'mes'; });
+  near(igL[0].saldoCorrigido, 3180, 'jun/25 negativo: saldo segurado no nominal', 1e-9);
+  near(igL[1].saldoCorrigido, 3180, 'jul/25 negativo: saldo segurado no nominal', 1e-9);
+  ok(ig.aplicouGarantiaSTJ === true, 'aplicouGarantiaSTJ=true (meses segurados no nominal)');
+  // juros de cada mes incidem sobre o saldo COM piso (decisao de 25/09/2026)
+  near(igL[0].jurosMes, 3180 * 0.01, 'jun/25: juros de 1% sobre o saldo com piso (3180)', 1e-9);
+  near(Math.round(ig.juros * 100) / 100, 512.51, 'juros 1% a.m. sobre saldo com piso = R$ 512,51', 1e-9);
 })();
 
 // 3) Item 14 — Taxa Legal (Lei 14.905), cutoff 30/08/2024
