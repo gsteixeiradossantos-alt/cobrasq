@@ -23352,58 +23352,104 @@ function _invSituacaoEnt(e){
 }
 // Só link http(s) vira âncora; o resto é descartado.
 function _invLink(u){ return /^https?:\/\//i.test(String(u||''))?`<br><a href="${escHtml(u)}" style="color:#1F4FA8;font-size:10px;word-break:break-all;">${escHtml(u)}</a>`:''; }
+// Relatório em formato de dossiê: identificação → o que dá para penhorar → teia →
+// tabelas por categoria → sinais de alerta → fontes → critérios do score → anexo.
 async function baixarRelatorioInvestigacao(investigacaoId){
   const supa=getSupabase(); if(!supa) return;
   try{
     const [{data:inv,error:ei},{data:ents,error:ee},{data:vinc},{data:evid},{data:eventos}]=await Promise.all([
       supa.from('investigacoes_patrimoniais').select('*').eq('id',investigacaoId).single(),
       supa.from('investigacao_entidades').select('*').eq('investigacao_id',investigacaoId).order('profundidade'),
-      supa.from('investigacao_vinculos').select('tipo,confianca,justificativa,origem_entidade_id,destino_entidade_id').eq('investigacao_id',investigacaoId),
-      supa.from('investigacao_evidencias').select('fonte_codigo,titulo,trecho,url,obtido_em,confianca').eq('investigacao_id',investigacaoId).order('obtido_em',{ascending:false}),
+      supa.from('investigacao_vinculos').select('id,tipo,confianca,justificativa,origem_entidade_id,destino_entidade_id').eq('investigacao_id',investigacaoId),
+      supa.from('investigacao_evidencias').select('entidade_id,vinculo_id,fonte_codigo,titulo,trecho,url,obtido_em,confianca').eq('investigacao_id',investigacaoId).order('obtido_em',{ascending:false}),
       supa.from('investigacao_eventos').select('tipo,mensagem,criado_em').eq('investigacao_id',investigacaoId).order('criado_em')
     ]);
     if(ei) throw ei; if(ee) throw ee;
-    const porId=Object.fromEntries((ents||[]).map(x=>[x.id,x]));
+    // Cobrança e credor só para a identificação; se não vier (RLS, cobrança nula), segue sem.
+    let cob=null;
+    if(inv.cobranca_id){ try{ const {data}=await supa.from('cobrancas').select('numero_processo,clientes:cliente_id(nome)').eq('id',inv.cobranca_id).maybeSingle(); cob=data; }catch(_){} }
+    const an=_invAnalise(ents,vinc,evid), raiz=an.raiz, c=an.cont;
     const comps=Array.isArray(inv.score_componentes)?inv.score_componentes:[];
-    const alvo=_invEsc(inv.nome_consultado)+(inv.documento_consultado?' · '+_invEsc(inv.documento_consultado):'');
-    // Teia na primeira página: PNG (html2canvas nem sempre desenha <svg>); se falhar, SVG embutido.
+    const res=inv.resumo||{};
+    const lista=v=>Array.isArray(v)?v:(v?[v]:[]);
+    const fOk=lista(res.fontes_concluidas), fNao=lista(res.fontes_nao_conclusivas);
+    const fTxt=f=>typeof f==='string'?_invEsc(f):_invEsc([f.fonte||f.codigo||f.nome,f.motivo||f.erro].filter(Boolean).join(': '));
     let teiaHtml='';
     if((ents||[]).length){
-      const svg=_invTeiaSvg(ents,vinc,{fundo:true,largura:760,altura:560});
+      const svg=_invTeiaSvg(ents,vinc,{fundo:true,largura:760,altura:580,analise:an});
       const png=await _invSvgParaPng(svg);
-      teiaHtml=`<h2>Teia de vínculos</h2>${png?`<img src="${png}" style="width:100%;display:block;">`:svg}`;
+      teiaHtml=`<h2>3. Teia de vínculos</h2>${png?`<img src="${png}" style="width:100%;display:block;">`:svg}`;
     }
+    const outros=(ents||[]).filter(e=>e!==raiz);
+    const emp=outros.filter(e=>e.tipo==='empresa'), pes=outros.filter(e=>e.tipo==='pessoa'), pro=outros.filter(e=>e.tipo==='processo');
+    const lig=e=>(vinc||[]).filter(v=>v.origem_entidade_id===e.id||v.destino_entidade_id===e.id).map(v=>{
+      const o=an.porId[v.origem_entidade_id===e.id?v.destino_entidade_id:v.origem_entidade_id]; return `${_invVincLbl(v.tipo)} ${o?.nome||o?.documento||''} (${v.confianca}%)`; }).join('; ');
+    const selos=e=>(an.comPenhora.has(e.id)?' <b style="color:#2F855A;">$</b>':'')+(an.comAlerta.has(e.id)?' <b style="color:#DD6B20;">!</b>':'');
+    const tab=(cab,linhas,vazio)=>linhas.length?`<table><thead><tr>${cab.map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody>${linhas.join('')}</tbody></table>`:`<p class="sub"><i>${vazio}</i></p>`;
+    const tr=a=>`<tr>${a.map(x=>`<td>${x}</td>`).join('')}</tr>`;
+    // Contratos e vínculos públicos: evidências do Portal/PNCP (não viram nó na teia).
+    const pub=(evid||[]).filter(x=>x.fonte_codigo==='pncp'||x.fonte_codigo==='portal_transparencia');
     const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><style>
       body{font-family:Arial,sans-serif;color:#0A1530;font-size:12px;line-height:1.45;margin:0;padding:8px}
       h1{font-size:18px;margin:0 0 4px} h2{font-size:13px;margin:18px 0 8px;border-bottom:1px solid #ddd;padding-bottom:4px}
+      h3{font-size:11.5px;margin:12px 0 4px;color:#5A6472;text-transform:uppercase;letter-spacing:.04em}
       .sub{color:#5A6472;font-size:11px} .chip{display:inline-block;padding:2px 8px;border-radius:12px;background:#F4F5F7;font-size:11px;margin-right:6px}
-      table{width:100%;border-collapse:collapse} td,th{border-bottom:1px solid #eee;padding:6px 4px;text-align:left;vertical-align:top}
-      th{color:#5A6472;font-size:10px;text-transform:uppercase}
+      table{width:100%;border-collapse:collapse} td,th{border-bottom:1px solid #eee;padding:5px 4px;text-align:left;vertical-align:top;font-size:11px}
+      th{color:#5A6472;font-size:9.5px;text-transform:uppercase}
+      .id td{border:none;padding:2px 8px 2px 0;font-size:12px} .id td:first-child{color:#5A6472;width:150px}
+      .cont{display:flex;gap:6px;margin:8px 0} .cont div{flex:1;border:1px solid #E2E5EA;border-radius:6px;padding:6px 8px} .cont b{font-size:16px;display:block}
+      .pen{padding:6px 8px;border-left:3px solid #2F855A;background:#F0FAF4;margin-bottom:5px}
+      .al{padding:6px 8px;border-left:3px solid #DD6B20;background:#FFF7ED;margin-bottom:5px} .al.r{border-left-color:#8A94A6;background:#F4F5F7}
       .nota{margin-top:16px;padding:10px;background:#FBF8EF;border:1px solid #E0D3A8;font-size:11px}
     </style></head><body>
-      <h1>Relatório de Investigação Patrimonial</h1>
+      <h1>Dossiê de Investigação Patrimonial</h1>
       <div class="sub">Gerado em ${_invEsc(new Date().toLocaleString('pt-BR'))} · COBRASQ</div>
-      <p><span class="chip">${_invEsc(_invStatusLabel(inv.status))}</span>
-         <span class="chip">Prioridade ${Math.round(+inv.score_prioridade||0)}/100</span></p>
-      <p><strong>Alvo:</strong> ${alvo}</p>
-      ${inv.resumo&&'recebe_ente_publico' in inv.resumo?`<p><strong>Recebe de ente público:</strong> ${inv.resumo.recebe_ente_publico===true?'sim (ver contratos vigentes / vínculo federal nas evidências)':inv.resumo.recebe_ente_publico===false?'nada encontrado no Portal da Transparência e no PNCP':'não verificado'}</p>`:''}
-      ${inv.resumo?.cobertura_processual?`<p class="sub">${_invEsc(inv.resumo.cobertura_processual)}</p>`:''}
+      <h2>1. Identificação</h2>
+      <table class="id">
+        <tr><td>Investigado</td><td><b>${_invEsc(raiz?.nome||inv.nome_consultado)}</b></td></tr>
+        <tr><td>CPF/CNPJ</td><td>${_invEsc(raiz?.documento||inv.documento_consultado||'não informado')}</td></tr>
+        ${cob?.clientes?.nome?`<tr><td>Credor</td><td>${_invEsc(cob.clientes.nome)}</td></tr>`:''}
+        ${cob?.numero_processo?`<tr><td>Processo da cobrança</td><td>${_invEsc(cob.numero_processo)}</td></tr>`:''}
+        <tr><td>Situação da investigação</td><td>${_invEsc(_invStatusLabel(inv.status))} · concluída em ${_invEsc(_invData(inv.concluido_em||inv.created_at))}</td></tr>
+        <tr><td>Prioridade</td><td>${Math.round(+inv.score_prioridade||0)}/100 (critérios na seção 7)</td></tr>
+        ${'recebe_ente_publico' in res?`<tr><td>Recebe de ente público</td><td>${res.recebe_ente_publico===true?'sim (ver seção 2)':res.recebe_ente_publico===false?'nada encontrado no Portal da Transparência e no PNCP':'não verificado'}</td></tr>`:''}
+        ${res.cobertura_processual?`<tr><td>Cobertura processual</td><td>${_invEsc(res.cobertura_processual)}</td></tr>`:''}
+      </table>
+      <h2>2. Resumo: o que pode ser penhorado</h2>
+      <div class="cont">
+        <div><b style="color:#2F855A;">${an.penhora.length}</b>pode penhorar</div>
+        <div><b>${c.empConf+c.empPista}</b>empresas (${c.empConf} confirmadas)</div>
+        <div><b>${c.pessoas}</b>pessoas</div>
+        <div><b>${c.autor+c.reu}</b>processos (${c.autor} autor · ${c.reu} réu)</div>
+        <div><b style="color:#DD6B20;">${c.alertas}</b>sinais de alerta</div>
+      </div>
+      ${an.penhora.length?an.penhora.map(p=>`<div class="pen"><b>${_invEsc(p.tipo)}</b>${p.conf?'':' <span class="sub">(pista, confirmar)</span>'}<br>${_invEsc(p.texto)}${_invLink(p.url)}</div>`).join('')
+        :'<p><i>Nenhum bem ou crédito penhorável identificado nas fontes consultadas. Ver na seção 6 as fontes que não responderam.</i></p>'}
+      ${an.impenhoravel.length?`<h3>Encontrado, mas não penhorável</h3><ul>${an.impenhoravel.map(x=>`<li>${_invEsc(x.texto)}</li>`).join('')}</ul>`:''}
       ${teiaHtml}
-      <h2${teiaHtml?' style="page-break-before:always;"':''}>Critérios do score</h2>
+      <h2 style="page-break-before:always;">4. Achados por categoria</h2>
+      <h3>Empresas (${emp.length})</h3>
+      ${tab(['Empresa','CNPJ','Situação','Ligação','Status','Conf.'],emp.map(e=>tr([_invEsc(e.nome)+selos(e),`<span style="white-space:nowrap;">${_invEsc(e.documento)}</span>`,_invEsc(_invSituacaoEnt(e)),_invEsc(lig(e)),_invEsc(e.status_verificacao),_invEsc(e.confianca)+'%'])),'Nenhuma empresa encontrada.')}
+      <h3>Pessoas (${pes.length})</h3>
+      ${tab(['Pessoa','Documento','Qualificação','Ligação','Status'],pes.map(e=>tr([_invEsc(e.nome)+selos(e),_invEsc(e.documento),_invEsc((e.dados||{}).qualificacao),_invEsc(lig(e)),_invEsc(e.status_verificacao)])),'Nenhuma pessoa vinculada encontrada.')}
+      <h3>Processos (${pro.length})</h3>
+      ${tab(['Número','Tribunal','Polo do devedor','Classe','Status'],pro.map(e=>{ const d=e.dados||{}; return tr([_invEsc(d.numero||e.nome)+selos(e),_invEsc(d.tribunal),d.polo==='A'?'autor':d.polo==='P'?'réu':'—',_invEsc(d.classe),_invEsc(e.status_verificacao)]); }),'Nenhum processo encontrado.')}
+      <h3>Contratos e vínculos públicos (${pub.length})</h3>
+      ${tab(['Fonte','Achado','Consultado em'],pub.map(x=>tr([_invEsc(x.fonte_codigo),`<b>${_invEsc(x.titulo||'')}</b>${x.trecho?'<br>'+_invEsc(x.trecho):''}${_invLink(x.url)}`,_invEsc(_invData(x.obtido_em))])),'Nada encontrado no Portal da Transparência e no PNCP.')}
+      <h2>5. Sinais de alerta</h2>
+      ${an.alertas.length?an.alertas.map(a=>`<div class="al${a.nivel==='alerta'?'':' r'}"><b>${_invEsc(a.titulo)}</b><br>${_invEsc(a.texto)}</div>`).join(''):'<p><i>Nenhum sinal de alerta nos dados encontrados.</i></p>'}
+      <p class="sub">Sinal de alerta é pista para conferir, não prova de fraude, ocultação de bens ou grupo econômico.</p>
+      <h2>6. Fontes consultadas</h2>
+      <h3>Responderam</h3>${fOk.length?`<ul>${fOk.map(f=>`<li>${fTxt(f)}</li>`).join('')}</ul>`:'<p class="sub"><i>Não registrado.</i></p>'}
+      <h3>Sem resposta ou não conclusivas</h3>${fNao.length?`<ul>${fNao.map(f=>`<li>${fTxt(f)}</li>`).join('')}</ul>`:'<p class="sub"><i>Nenhuma.</i></p>'}
+      <p class="sub">Fonte sem resposta não significa "nada encontrado": o resultado dela é desconhecido.</p>
+      <h2>7. Critérios do score de prioridade</h2>
       <ul>${(comps.length?comps:[{rotulo:'Ainda não calculado',pontos:'—',explicacao:''}]).map(x=>`<li><strong>${_invEsc(x.rotulo||x.motivo)}</strong>: ${_invEsc(x.pontos??'—')} ponto(s). ${_invEsc(x.explicacao||'')}</li>`).join('')}</ul>
-      <h2>Entidades</h2>
-      <table><thead><tr><th>Tipo</th><th>Nome / documento</th><th>Situação</th><th>Status</th><th>Confiança</th><th>Prof.</th></tr></thead><tbody>
-      ${(ents||[]).map(e=>`<tr><td>${_invEsc(e.tipo)}</td><td>${_invEsc(e.nome||e.documento||e.chave_normalizada)}</td><td>${_invEsc(_invSituacaoEnt(e))}</td><td>${_invEsc(e.status_verificacao)}</td><td>${_invEsc(e.confianca)}%</td><td>${_invEsc(e.profundidade)}</td></tr>`).join('')||'<tr><td colspan="6">Nenhuma entidade.</td></tr>'}
-      </tbody></table>
-      <h2>Vínculos</h2>
-      <table><thead><tr><th>De</th><th>Tipo</th><th>Para</th><th>Confiança</th><th>Justificativa</th></tr></thead><tbody>
-      ${(vinc||[]).map(v=>`<tr><td>${_invEsc(porId[v.origem_entidade_id]?.nome||v.origem_entidade_id)}</td><td>${_invEsc(v.tipo)}</td><td>${_invEsc(porId[v.destino_entidade_id]?.nome||v.destino_entidade_id)}</td><td>${_invEsc(v.confianca)}%</td><td>${_invEsc(v.justificativa||'')}</td></tr>`).join('')||'<tr><td colspan="5">Nenhum vínculo.</td></tr>'}
-      </tbody></table>
-      <h2>Fontes e evidências</h2>
+      <h2 style="page-break-before:always;">Anexo A. Todas as evidências</h2>
       <table><thead><tr><th>Fonte</th><th>Título / trecho</th><th>Confiança</th><th>Consultada em</th></tr></thead><tbody>
       ${(evid||[]).map(e=>`<tr><td>${_invEsc(e.fonte_codigo)}</td><td><strong>${_invEsc(e.titulo||'')}</strong>${e.trecho?'<br>'+_invEsc(e.trecho):''}${_invLink(e.url)}</td><td>${_invEsc(e.confianca)}%</td><td>${_invEsc(_invData(e.obtido_em))}</td></tr>`).join('')||'<tr><td colspan="4">Nenhuma evidência.</td></tr>'}
       </tbody></table>
-      <h2>Linha do tempo</h2>
+      <h2>Anexo B. Linha do tempo</h2>
       <ul>${(eventos||[]).map(e=>`<li>${_invEsc(_invData(e.criado_em))} · ${_invEsc(e.tipo)} · ${_invEsc(e.mensagem)}</li>`).join('')}</ul>
       <div class="nota">Pistas não equivalem a prova. Toda medida judicial exige confirmação da fonte e análise profissional.</div>
     </body></html>`;
@@ -23424,6 +23470,68 @@ async function baixarRelatorioInvestigacao(investigacaoId){
 const _INV_VINC_LBL={socio_de:'sócio de',tem_socio:'tem sócio',compartilha_endereco_fiscal:'mesmo endereço fiscal',compartilha_telefone:'mesmo telefone',compartilha_email:'mesmo e-mail',autor_em:'autor em',reu_em:'réu em',parte_em:'parte em'};
 function _invVincLbl(t){ return _INV_VINC_LBL[t]||String(t||'').replace(/_/g,' '); }
 const _INV_COR={pessoa:'#1F4FA8',empresa:'#B7791F',processo:'#6B46C1'};
+const _INV_ENT_LBL={pessoa:'Pessoas',empresa:'Empresas',processo:'Processos'};
+// Cor da linha por tipo de vínculo (a do nó é por tipo de entidade: _INV_COR).
+const _INV_VGRUPOS=[['socio','Sócio','#2B6CB0'],['endereco','Mesmo endereço','#DD6B20'],['contato','Mesmo telefone/e-mail','#2F855A'],['processo','Parte em processo','#805AD5'],['outro','Outro','#8A94A6']];
+function _invVGrupo(t){
+  if(t==='socio_de'||t==='tem_socio') return 'socio';
+  if(t==='compartilha_endereco_fiscal') return 'endereco';
+  if(t==='compartilha_telefone'||t==='compartilha_email') return 'contato';
+  if(/_em$/.test(String(t||''))) return 'processo';
+  return 'outro';
+}
+function _invVCor(t){ return (_INV_VGRUPOS.find(g=>g[0]===_invVGrupo(t))||_INV_VGRUPOS[4])[2]; }
+
+// Leitura do resultado, igual na tela e no PDF: o que dá para penhorar, sinais
+// de alerta (sempre pista, nunca acusação) e contadores. Só usa o que o worker
+// já grava (entidades, vínculos, trechos das evidências).
+function _invAnalise(ents, vinc, evid){
+  ents=ents||[]; vinc=vinc||[]; evid=evid||[];
+  const porId=Object.fromEntries(ents.map(e=>[e.id,e]));
+  const raiz=ents.find(e=>+e.profundidade===0)||null;
+  const nm=e=>e?.nome||e?.documento||e?.chave_normalizada||'—';
+  const sit=e=>String(_invSituacao((e?.dados||{}).situacao)).toLowerCase();
+  const lista=a=>a.slice(0,4).join(', ')+(a.length>4?` e mais ${a.length-4}`:'');
+  const penhora=[], impenhoravel=[], alertas=[];
+  evid.forEach(x=>{
+    const t=String(x.trecho||'');
+    if((x.fonte_codigo==='pncp'||x.fonte_codigo==='portal_transparencia')&&/vigente: crédito penhorável/.test(t))
+      penhora.push({entId:x.entidade_id, tipo:'Contrato público vigente', texto:t, url:x.url, conf:true});
+    else if(x.fonte_codigo==='portal_transparencia'&&/servidor público federal|servidor federal inativo|pensionista federal/.test(t))
+      penhora.push({entId:x.entidade_id, tipo:'Renda federal (penhorável no limite legal)', texto:t, url:x.url, conf:true});
+    if(/impenhorável/.test(t)) impenhoravel.push({entId:x.entidade_id, texto:t, url:x.url});
+  });
+  const doRaiz=vinc.filter(v=>raiz&&v.origem_entidade_id===raiz.id);
+  doRaiz.filter(v=>v.tipo==='autor_em').forEach(v=>{ const p=porId[v.destino_entidade_id]; if(!p) return; const d=p.dados||{};
+    penhora.push({entId:p.id, tipo:'Crédito em processo (devedor é autor): penhora no rosto dos autos', texto:[d.numero||nm(p),d.tribunal,d.classe].filter(Boolean).join(' · '), conf:p.status_verificacao==='confirmada'}); });
+  doRaiz.filter(v=>v.tipo==='socio_de').forEach(v=>{ const p=porId[v.destino_entidade_id]; if(!p||p.status_verificacao!=='confirmada'||sit(p)!=='ativa') return;
+    penhora.push({entId:p.id, tipo:'Participação em empresa ativa (quotas/lucros)', texto:`${nm(p)} · ${p.documento||''}`, conf:true}); });
+  // Sócio comum: a mesma pessoa em 2+ empresas da teia.
+  ents.filter(e=>e.tipo==='pessoa'&&e!==raiz).forEach(e=>{
+    const emp=[...new Set(vinc.filter(v=>_invVGrupo(v.tipo)==='socio'&&(v.origem_entidade_id===e.id||v.destino_entidade_id===e.id))
+      .map(v=>v.origem_entidade_id===e.id?v.destino_entidade_id:v.origem_entidade_id))].map(id=>porId[id]).filter(x=>x&&x.tipo==='empresa');
+    if(emp.length>=2) alertas.push({entId:e.id, nivel:'alerta', titulo:'Sócio em várias empresas da teia',
+      texto:`${nm(e)} aparece no quadro de ${emp.length} empresas desta investigação (${lista(emp.map(nm))}). Pode ser quem controla de fato ou alguém emprestando o nome: conferir antes de usar.`});
+  });
+  const mesmoEnd=doRaiz.filter(v=>v.tipo==='compartilha_endereco_fiscal').map(v=>porId[v.destino_entidade_id]).filter(Boolean);
+  if(raiz&&mesmoEnd.length>=2) alertas.push({entId:raiz.id, nivel:'alerta', titulo:'Várias empresas no endereço do devedor',
+    texto:`${mesmoEnd.length} empresas têm endereço fiscal igual ao do devedor (${lista(mesmoEnd.map(nm))}). Empresas "independentes" no mesmo local podem ser um grupo de fato, ou só um prédio comercial: conferir.`});
+  doRaiz.filter(v=>v.tipo==='socio_de').forEach(v=>{ const p=porId[v.destino_entidade_id]; if(!p) return; const s=sit(p);
+    if(/baixada|inapta|suspensa|nula/.test(s)) alertas.push({entId:p.id, nivel:'alerta', titulo:'Empresa do devedor encerrada ou irregular',
+      texto:`${nm(p)} está ${s}${p.status_verificacao==='confirmada'?'':' (vínculo ainda não confirmado)'}. Conferir se bens, clientes ou funcionários passaram para outra empresa antes disso.`}); });
+  const reu=doRaiz.filter(v=>v.tipo==='reu_em').length;
+  if(raiz&&reu>=3) alertas.push({entId:raiz.id, nivel:'alerta', titulo:'Outros credores cobrando',
+    texto:`O devedor é réu em ${reu} processos: há disputa pelos mesmos bens. Ver nos autos o que já foi penhorado ou indicado.`});
+  ents.filter(e=>e.tipo==='empresa'&&+((e.dados||{}).compartilhado_com)>3).forEach(e=>alertas.push({entId:e.id, nivel:'ressalva', titulo:'Contato de contador ou escritório',
+    texto:`O telefone/e-mail que liga ${nm(e)} ao devedor é usado por ${e.dados.compartilhado_com} CNPJs: provavelmente é do contador. Sozinho, esse vínculo não indica grupo econômico.`}));
+  const emp=ents.filter(e=>e.tipo==='empresa'&&e!==raiz), proc=doRaiz.map(v=>v.tipo);
+  return {raiz, porId, penhora, impenhoravel, alertas,
+    comPenhora:new Set(penhora.map(p=>p.entId).filter(Boolean)),
+    comAlerta:new Set(alertas.filter(a=>a.nivel==='alerta').map(a=>a.entId).filter(Boolean)),
+    cont:{empConf:emp.filter(e=>e.status_verificacao==='confirmada').length, empPista:emp.filter(e=>e.status_verificacao!=='confirmada').length,
+      pessoas:ents.filter(e=>e.tipo==='pessoa'&&e!==raiz).length, autor:proc.filter(t=>t==='autor_em').length, reu,
+      alertas:alertas.filter(a=>a.nivel==='alerta').length}};
+}
 let _invHost=null;          // {cobId, hostId}: onde recarregar depois de iniciar/processar
 const _invPartesCache={};   // cobId → partes carregadas (nome/doc para a RPC)
 
@@ -23518,21 +23626,33 @@ async function invIniciarSelecionados(cobId, hostId, btn){
   if(criadas.length) showToast(criadas.length===1?'Investigação concluída.':`${criadas.length} investigações processadas.`,'success');
 }
 
-// ── Teia (grafo radial em SVG próprio, sem biblioteca): alvo no centro,
-// profundidade 1 no primeiro anel, 2 no segundo. Mesma função gera a tela
-// (clicável) e a imagem da primeira página do PDF.
+// ── Teia (grafo radial em SVG próprio, sem biblioteca), no jeito do Sniper/CNJ:
+// cada pessoa, empresa ou processo é um quadrado; as linhas são os vínculos, com
+// cor por tipo. Alvo no centro, profundidade 1 no primeiro anel, 2 no segundo.
+// A mesma função gera a tela (clicável, com filtro) e a imagem do PDF.
+function _invGlifo(tipo, x, y, s, cor){
+  const f=n=>n.toFixed(1);
+  if(tipo==='pessoa') return `<circle cx="${f(x)}" cy="${f(y-s*0.28)}" r="${f(s*0.27)}" fill="${cor}"/><path d="M${f(x-s*0.52)} ${f(y+s*0.58)} Q${f(x)} ${f(y-s*0.12)} ${f(x+s*0.52)} ${f(y+s*0.58)} Z" fill="${cor}"/>`;
+  if(tipo==='empresa'){ const w=s*0.13; let j='';
+    for(const dx of [-0.2,0.2]) for(const dy of [-0.28,0.02]) j+=`<rect x="${f(x+dx*s-w/2)}" y="${f(y+dy*s-w/2)}" width="${f(w)}" height="${f(w)}" fill="${cor}"/>`;
+    return `<rect x="${f(x-s*0.42)}" y="${f(y-s*0.55)}" width="${f(s*0.84)}" height="${f(s*1.1)}" fill="none" stroke="${cor}" stroke-width="${f(Math.max(1,s*0.1))}"/>${j}<rect x="${f(x-s*0.09)}" y="${f(y+s*0.3)}" width="${f(s*0.18)}" height="${f(s*0.25)}" fill="${cor}"/>`; }
+  if(tipo==='processo') return `<path d="M${f(x-s*0.4)} ${f(y-s*0.55)} H${f(x+s*0.18)} L${f(x+s*0.4)} ${f(y-s*0.33)} V${f(y+s*0.55)} H${f(x-s*0.4)} Z" fill="none" stroke="${cor}" stroke-width="${f(Math.max(1,s*0.1))}"/>`
+    +[-0.12,0.1,0.32].map(dy=>`<line x1="${f(x-s*0.24)}" y1="${f(y+dy*s)}" x2="${f(x+s*0.24)}" y2="${f(y+dy*s)}" stroke="${cor}" stroke-width="${f(Math.max(0.8,s*0.08))}"/>`).join('');
+  return '';
+}
 function _invTeiaSvg(ents, vinc, opt){
   opt=opt||{};
-  const W=760, H=560, cx=W/2, cy=H/2;
+  const W=760, H=580, cx=W/2, cy=H/2+10;
   const porId=Object.fromEntries((ents||[]).map(e=>[e.id,e]));
   const prof=e=>Math.max(0,+e.profundidade||0);
   const maxP=Math.max(0,...(ents||[]).map(prof));
   const viz={}; (vinc||[]).forEach(v=>{ (viz[v.origem_entidade_id]=viz[v.origem_entidade_id]||[]).push(v.destino_entidade_id); (viz[v.destino_entidade_id]=viz[v.destino_entidade_id]||[]).push(v.origem_entidade_id); });
   // Cada nó ganha uma fatia do círculo proporcional ao tamanho da sua subárvore;
   // os filhos repartem a fatia do pai, então ficam perto dele e as linhas não se cruzam.
+  // O layout usa a teia inteira: filtrar esconde nós sem mudar os outros de lugar.
   const pos={}, fatia={}, pai={};
   const raizes=(ents||[]).filter(e=>prof(e)===0);
-  raizes.forEach((e,i)=>{ pos[e.id]={x:cx+i*46-(raizes.length-1)*23,y:cy}; });
+  raizes.forEach((e,i)=>{ pos[e.id]={x:cx+i*52-(raizes.length-1)*26,y:cy}; });
   const filhos={};
   for(let p=1;p<=maxP;p++) (ents||[]).filter(e=>prof(e)===p).forEach(e=>{
     const pid=(viz[e.id]||[]).find(id=>porId[id]&&prof(porId[id])===p-1&&(p===1||pai[id]!==undefined));
@@ -23550,78 +23670,193 @@ function _invTeiaSvg(ents, vinc, opt){
     soltos.forEach((e,i)=>{ const a=-Math.PI/2+2*Math.PI*(i+0.5)/soltos.length; fatia[e.id]=[a,a]; });
     nivel.forEach(e=>{ if(filhos[e.id]&&fatia[e.id]) reparte(filhos[e.id], fatia[e.id][0], fatia[e.id][1]); });
     nivel.forEach(e=>{ const f=fatia[e.id]; if(!f) return; const a=(f[0]+f[1])/2, r=raio(p);
-      pos[e.id]={x:cx+Math.cos(a)*r*1.3, y:cy+Math.sin(a)*r*0.92}; });
+      pos[e.id]={x:cx+Math.cos(a)*r*1.3, y:cy+Math.sin(a)*r*0.9}; });
   }
+  const fl=opt.filtro||null, an=opt.analise||null;
+  const visivel=e=>!!e&&!!pos[e.id]&&(prof(e)===0||!fl||(fl.ent.has(e.tipo)&&(!fl.soConf||e.status_verificacao==='confirmada')));
+  const vVis=(vinc||[]).filter(v=>visivel(porId[v.origem_entidade_id])&&visivel(porId[v.destino_entidade_id])&&(!fl||fl.grp.has(_invVGrupo(v.tipo))));
   const txt=opt.interativo?'currentColor':'#0A1530';
-  const muitas=(vinc||[]).length>24;
+  const muitas=vVis.length>24;
   const corta=(s,n)=>{ s=String(s||''); return s.length>n?s.slice(0,n-1)+'…':s; };
-  const arestas=(vinc||[]).filter(v=>pos[v.origem_entidade_id]&&pos[v.destino_entidade_id]).map(v=>{
-    const a=pos[v.origem_entidade_id], b=pos[v.destino_entidade_id], c=+v.confianca||0;
+  const arestas=vVis.map(v=>{
+    const a=pos[v.origem_entidade_id], b=pos[v.destino_entidade_id], c=+v.confianca||0, cor=_invVCor(v.tipo);
     const mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
     return `<g><title>${_invEsc(porId[v.origem_entidade_id]?.nome)} — ${_invEsc(_invVincLbl(v.tipo))} — ${_invEsc(porId[v.destino_entidade_id]?.nome)} (${c}%)</title>
-      <line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" stroke="#8A94A6" stroke-width="${c>=80?1.8:1.1}" ${c<70?'stroke-dasharray="5 4"':''} opacity="0.85"/>
-      ${muitas?'':`<text x="${mx.toFixed(1)}" y="${(my-3).toFixed(1)}" font-size="9" text-anchor="middle" fill="#5A6472" font-family="Arial,sans-serif">${_invEsc(_invVincLbl(v.tipo))} · ${c}%</text>`}</g>`;
+      <line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" stroke="${cor}" stroke-width="${c>=80?2.2:1.4}" ${c<70?'stroke-dasharray="5 4"':''} opacity="0.9"/>
+      ${muitas?'':`<text x="${mx.toFixed(1)}" y="${(my-3).toFixed(1)}" font-size="9" text-anchor="middle" fill="${cor}" font-family="Arial,sans-serif">${_invEsc(_invVincLbl(v.tipo))} · ${c}%</text>`}</g>`;
   }).join('');
-  const nos=(ents||[]).filter(e=>pos[e.id]).map(e=>{
+  const selo=(x,y,cor,ch)=>`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="6.5" fill="${cor}" stroke="#FFFFFF" stroke-width="1.5"/><text x="${x.toFixed(1)}" y="${(y+3.2).toFixed(1)}" font-size="9" font-weight="700" text-anchor="middle" fill="#FFFFFF" font-family="Arial,sans-serif">${ch}</text>`;
+  const nos=(ents||[]).filter(visivel).map(e=>{
     const p=pos[e.id], raiz=prof(e)===0, cor=_INV_COR[e.tipo]||'#5A6472', conf=e.status_verificacao==='confirmada';
-    const r=raiz?20:(prof(e)===1?13:10);
+    const s=raiz?21:(prof(e)===1?14:11);
     const nome=corta(e.nome||e.documento||e.chave_normalizada, raiz?34:24);
     const clique=opt.interativo?` onclick="invTeiaNo('${e.id}')" style="cursor:pointer;"`:'';
     return `<g data-no="${e.id}"${clique}><title>${_invEsc(e.nome||e.documento)} · ${_invEsc(e.tipo)} · ${_invEsc(e.status_verificacao)} (${_invEsc(e.confianca)}%)</title>
-      <circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r}" fill="${conf?cor:'#FFFFFF'}" stroke="${cor}" stroke-width="2" ${conf?'':'stroke-dasharray="4 3"'}/>
-      <text x="${p.x.toFixed(1)}" y="${(p.y+r+12).toFixed(1)}" font-size="${raiz?12:10}" font-weight="${raiz?700:400}" text-anchor="middle" fill="${txt}" font-family="Arial,sans-serif">${_invEsc(nome)}</text></g>`;
+      <rect class="inv-no" x="${(p.x-s).toFixed(1)}" y="${(p.y-s).toFixed(1)}" width="${2*s}" height="${2*s}" rx="4" fill="${conf?cor:'#FFFFFF'}" stroke="${cor}" stroke-width="2" ${conf?'':'stroke-dasharray="4 3"'}/>
+      ${_invGlifo(e.tipo,p.x,p.y,s*0.78,conf?'#FFFFFF':cor)}
+      ${an&&an.comPenhora.has(e.id)?selo(p.x+s,p.y-s,'#2F855A','$'):''}${an&&an.comAlerta.has(e.id)?selo(p.x-s,p.y-s,'#DD6B20','!'):''}
+      <text x="${p.x.toFixed(1)}" y="${(p.y+s+12).toFixed(1)}" font-size="${raiz?12:10}" font-weight="${raiz?700:400}" text-anchor="middle" fill="${txt}" font-family="Arial,sans-serif">${_invEsc(nome)}</text></g>`;
   }).join('');
-  const leg=[['pessoa','Pessoa'],['empresa','Empresa'],['processo','Processo']].map(([k,l],i)=>`<circle cx="${16+i*96}" cy="16" r="6" fill="${_INV_COR[k]}"/><text x="${26+i*96}" y="20" font-size="11" fill="${txt}" font-family="Arial,sans-serif">${l}</text>`).join('')
-    +`<circle cx="310" cy="16" r="6" fill="#FFFFFF" stroke="#5A6472" stroke-dasharray="3 2"/><text x="320" y="20" font-size="11" fill="${txt}" font-family="Arial,sans-serif">pista (não confirmada)</text>`;
+  // Legenda em duas linhas: nós (tipo, pista, selos) e linhas (tipo de vínculo).
+  let x=10, leg='';
+  const lt=(t,dx)=>{ leg+=`<text x="${x+dx}" y="20" font-size="10.5" fill="${txt}" font-family="Arial,sans-serif">${t}</text>`; x+=dx+t.length*5.6+16; };
+  [['pessoa','Pessoa'],['empresa','Empresa'],['processo','Processo']].forEach(([k,l])=>{ leg+=`<rect x="${x}" y="10" width="12" height="12" rx="2" fill="${_INV_COR[k]}"/>`; lt(l,17); });
+  leg+=`<rect x="${x}" y="10" width="12" height="12" rx="2" fill="#FFFFFF" stroke="#5A6472" stroke-dasharray="3 2"/>`; lt('pista (não confirmada)',17);
+  leg+=selo(x+6,16,'#2F855A','$'); lt('pode penhorar',15);
+  leg+=selo(x+6,16,'#DD6B20','!'); lt('sinal de alerta',15);
+  x=10;
+  _INV_VGRUPOS.filter(g=>g[0]!=='outro'||(vinc||[]).some(v=>_invVGrupo(v.tipo)==='outro')).forEach(([,l,c])=>{
+    leg+=`<line x1="${x}" y1="37" x2="${x+20}" y2="37" stroke="${c}" stroke-width="2.4"/><text x="${x+25}" y="41" font-size="10.5" fill="${txt}" font-family="Arial,sans-serif">${l}</text>`; x+=25+l.length*5.6+16; });
+  leg+=`<line x1="${x}" y1="37" x2="${x+20}" y2="37" stroke="#8A94A6" stroke-width="1.6" stroke-dasharray="5 4"/><text x="${x+25}" y="41" font-size="10.5" fill="${txt}" font-family="Arial,sans-serif">confiança abaixo de 70%</text>`;
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${opt.largura||'100%'}" ${opt.altura?`height="${opt.altura}"`:''} style="max-width:100%;height:auto;display:block;" role="img" aria-label="Teia de vínculos da investigação">${opt.fundo?`<rect width="${W}" height="${H}" fill="#FFFFFF"/>`:''}${leg}${arestas}${nos}</svg>`;
 }
 
+// Tela do resultado (Sniper): cartão do alvo, abas Grafo / Tabela / Sinais de
+// alerta e, à direita, o painel do nó escolhido.
 async function invVerTeia(invId, alvoId){
   const host=document.getElementById(alvoId); if(!host) return;
   const supa=getSupabase(); if(!supa) return;
   host.dataset.inv=invId;
   host.innerHTML=`<div class="cob-panel" style="padding:18px;margin-top:14px;color:var(--text-3);font-size:12.5px;">Montando a teia…</div>`;
-  const [{data:ents,error},{data:vinc},{data:evid}]=await Promise.all([
+  const [{data:inv},{data:ents,error},{data:vinc},{data:evid}]=await Promise.all([
+    supa.from('investigacoes_patrimoniais').select('id,status,nome_consultado,documento_consultado,score_prioridade,resumo,concluido_em,created_at').eq('id',invId).maybeSingle(),
     supa.from('investigacao_entidades').select('id,tipo,nome,documento,chave_normalizada,profundidade,confianca,status_verificacao,dados').eq('investigacao_id',invId).order('profundidade'),
     supa.from('investigacao_vinculos').select('id,tipo,confianca,justificativa,origem_entidade_id,destino_entidade_id').eq('investigacao_id',invId),
     supa.from('investigacao_evidencias').select('entidade_id,vinculo_id,fonte_codigo,titulo,trecho,url,obtido_em,confianca').eq('investigacao_id',invId).order('obtido_em',{ascending:false})
   ]);
   if(host.dataset.inv!==invId) return;
   if(error){ host.innerHTML=_detEmpty('Não foi possível montar a teia: '+error.message); return; }
-  window._invTeia={invId, alvoId, ents:ents||[], vinc:vinc||[], evid:evid||[]};
-  const raiz=(ents||[]).find(e=>+e.profundidade===0);
+  const an=_invAnalise(ents,vinc,evid);
+  window._invTeia={invId, alvoId, inv:inv||{}, ents:ents||[], vinc:vinc||[], evid:evid||[], an, aba:'grafo', sel:null,
+    filtro:{ent:new Set(Object.keys(_INV_COR)), grp:new Set(_INV_VGRUPOS.map(g=>g[0])), soConf:false}};
+  const raiz=an.raiz, c=an.cont, i=inv||{};
+  const cartao=(n,rot,sub,cor)=>`<div style="flex:1 1 120px;border:1px solid var(--border);border-radius:10px;padding:10px 12px;min-width:0;">
+    <div style="font-size:20px;font-weight:700;color:${cor||'var(--text)'};">${n}</div><div style="font-size:11.5px;font-weight:600;">${rot}</div>${sub?`<div style="font-size:10.5px;color:var(--text-3);">${sub}</div>`:''}</div>`;
   host.innerHTML=`<div class="cob-panel" style="padding:18px;margin-top:14px;">
-    <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
-      <div><div class="det-panel-tt" style="margin:0;">Teia da investigação · ${escHtml(raiz?.nome||'')}</div>
-      <div style="font-size:11.5px;color:var(--text-3);margin-top:3px;">Clique numa pessoa, empresa ou processo para ver as evidências. Linha tracejada = vínculo com confiança abaixo de 70%.</div></div>
-      <button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${invId}')">Baixar relatório</button>
+    <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:flex-start;">
+      <div style="display:flex;gap:12px;align-items:center;min-width:0;">
+        <svg viewBox="0 0 44 44" width="44" height="44" style="flex:none;"><rect x="1" y="1" width="42" height="42" rx="6" fill="${_INV_COR[raiz?.tipo]||'#5A6472'}"/>${_invGlifo(raiz?.tipo||'pessoa',22,22,16,'#FFFFFF')}</svg>
+        <div style="min-width:0;"><div style="font-size:15px;font-weight:700;">${escHtml(raiz?.nome||i.nome_consultado||'—')}</div>
+        <div style="font-size:11.5px;color:var(--text-3);font-family:var(--font-mono);">${escHtml(raiz?.documento||i.documento_consultado||'sem CPF/CNPJ')}</div>
+        <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;"><span class="det-chip">${escHtml(_invStatusLabel(i.status))}</span><span class="det-chip princ">Prioridade ${Math.round(+i.score_prioridade||0)}/100</span><span class="det-chip">${escHtml(_invData(i.concluido_em||i.created_at))}</span></div></div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${invId}')">Baixar relatório (PDF)</button>
     </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+      ${cartao(an.penhora.length,'Pode penhorar','contratos, renda, créditos, quotas','#2F855A')}
+      ${cartao(c.empConf+c.empPista,'Empresas',`${c.empConf} confirmada${c.empConf===1?'':'s'} · ${c.empPista} pista${c.empPista===1?'':'s'}`)}
+      ${cartao(c.pessoas,'Pessoas','sócios e vinculados')}
+      ${cartao(c.autor+c.reu,'Processos',`${c.autor} como autor · ${c.reu} como réu`)}
+      ${cartao(c.alertas,'Sinais de alerta','pistas para conferir',c.alertas?'#DD6B20':'')}
+    </div>
+    <div id="${alvoId}-abas" style="display:flex;gap:4px;border-bottom:1px solid var(--border);margin-top:14px;flex-wrap:wrap;"></div>
     <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:12px;">
-      <div style="flex:1 1 440px;min-width:0;color:var(--text);">${(ents||[]).length?_invTeiaSvg(ents,vinc,{interativo:true}):_detEmpty('Nenhuma entidade encontrada.')}</div>
+      <div id="${alvoId}-aba" style="flex:1 1 440px;min-width:0;color:var(--text);"></div>
       <div id="${alvoId}-ev" style="flex:1 1 260px;min-width:0;font-size:12.5px;"></div>
     </div>
   </div>`;
+  invTeiaAba('grafo');
   if(raiz) invTeiaNo(raiz.id);
+}
+
+function invTeiaAba(aba){
+  const t=window._invTeia; if(!t) return;
+  t.aba=aba;
+  const bar=document.getElementById(t.alvoId+'-abas'), box=document.getElementById(t.alvoId+'-aba'); if(!bar||!box) return;
+  const n=t.an.alertas.length;
+  bar.innerHTML=[['grafo','Grafo'],['tabela','Tabela'],['alertas',`Sinais de alerta${n?' ('+n+')':''}`]].map(([k,l])=>
+    `<button onclick="invTeiaAba('${k}')" style="padding:8px 12px;font-size:12.5px;font-family:inherit;border:none;background:none;cursor:pointer;border-bottom:2px solid ${k===aba?'var(--accent)':'transparent'};color:${k===aba?'var(--text)':'var(--text-3)'};font-weight:${k===aba?600:500};">${l}</button>`).join('');
+  if(aba==='grafo') return _invTeiaGrafo();
+  if(aba==='tabela') return _invTeiaTabela();
+  box.innerHTML=t.an.alertas.length?t.an.alertas.map(a=>`<div style="padding:10px 12px;border:1px solid ${a.nivel==='alerta'?'#F6AD55':'var(--border)'};border-left:4px solid ${a.nivel==='alerta'?'#DD6B20':'#8A94A6'};border-radius:8px;margin-bottom:8px;">
+      <div style="font-size:12.5px;font-weight:700;">${a.nivel==='alerta'?'⚠ ':''}${_invEsc(a.titulo)}</div>
+      <div style="font-size:12px;color:var(--text-2);margin-top:3px;">${_invEsc(a.texto)}</div>
+      ${a.entId?`<a href="javascript:void(0)" onclick="invTeiaNo('${a.entId}')" style="font-size:11.5px;color:var(--navy);">ver na teia →</a>`:''}</div>`).join('')
+    +`<div style="font-size:11px;color:var(--text-3);margin-top:6px;">Sinal de alerta é pista para conferir, não prova de fraude nem de grupo econômico.</div>`
+    :_detEmpty('Nenhum sinal de alerta nos dados encontrados.');
+}
+
+function _invTeiaGrafo(){
+  const t=window._invTeia; const box=document.getElementById(t.alvoId+'-aba'); if(!box) return;
+  const fl=t.filtro;
+  const presentes=new Set(t.ents.map(e=>e.tipo)), grpPres=new Set(t.vinc.map(v=>_invVGrupo(v.tipo)));
+  const chk=(tipo,k,rot,cor,on,quad)=>`<label style="display:inline-flex;gap:5px;align-items:center;font-size:11.5px;cursor:pointer;white-space:nowrap;">
+    <input type="checkbox" ${on?'checked':''} onchange="invTeiaFiltro('${tipo}','${k}',this.checked)">
+    ${quad?`<span style="width:10px;height:10px;border-radius:2px;background:${cor};display:inline-block;"></span>`:`<span style="width:16px;height:3px;background:${cor};display:inline-block;"></span>`}${rot}</label>`;
+  box.innerHTML=t.ents.length?`<div style="display:flex;gap:6px 14px;flex-wrap:wrap;align-items:center;padding:8px 10px;border:1px solid var(--border-2);border-radius:8px;">
+      <span style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);">Mostrar</span>
+      ${Object.keys(_INV_COR).filter(k=>presentes.has(k)).map(k=>chk('ent',k,_INV_ENT_LBL[k],_INV_COR[k],fl.ent.has(k),true)).join('')}
+      ${_INV_VGRUPOS.filter(g=>grpPres.has(g[0])).map(g=>chk('grp',g[0],g[1],g[2],fl.grp.has(g[0]),false)).join('')}
+      ${chk('conf','1','Só confirmados','#0A1530',fl.soConf,true)}
+    </div>
+    <div style="margin-top:8px;">${_invTeiaSvg(t.ents,t.vinc,{interativo:true,filtro:fl,analise:t.an})}</div>
+    <div style="font-size:11px;color:var(--text-3);">Clique num quadrado para ver vínculos e evidências.</div>`
+    :_detEmpty('Nenhuma entidade encontrada.');
+  if(t.sel) _invMarcaSel(t.sel);
+}
+function invTeiaFiltro(tipo,k,on){
+  const t=window._invTeia; if(!t) return;
+  if(tipo==='conf') t.filtro.soConf=on;
+  else { const s=tipo==='ent'?t.filtro.ent:t.filtro.grp; on?s.add(k):s.delete(k); }
+  _invTeiaGrafo();
+}
+function _invMarcaSel(entId){
+  const t=window._invTeia; if(!t) return;
+  document.querySelectorAll(`#${t.alvoId} [data-no] rect.inv-no`).forEach(r=>r.setAttribute('stroke-width', r.parentNode.dataset.no===entId?'4.5':'2'));
+}
+
+// Tabela por categoria, como o Sniper separa os bens por sistema de origem.
+function _invTeiaTabela(){
+  const t=window._invTeia; const box=document.getElementById(t.alvoId+'-aba'); if(!box) return;
+  const an=t.an, raiz=an.raiz;
+  const lig=e=>t.vinc.filter(v=>v.origem_entidade_id===e.id||v.destino_entidade_id===e.id).map(v=>{
+    const o=an.porId[v.origem_entidade_id===e.id?v.destino_entidade_id:v.origem_entidade_id]; return `${_invVincLbl(v.tipo)} ${o?.nome||o?.documento||''}`; });
+  const st=e=>`<span class="det-chip ${e.status_verificacao==='confirmada'?'princ':''}">${_invEsc(e.status_verificacao)}</span>`;
+  const selos=e=>(an.comPenhora.has(e.id)?' <span title="pode penhorar" style="color:#2F855A;font-weight:700;">$</span>':'')+(an.comAlerta.has(e.id)?' <span title="sinal de alerta" style="color:#DD6B20;font-weight:700;">⚠</span>':'');
+  const th=a=>`<tr>${a.map(x=>`<th style="text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);padding:6px 6px;border-bottom:1px solid var(--border);">${x}</th>`).join('')}</tr>`;
+  const td='style="padding:7px 6px;border-bottom:1px solid var(--border-2);vertical-align:top;font-size:12px;"';
+  const linha=(e,cols)=>`<tr onclick="invTeiaNo('${e.id}')" style="cursor:pointer;">${cols.map(c=>`<td ${td}>${c}</td>`).join('')}</tr>`;
+  const sec=(tt,n,corpo)=>`<div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin:14px 0 4px;">${tt} (${n})</div>${corpo}`;
+  const tab=(cab,linhas)=>linhas.length?`<div style="overflow-x:auto;"><table style="width:100%;border-collapse:collapse;">${th(cab)}${linhas.join('')}</table></div>`:'<div style="font-size:12px;color:var(--text-3);font-style:italic;">Nada encontrado.</div>';
+  const outros=t.ents.filter(e=>e!==raiz);
+  const emp=outros.filter(e=>e.tipo==='empresa'), pes=outros.filter(e=>e.tipo==='pessoa'), pro=outros.filter(e=>e.tipo==='processo');
+  const pub=t.evid.filter(x=>x.fonte_codigo==='pncp'||x.fonte_codigo==='portal_transparencia');
+  box.innerHTML=
+    sec('O que pode ser penhorado',an.penhora.length, an.penhora.length?an.penhora.map(p=>`<div style="padding:7px 0;border-bottom:1px solid var(--border-2);font-size:12px;">
+      <div style="font-weight:700;color:#2F855A;">${_invEsc(p.tipo)}${p.conf?'':' <span style="color:var(--text-3);font-weight:400;">(pista)</span>'}</div>
+      <div style="color:var(--text-2);">${_invEsc(p.texto)}</div>${/^https?:\/\//i.test(String(p.url||''))?`<a href="${escHtml(p.url)}" target="_blank" rel="noopener" style="font-size:11px;">abrir fonte</a>`:''}</div>`).join('')
+      :'<div style="font-size:12px;color:var(--text-3);font-style:italic;">Nenhum bem ou crédito penhorável identificado nas fontes consultadas.</div>')
+    +(an.impenhoravel.length?`<div style="font-size:11.5px;color:var(--text-3);margin-top:6px;">Não penhorável: ${an.impenhoravel.map(x=>_invEsc(x.texto)).join(' | ')}</div>`:'')
+    +sec('Empresas',emp.length,tab(['Empresa','CNPJ','Situação','Ligação','Status','Conf.'],emp.map(e=>linha(e,[_invEsc(e.nome)+selos(e),`<span style="font-family:var(--font-mono);white-space:nowrap;">${_invEsc(e.documento)}</span>`,_invEsc(_invSituacaoEnt(e)),_invEsc(lig(e).join('; ')),st(e),_invEsc(e.confianca)+'%']))))
+    +sec('Pessoas',pes.length,tab(['Pessoa','Documento','Qualificação','Ligação','Status'],pes.map(e=>linha(e,[_invEsc(e.nome)+selos(e),`<span style="font-family:var(--font-mono);">${_invEsc(e.documento)}</span>`,_invEsc((e.dados||{}).qualificacao),_invEsc(lig(e).join('; ')),st(e)]))))
+    +sec('Processos',pro.length,tab(['Número','Tribunal','Polo do devedor','Classe','Status'],pro.map(e=>{ const d=e.dados||{}; return linha(e,[`<span style="font-family:var(--font-mono);">${_invEsc(d.numero||e.nome)}</span>`+selos(e),_invEsc(d.tribunal),d.polo==='A'?'autor':d.polo==='P'?'réu':'—',_invEsc(d.classe),st(e)]); })))
+    +sec('Contratos e vínculos públicos',pub.length,tab(['Fonte','Achado','Consultado em'],pub.map(x=>`<tr>${[_invEsc(x.fonte_codigo),`<b>${_invEsc(x.titulo||'')}</b>${x.trecho?'<br>'+_invEsc(x.trecho):''}${/^https?:\/\//i.test(String(x.url||''))?`<br><a href="${escHtml(x.url)}" target="_blank" rel="noopener" style="font-size:11px;">abrir fonte</a>`:''}`,_invEsc(_invData(x.obtido_em))].map(c=>`<td ${td}>${c}</td>`).join('')}</tr>`)));
 }
 
 function invTeiaNo(entId){
   const t=window._invTeia; if(!t) return;
   const box=document.getElementById(t.alvoId+'-ev'); if(!box) return;
-  document.querySelectorAll(`#${t.alvoId} [data-no] circle`).forEach(c=>c.setAttribute('stroke-width', c.parentNode.dataset.no===entId?'4':'2'));
   const e=t.ents.find(x=>x.id===entId); if(!e) return;
-  const porId=Object.fromEntries(t.ents.map(x=>[x.id,x]));
+  t.sel=entId;
+  if(t.aba!=='grafo'){ invTeiaAba('grafo'); }
+  _invMarcaSel(entId);
+  const porId=t.an.porId;
   const vs=t.vinc.filter(v=>v.origem_entidade_id===entId||v.destino_entidade_id===entId);
   const vIds=new Set(vs.map(v=>v.id));
   const evs=t.evid.filter(x=>x.entidade_id===entId||(x.vinculo_id&&vIds.has(x.vinculo_id)));
+  const als=t.an.alertas.filter(a=>a.entId===entId), pen=t.an.penhora.filter(p=>p.entId===entId);
   const sit=_invSituacaoEnt(e);
+  const tt=s=>`<div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin:12px 0 4px;">${s}</div>`;
   box.innerHTML=`<div style="border:1px solid var(--border);border-radius:10px;padding:12px;">
-    <div style="font-size:13.5px;font-weight:700;">${_invEsc(e.nome||e.documento)}</div>
-    <div style="font-size:11.5px;color:var(--text-3);margin-top:2px;">${_invEsc(e.tipo)}${e.documento?' · <span style="font-family:var(--font-mono);">'+_invEsc(e.documento)+'</span>':''}</div>
+    <div style="display:flex;gap:10px;align-items:center;"><svg viewBox="0 0 30 30" width="30" height="30" style="flex:none;"><rect x="1" y="1" width="28" height="28" rx="4" fill="${_INV_COR[e.tipo]||'#5A6472'}"/>${_invGlifo(e.tipo,15,15,11,'#FFFFFF')}</svg>
+    <div style="min-width:0;"><div style="font-size:13.5px;font-weight:700;">${_invEsc(e.nome||e.documento)}</div>
+    <div style="font-size:11.5px;color:var(--text-3);">${_invEsc(e.tipo)}${e.documento?' · <span style="font-family:var(--font-mono);">'+_invEsc(e.documento)+'</span>':''}</div></div></div>
     <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><span class="det-chip ${e.status_verificacao==='confirmada'?'princ':''}">${_invEsc(e.status_verificacao)}</span><span class="det-chip">confiança ${_invEsc(e.confianca)}%</span>${sit&&sit!=='—'?`<span class="det-chip">${_invEsc(sit)}</span>`:''}</div>
-    ${vs.length?`<div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin:12px 0 4px;">Vínculos</div>
-      ${vs.map(v=>{ const outro=porId[v.origem_entidade_id===entId?v.destino_entidade_id:v.origem_entidade_id];
-        return `<div style="padding:5px 0;border-top:1px solid var(--border-2);"><a href="javascript:void(0)" onclick="invTeiaNo('${outro?.id||''}')" style="color:var(--navy);font-weight:600;">${_invEsc(outro?.nome||outro?.documento)}</a> <span style="color:var(--text-3);">· ${_invEsc(_invVincLbl(v.tipo))} · ${_invEsc(v.confianca)}%</span>${v.justificativa?`<div style="font-size:11.5px;color:var(--text-2);">${_invEsc(v.justificativa)}</div>`:''}</div>`; }).join('')}`:''}
-    <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin:12px 0 4px;">Evidências</div>
+    ${pen.length?tt('Pode penhorar')+pen.map(p=>`<div style="padding:5px 0;border-top:1px solid var(--border-2);"><div style="font-weight:600;color:#2F855A;">${_invEsc(p.tipo)}</div><div style="font-size:11.5px;color:var(--text-2);">${_invEsc(p.texto)}</div></div>`).join(''):''}
+    ${als.length?tt('Sinais de alerta')+als.map(a=>`<div style="padding:5px 0;border-top:1px solid var(--border-2);"><div style="font-weight:600;color:${a.nivel==='alerta'?'#C05621':'var(--text-2)'};">${_invEsc(a.titulo)}</div><div style="font-size:11.5px;color:var(--text-2);">${_invEsc(a.texto)}</div></div>`).join(''):''}
+    ${vs.length?tt('Vínculos')+vs.map(v=>{ const outro=porId[v.origem_entidade_id===entId?v.destino_entidade_id:v.origem_entidade_id];
+        return `<div style="padding:5px 0;border-top:1px solid var(--border-2);"><span style="display:inline-block;width:10px;height:3px;background:${_invVCor(v.tipo)};vertical-align:middle;margin-right:5px;"></span><a href="javascript:void(0)" onclick="invTeiaNo('${outro?.id||''}')" style="color:var(--navy);font-weight:600;">${_invEsc(outro?.nome||outro?.documento)}</a> <span style="color:var(--text-3);">· ${_invEsc(_invVincLbl(v.tipo))} · ${_invEsc(v.confianca)}%</span>${v.justificativa?`<div style="font-size:11.5px;color:var(--text-2);">${_invEsc(v.justificativa)}</div>`:''}</div>`; }).join(''):''}
+    ${tt('Evidências')}
     ${evs.length?evs.map(x=>`<div style="padding:6px 0;border-top:1px solid var(--border-2);"><div style="font-weight:600;">${_invEsc(x.titulo||x.fonte_codigo)}</div><div style="font-size:11px;color:var(--text-3);">${_invEsc(x.fonte_codigo)} · ${_invEsc(_invData(x.obtido_em))} · ${_invEsc(x.confianca)}%</div>${x.trecho?`<div style="font-size:11.5px;color:var(--text-2);margin-top:2px;">${_invEsc(x.trecho)}</div>`:''}${/^https?:\/\//i.test(String(x.url||''))?`<a href="${escHtml(x.url)}" target="_blank" rel="noopener" style="font-size:11px;word-break:break-all;">abrir fonte</a>`:''}</div>`).join(''):'<div style="color:var(--text-3);font-style:italic;">Sem evidência própria registrada.</div>'}
   </div>`;
 }
@@ -23631,7 +23866,7 @@ function _invSvgParaPng(svg){
   return new Promise(res=>{
     try{
       const img=new Image();
-      img.onload=()=>{ try{ const c=document.createElement('canvas'); c.width=1520; c.height=1120; const g=c.getContext('2d'); g.fillStyle='#fff'; g.fillRect(0,0,c.width,c.height); g.drawImage(img,0,0,c.width,c.height); res(c.toDataURL('image/png')); }catch(_){ res(null); } };
+      img.onload=()=>{ try{ const c=document.createElement('canvas'); c.width=1520; c.height=1160; const g=c.getContext('2d'); g.fillStyle='#fff'; g.fillRect(0,0,c.width,c.height); g.drawImage(img,0,0,c.width,c.height); res(c.toDataURL('image/png')); }catch(_){ res(null); } };
       img.onerror=()=>res(null);
       img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg);
     }catch(_){ res(null); }
