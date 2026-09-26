@@ -195,5 +195,16 @@ const item = (o) => Object.assign({
     assert.strictEqual(achados[0].polo, 'A');
   });
 
+  ok('filtrarTruncado: busca cortada ("José da Silva", 10.000 em 3 dias) só avisa com CPF conferido', () => {
+    const a = [{ numero_processo: '0002042-98.2026.8.16.0160', cpf_confere: false }, { numero_processo: 'x', cpf_confere: true }];
+    const cortada = L.filtrarTruncado(a, true);
+    assert.deepStrictEqual(cortada.achados.map(x => x.numero_processo), ['x']);
+    assert.strictEqual(cortada.descartados, 1);
+    const inteira = L.filtrarTruncado(a, false);                 // busca completa: nada muda
+    assert.strictEqual(inteira.achados.length, 2);
+    assert.strictEqual(inteira.descartados, 0);
+    assert.deepStrictEqual(L.filtrarTruncado(undefined, true), { achados: [], descartados: 0 });
+  });
+
   console.log(`\nF-47 · ${n} verificações ok.`);
 })().catch(e => { console.error('  FALHOU', e.message); process.exit(1); });

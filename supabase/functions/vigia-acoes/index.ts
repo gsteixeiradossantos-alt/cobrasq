@@ -43,7 +43,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
-import { nomeDeBusca, agruparAchados, montarAlvos, resumirMuitos } from './logica.mjs';
+import { nomeDeBusca, agruparAchados, montarAlvos, resumirMuitos, filtrarTruncado } from './logica.mjs';
 
 const MAX_ITENS_REPASSE = 5000; // por alvo, depois da poda no Mac
 
@@ -217,7 +217,7 @@ Deno.serve(async (req) => {
                   universo_escritorio: universo.filter((d: any) => d.origem === 'escritorio').length,
                   pendentes_hoje: 0, processados: 0,
                   pulados_nome: 0, comunicacoes: 0, novos: 0, atualizados: 0, erros: 0, truncados: 0,
-                  descartados: { nome_diferente: 0, nosso: 0, sem_cnj: 0, fora_da_uf: 0, outro_ramo: 0 }, achados: [] as any[] };
+                  descartados: { nome_diferente: 0, nosso: 0, sem_cnj: 0, fora_da_uf: 0, outro_ramo: 0, homonimo_truncado: 0 }, achados: [] as any[] };
     res.pendentes_hoje = universo.filter((d: any) => est.get(d.alvo)?.buscado_em !== hoje).length;
 
     const processar = async (dev: any, obter: () => Promise<{ itens: any[]; total: number; truncado: boolean }>) => {
@@ -228,7 +228,10 @@ Deno.serve(async (req) => {
       } else {
         try {
           const { itens, total, truncado } = await obter();
-          const { achados: todos, descartados } = agruparAchados(itens, dev.nome, cnjsNossos, dev.ufs, dev.doc);
+          const { achados: agrupados, descartados } = agruparAchados(itens, dev.nome, cnjsNossos, dev.ufs, dev.doc);
+          // busca cortada = nome comum demais: só fica o que tem CPF conferido
+          const { achados: todos, descartados: homonimos } = filtrarTruncado(agrupados, truncado);
+          res.descartados.homonimo_truncado += homonimos;
           const achados = resumirMuitos(todos);   // > 5 processos → 1 aviso "Vários processos (N)"
           res.comunicacoes += total;
           if (truncado) res.truncados++;
