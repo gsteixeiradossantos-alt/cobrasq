@@ -1,4 +1,7 @@
-// Worker da coleta patrimonial (v4).
+// Worker da coleta patrimonial (v5).
+// v5 (26/09/2026): grava a data de abertura (BrasilAPI data_inicio_atividade) em
+// dados.data_abertura de cada empresa enriquecida.
+//
 // Fontes públicas: base CNPJ no Supabase (sócio, endereço, telefone, e-mail),
 // BrasilAPI (cadastro + QSA), ViaCEP, Portal da Transparência (CGU), PNCP e o
 // que o Vigia de ações já gravou do DJEN. Sistemas restritos, CAPTCHA e
@@ -98,8 +101,15 @@ async function enriquecerEmpresa(inv: any, raiz: any, empresaId: string, cnpj: s
     const porte = j.porte || j.descricao_porte || '';
     const cap = j.capital_social != null ? String(j.capital_social) : '';
     const cidade = [j.municipio, j.uf].filter(Boolean).join('/');
+    const abertura = /^\d{4}-\d{2}-\d{2}$/.test(String(j.data_inicio_atividade || '')) ? j.data_inicio_atividade : null;
+    // Data de abertura alimenta o sinal "sócio em várias empresas recém-abertas" no
+    // painel. Mescla em dados sem apagar o que a base CNPJ já gravou.
+    if (abertura) {
+      const { data: atual } = await sb.from('investigacao_entidades').select('dados').eq('id', empresaId).single();
+      await sb.from('investigacao_entidades').update({ dados: { ...(atual?.dados || {}), data_abertura: abertura } }).eq('id', empresaId);
+    }
     await evidencia(inv.id, empresaId, 'brasilapi', 'Cadastro CNPJ consultado',
-      `${j.razao_social || cnpj} · ${maskCnpj(cnpj)} · situação ${sit}${porte ? ' · porte ' + porte : ''}${cap ? ' · capital ' + cap : ''}${cidade ? ' · ' + cidade : ''}`, url);
+      `${j.razao_social || cnpj} · ${maskCnpj(cnpj)} · situação ${sit}${abertura ? ' · aberta em ' + abertura.split('-').reverse().join('/') : ''}${porte ? ' · porte ' + porte : ''}${cap ? ' · capital ' + cap : ''}${cidade ? ' · ' + cidade : ''}`, url);
     for (const q of (Array.isArray(j.qsa) ? j.qsa : []).slice(0, 30)) {
       const nome = String(q.nome_socio || '').trim();
       if (!nome) continue;
