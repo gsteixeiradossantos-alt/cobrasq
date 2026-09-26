@@ -19,6 +19,16 @@
 //
 // Backfill manual: POST { inicio: 'YYYY-MM-DD', fim: 'YYYY-MM-DD' } ou { dias: N }.
 //
+// ⚠️ 403 do DJEN (26/09/2026): o comunicaapi.pje.jus.br devolve 403 para chamadas
+// saídas do Supabase — nada novo em intimacoes_djen desde 13/09/2026 — e 200 para
+// a mesma URL chamada do Mac do Gustavo (Brasil). Mesmo caminho da vigia-acoes:
+// o Mac baixa (scripts/djen-intimacoes-local.mjs) e repassa; a função grava.
+//   { modo:'janela' }      → { inicio, fim, oabs } que o Mac deve baixar;
+//   { modo:'resultados', inicio, fim, resultados:[{ oab, itens, erro? }], finalizar? }
+//                          → mesma gravação/dedup/vínculo da busca normal; com
+//                            finalizar (padrão true) roda também cruzar + eventos.
+// Sem `modo`, continua buscando no DJEN daqui (o que hoje dá 403).
+//
 // Auth: header Authorization: Bearer <CRON_INVOKE_SECRET>.
 // Secrets: CRON_INVOKE_SECRET, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 // Opcional: DJEN_OABS ("112743/PR,119424/PR" — default abaixo).
@@ -30,6 +40,7 @@ const API = 'https://comunicaapi.pje.jus.br/api/v1/comunicacao';
 const DIAS_JANELA = 5;          // reprocessa os últimos N dias (idempotente por dedup)
 const ITENS_POR_PAGINA = 100;   // teto da API
 const MAX_PAGINAS = 30;         // trava de segurança por OAB/run
+const MAX_ITENS_REPASSE = MAX_PAGINAS * ITENS_POR_PAGINA; // teto por OAB no modo 'resultados'
 const OABS_DEFAULT = '112743/PR,119424/PR'; // Gustavo, Ana Clara
 // A API recusa clientes sem User-Agent "de navegador".
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36';
@@ -215,15 +226,21 @@ Deno.serve(async (req) => {
   }
   try {
     const body = await req.json().catch(() => ({}));
+    const modo = body?.modo === 'janela' || body?.modo === 'resultados' ? body.modo : 'buscar';
     const dias = Number(body?.dias) > 0 ? Number(body.dias) : DIAS_JANELA;
     const fim = dataISO(body?.fim) || isoDate(new Date());
     const inicio = dataISO(body?.inicio) || isoDate(new Date(new Date(fim + 'T12:00:00Z').getTime() - dias * 86400000));
+    // p/ o cruzamento: a janela efetiva (backfill com inicio/fim pode ser maior que `dias`)
+    const diasJanela = Math.max(dias, Math.round((Date.parse(fim + 'T12:00:00Z') - Date.parse(inicio + 'T12:00:00Z')) / 86400000));
+
+    if (modo === 'janela') {
+      return new Response(JSON.stringify({ ok: true, inicio, fim, oabs: OABS }), { headers: { 'content-type': 'application/json' } });
+    }
 
     const cobrMap = await carregarCobrancasMap();
     const res: Record<string, any> = { inicio, fim, oabs: {} };
     let novas = 0;
-    for (const oab of OABS) {
-      const itens = await buscarOab(oab, inicio, fim);
+    const gravarItens = async (oab: string, itens: any[]) => {
       const c = { total: itens.length, novas: 0, repetidas: 0, erros: 0 };
       for (const it of itens) {
         const r = await gravar(it, oab, cobrMap);
@@ -231,13 +248,30 @@ Deno.serve(async (req) => {
       }
       novas += c.novas;
       res.oabs[oab] = c;
+    };
+
+    if (modo === 'resultados') {
+      const lista: any[] = Array.isArray(body?.resultados) ? body.resultados : [];
+      for (const r of lista) {
+        const oab = String(r?.oab || '').trim();
+        // só as OABs do escritório: o repasse não abre porta p/ gravar OAB alheia
+        if (!OABS.includes(oab)) { res.oabs[oab || '?'] = { erro: 'OAB fora de DJEN_OABS' }; continue; }
+        if (r?.erro) { res.oabs[oab] = { erro: `no Mac: ${String(r.erro).slice(0, 200)}` }; continue; }
+        await gravarItens(oab, (Array.isArray(r?.itens) ? r.itens : []).slice(0, MAX_ITENS_REPASSE));
+      }
+    } else {
+      for (const oab of OABS) await gravarItens(oab, await buscarOab(oab, inicio, fim));
+    }
+
+    res.novas = novas;
+    if (modo === 'resultados' && body?.finalizar === false) {
+      return new Response(JSON.stringify({ ok: true, ...res }), { headers: { 'content-type': 'application/json' } });
     }
     // Cruza com o e-mail (janela um pouco maior que a de busca, p/ e-mail atrasado).
-    const { data: cruzadas, error: eCruz } = await sb.rpc('intimacoes_djen_cruzar', { p_dias: dias + 10 });
+    const { data: cruzadas, error: eCruz } = await sb.rpc('intimacoes_djen_cruzar', { p_dias: diasJanela + 10 });
     if (eCruz) console.error('[djen] cruzar', eCruz.message);
     res.cruzadas = cruzadas ?? null;
     res.eventos = await gravarEventos();
-    res.novas = novas;
     return new Response(JSON.stringify({ ok: true, ...res }), { headers: { 'content-type': 'application/json' } });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
