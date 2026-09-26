@@ -47750,7 +47750,28 @@ async function tajEnviarZapSign(){
     const dados=_tajDados(); const supa=getSupabase(); if(!supa) throw new Error('Faça login.');
     // Mesma edge function do CRM: gera PDF, cria doc no ZapSign com signatários e âncoras <<assdevN>>.
     const _rep=_zapTelsRepetidos([...(dados.devedores||[]),...(dados.advogados||[])]);
-    if(_rep.length) throw new Error('Signatários com o mesmo telefone: '+_rep.join('; ')+'. Cada um precisa assinar pelo próprio celular.');
+    if(_rep.length){
+      // Exceção (Gustavo, 26/09/2026): pessoas que realmente só têm um celular assinam
+      // com selfie + foto do documento + código no PRÓPRIO e-mail + desenho. Sem e-mail
+      // próprio de cada uma, não sai. Fica registrado no histórico do caso.
+      if(!confirm('Signatários com o mesmo telefone: '+_rep.join('; ')+'.\n\nCada um deveria assinar pelo próprio celular. Se essas pessoas realmente só têm UM celular, cada uma vai assinar com selfie + foto do documento + código enviado ao PRÓPRIO e-mail + desenho.\n\nConfirmar que o telefone é compartilhado?')) throw new Error('Envio cancelado: signatários com o mesmo telefone.');
+      const _tn=s=>String(s||'').replace(/\D/g,'').replace(/^55(?=\d{10,11}$)/,'');
+      const _cont={}; [...(dados.devedores||[]),...(dados.advogados||[])].forEach(p=>{ const k=_tn(p.telefone); if(k) _cont[k]=(_cont[k]||0)+1; });
+      const _envolvidos=[...(dados.devedores||[]),...(dados.advogados||[])].filter(p=>_cont[_tn(p.telefone)]>1);
+      const _emails=[];
+      for(const p of _envolvidos){
+        const sug=(p===dados.devedores[0] && dev.email)?dev.email:'';
+        const em=String(prompt('E-mail PRÓPRIO de '+(p.nome||'?')+' (o código de assinatura vai para ele):', sug)||'').trim();
+        if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) throw new Error('Envio cancelado: e-mail de '+(p.nome||'?')+' ausente ou inválido.');
+        if(_emails.includes(em.toLowerCase())) throw new Error('Envio cancelado: '+(p.nome||'?')+' está com o mesmo e-mail de outro signatário.');
+        _emails.push(em.toLowerCase()); p.email=em; p.telCompartilhado=true;
+      }
+      dados.telCompartilhadoConfirmado=true;
+      if(!dev.historico) dev.historico=[];
+      dev.historico.push({ id:uid(), data:hoje(), tipo:'ZapSign',
+        texto:'Telefone compartilhado confirmado no envio do termo ('+_rep.join('; ')+'). Assinatura com selfie + foto do documento + código no e-mail de cada um: '+_envolvidos.map(p=>(p.nome||'?')+' <'+p.email+'>').join(', ')+'.', autor:(typeof currentUser!=='undefined'&&currentUser&&currentUser.nome)||'Sistema' });
+      save();
+    }
     const { data, error } = await supa.functions.invoke('gerar-acordo-termo', { body:{ casoId: _tajState.devId, html, dados } });
     if(error){ let det=''; try{ det=(await error.context.json()).error||''; }catch(_){}; throw new Error(det||error.message); }
     if(data && data.error) throw new Error(data.error);

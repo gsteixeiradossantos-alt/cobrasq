@@ -32,17 +32,27 @@ const valorBR = (v: unknown) => String(v ?? "").replace(".", ",");
 // Telefone igual em dois signatários: um recebe o link/código do outro e pode assinar
 // por ele ("não fui eu"). Regra do Gustavo, 26/09/2026: nenhum caso, nem com mais de
 // um contratante. Compara só dígitos, sem o DDI 55.
+const telNorm = (s: unknown) => onlyDigits(s).replace(/^55(?=\d{10,11}$)/, "");
 const telsRepetidos = (pessoas: any[]) => {
   const vistos: Record<string, string> = {};
   const rep: string[] = [];
   for (const p of pessoas) {
-    const t = onlyDigits(p?.telefone).replace(/^55(?=\d{10,11}$)/, "");
+    const t = telNorm(p?.telefone);
     if (!t) continue;
     const nome = String(p?.nome || "?").trim();
     if (vistos[t]) rep.push(`${vistos[t]} e ${nome}`); else vistos[t] = nome;
   }
   return rep;
 };
+// Exceção (Gustavo, 26/09/2026): quando as pessoas realmente só têm um celular, o gestor
+// confirma no painel e cada uma que divide o telefone assina com selfie + foto do
+// documento + código no PRÓPRIO e-mail + desenho. Sem e-mail próprio, continua bloqueado.
+const telsCompartilhados = (pessoas: any[]) => {
+  const cont: Record<string, number> = {};
+  for (const p of pessoas) { const t = telNorm(p?.telefone); if (t) cont[t] = (cont[t] || 0) + 1; }
+  return new Set(Object.keys(cont).filter((k) => cont[k] > 1));
+};
+const emailOk = (s: unknown) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s ?? "").trim());
 const isoToBR = (iso: unknown) => {
   const m = String(iso ?? "").match(/^(\d{4})-(\d{2})-(\d{2})/);
   return m ? `${m[3]}/${m[2]}/${m[1]}` : "";
@@ -65,7 +75,15 @@ Deno.serve(async (req) => {
       const _devs = (Array.isArray(dados.devedores) && dados.devedores.length) ? dados.devedores : [dados.devedor];
       const _advs = (Array.isArray(dados.advogados) ? dados.advogados : []).filter((a: any) => a && a.nome);
       const rep = telsRepetidos([..._devs, ..._advs]);
-      if (rep.length) return json({ error: `Signatários com o mesmo telefone: ${rep.join("; ")}. Cada um precisa assinar pelo próprio celular.` }, 400);
+      if (rep.length) {
+        const comp = telsCompartilhados([..._devs, ..._advs]);
+        const envolvidos = [..._devs, ..._advs].filter((p: any) => comp.has(telNorm(p?.telefone)));
+        const emails = envolvidos.map((p: any) => String(p?.email || "").trim().toLowerCase());
+        const excecaoOk = dados.telCompartilhadoConfirmado === true
+          && envolvidos.every((p: any) => p?.telCompartilhado === true && emailOk(p?.email))
+          && new Set(emails).size === emails.length;
+        if (!excecaoOk) return json({ error: `Signatários com o mesmo telefone: ${rep.join("; ")}. Cada um precisa assinar pelo próprio celular (ou confirmar a exceção com e-mail próprio de cada um).` }, 400);
+      }
     }
 
     const APP_BASE_URL = (Deno.env.get("APP_BASE_URL") || "").replace(/\/+$/, "");
@@ -128,6 +146,7 @@ Deno.serve(async (req) => {
         name: d.nome || "",
         email: null,
         auth_mode: "assinaturaTela",
+        ...(d.telCompartilhado ? { email: String(d.email).trim(), lock_email: true, auth_mode: "assinaturaTela-tokenEmail" } : {}),
         send_automatic_email: false,
         send_automatic_whatsapp: false,
         phone_country: "55",
@@ -159,6 +178,7 @@ Deno.serve(async (req) => {
         require_selfie_photo: false,
         require_document_photo: false,
         selfie_validation_type: "none",
+        ...(a.telCompartilhado ? { email: String(a.email).trim(), lock_email: true, auth_mode: "assinaturaTela-tokenEmail", require_selfie_photo: true, require_document_photo: true } : {}),
         signature_placement: "<<assadv" + (i + 2) + ">>",
       }))),
       lang: "pt-br",
