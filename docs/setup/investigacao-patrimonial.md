@@ -177,3 +177,32 @@ continue usando um estado anterior.
   por tipo (pessoa, empresa, processo); círculo vazio tracejado = pista não
   confirmada; linha tracejada = vínculo abaixo de 70%. Clicar num nó mostra os
   vínculos e as evidências dele. O PDF traz a mesma teia (PNG) na primeira página.
+
+## Tela no jeito Sniper e relatório em dossiê (26/09/2026)
+
+Inspirado na descrição pública do SNIPER/CNJ (docs.pdpj.jus.br/servicos-negociais/sniper)
+e em guias de análise de vínculos CPF/CNPJ. Nada mudou no worker nem no banco: tudo é
+leitura do que ele já grava.
+
+- **Tela do resultado**: cartão do investigado com contadores (pode penhorar, empresas
+  confirmadas/pistas, pessoas, processos como autor/réu, sinais de alerta) e três abas:
+  **Grafo** (com filtro por tipo de entidade, por tipo de vínculo e "só confirmados"),
+  **Tabela** (o que pode ser penhorado, empresas, pessoas, processos, contratos e
+  vínculos públicos; clicar numa linha abre o nó) e **Sinais de alerta**.
+- **Teia**: nós quadrados com ícone (pessoa, empresa, processo); cor da linha por tipo de
+  vínculo (sócio, mesmo endereço, mesmo telefone/e-mail, parte em processo); selo verde
+  "$" = pode penhorar, laranja "!" = sinal de alerta. Filtrar não move os outros nós.
+- **O que pode ser penhorado** (`_invAnalise`): contrato público vigente (PNCP/Portal),
+  renda federal de servidor/pensionista, processo em que o devedor é autor (penhora no
+  rosto dos autos), quotas de empresa ativa confirmada. Benefício marcado "impenhorável"
+  aparece à parte.
+- **Sinais de alerta** (sempre pista, nunca acusação): mesma pessoa no quadro de 2+
+  empresas da teia; 2+ empresas no endereço fiscal do devedor; empresa do devedor
+  baixada/inapta/suspensa/nula; devedor réu em 3+ processos; ressalva quando o contato
+  é usado por mais de 3 CNPJs (provável contador).
+- **Não implementado**: "sócio em empresas recém-abertas" depende da data de abertura,
+  que o worker não grava hoje.
+- **PDF em dossiê**: 1. identificação (com credor e processo da cobrança); 2. o que pode
+  ser penhorado; 3. teia; 4. achados por categoria; 5. sinais de alerta; 6. fontes que
+  responderam e que não responderam; 7. critérios do score; anexos com todas as
+  evidências e a linha do tempo.
