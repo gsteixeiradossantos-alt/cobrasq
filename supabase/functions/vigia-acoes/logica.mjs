@@ -265,6 +265,15 @@ export function filtrarTruncado(achados, truncado) {
   return { achados: ficam, descartados: lista.length - ficam.length };
 }
 
+// Aviso marcado "visto" volta para a fila quando o DJEN publica comunicação nova
+// naquele processo (decisão, sentença, intimação). "Descartado" nunca volta, e
+// processo sem publicação nova (ex.: arquivado) fica quieto. Decisão do Gustavo, 26/09/2026.
+export function reabrirVisto(statusAtual, idsExistentes, idsNovos) {
+  if (statusAtual !== 'visto') return false;
+  const ja = new Set((idsExistentes || []).map(String));
+  return (idsNovos || []).some(id => !ja.has(String(id)));
+}
+
 export function resumirMuitos(achados, teto = TETO_ACHADOS) {
   if (!Array.isArray(achados) || achados.length <= teto) return achados || [];
   const datas = (k) => achados.map(a => a[k]).filter(Boolean).sort();

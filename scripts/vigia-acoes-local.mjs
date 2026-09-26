@@ -151,12 +151,12 @@ async function main() {
   const fila = f.fila || [];
   log(`fila: ${fila.length} alvos (universo ${f.universo}, pendentes hoje ${f.pendentes_hoje}), janela ${f.inicio} a ${f.fim}`);
 
-  const soma = { processados: 0, comunicacoes: 0, novos: 0, atualizados: 0, erros: 0, erros_djen: 0, truncados: 0, pulados_nome: 0 };
+  const soma = { processados: 0, comunicacoes: 0, novos: 0, atualizados: 0, reabertos: 0, erros: 0, erros_djen: 0, truncados: 0, pulados_nome: 0 };
   let lote = [];
   const enviar = async () => {
     if (!lote.length) return;
     const r = await chamarFuncao(token, { modo: 'resultados', inicio: f.inicio, fim: f.fim, forcar: true, resultados: lote });
-    for (const k of ['processados', 'comunicacoes', 'novos', 'atualizados', 'erros', 'truncados', 'pulados_nome']) soma[k] += Number(r[k]) || 0;
+    for (const k of ['processados', 'comunicacoes', 'novos', 'atualizados', 'reabertos', 'erros', 'truncados', 'pulados_nome']) soma[k] += Number(r[k]) || 0;
     lote = [];
   };
 
@@ -182,7 +182,7 @@ async function main() {
     if (lote.length >= LOTE) await enviar();
   }
   await enviar();
-  log(`fim: ${soma.processados} alvos gravados, ${soma.comunicacoes} comunicações, ${soma.novos} avisos novos, ${soma.atualizados} atualizados, ` +
+  log(`fim: ${soma.processados} alvos gravados, ${soma.comunicacoes} comunicações, ${soma.novos} avisos novos, ${soma.atualizados} atualizados, ${soma.reabertos} reabertos, ` +
       `${soma.erros} erros na função, ${soma.erros_djen} erros no DJEN, ${soma.truncados} truncados, ` +
       `${stats.requisicoes} req DJEN (${stats.r429} × 429), ${Math.round((Date.now() - t0) / 1000)} s`);
 }

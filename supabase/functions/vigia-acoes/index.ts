@@ -22,7 +22,8 @@
 //      fora da UF do nosso processo (TJ/TRT/TRF da UF; decisão de 25/09/2026) e
 //      agrupa por CNJ;
 //   5) upsert em vigia_acoes, dedup (alvo, digitos). Status novo/visto/descartado
-//      é da tela — o worker nunca reabre um "descartado" nem um "visto".
+//      é da tela — o worker nunca reabre um "descartado"; um "visto" volta a "novo"
+//      só quando chega comunicação nova do DJEN naquele processo (reabrirVisto).
 //
 // Ritmo medido em 25/09/2026 (evidência no PR): x-ratelimit-limit 20; a 21ª
 // chamada seguida devolve 429 com retry-after 2 e o contador volta ~5 s depois.
@@ -43,7 +44,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
-import { nomeDeBusca, agruparAchados, montarAlvos, resumirMuitos, filtrarTruncado } from './logica.mjs';
+import { nomeDeBusca, agruparAchados, montarAlvos, resumirMuitos, filtrarTruncado, reabrirVisto } from './logica.mjs';
 
 const MAX_ITENS_REPASSE = 5000; // por alvo, depois da poda no Mac
 
@@ -138,9 +139,9 @@ async function carregarCnjsNossos(): Promise<Set<string>> {
   return s;
 }
 
-async function gravarAchado(dev: any, a: any): Promise<'novo' | 'atualizado' | 'erro'> {
+async function gravarAchado(dev: any, a: any): Promise<'novo' | 'atualizado' | 'reaberto' | 'erro'> {
   const { data: exist, error: eSel } = await sb.from('vigia_acoes')
-    .select('id, comunicacoes, primeira_data, ultima_data, polo, cpf_confere').eq('alvo', dev.alvo).eq('digitos', a.digitos).maybeSingle();
+    .select('id, status, comunicacoes, primeira_data, ultima_data, polo, cpf_confere').eq('alvo', dev.alvo).eq('digitos', a.digitos).maybeSingle();
   if (eSel) { console.error('[vigia] select', eSel.message); return 'erro'; }
   if (!exist) {
     const { error } = await sb.from('vigia_acoes').insert({
@@ -166,12 +167,14 @@ async function gravarAchado(dev: any, a: any): Promise<'novo' | 'atualizado' | '
     partes: a.partes, advogados: a.advogados, atualizado_em: new Date().toISOString(),
     cpf_confere: !!(exist.cpf_confere || a.cpf_confere),
   };
+  const reaberto = reabrirVisto(exist.status, exist.comunicacoes, a.comunicacoes);
+  if (reaberto) upd.status = 'novo';
   // Linha "Vários processos": a lista e a contagem são as da busca mais recente.
   if (a.processos) Object.assign(upd, { processos: a.processos, numero_processo: a.numero_processo, tribunal: a.tribunal, nome_encontrado: a.nome_encontrado });
   if (maisNovo) Object.assign(upd, { ultima_data: a.ultima_data, link: a.link, ultimo_texto: a.ultimo_texto });
   const { error } = await sb.from('vigia_acoes').update(upd).eq('id', exist.id);
   if (error) { console.error('[vigia] update', error.message); return 'erro'; }
-  return 'atualizado';
+  return reaberto ? 'reaberto' : 'atualizado';
 }
 
 Deno.serve(async (req) => {
@@ -216,7 +219,7 @@ Deno.serve(async (req) => {
     const res = { inicio, fim, dry_run: dryRun, universo: universo.length,
                   universo_escritorio: universo.filter((d: any) => d.origem === 'escritorio').length,
                   pendentes_hoje: 0, processados: 0,
-                  pulados_nome: 0, comunicacoes: 0, novos: 0, atualizados: 0, erros: 0, truncados: 0,
+                  pulados_nome: 0, comunicacoes: 0, novos: 0, atualizados: 0, reabertos: 0, erros: 0, truncados: 0,
                   descartados: { nome_diferente: 0, nosso: 0, sem_cnj: 0, fora_da_uf: 0, outro_ramo: 0, homonimo_truncado: 0 }, achados: [] as any[] };
     res.pendentes_hoje = universo.filter((d: any) => est.get(d.alvo)?.buscado_em !== hoje).length;
 
@@ -240,7 +243,7 @@ Deno.serve(async (req) => {
           for (const a of achados) {
             if (dryRun) { res.achados.push({ alvo: dev.alvo, devedor: dev.nome, uf: dev.ufs.join('/'), ...a, ultimo_texto: undefined, doc: undefined }); continue; }
             const r = await gravarAchado(dev, a);
-            if (r === 'novo') res.novos++; else if (r === 'atualizado') res.atualizados++; else res.erros++;
+            if (r === 'novo') res.novos++; else if (r === 'atualizado') res.atualizados++; else if (r === 'reaberto') res.reabertos++; else res.erros++;
           }
         } catch (e) {
           res.erros++;

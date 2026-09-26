@@ -206,5 +206,14 @@ const item = (o) => Object.assign({
     assert.deepStrictEqual(L.filtrarTruncado(undefined, true), { achados: [], descartados: 0 });
   });
 
+  ok('reabrirVisto: "visto" volta com publicação nova; descartado e arquivado não', () => {
+    assert.strictEqual(L.reabrirVisto('visto', [1, 2], [2, 3]), true);        // decisão nova no DJEN
+    assert.strictEqual(L.reabrirVisto('visto', [1, 2], [1, 2]), false);       // nada novo (arquivado)
+    assert.strictEqual(L.reabrirVisto('descartado', [1], [1, 9]), false);     // descartado nunca volta
+    assert.strictEqual(L.reabrirVisto('novo', [1], [9]), false);              // já está na fila
+    assert.strictEqual(L.reabrirVisto('visto', ['7'], [7]), false);           // id texto × número
+    assert.strictEqual(L.reabrirVisto('visto', null, [5]), true);
+  });
+
   console.log(`\nF-47 · ${n} verificações ok.`);
 })().catch(e => { console.error('  FALHOU', e.message); process.exit(1); });
