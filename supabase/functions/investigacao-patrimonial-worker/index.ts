@@ -246,6 +246,19 @@ async function portalTransparencia(inv: any, raiz: any, achadas: Map<string, Ach
 // CPF/CNPJ do fornecedor. Confirma quando o documento bate; mesmo nome sem
 // documento igual fica como pista; o resto é ruído da busca textual.
 const PNCP_UA = { 'User-Agent': 'Mozilla/5.0 (compatible; COBRASQ investigacao)', Accept: 'application/json' };
+// A API do PNCP às vezes derruba a conexão ou devolve 5xx: a busca tenta de novo
+// uma vez, 2 s depois, antes de virar "não conclusivo".
+async function pncpBusca(url: string) {
+  for (let tentativa = 1; ; tentativa++) {
+    try {
+      const res = await fetch(url, { headers: PNCP_UA, signal: AbortSignal.timeout(20000) });
+      if (res.ok || tentativa >= 2 || (res.status < 500 && res.status !== 429)) return res;
+    } catch (e) {
+      if (tentativa >= 2) throw e;
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+}
 async function pncp(inv: any, raiz: any, achadas: Map<string, Achada>, c: Contadores, nc: string[]) {
   const alvos = [] as { id: string; doc: string; nome: string }[];
   if (raiz.nome) alvos.push({ id: raiz.id, doc: dig(raiz.documento), nome: raiz.nome });
@@ -256,7 +269,7 @@ async function pncp(inv: any, raiz: any, achadas: Map<string, Achada>, c: Contad
     if (nomeBusca.length < 8) continue;
     try {
       const url = `https://pncp.gov.br/api/search/?q=${encodeURIComponent('"' + nomeBusca + '"')}&tipos_documento=contrato&ordenacao=-data&pagina=1&tam_pagina=8`;
-      const res = await fetch(url, { headers: PNCP_UA, signal: AbortSignal.timeout(20000) });
+      const res = await pncpBusca(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const j: any = await res.json();
       ok = true;
