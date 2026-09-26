@@ -29,6 +29,20 @@ const json = (obj: unknown, status = 200) =>
 const onlyDigits = (s: unknown) => String(s ?? "").replace(/\D/g, "");
 // A RPC espera valor BR ("1.234,56") e data "dd/mm/aaaa".
 const valorBR = (v: unknown) => String(v ?? "").replace(".", ",");
+// Telefone igual em dois signatários: um recebe o link/código do outro e pode assinar
+// por ele ("não fui eu"). Regra do Gustavo, 26/09/2026: nenhum caso, nem com mais de
+// um contratante. Compara só dígitos, sem o DDI 55.
+const telsRepetidos = (pessoas: any[]) => {
+  const vistos: Record<string, string> = {};
+  const rep: string[] = [];
+  for (const p of pessoas) {
+    const t = onlyDigits(p?.telefone).replace(/^55(?=\d{10,11}$)/, "");
+    if (!t) continue;
+    const nome = String(p?.nome || "?").trim();
+    if (vistos[t]) rep.push(`${vistos[t]} e ${nome}`); else vistos[t] = nome;
+  }
+  return rep;
+};
 const isoToBR = (iso: unknown) => {
   const m = String(iso ?? "").match(/^(\d{4})-(\d{2})-(\d{2})/);
   return m ? `${m[3]}/${m[2]}/${m[1]}` : "";
@@ -47,6 +61,12 @@ Deno.serve(async (req) => {
     const { casoId, html, dados } = await req.json().catch(() => ({}));
     if (!html || typeof html !== "string") return json({ error: 'Campo "html" obrigatório.' }, 400);
     if (!dados || !dados.devedor) return json({ error: 'Campo "dados" obrigatório.' }, 400);
+    {
+      const _devs = (Array.isArray(dados.devedores) && dados.devedores.length) ? dados.devedores : [dados.devedor];
+      const _advs = (Array.isArray(dados.advogados) ? dados.advogados : []).filter((a: any) => a && a.nome);
+      const rep = telsRepetidos([..._devs, ..._advs]);
+      if (rep.length) return json({ error: `Signatários com o mesmo telefone: ${rep.join("; ")}. Cada um precisa assinar pelo próprio celular.` }, 400);
+    }
 
     const APP_BASE_URL = (Deno.env.get("APP_BASE_URL") || "").replace(/\/+$/, "");
     const EMIT_SECRET = Deno.env.get("EMIT_ACORDO_SECRET");
@@ -112,6 +132,9 @@ Deno.serve(async (req) => {
         send_automatic_whatsapp: false,
         phone_country: "55",
         phone_number: onlyDigits(d.telefone),
+        // Nome e telefone travados: quem abre o link não troca pelo de outra pessoa.
+        lock_name: true,
+        lock_phone: !!onlyDigits(d.telefone),
         require_cpf: true,
         cpf: onlyDigits(d.documento),
         require_selfie_photo: true,
