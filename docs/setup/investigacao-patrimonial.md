@@ -156,3 +156,24 @@ continue usando um estado anterior.
   rodaram sem nada; `null` se não deu para verificar.
 - O relatório passou a mostrar o trecho e o link de cada evidência, e tribunal/polo
   dos processos.
+
+## Investigação por cobrança e teia (26/09/2026)
+
+- Menu lateral **Carteira → Investigação patrimonial** (`#/investigacao`): busca a
+  cobrança (devedor, credor, CPF/CNPJ ou nº do processo), lista as partes de
+  `cobranca_partes` e cria uma investigação por parte marcada. Colaborador também
+  usa — a RPC e a RLS já limitam ao que ele enxerga.
+- No detalhe da cobrança, a aba **Investigação patrimonial** substituiu a antiga
+  "Andamentos / CRM" (que só tinha atalhos). Os botões Atribuir tarefa, Registrar
+  negativação e Reatribuir responsável foram para **Resumo → Ações rápidas**, e a
+  etapa do funil para a coluna lateral do Resumo.
+- Migração `20260926_03_investigacao_cobranca_escolhida.sql`: a RPC ganhou
+  `p_cobranca_id` (opcional). Com ele, a investigação fica amarrada à cobrança
+  escolhida — e recusa devedor que não é parte dela. Sem ele, vale a regra antiga
+  (cobrança principal do devedor). A investigação continua aparecendo na ficha do
+  devedor.
+- **Teia**: grafo radial em SVG próprio (sem biblioteca) — alvo no centro,
+  profundidade 1 e 2 em anéis, cada filho na fatia do círculo do seu "pai". Cor
+  por tipo (pessoa, empresa, processo); círculo vazio tracejado = pista não
+  confirmada; linha tracejada = vínculo abaixo de 70%. Clicar num nó mostra os
+  vínculos e as evidências dele. O PDF traz a mesma teia (PNG) na primeira página.
