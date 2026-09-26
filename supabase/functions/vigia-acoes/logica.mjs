@@ -255,6 +255,16 @@ export function docConfere(texto, doc) {
 // as buscas seguintes atualizam o mesmo aviso, e "Descartar" vale para ele).
 export const TETO_ACHADOS = 5;
 export const DIGITOS_VARIOS = '0'.repeat(20);
+// Nome que estourou o teto do DJEN ("José da Silva": 10.000 comunicações em 3 dias,
+// 26/09/2026) é homônimo quase certo: a busca veio cortada e o nome não distingue
+// ninguém. Aí só vira aviso o achado cujo texto traz o CPF/CNPJ do devedor.
+export function filtrarTruncado(achados, truncado) {
+  const lista = Array.isArray(achados) ? achados : [];
+  if (!truncado) return { achados: lista, descartados: 0 };
+  const ficam = lista.filter(a => a.cpf_confere);
+  return { achados: ficam, descartados: lista.length - ficam.length };
+}
+
 export function resumirMuitos(achados, teto = TETO_ACHADOS) {
   if (!Array.isArray(achados) || achados.length <= teto) return achados || [];
   const datas = (k) => achados.map(a => a[k]).filter(Boolean).sort();
