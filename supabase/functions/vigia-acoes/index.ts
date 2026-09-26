@@ -30,12 +30,22 @@
 //
 // Manual: POST { dias, limite, alvos:['dev:…','esc:…'], nome:'trecho', inicio, fim, dry_run:true, forcar:true }
 //   dry_run → não grava nada, devolve os achados; forcar → ignora "já buscado hoje".
+//
+// ⚠️ 25/09/2026: o DJEN devolve 403 para chamadas saídas do Supabase (35/35 na 1ª
+// rodada; a mesma URL dá 200 no Mac, no Brasil). Por isso a busca roda no Mac
+// (scripts/vigia-acoes-local.mjs) em dois passos com o mesmo bearer:
+//   POST { modo:'fila', limite, forcar }  → { inicio, fim, fila:[{alvo, nome, busca}] }
+//   POST { modo:'resultados', inicio, fim, resultados:[{alvo, itens, total, truncado, erro}] }
+//     → a função refaz os filtros (nome exato, processo nosso, UF, teto, CPF) e grava.
+// O cron `vigia-acoes` (busca pela própria função) ficou pausado.
 // Auth: Authorization: Bearer <CRON_INVOKE_SECRET>.
 // Secrets: CRON_INVOKE_SECRET, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { nomeDeBusca, agruparAchados, montarAlvos, resumirMuitos } from './logica.mjs';
+
+const MAX_ITENS_REPASSE = 5000; // por alvo, depois da poda no Mac
 
 const API = 'https://comunicaapi.pje.jus.br/api/v1/comunicacao';
 const DIAS_JANELA = 3;          // olha 3 dias para trás: atraso de 1–2 dias não perde nada
@@ -175,7 +185,8 @@ Deno.serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const dryRun = body?.dry_run === true;
     const forcar = body?.forcar === true;
-    const limite = Math.min(Math.max(Number(body?.limite) || LIMITE_PADRAO, 1), 500);
+    const modo = body?.modo === 'fila' || body?.modo === 'resultados' ? body.modo : 'buscar';
+    const limite = Math.min(Math.max(Number(body?.limite) || LIMITE_PADRAO, 1), 2000);
     const orcamento = Math.min(Math.max(Number(body?.orcamento_ms) || ORCAMENTO_MS, 5000), 140000);
     const hoje = hojeBR();
     const dias = Number(body?.dias) > 0 ? Number(body.dias) : DIAS_JANELA;
@@ -209,15 +220,14 @@ Deno.serve(async (req) => {
                   descartados: { nome_diferente: 0, nosso: 0, sem_cnj: 0, fora_da_uf: 0, outro_ramo: 0 }, achados: [] as any[] };
     res.pendentes_hoje = universo.filter((d: any) => est.get(d.alvo)?.buscado_em !== hoje).length;
 
-    for (const dev of fila) {
-      if (Date.now() - t0 > orcamento) break;
+    const processar = async (dev: any, obter: () => Promise<{ itens: any[]; total: number; truncado: boolean }>) => {
       const { busca, motivo } = nomeDeBusca(dev.nome);
       let registro: Record<string, unknown> = { alvo: dev.alvo, devedor_id: dev.devedor_id, uf_ref: dev.ufs.join('/'), nome_busca: busca, buscado_em: hoje, buscado_ts: new Date().toISOString(), motivo, erro: null, comunicacoes: 0, achados: 0 };
       if (!busca) {
         res.pulados_nome++;
       } else {
         try {
-          const { itens, total, truncado } = await buscarNome(busca, inicio, fim);
+          const { itens, total, truncado } = await obter();
           const { achados: todos, descartados } = agruparAchados(itens, dev.nome, cnjsNossos, dev.ufs, dev.doc);
           const achados = resumirMuitos(todos);   // > 5 processos → 1 aviso "Vários processos (N)"
           res.comunicacoes += total;
@@ -240,6 +250,30 @@ Deno.serve(async (req) => {
         if (error) console.error('[vigia] busca upsert', error.message);
       }
       res.processados++;
+    };
+
+    if (modo === 'fila') {
+      return new Response(JSON.stringify({ ok: true, inicio, fim, universo: universo.length, pendentes_hoje: res.pendentes_hoje,
+        fila: fila.map((d: any) => ({ alvo: d.alvo, nome: d.nome, busca: nomeDeBusca(d.nome).busca })) }),
+        { headers: { 'content-type': 'application/json' } });
+    }
+    if (modo === 'resultados') {
+      const porAlvo = new Map(universo.map((d: any) => [d.alvo, d]));
+      for (const r of (Array.isArray(body?.resultados) ? body.resultados : [])) {
+        const dev = porAlvo.get(r?.alvo);
+        if (!dev) { res.erros++; continue; }   // saiu do universo entre a fila e o repasse
+        await processar(dev, async () => {
+          if (r.erro) throw new Error(String(r.erro).slice(0, 300));
+          const itens = Array.isArray(r.itens) ? r.itens.slice(0, MAX_ITENS_REPASSE) : [];
+          return { itens, total: Number(r.total) || itens.length, truncado: !!r.truncado };
+        });
+      }
+      return new Response(JSON.stringify({ ok: true, ...res, ms: Date.now() - t0 }), { headers: { 'content-type': 'application/json' } });
+    }
+
+    for (const dev of fila) {
+      if (Date.now() - t0 > orcamento) break;
+      await processar(dev, () => buscarNome(nomeDeBusca(dev.nome).busca as string, inicio, fim));
     }
     return new Response(JSON.stringify({ ok: true, ...res, ...stats, ms: Date.now() - t0 }), { headers: { 'content-type': 'application/json' } });
   } catch (e) {

@@ -180,5 +180,20 @@ const item = (o) => Object.assign({
     assert.deepStrictEqual(v.tribunal.split(', ').sort(), ['TJPR', 'TRT9']);
   });
 
+  ok('podarItens: repasse do Mac leva só o que tem o nome exato, sem homônimo "JUNIOR"', () => {
+    const itens = [
+      item({ id: 1, extra_grande: 'x'.repeat(100) }),
+      item({ id: 2, destinatarios: [{ nome: 'WESLEY CECHIN GOBATTO JUNIOR', polo: 'A' }] }),
+      item({ id: 3, destinatarios: [{ nome: 'OUTRA PESSOA', polo: 'P' }] }),
+    ];
+    const p = L.podarItens(itens, 'Wesley Cechin Gobatto');
+    assert.deepStrictEqual(p.map(x => x.id), [1]);
+    assert.strictEqual(p[0].extra_grande, undefined);           // só os campos que a função usa
+    // o que sobrou continua virando o mesmo aviso do lado da função
+    const { achados } = L.agruparAchados(p, 'Wesley Cechin Gobatto', new Set(), ['PR']);
+    assert.strictEqual(achados.length, 1);
+    assert.strictEqual(achados[0].polo, 'A');
+  });
+
   console.log(`\nF-47 · ${n} verificações ok.`);
 })().catch(e => { console.error('  FALHOU', e.message); process.exit(1); });
