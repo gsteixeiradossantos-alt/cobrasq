@@ -28,6 +28,9 @@
 // Para anexar a uma cobrança, acrescentar ao body: 'cobranca_id', '<uuid>',
 // 'categoria', 'devolucao-documento' (lista do painel), opcionalmente 'uploaded_by'
 // (uuid do usuário) e 'obs'. A resposta traz também { documento_id }.
+// Para anexar na FICHA DO CLIENTE (credor), em vez de cobrança: 'cliente_id', '<uuid>',
+// 'tipo' ('outros' | 'procuracao' | 'contrato_social' | 'cartao_cnpj') e 'uploaded_by'
+// (obrigatório). A resposta traz { cliente_documento_id }. Ver o bloco "ficha do cliente".
 //
 // 18/09/2026 — modo "enviar" (opcional, retrocompatível). Se o body trouxer `telefone`,
 // a função faz o ciclo inteiro que antes exigia 3 SQLs manuais em produção (insert na
@@ -197,6 +200,47 @@ Deno.serve(async (req) => {
       return json({ error: 'insert em cofre_arquivos falhou: ' + cErr.message }, 500);
     }
     return json({ path: cofrePath, bytes: bytes.byteLength, cofre_id: row?.id ?? null });
+  }
+
+  // 26/09/2026 — modo "ficha do cliente": documento do CREDOR (contrato de cessão,
+  // declaração, procuração, contrato social, cartão CNPJ) na ficha do cliente. Grava no
+  // bucket `peticao-assets` + linha em `public.cliente_documentos`, o mesmo par que
+  // `mcliUploadDoc()` do index.html grava pelo botão "Anexar" da ficha. O caminho
+  // começa pelo uid de quem sobe (a policy do bucket exige a 1ª pasta = uid), por isso
+  // `uploaded_by` é obrigatório aqui.
+  //   body: { cliente_id, tipo, base64, filename, uploaded_by }
+  //   resposta: { path, bytes, cliente_documento_id }
+  const clienteId = String(payload?.cliente_id || '');
+  if (clienteId) {
+    if (cobrancaId || payload?.telefone) {
+      return json({ error: 'modo ficha do cliente não aceita cobranca_id nem telefone' }, 400);
+    }
+    if (!/^[0-9a-f-]{36}$/i.test(clienteId)) return json({ error: 'cliente_id inválido' }, 400);
+    const TIPOS_CLIENTE = ['procuracao', 'contrato_social', 'cartao_cnpj', 'outros'];
+    const tipo = String(payload?.tipo || 'outros');
+    if (!TIPOS_CLIENTE.includes(tipo)) return json({ error: 'tipo inválido: ' + TIPOS_CLIENTE.join(', ') }, 400);
+    const uid = String(payload?.uploaded_by || '');
+    if (!/^[0-9a-f-]{36}$/i.test(uid)) return json({ error: 'uploaded_by (uuid) obrigatório no modo ficha do cliente' }, 400);
+    const { data: cli, error: cliErr } = await sb.from('clientes').select('id').eq('id', clienteId).maybeSingle();
+    if (cliErr) return json({ error: 'consulta falhou: ' + cliErr.message }, 500);
+    if (!cli) return json({ error: 'cliente não encontrado' }, 404);
+    // Mesmo formato de mcliUploadDoc: `<uid>/clientes/<id>/<tipo>_<ts>_<nome>`.
+    const nomeSafe = filenameIn.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w.\-]/g, '_');
+    const cliPath = `${uid}/clientes/${clienteId}/${tipo}_${Date.now()}_${nomeSafe}`;
+    const { error: upErr } = await sb.storage.from('peticao-assets').upload(cliPath, bytes, {
+      contentType: 'application/pdf', upsert: false,
+    });
+    if (upErr) return json({ error: 'upload na ficha falhou: ' + upErr.message }, 500);
+    const { data: row, error: cErr } = await sb.from('cliente_documentos').insert({
+      cliente_id: clienteId, tipo, nome: filenameIn, storage_path: cliPath,
+      mime_type: 'application/pdf', size_bytes: bytes.byteLength, uploaded_by: uid, ativo: true,
+    }).select('id').single();
+    if (cErr) {
+      // Sem a linha o arquivo não aparece na ficha: não deixa órfão no bucket.
+      await sb.storage.from('peticao-assets').remove([cliPath]).catch(() => {});
+      return json({ error: 'insert em cliente_documentos falhou: ' + cErr.message }, 500);
+    }
+    return json({ path: cliPath, bytes: bytes.byteLength, cliente_documento_id: row?.id ?? null });
   }
 
   // No storage, só ASCII (acento vira a letra sem acento, não '_').
