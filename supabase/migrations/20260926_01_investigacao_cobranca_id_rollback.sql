@@ -1,0 +1,4 @@
+-- Rollback de 20260926_01: volta a função à versão de 20260916_01 (que grava o
+-- id do devedor como cobranca_id e falha nos devedores sem cobrança de mesmo id).
+-- Reaplicar o bloco "create or replace function public.iniciar_investigacao_patrimonial"
+-- de supabase/migrations/20260916_01_investigacao_patrimonial.sql.
