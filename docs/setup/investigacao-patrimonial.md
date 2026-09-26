@@ -200,8 +200,10 @@ leitura do que ele já grava.
   empresas da teia; 2+ empresas no endereço fiscal do devedor; empresa do devedor
   baixada/inapta/suspensa/nula; devedor réu em 3+ processos; ressalva quando o contato
   é usado por mais de 3 CNPJs (provável contador).
-- **Não implementado**: "sócio em empresas recém-abertas" depende da data de abertura,
-  que o worker não grava hoje.
+- **Sócio em várias empresas abertas há pouco**: mesma pessoa (devedor ou outro sócio)
+  em 2+ empresas abertas nos últimos 2 anos. A data vem da BrasilAPI
+  (`data_inicio_atividade` → `dados.data_abertura`), gravada a partir do worker v5;
+  investigações anteriores não têm a data e o sinal só aparece se forem reprocessadas.
 - **PDF em dossiê**: 1. identificação (com credor e processo da cobrança); 2. o que pode
   ser penhorado; 3. teia; 4. achados por categoria; 5. sinais de alerta; 6. fontes que
   responderam e que não responderam; 7. critérios do score; anexos com todas as
