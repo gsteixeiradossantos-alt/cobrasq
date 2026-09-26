@@ -225,7 +225,7 @@ Deno.serve(async (req) => {
     if (cliErr) return json({ error: 'consulta falhou: ' + cliErr.message }, 500);
     if (!cli) return json({ error: 'cliente não encontrado' }, 404);
     // Mesmo formato de mcliUploadDoc: `<uid>/clientes/<id>/<tipo>_<ts>_<nome>`.
-    const nomeSafe = filenameIn.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w.\-]/g, '_');
+    const nomeSafe = filenameIn.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\w.\-]/g, '_');
     const cliPath = `${uid}/clientes/${clienteId}/${tipo}_${Date.now()}_${nomeSafe}`;
     const { error: upErr } = await sb.storage.from('peticao-assets').upload(cliPath, bytes, {
       contentType: 'application/pdf', upsert: false,
