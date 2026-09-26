@@ -15908,7 +15908,7 @@ async function renderDrawerAcordosStatus(devId){
   const dev=(DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
   const ids=(dev.acordos||[]).map(a=>a.id).filter(Boolean); if(!ids.length) return;
   let rows=[];
-  try{ const supa=getSupabase(); if(supa){ const r=await supa.from('acordos').select('id,status,status_zapsign,metadata').in('id',ids); rows=r.data||[]; } }catch(_){ return; }
+  try{ const supa=getSupabase(); if(supa){ const r=await supa.from('acordos').select('id,status,status_zapsign,metadata,zapsign_doc_id').in('id',ids); rows=r.data||[]; } }catch(_){ return; }
   rows.forEach(a=>{
     const host=document.getElementById('acordo-meta-'+a.id); if(!host) return;
     const m=a.metadata||{}; const zs=(a.status_zapsign||'').toLowerCase(); const bits=[];
@@ -15919,13 +15919,72 @@ async function renderDrawerAcordosStatus(devId){
       return;
     }
     if(zs==='assinado' || zs==='signed') bits.push(`<span style="font-size:11px;font-weight:700;color:#5E7C58;background:#E9EDE2;padding:2px 8px;border-radius:20px;">✓ Assinado</span>`);
-    else if(['enviado','visualizado','pendente','link-opened','new'].includes(zs)) bits.push(`<span style="font-size:11px;font-weight:700;color:#9C7F40;background:#FBF8EF;border:1px solid #E0D3A8;padding:2px 8px;border-radius:20px;">Aguardando assinatura</span>`);
+    else if(['enviado','visualizado','pendente','link-opened','new'].includes(zs)){
+      bits.push(`<span style="font-size:11px;font-weight:700;color:#9C7F40;background:#FBF8EF;border:1px solid #E0D3A8;padding:2px 8px;border-radius:20px;">Aguardando assinatura</span>`);
+      if(a.zapsign_doc_id && DB.config && DB.config.zapsignToken) bits.push(`<button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 8px;" onclick="zsPlanoBSemFotos('${escHtml(a.zapsign_doc_id)}','${escHtml(devId)}',this)" title="Para quem travou na câmera: troca a assinatura desse signatário, no MESMO documento, para desenho + CPF + código SMS + conferência na Receita, sem fotos, e reenvia o link">Plano B: sem fotos</button>`);
+    }
     if(m.boletos_emitidos && m.asaas_invoice_url) bits.push(`<a href="${escHtml(m.asaas_invoice_url)}" target="_blank" rel="noopener" style="font-size:11.5px;font-weight:600;color:#5E7C58;">✓ Boleto emitido — abrir →</a>`);
     else if(m.boletos_emitidos) bits.push(`<span style="font-size:11px;font-weight:600;color:#5E7C58;">✓ Boleto emitido</span>`);
     host.innerHTML = bits.length ? `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">${bits.join('')}</div>` : '';
   });
 }
 
+
+// Plano B (Gustavo, 26/09/2026): o devedor que não consegue concluir as fotos (a aba
+// do navegador recarrega ao abrir a câmera e perde tudo) passa a assinar, no MESMO
+// documento — nunca se cria documento novo —, com desenho + CPF + código SMS +
+// conferência do CPF na Receita (validate_cpf: nome + CPF + data de nascimento),
+// sem selfie e sem foto do documento. Só vale para quem ainda não assinou.
+async function zsPlanoBSemFotos(docToken, devId, btn){
+  const dev=(DB.devedores||[]).find(d=>d.id===devId)||{};
+  if(btn){ btn.disabled=true; btn.textContent='Consultando…'; }
+  try{
+    const doc=await ZapSignAPI.getDoc(docToken);
+    const pend=(doc.signers||[]).filter(s=>s && s.token && zsNormStatus(s.status)!=='SIGNED' && (s.require_selfie_photo || s.require_document_photo));
+    if(!pend.length){ showToast('Nenhum signatário pendente com fotos neste documento.','info'); return; }
+    let s=pend[0];
+    if(pend.length>1){
+      const lista=pend.map((x,i)=>(i+1)+') '+(x.name||'?')+(x.phone_number?' — '+x.phone_number:'')).join('\n');
+      const n=parseInt(prompt('Qual signatário vai assinar sem fotos?\n\n'+lista+'\n\nDigite o número:','1')||'',10);
+      if(!(n>=1 && n<=pend.length)) return;
+      s=pend[n-1];
+    }
+    // O detalhe do documento nem sempre traz o CPF do signatário: cai no cadastro
+    // (devedor principal) e, faltando, pergunta.
+    const _ehPrinc=String(s.name||'').trim().toLowerCase()===String(dev.nome||'').trim().toLowerCase();
+    let cpf=String(s.cpf||(_ehPrinc?dev.doc:'')||'').replace(/\D/g,'');
+    if(cpf.length!==11) cpf=String(prompt('CPF de '+(s.name||'?')+' (a conferência na Receita precisa dele):', cpf)||'').replace(/\D/g,'');
+    if(cpf.length!==11){ showToast('Plano B cancelado: CPF ausente ou inválido (só pessoa física).','danger'); return; }
+    if(!confirm('Plano B para '+(s.name||'?')+':\n\nNo MESMO documento, a assinatura passa a ser desenho + CPF + código por SMS + conferência na Receita (nome, CPF e data de nascimento), sem selfie e sem foto do documento.\n\nAlterar?')) return;
+    if(btn) btn.textContent='Alterando…';
+    await ZapSignAPI.req('POST',`/signers/${s.token}/`,{
+      name:s.name, phone_country:s.phone_country||'55', phone_number:s.phone_number||'',
+      auth_mode:'assinaturaTela-tokenSms', require_selfie_photo:false, require_document_photo:false,
+      selfie_validation_type:'none', require_cpf:true, cpf, validate_cpf:true,
+      lock_name:true, lock_phone:!!s.phone_number,
+    });
+    // Lê de volta do ZapSign o link vigente (a documentação não diz se ele muda).
+    const doc2=await ZapSignAPI.getDoc(docToken);
+    const s2=(doc2.signers||[]).find(x=>x.token===s.token) || (doc2.signers||[]).find(x=>x.name===s.name) || {};
+    const link=s2.sign_url||s2.signing_link||s.sign_url||'';
+    if(!dev.historico) dev.historico=[];
+    dev.historico.push({ id:uid(), data:hoje(), tipo:'ZapSign',
+      texto:`Plano B aplicado a ${s.name||'?'}: assinatura sem fotos (desenho + CPF + código SMS + conferência na Receita), no mesmo documento.`, autor:(currentUser&&currentUser.nome)||'Sistema' });
+    save();
+    if(typeof logAtividade==='function') logAtividade('ZapSign: plano B sem fotos', s.name||'', devId);
+    const s2ok=s2.auth_mode==='assinaturaTela-tokenSms' && !s2.require_selfie_photo && !s2.require_document_photo;
+    if(!s2ok) console.warn('[plano B] ZapSign devolveu o signatário sem a alteração completa:', s2);
+    const tel=String(s2.phone_number||s.phone_number||'').replace(/\D/g,'');
+    const msg=`${link}\n\nSegue acima o link para assinatura do seu acordo, agora SEM fotos:\n\n1) Clique no link acima;\n2) Confira o documento e clique em assinar;\n3) Informe seu CPF e sua data de nascimento;\n4) Digite o código que chegar por SMS;\n5) Assine na tela com o seu dedo e confirme.`;
+    if(!link){ showToast('Alterado, mas o ZapSign não devolveu o link. Abra o documento no ZapSign e copie o link.','warning'); return; }
+    if(!tel){ prompt('Alterado. Signatário sem telefone — copie a mensagem e envie manualmente:', msg); return; }
+    if(!confirm((s2ok?'Alterado no ZapSign.':'⚠ O ZapSign não confirmou todas as alterações — confira no documento antes de reenviar.')+'\n\nReenviar por WhatsApp?\n\nPara: '+(s.name||'?')+' — '+tel+'\n\nMensagem:\n'+msg)){ prompt('Link não reenviado. Se quiser, copie a mensagem:', msg); return; }
+    let r=null; try{ r=(typeof _aavEnviarWhats==='function')?await _aavEnviarWhats(tel,msg):null; }catch(_){}
+    if(r&&r.ok) showToast('Plano B aplicado e link reenviado por WhatsApp.','success');
+    else { showToast('Plano B aplicado, mas o WhatsApp falhou ('+(r&&r.error||'Z-API')+').','warning'); prompt('Copie a mensagem e envie manualmente:', msg); }
+  }catch(e){ showToast('Plano B falhou: '+(e&&e.message?e.message:e),'danger'); }
+  finally{ if(btn){ btn.disabled=false; btn.textContent='Plano B: sem fotos'; } }
+}
 
 // Onda 1 #6 — Resumo pro Astrea: monta um resumo técnico do caso (copiável) a partir
 // dos dados já carregados. Reimplementado no app (a função original vive no crm.html,
