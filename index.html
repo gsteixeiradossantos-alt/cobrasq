@@ -23148,6 +23148,11 @@ async function excluirCobranca(id){
   }
 }
 
+// Investigações do devedor + as avulsas (feitas antes do cadastro) do mesmo CPF/CNPJ.
+function _invFiltroFicha(id, doc){
+  const d=String(doc||'').replace(/\D/g,'');
+  return `devedor_id.eq.${id}`+(d.length===11||d.length===14?`,and(devedor_id.is.null,documento_consultado.eq.${d})`:'');
+}
 // ── 2) DETALHE DO DEVEDOR (ficha + todas as dívidas, com papel) ──────────────
 async function renderDevedorDetalhe(){
   const id=_detDevId, el=document.getElementById('page-devedor-detalhe');
@@ -23178,7 +23183,7 @@ async function renderDevedorDetalhe(){
     try{
       const { data: inv } = await supa.from('investigacoes_patrimoniais')
         .select('id,status,documento_consultado,nome_consultado,score_prioridade,score_componentes,resumo,created_at,iniciado_em,concluido_em')
-        .eq('devedor_id',id).order('created_at',{ascending:false}).limit(6);
+        .or(_invFiltroFicha(id,dev?.doc)).order('created_at',{ascending:false}).limit(6);
       investigacoes=inv||[];
     }catch(_){ investigacoes=[]; }
   }
@@ -23294,7 +23299,7 @@ function investigacaoPatrimonialPanel(dev, lista){
         <span class="det-chip ${i.status==='concluida'?'princ':''}">Prioridade ${Math.round(+i.score_prioridade||0)}/100</span>
       </div>
       <div style="font-size:11.5px;color:var(--text-2);margin-top:4px;">${qtd} entidade${qtd===1?'':'s'} confirmada${qtd===1?'':'s'}${motivo?' · '+escHtml(motivo):''}</div>
-      <div style="margin-top:7px;display:flex;gap:6px;flex-wrap:wrap;">${_invReprocessavel(i)?`<button class="btn btn-ghost btn-sm" onclick="processarInvestigacaoPatrimonial('${i.id}')">Processar agora</button>`:''}<button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${i.id}')">Baixar relatório</button></div>
+      <div style="margin-top:7px;display:flex;gap:6px;flex-wrap:wrap;">${_invReprocessavel(i)?`<button class="btn btn-ghost btn-sm" onclick="processarInvestigacaoPatrimonial('${i.id}')">Processar agora</button>`:''}<button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${i.id}',true)">Abrir relatório</button><button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${i.id}')">Baixar relatório</button></div>
     </div>`;
   }).join('');
   return `<div class="cob-panel" style="padding:18px;">
@@ -23355,8 +23360,12 @@ function _invSituacaoEnt(e){
 function _invLink(u){ return /^https?:\/\//i.test(String(u||''))?`<br><a href="${escHtml(u)}" style="color:#1F4FA8;font-size:10px;word-break:break-all;">${escHtml(u)}</a>`:''; }
 // Relatório em formato de dossiê: identificação → o que dá para penhorar → teia →
 // tabelas por categoria → sinais de alerta → fontes → critérios do score → anexo.
-async function baixarRelatorioInvestigacao(investigacaoId){
+// abrir=true mostra o PDF numa aba nova sem salvar. A aba é aberta já no clique
+// (antes dos awaits): aberta depois, o bloqueador de pop-up do navegador barra.
+async function baixarRelatorioInvestigacao(investigacaoId, abrir){
   const supa=getSupabase(); if(!supa) return;
+  const aba=abrir?window.open('','_blank'):null;
+  if(aba) try{ aba.document.title='Relatório de investigação'; aba.document.body.innerHTML='<p style="font:14px system-ui;padding:24px;color:#555;">Gerando relatório…</p>'; }catch(_){}
   try{
     const [{data:inv,error:ei},{data:ents,error:ee},{data:vinc},{data:evid},{data:eventos}]=await Promise.all([
       supa.from('investigacoes_patrimoniais').select('*').eq('id',investigacaoId).single(),
@@ -23457,11 +23466,21 @@ async function baixarRelatorioInvestigacao(investigacaoId){
     const nome='investigacao-patrimonial-'+(investigacaoId||'').slice(0,8)+'.pdf';
     if(window.html2pdf){
       const wrap=document.createElement('div'); wrap.innerHTML=html;
-      await window.html2pdf().set({margin:[12,12,14,12],filename:nome,image:{type:'jpeg',quality:0.95},html2canvas:{scale:2,useCORS:true},jsPDF:{unit:'mm',format:'a4',orientation:'portrait'}}).from(wrap).save();
+      const w=window.html2pdf().set({margin:[12,12,14,12],filename:nome,image:{type:'jpeg',quality:0.95},html2canvas:{scale:2,useCORS:true},jsPDF:{unit:'mm',format:'a4',orientation:'portrait'}}).from(wrap);
+      if(abrir) _invMostrarNaAba(aba, await w.outputPdf('blob'));
+      else await w.save();
     }else{
-      const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([html],{type:'text/html;charset=utf-8'})); a.download=nome.replace('.pdf','.html'); document.body.appendChild(a); a.click(); a.remove();
+      const blob=new Blob([html],{type:'text/html;charset=utf-8'});
+      if(abrir) _invMostrarNaAba(aba, blob);
+      else { const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=nome.replace('.pdf','.html'); document.body.appendChild(a); a.click(); a.remove(); }
     }
-  }catch(e){ showToast('Não foi possível gerar o relatório: '+((e&&e.message)||e),'danger'); }
+  }catch(e){ if(aba) try{aba.close();}catch(_){} showToast('Não foi possível gerar o relatório: '+((e&&e.message)||e),'danger'); }
+}
+function _invMostrarNaAba(aba, blob){
+  const url=URL.createObjectURL(blob);
+  if(aba&&!aba.closed) aba.location.href=url;
+  else if(!window.open(url,'_blank')) showToast('O navegador bloqueou a nova aba: libere pop-ups do painel ou use "Baixar relatório".','warning');
+  setTimeout(()=>URL.revokeObjectURL(url),120000);
 }
 
 // ── INVESTIGAÇÃO POR COBRANÇA (menu próprio + aba do detalhe da cobrança) ────
@@ -23551,6 +23570,7 @@ const _invPartesCache={};   // cobId → partes carregadas (nome/doc para a RPC)
 // Recarrega a tela em que a investigação foi disparada.
 async function _invRerender(){
   const ativa=id=>!!document.getElementById('page-'+id)?.classList.contains('active');
+  if(ativa('investigacao')) invCarregarAvulsas();
   if(_invHost && document.getElementById(_invHost.hostId) && (ativa('investigacao')||ativa('cobranca-detalhe'))) return invCarregarCobranca(_invHost.cobId,_invHost.hostId);
   if(ativa('devedor-detalhe')) return renderDevedorDetalhe();
 }
@@ -23594,7 +23614,7 @@ async function invCarregarCobranca(cobId, hostId){
       <div style="margin-top:7px;display:flex;gap:6px;flex-wrap:wrap;">
         ${i.status==='concluida'?`<button class="btn btn-ghost btn-sm" onclick="invVerTeia('${i.id}','${hostId}-teia')">Ver teia</button>`:''}
         ${_invReprocessavel(i)?`<button class="btn btn-ghost btn-sm" onclick="processarInvestigacaoPatrimonial('${i.id}')">Processar agora</button>`:''}
-        <button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${i.id}')">Baixar relatório</button>
+        <button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${i.id}',true)">Abrir relatório</button><button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${i.id}')">Baixar relatório</button>
       </div>
     </div>`;
   }).join('');
@@ -23753,7 +23773,7 @@ async function invVerTeia(invId, alvoId){
         <div style="font-size:11.5px;color:var(--text-3);font-family:var(--font-mono);">${escHtml(raiz?.documento||i.documento_consultado||'sem CPF/CNPJ')}</div>
         <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;"><span class="det-chip">${escHtml(_invStatusLabel(i.status))}</span><span class="det-chip princ">Prioridade ${Math.round(+i.score_prioridade||0)}/100</span><span class="det-chip">${escHtml(_invData(i.concluido_em||i.created_at))}</span></div></div>
       </div>
-      <button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${invId}')">Baixar relatório (PDF)</button>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;"><button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${invId}',true)">Abrir relatório</button><button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${invId}')">Baixar relatório (PDF)</button></div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
       ${cartao(an.penhora.length,'Pode penhorar','contratos, renda, créditos, quotas','#2F855A')}
@@ -23897,6 +23917,17 @@ async function renderInvestigacaoPatrimonial(){
       <input id="inv-busca" type="search" autocomplete="off" placeholder="Buscar por devedor, credor, CPF/CNPJ ou nº do processo" oninput="invFiltrarCasos()" style="margin-top:12px;width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;background:var(--surface);color:var(--text);">
       <div id="inv-casos" style="margin-top:8px;max-height:300px;overflow:auto;"><div style="padding:12px;color:var(--text-3);font-size:12.5px;">Carregando cobranças…</div></div>
     </div>
+    <div id="inv-av-bloco" class="cob-panel" style="padding:18px;margin-top:14px;">
+      <div class="det-panel-tt" style="margin:0;">Investigar sem cobrança</div>
+      <div style="font-size:11.5px;color:var(--text-3);margin-top:3px;">Para quem ainda não está cadastrado. Use o nome completo como consta na Receita. Cadastrar como devedor é opcional e pode ser feito depois.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
+        <input id="inv-av-nome" type="text" autocomplete="off" placeholder="Nome completo" style="flex:2 1 220px;min-width:0;padding:9px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;background:var(--surface);color:var(--text);">
+        <input id="inv-av-doc" type="text" autocomplete="off" inputmode="numeric" placeholder="CPF ou CNPJ" style="flex:1 1 150px;min-width:0;padding:9px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;background:var(--surface);color:var(--text);">
+        <button class="cob-btn-primary" onclick="invIniciarAvulsa(this)">Investigar</button>
+      </div>
+      <div id="inv-av-lista" style="margin-top:8px;"></div>
+    </div>
+    <div id="inv-av-teia"></div>
     <div id="inv-pag-sel"></div>
     <div id="inv-pag-host" style="margin-top:14px;"></div>
   </div>`;
@@ -23914,6 +23945,7 @@ async function renderInvestigacaoPatrimonial(){
     _invPagCasos=todos;
   }
   invFiltrarCasos();
+  invCarregarAvulsas();
   if(_invPagCobId) invEscolherCobranca(_invPagCobId);
 }
 function _invCasoTexto(c){
@@ -23929,7 +23961,75 @@ function invFiltrarCasos(){
       <div style="min-width:0;"><div style="font-size:13px;font-weight:600;">${escHtml(_petDevedorPrincipal(c))}${(c.cobranca_partes||[]).length>1?` <span style="font-weight:400;color:var(--text-3);font-size:11.5px;">+${(c.cobranca_partes||[]).length-1}</span>`:''}</div>
       <div style="font-size:11.5px;color:var(--text-3);">Credor: ${escHtml(_petCredorNome(c))}${c.numero_processo?` · <span style="font-family:var(--font-mono);">${escHtml(c.numero_processo)}</span>`:''}</div></div>
       <div style="font-size:11px;color:var(--text-3);white-space:nowrap;">${escHtml(statusLabel(c.status)||'')}</div>
-    </div>`).join(''):_detEmpty(q?'Nenhuma cobrança encontrada.':'Nenhuma cobrança ativa.');
+    </div>`).join(''):(q?`${_detEmpty('Nenhuma cobrança encontrada.')}<div style="text-align:center;margin-top:6px;"><button class="btn btn-ghost btn-sm" onclick="invUsarBusca()">Investigar sem cobrança</button></div>`:_detEmpty('Nenhuma cobrança ativa.'));
+}
+// Leva o texto buscado para o bloco "Investigar sem cobrança": só dígitos vira
+// CPF/CNPJ, o resto vira nome.
+function invUsarBusca(){
+  const v=String(document.getElementById('inv-busca')?.value||'').trim();
+  const ehDoc=/^[\d.\-\/\s]+$/.test(v);
+  const alvo=document.getElementById(ehDoc?'inv-av-doc':'inv-av-nome');
+  if(alvo) alvo.value=ehDoc?v.replace(/\D/g,''):v;
+  document.getElementById('inv-av-bloco')?.scrollIntoView({behavior:'smooth',block:'center'});
+  document.getElementById(ehDoc?'inv-av-nome':'inv-av-doc')?.focus();
+}
+// ── Investigação avulsa (sem cobrança nem devedor cadastrado) ──
+let _invAvCache=[];
+async function invIniciarAvulsa(btn){
+  const nome=String(document.getElementById('inv-av-nome')?.value||'').trim();
+  const doc=String(document.getElementById('inv-av-doc')?.value||'').replace(/\D/g,'');
+  if(!nome&&!doc){ showToast('Informe nome ou CPF/CNPJ para investigar.','warning'); return; }
+  if(doc&&doc.length!==11&&doc.length!==14){ showToast('CPF tem 11 dígitos e CNPJ tem 14.','warning'); return; }
+  const supa=getSupabase(); if(!supa){ showToast('Supabase não configurado.','danger'); return; }
+  const txt=btn?.textContent;
+  if(btn){ btn.disabled=true; btn.textContent='Investigando…'; }
+  try{
+    const { data, error }=await supa.rpc('iniciar_investigacao_patrimonial',{p_devedor_id:null,p_nome:nome||null,p_documento:doc||null,p_profundidade_maxima:2,p_entidades_maximas:80});
+    if(error) throw error;
+    ['inv-av-nome','inv-av-doc'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+    await processarInvestigacaoPatrimonial(data, true);
+    await invCarregarAvulsas(data);
+  }catch(e){
+    const msg=(e&&e.message)||String(e);
+    showToast(/null value|not-null|devedor/i.test(msg)?'Investigação sem cadastro ainda não liberada no banco (migração 20260926_04 pendente).':('Não foi possível iniciar: '+msg),'danger');
+  }finally{ if(btn){ btn.disabled=false; btn.textContent=txt||'Investigar'; } }
+}
+async function invCarregarAvulsas(abrirId){
+  const box=document.getElementById('inv-av-lista'); if(!box) return;
+  const supa=getSupabase(); if(!supa) return;
+  const { data, error }=await supa.from('investigacoes_patrimoniais')
+    .select('id,status,documento_consultado,nome_consultado,score_prioridade,resumo,created_at,iniciado_em,concluido_em')
+    .is('devedor_id',null).order('created_at',{ascending:false}).limit(20);
+  if(error){ box.innerHTML=''; return; }
+  _invAvCache=data||[];
+  const devPorDoc=d=>d?(DB.devedores||[]).find(x=>String(x.doc||'').replace(/\D/g,'')===d):null;
+  box.innerHTML=_invAvCache.length?_invAvCache.map(i=>{
+    const r=i.resumo||{}, qtd=r.entidades_confirmadas??r.entidades??0, cad=devPorDoc(i.documento_consultado);
+    return `<div style="padding:10px 0;border-top:1px solid var(--border-2);">
+      <div style="display:flex;gap:8px;justify-content:space-between;align-items:center;flex-wrap:wrap;">
+        <div style="font-size:12.5px;font-weight:650;min-width:0;">${escHtml(i.nome_consultado||'—')}<span style="font-weight:400;color:var(--text-3);"> · <span style="font-family:var(--font-mono);">${escHtml(i.documento_consultado||'sem CPF/CNPJ')}</span> · ${escHtml(_invStatusLabel(i.status))} · ${escHtml(_invData(i.created_at))}</span></div>
+        <span class="det-chip ${i.status==='concluida'?'princ':''}">Prioridade ${Math.round(+i.score_prioridade||0)}/100</span>
+      </div>
+      <div style="font-size:11.5px;color:var(--text-2);margin-top:4px;">${qtd} entidade${qtd===1?'':'s'} confirmada${qtd===1?'':'s'}${cad?' · já cadastrado como devedor':' · sem cadastro'}</div>
+      <div style="margin-top:7px;display:flex;gap:6px;flex-wrap:wrap;">
+        ${i.status==='concluida'?`<button class="btn btn-ghost btn-sm" onclick="invVerTeia('${i.id}','inv-av-teia')">Ver teia</button>`:''}
+        ${_invReprocessavel(i)?`<button class="btn btn-ghost btn-sm" onclick="processarInvestigacaoPatrimonial('${i.id}')">Processar agora</button>`:''}
+        <button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${i.id}',true)">Abrir relatório</button><button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${i.id}')">Baixar relatório</button>
+        ${cad?`<button class="btn btn-ghost btn-sm" onclick="verDevedor('${cad.id}')">Abrir ficha do devedor</button>`:`<button class="btn btn-ghost btn-sm" onclick="invCadastrarAvulsa('${i.id}')">Cadastrar como devedor</button>`}
+      </div>
+    </div>`;
+  }).join(''):'';
+  const alvo=abrirId&&_invAvCache.find(i=>i.id===abrirId&&i.status==='concluida');
+  if(alvo) invVerTeia(alvo.id,'inv-av-teia');
+}
+// Opcional: abre o cadastro de devedor já com nome e CPF/CNPJ da investigação.
+// Depois de salvo, a ficha do devedor mostra esta investigação pelo mesmo documento.
+function invCadastrarAvulsa(invId){
+  const i=_invAvCache.find(x=>x.id===invId); if(!i) return;
+  abrirNovoDevedor();
+  [['mdev-nome',i.nome_consultado],['mdev-doc',i.documento_consultado]].forEach(([id,v])=>{
+    const el=document.getElementById(id); if(el&&v){ el.value=v; el.dispatchEvent(new Event('input',{bubbles:true})); }
+  });
 }
 function invEscolherCobranca(cobId){
   _invPagCobId=cobId;
