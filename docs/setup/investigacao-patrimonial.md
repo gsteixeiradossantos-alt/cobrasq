@@ -122,3 +122,18 @@ tabelas retornam zero linhas.
 
 Depois de aplicar a migração, recarregue o painel para evitar que uma aba antiga
 continue usando um estado anterior.
+
+## Correções de 26/09/2026
+
+- Migração `20260926_01_investigacao_cobranca_id.sql`: a função de início gravava o
+  id do devedor como `cobranca_id`; nos devedores sem cobrança de mesmo id (117 de
+  1.119) o botão falhava por chave estrangeira. Agora a cobrança vem de
+  `cobranca_partes` (principal primeiro) ou fica nula.
+- Worker v3: o repositório estava na v1 (sem CORS) enquanto a produção rodava a
+  v2 — republicar do repo quebraria o botão. A v3 parte da v2 e: só marca
+  "confirmada" com CPF conferido no QSA ou CPF na razão social (MEI); reserva a
+  investigação de forma atômica; retoma `em_andamento` parado há mais de 10 min;
+  não duplica o devedor quando ele aparece no QSA; grava a situação cadastral por
+  extenso; "fontes concluídas" lista só as que rodaram.
+- Painel: relatório escapa HTML dos dados externos e mostra a situação cadastral;
+  "Processar agora" também aparece para investigação travada.

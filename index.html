@@ -23185,7 +23185,7 @@ async function renderDevedorDetalhe(){
     // íntegra e o painel explica a pendência ao iniciar uma investigação.
     try{
       const { data: inv } = await supa.from('investigacoes_patrimoniais')
-        .select('id,status,documento_consultado,nome_consultado,score_prioridade,score_componentes,resumo,created_at,concluido_em')
+        .select('id,status,documento_consultado,nome_consultado,score_prioridade,score_componentes,resumo,created_at,iniciado_em,concluido_em')
         .eq('devedor_id',id).order('created_at',{ascending:false}).limit(6);
       investigacoes=inv||[];
     }catch(_){ investigacoes=[]; }
@@ -23278,10 +23278,17 @@ async function renderDevedorDetalhe(){
 
 // ── Investigação patrimonial ───────────────────────────────────────────────
 // O navegador apenas cria a fila e consulta resultados já autorizados. Coletas
-// (públicas ou contratadas) são feitas pelo n8n/service role, nunca com segredo
-// exposto aqui e nunca por automação de sistemas sigilosos/captcha.
+// (públicas ou contratadas) são feitas pela Edge Function
+// investigacao-patrimonial-worker (service role), nunca com segredo exposto aqui
+// e nunca por automação de sistemas sigilosos/captcha.
 function _invStatusLabel(status){
   return ({pendente:'Aguardando fila',em_andamento:'Em andamento',aguardando_acesso:'Aguardando acesso',concluida:'Concluída',falhou:'Falhou',cancelada:'Cancelada'})[status]||status||'—';
+}
+// Mesmo critério do worker (TRAVADA_MIN): "em andamento" parado há mais de 10 min
+// é função derrubada no meio e pode ser reprocessado.
+function _invReprocessavel(i){
+  if(['pendente','falhou','aguardando_acesso'].includes(i.status)) return true;
+  return i.status==='em_andamento' && i.iniciado_em && (Date.now()-new Date(i.iniciado_em).getTime())>10*60000;
 }
 function _invData(v){ try{return new Date(v).toLocaleString('pt-BR',{dateStyle:'short',timeStyle:'short'});}catch(_){return '—';} }
 function investigacaoPatrimonialPanel(dev, lista){
@@ -23295,7 +23302,7 @@ function investigacaoPatrimonialPanel(dev, lista){
         <span class="det-chip ${i.status==='concluida'?'princ':''}">Prioridade ${Math.round(+i.score_prioridade||0)}/100</span>
       </div>
       <div style="font-size:11.5px;color:var(--text-2);margin-top:4px;">${qtd} entidade${qtd===1?'':'s'} confirmada${qtd===1?'':'s'}${motivo?' · '+escHtml(motivo):''}</div>
-      <div style="margin-top:7px;display:flex;gap:6px;flex-wrap:wrap;">${['pendente','falhou','aguardando_acesso'].includes(i.status)?`<button class="btn btn-ghost btn-sm" onclick="processarInvestigacaoPatrimonial('${i.id}')">Processar agora</button>`:''}<button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${i.id}')">Baixar relatório</button></div>
+      <div style="margin-top:7px;display:flex;gap:6px;flex-wrap:wrap;">${_invReprocessavel(i)?`<button class="btn btn-ghost btn-sm" onclick="processarInvestigacaoPatrimonial('${i.id}')">Processar agora</button>`:''}<button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${i.id}')">Baixar relatório</button></div>
     </div>`;
   }).join('');
   return `<div class="cob-panel" style="padding:18px;">
@@ -23340,7 +23347,11 @@ async function processarInvestigacaoPatrimonial(investigacaoId, silencioso){
     await renderDevedorDetalhe();
   }
 }
-function _invEsc(v){ return String(v==null?'—':v).replace(/[\r\n]+/g,' ').trim(); }
+// Nomes e trechos vêm de fontes externas (Receita, BrasilAPI): escapar antes de
+// virar HTML do relatório.
+function _invEsc(v){ return escHtml(String(v==null?'—':v).replace(/[\r\n]+/g,' ').trim()); }
+// Base CNPJ grava a situação em código (investigações anteriores a 26/09/2026).
+function _invSituacao(v){ if(v==null||v==='') return '—'; return ({'01':'nula','02':'ativa','03':'suspensa','04':'inapta','08':'baixada'})[String(v).padStart(2,'0')]||v; }
 async function baixarRelatorioInvestigacao(investigacaoId){
   const supa=getSupabase(); if(!supa) return;
   try{
@@ -23371,8 +23382,8 @@ async function baixarRelatorioInvestigacao(investigacaoId){
       <h2>Critérios do score</h2>
       <ul>${(comps.length?comps:[{rotulo:'Ainda não calculado',pontos:'—',explicacao:''}]).map(x=>`<li><strong>${_invEsc(x.rotulo||x.motivo)}</strong>: ${_invEsc(x.pontos??'—')} ponto(s). ${_invEsc(x.explicacao||'')}</li>`).join('')}</ul>
       <h2>Entidades</h2>
-      <table><thead><tr><th>Tipo</th><th>Nome / documento</th><th>Status</th><th>Confiança</th><th>Prof.</th></tr></thead><tbody>
-      ${(ents||[]).map(e=>`<tr><td>${_invEsc(e.tipo)}</td><td>${_invEsc(e.nome||e.documento||e.chave_normalizada)}</td><td>${_invEsc(e.status_verificacao)}</td><td>${_invEsc(e.confianca)}%</td><td>${_invEsc(e.profundidade)}</td></tr>`).join('')||'<tr><td colspan="5">Nenhuma entidade.</td></tr>'}
+      <table><thead><tr><th>Tipo</th><th>Nome / documento</th><th>Situação</th><th>Status</th><th>Confiança</th><th>Prof.</th></tr></thead><tbody>
+      ${(ents||[]).map(e=>`<tr><td>${_invEsc(e.tipo)}</td><td>${_invEsc(e.nome||e.documento||e.chave_normalizada)}</td><td>${_invEsc(_invSituacao(e.dados?.situacao))}</td><td>${_invEsc(e.status_verificacao)}</td><td>${_invEsc(e.confianca)}%</td><td>${_invEsc(e.profundidade)}</td></tr>`).join('')||'<tr><td colspan="6">Nenhuma entidade.</td></tr>'}
       </tbody></table>
       <h2>Vínculos</h2>
       <table><thead><tr><th>De</th><th>Tipo</th><th>Para</th><th>Confiança</th><th>Justificativa</th></tr></thead><tbody>
