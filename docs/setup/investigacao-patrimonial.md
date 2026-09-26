@@ -137,3 +137,22 @@ continue usando um estado anterior.
   extenso; "fontes concluídas" lista só as que rodaram.
 - Painel: relatório escapa HTML dos dados externos e mostra a situação cadastral;
   "Processar agora" também aparece para investigação travada.
+
+## Fontes novas (worker v4, 26/09/2026)
+
+| Fonte | O que faz | Status do que acha |
+|---|---|---|
+| Base CNPJ por telefone/e-mail (`receita_rf`) | Telefone e e-mail do cadastro do devedor e das empresas **confirmadas** (o cadastro do MEI traz o contato pessoal do titular) → RPCs `buscar_empresas_por_telefone`/`_email` | Sempre **pista**; contato usado por mais de 3 CNPJs é marcado como provável contador |
+| Portal da Transparência (`portal_transparencia`) | `/pessoa-fisica` ou `/pessoa-juridica` (vínculos federais: servidor, pensionista, contratado, sanções, benefícios impenhoráveis) e `/contratos/cpf-cnpj` do devedor e das empresas confirmadas | Evidência na própria entidade; só contrato **vigente** conta como recebível |
+| PNCP (`pncp`) | Busca textual de contratos pelo nome; o detalhe de cada contrato traz o CPF/CNPJ do fornecedor | Documento igual = recebível (se vigente); só o nome igual = **pista** (homônimo possível); o resto é descartado |
+| DJEN via Vigia (`djen`) | Não consulta o DJEN (ele devolve 403 ao Supabase): lê `vigia_acoes` do devedor, exceto os descartados | Entidade `processo`; `cpf_confere=true` confirma, senão **pista**. Polo A = crédito a penhorar no rosto dos autos; polo P = outros credores / rastro de bens |
+
+- Chave do Portal: segredo `PORTAL_TRANSPARENCIA_KEY` no Supabase (nunca no repo).
+  Sem a chave, a fonte fica em "não conclusivas".
+- Cada fonte isola as próprias falhas: uma que cair (timeout, 403) vai para
+  `fontes_nao_conclusivas` e as outras seguem.
+- `resumo.recebe_ente_publico`: `true` se há contrato vigente com documento
+  conferido ou vínculo de servidor/pensionista federal; `false` se Portal e PNCP
+  rodaram sem nada; `null` se não deu para verificar.
+- O relatório passou a mostrar o trecho e o link de cada evidência, e tribunal/polo
+  dos processos.
