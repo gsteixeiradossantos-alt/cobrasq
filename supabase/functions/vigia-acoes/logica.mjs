@@ -274,3 +274,27 @@ export function resumirMuitos(achados, teto = TETO_ACHADOS) {
     cpf_confere: achados.some(a => a.cpf_confere), processos,
   }];
 }
+
+// Repasse do Mac (25/09/2026): o DJEN devolve 403 para o servidor do Supabase, então
+// a busca roda no Mac (scripts/vigia-acoes-local.mjs) e o resultado vem para a Edge
+// Function. Para não mandar milhares de comunicações de homônimo, o Mac só repassa
+// as que têm um destinatário com o nome do alvo (o mesmo corte de agruparAchados),
+// com os campos que a gravação usa. A função refaz todos os filtros do lado dela.
+export function podarItens(itens, nomeDevedor) {
+  const chave = chaveNome(nomeDeBusca(nomeDevedor).busca || nomeDevedor);
+  const out = [];
+  for (const it of (itens || [])) {
+    const dests = Array.isArray(it?.destinatarios) ? it.destinatarios : [];
+    if (!dests.some(d => destinatarioCasa(d?.nome, chave))) continue;
+    out.push({
+      id: it.id, numero_processo: it.numero_processo, numeroprocessocommascara: it.numeroprocessocommascara,
+      data_disponibilizacao: it.data_disponibilizacao, datadisponibilizacao: it.datadisponibilizacao,
+      siglaTribunal: it.siglaTribunal, nomeOrgao: it.nomeOrgao, nomeClasse: it.nomeClasse, link: it.link,
+      texto: String(it.texto || '').slice(0, 20000),
+      destinatarios: dests.map(d => ({ nome: d?.nome, polo: d?.polo })),
+      destinatarioadvogados: (Array.isArray(it.destinatarioadvogados) ? it.destinatarioadvogados : [])
+        .map(x => ({ advogado: { nome: x?.advogado?.nome, numero_oab: x?.advogado?.numero_oab, uf_oab: x?.advogado?.uf_oab } })),
+    });
+  }
+  return out;
+}
