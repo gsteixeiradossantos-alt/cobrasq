@@ -335,7 +335,10 @@ async function processar(inv: any) {
   await evento(inv.id, 'fonte_iniciada', 'Iniciada consulta em fontes públicas.', { fontes: ['receita_rf', 'brasilapi', 'viacep', 'portal_transparencia', 'pncp', 'djen'] });
 
   if (raiz.tipo === 'pessoa' && raiz.nome) {
-    const { data: rows, error: rpcError } = await sb.rpc('buscar_empresas_por_socio', { p_nome: raiz.nome, p_cpf: dig(raiz.documento) || null });
+    // Com o cache frio a busca por nome passa do limite de 8 s (26/09/2026: timeout
+    // na 1ª chamada, 0,4 s na seguinte). Uma nova tentativa resolve.
+    let { data: rows, error: rpcError } = await sb.rpc('buscar_empresas_por_socio', { p_nome: raiz.nome, p_cpf: dig(raiz.documento) || null });
+    if (rpcError && /timeout/i.test(rpcError.message)) ({ data: rows, error: rpcError } = await sb.rpc('buscar_empresas_por_socio', { p_nome: raiz.nome, p_cpf: dig(raiz.documento) || null }));
     if (rpcError) naoConclusivas.push('Receita/base CNPJ indisponível: ' + rpcError.message);
     else contadores.fontes.add('receita_rf');
     for (const r of (rows || []).slice(0, teto)) {

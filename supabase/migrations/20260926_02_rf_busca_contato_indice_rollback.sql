@@ -1,0 +1,4 @@
+-- Rollback de 20260926_02: volta as duas funções à versão de 20260912 (sem a
+-- condição "<> ''", que faz a busca varrer a tabela inteira).
+-- Reaplicar os blocos "create or replace function public.buscar_empresas_por_telefone"
+-- e "public.buscar_empresas_por_email" de supabase/migrations/20260912_rf_cnpj_contato_endereco.sql.
