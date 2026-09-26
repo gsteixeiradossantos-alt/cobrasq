@@ -23435,6 +23435,17 @@ function _invTrechoFmt(t){
     .replace(/ · capital (\d+(?:\.\d+)?)(?= ·|$)/,(_,n)=>' · capital '+(+n).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}))
     .replace(/( · CNPJ [\d./-]+) · (\d{1,2})(?= ·|$)/,(_,a,c)=>`${a} · ${_INV_QUALIF[c]||'qualificação de código '+c+' na Receita'}`);
 }
+// Ligação lida a partir da entidade da linha: se ela é o destino do vínculo, o
+// rótulo inverte (COBRASQ "tem sócio" Gustavo; Ana Clara "sócio de" COBRASQ).
+const _INV_VINC_INV={socio_de:'tem sócio',tem_socio:'sócio de',autor_em:'tem como autor',reu_em:'tem como réu',parte_em:'tem como parte'};
+function _invVincLblDe(v,entId){ return v.origem_entidade_id===entId?_invVincLbl(v.tipo):(_INV_VINC_INV[v.tipo]||_invVincLbl(v.tipo)); }
+function _invLigacoes(e,vinc,porId,comConf){
+  return (vinc||[]).filter(v=>v.origem_entidade_id===e.id||v.destino_entidade_id===e.id).map(v=>{
+    const o=porId[v.origem_entidade_id===e.id?v.destino_entidade_id:v.origem_entidade_id];
+    const rot=_invVincLblDe(v,e.id), qual=(e.dados||{}).qualificacao;
+    const r=rot==='sócio de'&&e.tipo==='pessoa'&&qual?qual+' em':rot;
+    return `${r} ${o?.nome||_invDocFmt(o?.documento)||''}`+(comConf?` (${v.confianca}%)`:''); });
+}
 function _invErroLeigo(s){
   s=String(s||'');
   const tempo=/timed? ?out|timeout/i.test(s);
@@ -23468,15 +23479,17 @@ async function baixarRelatorioInvestigacao(investigacaoId, abrir){
     const lista=v=>Array.isArray(v)?v:(v?[v]:[]);
     const fOk=lista(res.fontes_concluidas), fNao=lista(res.fontes_nao_conclusivas);
     // Fonte que respondeu numa busca e caiu noutra (ex.: PNCP achou a empresa e não o
-    // nome do devedor) aparece nas duas listas: o resultado dela é incompleto.
+    // nome do devedor) vem nas duas listas do worker; no relatório fica só em "Sem
+    // resposta", porque o resultado dela é incompleto.
     const _FONTE_PREF={pncp:/^PNCP/i,portal_transparencia:/^Portal da Transpar/i,brasilapi:/^BrasilAPI/i,receita_rf:/^(Receita|Base CNPJ)/i,viacep:/^ViaCEP/i,djen:/^DJEN/i};
     const falhou=cod=>fNao.some(f=>_FONTE_PREF[cod]?.test(typeof f==='string'?f:String(f.fonte||f.codigo||f.nome||'')));
-    const fOkTxt=f=>{ const cod=typeof f==='string'?f:(f.fonte||f.codigo||f.nome); return _invEsc(_invFonteLbl(cod))+(falhou(cod)?' <span class="mute">(só em parte: ver abaixo)</span>':''); };
+    const fCod=f=>typeof f==='string'?f:(f.fonte||f.codigo||f.nome);
+    const fOkInteiras=fOk.filter(f=>!falhou(fCod(f)));
     const fNaoTxt=f=>typeof f==='string'?_invEsc(_invErroLeigo(f)):_invEsc(_invErroLeigo([f.fonte||f.codigo||f.nome,f.motivo||f.erro].filter(Boolean).join(': ')));
     const pubIncompleto=falhou('pncp')||falhou('portal_transparencia');
     const recebeTxt=res.recebe_ente_publico===true?'sim (ver seção 2)'
       :res.recebe_ente_publico===false?[falhou('portal_transparencia')?'Portal da Transparência não respondeu em parte das consultas':'nada no Portal da Transparência',
-          falhou('pncp')?(fOk.includes('pncp')?'PNCP respondeu só em parte das buscas: resultado incompleto (ver seção 6)':'PNCP não respondeu: resultado desconhecido'):'nada no PNCP'].join('; ')
+          falhou('pncp')?(fOk.includes('pncp')?'PNCP ficou sem resposta em parte das buscas: resultado incompleto (ver seção 6)':'PNCP não respondeu: resultado desconhecido'):'nada no PNCP'].join('; ')
       :'não verificado';
     const avulsa=!inv.devedor_id;
     const cobertura=avulsa?'Não feita: investigação sem devedor cadastrado, então o Vigia de ações (DJEN) não foi consultado.':res.cobertura_processual;
@@ -23492,14 +23505,7 @@ async function baixarRelatorioInvestigacao(investigacaoId, abrir){
     }
     const outros=(ents||[]).filter(e=>e!==raiz);
     const emp=outros.filter(e=>e.tipo==='empresa'), pes=outros.filter(e=>e.tipo==='pessoa'), pro=outros.filter(e=>e.tipo==='processo');
-    // Ligação lida a partir da linha da tabela: se a entidade é o destino do vínculo,
-    // o rótulo inverte (COBRASQ "tem sócio" Gustavo; Ana Clara "sócio de" COBRASQ).
-    const _INV_VINC_INV={socio_de:'tem sócio',tem_socio:'sócio de',autor_em:'tem como autor',reu_em:'tem como réu',parte_em:'tem como parte'};
-    const lig=e=>(vinc||[]).filter(v=>v.origem_entidade_id===e.id||v.destino_entidade_id===e.id).map(v=>{
-      const daqui=v.origem_entidade_id===e.id, o=an.porId[daqui?v.destino_entidade_id:v.origem_entidade_id];
-      const rot=daqui?_invVincLbl(v.tipo):(_INV_VINC_INV[v.tipo]||_invVincLbl(v.tipo)), qual=(e.dados||{}).qualificacao;
-      const r=rot==='sócio de'&&e.tipo==='pessoa'&&qual?qual+' em':rot;
-      return `${r} ${o?.nome||_invDocFmt(o?.documento)||''} (${v.confianca}%)`; }).join('; ');
+    const lig=e=>_invLigacoes(e,vinc,an.porId,true).join('; ');
     const selos=e=>(an.comPenhora.has(e.id)?' <b style="color:#2F7A55;">$</b>':'')+(an.comAlerta.has(e.id)?' <b style="color:#B8612A;">!</b>':'');
     const tab=(cab,linhas,vazio)=>linhas.length?`<table><thead><tr>${cab.map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody>${linhas.join('')}</tbody></table>`:`<p class="mute"><i>${vazio}</i></p>`;
     const tr=a=>`<tr>${a.map(x=>`<td>${x}</td>`).join('')}</tr>`;
@@ -23576,7 +23582,7 @@ async function baixarRelatorioInvestigacao(investigacaoId, abrir){
       ${an.alertas.length?an.alertas.map(a=>`<div class="al${a.nivel==='alerta'?'':' r'}"><b>${_invEsc(a.titulo)}</b><br>${_invEsc(a.texto)}</div>`).join(''):'<p><i>Nenhum sinal de alerta nos dados encontrados.</i></p>'}
       <p class="mute">Sinal de alerta é pista para conferir, não prova de fraude, ocultação de bens ou grupo econômico.</p></div>
       <div class="kp"><h2><span class="n">6</span>Fontes consultadas</h2>
-      <h3>Responderam</h3>${fOk.length?`<ul>${fOk.map(f=>`<li>${fOkTxt(f)}</li>`).join('')}</ul>`:'<p class="mute"><i>Não registrado.</i></p>'}
+      <h3>Responderam</h3>${fOkInteiras.length?`<ul>${fOkInteiras.map(f=>`<li>${_invEsc(_invFonteLbl(fCod(f)))}</li>`).join('')}</ul>`:'<p class="mute"><i>Não registrado.</i></p>'}
       <h3>Sem resposta ou não conclusivas</h3>${fNao.length?`<ul>${fNao.map(f=>`<li>${fNaoTxt(f)}</li>`).join('')}</ul>`:'<p class="mute"><i>Nenhuma.</i></p>'}
       <p class="mute">Fonte sem resposta não significa "nada encontrado": o resultado dela é desconhecido.</p></div>
       <div class="kp"><h2><span class="n">7</span>Critérios do score de prioridade</h2>
@@ -24006,8 +24012,7 @@ function _invMarcaSel(entId){
 function _invTeiaTabela(){
   const t=window._invTeia; const box=document.getElementById(t.alvoId+'-aba'); if(!box) return;
   const an=t.an, raiz=an.raiz;
-  const lig=e=>t.vinc.filter(v=>v.origem_entidade_id===e.id||v.destino_entidade_id===e.id).map(v=>{
-    const o=an.porId[v.origem_entidade_id===e.id?v.destino_entidade_id:v.origem_entidade_id]; return `${_invVincLbl(v.tipo)} ${o?.nome||o?.documento||''}`; });
+  const lig=e=>_invLigacoes(e,t.vinc,an.porId,false);
   const st=e=>`<span class="det-chip ${e.status_verificacao==='confirmada'?'princ':''}">${_invEsc(e.status_verificacao)}</span>`;
   const selos=e=>(an.comPenhora.has(e.id)?' <span title="pode penhorar" style="color:#2F855A;font-weight:700;">$</span>':'')+(an.comAlerta.has(e.id)?' <span title="sinal de alerta" style="color:#DD6B20;font-weight:700;">⚠</span>':'');
   const th=a=>`<tr>${a.map(x=>`<th style="text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-3);padding:6px 6px;border-bottom:1px solid var(--border);">${x}</th>`).join('')}</tr>`;
@@ -24024,8 +24029,8 @@ function _invTeiaTabela(){
       <div style="color:var(--text-2);">${_invEsc(p.texto)}</div>${/^https?:\/\//i.test(String(p.url||''))?`<a href="${escHtml(p.url)}" target="_blank" rel="noopener" style="font-size:11px;">abrir fonte</a>`:''}</div>`).join('')
       :'<div style="font-size:12px;color:var(--text-3);font-style:italic;">Nenhum bem ou crédito penhorável identificado nas fontes consultadas.</div>')
     +(an.impenhoravel.length?`<div style="font-size:11.5px;color:var(--text-3);margin-top:6px;">Não penhorável: ${an.impenhoravel.map(x=>_invEsc(x.texto)).join(' | ')}</div>`:'')
-    +sec('Empresas',emp.length,tab(['Empresa','CNPJ','Situação','Ligação','Status','Conf.'],emp.map(e=>linha(e,[_invEsc(e.nome)+selos(e),`<span style="font-family:var(--font-mono);white-space:nowrap;">${_invEsc(e.documento)}</span>`,_invEsc(_invSituacaoEnt(e)),_invEsc(lig(e).join('; ')),st(e),_invEsc(e.confianca)+'%']))))
-    +sec('Pessoas',pes.length,tab(['Pessoa','Documento','Qualificação','Ligação','Status'],pes.map(e=>linha(e,[_invEsc(e.nome)+selos(e),`<span style="font-family:var(--font-mono);">${_invEsc(e.documento)}</span>`,_invEsc((e.dados||{}).qualificacao),_invEsc(lig(e).join('; ')),st(e)]))))
+    +sec('Empresas',emp.length,tab(['Empresa','CNPJ','Situação','Ligação','Status','Conf.'],emp.map(e=>linha(e,[_invEsc(e.nome)+selos(e),`<span style="font-family:var(--font-mono);white-space:nowrap;">${_invEsc(_invDocFmt(e.documento))}</span>`,_invEsc(_invSituacaoEnt(e)),_invEsc(lig(e).join('; ')),st(e),_invEsc(e.confianca)+'%']))))
+    +sec('Pessoas',pes.length,tab(['Pessoa','Documento','Qualificação','Ligação','Status'],pes.map(e=>linha(e,[_invEsc(e.nome)+selos(e),`<span style="font-family:var(--font-mono);white-space:nowrap;">${_invEsc(_invDocFmt(e.documento))}</span>`,_invEsc((e.dados||{}).qualificacao),_invEsc(lig(e).join('; ')),st(e)]))))
     +sec('Processos',pro.length,tab(['Número','Tribunal','Polo do devedor','Classe','Status'],pro.map(e=>{ const d=e.dados||{}; return linha(e,[`<span style="font-family:var(--font-mono);">${_invEsc(d.numero||e.nome)}</span>`+selos(e),_invEsc(d.tribunal),d.polo==='A'?'autor':d.polo==='P'?'réu':'—',_invEsc(d.classe),st(e)]); })))
     +sec('Contratos e vínculos públicos',pub.length,tab(['Fonte','Achado','Consultado em'],pub.map(x=>`<tr>${[_invEsc(x.fonte_codigo),`<b>${_invEsc(x.titulo||'')}</b>${x.trecho?'<br>'+_invEsc(x.trecho):''}${/^https?:\/\//i.test(String(x.url||''))?`<br><a href="${escHtml(x.url)}" target="_blank" rel="noopener" style="font-size:11px;">abrir fonte</a>`:''}`,_invEsc(_invData(x.obtido_em))].map(c=>`<td ${td}>${c}</td>`).join('')}</tr>`)));
 }
@@ -24046,13 +24051,13 @@ function invTeiaNo(entId){
   const tt=s=>`<div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin:12px 0 4px;">${s}</div>`;
   box.innerHTML=`<div style="border:1px solid var(--border);border-radius:10px;padding:12px;">
     <div style="display:flex;gap:10px;align-items:center;"><svg viewBox="0 0 30 30" width="30" height="30" style="flex:none;"><rect x="1" y="1" width="28" height="28" rx="4" fill="${_INV_COR[e.tipo]||'#5A6472'}"/>${_invGlifo(e.tipo,15,15,11,'#FFFFFF')}</svg>
-    <div style="min-width:0;"><div style="font-size:13.5px;font-weight:700;">${_invEsc(e.nome||e.documento)}</div>
-    <div style="font-size:11.5px;color:var(--text-3);">${_invEsc(e.tipo)}${e.documento?' · <span style="font-family:var(--font-mono);">'+_invEsc(e.documento)+'</span>':''}</div></div></div>
+    <div style="min-width:0;"><div style="font-size:13.5px;font-weight:700;">${_invEsc(e.nome||_invDocFmt(e.documento))}</div>
+    <div style="font-size:11.5px;color:var(--text-3);">${_invEsc(e.tipo)}${e.documento?' · <span style="font-family:var(--font-mono);">'+_invEsc(_invDocFmt(e.documento))+'</span>':''}</div></div></div>
     <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><span class="det-chip ${e.status_verificacao==='confirmada'?'princ':''}">${_invEsc(e.status_verificacao)}</span><span class="det-chip">confiança ${_invEsc(e.confianca)}%</span>${sit&&sit!=='—'?`<span class="det-chip">${_invEsc(sit)}</span>`:''}</div>
     ${pen.length?tt('Pode penhorar')+pen.map(p=>`<div style="padding:5px 0;border-top:1px solid var(--border-2);"><div style="font-weight:600;color:#2F855A;">${_invEsc(p.tipo)}</div><div style="font-size:11.5px;color:var(--text-2);">${_invEsc(p.texto)}</div></div>`).join(''):''}
     ${als.length?tt('Sinais de alerta')+als.map(a=>`<div style="padding:5px 0;border-top:1px solid var(--border-2);"><div style="font-weight:600;color:${a.nivel==='alerta'?'#C05621':'var(--text-2)'};">${_invEsc(a.titulo)}</div><div style="font-size:11.5px;color:var(--text-2);">${_invEsc(a.texto)}</div></div>`).join(''):''}
     ${vs.length?tt('Vínculos')+vs.map(v=>{ const outro=porId[v.origem_entidade_id===entId?v.destino_entidade_id:v.origem_entidade_id];
-        return `<div style="padding:5px 0;border-top:1px solid var(--border-2);"><span style="display:inline-block;width:10px;height:3px;background:${_invVCor(v.tipo)};vertical-align:middle;margin-right:5px;"></span><a href="javascript:void(0)" onclick="invTeiaNo('${outro?.id||''}')" style="color:var(--navy);font-weight:600;">${_invEsc(outro?.nome||outro?.documento)}</a> <span style="color:var(--text-3);">· ${_invEsc(_invVincLbl(v.tipo))} · ${_invEsc(v.confianca)}%</span>${v.justificativa?`<div style="font-size:11.5px;color:var(--text-2);">${_invEsc(v.justificativa)}</div>`:''}</div>`; }).join(''):''}
+        return `<div style="padding:5px 0;border-top:1px solid var(--border-2);"><span style="display:inline-block;width:10px;height:3px;background:${_invVCor(v.tipo)};vertical-align:middle;margin-right:5px;"></span><a href="javascript:void(0)" onclick="invTeiaNo('${outro?.id||''}')" style="color:var(--navy);font-weight:600;">${_invEsc(outro?.nome||_invDocFmt(outro?.documento))}</a> <span style="color:var(--text-3);">· ${_invEsc(_invVincLblDe(v,entId))} · ${_invEsc(v.confianca)}%</span>${v.justificativa?`<div style="font-size:11.5px;color:var(--text-2);">${_invEsc(v.justificativa)}</div>`:''}</div>`; }).join(''):''}
     ${tt('Evidências')}
     ${evs.length?evs.map(x=>`<div style="padding:6px 0;border-top:1px solid var(--border-2);"><div style="font-weight:600;">${_invEsc(x.titulo||x.fonte_codigo)}</div><div style="font-size:11px;color:var(--text-3);">${_invEsc(x.fonte_codigo)} · ${_invEsc(_invData(x.obtido_em))} · ${_invEsc(x.confianca)}%</div>${x.trecho?`<div style="font-size:11.5px;color:var(--text-2);margin-top:2px;">${_invEsc(x.trecho)}</div>`:''}${/^https?:\/\//i.test(String(x.url||''))?`<a href="${escHtml(x.url)}" target="_blank" rel="noopener" style="font-size:11px;word-break:break-all;">abrir fonte</a>`:''}</div>`).join(''):'<div style="color:var(--text-3);font-style:italic;">Sem evidência própria registrada.</div>'}
   </div>`;

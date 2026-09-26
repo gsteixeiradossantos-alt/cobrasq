@@ -129,13 +129,19 @@ async function enriquecerEmpresa(inv: any, raiz: any, empresaId: string, cnpj: s
       contadores.pessoas++;
     }
   } catch (e) {
-    naoConclusivas.push(`BrasilAPI ${maskCnpj(cnpj)}: ` + (e instanceof Error ? e.message : String(e)));
+    naoConclusivas.push(`BrasilAPI ${maskCnpj(cnpj)}: ` + erroTxt(e));
   }
 }
 
 // ── Fontes da v4 ────────────────────────────────────────────────────────────
 type Achada = { id: string; cnpj: string; nome: string; confirmada: boolean };
-const erroTxt = (e: unknown) => e instanceof Error ? e.message : String(e);
+// Erro de rede cru (IP, URL, "os error 104") vai para o relatório do cliente: vira texto leigo.
+const erroTxt = (e: unknown) => {
+  const m = e instanceof Error ? e.message : String(e);
+  if (/timed? ?out|timeout|aborted/i.test(m)) return 'não respondeu a tempo';
+  if (/error sending request|os error|connection (reset|refused|error)|dns error|tcp connect/i.test(m)) return 'não respondeu (falha de conexão)';
+  return m;
+};
 // Contrato encerrado não gera crédito a penhorar hoje: só o vigente conta como recebível.
 const _fmtBR = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' });
 const vigente = (fim: unknown) => !fim || String(fim).slice(0, 10) >= _fmtBR.format(new Date());
@@ -419,7 +425,7 @@ async function processar(inv: any) {
           }
         }
       } catch (e) {
-        naoConclusivas.push('ViaCEP não conclusivo: ' + (e instanceof Error ? e.message : String(e)));
+        naoConclusivas.push('ViaCEP não conclusivo: ' + erroTxt(e));
       }
     }
   } else if (raiz.tipo === 'empresa' && dig(raiz.documento).length === 14) {
