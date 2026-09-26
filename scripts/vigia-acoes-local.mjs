@@ -22,6 +22,8 @@
 //   node scripts/vigia-acoes-local.mjs --limite 10     # só 10 alvos (teste)
 //   node scripts/vigia-acoes-local.mjs --forcar        # ignora "já buscado hoje"
 //   node scripts/vigia-acoes-local.mjs --so-djen       # só testa o DJEN, não chama a função
+//   node scripts/vigia-acoes-local.mjs --nome "WESLEY CECHIN" --inicio 2025-01-01 --forcar
+//                                                       # só quem tem esse trecho no nome, janela longa
 
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdirSync } from 'node:fs';
@@ -44,6 +46,9 @@ const opt = (n) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : un
 const LIMITE = Number(opt('--limite')) || 2000;
 const FORCAR = args.includes('--forcar');
 const SO_DJEN = args.includes('--so-djen');
+const NOME = opt('--nome');
+const INICIO = opt('--inicio');
+const FIM = opt('--fim');
 
 try { mkdirSync(LOG_DIR, { recursive: true }); } catch { /* sem log em arquivo */ }
 const log = (...m) => {
@@ -139,7 +144,10 @@ async function main() {
   const token = lerToken();
   if (!token) throw new Error('sem token: guardar o CRON_INVOKE_SECRET no Keychain, serviço cobrasq-vigia');
 
-  const f = await chamarFuncao(token, { modo: 'fila', limite: LIMITE, forcar: FORCAR });
+  const f = await chamarFuncao(token, {
+    modo: 'fila', limite: LIMITE, forcar: FORCAR,
+    ...(NOME ? { nome: NOME } : {}), ...(INICIO ? { inicio: INICIO } : {}), ...(FIM ? { fim: FIM } : {}),
+  });
   const fila = f.fila || [];
   log(`fila: ${fila.length} alvos (universo ${f.universo}, pendentes hoje ${f.pendentes_hoje}), janela ${f.inicio} a ${f.fim}`);
 
