@@ -127,7 +127,8 @@ async function enriquecerEmpresa(inv: any, raiz: any, empresaId: string, cnpj: s
 type Achada = { id: string; cnpj: string; nome: string; confirmada: boolean };
 const erroTxt = (e: unknown) => e instanceof Error ? e.message : String(e);
 // Contrato encerrado não gera crédito a penhorar hoje: só o vigente conta como recebível.
-const vigente = (fim: unknown) => !fim || String(fim).slice(0, 10) >= new Date().toISOString().slice(0, 10);
+const _fmtBR = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' });
+const vigente = (fim: unknown) => !fim || String(fim).slice(0, 10) >= _fmtBR.format(new Date());
 const brl = (v: unknown) => Number.isFinite(Number(v)) ? Number(v).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : '';
 
 // Telefone/e-mail → empresas (base CNPJ). O cadastro do MEI traz o telefone e o
