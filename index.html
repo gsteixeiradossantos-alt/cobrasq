@@ -23358,6 +23358,31 @@ function _invSituacaoEnt(e){
 }
 // Só link http(s) vira âncora; o resto é descartado.
 function _invLink(u){ return /^https?:\/\//i.test(String(u||''))?`<br><a href="${escHtml(u)}" style="color:#1F4FA8;font-size:10px;word-break:break-all;">${escHtml(u)}</a>`:''; }
+// Texto do relatório a partir do que o worker grava cru: código de qualificação da
+// Receita (49 = Sócio-Administrador, conferido na BrasilAPI), capital sem R$, CPF
+// mascarado da Receita (só os 6 dígitos do meio) e erro técnico de conexão.
+const _INV_QUALIF={'49':'Sócio-Administrador'};
+const _INV_FONTE_LBL={receita_rf:'Receita Federal (base CNPJ)',brasilapi:'BrasilAPI (cadastro CNPJ)',portal_transparencia:'Portal da Transparência',pncp:'PNCP (contratos públicos)',viacep:'ViaCEP',djen:'DJEN / Vigia de ações'};
+function _invFonteLbl(c){ return _INV_FONTE_LBL[c]||c; }
+function _invDocFmt(d){
+  const s=String(d||'');
+  if(/^\d{6}$/.test(s)) return `***.${s.slice(0,3)}.${s.slice(3)}-**`;
+  if(/^\d{11}$/.test(s)) return s.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/,'$1.$2.$3-$4');
+  if(/^\d{14}$/.test(s)) return s.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/,'$1.$2.$3/$4-$5');
+  return s;
+}
+function _invTrechoFmt(t){
+  return String(t||'')
+    .replace(/ · capital (\d+(?:\.\d+)?)(?= ·|$)/,(_,n)=>' · capital '+(+n).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}))
+    .replace(/( · CNPJ [\d./-]+) · (\d{1,2})(?= ·|$)/,(_,a,c)=>`${a} · ${_INV_QUALIF[c]||'qualificação de código '+c+' na Receita'}`);
+}
+function _invErroLeigo(s){
+  s=String(s||'');
+  const tempo=/timed? ?out|timeout/i.test(s);
+  if(!tempo&&!/error sending request|os error|connection (reset|refused|error)|dns error|tcp connect/i.test(s)) return s;
+  const i=s.indexOf(': ');
+  return (i>0?s.slice(0,i):'Fonte')+(tempo?': não respondeu a tempo':': não respondeu (falha de conexão)');
+}
 // Relatório em formato de dossiê: identificação → o que dá para penhorar → teia →
 // tabelas por categoria → sinais de alerta → fontes → critérios do score → anexo.
 // abrir=true mostra o PDF numa aba nova sem salvar. A aba é aberta já no clique
@@ -23383,90 +23408,141 @@ async function baixarRelatorioInvestigacao(investigacaoId, abrir){
     const res=inv.resumo||{};
     const lista=v=>Array.isArray(v)?v:(v?[v]:[]);
     const fOk=lista(res.fontes_concluidas), fNao=lista(res.fontes_nao_conclusivas);
-    const fTxt=f=>typeof f==='string'?_invEsc(f):_invEsc([f.fonte||f.codigo||f.nome,f.motivo||f.erro].filter(Boolean).join(': '));
+    // Fonte que respondeu numa busca e caiu noutra (ex.: PNCP achou a empresa e não o
+    // nome do devedor) aparece nas duas listas: o resultado dela é incompleto.
+    const _FONTE_PREF={pncp:/^PNCP/i,portal_transparencia:/^Portal da Transpar/i,brasilapi:/^BrasilAPI/i,receita_rf:/^(Receita|Base CNPJ)/i,viacep:/^ViaCEP/i,djen:/^DJEN/i};
+    const falhou=cod=>fNao.some(f=>_FONTE_PREF[cod]?.test(typeof f==='string'?f:String(f.fonte||f.codigo||f.nome||'')));
+    const fOkTxt=f=>{ const cod=typeof f==='string'?f:(f.fonte||f.codigo||f.nome); return _invEsc(_invFonteLbl(cod))+(falhou(cod)?' <span class="mute">(só em parte: ver abaixo)</span>':''); };
+    const fNaoTxt=f=>typeof f==='string'?_invEsc(_invErroLeigo(f)):_invEsc(_invErroLeigo([f.fonte||f.codigo||f.nome,f.motivo||f.erro].filter(Boolean).join(': ')));
+    const pubIncompleto=falhou('pncp')||falhou('portal_transparencia');
+    const recebeTxt=res.recebe_ente_publico===true?'sim (ver seção 2)'
+      :res.recebe_ente_publico===false?[falhou('portal_transparencia')?'Portal da Transparência não respondeu em parte das consultas':'nada no Portal da Transparência',
+          falhou('pncp')?(fOk.includes('pncp')?'PNCP respondeu só em parte das buscas: resultado incompleto (ver seção 6)':'PNCP não respondeu: resultado desconhecido'):'nada no PNCP'].join('; ')
+      :'não verificado';
+    const avulsa=!inv.devedor_id;
+    const cobertura=avulsa?'Não feita: investigação sem devedor cadastrado, então o Vigia de ações (DJEN) não foi consultado.':res.cobertura_processual;
+    const pl=(n,um,varios)=>`${n} ${n===1?um:varios}`;
     let teiaHtml='';
     if((ents||[]).length){
-      const svg=_invTeiaSvg(ents,vinc,{fundo:true,largura:760,altura:580,analise:an});
+      const svg=_invTeiaSvg(ents,vinc,{fundo:true,largura:760,analise:an,marca:true,recorte:true});
       const png=await _invSvgParaPng(svg);
-      teiaHtml=`<h2>3. Teia de vínculos</h2>${png?`<img src="${png}" style="width:100%;display:block;">`:svg}`;
+      // width/height fixam a proporção antes de a imagem decodificar: sem isso o
+      // html2pdf mede a página com a teia de altura zero e erra as quebras.
+      const vb=/viewBox="0 0 ([\d.]+) ([\d.]+)"/.exec(svg)||[0,760,580];
+      teiaHtml=`<h2><span class="n">3</span>Teia de vínculos</h2>${png?`<img src="${png}" width="${vb[1]}" height="${vb[2]}" style="width:100%;height:auto;aspect-ratio:${vb[1]}/${vb[2]};display:block;">`:svg}`;
     }
     const outros=(ents||[]).filter(e=>e!==raiz);
     const emp=outros.filter(e=>e.tipo==='empresa'), pes=outros.filter(e=>e.tipo==='pessoa'), pro=outros.filter(e=>e.tipo==='processo');
+    // Ligação lida a partir da linha da tabela: se a entidade é o destino do vínculo,
+    // o rótulo inverte (COBRASQ "tem sócio" Gustavo; Ana Clara "sócio de" COBRASQ).
+    const _INV_VINC_INV={socio_de:'tem sócio',tem_socio:'sócio de',autor_em:'tem como autor',reu_em:'tem como réu',parte_em:'tem como parte'};
     const lig=e=>(vinc||[]).filter(v=>v.origem_entidade_id===e.id||v.destino_entidade_id===e.id).map(v=>{
-      const o=an.porId[v.origem_entidade_id===e.id?v.destino_entidade_id:v.origem_entidade_id]; return `${_invVincLbl(v.tipo)} ${o?.nome||o?.documento||''} (${v.confianca}%)`; }).join('; ');
-    const selos=e=>(an.comPenhora.has(e.id)?' <b style="color:#2F855A;">$</b>':'')+(an.comAlerta.has(e.id)?' <b style="color:#DD6B20;">!</b>':'');
-    const tab=(cab,linhas,vazio)=>linhas.length?`<table><thead><tr>${cab.map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody>${linhas.join('')}</tbody></table>`:`<p class="sub"><i>${vazio}</i></p>`;
+      const daqui=v.origem_entidade_id===e.id, o=an.porId[daqui?v.destino_entidade_id:v.origem_entidade_id];
+      const rot=daqui?_invVincLbl(v.tipo):(_INV_VINC_INV[v.tipo]||_invVincLbl(v.tipo)), qual=(e.dados||{}).qualificacao;
+      const r=rot==='sócio de'&&e.tipo==='pessoa'&&qual?qual+' em':rot;
+      return `${r} ${o?.nome||_invDocFmt(o?.documento)||''} (${v.confianca}%)`; }).join('; ');
+    const selos=e=>(an.comPenhora.has(e.id)?' <b style="color:#2F7A55;">$</b>':'')+(an.comAlerta.has(e.id)?' <b style="color:#B8612A;">!</b>':'');
+    const tab=(cab,linhas,vazio)=>linhas.length?`<table><thead><tr>${cab.map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody>${linhas.join('')}</tbody></table>`:`<p class="mute"><i>${vazio}</i></p>`;
     const tr=a=>`<tr>${a.map(x=>`<td>${x}</td>`).join('')}</tr>`;
+    const doc=d=>`<span class="mono">${_invEsc(_invDocFmt(d))}</span>`;
     // Contratos e vínculos públicos: evidências do Portal/PNCP (não viram nó na teia).
     const pub=(evid||[]).filter(x=>x.fonte_codigo==='pncp'||x.fonte_codigo==='portal_transparencia');
-    const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-      body{font-family:Arial,sans-serif;color:#0A1530;font-size:12px;line-height:1.45;margin:0;padding:8px}
-      h1{font-size:18px;margin:0 0 4px} h2{font-size:13px;margin:18px 0 8px;border-bottom:1px solid #ddd;padding-bottom:4px}
-      h3{font-size:11.5px;margin:12px 0 4px;color:#5A6472;text-transform:uppercase;letter-spacing:.04em}
-      .sub{color:#5A6472;font-size:11px} .chip{display:inline-block;padding:2px 8px;border-radius:12px;background:#F4F5F7;font-size:11px;margin-right:6px}
-      table{width:100%;border-collapse:collapse} td,th{border-bottom:1px solid #eee;padding:5px 4px;text-align:left;vertical-align:top;font-size:11px}
-      th{color:#5A6472;font-size:9.5px;text-transform:uppercase}
-      .id td{border:none;padding:2px 8px 2px 0;font-size:12px} .id td:first-child{color:#5A6472;width:150px}
-      .cont{display:flex;gap:6px;margin:8px 0} .cont div{flex:1;border:1px solid #E2E5EA;border-radius:6px;padding:6px 8px} .cont b{font-size:16px;display:block}
-      .pen{padding:6px 8px;border-left:3px solid #2F855A;background:#F0FAF4;margin-bottom:5px}
-      .al{padding:6px 8px;border-left:3px solid #DD6B20;background:#FFF7ED;margin-bottom:5px} .al.r{border-left-color:#8A94A6;background:#F4F5F7}
-      .nota{margin-top:16px;padding:10px;background:#FBF8EF;border:1px solid #E0D3A8;font-size:11px}
-    </style></head><body>
-      <h1>Dossiê de Investigação Patrimonial</h1>
-      <div class="sub">Gerado em ${_invEsc(new Date().toLocaleString('pt-BR'))} · COBRASQ</div>
-      <h2>1. Identificação</h2>
+    const html=`<!DOCTYPE html><html><head><meta charset="utf-8">
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400&family=Inter+Tight:wght@400;600;700&family=JetBrains+Mono:wght@400;500&family=Instrument+Serif:ital@1&display=swap" rel="stylesheet">
+    <style>
+      .dos{font-family:'Inter Tight',Arial,sans-serif;color:#0A1530;font-size:11px;line-height:1.5;background:#FFFFFF;margin:0}
+      .dos .fx{background:#0A1530;color:#EFEAD9;padding:16px 20px 15px;display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #C9A961}
+      .dos .logo{display:flex;align-items:center;gap:11px}
+      .dos .pt{width:13px;height:13px;border-radius:50%;background:#C9A961;display:block}
+      .dos .wm{font-family:'Fraunces',Georgia,serif;font-weight:300;font-size:25px;line-height:1;color:#EFEAD9;letter-spacing:.01em}
+      .dos .wm i{font-style:normal;color:#C9A961}
+      .dos .fx-r{font-family:'JetBrains Mono',monospace;font-size:7.5px;letter-spacing:.14em;text-transform:uppercase;text-align:right;line-height:1.9;color:rgba(239,234,217,.72)}
+      .dos .eb{font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:.22em;text-transform:uppercase;color:#9C7F40;margin:22px 0 6px}
+      .dos h1{font-family:'Fraunces',Georgia,serif;font-weight:300;font-size:28px;line-height:1.1;letter-spacing:-.01em;margin:0}
+      .dos .lede{font-family:'Instrument Serif',Georgia,serif;font-style:italic;font-size:14px;color:rgba(10,21,48,.62);margin-top:6px}
+      .dos h2{font-family:'Fraunces',Georgia,serif;font-weight:400;font-size:16px;margin:22px 0 9px;padding-bottom:5px;border-bottom:.5px solid #C9A961}
+      .dos h2 .n{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.14em;color:#9C7F40;margin-right:9px;vertical-align:2px}
+      .dos h3{font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:500;margin:14px 0 5px;color:rgba(10,21,48,.58);text-transform:uppercase;letter-spacing:.16em}
+      .dos .mute{color:rgba(10,21,48,.58);font-size:10.5px} .dos .mono{font-family:'JetBrains Mono',monospace;font-size:9.5px;white-space:nowrap}
+      .dos table{width:100%;border-collapse:collapse} .dos td,.dos th{border-bottom:.5px solid rgba(10,21,48,.14);padding:5px 5px;text-align:left;vertical-align:top;font-size:10.5px}
+      .dos th{font-family:'JetBrains Mono',monospace;font-weight:500;color:rgba(10,21,48,.58);font-size:7.5px;letter-spacing:.12em;text-transform:uppercase;border-bottom:.5px solid #C9A961}
+      .dos .id td{border:none;padding:2.5px 10px 2.5px 0;font-size:11px} .dos .id td:first-child{color:rgba(10,21,48,.58);width:150px}
+      .dos .cont{display:flex;gap:6px;margin:8px 0 10px} .dos .cont div{flex:1;border:.5px solid rgba(10,21,48,.18);padding:7px 9px;font-size:10px;color:rgba(10,21,48,.7)}
+      .dos .cont b{font-family:'Fraunces',Georgia,serif;font-weight:300;font-size:22px;display:block;color:#0A1530;line-height:1.15}
+      .dos .pen{padding:6px 9px;border-left:2px solid #2F7A55;background:#F3F7F4;margin-bottom:5px}
+      .dos .al{padding:6px 9px;border-left:2px solid #B8612A;background:#FAF4EE;margin-bottom:5px} .dos .al.r{border-left-color:#8A94A6;background:#F5F6F8}
+      .dos ul{margin:4px 0;padding-left:18px} .dos li{margin-bottom:2px}
+      .dos .nota{margin-top:18px;padding:10px 12px;background:#F7F4EA;border:.5px solid #C9A961;font-size:10.5px}
+      .dos .rod{margin-top:14px;padding-top:8px;border-top:.5px solid rgba(10,21,48,.14);font-family:'JetBrains Mono',monospace;font-size:7px;letter-spacing:.12em;text-transform:uppercase;color:rgba(10,21,48,.55);line-height:1.8}
+    </style></head><body><div class="dos">
+      <div class="fx"><div class="logo"><span class="pt"></span><span class="wm">cobrasq<i>.</i></span></div>
+        <div class="fx-r">COBRASQ Recuperadora de Crédito e Cobrança Ltda<br>CNPJ 34.626.848/0001-42<br>Dois Vizinhos · PR</div></div>
+      <div class="eb">Dossiê · investigação patrimonial</div>
+      <h1>${_invEsc(raiz?.nome||inv.nome_consultado)}</h1>
+      <div class="lede">Gerado em ${_invEsc(new Date().toLocaleString('pt-BR'))}, a partir de fontes públicas.</div>
+      <h2><span class="n">1</span>Identificação</h2>
       <table class="id">
         <tr><td>Investigado</td><td><b>${_invEsc(raiz?.nome||inv.nome_consultado)}</b></td></tr>
-        <tr><td>CPF/CNPJ</td><td>${_invEsc(raiz?.documento||inv.documento_consultado||'não informado')}</td></tr>
+        <tr><td>CPF/CNPJ</td><td>${_invEsc(_invDocFmt(raiz?.documento||inv.documento_consultado)||'não informado')}</td></tr>
         ${cob?.clientes?.nome?`<tr><td>Credor</td><td>${_invEsc(cob.clientes.nome)}</td></tr>`:''}
         ${cob?.numero_processo?`<tr><td>Processo da cobrança</td><td>${_invEsc(cob.numero_processo)}</td></tr>`:''}
+        ${avulsa?`<tr><td>Tipo</td><td>Investigação avulsa (sem cobrança e sem devedor cadastrado)</td></tr>`:''}
         <tr><td>Situação da investigação</td><td>${_invEsc(_invStatusLabel(inv.status))} · concluída em ${_invEsc(_invData(inv.concluido_em||inv.created_at))}</td></tr>
         <tr><td>Prioridade</td><td>${Math.round(+inv.score_prioridade||0)}/100 (critérios na seção 7)</td></tr>
-        ${'recebe_ente_publico' in res?`<tr><td>Recebe de ente público</td><td>${res.recebe_ente_publico===true?'sim (ver seção 2)':res.recebe_ente_publico===false?'nada encontrado no Portal da Transparência e no PNCP':'não verificado'}</td></tr>`:''}
-        ${res.cobertura_processual?`<tr><td>Cobertura processual</td><td>${_invEsc(res.cobertura_processual)}</td></tr>`:''}
+        ${'recebe_ente_publico' in res?`<tr><td>Recebe de ente público</td><td>${_invEsc(recebeTxt)}</td></tr>`:''}
+        ${cobertura?`<tr><td>Cobertura processual</td><td>${_invEsc(cobertura)}</td></tr>`:''}
       </table>
-      <h2>2. Resumo: o que pode ser penhorado</h2>
+      <h2><span class="n">2</span>Resumo: o que pode ser penhorado</h2>
       <div class="cont">
-        <div><b style="color:#2F855A;">${an.penhora.length}</b>pode penhorar</div>
-        <div><b>${c.empConf+c.empPista}</b>empresas (${c.empConf} confirmadas)</div>
-        <div><b>${c.pessoas}</b>pessoas</div>
-        <div><b>${c.autor+c.reu}</b>processos (${c.autor} autor · ${c.reu} réu)</div>
-        <div><b style="color:#DD6B20;">${c.alertas}</b>sinais de alerta</div>
+        <div><b style="color:#2F7A55;">${an.penhora.length}</b>pode penhorar</div>
+        <div><b>${c.empConf+c.empPista}</b>${c.empConf+c.empPista===1?'empresa':'empresas'} (${pl(c.empConf,'confirmada','confirmadas')})</div>
+        <div><b>${c.pessoas}</b>${c.pessoas===1?'pessoa':'pessoas'}</div>
+        <div><b>${c.autor+c.reu}</b>${c.autor+c.reu===1?'processo':'processos'} (${c.autor} autor · ${c.reu} réu)</div>
+        <div><b style="color:#B8612A;">${c.alertas}</b>${c.alertas===1?'sinal de alerta':'sinais de alerta'}</div>
       </div>
-      ${an.penhora.length?an.penhora.map(p=>`<div class="pen"><b>${_invEsc(p.tipo)}</b>${p.conf?'':' <span class="sub">(pista, confirmar)</span>'}<br>${_invEsc(p.texto)}${_invLink(p.url)}</div>`).join('')
+      ${an.penhora.length?an.penhora.map(p=>`<div class="pen"><b>${_invEsc(p.tipo)}</b>${p.conf?'':' <span class="mute">(pista, confirmar)</span>'}<br>${_invEsc(_invTrechoFmt(p.texto))}${_invLink(p.url)}</div>`).join('')
         :'<p><i>Nenhum bem ou crédito penhorável identificado nas fontes consultadas. Ver na seção 6 as fontes que não responderam.</i></p>'}
-      ${an.impenhoravel.length?`<h3>Encontrado, mas não penhorável</h3><ul>${an.impenhoravel.map(x=>`<li>${_invEsc(x.texto)}</li>`).join('')}</ul>`:''}
+      ${an.impenhoravel.length?`<h3>Encontrado, mas não penhorável</h3><ul>${an.impenhoravel.map(x=>`<li>${_invEsc(_invTrechoFmt(x.texto))}</li>`).join('')}</ul>`:''}
       ${teiaHtml}
-      <h2 style="page-break-before:always;">4. Achados por categoria</h2>
+      <div class="kp"><h2><span class="n">4</span>Achados por categoria</h2>
       <h3>Empresas (${emp.length})</h3>
-      ${tab(['Empresa','CNPJ','Situação','Ligação','Status','Conf.'],emp.map(e=>tr([_invEsc(e.nome)+selos(e),`<span style="white-space:nowrap;">${_invEsc(e.documento)}</span>`,_invEsc(_invSituacaoEnt(e)),_invEsc(lig(e)),_invEsc(e.status_verificacao),_invEsc(e.confianca)+'%'])),'Nenhuma empresa encontrada.')}
+      ${tab(['Empresa','CNPJ','Situação','Ligação','Status','Conf.'],emp.map(e=>tr([_invEsc(e.nome)+selos(e),doc(e.documento),_invEsc(_invSituacaoEnt(e)),_invEsc(lig(e)),_invEsc(e.status_verificacao),_invEsc(e.confianca)+'%'])),'Nenhuma empresa encontrada.')}</div>
       <h3>Pessoas (${pes.length})</h3>
-      ${tab(['Pessoa','Documento','Qualificação','Ligação','Status'],pes.map(e=>tr([_invEsc(e.nome)+selos(e),_invEsc(e.documento),_invEsc((e.dados||{}).qualificacao),_invEsc(lig(e)),_invEsc(e.status_verificacao)])),'Nenhuma pessoa vinculada encontrada.')}
+      ${tab(['Pessoa','Documento','Qualificação','Ligação','Status'],pes.map(e=>tr([_invEsc(e.nome)+selos(e),doc(e.documento),_invEsc((e.dados||{}).qualificacao),_invEsc(lig(e)),_invEsc(e.status_verificacao)])),'Nenhuma pessoa vinculada encontrada.')}
       <h3>Processos (${pro.length})</h3>
-      ${tab(['Número','Tribunal','Polo do devedor','Classe','Status'],pro.map(e=>{ const d=e.dados||{}; return tr([_invEsc(d.numero||e.nome)+selos(e),_invEsc(d.tribunal),d.polo==='A'?'autor':d.polo==='P'?'réu':'—',_invEsc(d.classe),_invEsc(e.status_verificacao)]); }),'Nenhum processo encontrado.')}
+      ${tab(['Número','Tribunal','Polo do devedor','Classe','Status'],pro.map(e=>{ const d=e.dados||{}; return tr([_invEsc(d.numero||e.nome)+selos(e),_invEsc(d.tribunal),d.polo==='A'?'autor':d.polo==='P'?'réu':'—',_invEsc(d.classe),_invEsc(e.status_verificacao)]); }),avulsa?'Não pesquisado: investigação sem devedor cadastrado.':'Nenhum processo encontrado.')}
       <h3>Contratos e vínculos públicos (${pub.length})</h3>
-      ${tab(['Fonte','Achado','Consultado em'],pub.map(x=>tr([_invEsc(x.fonte_codigo),`<b>${_invEsc(x.titulo||'')}</b>${x.trecho?'<br>'+_invEsc(x.trecho):''}${_invLink(x.url)}`,_invEsc(_invData(x.obtido_em))])),'Nada encontrado no Portal da Transparência e no PNCP.')}
-      <h2>5. Sinais de alerta</h2>
+      ${tab(['Fonte','Achado','Consultado em'],pub.map(x=>tr([_invEsc(_invFonteLbl(x.fonte_codigo)),`<b>${_invEsc(x.titulo||'')}</b>${x.trecho?'<br>'+_invEsc(_invTrechoFmt(x.trecho)):''}${_invLink(x.url)}`,_invEsc(_invData(x.obtido_em))])),pubIncompleto?'Nada encontrado nas buscas que responderam; parte das consultas ficou sem resposta (seção 6).':'Nada encontrado no Portal da Transparência e no PNCP.')}
+      <div class="kp"><h2><span class="n">5</span>Sinais de alerta</h2>
       ${an.alertas.length?an.alertas.map(a=>`<div class="al${a.nivel==='alerta'?'':' r'}"><b>${_invEsc(a.titulo)}</b><br>${_invEsc(a.texto)}</div>`).join(''):'<p><i>Nenhum sinal de alerta nos dados encontrados.</i></p>'}
-      <p class="sub">Sinal de alerta é pista para conferir, não prova de fraude, ocultação de bens ou grupo econômico.</p>
-      <h2>6. Fontes consultadas</h2>
-      <h3>Responderam</h3>${fOk.length?`<ul>${fOk.map(f=>`<li>${fTxt(f)}</li>`).join('')}</ul>`:'<p class="sub"><i>Não registrado.</i></p>'}
-      <h3>Sem resposta ou não conclusivas</h3>${fNao.length?`<ul>${fNao.map(f=>`<li>${fTxt(f)}</li>`).join('')}</ul>`:'<p class="sub"><i>Nenhuma.</i></p>'}
-      <p class="sub">Fonte sem resposta não significa "nada encontrado": o resultado dela é desconhecido.</p>
-      <h2>7. Critérios do score de prioridade</h2>
-      <ul>${(comps.length?comps:[{rotulo:'Ainda não calculado',pontos:'—',explicacao:''}]).map(x=>`<li><strong>${_invEsc(x.rotulo||x.motivo)}</strong>: ${_invEsc(x.pontos??'—')} ponto(s). ${_invEsc(x.explicacao||'')}</li>`).join('')}</ul>
-      <h2 style="page-break-before:always;">Anexo A. Todas as evidências</h2>
+      <p class="mute">Sinal de alerta é pista para conferir, não prova de fraude, ocultação de bens ou grupo econômico.</p></div>
+      <div class="kp"><h2><span class="n">6</span>Fontes consultadas</h2>
+      <h3>Responderam</h3>${fOk.length?`<ul>${fOk.map(f=>`<li>${fOkTxt(f)}</li>`).join('')}</ul>`:'<p class="mute"><i>Não registrado.</i></p>'}
+      <h3>Sem resposta ou não conclusivas</h3>${fNao.length?`<ul>${fNao.map(f=>`<li>${fNaoTxt(f)}</li>`).join('')}</ul>`:'<p class="mute"><i>Nenhuma.</i></p>'}
+      <p class="mute">Fonte sem resposta não significa "nada encontrado": o resultado dela é desconhecido.</p></div>
+      <div class="kp"><h2><span class="n">7</span>Critérios do score de prioridade</h2>
+      <ul>${(comps.length?comps:[{rotulo:'Ainda não calculado',pontos:'—',explicacao:''}]).map(x=>`<li><strong>${_invEsc(x.rotulo||x.motivo)}</strong>: ${_invEsc(x.pontos??'—')} ponto(s). ${_invEsc(x.explicacao||'')}</li>`).join('')}</ul></div>
+      <h2><span class="n">A</span>Anexo A. Todas as evidências</h2>
       <table><thead><tr><th>Fonte</th><th>Título / trecho</th><th>Confiança</th><th>Consultada em</th></tr></thead><tbody>
-      ${(evid||[]).map(e=>`<tr><td>${_invEsc(e.fonte_codigo)}</td><td><strong>${_invEsc(e.titulo||'')}</strong>${e.trecho?'<br>'+_invEsc(e.trecho):''}${_invLink(e.url)}</td><td>${_invEsc(e.confianca)}%</td><td>${_invEsc(_invData(e.obtido_em))}</td></tr>`).join('')||'<tr><td colspan="4">Nenhuma evidência.</td></tr>'}
+      ${(evid||[]).map(e=>`<tr><td>${_invEsc(_invFonteLbl(e.fonte_codigo))}</td><td><strong>${_invEsc(e.titulo||'')}</strong>${e.trecho?'<br>'+_invEsc(_invTrechoFmt(e.trecho)):''}${_invLink(e.url)}</td><td>${_invEsc(e.confianca)}%</td><td>${_invEsc(_invData(e.obtido_em))}</td></tr>`).join('')||'<tr><td colspan="4">Nenhuma evidência.</td></tr>'}
       </tbody></table>
-      <h2>Anexo B. Linha do tempo</h2>
-      <ul>${(eventos||[]).map(e=>`<li>${_invEsc(_invData(e.criado_em))} · ${_invEsc(e.tipo)} · ${_invEsc(e.mensagem)}</li>`).join('')}</ul>
+      <div class="kp"><h2><span class="n">B</span>Anexo B. Linha do tempo</h2>
+      <ul>${(eventos||[]).map(e=>`<li>${_invEsc(_invData(e.criado_em))} · ${_invEsc(String(e.tipo||'').replace(/_/g,' '))} · ${_invEsc(String(e.mensagem||'').split(' | ').map(_invErroLeigo).join(' | '))}</li>`).join('')}</ul>
       <div class="nota">Pistas não equivalem a prova. Toda medida judicial exige confirmação da fonte e análise profissional.</div>
-    </body></html>`;
+      <div class="rod">COBRASQ Recuperadora de Crédito e Cobrança Ltda · CNPJ 34.626.848/0001-42<br>Av. Rio Grande do Sul, 380, Sala 201, Centro, Dois Vizinhos/PR · CEP 85660-000 · ccobrasq@gmail.com</div></div>
+    </div></body></html>`;
     const nome='investigacao-patrimonial-'+(investigacaoId||'').slice(0,8)+'.pdf';
     if(window.html2pdf){
       const wrap=document.createElement('div'); wrap.innerHTML=html;
-      const w=window.html2pdf().set({margin:[12,12,14,12],filename:nome,image:{type:'jpeg',quality:0.95},html2canvas:{scale:2,useCORS:true},jsPDF:{unit:'mm',format:'a4',orientation:'portrait'}}).from(wrap);
+      // Web fonts (Fraunces etc.) já carregadas pelo painel: espera antes do html2canvas.
+      try{ await document.fonts?.ready; }catch(_){}
+      const w=window.html2pdf().set({margin:[12,12,14,12],filename:nome,image:{type:'jpeg',quality:0.95},html2canvas:{scale:2,useCORS:true},
+        pagebreak:{mode:['css','legacy'],avoid:['tr','.pen','.al','.cont','.fx','img','.kp','.rod','li']},jsPDF:{unit:'mm',format:'a4',orientation:'portrait'}}).from(wrap)
+        .toPdf().get('pdf').then(pdf=>{
+          const n=pdf.internal.getNumberOfPages();
+          for(let i=1;i<=n;i++){ pdf.setPage(i); pdf.setFont('helvetica','normal'); pdf.setFontSize(7); pdf.setTextColor(120,126,140);
+            pdf.text('cobrasq. · Dossiê de investigação patrimonial',12,290); pdf.text(`${i} / ${n}`,198,290,{align:'right'}); }
+        });
       if(abrir) _invMostrarNaAba(aba, await w.outputPdf('blob'));
       else await w.save();
     }else{
@@ -23525,7 +23601,7 @@ function _invAnalise(ents, vinc, evid){
   doRaiz.filter(v=>v.tipo==='autor_em').forEach(v=>{ const p=porId[v.destino_entidade_id]; if(!p) return; const d=p.dados||{};
     penhora.push({entId:p.id, tipo:'Crédito em processo (devedor é autor): penhora no rosto dos autos', texto:[d.numero||nm(p),d.tribunal,d.classe].filter(Boolean).join(' · '), conf:p.status_verificacao==='confirmada'}); });
   doRaiz.filter(v=>v.tipo==='socio_de').forEach(v=>{ const p=porId[v.destino_entidade_id]; if(!p||p.status_verificacao!=='confirmada'||sit(p)!=='ativa') return;
-    penhora.push({entId:p.id, tipo:'Participação em empresa ativa (quotas/lucros)', texto:`${nm(p)} · ${p.documento||''}`, conf:true}); });
+    penhora.push({entId:p.id, tipo:'Participação em empresa ativa (quotas/lucros)', texto:`${nm(p)} · ${_invDocFmt(p.documento)||''}`, conf:true}); });
   // Sócio comum: a mesma pessoa em 2+ empresas da teia.
   ents.filter(e=>e.tipo==='pessoa'&&e!==raiz).forEach(e=>{
     const emp=[...new Set(vinc.filter(v=>_invVGrupo(v.tipo)==='socio'&&(v.origem_entidade_id===e.id||v.destino_entidade_id===e.id))
@@ -23709,39 +23785,68 @@ function _invTeiaSvg(ents, vinc, opt){
   const visivel=e=>!!e&&!!pos[e.id]&&(prof(e)===0||!fl||(fl.ent.has(e.tipo)&&(!fl.soConf||e.status_verificacao==='confirmada')));
   const vVis=(vinc||[]).filter(v=>visivel(porId[v.origem_entidade_id])&&visivel(porId[v.destino_entidade_id])&&(!fl||fl.grp.has(_invVGrupo(v.tipo))));
   const txt=opt.interativo?'currentColor':'#0A1530';
+  const FONTE=opt.marca?"'Inter Tight',Arial,sans-serif":'Arial,sans-serif';
+  // PDF na identidade COBRASQ: nós em Marinho/Champagne/Grafite, linhas em tons sóbrios.
+  const corEnt=t=>(opt.marca?{pessoa:'#0A1530',empresa:'#9C7F40',processo:'#6B7691'}:_INV_COR)[t]||'#5A6472';
+  const corVinc=t=>opt.marca?({socio:'#15224A',endereco:'#B8612A',contato:'#2F7A55',processo:'#6B7691',outro:'#8A94A6'})[_invVGrupo(t)]:_invVCor(t);
+  const PEN=opt.marca?'#2F7A55':'#2F855A', ALE=opt.marca?'#B8612A':'#DD6B20';
   const muitas=vVis.length>24;
   const corta=(s,n)=>{ s=String(s||''); return s.length>n?s.slice(0,n-1)+'…':s; };
+  // Nome em até 2 linhas, quebrando por palavra; só corta o que passar da 2ª.
+  const linhas=(s,n)=>{ const p=String(s||'').split(/\s+/).filter(Boolean), out=['']; 
+    p.forEach(w=>{ const l=out[out.length-1]; if(!l) out[out.length-1]=w; else if((l+' '+w).length<=n) out[out.length-1]=l+' '+w; else out.push(w); });
+    return out.length>2?[out[0],corta(out.slice(1).join(' '),n)]:out; };
+  const tam=e=>prof(e)===0?21:(prof(e)===1?14:11);
+  // Caixa ocupada por cada nó visível: o quadrado + o nome em até 2 linhas abaixo dele.
+  const caixas=(ents||[]).filter(visivel).map(e=>{ const p=pos[e.id], s=tam(e), r=prof(e)===0;
+    const nl=linhas(e.nome||_invDocFmt(e.documento)||e.chave_normalizada, r?30:22);
+    const w=Math.max(2*s, ...nl.map(l=>l.length*(r?7:5.9)))/2;
+    return [p.x-w-3, p.y-s-3, p.x+w+3, p.y+s+14+nl.length*(r?14:12)]; });
+  const bate=(x0,y0,x1,y1)=>caixas.some(k=>x0<k[2]&&x1>k[0]&&y0<k[3]&&y1>k[1]);
+  const usados=[];
   const arestas=vVis.map(v=>{
-    const a=pos[v.origem_entidade_id], b=pos[v.destino_entidade_id], c=+v.confianca||0, cor=_invVCor(v.tipo);
-    const mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
-    return `<g><title>${_invEsc(porId[v.origem_entidade_id]?.nome)} — ${_invEsc(_invVincLbl(v.tipo))} — ${_invEsc(porId[v.destino_entidade_id]?.nome)} (${c}%)</title>
+    const oe=porId[v.origem_entidade_id], de=porId[v.destino_entidade_id];
+    const a=pos[v.origem_entidade_id], b=pos[v.destino_entidade_id], c=+v.confianca||0, cor=corVinc(v.tipo);
+    // Rótulo com fundo branco no primeiro ponto da linha (a partir do meio) em que
+    // não encosta em nenhum nó, nome ou outro rótulo; sem lugar livre, fica só a linha.
+    const dx=b.x-a.x, dy=b.y-a.y, rot=`${_invVincLbl(v.tipo)} · ${c}%`, lw=rot.length*5.1/2+3;
+    const L=Math.hypot(dx,dy)||1, nx=-dy/L, ny=dx/L;
+    let mx=0, my=0, cabe=false;
+    if(!muitas) busca: for(const t of [0.5,0.42,0.58,0.34,0.66,0.26,0.74,0.2,0.8]) for(const o of [0,-12,12]){
+      const x=a.x+dx*t+nx*o, y=a.y+dy*t+ny*o, r=[x-lw,y-8,x+lw,y+5];
+      if(!bate(...r)&&!usados.some(k=>r[0]<k[2]&&r[2]>k[0]&&r[1]<k[3]&&r[3]>k[1])){ mx=x; my=y; cabe=true; usados.push(r); break busca; } }
+    return `<g><title>${_invEsc(oe?.nome)} — ${_invEsc(_invVincLbl(v.tipo))} — ${_invEsc(de?.nome)} (${c}%)</title>
       <line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" stroke="${cor}" stroke-width="${c>=80?2.2:1.4}" ${c<70?'stroke-dasharray="5 4"':''} opacity="0.9"/>
-      ${muitas?'':`<text x="${mx.toFixed(1)}" y="${(my-3).toFixed(1)}" font-size="9" text-anchor="middle" fill="${cor}" font-family="Arial,sans-serif">${_invEsc(_invVincLbl(v.tipo))} · ${c}%</text>`}</g>`;
+      ${cabe?`<text x="${mx.toFixed(1)}" y="${(my+3).toFixed(1)}" font-size="9" text-anchor="middle" fill="${cor}" stroke="#FFFFFF" stroke-width="3" paint-order="stroke" font-family="${FONTE}">${_invEsc(rot)}</text>`:''}</g>`;
   }).join('');
-  const selo=(x,y,cor,ch)=>`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="6.5" fill="${cor}" stroke="#FFFFFF" stroke-width="1.5"/><text x="${x.toFixed(1)}" y="${(y+3.2).toFixed(1)}" font-size="9" font-weight="700" text-anchor="middle" fill="#FFFFFF" font-family="Arial,sans-serif">${ch}</text>`;
+  const selo=(x,y,cor,ch)=>`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="6.5" fill="${cor}" stroke="#FFFFFF" stroke-width="1.5"/><text x="${x.toFixed(1)}" y="${(y+3.2).toFixed(1)}" font-size="9" font-weight="700" text-anchor="middle" fill="#FFFFFF" font-family="${FONTE}">${ch}</text>`;
   const nos=(ents||[]).filter(visivel).map(e=>{
-    const p=pos[e.id], raiz=prof(e)===0, cor=_INV_COR[e.tipo]||'#5A6472', conf=e.status_verificacao==='confirmada';
-    const s=raiz?21:(prof(e)===1?14:11);
-    const nome=corta(e.nome||e.documento||e.chave_normalizada, raiz?34:24);
+    const p=pos[e.id], raiz=prof(e)===0, cor=corEnt(e.tipo), conf=e.status_verificacao==='confirmada';
+    const s=tam(e);
+    const nome=linhas(e.nome||_invDocFmt(e.documento)||e.chave_normalizada, raiz?30:22);
     const clique=opt.interativo?` onclick="invTeiaNo('${e.id}')" style="cursor:pointer;"`:'';
     return `<g data-no="${e.id}"${clique}><title>${_invEsc(e.nome||e.documento)} · ${_invEsc(e.tipo)} · ${_invEsc(e.status_verificacao)} (${_invEsc(e.confianca)}%)</title>
       <rect class="inv-no" x="${(p.x-s).toFixed(1)}" y="${(p.y-s).toFixed(1)}" width="${2*s}" height="${2*s}" rx="4" fill="${conf?cor:'#FFFFFF'}" stroke="${cor}" stroke-width="2" ${conf?'':'stroke-dasharray="4 3"'}/>
       ${_invGlifo(e.tipo,p.x,p.y,s*0.78,conf?'#FFFFFF':cor)}
-      ${an&&an.comPenhora.has(e.id)?selo(p.x+s,p.y-s,'#2F855A','$'):''}${an&&an.comAlerta.has(e.id)?selo(p.x-s,p.y-s,'#DD6B20','!'):''}
-      <text x="${p.x.toFixed(1)}" y="${(p.y+s+12).toFixed(1)}" font-size="${raiz?12:10}" font-weight="${raiz?700:400}" text-anchor="middle" fill="${txt}" font-family="Arial,sans-serif">${_invEsc(nome)}</text></g>`;
+      ${an&&an.comPenhora.has(e.id)?selo(p.x+s,p.y-s,PEN,'$'):''}${an&&an.comAlerta.has(e.id)?selo(p.x-s,p.y-s,ALE,'!'):''}
+      <text x="${p.x.toFixed(1)}" y="${(p.y+s+12).toFixed(1)}" font-size="${raiz?12:10}" font-weight="${raiz?700:400}" text-anchor="middle" fill="${txt}" stroke="#FFFFFF" stroke-width="3" paint-order="stroke" font-family="${FONTE}">${nome.map((l,i)=>`<tspan x="${p.x.toFixed(1)}" dy="${i?(raiz?14:12):0}">${_invEsc(l)}</tspan>`).join('')}</text></g>`;
   }).join('');
   // Legenda em duas linhas: nós (tipo, pista, selos) e linhas (tipo de vínculo).
   let x=10, leg='';
-  const lt=(t,dx)=>{ leg+=`<text x="${x+dx}" y="20" font-size="10.5" fill="${txt}" font-family="Arial,sans-serif">${t}</text>`; x+=dx+t.length*5.6+16; };
-  [['pessoa','Pessoa'],['empresa','Empresa'],['processo','Processo']].forEach(([k,l])=>{ leg+=`<rect x="${x}" y="10" width="12" height="12" rx="2" fill="${_INV_COR[k]}"/>`; lt(l,17); });
+  const lt=(t,dx)=>{ leg+=`<text x="${x+dx}" y="20" font-size="10.5" fill="${txt}" font-family="${FONTE}">${t}</text>`; x+=dx+t.length*5.6+16; };
+  [['pessoa','Pessoa'],['empresa','Empresa'],['processo','Processo']].forEach(([k,l])=>{ leg+=`<rect x="${x}" y="10" width="12" height="12" rx="2" fill="${corEnt(k)}"/>`; lt(l,17); });
   leg+=`<rect x="${x}" y="10" width="12" height="12" rx="2" fill="#FFFFFF" stroke="#5A6472" stroke-dasharray="3 2"/>`; lt('pista (não confirmada)',17);
-  leg+=selo(x+6,16,'#2F855A','$'); lt('pode penhorar',15);
-  leg+=selo(x+6,16,'#DD6B20','!'); lt('sinal de alerta',15);
+  leg+=selo(x+6,16,PEN,'$'); lt('pode penhorar',15);
+  leg+=selo(x+6,16,ALE,'!'); lt('sinal de alerta',15);
   x=10;
-  _INV_VGRUPOS.filter(g=>g[0]!=='outro'||(vinc||[]).some(v=>_invVGrupo(v.tipo)==='outro')).forEach(([,l,c])=>{
-    leg+=`<line x1="${x}" y1="37" x2="${x+20}" y2="37" stroke="${c}" stroke-width="2.4"/><text x="${x+25}" y="41" font-size="10.5" fill="${txt}" font-family="Arial,sans-serif">${l}</text>`; x+=25+l.length*5.6+16; });
-  leg+=`<line x1="${x}" y1="37" x2="${x+20}" y2="37" stroke="#8A94A6" stroke-width="1.6" stroke-dasharray="5 4"/><text x="${x+25}" y="41" font-size="10.5" fill="${txt}" font-family="Arial,sans-serif">confiança abaixo de 70%</text>`;
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${opt.largura||'100%'}" ${opt.altura?`height="${opt.altura}"`:''} style="max-width:100%;height:auto;display:block;" role="img" aria-label="Teia de vínculos da investigação">${opt.fundo?`<rect width="${W}" height="${H}" fill="#FFFFFF"/>`:''}${leg}${arestas}${nos}</svg>`;
+  _INV_VGRUPOS.filter(g=>g[0]!=='outro'||(vinc||[]).some(v=>_invVGrupo(v.tipo)==='outro')).forEach(([k,l,c0])=>{ const c=opt.marca?corVinc(k==='socio'?'socio_de':k==='endereco'?'compartilha_endereco_fiscal':k==='contato'?'compartilha_telefone':k==='processo'?'reu_em':'x'):c0;
+    leg+=`<line x1="${x}" y1="37" x2="${x+20}" y2="37" stroke="${c}" stroke-width="2.4"/><text x="${x+25}" y="41" font-size="10.5" fill="${txt}" font-family="${FONTE}">${l}</text>`; x+=25+l.length*5.6+16; });
+  leg+=`<line x1="${x}" y1="37" x2="${x+20}" y2="37" stroke="#8A94A6" stroke-width="1.6" stroke-dasharray="5 4"/><text x="${x+25}" y="41" font-size="10.5" fill="${txt}" font-family="${FONTE}">confiança abaixo de 70%</text>`;
+  // recorte (PDF): a altura acompanha os nós visíveis, sem faixa vazia em cima e embaixo.
+  let dyG=0, Hs=H;
+  if(opt.recorte){ const ys=(ents||[]).filter(visivel).map(e=>[pos[e.id].y-tam(e)-10, pos[e.id].y+tam(e)+36]);
+    if(ys.length){ const y0=Math.min(...ys.map(v=>v[0])), y1=Math.max(...ys.map(v=>v[1])); dyG=58-y0; Hs=Math.min(H,Math.ceil(y1-y0+58+8)); } }
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${Hs}" width="${opt.largura||'100%'}" ${opt.altura?`height="${opt.altura}"`:''} style="max-width:100%;height:auto;display:block;" role="img" aria-label="Teia de vínculos da investigação">${opt.fundo?`<rect width="${W}" height="${Hs}" fill="#FFFFFF"/>`:''}${leg}<g transform="translate(0 ${dyG.toFixed(1)})">${arestas}${nos}</g></svg>`;
 }
 
 // Tela do resultado (Sniper): cartão do alvo, abas Grafo / Tabela / Sinais de
@@ -23899,7 +24004,7 @@ function _invSvgParaPng(svg){
   return new Promise(res=>{
     try{
       const img=new Image();
-      img.onload=()=>{ try{ const c=document.createElement('canvas'); c.width=1520; c.height=1160; const g=c.getContext('2d'); g.fillStyle='#fff'; g.fillRect(0,0,c.width,c.height); g.drawImage(img,0,0,c.width,c.height); res(c.toDataURL('image/png')); }catch(_){ res(null); } };
+      img.onload=()=>{ try{ const c=document.createElement('canvas'); const vb=(/viewBox="0 0 ([\d.]+) ([\d.]+)"/.exec(svg)||[0,760,580]); c.width=Math.round(vb[1]*2); c.height=Math.round(vb[2]*2); const g=c.getContext('2d'); g.fillStyle='#fff'; g.fillRect(0,0,c.width,c.height); g.drawImage(img,0,0,c.width,c.height); res(c.toDataURL('image/png')); }catch(_){ res(null); } };
       img.onerror=()=>res(null);
       img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg);
     }catch(_){ res(null); }
