@@ -47649,6 +47649,8 @@ async function tajEnviarZapSign(){
   try{
     const dados=_tajDados(); const supa=getSupabase(); if(!supa) throw new Error('Faça login.');
     // Mesma edge function do CRM: gera PDF, cria doc no ZapSign com signatários e âncoras <<assdevN>>.
+    const _rep=_zapTelsRepetidos([...(dados.devedores||[]),...(dados.advogados||[])]);
+    if(_rep.length) throw new Error('Signatários com o mesmo telefone: '+_rep.join('; ')+'. Cada um precisa assinar pelo próprio celular.');
     const { data, error } = await supa.functions.invoke('gerar-acordo-termo', { body:{ casoId: _tajState.devId, html, dados } });
     if(error){ let det=''; try{ det=(await error.context.json()).error||''; }catch(_){}; throw new Error(det||error.message); }
     if(data && data.error) throw new Error(data.error);
@@ -49974,6 +49976,18 @@ const AsaasAPI = {
 };
 
 // ── ZapSign ───────────────────────────────────────────────────
+// Telefone igual em dois signatários: um recebe o link/código do outro e pode assinar
+// por ele. Regra do Gustavo (26/09/2026): bloqueado em qualquer envio ao ZapSign.
+function _zapTelsRepetidos(pessoas){
+  const vistos={}, rep=[];
+  for(const p of (pessoas||[])){
+    const t=String((p&&(p.phone_number??p.telefone))||'').replace(/\D/g,'').replace(/^55(?=\d{10,11}$)/,'');
+    if(!t) continue;
+    const nome=String((p&&(p.name||p.nome))||'?').trim();
+    if(vistos[t]) rep.push(vistos[t]+' e '+nome); else vistos[t]=nome;
+  }
+  return rep;
+}
 const ZapSignAPI = {
   // Rota via proxy Vercel /api/zapsign para evitar CORS (ZapSign é server-to-server only)
   async req(method, path, data){
@@ -49989,7 +50003,7 @@ const ZapSignAPI = {
     if(!r.ok) throw new Error(json?.detail || json?.message || `Erro ${r.status}`);
     return json;
   },
-  createDoc(payload)      { return this.req('POST','/docs/',payload); },
+  createDoc(payload)      { const rep=_zapTelsRepetidos(payload&&payload.signers); if(rep.length) return Promise.reject(new Error('Signatários com o mesmo telefone: '+rep.join('; ')+'. Cada um precisa assinar pelo próprio celular.')); return this.req('POST','/docs/',payload); },
   // Anexa um documento EXTRA ao mesmo envelope/link (até 14 extras): o signatário
   // assina todas as peças num único link, cada uma como documento separado.
   addExtraDoc(token,payload){ return this.req('POST',`/docs/${token}/upload-extra-doc/`,payload); },
