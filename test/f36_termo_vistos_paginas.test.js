@@ -22,7 +22,7 @@ const path = require('path');
 const assert = require('assert');
 
 require(path.join(__dirname, '..', 'templates', 'termo-engine.js'));
-const { vistosPageCss, placeholders } = globalThis.TermoEngine;
+const { vistosPageCss, vistosAncoras, placeholders } = globalThis.TermoEngine;
 
 const conta = (s, re) => (s.match(re) || []).length;
 
@@ -66,10 +66,27 @@ assert.strictEqual(conta(c9, /<<vistodev9>>/g), 0);
 assert.ok(/@top-right\{ content:"<<vistodev7>> <<vistodev8>>"/.test(c9));
 console.log('  ok   5º devedor → @top-left; 9º fica sem visto (teto 8, 4 caixas × 2)');
 
-// placeholders() expõe o bloco pelo nº real de devedores
+// placeholders(): devedores, depois o credor, depois os advogados (26/09/2026 —
+// todos os signatários rubricam; mesma ordem de gerar-acordo-termo/index.ts)
 const devs = [1, 2].map((i) => ({ nome: 'Dev ' + i, documento: '000.000.000-0' + i }));
 const map = placeholders({ credor: { nome: 'COBRASQ' }, devedores: devs, acordo: { total: '100,00', parcelas: '1' } });
-assert.strictEqual(map.vistosPageCss, vistosPageCss(2));
-console.log('  ok   placeholders().vistosPageCss acompanha dados.devedores');
+assert.deepStrictEqual(vistosAncoras({ devedores: devs }), ['<<vistodev1>>', '<<vistodev2>>', '<<vistocredor>>']);
+assert.ok(/@bottom-left\{ content:"<<vistodev1>> <<vistodev2>>"/.test(map.vistosPageCss));
+assert.ok(/@bottom-right\{ content:"<<vistocredor>>"/.test(map.vistosPageCss));
+console.log('  ok   placeholders(): 2 devedores + credor');
 
-console.log('\nF-36 ok — visto por página: 1 âncora por devedor, 2 por caixa, Arial, teto 8.');
+const mapJ = placeholders({ credor: { nome: 'COBRASQ' }, devedores: devs.concat([{ nome: 'Dev 3' }]),
+  advogados: [{ nome: 'Adv' }, null, { nome: '' }], acordo: { total: '100,00', parcelas: '1' } });
+assert.ok(/@bottom-right\{ content:"<<vistodev3>> <<vistocredor>>"/.test(mapJ.vistosPageCss));
+assert.ok(/@top-left\{ content:"<<vistoadv2>>"/.test(mapJ.vistosPageCss));
+assert.strictEqual(conta(mapJ.vistosPageCss, /<<vistoadv3>>/g), 0, 'advogado sem nome não assina nem rubrica');
+console.log('  ok   3 devedores + credor + advogado → advogado em @top-left, <<vistoadv2>>');
+
+// lista com mais de 8 âncoras: corta no teto, mantém a ordem
+const muitos = Array.from({ length: 8 }, (_, i) => ({ nome: 'D' + i }));
+const c8 = vistosPageCss(vistosAncoras({ devedores: muitos, advogados: [{ nome: 'A' }] }));
+assert.strictEqual(conta(c8, /<<visto\w+>>/g), 8);
+assert.strictEqual(conta(c8, /<<vistocredor>>|<<vistoadv2>>/g), 0);
+console.log('  ok   8 devedores → credor e advogado ficam sem visto (teto 8)');
+
+console.log('\nF-36 ok — visto por página: devedores, credor e advogados, 2 por caixa, Arial, teto 8.');

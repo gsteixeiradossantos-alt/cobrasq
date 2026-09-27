@@ -64,6 +64,8 @@ Deno.serve(async (req) => {
   for (const ac of acordos || []) {
     const meta = (ac.metadata && typeof ac.metadata === 'object') ? ac.metadata as Record<string, unknown> : {};
     if (meta[ORIGEM]) continue;
+    // Devedores já assinaram; falta só o credor (zapsign-webhook, 26/09/2026).
+    if (meta.devedores_assinaram_em) continue;
 
     const horas = horasDesde((ac as any).zapsign_evento_em || (ac as any).created_at);
     if (horas == null || horas < LIMIAR_HORAS || horas >= TETO_HORAS) continue;

@@ -229,18 +229,38 @@
   // inferior dos templates é de 34mm justamente para o visto (≤28mm) não invadir o texto.
   // Mesma regra da âncora de assinatura: Arial (TrueType → trecho único no PDF), 3pt,
   // cinza-claro, letter-spacing 0. Não trocar por fonte via data:.
+  // Aceita o nº de devedores (só <<vistodevN>>, uso antigo) ou a lista pronta de
+  // âncoras (vistosAncoras: devedores, credor e advogados — 26/09/2026).
   function vistosPageCss(n) {
-    n = Math.min(Math.max(parseInt(n, 10) || 0, 0), 8);
-    if (!n) return "";
+    let ancs;
+    if (Array.isArray(n)) ancs = n.filter(Boolean);
+    else {
+      const k = Math.max(parseInt(n, 10) || 0, 0);
+      ancs = [];
+      for (let i = 1; i <= k; i++) ancs.push("<<vistodev" + i + ">>");
+    }
+    ancs = ancs.slice(0, 8);
+    if (!ancs.length) return "";
     const caixas = ["bottom-left", "bottom-right", "top-left", "top-right"];
     const est = "font-family:Arial,Helvetica,sans-serif; font-size:3pt; color:#e6e6e3; letter-spacing:0; word-spacing:30mm; white-space:nowrap; text-align:left; vertical-align:bottom; padding-bottom:2mm;";
     let css = "";
-    for (let i = 0; i < n; i += 2) {
-      const anc = ["<<vistodev" + (i + 1) + ">>"];
-      if (i + 1 < n) anc.push("<<vistodev" + (i + 2) + ">>");
-      css += "@" + caixas[i / 2] + "{ content:\"" + anc.join(" ") + "\"; " + est + " }\n";
+    for (let i = 0; i < ancs.length; i += 2) {
+      css += "@" + caixas[i / 2] + "{ content:\"" + ancs.slice(i, i + 2).join(" ") + "\"; " + est + " }\n";
     }
     return "@page{\n" + css + "}";
+  }
+
+  // Quem rubrica todas as páginas do acordo (Gustavo, 26/09/2026): cada devedor, o
+  // credor (assina em <<assadv>>; COBRASQ ou o credor representado por procuração) e
+  // cada advogado do executado. A ordem é a mesma dos signatários em
+  // gerar-acordo-termo/index.ts; com mais de 8, os últimos ficam sem visto.
+  function vistosAncoras(dados) {
+    const devs = (dados.devedores && dados.devedores.length) ? dados.devedores : (dados.devedor ? [dados.devedor] : []);
+    const advs = (Array.isArray(dados.advogados) ? dados.advogados : []).filter(function (a) { return a && a.nome; });
+    const ancs = devs.map(function (_, i) { return "<<vistodev" + (i + 1) + ">>"; });
+    ancs.push("<<vistocredor>>");
+    advs.forEach(function (_, i) { ancs.push("<<vistoadv" + (i + 2) + ">>"); });
+    return ancs;
   }
 
   // Assinaturas: um bloco por devedor, com a âncora <<assdevN>> (1-based).
@@ -321,7 +341,7 @@
       credorQualificacao: qualifCredor(cr),
       devedoresPreambulo: preambuloDevedores(devs),
       assinaturasDevedores: assinaturasDevedores(devs),
-      vistosPageCss: vistosPageCss(devs.length),
+      vistosPageCss: vistosPageCss(vistosAncoras(dados)),
       valorDivida: valorCompleto(ac.total),
       fraseReconhecimentoDivida: fraseReconhecimentoDivida(dados, "extrajudicial"),
       frasePagamento: frasePagamento(ac),
@@ -715,7 +735,7 @@
     extInt, reaisExt, valorCompleto, pctExt, dataExtenso, estadoFrase,
     qualifDevedor, qualifCredor, frasePagamento, fraseEntregaBoletos, placeholders,
     foroDe, comarcaDaQualificacao,
-    preambuloDevedores, assinaturasDevedores, generoDevedorLabel, papelDevedor, vistosPageCss,
+    preambuloDevedores, assinaturasDevedores, generoDevedorLabel, papelDevedor, vistosPageCss, vistosAncoras,
     preencher, carregarTemplate, montarTermoExtrajudicial,
     credorEhCobrasq, timbreDe, carregarTimbreTA, aplicarTimbreTA,
     ritoJudicial, papeisRito,

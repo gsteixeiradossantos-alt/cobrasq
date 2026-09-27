@@ -646,6 +646,9 @@ async function processarLembretesZapSign({ dry } = {}) {
     // "Início da etapa" = quando o documento entrou em assinatura. Preferimos
     // zapsign_evento_em (carimbo do webhook ao virar enviado/visualizado); fallback
     // pro created_at do acordo. Espelha o tempoNaEtapa do CRM da forma mais fiel possível.
+    // Devedores já assinaram e falta só o credor (zapsign-webhook, 26/09/2026): nada
+    // de cobrar o devedor nem de dar o acordo por abandonado.
+    if (meta.devedores_assinaram_em) { out.pulados++; continue; }
     const horas = horasDesde(ac.zapsign_evento_em || ac.created_at);
     if (horas == null) { out.pulados++; continue; }
 

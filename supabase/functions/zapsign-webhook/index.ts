@@ -59,7 +59,12 @@ function mapEvento(evt: string, docStatus?: string): string {
   // boletos e concluiria o caso antes de todos assinarem). Status próprio que NÃO
   // dispara emissão nem conclusão (o fluxo só age em novoStatus === 'assinado').
   if (e.includes('partial')) return 'assinado_parcial';
-  if (e.includes('signed') && !e.includes('refused')) return 'assinado';
+  // O ZapSign manda 'doc_signed' a CADA assinatura; o documento só está assinado
+  // quando o status do doc vira 'signed' (com alguém faltando, vem 'pending' — doc
+  // oficial "Doc signed", conferido em 26/09/2026). Antes daqui, a 1ª assinatura já
+  // valia como documento assinado: no doc d5ef4837 (14/08/2026) os boletos saíram e o
+  // caso foi concluído às 14h40, e o 2º signatário só assinou às 15h55.
+  if (e.includes('signed') && !e.includes('refused')) return (s && s !== 'signed') ? 'assinado_parcial' : 'assinado';
   if (e.includes('refused')) return 'recusado';
   if (e.includes('expired')) return 'expirado';
   if (e.includes('canceled') || e.includes('cancelled')) return 'cancelado';
@@ -161,6 +166,83 @@ async function salvarClienteAssinadoNaPasta(
   } catch (e) {
     return { salvo: false, detalhe: String((e as Error)?.message || e) };
   }
+}
+
+// === Todos os devedores assinaram (Gustavo, 26/09/2026) =======================
+// Os boletos saem quando o ÚLTIMO devedor assina — sem esperar advogado nem credor —
+// e o link de assinatura do credor vai por WhatsApp só para o pessoal do Gustavo (no
+// ZapSign o telefone do credor continua o da COBRASQ). Os signatários levam external_id
+// (dev1, dev2…, adv2…, credor) desde gerar-acordo-termo de 26/09/2026; documento antigo,
+// sem essas etiquetas, segue o caminho de sempre (só no documento todo assinado).
+// A lista vem do próprio ZapSign (detalhe do documento), não do payload: se o payload
+// trouxesse só quem acabou de assinar, "todos assinaram" daria verdadeiro cedo demais.
+const TEL_LINK_CREDOR = '5546999223332';
+
+type SignerZap = { external_id?: string; status?: string; signed_at?: string | null; token?: string; sign_url?: string; name?: string };
+
+async function signersDoZapSign(docId: string): Promise<SignerZap[] | null> {
+  const tk = Deno.env.get('ZAPSIGN_TOKEN');
+  if (!tk) return null;
+  try {
+    const r = await fetch('https://api.zapsign.com.br/api/v1/docs/' + encodeURIComponent(docId) + '/', {
+      headers: { 'Authorization': 'Bearer ' + tk },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!r.ok) return null;
+    const j = await r.json().catch(() => null);
+    return j && Array.isArray(j.signers) ? j.signers as SignerZap[] : null;
+  } catch (_) { return null; }
+}
+
+const assinou = (s: SignerZap) => String(s?.status || '').toLowerCase() === 'signed' || !!s?.signed_at;
+
+function devedoresTodosAssinaram(signers: SignerZap[] | null): boolean {
+  const devs = (signers || []).filter((s) => /^dev\d+$/.test(String(s?.external_id || '')));
+  return devs.length > 0 && devs.every(assinou);
+}
+
+async function enviarLinkCredor(
+  sb: ReturnType<typeof createClient>,
+  acordo: { id: string; devedor_id: string; cobranca_id?: string | null },
+  cobrancaId: string | null,
+  docId: string,
+  signers: SignerZap[] | null,
+): Promise<Record<string, unknown>> {
+  const cr = (signers || []).find((s) => String(s?.external_id || '') === 'credor');
+  if (!cr) return { enviado: false, motivo: 'documento sem signatário credor' };
+  if (assinou(cr)) return { enviado: false, motivo: 'credor já assinou' };
+  // Uma vez por documento: os avisos seguintes (advogado, credor) não reenviam.
+  const { data: ja } = await sb.from('devedor_eventos').select('id')
+    .eq('tipo', 'zapsign_link_credor').eq('payload->>doc_id', docId).limit(1);
+  if (ja && ja.length) return { enviado: false, motivo: 'link já enviado' };
+  const inst = Deno.env.get('ZAPI_INSTANCE'), tok = Deno.env.get('ZAPI_TOKEN'), cli = Deno.env.get('ZAPI_CLIENT_TOKEN');
+  if (!inst || !tok) return { enviado: false, motivo: 'Z-API não configurada' };
+  const link = cr.sign_url || ('https://app.zapsign.com.br/verificar/' + cr.token);
+  const { data: dv } = await sb.from('devedores').select('nome').eq('id', acordo.devedor_id).limit(1);
+  const nomeCaso = (dv && dv[0] && (dv[0] as { nome?: string }).nome) || '';
+  const message = 'Todos os devedores assinaram o acordo' + (nomeCaso ? ' de ' + nomeCaso : '') +
+    '. Falta a sua assinatura (' + (cr.name || 'credor') + '):\n' + link;
+  let resp: unknown = null, ok = false;
+  try {
+    const h: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (cli) h['Client-Token'] = cli;
+    const r = await fetch('https://api.z-api.io/instances/' + inst + '/token/' + tok + '/send-text', {
+      method: 'POST', headers: h, body: JSON.stringify({ phone: TEL_LINK_CREDOR, message }),
+      signal: AbortSignal.timeout(15000),
+    });
+    resp = await r.json().catch(() => ({ status: r.status }));
+    ok = r.ok && !!(resp as { messageId?: string; zaapId?: string })?.messageId;
+  } catch (e) { resp = { error: String((e as Error)?.message || e) }; }
+  if (ok) {
+    await sb.from('devedor_eventos').insert({
+      devedor_id: acordo.devedor_id,
+      cobranca_id: acordo.cobranca_id || cobrancaId || null,
+      tipo: 'zapsign_link_credor',
+      autor_nome: 'Automação (ZapSign)',
+      payload: { acao: '🔗 Todos os devedores assinaram — link do credor enviado ao WhatsApp do Gustavo.', doc_id: docId },
+    });
+  }
+  return { enviado: ok, resposta: resp };
 }
 
 // Casa o doc_id na tabela cliente_documentos (documentos de cliente, não de devedor).
@@ -479,7 +561,8 @@ Deno.serve(async (req) => {
   }
   if (!acordos || acordos.length === 0) {
     // Não é acordo de devedor — pode ser documento de CLIENTE (cessão/procuração/etc).
-    const cli = await tratarDocClienteAssinado(sb, docId, novoStatus, signedUrl, dataAssinatura);
+    // Cessão etc. (cedente + COBRASQ): assinatura parcial continua 'enviado'.
+    const cli = await tratarDocClienteAssinado(sb, docId, novoStatus === 'assinado_parcial' ? 'enviado' : novoStatus, signedUrl, dataAssinatura);
     if (cli.encontrado) {
       return new Response(JSON.stringify({ ok: true, tipo: 'cliente', status: novoStatus, doc_id: docId, arquivo: cli.arquivo }), {
         status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -548,8 +631,24 @@ Deno.serve(async (req) => {
   // /api/emitir-acordo (lá mora a chave Asaas). Best-effort: nunca derruba o webhook
   // — o status do acordo já foi salvo. A trava AUTO_EMIT_ACORDO=on (no servidor
   // Vercel) evita duplicar com o n8n enquanto o fluxo legado não é desligado.
+  // Com os signatários etiquetados, a emissão sai quando o último DEVEDOR assina (os
+  // avisos seguintes — advogado, credor — batem no "já emitido" do endpoint). No
+  // documento todo assinado, emite como sempre (é idempotente).
+  const signersZap = precisaCobranca ? await signersDoZapSign(docId) : null;
+  const devsOk = devedoresTodosAssinaram(signersZap);
+  // Marca no acordo que os devedores já assinaram: o documento segue 'enviado' até o
+  // credor assinar, e sem isto o lembrete de 30min e a régua 24h/48h/72h cobrariam do
+  // devedor uma assinatura que ele já fez (e aos 72h dariam o acordo por abandonado).
+  // Gravado ANTES da emissão, que relê o metadata e grava por cima dele.
+  if (devsOk) {
+    const { data: acMeta } = await sb.from('acordos').select('metadata').eq('id', acordo.id).limit(1);
+    const meta0 = (acMeta && acMeta[0] && (acMeta[0] as { metadata?: Record<string, unknown> }).metadata) || {};
+    if (!meta0.devedores_assinaram_em) {
+      await sb.from('acordos').update({ metadata: { ...meta0, devedores_assinaram_em: new Date().toISOString() } }).eq('id', acordo.id);
+    }
+  }
   let emissao: unknown = null;
-  if (novoStatus === 'assinado') {
+  if (novoStatus === 'assinado' || devsOk) {
     const base = (Deno.env.get('APP_BASE_URL') || '').replace(/\/+$/, '');
     const emitSecret = Deno.env.get('EMIT_ACORDO_SECRET');
     if (base && emitSecret) {
@@ -573,6 +672,13 @@ Deno.serve(async (req) => {
   // Conclusão automática do caso no CRM quando os boletos saíram (pedido do escritório:
   // após assinatura → documento → boletos, dar o caso por concluído). Só conclui com
   // emissão OK (boletos emitidos agora OU já emitidos antes); gate/erro NÃO concluem.
+  // Link do credor para o WhatsApp do Gustavo, uma vez, assim que os devedores fecharem.
+  let linkCredor: Record<string, unknown> | null = null;
+  if (devsOk && novoStatus !== 'assinado') {
+    linkCredor = await enviarLinkCredor(sb, acordo, cobrancaIdCRM, docId, signersZap);
+    if (!linkCredor.enviado) console.warn('[zapsign-webhook] link do credor: ' + JSON.stringify(linkCredor));
+  }
+
   let conclusao: { concluido: boolean; detalhe: string } | null = null;
   if (novoStatus === 'assinado') {
     const em = emissao as { ok?: boolean; skipped?: string; parcelas?: number; total?: number; invoice_url?: string } | null;
@@ -601,6 +707,7 @@ Deno.serve(async (req) => {
       arquivo_pasta: arquivoPasta,
       emissao,
       conclusao,
+      link_credor: linkCredor,
       cadastro
     }
   });

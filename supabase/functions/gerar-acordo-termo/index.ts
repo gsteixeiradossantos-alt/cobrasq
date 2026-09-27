@@ -52,6 +52,17 @@ const telsCompartilhados = (pessoas: any[]) => {
   for (const p of pessoas) { const t = telNorm(p?.telefone); if (t) cont[t] = (cont[t] || 0) + 1; }
   return new Set(Object.keys(cont).filter((k) => cont[k] > 1));
 };
+// Credor como signatário (Gustavo, 26/09/2026): assina em <<assadv>> e rubrica todas
+// as páginas. Sendo a COBRASQ, assina a COBRASQ; sendo outro credor, quem assina é o
+// Gustavo por procuração, mas o nome no ZapSign é o do credor. O telefone no ZapSign é
+// sempre o da COBRASQ; o link chega por WhatsApp no pessoal dele, pelo zapsign-webhook,
+// quando todos os devedores tiverem assinado — o ZapSign não manda nada sozinho.
+const CREDOR_TEL = "46988226533";
+const CREDOR_EMAIL = "ccobrasq@gmail.com";
+const nomeSignatarioCredor = (dados: any) => {
+  const nome = String(dados?.credor?.nome || "").trim();
+  return (!nome || /cobrasq/i.test(nome)) ? "COBRASQ Recuperadora de Crédito e Cobrança Ltda." : nome;
+};
 const emailOk = (s: unknown) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s ?? "").trim());
 const isoToBR = (iso: unknown) => {
   const m = String(iso ?? "").match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -74,7 +85,7 @@ Deno.serve(async (req) => {
     {
       const _devs = (Array.isArray(dados.devedores) && dados.devedores.length) ? dados.devedores : [dados.devedor];
       const _advs = (Array.isArray(dados.advogados) ? dados.advogados : []).filter((a: any) => a && a.nome);
-      const rep = telsRepetidos([..._devs, ..._advs]);
+      const rep = telsRepetidos([..._devs, ..._advs, { nome: nomeSignatarioCredor(dados), telefone: CREDOR_TEL }]);
       if (rep.length) {
         const comp = telsCompartilhados([..._devs, ..._advs]);
         const envolvidos = [..._devs, ..._advs].filter((p: any) => comp.has(telNorm(p?.telefone)));
@@ -111,9 +122,8 @@ Deno.serve(async (req) => {
       ? dados.devedores : (dados.devedor ? [dados.devedor] : []);
     const dev = devs[0] || {};
     // Advogado(s) da parte executada (acordo judicial): signatários opcionais que
-    // assinam nas âncoras <<assadv2>>, <<assadv3>>… (a <<assadv>> é da autora, que
-    // não assina por aqui). Sem advogado informado, o comportamento é idêntico ao
-    // anterior — array vazio, nada muda.
+    // assinam nas âncoras <<assadv2>>, <<assadv3>>… e rubricam em <<vistoadv2>>…
+    // A <<assadv>> é do credor, que assina por último (ver CREDOR_TEL).
     const advs = (Array.isArray(dados.advogados) ? dados.advogados : []).filter((a: any) => a && a.nome);
     const tipoAcordoLabel = dados.tipo === "judicial" ? "Acordo Judicial" : "Acordo Extrajudicial";
     // Título do documento no ZapSign: "<devedores> | <tipo> | Proc. n. <nº> | <cedente>"
@@ -144,6 +154,9 @@ Deno.serve(async (req) => {
       // automaticamente (senão o devedor receberia duas mensagens).
       signers: devs.map((d: any, i: number) => ({
         name: d.nome || "",
+        // external_id do signatário: o zapsign-webhook usa para saber quando TODOS os
+        // devedores assinaram (boletos + link do credor) sem esperar credor/advogado.
+        external_id: "dev" + (i + 1),
         email: null,
         auth_mode: "assinaturaTela",
         ...(d.telCompartilhado ? { email: String(d.email).trim(), lock_email: true, auth_mode: "assinaturaTela-tokenEmail" } : {}),
@@ -167,6 +180,7 @@ Deno.serve(async (req) => {
         rubrica_placement: "<<vistodev" + (i + 1) + ">>",
       })).concat(advs.map((a: any, i: number) => ({
         name: a.nome || "",
+        external_id: "adv" + (i + 2),
         email: null,
         auth_mode: "assinaturaTela",
         send_automatic_email: false,
@@ -180,7 +194,27 @@ Deno.serve(async (req) => {
         selfie_validation_type: "none",
         ...(a.telCompartilhado ? { email: String(a.email).trim(), lock_email: true, auth_mode: "assinaturaTela-tokenEmail", require_selfie_photo: true, require_document_photo: true } : {}),
         signature_placement: "<<assadv" + (i + 2) + ">>",
-      }))),
+        // Rubrica em todas as páginas também para o advogado (Gustavo, 26/09/2026).
+        rubrica_placement: "<<vistoadv" + (i + 2) + ">>",
+      }))).concat([{
+        name: nomeSignatarioCredor(dados),
+        external_id: "credor",
+        email: CREDOR_EMAIL,
+        auth_mode: "assinaturaTela",
+        send_automatic_email: false,
+        send_automatic_whatsapp: false,
+        phone_country: "55",
+        phone_number: CREDOR_TEL,
+        lock_name: true,
+        lock_email: true,
+        lock_phone: true,
+        require_cpf: false,
+        require_selfie_photo: false,
+        require_document_photo: false,
+        selfie_validation_type: "none",
+        signature_placement: "<<assadv>>",
+        rubrica_placement: "<<vistocredor>>",
+      }]),
       lang: "pt-br",
       disable_signer_emails: false,
       folder_path: "/",
@@ -204,7 +238,8 @@ Deno.serve(async (req) => {
     const token = zap.token || (zap.doc && zap.doc.token);
     const linkDe = (s: any) => (s && (s.sign_url || s.signing_link || s.signUrl || s.link)) || null;
     // Casa cada signatário (devedores + advogados, na MESMA ordem enviada ao ZapSign)
-    // com o signer devolvido, para que o link volte também para o advogado.
+    // com o signer devolvido, para que o link volte também para o advogado. O credor
+    // vem por último e fica de fora: o link dele sai pelo zapsign-webhook.
     const allSigners = devs.concat(advs);
     const mapSigners = (z: any) => {
       const arr = (z && z.signers) || [];
