@@ -698,7 +698,9 @@ Deno.serve(async (req) => {
       let caso: any = null;
       const casoId = c.caso_id || at?.caso_id || null;
       if (casoId) {
-        const r = await sb.from('casos').select('*').eq('id', casoId).maybeSingle();
+        // Desde 24/09 a view `casos` mostra arquivado/rascunho/fora_crm (com flag);
+        // a Bia continua ignorando esses casos, como antes.
+        const r = await sb.from('casos').select('*').eq('id', casoId).eq('arquivado', false).eq('is_draft', false).eq('fora_crm', false).maybeSingle();
         caso = r.data || null;
       }
 
@@ -1002,7 +1004,7 @@ Deno.serve(async (req) => {
 
         if (tipoPedido === 'panorama') {
           const hojeISOc = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-          const { data: casosCredor } = await sb.from('casos').select('valor_atual, encerrado, divida_vencimento').eq('cliente_id', credor.id);
+          const { data: casosCredor } = await sb.from('casos').select('valor_atual, encerrado, divida_vencimento').eq('cliente_id', credor.id).eq('arquivado', false).eq('is_draft', false).eq('fora_crm', false);
           const lista = casosCredor || [];
           const ativos = lista.filter((c: any) => !c.encerrado);
           const atrasados = ativos.filter((c: any) => c.divida_vencimento && String(c.divida_vencimento).slice(0, 10) < hojeISOc);
@@ -1023,7 +1025,7 @@ Deno.serve(async (req) => {
           await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, estado: 'bot', intencao: 'credor_especifico', turnos: novosTurnos, ultima_resposta_em: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
           respondidas++; continue;
         }
-        const { data: casosMatch } = await sb.from('casos').select('devedor, valor_orig, valor_atual, divida_vencimento, passo_atual, encerrado').eq('cliente_id', credor.id).ilike('devedor', `%${nomeBusca}%`).limit(5);
+        const { data: casosMatch } = await sb.from('casos').select('devedor, valor_orig, valor_atual, divida_vencimento, passo_atual, encerrado').eq('cliente_id', credor.id).eq('arquivado', false).eq('is_draft', false).eq('fora_crm', false).ilike('devedor', `%${nomeBusca}%`).limit(5);
         let msgCliente: string; let contextoHumano: string;
         if (casosMatch && casosMatch.length) {
           msgCliente = `Encontrei o caso do(a) ${nomeBusca} aqui na sua carteira. Vou passar pro setor responsável junto com os detalhes, e eles te retornam em breve.`;

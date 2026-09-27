@@ -111,7 +111,8 @@ Deno.serve(async (req) => {
   // F-06: o caso é lido com o CLIENT DO USUÁRIO (respeita RLS). Antes o
   // service-role buscava qualquer caso por id sem checar dono — bastava passar
   // o devedor_id de outro tenant para gerar uma petição com a PII alheia.
-  const { data: caso, error: errCaso } = await userClient.from('casos').select('*').eq('id', devedor_id).maybeSingle();
+  // Arquivado/rascunho/fora_crm aparecem na view desde 24/09, mas continuam fora da IA.
+  const { data: caso, error: errCaso } = await userClient.from('casos').select('*').eq('id', devedor_id).eq('arquivado', false).eq('is_draft', false).eq('fora_crm', false).maybeSingle();
   if (errCaso || !caso) {
     return new Response(JSON.stringify({ error: 'caso não encontrado ou sem acesso' }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   }

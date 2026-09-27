@@ -116,7 +116,8 @@ Deno.serve(async (req) => {
   // 403, permitindo sugerir resposta à última mensagem do cliente.
   let caso: any = null;
   if (caso_id) {
-    const r = await userClient.from('casos').select('*').eq('id', caso_id).maybeSingle();
+    // Arquivado/rascunho/fora_crm aparecem na view desde 24/09, mas continuam fora da IA.
+    const r = await userClient.from('casos').select('*').eq('id', caso_id).eq('arquivado', false).eq('is_draft', false).eq('fora_crm', false).maybeSingle();
     if (r.error || !r.data) {
       if (intencao !== 'responder') {
         return new Response(JSON.stringify({ error: 'caso não encontrado ou sem acesso' }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
