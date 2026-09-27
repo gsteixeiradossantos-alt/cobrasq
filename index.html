@@ -23390,10 +23390,48 @@ async function iniciarInvestigacaoPatrimonial(devedorId){
     showToast(/does not exist|schema cache/i.test(msg)?'Módulo ainda não instalado no Supabase. Aplique a migração 20260916_01 antes de usar.':('Não foi possível iniciar: '+msg),'danger');
   }
 }
+// DJEN para investigação avulsa (sem devedor, logo sem Vigia de ações). O DJEN
+// bloqueia o Supabase mas aceita o navegador (CORS aberto, conferido em
+// 26/09/2026): o painel busca pelo nome, histórico completo, e manda ao worker só
+// as comunicações cujo destinatário contém o nome. O worker aplica o filtro exato
+// do Vigia (supabase/functions/vigia-acoes/logica.mjs).
+async function _invDjenPeloNome(nomeCadastro){
+  const norm=v=>String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/&/g,' E ').replace(/[^A-Z0-9 ]+/g,' ').replace(/\s+/g,' ').trim();
+  const nome=String(nomeCadastro||'').split('|')[0].replace(/\([^)]*\)/g,' ').replace(/^[\s\d.\-\/]+(?=[A-Za-zÀ-ú])/,'').replace(/[\s\d.\-\/]+$/,'').replace(/\s+/g,' ').trim();
+  if(norm(nome).split(' ').filter(w=>w.length>1).length<2) return {erro:'nome curto demais para buscar no DJEN'};
+  const alvo=norm(nome), itens=[]; let total=0, lidos=0;
+  try{
+    for(let pagina=1;pagina<=5;pagina++){
+      const u=`https://comunicaapi.pje.jus.br/api/v1/comunicacao?nomeParte=${encodeURIComponent(nome)}&itensPorPagina=100&pagina=${pagina}`;
+      let r=await fetch(u,{signal:AbortSignal.timeout(20000)});
+      if(r.status===429){ await new Promise(ok=>setTimeout(ok,3000)); r=await fetch(u,{signal:AbortSignal.timeout(20000)}); }
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      const j=await r.json(); const lote=Array.isArray(j&&j.items)?j.items:[];
+      total=Number((j&&j.count)||0); lidos+=lote.length;
+      for(const it of lote){
+        const dests=Array.isArray(it&&it.destinatarios)?it.destinatarios:[];
+        if(!dests.some(d=>{ const n=norm(d&&d.nome); return n===alvo||n.startsWith(alvo+' ')||n.endsWith(' POR '+alvo); })) continue;
+        itens.push({id:it.id,numero_processo:it.numero_processo,numeroprocessocommascara:it.numeroprocessocommascara,
+          data_disponibilizacao:it.data_disponibilizacao,datadisponibilizacao:it.datadisponibilizacao,
+          siglaTribunal:it.siglaTribunal,nomeOrgao:it.nomeOrgao,nomeClasse:it.nomeClasse,link:it.link,
+          texto:String(it.texto||'').slice(0,20000),destinatarios:dests.map(d=>({nome:d&&d.nome,polo:d&&d.polo})),
+          destinatarioadvogados:(Array.isArray(it.destinatarioadvogados)?it.destinatarioadvogados:[]).map(x=>({advogado:{nome:x&&x.advogado&&x.advogado.nome,numero_oab:x&&x.advogado&&x.advogado.numero_oab,uf_oab:x&&x.advogado&&x.advogado.uf_oab}}))});
+      }
+      if(!lote.length||lidos>=total||lote.length<100) break;
+    }
+  }catch(e){ if(!lidos) return {erro:(e&&e.message)||String(e)}; }
+  return {nome,itens:itens.slice(0,300),total,truncado:lidos<total};
+}
 async function processarInvestigacaoPatrimonial(investigacaoId, silencioso){
   const supa=getSupabase(); if(!supa) return;
   try{
-    const {data,error}=await supa.functions.invoke('investigacao-patrimonial-worker',{body:{investigacao_id:investigacaoId}});
+    const body={investigacao_id:investigacaoId};
+    const {data:inv}=await supa.from('investigacoes_patrimoniais').select('devedor_id').eq('id',investigacaoId).maybeSingle();
+    if(inv&&!inv.devedor_id){
+      const {data:raiz}=await supa.from('investigacao_entidades').select('nome').eq('investigacao_id',investigacaoId).eq('profundidade',0).limit(1).maybeSingle();
+      if(raiz&&raiz.nome) body.djen=await _invDjenPeloNome(raiz.nome);
+    }
+    const {data,error}=await supa.functions.invoke('investigacao-patrimonial-worker',{body});
     if(error) throw error;
     if(!silencioso) showToast(data?.mensagem||'Fontes públicas processadas.','success');
     await _invRerender();
@@ -23492,7 +23530,8 @@ async function baixarRelatorioInvestigacao(investigacaoId, abrir){
           falhou('pncp')?(fOk.includes('pncp')?'PNCP ficou sem resposta em parte das buscas: resultado incompleto (ver seção 6)':'PNCP não respondeu: resultado desconhecido'):'nada no PNCP'].join('; ')
       :'não verificado';
     const avulsa=!inv.devedor_id;
-    const cobertura=avulsa?'Não feita: investigação sem devedor cadastrado, então o Vigia de ações (DJEN) não foi consultado.':res.cobertura_processual;
+    const djenOk=fOk.includes('djen');
+    const cobertura=avulsa&&!djenOk?'Não feita: investigação sem devedor cadastrado, então o DJEN não foi consultado.':res.cobertura_processual;
     const pl=(n,um,varios)=>`${n} ${n===1?um:varios}`;
     let teiaHtml='';
     if((ents||[]).length){
@@ -23575,7 +23614,7 @@ async function baixarRelatorioInvestigacao(investigacaoId, abrir){
       <h3>Pessoas (${pes.length})</h3>
       ${tab(['Pessoa','Documento','Qualificação','Ligação','Status'],pes.map(e=>tr([_invEsc(e.nome)+selos(e),doc(e.documento),_invEsc((e.dados||{}).qualificacao),_invEsc(lig(e)),_invEsc(e.status_verificacao)])),'Nenhuma pessoa vinculada encontrada.')}
       <h3>Processos (${pro.length})</h3>
-      ${tab(['Número','Tribunal','Polo do devedor','Classe','Status'],pro.map(e=>{ const d=e.dados||{}; return tr([_invEsc(d.numero||e.nome)+selos(e),_invEsc(d.tribunal),d.polo==='A'?'autor':d.polo==='P'?'réu':'—',_invEsc(d.classe),_invEsc(e.status_verificacao)]); }),avulsa?'Não pesquisado: investigação sem devedor cadastrado.':'Nenhum processo encontrado.')}
+      ${tab(['Número','Tribunal','Polo do devedor','Classe','Status'],pro.map(e=>{ const d=e.dados||{}; return tr([_invEsc(d.numero||e.nome)+selos(e),_invEsc(d.tribunal),d.polo==='A'?'autor':d.polo==='P'?'réu':'—',_invEsc(d.classe),_invEsc(e.status_verificacao)]); }),avulsa&&!djenOk?'Não pesquisado: DJEN não consultado (reprocessar pelo painel).':'Nenhum processo encontrado no DJEN.')}
       <h3>Contratos e vínculos públicos (${pub.length})</h3>
       ${tab(['Fonte','Achado','Consultado em'],pub.map(x=>tr([_invEsc(_invFonteLbl(x.fonte_codigo)),`<b>${_invEsc(x.titulo||'')}</b>${x.trecho?'<br>'+_invEsc(_invTrechoFmt(x.trecho)):''}${_invLink(x.url)}`,_invEsc(_invData(x.obtido_em))])),pubIncompleto?'Nada encontrado nas buscas que responderam; parte das consultas ficou sem resposta (seção 6).':'Nada encontrado no Portal da Transparência e no PNCP.')}
       <div class="kp"><h2><span class="n">5</span>Sinais de alerta</h2>
