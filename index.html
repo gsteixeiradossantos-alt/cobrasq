@@ -23422,6 +23422,29 @@ async function _invDjenPeloNome(nomeCadastro){
   }catch(e){ if(!lidos) return {erro:(e&&e.message)||String(e)}; }
   return {nome,itens:itens.slice(0,300),total,truncado:lidos<total};
 }
+// Texto das publicações dos processos que o Vigia achou para o devedor: o painel
+// busca cada processo pelo número no DJEN (CORS aberto, conferido em 26/09/2026)
+// e manda ao worker, que procura os sinais de bem. Processo que falhar aqui o
+// worker tenta por São Paulo e, por fim, pelo último trecho guardado pelo Vigia.
+async function _invDjenTextosVigia(supa, devedorId){
+  const {data:rows}=await supa.from('vigia_acoes').select('numero_processo,digitos').eq('devedor_id',devedorId).neq('status','descartado').order('ultima_data',{ascending:false}).limit(30);
+  const nums=[...new Set((rows||[]).map(r=>String(r.digitos||r.numero_processo||'').replace(/\D/g,'')).filter(d=>d.length===20&&!/^0+$/.test(d)))];
+  const porProcesso={}; let orcamento=4000000;
+  for(const d of nums){
+    try{
+      const u=`https://comunicaapi.pje.jus.br/api/v1/comunicacao?numeroProcesso=${d}&itensPorPagina=100&pagina=1`;
+      let r=await fetch(u,{signal:AbortSignal.timeout(20000)});
+      if(r.status===429){ await new Promise(ok=>setTimeout(ok,3000)); r=await fetch(u,{signal:AbortSignal.timeout(20000)}); }
+      if(!r.ok) continue;
+      const j=await r.json(); const lote=Array.isArray(j&&j.items)?j.items:[];
+      const itens=lote.map(it=>({texto:String(it.texto||'').slice(0,30000),data_disponibilizacao:it.data_disponibilizacao,tipoComunicacao:it.tipoComunicacao,tipoDocumento:it.tipoDocumento,link:it.link}));
+      const tam=itens.reduce((s,i)=>s+i.texto.length,0);
+      if(tam>orcamento) break;
+      orcamento-=tam; porProcesso[d]=itens;
+    }catch(_){}
+  }
+  return {porProcesso};
+}
 async function processarInvestigacaoPatrimonial(investigacaoId, silencioso){
   const supa=getSupabase(); if(!supa) return;
   try{
@@ -23430,6 +23453,8 @@ async function processarInvestigacaoPatrimonial(investigacaoId, silencioso){
     if(inv&&!inv.devedor_id){
       const {data:raiz}=await supa.from('investigacao_entidades').select('nome').eq('investigacao_id',investigacaoId).eq('profundidade',0).limit(1).maybeSingle();
       if(raiz&&raiz.nome) body.djen=await _invDjenPeloNome(raiz.nome);
+    }else if(inv&&inv.devedor_id){
+      try{ body.djen=await _invDjenTextosVigia(supa,inv.devedor_id); }catch(_){}
     }
     const {data,error}=await supa.functions.invoke('investigacao-patrimonial-worker',{body});
     if(error) throw error;
