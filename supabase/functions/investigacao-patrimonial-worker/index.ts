@@ -1,4 +1,6 @@
-// Worker da coleta patrimonial (v5).
+// Worker da coleta patrimonial (v6).
+// v6 (26/09/2026): investigação avulsa (sem devedor) consulta o DJEN pelo nome:
+// o painel busca no navegador e manda as comunicações em body.djen.
 // v5 (26/09/2026): grava a data de abertura (BrasilAPI data_inicio_atividade) em
 // dados.data_abertura de cada empresa enriquecida.
 //
@@ -20,6 +22,9 @@
 // da outra; "fontes concluídas" listava fonte que não chegou a rodar.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+// Filtro do Vigia reaproveitado. Mudou logica.mjs? Republicar também este worker
+// (o CI só republica a pasta que mudou).
+import { agruparAchados, filtrarTruncado } from "../vigia-acoes/logica.mjs";
 
 const sb = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
 const cors = {
@@ -318,42 +323,76 @@ async function pncp(inv: any, raiz: any, achadas: Map<string, Achada>, c: Contad
   return ok ? recebe : null;
 }
 
-// DJEN via Vigia de ações: não consulta o DJEN (ele bloqueia chamadas do
-// Supabase); reaproveita o que o Vigia já gravou em vigia_acoes para o devedor.
-// Polo A (devedor é autor) = crédito a penhorar no rosto dos autos; polo P
-// (réu) = outros credores e rastro de bens. cpf_confere decide confirmada/pista.
-async function vigiaDjen(inv: any, raiz: any, c: Contadores, nc: string[]) {
-  if (!inv.devedor_id) { nc.push('DJEN/Vigia: investigação sem devedor vinculado.'); return; }
+// Um processo do DJEN vira entidade + vínculo + evidência. Polo A (devedor é
+// autor) = crédito a penhorar no rosto dos autos; polo P (réu) = outros credores
+// e rastro de bens. cpf_confere decide confirmada/pista.
+async function gravarProcesso(inv: any, raiz: any, c: Contadores, r: any) {
+  const num = String(r.numero_processo || '').trim();
+  const d = dig(r.digitos || num);
+  if (!d) return;
+  const confirmado = r.cpf_confere === true;
+  const papel = r.polo === 'A' ? 'autor' : r.polo === 'P' ? 'réu' : 'parte (polo não identificado)';
+  const uso = r.polo === 'A' ? 'devedor é autor: possível crédito a penhorar no rosto dos autos'
+    : r.polo === 'P' ? 'devedor é réu: outros credores disputando os mesmos bens e rastro patrimonial nos autos'
+    : 'conferir o polo nos autos';
+  const id = await entidade(inv.id, 'processo', num || d, d, 1, confirmado ? 85 : 55, confirmado ? 'confirmada' : 'pista', {
+    numero: num, tribunal: r.tribunal || null, classe: r.classe || null, orgao: r.orgao || null, polo: r.polo || null,
+    primeira_data: r.primeira_data || null, ultima_data: r.ultima_data || null, fonte: 'djen', vigia_id: r.vigia_id || null, link: r.link || null,
+  });
+  await vinculo(inv.id, raiz.id, id, r.polo === 'A' ? 'autor_em' : r.polo === 'P' ? 'reu_em' : 'parte_em', confirmado ? 85 : 55,
+    confirmado ? 'CPF do devedor conferido na comunicação do DJEN.' : `Encontrado pelo nome${r.nome_encontrado ? ' "' + r.nome_encontrado + '"' : ''}; CPF não conferido: homônimo possível.`);
+  await evidencia(inv.id, id, 'djen', r.polo === 'A' ? 'Processo em que o devedor é autor' : 'Processo com o devedor no polo passivo',
+    `${num} · ${[r.tribunal, r.orgao].filter(Boolean).join(' · ')}${r.classe ? ' · ' + r.classe : ''} · ${papel} · ${r.qtd_comunicacoes || 0} comunicação(ões) de ${r.primeira_data || '?'} a ${r.ultima_data || '?'} · ${uso}${confirmado ? '' : ' · CPF não conferido'}`,
+    r.link || '');
+  if (confirmado) c.confirmadas++; else c.pistas++;
+  if (r.polo === 'A') c.processosAutor++; else c.processosReu++;
+}
+
+// DJEN via Vigia de ações: o Supabase não consulta o DJEN (ele bloqueia essas
+// chamadas); reaproveita o que o Vigia já gravou em vigia_acoes para o devedor.
+// Investigação avulsa (sem devedor) não tem Vigia: o painel consulta o DJEN
+// pelo navegador (CORS aberto) e manda as comunicações em body.djen.
+// Devolve o texto de cobertura processual do relatório.
+async function vigiaDjen(inv: any, raiz: any, djen: any, c: Contadores, nc: string[]): Promise<string> {
+  if (!inv.devedor_id) return await djenDireto(inv, raiz, djen, c, nc);
+  const cobertura = 'Processos vêm só do que o Vigia de ações já achou no DJEN (comunicações publicadas). Ausência de processo no relatório não significa ausência de ação.';
   const { data: rows, error } = await sb.from('vigia_acoes')
     .select('id,numero_processo,digitos,polo,tribunal,classe,orgao,link,primeira_data,ultima_data,qtd_comunicacoes,cpf_confere,nome_encontrado,status')
     .eq('devedor_id', inv.devedor_id).neq('status', 'descartado').order('ultima_data', { ascending: false }).limit(30);
-  if (error) { nc.push('DJEN/Vigia indisponível: ' + error.message); return; }
+  if (error) { nc.push('DJEN/Vigia indisponível: ' + error.message); return cobertura; }
   c.fontes.add('djen');
-  if (!rows?.length) { nc.push('DJEN/Vigia: o Vigia de ações ainda não encontrou (ou não varreu) processo deste devedor.'); return; }
-  for (const r of rows) {
-    const num = String(r.numero_processo || '').trim();
-    const d = dig(r.digitos || num);
-    if (!d) continue;
-    const confirmado = r.cpf_confere === true;
-    const papel = r.polo === 'A' ? 'autor' : r.polo === 'P' ? 'réu' : 'parte (polo não identificado)';
-    const uso = r.polo === 'A' ? 'devedor é autor: possível crédito a penhorar no rosto dos autos'
-      : r.polo === 'P' ? 'devedor é réu: outros credores disputando os mesmos bens e rastro patrimonial nos autos'
-      : 'conferir o polo nos autos';
-    const id = await entidade(inv.id, 'processo', num || d, d, 1, confirmado ? 85 : 55, confirmado ? 'confirmada' : 'pista', {
-      numero: num, tribunal: r.tribunal || null, classe: r.classe || null, orgao: r.orgao || null, polo: r.polo || null,
-      primeira_data: r.primeira_data || null, ultima_data: r.ultima_data || null, fonte: 'djen', vigia_id: r.id, link: r.link || null,
-    });
-    await vinculo(inv.id, raiz.id, id, r.polo === 'A' ? 'autor_em' : r.polo === 'P' ? 'reu_em' : 'parte_em', confirmado ? 85 : 55,
-      confirmado ? 'CPF do devedor conferido na comunicação do DJEN.' : `Encontrado pelo nome${r.nome_encontrado ? ' "' + r.nome_encontrado + '"' : ''}; CPF não conferido: homônimo possível.`);
-    await evidencia(inv.id, id, 'djen', r.polo === 'A' ? 'Processo em que o devedor é autor' : 'Processo com o devedor no polo passivo',
-      `${num} · ${[r.tribunal, r.orgao].filter(Boolean).join(' · ')}${r.classe ? ' · ' + r.classe : ''} · ${papel} · ${r.qtd_comunicacoes || 0} comunicação(ões) de ${r.primeira_data || '?'} a ${r.ultima_data || '?'} · ${uso}${confirmado ? '' : ' · CPF não conferido'}`,
-      r.link || '');
-    if (confirmado) c.confirmadas++; else c.pistas++;
-    if (r.polo === 'A') c.processosAutor++; else c.processosReu++;
-  }
+  if (!rows?.length) { nc.push('DJEN/Vigia: o Vigia de ações ainda não encontrou (ou não varreu) processo deste devedor.'); return cobertura; }
+  for (const r of rows) await gravarProcesso(inv, raiz, c, { ...r, vigia_id: r.id });
+  return cobertura;
 }
 
-async function processar(inv: any) {
+// Mesmo filtro do Vigia (logica.mjs): destinatário com o nome exato, processo
+// da casa fora, busca cortada só aproveita achado com CPF no texto. Sem filtro
+// de UF: a avulsa não tem processo nosso que defina a UF.
+async function djenDireto(inv: any, raiz: any, djen: any, c: Contadores, nc: string[]): Promise<string> {
+  const semConsulta = 'Não feita: investigação sem devedor cadastrado e o DJEN não foi consultado pelo painel.';
+  if (!djen || typeof djen !== 'object') { nc.push('DJEN: investigação sem devedor cadastrado; use "Processar agora" no painel para consultar o DJEN pelo nome.'); return semConsulta; }
+  if (djen.erro) { nc.push('DJEN não respondeu à consulta do painel: ' + String(djen.erro).slice(0, 200)); return semConsulta; }
+  if (!raiz.nome) { nc.push('DJEN: investigação sem nome; o DJEN só é pesquisado por nome.'); return semConsulta; }
+  const itens = Array.isArray(djen.itens) ? djen.itens.slice(0, 300) : [];
+  const total = Number(djen.total) || itens.length;
+  const truncado = djen.truncado === true;
+  const { achados, descartados } = agruparAchados(itens, raiz.nome, new Set(), null, raiz.documento || null);
+  const { achados: ficam, descartados: semCpf } = filtrarTruncado(achados, truncado);
+  c.fontes.add('djen');
+  const lista = ficam.slice().sort((a: any, b: any) => String(b.ultima_data || '').localeCompare(String(a.ultima_data || ''))).slice(0, 30);
+  for (const a of lista) await gravarProcesso(inv, raiz, c, { ...a, qtd_comunicacoes: (a.comunicacoes || []).length });
+  const notas = [
+    `Consultado direto no DJEN pelo nome "${String(djen.nome || raiz.nome)}", histórico completo (${total} comunicação(ões) publicadas${truncado ? `, lidas ${itens.length}` : ''}).`,
+    descartados.nosso ? `${descartados.nosso} comunicação(ões) de processo do escritório ficaram de fora.` : '',
+    truncado ? `Nome com muitas comunicações: só entram processos com o CPF/CNPJ no texto${semCpf ? ` (${semCpf} processo(s) sem CPF deixados de fora)` : ''}.` : '',
+    ficam.length > lista.length ? `Relatório mostra os ${lista.length} processos mais recentes de ${ficam.length}.` : '',
+    'O DJEN só traz processos com comunicação publicada: ausência de processo no relatório não significa ausência de ação.',
+  ];
+  return notas.filter(Boolean).join(' ');
+}
+
+async function processar(inv: any, djen: any = null) {
   const { data: raizes, error } = await sb.from('investigacao_entidades').select('*').eq('investigacao_id', inv.id).eq('profundidade', 0).limit(1);
   if (error || !raizes?.[0]) throw error || new Error('Entidade-raiz ausente');
   const raiz = raizes[0];
@@ -444,7 +483,7 @@ async function processar(inv: any) {
   await segura('Telefone/e-mail', () => porContato(inv, raiz, achadas, contadores, naoConclusivas));
   const recebePt = await segura('Portal da Transparência', () => portalTransparencia(inv, raiz, achadas, contadores, naoConclusivas));
   const recebePncp = await segura('PNCP', () => pncp(inv, raiz, achadas, contadores, naoConclusivas));
-  await segura('DJEN/Vigia', () => vigiaDjen(inv, raiz, contadores, naoConclusivas));
+  const cobertura = await segura('DJEN/Vigia', () => vigiaDjen(inv, raiz, djen, contadores, naoConclusivas));
   const recebeEntePublico = recebePt === true || recebePncp === true ? true : (recebePt === false && recebePncp !== null ? false : null);
 
   const componentes = [] as any[];
@@ -463,7 +502,7 @@ async function processar(inv: any) {
     recebe_ente_publico: recebeEntePublico,
     processos_autor: contadores.processosAutor,
     processos_reu: contadores.processosReu,
-    cobertura_processual: 'Processos vêm só do que o Vigia de ações já achou no DJEN (comunicações publicadas). Ausência de processo no relatório não significa ausência de ação.',
+    cobertura_processual: cobertura || 'DJEN não consultado (falha na consulta, ver fontes não conclusivas).',
   };
   await sb.from('investigacoes_patrimoniais').update({
     status: naoConclusivas.length && !(empresas || contadores.pessoas || contadores.confirmadas || contadores.pistas || contadores.recebiveis) ? 'aguardando_acesso' : 'concluida',
@@ -500,7 +539,7 @@ Deno.serve(async req => {
     .or(`status.in.(${REPROCESSAVEIS.join(',')}),and(status.eq.em_andamento,iniciado_em.lt."${travadaAntes}")`)
     .select('*');
   if (!reservada?.length) return json({ ok: true, id, status: inv.status, mensagem: inv.status === 'em_andamento' ? 'Investigação já está sendo processada.' : 'Investigação já processada.' });
-  try { return json({ ok: true, resultado: await processar(reservada[0]) }); }
+  try { return json({ ok: true, resultado: await processar(reservada[0], body.djen || null) }); }
   catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await sb.from('investigacoes_patrimoniais').update({ status: 'falhou', resumo: { erro: msg } }).eq('id', id);
