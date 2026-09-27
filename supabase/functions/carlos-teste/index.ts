@@ -6,7 +6,7 @@
 // usa um cenário fictício, calcula as 3 formas de pagamento com o motor real
 // (_shared/calc-cobranca.ts), e chama o Claude. Sempre somente leitura.
 //
-// Auth: nenhuma além do apikey do Supabase (anon) — deploy com --no-verify-jwt.
+// Auth: JWT de usuário logado com papel proprietario (verify_jwt=true + checagem em código).
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
@@ -31,6 +31,20 @@ function fmtBRL(v: number): string {
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: CORS });
   if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
+
+  // Auditoria 26/09/2026: esta bancada respondia a qualquer POST com a chave
+  // publicável (custo na Anthropic; a carlos-teste ainda devolvia o cálculo de
+  // um caso real por caso_id). Agora só o proprietário logado usa.
+  const authHeader = req.headers.get('authorization') || '';
+  const userClient = createClient(
+    Deno.env.get('SUPABASE_URL')!,
+    Deno.env.get('SUPABASE_ANON_KEY')!,
+    { global: { headers: { Authorization: authHeader } } }
+  );
+  const { data: { user }, error: errAuth } = await userClient.auth.getUser();
+  if (errAuth || !user) return json({ error: 'unauthorized' }, 401);
+  const { data: papel } = await userClient.rpc('current_user_papel');
+  if (papel !== 'proprietario') return json({ error: 'forbidden' }, 403);
 
   const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY');
   if (!ANTHROPIC_API_KEY) return json({ error: 'falta ANTHROPIC_API_KEY' }, 500);

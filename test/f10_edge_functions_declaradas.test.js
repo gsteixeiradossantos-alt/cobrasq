@@ -88,7 +88,7 @@ ok('todas as entradas dizem verify_jwt explicitamente',
 // — sem header nenhum, `provided` é vazio, o && curto-circuita e a função executa.
 // Trava que só barra quem chuta errado. Correção é trabalho à parte; esta guarda não
 // substitui ler o código de quem desliga o gateway.
-const ABERTAS_CONHECIDAS = new Set(['bia-chat-teste', 'carlos-teste']);
+const ABERTAS_CONHECIDAS = new Set([]);
 const semTrava = [];
 for (const [slug, vj] of Object.entries(declarado)) {
   if (vj !== false || ABERTAS_CONHECIDAS.has(slug)) continue;
