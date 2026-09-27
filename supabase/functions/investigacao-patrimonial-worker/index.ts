@@ -1,4 +1,8 @@
-// Worker da coleta patrimonial (v6).
+// Worker da coleta patrimonial (v7).
+// v7 (26/09/2026): com profundidade 2, busca as outras empresas dos sócios das
+// empresas confirmadas (nome + 6 dígitos do CPF) e cruza o endereço fiscal
+// delas; detalha sanções CEIS/CNEP; grava capital social; resumo.cortes lista o
+// que ficou de fora por limite.
 // v6 (26/09/2026): investigação avulsa (sem devedor) consulta o DJEN pelo nome:
 // o painel busca no navegador e manda as comunicações em body.djen.
 // v5 (26/09/2026): grava a data de abertura (BrasilAPI data_inicio_atividade) em
@@ -61,8 +65,12 @@ async function evidencia(inv: string, entidade: string, fonte: string, titulo: s
     url: url || null, confianca: fonte === 'receita_rf' ? 85 : 75, hash_conteudo: h,
   }, { onConflict: 'investigacao_id,fonte_codigo,hash_conteudo' });
 }
-async function entidade(inv: string, tipo: string, nome: string, documento: string, profundidade: number, confianca: number, status: string, dados = {}) {
+async function entidade(inv: string, tipo: string, nome: string, documento: string, profundidade: number, confianca: number, status: string, dados: Record<string, unknown> = {}) {
   const chave = dig(documento) || key(nome);
+  // Pista confirmada à mão no painel (botão "Confirmar pista") sobrevive ao reprocessamento.
+  const { data: ant } = await sb.from('investigacao_entidades').select('dados').eq('investigacao_id', inv).eq('tipo', tipo).eq('chave_normalizada', chave).maybeSingle();
+  const manual = (ant?.dados as any)?.confirmado_manual;
+  if (manual) { status = 'confirmada'; dados = { ...dados, confirmado_manual: manual }; }
   const { data, error } = await sb.from('investigacao_entidades').upsert({
     investigacao_id: inv, tipo, nome: nome || null, documento: dig(documento) || null,
     chave_normalizada: chave, profundidade, confianca, status_verificacao: status, dados,
@@ -83,7 +91,10 @@ async function brasilApiCnpj(cnpj: string) {
   return { url, json: await res.json() as any };
 }
 
-type Contadores = { pessoas: number; enriquecidas: number; confirmadas: number; pistas: number; recebiveis: number; processosAutor: number; processosReu: number; fontes: Set<string> };
+// `cortes` lista os limites que deixaram algo de fora: vai ao relatório para o
+// leitor saber que a busca não foi exaustiva (e onde).
+type Contadores = { pessoas: number; enriquecidas: number; confirmadas: number; pistas: number; recebiveis: number; processosAutor: number; processosReu: number; fontes: Set<string>; cortes: string[] };
+type Socio = { id: string; nome: string; miolo: string; empresa: string };
 
 // Situação cadastral da base CNPJ vem em código.
 const SITUACAO: Record<string, string> = { '01': 'nula', '02': 'ativa', '03': 'suspensa', '04': 'inapta', '08': 'baixada' };
@@ -97,7 +108,8 @@ function ehRaiz(raiz: any, nome: string, docMascarado: string) {
   return raiz?.tipo === 'pessoa' && cpf.length === 11 && d.length === 6 && cpf.slice(3, 9) === d && key(nome) === key(raiz.nome);
 }
 
-async function enriquecerEmpresa(inv: any, raiz: any, empresaId: string, cnpj: string, contadores: Contadores, naoConclusivas: string[]) {
+async function enriquecerEmpresa(inv: any, raiz: any, empresaId: string, cnpj: string, contadores: Contadores, naoConclusivas: string[]): Promise<Socio[]> {
+  const socios: Socio[] = [];
   try {
     const { url, json: j } = await brasilApiCnpj(cnpj);
     contadores.enriquecidas++;
@@ -109,13 +121,19 @@ async function enriquecerEmpresa(inv: any, raiz: any, empresaId: string, cnpj: s
     const abertura = /^\d{4}-\d{2}-\d{2}$/.test(String(j.data_inicio_atividade || '')) ? j.data_inicio_atividade : null;
     // Data de abertura alimenta o sinal "sócio em várias empresas recém-abertas" no
     // painel. Mescla em dados sem apagar o que a base CNPJ já gravou.
-    if (abertura) {
+    // Capital social numérico alimenta o sinal "capital irrisório perto da dívida".
+    const capital = Number.isFinite(Number(j.capital_social)) ? Number(j.capital_social) : null;
+    if (abertura || capital != null) {
       const { data: atual } = await sb.from('investigacao_entidades').select('dados').eq('id', empresaId).single();
-      await sb.from('investigacao_entidades').update({ dados: { ...(atual?.dados || {}), data_abertura: abertura } }).eq('id', empresaId);
+      await sb.from('investigacao_entidades').update({ dados: {
+        ...(atual?.dados || {}), ...(abertura ? { data_abertura: abertura } : {}), ...(capital != null ? { capital_social: capital } : {}),
+      } }).eq('id', empresaId);
     }
     await evidencia(inv.id, empresaId, 'brasilapi', 'Cadastro CNPJ consultado',
       `${j.razao_social || cnpj} · ${maskCnpj(cnpj)} · situação ${sit}${abertura ? ' · aberta em ' + abertura.split('-').reverse().join('/') : ''}${porte ? ' · porte ' + porte : ''}${cap ? ' · capital ' + cap : ''}${cidade ? ' · ' + cidade : ''}`, url);
-    for (const q of (Array.isArray(j.qsa) ? j.qsa : []).slice(0, 30)) {
+    const qsa = Array.isArray(j.qsa) ? j.qsa : [];
+    if (qsa.length > 30) contadores.cortes.push(`Quadro societário de ${maskCnpj(cnpj)}: ${qsa.length} sócios, lidos os 30 primeiros.`);
+    for (const q of qsa.slice(0, 30)) {
       const nome = String(q.nome_socio || '').trim();
       if (!nome) continue;
       const propria = ehRaiz(raiz, nome, q.cnpj_cpf_do_socio || '');
@@ -132,9 +150,96 @@ async function enriquecerEmpresa(inv: any, raiz: any, empresaId: string, cnpj: s
       await evidencia(inv.id, idPessoa, 'brasilapi', 'Sócio no quadro societário',
         `${nome}${q.qualificacao_socio ? ' · ' + q.qualificacao_socio : ''} · em ${maskCnpj(cnpj)}`, url);
       contadores.pessoas++;
+      const miolo = dig(q.cnpj_cpf_do_socio);
+      if (miolo.length === 6) socios.push({ id: idPessoa, nome, miolo, empresa: cnpj });
     }
   } catch (e) {
     naoConclusivas.push(`BrasilAPI ${maskCnpj(cnpj)}: ` + erroTxt(e));
+  }
+  return socios;
+}
+
+// Empresas dos sócios: o QSA público só mostra 6 dígitos do CPF, e a RPC da base
+// CNPJ confere exatamente esses 6 (miolo). Passa o CPF "000"+miolo+"00" e só
+// aceita confere=true: nome igual com miolo diferente é homônimo e fica de fora.
+// Sai sempre como pista: é a teia do devedor (grupo econômico, confusão
+// patrimonial), não bem dele. Cada consulta leva até ~11 s com o cache frio,
+// por isso há teto de sócios e de tempo.
+const SOCIOS_MAX = 6;
+async function empresasDosSocios(inv: any, socios: Socio[], achadas: Map<string, Achada>, c: Contadores, nc: string[], prazo: number) {
+  const unicos = [...new Map(socios.map(s => [key(s.nome) + s.miolo, s])).values()];
+  if (unicos.length > SOCIOS_MAX) c.cortes.push(`Empresas dos sócios: ${unicos.length} sócios nas empresas confirmadas, pesquisados os ${SOCIOS_MAX} primeiros.`);
+  let feitos = 0;
+  for (const s of unicos.slice(0, SOCIOS_MAX)) {
+    if (Date.now() > prazo) { c.cortes.push(`Empresas dos sócios: tempo esgotado, ${unicos.slice(0, SOCIOS_MAX).length - feitos} sócio(s) não pesquisado(s).`); break; }
+    const arg = { p_nome: s.nome, p_cpf: '000' + s.miolo + '00' };
+    let { data: rows, error } = await sb.rpc('buscar_empresas_por_socio', arg);
+    if (error && /timeout/i.test(error.message)) ({ data: rows, error } = await sb.rpc('buscar_empresas_por_socio', arg));
+    feitos++;
+    if (error) { nc.push(`Empresas do sócio ${s.nome}: ${erroTxt(error.message)}`); continue; }
+    c.fontes.add('receita_rf');
+    const delas = (rows || []).filter((r: any) => r.confere === true && dig(r.cnpj).length === 14 && !achadas.has(dig(r.cnpj)));
+    if (delas.length > 10) c.cortes.push(`Empresas do sócio ${s.nome}: ${delas.length} empresas, gravadas as 10 primeiras.`);
+    for (const r of delas.slice(0, 10)) {
+      const cnpj = dig(r.cnpj);
+      const id = await entidade(inv.id, 'empresa', r.nome || r.fantasia || cnpj, cnpj, 2, 60, 'pista', {
+        situacao: situacaoTexto(r.situacao), papel: r.papel || null, fonte: 'receita_rf', criterio: 'empresa_do_socio',
+      });
+      await vinculo(inv.id, s.id, id, 'socio_de', 60,
+        `Sócio de ${maskCnpj(s.empresa)}; nome e seis dígitos públicos do CPF conferem na base CNPJ.`);
+      await evidencia(inv.id, id, 'receita_rf', 'Outra empresa do sócio',
+        `${r.nome || r.fantasia || cnpj} · CNPJ ${maskCnpj(cnpj)} · ${r.papel || 'sócio'}: ${s.nome} (também sócio de ${maskCnpj(s.empresa)})${situacaoTexto(r.situacao) ? ' · ' + situacaoTexto(r.situacao) : ''}`);
+      achadas.set(cnpj, { id, cnpj, nome: r.nome || cnpj, confirmada: false });
+      c.pistas++;
+    }
+  }
+}
+
+// Endereço das empresas confirmadas → outras empresas no mesmo endereço fiscal.
+// Endereço com muitos CNPJs é de contador, coworking ou galeria: registra a
+// ressalva e não gera pista (seria só ruído).
+const ENDERECO_ESCRITORIO = 3, ENDERECO_MASSA = 10;
+async function enderecoDasEmpresas(inv: any, achadas: Map<string, Achada>, c: Contadores, nc: string[], prazo: number) {
+  const confirmadas = [...achadas.values()].filter(a => a.confirmada);
+  if (confirmadas.length > 4) c.cortes.push(`Endereço das empresas: ${confirmadas.length} empresas confirmadas, cruzados os endereços das 4 primeiras.`);
+  const vistos = new Set<string>();
+  for (const a of confirmadas.slice(0, 4)) {
+    if (Date.now() > prazo) { c.cortes.push('Endereço das empresas: tempo esgotado antes de cruzar todos os endereços.'); break; }
+    const { data: est } = await sb.from('rf_estabelecimentos').select('cep,numero,logradouro,tipo_logradouro,municipio')
+      .eq('cnpj_basico', a.cnpj.slice(0, 8)).eq('cnpj_ordem', a.cnpj.slice(8, 12)).eq('cnpj_dv', a.cnpj.slice(12)).maybeSingle();
+    const cep = dig(est?.cep), numero = dig(est?.numero), rua = String(est?.logradouro || '').trim();
+    if (cep.length !== 8 || !numero || numero === '0' || !rua) continue;
+    if (vistos.has(cep + '|' + numero)) continue;
+    vistos.add(cep + '|' + numero);
+    const { data: rows, error } = await sb.rpc('buscar_empresas_por_endereco', { p_cep: cep, p_numero: numero, p_logradouro: rua });
+    if (error) { nc.push(`Endereço de ${maskCnpj(a.cnpj)}: ${erroTxt(error.message)}`); continue; }
+    c.fontes.add('receita_rf');
+    const outras = (rows || []).filter((r: any) => dig(r.cnpj).length === 14 && dig(r.cnpj) !== a.cnpj);
+    const endTxt = `${[est?.tipo_logradouro, rua].filter(Boolean).join(' ')}, ${numero} · CEP ${cep}`;
+    const { data: atual } = await sb.from('investigacao_entidades').select('dados').eq('id', a.id).single();
+    await sb.from('investigacao_entidades').update({ dados: {
+      ...(atual?.dados || {}), endereco_fiscal: endTxt, endereco_compartilhado_com: outras.length,
+    } }).eq('id', a.id);
+    if (!outras.length) continue;
+    if (outras.length >= ENDERECO_MASSA) {
+      await evidencia(inv.id, a.id, 'receita_rf', 'Endereço fiscal compartilhado por muitas empresas',
+        `${endTxt} · ${outras.length >= 49 ? '49 ou mais' : outras.length} outros CNPJs no mesmo endereço: provável escritório de contabilidade, coworking ou galeria. Não gera pista de vínculo.`);
+      continue;
+    }
+    const escritorio = outras.length >= ENDERECO_ESCRITORIO;
+    for (const r of outras) {
+      const cnpj = dig(r.cnpj);
+      if (achadas.has(cnpj)) continue;
+      const id = await entidade(inv.id, 'empresa', r.nome || r.fantasia || cnpj, cnpj, 2, escritorio ? 30 : 45, 'pista', {
+        situacao: situacaoTexto(r.situacao), fonte: 'receita_rf', criterio: 'endereco_da_empresa', compartilhado_com: outras.length,
+      });
+      await vinculo(inv.id, a.id, id, 'compartilha_endereco_fiscal', escritorio ? 30 : 45,
+        `Mesmo endereço fiscal de ${maskCnpj(a.cnpj)}${escritorio ? `; ${outras.length} CNPJs no endereço, pode ser escritório de contabilidade` : ''}. Requer confirmação.`);
+      await evidencia(inv.id, id, 'receita_rf', 'Empresa no mesmo endereço de empresa do devedor',
+        `${r.nome || r.fantasia || cnpj} · ${maskCnpj(cnpj)} · ${endTxt} (endereço de ${maskCnpj(a.cnpj)})${situacaoTexto(r.situacao) ? ' · ' + situacaoTexto(r.situacao) : ''}`);
+      achadas.set(cnpj, { id, cnpj, nome: r.nome || cnpj, confirmada: false });
+      c.pistas++;
+    }
   }
 }
 
@@ -173,6 +278,8 @@ async function porContato(inv: any, raiz: any, achadas: Map<string, Achada>, c: 
     addEmail(est?.email, `cadastro de ${maskCnpj(a.cnpj)}`);
   }
   if (!tels.size && !emails.size) { nc.push('Telefone/e-mail: devedor e empresas confirmadas sem telefone ou e-mail cadastrado.'); return; }
+  if (tels.size > 4) c.cortes.push(`Telefone: ${tels.size} telefones conhecidos, pesquisados os 4 primeiros.`);
+  if (emails.size > 3) c.cortes.push(`E-mail: ${emails.size} e-mails conhecidos, pesquisados os 3 primeiros.`);
   const consultas = [
     ...[...tels].slice(0, 4).map(([v, o]) => ({ tipo: 'telefone', v, o, rpc: 'buscar_empresas_por_telefone', arg: { p_tel: v } })),
     ...[...emails].slice(0, 3).map(([v, o]) => ({ tipo: 'e-mail', v, o, rpc: 'buscar_empresas_por_email', arg: { p_email: v } })),
@@ -181,6 +288,7 @@ async function porContato(inv: any, raiz: any, achadas: Map<string, Achada>, c: 
     const { data: rows, error } = await sb.rpc(q.rpc, q.arg);
     if (error) { nc.push(`Base CNPJ por ${q.tipo} indisponível: ${error.message}`); continue; }
     c.fontes.add('receita_rf');
+    if ((rows || []).length > 10) c.cortes.push(`Base CNPJ por ${q.tipo} ${q.v}: ${rows.length} empresas, lidas as 10 primeiras.`);
     for (const r of (rows || []).slice(0, 10)) {
       const cnpj = dig(r.cnpj);
       if (cnpj.length !== 14 || achadas.has(cnpj)) continue;
@@ -233,6 +341,7 @@ async function portalTransparencia(inv: any, raiz: any, achadas: Map<string, Ach
   if (dig(raiz.documento).length === 11 || dig(raiz.documento).length === 14) alvos.push({ id: raiz.id, doc: dig(raiz.documento), nome: raiz.nome || '' });
   for (const a of achadas.values()) if (a.confirmada && a.cnpj !== dig(raiz.documento)) alvos.push({ id: a.id, doc: a.cnpj, nome: a.nome });
   if (!alvos.length) { nc.push('Portal da Transparência: sem CPF/CNPJ conferido para consultar.'); return false; }
+  if (alvos.length > 6) c.cortes.push(`Portal da Transparência: ${alvos.length} documentos conferidos, consultados os 6 primeiros.`);
   let recebe = false, ok = false;
   for (const a of alvos.slice(0, 6)) {
     const pf = a.doc.length === 11;
@@ -246,7 +355,21 @@ async function portalTransparencia(inv: any, raiz: any, achadas: Map<string, Ach
       await evidencia(inv.id, a.id, 'portal_transparencia', pf ? 'Cadastro federal do CPF' : 'Cadastro federal do CNPJ',
         `${a.nome || a.doc} · ${pf ? 'CPF' : maskCnpj(a.doc)} · ${p ? (flags.length ? flags.join('; ') : 'nenhum vínculo federal registrado') : 'documento sem registro no Portal'}`,
         `https://portaldatransparencia.gov.br/${pf ? 'pessoa-fisica/busca/lista?termo=' + encodeURIComponent(a.nome) : 'pessoa-juridica/' + a.doc}`);
+      // Sanção vigente de contratar com o poder público: detalhe só quando a flag
+      // do cadastro acusa (poupa duas chamadas por documento limpo).
+      for (const [flag, ep, rot] of [['sancionadoCEIS', 'ceis', 'CEIS'], ['sancionadoCNEP', 'cnep', 'CNEP']]) {
+        if (p?.[flag] !== true) continue;
+        const lista = await ptGet(`/${ep}?codigoSancionado=${a.doc}&pagina=1`, chave);
+        for (const s of (Array.isArray(lista) ? lista : []).slice(0, 5)) {
+          const orgao = s?.orgaoSancionador?.nome || s?.fonteSancao?.nomeExibicao || 'órgão não informado';
+          const multa = String(s?.valorMulta || '').replace(/[^\d,]/g, '');
+          await evidencia(inv.id, a.id, 'portal_transparencia', `Sanção ${rot}`,
+            `${s?.tipoSancao?.descricaoResumida || 'sanção'} · ${orgao} · de ${s?.dataInicioSancao || '?'} a ${s?.dataFimSancao || 'sem prazo'}${s?.numeroProcesso ? ' · processo ' + s.numeroProcesso : ''}${multa && multa !== '0,00' ? ' · multa R$ ' + multa : ''}${s?.abrangenciaDefinidaDecisaoJudicial ? ' · abrangência: ' + s.abrangenciaDefinidaDecisaoJudicial : ''}`,
+            pf ? 'https://portaldatransparencia.gov.br/sancoes/consulta' : `https://portaldatransparencia.gov.br/sancoes/consulta?cpfCnpj=${a.doc}`);
+        }
+      }
       const contratos = await ptGet(`/contratos/cpf-cnpj?cpfCnpj=${a.doc}&pagina=1`, chave);
+      if (Array.isArray(contratos) && contratos.length > 10) c.cortes.push(`Portal da Transparência ${pf ? 'CPF' : maskCnpj(a.doc)}: ${contratos.length}+ contratos federais, lidos os 10 primeiros.`);
       for (const k of (Array.isArray(contratos) ? contratos : []).slice(0, 10)) {
         const ativo = vigente(k?.dataFimVigencia);
         const orgao = k?.unidadeGestora?.orgaoMaximo?.nome || k?.unidadeGestora?.nome || 'órgão federal';
@@ -284,6 +407,7 @@ async function pncp(inv: any, raiz: any, achadas: Map<string, Achada>, c: Contad
   const alvos = [] as { id: string; doc: string; nome: string }[];
   if (raiz.nome) alvos.push({ id: raiz.id, doc: dig(raiz.documento), nome: raiz.nome });
   for (const a of achadas.values()) if (a.confirmada && a.cnpj !== dig(raiz.documento)) alvos.push({ id: a.id, doc: a.cnpj, nome: a.nome });
+  if (alvos.length > 4) c.cortes.push(`PNCP: ${alvos.length} nomes para pesquisar, pesquisados os 4 primeiros.`);
   let recebe = false, ok = false;
   for (const a of alvos.slice(0, 4)) {
     const nomeBusca = a.nome.replace(/\s*\d{11}\s*$/, '').trim();   // MEI: tira o CPF da razão social
@@ -397,7 +521,10 @@ async function processar(inv: any, djen: any = null) {
   if (error || !raizes?.[0]) throw error || new Error('Entidade-raiz ausente');
   const raiz = raizes[0];
   let empresas = 0;
-  const contadores: Contadores = { pessoas: 0, enriquecidas: 0, confirmadas: 0, pistas: 0, recebiveis: 0, processosAutor: 0, processosReu: 0, fontes: new Set() };
+  const contadores: Contadores = { pessoas: 0, enriquecidas: 0, confirmadas: 0, pistas: 0, recebiveis: 0, processosAutor: 0, processosReu: 0, fontes: new Set(), cortes: [] };
+  // Sócios das empresas confirmadas, para a busca das empresas deles (profundidade 2).
+  const socios: Socio[] = [];
+  const inicio = Date.now();
   const achadas = new Map<string, Achada>();
   const naoConclusivas: string[] = [];
   const teto = Math.max(0, Math.min(Number(inv.entidades_maximas || 80) - 1, 40));
@@ -410,6 +537,7 @@ async function processar(inv: any, djen: any = null) {
     if (rpcError && /timeout/i.test(rpcError.message)) ({ data: rows, error: rpcError } = await sb.rpc('buscar_empresas_por_socio', { p_nome: raiz.nome, p_cpf: dig(raiz.documento) || null }));
     if (rpcError) naoConclusivas.push('Receita/base CNPJ indisponível: ' + rpcError.message);
     else contadores.fontes.add('receita_rf');
+    if ((rows || []).length > teto) contadores.cortes.push(`Base CNPJ: ${rows.length >= 50 ? '50 ou mais' : rows.length} empresas com o nome do devedor, analisadas as ${teto} primeiras.`);
     for (const r of (rows || []).slice(0, teto)) {
       const cnpj = dig(r.cnpj);
       if (cnpj.length !== 14) continue;
@@ -431,7 +559,8 @@ async function processar(inv: any, djen: any = null) {
       empresas++;
       achadas.set(cnpj, { id, cnpj, nome: r.nome || r.fantasia || cnpj, confirmada: conferido });
       if (conferido) contadores.confirmadas++; else contadores.pistas++;
-      await enriquecerEmpresa(inv, raiz, id, cnpj, contadores, naoConclusivas);
+      const qsa = await enriquecerEmpresa(inv, raiz, id, cnpj, contadores, naoConclusivas);
+      if (conferido) socios.push(...qsa);
     }
 
     const end = (raiz.dados || {}).endereco || {};
@@ -447,12 +576,13 @@ async function processar(inv: any, djen: any = null) {
         } else {
           const { data: porEndereco, error: ee } = await sb.rpc('buscar_empresas_por_endereco', { p_cep: cep, p_numero: numero, p_logradouro: rua });
           if (ee) naoConclusivas.push('Receita/endereço indisponível: ' + ee.message);
+          if ((porEndereco || []).length > 20) contadores.cortes.push(`Endereço do devedor: ${porEndereco.length >= 50 ? '50 ou mais' : porEndereco.length} empresas no endereço, gravadas as 20 primeiras.`);
           for (const r of (porEndereco || []).slice(0, 20)) {
             const cnpj = dig(r.cnpj);
             // Empresa já achada pelo sócio não é rebaixada a pista pelo endereço.
             if (cnpj.length !== 14 || achadas.has(cnpj)) continue;
             const id = await entidade(inv.id, 'empresa', r.nome || r.fantasia || cnpj, cnpj, 1, 45, 'pista', {
-              situacao: situacaoTexto(r.situacao), fonte: 'receita_rf', criterio: 'endereco_fiscal',
+              situacao: situacaoTexto(r.situacao), fonte: 'receita_rf', criterio: 'endereco_fiscal', compartilhado_com: (porEndereco || []).length,
             });
             await vinculo(inv.id, raiz.id, id, 'compartilha_endereco_fiscal', 45,
               'Endereço fiscal compatível; requer confirmação independente antes de qualquer medida.');
@@ -471,7 +601,7 @@ async function processar(inv: any, djen: any = null) {
     const cnpj = dig(raiz.documento);
     empresas = 1;
     achadas.set(cnpj, { id: raiz.id, cnpj, nome: raiz.nome || cnpj, confirmada: true });
-    await enriquecerEmpresa(inv, raiz, raiz.id, cnpj, contadores, naoConclusivas);
+    socios.push(...await enriquecerEmpresa(inv, raiz, raiz.id, cnpj, contadores, naoConclusivas));
   } else {
     naoConclusivas.push('Pessoa sem nome: a base CNPJ só é pesquisada por nome (com CPF para conferir).');
   }
@@ -480,6 +610,13 @@ async function processar(inv: any, djen: any = null) {
   const segura = async <T>(nome: string, f: () => Promise<T>) => {
     try { return await f(); } catch (e) { naoConclusivas.push(`${nome}: ${erroTxt(e)}`); return null; }
   };
+  // Teia de 2º nível (sócios e endereço das empresas): para de abrir consultas
+  // 90 s depois do início. Só quando a investigação pede profundidade 2 ou mais.
+  const prazo = inicio + 90000;
+  if (Number(inv.profundidade_maxima || 1) >= 2) {
+    if (socios.length) await segura('Empresas dos sócios', () => empresasDosSocios(inv, socios, achadas, contadores, naoConclusivas, prazo));
+    await segura('Endereço das empresas', () => enderecoDasEmpresas(inv, achadas, contadores, naoConclusivas, prazo));
+  }
   await segura('Telefone/e-mail', () => porContato(inv, raiz, achadas, contadores, naoConclusivas));
   const recebePt = await segura('Portal da Transparência', () => portalTransparencia(inv, raiz, achadas, contadores, naoConclusivas));
   const recebePncp = await segura('PNCP', () => pncp(inv, raiz, achadas, contadores, naoConclusivas));
@@ -503,6 +640,7 @@ async function processar(inv: any, djen: any = null) {
     processos_autor: contadores.processosAutor,
     processos_reu: contadores.processosReu,
     cobertura_processual: cobertura || 'DJEN não consultado (falha na consulta, ver fontes não conclusivas).',
+    cortes: contadores.cortes,
   };
   await sb.from('investigacoes_patrimoniais').update({
     status: naoConclusivas.length && !(empresas || contadores.pessoas || contadores.confirmadas || contadores.pistas || contadores.recebiveis) ? 'aguardando_acesso' : 'concluida',
@@ -514,6 +652,31 @@ async function processar(inv: any, djen: any = null) {
   await evento(inv.id, naoConclusivas.length ? 'fonte_nao_conclusiva' : 'fonte_concluida',
     naoConclusivas.length ? naoConclusivas.join(' | ') : 'Fontes públicas concluídas.', resumo);
   return { id: inv.id, empresas, pessoas: contadores.pessoas, naoConclusivas };
+}
+
+// Botão "Confirmar pista" do painel. A tabela só tem política de leitura: a
+// escrita passa por aqui, restrita ao proprietário (mesma regra de escrita de
+// investigacoes_patrimoniais). confirmar=false desfaz.
+async function confirmarPista(userClient: any, user: any, inv: any, body: any) {
+  const { data: papel } = await userClient.rpc('current_user_papel');
+  if (papel !== 'proprietario') return json({ error: 'Só o proprietário confirma pistas.' }, 403);
+  const entId = String(body.entidade_id || '');
+  const { data: ent } = await sb.from('investigacao_entidades').select('id,nome,documento,status_verificacao,dados,profundidade')
+    .eq('id', entId).eq('investigacao_id', inv.id).maybeSingle();
+  if (!ent || ent.profundidade === 0) return json({ error: 'entidade não encontrada nesta investigação' }, 404);
+  const dados: Record<string, unknown> = { ...(ent.dados || {}) };
+  const confirmar = body.confirmar !== false;
+  if (confirmar) {
+    if (ent.status_verificacao === 'confirmada' && !dados.confirmado_manual) return json({ ok: true, status: 'confirmada' });
+    dados.confirmado_manual = { por: user.email || user.id, em: new Date().toISOString(), status_anterior: ent.status_verificacao, motivo: String(body.motivo || '').slice(0, 300) || null };
+  } else if (!dados.confirmado_manual) return json({ error: 'esta entidade não foi confirmada à mão' }, 400);
+  const anterior = (dados.confirmado_manual as any)?.status_anterior || 'pista';
+  if (!confirmar) delete dados.confirmado_manual;
+  const status = confirmar ? 'confirmada' : anterior;
+  const { error } = await sb.from('investigacao_entidades').update({ status_verificacao: status, dados }).eq('id', ent.id);
+  if (error) return json({ error: error.message }, 500);
+  await evento(inv.id, 'nota', `${confirmar ? 'Pista confirmada' : 'Confirmação desfeita'} por ${user.email || user.id}: ${ent.nome || ent.documento}${confirmar && body.motivo ? ' · ' + String(body.motivo).slice(0, 300) : ''}`);
+  return json({ ok: true, status });
 }
 
 Deno.serve(async req => {
@@ -530,6 +693,7 @@ Deno.serve(async req => {
   // comprovar que este usuário pode ler exatamente esta investigação.
   const { data: inv, error } = await userClient.from('investigacoes_patrimoniais').select('*').eq('id', id).single();
   if (error || !inv) return json({ error: 'investigação não encontrada ou sem acesso' }, 404);
+  if (body.acao === 'confirmar_pista') return confirmarPista(userClient, user, inv, body);
   // Reserva atômica: só um chamado passa do "pendente" para "em_andamento". Um
   // "em_andamento" parado há mais de TRAVADA_MIN minutos é tomado de volta.
   const travadaAntes = new Date(Date.now() - TRAVADA_MIN * 60000).toISOString();

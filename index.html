@@ -23500,18 +23500,20 @@ async function baixarRelatorioInvestigacao(investigacaoId, abrir){
   const aba=abrir?window.open('','_blank'):null;
   if(aba) try{ aba.document.title='Relatório de investigação'; aba.document.body.innerHTML='<p style="font:14px system-ui;padding:24px;color:#555;">Gerando relatório…</p>'; }catch(_){}
   try{
-    const [{data:inv,error:ei},{data:ents,error:ee},{data:vinc},{data:evid},{data:eventos}]=await Promise.all([
+    const [{data:inv,error:ei},{data:ents,error:ee},{data:vinc},{data:evid}]=await Promise.all([
       supa.from('investigacoes_patrimoniais').select('*').eq('id',investigacaoId).single(),
       supa.from('investigacao_entidades').select('*').eq('investigacao_id',investigacaoId).order('profundidade'),
       supa.from('investigacao_vinculos').select('id,tipo,confianca,justificativa,origem_entidade_id,destino_entidade_id').eq('investigacao_id',investigacaoId),
-      supa.from('investigacao_evidencias').select('entidade_id,vinculo_id,fonte_codigo,titulo,trecho,url,obtido_em,confianca').eq('investigacao_id',investigacaoId).order('obtido_em',{ascending:false}),
-      supa.from('investigacao_eventos').select('tipo,mensagem,criado_em').eq('investigacao_id',investigacaoId).order('criado_em')
+      supa.from('investigacao_evidencias').select('entidade_id,vinculo_id,fonte_codigo,titulo,trecho,url,obtido_em,confianca').eq('investigacao_id',investigacaoId).order('obtido_em',{ascending:false})
     ]);
     if(ei) throw ei; if(ee) throw ee;
-    // Cobrança e credor só para a identificação; se não vier (RLS, cobrança nula), segue sem.
+    // Cobrança: credor e processo na identificação; data e valor da dívida nos
+    // sinais. Se não vier (RLS, cobrança nula), segue sem.
     let cob=null;
-    if(inv.cobranca_id){ try{ const {data}=await supa.from('cobrancas').select('numero_processo,clientes:cliente_id(nome)').eq('id',inv.cobranca_id).maybeSingle(); cob=data; }catch(_){} }
-    const an=_invAnalise(ents,vinc,evid), raiz=an.raiz, c=an.cont;
+    if(inv.cobranca_id){ try{ const {data}=await supa.from('cobrancas').select(_INV_COB_CTX).eq('id',inv.cobranca_id).maybeSingle(); cob=data; }catch(_){} }
+    const ctx=_invCtxDivida(cob);
+    const an=_invAnalise(ents,vinc,evid,ctx), raiz=an.raiz, c=an.cont;
+    const pedidos=_invPedidos(an), tempo=_invLinhaTempo(inv,ents,evid,ctx), cortes=Array.isArray((inv.resumo||{}).cortes)?inv.resumo.cortes:[];
     const comps=Array.isArray(inv.score_componentes)?inv.score_componentes:[];
     const res=inv.resumo||{};
     const lista=v=>Array.isArray(v)?v:(v?[v]:[]);
@@ -23527,7 +23529,7 @@ async function baixarRelatorioInvestigacao(investigacaoId, abrir){
     const pubIncompleto=falhou('pncp')||falhou('portal_transparencia');
     const recebeTxt=res.recebe_ente_publico===true?'sim (ver seção 2)'
       :res.recebe_ente_publico===false?[falhou('portal_transparencia')?'Portal da Transparência não respondeu em parte das consultas':'nada no Portal da Transparência',
-          falhou('pncp')?(fOk.includes('pncp')?'PNCP ficou sem resposta em parte das buscas: resultado incompleto (ver seção 6)':'PNCP não respondeu: resultado desconhecido'):'nada no PNCP'].join('; ')
+          falhou('pncp')?(fOk.includes('pncp')?'PNCP ficou sem resposta em parte das buscas: resultado incompleto (ver seção 7)':'PNCP não respondeu: resultado desconhecido'):'nada no PNCP'].join('; ')
       :'não verificado';
     const avulsa=!inv.devedor_id;
     const djenOk=fOk.includes('djen');
@@ -23540,7 +23542,7 @@ async function baixarRelatorioInvestigacao(investigacaoId, abrir){
       // width/height fixam a proporção antes de a imagem decodificar: sem isso o
       // html2pdf mede a página com a teia de altura zero e erra as quebras.
       const vb=/viewBox="0 0 ([\d.]+) ([\d.]+)"/.exec(svg)||[0,760,580];
-      teiaHtml=`<h2><span class="n">3</span>Teia de vínculos</h2>${png?`<img src="${png}" width="${vb[1]}" height="${vb[2]}" style="width:100%;height:auto;aspect-ratio:${vb[1]}/${vb[2]};display:block;">`:svg}`;
+      teiaHtml=`<h2><span class="n">4</span>Teia de vínculos</h2>${png?`<img src="${png}" width="${vb[1]}" height="${vb[2]}" style="width:100%;height:auto;aspect-ratio:${vb[1]}/${vb[2]};display:block;">`:svg}`;
     }
     const outros=(ents||[]).filter(e=>e!==raiz);
     const emp=outros.filter(e=>e.tipo==='empresa'), pes=outros.filter(e=>e.tipo==='pessoa'), pro=outros.filter(e=>e.tipo==='processo');
@@ -23592,7 +23594,7 @@ async function baixarRelatorioInvestigacao(investigacaoId, abrir){
         ${cob?.numero_processo?`<tr><td>Processo da cobrança</td><td>${_invEsc(cob.numero_processo)}</td></tr>`:''}
         ${avulsa?`<tr><td>Tipo</td><td>Investigação avulsa (sem cobrança e sem devedor cadastrado)</td></tr>`:''}
         <tr><td>Situação da investigação</td><td>${_invEsc(_invStatusLabel(inv.status))} · concluída em ${_invEsc(_invData(inv.concluido_em||inv.created_at))}</td></tr>
-        <tr><td>Prioridade</td><td>${Math.round(+inv.score_prioridade||0)}/100 (critérios na seção 7)</td></tr>
+        <tr><td>Prioridade</td><td>${Math.round(+inv.score_prioridade||0)}/100 (critérios na seção 8)</td></tr>
         ${'recebe_ente_publico' in res?`<tr><td>Recebe de ente público</td><td>${_invEsc(recebeTxt)}</td></tr>`:''}
         ${cobertura?`<tr><td>Cobertura processual</td><td>${_invEsc(cobertura)}</td></tr>`:''}
       </table>
@@ -23605,10 +23607,13 @@ async function baixarRelatorioInvestigacao(investigacaoId, abrir){
         <div><b style="color:#B8612A;">${c.alertas}</b>${c.alertas===1?'sinal de alerta':'sinais de alerta'}</div>
       </div>
       ${an.penhora.length?an.penhora.map(p=>`<div class="pen"><b>${_invEsc(p.tipo)}</b>${p.conf?'':' <span class="mute">(pista, confirmar)</span>'}<br>${_invEsc(_invTrechoFmt(p.texto))}${_invLink(p.url)}</div>`).join('')
-        :'<p><i>Nenhum bem ou crédito penhorável identificado nas fontes consultadas. Ver na seção 6 as fontes que não responderam.</i></p>'}
+        :'<p><i>Nenhum bem ou crédito penhorável identificado nas fontes consultadas. Ver na seção 7 as fontes que não responderam.</i></p>'}
       ${an.impenhoravel.length?`<h3>Encontrado, mas não penhorável</h3><ul>${an.impenhoravel.map(x=>`<li>${_invEsc(_invTrechoFmt(x.texto))}</li>`).join('')}</ul>`:''}
+      <div class="kp"><h2><span class="n">3</span>O que pedir ao juiz</h2>
+      ${pedidos.length?`<ol style="margin:4px 0;padding-left:18px;">${pedidos.map(x=>`<li style="margin-bottom:5px;"><b>${_invEsc(x.titulo)}</b><br>${_invEsc(x.texto)}</li>`).join('')}</ol>`:'<p><i>Nenhum pedido sugerido a partir dos achados desta investigação.</i></p>'}
+      <p class="mute">Sugestão em ordem de força da prova, do crédito já confirmado ao que ainda depende de conferência. Não substitui a análise do advogado.</p></div>
       ${teiaHtml}
-      <div class="kp"><h2><span class="n">4</span>Achados por categoria</h2>
+      <div class="kp"><h2><span class="n">5</span>Achados por categoria</h2>
       <h3>Empresas (${emp.length})</h3>
       ${tab(['Empresa','CNPJ','Situação','Ligação','Status','Conf.'],emp.map(e=>tr([_invEsc(e.nome)+selos(e),doc(e.documento),_invEsc(_invSituacaoEnt(e)),_invEsc(lig(e)),_invEsc(e.status_verificacao),_invEsc(e.confianca)+'%'])),'Nenhuma empresa encontrada.')}</div>
       <h3>Pessoas (${pes.length})</h3>
@@ -23616,22 +23621,24 @@ async function baixarRelatorioInvestigacao(investigacaoId, abrir){
       <h3>Processos (${pro.length})</h3>
       ${tab(['Número','Tribunal','Polo do devedor','Classe','Status'],pro.map(e=>{ const d=e.dados||{}; return tr([_invEsc(d.numero||e.nome)+selos(e),_invEsc(d.tribunal),d.polo==='A'?'autor':d.polo==='P'?'réu':'—',_invEsc(d.classe),_invEsc(e.status_verificacao)]); }),avulsa&&!djenOk?'Não pesquisado: DJEN não consultado (reprocessar pelo painel).':'Nenhum processo encontrado no DJEN.')}
       <h3>Contratos e vínculos públicos (${pub.length})</h3>
-      ${tab(['Fonte','Achado','Consultado em'],pub.map(x=>tr([_invEsc(_invFonteLbl(x.fonte_codigo)),`<b>${_invEsc(x.titulo||'')}</b>${x.trecho?'<br>'+_invEsc(_invTrechoFmt(x.trecho)):''}${_invLink(x.url)}`,_invEsc(_invData(x.obtido_em))])),pubIncompleto?'Nada encontrado nas buscas que responderam; parte das consultas ficou sem resposta (seção 6).':'Nada encontrado no Portal da Transparência e no PNCP.')}
-      <div class="kp"><h2><span class="n">5</span>Sinais de alerta</h2>
+      ${tab(['Fonte','Achado','Consultado em'],pub.map(x=>tr([_invEsc(_invFonteLbl(x.fonte_codigo)),`<b>${_invEsc(x.titulo||'')}</b>${x.trecho?'<br>'+_invEsc(_invTrechoFmt(x.trecho)):''}${_invLink(x.url)}`,_invEsc(_invData(x.obtido_em))])),pubIncompleto?'Nada encontrado nas buscas que responderam; parte das consultas ficou sem resposta (seção 7).':'Nada encontrado no Portal da Transparência e no PNCP.')}
+      <div class="kp"><h2><span class="n">6</span>Sinais de alerta</h2>
       ${an.alertas.length?an.alertas.map(a=>`<div class="al${a.nivel==='alerta'?'':' r'}"><b>${_invEsc(a.titulo)}</b><br>${_invEsc(a.texto)}</div>`).join(''):'<p><i>Nenhum sinal de alerta nos dados encontrados.</i></p>'}
       <p class="mute">Sinal de alerta é pista para conferir, não prova de fraude, ocultação de bens ou grupo econômico.</p></div>
-      <div class="kp"><h2><span class="n">6</span>Fontes consultadas</h2>
+      <div class="kp"><h2><span class="n">7</span>Fontes consultadas</h2>
       <h3>Responderam</h3>${fOkInteiras.length?`<ul>${fOkInteiras.map(f=>`<li>${_invEsc(_invFonteLbl(fCod(f)))}</li>`).join('')}</ul>`:'<p class="mute"><i>Não registrado.</i></p>'}
       <h3>Sem resposta ou não conclusivas</h3>${fNao.length?`<ul>${fNao.map(f=>`<li>${fNaoTxt(f)}</li>`).join('')}</ul>`:'<p class="mute"><i>Nenhuma.</i></p>'}
-      <p class="mute">Fonte sem resposta não significa "nada encontrado": o resultado dela é desconhecido.</p></div>
-      <div class="kp"><h2><span class="n">7</span>Critérios do score de prioridade</h2>
+      <p class="mute">Fonte sem resposta não significa "nada encontrado": o resultado dela é desconhecido.</p>
+      <h3>Limites da busca</h3>${cortes.length?`<ul>${cortes.map(x=>`<li>${_invEsc(x)}</li>`).join('')}</ul><p class="mute">O que passou desses limites não foi lido: pode haver mais achados.</p>`:'<p class="mute"><i>Nenhuma busca atingiu o limite de resultados.</i></p>'}</div>
+      <div class="kp"><h2><span class="n">8</span>Critérios do score de prioridade</h2>
       <ul>${(comps.length?comps:[{rotulo:'Ainda não calculado',pontos:'—',explicacao:''}]).map(x=>`<li><strong>${_invEsc(x.rotulo||x.motivo)}</strong>: ${_invEsc(x.pontos??'—')} ponto(s). ${_invEsc(x.explicacao||'')}</li>`).join('')}</ul></div>
       <h2><span class="n">A</span>Anexo A. Todas as evidências</h2>
       <table><thead><tr><th>Fonte</th><th>Título / trecho</th><th>Confiança</th><th>Consultada em</th></tr></thead><tbody>
       ${(evid||[]).map(e=>`<tr><td>${_invEsc(_invFonteLbl(e.fonte_codigo))}</td><td><strong>${_invEsc(e.titulo||'')}</strong>${e.trecho?'<br>'+_invEsc(_invTrechoFmt(e.trecho)):''}${_invLink(e.url)}</td><td>${_invEsc(e.confianca)}%</td><td>${_invEsc(_invData(e.obtido_em))}</td></tr>`).join('')||'<tr><td colspan="4">Nenhuma evidência.</td></tr>'}
       </tbody></table>
       <div class="kp"><h2><span class="n">B</span>Anexo B. Linha do tempo</h2>
-      <ul>${(eventos||[]).map(e=>`<li>${_invEsc(_invData(e.criado_em))} · ${_invEsc(String(e.tipo||'').replace(/_/g,' '))} · ${_invEsc(String(e.mensagem||'').split(' | ').map(_invErroLeigo).join(' | '))}</li>`).join('')}</ul>
+      ${tempo.length?`<table><tbody>${tempo.map(x=>`<tr><td class="mono" style="width:78px;">${x.data.split('-').reverse().join('/')}</td><td>${_invEsc(x.texto)}</td></tr>`).join('')}</tbody></table>`:'<p class="mute"><i>Nenhum fato datado encontrado.</i></p>'}
+      ${ctx.vencimento?'':`<p class="mute">${inv.cobranca_id?'A cobrança não tem data de vencimento cadastrada':'Investigação sem cobrança'}: a data da dívida fica fora da linha do tempo e o sinal "empresa aberta depois da dívida" não pôde ser verificado.</p>`}
       <div class="nota">Pistas não equivalem a prova. Toda medida judicial exige confirmação da fonte e análise profissional.</div>
       <div class="rod">COBRASQ Recuperadora de Crédito e Cobrança Ltda · CNPJ 34.626.848/0001-42<br>Av. Rio Grande do Sul, 380, Sala 201, Centro, Dois Vizinhos/PR · CEP 85660-000 · ccobrasq@gmail.com</div></div>
     </div></body></html>`;
@@ -23686,8 +23693,8 @@ function _invVCor(t){ return (_INV_VGRUPOS.find(g=>g[0]===_invVGrupo(t))||_INV_V
 // Leitura do resultado, igual na tela e no PDF: o que dá para penhorar, sinais
 // de alerta (sempre pista, nunca acusação) e contadores. Só usa o que o worker
 // já grava (entidades, vínculos, trechos das evidências).
-function _invAnalise(ents, vinc, evid){
-  ents=ents||[]; vinc=vinc||[]; evid=evid||[];
+function _invAnalise(ents, vinc, evid, ctx){
+  ents=ents||[]; vinc=vinc||[]; evid=evid||[]; ctx=ctx||{};
   const porId=Object.fromEntries(ents.map(e=>[e.id,e]));
   const raiz=ents.find(e=>+e.profundidade===0)||null;
   const nm=e=>e?.nome||e?.documento||e?.chave_normalizada||'—';
@@ -23726,17 +23733,51 @@ function _invAnalise(ents, vinc, evid){
     if(novas.length>=2) alertas.push({entId:e.id, nivel:'alerta', titulo:'Sócio em várias empresas abertas há pouco',
       texto:`${nm(e)} está no quadro de ${novas.length} empresas abertas nos últimos 2 anos (${lista(novas.map(x=>nm(x)+' em '+x.dados.data_abertura.split('-').reverse().join('/')))}). Empresa nova no lugar da antiga pode receber bens ou clientes do devedor: conferir.`});
   });
+  // Endereço usado por 10+ CNPJs (mesmo corte do worker) é escritório de
+  // contabilidade, coworking ou galeria: o sinal cai para ressalva.
   const mesmoEnd=doRaiz.filter(v=>v.tipo==='compartilha_endereco_fiscal').map(v=>porId[v.destino_entidade_id]).filter(Boolean);
-  if(raiz&&mesmoEnd.length>=2) alertas.push({entId:raiz.id, nivel:'alerta', titulo:'Várias empresas no endereço do devedor',
-    texto:`${mesmoEnd.length} empresas têm endereço fiscal igual ao do devedor (${lista(mesmoEnd.map(nm))}). Empresas "independentes" no mesmo local podem ser um grupo de fato, ou só um prédio comercial: conferir.`});
+  const endMassa=raiz&&(+((raiz.dados||{}).endereco_compartilhado_com)>=10||mesmoEnd.some(e=>+((e.dados||{}).compartilhado_com)>=10));
+  if(raiz&&mesmoEnd.length>=2) alertas.push(endMassa
+    ?{entId:raiz.id, nivel:'ressalva', titulo:'Endereço do devedor usado por muitos CNPJs',
+      texto:`${mesmoEnd.length} empresas têm endereço fiscal igual ao do devedor (${lista(mesmoEnd.map(nm))}), mas o endereço é usado por 10 ou mais CNPJs: provável escritório de contabilidade, coworking ou galeria. Sozinho, não indica grupo econômico.`}
+    :{entId:raiz.id, nivel:'alerta', titulo:'Várias empresas no endereço do devedor',
+      texto:`${mesmoEnd.length} empresas têm endereço fiscal igual ao do devedor (${lista(mesmoEnd.map(nm))}). Empresas "independentes" no mesmo local podem ser um grupo de fato, ou só um prédio comercial: conferir.`});
+  // Empresa aberta depois do vencimento da dívida: do devedor (sócio) ou, quando o
+  // devedor é empresa, dos sócios dele. Sem data da dívida o sinal não aparece.
+  const venc=ctx.vencimento, fmtD=s=>String(s).split('-').reverse().join('/');
+  if(venc){
+    const depois=ents.filter(e=>e.tipo==='empresa'&&e!==raiz&&String((e.dados||{}).data_abertura||'')>=venc
+      &&(doRaiz.some(v=>v.tipo==='socio_de'&&v.destino_entidade_id===e.id)||(raiz?.tipo==='empresa'&&(e.dados||{}).criterio==='empresa_do_socio')));
+    if(depois.length) alertas.push({entId:depois[0].id, nivel:'alerta', titulo:'Empresa aberta depois da dívida',
+      texto:`${depois.length===1?'Uma empresa ligada ao devedor foi aberta':depois.length+' empresas ligadas ao devedor foram abertas'} depois do vencimento da dívida (${fmtD(venc)}): ${lista(depois.map(x=>nm(x)+' em '+fmtD(x.dados.data_abertura)))}. Empresa nova pode estar recebendo o faturamento, os bens ou os clientes que respondem pela dívida: conferir.`});
+  }
+  // Capital social irrisório diante da dívida (ou ≤ R$ 1.000 sem valor da dívida).
+  // MEI fica de fora: o nome dele termina no CPF e o capital baixo é o normal.
+  const brl=n=>(+n).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+  const tetoCap=ctx.valor>0?ctx.valor*0.1:1000;
+  ents.filter(e=>e.tipo==='empresa'&&e.status_verificacao==='confirmada'&&!/\d{11}\s*$/.test(String(e.nome||''))
+    &&(e===raiz||doRaiz.some(v=>v.tipo==='socio_de'&&v.destino_entidade_id===e.id))
+    &&+((e.dados||{}).capital_social)>0&&+e.dados.capital_social<tetoCap).forEach(e=>alertas.push({entId:e.id, nivel:'alerta', titulo:'Capital social irrisório',
+    texto:`${nm(e)} declara capital social de ${brl(e.dados.capital_social)}${ctx.valor>0?`, menos de 10% da dívida (${brl(ctx.valor)})`:''}. Empresa sem patrimônio próprio para responder pelas obrigações pode ser só fachada: somado a outros sinais, reforça o pedido de desconsideração.`}));
   doRaiz.filter(v=>v.tipo==='socio_de').forEach(v=>{ const p=porId[v.destino_entidade_id]; if(!p) return; const s=sit(p);
     if(/baixada|inapta|suspensa|nula/.test(s)) alertas.push({entId:p.id, nivel:'alerta', titulo:'Empresa do devedor encerrada ou irregular',
       texto:`${nm(p)} está ${s}${p.status_verificacao==='confirmada'?'':' (vínculo ainda não confirmado)'}. Conferir se bens, clientes ou funcionários passaram para outra empresa antes disso.`}); });
   const reu=doRaiz.filter(v=>v.tipo==='reu_em').length;
   if(raiz&&reu>=3) alertas.push({entId:raiz.id, nivel:'alerta', titulo:'Outros credores cobrando',
     texto:`O devedor é réu em ${reu} processos: há disputa pelos mesmos bens. Ver nos autos o que já foi penhorado ou indicado.`});
-  ents.filter(e=>e.tipo==='empresa'&&+((e.dados||{}).compartilhado_com)>3).forEach(e=>alertas.push({entId:e.id, nivel:'ressalva', titulo:'Contato de contador ou escritório',
-    texto:`O telefone/e-mail que liga ${nm(e)} ao devedor é usado por ${e.dados.compartilhado_com} CNPJs: provavelmente é do contador. Sozinho, esse vínculo não indica grupo econômico.`}));
+  // Pista achada por contato ou endereço muito usado: o texto segue o critério.
+  ents.filter(e=>e.tipo==='empresa'&&+((e.dados||{}).compartilhado_com)>=3).forEach(e=>{
+    const d=e.dados, porEnd=/^endereco/.test(String(d.criterio||''));
+    if(!porEnd&&+d.compartilhado_com<=3) return;
+    alertas.push(porEnd
+      ?{entId:e.id, nivel:'ressalva', titulo:'Endereço de contador ou escritório',
+        texto:`O endereço que liga ${nm(e)} à teia é usado por ${d.compartilhado_com} outros CNPJs: provavelmente é escritório de contabilidade, coworking ou galeria. Sozinho, esse vínculo não indica grupo econômico.`}
+      :{entId:e.id, nivel:'ressalva', titulo:'Contato de contador ou escritório',
+        texto:`O telefone/e-mail que liga ${nm(e)} ao devedor é usado por ${d.compartilhado_com} CNPJs: provavelmente é do contador. Sozinho, esse vínculo não indica grupo econômico.`});
+  });
+  // Empresa confirmada cujo próprio endereço fiscal é compartilhado (worker v7).
+  ents.filter(e=>e.tipo==='empresa'&&+((e.dados||{}).endereco_compartilhado_com)>=3).forEach(e=>alertas.push({entId:e.id, nivel:'ressalva', titulo:'Sede em endereço compartilhado',
+    texto:`O endereço fiscal de ${nm(e)}${e.dados.endereco_fiscal?' ('+e.dados.endereco_fiscal+')':''} é usado por mais ${e.dados.endereco_compartilhado_com} CNPJs: provável escritório de contabilidade, coworking ou galeria. Diligência no endereço pode não achar a empresa nem bens dela.`}));
   const emp=ents.filter(e=>e.tipo==='empresa'&&e!==raiz), proc=doRaiz.map(v=>v.tipo);
   return {raiz, porId, penhora, impenhoravel, alertas,
     comPenhora:new Set(penhora.map(p=>p.entId).filter(Boolean)),
@@ -23744,6 +23785,67 @@ function _invAnalise(ents, vinc, evid){
     cont:{empConf:emp.filter(e=>e.status_verificacao==='confirmada').length, empPista:emp.filter(e=>e.status_verificacao!=='confirmada').length,
       pessoas:ents.filter(e=>e.tipo==='pessoa'&&e!==raiz).length, autor:proc.filter(t=>t==='autor_em').length, reu,
       alertas:alertas.filter(a=>a.nivel==='alerta').length}};
+}
+// Data e valor da dívida para os sinais que comparam com ela. cobrancas.vencimento
+// é esparso: vale o mais antigo entre ele, divida.vencimento e os títulos.
+function _invCtxDivida(cob){
+  if(!cob) return {};
+  const d=cob.divida||{};
+  const datas=[cob.vencimento,d.vencimento,..._titulosValidos(d).map(t=>t.vencimento)]
+    .map(x=>String(x||'').slice(0,10)).filter(x=>/^\d{4}-\d{2}-\d{2}$/.test(x)).sort();
+  const valor=+cob.valor_atual||+cob.valor_orig||parseValorBR(d.totalAvista)||parseValorBR(d.valorOriginal)||0;
+  return {vencimento:datas[0]||null, valor:valor>0?valor:null};
+}
+const _INV_COB_CTX='numero_processo,vencimento,valor_orig,valor_atual,divida,clientes:cliente_id(nome)';
+// "O que pedir ao juiz": um pedido por achado, do mais forte (crédito confirmado)
+// ao que ainda depende de conferência. Artigos conferidos no Planalto em 26/09/2026.
+function _invPedidos(an){
+  const porId=an.porId, raiz=an.raiz, out=[];
+  const curto=t=>String(t||'').split(' · ').slice(0,4).join(' · ').replace(/(\d{4})-(\d{2})-(\d{2})/g,'$3/$2/$1');
+  an.penhora.forEach(p=>{
+    const e=porId[p.entId]||{}, d=e.dados||{};
+    let ped;
+    if(p.tipo==='Contrato público vigente') ped={forca:1, titulo:'Penhora de crédito em contrato público',
+      texto:`Penhora do que o órgão contratante ainda deve pagar ao devedor (${curto(_invTrechoFmt(p.texto))}), com intimação do órgão para não pagar ao devedor e depositar em juízo (art. 855, I, do CPC).`};
+    else if(/^Renda federal/.test(p.tipo)) ped={forca:3, titulo:'Ofício ao órgão pagador da renda federal',
+      texto:`Salário, provento e pensão são impenhoráveis, salvo para pagar alimentos ou no que passar de 50 salários mínimos por mês (art. 833, IV e § 2º, do CPC). Pedir só se o caso se encaixar numa dessas exceções. Achado: ${curto(p.texto)}.`};
+    else if(/rosto dos autos/.test(p.tipo)) ped={forca:1, titulo:'Penhora no rosto dos autos',
+      texto:`Averbação da penhora no processo ${d.numero||e.nome||''}${d.tribunal?' ('+d.tribunal+')':''}, em que o devedor é autor, para que o que ele vier a receber fique preso a esta cobrança (art. 860 do CPC).`};
+    else if(/quotas/.test(p.tipo)) ped={forca:2, titulo:'Penhora das quotas',
+      texto:`Penhora das quotas do devedor em ${e.nome||''}${e.documento?' (CNPJ '+_invDocFmt(e.documento)+')':''}, com intimação da sociedade nos termos do art. 861 do CPC.`};
+    if(!ped) return;
+    if(!p.conf){ ped.forca=4; ped.texto='Depois de confirmar o vínculo: '+ped.texto; }
+    out.push(ped);
+  });
+  const sinais=an.alertas.filter(a=>a.nivel==='alerta'&&a.titulo!=='Outros credores cobrando');
+  if(sinais.length) out.push({forca:5, titulo:raiz?.tipo==='empresa'?'Desconsideração da personalidade jurídica':'Desconsideração inversa da personalidade jurídica',
+    texto:`Sinais encontrados: ${[...new Set(sinais.map(a=>a.titulo))].join('; ')}. Conferir antes: se houver prova de desvio de finalidade ou confusão patrimonial (art. 50 do Código Civil), pedir a desconsideração pelo incidente dos arts. 133 e 134 do CPC${raiz?.tipo==='empresa'?', para alcançar os bens dos sócios':', na forma inversa (art. 133, § 2º), para alcançar os bens das empresas usadas pelo devedor'}.`});
+  if(an.cont.reu>=3) out.push({forca:6, titulo:'Consultar os outros processos contra o devedor',
+    texto:`O devedor é réu em ${an.cont.reu} processos: ver nos autos o que já foi penhorado ou indicado antes de pedir bens que outro credor já alcançou.`});
+  return out.sort((a,b)=>a.forca-b.forca);
+}
+// Linha do tempo do caso (fatos datados), no lugar do registro técnico do worker.
+function _invIsoData(s){ s=String(s||''); let m=/^(\d{4}-\d{2}-\d{2})/.exec(s); if(m) return m[1]; m=/^(\d{2})\/(\d{2})\/(\d{4})/.exec(s); return m?`${m[3]}-${m[2]}-${m[1]}`:null; }
+function _invLinhaTempo(inv, ents, evid, ctx){
+  const out=[], vistos=new Set();
+  const add=(d,t)=>{ const iso=_invIsoData(d); if(!iso||vistos.has(iso+t)) return; vistos.add(iso+t); out.push({data:iso,texto:t}); };
+  if(ctx&&ctx.vencimento) add(ctx.vencimento,'Vencimento da dívida cobrada');
+  (ents||[]).forEach(e=>{ const d=e.dados||{};
+    if(e.tipo==='empresa'&&d.data_abertura) add(d.data_abertura,`Abertura de ${e.nome||'empresa'}${e.documento?' ('+_invDocFmt(e.documento)+')':''}`);
+    if(e.tipo==='processo'){ const pol=d.polo==='A'?'devedor autor':d.polo==='P'?'devedor réu':'';
+      add(d.primeira_data,`Processo ${d.numero||e.nome}${pol?' ('+pol+')':''}: primeira publicação no DJEN`);
+      if(d.ultima_data!==d.primeira_data) add(d.ultima_data,`Processo ${d.numero||e.nome}: última publicação no DJEN`); }
+  });
+  (evid||[]).forEach(x=>{ const t=String(x.trecho||''), seg=t.split(' · ');
+    if(/^Sanção (CEIS|CNEP)/.test(x.titulo||'')){ const m=/ · de (\S+) a (.+?)(?: · |$)/.exec(t); if(!m) return;
+      add(m[1],`Início de ${x.titulo}: ${seg.slice(0,2).join(' · ')}`); if(!/^sem/.test(m[2])) add(m[2],`Fim de ${x.titulo}: ${seg.slice(0,2).join(' · ')}`); }
+    else if(/^Contrato/.test(x.titulo||'')){ const m=/vigência (\S+) a (\S+?)(?: · |$)/.exec(t); if(!m) return;
+      const rot=x.fonte_codigo==='pncp'?[seg[0],seg[2]].filter(Boolean).join(' · '):seg.slice(0,2).join(' · ');
+      add(m[1],`Início de contrato público: ${rot}`); add(m[2],`Fim da vigência de contrato público: ${rot}`); }
+  });
+  add(inv.created_at,'Início desta investigação');
+  if(inv.concluido_em) add(inv.concluido_em,'Conclusão desta investigação');
+  return out.sort((a,b)=>a.data.localeCompare(b.data));
 }
 let _invHost=null;          // {cobId, hostId}: onde recarregar depois de iniciar/processar
 const _invPartesCache={};   // cobId → partes carregadas (nome/doc para a RPC)
@@ -23962,14 +24064,17 @@ async function invVerTeia(invId, alvoId){
   host.dataset.inv=invId;
   host.innerHTML=`<div class="cob-panel" style="padding:18px;margin-top:14px;color:var(--text-3);font-size:12.5px;">Montando a teia…</div>`;
   const [{data:inv},{data:ents,error},{data:vinc},{data:evid}]=await Promise.all([
-    supa.from('investigacoes_patrimoniais').select('id,status,nome_consultado,documento_consultado,score_prioridade,resumo,concluido_em,created_at').eq('id',invId).maybeSingle(),
+    supa.from('investigacoes_patrimoniais').select('id,status,nome_consultado,documento_consultado,score_prioridade,resumo,concluido_em,created_at,cobranca_id').eq('id',invId).maybeSingle(),
     supa.from('investigacao_entidades').select('id,tipo,nome,documento,chave_normalizada,profundidade,confianca,status_verificacao,dados').eq('investigacao_id',invId).order('profundidade'),
     supa.from('investigacao_vinculos').select('id,tipo,confianca,justificativa,origem_entidade_id,destino_entidade_id').eq('investigacao_id',invId),
     supa.from('investigacao_evidencias').select('entidade_id,vinculo_id,fonte_codigo,titulo,trecho,url,obtido_em,confianca').eq('investigacao_id',invId).order('obtido_em',{ascending:false})
   ]);
   if(host.dataset.inv!==invId) return;
   if(error){ host.innerHTML=_detEmpty('Não foi possível montar a teia: '+error.message); return; }
-  const an=_invAnalise(ents,vinc,evid);
+  let cob=null;
+  if(inv&&inv.cobranca_id){ try{ const {data}=await supa.from('cobrancas').select(_INV_COB_CTX).eq('id',inv.cobranca_id).maybeSingle(); cob=data; }catch(_){} }
+  if(host.dataset.inv!==invId) return;
+  const an=_invAnalise(ents,vinc,evid,_invCtxDivida(cob));
   window._invTeia={invId, alvoId, inv:inv||{}, ents:ents||[], vinc:vinc||[], evid:evid||[], an, aba:'grafo', sel:null,
     filtro:{ent:new Set(Object.keys(_INV_COR)), grp:new Set(_INV_VGRUPOS.map(g=>g[0])), soConf:false}};
   const raiz=an.raiz, c=an.cont, i=inv||{};
@@ -24088,12 +24193,17 @@ function invTeiaNo(entId){
   const evs=t.evid.filter(x=>x.entidade_id===entId||(x.vinculo_id&&vIds.has(x.vinculo_id)));
   const als=t.an.alertas.filter(a=>a.entId===entId), pen=t.an.penhora.filter(p=>p.entId===entId);
   const sit=_invSituacaoEnt(e);
+  // Confirmar à mão: só o proprietário (o worker confere de novo) e nunca o alvo.
+  const man=(e.dados||{}).confirmado_manual||null;
+  const podeConf=currentUser?.papel==='proprietario'&&+e.profundidade!==0&&(man||e.status_verificacao!=='confirmada');
   const tt=s=>`<div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin:12px 0 4px;">${s}</div>`;
   box.innerHTML=`<div style="border:1px solid var(--border);border-radius:10px;padding:12px;">
     <div style="display:flex;gap:10px;align-items:center;"><svg viewBox="0 0 30 30" width="30" height="30" style="flex:none;"><rect x="1" y="1" width="28" height="28" rx="4" fill="${_INV_COR[e.tipo]||'#5A6472'}"/>${_invGlifo(e.tipo,15,15,11,'#FFFFFF')}</svg>
     <div style="min-width:0;"><div style="font-size:13.5px;font-weight:700;">${_invEsc(e.nome||_invDocFmt(e.documento))}</div>
     <div style="font-size:11.5px;color:var(--text-3);">${_invEsc(e.tipo)}${e.documento?' · <span style="font-family:var(--font-mono);">'+_invEsc(_invDocFmt(e.documento))+'</span>':''}</div></div></div>
-    <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><span class="det-chip ${e.status_verificacao==='confirmada'?'princ':''}">${_invEsc(e.status_verificacao)}</span><span class="det-chip">confiança ${_invEsc(e.confianca)}%</span>${sit&&sit!=='—'?`<span class="det-chip">${_invEsc(sit)}</span>`:''}</div>
+    <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;"><span class="det-chip ${e.status_verificacao==='confirmada'?'princ':''}">${_invEsc(e.status_verificacao)}${man?' à mão':''}</span><span class="det-chip">confiança ${_invEsc(e.confianca)}%</span>${sit&&sit!=='—'?`<span class="det-chip">${_invEsc(sit)}</span>`:''}</div>
+    ${man?`<div style="font-size:11px;color:var(--text-3);margin-top:5px;">Confirmada por ${_invEsc(man.por)} em ${_invEsc(_invData(man.em))}${man.motivo?': '+_invEsc(man.motivo):''}</div>`:''}
+    ${podeConf?`<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" onclick="invConfirmarPista('${e.id}',${man?'false':'true'})">${man?'Desfazer confirmação':'Confirmar pista'}</button></div>`:''}
     ${pen.length?tt('Pode penhorar')+pen.map(p=>`<div style="padding:5px 0;border-top:1px solid var(--border-2);"><div style="font-weight:600;color:#2F855A;">${_invEsc(p.tipo)}</div><div style="font-size:11.5px;color:var(--text-2);">${_invEsc(p.texto)}</div></div>`).join(''):''}
     ${als.length?tt('Sinais de alerta')+als.map(a=>`<div style="padding:5px 0;border-top:1px solid var(--border-2);"><div style="font-weight:600;color:${a.nivel==='alerta'?'#C05621':'var(--text-2)'};">${_invEsc(a.titulo)}</div><div style="font-size:11.5px;color:var(--text-2);">${_invEsc(a.texto)}</div></div>`).join(''):''}
     ${vs.length?tt('Vínculos')+vs.map(v=>{ const outro=porId[v.origem_entidade_id===entId?v.destino_entidade_id:v.origem_entidade_id];
@@ -24101,6 +24211,25 @@ function invTeiaNo(entId){
     ${tt('Evidências')}
     ${evs.length?evs.map(x=>`<div style="padding:6px 0;border-top:1px solid var(--border-2);"><div style="font-weight:600;">${_invEsc(x.titulo||x.fonte_codigo)}</div><div style="font-size:11px;color:var(--text-3);">${_invEsc(x.fonte_codigo)} · ${_invEsc(_invData(x.obtido_em))} · ${_invEsc(x.confianca)}%</div>${x.trecho?`<div style="font-size:11.5px;color:var(--text-2);margin-top:2px;">${_invEsc(x.trecho)}</div>`:''}${/^https?:\/\//i.test(String(x.url||''))?`<a href="${escHtml(x.url)}" target="_blank" rel="noopener" style="font-size:11px;word-break:break-all;">abrir fonte</a>`:''}</div>`).join(''):'<div style="color:var(--text-3);font-style:italic;">Sem evidência própria registrada.</div>'}
   </div>`;
+}
+
+// Pista conferida fora do sistema (ex.: contrato social, certidão da Junta) vira
+// "confirmada" e continua assim nos reprocessamentos (worker v7).
+function invConfirmarPista(entId, confirmar){
+  const t=window._invTeia; if(!t) return;
+  const e=t.ents.find(x=>x.id===entId); if(!e) return;
+  const enviar=async motivo=>{
+    try{
+      const {data,error}=await getSupabase().functions.invoke('investigacao-patrimonial-worker',{body:{investigacao_id:t.invId, acao:'confirmar_pista', entidade_id:entId, confirmar, motivo}});
+      if(error){ let msg=error.message; try{ const j=await error.context?.json?.(); if(j&&j.error) msg=j.error; }catch(_){} throw new Error(msg); }
+      if(data&&data.error) throw new Error(data.error);
+      showToast(confirmar?'Pista confirmada.':'Confirmação desfeita.','success');
+      await invVerTeia(t.invId,t.alvoId);
+      invTeiaNo(entId);
+    }catch(err){ showToast('Não foi possível '+(confirmar?'confirmar':'desfazer')+': '+((err&&err.message)||err),'danger'); }
+  };
+  if(!confirmar){ if(confirm(`Desfazer a confirmação de "${e.nome||_invDocFmt(e.documento)}"? Ela volta a ser pista.`)) enviar(''); return; }
+  promptModal('Confirmar pista',`Como foi conferido que "${e.nome||_invDocFmt(e.documento)}" está mesmo ligada ao devedor? (opcional: ex. contrato social, certidão da Junta)`,v=>{ if(v==null) return; enviar(String(v).trim()); },{textarea:true});
 }
 
 // SVG → PNG para o PDF (html2canvas nem sempre desenha <svg> embutido).
