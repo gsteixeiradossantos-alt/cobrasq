@@ -36,11 +36,17 @@ no código, ou ação na UI) e o **estado-correto** esperado. Atualize ao descob
 ## R-03 · Rascunho-fantasma (caso some e volta)
 - **O que é:** o carimbo de rascunho precisa viver na COLUNA `is_draft` (em `devedores` E `cobrancas`), não só
   no `metadata`; senão ressuscita na carga e/ou some do CRM.
-- **Onde:** `devedores.is_draft`, `cobrancas.is_draft`, `clientes.is_draft`; view `casos` (`... and not is_draft`).
-- **Teste:** `auditoria_dados_perfis.sql §3` (contagem de `is_draft`; rascunhos antigos); conferir que a view
-  `casos` exclui draft e mantém `security_invoker=true`.
-- **Estado-correto:** `is_draft` na coluna; view exclui; índice de CPF exclui rascunho.
-- **Perfil exposto:** colaborador (cadastra e "some"). **Última checagem:** dev_draft=1, cob_draft=3, cli_draft=0.
+- **Onde:** `devedores.is_draft`, `cobrancas.is_draft`, `clientes.is_draft`; view `casos` expõe `is_draft`
+  (e `arquivado`, `fora_crm`) como coluna — desde `20260924e_casos_sem_ocultacao` ela **não esconde mais**
+  rascunho: a tela mostra com selo ("nada mais some", decisão do Gustavo em 24/09/2026).
+- **Teste:** `auditoria_dados_perfis.sql §3` (contagem de `is_draft`; rascunhos antigos) e `§3b` (view expõe
+  as flags, contagem por flag, `security_invoker=true`). As funções de IA (`bia-atendimento`, `beatriz-msg`,
+  `peticao-assistente`) filtram `is_draft=false` / `arquivado=false` / `fora_crm=false` — grep deve achar
+  o filtro nas três.
+- **Estado-correto:** `is_draft` na coluna (não só no metadata); a view mostra com a flag; a IA ignora;
+  índice de CPF exclui rascunho.
+- **Perfil exposto:** colaborador (cadastra e "some"). **Última checagem (26/09/2026):** dev_draft=0;
+  view `casos` 1071 linhas = 903 sem flag + 96 arquivadas + 6 rascunho + 73 fora_crm (há sobreposição).
 
 ## R-04 · "O conserto ficou em PR aberto" (nunca foi pro ar)
 - **O que é:** o fix existe em branch/PR mas NÃO foi mergeado em `main` → não está no ar (deploy = merge).

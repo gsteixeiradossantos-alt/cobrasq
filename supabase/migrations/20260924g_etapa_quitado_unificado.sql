@@ -1,4 +1,9 @@
--- 20260924d_etapa_quitado_unificado
+-- 20260924g_etapa_quitado_unificado  (era 20260924d_etapa_quitado_unificado)
+-- RENOMEADA em 26/09/2026 (auditoria): em produção ela rodou DEPOIS da 20260924f
+-- (schema_migrations 20260924203421 > 20260924203150). As duas redefinem
+-- cobrancas_etapa_de_status; com o nome "d", uma reexecução em ordem de arquivo
+-- deixaria por último a versão da "f" e devolveria o ramo "Quitado ao cliente".
+-- Com "g", a ordem do repo = a de produção, e a função final é esta.
 -- APLICADA em produção em 24/09/2026 (com SET search_path, igual à função anterior). Depende de 20260924c_cobrancas_etapa_trigger (a função e o
 -- trigger precisam existir).
 --
