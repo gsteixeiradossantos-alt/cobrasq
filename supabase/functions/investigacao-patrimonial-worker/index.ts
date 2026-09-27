@@ -1,4 +1,12 @@
-// Worker da coleta patrimonial (v7).
+// Worker da coleta patrimonial (v8).
+// v8 (26/09/2026): INPI (marcas do devedor pelo nome + CPF conferido; marcas e
+// patentes das empresas pelo CNPJ; CPF completo do sócio quando o INPI mostra e
+// os 6 dígitos do QSA batem), DataJud (classe, assuntos, órgão e último
+// andamento dos processos; segredo DATAJUD_API_KEY) e sinais de bem/dinheiro no
+// texto das publicações do DJEN. O INPI não responde a IP dos EUA: o worker se
+// chama com x-region: sa-east-1 (acao 'sp'), e o braço de São Paulo só busca e lê,
+// sem gravar. O texto do DJEN vai pelo mesmo braço; se falhar, fica o
+// ultimo_texto que o Vigia gravou.
 // v7 (26/09/2026): com profundidade 2, busca as outras empresas dos sócios das
 // empresas confirmadas (nome + 6 dígitos do CPF) e cruza o endereço fiscal
 // delas; detalha sanções CEIS/CNEP; grava capital social; resumo.cortes lista o
@@ -29,6 +37,8 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 // Filtro do Vigia reaproveitado. Mudou logica.mjs? Republicar também este worker
 // (o CI só republica a pasta que mudou).
 import { agruparAchados, filtrarTruncado } from "../vigia-acoes/logica.mjs";
+// Leitura pura das fontes da v8 (INPI, DataJud, texto do DJEN): testada no F-49.
+import { aliasDatajud, datajudResumo, inpiMarcas, inpiPatentes, inpiTitulares, marcaViva, sinaisTexto, titularConfere } from "./fontes.mjs";
 
 const sb = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '');
 const cors = {
@@ -93,7 +103,7 @@ async function brasilApiCnpj(cnpj: string) {
 
 // `cortes` lista os limites que deixaram algo de fora: vai ao relatório para o
 // leitor saber que a busca não foi exaustiva (e onde).
-type Contadores = { pessoas: number; enriquecidas: number; confirmadas: number; pistas: number; recebiveis: number; processosAutor: number; processosReu: number; fontes: Set<string>; cortes: string[] };
+type Contadores = { pessoas: number; enriquecidas: number; confirmadas: number; pistas: number; recebiveis: number; processosAutor: number; processosReu: number; marcasVivas: number; patentes: number; sinais: number; fontes: Set<string>; cortes: string[] };
 type Socio = { id: string; nome: string; miolo: string; empresa: string };
 
 // Situação cadastral da base CNPJ vem em código.
@@ -447,13 +457,228 @@ async function pncp(inv: any, raiz: any, achadas: Map<string, Achada>, c: Contad
   return ok ? recebe : null;
 }
 
+// ── Fontes da v8 ────────────────────────────────────────────────────────────
+// O INPI não responde a quem chama dos EUA (26/09/2026: timeout de conexão a
+// partir de us-east-1, 200 em 0,1 s a partir de sa-east-1). O worker chama a si
+// mesmo com o cabeçalho x-region: sa-east-1, repassando a sessão do usuário; a
+// instância de São Paulo só busca e devolve o resultado lido (acao 'sp'), sem
+// gravar nada.
+const SUPA_URL = Deno.env.get('SUPABASE_URL') ?? '';
+async function viaSP(auth: string, invId: string, tarefas: any[], timeout = 75000): Promise<any[]> {
+  const res = await fetch(`${SUPA_URL}/functions/v1/investigacao-patrimonial-worker`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: auth, apikey: Deno.env.get('SUPABASE_ANON_KEY') ?? '', 'x-region': 'sa-east-1' },
+    body: JSON.stringify({ investigacao_id: invId, acao: 'sp', tarefas }),
+    signal: AbortSignal.timeout(timeout),
+  });
+  const j: any = await res.json().catch(() => null);
+  if (!res.ok || !Array.isArray(j?.resultados)) throw new Error(j?.error || `HTTP ${res.status}`);
+  return j.resultados;
+}
+async function mesclarDados(id: string, extra: Record<string, unknown>) {
+  const { data: atual } = await sb.from('investigacao_entidades').select('dados').eq('id', id).single();
+  await sb.from('investigacao_entidades').update({ dados: { ...(atual?.dados || {}), ...extra } }).eq('id', id);
+}
+// Até n tarefas ao mesmo tempo, na ordem da lista.
+async function emLotes<T, R>(lista: T[], n: number, f: (x: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(lista.length);
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, lista.length) }, async () => {
+    while (i < lista.length) { const k = i++; out[k] = await f(lista[k]); }
+  }));
+  return out;
+}
+
+// pePI do INPI: sessão anônima por cookie; a lista de titulares da última busca
+// fica na sessão e o link "pos=N" abre as marcas de um deles.
+const INPI = 'https://busca.inpi.gov.br/pePI/servlet/';
+const INPI_PATENTE_CAMPOS = ['NumPedido', 'NumPrioridade', 'CodigoPct', 'DataDeposito1', 'DataDeposito2', 'DataPrioridade1', 'DataPrioridade2',
+  'DataDepositoPCT1', 'DataDepositoPCT2', 'DataPublicacaoPCT1', 'DataPublicacaoPCT2', 'ClassificacaoIPC', 'CatchWordIPC', 'Titulo', 'Resumo',
+  'NomeDepositante', 'NomeInventor'];
+async function inpiSessao() {
+  const cookies = new Map<string, string>();
+  const guarda = (r: Response) => {
+    for (const c of ((r.headers as any).getSetCookie?.() || []) as string[]) { const [kv] = c.split(';'); const i = kv.indexOf('='); if (i > 0) cookies.set(kv.slice(0, i).trim(), kv.slice(i + 1)); }
+  };
+  const cab = () => ({ Cookie: [...cookies].map(([k, v]) => `${k}=${v}`).join('; '), 'User-Agent': 'Mozilla/5.0 (compatible; COBRASQ investigacao)' });
+  const texto = async (r: Response) => { guarda(r); return new TextDecoder('latin1').decode(await r.arrayBuffer()); };
+  const post = async (p: string, campos: Record<string, string>) => texto(await fetch(INPI + p, {
+    method: 'POST', headers: { ...cab(), 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(campos).toString(), redirect: 'manual', signal: AbortSignal.timeout(20000),
+  }));
+  const get = async (p: string) => texto(await fetch(INPI + p, { headers: cab(), signal: AbortSignal.timeout(20000) }));
+  await post('LoginController', { T_Login: '', T_Senha: '', action: 'login', Usuario: '' });
+  return { post, get };
+}
+// Tarefa INPI (roda em São Paulo). alvo = { cpf, nome } | { miolo, nome } | { cnpj }.
+// Pessoa vai pelo nome (a busca por CPF não acha pessoa física no pePI) e só
+// aceita o titular cujo CPF confere. Empresa vai pelo CNPJ; titular com outro
+// documento na mesma busca volta marcado confere=false.
+async function tarefaInpi(alvo: any) {
+  const s = await inpiSessao();
+  const h = await s.post('MarcasServletController', {
+    Action: 'searchNome', tipoPesquisa: 'BY_CNPJ_NOME', precisao: 'exata',
+    cpf_cgc_numINPI: alvo.cnpj || '', nomeTitular: alvo.cnpj ? '' : String(alvo.nome || ''), registerPerPage: '20', botao: ' pesquisar » ',
+  });
+  const titulares = [] as any[];
+  for (const t of inpiTitulares(h).slice(0, 20)) {
+    const confere = titularConfere(t, alvo);
+    if (!confere && !alvo.cnpj) continue;
+    if (titulares.length >= 3) break;
+    const m = inpiMarcas(await s.get(`MarcasServletController?Action=searchMarca&tipoPesquisa=BY_CNPJ_NOME&pos=${t.pos}`));
+    titulares.push({ nome: t.nome, doc: t.doc, confere, total: m.total, marcas: m.itens.slice(0, 20) });
+  }
+  let patentes = null;
+  if (alvo.cnpj) {
+    const campos: Record<string, string> = { Action: 'SearchAvancado', CpfCnpjDepositante: alvo.cnpj, RegisterPerPage: '20', botao: ' pesquisar » ' };
+    for (const k of INPI_PATENTE_CAMPOS) campos[k] = '';
+    patentes = inpiPatentes(await s.post('PatenteServletController', campos));
+  }
+  return { titulares, patentes };
+}
+// Comunicações do DJEN de um processo, lidas em São Paulo. Volta só as que
+// têm sinal de bem, dinheiro ou paradeiro no texto (o texto inteiro não viaja).
+async function tarefaDjenProcesso(numero: string) {
+  const d = dig(numero);
+  const res = await fetch(`https://comunicaapi.pje.jus.br/api/v1/comunicacao?numeroProcesso=${d}&itensPorPagina=100&pagina=1`,
+    { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(20000) });
+  if (!res.ok) throw new Error(`DJEN HTTP ${res.status}`);
+  const j: any = await res.json();
+  const itens = Array.isArray(j?.items) ? j.items : [];
+  return { total: itens.length, comSinal: itens.map(comunicacaoComSinal).filter(Boolean) };
+}
+function comunicacaoComSinal(it: any) {
+  const sinais = sinaisTexto(it?.texto);
+  if (!sinais.length) return null;
+  return { data: it?.data_disponibilizacao || null, tipo: [it?.tipoComunicacao, it?.tipoDocumento].filter(Boolean).join(' · ') || null, link: it?.link || null, sinais };
+}
+async function executarSP(tarefas: any[]) {
+  return await emLotes((Array.isArray(tarefas) ? tarefas : []).slice(0, 40), 5, async (t: any) => {
+    try {
+      if (t?.tipo === 'inpi') return { ok: true, dados: await tarefaInpi(t) };
+      if (t?.tipo === 'djen_proc') return { ok: true, dados: await tarefaDjenProcesso(String(t.numero || '')) };
+      return { ok: false, erro: 'tarefa desconhecida' };
+    } catch (e) { return { ok: false, erro: erroTxt(e) }; }
+  });
+}
+
+const fmtCpf = (d: string) => d.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, '$1.$2.$3-$4');
+// Marcas e patentes. Marca registrada (ou pedido em andamento) é bem penhorável
+// (CPC art. 835, XIII, "outros direitos"). Sócio que aparece como titular com o
+// CPF inteiro ganha o CPF completo em dados.cpf_completo (o QSA só mostra 6 dígitos).
+async function inpi(inv: any, raiz: any, socios: Socio[], achadas: Map<string, Achada>, c: Contadores, nc: string[], auth: string) {
+  const { data: fonte } = await sb.from('investigacao_fontes').select('codigo').eq('codigo', 'inpi').maybeSingle();
+  if (!fonte) { nc.push('INPI: fonte ainda não cadastrada no banco (migração 20260926_06 pendente).'); return; }
+  const alvos = [] as { id: string; nome: string; papel: 'devedor' | 'socio' | 'empresa'; t: any }[];
+  const cpfRaiz = dig(raiz.documento);
+  if (raiz.tipo === 'pessoa' && raiz.nome) {
+    if (cpfRaiz.length === 11) alvos.push({ id: raiz.id, nome: raiz.nome, papel: 'devedor', t: { tipo: 'inpi', nome: raiz.nome, cpf: cpfRaiz } });
+    else nc.push('INPI: devedor sem CPF para conferir o titular; marcas da pessoa não pesquisadas.');
+  }
+  const unicos = [...new Map(socios.map(s => [key(s.nome) + s.miolo, s])).values()];
+  if (unicos.length > SOCIOS_MAX) c.cortes.push(`INPI: ${unicos.length} sócios, pesquisados os ${SOCIOS_MAX} primeiros.`);
+  for (const s of unicos.slice(0, SOCIOS_MAX)) alvos.push({ id: s.id, nome: s.nome, papel: 'socio', t: { tipo: 'inpi', nome: s.nome, miolo: s.miolo } });
+  const empresas = [...achadas.values()].sort((a, b) => Number(b.confirmada) - Number(a.confirmada));
+  if (empresas.length > 10) c.cortes.push(`INPI: ${empresas.length} empresas na teia, pesquisadas 10 (confirmadas primeiro).`);
+  for (const a of empresas.slice(0, 10)) alvos.push({ id: a.id, nome: a.nome, papel: 'empresa', t: { tipo: 'inpi', cnpj: a.cnpj } });
+  if (!alvos.length) { nc.push('INPI: nenhum CPF ou CNPJ conferido para pesquisar.'); return; }
+
+  let resultados: any[];
+  try { resultados = await viaSP(auth, inv.id, alvos.map(a => a.t)); }
+  catch (e) { nc.push('INPI (consulta via São Paulo): ' + erroTxt(e)); return; }
+  const url = 'https://busca.inpi.gov.br/pePI/';
+  let algum = false;
+  for (let i = 0; i < alvos.length; i++) {
+    const a = alvos[i], r = resultados[i];
+    if (!r?.ok) { nc.push(`INPI (${a.nome}): ${r?.erro || 'sem resposta'}`); continue; }
+    algum = true;
+    const { titulares = [], patentes = null } = r.dados || {};
+    let marcas = 0, vivas = 0;
+    for (const t of titulares) {
+      if (a.papel === 'socio' && t.confere && dig(t.doc).length === 11) {
+        await mesclarDados(a.id, { cpf_completo: dig(t.doc), cpf_fonte: 'inpi' });
+        await evidencia(inv.id, a.id, 'inpi', 'CPF completo do sócio (INPI)',
+          `${a.nome} · CPF ${fmtCpf(dig(t.doc))} no cadastro de titular do INPI · nome e os 6 dígitos públicos do QSA conferem`, url);
+      }
+      const deOutro = !t.confere;
+      for (const m of (t.marcas || []).slice(0, 10)) {
+        const viva = marcaViva(m.situacao);
+        marcas++; if (viva) vivas++;
+        await evidencia(inv.id, a.id, 'inpi', deOutro ? 'Marca na busca pelo CNPJ, em nome de outro titular' : 'Marca no INPI',
+          `${m.marca} · processo ${m.numero}${m.classe ? ' · ' + m.classe : ''} · ${m.situacao || 'situação não informada'}${deOutro ? ` · titular ${t.nome || '?'}` : ''}${viva && !deOutro ? (a.id === raiz.id ? ' · penhorável (CPC art. 835, XIII)' : a.papel === 'empresa' ? ' · bem da empresa: alcança o devedor pelas quotas ou por desconsideração' : ' · bem do sócio: alcança o devedor só por desconsideração') : ''}`, url);
+      }
+      if ((t.total || 0) > 10) c.cortes.push(`INPI: ${t.nome || a.nome} tem ${t.total} marcas, gravadas as 10 primeiras.`);
+    }
+    if (patentes?.total) {
+      await evidencia(inv.id, a.id, 'inpi', 'Patentes no INPI',
+        `${patentes.total} pedido(s) de patente com este CNPJ como depositante · ${(patentes.itens || []).slice(0, 5).map((p: any) => `${p.pedido} (${p.deposito || '?'})${p.titulo ? ' ' + String(p.titulo).slice(0, 80) : ''}`).join('; ')}`, url);
+    }
+    if (marcas || patentes?.total) {
+      await mesclarDados(a.id, { inpi: { marcas, marcas_vivas: vivas, patentes: patentes?.total || 0 } });
+      c.marcasVivas += vivas; c.patentes += patentes?.total || 0;
+    }
+  }
+  if (algum) c.fontes.add('inpi');
+}
+
+// DataJud (CNJ): completa os processos já achados com classe, assuntos, órgão e
+// último andamento. Não traz partes nem valor da causa. Chave pública do CNJ no
+// segredo DATAJUD_API_KEY.
+async function datajud(inv: any, c: Contadores, nc: string[]) {
+  const chave = Deno.env.get('DATAJUD_API_KEY') || '';
+  const { data: procs } = await sb.from('investigacao_entidades').select('id,documento,dados').eq('investigacao_id', inv.id).eq('tipo', 'processo').limit(30);
+  if (!procs?.length) return;
+  if (!chave) { nc.push('DataJud: chave não configurada no Supabase; processos sem classe/andamento do CNJ.'); return; }
+  let ok = 0, falhas = 0, semIndice = 0;
+  await emLotes(procs, 5, async (p: any) => {
+    const alias = aliasDatajud(p.documento);
+    if (!alias) { semIndice++; return; }
+    try {
+      const res = await fetch(`https://api-publica.datajud.cnj.jus.br/${alias}/_search`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `APIKey ${chave}` },
+        body: JSON.stringify({ query: { match: { numeroProcesso: dig(p.documento) } }, size: 5 }), signal: AbortSignal.timeout(20000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const j: any = await res.json();
+      // Um número pode ter um registro por grau: fica o de andamento mais recente.
+      const regs = (j?.hits?.hits || []).map((h: any) => datajudResumo(h?._source)).filter(Boolean)
+        .sort((a: any, b: any) => String(b.ultimo_andamento?.data || '').localeCompare(String(a.ultimo_andamento?.data || '')));
+      ok++;
+      if (!regs.length) return;
+      const r = regs[0];
+      await mesclarDados(p.id, { datajud: r, ...(p.dados?.classe ? {} : { classe: r.classe }), ...(p.dados?.orgao ? {} : { orgao: r.orgao }) });
+      await evidencia(inv.id, p.id, 'datajud', 'Dados do processo no DataJud (CNJ)',
+        `${r.classe || 'classe não informada'}${r.assuntos.length ? ' · ' + r.assuntos.join(', ') : ''}${r.orgao ? ' · ' + r.orgao : ''}${r.grau ? ' · ' + r.grau : ''}${r.ajuizamento ? ' · ajuizado em ' + r.ajuizamento.split('-').reverse().join('/') : ''}${r.ultimo_andamento ? ` · último andamento: ${r.ultimo_andamento.nome || '?'} em ${r.ultimo_andamento.data.split('-').reverse().join('/')}` : ''}`,
+        'https://datajud-wiki.cnj.jus.br/api-publica/');
+    } catch (e) { falhas++; if (falhas <= 3) nc.push(`DataJud ${p.documento}: ${erroTxt(e)}`); }
+  });
+  if (ok) c.fontes.add('datajud');
+  if (semIndice) nc.push(`DataJud: ${semIndice} processo(s) de tribunal sem índice público mapeado (superiores, eleitoral, militar).`);
+}
+
+// Sinais no texto das publicações (Renajud, alvará, penhora, Sisbajud, leilão,
+// imóvel, Infojud, desconsideração, paradeiro): vira evidência no processo, um
+// por tipo de sinal, com a publicação mais recente. É pista a conferir nos autos.
+async function gravarSinais(inv: any, procId: string, numero: string, comunicacoes: any[], c: Contadores) {
+  const porTipo = new Map<string, any>();
+  const ordenadas = comunicacoes.slice().sort((a, b) => String(b.data || '').localeCompare(String(a.data || '')));
+  for (const k of ordenadas) for (const s of k.sinais || []) if (!porTipo.has(s.tipo)) porTipo.set(s.tipo, { ...s, data: k.data, tipoCom: k.tipo, link: k.link });
+  if (!porTipo.size) return;
+  for (const s of porTipo.values()) {
+    await evidencia(inv.id, procId, 'djen', `Sinal no texto: ${s.rotulo}`,
+      `${numero} · publicação de ${s.data ? String(s.data).slice(0, 10).split('-').reverse().join('/') : '?'}${s.tipoCom ? ' (' + s.tipoCom + ')' : ''}: "${s.trecho}"`, s.link || '');
+  }
+  await mesclarDados(procId, { sinais: [...porTipo.keys()] });
+  c.sinais += porTipo.size;
+}
+
 // Um processo do DJEN vira entidade + vínculo + evidência. Polo A (devedor é
 // autor) = crédito a penhorar no rosto dos autos; polo P (réu) = outros credores
 // e rastro de bens. cpf_confere decide confirmada/pista.
 async function gravarProcesso(inv: any, raiz: any, c: Contadores, r: any) {
   const num = String(r.numero_processo || '').trim();
   const d = dig(r.digitos || num);
-  if (!d) return;
+  if (!d) return null;
   const confirmado = r.cpf_confere === true;
   const papel = r.polo === 'A' ? 'autor' : r.polo === 'P' ? 'réu' : 'parte (polo não identificado)';
   const uso = r.polo === 'A' ? 'devedor é autor: possível crédito a penhorar no rosto dos autos'
@@ -470,6 +695,7 @@ async function gravarProcesso(inv: any, raiz: any, c: Contadores, r: any) {
     r.link || '');
   if (confirmado) c.confirmadas++; else c.pistas++;
   if (r.polo === 'A') c.processosAutor++; else c.processosReu++;
+  return id;
 }
 
 // DJEN via Vigia de ações: o Supabase não consulta o DJEN (ele bloqueia essas
@@ -477,17 +703,37 @@ async function gravarProcesso(inv: any, raiz: any, c: Contadores, r: any) {
 // Investigação avulsa (sem devedor) não tem Vigia: o painel consulta o DJEN
 // pelo navegador (CORS aberto) e manda as comunicações em body.djen.
 // Devolve o texto de cobertura processual do relatório.
-async function vigiaDjen(inv: any, raiz: any, djen: any, c: Contadores, nc: string[]): Promise<string> {
+async function vigiaDjen(inv: any, raiz: any, djen: any, c: Contadores, nc: string[], auth: string): Promise<string> {
   if (!inv.devedor_id) return await djenDireto(inv, raiz, djen, c, nc);
   const cobertura = 'Processos vêm só do que o Vigia de ações já achou no DJEN (comunicações publicadas). Ausência de processo no relatório não significa ausência de ação.';
   const { data: rows, error } = await sb.from('vigia_acoes')
-    .select('id,numero_processo,digitos,polo,tribunal,classe,orgao,link,primeira_data,ultima_data,qtd_comunicacoes,cpf_confere,nome_encontrado,status')
+    .select('id,numero_processo,digitos,polo,tribunal,classe,orgao,link,primeira_data,ultima_data,qtd_comunicacoes,cpf_confere,nome_encontrado,status,ultimo_texto')
     .eq('devedor_id', inv.devedor_id).neq('status', 'descartado').order('ultima_data', { ascending: false }).limit(30);
   if (error) { nc.push('DJEN/Vigia indisponível: ' + error.message); return cobertura; }
   c.fontes.add('djen');
   if (!rows?.length) { nc.push('DJEN/Vigia: o Vigia de ações ainda não encontrou (ou não varreu) processo deste devedor.'); return cobertura; }
-  for (const r of rows) await gravarProcesso(inv, raiz, c, { ...r, vigia_id: r.id });
-  return cobertura;
+  const gravados = [] as { id: string; numero: string; d: string; ultimo: string; data: string | null; link: string | null }[];
+  for (const r of rows) {
+    const id = await gravarProcesso(inv, raiz, c, { ...r, vigia_id: r.id });
+    const d = dig(r.digitos || r.numero_processo);
+    if (id && d.length === 20 && !/^0+$/.test(d)) gravados.push({ id, numero: r.numero_processo || d, d, ultimo: r.ultimo_texto || '', data: r.ultima_data || null, link: r.link || null });
+  }
+  // Texto das publicações: o Vigia guarda só o último trecho (1.200 caracteres).
+  // Busca todas as comunicações de cada processo pelo número, via São Paulo; se
+  // falhar, lê o trecho que o Vigia guardou.
+  let lidos: any[] | null = null;
+  try { lidos = gravados.length ? await viaSP(auth, inv.id, gravados.map(g => ({ tipo: 'djen_proc', numero: g.d }))) : []; }
+  catch (e) { nc.push('DJEN (texto das publicações via São Paulo): ' + erroTxt(e) + '; lido só o último trecho guardado pelo Vigia.'); }
+  let falhas = 0;
+  for (let i = 0; i < gravados.length; i++) {
+    const g = gravados[i], r = lidos?.[i];
+    if (r?.ok) { await gravarSinais(inv, g.id, g.numero, r.dados?.comSinal || [], c); continue; }
+    if (lidos) falhas++;
+    const k = comunicacaoComSinal({ texto: g.ultimo, data_disponibilizacao: g.data, link: g.link });
+    if (k) await gravarSinais(inv, g.id, g.numero, [k], c);
+  }
+  if (falhas) nc.push(`DJEN: texto completo de ${falhas} processo(s) não lido (${lidos?.find((r: any) => !r?.ok)?.erro || 'falha'}); usado o último trecho guardado pelo Vigia.`);
+  return cobertura + ' O texto das publicações foi lido em busca de sinais de bens (Renajud, alvará, penhora, Sisbajud, leilão, imóvel, Infojud, desconsideração, paradeiro).';
 }
 
 // Mesmo filtro do Vigia (logica.mjs): destinatário com o nome exato, processo
@@ -505,7 +751,19 @@ async function djenDireto(inv: any, raiz: any, djen: any, c: Contadores, nc: str
   const { achados: ficam, descartados: semCpf } = filtrarTruncado(achados, truncado);
   c.fontes.add('djen');
   const lista = ficam.slice().sort((a: any, b: any) => String(b.ultima_data || '').localeCompare(String(a.ultima_data || ''))).slice(0, 30);
-  for (const a of lista) await gravarProcesso(inv, raiz, c, { ...a, qtd_comunicacoes: (a.comunicacoes || []).length });
+  // O painel já manda o texto de cada comunicação: os sinais saem daqui mesmo.
+  const porProcesso = new Map<string, any[]>();
+  for (const it of itens) {
+    const k = comunicacaoComSinal(it);
+    if (!k) continue;
+    const d = dig(it?.numero_processo || it?.numeroprocessocommascara);
+    porProcesso.set(d, [...(porProcesso.get(d) || []), k]);
+  }
+  for (const a of lista) {
+    const id = await gravarProcesso(inv, raiz, c, { ...a, qtd_comunicacoes: (a.comunicacoes || []).length });
+    const d = dig(a.digitos || a.numero_processo);
+    if (id && porProcesso.has(d)) await gravarSinais(inv, id, a.numero_processo || d, porProcesso.get(d)!, c);
+  }
   const notas = [
     `Consultado direto no DJEN pelo nome "${String(djen.nome || raiz.nome)}", histórico completo (${total} comunicação(ões) publicadas${truncado ? `, lidas ${itens.length}` : ''}).`,
     descartados.nosso ? `${descartados.nosso} comunicação(ões) de processo do escritório ficaram de fora.` : '',
@@ -516,19 +774,19 @@ async function djenDireto(inv: any, raiz: any, djen: any, c: Contadores, nc: str
   return notas.filter(Boolean).join(' ');
 }
 
-async function processar(inv: any, djen: any = null) {
+async function processar(inv: any, djen: any = null, auth = '') {
   const { data: raizes, error } = await sb.from('investigacao_entidades').select('*').eq('investigacao_id', inv.id).eq('profundidade', 0).limit(1);
   if (error || !raizes?.[0]) throw error || new Error('Entidade-raiz ausente');
   const raiz = raizes[0];
   let empresas = 0;
-  const contadores: Contadores = { pessoas: 0, enriquecidas: 0, confirmadas: 0, pistas: 0, recebiveis: 0, processosAutor: 0, processosReu: 0, fontes: new Set(), cortes: [] };
+  const contadores: Contadores = { pessoas: 0, enriquecidas: 0, confirmadas: 0, pistas: 0, recebiveis: 0, processosAutor: 0, processosReu: 0, marcasVivas: 0, patentes: 0, sinais: 0, fontes: new Set(), cortes: [] };
   // Sócios das empresas confirmadas, para a busca das empresas deles (profundidade 2).
   const socios: Socio[] = [];
   const inicio = Date.now();
   const achadas = new Map<string, Achada>();
   const naoConclusivas: string[] = [];
   const teto = Math.max(0, Math.min(Number(inv.entidades_maximas || 80) - 1, 40));
-  await evento(inv.id, 'fonte_iniciada', 'Iniciada consulta em fontes públicas.', { fontes: ['receita_rf', 'brasilapi', 'viacep', 'portal_transparencia', 'pncp', 'djen'] });
+  await evento(inv.id, 'fonte_iniciada', 'Iniciada consulta em fontes públicas.', { fontes: ['receita_rf', 'brasilapi', 'viacep', 'portal_transparencia', 'pncp', 'djen', 'datajud', 'inpi'] });
 
   if (raiz.tipo === 'pessoa' && raiz.nome) {
     // Com o cache frio a busca por nome passa do limite de 8 s (26/09/2026: timeout
@@ -613,6 +871,9 @@ async function processar(inv: any, djen: any = null) {
   // Teia de 2º nível (sócios e endereço das empresas): para de abrir consultas
   // 90 s depois do início. Só quando a investigação pede profundidade 2 ou mais.
   const prazo = inicio + 90000;
+  // INPI roda em São Paulo e em paralelo com o resto: parte das empresas e dos
+  // sócios já conhecidos no 1º nível (as pistas do 2º nível ficam de fora).
+  const inpiEmCurso = segura('INPI', () => inpi(inv, raiz, socios, new Map(achadas), contadores, naoConclusivas, auth));
   if (Number(inv.profundidade_maxima || 1) >= 2) {
     if (socios.length) await segura('Empresas dos sócios', () => empresasDosSocios(inv, socios, achadas, contadores, naoConclusivas, prazo));
     await segura('Endereço das empresas', () => enderecoDasEmpresas(inv, achadas, contadores, naoConclusivas, prazo));
@@ -620,7 +881,9 @@ async function processar(inv: any, djen: any = null) {
   await segura('Telefone/e-mail', () => porContato(inv, raiz, achadas, contadores, naoConclusivas));
   const recebePt = await segura('Portal da Transparência', () => portalTransparencia(inv, raiz, achadas, contadores, naoConclusivas));
   const recebePncp = await segura('PNCP', () => pncp(inv, raiz, achadas, contadores, naoConclusivas));
-  const cobertura = await segura('DJEN/Vigia', () => vigiaDjen(inv, raiz, djen, contadores, naoConclusivas));
+  const cobertura = await segura('DJEN/Vigia', () => vigiaDjen(inv, raiz, djen, contadores, naoConclusivas, auth));
+  await segura('DataJud', () => datajud(inv, contadores, naoConclusivas));
+  await inpiEmCurso;
   const recebeEntePublico = recebePt === true || recebePncp === true ? true : (recebePt === false && recebePncp !== null ? false : null);
 
   const componentes = [] as any[];
@@ -630,6 +893,8 @@ async function processar(inv: any, djen: any = null) {
   if (contadores.recebiveis) componentes.push({ rotulo: 'Recebe de ente público', pontos: Math.min(contadores.recebiveis * 10, 25), explicacao: `${contadores.recebiveis} contrato(s) público(s) vigente(s) com documento conferido: crédito penhorável junto ao órgão pagador.` });
   if (contadores.processosAutor) componentes.push({ rotulo: 'Processos como autor', pontos: Math.min(contadores.processosAutor * 5, 15), explicacao: `${contadores.processosAutor} processo(s) em que o devedor é autor (Vigia/DJEN): possível penhora no rosto dos autos.` });
   if (contadores.processosReu) componentes.push({ rotulo: 'Processos como réu', pontos: Math.min(contadores.processosReu * 2, 10), explicacao: `${contadores.processosReu} processo(s) com o devedor no polo passivo (Vigia/DJEN): outros credores e rastro de bens.` });
+  if (contadores.marcasVivas || contadores.patentes) componentes.push({ rotulo: 'Marcas e patentes (INPI)', pontos: Math.min(contadores.marcasVivas * 5 + (contadores.patentes ? 5 : 0), 15), explicacao: `${contadores.marcasVivas} marca(s) em vigor ou em andamento${contadores.patentes ? ` e ${contadores.patentes} pedido(s) de patente` : ''} no INPI: penhoráveis (CPC art. 835, XIII).` });
+  if (contadores.sinais) componentes.push({ rotulo: 'Sinais nas publicações', pontos: Math.min(contadores.sinais * 2, 10), explicacao: `${contadores.sinais} sinal(is) de bem, dinheiro ou paradeiro no texto das publicações do DJEN (Renajud, alvará, penhora, Sisbajud etc.): conferir nos autos.` });
   const score = Math.min(100, componentes.reduce((s, x) => s + Number(x.pontos || 0), 0));
   const resumo = {
     entidades_confirmadas: contadores.confirmadas + (raiz.status_verificacao === 'confirmada' ? 1 : 0),
@@ -641,6 +906,9 @@ async function processar(inv: any, djen: any = null) {
     processos_reu: contadores.processosReu,
     cobertura_processual: cobertura || 'DJEN não consultado (falha na consulta, ver fontes não conclusivas).',
     cortes: contadores.cortes,
+    marcas_vivas: contadores.marcasVivas,
+    patentes: contadores.patentes,
+    sinais_publicacoes: contadores.sinais,
   };
   await sb.from('investigacoes_patrimoniais').update({
     status: naoConclusivas.length && !(empresas || contadores.pessoas || contadores.confirmadas || contadores.pistas || contadores.recebiveis) ? 'aguardando_acesso' : 'concluida',
@@ -694,6 +962,12 @@ Deno.serve(async req => {
   const { data: inv, error } = await userClient.from('investigacoes_patrimoniais').select('*').eq('id', id).single();
   if (error || !inv) return json({ error: 'investigação não encontrada ou sem acesso' }, 404);
   if (body.acao === 'confirmar_pista') return confirmarPista(userClient, user, inv, body);
+  // Braço de São Paulo (ver viaSP): só busca e lê fontes que não respondem aos
+  // EUA; não grava nada. Fora de sa-east-1 recusa, para não virar laço.
+  if (body.acao === 'sp') {
+    if (Deno.env.get('SB_REGION') !== 'sa-east-1') return json({ error: `acao sp só roda em sa-east-1 (esta instância: ${Deno.env.get('SB_REGION') || '?'})` }, 400);
+    return json({ ok: true, resultados: await executarSP(body.tarefas) });
+  }
   // Reserva atômica: só um chamado passa do "pendente" para "em_andamento". Um
   // "em_andamento" parado há mais de TRAVADA_MIN minutos é tomado de volta.
   const travadaAntes = new Date(Date.now() - TRAVADA_MIN * 60000).toISOString();
@@ -703,7 +977,7 @@ Deno.serve(async req => {
     .or(`status.in.(${REPROCESSAVEIS.join(',')}),and(status.eq.em_andamento,iniciado_em.lt."${travadaAntes}")`)
     .select('*');
   if (!reservada?.length) return json({ ok: true, id, status: inv.status, mensagem: inv.status === 'em_andamento' ? 'Investigação já está sendo processada.' : 'Investigação já processada.' });
-  try { return json({ ok: true, resultado: await processar(reservada[0], body.djen || null) }); }
+  try { return json({ ok: true, resultado: await processar(reservada[0], body.djen || null, authorization) }); }
   catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     await sb.from('investigacoes_patrimoniais').update({ status: 'falhou', resumo: { erro: msg } }).eq('id', id);
