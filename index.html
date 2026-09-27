@@ -23459,7 +23459,7 @@ function _invLink(u){ return /^https?:\/\//i.test(String(u||''))?`<br><a href="$
 // Receita (49 = Sócio-Administrador, conferido na BrasilAPI), capital sem R$, CPF
 // mascarado da Receita (só os 6 dígitos do meio) e erro técnico de conexão.
 const _INV_QUALIF={'49':'Sócio-Administrador'};
-const _INV_FONTE_LBL={receita_rf:'Receita Federal (base CNPJ)',brasilapi:'BrasilAPI (cadastro CNPJ)',portal_transparencia:'Portal da Transparência',pncp:'PNCP (contratos públicos)',viacep:'ViaCEP',djen:'DJEN / Vigia de ações'};
+const _INV_FONTE_LBL={receita_rf:'Receita Federal (base CNPJ)',brasilapi:'BrasilAPI (cadastro CNPJ)',portal_transparencia:'Portal da Transparência',pncp:'PNCP (contratos públicos)',viacep:'ViaCEP',djen:'DJEN / Vigia de ações',inpi:'INPI (marcas e patentes)',datajud:'DataJud (CNJ)',manual:'Conferência manual'};
 function _invFonteLbl(c){ return _INV_FONTE_LBL[c]||c; }
 function _invDocFmt(d){
   const s=String(d||'');
@@ -23521,7 +23521,7 @@ async function baixarRelatorioInvestigacao(investigacaoId, abrir){
     // Fonte que respondeu numa busca e caiu noutra (ex.: PNCP achou a empresa e não o
     // nome do devedor) vem nas duas listas do worker; no relatório fica só em "Sem
     // resposta", porque o resultado dela é incompleto.
-    const _FONTE_PREF={pncp:/^PNCP/i,portal_transparencia:/^Portal da Transpar/i,brasilapi:/^BrasilAPI/i,receita_rf:/^(Receita|Base CNPJ)/i,viacep:/^ViaCEP/i,djen:/^DJEN/i};
+    const _FONTE_PREF={pncp:/^PNCP/i,portal_transparencia:/^Portal da Transpar/i,brasilapi:/^BrasilAPI/i,receita_rf:/^(Receita|Base CNPJ)/i,viacep:/^ViaCEP/i,djen:/^DJEN/i,inpi:/^INPI/i,datajud:/^DataJud/i};
     const falhou=cod=>fNao.some(f=>_FONTE_PREF[cod]?.test(typeof f==='string'?f:String(f.fonte||f.codigo||f.nome||'')));
     const fCod=f=>typeof f==='string'?f:(f.fonte||f.codigo||f.nome);
     const fOkInteiras=fOk.filter(f=>!falhou(fCod(f)));
@@ -23553,6 +23553,13 @@ async function baixarRelatorioInvestigacao(investigacaoId, abrir){
     const doc=d=>`<span class="mono">${_invEsc(_invDocFmt(d))}</span>`;
     // Contratos e vínculos públicos: evidências do Portal/PNCP (não viram nó na teia).
     const pub=(evid||[]).filter(x=>x.fonte_codigo==='pncp'||x.fonte_codigo==='portal_transparencia');
+    // Protesto (CENPROT) é consulta manual: devedor, empresas confirmadas e pessoas
+    // com CPF inteiro (do cadastro ou pelo INPI).
+    const protestoAlvos=[], _vistoDoc=new Set();
+    const _addAlvo=(nome,d)=>{ d=String(d||'').replace(/\D/g,''); if((d.length===11||d.length===14)&&!_vistoDoc.has(d)){ _vistoDoc.add(d); protestoAlvos.push({nome:nome||'—',doc:d}); } };
+    _addAlvo(raiz?.nome||inv.nome_consultado, raiz?.documento||inv.documento_consultado);
+    emp.filter(e=>e.status_verificacao==='confirmada').forEach(e=>_addAlvo(e.nome,e.documento));
+    pes.forEach(e=>_addAlvo(e.nome,(e.dados||{}).cpf_completo||e.documento));
     const html=`<!DOCTYPE html><html><head><meta charset="utf-8">
     <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400&family=Inter+Tight:wght@400;600;700&family=JetBrains+Mono:wght@400;500&family=Instrument+Serif:ital@1&display=swap" rel="stylesheet">
     <style>
@@ -23617,9 +23624,18 @@ async function baixarRelatorioInvestigacao(investigacaoId, abrir){
       <h3>Empresas (${emp.length})</h3>
       ${tab(['Empresa','CNPJ','Situação','Ligação','Status','Conf.'],emp.map(e=>tr([_invEsc(e.nome)+selos(e),doc(e.documento),_invEsc(_invSituacaoEnt(e)),_invEsc(lig(e)),_invEsc(e.status_verificacao),_invEsc(e.confianca)+'%'])),'Nenhuma empresa encontrada.')}</div>
       <h3>Pessoas (${pes.length})</h3>
-      ${tab(['Pessoa','Documento','Qualificação','Ligação','Status'],pes.map(e=>tr([_invEsc(e.nome)+selos(e),doc(e.documento),_invEsc((e.dados||{}).qualificacao),_invEsc(lig(e)),_invEsc(e.status_verificacao)])),'Nenhuma pessoa vinculada encontrada.')}
+      ${tab(['Pessoa','Documento','Qualificação','Ligação','Status'],pes.map(e=>{ const d=e.dados||{}; return tr([_invEsc(e.nome)+selos(e),d.cpf_completo?doc(d.cpf_completo)+' <span class="mute">(CPF completo pelo INPI)</span>':doc(e.documento),_invEsc(d.qualificacao),_invEsc(lig(e)),_invEsc(e.status_verificacao)]); }),'Nenhuma pessoa vinculada encontrada.')}
       <h3>Processos (${pro.length})</h3>
-      ${tab(['Número','Tribunal','Polo do devedor','Classe','Status'],pro.map(e=>{ const d=e.dados||{}; return tr([_invEsc(d.numero||e.nome)+selos(e),_invEsc(d.tribunal),d.polo==='A'?'autor':d.polo==='P'?'réu':'—',_invEsc(d.classe),_invEsc(e.status_verificacao)]); }),avulsa&&!djenOk?'Não pesquisado: DJEN não consultado (reprocessar pelo painel).':'Nenhum processo encontrado no DJEN.')}
+      ${tab(['Número','Tribunal','Polo do devedor','Classe / órgão','Último andamento','Status'],pro.map(e=>{ const d=e.dados||{}, dj=d.datajud||{}, u=dj.ultimo_andamento;
+        return tr([_invEsc(d.numero||e.nome)+selos(e)+((d.sinais||[]).length?' <b style="color:#B8612A;">✎</b>':''),_invEsc(d.tribunal),d.polo==='A'?'autor':d.polo==='P'?'réu':'—',
+          _invEsc([d.classe||dj.classe,dj.assuntos?.length?dj.assuntos.join(', '):'',d.orgao||dj.orgao].filter(Boolean).join(' · ')),
+          u?_invEsc(`${u.nome||'?'} em ${String(u.data).split('-').reverse().join('/')}`):'<span class="mute">—</span>',_invEsc(e.status_verificacao)]); }),avulsa&&!djenOk?'Não pesquisado: DJEN não consultado (reprocessar pelo painel).':'Nenhum processo encontrado no DJEN.')}
+      ${pro.some(e=>(e.dados||{}).sinais?.length)?'<p class="mute">✎ = a publicação fala em bem, dinheiro ou paradeiro (lista abaixo). Último andamento vem do DataJud (CNJ).</p>':''}
+      <h3>O que as publicações dizem (${an.sinais.length})</h3>
+      ${tab(['Sinal','Trecho da publicação'],an.sinais.map(s=>tr([`<b>${_invEsc(s.rotulo)}</b>`,_invEsc(s.texto)+_invLink(s.url)])),djenOk?'Nenhuma publicação lida fala em alvará, bloqueio, veículo, imóvel, penhora, leilão, acordo, Infojud, desconsideração ou paradeiro.':'Publicações não lidas nesta investigação.')}
+      ${an.sinais.length?'<p class="mute">A palavra pode estar numa lista de pedidos ou ter tido resultado negativo: conferir nos autos antes de usar.</p>':''}
+      <h3>Marcas e patentes no INPI (${an.inpi.length})</h3>
+      ${tab(['Titular','Achado'],an.inpi.map(x=>tr([_invEsc((an.porId[x.entidade_id]||{}).nome||'—'),`<b>${_invEsc(x.titulo||'')}</b>${x.trecho?'<br>'+_invEsc(_invTrechoFmt(x.trecho)):''}${_invLink(x.url)}`])),fOk.includes('inpi')?'Nenhuma marca ou patente em nome do devedor, dos sócios ou das empresas pesquisadas.':'INPI não consultado nesta investigação.')}
       <h3>Contratos e vínculos públicos (${pub.length})</h3>
       ${tab(['Fonte','Achado','Consultado em'],pub.map(x=>tr([_invEsc(_invFonteLbl(x.fonte_codigo)),`<b>${_invEsc(x.titulo||'')}</b>${x.trecho?'<br>'+_invEsc(_invTrechoFmt(x.trecho)):''}${_invLink(x.url)}`,_invEsc(_invData(x.obtido_em))])),pubIncompleto?'Nada encontrado nas buscas que responderam; parte das consultas ficou sem resposta (seção 7).':'Nada encontrado no Portal da Transparência e no PNCP.')}
       <div class="kp"><h2><span class="n">6</span>Sinais de alerta</h2>
@@ -23629,6 +23645,9 @@ async function baixarRelatorioInvestigacao(investigacaoId, abrir){
       <h3>Responderam</h3>${fOkInteiras.length?`<ul>${fOkInteiras.map(f=>`<li>${_invEsc(_invFonteLbl(fCod(f)))}</li>`).join('')}</ul>`:'<p class="mute"><i>Não registrado.</i></p>'}
       <h3>Sem resposta ou não conclusivas</h3>${fNao.length?`<ul>${fNao.map(f=>`<li>${fNaoTxt(f)}</li>`).join('')}</ul>`:'<p class="mute"><i>Nenhuma.</i></p>'}
       <p class="mute">Fonte sem resposta não significa "nada encontrado": o resultado dela é desconhecido.</p>
+      <h3>Consulta manual: protestos</h3>
+      <p>A consulta de protestos em cartório exige a verificação "não sou robô" e por isso não é automática. É gratuita em <a href="https://www.pesquisaprotesto.com.br/">pesquisaprotesto.com.br</a>, com os documentos abaixo.</p>
+      ${protestoAlvos.length?`<table><tbody>${protestoAlvos.map(a=>tr([_invEsc(a.nome),doc(a.doc)])).join('')}</tbody></table>`:'<p class="mute"><i>Nenhum CPF/CNPJ completo na investigação.</i></p>'}
       <h3>Limites da busca</h3>${cortes.length?`<ul>${cortes.map(x=>`<li>${_invEsc(x)}</li>`).join('')}</ul><p class="mute">O que passou desses limites não foi lido: pode haver mais achados.</p>`:'<p class="mute"><i>Nenhuma busca atingiu o limite de resultados.</i></p>'}</div>
       <div class="kp"><h2><span class="n">8</span>Critérios do score de prioridade</h2>
       <ul>${(comps.length?comps:[{rotulo:'Ainda não calculado',pontos:'—',explicacao:''}]).map(x=>`<li><strong>${_invEsc(x.rotulo||x.motivo)}</strong>: ${_invEsc(x.pontos??'—')} ponto(s). ${_invEsc(x.explicacao||'')}</li>`).join('')}</ul></div>
@@ -23707,6 +23726,9 @@ function _invAnalise(ents, vinc, evid, ctx){
       penhora.push({entId:x.entidade_id, tipo:'Contrato público vigente', texto:t, url:x.url, conf:true});
     else if(x.fonte_codigo==='portal_transparencia'&&/servidor público federal|servidor federal inativo|pensionista federal/.test(t))
       penhora.push({entId:x.entidade_id, tipo:'Renda federal (penhorável no limite legal)', texto:t, url:x.url, conf:true});
+    // Marca do próprio devedor (titular conferido por CPF/CNPJ no worker v8).
+    else if(x.fonte_codigo==='inpi'&&x.titulo==='Marca no INPI'&&/penhorável \(CPC art\. 835, XIII\)/.test(t))
+      penhora.push({entId:x.entidade_id, tipo:'Marca registrada no INPI', texto:t.replace(/ · penhorável \(CPC art\. 835, XIII\)$/,''), url:x.url, conf:true});
     if(/impenhorável/.test(t)) impenhoravel.push({entId:x.entidade_id, texto:t, url:x.url});
   });
   const doRaiz=vinc.filter(v=>raiz&&v.origem_entidade_id===raiz.id);
@@ -23779,7 +23801,11 @@ function _invAnalise(ents, vinc, evid, ctx){
   ents.filter(e=>e.tipo==='empresa'&&+((e.dados||{}).endereco_compartilhado_com)>=3).forEach(e=>alertas.push({entId:e.id, nivel:'ressalva', titulo:'Sede em endereço compartilhado',
     texto:`O endereço fiscal de ${nm(e)}${e.dados.endereco_fiscal?' ('+e.dados.endereco_fiscal+')':''} é usado por mais ${e.dados.endereco_compartilhado_com} CNPJs: provável escritório de contabilidade, coworking ou galeria. Diligência no endereço pode não achar a empresa nem bens dela.`}));
   const emp=ents.filter(e=>e.tipo==='empresa'&&e!==raiz), proc=doRaiz.map(v=>v.tipo);
-  return {raiz, porId, penhora, impenhoravel, alertas,
+  // Sinais no texto das publicações do DJEN (worker v8): pista a conferir nos autos.
+  const sinais=evid.filter(x=>x.fonte_codigo==='djen'&&/^Sinal no texto: /.test(x.titulo||''))
+    .map(x=>({entId:x.entidade_id, rotulo:String(x.titulo).replace(/^Sinal no texto: /,''), texto:String(x.trecho||''), url:x.url}));
+  const inpi=evid.filter(x=>x.fonte_codigo==='inpi');
+  return {raiz, porId, penhora, impenhoravel, alertas, sinais, inpi,
     comPenhora:new Set(penhora.map(p=>p.entId).filter(Boolean)),
     comAlerta:new Set(alertas.filter(a=>a.nivel==='alerta').map(a=>a.entId).filter(Boolean)),
     cont:{empConf:emp.filter(e=>e.status_verificacao==='confirmada').length, empPista:emp.filter(e=>e.status_verificacao!=='confirmada').length,
@@ -23813,6 +23839,8 @@ function _invPedidos(an){
       texto:`Averbação da penhora no processo ${d.numero||e.nome||''}${d.tribunal?' ('+d.tribunal+')':''}, em que o devedor é autor, para que o que ele vier a receber fique preso a esta cobrança (art. 860 do CPC).`};
     else if(/quotas/.test(p.tipo)) ped={forca:2, titulo:'Penhora das quotas',
       texto:`Penhora das quotas do devedor em ${e.nome||''}${e.documento?' (CNPJ '+_invDocFmt(e.documento)+')':''}, com intimação da sociedade nos termos do art. 861 do CPC.`};
+    else if(p.tipo==='Marca registrada no INPI') ped={forca:2, titulo:'Penhora da marca',
+      texto:`Penhora dos direitos do devedor sobre a marca (${curto(p.texto)}), como "outros direitos" (art. 835, XIII, do CPC), com ofício ao INPI para anotar o ônus no registro (art. 136, II, da Lei 9.279/1996). Conferir antes no processo do INPI se o titular ainda é o devedor.`};
     if(!ped) return;
     if(!p.conf){ ped.forca=4; ped.texto='Depois de confirmar o vínculo: '+ped.texto; }
     out.push(ped);
@@ -23834,7 +23862,10 @@ function _invLinhaTempo(inv, ents, evid, ctx){
     if(e.tipo==='empresa'&&d.data_abertura) add(d.data_abertura,`Abertura de ${e.nome||'empresa'}${e.documento?' ('+_invDocFmt(e.documento)+')':''}`);
     if(e.tipo==='processo'){ const pol=d.polo==='A'?'devedor autor':d.polo==='P'?'devedor réu':'';
       add(d.primeira_data,`Processo ${d.numero||e.nome}${pol?' ('+pol+')':''}: primeira publicação no DJEN`);
-      if(d.ultima_data!==d.primeira_data) add(d.ultima_data,`Processo ${d.numero||e.nome}: última publicação no DJEN`); }
+      if(d.ultima_data!==d.primeira_data) add(d.ultima_data,`Processo ${d.numero||e.nome}: última publicação no DJEN`);
+      const dj=d.datajud||{};
+      if(dj.ajuizamento) add(dj.ajuizamento,`Processo ${d.numero||e.nome}: ajuizamento (DataJud)`);
+      if(dj.ultimo_andamento?.data) add(dj.ultimo_andamento.data,`Processo ${d.numero||e.nome}: último andamento no DataJud${dj.ultimo_andamento.nome?' ('+dj.ultimo_andamento.nome+')':''}`); }
   });
   (evid||[]).forEach(x=>{ const t=String(x.trecho||''), seg=t.split(' · ');
     if(/^Sanção (CEIS|CNEP)/.test(x.titulo||'')){ const m=/ · de (\S+) a (.+?)(?: · |$)/.exec(t); if(!m) return;
@@ -23842,6 +23873,8 @@ function _invLinhaTempo(inv, ents, evid, ctx){
     else if(/^Contrato/.test(x.titulo||'')){ const m=/vigência (\S+) a (\S+?)(?: · |$)/.exec(t); if(!m) return;
       const rot=x.fonte_codigo==='pncp'?[seg[0],seg[2]].filter(Boolean).join(' · '):seg.slice(0,2).join(' · ');
       add(m[1],`Início de contrato público: ${rot}`); add(m[2],`Fim da vigência de contrato público: ${rot}`); }
+    else if(/^Sinal no texto: /.test(x.titulo||'')){ const m=/publicação de (\d{2}\/\d{2}\/\d{4})/.exec(t); if(!m) return;
+      add(m[1],`Publicação no processo ${seg[0]} fala em: ${String(x.titulo).replace(/^Sinal no texto: /,'')}`); }
   });
   add(inv.created_at,'Início desta investigação');
   if(inv.concluido_em) add(inv.concluido_em,'Conclusão desta investigação');
@@ -24091,7 +24124,7 @@ async function invVerTeia(invId, alvoId){
       <div style="display:flex;gap:6px;flex-wrap:wrap;"><button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${invId}',true)">Abrir relatório</button><button class="btn btn-ghost btn-sm" onclick="baixarRelatorioInvestigacao('${invId}')">Baixar relatório (PDF)</button></div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
-      ${cartao(an.penhora.length,'Pode penhorar','contratos, renda, créditos, quotas','#2F855A')}
+      ${cartao(an.penhora.length,'Pode penhorar','contratos, renda, créditos, quotas, marcas','#2F855A')}
       ${cartao(c.empConf+c.empPista,'Empresas',`${c.empConf} confirmada${c.empConf===1?'':'s'} · ${c.empPista} pista${c.empPista===1?'':'s'}`)}
       ${cartao(c.pessoas,'Pessoas','sócios e vinculados')}
       ${cartao(c.autor+c.reu,'Processos',`${c.autor} como autor · ${c.reu} como réu`)}
@@ -24175,8 +24208,15 @@ function _invTeiaTabela(){
       :'<div style="font-size:12px;color:var(--text-3);font-style:italic;">Nenhum bem ou crédito penhorável identificado nas fontes consultadas.</div>')
     +(an.impenhoravel.length?`<div style="font-size:11.5px;color:var(--text-3);margin-top:6px;">Não penhorável: ${an.impenhoravel.map(x=>_invEsc(x.texto)).join(' | ')}</div>`:'')
     +sec('Empresas',emp.length,tab(['Empresa','CNPJ','Situação','Ligação','Status','Conf.'],emp.map(e=>linha(e,[_invEsc(e.nome)+selos(e),`<span style="font-family:var(--font-mono);white-space:nowrap;">${_invEsc(_invDocFmt(e.documento))}</span>`,_invEsc(_invSituacaoEnt(e)),_invEsc(lig(e).join('; ')),st(e),_invEsc(e.confianca)+'%']))))
-    +sec('Pessoas',pes.length,tab(['Pessoa','Documento','Qualificação','Ligação','Status'],pes.map(e=>linha(e,[_invEsc(e.nome)+selos(e),`<span style="font-family:var(--font-mono);white-space:nowrap;">${_invEsc(_invDocFmt(e.documento))}</span>`,_invEsc((e.dados||{}).qualificacao),_invEsc(lig(e).join('; ')),st(e)]))))
-    +sec('Processos',pro.length,tab(['Número','Tribunal','Polo do devedor','Classe','Status'],pro.map(e=>{ const d=e.dados||{}; return linha(e,[`<span style="font-family:var(--font-mono);">${_invEsc(d.numero||e.nome)}</span>`+selos(e),_invEsc(d.tribunal),d.polo==='A'?'autor':d.polo==='P'?'réu':'—',_invEsc(d.classe),st(e)]); })))
+    +sec('Pessoas',pes.length,tab(['Pessoa','Documento','Qualificação','Ligação','Status'],pes.map(e=>linha(e,[_invEsc(e.nome)+selos(e),`<span style="font-family:var(--font-mono);white-space:nowrap;">${_invEsc(_invDocFmt((e.dados||{}).cpf_completo||e.documento))}</span>${(e.dados||{}).cpf_completo?' <span style="font-size:10.5px;color:var(--text-3);">(INPI)</span>':''}`,_invEsc((e.dados||{}).qualificacao),_invEsc(lig(e).join('; ')),st(e)]))))
+    +sec('Processos',pro.length,tab(['Número','Tribunal','Polo do devedor','Classe / órgão','Último andamento','Status'],pro.map(e=>{ const d=e.dados||{}, dj=d.datajud||{}, u=dj.ultimo_andamento;
+      return linha(e,[`<span style="font-family:var(--font-mono);">${_invEsc(d.numero||e.nome)}</span>`+selos(e)+((d.sinais||[]).length?' <span title="a publicação fala em bem, dinheiro ou paradeiro" style="color:#DD6B20;font-weight:700;">✎</span>':''),_invEsc(d.tribunal),d.polo==='A'?'autor':d.polo==='P'?'réu':'—',
+        _invEsc([d.classe||dj.classe,d.orgao||dj.orgao].filter(Boolean).join(' · ')),u?_invEsc(`${u.nome||'?'} em ${String(u.data).split('-').reverse().join('/')}`):'—',st(e)]); })))
+    +sec('O que as publicações dizem',an.sinais.length,an.sinais.length?an.sinais.map(x=>`<div onclick="invTeiaNo('${x.entId}')" style="padding:7px 0;border-bottom:1px solid var(--border-2);font-size:12px;cursor:pointer;">
+      <div style="font-weight:700;color:#C05621;">${_invEsc(x.rotulo)}</div><div style="color:var(--text-2);">${_invEsc(x.texto)}</div>${/^https?:\/\//i.test(String(x.url||''))?`<a href="${escHtml(x.url)}" target="_blank" rel="noopener" style="font-size:11px;" onclick="event.stopPropagation()">abrir publicação</a>`:''}</div>`).join('')
+      +'<div style="font-size:11px;color:var(--text-3);margin-top:4px;">A palavra pode estar numa lista de pedidos ou ter tido resultado negativo: conferir nos autos.</div>'
+      :'<div style="font-size:12px;color:var(--text-3);font-style:italic;">Nada encontrado.</div>')
+    +sec('Marcas e patentes no INPI',an.inpi.length,tab(['Titular','Achado'],an.inpi.map(x=>`<tr>${[_invEsc((an.porId[x.entidade_id]||{}).nome||'—'),`<b>${_invEsc(x.titulo||'')}</b>${x.trecho?'<br>'+_invEsc(x.trecho):''}${/^https?:\/\//i.test(String(x.url||''))?`<br><a href="${escHtml(x.url)}" target="_blank" rel="noopener" style="font-size:11px;">abrir fonte</a>`:''}`].map(c=>`<td ${td}>${c}</td>`).join('')}</tr>`)))
     +sec('Contratos e vínculos públicos',pub.length,tab(['Fonte','Achado','Consultado em'],pub.map(x=>`<tr>${[_invEsc(x.fonte_codigo),`<b>${_invEsc(x.titulo||'')}</b>${x.trecho?'<br>'+_invEsc(x.trecho):''}${/^https?:\/\//i.test(String(x.url||''))?`<br><a href="${escHtml(x.url)}" target="_blank" rel="noopener" style="font-size:11px;">abrir fonte</a>`:''}`,_invEsc(_invData(x.obtido_em))].map(c=>`<td ${td}>${c}</td>`).join('')}</tr>`)));
 }
 
