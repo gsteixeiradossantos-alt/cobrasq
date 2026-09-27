@@ -463,6 +463,8 @@ async function alterarVencimentoAsaas(paymentId: string, novaDataISO: string, no
 }
 
 Deno.serve(async (req) => {
+  // verify_jwt=false (config.toml): o cron manda CRON_INVOKE_SECRET, que não é JWT.
+  // Esta checagem é a ÚNICA trava da função — não remover.
   const expected = Deno.env.get('CRON_INVOKE_SECRET');
   if (!expected) return new Response(JSON.stringify({ error: 'CRON_INVOKE_SECRET não configurado' }), { status: 500 });
   const provided = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
