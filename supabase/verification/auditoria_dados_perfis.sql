@@ -34,8 +34,15 @@ select 'clientes', count(*), count(*) filter (where is_draft),
        count(*) filter (where is_draft and coalesce(draft_expires_at, now()) < now())
 from clientes;
 
--- §3b · A view casos deve EXCLUIR draft e ser a fonte do CRM (conferir contagem coerente)
-select count(*) as casos_visiveis_no_crm from casos;
+-- §3b · A view casos é a fonte do CRM e, desde 20260924e, NÃO esconde rascunho/arquivado/
+-- fora_crm: expõe as três como coluna (a tela mostra com selo; as funções de IA filtram).
+-- Conferir que as flags existem e a contagem por flag é coerente.
+select count(*)                                                         as casos_total,
+       count(*) filter (where not arquivado and not is_draft and not fora_crm) as sem_flag,
+       count(*) filter (where arquivado)                                as arquivados,
+       count(*) filter (where is_draft)                                 as rascunhos,
+       count(*) filter (where fora_crm)                                 as fora_crm
+from casos;
 
 -- §4 · R-08 Financeiro: devedores sem asaas_customer_id não viram fin_operacao ao receber
 select count(*) as dev_total,
