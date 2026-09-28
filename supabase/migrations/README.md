@@ -264,9 +264,9 @@ secrets já existentes `CRON_INVOKE_SECRET`, `SUPABASE_URL`,
 bearer do cron para a primeira rodada. Enquanto a migração não estiver aplicada, a aba
 "Vigia de ações" mostra "Não foi possível ler o vigia" e o painel não mostra alerta.
 
-## 20260928_02 — `bens_cobranca` + `bens_constricoes` (aba "Bens e constrições")
+## 20260928_03 — `bens_cobranca` + `bens_constricoes` (aba "Bens e constrições")
 
-**Não aplicada.** `20260928_02_bens_constricoes.sql` (+ `_rollback`). Aditiva: duas
+**Não aplicada.** `20260928_03_bens_constricoes.sql` (+ `_rollback`). Aditiva: duas
 tabelas novas (o bem constrito/averbado no processo e, uma linha por ato, as
 constrições — tipo, AV/R, data, CNJ completo com CHECK de formato, mov./folha, valor,
 depositário, situação) e a categoria `matricula` no CHECK de `documentos` (a certidão
@@ -286,5 +286,5 @@ conferido que nada persistiu (tabela inexistente, usuário sintético ausente, C
 `matricula`).
 
 **Ordem:** aplicar a migração → merge. Merge antes da migração: a aba abre com
-"migração 20260928_02 pendente" e escolher a categoria "Matrícula / certidão" num
+"migração 20260928_03 pendente" e escolher a categoria "Matrícula / certidão" num
 upload falha no CHECK.

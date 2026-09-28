@@ -1,4 +1,4 @@
--- Rollback de 20260928_02_bens_constricoes.sql.
+-- Rollback de 20260928_03_bens_constricoes.sql.
 -- Apaga as duas tabelas (e os registros) e tira a categoria 'matricula'.
 -- Antes: documentos com categoria 'matricula' viram 'outros', senão o CHECK falha.
 begin;
