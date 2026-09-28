@@ -266,7 +266,7 @@ bearer do cron para a primeira rodada. Enquanto a migração não estiver aplica
 
 ## 20260928_03 — `bens_cobranca` + `bens_constricoes` (aba "Bens e constrições")
 
-**Não aplicada.** `20260928_03_bens_constricoes.sql` (+ `_rollback`). Aditiva: duas
+**Aplicada em produção em 28/09/2026** (apply_migration `bens_constricoes`). `20260928_03_bens_constricoes.sql` (+ `_rollback`). Aditiva: duas
 tabelas novas (o bem constrito/averbado no processo e, uma linha por ato, as
 constrições — tipo, AV/R, data, CNJ completo com CHECK de formato, mov./folha, valor,
 depositário, situação) e a categoria `matricula` no CHECK de `documentos` (a certidão
