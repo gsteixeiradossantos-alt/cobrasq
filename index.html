@@ -4542,6 +4542,7 @@ body.viewas-readonly select {
         <input type="text" id="modal-prompt-input" style="width:100%;padding:10px 14px;border:1.5px solid var(--border-2);border-radius:var(--radius-sm);font-size:14px;color:var(--text);background:var(--bg);outline:none;" onkeydown="if(event.key==='Enter')_promptConfirm()">
         <textarea id="modal-prompt-textarea" rows="5" style="display:none;width:100%;padding:10px 14px;border:1.5px solid var(--border-2);border-radius:var(--radius-sm);font-size:13px;color:var(--text);background:var(--bg);outline:none;resize:vertical;"></textarea>
         <div id="modal-prompt-hint" style="font-size:11px;color:var(--text-3);margin-top:6px;"></div>
+        <label id="modal-prompt-check-wrap" style="display:none;align-items:center;gap:8px;margin-top:10px;font-size:12.5px;color:var(--text-2);cursor:pointer;"><input type="checkbox" id="modal-prompt-check"><span id="modal-prompt-check-label"></span></label>
       </div>
     </div>
     <div class="modal-footer">
@@ -6751,7 +6752,15 @@ function _salvarPromessa(devId){
   showToast('Promessa registrada.','success');
   if(typeof renderDrawerBody==='function') renderDrawerBody(devId);
 }
-function promptModal(title,label,cb,{textarea=false,hint='',value=''}={}){
+// `checkbox` (opcional): {label, checked} → uma caixa abaixo do campo; o callback recebe
+// o estado dela como 2º argumento. Sem a opção, a caixa fica oculta e nada muda.
+function promptModal(title,label,cb,{textarea=false,hint='',value='',checkbox=null}={}){
+  const _cw=document.getElementById('modal-prompt-check-wrap');
+  if(_cw){
+    _cw.style.display=checkbox?'flex':'none';
+    document.getElementById('modal-prompt-check').checked=!!(checkbox&&checkbox.checked);
+    document.getElementById('modal-prompt-check-label').textContent=checkbox?checkbox.label:'';
+  }
   document.getElementById('modal-prompt-title').textContent=title;
   document.getElementById('modal-prompt-label').textContent=label;
   document.getElementById('modal-prompt-hint').textContent=hint;
@@ -6767,8 +6776,10 @@ function _promptConfirm(){
   const inp=document.getElementById('modal-prompt-input');
   const ta=document.getElementById('modal-prompt-textarea');
   const v=inp.style.display!=='none'?inp.value.trim():ta.value.trim();
+  const _cw=document.getElementById('modal-prompt-check-wrap');
+  const marcado=!!(_cw && _cw.style.display!=='none' && document.getElementById('modal-prompt-check').checked);
   closeModal('modal-prompt');
-  if(window._promptCb)window._promptCb(v||null);
+  if(window._promptCb)window._promptCb(v||null, marcado);
 }
 
 // ── Telefone de envio (assinatura) ───────────────────────────────────────────
@@ -22001,7 +22012,9 @@ function buildCaseTimeline(eventos, repasses, legacyHist){
   (eventos||[]).forEach(e=>{
     const p=e.payload||{};
     let texto = p.acao_completa||p.acao||p.texto||p.descricao||p.mensagem||e.tipo||'';
-    let tipoLabel = e.tipo==='andamento_judicial' ? 'Andamento judicial'
+    // `_rotulo`: rótulo já pronto (só o portal do cedente preenche — cpEventosCliente).
+    let tipoLabel = e._rotulo ? e._rotulo
+                  : e.tipo==='andamento_judicial' ? 'Andamento judicial'
                   : e.tipo==='repasse' ? 'Repasse'
                   : e.tipo==='nota_manual' ? 'Nota'
                   : e.tipo==='mudanca_status' ? statusLabel(p.status_novo||'')
@@ -23283,7 +23296,7 @@ async function removerRepasse(id){
 // Nota manual no histórico: qualquer usuário pode registrar anotações no caso.
 function adicionarNotaHistorico(cobId){
   if(!cobId){ showToast('Cobrança inválida.','danger'); return; }
-  promptModal('Adicionar nota ao histórico', 'Descreva o que aconteceu:', async (nota)=>{
+  promptModal('Adicionar nota ao histórico', 'Descreva o que aconteceu:', async (nota, mostrarCliente)=>{
     if(!nota) return;
     const supa=getSupabase(); if(!supa){ showToast('Supabase não configurado.','danger'); return; }
     try{
@@ -23291,13 +23304,15 @@ function adicionarNotaHistorico(cobId){
         cobranca_id: cobId,
         devedor_id: cobId, // invariante cobranca.id=devedor principal → RLS do cedente (eventos_cedente_read)
         tipo: 'nota_manual',
-        payload: { acao_completa: nota.trim() + ' (registrado por ' + (currentUser?.nome||'usuário') + ')', registrado_por: currentUser?.nome, origem: 'manual' }
+        // visivel_cliente: só com a caixa marcada a nota aparece no portal do cliente
+        // (cpEventosCliente). O cliente vê o texto sem o "(registrado por …)".
+        payload: { acao_completa: nota.trim() + ' (registrado por ' + (currentUser?.nome||'usuário') + ')', texto: nota.trim(), registrado_por: currentUser?.nome, origem: 'manual', visivel_cliente: !!mostrarCliente }
       });
       if(error) throw error;
       showToast('Nota adicionada ao histórico.','success');
       renderCobrancaDetalhe();
     }catch(e){ showToast('Falha ao registrar: '+(e.message||e),'danger'); }
-  }, { textarea: true, hint: 'A nota ficará visível no histórico do caso para todos os usuários.' });
+  }, { textarea: true, hint: 'A nota fica no histórico do caso para a equipe. Só aparece ao cliente, no portal, se a caixa abaixo estiver marcada.', checkbox: { label: 'Mostrar esta nota ao cliente no portal', checked: false } });
 }
 
 // Negativação manual (handoff §4.9): registra no histórico do caso. Sem API por ora;
@@ -27427,6 +27442,33 @@ function cpStepIndex(status){
   if(/contato|notific|proposta|an[áa]lise|andamento/.test(s)) return 1;
   return 0;
 }
+// "Devolvida"/"8. Devolvida": a COBRASQ encerrou e o título voltou ao cliente. Não é
+// quitação nem repasse — antes caía no índice 4 e a jornada marcava "Quitada pelo
+// devedor" como feita, e o card mostrava o capital inteiro como "saldo a receber".
+// "Devolver" (ainda a devolver) não entra: o caso segue sob a COBRASQ até a devolução.
+function cpEhDevolvida(status){ return /devolvid/i.test(status||''); }
+// Jornada do detalhe do caso. `repassado` = soma de repasses_cliente do caso (null enquanto
+// não carregou). Caso quitado cujo capital já voltou inteiro ao cliente — ou quitado direto
+// a ele — completa a última etapa ("Repassada a você"); cpStepIndex sozinho parava na 4ª.
+function cpStepsHtml(status, repassado, capital){
+  let steps=['Registrada na COBRASQ','Notificação e cobrança','Acordo ou ação judicial','Quitada pelo devedor','Repassada a você'];
+  let idx=cpStepIndex(status);
+  if(cpEhDevolvida(status)){
+    steps=['Registrada na COBRASQ','Notificação e cobrança','Cobrança devolvida a você'];
+    idx=steps.length; // todas concluídas
+  } else if(idx===3){
+    const direto=/quitado (ao cliente|direto ao credor)/i.test(status||'');
+    const tudo=repassado!=null && +capital>0 && repassado+0.005>=+capital;
+    if(direto || tudo) idx=steps.length;
+  }
+  return steps.map((l,i)=>{
+    let cls='todo';
+    if(idx==='failed'){ cls = i===0?'done' : (i===1?'failed':'todo'); }
+    else { cls = i<idx?'done' : (i===idx?'current':'todo'); }
+    const inner = cls==='done'?'✓' : (cls==='failed'?'!' : (i+1));
+    return `<div class="cp-step ${cls}"><div class="cp-step-c">${inner}</div><div class="cp-step-l">${l}</div></div>`;
+  }).join('');
+}
 // ── Beatriz IA (casca; liga no /api/claude numa 2ª etapa) ──
 function cpBeatrizOpen(){
   const ov=document.getElementById('cpBeatrizOv'); if(!ov) return;
@@ -28098,15 +28140,12 @@ function cpVerDevedor(id){
   const _partesCaso=((cob&&cob.cobranca_partes)||[]).slice().sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
   const partesHtml = _partesCaso.length>1 ? `<div class="cp-card" style="margin-bottom:18px;"><div class="cp-label" style="margin-bottom:12px;">Partes do caso (${_partesCaso.length})</div>${_partesCaso.map(p=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:9px 0;border-top:1px solid var(--pline);"><div style="min-width:0;"><span style="font-size:13.5px;font-weight:600;color:var(--ink);">${escHtml((p.devedores&&p.devedores.nome)||'—')}</span>${p.principal?' <span class="cp-mono" style="font-size:9px;color:var(--gold-2);text-transform:uppercase;letter-spacing:.1em;">principal</span>':''}<div class="cp-mono" style="font-size:11px;color:var(--mute);">${escHtml((p.devedores&&p.devedores.doc)||'—')}</div></div><span class="cp-label" style="white-space:nowrap;">${cpPapelLbl(p.papel)}</span></div>`).join('')}</div>` : '';
   const capital=cob?((cob.valor_capital!=null)?+cob.valor_capital:((cob.divida&&cob.divida.valorCapital!=null)?+cob.divida.valorCapital:(+cob.valor_orig||(parseValorBR(d.valorOrig)||0)))):(parseValorBR(d.valorOrig)||0);
-  const stepIdx=cpStepIndex(d.status);
-  const STEPS=['Registrada na COBRASQ','Notificação e cobrança','Acordo ou ação judicial','Quitada pelo devedor','Repassada a você'];
-  const stepHtml=STEPS.map((l,i)=>{
-    let cls='todo';
-    if(stepIdx==='failed'){ cls = i===0?'done' : (i===1?'failed':'todo'); }
-    else { cls = i<stepIdx?'done' : (i===stepIdx?'current':'todo'); }
-    const inner = cls==='done'?'✓' : (cls==='failed'?'!' : (i+1));
-    return `<div class="cp-step ${cls}"><div class="cp-step-c">${inner}</div><div class="cp-step-l">${l}</div></div>`;
-  }).join('');
+  // Status da COBRANÇA (relacional) manda; d.status (blob) só na falta dela.
+  const stCaso=(cob&&cob.status)||d.status||'';
+  const devolvida=cpEhDevolvida(stCaso);
+  // Repassado ainda não conhecido aqui (repasses chegam assíncronos em cpFillRepassesDevedor,
+  // que redesenha a jornada com o valor real).
+  const stepHtml=cpStepsHtml(stCaso, null, capital);
 
   body.innerHTML = `
     <button class="cp-btn cp-btn-outline" style="border-color:var(--pline);color:var(--mute);margin-bottom:18px;" onclick="cpNavigate('carteira')">‹ Voltar à carteira</button>
@@ -28124,7 +28163,7 @@ function cpVerDevedor(id){
     ${partesHtml}
     <div class="cp-card" style="margin-bottom:18px;">
       <div class="cp-label" style="margin-bottom:18px;">Jornada do caso</div>
-      <div class="cp-steps">${stepHtml}</div>
+      <div class="cp-steps" id="cpDevSteps">${stepHtml}</div>
     </div>
     <div style="display:grid;grid-template-columns:1.1fr 1fr;gap:18px;margin-bottom:18px;">
       <div class="cp-card">
@@ -28137,6 +28176,7 @@ function cpVerDevedor(id){
           <div style="display:flex;justify-content:space-between;margin-bottom:10px;"><span style="font-size:13px;color:var(--mute);">Capital (principal)</span><span class="cp-num" style="font-size:18px;color:var(--ink);">${fmtR(capital)}</span></div>
           <div style="display:flex;justify-content:space-between;margin-bottom:10px;"><span style="font-size:13px;color:var(--mute);">Já repassado a você</span><span class="cp-num" id="cpDevCapRec" style="font-size:18px;color:var(--st-quitado);">—</span></div>
           <div style="display:flex;justify-content:space-between;padding-top:10px;border-top:1px solid var(--pline);"><span style="font-size:13px;color:var(--ink);font-weight:600;">Saldo a receber</span><span class="cp-num" id="cpDevCapSaldo" style="font-size:18px;color:var(--gold-2);">—</span></div>
+          ${devolvida?`<div style="margin-top:12px;font-size:12.5px;color:var(--mute);line-height:1.5;">Cobrança devolvida a você: a COBRASQ encerrou a cobrança deste caso e não há saldo a receber por aqui.</div>`:''}
           <div style="margin-top:14px;background:color-mix(in srgb,var(--st-quitado) 12%,transparent);border-radius:11px;padding:11px 13px;"><span class="cp-lead" style="font-size:14px;color:var(--st-quitado);">O principal volta inteiro ao seu caixa. A COBRASQ fica apenas com os acessórios.</span></div>
         </div>
         <div class="cp-card">
@@ -28215,13 +28255,70 @@ async function cpEnviarDocumentoCaso(cobId){
   cpFillDocumentosCaso(cobId);
 }
 
+// Nota da equipe só aparece ao cliente quando marcada "mostrar ao cliente" ao ser criada.
+function cpNotaVisivelCliente(p){ return !!(p && (p.visivel_cliente===true || p.visivelCliente===true)); }
+// devedor_eventos → só o que o cliente deve ver, com rótulo e texto do PORTAL. Texto livre
+// escrito pela equipe (acao_completa de acordo cancelado/descumprido, notas) nunca passa,
+// salvo andamento judicial (curado) e nota marcada visível. Tipo fora da lista = oculto.
+function cpEventosCliente(eventos, reps){
+  const out=[];
+  const R=v=>fmtR(+v||0);
+  (eventos||[]).forEach(e=>{
+    if(!e) return;
+    const p=e.payload||{};
+    const ev=(tipo,texto,data)=>out.push({ tipo:'andamento_judicial', _rotulo:tipo, payload:{ acao_completa:texto, data:data||p.data||null }, criado_em:e.criado_em });
+    switch(e.tipo){
+      case 'andamento_judicial':
+        out.push({ tipo:'andamento_judicial', payload:p, criado_em:e.criado_em }); break;
+      case 'asaas_pagamento_recebido': {
+        const parc=(typeof p.installment==='number')?` (parcela ${p.installment})`:'';
+        ev('Pagamento', `Pagamento recebido — ${R(p.value)}${parc}`, p.payment_date); break; }
+      case 'asaas_pagamento_atrasado': {
+        const venc=p.due_date?` com vencimento em ${_detData(p.due_date)}`:'';
+        ev('Pagamento', `Parcela de ${R(p.value)}${venc} não foi paga no prazo`, null); break; }
+      case 'asaas_boletos_emitidos': {
+        const n=+p.parcelas||0;
+        ev('Acordo', n>1?`Boletos do acordo emitidos — ${n} parcelas, total ${R(p.total)}`:`Boleto do acordo emitido — ${R(p.total)}`); break; }
+      case 'zapsign_assinado':
+      case 'acordo_assinado_confirmado':
+        ev('Acordo', 'Acordo assinado pelo devedor'); break;
+      case 'acordo_concluido_auto':
+        ev('Acordo', 'Acordo formalizado e boletos enviados ao devedor'); break;
+      case 'acordo_cancelado':
+        ev('Acordo', 'Acordo cancelado'); break;
+      case 'acordo_descumprido':
+        ev('Acordo', 'Acordo não cumprido pelo devedor'); break;
+      case 'caso_criado':
+        ev('Caso', 'Caso registrado na COBRASQ'); break;
+      case 'repasse':
+        // Os PIX do caso já aparecem um a um (repasses_cliente); o evento-resumo só entra
+        // quando não há nenhum repasse registrado na tabela.
+        if(!(reps||[]).length) ev('Repasse', 'Capital repassado a você');
+        break;
+      case 'nota_manual': case 'nota': case 'anotacao': case 'historico_legacy': case 'mudanca_status':
+        if(cpNotaVisivelCliente(p)){
+          const t=p.texto||p.acao_completa||p.acao||p.descricao||p.titulo||'';
+          if(t) ev('Nota', t);
+        }
+        break;
+      default: break; // interno (script_*, telefone_*, edicao, reatribuicao, falhas...) — oculto
+    }
+  });
+  return out;
+}
+// metadata.historico (blob) no portal: só o comprovante enviado pelo próprio cliente e o
+// que a equipe marcou visível. Notas, "Script", ligações etc. ficam no painel.
+function cpHistLegadoCliente(hist){
+  return (hist||[]).filter(h=>h && (h.tipo==='Comprovante' || cpNotaVisivelCliente(h)));
+}
 // Monta o "Histórico do caso" do portal do cedente. Usa o MESMO builder do CRM
-// (buildCaseTimeline): eventos = devedor_eventos (andamentos judiciais curados,
-// notas, repasse-quitação — lidos via RLS eventos_cedente_read), repasses =
-// repasses_cliente, e a cauda legada de metadata.historico (não-datajud). Assim
-// o cedente e o gestor veem EXATAMENTE a mesma timeline.
+// (buildCaseTimeline), mas só com o que é PARA O CLIENTE: devedor_eventos passa por
+// cpEventosCliente (lista branca + texto próprio do portal) e a cauda legada de
+// metadata.historico por cpHistLegadoCliente. Antes ia tudo — nota interna da equipe,
+// mudança de status de migração em massa, payload cru do Asaas (payment_id, cus_...,
+// invoice_url) —, inclusive telefone de terceiro e fila interna de envio (28/09/2026).
 function cpRenderDevTimeline(eventos, reps, legacyHist){
-  const itens=buildCaseTimeline(eventos, reps, legacyHist);
+  const itens=buildCaseTimeline(cpEventosCliente(eventos, reps), reps, cpHistLegadoCliente(legacyHist));
   if(!itens.length){
     return `<div class="cp-tl-item"><span class="cp-tl-dot"></span><div style="font-size:13px;color:var(--ink);">Caso registrado na COBRASQ.<div style="font-size:11.5px;color:var(--mute);margin-top:2px;">Os andamentos detalhados aparecem aqui conforme o caso avança.</div></div></div>`;
   }
@@ -28236,8 +28333,19 @@ async function cpFillRepassesDevedor(cobId){
   let eventos=[];
   if(supa){
     try{ const { data }=await supa.from('repasses_cliente').select('*').eq('cobranca_id',cobId).order('data_pix',{ascending:false,nullsFirst:false}); reps=data||[]; }catch(_){}
-    // Eventos do caso via RLS de cedente (eventos_cedente_read filtra por devedor_id).
-    try{ const { data:ev }=await supa.from('devedor_eventos').select('tipo,payload,criado_em').eq('devedor_id',cobId).order('criado_em',{ascending:false}).limit(50); eventos=ev||[]; }catch(_){}
+    // Eventos do caso: pela cobrança (cobranca_id) ou, nos eventos antigos sem cobranca_id,
+    // pelo devedor PRINCIPAL de cobranca_partes. Antes buscava devedor_id = id da cobrança,
+    // que só acerta no legado 1:1 — 67 casos têm o principal com id diferente (28/09/2026).
+    // Evento sem cobranca_id de outro caso do mesmo devedor não entra (filtro por caso).
+    try{
+      const _cb=(typeof DB_cobrancas!=='undefined'?DB_cobrancas:[]||[]).find(c=>c.id===cobId);
+      const _pp=((_cb&&_cb.cobranca_partes)||[]).find(x=>x.principal);
+      const _devIds=[...new Set([cobId, _pp&&_pp.devedor_id].filter(Boolean))];
+      const { data:ev }=await supa.from('devedor_eventos').select('tipo,payload,criado_em')
+        .or(`cobranca_id.eq.${cobId},and(cobranca_id.is.null,devedor_id.in.(${_devIds.join(',')}))`)
+        .order('criado_em',{ascending:false}).limit(80);
+      eventos=ev||[];
+    }catch(_){}
   }
   // Re-renderiza o "Histórico do caso" unindo eventos (andamentos curados + notas)
   // + repasses + cauda legada de metadata.historico.
@@ -28249,7 +28357,13 @@ async function cpFillRepassesDevedor(cobId){
   const saldo=(cap!=null)?(cap-recebido):null;
   // Preenche o card "Seu capital neste caso" do detalhe
   const rec=document.getElementById('cpDevCapRec'); if(rec) rec.textContent=fmtR(recebido);
-  const sal=document.getElementById('cpDevCapSaldo'); if(sal) sal.textContent=(saldo!=null?fmtR(Math.max(saldo,0)):'—');
+  const _st=(cob&&cob.status)||((DB.devedores||[]).find(x=>x.id===cobId)||{}).status||'';
+  // Caso devolvido: não há saldo a receber pela COBRASQ (o título voltou ao cliente).
+  const sal=document.getElementById('cpDevCapSaldo'); if(sal) sal.textContent=cpEhDevolvida(_st)?'—':(saldo!=null?fmtR(Math.max(saldo,0)):'—');
+  // Jornada com o repassado real: quitado + capital 100% repassado completa "Repassada a você".
+  const stepsEl=document.getElementById('cpDevSteps');
+  const _capJ=(cap!=null)?cap:(cob?(+cob.valor_orig||0):0);
+  if(stepsEl) stepsEl.innerHTML=cpStepsHtml(_st, recebido, _capJ);
   if(!reps.length){
     el.innerHTML=`<div style="font-size:12.5px;color:var(--mute);padding:6px 0;">Nenhum repasse registrado neste caso ainda. Os valores recuperados aparecem aqui quando a COBRASQ repassa.</div>`;
     return;
