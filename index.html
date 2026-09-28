@@ -24147,7 +24147,15 @@ const _CNJ_RE=/^\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}$/;
 let _bensCtx=null; // {cobId, hostId, bens, partes, docs, numeroProcesso}
 const _bensLbl=(lista,v)=>{ const f=lista.find(x=>x[0]===v); return f?f[1]:(v||'—'); };
 function _bensDataBR(v){ if(!v) return '—'; const m=String(v).match(/^(\d{4})-(\d{2})-(\d{2})/); return m?`${m[3]}/${m[2]}/${m[1]}`:String(v); }
-function _bensNum(v){ const s=String(v==null?'':v).trim(); if(!s) return null; const n=Number(s.includes(',')?s.replace(/\./g,'').replace(',','.'):s); return isFinite(n)?n:NaN; }
+// "20.411,02" e "150.000" (ponto de milhar sem vírgula) → número; "533.6" continua decimal.
+function _bensNum(v){ const s=String(v==null?'':v).replace(/R\$|\s/g,''); if(!s) return null;
+  const t=s.includes(',')?s.replace(/\./g,'').replace(',','.'):(/^-?\d{1,3}(\.\d{3})+$/.test(s)?s.replace(/\./g,''):s);
+  const n=Number(t); return isFinite(n)?n:NaN; }
+// Número de processo guardado só com os 20 dígitos → máscara CNJ; outro formato fica como está.
+function _bensCNJ(v){ const s=String(v||'').trim(), d=s.replace(/\D/g,''); return d.length===20&&/^[\d.\-\s]+$/.test(s)?d.replace(/^(\d{7})(\d{2})(\d{4})(\d)(\d{2})(\d{4})$/,'$1-$2.$3.$4.$5.$6'):s; }
+// Mantém no select o vínculo atual mesmo quando ele não está entre as opções (doc inativo,
+// devedor que saiu das partes) — senão salvar a edição apagaria o vínculo sem aviso.
+function _bensOptsCom(opts, atual, rotulo){ return (atual&&!opts.some(o=>o[0]===atual))?opts.concat([[atual,rotulo]]):opts; }
 function _bensNumTxt(v){ return v==null||v===''?'':fmt(v); }
 function _bensIdent(b){
   if(b.tipo==='imovel') return [b.matricula?`Matrícula ${b.matricula}`:'', b.cartorio||b.comarca||''].filter(Boolean).join(' · ')||'Imóvel sem matrícula';
@@ -24155,7 +24163,10 @@ function _bensIdent(b){
   return b.identificacao||b.descricao||_bensLbl(BENS_TIPOS,b.tipo);
 }
 async function _bensUid(supa){ try{ const {data}=await supa.auth.getUser(); return data&&data.user?data.user.id:null; }catch(_){ return null; } }
-function _bensTabelaFaltando(err){ const m=String(err&&(err.message||err.code)||''); return /bens_cobranca|bens_constricoes|42P01|PGRST205|does not exist|schema cache/i.test(m); }
+function _bensTabelaFaltando(err){ const code=String(err&&err.code||''), m=String(err&&err.message||''); return code==='42P01'||code==='PGRST205'||/relation "?(public\.)?bens_(cobranca|constricoes)"? does not exist|Could not find the table '?(public\.)?bens_(cobranca|constricoes)/i.test(m); }
+
+// Sem erro e sem linha devolvida = a RLS barrou (cobrança que não é sua) — não é "sucesso".
+function _bensErro(err){ if(!err) return 'sem permissão nesta cobrança.'; return /row-level security|permission denied|42501/i.test(String(err.message||'')+String(err.code||''))?'sem permissão nesta cobrança.':(err.message||String(err)); }
 
 async function bensCarregarCobranca(cobId, hostId){
   const host=document.getElementById(hostId); if(!host||!cobId) return;
@@ -24175,7 +24186,7 @@ async function bensCarregarCobranca(cobId, hostId){
     return;
   }
   const ps=(partes||[]).filter(p=>p.devedor_id).sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
-  _bensCtx={cobId, hostId, bens:bens||[], partes:ps, docs:docs||[], numeroProcesso:(cob&&cob.numero_processo)||''};
+  _bensCtx={cobId, hostId, bens:bens||[], partes:ps, docs:docs||[], numeroProcesso:_bensCNJ(cob&&cob.numero_processo)};
   bensRender();
 }
 
@@ -24286,7 +24297,7 @@ function bensAbrirBem(bemId){
   const docOpts=[['','— sem certidão anexada —']].concat(c.docs.slice().sort((x,y)=>(y.categoria==='matricula'?1:0)-(x.categoria==='matricula'?1:0)).map(d=>[d.id,(d.categoria==='matricula'?'📄 ':'')+d.nome]));
   const props=(b.proprietarios&&b.proprietarios.length)?b.proprietarios:(bemId?[]:[princ&&princ.devedores?{nome:princ.devedores.nome,doc:princ.devedores.doc}:{}]);
   const corpo=`
-    <div style="${_bensLinha}">${_bensCampo('Tipo do bem',_bensSel('bem-tipo',BENS_TIPOS,b.tipo).replace('<select','<select onchange="bensTipoMudou()"'),'180px')}${_bensCampo('Devedor dono (cadastro)',_bensSel('bem-dev',devOpts,b.devedor_id||(bemId?'':(princ&&princ.devedor_id)||'')),'260px')}</div>
+    <div style="${_bensLinha}">${_bensCampo('Tipo do bem',_bensSel('bem-tipo',BENS_TIPOS,b.tipo).replace('<select','<select onchange="bensTipoMudou()"'),'180px')}${_bensCampo('Devedor dono (cadastro)',_bensSel('bem-dev',_bensOptsCom(devOpts,b.devedor_id,'(devedor fora das partes desta cobrança)'),b.devedor_id||(bemId?'':(princ&&princ.devedor_id)||'')),'260px')}</div>
     <div style="${_bensLinha}" data-bem-tipo="imovel">${_bensCampo('Matrícula',_bensInp('bem-matricula',b.matricula),'120px')}${_bensCampo('Cartório (RI)',_bensInp('bem-cartorio',b.cartorio),'220px')}${_bensCampo('Comarca',_bensInp('bem-comarca',b.comarca),'160px')}</div>
     <div style="${_bensLinha}" data-bem-tipo="imovel">${_bensCampo('Endereço',_bensInp('bem-endereco',b.endereco),'380px')}${_bensCampo('Área (m²)',_bensInp('bem-area',_bensNumTxt(b.area_m2)),'110px')}</div>
     <div style="${_bensLinha}" data-bem-tipo="veiculo">${_bensCampo('Placa',_bensInp('bem-placa',b.placa),'140px')}${_bensCampo('RENAVAM',_bensInp('bem-renavam',b.renavam),'180px')}</div>
@@ -24299,7 +24310,7 @@ function bensAbrirBem(bemId){
     <div id="bem-onus">${(b.onus_terceiros||[]).map(o=>_bensRepLinha(_BENS_ONUS_CAMPOS,o)).join('')}</div>
     <button class="btn btn-ghost btn-sm" onclick="bensRepAdd('bem-onus','onus')" style="margin-bottom:10px;">+ Ônus</button>
     <div style="${_bensLinha}">${_bensCampo('Avaliação (R$)',_bensInp('bem-aval',_bensNumTxt(b.avaliacao_valor)),'140px')}${_bensCampo('Data da avaliação',_bensInp('bem-aval-data',b.avaliacao_data,'type="date"'),'150px')}${_bensCampo('Fonte da avaliação',_bensInp('bem-aval-fonte',b.avaliacao_fonte,'placeholder="oficial de justiça, laudo…"'),'200px')}</div>
-    <div style="${_bensLinha}">${_bensCampo('Certidão de matrícula (Documentos do caso)',_bensSel('bem-cert',docOpts,b.certidao_documento_id||''),'320px')}${_bensCampo('Data da certidão',_bensInp('bem-cert-data',b.certidao_data,'type="date"'),'150px')}</div>
+    <div style="${_bensLinha}">${_bensCampo('Certidão de matrícula (Documentos do caso)',_bensSel('bem-cert',_bensOptsCom(docOpts,b.certidao_documento_id,'(documento inativo ou de outro caso)'),b.certidao_documento_id||''),'320px')}${_bensCampo('Data da certidão',_bensInp('bem-cert-data',b.certidao_data,'type="date"'),'150px')}</div>
     <div style="${_bensLinha}">${_bensCampo('Observação',`<textarea id="bem-obs" rows="2" style="${_bensInpSt}margin-top:3px;">${escHtml(b.observacao||'')}</textarea>`,'100%')}</div>`;
   _bensModal('modal-bem', bemId?'Editar bem':'Novo bem', corpo, ()=>bensSalvarBem(bemId||null));
   bensTipoMudou();
@@ -24309,7 +24320,7 @@ async function bensSalvarBem(bemId){
   const c=_bensCtx; if(!c) return;
   const v=id=>{ const s=(document.getElementById(id)?.value||'').trim(); return s||null; };
   const tipo=v('bem-tipo');
-  const area=_bensNum(v('bem-area')), aval=_bensNum(v('bem-aval'));
+  const area=tipo==='imovel'?_bensNum(v('bem-area')):null, aval=_bensNum(v('bem-aval'));
   if(Number.isNaN(area)||Number.isNaN(aval)){ showToast('Área ou avaliação com número inválido (use 533,60).','warning'); return; }
   const row={
     cobranca_id:c.cobId, devedor_id:v('bem-dev'), tipo, descricao:v('bem-desc'),
@@ -24323,10 +24334,10 @@ async function bensSalvarBem(bemId){
   };
   const supa=getSupabase(); if(!supa) return;
   const btn=document.getElementById('modal-bem-salvar'); if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
-  const q=bemId ? supa.from('bens_cobranca').update(row).eq('id',bemId)
-               : supa.from('bens_cobranca').insert({...row, origem:'manual', criado_por:await _bensUid(supa)});
-  const {error}=await q;
-  if(error){ if(btn){ btn.disabled=false; btn.textContent='Salvar'; } showToast('Não foi possível salvar o bem: '+error.message,'danger'); return; }
+  const q=bemId ? supa.from('bens_cobranca').update(row).eq('id',bemId).select('id')
+               : supa.from('bens_cobranca').insert({...row, origem:'manual', criado_por:await _bensUid(supa)}).select('id');
+  const {data:gravou,error}=await q;
+  if(error||!(gravou&&gravou.length)){ if(btn){ btn.disabled=false; btn.textContent='Salvar'; } showToast('Não foi possível salvar o bem: '+_bensErro(error),'danger'); return; }
   document.getElementById('modal-bem')?.remove();
   showToast(bemId?'Bem atualizado.':'Bem cadastrado.','success');
   bensCarregarCobranca(c.cobId, c.hostId);
@@ -24341,7 +24352,7 @@ function bensAbrirConstricao(bemId, constrId){
     <div style="font-size:12px;color:var(--text-2);margin-bottom:10px;">${escHtml(_bensLbl(BENS_TIPOS,b.tipo))} · ${escHtml(_bensIdent(b))}</div>
     <div style="${_bensLinha}">${_bensCampo('Tipo de ato',_bensSel('con-tipo',CONSTR_TIPOS,k.tipo),'280px')}${_bensCampo('Nº do ato no registro',_bensInp('con-ato',k.ato_registro,'placeholder="AV.18, R.20, protocolo Sisbajud"'),'180px')}${_bensCampo('Data do ato',_bensInp('con-data',k.data_ato,'type="date"'),'150px')}</div>
     <div style="${_bensLinha}">${_bensCampo('Processo (CNJ completo)',_bensInp('con-proc',k.numero_processo,'placeholder="0000000-00.0000.0.00.0000"'),'260px')}${_bensCampo('Movimento / folha',_bensInp('con-mov',k.mov_folha,'placeholder="mov. 27.1"'),'160px')}${_bensCampo('Valor (R$)',_bensInp('con-valor',_bensNumTxt(k.valor)),'140px')}</div>
-    <div style="${_bensLinha}">${_bensCampo('Depositário',_bensInp('con-dep',k.depositario),'260px')}${_bensCampo('Situação',_bensSel('con-sit',CONSTR_SITUACOES,k.situacao),'150px')}${_bensCampo('Documento (termo, certidão)',_bensSel('con-doc',docOpts,k.documento_id||''),'240px')}</div>
+    <div style="${_bensLinha}">${_bensCampo('Depositário',_bensInp('con-dep',k.depositario),'260px')}${_bensCampo('Situação',_bensSel('con-sit',CONSTR_SITUACOES,k.situacao),'150px')}${_bensCampo('Documento (termo, certidão)',_bensSel('con-doc',_bensOptsCom(docOpts,k.documento_id,'(documento inativo ou de outro caso)'),k.documento_id||''),'240px')}</div>
     <div style="${_bensLinha}">${_bensCampo('Observação',`<textarea id="con-obs" rows="2" style="${_bensInpSt}margin-top:3px;">${escHtml(k.observacao||'')}</textarea>`,'100%')}</div>`;
   _bensModal('modal-constr', constrId?'Editar constrição':'Nova constrição', corpo, ()=>bensSalvarConstricao(bemId, constrId||null));
 }
@@ -24349,17 +24360,17 @@ function bensAbrirConstricao(bemId, constrId){
 async function bensSalvarConstricao(bemId, constrId){
   const c=_bensCtx; if(!c) return;
   const v=id=>{ const s=(document.getElementById(id)?.value||'').trim(); return s||null; };
-  const proc=v('con-proc'), valor=_bensNum(v('con-valor'));
+  const proc=v('con-proc')&&_bensCNJ(v('con-proc')), valor=_bensNum(v('con-valor'));
   if(proc && !_CNJ_RE.test(proc)){ showToast('Número do processo tem que ser o CNJ completo (0000000-00.0000.0.00.0000).','warning'); return; }
   if(Number.isNaN(valor)){ showToast('Valor inválido (use 21.987,00).','warning'); return; }
   const row={ bem_id:bemId, tipo:v('con-tipo'), ato_registro:v('con-ato'), data_ato:v('con-data'), numero_processo:proc,
     mov_folha:v('con-mov'), valor, depositario:v('con-dep'), situacao:v('con-sit')||'ativa', documento_id:v('con-doc'), observacao:v('con-obs') };
   const supa=getSupabase(); if(!supa) return;
   const btn=document.getElementById('modal-constr-salvar'); if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
-  const q=constrId ? supa.from('bens_constricoes').update(row).eq('id',constrId)
-                   : supa.from('bens_constricoes').insert({...row, criado_por:await _bensUid(supa)});
-  const {error}=await q;
-  if(error){ if(btn){ btn.disabled=false; btn.textContent='Salvar'; } showToast('Não foi possível salvar a constrição: '+error.message,'danger'); return; }
+  const q=constrId ? supa.from('bens_constricoes').update(row).eq('id',constrId).select('id')
+                   : supa.from('bens_constricoes').insert({...row, criado_por:await _bensUid(supa)}).select('id');
+  const {data:gravou,error}=await q;
+  if(error||!(gravou&&gravou.length)){ if(btn){ btn.disabled=false; btn.textContent='Salvar'; } showToast('Não foi possível salvar a constrição: '+_bensErro(error),'danger'); return; }
   document.getElementById('modal-constr')?.remove();
   showToast(constrId?'Constrição atualizada.':'Constrição lançada.','success');
   bensCarregarCobranca(c.cobId, c.hostId);
@@ -24370,16 +24381,16 @@ async function bensExcluirBem(bemId){
   const b=c.bens.find(x=>x.id===bemId); if(!b) return;
   const n=(b.bens_constricoes||[]).length;
   if(!confirm(`Excluir o bem "${_bensIdent(b)}"${n?` e as ${n} constrição(ões) lançadas nele`:''}? A certidão continua em Documentos do caso.`)) return;
-  const {error}=await getSupabase().from('bens_cobranca').delete().eq('id',bemId);
-  if(error){ showToast('Não foi possível excluir: '+error.message,'danger'); return; }
+  const {data:apagou,error}=await getSupabase().from('bens_cobranca').delete().eq('id',bemId).select('id');
+  if(error||!(apagou&&apagou.length)){ showToast('Não foi possível excluir: '+_bensErro(error),'danger'); return; }
   showToast('Bem excluído.','success');
   bensCarregarCobranca(c.cobId, c.hostId);
 }
 async function bensExcluirConstricao(constrId){
   const c=_bensCtx; if(!c) return;
   if(!confirm('Excluir esta constrição? Para registrar que foi cancelada ou levantada, prefira editar a situação.')) return;
-  const {error}=await getSupabase().from('bens_constricoes').delete().eq('id',constrId);
-  if(error){ showToast('Não foi possível excluir: '+error.message,'danger'); return; }
+  const {data:apagou,error}=await getSupabase().from('bens_constricoes').delete().eq('id',constrId).select('id');
+  if(error||!(apagou&&apagou.length)){ showToast('Não foi possível excluir: '+_bensErro(error),'danger'); return; }
   showToast('Constrição excluída.','success');
   bensCarregarCobranca(c.cobId, c.hostId);
 }
