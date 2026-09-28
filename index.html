@@ -11502,7 +11502,7 @@ async function renderPainel(){
     // número que muda 1 s depois. O de boletos passa pela memória por chave (uma
     // consulta por 15 s, não uma por pintura) — aquecida junto com os pedaços, para
     // os dois banners entrarem na mesma pintura e o conteúdo descer uma vez só.
-    if(sinaisProntos){ checkAlertaBoletosPendentes(el); checkAlertaCasosAgir(el); checkAlertaVigiaAcoes(el); }
+    if(sinaisProntos){ checkAlertaBoletosPendentes(el); checkAlertaCasosAgir(el); checkAlertaVigiaAcoes(el); checkAlertaDocsCliente(el); }
   };
 
   // Primeira pintura: agora, com a memória e o que já estava fresco em cache.
@@ -11703,6 +11703,42 @@ async function checkAlertaVigiaAcoes(painelEl){
     </div>`;
     el.insertAdjacentHTML('beforeend', html);
   }catch(e){ /* best-effort */ }
+}
+// Documentos que o cliente (cedente) enviou pelo portal e aguardam a equipe aprovar
+// (documentos.origem='cliente', status_aprovacao='pendente'). Aprovação na aba
+// "Portal do cliente" do caso. Antes da migração 20260928_01 a coluna não existe:
+// a consulta erra e o aviso simplesmente não aparece.
+async function checkAlertaDocsCliente(painelEl){
+  try{
+    if(currentUser?.tipo !== 'gestor') return;
+    const pgEl = painelEl || document.getElementById('page-painel'); if(!pgEl) return;
+    const supa = getSupabase(); if(!supa) return;
+    const gen = _painelGen;
+    const { data, error } = await supa.from('documentos')
+      .select('id,cobranca_id,uploaded_at').eq('origem','cliente').eq('status_aprovacao','pendente').eq('ativo',true)
+      .order('uploaded_at',{ascending:true}).limit(200);
+    if(gen !== _painelGen) return;
+    const el = pgEl.querySelector('#painel-alerts') || pgEl;
+    const old = el.querySelector('#cob-alert-docs-cliente'); if(old) old.remove();
+    if(error || !data || !data.length) return;
+    const porCaso = new Map();
+    data.forEach(d=>{ if(d.cobranca_id) porCaso.set(d.cobranca_id, (porCaso.get(d.cobranca_id)||0)+1); });
+    const casos = [...porCaso.entries()];
+    const nomeCaso = (cid)=>{ const c=(DB_cobrancas||[]).find(x=>x.id===cid); return c ? (_cobrPrincipalNome(c)||_cobrCredorNome(c)||'caso') : 'caso #'+String(cid).slice(0,8); };
+    const links = casos.slice(0,6).map(([cid,n])=>`<a href="#" style="color:var(--navy);font-weight:600;text-decoration:underline;" onclick="event.preventDefault();abrirPortalClienteCaso('${escHtml(cid)}')">${escHtml(nomeCaso(cid))}${n>1?` (${n})`:''}</a>`).join(' · ');
+    const ic = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6"/><path d="M12 18v-6"/><path d="M9 15l3-3 3 3"/></svg>`;
+    const html = `<div class="cob-alert" id="cob-alert-docs-cliente" style="border-left-color:var(--gold,#C9A961);margin-bottom:16px;">
+      <span class="cob-alert-ic" style="color:#9C7F40;">${ic}</span>
+      <div><b>${data.length}</b> documento${data.length!==1?'s':''} enviado${data.length!==1?'s':''} pelo cliente no portal aguardando aprovação${casos.length?` — ${links}${casos.length>6?` e mais ${casos.length-6}`:''}`:''}.</div>
+      ${casos.length?`<button style="margin-left:auto;color:var(--navy);background:var(--gold);border:0;border-radius:8px;padding:8px 14px;font-size:12.5px;font-weight:700;cursor:pointer;white-space:nowrap;" onclick="abrirPortalClienteCaso('${escHtml(casos[0][0])}')">Conferir →</button>`:''}
+    </div>`;
+    el.insertAdjacentHTML('beforeend', html);
+  }catch(e){ /* best-effort */ }
+}
+// Abre o caso direto na aba "Portal do cliente" (aviso do Painel).
+function abrirPortalClienteCaso(cobId){
+  window._detTabInicial = 'portal';
+  verCobranca(cobId);
 }
 
 // Resolve (manual, pela sessão do gestor logado) as pendências dos acordos assinados:
@@ -22025,15 +22061,21 @@ function _detTags(tags){
 // cobranca_id; devedor_id = principal p/ satisfazer a RLS de documentos).
 // Aceita vários arquivos por seleção (input `multiple`): sobe em série, todos na
 // categoria escolhida no select; um que falhar não derruba os demais.
-async function uploadAnexoCobranca(){
+// modo 'cliente' (aba Portal do cliente): documento que o cliente mandou por WhatsApp e
+// a equipe cadastra — grava origem 'cliente', já aprovado e visível no portal, no
+// prefixo cobrancas/<id>/cliente/ (o mesmo do envio pelo portal).
+async function uploadAnexoCobranca(modo){
   const ctx = window._anexoCtx; if(!ctx || !ctx.cobId) return;
-  const inp = document.getElementById('cob-anexo-file');
+  const doCliente = modo==='cliente';
+  const sfx = doCliente ? '-cli' : '';
+  const inp = document.getElementById('cob-anexo-file'+sfx);
   const files = Array.from((inp && inp.files) || []);
   if(!files.length) return;
   const supa = getSupabase(); if(!supa){ if(inp) inp.value=''; return; }
-  const btn = document.getElementById('cob-anexo-btn');
+  const btn = document.getElementById('cob-anexo-btn'+sfx);
+  const btnTxt = btn ? btn.textContent : '';
   const chave = (String(ctx.devDoc||'').replace(/\D/g,'')) || ('id-'+ctx.devId);
-  const cat = (document.getElementById('cob-anexo-cat')||{}).value || 'outros';
+  const cat = (document.getElementById('cob-anexo-cat'+sfx)||{}).value || 'outros';
   const { data: udata } = await supa.auth.getUser();
   const uid = udata && udata.user ? udata.user.id : null;
   let ok=0; const erros=[];
@@ -22045,7 +22087,7 @@ async function uploadAnexoCobranca(){
     try{
       const nomeSeguro = file.name.replace(/[^a-zA-Z0-9._-]/g,'_');
       // Date.now()+i: dois arquivos na mesma seleção não podem colidir no path.
-      const path = `cobrancas/${ctx.cobId}/${cat}/${Date.now()+i}_${nomeSeguro}`;
+      const path = `cobrancas/${ctx.cobId}/${doCliente?'cliente':cat}/${Date.now()+i}_${nomeSeguro}`;
       const { error: upErr } = await supa.storage.from('documentos')
         .upload(path, file, { contentType: file.type || 'application/octet-stream', upsert: false });
       if(upErr) throw upErr;
@@ -22053,7 +22095,8 @@ async function uploadAnexoCobranca(){
         devedor_doc: chave, devedor_id: ctx.devId, cobranca_id: ctx.cobId,
         categoria: cat, nome: file.name, storage_path: path,
         mime_type: file.type||null, size_bytes: file.size,
-        uploaded_by: uid
+        uploaded_by: uid,
+        ...(doCliente ? { origem:'cliente', status_aprovacao:'aprovado', visivel_cliente:true, aprovado_por:uid, aprovado_em:new Date().toISOString() } : {})
       });
       if(insErr){ await supa.storage.from('documentos').move(path, '_lixeira/'+path).catch(()=>{}); throw insErr; }
       ok++;
@@ -22064,8 +22107,34 @@ async function uploadAnexoCobranca(){
   }
   if(ok) showToast(ok===1 ? 'Anexo enviado.' : `${ok} anexos enviados.`, 'success');
   if(erros.length) showToast((erros.length===1 ? 'Falha ao anexar — ' : `${erros.length} falharam — `) + erros.join(' · '), 'danger');
-  if(btn){ btn.disabled=false; btn.textContent='+ Anexar'; }
-  if(inp) inp.value=''; renderCobrancaDetalhe();
+  if(btn){ btn.disabled=false; btn.textContent=btnTxt||'+ Anexar'; }
+  if(inp) inp.value='';
+  if(doCliente) window._detTabInicial='portal';
+  renderCobrancaDetalhe();
+}
+// Compartilha (ou tira) um documento do caso com o cliente no portal.
+async function portalDocCompartilhar(docId, ligar){
+  const supa = getSupabase(); if(!supa) return;
+  const { data, error } = await supa.from('documentos').update({ visivel_cliente: !!ligar }).eq('id', docId).select('id');
+  if(error || !data || !data.length){ showToast('Não foi possível alterar: '+(error?error.message:'sem permissão (só o gestor e o responsável pelo caso)'),'danger'); return; }
+  showToast(ligar ? 'Documento compartilhado com o cliente.' : 'Documento tirado do portal do cliente.','success');
+  window._detTabInicial = (document.querySelector('#page-cobranca-detalhe .det-tabbar [data-cobrtab].on')||{}).dataset?.cobrtab || null;
+  renderCobrancaDetalhe();
+}
+// Aprova ou recusa documento enviado pelo cliente no portal (só gestor).
+async function portalDocDecidir(docId, decisao){
+  if(currentUser?.tipo !== 'gestor'){ showToast('Apenas o gestor aprova documentos do cliente.','warning'); return; }
+  if(decisao==='recusado' && !confirm('Recusar este documento? O cliente verá "Recusado" no portal; o arquivo não é apagado.')) return;
+  const supa = getSupabase(); if(!supa) return;
+  const { data: udata } = await supa.auth.getUser();
+  const uid = udata && udata.user ? udata.user.id : null;
+  const { data, error } = await supa.from('documentos')
+    .update({ status_aprovacao: decisao, aprovado_por: uid, aprovado_em: new Date().toISOString() })
+    .eq('id', docId).select('id');
+  if(error || !data || !data.length){ showToast('Não foi possível gravar: '+(error?error.message:'sem permissão'),'danger'); return; }
+  showToast(decisao==='aprovado' ? 'Documento aprovado — entra nos documentos do caso.' : 'Documento recusado.','success');
+  window._detTabInicial = 'portal';
+  renderCobrancaDetalhe();
 }
 async function removerAnexoCobranca(docId){
   if(currentUser?.tipo !== 'gestor'){ showToast('Apenas o gestor pode remover anexos.','warning'); return; }
@@ -22135,15 +22204,22 @@ async function renderCobrancaDetalhe(){
     const { data:ev } = await supa.from('devedor_eventos')
       .select('tipo,payload,criado_em').eq('cobranca_id',id).order('criado_em',{ascending:false}).limit(25);
     hist=ev||[];
-    const { data:ax } = await supa.from('documentos')
-      .select('id,nome,categoria,size_bytes,uploaded_at').eq('cobranca_id',id).eq('ativo',true).order('uploaded_at',{ascending:false});
-    anexos=ax||[];
+    // Colunas do portal do cliente (migração 20260928_01). Sem elas no banco a consulta
+    // erra; aí cai na consulta antiga e a aba Portal do cliente avisa que falta a migração.
+    let axRes = await supa.from('documentos')
+      .select('id,nome,categoria,size_bytes,uploaded_at,visivel_cliente,origem,status_aprovacao,aprovado_em').eq('cobranca_id',id).eq('ativo',true).order('uploaded_at',{ascending:false});
+    window._portalDocsSemColunas = !!axRes.error;
+    if(axRes.error){
+      axRes = await supa.from('documentos')
+        .select('id,nome,categoria,size_bytes,uploaded_at').eq('cobranca_id',id).eq('ativo',true).order('uploaded_at',{ascending:false});
+    }
+    anexos=axRes.data||[];
     const { data:rp } = await supa.from('repasses_cliente')
       .select('*').eq('cobranca_id',id).order('data_pix',{ascending:false,nullsFirst:false});
     repasses=rp||[];
   }
   if(!cob) cob=(DB_cobrancas||[]).find(c=>c.id===id)||null;
-  if(!cob){ el.innerHTML=`<div class="det-wrap det-fade"><button class="det-back" onclick="showPage('cobr')">${ico('arrow-left',14)||'←'} Voltar</button><div class="cob-panel"><div class="cob-empty-big"><div class="cob-empty-tt">Cobrança não encontrada</div></div></div></div>`; return; }
+  if(!cob){ window._detTabInicial=null; el.innerHTML=`<div class="det-wrap det-fade"><button class="det-back" onclick="showPage('cobr')">${ico('arrow-left',14)||'←'} Voltar</button><div class="cob-panel"><div class="cob-empty-big"><div class="cob-empty-tt">Cobrança não encontrada</div></div></div></div>`; return; }
 
   const partes=(cob.cobranca_partes||[]).slice().sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
   const credor=_cobrCredorNome(cob);
@@ -22397,21 +22473,77 @@ async function renderCobrancaDetalhe(){
   const ehGestorAx = currentUser?.tipo==='gestor';
   const catOptsAx = DOC_CATEGORIAS.map(c=>`<option value="${c[0]}">${c[1]}</option>`).join('');
   const _docBadge=(nome)=>{ const ext=String(nome||'').split('.').pop().toUpperCase().slice(0,4)||'DOC'; return ext; };
+  // Enviado pelo cliente e ainda não aprovado (ou recusado) fica só na aba Portal do cliente.
+  const anexosCaso = anexos.filter(a=>a.status_aprovacao!=='pendente' && a.status_aprovacao!=='recusado');
+  const _semColPortal = !!window._portalDocsSemColunas;
   const panelAnexos=`<div class="det2-panel">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
-      <div class="det2-panel-tt" style="margin:0;">Documentos do caso${anexos.length?` (${anexos.length})`:''}</div>
+      <div class="det2-panel-tt" style="margin:0;">Documentos do caso${anexosCaso.length?` (${anexosCaso.length})`:''}</div>
       <div style="display:flex;gap:6px;align-items:center;">
         <select id="cob-anexo-cat" style="padding:6px 8px;border:1px solid var(--d-border);border-radius:var(--d-radius);font-size:12px;font-family:inherit;background:var(--surface);color:var(--text);">${catOptsAx}</select>
         <button class="btn btn-ghost btn-sm" id="cob-anexo-btn" onclick="document.getElementById('cob-anexo-file').click()">+ Anexar</button>
         <input type="file" id="cob-anexo-file" multiple style="display:none" accept=".pdf,.png,.jpg,.jpeg,.webp,.heic,.doc,.docx" onchange="uploadAnexoCobranca()"/>
       </div>
     </div>
-    ${anexos.length ? `<div class="det2-doclist">${anexos.map(a=>`<div class="row">
+    ${anexosCaso.length ? `<div class="det2-doclist">${anexosCaso.map(a=>{
+      // Repasse o cliente já vê sempre (policies antigas); os demais só se compartilhados.
+      const noPortal = a.categoria==='repasse' || !!a.visivel_cliente || a.origem==='cliente';
+      const btnPortal = _semColPortal || a.categoria==='repasse' ? ''
+        : (a.visivel_cliente
+            ? `<button class="btn btn-ghost btn-sm" title="O cliente vê este documento no portal. Clique para tirar." onclick="portalDocCompartilhar('${a.id}',false)">No portal ✓</button>`
+            : `<button class="btn btn-ghost btn-sm" title="Deixar o cliente ver este documento no portal" onclick="portalDocCompartilhar('${a.id}',true)">Compartilhar c/ cliente</button>`);
+      return `<div class="row">
       <span class="det2-docbadge">${escHtml(_docBadge(a.nome))}</span>
       <div style="min-width:0;flex:1;"><div style="font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(a.nome)}</div>
-      <div style="font-size:10.5px;color:var(--d-text-3);font-family:var(--font-mono);margin-top:1px;">${escHtml(docCatLabel(a.categoria))}${a.size_bytes?` · ${(a.size_bytes/1024/1024).toFixed(a.size_bytes>1048576?1:2)} MB`:''}</div></div>
-      <div style="display:flex;gap:6px;flex-shrink:0;"><button class="btn btn-ghost btn-sm" onclick="baixarDocumentoDevedor('${a.id}')">Abrir</button>${ehGestorAx?`<button class="btn btn-ghost btn-sm" style="color:var(--d-danger);" onclick="removerAnexoCobranca('${a.id}')">Remover</button>`:''}</div>
-    </div>`).join('')}</div>` : `<div class="det2-empty"><span class="ic">${ico('folder',20)}</span><div class="tt">Nenhum documento anexado.</div><div class="sub">Envie cheque-frente, contrato, prints…</div></div>`}
+      <div style="font-size:10.5px;color:var(--d-text-3);font-family:var(--font-mono);margin-top:1px;">${escHtml(docCatLabel(a.categoria))}${a.size_bytes?` · ${(a.size_bytes/1024/1024).toFixed(a.size_bytes>1048576?1:2)} MB`:''}${a.origem==='cliente'?' · enviado pelo cliente':''}${!_semColPortal&&noPortal?' · cliente vê':''}</div></div>
+      <div style="display:flex;gap:6px;flex-shrink:0;"><button class="btn btn-ghost btn-sm" onclick="baixarDocumentoDevedor('${a.id}')">Abrir</button>${btnPortal}${ehGestorAx?`<button class="btn btn-ghost btn-sm" style="color:var(--d-danger);" onclick="removerAnexoCobranca('${a.id}')">Remover</button>`:''}</div>
+    </div>`; }).join('')}</div>` : `<div class="det2-empty"><span class="ic">${ico('folder',20)}</span><div class="tt">Nenhum documento anexado.</div><div class="sub">Envie cheque-frente, contrato, prints…</div></div>`}
+  </div>`;
+
+  // Aba "Portal do cliente": o que o cliente (cedente) enxerga deste caso no portal —
+  // repasses (sempre), o que a equipe compartilhou e o que o próprio cliente enviou.
+  // Envio pelo portal chega PENDENTE: gestor aprova ou recusa. Documento que o cliente
+  // mandou por WhatsApp entra por "Cadastrar recebido do cliente" (já aprovado).
+  const _portalCatsCli = DOC_CATEGORIAS.filter(c=>['contrato','nota-promissoria','comprovante','outros'].includes(c[0]));
+  const portalDocs = anexos.filter(a=>a.categoria==='repasse' || a.visivel_cliente || a.origem==='cliente');
+  const portalPend = portalDocs.filter(a=>a.status_aprovacao==='pendente');
+  window._portalPendCount = portalPend.length;
+  const _pill=(txt,bg,fg)=>`<span style="display:inline-block;padding:1px 7px;border-radius:999px;font-size:10.5px;font-weight:700;background:${bg};color:${fg};margin-left:6px;vertical-align:1px;">${txt}</span>`;
+  const _statusPill=(a)=> a.status_aprovacao==='pendente' ? _pill('Aguardando aprovação','#FFF4D6','#8A6400')
+    : a.status_aprovacao==='recusado' ? _pill('Recusado','#FCE8E6','#A12B20')
+    : a.origem==='cliente' ? _pill('Enviado pelo cliente','#E8F1FB','#1F4E7A')
+    : a.categoria==='repasse' ? _pill('Repasse','#EEF6EE','#2E6B34')
+    : _pill('Compartilhado pela equipe','#F1EFE8','#5A5448');
+  const portalRow=(a)=>{
+    const pend = a.status_aprovacao==='pendente';
+    const acoes = [`<button class="btn btn-ghost btn-sm" onclick="baixarDocumentoDevedor('${a.id}')">Abrir</button>`];
+    if(pend && ehGestorAx){
+      acoes.push(`<button class="btn btn-success btn-sm" onclick="portalDocDecidir('${a.id}','aprovado')">Aprovar</button>`);
+      acoes.push(`<button class="btn btn-ghost btn-sm" style="color:var(--d-danger);" onclick="portalDocDecidir('${a.id}','recusado')">Recusar</button>`);
+    } else if(a.visivel_cliente && a.origem!=='cliente' && a.categoria!=='repasse'){
+      acoes.push(`<button class="btn btn-ghost btn-sm" onclick="portalDocCompartilhar('${a.id}',false)">Tirar do portal</button>`);
+    }
+    return `<div class="row">
+      <span class="det2-docbadge">${escHtml(_docBadge(a.nome))}</span>
+      <div style="min-width:0;flex:1;"><div style="font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(a.nome)}${_statusPill(a)}</div>
+      <div style="font-size:10.5px;color:var(--d-text-3);font-family:var(--font-mono);margin-top:1px;">${escHtml(docCatLabel(a.categoria))} · ${escHtml(_detData(a.uploaded_at))}${a.size_bytes?` · ${(a.size_bytes/1024/1024).toFixed(a.size_bytes>1048576?1:2)} MB`:''}</div></div>
+      <div style="display:flex;gap:6px;flex-shrink:0;">${acoes.join('')}</div>
+    </div>`;
+  };
+  const panelPortal = _semColPortal
+    ? `<div class="det2-panel"><div class="det2-panel-tt">Portal do cliente</div>${_detEmpty('Falta aplicar no banco a migração 20260928_01 (documentos do portal do cliente). Até lá o cliente vê só os repasses.')}</div>`
+    : `<div class="det2-panel">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+      <div class="det2-panel-tt" style="margin:0;">Documentos que o cliente acessa${portalDocs.length?` (${portalDocs.length})`:''}</div>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <select id="cob-anexo-cat-cli" style="padding:6px 8px;border:1px solid var(--d-border);border-radius:var(--d-radius);font-size:12px;font-family:inherit;background:var(--surface);color:var(--text);">${_portalCatsCli.map(c=>`<option value="${c[0]}">${c[1]}</option>`).join('')}</select>
+        <button class="btn btn-ghost btn-sm" id="cob-anexo-btn-cli" title="Documento que o cliente mandou por WhatsApp/e-mail: entra como enviado pelo cliente, já aprovado e visível para ele" onclick="document.getElementById('cob-anexo-file-cli').click()">+ Cadastrar recebido do cliente</button>
+        <input type="file" id="cob-anexo-file-cli" multiple style="display:none" accept=".pdf,.png,.jpg,.jpeg,.webp,.heic,.doc,.docx" onchange="uploadAnexoCobranca('cliente')"/>
+      </div>
+    </div>
+    <div style="font-size:12px;color:var(--d-text-3);margin:0 0 12px;line-height:1.5;">Comprovantes de repasse aparecem sempre. Outros documentos do caso só aparecem ao cliente quando compartilhados (botão <strong>Compartilhar c/ cliente</strong> na aba Documentos do caso). O que o cliente envia pelo portal chega aqui aguardando aprovação.</div>
+    ${portalDocs.length ? `<div class="det2-doclist">${portalPend.concat(portalDocs.filter(a=>a.status_aprovacao!=='pendente')).map(portalRow).join('')}</div>`
+      : `<div class="det2-empty"><span class="ic">${ico('folder',20)}</span><div class="tt">O cliente ainda não tem documentos deste caso no portal.</div></div>`}
   </div>`;
 
   // Gera as peças do caso no padrão visual COBRASQ (Capa do Caso + Ficha de Qualificação),
@@ -22576,8 +22708,9 @@ async function renderCobrancaDetalhe(){
     ['hist','Histórico', panelHist],
     ['proc','Processo', panelProcesso],
     ['acordos',`Acordos${_acordosPrinc.length?` (${_acordoContaLbl(_acordosPrinc)})`:''}`, panelAcordos],
-    ['docs',`Documentos do caso${anexos.length?` (${anexos.length})`:''}`, panelDocGerar+panelAnexos],
+    ['docs',`Documentos do caso${anexosCaso.length?` (${anexosCaso.length})`:''}`, panelDocGerar+panelAnexos],
     ['repasses',`Repasses ao cliente${repasses.length?` (${repasses.length})`:''}`, panelRepasses],
+    ['portal',`Portal do cliente${portalPend.length?` · ${portalPend.length} a aprovar`:''}`, panelPortal],
     ['invest','Investigação patrimonial', `<div id="inv-cob-host"></div>`]
   ];
   const tabBar=`<div class="det-seg det-tabbar det2-tabbar" style="flex-wrap:wrap;">${_tabs.map((t,i)=>`<button class="det2-tabbtn ${i===0?'on':''}" data-cobrtab="${t[0]}" onclick="cobrDetTab('${t[0]}')">${t[1]}</button>`).join('')}</div>`;
@@ -22607,6 +22740,8 @@ async function renderCobrancaDetalhe(){
     </div>
     ${panes}
   </div>`;
+  // Aba pedida por quem abriu (aviso do Painel, ou ação da aba Portal que re-renderiza).
+  if(window._detTabInicial){ const t=window._detTabInicial; window._detTabInicial=null; cobrDetTab(t); }
 }
 // Alterna as abas do Detalhe da cobrança sem re-fetch (panes já renderizados).
 function cobrDetTab(name){
@@ -28006,9 +28141,11 @@ function cpVerDevedor(id){
         </div>
         <div class="cp-card">
           <div class="cp-label" style="margin-bottom:12px;">Documentos</div>
-          <div style="border:1.5px dashed var(--pline);border-radius:12px;padding:22px;text-align:center;">
-            <div style="font-size:12.5px;color:var(--mute);margin-bottom:10px;">Anexe um documento referente a este caso.</div>
-            <button class="cp-btn cp-btn-outline" style="padding:8px 14px;" onclick="showToast('Envio de documentos pelo portal — em breve.','info')">Enviar documento</button>
+          <div id="cpDevDocs"><div style="padding:6px 0 12px;color:var(--mute);font-size:12.5px;">Carregando…</div></div>
+          <div id="cpDevDocsEnviar" style="border:1.5px dashed var(--pline);border-radius:12px;padding:18px;text-align:center;">
+            <div style="font-size:12.5px;color:var(--mute);margin-bottom:10px;">Anexe um documento referente a este caso (contrato, nota, comprovante…). A COBRASQ confere e confirma.</div>
+            <button class="cp-btn cp-btn-outline" id="cpDevDocsBtn" style="padding:8px 14px;" onclick="document.getElementById('cpDevDocsFile').click()">Enviar documento</button>
+            <input type="file" id="cpDevDocsFile" multiple style="display:none" accept=".pdf,.png,.jpg,.jpeg,.webp,.heic,.doc,.docx" onchange="cpEnviarDocumentoCaso('${escHtml(d.id)}')"/>
           </div>
         </div>
       </div>
@@ -28018,6 +28155,64 @@ function cpVerDevedor(id){
       <div id="cpDevRepasses"><div style="padding:14px 0;color:var(--mute);font-size:12.5px;">Carregando…</div></div>
     </div>`;
   cpFillRepassesDevedor(d.id);
+  cpFillDocumentosCaso(d.id);
+}
+
+// Portal do cliente — documentos do caso. A RLS entrega ao cedente: repasses, o que a
+// equipe compartilhou (visivel_cliente) e o que ele mesmo enviou (origem 'cliente').
+// Envio: storage em cobrancas/<id>/cliente/ + RPC cedente_registrar_documento, que
+// grava como pendente até a equipe aprovar (migração 20260928_01).
+async function cpFillDocumentosCaso(cobId){
+  const el=document.getElementById('cpDevDocs'); if(!el) return;
+  const supa=getSupabase();
+  let docs=[], semColunas=false;
+  if(supa){
+    let r=await supa.from('documentos').select('id,nome,categoria,uploaded_at,origem,status_aprovacao')
+      .eq('cobranca_id',cobId).eq('ativo',true).order('uploaded_at',{ascending:false});
+    if(r.error){ semColunas=true; r=await supa.from('documentos').select('id,nome,categoria,uploaded_at').eq('cobranca_id',cobId).eq('ativo',true).order('uploaded_at',{ascending:false}); }
+    docs=(r&&r.data)||[];
+  }
+  // Sem a migração não há como registrar o envio: some o botão em vez de falhar no clique.
+  const env=document.getElementById('cpDevDocsEnviar'); if(env) env.style.display = (supa && !semColunas) ? '' : 'none';
+  if(!docs.length){
+    el.innerHTML=`<div style="font-size:12.5px;color:var(--mute);padding:0 0 12px;">Nenhum documento disponível neste caso ainda.</div>`;
+    return;
+  }
+  const pill=(d)=> d.status_aprovacao==='pendente' ? `<span class="cp-mono" style="font-size:10px;color:var(--gold-2);margin-left:6px;">EM CONFERÊNCIA</span>`
+    : d.status_aprovacao==='recusado' ? `<span class="cp-mono" style="font-size:10px;color:#A12B20;margin-left:6px;">RECUSADO</span>`
+    : d.origem==='cliente' ? `<span class="cp-mono" style="font-size:10px;color:var(--mute);margin-left:6px;">ENVIADO POR VOCÊ</span>` : '';
+  el.innerHTML=`<div style="margin-bottom:12px;">${docs.map(d=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--pline);font-size:12.5px;">
+      <div style="min-width:0;"><div style="color:var(--ink);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(d.nome||'documento')}</div>
+        <div style="font-size:11px;color:var(--mute);margin-top:1px;">${escHtml(docCatLabel(d.categoria))} · ${escHtml(d.uploaded_at?_detData(d.uploaded_at):'—')}${pill(d)}</div></div>
+      <button class="cp-label" style="border:0;background:none;color:var(--gold-2);cursor:pointer;text-transform:uppercase;flex-shrink:0;" onclick="baixarDocumentoDevedor('${d.id}')">abrir</button>
+    </div>`).join('')}</div>`;
+}
+async function cpEnviarDocumentoCaso(cobId){
+  const inp=document.getElementById('cpDevDocsFile');
+  const files=Array.from((inp&&inp.files)||[]);
+  if(!files.length) return;
+  const supa=getSupabase(); if(!supa){ if(inp) inp.value=''; return; }
+  const btn=document.getElementById('cpDevDocsBtn');
+  let ok=0; const erros=[];
+  if(btn) btn.disabled=true;
+  for(let i=0;i<files.length;i++){
+    const f=files[i];
+    if(btn) btn.textContent = files.length>1 ? `Enviando ${i+1}/${files.length}…` : 'Enviando…';
+    if(f.size > 20*1024*1024){ erros.push(`${f.name}: acima de 20 MB`); continue; }
+    const path=`cobrancas/${cobId}/cliente/${Date.now()+i}_${f.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
+    try{
+      const { error:upErr }=await supa.storage.from('documentos').upload(path, f, { contentType:f.type||'application/octet-stream', upsert:false });
+      if(upErr) throw upErr;
+      const { error:rpcErr }=await supa.rpc('cedente_registrar_documento', { p_cobranca_id:cobId, p_nome:f.name, p_storage_path:path, p_mime:f.type||null, p_size:f.size, p_categoria:'outros' });
+      if(rpcErr) throw rpcErr;
+      ok++;
+    }catch(e){ erros.push(`${f.name}: ${String(e&&e.message||e)}`); }
+  }
+  if(ok) showToast(ok===1 ? 'Documento enviado. A COBRASQ vai conferir.' : `${ok} documentos enviados. A COBRASQ vai conferir.`, 'success');
+  if(erros.length) showToast('Não foi possível enviar — '+erros.join(' · '), 'danger');
+  if(btn){ btn.disabled=false; btn.textContent='Enviar documento'; }
+  if(inp) inp.value='';
+  cpFillDocumentosCaso(cobId);
 }
 
 // Monta o "Histórico do caso" do portal do cedente. Usa o MESMO builder do CRM
