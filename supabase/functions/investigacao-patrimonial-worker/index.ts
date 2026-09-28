@@ -5,7 +5,8 @@
 // andamento dos processos; segredo DATAJUD_API_KEY) e sinais de bem/dinheiro no
 // texto das publicações do DJEN. O INPI não responde a IP dos EUA: o worker se
 // chama com x-region: sa-east-1 (acao 'sp'), e o braço de São Paulo só busca e lê,
-// sem gravar. O texto do DJEN vai pelo mesmo braço; se falhar, fica o
+// sem gravar. O texto do DJEN vem do painel (navegador, pelo número do
+// processo); o que faltar vai pelo braço de São Paulo e, se falhar, fica o
 // ultimo_texto que o Vigia gravou.
 // v7 (26/09/2026): com profundidade 2, busca as outras empresas dos sócios das
 // empresas confirmadas (nome + 6 dígitos do CPF) e cruza o endereço fiscal
@@ -719,14 +720,17 @@ async function vigiaDjen(inv: any, raiz: any, djen: any, c: Contadores, nc: stri
     if (id && d.length === 20 && !/^0+$/.test(d)) gravados.push({ id, numero: r.numero_processo || d, d, ultimo: r.ultimo_texto || '', data: r.ultima_data || null, link: r.link || null });
   }
   // Texto das publicações: o Vigia guarda só o último trecho (1.200 caracteres).
-  // Busca todas as comunicações de cada processo pelo número, via São Paulo; se
-  // falhar, lê o trecho que o Vigia guardou.
+  // 1º o que o painel buscou no navegador (djen.porProcesso, pelo número); o que
+  // faltar vai por São Paulo; se falhar, lê o trecho que o Vigia guardou.
+  const doPainel = djen && typeof djen.porProcesso === 'object' && djen.porProcesso ? djen.porProcesso : {};
+  const faltam = gravados.filter(g => !Array.isArray(doPainel[g.d]));
+  for (const g of gravados) if (Array.isArray(doPainel[g.d])) await gravarSinais(inv, g.id, g.numero, doPainel[g.d].map(comunicacaoComSinal).filter(Boolean), c);
   let lidos: any[] | null = null;
-  try { lidos = gravados.length ? await viaSP(auth, inv.id, gravados.map(g => ({ tipo: 'djen_proc', numero: g.d }))) : []; }
+  try { lidos = faltam.length ? await viaSP(auth, inv.id, faltam.map(g => ({ tipo: 'djen_proc', numero: g.d }))) : []; }
   catch (e) { nc.push('DJEN (texto das publicações via São Paulo): ' + erroTxt(e) + '; lido só o último trecho guardado pelo Vigia.'); }
   let falhas = 0;
-  for (let i = 0; i < gravados.length; i++) {
-    const g = gravados[i], r = lidos?.[i];
+  for (let i = 0; i < faltam.length; i++) {
+    const g = faltam[i], r = lidos?.[i];
     if (r?.ok) { await gravarSinais(inv, g.id, g.numero, r.dados?.comSinal || [], c); continue; }
     if (lidos) falhas++;
     const k = comunicacaoComSinal({ texto: g.ultimo, data_disponibilizacao: g.data, link: g.link });
