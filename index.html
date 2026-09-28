@@ -23302,9 +23302,13 @@ function adicionarNotaHistorico(cobId){
     if(!nota) return;
     const supa=getSupabase(); if(!supa){ showToast('Supabase não configurado.','danger'); return; }
     try{
+      // devedor_id = devedor principal (cobranca_partes). O id da cobrança só coincide
+      // com o do devedor nos casos legado 1:1; nos demais a nota caía em ficha errada.
+      let devId=cobId;
+      try{ const { data:pp }=await supa.from('cobranca_partes').select('devedor_id').eq('cobranca_id',cobId).eq('principal',true).limit(1); if(pp&&pp[0]&&pp[0].devedor_id) devId=pp[0].devedor_id; }catch(_){}
       const { error } = await supa.from('devedor_eventos').insert({
         cobranca_id: cobId,
-        devedor_id: cobId, // invariante cobranca.id=devedor principal → RLS do cedente (eventos_cedente_read)
+        devedor_id: devId,
         tipo: 'nota_manual',
         // visivel_cliente: só com a caixa marcada a nota aparece no portal do cliente
         // (cpEventosCliente). O cliente vê o texto sem o "(registrado por …)".
@@ -28179,7 +28183,7 @@ async function cpRenderDashboard(body){
   // "Repassado a você" = soma REAL dos repasses ao cliente (não o valor dos casos quitados, que enganava).
   let recuperado = 0;
   window._cpDashRep = [];
-  try{ const supa=getSupabase(); if(supa){ const { data:rps }=await supa.from('repasses_cliente').select('valor,data_pix').order('data_pix',{ascending:false,nullsFirst:false}); window._cpDashRep=rps||[]; recuperado=(rps||[]).reduce((s,r)=>s+(+r.valor||0),0); } }catch(_){}
+  try{ const supa=getSupabase(); if(supa){ const { data:rps }=await supa.from('repasses_cliente').select('valor,data_pix,cobranca_id').order('data_pix',{ascending:false,nullsFirst:false}); window._cpDashRep=rps||[]; recuperado=(rps||[]).reduce((s,r)=>s+(+r.valor||0),0); } }catch(_){}
   // comprovantes pendentes de aprovação
   const compPendentes = devs.reduce((s,d)=>s+((d.comprovantes||[]).filter(c=>c.status==='pendente').length),0);
 
@@ -28189,8 +28193,14 @@ async function cpRenderDashboard(body){
   // teria capitalTotal 0 e o "saldo a receber" apareceria zerado.
   const _cpCapIds=cpClienteIds();
   const cobr=(typeof DB_cobrancas!=='undefined'?DB_cobrancas:[]||[]).filter(c=>_cpCapIds.includes(c.cliente_id));
-  const capitalTotal=cobr.reduce((s,c)=>s+((c.valor_capital!=null)?+c.valor_capital:((c.divida&&c.divida.valorCapital!=null)?+c.divida.valorCapital:(+c.valor_orig||parseValorBR((devs.find(d=>d.id===c.id)||{}).valorOrig)||0))),0);
-  const saldoReceber=Math.max(capitalTotal-recuperado,0);
+  const _cpCapDe=c=>(c.valor_capital!=null)?+c.valor_capital:((c.divida&&c.divida.valorCapital!=null)?+c.divida.valorCapital:(+c.valor_orig||parseValorBR((devs.find(d=>d.id===c.id)||{}).valorOrig)||0));
+  const capitalTotal=cobr.reduce((s,c)=>s+_cpCapDe(c),0);
+  // Saldo a receber: cobrança devolvida não tem saldo a caminho (a COBRASQ encerrou a
+  // cobrança) — fica fora do capital e seus repasses fora do abatimento.
+  const _cpDevolv=new Set(cobr.filter(c=>cpEhDevolvida(c.status)).map(c=>c.id));
+  const _capSaldo=cobr.filter(c=>!_cpDevolv.has(c.id)).reduce((s,c)=>s+_cpCapDe(c),0);
+  const _recSaldo=(window._cpDashRep||[]).filter(r=>!_cpDevolv.has(r.cobranca_id)).reduce((s,r)=>s+(+r.valor||0),0);
+  const saldoReceber=Math.max(_capSaldo-_recSaldo,0);
   const pctVolta=capitalTotal>0?Math.min(100,(recuperado/capitalTotal)*100):0;
   const nRep=(window._cpDashRep||[]).length;
   // Atividade recente (sintetizada de repasses + status dos casos)
