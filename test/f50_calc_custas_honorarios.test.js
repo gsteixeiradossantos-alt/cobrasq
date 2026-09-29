@@ -79,6 +79,31 @@ const m30 = ctx.memoria3Folhas(r0, ctx.consolidarCustasHon(r0), {});
 assert.ok(!/Custas<br>processuais/.test(m30.thead), 'sem custas não há coluna de custas');
 console.log('  ✔ sem custas, sem coluna');
 
+// multaInicial (cláusula penal já somada ao valor): 1ª linha e composição; o total não muda
+const pMi = Object.assign({}, params, { multaInicial: 2781, multaLabel: 'Cláusula penal (50%)' });
+const rMi = E.calcularJudicial(pMi, E.TABELAS);
+rMi.params = pMi;
+rMi.custasRecolher = [1, 2, 3].map(() => ({ descricao: 'expedição', ref: 'mov. 99', valor: 30 }));
+const consMi = ctx.consolidarCustasHon(rMi);
+assert.strictEqual(consMi.total, 14795.59, 'multaInicial não muda o total');
+const mMi = ctx.memoria3Folhas(rMi, consMi, {});
+assert.ok(mMi.comp.includes('Valor nominal da dívida</span><span class="sum-val">' + E.fmtBRL(5562)), 'nominal = valor − multaInicial');
+assert.ok(mMi.comp.includes('Cláusula penal (50%)</span><span class="sum-val">+ ' + E.fmtBRL(2781)), 'linha do labelMulta');
+const primeira = mMi.chunks[0][0];
+assert.ok(primeira.includes('>' + E.fmtBRL(2781) + '</td>'), 'multa na coluna Multa do 1º mês');
+const sc0 = r.principal.linhas.find((l) => l.tipo === 'mes').saldoCorrigido;
+assert.ok(primeira.includes(E.fmtBRL(Math.round((Math.round(sc0 * 100) / 100 - 2781) * 100) / 100)), '1º mês: saldo corrigido sem a multa');
+assert.ok(!mMi.chunks[0][1].includes(E.fmtBRL(2781)), 'multa só no 1º mês');
+assert.ok(mMi.fecho.includes('principal corrigido, com cláusula penal e juros de mora'), 'fechamento cita a cláusula penal');
+console.log('  ✔ multaInicial: 1ª linha, composição e total inalterado');
+
+// descrição própria das custas a recolher (separada da referência)
+const tabMi = mMi.chunks.map((c) => c.join('')).join('');
+assert.ok(mMi.comp.includes('e expedição a recolher, 3 × ' + E.fmtBRL(30)), 'composição usa a descrição');
+assert.ok(tabMi.includes('expedição a recolher<br>(3 × ') && !tabMi.includes('mov. 99'), 'tabela usa a descrição, não a referência');
+assert.ok(HTML.includes('data-f="desc"') && HTML.includes("descricao:(r.desc||'').trim()"), 'campo descrição no formulário');
+console.log('  ✔ descrição das custas a recolher');
+
 // rito JEC e base dos honorários
 assert.ok(HTML.includes('JEC, 1º grau: sem custas e honorários (arts. 54 e 55 da Lei 9.099/95), salvo acórdão da Turma Recursal ou as exceções do art. 55, parágrafo único.'), 'nota do JEC');
 assert.ok(HTML.includes("base:'CORRIGIDO_JUROS_MULTA'"), 'honorários sobre principal corrigido + multa + juros');
