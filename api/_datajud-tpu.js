@@ -30,7 +30,12 @@ const TPU_MOV = {
   // rotulado como penhora até 30/09/2026 (961 eventos em 218 cobranças).
   51:    { include: true,  label: 'Conclusos' },
   970:   { include: true,  label: 'Processo arquivado' },
-  466:   { include: true,  label: 'Processo suspenso' },
+  // 466 = "Homologação de Transação" na TPU (sentença com mérito) — era "Processo suspenso".
+  466:   { include: true,  label: 'Acordo homologado' },
+  // 893 = "Desarquivamento" — sem código na tabela, o fallback /arquivamento/ o rotulava "arquivado".
+  893:   { include: true,  label: 'Processo desarquivado' },
+  // 898 = "Por decisão judicial" (pai 25, Suspensão ou Sobrestamento) — caía em "Decisão proferida".
+  898:   { include: true,  label: 'Processo suspenso por decisão judicial' },
   // Ruído procedural — explicitamente descartado.
   123:   { include: false, label: 'Remessa' },
   132:   { include: false, label: 'Recebimento' },

@@ -16,6 +16,15 @@ const m = html.match(/\b51:\{include:(true|false),label:'([^']*)'\}/);
 assert.ok(m, 'front: código 51 não encontrado em TPU_MOV');
 assert.strictEqual(m[2], 'Conclusos', 'front: código 51 com rótulo ' + m[2]);
 
+// 466/893/898 — conferidos na mesma TPU: Homologação de Transação, Desarquivamento,
+// Suspensão por decisão judicial.
+const esperados = { 466: 'Acordo homologado', 893: 'Processo desarquivado', 898: 'Processo suspenso por decisão judicial' };
+for (const [cod, rot] of Object.entries(esperados)) {
+  assert.strictEqual(curarMovimento(cod, '', []).label, rot, 'backend: código ' + cod);
+  const mf = html.match(new RegExp('\\b' + cod + ":\\{include:true,label:'([^']*)'\\}"));
+  assert.ok(mf && mf[1] === rot, 'front: código ' + cod + ' = ' + (mf && mf[1]));
+}
+
 // Penhora de verdade (nome com "penhora", código fora da tabela) continua penhora.
 assert.strictEqual(curarMovimento('99999', 'Penhora online', []).label, 'Penhora/constrição de bens');
 
