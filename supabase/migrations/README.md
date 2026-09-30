@@ -288,3 +288,13 @@ conferido que nada persistiu (tabela inexistente, usuário sintético ausente, C
 **Ordem:** aplicar a migração → merge. Merge antes da migração: a aba abre com
 "migração 20260928_03 pendente" e escolher a categoria "Matrícula / certidão" num
 upload falha no CHECK.
+
+## 20260930_02 — trava de tarifa do Asaas duplicada (F-52b)
+
+**Não aplicada.** Aditiva: índice único parcial
+`fin_lancamento_tarifa_asaas_uidx` sobre a primeira palavra de `observacoes`
+(o marcador `[asaas_tarifa:…]` / `[asaas_ft:…]`), só nas linhas que têm marcador.
+Em 30/09/2026 havia 0 linhas marcadas em produção. Enquanto não aplicada, o
+código funciona igual ao do PR 859 (conferência pelo marcador); depois de
+aplicada, um insert simultâneo do webhook e do cron volta 409 e vira
+"já lançada". Rollback: `20260930_02_..._rollback.sql`.

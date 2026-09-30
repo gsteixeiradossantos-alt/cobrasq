@@ -125,17 +125,28 @@ async function _jaLancada(chave) {
   return (rows && rows[0]) ? rows[0].id : null;
 }
 
-// Grava uma tarifa. Não confere o marcador — quem chama confere.
+// Conflito no índice fin_lancamento_tarifa_asaas_uidx: o outro caminho (webhook ou
+// cron) gravou a mesma tarifa entre a conferência e o insert.
+function _ehDuplicada(e) { return /: 409 —|23505/.test(String(e && e.message)); }
+
+// Grava uma tarifa. Não confere o marcador — quem chama confere. Devolve o id, ou
+// null se o banco recusou por já existir (índice único).
 async function _inserirTarifa({ chave, valor, data, rotulo, nome, cobrancaId, obs }) {
-  const ins = await sbFetch('fin_lancamento', { method: 'POST', body: JSON.stringify({
-    descricao: descricaoTarifa(rotulo, nome),
-    valor: -valor, valor_pago: -valor,
-    tipo_movimento: 0, status: 1,
-    conta_id: CONTA_ASAAS,
-    data_competencia: data, data_vencimento: data, data_pagamento: data,
-    cobranca_id: cobrancaId || null,
-    observacoes: `${chave} ${obs || ''}`.trim(),
-  }) });
+  let ins;
+  try {
+    ins = await sbFetch('fin_lancamento', { method: 'POST', body: JSON.stringify({
+      descricao: descricaoTarifa(rotulo, nome),
+      valor: -valor, valor_pago: -valor,
+      tipo_movimento: 0, status: 1,
+      conta_id: CONTA_ASAAS,
+      data_competencia: data, data_vencimento: data, data_pagamento: data,
+      cobranca_id: cobrancaId || null,
+      observacoes: `${chave} ${obs || ''}`.trim(),
+    }) });
+  } catch (e) {
+    if (_ehDuplicada(e)) return null;
+    throw e;
+  }
   const id = (ins && ins[0] && ins[0].id) || null;
   if (id) {
     try {
@@ -163,6 +174,7 @@ async function garantirTarifaDoPagamento({ payment, paymentId, devedor, desde })
     }
     const id = await _inserirTarifa({ chave, ...t, nome, cobrancaId: devedor && devedor.id,
       obs: `Tarifa do pagamento ${pid} (valor ${payment.value} − líquido ${payment.netValue}), via webhook.` });
+    if (!id) return { skip: 'ja_lancada' };
     return { id, ...t };
   } catch (e) {
     console.warn('[tarifas-asaas] garantirTarifaDoPagamento:', e.message);
@@ -218,6 +230,7 @@ async function sincronizarTarifasAsaas({ dry = false, dias = 10, desde } = {}) {
       if (dry) { res.lancadas.push({ dry: true, descricao: descricaoTarifa(t.rotulo, nome), valor: -t.valor, data: t.data, chave: t.chave }); continue; }
       const id = await _inserirTarifa({ ...t, nome, cobrancaId: dono && dono.id,
         obs: `Extrato Asaas ${t.ftId}${t.transferId ? ' (transferência ' + t.transferId + ')' : ''}, via sincronização diária.` });
+      if (!id) { res.ja_lancadas++; continue; }
       res.lancadas.push({ id, descricao: descricaoTarifa(t.rotulo, nome), valor: -t.valor, data: t.data });
     } catch (e) { res.erros.push({ chave: t.chave, error: e.message }); }
   }

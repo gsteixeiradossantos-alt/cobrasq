@@ -29,6 +29,7 @@ process.env.ASAAS_ENV = 'production';
 const db = { fin_lancamento: [], fin_lancamento_categoria: [] };
 let extrato = [];
 let nextId = 1000;
+let corrida = false;
 function resp(obj, status = 200) {
   return { ok: status < 400, status, text: async () => JSON.stringify(obj) };
 }
@@ -44,11 +45,17 @@ global.fetch = async (url, opts = {}) => {
   const method = (opts.method || 'GET').toUpperCase();
   if (method === 'POST') {
     const row = { id: nextId++, ...JSON.parse(opts.body) };
+    // Índice fin_lancamento_tarifa_asaas_uidx (migração 20260930_02).
+    const marca = r => /^\[asaas_(tarifa|ft):/.test(r.observacoes || '') ? r.observacoes.split(' ')[0] : null;
+    if (tabela === 'fin_lancamento' && marca(row) && db.fin_lancamento.some(r => marca(r) === marca(row))) {
+      return resp({ code: '23505', message: 'duplicate key value violates unique constraint "fin_lancamento_tarifa_asaas_uidx"' }, 409);
+    }
     (db[tabela] = db[tabela] || []).push(row);
     return resp([row]);
   }
   // GET: só os filtros usados pelo módulo.
   let rows = (db[tabela] || []).slice();
+  if (corrida && tabela === 'fin_lancamento') rows = []; // a conferência não vê a linha do outro
   for (const [k, v] of u.searchParams) {
     if (['select', 'limit', 'order'].includes(k)) continue;
     if (v.startsWith('eq.')) rows = rows.filter(r => String(r[k]) === v.slice(3));
@@ -148,12 +155,27 @@ const T = require('../api/_tarifas-asaas.js');
     payment: { id: 'pay_boleto2', value: 100, netValue: 98.01, billingType: 'BOLETO', paymentDate: '2026-10-03', creditDate: '2026-10-04' } });
   assert.strictEqual(tarde.skip, 'ja_lancada');
 
+  // Corrida webhook × cron: a conferência não enxerga a linha do outro; o índice único
+  // recusa o segundo insert e o código trata como já lançada (sem erro, sem linha nova).
+  corrida = true;
+  const antesCorrida = db.fin_lancamento.length;
+  const rw = await T.garantirTarifaDoPagamento({ payment: pix, paymentId: 'pay_pix', devedor: { id: 'dev-1', nome: 'Fulana de Tal' } });
+  assert.strictEqual(rw.skip, 'ja_lancada', JSON.stringify(rw));
+  const sc = await T.sincronizarTarifasAsaas({ desde: '2026-09-30', dias: 60 });
+  assert.strictEqual(sc.lancadas.length, 0, JSON.stringify(sc));
+  assert.strictEqual(sc.erros.length, 0, JSON.stringify(sc));
+  assert.strictEqual(sc.ja_lancadas, 4);
+  assert.strictEqual(db.fin_lancamento.length, antesCorrida);
+  corrida = false;
+
   // O webhook chama o helper (e o cron o sincronizador) — guarda contra remoção.
   const fs = require('fs'), path = require('path');
   const pr = fs.readFileSync(path.join(__dirname, '..', 'api', '_processar-recebimento.js'), 'utf8');
   assert.ok(pr.includes('garantirTarifaDoPagamento({ payment, paymentId, devedor })'));
   const cron = fs.readFileSync(path.join(__dirname, '..', 'api', 'cron-regua.js'), 'utf8');
   assert.ok(cron.includes('sincronizarTarifasAsaas({ dry })'));
+  const mig = fs.readFileSync(path.join(__dirname, '..', 'supabase', 'migrations', '20260930_02_fin_lancamento_tarifa_asaas_uidx.sql'), 'utf8');
+  assert.ok(/create unique index[\s\S]*split_part\(observacoes, ' ', 1\)/i.test(mig), 'índice único do marcador');
 
   console.log('F-52 ok — tarifas Asaas automáticas e idempotentes');
 })().catch(e => { console.error(e); process.exit(1); });
