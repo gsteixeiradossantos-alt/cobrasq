@@ -3,26 +3,79 @@
 // a edge function enviar-whatsapp usa ZAPI_INSTANCE (sem _ID) no runtime do Supabase
 // — são secrets de runtimes diferentes.
 
-async function zapiSendText(phone, message) {
+// Normaliza p/ o formato que a Z-API espera (DDI 55), igual ao waTel55 do front
+// (ZApiAPI._tel em index.html). Sem isso, número local (DDD+9+8 díg.) vai sem DDI
+// e a Z-API não entrega.
+function normalizarTelefone(phone) {
+  let fone = String(phone || '').replace(/\D/g, '');
+  if (fone && fone.length <= 11 && !fone.startsWith('55')) fone = '55' + fone;
+  return fone;
+}
+
+function credenciais() {
   const token = process.env.ZAPI_TOKEN || '';
   const instance = process.env.ZAPI_INSTANCE_ID || '';
   const clientTk = process.env.ZAPI_CLIENT_TOKEN || '';
   if (!token || !instance) throw new Error('Z-API não configurada');
-  const url = `https://api.z-api.io/instances/${encodeURIComponent(instance)}/token/${encodeURIComponent(token)}/send-text`;
   const headers = { 'Content-Type': 'application/json' };
   if (clientTk) headers['Client-Token'] = clientTk;
-  // Normaliza p/ o formato que a Z-API espera (DDI 55), igual ao waTel55 do front.
-  let fone = String(phone).replace(/\D/g, '');
-  if (fone && fone.length <= 11 && !fone.startsWith('55')) fone = '55' + fone;
-  const r = await fetch(url, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ phone: fone, message }),
-  });
+  const base = `https://api.z-api.io/instances/${encodeURIComponent(instance)}/token/${encodeURIComponent(token)}`;
+  return { base, headers };
+}
+
+async function postZapi(url, headers, corpo) {
+  const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(corpo) });
   const text = await r.text();
   let data; try { data = JSON.parse(text); } catch { data = text; }
   if (!r.ok) throw new Error(`Z-API HTTP ${r.status}: ${typeof data === 'string' ? data : JSON.stringify(data)}`);
   return data;
 }
 
-module.exports = { zapiSendText };
+async function zapiSendText(phone, message) {
+  const { base, headers } = credenciais();
+  return postZapi(`${base}/send-text`, headers, { phone: normalizarTelefone(phone), message });
+}
+
+// Limite do payload aceito pela função serverless (Vercel corta o body acima de ~4,5 MB).
+// Cortamos antes, com erro legível, em vez de deixar a Z-API/Vercel devolver 413 opaco.
+const MAX_BASE64_BYTES = 3.5 * 1024 * 1024;
+
+// Envia documento (padrão: PDF). `document` aceita:
+//   - URL https pública        -> a Z-API baixa o arquivo
+//   - data URI base64          -> "data:application/pdf;base64,JVBERi0..."
+//   - base64 puro              -> convertido em data URI com o mime da extensão
+// Preferir base64 quando o arquivo for confidencial: URL pública fica acessível a
+// quem tiver o link. Endpoint: POST /send-document/{extensao}.
+async function zapiSendDocument(phone, { document, fileName, caption, extension } = {}) {
+  if (!document) throw new Error('Documento ausente (informe URL https ou base64)');
+  if (!fileName) throw new Error('fileName é obrigatório — é o nome que o destinatário vê');
+
+  const ext = String(extension || fileName.split('.').pop() || 'pdf').toLowerCase();
+  if (!/^[a-z0-9]{2,5}$/.test(ext)) throw new Error(`Extensão inválida: ${ext}`);
+
+  const bruto = String(document);
+  const ehUrl = /^https:\/\//i.test(bruto);
+  let payloadDoc = bruto;
+
+  if (!ehUrl) {
+    if (/^http:\/\//i.test(bruto)) throw new Error('URL de documento precisa ser https');
+    const soBase64 = bruto.replace(/^data:[^;]+;base64,/, '');
+    if (!/^[A-Za-z0-9+/=\s]+$/.test(soBase64)) throw new Error('Documento não é URL https nem base64 válido');
+    const bytes = Math.floor(soBase64.replace(/\s/g, '').length * 3 / 4);
+    if (bytes > MAX_BASE64_BYTES) {
+      throw new Error(`Documento tem ~${(bytes / 1024 / 1024).toFixed(1)} MB; o limite por envio é 3.5 MB. Use URL https.`);
+    }
+    const mime = ext === 'pdf' ? 'application/pdf' : `application/${ext}`;
+    payloadDoc = bruto.startsWith('data:') ? bruto : `data:${mime};base64,${soBase64.replace(/\s/g, '')}`;
+  }
+
+  const { base, headers } = credenciais();
+  return postZapi(`${base}/send-document/${ext}`, headers, {
+    phone: normalizarTelefone(phone),
+    document: payloadDoc,
+    fileName,
+    caption: caption || '',
+  });
+}
+
+module.exports = { zapiSendText, zapiSendDocument, normalizarTelefone };

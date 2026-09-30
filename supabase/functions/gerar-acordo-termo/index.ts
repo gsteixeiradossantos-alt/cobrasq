@@ -178,6 +178,10 @@ Deno.serve(async (req) => {
           p_num_parcelas: parseInt(String(ac.parcelas ?? "1"), 10) || null,
           p_data_primeiro_venc: isoToBR(ac.vencimento),
           p_forma: "boleto",
+          // R-19: ac.total é o valor CHEIO do acordo (entrada incluída) — sem
+          // repassar a entrada, api/_emitir-acordo.js parcelava o total cheio
+          // no Asaas e cobrava a entrada (paga à parte, ex. PIX) de novo.
+          p_valor_entrada: (ac.entrada && ac.entrada.valor) ? valorBR(ac.entrada.valor) : null,
         }),
         signal: AbortSignal.timeout(15000),
       });

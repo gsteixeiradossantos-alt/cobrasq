@@ -120,5 +120,73 @@ LOG('8) Multa unica: pagamento que zera a multa nao a reaplica em mes posterior'
   near(totalMulta, 1000, 'multa total = 10% de 10000, aplicada uma unica vez');
 })();
 
+// 9) Evento sem `tipo` tem de valer como pagamento — nao pode ser descartado calado
+LOG('9) Evento sem tipo explicito e tratado como PAGAMENTO');
+(function () {
+  var base = { valorOriginal: 10000, dataCorrecao: D(2024, 0, 10), dataFim: D(2024, 11, 10),
+    dataJuros: D(2024, 0, 10), indice: 'INPC', taxaJurosMensal: 1, aplicarMulta: false };
+  var semTipo = E.calcularPrincipal(Object.assign({}, base, { eventos: [{ data: '2024-03-05', valor: 3000 }] }));
+  var comTipo = E.calcularPrincipal(Object.assign({}, base, { eventos: [{ tipo: 'PAGAMENTO', data: '2024-03-05', valor: 3000 }] }));
+  var semEv = E.calcularPrincipal(Object.assign({}, base, { eventos: [] }));
+  near(semTipo.saldoCorrigido + semTipo.jurosAcumulados, comTipo.saldoCorrigido + comTipo.jurosAcumulados,
+    'evento sem tipo produz o mesmo saldo que evento com tipo', 0.005);
+  ok(semTipo.saldoCorrigido + semTipo.jurosAcumulados < semEv.saldoCorrigido + semEv.jurosAcumulados,
+    'pagamento sem tipo efetivamente abate o saldo');
+})();
+
+// 10) Excedente de pagamento desce para os itens seguintes (art. 355 CC), nao evapora
+LOG('10) Pagamento maior que o item 1 cascateia para os itens seguintes');
+(function () {
+  var p = { valorOriginal: 334, dataCorrecao: D(2023, 5, 17), dataJuros: D(2023, 5, 17),
+    dataFim: D(2026, 7, 7), indice: 'TJPR', taxaJurosMensal: 1, aplicarMulta: false,
+    parcelasExtras: [{ valor: '230', dataCorr: '2023-06-21' }], honC: { ativo: false } };
+  var semPgto = E.calcularJudicial(Object.assign({}, p, { eventos: [] }));
+  var comPgto = E.calcularJudicial(Object.assign({}, p, { eventos: [{ tipo: 'PAGAMENTO', data: '2025-04-24', valor: 564 }] }));
+  var item2Sem = semPgto.parcelasResultados[0].resultado;
+  var item2Com = comPgto.parcelasResultados[0].resultado;
+  near(comPgto.principal.saldoCorrigido + comPgto.principal.jurosAcumulados, 0, 'item 1 zerado pelo pagamento', 0.005);
+  ok(item2Com.saldoCorrigido + item2Com.jurosAcumulados < item2Sem.saldoCorrigido + item2Sem.jurosAcumulados,
+    'item 2 recebeu o excedente em vez de correr integral');
+  ok(comPgto.totalGeral < semPgto.totalGeral - 100, 'total geral cai alem do valor do item 1');
+  // pagamento que supera TODOS os itens deixa credito visivel, nao sumido
+  var demais = E.calcularJudicial(Object.assign({}, p, { eventos: [{ tipo: 'PAGAMENTO', data: '2025-04-24', valor: 5000 }] }));
+  near(demais.totalGeral, 0, 'pagamento acima do devido zera o total', 0.005);
+  ok(demais.creditoNaoImputado > 0, 'sobra apos o ultimo item fica exposta em creditoNaoImputado');
+})();
+
+// 11) Datas em string produzem o MESMO numero que datas em Date
+// Regressao real: `multaData` como 'AAAA-MM-DD' caia na comparacao string x Date
+// e a multa inteira era descartada sem erro nenhum -- num caso de R$ 5.278,00 o
+// saldo saia R$ 2.647,49 menor, contra o proprio credor. O mesmo risco valia
+// para dataCorrecao, dataFim e dataJuros.
+LOG('11) Datas como string equivalem a datas como Date');
+(function () {
+  var di = '2024-05-17', df = '2026-08-12';
+  var dID = D(2024, 4, 17), dFD = D(2026, 7, 12);
+
+  // multaData nos dois formatos
+  var mStr = E.juridica('5278.00', dID, dFD, 'TJPR', 50, 0, 1, { multaData: di });
+  var mDat = E.juridica('5278.00', dID, dFD, 'TJPR', 50, 0, 1, { multaData: dID });
+  near(mStr.multa, mDat.multa, 'multaData string x Date: mesma multa');
+  near(mStr.total, mDat.total, 'multaData string x Date: mesmo total');
+  ok(mStr.multa > 0, 'multaData em string NAO zera a multa');
+
+  // dataIni/dataFim nos dois formatos (juridica usa diffDias fora do motor)
+  var jStr = E.juridica('9612.00', di, df, 'TJPR', 50, 0, 1);
+  var jDat = E.juridica('9612.00', dID, dFD, 'TJPR', 50, 0, 1);
+  near(jStr.total, jDat.total, 'dataIni/dataFim string x Date: mesmo total');
+  near(jStr.mesesPRO, jDat.mesesPRO, 'dataIni/dataFim string x Date: mesmo mesesPRO');
+
+  // correcaoMensal tambem aceita string
+  var cStr = E.correcaoMensal(1000, di, df, 'INPC');
+  var cDat = E.correcaoMensal(1000, dID, dFD, 'INPC');
+  near(cStr.valorCorrigido, cDat.valorCorrigido, 'correcaoMensal string x Date');
+
+  // dataJuros AUSENTE nao pode virar "juros desde o inicio" por conta da normalizacao
+  var semJ = E.calcularPrincipal({ valorOriginal: 1000, dataCorrecao: dID, dataFim: dFD,
+    indice: 'INPC', taxaJurosMensal: 1, aplicarMulta: false, eventos: [] });
+  near(semJ.jurosAcumulados, 0, 'sem dataJuros continua sem juros');
+})();
+
 LOG(FAIL === 0 ? '\nOK -- ' + RAN + ' assercoes passaram (motor canonico v3).' : '\nFALHOU -- ' + FAIL + '/' + RAN + ' assercao(oes).');
 if (FAIL > 0) { if (typeof process !== 'undefined' && process.exit) process.exit(1); else throw new Error('calc-engine: ' + FAIL + ' falhas'); }

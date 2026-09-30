@@ -145,7 +145,13 @@ function devLinkPortal() {
 }
 
 function acordoAtivo(ac) {
-  return ac && (ac.status === 'ativo' || (ac.parcelas || []).some(p => !p.pago));
+  if (!ac) return false;
+  // Cancelado/encerrado é terminal. Antes o OR abaixo ignorava o status: um acordo
+  // CANCELADO com parcelas em aberto voltava a ser "ativo", a régua seguia cobrando
+  // parcelas de um acordo morto e o caso continuava fora da régua de cobrança.
+  const st = String(ac.status || '').toLowerCase();
+  if (st === 'cancelado' || st === 'encerrado') return false;
+  return ac.status === 'ativo' || (ac.parcelas || []).some(p => !p.pago);
 }
 
 // Fase 3 — status que NÃO entram na régua de COBRANÇA (pré-acordo). Antes só os 4
@@ -163,6 +169,9 @@ const STATUS_FORA_REGUA = [
   // fase judicial -> não cobrar por WhatsApp automático
   'Ação judicial', 'Petição inicial', 'Citação', 'Contestação',
   'Audiência', 'Sentença', 'Recurso', 'Execução', 'Penhora', 'Hasta pública',
+  // "Quita Fácil" virou etiqueta oficial (30/07) -> tem cadência própria (reguaQuita),
+  // não pode também levar a régua A de cobrança normal por cima (mensagem duplicada).
+  'Quita Fácil',
 ];
 
 // ── Idempotência: lookup/registro em regua_envios ───────────────
@@ -781,9 +790,11 @@ async function reguaQuita({ dry, DB }) {
     if (c.arquivado) continue;
     if (c.numero_processo && String(c.numero_processo).trim()) continue;                       // já ajuizado
     // Modelo: QuitaFácil só quando o AMIGÁVEL FRACASSOU (status "Fazer ação"/"Acordo
-    // infrutífero"/"encaminhado ao judicial"/"reajuizar"). Micro em amigável ("Cobrar",
-    // "Em negociação"…) NÃO entra — segue na cobrança normal.
-    if (!/fazer a[çc][ãa]o|infrut[íi]fero|encaminh\w*\s*(ao\s*)?judic|reajuizar/i.test(c.status || '')) continue;
+    // infrutífero"/"encaminhado ao judicial"/"reajuizar") OU já está oficialmente na
+    // etiqueta "Quita Fácil" (30/07 — status oficial, movido com confirmação humana
+    // pelo painel). Micro em amigável ("Cobrar", "Em negociação"…) NÃO entra — segue
+    // na cobrança normal.
+    if (!/fazer a[çc][ãa]o|infrut[íi]fero|encaminh\w*\s*(ao\s*)?judic|reajuizar|quita\s*f[aá]cil/i.test(c.status || '')) continue;
     if (/quitad|encerrad|recebid|baixad|devolvid|sem ?[êe]xito/i.test(c.status || '')) continue;  // terminal
     const cfg = cfgPorCredor[c.cliente_id] || {};
     const limite = (cfg.limite != null && cfg.limite !== '' && +cfg.limite > 0) ? +cfg.limite : 500;
@@ -814,7 +825,9 @@ async function reguaQuita({ dry, DB }) {
   try {
     for (let i = 0; i < cobIds.length; i += 100) {
       const ch = cobIds.slice(i, i + 100).map(encodeURIComponent).join(',');
-      const rows = await sbFetch(`acordos?select=cobranca_id&cobranca_id=in.(${ch})&metadata->>origem=eq.quitafacil`);
+      // status=neq.cancelado: um acordo QuitaFácil CANCELADO não pode bloquear o caso
+      // de voltar à autonegociação para sempre.
+      const rows = await sbFetch(`acordos?select=cobranca_id&cobranca_id=in.(${ch})&metadata->>origem=eq.quitafacil&status=neq.cancelado`);
       for (const r of (rows || [])) jaAcordo.add(r.cobranca_id);
     }
   } catch (e) { /* melhor esforço */ }
@@ -986,7 +999,7 @@ async function processarNegativacoes({ dry }) {
   for (const c of (negativados || [])) {
     let pago = false;
     try {
-      const acs = await sbFetch(`acordos?cobranca_id=eq.${c.id}&metadata->>origem=eq.quitafacil&select=parcelas`);
+      const acs = await sbFetch(`acordos?cobranca_id=eq.${c.id}&metadata->>origem=eq.quitafacil&status=neq.cancelado&select=parcelas`);
       pago = (acs || []).some(a => Array.isArray(a.parcelas) && a.parcelas.length && a.parcelas.every(p => p && p.pago));
     } catch (_) { }
     if (!pago) continue;
@@ -1001,6 +1014,82 @@ async function processarNegativacoes({ dry }) {
       out.baixados++; out.itens.push({ cob: c.id, acao: 'baixar', status: 'baixado' });
     } else if (res.pendente) { out.pendentes++; out.itens.push({ cob: c.id, acao: 'baixar', pendente: res.pendente }); }
     else { out.falhas++; out.itens.push({ cob: c.id, acao: 'baixar', erro: res.erro }); }
+  }
+  return out;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// RECÁLCULO DIÁRIO DO VALOR ATUAL — cobrancas.valor_atual não é coluna
+// materializada: hoje só é recalculado no navegador (dividaAtualHoje, index.html)
+// e só grava de volta se aquele caso específico for salvo depois. Casos parados
+// (ninguém abre no painel) ficam com o valor congelado na última visita, mesmo
+// a dívida continuando a correr. Este passo roda 1x/dia no mesmo cron da régua
+// e espelha EXATAMENTE a fórmula de calcDividaCobranca: correção 8% a.a. + juros
+// 1% a.m. simples pró-rata + multa 2% única sobre o corrigido + taxa de serviço
+// COBRASQ 30%, a partir do vencimento.
+// NÃO mexe em casos com acordo_final — acordo aceito CONGELA o valor por design
+// (mesma regra do dividaAtualHoje). Não existe hoje nenhuma detecção automática
+// de descumprimento de acordo no sistema; se um acordo for quebrado, o caso
+// precisa primeiro sair do estado "com acordo" (ou o valor_atual ser corrigido
+// manualmente) antes deste recálculo voltar a alcançá-lo — decisão do Gustavo
+// (29/07): acordo não recalcula, exceto se descumprir.
+// ════════════════════════════════════════════════════════════════════════════
+const RECALC_CORRECAO_MENSAL = 0.08 / 12; // 8% a.a. fixa → mensal
+const RECALC_JUROS_MENSAL    = 0.01;      // 1% a.m. simples
+const RECALC_MULTA_PCT       = 0.02;      // multa única sobre o corrigido
+const RECALC_TAXA_SERVICO    = 0.30;      // taxa de serviço COBRASQ
+const RECALC_DIAS_MES        = 30.4375;   // 365,25/12 — igual ao calcDividaCobranca
+// Status terminais: dívida parada (quitada/devolvida/encerrada) não corrige mais.
+const RECALC_STATUS_FORA = /quitad|devolvid|encerrad|recebid|sem ?[êe]xito/i;
+
+function _recalcValorAtual(capital, vencStr) {
+  const venc = new Date(vencStr + 'T00:00:00');
+  const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
+  const diasAtraso = Math.round((hoje - venc) / 86400000);
+  if (diasAtraso <= 0) return null; // ainda não venceu / sem atraso: nada a corrigir
+  const meses = diasAtraso / RECALC_DIAS_MES;
+  const correcao = capital * RECALC_CORRECAO_MENSAL * meses;
+  const corrigido = capital + correcao;
+  const juros = corrigido * RECALC_JUROS_MENSAL * meses;
+  const multa = corrigido * RECALC_MULTA_PCT;
+  const subtotal = corrigido + juros + multa;
+  const taxa = subtotal * RECALC_TAXA_SERVICO;
+  return Math.ceil(subtotal + taxa);
+}
+
+async function recalcularValoresAtuais({ dry } = {}) {
+  const out = { candidatos: 0, atualizados: 0, falhas: 0 };
+  let rows;
+  try {
+    rows = await sbFetch(
+      'cobrancas?select=id,valor_capital,valor_atual,vencimento,status' +
+      '&arquivado=eq.false&is_draft=eq.false' +
+      '&acordo_final=is.null' +
+      '&vencimento=not.is.null' +
+      '&valor_capital=not.is.null' +
+      '&limit=2000'
+    );
+  } catch (e) { return { ...out, error: e.message }; }
+  if (!Array.isArray(rows)) return out;
+
+  for (const r of rows) {
+    if (RECALC_STATUS_FORA.test(r.status || '')) continue;
+    const cap = Number(r.valor_capital);
+    if (!(cap > 0)) continue;
+    const novo = _recalcValorAtual(cap, r.vencimento);
+    if (novo == null) continue;
+    out.candidatos++;
+    const atual = Number(r.valor_atual) || 0;
+    if (Math.abs(novo - atual) < 1) continue; // já em dia (arredondamento)
+    if (dry) { out.atualizados++; continue; }
+    try {
+      await sbFetch(`cobrancas?id=eq.${encodeURIComponent(r.id)}`, {
+        method: 'PATCH',
+        headers: { 'Prefer': 'return=minimal' },
+        body: JSON.stringify({ valor_atual: novo }),
+      });
+      out.atualizados++;
+    } catch (e) { out.falhas++; }
   }
   return out;
 }
@@ -1085,13 +1174,19 @@ module.exports = async function handler(req, res) {
     try { negativacao = await processarNegativacoes({ dry }); }
     catch (e) { negativacao = { error: e.message }; }
 
+    // Recálculo diário de valor_atual (mora corre mesmo sem ninguém abrir o painel;
+    // não mexe em casos com acordo — ver comentário em recalcularValoresAtuais).
+    let recalculo = null;
+    try { recalculo = await recalcularValoresAtuais({ dry }); }
+    catch (e) { recalculo = { error: e.message }; }
+
     const reguaCobranca = Array.isArray(DB.config?.reguaCobranca) ? DB.config.reguaCobranca
                        : Array.isArray(DB.config?.regraCobranca) ? DB.config.regraCobranca : [];
     const reguaAcordo   = Array.isArray(DB.config?.reguaAcordo) ? DB.config.reguaAcordo : [];
 
     if (reguaCobranca.length === 0 && reguaAcordo.length === 0) {
       const calendarStats = dry ? null : await processarCalendarPendingDeletes();
-      return res.status(200).json({ ok: true, msg: 'Nenhum passo configurado nas réguas clássicas.', calendar: calendarStats, contasPagar, quita, negativacao });
+      return res.status(200).json({ ok: true, msg: 'Nenhum passo configurado nas réguas clássicas.', calendar: calendarStats, contasPagar, quita, negativacao, recalculo });
     }
 
     const credor = DB.config?.empresa || 'COBRASQ';
@@ -1298,7 +1393,7 @@ module.exports = async function handler(req, res) {
     try { zapsign = await processarLembretesZapSign({ dry: dry || !zapsignLive }); }
     catch (e) { zapsign = { error: e.message }; }
 
-    res.status(200).json({ ok: true, hoje: new Date().toISOString().slice(0,10), ...resultado, calendar, contasPagar, zapsign, zapsign_live: zapsignLive, quita, negativacao });
+    res.status(200).json({ ok: true, hoje: new Date().toISOString().slice(0,10), ...resultado, calendar, contasPagar, zapsign, zapsign_live: zapsignLive, quita, negativacao, recalculo });
   } catch (err) {
     console.error('[cron-regua]', err);
     res.status(500).json({ ok: false, error: err.message });

@@ -186,6 +186,152 @@ no código, ou ação na UI) e o **estado-correto** esperado. Atualize ao descob
 
 ---
 
+## R-16 · View `casos` SECURITY DEFINER + grant `anon` (F-04 de novo) ⚠️ P0
+
+**O que acontece.** Uma redefinição de `public.casos` que esquece
+`WITH (security_invoker = true)` faz a view rodar como o dono (`postgres`) e
+passar por cima da RLS. Somando o grant histórico para `anon`, a carteira
+inteira fica legível **sem login** com a chave anon que vai dentro do
+`index.html`. Aconteceu em 27/07/2026 (`casos_view_add_carlos_ativo`) e só foi
+achado na auditoria de 29/07.
+
+**Teste (externo, com a chave anon do projeto):**
+```
+GET /rest/v1/casos?select=id&limit=1   →  deve ser 401
+```
+Se vier `HTTP 206` com `content-range`, está vazando. Conferir também
+`vw_bia_respostas_humanas` e `vw_bia_metricas_semanal`.
+
+**Cuidado ao interpretar:** `clientes` e `acordos` devolvem `HTTP 200` com corpo
+`[]` e `content-range: */0` — isso é o estado CERTO (grant existe, RLS filtra).
+O sinal de vazamento é a CONTAGEM, não o 200.
+
+**Teste no banco:**
+```sql
+select coalesce((select option_value from pg_options_to_table(c.reloptions)
+                  where option_name='security_invoker'),'(ausente)')
+from pg_class c join pg_namespace n on n.oid=c.relnamespace and n.nspname='public'
+where c.relname='casos';   -- tem que ser 'true'
+```
+
+**Corrigido em 29/07/2026, completo:**
+1. `20260729_p0_views_revoke_anon.sql` — tirou o `anon` das três views (fechou o
+   acesso sem login).
+2. `20260729_devedores_colaborador_parte.sql` — policy "se o caso é meu, o
+   devedor do caso é visível para mim", que era o que travava o passo 3.
+3. `20260729_f04_casos_security_invoker.sql` — a view voltou a respeitar a RLS.
+
+Conferido por perfil: colaboradora 145 → **62** casos (0 sem devedor), gestor
+**145** (0 sem devedor).
+
+**Ainda DEFINER:** `vw_bia_respostas_humanas` e `vw_bia_metricas_semanal`. Sem
+`anon`, então não vazam para fora; entre logados seguem sem RLS. Não têm
+consumidor no código — avaliar dropar em vez de consertar.
+
+---
+
+## R-17 · Coluna derivada que ninguém mantém (a tela mente sobre o banco)
+
+**O que acontece.** Um estado que era derivado em runtime vira COLUNA no banco,
+a tela passa a ler a coluna com precedência — e as vias que gravam a origem do
+dado não escrevem a coluna junto. A tela passa a contradizer o próprio banco.
+
+Aconteceu em 29/07 com `cobrancas.etapa`: o dono moveu 3 casos de "Cobrar" para
+"Fazer ação" em lote, o `status` gravou certo e o pipeline continuou mostrando
+os 3 em "Cobrar". São 5+ lugares que gravam `status` (popover, barra de lote,
+Bia, importação, sync do acordo) e nenhum escrevia `etapa`.
+
+**Teste:**
+```sql
+select status, etapa, count(*) from public.cobrancas
+ where coalesce(arquivado,false)=false and coalesce(is_draft,false)=false
+ group by 1,2 having status ilike '%fazer a%' and etapa <> 'fazer_acao';
+```
+Qualquer linha aqui é desincronia. Vale para qualquer par origem/derivado.
+
+**A regra.** Coluna derivada só ganha precedência na tela DEPOIS que existe um
+trigger mantendo-a. Patch em cada call site não conta — basta esquecer um (ou
+entrar um novo pela Bia) e o bug volta calado.
+
+**Corrigido:** `20260729_cobrancas_etapa_trigger.sql` (trigger BEFORE INSERT OR
+UPDATE OF status, numero_processo). A tela segue derivando em runtime de
+propósito — dá o mesmo resultado sem depender do trigger estar de pé.
+
+---
+
+## R-18 · Trigger testado só por service_role (quebra o caminho da tela)
+
+**O que acontece.** Um trigger que grava numa tabela com RLS é testado pelo
+caminho que ignora RLS — `service_role`, uma skill, um script — e vai para
+produção quebrando o caminho de quem está logado na tela. O erro nem parece do
+trigger: aparece como falha da operação principal.
+
+Aconteceu em 29/07 com `trg_audiencias_agendar_lembretes`: criar ou editar
+audiência pela UI passou a dar
+
+```
+ERROR: new row violates row-level security policy for table "crm_mensagens_agendadas"
+```
+
+porque o INSERT dos lembretes não preenchia `operador_id`, exigido pela policy.
+A skill `audiencias-cobrasq` inserta via service_role e não sentia nada.
+
+**Teste — obrigatório para TODO trigger novo, antes de aplicar:**
+```sql
+begin;
+  set local role authenticated;
+  set local request.jwt.claims = '{"sub":"<app_users.id>","role":"authenticated"}';
+  -- a operação que dispara o trigger
+rollback;
+```
+Rodar como gestor E como colaborador. Se levantar `permission denied` ou
+`violates row-level security policy`, o trigger não está pronto.
+
+**Checar também:** se o trigger LÊ outra tabela, o usuário precisa de SELECT
+nela (senão é `permission denied`, não linha filtrada); e a função precisa de
+`SET search_path` (advisor `function_search_path_mutable`).
+
+**Corrigido:** `20260729_fix_audiencias_trigger_operador_id.sql`.
+
+---
+
+## R-19 · Corrente acordo → boleto cobrava a entrada de novo (n8n/ZapSign)
+
+**O que acontece.** `acordos.valor_total` guarda o valor CHEIO do acordo
+(entrada incluída) — é assim que o fluxo manual de "criar acordo" em
+`index.html` sempre gravou, junto com `acordos.valor_entrada` à parte. Mas o
+fluxo ZapSign/n8n (`gerar-acordo-termo` → RPC `vincular_zapsign_acordo`) nunca
+preenchia `valor_entrada`, e `api/_emitir-acordo.js` soma `valor_total` inteiro
+e divide por `num_parcelas` sem descontar nada. Resultado: uma entrada paga à
+parte (ex. PIX) era cobrada de novo, embutida nas parcelas do boleto.
+
+Aconteceu em 05/08/2026 com Edilaine Aparecida Dutra da Silva: acordo de
+R$5.054,00 com entrada de R$500,00 (PIX) + 9x deveria gerar 9 boletos de
+R$506,00; sem o desconto da entrada, o Asaas gerou 9 boletos de ~R$561/554
+(total cheio ÷ 9). Corrigido manualmente no Asaas por Gustavo antes do fix de
+código.
+
+**Teste:** criar/editar um acordo com "Tem entrada?" marcado pela
+`peticao-teixeira-azzolin` (modo acordo), assinar no ZapSign (ou simular a
+chamada a `gerar-acordo-termo`) e conferir `acordos.valor_entrada` preenchido
+e o `totalValue` enviado ao Asaas (`api/_emitir-acordo.js` → `pay.totalValue`)
+já descontando a entrada.
+
+**Corrigido:** `20260806_vincular_zapsign_acordo_entrada.sql` (RPC ganha
+`p_valor_entrada`) + `supabase/functions/gerar-acordo-termo/index.ts` (passa
+`ac.entrada.valor`) + `api/_emitir-acordo.js` (subtrai `valor_entrada` de
+`total` antes de montar o installment). **Migração e deploy da edge function
+pendentes de aplicação manual em produção** — ver PR.
+
+**Achado junto (mesmo PR):** `api/_emitir-acordo.js` também tinha `fine: { value: 2 }`
+hardcoded — 2% de multa no boleto Asaas, enquanto o termo assinado
+(`peticao-teixeira-azzolin`, campo "Multa boleto (%)") usa 10% como padrão.
+Corrigido para 10%. **Retroativo:** os 20 acordos já emitidos por este fluxo
+(`metadata.boletos_emitidos=true`) saíram com multa 2% — correção nos boletos
+já existentes no Asaas é manual, fora desta migração (ver conversa/PR #483).
+
+---
+
 ### Invariantes guardadas (não quebrar)
 - **F-04** view `casos`/`view_casos` SEMPRE `WITH (security_invoker = true)`.
 - **F-20** trigger anti-encolhimento do blob + rebase do baseline no cliente.

@@ -31,6 +31,18 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 
+// Data de calendário em Curitiba. O runtime das Edge Functions roda em UTC, então
+// `toISOString().slice(0,10)` grava a data de UTC: das 21h à meia-noite (BRT) o servidor
+// já virou o dia, e a parcela nascia com vencimento no dia seguinte. Intl com timeZone
+// explícito porque aqui não existe "fuso local". (Espelha api/_data.js, que é CommonJS e
+// não pode ser importado por Deno.)
+const _fmtBR = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" });
+const isoBR = (d: Date | string | number = Date.now()) => {
+  const x = d instanceof Date ? d : new Date(d);
+  return isNaN(x.getTime()) ? "" : _fmtBR.format(x);
+};
+
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, content-type, asaas-access-token',
@@ -60,6 +72,34 @@ async function safeEqual(a: string, b: string): Promise<boolean> {
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Recebimento confirmado que o /api/processar-recebimento NÃO conseguiu processar.
+// Vai para a mesma fila dos pagamentos órfãos (asaas_pagamento_orfao), que já tem tela
+// no painel — assim a falha aparece para uma pessoa em vez de morrer num log que
+// ninguém lê. Idempotente pelo índice único em asaas_payment_id: o Asaas reenvia o
+// webhook até receber 200, e a fila não pode encher de repetição.
+// Best-effort de propósito: registrar a falha não pode derrubar o webhook.
+// deno-lint-ignore no-explicit-any
+async function registrarFalhaProcessamento(sb: any, paymentId: string, payment: any, httpStatus: number, resposta: unknown) {
+  if (!paymentId) return;
+  try {
+    const detalhe = httpStatus
+      ? `processar-recebimento respondeu HTTP ${httpStatus}: ${JSON.stringify(resposta).slice(0, 500)}`
+      : `processar-recebimento não respondeu: ${JSON.stringify(resposta).slice(0, 500)}`;
+    await sb.from('asaas_pagamento_orfao').upsert({
+      asaas_payment_id: paymentId,
+      asaas_customer_id: payment?.customer || null,
+      valor: payment?.value ?? null,
+      due_date: payment?.dueDate || null,
+      payment_date: payment?.paymentDate || payment?.clientPaymentDate || null,
+      billing_type: payment?.billingType || null,
+      motivo: 'falha_processamento',
+      detalhe,
+    }, { onConflict: 'asaas_payment_id', ignoreDuplicates: true });
+  } catch (e) {
+    console.warn('[asaas-webhook] registrar falha de processamento: ' + String((e as Error)?.message || e));
+  }
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -159,7 +199,7 @@ Deno.serve(async (req) => {
           const novoValor = payment.value != null ? Number(payment.value) : null;
           const novoVenc = payment.dueDate || null;
           const patch: Record<string, unknown> = {
-            observacoes: `${alvo.observacoes || ''} | Asaas PAYMENT_UPDATED (${paymentId}) em ${new Date().toISOString().slice(0, 10)}: valor ${alvo.valor}→${novoValor ?? alvo.valor}, vencimento ${alvo.data_vencimento}→${novoVenc ?? alvo.data_vencimento}.`,
+            observacoes: `${alvo.observacoes || ''} | Asaas PAYMENT_UPDATED (${paymentId}) em ${isoBR()}: valor ${alvo.valor}→${novoValor ?? alvo.valor}, vencimento ${alvo.data_vencimento}→${novoVenc ?? alvo.data_vencimento}.`,
           };
           if (novoValor != null) patch.valor = novoValor;
           if (novoVenc) { patch.data_vencimento = novoVenc; patch.data_competencia = novoVenc; }
@@ -267,30 +307,36 @@ Deno.serve(async (req) => {
     } catch {/* ignore — status/regra de baixa real refinada na PR3 */}
   }
 
-  // Sem devedor casado não há onde registrar o evento (devedor_eventos.devedor_id é
-  // NOT NULL). Confirmamos 200 para o Asaas parar de reenviar e logamos o motivo.
-  if (!devedorId) {
-    return json({ ok: true, unmatched: true, reason: 'customer sem devedor', customer: payment.customer || null, payment_id: paymentId });
+  // BUG CRÍTICO até 2026-08-07: sem devedor casado, a function parava AQUI — devolvia
+  // 200 pro Asaas (que então parava de reenviar) e NUNCA chamava /api/processar-recebimento.
+  // Dinheiro recebido de verdade (ex.: Cecília Aparecida Federle, PIX de R$252 em
+  // 07/08, sem devedor cadastrado) ficava com ZERO registro no sistema — nem
+  // fin_operacao, nem lançamento, nem recibo. Isso também explica boa parte do gap
+  // achado na auditoria de 06/08 (webhook só tinha processado 19 de 52 recebimentos
+  // de julho). `devedor_eventos.devedor_id` é NOT NULL, então só pulamos ESSE insert
+  // quando não há devedor — mas o fluxo de recebimento (PR3) segue adiante igual,
+  // porque /api/processar-recebimento já lida com devedor nulo (cria a operação e o
+  // lançamento sem vínculo, em vez de descartar o pagamento).
+  if (devedorId) {
+    await sb.from('devedor_eventos').insert({
+      devedor_id: devedorId,
+      cobranca_id: cobrancaId,
+      tipo: 'asaas_pagamento_recebido',
+      payload: {
+        payment_id: paymentId,
+        event,
+        asaas_customer: payment.customer || null,
+        installment: payment.installment || null,
+        external_reference: extRef || null,
+        value: payment.value ?? null,
+        net_value: payment.netValue ?? null,
+        billing_type: payment.billingType || null,
+        payment_date: payment.paymentDate || payment.clientPaymentDate || null,
+        status: payment.status || null
+      },
+      autor_nome: 'Asaas (webhook)'
+    });
   }
-
-  await sb.from('devedor_eventos').insert({
-    devedor_id: devedorId,
-    cobranca_id: cobrancaId,
-    tipo: 'asaas_pagamento_recebido',
-    payload: {
-      payment_id: paymentId,
-      event,
-      asaas_customer: payment.customer || null,
-      installment: payment.installment || null,
-      external_reference: extRef || null,
-      value: payment.value ?? null,
-      net_value: payment.netValue ?? null,
-      billing_type: payment.billingType || null,
-      payment_date: payment.paymentDate || payment.clientPaymentDate || null,
-      status: payment.status || null
-    },
-    autor_nome: 'Asaas (webhook)'
-  });
 
   // PR3: cria a "operação única" (recebimento + split capital/honorário) e envia o
   // recibo ao devedor. Delega ao endpoint Vercel (lá moram a chave Asaas e a lógica
@@ -307,9 +353,19 @@ Deno.serve(async (req) => {
         signal: AbortSignal.timeout(25000),
       });
       operacao = await r.json().catch(() => ({ status: r.status }));
+      // O status HTTP precisa ser OLHADO. Sem isto, um 500 do endpoint virava só mais um
+      // campo no JSON de resposta e o webhook devolvia 200 ao Asaas, que então parava de
+      // reenviar: falha permanente, silenciosa e sem rastro. Foi assim que os recebimentos
+      // de 28/08 a 02/09/2026 se perderam — 8 pagamentos sem operação, sem lançamento e
+      // sem recibo, e ninguém soube até o devedor perguntar pelo comprovante.
+      if (!r.ok) {
+        await registrarFalhaProcessamento(sb, paymentId, payment, r.status, operacao);
+        operacao = { erro_http: r.status, resposta: operacao };
+      }
     } catch (e) {
       operacao = { error: String((e as Error)?.message || e) };
       console.warn('[asaas-webhook] processar-recebimento falhou: ' + JSON.stringify(operacao));
+      await registrarFalhaProcessamento(sb, paymentId, payment, 0, operacao);
     }
   }
 

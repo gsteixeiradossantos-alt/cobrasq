@@ -160,7 +160,7 @@ Deno.serve(async (req) => {
     // 4) Idempotência leve: acordo QuitaFácil já emitido p/ esta cobrança → devolve o link.
     if (cobrancaId) {
       const { data: jaAcs } = await supa.from("acordos")
-        .select("id,metadata").eq("cobranca_id", cobrancaId).limit(20);
+        .select("id,metadata").eq("cobranca_id", cobrancaId).neq("status", "cancelado").limit(20);
       const ja = (jaAcs || []).find((a: any) => a?.metadata?.origem === "quitafacil" && a?.metadata?.asaas_invoice_url);
       if (ja) return json({ ok: true, link: ja.metadata.asaas_invoice_url, acordoId: ja.id, reaproveitado: true });
     }

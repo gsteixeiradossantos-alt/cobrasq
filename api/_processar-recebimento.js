@@ -14,7 +14,26 @@
 const crypto = require('crypto');
 const { sbFetch } = require('./_sb.js');
 const { asaasReq } = require('./_asaas.js');
-const { zapiSendText } = require('./_zapi.js');
+const { zapiSendText, zapiSendDocumentPdf } = require('./_zapi.js');
+const { gerarReciboPdfBase64, formaPagamento } = require('./_recibo.js');
+
+// Conta e categorias da ponte fin_lancamento. Sem elas o lançamento nasce órfão:
+// some dos relatórios por categoria e não entra em conta nenhuma. A revisão de
+// 14/08/2026 achou 19 assim (R$ 1.970,86) — 11 "Recebimento" e 8 "Repasse ao
+// credor", todos criados por este arquivo.
+const CONTA_ASAAS = 13;
+const CATEGORIA_ACORDOS = 167;  // receita do recebimento
+const CATEGORIA_REPASSE = 156;  // "Aquisição de dívidas de terceiros" = repasse ao credor
+
+// Vincula a categoria ao lançamento. Best-effort: categoria é secundária e não pode
+// derrubar o processamento do recebimento, que é o que de fato move dinheiro.
+async function _categorizar(lancId, categoriaId, valor){
+  if(!lancId) return;
+  try{
+    await sbFetch('fin_lancamento_categoria', { method:'POST', prefer:'return=minimal',
+      body: JSON.stringify({ lancamento_id: lancId, categoria_id: categoriaId, valor: Math.abs(+valor||0) }) });
+  }catch(e){ console.warn('[processar-recebimento] categoria:', e.message); }
+}
 
 function timingSafeEq(a, b) {
   const ab = Buffer.from(String(a || '')); const bb = Buffer.from(String(b || ''));
@@ -23,8 +42,11 @@ function timingSafeEq(a, b) {
 }
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
-function firstName(n) { return String(n || '').trim().split(/\s+/)[0] || ''; }
-function fmtR(v) { return 'R$ ' + (Number(v) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+
+// Cópia de monitoramento: o Gustavo recebe o PDF do recibo de TODO recebimento confirmado
+// (pedido 2026-08-06), independente do devedor ter telefone cadastrado ou não. Só o PDF,
+// sem a mensagem de texto que vai pro devedor.
+const NUMERO_MONITORAMENTO = '46999223332';
 
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -119,6 +141,36 @@ module.exports = async function handler(req, res) {
     const inserted = await sbFetch('fin_operacao', { method: 'POST', body: JSON.stringify(row) });
     const operacao = Array.isArray(inserted) ? inserted[0] : inserted;
 
+    // Baixa a parcela correspondente em acordos.parcelas (jsonb) — sem isso, o
+    // "Recuperado no mês" do painel (index.html: recuperadoNoMes) só soma baixa
+    // manual (toggleParcela), nunca pagamento confirmado automaticamente pelo
+    // Asaas. Best-effort: não derruba o webhook se a casada falhar.
+    if (acordo && Array.isArray(acordo.parcelas) && acordo.parcelas.length) {
+      try {
+        const parcelas = acordo.parcelas.map(p => ({ ...p }));
+        let idx = -1;
+        if (payment.installmentNumber != null) {
+          idx = parcelas.findIndex(p => Number(p.numero) === Number(payment.installmentNumber) && !p.pago);
+        }
+        if (idx < 0) {
+          // Sem installmentNumber (cobrança avulsa) — casa pela parcela em aberto de valor mais próximo.
+          idx = parcelas.reduce((best, p, i) => {
+            if (p.pago) return best;
+            const diff = Math.abs((+p.valor || 0) - valorRecebido);
+            const bestDiff = best < 0 ? Infinity : Math.abs((+parcelas[best].valor || 0) - valorRecebido);
+            return diff < bestDiff ? i : best;
+          }, -1);
+        }
+        if (idx >= 0) {
+          parcelas[idx].pago = true;
+          parcelas[idx].pagoEm = row.recebido_em;
+          const patch = { parcelas };
+          if (parcelas.every(p => p.pago)) patch.status = 'encerrado';
+          await sbFetch(`acordos?id=eq.${encodeURIComponent(acordo.id)}`, { method: 'PATCH', body: JSON.stringify(patch) });
+        }
+      } catch (e) { console.warn('[processar-recebimento] baixa de parcela:', e.message); }
+    }
+
     // Ponte fin_lancamento: registra a RECEITA do recebimento (já paga) e a DESPESA
     // de repasse (nasce ATIVA/pendente porque o recebimento confirmou; vira "pago"
     // quando o PIX de repasse efetiva — /api/repassar e /api/repasse-concluido).
@@ -130,35 +182,55 @@ module.exports = async function handler(req, res) {
         const devNome = (devedor && devedor.nome) || 'devedor';
         const parcTxt = row.parcela && row.total_parcelas ? ` ${row.parcela}/${row.total_parcelas}` : '';
 
-        // Evita duplicar quando já existe uma linha PENDENTE pré-cadastrada pra este
-        // devedor sem asaas_payment_id (ex.: import manual de PDF/planilha — caso real
-        // 2026-07-26: 50 lançamentos de agosto importados do extrato Asaas antes do
-        // webhook confirmar o pagamento de verdade). Casa por devedor_id (raw_payload)
-        // + valor aproximado; se achar, BAIXA a linha existente em vez de criar outra.
+        // Casa com o lançamento já existente pra este devedor via cobranca_id (FK real —
+        // ver migração 20260806_fin_lancamento_cobranca_id.sql; antes disso a casada era
+        // por raw_payload->>'devedor_id', texto solto só nas linhas do import). Considera
+        // tanto PENDENTE quanto já PAGO (idempotente) — se já tiver sido baixado por outro
+        // caminho (ex.: manual, antes do webhook chegar), só reconfirma em vez de duplicar.
+        // Duplicidade real (auditoria 2026-08-06, R$1.867 contados 2x): a versão antiga só
+        // olhava status=0, então uma linha já paga manualmente virava candidata inexistente
+        // e o webhook criava uma segunda linha do zero pro mesmo pagamento.
         let lancReceitaId = null;
-        let pendenteExistente = null;
+        let existente = null;
         if (devedor && devedor.id) {
           const candidatos = await sbFetch(
-            `fin_lancamento?tipo_movimento=eq.1&status=eq.0&raw_payload->>devedor_id=eq.${devedor.id}&select=id,valor,observacoes&order=criada_em.desc&limit=20`
+            `fin_lancamento?tipo_movimento=eq.1&status=in.(0,1)&cobranca_id=eq.${devedor.id}&select=id,valor,status,observacoes&order=criada_em.desc&limit=20`
           ).catch(() => []);
-          pendenteExistente = (candidatos || []).find(c => Math.abs(Number(c.valor) - valorRecebido) < 0.05) || null;
+          existente = (candidatos || []).find(c => Math.abs(Number(c.valor) - valorRecebido) < 0.05) || null;
         }
 
-        if (pendenteExistente) {
-          await sbFetch(`fin_lancamento?id=eq.${pendenteExistente.id}`, { method: 'PATCH', body: JSON.stringify({
-            status: 1, valor_pago: valorRecebido, data_pagamento: row.recebido_em,
-            observacoes: `${pendenteExistente.observacoes || ''} | confirmado via Asaas payment ${paymentId} em ${row.recebido_em}.`,
+        const ehBoleto = String(payment.billingType || '').toUpperCase() === 'BOLETO';
+
+        if (existente) {
+          await sbFetch(`fin_lancamento?id=eq.${existente.id}`, { method: 'PATCH', body: JSON.stringify({
+            // data_competencia também move pra data real do pagamento — senão a linha
+            // continua aparecendo/agrupada no dia do vencimento original (pedido do
+            // Gustavo 2026-08-06), mesmo já tendo sido baixada em outra data.
+            status: 1, valor_pago: valorRecebido, data_pagamento: row.recebido_em, data_competencia: row.recebido_em,
+            observacoes: `${existente.observacoes || ''} | confirmado via Asaas payment ${paymentId} em ${row.recebido_em}.`,
           }) }).catch(() => null);
-          lancReceitaId = pendenteExistente.id;
+          lancReceitaId = existente.id;
+        } else if (ehBoleto) {
+          // Boleto sempre nasce de uma parcela já importada/cadastrada no sistema — se não
+          // achou candidato, é sinal de parcela faltando no cadastro, não de recebimento
+          // avulso. NÃO cria lançamento novo (pedido do Gustavo 2026-08-06): criar mascarava
+          // o problema real (cadastro incompleto) atrás de uma linha sem categoria/conta.
+          console.warn(`[processar-recebimento] boleto sem lançamento correspondente — devedor=${devedor && devedor.id} valor=${valorRecebido} payment=${paymentId}`);
         } else {
           const rec = await sbFetch('fin_lancamento', { method: 'POST', body: JSON.stringify({
             descricao: `Recebimento — ${devNome}${parcTxt}`,
             valor: valorRecebido, valor_pago: valorRecebido,
             tipo_movimento: 1, status: 1,
+            conta_id: CONTA_ASAAS,
             data_competencia: row.recebido_em, data_pagamento: row.recebido_em,
+            // recebimento consumado: vencimento = o dia em que o dinheiro entrou.
+            // Sem isto o lançamento some de qualquer relatório por vencimento.
+            data_vencimento: row.recebido_em,
             numero_parcela: row.parcela, total_parcelas: row.total_parcelas,
+            cobranca_id: devedor ? devedor.id : null,
           }) }).catch(() => null);
           lancReceitaId = (rec && rec[0] && rec[0].id) || null;
+          await _categorizar(lancReceitaId, CATEGORIA_ACORDOS, valorRecebido);
         }
         let lancDespesaId = null;
         if (valorCapital > 0) {
@@ -166,10 +238,12 @@ module.exports = async function handler(req, res) {
             descricao: `Repasse ao credor — ${credorNome || '—'}${parcTxt}`,
             valor: -valorCapital,
             tipo_movimento: 0, status: 0,
+            conta_id: CONTA_ASAAS,
             data_competencia: row.recebido_em, data_vencimento: row.recebido_em,
             numero_parcela: row.parcela, total_parcelas: row.total_parcelas,
           }) }).catch(() => null);
           lancDespesaId = (desp && desp[0] && desp[0].id) || null;
+          await _categorizar(lancDespesaId, CATEGORIA_REPASSE, valorCapital);
         }
         if (lancReceitaId || lancDespesaId) {
           await sbFetch(`fin_operacao?id=eq.${operacao.id}`, { method: 'PATCH', body: JSON.stringify({ lancamento_receita_id: lancReceitaId, lancamento_despesa_id: lancDespesaId }) }).catch(() => {});
@@ -196,17 +270,45 @@ module.exports = async function handler(req, res) {
       } catch (e) { nf = { error: e.message }; }
     }
 
-    // Recibo automático ao devedor (R4) — best-effort. Fala como a Bia e envia o
-    // COMPROVANTE oficial do Asaas (transactionReceiptUrl) quando disponível.
-    let zap = null;
+    // Recibo automático (R4) — best-effort. Formato "Financeiro COBRASQ" (pedido do
+    // Gustavo 2026-08-06): PDF do recibo (mesmo timbrado que a Bia já usa quando o
+    // devedor pede o comprovante manualmente — ver _recibo.js), gerado UMA vez e usado
+    // em dois envios independentes:
+    //   1. ao devedor (se tiver telefone cadastrado) — PDF anexo + mensagem confirmando
+    //      a parcela; sem PDF, cai no link oficial do Asaas em vez de mentir "em anexo".
+    //   2. cópia de monitoramento pro número do Gustavo — SÓ o PDF, sem mensagem, em
+    //      TODO recebimento (mesmo sem devedor casado/telefone).
+    const nomeCompleto = (devedor && devedor.nome) || 'Cliente';
+    const dadosRec = {
+      nome: nomeCompleto,
+      valorNum: valorRecebido,
+      valorFmt: valorRecebido.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+      dataISO: row.recebido_em,
+      forma: formaPagamento(payment.billingType),
+      num: 'Nº ' + String(paymentId).slice(-6).toUpperCase(),
+    };
+    let b64 = '';
+    try { b64 = await gerarReciboPdfBase64(dadosRec); } catch (e) { console.warn('[processar-recebimento] gerar recibo PDF:', e.message); }
+
+    let zap = null, pdfEnviado = false;
     const tel = String((devedor && devedor.telefone) || '').replace(/\D/g, '');
     if (tel) {
-      const parc = row.parcela && row.total_parcelas ? ` (parcela ${row.parcela}/${row.total_parcelas})` : '';
-      const ola = firstName(devedor && devedor.nome);
+      if (b64) { try { pdfEnviado = await zapiSendDocumentPdf(tel, b64, 'Recibo COBRASQ.pdf'); } catch (e) { pdfEnviado = false; } }
+
+      const meioTxt = { PIX: 'do Pix', BOLETO: 'do boleto', CREDIT_CARD: 'do cartão', DEBIT_CARD: 'do cartão' }[String(payment.billingType || '').toUpperCase()] || 'do pagamento';
+      const linhaParcela = row.parcela && row.total_parcelas ? ` referente a parcela n. ${row.parcela} de ${row.total_parcelas} do acordo realizado` : '';
       const recibo = String((payment && payment.transactionReceiptUrl) || '').trim();
-      const linhaRecibo = recibo ? `\n\nSegue o comprovante:\n${recibo}` : '';
-      const msg = `*Bia • COBRASQ*\n${ola ? 'Olá, ' + ola + '! ' : ''}Recebemos seu pagamento${parc} no valor de ${fmtR(valorRecebido)}. Muito obrigada!${linhaRecibo}`;
+      const linhaAnexo = pdfEnviado
+        ? 'Em anexo, seu recibo de pagamento.'
+        : (recibo ? `Segue o comprovante:\n${recibo}` : '');
+
+      const msg = `*Financeiro COBRASQ*\n${nomeCompleto}, o pagamento ${meioTxt}${linhaParcela} foi confirmado. ✅${linhaAnexo ? '\n\n' + linhaAnexo : ''}\n_Agradecemos!_`;
       try { zap = await zapiSendText(tel, msg); } catch (e) { zap = { error: e.message }; }
+    }
+
+    let monitorEnviado = false;
+    if (b64) {
+      try { monitorEnviado = await zapiSendDocumentPdf(NUMERO_MONITORAMENTO, b64, `Recibo COBRASQ - ${nomeCompleto}.pdf`); } catch (e) { monitorEnviado = false; }
     }
 
     return res.status(200).json({
@@ -216,7 +318,9 @@ module.exports = async function handler(req, res) {
       valor_capital: valorCapital,
       valor_honorario: valorHonorario,
       repasse_status: row.repasse_status,
+      recibo_pdf_enviado: pdfEnviado,
       recibo_enviado: !!(zap && zap.messageId),
+      recibo_monitoramento_enviado: monitorEnviado,
       nf,
     });
   } catch (e) {

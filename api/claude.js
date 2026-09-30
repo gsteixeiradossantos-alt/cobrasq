@@ -56,22 +56,42 @@ module.exports = async function handler(req, res) {
 
   const version = req.headers['anthropic-version'] || '2023-06-01';
 
-  try {
-    const upstream = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': version,
-      },
-      body: JSON.stringify(body),
-    });
-    const text = await upstream.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
-    res.status(upstream.status).json(data);
-  } catch (err) {
-    console.error('[claude proxy] erro upstream:', err.message);
-    res.status(502).json({ error: { message: 'Serviço de IA temporariamente indisponível. Tente novamente.' } });
+  // A Anthropic responde 429 (rate limit) ou 529 (overloaded_error) em picos de
+  // demanda — condição transitória, some em segundos. Retry com backoff aqui
+  // evita que todo pico vire um "Overloaded" cru na tela de quem estiver usando
+  // qualquer uma das telas que chamam este proxy (repasses IA, chat, etc.).
+  const RETRY_STATUSES = new Set([429, 500, 502, 503, 529]);
+  const MAX_ATTEMPTS = 3;
+  const BACKOFF_MS = [500, 1500];
+
+  let data, status;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    try {
+      const upstream = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': version,
+        },
+        body: JSON.stringify(body),
+      });
+      const text = await upstream.text();
+      status = upstream.status;
+      try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    } catch (err) {
+      console.error('[claude proxy] erro upstream:', err.message);
+      status = 502;
+      data = { error: { message: 'Serviço de IA temporariamente indisponível. Tente novamente.' } };
+    }
+    const isLastAttempt = attempt === MAX_ATTEMPTS - 1;
+    if (!RETRY_STATUSES.has(status) || isLastAttempt) break;
+    console.warn(`[claude proxy] status ${status}, tentativa ${attempt + 1}/${MAX_ATTEMPTS}, retry em ${BACKOFF_MS[attempt]}ms`);
+    await new Promise(r => setTimeout(r, BACKOFF_MS[attempt]));
   }
+
+  if (RETRY_STATUSES.has(status)) {
+    data = { error: { message: 'IA sobrecarregada no momento. Tentamos algumas vezes automaticamente — tente de novo em instantes.' } };
+  }
+  res.status(status).json(data);
 };
