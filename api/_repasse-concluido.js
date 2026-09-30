@@ -7,7 +7,7 @@
 // Idempotente: se já está 'efetuado', não reenvia.
 
 const { sbFetch } = require('./_sb.js');
-const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
+const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp, listarParcelas } = require('./_repasse-msg.js');
 const { devedorPrincipal, partesDaCobranca, registrarRepasseNaFicha, resolverCobrancaId } = require('./_repasse-ficha.js');
 const { guardarComprovante } = require('./_comprovante.js');
 const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_comprovante-pdf.js');
@@ -20,6 +20,18 @@ function timingSafeEq(a, b) {
   return crypto.timingSafeEqual(ab, bb);
 }
 function safeJson(s) { try { return JSON.parse(s); } catch { return {}; } }
+
+// Todas as operações pagas pelo mesmo transfer (PIX em lote), com `op` sempre incluída.
+// Sem lote, devolve [op] — o caminho de sempre.
+async function grupoDoTransfer(op, transferId) {
+  const lote = op.metadata && op.metadata.repasse_lote;
+  const tid = transferId || op.repasse_asaas_transfer_id;
+  if (!lote || !Array.isArray(lote.operacoes) || lote.operacoes.length < 2 || !tid) return [op];
+  const ids = lote.operacoes.map(x => encodeURIComponent(x)).join(',');
+  const rows = await sbFetch(`fin_operacao?id=in.(${ids})&repasse_asaas_transfer_id=eq.${encodeURIComponent(tid)}&select=*`).catch(() => []);
+  const out = Array.isArray(rows) ? rows.filter(r => r.id !== op.id) : [];
+  return [op, ...out];
+}
 
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -50,9 +62,19 @@ module.exports = async function handler(req, res) {
     // (inclusive um TRANSFER_FAILED tardio/fora de ordem ou reentrega de webhook).
     // Antes, um FAILED após o DONE reabria para 'pendente' e podia disparar repasse
     // em dobro. Transfer concluído não volta atrás aqui.
-    if (op.repasse_status === 'efetuado') {
+    //
+    // PIX em lote (várias parcelas, um transfer — ver repassarLote em _repassar.js): o
+    // Asaas devolve só a 1ª operação no externalReference; as outras vêm pelo transfer id.
+    // O grupo conclui ou falha junto, e o credor recebe UMA mensagem.
+    const grupo = await grupoDoTransfer(op, transferId);
+    const abertas = grupo.filter(o => o.repasse_status !== 'efetuado');
+    if (!abertas.length) {
       return res.status(200).json({ ok: true, duplicate: true, operacao_id: op.id, repasse_status: 'efetuado' });
     }
+    const lote = grupo.length > 1 ? ((op.metadata && op.metadata.repasse_lote) || {}) : null;
+    const valorPix = Math.round(grupo.reduce((s, o) => s + (Number(o.valor_capital) || 0), 0) * 100) / 100;
+    const parcelasLote = lote ? ((lote.parcelas && lote.parcelas.length) ? lote.parcelas
+      : [...new Set(grupo.map(o => Number(o.parcela) || 0).filter(n => n > 0))].sort((a, b) => a - b)) : null;
 
     const comprovanteUrl = transfer.transactionReceiptUrl || transfer.receiptUrl || op.repasse_comprovante_url || '';
     // P1 (auditoria 2026-06) — ao FALHAR, zera o transfer_id para liberar novo disparo
@@ -64,34 +86,39 @@ module.exports = async function handler(req, res) {
     // ASSÍNCRONA — a maioria dos repasses passa por este caminho, não pelo disparo.
     const arqCompr = concluido ? await guardarComprovante(comprovanteUrl, transferId || op.repasse_asaas_transfer_id) : null;
     const transferIdFalho = falhou ? (transferId || op.repasse_asaas_transfer_id || null) : null;
-    const update = {
-      repasse_status: falhou ? 'pendente' : (concluido ? 'efetuado' : 'preparado'),
-      repasse_asaas_transfer_id: falhou ? null : (transferId || op.repasse_asaas_transfer_id),
-      repasse_comprovante_url: comprovanteUrl || null,
-      repasse_efetuado_em: concluido ? new Date().toISOString() : op.repasse_efetuado_em,
-      metadata: {
-        ...(op.metadata || {}),
-        repasse_asaas_status: st,
-        repasse_falhou: falhou || undefined,
-        ...(transferIdFalho ? { repasse_asaas_transfer_id_falho: transferIdFalho } : {}),
-        ...(arqCompr ? { comprovante_storage_path: arqCompr.storage_path, comprovante_bytes: arqCompr.bytes } : {}),
-      },
-    };
-    await sbFetch(`fin_operacao?id=eq.${op.id}`, { method: 'PATCH', body: JSON.stringify(update) });
+    const novoStatus = falhou ? 'pendente' : (concluido ? 'efetuado' : 'preparado');
+    const agora = new Date().toISOString();
+    await Promise.all(abertas.map(o => sbFetch(`fin_operacao?id=eq.${o.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        repasse_status: novoStatus,
+        repasse_asaas_transfer_id: falhou ? null : (transferId || o.repasse_asaas_transfer_id),
+        repasse_comprovante_url: comprovanteUrl || null,
+        repasse_efetuado_em: concluido ? agora : o.repasse_efetuado_em,
+        metadata: {
+          ...(o.metadata || {}),
+          repasse_asaas_status: st,
+          repasse_falhou: falhou || undefined,
+          ...(transferIdFalho ? { repasse_asaas_transfer_id_falho: transferIdFalho } : {}),
+          ...(arqCompr ? { comprovante_storage_path: arqCompr.storage_path, comprovante_bytes: arqCompr.bytes } : {}),
+        },
+      }),
+    })));
 
     // Ponte fin_lancamento: ao concluir, marca a despesa de repasse como PAGA. Move
     // data_competencia junto — senão a linha some do dia/mês em que o repasse saiu de
     // verdade e fica presa no dia em que foi cadastrada (mesmo bug do lado da receita,
     // pedido do Gustavo 2026-08-06).
-    if (concluido && op.lancamento_despesa_id) {
+    if (concluido) {
       const hoje = hojeBR();
-      await sbFetch(`fin_lancamento?id=eq.${op.lancamento_despesa_id}`, {
+      await Promise.all(abertas.filter(o => o.lancamento_despesa_id).map(o => sbFetch(`fin_lancamento?id=eq.${o.lancamento_despesa_id}`, {
         method: 'PATCH',
-        body: JSON.stringify({ status: 1, data_pagamento: hoje, data_competencia: hoje, valor_pago: -(Number(op.valor_capital) || 0) }),
-      }).catch(() => {});
+        body: JSON.stringify({ status: 1, data_pagamento: hoje, data_competencia: hoje, valor_pago: -(Number(o.valor_capital) || 0) }),
+      }).catch(() => {})));
     }
 
-    // Comprovante ao credor quando concluído (best-effort). Uma mensagem por PIX, com
+    // Comprovante ao credor quando concluído (best-effort). Uma mensagem por PIX (no lote,
+    // uma para todas as parcelas), com
     // o PDF em anexo. Parcela e devedor saem do que /api/repassar gravou na operação;
     // aqui a descrição do lançamento não chega no payload do Asaas.
     let envio = null; let ficha = null;
@@ -112,8 +139,8 @@ module.exports = async function handler(req, res) {
       if (!pdf) pdf = await imprimirPaginaAsaasPdf(comprovanteUrl);
       if (!pdf) {
         pdf = await gerarComprovanteRepassePdf({
-          credorNome: credor.nome, devedor: devNome, parcela: op.parcela,
-          valor: op.valor_capital, dataISO: hojeBR(),
+          credorNome: credor.nome, devedor: devNome, parcela: parcelasLote ? listarParcelas(parcelasLote) : op.parcela,
+          valor: valorPix, dataISO: hojeBR(),
           transferId: transferId || op.repasse_asaas_transfer_id,
           chavePix: (op.metadata && op.metadata.repasse_pix_key) || '', urlAsaas: comprovanteUrl,
         });
@@ -124,7 +151,8 @@ module.exports = async function handler(req, res) {
         partesDaCobranca(cobId).catch(() => []),
       ]);
       envio = await enviarComprovanteCredor({
-        telefone: destinoWhatsapp(credor), parcela: op.parcela, total: op.total_parcelas || null, devedor: devNome,
+        telefone: destinoWhatsapp(credor), parcela: op.parcela, total: (lote && lote.total_parcelas) || op.total_parcelas || null, devedor: devNome,
+        ...(parcelasLote ? { parcelas: parcelasLote } : {}),
         doc: dp && dp.doc, partes,
         base64: pdf, ext: 'pdf', comprovanteUrl,
       });
@@ -132,13 +160,14 @@ module.exports = async function handler(req, res) {
       // já tiver registrado ao concluir na hora.
       ficha = await registrarRepasseNaFicha({
         cobrancaId: await resolverCobrancaId(op),
-        credor, valor: op.valor_capital, transferId: transferId || op.repasse_asaas_transfer_id,
+        credor, valor: valorPix, transferId: transferId || op.repasse_asaas_transfer_id,
         dataPix: hojeBR(), comprovante: arqCompr,
       });
     }
 
     return res.status(200).json({
-      ok: true, operacao_id: op.id, repasse_status: update.repasse_status,
+      ok: true, operacao_id: op.id, repasse_status: novoStatus,
+      ...(grupo.length > 1 ? { operacao_ids: grupo.map(o => o.id) } : {}),
       comprovante_enviado: !!(envio && envio.enviado),
       comprovante_via: (envio && envio.via) || null,
       comprovante_agendado_para: (envio && envio.agendado && envio.agendada_para) || null,

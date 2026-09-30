@@ -12,7 +12,7 @@ const { requireUser, applyCors } = require('./_auth.js');
 const { sbFetch } = require('./_sb.js');
 const { guardarComprovante } = require('./_comprovante.js');
 const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_comprovante-pdf.js');
-const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
+const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp, listarParcelas } = require('./_repasse-msg.js');
 const { registrarRepasseNaFicha, resolverCobrancaId, devedorPrincipal, partesDaCobranca } = require('./_repasse-ficha.js');
 
 const { hojeBR } = require('./_data.js');
@@ -53,6 +53,12 @@ module.exports = async function handler(req, res) {
       devNome = lerDescricaoRepasse(op.metadata.lancamento_descricao).devedor;
     }
 
+    // PIX em lote (ver repassarLote em _repassar.js): o comprovante é UM para todas as
+    // parcelas — a mensagem cita todas e o valor é o do PIX, não o desta parcela.
+    const lote = op.metadata && op.metadata.repasse_lote;
+    const ehLote = !!(lote && Array.isArray(lote.parcelas) && lote.parcelas.length > 1);
+    const valorPix = ehLote && Number(lote.valor_total) > 0 ? Number(lote.valor_total) : op.valor_capital;
+
     const url = op.repasse_comprovante_url || '';
     const arq = await guardarComprovante(url, op.repasse_asaas_transfer_id);
     // PDF original do Asaas primeiro (ver _repassar.js).
@@ -60,8 +66,8 @@ module.exports = async function handler(req, res) {
     if (!pdf) pdf = await imprimirPaginaAsaasPdf(url);
     if (!pdf) {
       pdf = await gerarComprovanteRepassePdf({
-        credorNome: credor.nome, devedor: devNome, parcela: op.parcela,
-        valor: op.valor_capital,
+        credorNome: credor.nome, devedor: devNome, parcela: ehLote ? listarParcelas(lote.parcelas) : op.parcela,
+        valor: valorPix,
         dataISO: String(op.repasse_efetuado_em || '').slice(0, 10) || hojeBR(),
         transferId: op.repasse_asaas_transfer_id,
         chavePix: (op.metadata && op.metadata.repasse_pix_key) || '', urlAsaas: url,
@@ -78,6 +84,7 @@ module.exports = async function handler(req, res) {
     ]);
     const envio = await enviarComprovanteCredor({
       telefone: destinoWhatsapp(credor), parcela: op.parcela, devedor: devNome,
+      ...(ehLote ? { parcelas: lote.parcelas, total: lote.total_parcelas || null } : {}),
       doc: dp && dp.doc, partes,
       base64: pdf, ext: 'pdf', comprovanteUrl: url,
     });
@@ -90,7 +97,7 @@ module.exports = async function handler(req, res) {
     let ficha = null;
     if (cobrancaId && pdf) {
       ficha = await registrarRepasseNaFicha({
-        cobrancaId, credor, valor: op.valor_capital,
+        cobrancaId, credor, valor: valorPix,
         transferId: op.repasse_asaas_transfer_id,
         dataPix: String(op.repasse_efetuado_em || '').slice(0, 10),
         comprovante: { base64: pdf, ext: 'pdf' },
