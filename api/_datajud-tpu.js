@@ -26,7 +26,9 @@ const TPU_MOV = {
   220:   { include: true,  label: 'Sentença de improcedência' },
   3:     { include: true,  label: 'Decisão proferida' },
   11009: { include: true,  label: 'Despacho do juízo' },
-  51:    { include: true,  label: 'Penhora/constrição de bens' },
+  // 51 = "Conclusão" na TPU (autos conclusos ao juiz) — NÃO é penhora. Estava
+  // rotulado como penhora até 30/09/2026 (961 eventos em 218 cobranças).
+  51:    { include: true,  label: 'Conclusos' },
   970:   { include: true,  label: 'Processo arquivado' },
   466:   { include: true,  label: 'Processo suspenso' },
   // Ruído procedural — explicitamente descartado.
