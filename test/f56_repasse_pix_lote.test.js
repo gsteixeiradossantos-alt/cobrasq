@@ -235,5 +235,26 @@ function inicio() { novoBanco(); transfers = []; mensagens = []; fichas = []; as
     assert.ok(!mensagens[0].parcelas);
   });
 
+  // Cobrança cadastrada com partes: id da cobrança ≠ id do devedor (Deivid Ghizzo, 30/09/2026).
+  await caso('cobrança com partes: devedor_id vem do devedor principal, não do id da cobrança', async () => {
+    db.fin_lancamento.push({ id: 31, descricao: 'Deivid Ghizzo 1/1', valor: -1508.99, tipo_movimento: 0, status: 0, cobranca_id: 'cob-dei', credor_id: null, numero_parcela: 1, total_parcelas: 1 });
+    db.cobrancas.push({ id: 'cob-dei', cliente_id: 'cli-kal' });
+    db.devedores.push({ id: 'dev-dei', nome: 'Deivid Ghizzo' });
+    db.cobranca_partes = [{ cobranca_id: 'cob-dei', devedor_id: 'dev-dei', principal: true }];
+    const r = await chamarRepassar({ lancamento_id: 31 });
+    assert.strictEqual(r.code, 200, JSON.stringify(r.corpo));
+    assert.strictEqual(db.fin_operacao[0].devedor_id, 'dev-dei');
+  });
+
+  await caso('cobrança sem devedor nenhum: erro claro e nenhum PIX', async () => {
+    db.fin_lancamento.push({ id: 32, descricao: 'Sem Cadastro 1/1', valor: -100, tipo_movimento: 0, status: 0, cobranca_id: 'cob-sem', credor_id: null, numero_parcela: 1, total_parcelas: 1 });
+    db.cobrancas.push({ id: 'cob-sem', cliente_id: 'cli-kal' });
+    const r = await chamarRepassar({ lancamento_id: 32 });
+    assert.strictEqual(r.code, 400, JSON.stringify(r.corpo));
+    assert.ok(/cobrança de Sem Cadastro não tem devedor cadastrado/.test(r.corpo.error), r.corpo.error);
+    assert.strictEqual(transfers.length, 0);
+    assert.strictEqual(db.fin_operacao.length, 0);
+  });
+
   console.log(`\nF-56: ${ok} casos OK`);
 })().catch(e => { console.error('✗', e.message); process.exit(1); });

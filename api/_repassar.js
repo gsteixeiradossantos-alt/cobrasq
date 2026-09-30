@@ -64,6 +64,21 @@ async function operacaoDoLancamento(lancamentoId, body) {
       return { status: 400, json: { error: 'lançamento sem credor vinculado — informe credor_id ou vincule a cobrança' } };
     }
     const credorEscolhido = body.credor_id || credorId;
+    // Nos casos antigos o id da cobrança é o do devedor; nos cadastrados com partes (ex.:
+    // Deivid Ghizzo, 19/09/2026) não é — o devedor vem de cobranca_partes (principal).
+    // Gravar o id da cobrança nesses casos violava fin_operacao_devedor_id_fkey (409).
+    // Cobrança sem devedor nenhum: erro claro, para o Gustavo arrumar o cadastro (30/09/2026).
+    if (devedorId) {
+      const dvs = await sbFetch(`devedores?id=eq.${devedorId}&select=id&limit=1`);
+      if (!dvs.length) {
+        const pts = await sbFetch(`cobranca_partes?cobranca_id=eq.${devedorId}&devedor_id=not.is.null&select=devedor_id,principal&order=principal.desc&limit=1`);
+        if (!pts.length) {
+          const nome = lerDescricaoRepasse(lanc.descricao).devedor || 'este caso';
+          return { status: 400, json: { error: `Repasse bloqueado: a cobrança de ${nome} não tem devedor cadastrado. Cadastre o devedor e tente de novo.` } };
+        }
+        devedorId = pts[0].devedor_id;
+      }
+    }
 
     // Grava a escolha no lançamento e nas OUTRAS parcelas em aberto do mesmo
     // devedor, para não repetir a escolha a cada parcela. Casa pelo texto sem a
