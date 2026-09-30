@@ -24,6 +24,7 @@ const handlers = {
   'repasse-nova-receita': require('./_repasse-nova-receita.js'),
   'diagnostico-financeiro': require('./_diagnostico-financeiro.js'),
   'conciliacao-asaas': require('./_conciliacao-asaas.js'),
+  'tarifas-asaas': require('./_tarifas-asaas.js'),
   'eproc-peticionamento': require('./_eproc-peticionamento.js'),
   'criar-cedente': require('./_criar-cedente.js'),
   'mercadopago': require('./_mercadopago.js'),
