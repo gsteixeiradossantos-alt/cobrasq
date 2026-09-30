@@ -81,6 +81,15 @@
   };
   function estadoFrase(uf) { uf = String(uf || "").trim().toUpperCase(); return UF[uf] ? "Estado " + UF[uf] : (uf || ""); }
 
+  // Documento como sai no termo: o cadastro guarda CPF/CNPJ só em dígitos
+  // ("02433555990"); no texto vai com pontos e hífen ("024.335.559-90").
+  function fmtDocumento(doc) {
+    const d = String(doc || "").replace(/\D/g, "");
+    if (d.length === 11) return d.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, "$1.$2.$3-$4");
+    if (d.length === 14) return d.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/, "$1.$2.$3/$4-$5");
+    return String(doc || "").trim();
+  }
+
   function qualifDevedor(dev) {
     const e = dev.endereco || {};
     const endereco = [
@@ -95,11 +104,11 @@
     const tel = dev.telefone ? "telefone n. " + dev.telefone : "";
     let base;
     if (dev.tipo === "PJ") {
-      base = "pessoa jurídica de direito privado, inscrita no CNPJ sob n. " + (dev.documento || "");
+      base = "pessoa jurídica de direito privado, inscrita no CNPJ sob n. " + fmtDocumento(dev.documento);
     } else {
       const nac = dev.genero === "M" ? "brasileiro" : "brasileira";
       const insc = dev.genero === "M" ? "inscrito" : "inscrita";
-      base = nac + ", " + insc + " no CPF sob. n. " + (dev.documento || "");
+      base = nac + ", " + insc + " no CPF sob n. " + fmtDocumento(dev.documento);
     }
     // Junta só os trechos não-vazios — endereço ausente/parcial não gera ", ," nem vírgula órfã.
     return [base, endereco, tel].filter(Boolean).join(", ") + ".";
@@ -108,7 +117,7 @@
   // Credor: usa a qualificação verbatim guardada no cadastro; senão, monta uma básica.
   function qualifCredor(cred) {
     if (cred.qualificacao && cred.qualificacao.trim()) return cred.qualificacao.trim();
-    return "pessoa jurídica de direito privado, inscrita no CNPJ sob n. " + (cred.documento || "") +
+    return "pessoa jurídica de direito privado, inscrita no CNPJ sob n. " + fmtDocumento(cred.documento) +
       (cred.endereco ? ", com endereço na " + cred.endereco : "") + ".";
   }
 
