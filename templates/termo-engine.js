@@ -108,7 +108,7 @@
     } else {
       const nac = dev.genero === "M" ? "brasileiro" : "brasileira";
       const insc = dev.genero === "M" ? "inscrito" : "inscrita";
-      base = nac + ", " + insc + " no CPF sob. n. " + fmtDocumento(dev.documento);
+      base = nac + ", " + insc + " no CPF sob n. " + fmtDocumento(dev.documento);
     }
     // Junta só os trechos não-vazios — endereço ausente/parcial não gera ", ," nem vírgula órfã.
     return [base, endereco, tel].filter(Boolean).join(", ") + ".";
