@@ -37663,6 +37663,34 @@ async function cobrasqComprovantePDF(operacaoId){
 //   • repasses A FAZER    → `fin_lancamento` tipo_movimento=0 status=0 (parcela prevista).
 // Somar as duas tabelas para a MESMA parcela duplicaria — por isso o pago vem só de
 // `repasses_cliente` e o previsto só dos lançamentos em aberto.
+// Junta a pessoa física com a empresa dela quando as duas são partes do mesmo caso
+// (MEI, ou CNPJ cujo nome contém o nome da PF). Sem isso o extrato dizia "Edenilson
+// dos Santos e Edenilson dos Santos 07238395908" (30/09/2026). A PJ vira rótulo:
+// "Nome (PF e MEI)" ou "Nome (PF e PJ)"; os dois documentos continuam na legenda.
+// Partes que são pessoas diferentes seguem separadas.
+function _extratoAgruparPartes(partes){
+  const dig = d => String(d||'').replace(/\D/g,'');
+  const norm = t => String(t||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase()
+    .replace(/\(?\bmei\b\)?/g,' ').replace(/[\d.\/\-]{2,}/g,' ')
+    .replace(/[^a-z ]+/g,' ').replace(/\s+/g,' ').trim();
+  const lista = (partes||[]).map(p=>({ nome:p.nome, doc:p.doc||'', docs:p.doc?[p.doc]:[], rotulo:'' }));
+  const ehPJ = p => dig(p.doc).length===14 || /\bmei\b/i.test(p.nome);
+  const usados = new Set();
+  lista.forEach((pf,i)=>{
+    if(usados.has(i) || ehPJ(pf)) return;
+    const n = norm(pf.nome);
+    if(n.split(' ').length < 2) return;
+    lista.forEach((pj,j)=>{
+      if(j===i || usados.has(j) || !ehPJ(pj) || pf.rotulo) return;
+      if(!(' '+norm(pj.nome)+' ').includes(' '+n+' ')) return;
+      pf.rotulo = /\bmei\b/i.test(pj.nome) ? 'PF e MEI' : 'PF e PJ';
+      if(pj.doc) pf.docs.push(pj.doc);
+      usados.add(j);
+    });
+  });
+  return lista.filter((_,i)=>!usados.has(i))
+    .map(p=>({ ...p, rotuloNome: p.rotulo ? `${p.nome} (${p.rotulo})` : p.nome }));
+}
 // Coleta os dados do extrato. Separado de quem gera o PDF/PNG porque o mesmo
 // documento serve para baixar e para enviar ao credor por WhatsApp.
 async function _extratoRepasseDados(cobId){
@@ -37699,7 +37727,8 @@ async function _extratoRepasseDados(cobId){
   const _partes = (partes||[]).slice().sort((x,y)=>(y.principal?1:0)-(x.principal?1:0))
     .map(x=>({ nome:(x.devedores&&x.devedores.nome)||'', doc:(x.devedores&&x.devedores.doc)||'' }))
     .filter(x=>x.nome);
-  const devedor = _partes.map(x=>x.nome).join(' e ') || '—';
+  const _grupos = _extratoAgruparPartes(_partes);
+  const devedor = _grupos.map(x=>x.rotuloNome).join(' e ') || '—';
   const devedorDoc = (_partes[0] && _partes[0].doc) || '';
   const capital = (cob.valor_capital!=null) ? +cob.valor_capital : null;
 
@@ -37727,7 +37756,7 @@ async function _extratoRepasseDados(cobId){
   // O grupo tem precedência: `clientes.telefone` nesses casos é um número
   // pessoal, e mandar extrato de repasse para lá é entregar no lugar errado.
   const grupo = (cli.metadata && cli.metadata.whatsapp_repasse) || '';
-  return { cobId, html, credor, credorTel: cli.telefone||'', credorGrupo: grupo, devedor, devedorDoc, devedorPartes: _partes, total, pago, aberto };
+  return { cobId, html, credor, credorTel: cli.telefone||'', credorGrupo: grupo, devedor, devedorDoc, devedorPartes: _grupos, total, pago, aberto };
 }
 
 async function extratoRepasseAcordoPDF(cobId){
@@ -37824,8 +37853,13 @@ async function enviarExtratoRepasseWA(cobId){
     // o avalista, que é justamente quem ele pode acionar.
     const _docRot = (doc)=>{ const n=String(doc||'').replace(/\D/g,'');
       return n.length===11 ? 'CPF' : (n.length===14 ? 'CNPJ' : 'CPF/CNPJ'); };
-    const _quemLista = (d.devedorPartes||[]).map(p =>
-      p.doc ? `*${p.nome}*, ${_docRot(p.doc)} ${_tajDocFmt(p.doc)}` : `*${p.nome}*`);
+    const _docsTxt = p => (p.docs&&p.docs.length ? p.docs : (p.doc?[p.doc]:[]))
+      .map(x=>`${_docRot(x)} ${_tajDocFmt(x)}`).join(' e ');
+    const _quemLista = (d.devedorPartes||[]).map(p => {
+      const nomeP = p.rotulo ? `*${p.nome}* (${p.rotulo})` : `*${p.nome}*`;
+      const docs = _docsTxt(p);
+      return docs ? `${nomeP}, ${docs}` : nomeP;
+    });
     const quemDev = _quemLista.length === 0 ? `*${d.devedor}*`
       : _quemLista.length === 1 ? _quemLista[0]
       : _quemLista.slice(0,-1).join(', ') + ' e ' + _quemLista[_quemLista.length-1];
