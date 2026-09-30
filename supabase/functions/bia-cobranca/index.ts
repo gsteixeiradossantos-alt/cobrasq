@@ -10,8 +10,12 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { MODELO } from '../_shared/bia-system.ts';
 import { resolverJid } from '../_shared/telefone-jid.ts';
+import { ehDiaUtil, etapaPreVencimento, noveHorasBRT, vencimentoEfetivo } from '../_shared/dias-uteis.ts';
+import { textosPreVencimento } from '../_shared/bia-avisos.ts';
 
 const SIG = '*Bia • COBRASQ*';
+// 1º aviso antes do vencimento: N dias antes (mesma variável do bia-cobranca-sync)
+const AVISO_DIAS = Math.max(1, Number(Deno.env.get('AVISO_PREVIO_DIAS') ?? 3));
 const MAX_POR_RUN = 10; // query limit (pode ter duplicatas de telefone que serão deduplicadas)
 
 function json(o: unknown, status = 200) {
@@ -35,8 +39,10 @@ function spDate(iso: string | null): string {
   if (!iso) return '';
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date(iso));
 }
-// horário comercial em São Paulo: seg-sex, 09:00–17:59 (via Intl parts — robusto)
+// horário comercial em São Paulo: dia útil (seg-sex fora de feriado nacional),
+// 09:00–17:59 (via Intl parts — robusto)
 function horarioComercial(): boolean {
+  if (!ehDiaUtil(hojeSP())) return false;
   const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Sao_Paulo', weekday: 'short', hour: 'numeric', hour12: false }).formatToParts(new Date());
   const wd = parts.find(p => p.type === 'weekday')?.value || '';
   let h = parseInt(parts.find(p => p.type === 'hour')?.value || '0', 10);
@@ -371,7 +377,7 @@ Deno.serve(async (req) => {
     }
 
     // confere no Asaas se já pagou / deletado / cancelado → para de cobrar
-    let pago = false, cancelado = false, venc = c.venc_atual, url = c.invoice_url;
+    let pago = false, cancelado = false, venc = c.venc_atual, url = c.invoice_url, valorAsaas: number | null = null;
     try {
       const r = await fetch(`${aBase}/payments/${c.asaas_payment_id}`, { headers: aHead });
       if (r.ok) {
@@ -380,6 +386,7 @@ Deno.serve(async (req) => {
         if (['RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH'].includes(st)) pago = true;
         if (['CANCELLED', 'REFUNDED', 'DELETED'].includes(st) || p.deleted === true) cancelado = true;
         venc = p.dueDate || venc; url = p.invoiceUrl || url;
+        if (Number(p.value) > 0) valorAsaas = Number(p.value);
       }
     } catch { /* mantém cache */ }
     if (pago) {
@@ -431,38 +438,47 @@ Deno.serve(async (req) => {
       followups++; continue;
     }
 
-    // ===== AVISO PRÉ-VENCIMENTO =====
-    // Até 21/08/2026 ninguém era avisado ANTES do boleto vencer: o sync só trazia
-    // vencidos e os que venciam no dia, e as notificações nativas do Asaas estão
-    // desligadas de propósito (todo customer é criado com notificationDisabled).
-    // Este ramo trata o boleto que AINDA NÃO VENCEU: manda um lembrete gentil, uma
-    // vez só, e reagenda para o dia do vencimento — a partir daí a régua de cobrança
-    // normal assume. Não conta como lembrete de cobrança e nunca escala: quem ainda
-    // está no prazo não é inadimplente e não pode ser tratado como tal.
+    // ===== AVISOS ANTES DO VENCIMENTO (3 dias antes, véspera e dia) =====
+    // Até 21/08/2026 ninguém era avisado ANTES do boleto vencer (as notificações
+    // nativas do Asaas estão desligadas de propósito: todo customer é criado com
+    // notificationDisabled). Até 30/09/2026 era UM aviso D-3 contado em dias
+    // corridos, e a data vinha da agenda gravada no sync: quando o vencimento
+    // mudava no Asaas, o aviso saía na data velha (Elisandra levou "vence em 10
+    // dias" em 30/09 para um boleto de 10/10; José Lentz, já cobrado 2x, levou
+    // "passando só pra lembrar... vence em 80 dias").
+    //
+    // Agora a etapa sai da data REAL do Asaas, lida agora: 3 dias antes, véspera
+    // (dia útil anterior) e dia — todos em dia útil; boleto que vence em sábado,
+    // domingo ou feriado conta como vencendo no próximo dia útil (dias-uteis.ts).
+    // Não conta como lembrete de cobrança e nunca escala: quem ainda está no prazo
+    // não é inadimplente e não pode ser tratado como tal.
     const vencIso = String(venc || c.venc_atual || '').slice(0, 10);
-    if (vencIso && vencIso > hojeSP()) {
+    const pre = vencIso ? etapaPreVencimento(vencIso, hoje, AVISO_DIAS) : { etapa: 'vencido' as const };
+    if (pre.etapa !== 'vencido') {
+      const sinc: Record<string, unknown> = { venc_atual: vencIso, invoice_url: url, updated_at: agoraIso };
+      if (valorAsaas) sinc.valor = valorAsaas;
+      if (pre.etapa === 'aguardar') {
+        // cedo demais (vencimento mudou para frente): só reagenda, sem mensagem
+        await sb.from('bia_cobranca').update({ ...sinc, proximo_lembrete_em: noveHorasBRT(pre.proximo) }).eq('asaas_payment_id', c.asaas_payment_id);
+        puladas++; continue;
+      }
       if (!(await whatsappExiste(tel))) {
         await sb.from('bia_cobranca').update({ status: 'pausada', observacao: 'numero sem WhatsApp', updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
         puladas++; continue;
       }
-      const diasFalta = Math.round((Date.parse(vencIso) - Date.parse(hojeSP())) / 864e5);
-      const quando = diasFalta === 1 ? 'amanhã' : `em ${diasFalta} dias`;
-      const blocosAviso = [
-        `${SIG}\n${ola}`,
-        `Passando só pra lembrar: sua parcela de R$ ${brMoney(c.valor)} vence ${quando}, dia ${brDate(vencIso)}.`,
-        `Se quiser adiantar, o boleto está aqui:\n${url}`,
-        `Se já pagou, pode desconsiderar.`,
-      ];
+      const blocosAviso = textosPreVencimento({
+        etapa: pre.etapa, sig: SIG, nome: String(c.nome || ''), valor: valorAsaas ?? c.valor,
+        venc: vencIso, vencEf: vencimentoEfetivo(vencIso), hoje, url: String(url || ''),
+        jaCobrado: (c.lembretes_enviados ?? 0) >= 1,
+      });
       const { ok: okAviso } = await enviarBlocos(tel, blocosAviso);
       if (!okAviso) { puladas++; continue; }
-      // Reagenda para o dia do vencimento: um aviso por boleto, e a régua normal
-      // retoma quando (e se) ele vencer.
       await sb.from('bia_cobranca').update({
-        proximo_lembrete_em: new Date(Date.parse(vencIso + 'T12:00:00Z')).toISOString(),
-        observacao: `aviso pré-vencimento enviado em ${hojeSP()} (D-${diasFalta})`,
-        updated_at: agoraIso,
+        ...sinc,
+        proximo_lembrete_em: noveHorasBRT(pre.proximo),
+        observacao: `aviso ${pre.etapa === 'antecipado' ? '3 dias antes' : pre.etapa === 'vespera' ? 'da véspera' : 'do dia do vencimento'} enviado em ${hoje}`,
       }).eq('asaas_payment_id', c.asaas_payment_id);
-      await sb.from('bia_cobranca_log').insert({ asaas_payment_id: c.asaas_payment_id, telefone: tel, lembrete_num: 0, texto: 'AVISO PRE-VENCIMENTO: ' + blocosAviso.join('\n\n') });
+      await sb.from('bia_cobranca_log').insert({ asaas_payment_id: c.asaas_payment_id, telefone: tel, lembrete_num: 0, texto: `AVISO PRE-VENCIMENTO (${pre.etapa}): ` + blocosAviso.join('\n\n') });
       enviadas++; continue;
     }
 
@@ -484,8 +500,8 @@ Deno.serve(async (req) => {
 
     // monta a mensagem: escalada por dias de atraso (contra a data ATUAL) + firmeza real.
     const n = (c.lembretes_enviados ?? 0) + 1;
-    const vencAtualStr = String(venc || c.venc_atual || '').slice(0, 10);
-    const diasVencAtual = vencAtualStr ? Math.round((Date.parse(hoje) - Date.parse(vencAtualStr)) / 864e5) : diasVencido;
+    // atraso contado do vencimento de FATO (boleto de sábado vence na segunda)
+    const diasVencAtual = vencIso ? Math.round((Date.parse(hoje) - Date.parse(vencimentoEfetivo(vencIso))) / 864e5) : diasVencido;
     // só ameaça (judicial/negativação/protesto) se JÁ houve lembrete anterior do MESMO boleto
     // sem resultado e o atraso passou de 7 dias — no 1º contato, nunca ameaça.
     const jaCobrado = (c.lembretes_enviados ?? 0) >= 1;
@@ -525,12 +541,6 @@ Deno.serve(async (req) => {
         `Preciso que você regularize com urgência. Continuando sem pagamento, o caso vai ser encaminhado pra negativação e protesto.`,
         `Dá pra resolver por aqui:\n${url}`,
         `Se precisar acertar uma data, me chama.`,
-      ];
-    } else if (diasVencAtual <= 0) {
-      blocos = [
-        `${ola} Aqui é da COBRASQ. Passando pra lembrar que sua parcela de R$ ${val} vence ${diasVencAtual === 0 ? `hoje (${brDate(venc)})` : `no dia ${brDate(venc)}`}.${multi}`,
-        `Pra já deixar quitado, é só usar o link:\n${url}`,
-        `Qualquer coisa, estou à disposição.`,
       ];
     } else {
       blocos = [
