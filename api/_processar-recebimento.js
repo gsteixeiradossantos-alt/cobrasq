@@ -48,6 +48,7 @@ const { zapiSendText, zapiSendDocumentPdf, normalizarTelefone } = require('./_za
 const { gerarReciboPdfBase64, formaPagamento } = require('./_recibo.js');
 
 const { hojeBR } = require('./_data.js');
+const { garantirTarifaDoPagamento } = require('./_tarifas-asaas.js');
 // Conta e categorias da ponte fin_lancamento. Sem elas o lançamento nasce órfão:
 // some dos relatórios por categoria e não entra em conta nenhuma. A revisão de
 // 14/08/2026 achou 19 assim (R$ 1.970,86) — 11 "Recebimento" e 8 "Repasse ao
@@ -407,6 +408,11 @@ module.exports = async function handler(req, res) {
           operacao.lancamento_despesa_id = lancDespesaId;
         }
       } catch (e) { console.warn('[processar-recebimento] ponte fin_lancamento:', e.message); }
+
+      // Tarifa do Asaas (value − netValue), no dia do crédito. Até 30/09/2026 era lançada
+      // à mão na conciliação — ver api/_tarifas-asaas.js. Idempotente por marcador; o
+      // cron diário cobre o caso de este passo falhar.
+      await garantirTarifaDoPagamento({ payment, paymentId, devedor });
     }
 
     // PR5: emissão automática da NFS-e (gated por AUTO_EMIT_NF=on). Best-effort —
