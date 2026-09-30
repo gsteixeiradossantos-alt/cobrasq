@@ -34040,8 +34040,18 @@ function _finContaAvatar(conta, size){
 //     novos, em decrescente tira os mais antigos. As outras colunas ordenam só
 //     o que já foi carregado — o aviso de "lista cortada" no cabeçalho continua
 //     sendo o que denuncia que existe coisa fora da janela.
+// Data em que a linha cai no período, na ordem e na faixa do dia. Em aberto, é o
+// VENCIMENTO: é quando o dinheiro precisa entrar ou sair. Quitada, é a competência, que a
+// baixa grava com a data do pagamento. Filtrar tudo pela competência escondia o que mudou
+// de data: em 30/09/2026 o Leandro Bernardo de Souza adiou as parcelas para 25/10 e 25/11 e
+// elas seguiam em setembro; o repasse 8/11 do Isac, que vence em 26/09 com competência de
+// agosto, sumia de setembro. Eram 43 lançamentos em aberto com os dois meses diferentes.
+function _finLancDataPeriodo(l){
+  if(!l.data_vencimento || l.status!==0 || l.data_pagamento || l.conciliado) return (l.data_competencia||'').slice(0,10);
+  return String(l.data_vencimento).slice(0,10);
+}
 const FIN_LANC_ORD_COLS = {
-  data:      { label:'DATA',      val:(l)=>(l.data_competencia||'') },
+  data:      { label:'DATA',      val:(l)=>_finLancDataPeriodo(l) },
   descricao: { label:'DESCRIÇÃO', val:(l)=>(l.descricao||'').toLowerCase() },
   categoria: { label:'CATEGORIA', val:(l,ctx)=>{ const c=ctx&&ctx.catPorLanc&&ctx.catPorLanc[l.id]; return c?c.nome.toLowerCase():'\uffff'; } },
   valor:     { label:'VALOR',     val:(l)=>(l.tipo_movimento===1?1:-1)*Math.abs(+l.valor||0) },
@@ -34066,7 +34076,7 @@ function _finLancCascataOrdenados(){
     if(va < vb) return -s;
     if(va > vb) return  s;
     // Desempate fixo: sem isto a ordem de iguais muda a cada render.
-    const da = a.data_competencia||'', db = b.data_competencia||'';
+    const da = _finLancDataPeriodo(a), db = _finLancDataPeriodo(b);
     if(da !== db) return da < db ? -1 : 1;
     return (a.id||0) - (b.id||0);
   });
@@ -34141,8 +34151,10 @@ async function _finLancCascataCarregar(){
   // ── Etapa 1: as linhas ──────────────────────────────────────────────────────
   const baseSel = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,valor_pago,tipo_movimento,status,conciliado,conta_id,cobranca_id,credor_id,contato_id,numero_parcela,total_parcelas,judicial_liberado_em,fin_conta(descricao,banco_nome),fin_contato(nome)';
   const extra = (await _finTemColunasCascata()) ? ',cedente_id,capital,meu_total,amortizado,repasse_status' : '';
+  // Mesma regra de _finLancDataPeriodo: em aberto pelo vencimento, quitado pela competência.
   const consultaBase = () => sb.from('fin_lancamento').select(baseSel+extra)
-    .gte('data_competencia', ini).lte('data_competencia', fim);
+    .or(`and(status.eq.0,data_pagamento.is.null,conciliado.is.false,data_vencimento.gte.${ini},data_vencimento.lte.${fim}),`
+      + `and(data_competencia.gte.${ini},data_competencia.lte.${fim},or(status.neq.0,data_pagamento.not.is.null,conciliado.is.true,data_vencimento.is.null))`);
   const ordenaLimita = c => c.order('data_competencia',{ascending:_finLancOrdServidorAsc()}).limit(FIN_LANC_LIMITE);
   let q = consultaBase();
   if(termo) q = q.filter('descricao', 'imatch', _finBuscaRegexSemAcento(termo));
@@ -34344,7 +34356,7 @@ function _finLancCascataRender(){
   const totalDoDia = {};
   if(agrupado){
     for(const l of ordenados){
-      const d = (l.data_competencia||'').slice(0,10);
+      const d = _finLancDataPeriodo(l);
       const g = totalDoDia[d] || (totalDoDia[d] = { e:0, s:0, n:0 });
       const v = Math.abs(+l.valor||0);
       if(l.tipo_movimento===1) g.e += v; else g.s += v;
@@ -34354,7 +34366,7 @@ function _finLancCascataRender(){
   const porDia = [];
   let atual = null;
   for(const l of (agrupado ? pagina : [])){
-    const d = (l.data_competencia||'').slice(0,10);
+    const d = _finLancDataPeriodo(l);
     if(!atual || atual.data !== d){ atual = { data:d, itens:[], tot: totalDoDia[d] || { e:0, s:0, n:0 } }; porDia.push(atual); }
     atual.itens.push(l);
   }
