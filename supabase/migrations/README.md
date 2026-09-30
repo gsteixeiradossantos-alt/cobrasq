@@ -291,7 +291,8 @@ upload falha no CHECK.
 
 ## 20260930_02 — trava de tarifa do Asaas duplicada (F-52b)
 
-**Não aplicada.** Aditiva: índice único parcial
+**Aplicada em 30/09/2026** (índice conferido em `pg_indexes`; teste com rollback:
+segundo insert com o mesmo marcador recusado com 23505). Aditiva: índice único parcial
 `fin_lancamento_tarifa_asaas_uidx` sobre a primeira palavra de `observacoes`
 (o marcador `[asaas_tarifa:…]` / `[asaas_ft:…]`), só nas linhas que têm marcador.
 Em 30/09/2026 havia 0 linhas marcadas em produção. Enquanto não aplicada, o
