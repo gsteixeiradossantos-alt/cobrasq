@@ -64,6 +64,14 @@ async function operacaoDoLancamento(lancamentoId, body) {
       return { status: 400, json: { error: 'lançamento sem credor vinculado — informe credor_id ou vincule a cobrança' } };
     }
     const credorEscolhido = body.credor_id || credorId;
+    // O id da cobrança costuma ser o do devedor, mas há cobrança sem linha em `devedores`
+    // (69 de 1.123 em 30/09/2026 — ex.: Deivid Ghizzo, cadastrado direto na cobrança).
+    // Gravar o id assim viola fin_operacao_devedor_id_fkey (409) e trava o repasse; sem
+    // devedor, a operação vai sem o vínculo — o nome sai da descrição do lançamento.
+    if (devedorId) {
+      const dvs = await sbFetch(`devedores?id=eq.${devedorId}&select=id&limit=1`).catch(() => null);
+      if (Array.isArray(dvs) && !dvs.length) devedorId = null;
+    }
 
     // Grava a escolha no lançamento e nas OUTRAS parcelas em aberto do mesmo
     // devedor, para não repetir a escolha a cada parcela. Casa pelo texto sem a
