@@ -7,7 +7,7 @@
 // Idempotente: se já está 'efetuado', não reenvia.
 
 const { sbFetch } = require('./_sb.js');
-const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp, listarParcelas } = require('./_repasse-msg.js');
+const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp, primeiraParcela } = require('./_repasse-msg.js');
 const { devedorPrincipal, partesDaCobranca, registrarRepasseNaFicha, resolverCobrancaId } = require('./_repasse-ficha.js');
 const { guardarComprovante } = require('./_comprovante.js');
 const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_comprovante-pdf.js');
@@ -139,7 +139,7 @@ module.exports = async function handler(req, res) {
       if (!pdf) pdf = await imprimirPaginaAsaasPdf(comprovanteUrl);
       if (!pdf) {
         pdf = await gerarComprovanteRepassePdf({
-          credorNome: credor.nome, devedor: devNome, parcela: parcelasLote ? listarParcelas(parcelasLote) : op.parcela,
+          credorNome: credor.nome, devedor: devNome, parcela: parcelasLote ? primeiraParcela(parcelasLote) : op.parcela,
           valor: valorPix, dataISO: hojeBR(),
           transferId: transferId || op.repasse_asaas_transfer_id,
           chavePix: (op.metadata && op.metadata.repasse_pix_key) || '', urlAsaas: comprovanteUrl,
