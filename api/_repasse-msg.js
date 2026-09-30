@@ -202,11 +202,41 @@ function docPorExtenso(doc) {
   return '';
 }
 
+// Junta a pessoa física com a empresa dela quando as duas são partes do mesmo caso
+// (MEI, ou CNPJ cujo nome contém o nome da PF). Sem isso o credor lia "Jeferson Luciano
+// Pereira (CPF …) e 50.677.114 Jeferson Luciano Pereira (MEI) (CNPJ …)" (30/09/2026).
+// A PJ vira rótulo "(PF e MEI)" ou "(PF e PJ)" e os dois documentos ficam. Mesma regra
+// de _extratoAgruparPartes no index.html (extrato de repasse).
+function agruparPartes(partes) {
+  const dig = d => String(d || '').replace(/\D/g, '');
+  const norm = t => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    .replace(/\(?\bmei\b\)?/g, ' ').replace(/[\d./\-]{2,}/g, ' ')
+    .replace(/[^a-z ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const lista = (partes || []).filter(p => p && p.nome)
+    .map(p => ({ nome: p.nome, doc: p.doc || '', docs: p.doc ? [p.doc] : [], rotulo: '' }));
+  const ehPJ = p => dig(p.doc).length === 14 || /\bmei\b/i.test(p.nome);
+  const usados = new Set();
+  lista.forEach((pf, i) => {
+    if (usados.has(i) || ehPJ(pf)) return;
+    const n = norm(pf.nome);
+    if (n.split(' ').length < 2) return;
+    lista.forEach((pj, j) => {
+      if (j === i || usados.has(j) || !ehPJ(pj) || pf.rotulo) return;
+      if (!(' ' + norm(pj.nome) + ' ').includes(' ' + n + ' ')) return;
+      pf.rotulo = /\bmei\b/i.test(pj.nome) ? 'PF e MEI' : 'PF e PJ';
+      if (pj.doc) pf.docs.push(pj.doc);
+      usados.add(j);
+    });
+  });
+  return lista.filter((_, i) => !usados.has(i));
+}
+
 // "A", "A e B", "A, B e C" — cada um com o documento entre parênteses quando conhecido.
 function listarPagadores(partes) {
-  const nomes = (partes || []).filter(p => p && p.nome).map(p => {
-    const d = docPorExtenso(p.doc);
-    return d ? `${p.nome} (${d})` : p.nome;
+  const nomes = agruparPartes(partes).map(p => {
+    const nome = p.rotulo ? `${p.nome} (${p.rotulo})` : p.nome;
+    const d = p.docs.map(docPorExtenso).filter(Boolean).join(' e ');
+    return d ? `${nome} (${d})` : nome;
   });
   if (nomes.length <= 1) return nomes[0] || '';
   return nomes.slice(0, -1).join(', ') + ' e ' + nomes[nomes.length - 1];
@@ -344,4 +374,4 @@ async function enviarComprovanteCredor({ telefone, parcela, total, devedor, doc,
   }
 }
 
-module.exports = { lerDescricaoRepasse, descricaoPix, msgComprovanteCredor, listarPagadores, pedeBaixaRestricoes, PARAGRAFO_RESTRICOES, paragrafoRestricoes, enviarComprovanteCredor, destinoWhatsapp, docPorExtenso, proximoHorarioComercial, JANELA_COMPROVANTE, ESPACO_MS };
+module.exports = { lerDescricaoRepasse, descricaoPix, msgComprovanteCredor, listarPagadores, agruparPartes, pedeBaixaRestricoes, PARAGRAFO_RESTRICOES, paragrafoRestricoes, enviarComprovanteCredor, destinoWhatsapp, docPorExtenso, proximoHorarioComercial, JANELA_COMPROVANTE, ESPACO_MS };
