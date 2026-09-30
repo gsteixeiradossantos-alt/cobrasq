@@ -22,7 +22,7 @@ const { sbFetch } = require('./_sb.js');
 const { asaasReq } = require('./_asaas.js');
 const { guardarComprovante } = require('./_comprovante.js');
 const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_comprovante-pdf.js');
-const { lerDescricaoRepasse, descricaoPix, listarParcelas, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
+const { lerDescricaoRepasse, descricaoPix, primeiraParcela, enviarComprovanteCredor, destinoWhatsapp } = require('./_repasse-msg.js');
 const { saldoDeCapital, devedorPrincipal, partesDaCobranca, resolverCobrancaId, registrarRepasseNaFicha } = require('./_repasse-ficha.js');
 
 const { hojeBR } = require('./_data.js');
@@ -576,7 +576,7 @@ async function repassarLote(res, body) {
       if (!pdf) pdf = await imprimirPaginaAsaasPdf(comprovanteUrl);
       if (!pdf) {
         pdf = await gerarComprovanteRepassePdf({
-          credorNome: credor.nome, devedor, parcela: listarParcelas(parcelas),
+          credorNome: credor.nome, devedor, parcela: primeiraParcela(parcelas),
           valor: total, dataISO: hojeBR(),
           transferId: transfer.id, chavePix: pixKey, urlAsaas: comprovanteUrl,
         });

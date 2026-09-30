@@ -6,7 +6,7 @@
  * três PIX, três tarifas, três comprovantes. O Gustavo pediu um PIX com a soma.
  *
  * O que se prova aqui, com banco e Asaas falsos:
- *   - UM /transfers com a soma e a descrição "3, 8 e 9 - Fernanda da Silva";
+ *   - UM /transfers com a soma e a descrição "3 - Fernanda da Silva" (só a 1ª parcela, pedido de 30/09);
  *   - as três operações ficam com o MESMO transfer; as três saídas são baixadas;
  *   - UMA mensagem ao credor citando as três parcelas e UMA linha na ficha, com a soma;
  *   - Asaas ainda processando → o webhook conclui o grupo inteiro, e a reentrega é
@@ -155,7 +155,7 @@ function inicio() { novoBanco(); transfers = []; mensagens = []; fichas = []; as
     assert.strictEqual(r.code, 200, JSON.stringify(r.corpo));
     assert.strictEqual(transfers.length, 1);
     assert.strictEqual(transfers[0].value, 1218);
-    assert.strictEqual(transfers[0].description, '3, 8 e 9 - Fernanda da Silva');
+    assert.strictEqual(transfers[0].description, '3 - Fernanda da Silva');
     assert.strictEqual(r.corpo.valor_total, 1218);
     assert.strictEqual(r.corpo.repasse_status, 'efetuado');
     assert.strictEqual(db.fin_operacao.length, 3);
@@ -164,7 +164,7 @@ function inicio() { novoBanco(); transfers = []; mensagens = []; fichas = []; as
     assert.strictEqual(db.fin_lancamento.find(l => l.id === 21).status, 0, 'lançamento fora da seleção não pode ser tocado');
     assert.strictEqual(mensagens.length, 1);
     assert.deepStrictEqual(mensagens[0].parcelas, [3, 8, 9]);
-    assert.ok(/parcelas 3, 8 e 9 de 9/.test(mensagens[0].texto), mensagens[0].texto);
+    assert.ok(/referente à \*parcela 3 de 9\*/.test(mensagens[0].texto) && !/8 e 9/.test(mensagens[0].texto), mensagens[0].texto);
     assert.strictEqual(fichas.length, 1);
     assert.strictEqual(fichas[0].valor, 1218);
   });

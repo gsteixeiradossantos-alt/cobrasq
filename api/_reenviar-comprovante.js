@@ -12,7 +12,7 @@ const { requireUser, applyCors } = require('./_auth.js');
 const { sbFetch } = require('./_sb.js');
 const { guardarComprovante } = require('./_comprovante.js');
 const { gerarComprovanteRepassePdf, imprimirPaginaAsaasPdf } = require('./_comprovante-pdf.js');
-const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp, listarParcelas } = require('./_repasse-msg.js');
+const { lerDescricaoRepasse, enviarComprovanteCredor, destinoWhatsapp, primeiraParcela } = require('./_repasse-msg.js');
 const { registrarRepasseNaFicha, resolverCobrancaId, devedorPrincipal, partesDaCobranca } = require('./_repasse-ficha.js');
 
 const { hojeBR } = require('./_data.js');
@@ -66,7 +66,7 @@ module.exports = async function handler(req, res) {
     if (!pdf) pdf = await imprimirPaginaAsaasPdf(url);
     if (!pdf) {
       pdf = await gerarComprovanteRepassePdf({
-        credorNome: credor.nome, devedor: devNome, parcela: ehLote ? listarParcelas(lote.parcelas) : op.parcela,
+        credorNome: credor.nome, devedor: devNome, parcela: ehLote ? primeiraParcela(lote.parcelas) : op.parcela,
         valor: valorPix,
         dataISO: String(op.repasse_efetuado_em || '').slice(0, 10) || hojeBR(),
         transferId: op.repasse_asaas_transfer_id,
