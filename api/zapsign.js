@@ -6,6 +6,29 @@
 // excluía documentos de assinatura e lia PII de contratos do escritório.
 
 const { requireUser, applyCors } = require('./_auth.js');
+const { sbFetch } = require('./_sb.js');
+
+// Disparar assinatura (qualquer método que não seja leitura) é do proprietário
+// e do colaborador ATIVO com app_users.pode_zapsign = true (28/09/2026).
+// Sem conseguir conferir, nega (fail-closed). Leitura (GET) segue como antes.
+async function podeDisparar(user, res) {
+  let rows;
+  try {
+    rows = await sbFetch(`app_users?id=eq.${encodeURIComponent(user.id)}&select=papel,ativo,pode_zapsign`, { method: 'GET' });
+  } catch (e) {
+    console.error('[zapsign proxy] leitura de app_users falhou:', e.message);
+    res.status(503).json({ error: 'Não foi possível conferir sua permissão de assinatura. Tente novamente.' });
+    return false;
+  }
+  const u = Array.isArray(rows) ? rows[0] : null;
+  const ok = !!u && u.ativo !== false &&
+    (u.papel === 'proprietario' || (u.papel === 'colaborador' && u.pode_zapsign === true));
+  if (!ok) {
+    res.status(403).json({ error: 'Seu usuário não tem permissão para enviar documentos para assinatura. Peça ao Gustavo.' });
+    return false;
+  }
+  return true;
+}
 
 module.exports = async function handler(req, res) {
   applyCors(req, res);
@@ -41,6 +64,8 @@ module.exports = async function handler(req, res) {
       return res.status(502).json({ error: 'download falhou: ' + (e && e.message || e) });
     }
   }
+
+  if (!['GET', 'HEAD'].includes(req.method) && !(await podeDisparar(user, res))) return;
 
   // Credencial SÓ via env var (gestor confirmou ZAPSIGN_TOKEN setada no Vercel).
   const token = process.env.ZAPSIGN_TOKEN || '';

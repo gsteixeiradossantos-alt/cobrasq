@@ -17,6 +17,62 @@
 // para que os call sites no front continuem funcionando sem mudança de parsing.
 
 const { requireUser, applyCors } = require('./_auth.js');
+const { sbFetch } = require('./_sb.js');
+
+// Só a equipe usa a IA (28/09/2026): proprietário ou colaborador ATIVO em app_users.
+// Cedente e devedor logados eram aceitos só por terem sessão válida.
+// Limite diário POR USUÁRIO em app_users.ia_limite_dia (dia de Brasília), contado no
+// banco pela RPC ia_uso_registrar (service role; migração 20260928_02). O proprietário
+// não tem teto. Colaborador começa em 0 = IA bloqueada (decisão de 01/10/2026); o
+// Gustavo libera na tela de usuários, sem mexer em código.
+async function lerLimiteColaborador(userId) {
+  // Consulta à parte: sem a coluna (migração pendente) o proprietário segue usando a
+  // IA e o colaborador fica bloqueado (limite 0).
+  try {
+    const rows = await sbFetch(`app_users?id=eq.${encodeURIComponent(userId)}&select=ia_limite_dia`, { method: 'GET' });
+    const n = Number(Array.isArray(rows) && rows[0] ? rows[0].ia_limite_dia : 0);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  } catch (e) {
+    console.error('[claude proxy] leitura de ia_limite_dia falhou:', e.message);
+    return 0;
+  }
+}
+
+async function autorizarEquipe(user, res) {
+  let rows;
+  try {
+    rows = await sbFetch(`app_users?id=eq.${encodeURIComponent(user.id)}&select=papel,ativo`, { method: 'GET' });
+  } catch (e) {
+    console.error('[claude proxy] leitura de app_users falhou:', e.message);
+    res.status(503).json({ error: { message: 'Não foi possível conferir seu acesso à IA. Tente novamente.' } });
+    return null;
+  }
+  const u = Array.isArray(rows) ? rows[0] : null;
+  if (!u || u.ativo === false || !['proprietario', 'colaborador'].includes(u.papel)) {
+    res.status(403).json({ error: { message: 'A IA é de uso exclusivo da equipe COBRASQ.' } });
+    return null;
+  }
+  if (u.papel === 'proprietario') return u;
+  const limite = await lerLimiteColaborador(user.id);
+  if (limite <= 0) {
+    res.status(403).json({ error: { message: 'A IA não está liberada para o seu usuário. Se precisar, fale com o Gustavo.' } });
+    return null;
+  }
+  let r;
+  try {
+    r = await sbFetch('rpc/ia_uso_registrar', { method: 'POST', body: JSON.stringify({ p_user: user.id, p_limite: limite }) });
+  } catch (e) {
+    // Sem a contagem, fecha (fail-closed): melhor negar do que liberar sem teto.
+    console.error('[claude proxy] ia_uso_registrar falhou:', e.message);
+    res.status(503).json({ error: { message: 'Não foi possível registrar o uso da IA. Tente novamente.' } });
+    return null;
+  }
+  if (!r || r.ok !== true) {
+    res.status(429).json({ error: { message: `Limite diário da IA atingido (${limite} pedidos). Volta amanhã; se precisar antes, fale com o Gustavo.` } });
+    return null;
+  }
+  return u;
+}
 
 module.exports = async function handler(req, res) {
   applyCors(req, res, { methods: 'POST, OPTIONS' });
@@ -53,6 +109,8 @@ module.exports = async function handler(req, res) {
   if (!Number.isFinite(body.max_tokens) || body.max_tokens <= 0 || body.max_tokens > MAX_TOKENS_CEILING) {
     body.max_tokens = Math.min(Number(body.max_tokens) > 0 ? Number(body.max_tokens) : 4096, MAX_TOKENS_CEILING);
   }
+
+  if (!(await autorizarEquipe(user, res))) return;
 
   const version = req.headers['anthropic-version'] || '2023-06-01';
 

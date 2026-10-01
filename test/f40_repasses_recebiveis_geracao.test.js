@@ -51,7 +51,8 @@ let nInad = 0; let falharInad = false;
 const renders = [];
 const ctx = {
   console, setTimeout, Promise, Date, Math, Object, Set, Array, String, Number,
-  DB: { config: { asaasKey: 'k' } },
+  DB: { config: { integ: { asaas: true } } },
+  integOn: n => !!ctx.DB.config.integ[n],
   isoLocal: d => d.toISOString().slice(0, 10),
   _rapLerDescricao: () => ({}),
   getSupabase: () => ({ from: () => ({

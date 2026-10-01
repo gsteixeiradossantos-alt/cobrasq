@@ -2469,7 +2469,7 @@ body.viewas-readonly select {
               <a onclick="showPage('audiencias')">Audiências</a>
               <a onclick="showPage('lembretes')">Lembretes</a>
               <a onclick="showPage('docs')">Documentos</a>
-              <a onclick="showPage('wa')">WhatsApp</a>
+              <a id="cn-more-wa" onclick="showPage('wa')">WhatsApp</a>
               <a onclick="showPage('intimacoes')">Intimações</a>
               <a onclick="showPage('clientes')">Clientes</a>
               <a onclick="showPage('importacao')">Importação</a>
@@ -5182,6 +5182,28 @@ function reinitSupabase(){
 
 // Onda 1b: os proxies /api/* agora exigem o token de sessão do Supabase
 // (Authorization: Bearer). Este helper devolve o header para anexar no fetch.
+// Integração ligada? Marca sem segredo em DB.config.integ (o valor da chave fica em
+// config_segredos / variáveis da Vercel). Segurança do colaborador, 28/09/2026.
+// Chaves de integração saíram do blob (config_segredos, só o proprietário lê; o
+// servidor usa as variáveis da Vercel). Uma aba/localStorage antigo ainda pode tê-las
+// em DB.config — apaga para não regravar no blob (o trigger do banco também remove).
+const _SEGREDOS_BLOB = ['asaasKey','zapsignToken','zapiInstanceId','zapiToken','zapiClientToken','claudeApiKey'];
+function _limparSegredosLocais(){
+  if(!DB || !DB.config || !DB.config.integ) return; // só depois da migração (integ presente)
+  _SEGREDOS_BLOB.forEach(k=>{ if(k in DB.config) delete DB.config[k]; });
+}
+// Antes da migração 20260928_03 o blob ainda não tem config.integ: cai na presença da
+// chave antiga, para o painel não "desligar" as integrações se subir antes do banco.
+const _INTEG_LEGADO = { asaas:['asaasKey'], zapsign:['zapsignToken'], zapi:['zapiInstanceId','zapiToken'] };
+function integOn(nome){
+  const c = DB && DB.config; if(!c) return false;
+  // Colaborador: só a assinatura (ZapSign). Boleto (Asaas) e WhatsApp (Z-API) ficam
+  // desligados para ele — o /api/asaas e o /api/zapi também negam (api/_papel.js).
+  if(nome !== 'zapsign' && typeof currentUser !== 'undefined' && currentUser?.papel === 'colaborador') return false;
+  if(c.integ && typeof c.integ === 'object') return !!c.integ[nome];
+  return (_INTEG_LEGADO[nome]||[]).every(k=>!!c[k]);
+}
+
 async function authHeaders(){
   try{
     const supa = getSupabase();
@@ -5373,6 +5395,7 @@ async function loadFromSupabase(){
         fatHistorico: { ...DB.fatHistorico, ...(p.fatHistorico||{}) },
         config: { ...DB.config, ...(p.config||{}) }
       };
+      _limparSegredosLocais();
       _syncRemoteUpdatedAt = data.updated_at || null; // baseline pra optimistic concurrency
       _lastKnownDevCount = Array.isArray(p.devedores) ? p.devedores.length : null; // F-20
       _syncSnapshot = _buildSyncSnapshot(); // baseline para gravação por registro
@@ -6158,7 +6181,9 @@ async function flushRelational(){
   try{
     const sess = await supa.auth.getSession().catch(()=>({ data:{ session:null } }));
     if(!sess?.data?.session) return; // sem sessão, RLS bloqueia escrita
-    if(Array.isArray(DB.clientes) && DB.clientes.length){
+    // Colaborador não grava credor direto (cadastro vai por pedido de aprovação, F-22) e a RLS
+    // de clientes passou a ser só do proprietário — pular evita erro vermelho a cada save dela.
+    if(Array.isArray(DB.clientes) && DB.clientes.length && !ehColaborador()){
       // Envio POR REGISTRO ALTERADO: só manda o cliente que mudou nesta sessão (diff contra o
       // snapshot carregado no load), em vez do upsert em massa da lista inteira. Antes, qualquer
       // save reescrevia TODOS os clientes a partir da memória — e se algum vínculo (ex.:
@@ -7610,7 +7635,7 @@ async function portalEnviarMudouContato(){
     if(!data?.ok) throw new Error(data?.erro || 'Falha ao enviar.');
 
     // Notifica gestor via Z-API (best effort — não bloqueia).
-    if(DB?.config?.zapiInstanceId && DB?.config?.zapiToken && DB?.config?.adminTel){
+    if(integOn('zapi') && DB?.config?.adminTel){
       const adminMsg = `🔔 *Nova solicitação de atualização de contato*\n\nCPF: ${cpf.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/,'$1.$2.$3-$4')}\nNome: ${nome}\nNovo telefone: ${tel}\nPreferência: ${pref}\n\nAbra o sistema pra atender.`;
       try { await ZApiAPI.sendText(DB.config.adminTel, adminMsg); }
       catch(e){ console.warn('F-20: aviso Z-API (solicitação de contato) falhou:', e?.message||e); /* não bloqueia: a solicitação já foi gravada */ }
@@ -7681,6 +7706,16 @@ function iniciarSessao(){
     const tipo = currentUser.tipo || '';
     navDelegacao.style.display = (tipo === 'gestor') ? '' : 'none';
   }
+
+  // WhatsApp: só gestor (decisão 28/09/2026 — colaborador não opera Z-API; as conversas dos
+  // casos dela seguem no drawer do caso). Reforçado em showPage e pela RLS (migração 09).
+  const navWa = document.getElementById('nav-wa');
+  if(navWa){
+    const tipo = currentUser.tipo || '';
+    navWa.style.display = (tipo === 'gestor') ? '' : 'none';
+  }
+  const cnMoreWa = document.getElementById('cn-more-wa');
+  if(cnMoreWa) cnMoreWa.style.display = ((currentUser.tipo||'') === 'gestor') ? '' : 'none';
 
   // Aba Financeiro: somente gestor (proprietário). Operadoras não acessam.
   const navFin = document.getElementById('nav-fin');
@@ -7884,7 +7919,7 @@ const PAGE_RENDERERS = {
 };
 
 // Páginas com dados agregados de toda a carteira/credores — só gestor (proprietário).
-const ADMIN_ONLY_PAGES = new Set(['fin','relat','pipeline','importacao','delegacao','nf-avulsa']);
+const ADMIN_ONLY_PAGES = new Set(['fin','relat','pipeline','importacao','delegacao','nf-avulsa','wa']);
 
 // ALIAS DA FUSÃO (handoff v3 §2). As rotas antigas continuam abrindo a tela
 // certa; quem acende no menu é o item único da fusão.
@@ -9038,7 +9073,7 @@ async function renderAudiencias(){
     </div>
     <div class="pnl-dark-hr"></div>
     <div style="display:flex;gap:9px;flex-wrap:wrap;">
-      <button class="cob-btn-ghost" style="background:transparent;color:#EFEAD9;border-color:rgba(255,255,255,.22);" onclick="showPage('wa');setTimeout(()=>setWATab&&setWATab('agendados'),50);">Ver lembretes</button>
+      <button class="cob-btn-ghost" style="background:transparent;color:#EFEAD9;border-color:rgba(255,255,255,.22);" onclick="window._waTab='agendados';showPage('wa');">Ver lembretes</button>
       ${prox && prox.sala && /^https?:/i.test(prox.sala)
         ? `<a class="cob-btn-primary" href="${escHtml(prox.sala)}" target="_blank" rel="noopener" style="background:var(--accent);color:#0A1530;border:0;text-decoration:none;">Abrir sala virtual</a>`
         : ''}
@@ -9310,7 +9345,7 @@ async function renderLembretes(){
     </div>
     <div class="pnl-dark-hr"></div>
     <div style="display:flex;gap:9px;flex-wrap:wrap;">
-      <button class="cob-btn-ghost" style="background:transparent;color:#EFEAD9;border-color:rgba(255,255,255,.22);" onclick="showPage('wa');setTimeout(()=>setWATab&&setWATab('agendados'),50);">Ver avisos</button>
+      <button class="cob-btn-ghost" style="background:transparent;color:#EFEAD9;border-color:rgba(255,255,255,.22);" onclick="window._waTab='agendados';showPage('wa');">Ver avisos</button>
     </div>
   </div>`;
 
@@ -9732,7 +9767,7 @@ function rankingTarefasModal(){
 }
 
 // ── Gerência de colunas (gestor) ─────────────────────────────────────────────
-function gerirColunasModal(){
+function gerirColunasModal(){ if(_cfgSoDono()) return;
   if(currentUser?.tipo!=='gestor') return;
   const cols=tarefaColunas();
   const rows=cols.map((c,i)=>`<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);">
@@ -9761,7 +9796,7 @@ function excluirColuna(id){
 }
 
 // ── Gerência de tipos (gestor) ───────────────────────────────────────────────
-function gerirTiposModal(){
+function gerirTiposModal(){ if(_cfgSoDono()) return;
   if(currentUser?.tipo!=='gestor') return;
   const tipos=tarefaTipos();
   const ta='width:100%;padding:7px 9px;border:1px solid var(--border-2);border-radius:6px;font-size:12.5px;font-family:inherit;background:var(--bg);color:var(--text);resize:vertical;';
@@ -13264,7 +13299,7 @@ function openDrawer(devId){
   document.getElementById('devDrawer-overlay').classList.add('open');
 
   // Auto-verificação silenciosa: atualiza minutas PENDING sem bloquear UI
-  if(DB.config.zapsignToken){
+  if(integOn('zapsign')){
     const pending = (dev.minutas||[]).filter(m=>m.zapsignToken && m.zapsignStatus==='PENDING');
     if(pending.length){
       Promise.all(pending.map(async m=>{
@@ -13390,7 +13425,7 @@ async function renderDrawerComunicacao(devId){
   const box = document.getElementById('drawer-comm-'+devId); if(!box) return;
   const dev = (DB.devedores||[]).find(d=>d.id===devId); if(!dev) return;
   const tel = String(dev.tel||'').replace(/\D/g,'');
-  const reguaOn = !!(DB.config?.zapiInstanceId && DB.config?.zapiToken);
+  const reguaOn = !!(integOn('zapi'));
   const reguaHtml = `<div style="display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--text-2);margin-top:10px;"><span style="width:7px;height:7px;border-radius:50%;background:${reguaOn?'#5E7C58':'#A65A4A'};flex-shrink:0;"></span>Régua de WhatsApp ${reguaOn?'ativa':'pausada'}</div>`;
   const waBtn = tel ? `<button onclick="window.open('https://wa.me/55${tel}','_blank')" style="display:flex;align-items:center;gap:10px;width:100%;padding:9px 11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:12.5px;color:var(--text);font-weight:500;text-align:left;cursor:pointer;">💬 Enviar WhatsApp</button>` : '';
   if(!tel){ box.innerHTML = `<div style="font-size:12px;color:var(--text-3);">Sem telefone cadastrado.</div>${reguaHtml}`; return; }
@@ -13423,18 +13458,11 @@ async function renderDrawerComunicacao(devId){
   }catch(_){}
   box.innerHTML = _mesaHtml + pendHtml + waBtn + reguaHtml;
 }
-// Abre a conversa na página WhatsApp NATIVA (não no CRM), já focada no telefone.
+// Abre a conversa do devedor (antes ia para a aba Pendentes da página WhatsApp).
 function _drawerAbrirConversa(tel){
-  try{ closeDrawer(); }catch(_){}
-  showPage('wa');
-  let tries=0;
-  const t=setInterval(()=>{ tries++;
-    if(typeof waPendSelecionarTel==='function' && window._waPend && Array.isArray(window._waPend.lista) && window._waPend.lista.length){
-      try{ waPendSelecionarTel(tel); }catch(_){}
-      clearInterval(t);
-    }
-    if(tries>20) clearInterval(t);
-  }, 250);
+  // A aba Pendentes saiu (28/09/2026); a conversa abre direto no WhatsApp do aparelho.
+  const t=String(tel||'').replace(/\D/g,''); if(!t) return;
+  window.open('https://wa.me/55'+t,'_blank');
 }
 
 // ============================================================
@@ -15255,7 +15283,7 @@ async function renderDrawerAsaas(devId){
   const dev = (DB.devedores||[]).find(d=>d.id===devId);
   if(!dev) return;
 
-  if(!DB.config.asaasKey){
+  if(!integOn('asaas')){
     panel.innerHTML = `<div class="empty-state" style="padding:30px;">
       <div class="empty-state-icon">${ico('key',36)}</div>
       <h3>Asaas não configurado</h3>
@@ -15510,7 +15538,7 @@ async function enviarCobrancaWhatsApp(chargeId, devId){
   const tel = dev.tel?.replace(/\D/g,'');
   if(!tel){ showToast('Devedor sem telefone cadastrado.','warning'); return; }
 
-  if(!DB.config.zapiInstanceId||!DB.config.zapiToken){
+  if(!integOn('zapi')){
     showToast('Z-Api não configurado. Configure em Configurações → Integrações.','warning');
     return;
   }
@@ -15613,7 +15641,7 @@ async function executarPassoRegua(idx, devId){
   const tel = dev.tel?.replace(/\D/g,'');
   if(regra.canal==='whatsapp'){
     if(!tel){ showToast('Devedor sem telefone.','warning'); return; }
-    if(!DB.config.zapiInstanceId){ showToast('Z-Api não configurado.','warning'); return; }
+    if(!integOn('zapi')){ showToast('Z-Api não configurado.','warning'); return; }
     try {
       if(link) await ZApiAPI.sendLink(tel, msg, link, 'COBRASQ — Cobrança');
       else await ZApiAPI.sendText(tel, msg);
@@ -15968,7 +15996,7 @@ async function renderDrawerAcordosStatus(devId){
     if(zs==='assinado' || zs==='signed') bits.push(`<span style="font-size:11px;font-weight:700;color:#5E7C58;background:#E9EDE2;padding:2px 8px;border-radius:20px;">✓ Assinado</span>`);
     else if(['enviado','visualizado','pendente','link-opened','new'].includes(zs)){
       bits.push(`<span style="font-size:11px;font-weight:700;color:#9C7F40;background:#FBF8EF;border:1px solid #E0D3A8;padding:2px 8px;border-radius:20px;">Aguardando assinatura</span>`);
-      if(a.zapsign_doc_id && DB.config && DB.config.zapsignToken) bits.push(`<button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 8px;" onclick="zsPlanoBSemFotos('${escHtml(a.zapsign_doc_id)}','${escHtml(devId)}',this)" title="Para quem travou na câmera: troca a assinatura desse signatário, no MESMO documento, para desenho + CPF + código SMS, sem fotos, e reenvia o link">Plano B: sem fotos</button>`);
+      if(a.zapsign_doc_id && integOn('zapsign') && podeZapsign()) bits.push(`<button class="btn btn-ghost btn-sm" style="font-size:11px;padding:2px 8px;" onclick="zsPlanoBSemFotos('${escHtml(a.zapsign_doc_id)}','${escHtml(devId)}',this)" title="Para quem travou na câmera: troca a assinatura desse signatário, no MESMO documento, para desenho + CPF + código SMS, sem fotos, e reenvia o link">Plano B: sem fotos</button>`);
     }
     if(m.boletos_emitidos && m.asaas_invoice_url) bits.push(`<a href="${escHtml(m.asaas_invoice_url)}" target="_blank" rel="noopener" style="font-size:11.5px;font-weight:600;color:#5E7C58;">✓ Boleto emitido — abrir →</a>`);
     else if(m.boletos_emitidos) bits.push(`<span style="font-size:11px;font-weight:600;color:#5E7C58;">✓ Boleto emitido</span>`);
@@ -16806,7 +16834,7 @@ function _situacoesJud(){
   const c = DB.config && DB.config.fasesJudiciais;
   return (Array.isArray(c) && c.length) ? c : _SITUACOES_JUD;
 }
-function salvarFasesJudiciais(){
+function salvarFasesJudiciais(){ if(_cfgSoDono()) return;
   const txt = document.getElementById('cfg-fases-jud')?.value || '';
   const lista = txt.split('\n').map(s=>s.trim()).filter(Boolean);
   if(!lista.length){ showToast('Informe ao menos uma fase.','warning'); return; }
@@ -16838,7 +16866,7 @@ function addEtiquetaRow(){
   const list = document.getElementById('cfg-etiquetas-list');
   if(list) list.insertAdjacentHTML('beforeend', _cfgEtqRowHTML('', '#8A96B8'));
 }
-async function salvarEtiquetas(){
+async function salvarEtiquetas(){ if(_cfgSoDono()) return;
   const rows = Array.from(document.querySelectorAll('#cfg-etiquetas-list .cfg-etq-row'));
   const itens = rows.map(r=>({
     orig: r.dataset.orig || '',
@@ -20030,7 +20058,7 @@ function crmDrop(ev, colId){
 }
 
 // Gestão de colunas
-function crmAddColuna(){
+function crmAddColuna(){ if(_cfgSoDono()) return;
   promptModal('Nova coluna','Nome da coluna:',(nome)=>{
     if(!nome || !nome.trim()) return;
     crmEnsureColunas();
@@ -20038,7 +20066,7 @@ function crmAddColuna(){
     save(); renderCrm();
   });
 }
-function crmRenameColuna(id){
+function crmRenameColuna(id){ if(_cfgSoDono()) return;
   const col = (DB.config.crmColunas||[]).find(c=>c.id===id);
   if(!col) return;
   promptModal('Renomear coluna','Novo nome:',(nome)=>{
@@ -20046,7 +20074,7 @@ function crmRenameColuna(id){
     col.nome = nome.trim(); save(); renderCrm();
   }, { value: col.nome });
 }
-function crmMoveColuna(id, dir){
+function crmMoveColuna(id, dir){ if(_cfgSoDono()) return;
   const cols = DB.config.crmColunas||[];
   const i = cols.findIndex(c=>c.id===id);
   const j = i + dir;
@@ -20054,7 +20082,7 @@ function crmMoveColuna(id, dir){
   [cols[i], cols[j]] = [cols[j], cols[i]];
   save(); renderCrm();
 }
-function crmDelColuna(id){
+function crmDelColuna(id){ if(_cfgSoDono()) return;
   const cols = DB.config.crmColunas||[];
   if(cols.length<=1){ showToast('Mantenha ao menos uma coluna.','warning'); return; }
   const col = cols.find(c=>c.id===id);
@@ -21477,7 +21505,7 @@ async function renderCobrancas(opts){
     </div>`:''; })()}
 
     ${(() => {
-      const zapiOk = !!(DB.config?.zapiInstanceId && DB.config?.zapiToken);
+      const zapiOk = !!(integOn('zapi'));
       const elegiveis = (DB.devedores||[]).filter(d=>!d.arquivado && (d.tel||d.telefone)).length;
       const waIco = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>';
       return zapiOk
@@ -21578,7 +21606,7 @@ function _cobrDevedorDe(c){
 async function cobrLoteDisparar(){
   const sel = _cobrSelecionadas();
   if(!sel.length){ showToast('Nenhum caso selecionado.','warning'); return; }
-  if(!DB.config?.zapiInstanceId || !DB.config?.zapiToken){
+  if(!integOn('zapi')){
     showToast('Z-API não configurada — Configurações → Integrações.','warning'); return;
   }
   const alvos = sel.map(c=>({ c, dev:_cobrDevedorDe(c) }))
@@ -21815,6 +21843,7 @@ function bulkExportarCobr(){
   showToast(`${rows.length} casos exportados.`,'success');
 }
 async function bulkExcluirCobr(){
+  if(ehColaborador()){ showToast('Só o administrador exclui casos. Peça ao Gustavo.','warning'); return; }
   if(!selectedCobrIds.size){ showToast('Nenhum caso selecionado.','warning'); return; }
   const n = selectedCobrIds.size;
   if(!confirm(`Excluir ${n} cobrança${n!==1?'s':''}? Esta ação não pode ser desfeita.`)) return;
@@ -23283,6 +23312,7 @@ async function recomputarSaldoCapital(cobId){
   }catch(e){ return null; }
 }
 async function removerRepasse(id){
+  if(ehColaborador()){ showToast('Só o administrador exclui repasses. Peça ao Gustavo.','warning'); return; }
   if(currentUser?.tipo!=='gestor'){ showToast('Apenas o gestor pode remover repasses.','warning'); return; }
   const supa=getSupabase(); if(!supa) return;
   if(!confirm('Remover este repasse? O valor volta para o saldo do capital.')) return;
@@ -23342,6 +23372,7 @@ function registrarNegativacao(cobId, devId){
 }
 
 async function excluirCobranca(id){
+  if(ehColaborador()){ showToast('Só o administrador exclui casos. Peça ao Gustavo.','warning'); return; }
   if(!confirm('Excluir esta cobrança permanentemente?\n\nTodos os históricos, partes e documentos vinculados também serão excluídos.\nEsta ação não pode ser desfeita.')) return;
   const supa = getSupabase();
   if(!supa){ showToast('Supabase não configurado.','danger'); return; }
@@ -24938,7 +24969,7 @@ async function renderClienteDetalhe(){
   // Procuração saiu daqui (24/09/2026): é documento do escritório e não pode ser
   // gerada nem enviada pelo sistema da COBRASQ (CED art. 40 IV; Prov. 205 art. 8º).
   const _docTipos=[{t:'cessao',nome:'Contrato de cessão'},{t:'declaracao',nome:'Declaração de cessão'}];
-  const _zapOn=!!(DB.config&&DB.config.zapsignToken);
+  const _zapOn=!!(integOn('zapsign') && podeZapsign());
   const panelDocumentos=`<div class="cob-panel" style="padding:18px;">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
       <div class="det-panel-tt" style="margin:0;">Documentos &amp; contratos</div>
@@ -25949,7 +25980,7 @@ function abrirNovoCliente(){
   document.getElementById('modal-cliente-title').textContent = 'Novo Cliente (Cedente)';
   // C1: docs do cliente — vazio em novo cadastro
   if (typeof mcliCarregarDocumentos === 'function') mcliCarregarDocumentos(null);
-  { const r=document.getElementById('mcli-docs-zapsign-row'); if(r) r.style.display=DB.config?.zapsignToken?'grid':'none'; }
+  { const r=document.getElementById('mcli-docs-zapsign-row'); if(r) r.style.display=integOn('zapsign')&&podeZapsign()?'grid':'none'; }
   openModal('modal-cliente');
 }
 
@@ -26101,6 +26132,7 @@ function populateClienteSelectorGrupo(){
 }
 
 async function mcliNovoGrupoEconomico(){
+  if(_cfgSoDono()) return;
   const nome = (prompt('Nome do novo grupo econômico (ex.: Grupo Bordin):')||'').trim();
   if(!nome) return;
   const supa = getSupabase();
@@ -26692,6 +26724,18 @@ function mcliCnpjAplicarExtracted(extracted){
 
 // ── AÇÕES RESTRITAS AO GESTOR ─────────────────────────────
 function ehColaborador(){ return currentUser?.papel === 'colaborador'; }
+// Configuração compartilhada (DB.config: colunas/tipos de tarefa, colunas do CRM, fases,
+// etiquetas, nome do perfil) é só do proprietário: no banco, o trigger
+// trg_cobrasq_data_config_dono (migração 20260928_08) devolve a config antiga quando quem
+// grava não é o proprietário. Aqui avisa antes, para a mudança não "sumir" depois.
+function _cfgSoDono(){
+  if(!ehColaborador()) return false;
+  showToast('Só o administrador altera essa configuração. Peça ao Gustavo.','warning');
+  return true;
+}
+// Enviar para assinatura: proprietário sempre; colaborador só com app_users.pode_zapsign
+// (o /api/zapsign confere de novo no servidor).
+function podeZapsign(){ return !ehColaborador() || currentUser?.podeZapsign === true; }
 
 // Sem tela de Aprovações (retirada em 09/2026): o colaborador não grava a ação restrita —
 // recebe aviso para pedir ao gestor, que recebe o pedido no WhatsApp (Z-API, best-effort).
@@ -26699,7 +26743,7 @@ function ehColaborador(){ return currentUser?.papel === 'colaborador'; }
 async function solicitarAprovacao(tipo, recursoId, resumo, payload){
   showToast('Esta ação depende do gestor — peça a ele diretamente.','warning');
   try { logAtividade?.('Ação restrita (pediu ao gestor)', `${tipo} — ${resumo}`, recursoId); } catch(_){}
-  if(DB?.config?.zapiInstanceId && DB?.config?.zapiToken && DB?.config?.adminTel){
+  if(integOn('zapi') && DB?.config?.adminTel){
     const msg = `🔔 *Pedido de colaborador*\n\nTipo: ${tipo}\n${resumo || ''}\nSolicitante: ${currentUser?.nome || currentUser?.email || '—'}`;
     try { ZApiAPI.sendText(DB.config.adminTel, msg).catch(err=>console.warn('aviso Z-API (pedido ao gestor) falhou:', err?.message||err)); }
     catch(e){ console.warn('aviso Z-API (pedido ao gestor) não disparou:', e?.message||e); }
@@ -26733,6 +26777,14 @@ async function carregarAppUser(supa, userId){
       .maybeSingle();
     if(error){ console.warn('carregarAppUser:', error.message); return { status:'error', user:null }; }
     if(!data) return { status:'absent', user:null };
+    // pode_zapsign em consulta à parte: se a coluna ainda não existir (migração não
+    // aplicada), o login não pode cair — só a assinatura fica fechada para o colaborador.
+    if(data.papel === 'colaborador'){
+      try {
+        const z = await supa.from('app_users').select('pode_zapsign').eq('id', userId).maybeSingle();
+        data.pode_zapsign = !z.error && z.data?.pode_zapsign === true;
+      } catch(_){ data.pode_zapsign = false; }
+    }
     return { status:'ok', user:data };
   } catch(e){
     console.warn('carregarAppUser exception:', e?.message||e);
@@ -26777,7 +26829,8 @@ function montarCurrentUserDeAppUser(appUser, authUser){
     supaId: authUser.id,
     cargo: appUser.cargo || '',
     podeVerGrupo: !!appUser.pode_ver_grupo,
-    clienteGrupoId: appUser.cliente_grupo_id || null
+    clienteGrupoId: appUser.cliente_grupo_id || null,
+    podeZapsign: papel === 'proprietario' || appUser.pode_zapsign === true
   };
 }
 
@@ -26910,7 +26963,7 @@ async function editCliente(id){
   if (typeof mcliCarregarDocumentos === 'function') mcliCarregarDocumentos(c.id);
   // Item B: cobranças vinculadas a este credor
   if (typeof mcliCarregarCobrancas === 'function') mcliCarregarCobrancas();
-  { const r=document.getElementById('mcli-docs-zapsign-row'); if(r) r.style.display=DB.config?.zapsignToken?'grid':'none'; }
+  { const r=document.getElementById('mcli-docs-zapsign-row'); if(r) r.style.display=integOn('zapsign')&&podeZapsign()?'grid':'none'; }
   openModal('modal-cliente');
 }
 
@@ -29605,7 +29658,7 @@ function petResumoSistema(dev){
 // Agrupa por cliente Asaas; resolve nome/CPF do devedor cadastrado e, na falta
 // (cliente só com cus_), busca no Asaas. Aceita cliente sem cadastro completo.
 async function petLoadBoletosAsaas(){
-  if(!DB.config.asaasKey) return { erro:'Configure a chave do Asaas em Configurações → Integrações.', groups:[] };
+  if(!integOn('asaas')) return { erro:'Configure a chave do Asaas em Configurações → Integrações.', groups:[] };
   const data = await _loadInadimplentes({incluirVincendas:true}).catch(()=>null);
   if(!data) return { erro:'Falha ao carregar os boletos do Asaas.', groups:[] };
   const groups = [];
@@ -31392,7 +31445,7 @@ async function _loadFinHeader(){
 
     // KPI "Vencido (Asaas)" — só existe quando Asaas configurado; reusa o helper
     // compartilhado (cacheado), sem segunda batida no Asaas.
-    if(DB.config.asaasKey && document.getElementById('kpi-venc')){
+    if(integOn('asaas') && document.getElementById('kpi-venc')){
       _loadInadimplentes().then(({ devList })=>{
         const totVencido = devList.reduce((s,g)=>s+g.agg.nominal,0);
         const n = devList.length;
@@ -37612,7 +37665,7 @@ async function _repCarregarRecebiveisReal(){
     const [inad, pendenteAsaas] = await Promise.all([
       _loadInadimplentes().catch(e => { console.warn('[repasses] inadimplência:', (e && e.message) || e); return null; }),
       (async () => {
-        if(!DB.config.asaasKey) return [];
+        if(!integOn('asaas')) return [];
         try{
           const fim30 = isoLocal(new Date(Date.now()+30*86400000));
           const rr = await AsaasAPI.req('GET','/payments?limit=100&sort=dueDate&order=asc&status=PENDING').catch(()=>({data:[]}));
@@ -38852,7 +38905,7 @@ function _finComposicaoInadHtml(){
   const venceEm7 = pendenteAsaas.filter(cc=>cc.dueDate<=in7).reduce((s,cc)=>s+(+cc.value||0),0);
   const aVencer30 = pendenteAsaas.filter(cc=>cc.dueDate>in7).reduce((s,cc)=>s+(+cc.value||0),0);
   const composTotal = kpiVencido + venceEm7 + aVencer30 || 1;
-  const inadHtml = !DB.config.asaasKey ? `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">Asaas não configurado</div></div>`
+  const inadHtml = !integOn('asaas') ? `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">Asaas não configurado</div></div>`
     : (!inad.devList.length ? `<div class="empty-state" style="padding:24px;"><div class="empty-state-title">${_repState.recebiveisProntos ? 'Nenhuma parcela em atraso' : 'carregando…'}</div></div>`
     : inad.devList.slice(0,6).map(g=>{
         const dev=g.dev; const dias = g.agg.oldest ? Math.max(0,Math.round((Date.now()-new Date(g.agg.oldest.slice(0,10)+'T00:00:00'))/86400000)) : 0;
@@ -43578,7 +43631,7 @@ async function renderFinAsaas(el){
   if(!el) el = document.getElementById('fin-content');
   if(!el) return;
 
-  if(!DB.config.asaasKey){
+  if(!integOn('asaas')){
     el.innerHTML = `<div class="empty-state" style="padding:60px 20px;">
       <div class="empty-state-icon">${ico('key',36)}</div>
       <h3>Asaas não configurado</h3>
@@ -43851,7 +43904,7 @@ async function _loadInadimplentes(opts){
   if(!force && !comVincendas && window._inadCache && (now - window._inadCache.at < 60000)){
     return window._inadCache.data;
   }
-  if(!DB.config.asaasKey){
+  if(!integOn('asaas')){
     const empty = { devList: [], charges: [], oldestAll: null };
     if(!comVincendas){ window._cobrancasGroups = {}; window._inadCache = { at: now, data: empty }; }
     return empty;
@@ -43905,7 +43958,7 @@ async function renderFinCobrancas(el){
   if(!el) el = document.getElementById('fin-content');
   if(!el) return;
 
-  if(!DB.config.asaasKey){
+  if(!integOn('asaas')){
     el.innerHTML = `<div class="empty-state" style="padding:60px 20px;">
       <div class="empty-state-icon">${ico('key',36)}</div>
       <h3>Asaas não configurado</h3>
@@ -44059,7 +44112,7 @@ function abrirExecucaoDeParcelas(devId){
       <div style="flex:1;background:var(--surface-2);border-radius:var(--radius-sm);padding:12px 14px;" id="mexec-resumo"></div>
     </div>
 
-    ${dev.tel && DB.config.zapiInstanceId ? `
+    ${dev.tel && integOn('zapi') ? `
       <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer;margin-bottom:6px;">
         <input type="checkbox" id="mexec-wa" checked style="margin:0;"> Avisar o devedor por WhatsApp (o aviso não menciona processo)
       </label>` : ''}
@@ -44648,8 +44701,10 @@ function renderRelatPerf(el){
 function renderWhatsApp(){
   const el = document.getElementById('page-wa');
   if(!el) return;
-  const activeTab = window._waTab || 'regua';
-  const zapiOk = !!(DB.config.zapiInstanceId && DB.config.zapiToken);
+  // Abas Pendentes e Conversas saíram para todos (28/09/2026); link antigo cai em Agendados.
+  if(['pendentes','conversas'].includes(window._waTab)) window._waTab = 'agendados';
+  const activeTab = window._waTab || 'agendados';
+  const zapiOk = !!integOn('zapi');
 
   el.innerHTML = `
     <div class="cob-pg-head">
@@ -44657,7 +44712,7 @@ function renderWhatsApp(){
         <h1 class="cob-h1">WhatsApp</h1>
         <div class="cob-h1-sub" style="display:flex;align-items:center;gap:6px;">
           <span style="width:8px;height:8px;border-radius:50%;background:${zapiOk?'var(--green)':'var(--text-3)'};${zapiOk?'box-shadow:0 0 0 3px rgba(74,122,82,.2);':''}"></span>
-          ${zapiOk ? `Z-API conectado · ${escHtml(DB.config.zapiInstanceId||'')}` : 'Configure Z-API em Integrações para enviar mensagens'}
+          ${zapiOk ? 'Z-API conectado' : 'Configure Z-API em Integrações para enviar mensagens'}
         </div>
       </div>
       <div class="cob-head-actions">
@@ -44665,8 +44720,6 @@ function renderWhatsApp(){
       </div>
     </div>
     <div class="tabs" style="margin-bottom:16px;">
-      <div class="tab ${activeTab==='pendentes'?'active':''}" onclick="setWATab('pendentes',this)">Pendentes <span id="waPendBadge" style="display:none;"></span></div>
-      <div class="tab ${activeTab==='conversas'?'active':''}" onclick="setWATab('conversas',this)">Conversas</div>
       <div class="tab ${activeTab==='agendados'?'active':''}" onclick="setWATab('agendados',this)">Agendados</div>
       <div class="tab ${activeTab==='config'?'active':''}" onclick="setWATab('config',this)">Configuração</div>
       <div class="tab ${activeTab==='regua'?'active':''}" onclick="setWATab('regua',this)">Régua</div>
@@ -44687,9 +44740,7 @@ function setWATab(tab, el){
 function renderWATab(tab){
   const el = document.getElementById('wa-content');
   if(!el) return;
-  if(tab==='pendentes') renderWAPendentes(el);
-  else if(tab==='conversas') renderWAConversas(el);
-  else if(tab==='agendados') renderWAAgendados(el);
+  if(tab==='agendados') renderWAAgendados(el);
   else if(tab==='config') renderWAConfig(el);
   else if(tab==='regua') renderWARegua(el);
   else if(tab==='templates') renderWATemplates(el);
@@ -45027,7 +45078,7 @@ function waPendBurstCount(p){
 function waPendBadgeUpdate(){
   const P = window._waPend;
   const badge = document.getElementById('waPendBadge');
-  if(!badge) return;
+  if(!badge || !P || !Array.isArray(P.lista)) return; // aba Pendentes removida: sem badge
   const n = P.lista.length;
   if(n){ badge.style.cssText='display:inline-block;background:var(--danger);color:#fff;border-radius:100px;padding:1px 7px;font-family:var(--font-mono);font-size:10px;font-weight:600;margin-left:2px;'; badge.textContent=String(n); }
   else badge.style.display='none';
@@ -46381,7 +46432,7 @@ async function _waCarregarStats(){
 
 function renderWARegua(el){
   const regua = (DB.config.whatsapp||{}).regua||[];
-  const zapiOk = !!(DB.config.zapiInstanceId && DB.config.zapiToken);
+  const zapiOk = !!integOn('zapi');
   const elegiveis = (DB.devedores||[]).filter(d=>!d.arquivado && (d.tel||d.telefone)).length;
   // Busca os números uma vez e redesenha; não bloqueia o primeiro paint.
   if(_waReguaStats === null){ _waCarregarStats().then(()=>{ const c=document.getElementById('wa-content'); if(c && window._waTab==='regua') renderWARegua(c); }); }
@@ -46910,12 +46961,12 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
         <div class="int-card-header">
           <div class="int-card-logo">${ico('card',20)}</div>
           <div><div class="int-card-name">Asaas</div><div class="int-card-sub">Cobranças, boletos, PIX e gestão de recebimentos</div></div>
-          <div class="int-status">${DB.config.asaasKey?`<div class="int-dot int-dot-ok"></div>Configurado`:`<div class="int-dot int-dot-idle"></div>Não configurado`}</div>
+          <div class="int-status">${integOn('asaas')?`<div class="int-dot int-dot-ok"></div>Configurado`:`<div class="int-dot int-dot-idle"></div>Não configurado`}</div>
         </div>
         <div class="fg-row">
           <div class="fg" style="flex:2;">
             <label>Chave API ($aact_…)</label>
-            <input type="password" id="cfg-asaas-key" value="${DB.config.asaasKey||''}" placeholder="$aact_YTU3YWM..."/>
+            <input type="password" id="cfg-asaas-key" value="" placeholder="${integOn('asaas')?'•••• guardada (em branco mantém)':'$aact_YTU3YWM...'}" autocomplete="off"/>
           </div>
           <div class="fg" style="flex:1;">
             <label>Ambiente</label>
@@ -46934,11 +46985,11 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
         <div class="int-card-header">
           <div class="int-card-logo">${ico('signature',20)}</div>
           <div><div class="int-card-name">ZapSign</div><div class="int-card-sub">Assinatura digital de documentos e minutas</div></div>
-          <div class="int-status">${DB.config.zapsignToken?`<div class="int-dot int-dot-ok"></div>Configurado`:`<div class="int-dot int-dot-idle"></div>Não configurado`}</div>
+          <div class="int-status">${integOn('zapsign')?`<div class="int-dot int-dot-ok"></div>Configurado`:`<div class="int-dot int-dot-idle"></div>Não configurado`}</div>
         </div>
         <div class="fg">
           <label>API Token</label>
-          <input type="password" id="cfg-zapsign-token" value="${DB.config.zapsignToken||''}" placeholder="Token do ZapSign (obtenha em app.zapsign.com.br)"/>
+          <input type="password" id="cfg-zapsign-token" value="" placeholder="${integOn('zapsign')?'•••• guardado (em branco mantém)':'Token do ZapSign (obtenha em app.zapsign.com.br)'}" autocomplete="off"/>
         </div>
         <div class="fg">
           <label>Mensagem padrão do WhatsApp (link de assinatura)</label>
@@ -46954,15 +47005,15 @@ INSERT INTO cobrasq_data (key, data) VALUES ('main', '{}')
         <div class="int-card-header">
           <div class="int-card-logo">${ico('whatsapp',20)}</div>
           <div><div class="int-card-name">Z-Api</div><div class="int-card-sub">Envio de mensagens e links via WhatsApp</div></div>
-          <div class="int-status">${DB.config.zapiInstanceId?`<div class="int-dot int-dot-ok"></div>Configurado`:`<div class="int-dot int-dot-idle"></div>Não configurado`}</div>
+          <div class="int-status">${integOn('zapi')?`<div class="int-dot int-dot-ok"></div>Configurado`:`<div class="int-dot int-dot-idle"></div>Não configurado`}</div>
         </div>
         <div class="fg-row">
-          <div class="fg"><label>Instance ID</label><input type="text" id="cfg-zapi-instance" value="${DB.config.zapiInstanceId||''}" placeholder="3D..."/></div>
-          <div class="fg"><label>Token</label><input type="password" id="cfg-zapi-token" value="${DB.config.zapiToken||''}" placeholder="F..."/></div>
+          <div class="fg"><label>Instance ID</label><input type="text" id="cfg-zapi-instance" value="" placeholder="${integOn('zapi')?'•••• guardado':'3D...'}" autocomplete="off"/></div>
+          <div class="fg"><label>Token</label><input type="password" id="cfg-zapi-token" value="" placeholder="${integOn('zapi')?'•••• guardado':'F...'}" autocomplete="off"/></div>
         </div>
         <div class="fg">
           <label>Client-Token (Security Token)</label>
-          <input type="password" id="cfg-zapi-client-token" value="${DB.config.zapiClientToken||''}" placeholder="F..."/>
+          <input type="password" id="cfg-zapi-client-token" value="" placeholder="${integOn('zapi')?'•••• guardado':'F...'}" autocomplete="off"/>
         </div>
         <div class="fg">
           <label>Telefone admin (notificações Z-API) <span style="color:var(--text-3);font-weight:400;font-size:11.5px;">— recebe alertas de solicitações do portal</span></label>
@@ -47248,7 +47299,7 @@ function importarBackup(input){
 }
 
 function previewAvatar(nome){ const av=initials(nome); const p=document.getElementById('cfgAvatarPreview'); if(p)p.textContent=av; }
-function salvarPerfil(){ DB.config.nome=document.getElementById('cfg-nome')?.value||DB.config.nome; DB.config.email=document.getElementById('cfg-email')?.value||DB.config.email; DB.config.avatar=initials(DB.config.nome); save(); const sn=document.getElementById('sidebarUserName'); if(sn)sn.textContent=DB.config.nome; const sa=document.getElementById('sidebarAvatarInitials'); if(sa)sa.textContent=DB.config.avatar; showToast('Perfil salvo!','success'); }
+function salvarPerfil(){ if(_cfgSoDono()) return; DB.config.nome=document.getElementById('cfg-nome')?.value||DB.config.nome; DB.config.email=document.getElementById('cfg-email')?.value||DB.config.email; DB.config.avatar=initials(DB.config.nome); save(); const sn=document.getElementById('sidebarUserName'); if(sn)sn.textContent=DB.config.nome; const sa=document.getElementById('sidebarAvatarInitials'); if(sa)sa.textContent=DB.config.avatar; showToast('Perfil salvo!','success'); }
 function salvarEmpresa(){ DB.config.empresa=document.getElementById('cfg-empresa')?.value||DB.config.empresa; DB.config.cnpj=document.getElementById('cfg-cnpj')?.value||DB.config.cnpj; DB.config.sub=document.getElementById('cfg-sub')?.value||DB.config.sub; DB.config.metaMensal=+document.getElementById('cfg-meta')?.value||DB.config.metaMensal; save(); showToast('Configurações da empresa salvas!','success'); }
 
 function salvarParamsCalculo(){
@@ -47287,6 +47338,16 @@ async function renderCfgUsuariosApp(){
     const r=await sb.from('app_users').select('id,nome,email,papel,ativo,cargo').order('nome');
     if(r.error) throw r.error;
     rows=r.data||[];
+    // pode_zapsign à parte: sem a coluna (migração pendente) a lista continua abrindo.
+    try{
+      const z=await sb.from('app_users').select('id,pode_zapsign').eq('papel','colaborador');
+      if(!z.error){ const m={}; (z.data||[]).forEach(x=>{ m[x.id]=x.pode_zapsign===true; }); rows.forEach(u=>{ if(u.id in m) u.pode_zapsign=m[u.id]; }); }
+    }catch(_){}
+    // ia_limite_dia à parte, pelo mesmo motivo (coluna da migração 02).
+    try{
+      const q=await sb.from('app_users').select('id,ia_limite_dia').eq('papel','colaborador');
+      if(!q.error){ const m={}; (q.data||[]).forEach(x=>{ m[x.id]=Number(x.ia_limite_dia)||0; }); rows.forEach(u=>{ if(u.id in m) u.ia_limite_dia=m[u.id]; }); }
+    }catch(_){}
   }catch(e){ host.innerHTML=`<div style="color:var(--danger);font-size:13px;">Não foi possível carregar usuários: ${escHtml(e.message||String(e))}</div>`; return; }
   const staff=rows.filter(u=>['proprietario','colaborador'].includes(u.papel));
   // Onda F · M1 — proprietário edita papel + ativa/desativa direto em app_users.
@@ -47315,7 +47376,15 @@ async function renderCfgUsuariosApp(){
         // Excluir é a exceção (Desativar é o caminho normal): apaga a conta do Auth e,
         // por cascade, a linha de app_users — liberando o e-mail para recadastro.
         const btnExcluir = `<button class="btn btn-ghost btn-xs" style="color:var(--danger);" title="Apaga o acesso definitivamente" onclick="usrExcluirUsuario('${uid}', '${escHtml((u.nome||u.email||'').replace(/'/g,'&#39;'))}', this)">Excluir</button>`;
-        acoesCell = `<td><div style="display:flex;gap:6px;align-items:center;">${papelSel}${btnAtivo}${btnExcluir}</div></td>`;
+        // Colaborador só envia para assinatura (ZapSign) se o administrador liberar.
+        const btnZap = u.papel==='colaborador'
+          ? `<label style="display:flex;gap:4px;align-items:center;font-size:11px;white-space:nowrap;" title="Permite enviar documentos para assinatura pelo ZapSign"><input type="checkbox" ${u.pode_zapsign===true?'checked':''} onchange="usrAlternarZapsign('${uid}', this.checked, this)"/>Assinatura</label>`
+          : '';
+        // IA: 0 = bloqueada (padrão). O administrador libera N usos por dia, sem mexer em código.
+        const inpIa = (u.papel==='colaborador' && 'ia_limite_dia' in u)
+          ? `<label style="display:flex;gap:4px;align-items:center;font-size:11px;white-space:nowrap;" title="Quantas vezes por dia este usuário pode usar a IA. 0 = bloqueada.">IA/dia <input type="number" min="0" step="1" value="${Number(u.ia_limite_dia)||0}" onchange="usrDefinirLimiteIa('${uid}', this.value, this)" style="width:56px;padding:3px 6px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;background:var(--bg);color:var(--text);"/></label>`
+          : '';
+        acoesCell = `<td><div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">${papelSel}${btnAtivo}${btnZap}${inpIa}${btnExcluir}</div></td>`;
       }
     }
     return `<tr><td><strong>${escHtml(u.nome||'—')}</strong>${meu?' <span style="font-size:10.5px;color:var(--text-3);">(você)</span>':''}</td><td style="font-size:12px;color:var(--text-3);">${escHtml(u.email||'—')}</td><td>${badge}</td><td>${st}</td>${acoesCell}</tr>`;
@@ -47372,6 +47441,43 @@ async function usrAlterarPapel(userId, novoPapel, sel){
     showToast('Erro ao alterar papel: '+(e.message||e)+' (pode exigir policy/Edge).','danger');
     if(typeof renderCfgUsuariosApp==='function') renderCfgUsuariosApp();
   }
+}
+
+// Proprietário libera/bloqueia o envio para assinatura (ZapSign) de um colaborador.
+// A coluna está na trava de privilégio (enforce_app_users_privilege_lock): só o
+// proprietário grava; o /api/zapsign confere a mesma coluna no servidor.
+async function usrDefinirLimiteIa(userId, valor, inp){
+  const isOwner = (currentUser?.papel==='proprietario') || (currentUser?.tipo==='gestor');
+  const anterior = inp ? inp.defaultValue : '0';
+  if(!isOwner){ showToast('Só o administrador libera a IA.','danger'); if(inp) inp.value=anterior; return; }
+  const n = Math.floor(Number(valor));
+  if(!Number.isFinite(n) || n<0){ showToast('Informe um número inteiro, 0 ou maior.','warning'); if(inp) inp.value=anterior; return; }
+  const sb=getSupabase(); if(!sb){ showToast('Sem conexão com o banco.','danger'); if(inp) inp.value=anterior; return; }
+  if(inp) inp.disabled=true;
+  try{
+    const { error } = await sb.from('app_users').update({ ia_limite_dia: n }).eq('id', userId);
+    if(error) throw error;
+    if(inp){ inp.value=String(n); inp.defaultValue=String(n); }
+    showToast(n ? `IA liberada: até ${n} uso${n!==1?'s':''} por dia.` : 'IA bloqueada para este usuário.','success');
+  }catch(e){
+    if(inp) inp.value=anterior;
+    showToast('Erro ao gravar o limite de IA: '+(e.message||e),'danger');
+  }finally{ if(inp) inp.disabled=false; }
+}
+
+async function usrAlternarZapsign(userId, pode, chk){
+  const isOwner = (currentUser?.papel==='proprietario') || (currentUser?.tipo==='gestor');
+  if(!isOwner){ showToast('Só o administrador libera a assinatura.','danger'); if(chk) chk.checked=!pode; return; }
+  const sb=getSupabase(); if(!sb){ showToast('Sem conexão com o banco.','danger'); if(chk) chk.checked=!pode; return; }
+  if(chk) chk.disabled=true;
+  try{
+    const { error } = await sb.from('app_users').update({ pode_zapsign: !!pode }).eq('id', userId);
+    if(error) throw error;
+    showToast(pode ? 'Assinatura liberada para o colaborador.' : 'Assinatura bloqueada para o colaborador.','success');
+  }catch(e){
+    if(chk) chk.checked=!pode;
+    showToast('Erro ao gravar a permissão de assinatura: '+(e.message||e),'danger');
+  }finally{ if(chk) chk.disabled=false; }
 }
 
 // Onda F · M1 — proprietário ativa/desativa OUTRO usuário (coluna app_users.ativo).
@@ -47614,18 +47720,33 @@ async function tplExcluir(id){
 
 function addCategoria(tipo){ const id=tipo==='receita'?'nova-cat-rec':'nova-cat-des'; const v=(document.getElementById(id)?.value||'').trim(); if(!v)return; if(!DB.config.categorias)DB.config.categorias={receita:[],despesa:[]}; DB.config.categorias[tipo].push(v); save(); renderCfgSection('categorias'); }
 function delCategoria(tipo,i){ DB.config.categorias[tipo].splice(i,1); save(); renderCfgSection('categorias'); }
-function salvarIntegracoes(){
+// Segurança do colaborador (28/09/2026): chaves e tokens NÃO vão mais para o blob
+// (o colaborador lê o blob inteiro). Ficam em `config_segredos`, que só o proprietário
+// lê (RLS), e o blob guarda só `config.integ` = {asaas,zapsign,zapi} (ligado/desligado).
+// O servidor continua usando as variáveis de ambiente da Vercel. Campo em branco = mantém.
+const _SEGREDOS_FORM = [
+  ['asaasKey','cfg-asaas-key','asaas'], ['zapsignToken','cfg-zapsign-token','zapsign'],
+  ['zapiInstanceId','cfg-zapi-instance','zapi'], ['zapiToken','cfg-zapi-token','zapi'],
+  ['zapiClientToken','cfg-zapi-client-token','zapi'],
+];
+async function salvarIntegracoes(){
   DB.config.supabaseUrl       = (document.getElementById('cfg-supa-url')?.value||'').trim();
   DB.config.supabaseAnonKey   = (document.getElementById('cfg-supa-key')?.value||'').trim();
-  DB.config.claudeApiKey      = '';  // F-02: chave da IA agora é server-side (env ANTHROPIC_API_KEY); limpa qualquer valor antigo do navegador.
-  DB.config.asaasKey          = document.getElementById('cfg-asaas-key')?.value||'';
   DB.config.asaasEnv          = document.getElementById('cfg-asaas-env')?.value||'sandbox';
-  DB.config.zapsignToken      = document.getElementById('cfg-zapsign-token')?.value||'';
   DB.config.zapsignMsgPadrao  = document.getElementById('cfg-zapsign-msg')?.value||'';
-  DB.config.zapiInstanceId    = document.getElementById('cfg-zapi-instance')?.value||'';
-  DB.config.zapiToken         = document.getElementById('cfg-zapi-token')?.value||'';
-  DB.config.zapiClientToken   = document.getElementById('cfg-zapi-client-token')?.value||'';
   DB.config.adminTel          = (document.getElementById('cfg-zapi-admin-tel')?.value||'').replace(/\D/g,'');
+  const novos = _SEGREDOS_FORM.map(([chave,id,integ])=>({ chave, integ, valor:(document.getElementById(id)?.value||'').trim() }))
+    .filter(x=>x.valor);
+  if(novos.length){
+    const supa = getSupabase();
+    const { error } = supa ? await supa.from('config_segredos').upsert(
+      novos.map(x=>({ chave:x.chave, valor:x.valor, atualizado_em:new Date().toISOString() })), { onConflict:'chave' })
+      : { error:{ message:'sem conexão com o banco' } };
+    if(error){ showToast('Chaves NÃO salvas: '+error.message,'danger'); return; }
+    DB.config.integ = { asaas:integOn('asaas'), zapsign:integOn('zapsign'), zapi:integOn('zapi') };
+    novos.forEach(x=>{ DB.config.integ[x.integ] = true; });
+    _SEGREDOS_FORM.forEach(([,id])=>{ const el=document.getElementById(id); if(el) el.value=''; });
+  }
   reinitSupabase(); // re-inicializa cliente Supabase com novas credenciais
   save();
   const msg = document.getElementById('cfg-int-msg');
@@ -47634,15 +47755,13 @@ function salvarIntegracoes(){
 }
 
 async function testarAsaas(){
-  const key = document.getElementById('cfg-asaas-key')?.value;
   const env = document.getElementById('cfg-asaas-env')?.value||'sandbox';
   const res = document.getElementById('asaas-test-result');
   const btn = document.getElementById('btn-test-asaas');
-  if(!key){ res.textContent='Chave vazia'; res.style.color='var(--warning)'; return; }
   btn.disabled=true; res.textContent='Testando…'; res.style.color='var(--text-3)';
   try {
     const r = await fetch(`/api/asaas?path=customers&limit=1`,{
-      headers:{'x-asaas-key':key,'x-asaas-env':env,'Content-Type':'application/json', ...(await authHeaders())}
+      headers:{'x-asaas-env':env,'Content-Type':'application/json', ...(await authHeaders())}
     });
     if(r.ok){ res.textContent='Conectado!'; res.style.color='var(--success)'; }
     else { const j=await r.json().catch(()=>{}); res.textContent='Erro: '+traduzirErro(j?.errors?.[0]?.description||j?.error||`HTTP ${r.status}`); res.style.color='var(--danger)'; }
@@ -47656,7 +47775,8 @@ async function testarAsaas(){
 let _vincZapCli=null, _vincZapDocs=[], _vincZapLinked=new Set();
 function _vincZapClose(){ document.getElementById('vinczap-overlay')?.remove(); _vincZapCli=null; _vincZapDocs=[]; }
 async function abrirVincularZapSign(clienteId){
-  if(!DB.config?.zapsignToken){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
+  if(!integOn('zapsign')){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
+  if(!podeZapsign()){ showToast('Seu usuário não tem permissão para enviar documentos para assinatura. Peça ao Gustavo.','warning'); return; }
   const supa=getSupabase(); if(!supa){ showToast('Sem conexão com o banco.','danger'); return; }
   const cli=(DB.clientes||[]).find(c=>c.id===clienteId)||(typeof _detCliObj!=='undefined'?_detCliObj:null);
   _vincZapClose();
@@ -47768,7 +47888,8 @@ async function _vincZapAttach(token, btn){
 // (não duplica a linha, que é o que aconteceria usando "Vincular do ZapSign").
 async function reconciliarDocsClienteZapSign(clienteId, btn){
   const supa=getSupabase(); if(!supa){ showToast('Sem conexão com o banco.','danger'); return; }
-  if(!DB.config?.zapsignToken){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
+  if(!integOn('zapsign')){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
+  if(!podeZapsign()){ showToast('Seu usuário não tem permissão para enviar documentos para assinatura. Peça ao Gustavo.','warning'); return; }
   const orig=btn?btn.textContent:''; if(btn){ btn.disabled=true; btn.textContent='Consultando…'; }
   let assinados=0, atualizados=0, falhas=0;
   try{
@@ -47839,15 +47960,13 @@ async function reconciliarDocsClienteZapSign(clienteId, btn){
 }
 
 async function testarZapSign(){
-  const token = document.getElementById('cfg-zapsign-token')?.value;
   const res = document.getElementById('zapsign-test-result');
   const btn = document.getElementById('btn-test-zapsign');
-  if(!token){ res.textContent='Token vazio'; res.style.color='var(--warning)'; return; }
   btn.disabled=true; res.textContent='Testando…'; res.style.color='var(--text-3)';
   try {
     // Proxy server-to-server — evita CORS do ZapSign
     const r = await fetch(`/api/zapsign?path=${encodeURIComponent('docs/')}`, {
-      headers: { 'Content-Type':'application/json', 'x-zapsign-token': token, ...(await authHeaders()) }
+      headers: { 'Content-Type':'application/json', ...(await authHeaders()) }
     });
     if(r.ok || r.status===200){ res.textContent='Conectado!'; res.style.color='var(--success)'; }
     else {
@@ -47860,16 +47979,12 @@ async function testarZapSign(){
 }
 
 async function testarZApi(){
-  const inst  = document.getElementById('cfg-zapi-instance')?.value;
-  const tok   = document.getElementById('cfg-zapi-token')?.value;
-  const ctok  = document.getElementById('cfg-zapi-client-token')?.value;
   const res   = document.getElementById('zapi-test-result');
   const btn   = document.getElementById('btn-test-zapi');
-  if(!inst||!tok){ res.textContent='Instance/Token vazios'; res.style.color='var(--warning)'; return; }
   btn.disabled=true; res.textContent='Testando…'; res.style.color='var(--text-3)';
   try {
-    const base = `https://api.z-api.io/instances/${inst}/token/${tok}`;
-    const r = await fetch(`${base}/status`,{headers:{'Content-Type':'application/json','Client-Token':ctok||''}});
+    // Testa a instância que o SERVIDOR usa (variáveis da Vercel), pelo proxy.
+    const r = await fetch('/api/zapi?path=status',{headers:{'Content-Type':'application/json', ...(await authHeaders())}});
     const j = await r.json().catch(()=>({connected:false}));
     if(j.connected){ res.textContent='✅ WhatsApp conectado!'; res.style.color='var(--success)'; }
     else { res.textContent='Instância desconectada. Verifique o QR Code.'; res.style.color='var(--warning)'; }
@@ -50366,7 +50481,8 @@ async function _telClienteRelacional(clienteId){
 async function enviarDocClienteZapSign(tipo){
   const d=_docClienteDados();
   if(!d.nome){ showToast('Informe a razão social do cliente.','warning'); return; }
-  if(!DB.config.zapsignToken){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
+  if(!integOn('zapsign')){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
+  if(!podeZapsign()){ showToast('Seu usuário não tem permissão para enviar documentos para assinatura. Peça ao Gustavo.','warning'); return; }
   // Contrato: nº, novo/renovação, porte e representante antes de conferir/editar.
   _contratoCtx=null; _qualifCtx=null;
   if(tipo==='cessao' && !(await _contratoGarantir(d))) return;
@@ -50400,7 +50516,7 @@ async function enviarDocClienteZapSign(tipo){
     if(cfg.agendarPara){
       erroAgenda=await _agendarMsgDocCliente(tel, signerLink, cfg.msg, cfg.agendarPara);
       agendouMsg=!erroAgenda;
-    }else if(DB.config.zapiInstanceId) await ZApiAPI.sendLink(tel,cfg.msg,signerLink,`Assinar — ${tipoNome}`);
+    }else if(integOn('zapi')) await ZApiAPI.sendLink(tel,cfg.msg,signerLink,`Assinar — ${tipoNome}`);
     logAtividade(agendouMsg?'Agendou envio de doc cliente (ZapSign)':'Enviou doc cliente para ZapSign',`${tipoNome} — ${d.nome}${agendouMsg?' — mensagem em '+cfg.agendarPara.toLocaleString('pt-BR'):''}`);
     // Registra no cadastro do cliente (o webhook casa o assinado de volta pelo token).
     const _cid=_docClienteId();
@@ -50410,7 +50526,7 @@ async function enviarDocClienteZapSign(tipo){
     document.getElementById('mzs-body').innerHTML=`
       <div style="padding:16px 0 20px;">
         <div style="font-size:13px;font-weight:700;color:var(--success);margin-bottom:4px;">
-          Documento enviado${erroAgenda?' ao ZapSign, mas o AGENDAMENTO da mensagem falhou ('+escHtml(erroAgenda)+'). Copie o link abaixo e envie manualmente.':agendouMsg?' ao ZapSign. Mensagem com o link agendada para '+escHtml(cfg.agendarPara.toLocaleString('pt-BR',{weekday:'short',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}))+'.':(DB.config.zapiInstanceId?' e link disparado via WhatsApp.':' com sucesso.')}</div>
+          Documento enviado${erroAgenda?' ao ZapSign, mas o AGENDAMENTO da mensagem falhou ('+escHtml(erroAgenda)+'). Copie o link abaixo e envie manualmente.':agendouMsg?' ao ZapSign. Mensagem com o link agendada para '+escHtml(cfg.agendarPara.toLocaleString('pt-BR',{weekday:'short',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}))+'.':(integOn('zapi')?' e link disparado via WhatsApp.':' com sucesso.')}</div>
         <div style="font-size:12.5px;color:var(--text-2);margin-bottom:18px;">
           <strong>${escHtml(d.nome)}</strong> receberá o link de assinatura.</div>
         <div style="background:var(--surface-2);border-radius:var(--radius-sm);padding:12px;">
@@ -50517,7 +50633,8 @@ async function _agendarMsgDocCliente(tel, signerLink, msg, quando){
   }catch(e){ return (e&&e.message)||String(e); }
 }
 function abrirModalDocLote(){
-  if(!DB.config?.zapsignToken){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
+  if(!integOn('zapsign')){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
+  if(!podeZapsign()){ showToast('Seu usuário não tem permissão para enviar documentos para assinatura. Peça ao Gustavo.','warning'); return; }
   ['cessao','declaracao'].forEach(t=>{ const el=document.getElementById('dlote-'+t); if(el) el.checked=true; });
   // Termos de cessão entram desmarcados: só fazem sentido depois de escolher os créditos.
   _loteAnexoSel=null;
@@ -50780,7 +50897,7 @@ async function enviarLoteDocClienteZapSign(){
         agendada_para:agendarPara.toISOString(), status:'pendente', origem:'manual_doc_cliente' });
       // Os documentos já estão no ZapSign: não aborta — registra na ficha e mostra o link para envio manual.
       if(eAg) erroAgenda=eAg.message||String(eAg); else agendouMsg=true;
-    }else if(DB.config.zapiInstanceId){
+    }else if(integOn('zapi')){
       if(links.length>1) await ZApiAPI.sendText(tel,`${msgTxt}\n\nSão ${links.length} links de assinatura (o ZapSign aceita até 15 documentos por link):\n${textoLinks}`);
       else await ZApiAPI.sendLink(tel,msgTxt,signerLink,`Assinar — ${nomesDoc}`);
     }
@@ -50802,7 +50919,7 @@ async function enviarLoteDocClienteZapSign(){
     document.getElementById('mzs-body').innerHTML=`
       <div style="padding:16px 0 20px;">
         <div style="font-size:13px;font-weight:700;color:var(--success);margin-bottom:4px;">
-          ${pdfs.length>1?pdfs.length+' documentos enviados':'Documento enviado'}${links.length>1?' em '+links.length+' links':''}${erroAgenda?' ao ZapSign, mas o AGENDAMENTO da mensagem falhou ('+escHtml(erroAgenda)+'). Copie os links abaixo e envie manualmente.':agendouMsg?' ao ZapSign. Mensagem com o(s) link(s) agendada para '+escHtml(agendarPara.toLocaleString('pt-BR',{weekday:'short',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}))+'.':(DB.config.zapiInstanceId?' e link(s) disparado(s) via WhatsApp.':' com sucesso.')}</div>
+          ${pdfs.length>1?pdfs.length+' documentos enviados':'Documento enviado'}${links.length>1?' em '+links.length+' links':''}${erroAgenda?' ao ZapSign, mas o AGENDAMENTO da mensagem falhou ('+escHtml(erroAgenda)+'). Copie os links abaixo e envie manualmente.':agendouMsg?' ao ZapSign. Mensagem com o(s) link(s) agendada para '+escHtml(agendarPara.toLocaleString('pt-BR',{weekday:'short',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}))+'.':(integOn('zapi')?' e link(s) disparado(s) via WhatsApp.':' com sucesso.')}</div>
         <div style="font-size:12.5px;color:var(--text-2);margin-bottom:4px;"><strong>${escHtml(d.nome)}</strong> receberá ${links.length>1?'os links':'o link'} de assinatura.</div>
         <div style="font-size:12px;color:var(--text-3);margin-bottom:${emailCessionaria?6:18}px;">${tipos.map(t=>titulos[t]).join(' · ')}</div>
         ${emailCessionaria?`<div style="font-size:12px;color:var(--text-2);margin-bottom:18px;">A COBRASQ também assina: entre no ZapSign com <strong>${escHtml(emailCessionaria)}</strong> → Minhas Assinaturas → assinar em lote.</div>`:''}
@@ -50891,9 +51008,9 @@ function mv2Step4(){
       <button class="btn btn-ghost btn-sm" onclick="mv2SalvarNoCaso()" title="Salvar minuta no caso">Salvar</button>
       <button class="btn btn-ghost btn-sm" onclick="mv2DownloadDocx()">📄 .docx</button>
       <button class="btn btn-ghost btn-sm" onclick="mv2ImprimirPDF()">🖨️ PDF</button>
-      ${DB.config.zapsignToken?`<button class="btn btn-outline btn-sm" onclick="mv2EnviarZapSign()">✍️ ZapSign</button>`:''}
-      ${DB.config.zapiInstanceId?`<button class="btn btn-outline btn-sm" onclick="mv2EnviarWhatsApp()">💬 WhatsApp</button>`:''}
-      ${isAcordo&&DB.config.asaasKey?`<button class="btn btn-primary btn-sm" onclick="mv2EmitirCobrancasAcordo()">💳 Emitir cobranças</button>`:''}
+      ${integOn('zapsign')&&podeZapsign()?`<button class="btn btn-outline btn-sm" onclick="mv2EnviarZapSign()">✍️ ZapSign</button>`:''}
+      ${integOn('zapi')?`<button class="btn btn-outline btn-sm" onclick="mv2EnviarWhatsApp()">💬 WhatsApp</button>`:''}
+      ${isAcordo&&integOn('asaas')?`<button class="btn btn-primary btn-sm" onclick="mv2EmitirCobrancasAcordo()">💳 Emitir cobranças</button>`:''}
     </div>`;
 }
 
@@ -50962,7 +51079,8 @@ function mv2SalvarNoCaso(){
 async function mv2EnviarZapSign(){
   const dev  = (DB.devedores||[]).find(d=>d.id===_minuta.devId)||{};
   const tipo = MINUTA_TIPOS.find(t=>t.id===_minuta.tipo);
-  if(!DB.config.zapsignToken){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
+  if(!integOn('zapsign')){ showToast('Configure o ZapSign em Integrações.','warning'); return; }
+  if(!podeZapsign()){ showToast('Seu usuário não tem permissão para enviar documentos para assinatura. Peça ao Gustavo.','warning'); return; }
   if(!dev.nome){ showToast('Devedor sem nome.','warning'); return; }
   const telSel = await promptTelefoneEnvio(dev.tel); if(telSel===null) return;
 
@@ -51019,7 +51137,7 @@ async function mv2EnviarZapSign(){
             <button class="btn btn-primary btn-sm" onclick="navigator.clipboard.writeText('${escHtml(signerLink)}');showToast('Link copiado.','success');">Copiar</button>
           </div>
         </div>
-        ${DB.config.zapiInstanceId ? `
+        ${integOn('zapi') ? `
           <button class="btn btn-ghost btn-sm" style="width:100%;" onclick="mv2EnviarLinkWhatsApp('${escHtml(signerLink)}','${telSel}')">
             Enviar link via WhatsApp
           </button>` : ''}
@@ -51057,7 +51175,7 @@ async function mv2EnviarWhatsApp(){
   const tipo = MINUTA_TIPOS.find(t=>t.id===_minuta.tipo);
   const tel  = dev.tel?.replace(/\D/g,'');
   if(!tel){ showToast('Devedor sem telefone.','warning'); return; }
-  if(!DB.config.zapiInstanceId){ showToast('Z-Api não configurado.','warning'); return; }
+  if(!integOn('zapi')){ showToast('Z-Api não configurado.','warning'); return; }
   try {
     const msg = `Olá ${dev.nome||''}!\n\nA COBRASQ encaminhou o documento *${tipo?.nome||''}* para sua análise.\n\nPara dúvidas ou regularização, entre em contato.\n\nCOBRASQ — Recuperadora de Crédito\n${DB.config.zapiPhone||''}`;
     await ZApiAPI.sendText(tel, msg);
@@ -51137,11 +51255,10 @@ const AsaasAPI = {
   proxy: '/api/asaas',
   get h(){ return {
     'Content-Type':'application/json',
-    'x-asaas-key': DB.config.asaasKey||'',
     'x-asaas-env': DB.config.asaasEnv||'sandbox',
   }; },
   async req(method, path, data){
-    if(!DB.config.asaasKey) throw new Error('Chave Asaas não configurada em Configurações → Integrações');
+    if(!integOn('asaas')) throw new Error('Chave Asaas não configurada em Configurações → Integrações');
     // Separa path de query string
     const [pathPart, queryPart] = path.split('?');
     const cleanPath = pathPart.replace(/^\/+/,'');
@@ -51195,11 +51312,12 @@ function _zapTelsRepetidos(pessoas){
 const ZapSignAPI = {
   // Rota via proxy Vercel /api/zapsign para evitar CORS (ZapSign é server-to-server only)
   async req(method, path, data){
-    if(!DB.config.zapsignToken) throw new Error('Token ZapSign não configurado em Configurações → Integrações');
+    if(!integOn('zapsign')) throw new Error('Token ZapSign não configurado em Configurações → Integrações');
+    if(!['GET','HEAD'].includes(method) && !podeZapsign()) throw new Error('Seu usuário não tem permissão para enviar documentos para assinatura. Peça ao Gustavo.');
     const safePath = path.replace(/^\/+/, '');
     const opts = {
       method,
-      headers: { 'Content-Type':'application/json', 'x-zapsign-token': DB.config.zapsignToken, ...(await authHeaders()) }
+      headers: { 'Content-Type':'application/json', ...(await authHeaders()) }
     };
     if(data && !['GET','HEAD','DELETE'].includes(method)) opts.body = JSON.stringify(data);
     const r = await fetch(`/api/zapsign?path=${encodeURIComponent(safePath)}`, opts);
@@ -52455,7 +52573,7 @@ function nfaUpdateNavBadge(){
 function _aavMostrarEnvioWhats(){
   const w = _aavPendingWa; if(!w) return;
   if(!w.tel){ showToast('Sem telefone para este envio.','warning'); return; }
-  if(!DB.config.zapiInstanceId){ showToast('Z-API não configurado em Integrações.','warning'); return; }
+  if(!integOn('zapi')){ showToast('Z-API não configurado em Integrações.','warning'); return; }
   const msg = _aavMontarMsg(w.nome, w.titulo, w.link);
   document.getElementById('mzs-body').innerHTML = `
     <div style="padding:4px 0 8px;">
@@ -52841,7 +52959,7 @@ async function zsReenviarWhatsApp(minutaId, devId){
   if(!dev) return;
   const m = (dev.minutas||[]).find(x=>x.id===minutaId);
   if(!m||!m.signLink){ showToast('Link de assinatura não disponível.','warning'); return; }
-  if(!DB.config.zapiInstanceId){ showToast('Z-Api não configurado em Integrações.','warning'); return; }
+  if(!integOn('zapi')){ showToast('Z-Api não configurado em Integrações.','warning'); return; }
   const telSel = await promptTelefoneEnvio(dev.tel); if(telSel===null) return;
   try {
     const tel = telSel;
@@ -52867,24 +52985,22 @@ async function zsReenviarNotificacao(minutaId, devId){
 
 // ── Z-Api ─────────────────────────────────────────────────────
 const ZApiAPI = {
-  get base(){
-    const inst = DB.config.zapiInstanceId||'';
-    const tok  = DB.config.zapiToken||'';
-    return `https://api.z-api.io/instances/${inst}/token/${tok}`;
-  },
-  get h(){ return { 'Content-Type':'application/json', 'Client-Token': DB.config.zapiClientToken||'' }; },
+  // Segurança do colaborador (28/09/2026): instância e tokens NÃO ficam mais no navegador
+  // (saíram do blob). Tudo passa pelo proxy /api/zapi, que usa as variáveis da Vercel.
   // Normaliza o telefone p/ a Z-API: só dígitos e prefixa o DDI 55 quando faltar.
   // Espelha api/_zapi.js (15-16). Sem isso, número local (DDD+9+8 díg.) vai sem DDI
   // e a Z-API não entrega.
   _tel(phone){ let f = String(phone||'').replace(/\D/g,''); if(f && f.length<=11 && !f.startsWith('55')) f = '55'+f; return f; },
   async req(method, path, data){
-    if(!DB.config.zapiInstanceId||!DB.config.zapiToken)
+    if(!integOn('zapi'))
       throw new Error('Z-Api não configurado em Configurações → Integrações');
-    const opts = { method, headers: this.h };
+    const [rota, qs] = String(path||'').replace(/^\/+/, '').split('?');
+    const url = '/api/zapi?path=' + encodeURIComponent(rota) + (qs ? '&' + qs : '');
+    const opts = { method, headers: { 'Content-Type':'application/json', ...(await authHeaders()) } };
     if(data) opts.body = JSON.stringify(data);
-    const r = await fetch(this.base + path, opts);
+    const r = await fetch(url, opts);
     const json = await r.json().catch(()=>({ message:`HTTP ${r.status}` }));
-    if(!r.ok) throw new Error(json?.message || `Erro ${r.status}`);
+    if(!r.ok) throw new Error(json?.message || json?.error || `Erro ${r.status}`);
     return json;
   },
   sendText(phone, message){ return this.req('POST','/send-text',{ phone:this._tel(phone), message }); },
@@ -52992,7 +53108,7 @@ function getAlertas(){
   });
 
   // Documentos ZapSign pendentes há mais de 7 dias
-  if(DB.config.zapsignToken){
+  if(integOn('zapsign')){
     const limite7d = new Date(); limite7d.setDate(limite7d.getDate()-7);
     const velhosP = [];
     (DB.devedores||[]).forEach(d=>{
@@ -54276,7 +54392,7 @@ async function _relAutoSalvarCopiaPdf(clienteId, b64, nome){
 async function _relAutoEnviarUm(clienteId, btn){
   const cli=(DB.clientes||[]).find(c=>c.id===clienteId); if(!cli){ return false; }
   const tel=_relAutoTel(cli); if(!tel){ showToast('Cliente sem telefone.','warning'); return false; }
-  if(!(DB.config?.zapiInstanceId&&DB.config?.zapiToken)){ showToast('Configure o Z-API em Configurações → Integrações.','warning'); return false; }
+  if(!(integOn('zapi'))){ showToast('Configure o Z-API em Configurações → Integrações.','warning'); return false; }
   const nomeCli=cli.nomeFantasia||cli.nome_fantasia||cli.nome;
   if(btn && !confirm('Enviar o relatório de andamento para '+nomeCli+' no WhatsApp '+tel+'?')) return false;
   const orig=btn?btn.textContent:''; if(btn){ btn.disabled=true; btn.textContent='Enviando…'; }
