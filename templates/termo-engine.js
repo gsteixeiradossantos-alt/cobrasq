@@ -90,6 +90,12 @@
     return String(doc || "").trim();
   }
 
+  // CEP guardado só em dígitos ("85660000") sai como "85660-000".
+  function fmtCep(cep) {
+    const d = String(cep || "").replace(/\D/g, "");
+    return d.length === 8 ? d.slice(0, 5) + "-" + d.slice(5) : String(cep || "").trim();
+  }
+
   function qualifDevedor(dev) {
     const e = dev.endereco || {};
     const endereco = [
@@ -97,7 +103,7 @@
       e.numero ? "n. " + e.numero : "",
       e.complemento ? e.complemento : "",
       e.bairro ? "no bairro " + e.bairro : "",
-      e.cep ? "CEP. " + e.cep : "",
+      e.cep ? "CEP. " + fmtCep(e.cep) : "",
       e.cidade ? "município de " + e.cidade : "",
       e.uf ? estadoFrase(e.uf) : ""
     ].filter(Boolean).join(", ");
@@ -559,7 +565,7 @@
       e.numero ? "n. " + e.numero : "",
       e.complemento ? e.complemento : "",
       e.bairro ? e.bairro : "",
-      e.cep ? "CEP " + e.cep : "",
+      e.cep ? "CEP " + fmtCep(e.cep) : "",
       e.cidade ? e.cidade : "",
       e.uf ? estadoFrase(e.uf) : ""
     ].filter(Boolean).join(", ");
