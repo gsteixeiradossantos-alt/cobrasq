@@ -44,7 +44,7 @@ function comprovanteHtml(d) {
   const linhas = [
     ['Credor', d.credorNome],
     ['Devedor', d.devedor],
-    d.parcela ? ['Parcela', `n. ${d.parcela}`] : null,
+    d.parcela ? [/ e /.test(String(d.parcela)) ? 'Parcelas' : 'Parcela', `n. ${d.parcela}`] : null,
     ['Chave PIX de destino', mascararChave(d.chavePix)],
     ['Data da transferência', fmtData(d.dataISO)],
     ['Identificador Asaas', d.transferId || '—'],
@@ -85,7 +85,7 @@ td.v.mono{font-family:'JetBrains Mono',monospace;font-size:11.5px;font-weight:40
 <div class="inner">
   <div class="title"><div><div class="kicker">Transferência PIX ao credor</div><div class="t">Comprovante<br/>de repasse</div></div></div>
   <div class="vbox"><span class="vl">Valor repassado</span><span class="vv">R$ ${escapeHtml(fmtBRL(d.valor))}</span></div>
-  <p class="decl">A <b>COBRASQ Recuperadora de Crédito e Cobrança Ltda.</b> repassou a <b>${escapeHtml(d.credorNome)}</b> a importância de <b>R$ ${escapeHtml(fmtBRL(d.valor))}</b>, referente ao pagamento realizado por <b>${escapeHtml(d.devedor)}</b>${d.parcela ? `, parcela n. ${escapeHtml(String(d.parcela))}` : ''}.</p>
+  <p class="decl">A <b>COBRASQ Recuperadora de Crédito e Cobrança Ltda.</b> repassou a <b>${escapeHtml(d.credorNome)}</b> a importância de <b>R$ ${escapeHtml(fmtBRL(d.valor))}</b>, referente ao pagamento realizado por <b>${escapeHtml(d.devedor)}</b>${d.parcela ? `, ${/ e /.test(String(d.parcela)) ? 'parcelas' : 'parcela'} n. ${escapeHtml(String(d.parcela))}` : ''}.</p>
   <table>${linhas.map(([k, v]) => `<tr><td class="k">${escapeHtml(k)}</td><td class="v${/Identificador|Chave/.test(k) ? ' mono' : ''}">${escapeHtml(v)}</td></tr>`).join('')}</table>
   <div class="pd">Dois Vizinhos/PR, ${dataExtenso(d.dataISO)}.</div>
 </div>
