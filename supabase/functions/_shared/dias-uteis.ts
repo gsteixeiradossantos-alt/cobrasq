@@ -116,3 +116,17 @@ export function somarDiasUteis(iso: string, n: number): string {
   for (let i = 0; i < n; i++) d = diaUtilEmOuDepois(somarDias(d, 1));
   return d;
 }
+
+// Vencimento ANTECIPADO no Asaas (sync): devolve o novo proximo_lembrete_em, ou
+// null se não há o que antecipar. Só antecipa — nunca empurra para depois.
+export function reagendarAntecipado(
+  s: { venc: string; status: string; prox: string },
+  novoVenc: string, hoje: string, antecedencia: number, agoraIso: string,
+): string | null {
+  const nv = String(novoVenc || '').slice(0, 10);
+  if (s.status !== 'ativa' || !nv || !s.venc || nv >= s.venc) return null;
+  const et = etapaPreVencimento(nv, hoje, antecedencia);
+  if (et.etapa === 'vencido') return null;
+  const quando = et.etapa === 'aguardar' ? noveHorasBRT(et.proximo) : agoraIso;
+  return !s.prox || Date.parse(quando) < Date.parse(s.prox) ? quando : null;
+}

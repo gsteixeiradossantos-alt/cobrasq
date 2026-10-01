@@ -11,7 +11,7 @@ import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { MODELO } from '../_shared/bia-system.ts';
 import { resolverJid } from '../_shared/telefone-jid.ts';
 import { ehDiaUtil, etapaPreVencimento, noveHorasBRT, somarDiasUteis, vencimentoEfetivo } from '../_shared/dias-uteis.ts';
-import { textosAtraso, textosPreVencimento } from '../_shared/bia-avisos.ts';
+import { decidirPrazoFinal, PREFIXO_PRAZO, prazoDoLog, textosAtraso, textosPreVencimento } from '../_shared/bia-avisos.ts';
 
 const SIG = '*Bia • COBRASQ*';
 // 1º aviso antes do vencimento: N dias antes (mesma variável do bia-cobranca-sync)
@@ -488,6 +488,24 @@ Deno.serve(async (req) => {
         if (count && count > 0) nAberto = count;
       }
     } catch { /* ignora */ }
+    // prazo final: uma vez só (ver decidirPrazoFinal em bia-avisos.ts)
+    if (pertoAcao && !promessaQuebrada) {
+      const { data: ultPrazo } = await sb.from('bia_cobranca_log').select('texto')
+        .eq('asaas_payment_id', c.asaas_payment_id).like('texto', `${PREFIXO_PRAZO}%`)
+        .order('id', { ascending: false }).limit(1);
+      const prazoAnt = prazoDoLog(ultPrazo?.[0]?.texto);
+      const dec = decidirPrazoFinal(prazoAnt, hoje);
+      if (dec === 'aguardar') {
+        await sb.from('bia_cobranca').update({ proximo_lembrete_em: noveHorasBRT(somarDiasUteis(String(prazoAnt), 1)), updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
+        puladas++; continue;
+      }
+      if (dec === 'para_acao') {
+        await sb.from('bia_cobranca').update({ status: 'para_acao', marcada_acao_em: agoraIso, updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
+        paraAcao++;
+        await notificar(`COBRANÇA -> PARA AÇÃO\n${c.nome || ('+' + tel)} | R$ ${brMoney(c.valor)} | venceu ${brDate(c.venc_original)}\nPrazo final de ${brDate(prazoAnt)} passou sem pagamento. Encaminhar ao Teixeira & Azzolin.`);
+        continue;
+      }
+    }
     // textos aprovados em 30/09/2026 (bia-avisos.ts); nenhum cita negativação/protesto.
     // Prazo final: data fixa, 2 dias úteis à frente (antes: "48 horas").
     const prazo = somarDiasUteis(hoje, 2);
@@ -496,17 +514,19 @@ Deno.serve(async (req) => {
       sig: SIG, nome: String(c.nome || ''), valor: c.valor, venc: String(venc || c.venc_atual || ''), url: String(url || ''),
       nAberto, prazo, dataPrometida: c.data_prometida ? String(c.data_prometida) : undefined,
     });
-    const msgLog = blocos.join('\n\n');
+    const ehPrazoFinal = pertoAcao && !promessaQuebrada;
+    const msgLog = (ehPrazoFinal ? `${PREFIXO_PRAZO}${prazo}: ` : '') + blocos.join('\n\n');
 
     // envia bloco a bloco (mensagens separadas), com um pequeno intervalo
     const { ok } = await enviarBlocos(tel, blocos);
     if (!ok) { puladas++; continue; }
 
     // avança a régua: cadência normal (n<=2 +1d; n>=3 +2d)
+    // depois do prazo final, só volta a olhar no dia útil seguinte ao prazo
     const proxMs = Date.now() + (n <= 2 ? 1 : 2) * 864e5;
     const upd: any = {
       lembretes_enviados: n, ultimo_lembrete_em: agoraIso,
-      proximo_lembrete_em: new Date(proxMs).toISOString(),
+      proximo_lembrete_em: ehPrazoFinal ? noveHorasBRT(somarDiasUteis(prazo, 1)) : new Date(proxMs).toISOString(),
       primeiro_contato_em: c.primeiro_contato_em || agoraIso, venc_atual: venc, invoice_url: url, updated_at: agoraIso,
     };
     if (promessaQuebrada) {
