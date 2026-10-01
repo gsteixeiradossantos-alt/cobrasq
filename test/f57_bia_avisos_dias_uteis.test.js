@@ -113,5 +113,29 @@ const FN = path.join(__dirname, '..', 'supabase', 'functions');
   assert.strictEqual(U.somarDiasUteis('2026-10-19', 2), '2026-10-21');
   assert.strictEqual(U.somarDiasUteis('2026-10-22', 2), '2026-10-26');
 
+  // prazo final sai uma vez só (01/10/2026)
+  assert.strictEqual(T.prazoDoLog('PRAZO FINAL até 2026-11-04: *Bia • COBRASQ*\nOi Maria.'), '2026-11-04');
+  assert.strictEqual(T.prazoDoLog('*Bia • COBRASQ*\nOi Maria, tudo bem?'), null);
+  assert.strictEqual(T.decidirPrazoFinal(null, '2026-11-02'), 'enviar');
+  assert.strictEqual(T.decidirPrazoFinal('2026-11-04', '2026-11-03'), 'aguardar');
+  assert.strictEqual(T.decidirPrazoFinal('2026-11-04', '2026-11-04'), 'aguardar');
+  assert.strictEqual(T.decidirPrazoFinal('2026-11-04', '2026-11-05'), 'para_acao');
+
+  // vencimento antecipado no Asaas: 22/10 -> 15/10, linha agendada para 19/10 9h
+  const ag0 = { venc: '2026-10-22', status: 'ativa', prox: '2026-10-19T12:00:00.000Z' };
+  const AG = '2026-10-08T15:00:00.000Z';
+  // em 08/10: novo 3 dias antes = sexta 09/10 (12/10 é feriado) -> antecipa para 09/10 9h
+  assert.strictEqual(U.reagendarAntecipado(ag0, '2026-10-15', '2026-10-08', 3, AG), '2026-10-09T12:00:00.000Z');
+  // em 14/10 (véspera do novo): manda agora
+  assert.strictEqual(U.reagendarAntecipado(ag0, '2026-10-15', '2026-10-14', 3, AG), AG);
+  // vencimento para FRENTE ou igual: não mexe (o worker resolve)
+  assert.strictEqual(U.reagendarAntecipado(ag0, '2026-10-29', '2026-10-08', 3, AG), null);
+  assert.strictEqual(U.reagendarAntecipado(ag0, '2026-10-22', '2026-10-08', 3, AG), null);
+  // já agendado antes do que seria: não empurra
+  assert.strictEqual(U.reagendarAntecipado({ ...ag0, prox: '2026-10-05T12:00:00.000Z' }, '2026-10-15', '2026-10-08', 3, AG), null);
+  // pausada/adiada/para_acao: não mexe; novo vencimento já passado: não mexe
+  assert.strictEqual(U.reagendarAntecipado({ ...ag0, status: 'adiada' }, '2026-10-15', '2026-10-08', 3, AG), null);
+  assert.strictEqual(U.reagendarAntecipado(ag0, '2026-10-01', '2026-10-08', 3, AG), null);
+
   console.log('F-57 ok');
 })().catch((e) => { console.error(e); process.exit(1); });

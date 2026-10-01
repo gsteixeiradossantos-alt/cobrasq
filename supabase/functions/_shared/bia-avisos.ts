@@ -147,3 +147,21 @@ export function textosAtraso(c: CobrancaAtraso): string[] {
   b[0] = `${c.sig}\n${b[0]}`;
   return b;
 }
+
+// ===== Prazo final sai UMA vez =====
+// Antes, o "prazo final" se repetia a cada 2 dias com uma data nova enquanto o
+// caso não ia para ação — a data dada ao devedor deixava de valer. O prazo
+// enviado fica no log ("PRAZO FINAL até AAAA-MM-DD: ..."); depois dele:
+//  - dentro do prazo  -> não manda nada, volta a olhar no dia útil seguinte ao prazo
+//  - prazo vencido    -> o caso vai para ação (é o que a mensagem anunciou)
+export const PREFIXO_PRAZO = 'PRAZO FINAL até ';
+
+export function prazoDoLog(texto: string | null | undefined): string | null {
+  const m = String(texto || '').match(/^PRAZO FINAL até (\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : null;
+}
+
+export function decidirPrazoFinal(prazoAnterior: string | null, hoje: string): 'enviar' | 'aguardar' | 'para_acao' {
+  if (!prazoAnterior) return 'enviar';
+  return hoje.slice(0, 10) <= prazoAnterior ? 'aguardar' : 'para_acao';
+}

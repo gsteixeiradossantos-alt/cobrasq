@@ -6,7 +6,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { mesmoNumero } from '../_shared/telefone-jid.ts';
-import { etapaPreVencimento, noveHorasBRT } from '../_shared/dias-uteis.ts';
+import { etapaPreVencimento, noveHorasBRT, reagendarAntecipado } from '../_shared/dias-uteis.ts';
 
 function json(o: unknown, status = 200) {
   return new Response(JSON.stringify(o), { status, headers: { 'Content-Type': 'application/json' } });
@@ -124,11 +124,13 @@ Deno.serve(async (req) => {
   const payIds = pays.map(p => p.id);
   const jaExiste = new Set<string>();
   const telSalvo = new Map<string, string>();
+  const salvo = new Map<string, { venc: string; status: string; prox: string }>();
   for (let i = 0; i < payIds.length; i += 100) {
-    const { data } = await sb.from('bia_cobranca').select('asaas_payment_id, telefone').in('asaas_payment_id', payIds.slice(i, i + 100));
+    const { data } = await sb.from('bia_cobranca').select('asaas_payment_id, telefone, venc_atual, status, proximo_lembrete_em').in('asaas_payment_id', payIds.slice(i, i + 100));
     (data || []).forEach((r: any) => {
       jaExiste.add(r.asaas_payment_id);
       if (r.telefone) telSalvo.set(r.asaas_payment_id, String(r.telefone));
+      salvo.set(r.asaas_payment_id, { venc: String(r.venc_atual || '').slice(0, 10), status: String(r.status || ''), prox: String(r.proximo_lembrete_em || '') });
     });
   }
 
@@ -151,10 +153,18 @@ Deno.serve(async (req) => {
   for (const p of pays) {
     const c = cust[p.customer] || { nome: '', tel: '' };
     if (jaExiste.has(p.id)) {
-      atualizadas.push(sb.from('bia_cobranca').update({
+      const upd: Record<string, unknown> = {
         asaas_customer_id: p.customer, telefone: telefonePreservado(p.id, c.tel), nome: c.nome || null,
         valor: p.value, invoice_url: p.invoiceUrl || null, synced_em: agora, updated_at: agora,
-      }).eq('asaas_payment_id', p.id));
+      };
+      // Vencimento ANTECIPADO no Asaas: a linha seguia agendada pela data velha e o
+      // aviso de 3 dias antes/véspera saía tarde ou nem saía (01/10/2026). Mudança
+      // para frente o próprio worker resolve ao ler a data real; para trás, só aqui.
+      // Só antecipa — nunca empurra para depois um lembrete já agendado.
+      const s0 = salvo.get(p.id);
+      const antes = s0 ? reagendarAntecipado(s0, String(p.dueDate || ''), hoje, avisoDias, agora) : null;
+      if (antes) upd.proximo_lembrete_em = antes;
+      atualizadas.push(sb.from('bia_cobranca').update(upd).eq('asaas_payment_id', p.id));
     } else {
       // Boleto que ainda não venceu entra agendado para o dia do 1º aviso (9h BRT),
       // não para agora — senão o devedor receberia o aviso no instante em que o boleto
