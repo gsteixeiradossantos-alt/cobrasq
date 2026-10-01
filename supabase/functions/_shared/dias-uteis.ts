@@ -109,3 +109,10 @@ export function etapaPreVencimento(venc: string, hoje: string, antecedencia = 3)
 export function noveHorasBRT(iso: string): string {
   return new Date(Date.parse(iso.slice(0, 10) + 'T12:00:00Z')).toISOString();
 }
+
+// n-ésimo dia útil depois de `iso` (prazo final da Bia: 2 dias úteis).
+export function somarDiasUteis(iso: string, n: number): string {
+  let d = iso.slice(0, 10);
+  for (let i = 0; i < n; i++) d = diaUtilEmOuDepois(somarDias(d, 1));
+  return d;
+}

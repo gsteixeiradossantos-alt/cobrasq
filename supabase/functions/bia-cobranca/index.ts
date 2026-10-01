@@ -10,8 +10,8 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { MODELO } from '../_shared/bia-system.ts';
 import { resolverJid } from '../_shared/telefone-jid.ts';
-import { ehDiaUtil, etapaPreVencimento, noveHorasBRT, vencimentoEfetivo } from '../_shared/dias-uteis.ts';
-import { textosPreVencimento } from '../_shared/bia-avisos.ts';
+import { ehDiaUtil, etapaPreVencimento, noveHorasBRT, somarDiasUteis, vencimentoEfetivo } from '../_shared/dias-uteis.ts';
+import { textosAtraso, textosPreVencimento } from '../_shared/bia-avisos.ts';
 
 const SIG = '*Bia • COBRASQ*';
 // 1º aviso antes do vencimento: N dias antes (mesma variável do bia-cobranca-sync)
@@ -321,7 +321,7 @@ Deno.serve(async (req) => {
   });
   if (error) return json({ error: 'claim bia_cobranca: ' + error.message }, 500);
 
-  let enviadas = 0, pagas = 0, paraAcao = 0, puladas = 0, followups = 0;
+  let enviadas = 0, pagas = 0, paraAcao = 0, puladas = 0;
   const agoraIso = new Date().toISOString();
   const telefonesProcessados = new Set<string>();
 
@@ -399,43 +399,13 @@ Deno.serve(async (req) => {
     }
 
     const hoje = hojeSP();
-    const primeiroNome = String(c.nome || '').split(' ')[0] || '';
-    const ola = primeiroNome ? `Oi ${primeiroNome}, tudo bem?` : 'Oi, tudo bem?';
-    const val = brMoney(c.valor);
 
-    // ===== FOLLOW-UP DO MESMO DIA =====
-    // Se já cobramos HOJE (de manhã) e o cliente NÃO respondeu, e chegou aqui é porque
-    // o proximo_lembrete_em (13h30) já passou. Manda UM follow-up firme e reagenda a régua
-    // normal pra amanhã (sem contar como novo lembrete/escalada).
+    // Já cobrado HOJE: não manda de novo no mesmo dia. Até 30/09/2026 havia aqui
+    // um follow-up às 13h30 para quem não respondia; o Gustavo tirou (p08 da
+    // página de aprovação). Fica só a trava contra duas cobranças no mesmo dia.
     if (spDate(c.ultimo_lembrete_em) === hoje) {
-      // Follow-up duro no MESMO dia só a partir do 2º ciclo de lembrete: no 1º
-      // contato, silêncio até 13h30 NÃO significa "não há intenção de resolver"
-      // (achado P2 da auditoria 29/07 — tom de ultimato em dívida vencida há 2 dias).
-      if ((c.lembretes_enviados ?? 0) < 2) {
-        await sb.from('bia_cobranca').update({ proximo_lembrete_em: new Date(Date.now() + 864e5).toISOString(), updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
-        puladas++; continue;
-      }
-      const blocos = [
-        `${ola} Passei mais cedo sobre sua parcela de R$ ${val} e até agora não tive seu retorno.`,
-        `Preciso de um posicionamento ainda hoje. Sem resposta, vou entender que não há intenção de resolver por aqui e o caso segue para as próximas providências.`,
-        `Se você não consegue responder agora, me manda só uma palavra avisando que retorna mais tarde — assim eu aguardo. Combinado?`,
-      ];
-      blocos[0] = `${SIG}\n${blocos[0]}`;
-      const { ok } = await enviarBlocos(tel, blocos);
-      if (!ok) { puladas++; continue; }
-      const nAtual = c.lembretes_enviados ?? 1;
-      const proxMs = Date.now() + (nAtual <= 2 ? 1 : 2) * 864e5;
-      const proxFup = new Date(proxMs).toISOString();
-      await sb.from('bia_cobranca').update({ ultimo_lembrete_em: agoraIso, proximo_lembrete_em: proxFup, observacao: 'follow-up enviado; sem resposta até 13h30', updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
-      if (c.asaas_customer_id) {
-        await sb.from('bia_cobranca')
-          .update({ proximo_lembrete_em: proxFup, updated_at: agoraIso })
-          .eq('asaas_customer_id', c.asaas_customer_id)
-          .in('status', ['ativa', 'adiada'])
-          .neq('asaas_payment_id', c.asaas_payment_id);
-      }
-      await sb.from('bia_cobranca_log').insert({ asaas_payment_id: c.asaas_payment_id, telefone: tel, lembrete_num: nAtual, texto: 'FOLLOW-UP: ' + blocos.join('\n\n') });
-      followups++; continue;
+      await sb.from('bia_cobranca').update({ proximo_lembrete_em: new Date(Date.now() + 864e5).toISOString(), updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
+      puladas++; continue;
     }
 
     // ===== AVISOS ANTES DO VENCIMENTO (3 dias antes, véspera e dia) =====
@@ -518,52 +488,25 @@ Deno.serve(async (req) => {
         if (count && count > 0) nAberto = count;
       }
     } catch { /* ignora */ }
-    const multi = nAberto > 1 ? ` Constam ${nAberto} boletos em aberto em seu nome.` : '';
-    // mensagem em BLOCOS (várias mensagens curtas, como um humano digita), não um textão.
-    let blocos: string[];
-    if (promessaQuebrada) {
-      blocos = [
-        `${ola} Você tinha se comprometido a pagar a parcela de R$ ${val} até ${brDate(c.data_prometida)}, e o pagamento não entrou.`,
-        `Isso deixa o acordo descumprido.${multi}`,
-        `Regularize hoje pra gente evitar a negativação do seu nome e o protesto:\n${url}`,
-        `Se aconteceu algum imprevisto, me chama agora.`,
-      ];
-    } else if (pertoAcao) {
-      blocos = [
-        `${ola} Vou precisar ser bem direta com você agora.`,
-        `Sua parcela de R$ ${val} está vencida desde ${brDate(venc)} e continua em aberto.${multi}`,
-        `Vou te dar um prazo final de 48 horas. Passando disso sem pagamento, o caso vai pra protesto em cartório e negativação (SPC/Serasa).`,
-        `Ainda dá tempo de resolver por aqui:\n${url}`,
-      ];
-    } else if (jaCobrado && diasVencAtual >= 7) {
-      blocos = [
-        `${ola} Sua parcela de R$ ${val} está vencida desde ${brDate(venc)} e ainda não foi paga.${multi}`,
-        `Preciso que você regularize com urgência. Continuando sem pagamento, o caso vai ser encaminhado pra negativação e protesto.`,
-        `Dá pra resolver por aqui:\n${url}`,
-        `Se precisar acertar uma data, me chama.`,
-      ];
-    } else {
-      blocos = [
-        `${ola} Sua parcela de R$ ${val} venceu em ${brDate(venc)} e ainda consta em aberto.${multi}`,
-        `Pedimos que regularize o quanto antes pra evitar encargos e o prosseguimento da cobrança:\n${url}`,
-        `Estou à disposição pra acertar.`,
-      ];
-    }
-    blocos[0] = `${SIG}\n${blocos[0]}`; // assinatura só no 1º bloco
+    // textos aprovados em 30/09/2026 (bia-avisos.ts); nenhum cita negativação/protesto.
+    // Prazo final: data fixa, 2 dias úteis à frente (antes: "48 horas").
+    const prazo = somarDiasUteis(hoje, 2);
+    const blocos = textosAtraso({
+      tipo: promessaQuebrada ? 'promessa_quebrada' : pertoAcao ? 'prazo_final' : (jaCobrado && diasVencAtual >= 7) ? 'sete_dias' : 'primeira',
+      sig: SIG, nome: String(c.nome || ''), valor: c.valor, venc: String(venc || c.venc_atual || ''), url: String(url || ''),
+      nAberto, prazo, dataPrometida: c.data_prometida ? String(c.data_prometida) : undefined,
+    });
     const msgLog = blocos.join('\n\n');
 
     // envia bloco a bloco (mensagens separadas), com um pequeno intervalo
     const { ok } = await enviarBlocos(tel, blocos);
     if (!ok) { puladas++; continue; }
 
-    // avança a régua. Se a parcela está EM ATRASO e ainda dá tempo, agenda o FOLLOW-UP
-    // pra hoje 13h30 (se o cliente não responder até lá). Senão, cadência normal (n<=2 +1d; n>=3 +2d).
-    const followUpAtISO = new Date(`${hoje}T13:30:00-03:00`).toISOString();
-    const podeFupHoje = diasVencAtual >= 1 && Date.now() < Date.parse(followUpAtISO);
+    // avança a régua: cadência normal (n<=2 +1d; n>=3 +2d)
     const proxMs = Date.now() + (n <= 2 ? 1 : 2) * 864e5;
     const upd: any = {
       lembretes_enviados: n, ultimo_lembrete_em: agoraIso,
-      proximo_lembrete_em: podeFupHoje ? followUpAtISO : new Date(proxMs).toISOString(),
+      proximo_lembrete_em: new Date(proxMs).toISOString(),
       primeiro_contato_em: c.primeiro_contato_em || agoraIso, venc_atual: venc, invoice_url: url, updated_at: agoraIso,
     };
     if (promessaQuebrada) {
@@ -585,5 +528,5 @@ Deno.serve(async (req) => {
     enviadas++;
   }
 
-  return json({ ok: true, candidatas: rows?.length || 0, enviadas, followups, pagas, para_acao: paraAcao, puladas });
+  return json({ ok: true, candidatas: rows?.length || 0, enviadas, pagas, para_acao: paraAcao, puladas });
 });

@@ -46,47 +46,104 @@ export type AvisoPreVenc = {
 };
 
 export function textosPreVencimento(a: AvisoPreVenc): string[] {
-  const primeiro = String(a.nome || '').trim().split(/\s+/)[0] || '';
-  const ola = primeiro ? `Oi ${primeiro}, tudo bem?` : 'Oi, tudo bem?';
+  const ola = saudacao(a.nome);
   const val = brMoney(a.valor);
-  const link = a.url ? `\n${a.url}` : '';
+  const url = a.url || '';
   const prorrogado = a.vencEf !== a.venc.slice(0, 10);
-  let corpo: string[];
-
-  if (a.jaCobrado) {
-    if (a.etapa === 'dia') {
-      corpo = [
-        `Hoje é o novo vencimento da sua parcela de R$ ${val}.`,
-        `O boleto está aqui:${link}`,
-        `Se já pagou, pode desconsiderar.`,
-      ];
-    } else {
-      corpo = [
-        `Passando pra lembrar do novo vencimento da sua parcela de R$ ${val}: ${quando(a.hoje, a.vencEf)}.`,
-        `O boleto atualizado está aqui:${link}`,
-        `Conto com você nessa data. Se já pagou, pode desconsiderar.`,
-      ];
-    }
-  } else if (a.etapa === 'dia') {
-    corpo = [
-      prorrogado
-        ? `Sua parcela de R$ ${val} venceu ${diaSemana(a.venc) === 'sábado' || diaSemana(a.venc) === 'domingo' ? 'no' : 'na'} ${diaSemana(a.venc)} (${ddmm(a.venc)}), que não foi dia útil, então dá pra pagar hoje.`
-        : `Sua parcela de R$ ${val} vence hoje.`,
-      `Pra deixar em dia, é só usar o link:${link}`,
-      `Se já pagou, pode desconsiderar.`,
-    ];
-  } else if (a.etapa === 'vespera') {
-    corpo = [
-      `Sua parcela de R$ ${val} vence ${quando(a.hoje, a.vencEf)}.`,
-      `O boleto está aqui:${link}`,
-      `Se já pagou, pode desconsiderar.`,
-    ];
-  } else {
-    corpo = [
-      `Passando pra lembrar: sua parcela de R$ ${val} vence ${quando(a.hoje, a.vencEf)}.`,
-      `Se quiser adiantar, o boleto está aqui:${link}`,
-      `Se já pagou, pode desconsiderar.`,
+  const fecho = 'Qualquer dúvida, fico à disposição!';
+  // textos aprovados pelo Gustavo em 30/09/2026 (página de aprovação, p01–p06)
+  if (a.etapa === 'dia' && !prorrogado) {
+    // p03 / p06: o dia do vencimento é igual para quem já foi cobrado
+    return [
+      `${a.sig}\n${ola} Sua parcela de R$ ${val} vence hoje.`,
+      `Pague via Boleto ou PIX clicando no link a seguir: ${url}`,
+      fecho,
     ];
   }
-  return [`${a.sig}\n${ola}`, ...corpo];
+  if (a.etapa === 'dia') {
+    // p04: venceu em sábado/domingo/feriado e o boleto vale hoje
+    const s = diaSemana(a.venc);
+    return [
+      `${a.sig}\n${ola} Sua parcela de R$ ${val} venceu ${s === 'sábado' || s === 'domingo' ? 'no' : 'na'} ${s} (${ddmm(a.venc)}), que não foi dia útil, então dá pra pagar hoje.`,
+      `Pra deixar em dia, é só usar o link:\n${url}`,
+      fecho,
+    ];
+  }
+  if (a.jaCobrado) {
+    // p05: já levou cobrança de atraso e o vencimento foi mudado para frente
+    return [
+      `${a.sig}\n${ola} Passando pra lembrar do novo vencimento da sua parcela de R$ ${val}: ${quando(a.hoje, a.vencEf)}.`,
+      `O boleto atualizado está aqui: ${url}`,
+      `Conto com você nessa data. ${fecho}`,
+    ];
+  }
+  if (a.etapa === 'vespera') {
+    // p02: sem link, por decisão dele
+    return [
+      `${a.sig}\n${ola} Passando apenas para lembrar que a sua parcela de R$ ${val} vencerá ${quando(a.hoje, a.vencEf)}.`,
+      `Efetue o pagamento na data correta e evite a cobrança de juros e multa. ${fecho}`,
+    ];
+  }
+  // p01: 3 dias (úteis) antes
+  return [
+    `${a.sig}\n${ola} Passando pra lembrar: sua parcela de R$ ${val} vence ${quando(a.hoje, a.vencEf)}.`,
+    `Se quiser adiantar, o boleto está aqui:\n${url}`,
+    fecho,
+  ];
+}
+
+function saudacao(nome: string): string {
+  const primeiro = String(nome || '').trim().split(/\s+/)[0] || '';
+  return primeiro ? `Oi ${primeiro}, tudo bem?` : 'Oi, tudo bem?';
+}
+
+// ===== Cobrança de boleto JÁ VENCIDO (p07, p09, p10, p11) =====
+// Nenhum texto cita negativação nem protesto (decisão de 30/09/2026). A linha de
+// "N boletos em aberto" só entra na de 7 dias e na de prazo final.
+export type CobrancaAtraso = {
+  tipo: 'primeira' | 'sete_dias' | 'prazo_final' | 'promessa_quebrada';
+  sig: string;
+  nome: string;
+  valor: unknown;
+  venc: string;          // vencimento do boleto
+  url: string;
+  nAberto: number;       // boletos em aberto do mesmo cliente
+  prazo?: string;        // prazo_final: data limite (dia útil)
+  dataPrometida?: string; // promessa_quebrada
+};
+
+export function textosAtraso(c: CobrancaAtraso): string[] {
+  const ola = saudacao(c.nome);
+  const val = brMoney(c.valor);
+  const url = c.url || '';
+  const multi = c.nAberto > 1 ? ` Constam ${c.nAberto} boletos em aberto em seu nome.` : '';
+  let b: string[];
+  if (c.tipo === 'promessa_quebrada') {
+    b = [
+      `${ola} Você tinha combinado de pagar a parcela de R$ ${val} até ${ddmm(String(c.dataPrometida || ''))}, e o pagamento não entrou.`,
+      `Aconteceu alguma coisa?`,
+    ];
+  } else if (c.tipo === 'prazo_final') {
+    const primeiro = String(c.nome || '').trim().split(/\s+/)[0] || '';
+    const prazo = String(c.prazo || '');
+    b = [
+      `${primeiro ? `Oi ${primeiro}.` : 'Oi.'} Sua parcela de R$ ${val} está vencida desde ${ddmm(c.venc)} e já tentei contato algumas vezes sem retorno.${multi}`,
+      `Te dou até ${diaSemana(prazo)}, ${ddmm(prazo)}, pra pagar ou me chamar pra combinar: ${url}`,
+      `Depois dessa data, o caso sai do atendimento por aqui e seguirá para o jurídico para as medidas de cobranças cabíveis.`,
+    ];
+  } else if (c.tipo === 'sete_dias') {
+    b = [
+      `${ola} Sua parcela de R$ ${val} está vencida desde ${ddmm(c.venc)} e segue em aberto.${multi}`,
+      `Preciso que você regularize com urgência, pelo link:\n${url}`,
+      `Se precisar combinar uma data, me responde aqui. Sem retorno, o caso segue para as próximas medidas de cobrança.`,
+    ];
+  } else {
+    b = [
+      `${ola} Sua parcela de R$ ${val} venceu em ${ddmm(c.venc)} e ainda não consta o pagamento.`,
+      `Pedimos que regularize o quanto antes pra evitar o aumento de encargos e o prosseguimento da cobrança:\n${url}`,
+      `Estou à disposição para conversar, caso precise.`,
+    ];
+  }
+  b[0] = `${c.sig}\n${b[0]}`;
+  return b;
 }

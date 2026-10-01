@@ -60,13 +60,58 @@ const FN = path.join(__dirname, '..', 'supabase', 'functions');
   const t1 = txt({ etapa: 'antecipado', venc: '2026-10-22', vencEf: '2026-10-22', hoje: '2026-10-19' });
   assert.ok(t1.startsWith('*Bia • COBRASQ*\nOi Elisandra, tudo bem?'), t1);
   assert.ok(t1.includes('R$ 206,00 vence na quinta-feira, dia 22/10'), t1);
-  assert.ok(txt({ etapa: 'vespera', venc: '2026-10-22', vencEf: '2026-10-22', hoje: '2026-10-21' }).includes('vence amanhã, dia 22/10'));
-  assert.ok(txt({ etapa: 'vespera', venc: '2026-10-25', vencEf: '2026-10-26', hoje: '2026-10-23' }).includes('vence na segunda-feira, dia 26/10'));
+  assert.ok(txt({ etapa: 'vespera', venc: '2026-10-22', vencEf: '2026-10-22', hoje: '2026-10-21' }).includes('vencerá amanhã, dia 22/10'));
+  assert.ok(txt({ etapa: 'vespera', venc: '2026-10-25', vencEf: '2026-10-26', hoje: '2026-10-23' }).includes('vencerá na segunda-feira, dia 26/10'));
   assert.ok(txt({ etapa: 'dia', venc: '2026-10-22', vencEf: '2026-10-22', hoje: '2026-10-22' }).includes('vence hoje'));
   assert.ok(txt({ etapa: 'dia', venc: '2026-10-25', vencEf: '2026-10-26', hoje: '2026-10-26' }).includes('venceu no domingo (25/10), que não foi dia útil'));
   const tj = txt({ etapa: 'antecipado', venc: '2026-12-09', vencEf: '2026-12-09', hoje: '2026-12-04', jaCobrado: true });
   assert.ok(tj.includes('novo vencimento') && tj.includes('na quarta-feira, dia 09/12'), tj);
   for (const t of [t1, tj]) assert.ok(!/negativa|protesto|atraso|em aberto/i.test(t), t);
+
+  // textos aprovados pelo Gustavo em 30/09/2026, balão a balão
+  const S = '*Bia • COBRASQ*';
+  const M = { sig: S, nome: 'Maria Souza', valor: 350, url: 'U', jaCobrado: false };
+  const pv = (o) => T.textosPreVencimento({ ...M, ...o });
+  assert.deepStrictEqual(pv({ etapa: 'antecipado', venc: '2026-10-22', vencEf: '2026-10-22', hoje: '2026-10-19' }), [
+    `${S}\nOi Maria, tudo bem? Passando pra lembrar: sua parcela de R$ 350,00 vence na quinta-feira, dia 22/10.`,
+    'Se quiser adiantar, o boleto está aqui:\nU', 'Qualquer dúvida, fico à disposição!']);
+  assert.deepStrictEqual(pv({ etapa: 'vespera', venc: '2026-10-22', vencEf: '2026-10-22', hoje: '2026-10-21' }), [
+    `${S}\nOi Maria, tudo bem? Passando apenas para lembrar que a sua parcela de R$ 350,00 vencerá amanhã, dia 22/10.`,
+    'Efetue o pagamento na data correta e evite a cobrança de juros e multa. Qualquer dúvida, fico à disposição!']);
+  const dia = [`${S}\nOi Maria, tudo bem? Sua parcela de R$ 350,00 vence hoje.`, 'Pague via Boleto ou PIX clicando no link a seguir: U', 'Qualquer dúvida, fico à disposição!'];
+  assert.deepStrictEqual(pv({ etapa: 'dia', venc: '2026-10-22', vencEf: '2026-10-22', hoje: '2026-10-22' }), dia);
+  assert.deepStrictEqual(pv({ etapa: 'dia', venc: '2026-10-22', vencEf: '2026-10-22', hoje: '2026-10-22', jaCobrado: true }), dia);
+  assert.deepStrictEqual(pv({ etapa: 'dia', venc: '2026-10-25', vencEf: '2026-10-26', hoje: '2026-10-26' }), [
+    `${S}\nOi Maria, tudo bem? Sua parcela de R$ 350,00 venceu no domingo (25/10), que não foi dia útil, então dá pra pagar hoje.`,
+    'Pra deixar em dia, é só usar o link:\nU', 'Qualquer dúvida, fico à disposição!']);
+  assert.deepStrictEqual(pv({ etapa: 'antecipado', venc: '2026-10-22', vencEf: '2026-10-22', hoje: '2026-10-19', jaCobrado: true }), [
+    `${S}\nOi Maria, tudo bem? Passando pra lembrar do novo vencimento da sua parcela de R$ 350,00: na quinta-feira, dia 22/10.`,
+    'O boleto atualizado está aqui: U', 'Conto com você nessa data. Qualquer dúvida, fico à disposição!']);
+
+  const at = (o) => T.textosAtraso({ sig: S, nome: 'Maria Souza', valor: 350, venc: '2026-10-22', url: 'U', nAberto: 1, ...o });
+  assert.deepStrictEqual(at({ tipo: 'primeira', nAberto: 3 }), [
+    `${S}\nOi Maria, tudo bem? Sua parcela de R$ 350,00 venceu em 22/10 e ainda não consta o pagamento.`,
+    'Pedimos que regularize o quanto antes pra evitar o aumento de encargos e o prosseguimento da cobrança:\nU',
+    'Estou à disposição para conversar, caso precise.']);
+  assert.deepStrictEqual(at({ tipo: 'sete_dias', nAberto: 2 }), [
+    `${S}\nOi Maria, tudo bem? Sua parcela de R$ 350,00 está vencida desde 22/10 e segue em aberto. Constam 2 boletos em aberto em seu nome.`,
+    'Preciso que você regularize com urgência, pelo link:\nU',
+    'Se precisar combinar uma data, me responde aqui. Sem retorno, o caso segue para as próximas medidas de cobrança.']);
+  assert.deepStrictEqual(at({ tipo: 'prazo_final', prazo: '2026-11-04' }), [
+    `${S}\nOi Maria. Sua parcela de R$ 350,00 está vencida desde 22/10 e já tentei contato algumas vezes sem retorno.`,
+    'Te dou até quarta-feira, 04/11, pra pagar ou me chamar pra combinar: U',
+    'Depois dessa data, o caso sai do atendimento por aqui e seguirá para o jurídico para as medidas de cobranças cabíveis.']);
+  assert.deepStrictEqual(at({ tipo: 'promessa_quebrada', dataPrometida: '2026-10-20', nAberto: 2 }), [
+    `${S}\nOi Maria, tudo bem? Você tinha combinado de pagar a parcela de R$ 350,00 até 20/10, e o pagamento não entrou.`,
+    'Aconteceu alguma coisa?']);
+  for (const tipo of ['primeira', 'sete_dias', 'prazo_final', 'promessa_quebrada']) {
+    const t = at({ tipo, prazo: '2026-11-04', dataPrometida: '2026-10-20' }).join(' ');
+    assert.ok(!/negativa|protesto|SPC|Serasa|cart[óo]rio/i.test(t), t);
+  }
+  // prazo final = 2 dias úteis à frente: sexta 30/10 -> (02/11 é Finados) terça 03 -> quarta 04/11
+  assert.strictEqual(U.somarDiasUteis('2026-10-30', 2), '2026-11-04');
+  assert.strictEqual(U.somarDiasUteis('2026-10-19', 2), '2026-10-21');
+  assert.strictEqual(U.somarDiasUteis('2026-10-22', 2), '2026-10-26');
 
   console.log('F-57 ok');
 })().catch((e) => { console.error(e); process.exit(1); });
