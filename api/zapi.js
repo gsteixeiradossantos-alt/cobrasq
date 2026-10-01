@@ -6,6 +6,7 @@
 // WhatsApp do escritório (envio em massa, leitura de conversas).
 
 const { requireUser, applyCors } = require('./_auth.js');
+const { bloquearColaborador } = require('./_papel.js');
 
 module.exports = async function handler(req, res) {
   applyCors(req, res);
@@ -17,6 +18,8 @@ module.exports = async function handler(req, res) {
 
   const user = await requireUser(req, res);
   if (!user) return;
+  // Colaborador não usa este proxy (28/09/2026) — o painel também esconde os botões.
+  if (!(await bloquearColaborador(user, res, 'O WhatsApp (Z-API)'))) return;
 
   // Credenciais SÓ via env vars (gestor confirmou ZAPI_TOKEN/ZAPI_INSTANCE_ID no Vercel).
   const token       = process.env.ZAPI_TOKEN || '';

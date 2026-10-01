@@ -3,12 +3,20 @@
 -- NÃO APLICADA. Aditiva. Rollback: 20260928_02_ia_uso_diario_rollback.sql
 --
 -- /api/claude aceitava qualquer sessão válida, sem teto de quantidade. Agora o
--- proxy confere app_users (equipe ativa) e, para o colaborador, chama
+-- proxy confere app_users (equipe ativa) e, para o colaborador, lê
+-- app_users.ia_limite_dia (padrão 0 = IA bloqueada — decisão do Gustavo em
+-- 01/10/2026: "bloqueia tudo de ia, se precisar vou liberando") e chama
 -- ia_uso_registrar(p_user, p_limite): incrementa o contador do dia (fuso de
 -- Brasília) de forma atômica e devolve ok=false quando passaria do limite.
+-- ia_limite_dia entra na trava de privilégio (20260928_04): só o proprietário altera.
 -- Só o service role (o proxy na Vercel) executa a RPC; a tabela não tem policy
 -- para authenticated/anon — só o proprietário lê, para acompanhar o uso.
 -- ============================================================================
+
+alter table public.app_users add column if not exists ia_limite_dia integer not null default 0
+  check (ia_limite_dia >= 0);
+comment on column public.app_users.ia_limite_dia is
+  'Pedidos de IA (/api/claude) por dia para o colaborador. 0 = bloqueado. Proprietário não tem teto. Só o proprietário altera.';
 
 create table if not exists public.ia_uso_diario (
   user_id   uuid not null references public.app_users(id) on delete cascade,

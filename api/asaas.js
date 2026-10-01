@@ -5,6 +5,7 @@
 // alterava/cancelava cobranças na conta Asaas do escritório.
 
 const { requireUser, applyCors } = require('./_auth.js');
+const { bloquearColaborador } = require('./_papel.js');
 
 module.exports = async function handler(req, res) {
   applyCors(req, res);
@@ -16,6 +17,8 @@ module.exports = async function handler(req, res) {
 
   const user = await requireUser(req, res);
   if (!user) return;
+  // Colaborador não usa este proxy (28/09/2026) — o painel também esconde os botões.
+  if (!(await bloquearColaborador(user, res, 'Asaas (boletos)'))) return;
 
   // Credencial SÓ via env var (gestor confirmou ASAAS_API_KEY setada no Vercel).
   // O fallback de chave via header x-asaas-key foi removido: chave nunca vem do cliente.
