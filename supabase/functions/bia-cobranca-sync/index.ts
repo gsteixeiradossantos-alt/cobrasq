@@ -153,18 +153,17 @@ Deno.serve(async (req) => {
   for (const p of pays) {
     const c = cust[p.customer] || { nome: '', tel: '' };
     if (jaExiste.has(p.id)) {
-      const upd: Record<string, unknown> = {
-        asaas_customer_id: p.customer, telefone: telefonePreservado(p.id, c.tel), nome: c.nome || null,
-        valor: p.value, invoice_url: p.invoiceUrl || null, synced_em: agora, updated_at: agora,
-      };
       // Vencimento ANTECIPADO no Asaas: a linha seguia agendada pela data velha e o
       // aviso de 3 dias antes/véspera saía tarde ou nem saía (01/10/2026). Mudança
       // para frente o próprio worker resolve ao ler a data real; para trás, só aqui.
       // Só antecipa — nunca empurra para depois um lembrete já agendado.
       const s0 = salvo.get(p.id);
       const antes = s0 ? reagendarAntecipado(s0, String(p.dueDate || ''), hoje, avisoDias, agora) : null;
-      if (antes) upd.proximo_lembrete_em = antes;
-      atualizadas.push(sb.from('bia_cobranca').update(upd).eq('asaas_payment_id', p.id));
+      atualizadas.push(sb.from('bia_cobranca').update({
+        asaas_customer_id: p.customer, telefone: telefonePreservado(p.id, c.tel), nome: c.nome || null,
+        valor: p.value, invoice_url: p.invoiceUrl || null, synced_em: agora, updated_at: agora,
+        ...(antes ? { proximo_lembrete_em: antes } : {}),
+      }).eq('asaas_payment_id', p.id));
     } else {
       // Boleto que ainda não venceu entra agendado para o dia do 1º aviso (9h BRT),
       // não para agora — senão o devedor receberia o aviso no instante em que o boleto
