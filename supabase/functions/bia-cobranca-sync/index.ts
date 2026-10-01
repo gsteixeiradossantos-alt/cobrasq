@@ -6,6 +6,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { mesmoNumero } from '../_shared/telefone-jid.ts';
+import { etapaPreVencimento, noveHorasBRT } from '../_shared/dias-uteis.ts';
 
 function json(o: unknown, status = 200) {
   return new Response(JSON.stringify(o), { status, headers: { 'Content-Type': 'application/json' } });
@@ -82,10 +83,13 @@ Deno.serve(async (req) => {
   // HOJE — então o devedor nunca era avisado ANTES de vencer, e as notificações
   // nativas do Asaas estão desligadas de propósito (api/_asaas.js cria todo customer
   // com notificationDisabled: true). Resultado: zero canal de aviso prévio.
-  // Agora puxamos também as PENDING que vencem nos próximos N dias.
-  const avisoDias = Math.max(0, Number(Deno.env.get('AVISO_PREVIO_DIAS') ?? 3));
+  // Agora puxamos também as PENDING que vencem nos próximos N dias. O 1º aviso sai
+  // N dias antes do vencimento de fato, recuado para dia útil (dias-uteis.ts) —
+  // pode cair até ~5 dias antes do N (fim de semana + feriado emendado), por isso
+  // a janela de busca tem folga de 7 dias.
+  const avisoDias = Math.max(1, Number(Deno.env.get('AVISO_PREVIO_DIAS') ?? 3));
   const ateAviso = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' })
-    .format(new Date(Date.now() + avisoDias * 864e5));
+    .format(new Date(Date.now() + (avisoDias + 7) * 864e5));
 
   // 1) vencidas + 2) a vencer de hoje até hoje+N (ainda PENDING)
   const overdue = await pagina('status=OVERDUE');
@@ -152,13 +156,12 @@ Deno.serve(async (req) => {
         valor: p.value, invoice_url: p.invoiceUrl || null, synced_em: agora, updated_at: agora,
       }).eq('asaas_payment_id', p.id));
     } else {
-      // Boleto que ainda não venceu entra agendado para o dia do AVISO (D-N às 9h BRT),
+      // Boleto que ainda não venceu entra agendado para o dia do 1º aviso (9h BRT),
       // não para agora — senão o devedor receberia o aviso no instante em que o boleto
-      // é emitido. Vencido/vencendo hoje segue imediato, como antes.
-      const aVencer = String(p.dueDate || '') > hoje;
-      const diaAviso = aVencer
-        ? new Date(Date.parse(p.dueDate + 'T12:00:00Z') - avisoDias * 864e5).toISOString()
-        : agora;
+      // é emitido. Já dentro da janela de aviso ou vencido segue imediato; o
+      // bia-cobranca decide qual aviso (3 dias antes, véspera, dia) pela data real.
+      const et = p.dueDate ? etapaPreVencimento(String(p.dueDate), hoje, avisoDias) : null;
+      const diaAviso = et && et.etapa === 'aguardar' ? noveHorasBRT(et.proximo) : agora;
       novas.push({
         asaas_payment_id: p.id, asaas_customer_id: p.customer, telefone: c.tel || null, nome: c.nome || null,
         valor: p.value, venc_original: p.dueDate, venc_atual: p.dueDate, invoice_url: p.invoiceUrl || null,

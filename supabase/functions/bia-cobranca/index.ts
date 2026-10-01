@@ -10,8 +10,12 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { MODELO } from '../_shared/bia-system.ts';
 import { resolverJid } from '../_shared/telefone-jid.ts';
+import { ehDiaUtil, etapaPreVencimento, noveHorasBRT, somarDiasUteis, vencimentoEfetivo } from '../_shared/dias-uteis.ts';
+import { textosAtraso, textosPreVencimento } from '../_shared/bia-avisos.ts';
 
 const SIG = '*Bia • COBRASQ*';
+// 1º aviso antes do vencimento: N dias antes (mesma variável do bia-cobranca-sync)
+const AVISO_DIAS = Math.max(1, Number(Deno.env.get('AVISO_PREVIO_DIAS') ?? 3));
 const MAX_POR_RUN = 10; // query limit (pode ter duplicatas de telefone que serão deduplicadas)
 
 function json(o: unknown, status = 200) {
@@ -35,8 +39,10 @@ function spDate(iso: string | null): string {
   if (!iso) return '';
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date(iso));
 }
-// horário comercial em São Paulo: seg-sex, 09:00–17:59 (via Intl parts — robusto)
+// horário comercial em São Paulo: dia útil (seg-sex fora de feriado nacional),
+// 09:00–17:59 (via Intl parts — robusto)
 function horarioComercial(): boolean {
+  if (!ehDiaUtil(hojeSP())) return false;
   const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Sao_Paulo', weekday: 'short', hour: 'numeric', hour12: false }).formatToParts(new Date());
   const wd = parts.find(p => p.type === 'weekday')?.value || '';
   let h = parseInt(parts.find(p => p.type === 'hour')?.value || '0', 10);
@@ -315,7 +321,7 @@ Deno.serve(async (req) => {
   });
   if (error) return json({ error: 'claim bia_cobranca: ' + error.message }, 500);
 
-  let enviadas = 0, pagas = 0, paraAcao = 0, puladas = 0, followups = 0;
+  let enviadas = 0, pagas = 0, paraAcao = 0, puladas = 0;
   const agoraIso = new Date().toISOString();
   const telefonesProcessados = new Set<string>();
 
@@ -371,7 +377,7 @@ Deno.serve(async (req) => {
     }
 
     // confere no Asaas se já pagou / deletado / cancelado → para de cobrar
-    let pago = false, cancelado = false, venc = c.venc_atual, url = c.invoice_url;
+    let pago = false, cancelado = false, venc = c.venc_atual, url = c.invoice_url, valorAsaas: number | null = null;
     try {
       const r = await fetch(`${aBase}/payments/${c.asaas_payment_id}`, { headers: aHead });
       if (r.ok) {
@@ -380,6 +386,7 @@ Deno.serve(async (req) => {
         if (['RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH'].includes(st)) pago = true;
         if (['CANCELLED', 'REFUNDED', 'DELETED'].includes(st) || p.deleted === true) cancelado = true;
         venc = p.dueDate || venc; url = p.invoiceUrl || url;
+        if (Number(p.value) > 0) valorAsaas = Number(p.value);
       }
     } catch { /* mantém cache */ }
     if (pago) {
@@ -392,77 +399,56 @@ Deno.serve(async (req) => {
     }
 
     const hoje = hojeSP();
-    const primeiroNome = String(c.nome || '').split(' ')[0] || '';
-    const ola = primeiroNome ? `Oi ${primeiroNome}, tudo bem?` : 'Oi, tudo bem?';
-    const val = brMoney(c.valor);
 
-    // ===== FOLLOW-UP DO MESMO DIA =====
-    // Se já cobramos HOJE (de manhã) e o cliente NÃO respondeu, e chegou aqui é porque
-    // o proximo_lembrete_em (13h30) já passou. Manda UM follow-up firme e reagenda a régua
-    // normal pra amanhã (sem contar como novo lembrete/escalada).
+    // Já cobrado HOJE: não manda de novo no mesmo dia. Até 30/09/2026 havia aqui
+    // um follow-up às 13h30 para quem não respondia; o Gustavo tirou (p08 da
+    // página de aprovação). Fica só a trava contra duas cobranças no mesmo dia.
     if (spDate(c.ultimo_lembrete_em) === hoje) {
-      // Follow-up duro no MESMO dia só a partir do 2º ciclo de lembrete: no 1º
-      // contato, silêncio até 13h30 NÃO significa "não há intenção de resolver"
-      // (achado P2 da auditoria 29/07 — tom de ultimato em dívida vencida há 2 dias).
-      if ((c.lembretes_enviados ?? 0) < 2) {
-        await sb.from('bia_cobranca').update({ proximo_lembrete_em: new Date(Date.now() + 864e5).toISOString(), updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
-        puladas++; continue;
-      }
-      const blocos = [
-        `${ola} Passei mais cedo sobre sua parcela de R$ ${val} e até agora não tive seu retorno.`,
-        `Preciso de um posicionamento ainda hoje. Sem resposta, vou entender que não há intenção de resolver por aqui e o caso segue para as próximas providências.`,
-        `Se você não consegue responder agora, me manda só uma palavra avisando que retorna mais tarde — assim eu aguardo. Combinado?`,
-      ];
-      blocos[0] = `${SIG}\n${blocos[0]}`;
-      const { ok } = await enviarBlocos(tel, blocos);
-      if (!ok) { puladas++; continue; }
-      const nAtual = c.lembretes_enviados ?? 1;
-      const proxMs = Date.now() + (nAtual <= 2 ? 1 : 2) * 864e5;
-      const proxFup = new Date(proxMs).toISOString();
-      await sb.from('bia_cobranca').update({ ultimo_lembrete_em: agoraIso, proximo_lembrete_em: proxFup, observacao: 'follow-up enviado; sem resposta até 13h30', updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
-      if (c.asaas_customer_id) {
-        await sb.from('bia_cobranca')
-          .update({ proximo_lembrete_em: proxFup, updated_at: agoraIso })
-          .eq('asaas_customer_id', c.asaas_customer_id)
-          .in('status', ['ativa', 'adiada'])
-          .neq('asaas_payment_id', c.asaas_payment_id);
-      }
-      await sb.from('bia_cobranca_log').insert({ asaas_payment_id: c.asaas_payment_id, telefone: tel, lembrete_num: nAtual, texto: 'FOLLOW-UP: ' + blocos.join('\n\n') });
-      followups++; continue;
+      await sb.from('bia_cobranca').update({ proximo_lembrete_em: new Date(Date.now() + 864e5).toISOString(), updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
+      puladas++; continue;
     }
 
-    // ===== AVISO PRÉ-VENCIMENTO =====
-    // Até 21/08/2026 ninguém era avisado ANTES do boleto vencer: o sync só trazia
-    // vencidos e os que venciam no dia, e as notificações nativas do Asaas estão
-    // desligadas de propósito (todo customer é criado com notificationDisabled).
-    // Este ramo trata o boleto que AINDA NÃO VENCEU: manda um lembrete gentil, uma
-    // vez só, e reagenda para o dia do vencimento — a partir daí a régua de cobrança
-    // normal assume. Não conta como lembrete de cobrança e nunca escala: quem ainda
-    // está no prazo não é inadimplente e não pode ser tratado como tal.
+    // ===== AVISOS ANTES DO VENCIMENTO (3 dias antes, véspera e dia) =====
+    // Até 21/08/2026 ninguém era avisado ANTES do boleto vencer (as notificações
+    // nativas do Asaas estão desligadas de propósito: todo customer é criado com
+    // notificationDisabled). Até 30/09/2026 era UM aviso D-3 contado em dias
+    // corridos, e a data vinha da agenda gravada no sync: quando o vencimento
+    // mudava no Asaas, o aviso saía na data velha (Elisandra levou "vence em 10
+    // dias" em 30/09 para um boleto de 10/10; José Lentz, já cobrado 2x, levou
+    // "passando só pra lembrar... vence em 80 dias").
+    //
+    // Agora a etapa sai da data REAL do Asaas, lida agora: 3 dias antes, véspera
+    // (dia útil anterior) e dia — todos em dia útil; boleto que vence em sábado,
+    // domingo ou feriado conta como vencendo no próximo dia útil (dias-uteis.ts).
+    // Não conta como lembrete de cobrança e nunca escala: quem ainda está no prazo
+    // não é inadimplente e não pode ser tratado como tal.
     const vencIso = String(venc || c.venc_atual || '').slice(0, 10);
-    if (vencIso && vencIso > hojeSP()) {
+    const pre = vencIso ? etapaPreVencimento(vencIso, hoje, AVISO_DIAS) : { etapa: 'vencido' as const };
+    if (pre.etapa !== 'vencido') {
+      const sinc: Record<string, unknown> = { venc_atual: vencIso, invoice_url: url, updated_at: agoraIso };
+      if (valorAsaas) sinc.valor = valorAsaas;
+      if (pre.etapa === 'aguardar') {
+        // cedo demais (vencimento mudou para frente): só reagenda, sem mensagem
+        await sb.from('bia_cobranca').update({ ...sinc, proximo_lembrete_em: noveHorasBRT(pre.proximo) }).eq('asaas_payment_id', c.asaas_payment_id);
+        puladas++; continue;
+      }
       if (!(await whatsappExiste(tel))) {
         await sb.from('bia_cobranca').update({ status: 'pausada', observacao: 'numero sem WhatsApp', updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
         puladas++; continue;
       }
-      const diasFalta = Math.round((Date.parse(vencIso) - Date.parse(hojeSP())) / 864e5);
-      const quando = diasFalta === 1 ? 'amanhã' : `em ${diasFalta} dias`;
-      const blocosAviso = [
-        `${SIG}\n${ola}`,
-        `Passando só pra lembrar: sua parcela de R$ ${brMoney(c.valor)} vence ${quando}, dia ${brDate(vencIso)}.`,
-        `Se quiser adiantar, o boleto está aqui:\n${url}`,
-        `Se já pagou, pode desconsiderar.`,
-      ];
+      const blocosAviso = textosPreVencimento({
+        etapa: pre.etapa, sig: SIG, nome: String(c.nome || ''), valor: valorAsaas ?? c.valor,
+        venc: vencIso, vencEf: vencimentoEfetivo(vencIso), hoje, url: String(url || ''),
+        jaCobrado: (c.lembretes_enviados ?? 0) >= 1,
+      });
       const { ok: okAviso } = await enviarBlocos(tel, blocosAviso);
       if (!okAviso) { puladas++; continue; }
-      // Reagenda para o dia do vencimento: um aviso por boleto, e a régua normal
-      // retoma quando (e se) ele vencer.
       await sb.from('bia_cobranca').update({
-        proximo_lembrete_em: new Date(Date.parse(vencIso + 'T12:00:00Z')).toISOString(),
-        observacao: `aviso pré-vencimento enviado em ${hojeSP()} (D-${diasFalta})`,
-        updated_at: agoraIso,
+        ...sinc,
+        proximo_lembrete_em: noveHorasBRT(pre.proximo),
+        observacao: `aviso ${pre.etapa === 'antecipado' ? '3 dias antes' : pre.etapa === 'vespera' ? 'da véspera' : 'do dia do vencimento'} enviado em ${hoje}`,
       }).eq('asaas_payment_id', c.asaas_payment_id);
-      await sb.from('bia_cobranca_log').insert({ asaas_payment_id: c.asaas_payment_id, telefone: tel, lembrete_num: 0, texto: 'AVISO PRE-VENCIMENTO: ' + blocosAviso.join('\n\n') });
+      await sb.from('bia_cobranca_log').insert({ asaas_payment_id: c.asaas_payment_id, telefone: tel, lembrete_num: 0, texto: `AVISO PRE-VENCIMENTO (${pre.etapa}): ` + blocosAviso.join('\n\n') });
       enviadas++; continue;
     }
 
@@ -484,8 +470,8 @@ Deno.serve(async (req) => {
 
     // monta a mensagem: escalada por dias de atraso (contra a data ATUAL) + firmeza real.
     const n = (c.lembretes_enviados ?? 0) + 1;
-    const vencAtualStr = String(venc || c.venc_atual || '').slice(0, 10);
-    const diasVencAtual = vencAtualStr ? Math.round((Date.parse(hoje) - Date.parse(vencAtualStr)) / 864e5) : diasVencido;
+    // atraso contado do vencimento de FATO (boleto de sábado vence na segunda)
+    const diasVencAtual = vencIso ? Math.round((Date.parse(hoje) - Date.parse(vencimentoEfetivo(vencIso))) / 864e5) : diasVencido;
     // só ameaça (judicial/negativação/protesto) se JÁ houve lembrete anterior do MESMO boleto
     // sem resultado e o atraso passou de 7 dias — no 1º contato, nunca ameaça.
     const jaCobrado = (c.lembretes_enviados ?? 0) >= 1;
@@ -502,58 +488,25 @@ Deno.serve(async (req) => {
         if (count && count > 0) nAberto = count;
       }
     } catch { /* ignora */ }
-    const multi = nAberto > 1 ? ` Constam ${nAberto} boletos em aberto em seu nome.` : '';
-    // mensagem em BLOCOS (várias mensagens curtas, como um humano digita), não um textão.
-    let blocos: string[];
-    if (promessaQuebrada) {
-      blocos = [
-        `${ola} Você tinha se comprometido a pagar a parcela de R$ ${val} até ${brDate(c.data_prometida)}, e o pagamento não entrou.`,
-        `Isso deixa o acordo descumprido.${multi}`,
-        `Regularize hoje pra gente evitar a negativação do seu nome e o protesto:\n${url}`,
-        `Se aconteceu algum imprevisto, me chama agora.`,
-      ];
-    } else if (pertoAcao) {
-      blocos = [
-        `${ola} Vou precisar ser bem direta com você agora.`,
-        `Sua parcela de R$ ${val} está vencida desde ${brDate(venc)} e continua em aberto.${multi}`,
-        `Vou te dar um prazo final de 48 horas. Passando disso sem pagamento, o caso vai pra protesto em cartório e negativação (SPC/Serasa).`,
-        `Ainda dá tempo de resolver por aqui:\n${url}`,
-      ];
-    } else if (jaCobrado && diasVencAtual >= 7) {
-      blocos = [
-        `${ola} Sua parcela de R$ ${val} está vencida desde ${brDate(venc)} e ainda não foi paga.${multi}`,
-        `Preciso que você regularize com urgência. Continuando sem pagamento, o caso vai ser encaminhado pra negativação e protesto.`,
-        `Dá pra resolver por aqui:\n${url}`,
-        `Se precisar acertar uma data, me chama.`,
-      ];
-    } else if (diasVencAtual <= 0) {
-      blocos = [
-        `${ola} Aqui é da COBRASQ. Passando pra lembrar que sua parcela de R$ ${val} vence ${diasVencAtual === 0 ? `hoje (${brDate(venc)})` : `no dia ${brDate(venc)}`}.${multi}`,
-        `Pra já deixar quitado, é só usar o link:\n${url}`,
-        `Qualquer coisa, estou à disposição.`,
-      ];
-    } else {
-      blocos = [
-        `${ola} Sua parcela de R$ ${val} venceu em ${brDate(venc)} e ainda consta em aberto.${multi}`,
-        `Pedimos que regularize o quanto antes pra evitar encargos e o prosseguimento da cobrança:\n${url}`,
-        `Estou à disposição pra acertar.`,
-      ];
-    }
-    blocos[0] = `${SIG}\n${blocos[0]}`; // assinatura só no 1º bloco
+    // textos aprovados em 30/09/2026 (bia-avisos.ts); nenhum cita negativação/protesto.
+    // Prazo final: data fixa, 2 dias úteis à frente (antes: "48 horas").
+    const prazo = somarDiasUteis(hoje, 2);
+    const blocos = textosAtraso({
+      tipo: promessaQuebrada ? 'promessa_quebrada' : pertoAcao ? 'prazo_final' : (jaCobrado && diasVencAtual >= 7) ? 'sete_dias' : 'primeira',
+      sig: SIG, nome: String(c.nome || ''), valor: c.valor, venc: String(venc || c.venc_atual || ''), url: String(url || ''),
+      nAberto, prazo, dataPrometida: c.data_prometida ? String(c.data_prometida) : undefined,
+    });
     const msgLog = blocos.join('\n\n');
 
     // envia bloco a bloco (mensagens separadas), com um pequeno intervalo
     const { ok } = await enviarBlocos(tel, blocos);
     if (!ok) { puladas++; continue; }
 
-    // avança a régua. Se a parcela está EM ATRASO e ainda dá tempo, agenda o FOLLOW-UP
-    // pra hoje 13h30 (se o cliente não responder até lá). Senão, cadência normal (n<=2 +1d; n>=3 +2d).
-    const followUpAtISO = new Date(`${hoje}T13:30:00-03:00`).toISOString();
-    const podeFupHoje = diasVencAtual >= 1 && Date.now() < Date.parse(followUpAtISO);
+    // avança a régua: cadência normal (n<=2 +1d; n>=3 +2d)
     const proxMs = Date.now() + (n <= 2 ? 1 : 2) * 864e5;
     const upd: any = {
       lembretes_enviados: n, ultimo_lembrete_em: agoraIso,
-      proximo_lembrete_em: podeFupHoje ? followUpAtISO : new Date(proxMs).toISOString(),
+      proximo_lembrete_em: new Date(proxMs).toISOString(),
       primeiro_contato_em: c.primeiro_contato_em || agoraIso, venc_atual: venc, invoice_url: url, updated_at: agoraIso,
     };
     if (promessaQuebrada) {
@@ -575,5 +528,5 @@ Deno.serve(async (req) => {
     enviadas++;
   }
 
-  return json({ ok: true, candidatas: rows?.length || 0, enviadas, followups, pagas, para_acao: paraAcao, puladas });
+  return json({ ok: true, candidatas: rows?.length || 0, enviadas, pagas, para_acao: paraAcao, puladas });
 });
