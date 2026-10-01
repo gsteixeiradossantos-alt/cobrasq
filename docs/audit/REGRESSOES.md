@@ -693,3 +693,23 @@ certo; o erro é de dado, e engana quem consulta a tabela.
 em boleto → `'boleto'`; só PIX em 1 parcela → `'avista'`; PIX parcelado → `'outro'`. Gravada nos
 dois caminhos (`upsert` quando novo, `update` quando já existe) e no blob local (`acLocal.forma`).
 O `'avista'` do "Novo Acordo" fica como provisório e anotado como tal.
+
+---
+
+## R-31 · Rótulo de período sem o ano (4 anos de dados lidos como "setembro")
+
+**O que acontece.** O seletor de período personalizado do Financeiro mostrava só dia/mês.
+Um período 01/09/2026—30/09/2030 aparecia como "01/09 – 30/09" e a aba Caixa exibia
+lucro, entradas e meta de 4 anos como se fossem do mês. Em 28/09/2026 a meta apareceu
+como "meta proporcional R$ 1.960.000,00" (49 meses × R$ 40.000) e parecia erro de conta.
+
+**Teste (SQL).** A soma do mês tem que ser a da tela com o seletor em "Mês":
+```sql
+select sum(abs(valor)) from public.fin_lancamento
+ where tipo_movimento = 1 and data_competencia between '2026-09-01' and '2026-09-30';
+```
+Em 28/09/2026: R$ 46.684,24 no mês contra R$ 271.107,76 na faixa até 2030.
+
+**Estado-correto.** Quando início ou fim do período personalizado sai do ano corrente,
+o rótulo e o título da ponte levam o ano ("01/09/26 – 30/09/30") — PR #854.
+Rótulo de período nunca omite informação que muda a ordem de grandeza do número.

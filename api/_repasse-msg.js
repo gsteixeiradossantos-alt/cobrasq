@@ -177,7 +177,26 @@ function lerDescricaoRepasse(descricao) {
 
 // Descrição que o credor lê no extrato do PIX: "<nº parcela> - <devedor>".
 // Limite do Asaas é 500 caracteres.
+// "3, 8 e 9" — números das parcelas pagas num PIX só (lote), em ordem.
+function listarParcelas(ps) {
+  const ns = [...new Set((ps || []).map(Number).filter(n => n > 0))].sort((a, b) => a - b);
+  if (ns.length <= 1) return ns.length ? String(ns[0]) : '';
+  return ns.slice(0, -1).join(', ') + ' e ' + ns[ns.length - 1];
+}
+// Lote = PIX único para várias parcelas (pedido do Gustavo, 30/09/2026: três parcelas
+// da mesma devedora ao mesmo credor não precisam de três PIX). `parcelas` com 2+
+// números prevalece sobre `parcela`.
+function ehLote(d) { return !!(d && Array.isArray(d.parcelas) && listarParcelas(d.parcelas).includes(' e ')); }
+
+// Num lote, extrato do PIX, nome do arquivo e mensagem citam TODAS as parcelas ("3, 4 e 5
+// - Elison …"). Decisão do Gustavo em 30/09/2026, depois de ver o comprovante do Elison
+// sair como "3 - Elison" e "parcela 3 de 5": "Todas em tudo". Substitui o pedido anterior
+// do mesmo dia de citar só a primeira.
 function descricaoPix(d) {
+  if (ehLote(d)) {
+    const p = listarParcelas(d.parcelas);
+    return ((d.devedor ? `${p} - ${d.devedor}` : `Repasse Cobrasq - parcelas ${p}`)).slice(0, 500);
+  }
   const nome = (d && d.devedor) || '';
   // Sem devedor, "7 - " sozinho não diz nada a quem lê o extrato.
   const txt = nome
@@ -186,8 +205,8 @@ function descricaoPix(d) {
   return txt.slice(0, 500);
 }
 
-// Mensagem que acompanha o comprovante. Uma por PIX — cada parcela é uma transferência
-// e um comprovante distintos, então agrupar credor confundiria a conferência.
+// Mensagem que acompanha o comprovante. Uma por PIX: parcela paga sozinha tem o seu;
+// parcelas pagas num PIX só (lote) dividem uma mensagem, que nomeia todas.
 // "039.693.609-19" -> "CPF n. 039.693.609-19" · "22.730.701/0001-19" -> "CNPJ n. …".
 // Decide pelo NÚMERO DE DÍGITOS, não pelo que estiver escrito: no Astrea aparece CPF
 // rotulado como CNPJ e vice-versa. Formata mesmo se vier sem pontuação.
@@ -202,11 +221,41 @@ function docPorExtenso(doc) {
   return '';
 }
 
+// Junta a pessoa física com a empresa dela quando as duas são partes do mesmo caso
+// (MEI, ou CNPJ cujo nome contém o nome da PF). Sem isso o credor lia "Jeferson Luciano
+// Pereira (CPF …) e 50.677.114 Jeferson Luciano Pereira (MEI) (CNPJ …)" (30/09/2026).
+// A PJ vira rótulo "(PF e MEI)" ou "(PF e PJ)" e os dois documentos ficam. Mesma regra
+// de _extratoAgruparPartes no index.html (extrato de repasse).
+function agruparPartes(partes) {
+  const dig = d => String(d || '').replace(/\D/g, '');
+  const norm = t => String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    .replace(/\(?\bmei\b\)?/g, ' ').replace(/[\d./\-]{2,}/g, ' ')
+    .replace(/[^a-z ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const lista = (partes || []).filter(p => p && p.nome)
+    .map(p => ({ nome: p.nome, doc: p.doc || '', docs: p.doc ? [p.doc] : [], rotulo: '' }));
+  const ehPJ = p => dig(p.doc).length === 14 || /\bmei\b/i.test(p.nome);
+  const usados = new Set();
+  lista.forEach((pf, i) => {
+    if (usados.has(i) || ehPJ(pf)) return;
+    const n = norm(pf.nome);
+    if (n.split(' ').length < 2) return;
+    lista.forEach((pj, j) => {
+      if (j === i || usados.has(j) || !ehPJ(pj) || pf.rotulo) return;
+      if (!(' ' + norm(pj.nome) + ' ').includes(' ' + n + ' ')) return;
+      pf.rotulo = /\bmei\b/i.test(pj.nome) ? 'PF e MEI' : 'PF e PJ';
+      if (pj.doc) pf.docs.push(pj.doc);
+      usados.add(j);
+    });
+  });
+  return lista.filter((_, i) => !usados.has(i));
+}
+
 // "A", "A e B", "A, B e C" — cada um com o documento entre parênteses quando conhecido.
 function listarPagadores(partes) {
-  const nomes = (partes || []).filter(p => p && p.nome).map(p => {
-    const d = docPorExtenso(p.doc);
-    return d ? `${p.nome} (${d})` : p.nome;
+  const nomes = agruparPartes(partes).map(p => {
+    const nome = p.rotulo ? `${p.nome} (${p.rotulo})` : p.nome;
+    const d = p.docs.map(docPorExtenso).filter(Boolean).join(' e ');
+    return d ? `${nome} (${d})` : nome;
   });
   if (nomes.length <= 1) return nomes[0] || '';
   return nomes.slice(0, -1).join(', ') + ' e ' + nomes[nomes.length - 1];
@@ -234,11 +283,12 @@ function paragrafoRestricoes(nomes) {
 // Mantido para quem só quer saber se a frase está lá (testes/telas): o trecho fixo.
 const PARAGRAFO_RESTRICOES = RESTRICOES_FIM.trim();
 
-function pedeBaixaRestricoes(parcela) {
+function pedeBaixaRestricoes(parcela, parcelas) {
+  if (ehLote({ parcelas })) return parcelas.map(Number).includes(1);
   return !parcela || Number(parcela) === 1;
 }
 
-function msgComprovanteCredor({ parcela, total, devedor, doc, partes }) {
+function msgComprovanteCredor({ parcela, parcelas, total, devedor, doc, partes }) {
   // Documento entre parênteses quando conhecido — pedido do Gustavo em 17/08/2026, para o
   // credor identificar o devedor sem depender do nome. Devedor sem cadastro não tem doc:
   // a frase sai sem, em vez de com um campo vazio.
@@ -262,11 +312,16 @@ function msgComprovanteCredor({ parcela, total, devedor, doc, partes }) {
   const avista = !p || (p === 1 && t === 1);
   const qual = avista ? '' : (t ? `parcela ${p} de ${t}` : `parcela ${p}`);
   let ref;
-  if (avista) ref = quem ? `do pagamento à vista realizado por *${quem}.*` : `do pagamento à vista.`;
+  if (ehLote({ parcelas })) {
+    // Lote (3, 8 e 9 de 9): "referente às parcelas 3, 8 e 9 de 9 do acordo firmado por X"
+    // — todas (ver descricaoPix).
+    const quais = `parcelas ${listarParcelas(parcelas)}${t ? ` de ${t}` : ''}`;
+    ref = quem ? `referente às *${quais}* do acordo firmado por *${quem}.*` : `referente às *${quais}*.`;
+  } else if (avista) ref = quem ? `do pagamento à vista realizado por *${quem}.*` : `do pagamento à vista.`;
   else ref = quem ? `referente à *${qual}* do acordo firmado por *${quem}.*` : `referente à *${qual}*.`;
   return `*Setor financeiro | COBRASQ:*\n`
     + `Encaminhamos, em anexo, o comprovante de repasse ${ref}\n\n`
-    + (pedeBaixaRestricoes(parcela) ? `${paragrafoRestricoes(nomes)}\n\n` : '')
+    + (pedeBaixaRestricoes(parcela, parcelas) ? `${paragrafoRestricoes(nomes)}\n\n` : '')
     + `Qualquer dúvida é só nos comunicar!\n\n`
     + `Atenciosamente,\n`
     + `*COBRASQ Recuperadora de Crédito e Cobrança*`;
@@ -288,21 +343,21 @@ function destinoWhatsapp(credor) {
 //
 // Best-effort por design: o PIX já saiu quando isto roda. Falha aqui vira log, nunca
 // erro do repasse.
-async function enviarComprovanteCredor({ telefone, parcela, total, devedor, doc, partes, base64, ext, comprovanteUrl, agora }) {
+async function enviarComprovanteCredor({ telefone, parcela, parcelas, total, devedor, doc, partes, base64, ext, comprovanteUrl, agora }) {
   // Não limpar aqui: o destino pode ser um GRUPO do WhatsApp ("1203634…-group"), que a
   // Z-API trata no mesmo campo. Quem normaliza é o _zapi.js, que sabe distinguir os dois.
   const tel = String(telefone || '').trim();
   const digitos = tel.replace(/\D/g, '');
   if (digitos.length < 10) return { enviado: false, motivo: 'credor sem telefone válido' };
 
-  const msg = msgComprovanteCredor({ parcela, total, devedor, doc, partes });
+  const msg = msgComprovanteCredor({ parcela, parcelas, total, devedor, doc, partes });
   // Nome do arquivo = a mesma identificação do extrato do PIX: "1 - Elen Demgenski".
   // O credor arquiva vários comprovantes; assim ele acha pelo nome sem abrir um a um.
   //
   // SEM extensão: a Z-API acrescenta a dela a partir do endpoint /send-document/{ext}.
   // Mandando "....pdf" o credor recebia "Comprovante ... .pdf.pdf" (visto em 17/08/2026).
   // Também tira o que atrapalha nome de arquivo em Windows/Android.
-  const nomeArquivo = (descricaoPix({ parcela, devedor }) || 'Comprovante de repasse')
+  const nomeArquivo = (descricaoPix({ parcela, parcelas, devedor }) || 'Comprovante de repasse')
     .replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim()
     .replace(/\.(pdf|html?)$/i, '').slice(0, 90);
 
@@ -344,4 +399,4 @@ async function enviarComprovanteCredor({ telefone, parcela, total, devedor, doc,
   }
 }
 
-module.exports = { lerDescricaoRepasse, descricaoPix, msgComprovanteCredor, listarPagadores, pedeBaixaRestricoes, PARAGRAFO_RESTRICOES, paragrafoRestricoes, enviarComprovanteCredor, destinoWhatsapp, docPorExtenso, proximoHorarioComercial, JANELA_COMPROVANTE, ESPACO_MS };
+module.exports = { lerDescricaoRepasse, descricaoPix, listarParcelas, msgComprovanteCredor, listarPagadores, agruparPartes, pedeBaixaRestricoes, PARAGRAFO_RESTRICOES, paragrafoRestricoes, enviarComprovanteCredor, destinoWhatsapp, docPorExtenso, proximoHorarioComercial, JANELA_COMPROVANTE, ESPACO_MS };

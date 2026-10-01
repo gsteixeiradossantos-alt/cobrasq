@@ -1253,9 +1253,15 @@ module.exports = async function handler(req, res) {
     // PR7: contas a pagar próprias — independe da régua de cobrança estar ativa.
     const { contasPagar = null, receberAtrasadas = null } = dry ? {} : await processarFinanceiroDoDia(DB);
 
+    // Tarifas do Asaas (Pix enviado, mensageria e as de recebimento que o webhook não
+    // lançou) — só existem no extrato /financialTransactions. Ver api/_tarifas-asaas.js.
+    let tarifasAsaas = null;
+    try { tarifasAsaas = await require('./_tarifas-asaas.js').sincronizarTarifasAsaas({ dry }); }
+    catch (e) { tarifasAsaas = { error: e.message }; }
+
     if (DB.config?.reguaAtiva === false) {
       const calendarStats = dry ? null : await processarCalendarPendingDeletes();
-      return res.status(200).json({ ok: true, msg: 'Régua pausada globalmente.', calendar: calendarStats, contasPagar, receberAtrasadas });
+      return res.status(200).json({ ok: true, msg: 'Régua pausada globalmente.', calendar: calendarStats, contasPagar, receberAtrasadas, tarifasAsaas });
     }
 
     // ===== RÉGUA C — QUITAFÁCIL (independe das outras réguas). Duplo gate:
@@ -1283,7 +1289,7 @@ module.exports = async function handler(req, res) {
 
     if (reguaCobranca.length === 0 && reguaAcordo.length === 0) {
       const calendarStats = dry ? null : await processarCalendarPendingDeletes();
-      return res.status(200).json({ ok: true, msg: 'Nenhum passo configurado nas réguas clássicas.', calendar: calendarStats, contasPagar, receberAtrasadas, quita, negativacao, recalculo });
+      return res.status(200).json({ ok: true, msg: 'Nenhum passo configurado nas réguas clássicas.', calendar: calendarStats, contasPagar, receberAtrasadas, tarifasAsaas, quita, negativacao, recalculo });
     }
 
     const credor = DB.config?.empresa || 'COBRASQ';
@@ -1490,7 +1496,7 @@ module.exports = async function handler(req, res) {
     try { zapsign = await processarLembretesZapSign({ dry: dry || !zapsignLive }); }
     catch (e) { zapsign = { error: e.message }; }
 
-    res.status(200).json({ ok: true, hoje: hojeBR(), ...resultado, calendar, contasPagar, receberAtrasadas, zapsign, zapsign_live: zapsignLive, quita, negativacao, recalculo });
+    res.status(200).json({ ok: true, hoje: hojeBR(), ...resultado, calendar, contasPagar, receberAtrasadas, tarifasAsaas, zapsign, zapsign_live: zapsignLive, quita, negativacao, recalculo });
   } catch (err) {
     console.error('[cron-regua]', err);
     res.status(500).json({ ok: false, error: err.message });

@@ -1,5 +1,5 @@
 /*
- * Teste F-50 — perfil colaborador blindado (28/09/2026, antes do login da estagiária).
+ * Teste F-58 — perfil colaborador blindado (28/09/2026, antes do login da estagiária).
  *
  *   1) api/_papel.js: colaborador leva 403 no Asaas/Z-API; proprietário/cedente seguem;
  *      falha ao ler app_users = 503 (fail-closed).
@@ -8,7 +8,7 @@
  *   3) migração 09: nenhuma policy "staff_all" sobrevive nas tabelas de WhatsApp.
  *
  * Como rodar:
- *   node test/f50_colaborador_seguro.test.js
+ *   node test/f58_colaborador_seguro.test.js
  */
 'use strict';
 
@@ -84,5 +84,5 @@ function carregarPapel(sbFetch) {
   }
   assert.ok(fs.existsSync(path.join(raiz, 'supabase', 'migrations', '20260928_09_colaborador_whatsapp_e_exclusoes_rollback.sql')));
 
-  console.log('f50_colaborador_seguro: ok');
+  console.log('f58_colaborador_seguro: ok');
 })().catch((e) => { console.error(e); process.exit(1); });

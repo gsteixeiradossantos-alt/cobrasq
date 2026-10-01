@@ -263,3 +263,39 @@ secrets já existentes `CRON_INVOKE_SECRET`, `SUPABASE_URL`,
 `SUPABASE_SERVICE_ROLE_KEY`) → opcional `POST /vigia-acoes {"forcar":true}` com o
 bearer do cron para a primeira rodada. Enquanto a migração não estiver aplicada, a aba
 "Vigia de ações" mostra "Não foi possível ler o vigia" e o painel não mostra alerta.
+
+## 20260928_03 — `bens_cobranca` + `bens_constricoes` (aba "Bens e constrições")
+
+**Aplicada em produção em 28/09/2026** (apply_migration `bens_constricoes`). `20260928_03_bens_constricoes.sql` (+ `_rollback`). Aditiva: duas
+tabelas novas (o bem constrito/averbado no processo e, uma linha por ato, as
+constrições — tipo, AV/R, data, CNJ completo com CHECK de formato, mov./folha, valor,
+depositário, situação) e a categoria `matricula` no CHECK de `documentos` (a certidão
+fica em Documentos do caso; o bem só aponta para ela). RLS: proprietário tudo;
+colaborador só nas cobranças com `cadastrado_por`/`assigned_to` = ele; cedente e
+devedor nada (o papel é testado explicitamente, porque o cedente lê `cobrancas`);
+`anon` sem grant. Decisões do Gustavo (28/09/2026): tabela própria (não
+`investigacao_entidades`, que guarda pista), certidão via Documentos do caso, só o
+escritório vê (a categoria `matricula` **não** entra na lista do portal do cliente).
+
+Dry-run em prod (28/09/2026, `DO ... RAISE EXCEPTION`, R-18 como `authenticated` com
+jwt claims, colaborador sintético): `gestor_bens=2 gestor_constr=1 cnj_curto=barrado |
+colab_bens=1 colab_constr=0 colab_ins_alheio=negado colab_constr_alheio=negado
+colab_ins_proprio=ok colab_constr_proprio=ok colab_upd_alheio=0 | ced_ve_cobranca=1
+ced_bens=0 ced_constr=0 ced_ins=negado | anon=negado | cat_matricula=1`. Depois
+conferido que nada persistiu (tabela inexistente, usuário sintético ausente, CHECK sem
+`matricula`).
+
+**Ordem:** aplicar a migração → merge. Merge antes da migração: a aba abre com
+"migração 20260928_03 pendente" e escolher a categoria "Matrícula / certidão" num
+upload falha no CHECK.
+
+## 20260930_02 — trava de tarifa do Asaas duplicada (F-52b)
+
+**Aplicada em 30/09/2026** (índice conferido em `pg_indexes`; teste com rollback:
+segundo insert com o mesmo marcador recusado com 23505). Aditiva: índice único parcial
+`fin_lancamento_tarifa_asaas_uidx` sobre a primeira palavra de `observacoes`
+(o marcador `[asaas_tarifa:…]` / `[asaas_ft:…]`), só nas linhas que têm marcador.
+Em 30/09/2026 havia 0 linhas marcadas em produção. Enquanto não aplicada, o
+código funciona igual ao do PR 859 (conferência pelo marcador); depois de
+aplicada, um insert simultâneo do webhook e do cron volta 409 e vira
+"já lançada". Rollback: `20260930_02_..._rollback.sql`.

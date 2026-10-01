@@ -626,7 +626,8 @@ async function inpi(inv: any, raiz: any, socios: Socio[], achadas: Map<string, A
 // último andamento. Não traz partes nem valor da causa. Chave pública do CNJ no
 // segredo DATAJUD_API_KEY.
 async function datajud(inv: any, c: Contadores, nc: string[]) {
-  const chave = Deno.env.get('DATAJUD_API_KEY') || '';
+  // Aceita a chave colada como na wiki do CNJ ("APIKey xxx" ou "Authorization: APIKey xxx").
+  const chave = (Deno.env.get('DATAJUD_API_KEY') || '').trim().replace(/^(authorization:\s*)?apikey\s+/i, '');
   const { data: procs } = await sb.from('investigacao_entidades').select('id,documento,dados').eq('investigacao_id', inv.id).eq('tipo', 'processo').limit(30);
   if (!procs?.length) return;
   if (!chave) { nc.push('DataJud: chave não configurada no Supabase; processos sem classe/andamento do CNJ.'); return; }

@@ -4542,6 +4542,7 @@ body.viewas-readonly select {
         <input type="text" id="modal-prompt-input" style="width:100%;padding:10px 14px;border:1.5px solid var(--border-2);border-radius:var(--radius-sm);font-size:14px;color:var(--text);background:var(--bg);outline:none;" onkeydown="if(event.key==='Enter')_promptConfirm()">
         <textarea id="modal-prompt-textarea" rows="5" style="display:none;width:100%;padding:10px 14px;border:1.5px solid var(--border-2);border-radius:var(--radius-sm);font-size:13px;color:var(--text);background:var(--bg);outline:none;resize:vertical;"></textarea>
         <div id="modal-prompt-hint" style="font-size:11px;color:var(--text-3);margin-top:6px;"></div>
+        <label id="modal-prompt-check-wrap" style="display:none;align-items:center;gap:8px;margin-top:10px;font-size:12.5px;color:var(--text-2);cursor:pointer;"><input type="checkbox" id="modal-prompt-check"><span id="modal-prompt-check-label"></span></label>
       </div>
     </div>
     <div class="modal-footer">
@@ -6776,7 +6777,15 @@ function _salvarPromessa(devId){
   showToast('Promessa registrada.','success');
   if(typeof renderDrawerBody==='function') renderDrawerBody(devId);
 }
-function promptModal(title,label,cb,{textarea=false,hint='',value=''}={}){
+// `checkbox` (opcional): {label, checked} → uma caixa abaixo do campo; o callback recebe
+// o estado dela como 2º argumento. Sem a opção, a caixa fica oculta e nada muda.
+function promptModal(title,label,cb,{textarea=false,hint='',value='',checkbox=null}={}){
+  const _cw=document.getElementById('modal-prompt-check-wrap');
+  if(_cw){
+    _cw.style.display=checkbox?'flex':'none';
+    document.getElementById('modal-prompt-check').checked=!!(checkbox&&checkbox.checked);
+    document.getElementById('modal-prompt-check-label').textContent=checkbox?checkbox.label:'';
+  }
   document.getElementById('modal-prompt-title').textContent=title;
   document.getElementById('modal-prompt-label').textContent=label;
   document.getElementById('modal-prompt-hint').textContent=hint;
@@ -6792,8 +6801,10 @@ function _promptConfirm(){
   const inp=document.getElementById('modal-prompt-input');
   const ta=document.getElementById('modal-prompt-textarea');
   const v=inp.style.display!=='none'?inp.value.trim():ta.value.trim();
+  const _cw=document.getElementById('modal-prompt-check-wrap');
+  const marcado=!!(_cw && _cw.style.display!=='none' && document.getElementById('modal-prompt-check').checked);
   closeModal('modal-prompt');
-  if(window._promptCb)window._promptCb(v||null);
+  if(window._promptCb)window._promptCb(v||null, marcado);
 }
 
 // ── Telefone de envio (assinatura) ───────────────────────────────────────────
@@ -21999,8 +22010,9 @@ const TPU_MOV = {
   848:{include:true,label:'Trânsito em julgado'}, 246:{include:true,label:'Arquivamento definitivo'},
   193:{include:true,label:'Sentença proferida'}, 219:{include:true,label:'Sentença de procedência'},
   220:{include:true,label:'Sentença de improcedência'}, 3:{include:true,label:'Decisão proferida'},
-  11009:{include:true,label:'Despacho do juízo'}, 51:{include:true,label:'Penhora/constrição de bens'},
-  970:{include:true,label:'Processo arquivado'}, 466:{include:true,label:'Processo suspenso'},
+  11009:{include:true,label:'Despacho do juízo'}, 51:{include:true,label:'Conclusos'},
+  970:{include:true,label:'Processo arquivado'}, 466:{include:true,label:'Acordo homologado'},
+  893:{include:true,label:'Processo desarquivado'}, 898:{include:true,label:'Processo suspenso por decisão judicial'},
   123:{include:false},132:{include:false},581:{include:false},60:{include:false},14736:{include:false},
   12266:{include:false},12283:{include:false},12293:{include:false},11383:{include:false}
 };
@@ -22030,7 +22042,9 @@ function buildCaseTimeline(eventos, repasses, legacyHist){
   (eventos||[]).forEach(e=>{
     const p=e.payload||{};
     let texto = p.acao_completa||p.acao||p.texto||p.descricao||p.mensagem||e.tipo||'';
-    let tipoLabel = e.tipo==='andamento_judicial' ? 'Andamento judicial'
+    // `_rotulo`: rótulo já pronto (só o portal do cedente preenche — cpEventosCliente).
+    let tipoLabel = e._rotulo ? e._rotulo
+                  : e.tipo==='andamento_judicial' ? 'Andamento judicial'
                   : e.tipo==='repasse' ? 'Repasse'
                   : e.tipo==='nota_manual' ? 'Nota'
                   : e.tipo==='mudanca_status' ? statusLabel(p.status_novo||'')
@@ -22533,7 +22547,7 @@ async function renderCobrancaDetalhe(){
   // repasses (sempre), o que a equipe compartilhou e o que o próprio cliente enviou.
   // Envio pelo portal chega PENDENTE: gestor aprova ou recusa. Documento que o cliente
   // mandou por WhatsApp entra por "Cadastrar recebido do cliente" (já aprovado).
-  const _portalCatsCli = DOC_CATEGORIAS.filter(c=>['contrato','nota-promissoria','comprovante','outros'].includes(c[0]));
+  const _portalCatsCli = DOC_CATEGORIAS.filter(c=>['contrato','nota-promissoria','cheque','duplicata','boleto','comprovante','outros'].includes(c[0]));
   const portalDocs = anexos.filter(a=>a.categoria==='repasse' || a.visivel_cliente || a.origem==='cliente');
   const portalPend = portalDocs.filter(a=>a.status_aprovacao==='pendente');
   window._portalPendCount = portalPend.length;
@@ -22740,7 +22754,8 @@ async function renderCobrancaDetalhe(){
     ['docs',`Documentos do caso${anexosCaso.length?` (${anexosCaso.length})`:''}`, panelDocGerar+panelAnexos],
     ['repasses',`Repasses ao cliente${repasses.length?` (${repasses.length})`:''}`, panelRepasses],
     ['portal',`Portal do cliente${portalPend.length?` · ${portalPend.length} a aprovar`:''}`, panelPortal],
-    ['invest','Investigação patrimonial', `<div id="inv-cob-host"></div>`]
+    ['invest','Investigação patrimonial', `<div id="inv-cob-host"></div>`],
+    ['bens','Bens e constrições', `<div id="bens-cob-host"></div>`]
   ];
   const tabBar=`<div class="det-seg det-tabbar det2-tabbar" style="flex-wrap:wrap;">${_tabs.map((t,i)=>`<button class="det2-tabbtn ${i===0?'on':''}" data-cobrtab="${t[0]}" onclick="cobrDetTab('${t[0]}')">${t[1]}</button>`).join('')}</div>`;
   const panes=_tabs.map((t,i)=>`<div class="det-tabpane" data-pane="${t[0]}" style="display:${i===0?'':'none'};margin-top:14px;">${t[2]}</div>`).join('');
@@ -22779,6 +22794,7 @@ function cobrDetTab(name){
   // ONDA H — hooks LAZY on tab-open, espelhando setDrawerTab (os panes são renderizados
   // de uma vez, mas negRenderPainel/renderDrawerAcordosStatus só rodam quando a aba aparece).
   if(name==='invest' && typeof invCarregarCobranca==='function' && typeof _detCobrId!=='undefined'){ invCarregarCobranca(_detCobrId,'inv-cob-host'); return; }
+  if(name==='bens' && typeof bensCarregarCobranca==='function' && typeof _detCobrId!=='undefined'){ bensCarregarCobranca(_detCobrId,'bens-cob-host'); return; }
   const _dv = window._detNegDevId || '';
   if(!_dv) return;
   try{
@@ -23313,21 +23329,27 @@ async function removerRepasse(id){
 // Nota manual no histórico: qualquer usuário pode registrar anotações no caso.
 function adicionarNotaHistorico(cobId){
   if(!cobId){ showToast('Cobrança inválida.','danger'); return; }
-  promptModal('Adicionar nota ao histórico', 'Descreva o que aconteceu:', async (nota)=>{
+  promptModal('Adicionar nota ao histórico', 'Descreva o que aconteceu:', async (nota, mostrarCliente)=>{
     if(!nota) return;
     const supa=getSupabase(); if(!supa){ showToast('Supabase não configurado.','danger'); return; }
     try{
+      // devedor_id = devedor principal (cobranca_partes). O id da cobrança só coincide
+      // com o do devedor nos casos legado 1:1; nos demais a nota caía em ficha errada.
+      let devId=cobId;
+      try{ const { data:pp }=await supa.from('cobranca_partes').select('devedor_id').eq('cobranca_id',cobId).eq('principal',true).limit(1); if(pp&&pp[0]&&pp[0].devedor_id) devId=pp[0].devedor_id; }catch(_){}
       const { error } = await supa.from('devedor_eventos').insert({
         cobranca_id: cobId,
-        devedor_id: cobId, // invariante cobranca.id=devedor principal → RLS do cedente (eventos_cedente_read)
+        devedor_id: devId,
         tipo: 'nota_manual',
-        payload: { acao_completa: nota.trim() + ' (registrado por ' + (currentUser?.nome||'usuário') + ')', registrado_por: currentUser?.nome, origem: 'manual' }
+        // visivel_cliente: só com a caixa marcada a nota aparece no portal do cliente
+        // (cpEventosCliente). O cliente vê o texto sem o "(registrado por …)".
+        payload: { acao_completa: nota.trim() + ' (registrado por ' + (currentUser?.nome||'usuário') + ')', texto: nota.trim(), registrado_por: currentUser?.nome, origem: 'manual', visivel_cliente: !!mostrarCliente }
       });
       if(error) throw error;
       showToast('Nota adicionada ao histórico.','success');
       renderCobrancaDetalhe();
     }catch(e){ showToast('Falha ao registrar: '+(e.message||e),'danger'); }
-  }, { textarea: true, hint: 'A nota ficará visível no histórico do caso para todos os usuários.' });
+  }, { textarea: true, hint: 'A nota fica no histórico do caso para a equipe. Só aparece ao cliente, no portal, se a caixa abaixo estiver marcada.', checkbox: { label: 'Mostrar esta nota ao cliente no portal', checked: false } });
 }
 
 // Negativação manual (handoff §4.9): registra no histórico do caso. Sem API por ora;
@@ -24142,6 +24164,267 @@ async function invCarregarCobranca(cobId, hostId){
   <div id="${hostId}-teia"></div>`;
   const alvo=(teiaAberta&&lista.find(i=>i.id===teiaAberta&&i.status==='concluida'))||lista.find(i=>i.status==='concluida');
   if(alvo) invVerTeia(alvo.id, hostId+'-teia');
+}
+
+// ── Bens e constrições da cobrança (pedido do Gustavo em 28/09/2026) ──
+// Bem JÁ constrito/averbado no processo (matrícula com AV/R, veículo com Renajud, conta
+// com Sisbajud) — tabelas bens_cobranca + bens_constricoes (migração 20260928_03).
+// Pista de patrimônio fica na aba Investigação patrimonial, não aqui. Só escritório
+// (RLS: proprietário tudo, colaborador nas cobranças dele). A certidão de matrícula é
+// um documento da aba "Documentos do caso" (categoria 'matricula'); o bem só aponta.
+const BENS_TIPOS=[['imovel','Imóvel'],['veiculo','Veículo'],['conta','Conta / Sisbajud'],['cotas','Cotas sociais'],['outro','Outro']];
+const CONSTR_TIPOS=[['averbacao_premonitoria','Averbação premonitória (art. 828 CPC)'],['penhora','Penhora'],['arresto','Arresto'],['indisponibilidade','Indisponibilidade'],['sisbajud','Bloqueio Sisbajud'],['renajud','Restrição Renajud'],['cnib','CNIB'],['outra','Outra']];
+const CONSTR_SITUACOES=[['ativa','Ativa'],['cancelada','Cancelada'],['levantada','Levantada']];
+const _CNJ_RE=/^\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}$/;
+let _bensCtx=null; // {cobId, hostId, bens, partes, docs, numeroProcesso}
+const _bensLbl=(lista,v)=>{ const f=lista.find(x=>x[0]===v); return f?f[1]:(v||'—'); };
+function _bensDataBR(v){ if(!v) return '—'; const m=String(v).match(/^(\d{4})-(\d{2})-(\d{2})/); return m?`${m[3]}/${m[2]}/${m[1]}`:String(v); }
+// "20.411,02" e "150.000" (ponto de milhar sem vírgula) → número; "533.6" continua decimal.
+function _bensNum(v){ const s=String(v==null?'':v).replace(/R\$|\s/g,''); if(!s) return null;
+  const t=s.includes(',')?s.replace(/\./g,'').replace(',','.'):(/^-?\d{1,3}(\.\d{3})+$/.test(s)?s.replace(/\./g,''):s);
+  const n=Number(t); return isFinite(n)?n:NaN; }
+// Número de processo guardado só com os 20 dígitos → máscara CNJ; outro formato fica como está.
+function _bensCNJ(v){ const s=String(v||'').trim(), d=s.replace(/\D/g,''); return d.length===20&&/^[\d.\-\s]+$/.test(s)?d.replace(/^(\d{7})(\d{2})(\d{4})(\d)(\d{2})(\d{4})$/,'$1-$2.$3.$4.$5.$6'):s; }
+// Mantém no select o vínculo atual mesmo quando ele não está entre as opções (doc inativo,
+// devedor que saiu das partes) — senão salvar a edição apagaria o vínculo sem aviso.
+function _bensOptsCom(opts, atual, rotulo){ return (atual&&!opts.some(o=>o[0]===atual))?opts.concat([[atual,rotulo]]):opts; }
+function _bensNumTxt(v){ return v==null||v===''?'':fmt(v); }
+function _bensIdent(b){
+  if(b.tipo==='imovel') return [b.matricula?`Matrícula ${b.matricula}`:'', b.cartorio||b.comarca||''].filter(Boolean).join(' · ')||'Imóvel sem matrícula';
+  if(b.tipo==='veiculo') return [b.placa?`Placa ${b.placa}`:'', b.renavam?`RENAVAM ${b.renavam}`:''].filter(Boolean).join(' · ')||'Veículo sem placa';
+  return b.identificacao||b.descricao||_bensLbl(BENS_TIPOS,b.tipo);
+}
+async function _bensUid(supa){ try{ const {data}=await supa.auth.getUser(); return data&&data.user?data.user.id:null; }catch(_){ return null; } }
+function _bensTabelaFaltando(err){ const code=String(err&&err.code||''), m=String(err&&err.message||''); return code==='42P01'||code==='PGRST205'||/relation "?(public\.)?bens_(cobranca|constricoes)"? does not exist|Could not find the table '?(public\.)?bens_(cobranca|constricoes)/i.test(m); }
+
+// Sem erro e sem linha devolvida = a RLS barrou (cobrança que não é sua) — não é "sucesso".
+function _bensErro(err){ if(!err) return 'sem permissão nesta cobrança.'; return /row-level security|permission denied|42501/i.test(String(err.message||'')+String(err.code||''))?'sem permissão nesta cobrança.':(err.message||String(err)); }
+
+async function bensCarregarCobranca(cobId, hostId){
+  const host=document.getElementById(hostId); if(!host||!cobId) return;
+  const supa=getSupabase(); if(!supa){ host.innerHTML=_detEmpty('Supabase não configurado.'); return; }
+  if(host.dataset.cob!==cobId){ host.dataset.cob=cobId; host.innerHTML=`<div style="padding:18px;color:var(--text-3);font-size:12.5px;">Carregando…</div>`; }
+  const [{data:partes},{data:cob},{data:docs},{data:bens,error}]=await Promise.all([
+    supa.from('cobranca_partes').select('devedor_id,papel,principal,devedores(id,nome,doc)').eq('cobranca_id',cobId),
+    supa.from('cobrancas').select('id,numero_processo').eq('id',cobId).maybeSingle(),
+    supa.from('documentos').select('id,nome,categoria').eq('cobranca_id',cobId).eq('ativo',true),
+    supa.from('bens_cobranca').select('*,bens_constricoes(*)').eq('cobranca_id',cobId).order('created_at',{ascending:true})
+  ]);
+  if(host.dataset.cob!==cobId) return; // trocou de cobrança enquanto carregava
+  if(error){
+    host.innerHTML=_detEmpty(_bensTabelaFaltando(error)
+      ? 'Bens e constrições ainda não está ativo no banco (migração 20260928_03 pendente).'
+      : 'Não foi possível carregar os bens: '+(error.message||error));
+    return;
+  }
+  const ps=(partes||[]).filter(p=>p.devedor_id).sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
+  _bensCtx={cobId, hostId, bens:bens||[], partes:ps, docs:docs||[], numeroProcesso:_bensCNJ(cob&&cob.numero_processo)};
+  bensRender();
+}
+
+function bensRender(){
+  const c=_bensCtx; if(!c) return;
+  const host=document.getElementById(c.hostId); if(!host) return;
+  const ehGestor=currentUser?.tipo==='gestor';
+  const nomeDev=id=>{ const p=c.partes.find(x=>x.devedor_id===id); return p&&p.devedores?p.devedores.nome:''; };
+  const docDe=id=>c.docs.find(d=>d.id===id);
+  const cards=c.bens.map(b=>{
+    const constr=(b.bens_constricoes||[]).slice().sort((x,y)=>String(x.data_ato||'').localeCompare(String(y.data_ato||'')));
+    const ativas=constr.filter(k=>k.situacao==='ativa').length;
+    const props=(b.proprietarios||[]).map(p=>[p.nome,p.doc,p.fracao,p.ato].filter(Boolean).join(' · ')).filter(Boolean);
+    const onus=(b.onus_terceiros||[]).map(o=>[o.tipo,o.credor,o.ato,_bensDataBR(o.data)!=='—'?_bensDataBR(o.data):'',o.situacao].filter(Boolean).join(' · ')).filter(Boolean);
+    const cert=b.certidao_documento_id?docDe(b.certidao_documento_id):null;
+    const linhasConstr=constr.map(k=>`<tr style="border-top:1px solid var(--border-2);${k.situacao!=='ativa'?'opacity:.6;':''}">
+        <td style="padding:6px 8px 6px 0;font-weight:600;">${escHtml(_bensLbl(CONSTR_TIPOS,k.tipo))}</td>
+        <td style="padding:6px 8px;font-family:var(--font-mono);">${escHtml(k.ato_registro||'—')}</td>
+        <td style="padding:6px 8px;">${escHtml(_bensDataBR(k.data_ato))}</td>
+        <td style="padding:6px 8px;font-family:var(--font-mono);white-space:nowrap;">${escHtml(k.numero_processo||'—')}</td>
+        <td style="padding:6px 8px;">${escHtml(k.mov_folha||'—')}</td>
+        <td style="padding:6px 8px;text-align:right;white-space:nowrap;">${k.valor!=null?'R$ '+fmt(k.valor):'—'}</td>
+        <td style="padding:6px 8px;">${escHtml(k.depositario||'—')}</td>
+        <td style="padding:6px 8px;"><span class="det-chip ${k.situacao==='ativa'?'princ':''}">${escHtml(_bensLbl(CONSTR_SITUACOES,k.situacao))}</span></td>
+        <td style="padding:6px 0;white-space:nowrap;text-align:right;"><button class="btn btn-ghost btn-sm" onclick="bensAbrirConstricao('${b.id}','${k.id}')">Editar</button>${ehGestor?`<button class="btn btn-ghost btn-sm" style="color:var(--danger);" onclick="bensExcluirConstricao('${k.id}')">✕</button>`:''}</td>
+      </tr>${k.observacao?`<tr><td colspan="9" style="padding:0 0 6px;font-size:11px;color:var(--text-3);">${escHtml(k.observacao)}</td></tr>`:''}`).join('');
+    return `<div class="cob-panel" style="padding:16px 18px;margin-bottom:12px;">
+      <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:flex-start;">
+        <div style="min-width:0;flex:1;">
+          <div style="font-size:13.5px;font-weight:700;">${escHtml(_bensLbl(BENS_TIPOS,b.tipo))} · ${escHtml(_bensIdent(b))}
+            <span class="det-chip ${ativas?'princ':''}" style="margin-left:6px;">${ativas} constrição${ativas===1?'':'ões'} ativa${ativas===1?'':'s'}</span></div>
+          ${b.descricao||b.endereco||b.area_m2!=null?`<div style="font-size:12px;color:var(--text-2);margin-top:3px;">${escHtml([b.descricao,b.endereco,b.area_m2!=null?fmt(b.area_m2)+' m²':''].filter(Boolean).join(' · '))}</div>`:''}
+          <div style="font-size:11.5px;color:var(--text-3);margin-top:3px;">Proprietário(s): ${props.length?escHtml(props.join(' | ')):'—'}${b.devedor_id&&nomeDev(b.devedor_id)?` · devedor: ${escHtml(nomeDev(b.devedor_id))}`:''}</div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button class="btn btn-ghost btn-sm" onclick="bensAbrirConstricao('${b.id}')">+ Constrição</button>
+          <button class="btn btn-ghost btn-sm" onclick="bensAbrirBem('${b.id}')">Editar bem</button>
+          ${ehGestor?`<button class="btn btn-ghost btn-sm" style="color:var(--danger);" onclick="bensExcluirBem('${b.id}')">Excluir</button>`:''}
+        </div>
+      </div>
+      ${constr.length?`<div style="overflow-x:auto;margin-top:10px;"><table style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead><tr style="color:var(--text-3);font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;text-align:left;">
+          <th style="padding:4px 8px 4px 0;">Ato</th><th style="padding:4px 8px;">Nº registro</th><th style="padding:4px 8px;">Data</th><th style="padding:4px 8px;">Processo</th><th style="padding:4px 8px;">Mov./fls.</th><th style="padding:4px 8px;text-align:right;">Valor</th><th style="padding:4px 8px;">Depositário</th><th style="padding:4px 8px;">Situação</th><th></th></tr></thead>
+        <tbody>${linhasConstr}</tbody></table></div>`:`<div style="font-size:12px;color:var(--text-3);font-style:italic;margin-top:10px;">Nenhuma constrição lançada neste bem.</div>`}
+      <div style="display:flex;gap:18px;flex-wrap:wrap;margin-top:10px;font-size:11.5px;color:var(--text-2);">
+        <div><strong>Ônus de terceiros:</strong> ${onus.length?escHtml(onus.join(' | ')):'nenhum anotado'}</div>
+        <div><strong>Avaliação:</strong> ${b.avaliacao_valor!=null?'R$ '+fmt(b.avaliacao_valor)+(b.avaliacao_data?' em '+_bensDataBR(b.avaliacao_data):'')+(b.avaliacao_fonte?' ('+escHtml(b.avaliacao_fonte)+')':''):'—'}</div>
+        <div><strong>Certidão:</strong> ${cert?`<a href="#" onclick="baixarDocumentoDevedor('${cert.id}');return false;">${escHtml(cert.nome)}</a>`:(b.certidao_documento_id?'documento removido':'—')}${b.certidao_data?' · de '+_bensDataBR(b.certidao_data):''}</div>
+      </div>
+      ${b.observacao?`<div style="font-size:11.5px;color:var(--text-3);margin-top:6px;">${escHtml(b.observacao)}</div>`:''}
+    </div>`;
+  }).join('');
+  host.innerHTML=`<div class="cob-panel" style="padding:16px 18px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+      <div><div class="det-panel-tt" style="margin:0;">Bens e constrições</div>
+      <div style="font-size:11.5px;color:var(--text-3);margin-top:3px;">Bem já penhorado, averbado ou bloqueado no processo. Pista de patrimônio fica na aba Investigação patrimonial. A certidão de matrícula se anexa em Documentos do caso (categoria "Matrícula / certidão").</div></div>
+      <button class="cob-btn-primary" onclick="bensAbrirBem()">+ Novo bem</button>
+    </div>
+    ${cards||_detEmpty('Nenhum bem constrito cadastrado nesta cobrança.')}`;
+}
+
+function _bensModal(id, titulo, corpo, onSalvar){
+  let m=document.getElementById(id);
+  if(m) m.remove();
+  m=document.createElement('div'); m.id=id; m.className='overlay';
+  m.innerHTML=`<div style="max-width:720px;width:94%;margin:50px auto 40px;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.25);overflow:hidden;">
+    <div style="display:flex;align-items:center;gap:8px;padding:13px 16px;border-bottom:1px solid var(--border);">
+      <strong style="font-size:14px;flex:1;">${escHtml(titulo)}</strong>
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('${id}').remove()">✕</button>
+    </div>
+    <div style="padding:14px 16px;max-height:70vh;overflow-y:auto;">${corpo}</div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid var(--border);">
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('${id}').remove()">Cancelar</button>
+      <button class="cob-btn-primary" id="${id}-salvar">Salvar</button>
+    </div></div>`;
+  document.body.appendChild(m);
+  m.addEventListener('click', function(e){ if(e.target===this) this.remove(); });
+  document.getElementById(id+'-salvar').onclick=onSalvar;
+  m.classList.add('open');
+  return m;
+}
+const _bensInpSt='width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;font-family:inherit;background:var(--bg);color:var(--text);box-sizing:border-box;';
+function _bensCampo(lbl, html, larg){ return `<label style="display:block;flex:1 1 ${larg||'200px'};min-width:0;font-size:11px;color:var(--text-3);font-weight:600;">${escHtml(lbl)}${html}</label>`; }
+function _bensInp(id, v, extra){ return `<input id="${id}" value="${escHtml(v==null?'':String(v))}" style="${_bensInpSt}margin-top:3px;" ${extra||''}>`; }
+function _bensSel(id, lista, v){ return `<select id="${id}" style="${_bensInpSt}margin-top:3px;">${lista.map(o=>`<option value="${escHtml(o[0])}" ${o[0]===v?'selected':''}>${escHtml(o[1])}</option>`).join('')}</select>`; }
+const _bensLinha='display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;';
+// Linhas repetíveis (proprietários, ônus): cada linha é um grupo de inputs com data-k.
+function _bensRepLinha(campos, v){
+  return `<div class="bens-rep" style="display:flex;gap:6px;margin-bottom:6px;align-items:center;">${campos.map(([k,ph,w,tp])=>`<input data-k="${k}" type="${tp||'text'}" placeholder="${escHtml(ph)}" value="${escHtml(v&&v[k]!=null?String(v[k]):'')}" style="${_bensInpSt}flex:${w||1};">`).join('')}<button class="btn btn-ghost btn-sm" onclick="this.parentNode.remove()">✕</button></div>`;
+}
+const _BENS_PROP_CAMPOS=[['nome','Nome',3],['doc','CPF/CNPJ',2],['fracao','Fração',1],['ato','Ato (R.13)',1]];
+const _BENS_ONUS_CAMPOS=[['tipo','Hipoteca, alien. fiduciária, penhora…',3],['credor','Credor / processo',3],['ato','Ato',1],['data','',2,'date'],['situacao','Situação',2]];
+function bensRepAdd(boxId, qual){ const box=document.getElementById(boxId); if(box) box.insertAdjacentHTML('beforeend', _bensRepLinha(qual==='prop'?_BENS_PROP_CAMPOS:_BENS_ONUS_CAMPOS)); }
+function _bensRepLer(boxId){
+  return [...document.querySelectorAll('#'+boxId+' .bens-rep')].map(l=>{
+    const o={}; l.querySelectorAll('input[data-k]').forEach(i=>{ const v=i.value.trim(); if(v) o[i.dataset.k]=v; }); return o;
+  }).filter(o=>Object.keys(o).length);
+}
+function bensTipoMudou(){
+  const t=document.getElementById('bem-tipo')?.value;
+  document.querySelectorAll('#modal-bem [data-bem-tipo]').forEach(el=>{ el.style.display=el.dataset.bemTipo.split(',').includes(t)?'':'none'; });
+}
+
+function bensAbrirBem(bemId){
+  const c=_bensCtx; if(!c) return;
+  const b=(bemId&&c.bens.find(x=>x.id===bemId))||{tipo:'imovel',proprietarios:[],onus_terceiros:[]};
+  const princ=c.partes.find(p=>p.principal)||c.partes[0];
+  const devOpts=[['','— não vinculado —']].concat(c.partes.map(p=>[p.devedor_id,(p.devedores&&p.devedores.nome||'—')+(p.principal?' (principal)':'')]));
+  const docOpts=[['','— sem certidão anexada —']].concat(c.docs.slice().sort((x,y)=>(y.categoria==='matricula'?1:0)-(x.categoria==='matricula'?1:0)).map(d=>[d.id,(d.categoria==='matricula'?'📄 ':'')+d.nome]));
+  const props=(b.proprietarios&&b.proprietarios.length)?b.proprietarios:(bemId?[]:[princ&&princ.devedores?{nome:princ.devedores.nome,doc:princ.devedores.doc}:{}]);
+  const corpo=`
+    <div style="${_bensLinha}">${_bensCampo('Tipo do bem',_bensSel('bem-tipo',BENS_TIPOS,b.tipo).replace('<select','<select onchange="bensTipoMudou()"'),'180px')}${_bensCampo('Devedor dono (cadastro)',_bensSel('bem-dev',_bensOptsCom(devOpts,b.devedor_id,'(devedor fora das partes desta cobrança)'),b.devedor_id||(bemId?'':(princ&&princ.devedor_id)||'')),'260px')}</div>
+    <div style="${_bensLinha}" data-bem-tipo="imovel">${_bensCampo('Matrícula',_bensInp('bem-matricula',b.matricula),'120px')}${_bensCampo('Cartório (RI)',_bensInp('bem-cartorio',b.cartorio),'220px')}${_bensCampo('Comarca',_bensInp('bem-comarca',b.comarca),'160px')}</div>
+    <div style="${_bensLinha}" data-bem-tipo="imovel">${_bensCampo('Endereço',_bensInp('bem-endereco',b.endereco),'380px')}${_bensCampo('Área (m²)',_bensInp('bem-area',_bensNumTxt(b.area_m2)),'110px')}</div>
+    <div style="${_bensLinha}" data-bem-tipo="veiculo">${_bensCampo('Placa',_bensInp('bem-placa',b.placa),'140px')}${_bensCampo('RENAVAM',_bensInp('bem-renavam',b.renavam),'180px')}</div>
+    <div style="${_bensLinha}" data-bem-tipo="conta,cotas,outro">${_bensCampo('Identificação (banco/conta, CNPJ da sociedade…)',_bensInp('bem-ident',b.identificacao),'380px')}</div>
+    <div style="${_bensLinha}">${_bensCampo('Descrição',_bensInp('bem-desc',b.descricao,'placeholder="Lote 13-D, quadra 10… casa de alvenaria"'),'100%')}</div>
+    <div style="font-size:11px;color:var(--text-3);font-weight:600;margin:4px 0;">Proprietário(s) segundo o registro</div>
+    <div id="bem-props">${props.map(p=>_bensRepLinha(_BENS_PROP_CAMPOS,p)).join('')}</div>
+    <button class="btn btn-ghost btn-sm" onclick="bensRepAdd('bem-props','prop')" style="margin-bottom:10px;">+ Proprietário</button>
+    <div style="font-size:11px;color:var(--text-3);font-weight:600;margin:4px 0;">Ônus de terceiros (hipoteca, alienação fiduciária, outras penhoras)</div>
+    <div id="bem-onus">${(b.onus_terceiros||[]).map(o=>_bensRepLinha(_BENS_ONUS_CAMPOS,o)).join('')}</div>
+    <button class="btn btn-ghost btn-sm" onclick="bensRepAdd('bem-onus','onus')" style="margin-bottom:10px;">+ Ônus</button>
+    <div style="${_bensLinha}">${_bensCampo('Avaliação (R$)',_bensInp('bem-aval',_bensNumTxt(b.avaliacao_valor)),'140px')}${_bensCampo('Data da avaliação',_bensInp('bem-aval-data',b.avaliacao_data,'type="date"'),'150px')}${_bensCampo('Fonte da avaliação',_bensInp('bem-aval-fonte',b.avaliacao_fonte,'placeholder="oficial de justiça, laudo…"'),'200px')}</div>
+    <div style="${_bensLinha}">${_bensCampo('Certidão de matrícula (Documentos do caso)',_bensSel('bem-cert',_bensOptsCom(docOpts,b.certidao_documento_id,'(documento inativo ou de outro caso)'),b.certidao_documento_id||''),'320px')}${_bensCampo('Data da certidão',_bensInp('bem-cert-data',b.certidao_data,'type="date"'),'150px')}</div>
+    <div style="${_bensLinha}">${_bensCampo('Observação',`<textarea id="bem-obs" rows="2" style="${_bensInpSt}margin-top:3px;">${escHtml(b.observacao||'')}</textarea>`,'100%')}</div>`;
+  _bensModal('modal-bem', bemId?'Editar bem':'Novo bem', corpo, ()=>bensSalvarBem(bemId||null));
+  bensTipoMudou();
+}
+
+async function bensSalvarBem(bemId){
+  const c=_bensCtx; if(!c) return;
+  const v=id=>{ const s=(document.getElementById(id)?.value||'').trim(); return s||null; };
+  const tipo=v('bem-tipo');
+  const area=tipo==='imovel'?_bensNum(v('bem-area')):null, aval=_bensNum(v('bem-aval'));
+  if(Number.isNaN(area)||Number.isNaN(aval)){ showToast('Área ou avaliação com número inválido (use 533,60).','warning'); return; }
+  const row={
+    cobranca_id:c.cobId, devedor_id:v('bem-dev'), tipo, descricao:v('bem-desc'),
+    matricula:tipo==='imovel'?v('bem-matricula'):null, cartorio:tipo==='imovel'?v('bem-cartorio'):null,
+    comarca:tipo==='imovel'?v('bem-comarca'):null, endereco:tipo==='imovel'?v('bem-endereco'):null, area_m2:tipo==='imovel'?area:null,
+    placa:tipo==='veiculo'?(v('bem-placa')||'').toUpperCase()||null:null, renavam:tipo==='veiculo'?v('bem-renavam'):null,
+    identificacao:['conta','cotas','outro'].includes(tipo)?v('bem-ident'):null,
+    proprietarios:_bensRepLer('bem-props'), onus_terceiros:_bensRepLer('bem-onus'),
+    avaliacao_valor:aval, avaliacao_data:v('bem-aval-data'), avaliacao_fonte:v('bem-aval-fonte'),
+    certidao_documento_id:v('bem-cert'), certidao_data:v('bem-cert-data'), observacao:v('bem-obs')
+  };
+  const supa=getSupabase(); if(!supa) return;
+  const btn=document.getElementById('modal-bem-salvar'); if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
+  const q=bemId ? supa.from('bens_cobranca').update(row).eq('id',bemId).select('id')
+               : supa.from('bens_cobranca').insert({...row, origem:'manual', criado_por:await _bensUid(supa)}).select('id');
+  const {data:gravou,error}=await q;
+  if(error||!(gravou&&gravou.length)){ if(btn){ btn.disabled=false; btn.textContent='Salvar'; } showToast('Não foi possível salvar o bem: '+_bensErro(error),'danger'); return; }
+  document.getElementById('modal-bem')?.remove();
+  showToast(bemId?'Bem atualizado.':'Bem cadastrado.','success');
+  bensCarregarCobranca(c.cobId, c.hostId);
+}
+
+function bensAbrirConstricao(bemId, constrId){
+  const c=_bensCtx; if(!c) return;
+  const b=c.bens.find(x=>x.id===bemId); if(!b) return;
+  const k=(constrId&&(b.bens_constricoes||[]).find(x=>x.id===constrId))||{tipo:'penhora',situacao:'ativa',numero_processo:c.numeroProcesso};
+  const docOpts=[['','— nenhum —']].concat(c.docs.map(d=>[d.id,d.nome]));
+  const corpo=`
+    <div style="font-size:12px;color:var(--text-2);margin-bottom:10px;">${escHtml(_bensLbl(BENS_TIPOS,b.tipo))} · ${escHtml(_bensIdent(b))}</div>
+    <div style="${_bensLinha}">${_bensCampo('Tipo de ato',_bensSel('con-tipo',CONSTR_TIPOS,k.tipo),'280px')}${_bensCampo('Nº do ato no registro',_bensInp('con-ato',k.ato_registro,'placeholder="AV.18, R.20, protocolo Sisbajud"'),'180px')}${_bensCampo('Data do ato',_bensInp('con-data',k.data_ato,'type="date"'),'150px')}</div>
+    <div style="${_bensLinha}">${_bensCampo('Processo (CNJ completo)',_bensInp('con-proc',k.numero_processo,'placeholder="0000000-00.0000.0.00.0000"'),'260px')}${_bensCampo('Movimento / folha',_bensInp('con-mov',k.mov_folha,'placeholder="mov. 27.1"'),'160px')}${_bensCampo('Valor (R$)',_bensInp('con-valor',_bensNumTxt(k.valor)),'140px')}</div>
+    <div style="${_bensLinha}">${_bensCampo('Depositário',_bensInp('con-dep',k.depositario),'260px')}${_bensCampo('Situação',_bensSel('con-sit',CONSTR_SITUACOES,k.situacao),'150px')}${_bensCampo('Documento (termo, certidão)',_bensSel('con-doc',_bensOptsCom(docOpts,k.documento_id,'(documento inativo ou de outro caso)'),k.documento_id||''),'240px')}</div>
+    <div style="${_bensLinha}">${_bensCampo('Observação',`<textarea id="con-obs" rows="2" style="${_bensInpSt}margin-top:3px;">${escHtml(k.observacao||'')}</textarea>`,'100%')}</div>`;
+  _bensModal('modal-constr', constrId?'Editar constrição':'Nova constrição', corpo, ()=>bensSalvarConstricao(bemId, constrId||null));
+}
+
+async function bensSalvarConstricao(bemId, constrId){
+  const c=_bensCtx; if(!c) return;
+  const v=id=>{ const s=(document.getElementById(id)?.value||'').trim(); return s||null; };
+  const proc=v('con-proc')&&_bensCNJ(v('con-proc')), valor=_bensNum(v('con-valor'));
+  if(proc && !_CNJ_RE.test(proc)){ showToast('Número do processo tem que ser o CNJ completo (0000000-00.0000.0.00.0000).','warning'); return; }
+  if(Number.isNaN(valor)){ showToast('Valor inválido (use 21.987,00).','warning'); return; }
+  const row={ bem_id:bemId, tipo:v('con-tipo'), ato_registro:v('con-ato'), data_ato:v('con-data'), numero_processo:proc,
+    mov_folha:v('con-mov'), valor, depositario:v('con-dep'), situacao:v('con-sit')||'ativa', documento_id:v('con-doc'), observacao:v('con-obs') };
+  const supa=getSupabase(); if(!supa) return;
+  const btn=document.getElementById('modal-constr-salvar'); if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
+  const q=constrId ? supa.from('bens_constricoes').update(row).eq('id',constrId).select('id')
+                   : supa.from('bens_constricoes').insert({...row, criado_por:await _bensUid(supa)}).select('id');
+  const {data:gravou,error}=await q;
+  if(error||!(gravou&&gravou.length)){ if(btn){ btn.disabled=false; btn.textContent='Salvar'; } showToast('Não foi possível salvar a constrição: '+_bensErro(error),'danger'); return; }
+  document.getElementById('modal-constr')?.remove();
+  showToast(constrId?'Constrição atualizada.':'Constrição lançada.','success');
+  bensCarregarCobranca(c.cobId, c.hostId);
+}
+
+async function bensExcluirBem(bemId){
+  const c=_bensCtx; if(!c) return;
+  const b=c.bens.find(x=>x.id===bemId); if(!b) return;
+  const n=(b.bens_constricoes||[]).length;
+  if(!confirm(`Excluir o bem "${_bensIdent(b)}"${n?` e as ${n} constrição(ões) lançadas nele`:''}? A certidão continua em Documentos do caso.`)) return;
+  const {data:apagou,error}=await getSupabase().from('bens_cobranca').delete().eq('id',bemId).select('id');
+  if(error||!(apagou&&apagou.length)){ showToast('Não foi possível excluir: '+_bensErro(error),'danger'); return; }
+  showToast('Bem excluído.','success');
+  bensCarregarCobranca(c.cobId, c.hostId);
+}
+async function bensExcluirConstricao(constrId){
+  const c=_bensCtx; if(!c) return;
+  if(!confirm('Excluir esta constrição? Para registrar que foi cancelada ou levantada, prefira editar a situação.')) return;
+  const {data:apagou,error}=await getSupabase().from('bens_constricoes').delete().eq('id',constrId).select('id');
+  if(error||!(apagou&&apagou.length)){ showToast('Não foi possível excluir: '+_bensErro(error),'danger'); return; }
+  showToast('Constrição excluída.','success');
+  bensCarregarCobranca(c.cobId, c.hostId);
 }
 
 async function invIniciarSelecionados(cobId, hostId, btn){
@@ -27480,6 +27763,33 @@ function cpStepIndex(status){
   if(/contato|notific|proposta|an[áa]lise|andamento/.test(s)) return 1;
   return 0;
 }
+// "Devolvida"/"8. Devolvida": a COBRASQ encerrou e o título voltou ao cliente. Não é
+// quitação nem repasse — antes caía no índice 4 e a jornada marcava "Quitada pelo
+// devedor" como feita, e o card mostrava o capital inteiro como "saldo a receber".
+// "Devolver" (ainda a devolver) não entra: o caso segue sob a COBRASQ até a devolução.
+function cpEhDevolvida(status){ return /devolvid/i.test(status||''); }
+// Jornada do detalhe do caso. `repassado` = soma de repasses_cliente do caso (null enquanto
+// não carregou). Caso quitado cujo capital já voltou inteiro ao cliente — ou quitado direto
+// a ele — completa a última etapa ("Repassada a você"); cpStepIndex sozinho parava na 4ª.
+function cpStepsHtml(status, repassado, capital){
+  let steps=['Registrada na COBRASQ','Notificação e cobrança','Acordo ou ação judicial','Quitada pelo devedor','Repassada a você'];
+  let idx=cpStepIndex(status);
+  if(cpEhDevolvida(status)){
+    steps=['Registrada na COBRASQ','Notificação e cobrança','Cobrança devolvida a você'];
+    idx=steps.length; // todas concluídas
+  } else if(idx===3){
+    const direto=/quitado (ao cliente|direto ao credor)/i.test(status||'');
+    const tudo=repassado!=null && +capital>0 && repassado+0.005>=+capital;
+    if(direto || tudo) idx=steps.length;
+  }
+  return steps.map((l,i)=>{
+    let cls='todo';
+    if(idx==='failed'){ cls = i===0?'done' : (i===1?'failed':'todo'); }
+    else { cls = i<idx?'done' : (i===idx?'current':'todo'); }
+    const inner = cls==='done'?'✓' : (cls==='failed'?'!' : (i+1));
+    return `<div class="cp-step ${cls}"><div class="cp-step-c">${inner}</div><div class="cp-step-l">${l}</div></div>`;
+  }).join('');
+}
 // ── Beatriz IA (casca; liga no /api/claude numa 2ª etapa) ──
 function cpBeatrizOpen(){
   const ov=document.getElementById('cpBeatrizOv'); if(!ov) return;
@@ -27938,7 +28248,7 @@ async function cpRenderDashboard(body){
   // "Repassado a você" = soma REAL dos repasses ao cliente (não o valor dos casos quitados, que enganava).
   let recuperado = 0;
   window._cpDashRep = [];
-  try{ const supa=getSupabase(); if(supa){ const { data:rps }=await supa.from('repasses_cliente').select('valor,data_pix').order('data_pix',{ascending:false,nullsFirst:false}); window._cpDashRep=rps||[]; recuperado=(rps||[]).reduce((s,r)=>s+(+r.valor||0),0); } }catch(_){}
+  try{ const supa=getSupabase(); if(supa){ const { data:rps }=await supa.from('repasses_cliente').select('valor,data_pix,cobranca_id').order('data_pix',{ascending:false,nullsFirst:false}); window._cpDashRep=rps||[]; recuperado=(rps||[]).reduce((s,r)=>s+(+r.valor||0),0); } }catch(_){}
   // comprovantes pendentes de aprovação
   const compPendentes = devs.reduce((s,d)=>s+((d.comprovantes||[]).filter(c=>c.status==='pendente').length),0);
 
@@ -27948,8 +28258,14 @@ async function cpRenderDashboard(body){
   // teria capitalTotal 0 e o "saldo a receber" apareceria zerado.
   const _cpCapIds=cpClienteIds();
   const cobr=(typeof DB_cobrancas!=='undefined'?DB_cobrancas:[]||[]).filter(c=>_cpCapIds.includes(c.cliente_id));
-  const capitalTotal=cobr.reduce((s,c)=>s+((c.valor_capital!=null)?+c.valor_capital:((c.divida&&c.divida.valorCapital!=null)?+c.divida.valorCapital:(+c.valor_orig||parseValorBR((devs.find(d=>d.id===c.id)||{}).valorOrig)||0))),0);
-  const saldoReceber=Math.max(capitalTotal-recuperado,0);
+  const _cpCapDe=c=>(c.valor_capital!=null)?+c.valor_capital:((c.divida&&c.divida.valorCapital!=null)?+c.divida.valorCapital:(+c.valor_orig||parseValorBR((devs.find(d=>d.id===c.id)||{}).valorOrig)||0));
+  const capitalTotal=cobr.reduce((s,c)=>s+_cpCapDe(c),0);
+  // Saldo a receber: cobrança devolvida não tem saldo a caminho (a COBRASQ encerrou a
+  // cobrança) — fica fora do capital e seus repasses fora do abatimento.
+  const _cpDevolv=new Set(cobr.filter(c=>cpEhDevolvida(c.status)).map(c=>c.id));
+  const _capSaldo=cobr.filter(c=>!_cpDevolv.has(c.id)).reduce((s,c)=>s+_cpCapDe(c),0);
+  const _recSaldo=(window._cpDashRep||[]).filter(r=>!_cpDevolv.has(r.cobranca_id)).reduce((s,r)=>s+(+r.valor||0),0);
+  const saldoReceber=Math.max(_capSaldo-_recSaldo,0);
   const pctVolta=capitalTotal>0?Math.min(100,(recuperado/capitalTotal)*100):0;
   const nRep=(window._cpDashRep||[]).length;
   // Atividade recente (sintetizada de repasses + status dos casos)
@@ -28151,15 +28467,12 @@ function cpVerDevedor(id){
   const _partesCaso=((cob&&cob.cobranca_partes)||[]).slice().sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
   const partesHtml = _partesCaso.length>1 ? `<div class="cp-card" style="margin-bottom:18px;"><div class="cp-label" style="margin-bottom:12px;">Partes do caso (${_partesCaso.length})</div>${_partesCaso.map(p=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:9px 0;border-top:1px solid var(--pline);"><div style="min-width:0;"><span style="font-size:13.5px;font-weight:600;color:var(--ink);">${escHtml((p.devedores&&p.devedores.nome)||'—')}</span>${p.principal?' <span class="cp-mono" style="font-size:9px;color:var(--gold-2);text-transform:uppercase;letter-spacing:.1em;">principal</span>':''}<div class="cp-mono" style="font-size:11px;color:var(--mute);">${escHtml((p.devedores&&p.devedores.doc)||'—')}</div></div><span class="cp-label" style="white-space:nowrap;">${cpPapelLbl(p.papel)}</span></div>`).join('')}</div>` : '';
   const capital=cob?((cob.valor_capital!=null)?+cob.valor_capital:((cob.divida&&cob.divida.valorCapital!=null)?+cob.divida.valorCapital:(+cob.valor_orig||(parseValorBR(d.valorOrig)||0)))):(parseValorBR(d.valorOrig)||0);
-  const stepIdx=cpStepIndex(d.status);
-  const STEPS=['Registrada na COBRASQ','Notificação e cobrança','Acordo ou ação judicial','Quitada pelo devedor','Repassada a você'];
-  const stepHtml=STEPS.map((l,i)=>{
-    let cls='todo';
-    if(stepIdx==='failed'){ cls = i===0?'done' : (i===1?'failed':'todo'); }
-    else { cls = i<stepIdx?'done' : (i===stepIdx?'current':'todo'); }
-    const inner = cls==='done'?'✓' : (cls==='failed'?'!' : (i+1));
-    return `<div class="cp-step ${cls}"><div class="cp-step-c">${inner}</div><div class="cp-step-l">${l}</div></div>`;
-  }).join('');
+  // Status da COBRANÇA (relacional) manda; d.status (blob) só na falta dela.
+  const stCaso=(cob&&cob.status)||d.status||'';
+  const devolvida=cpEhDevolvida(stCaso);
+  // Repassado ainda não conhecido aqui (repasses chegam assíncronos em cpFillRepassesDevedor,
+  // que redesenha a jornada com o valor real).
+  const stepHtml=cpStepsHtml(stCaso, null, capital);
 
   body.innerHTML = `
     <button class="cp-btn cp-btn-outline" style="border-color:var(--pline);color:var(--mute);margin-bottom:18px;" onclick="cpNavigate('carteira')">‹ Voltar à carteira</button>
@@ -28177,7 +28490,7 @@ function cpVerDevedor(id){
     ${partesHtml}
     <div class="cp-card" style="margin-bottom:18px;">
       <div class="cp-label" style="margin-bottom:18px;">Jornada do caso</div>
-      <div class="cp-steps">${stepHtml}</div>
+      <div class="cp-steps" id="cpDevSteps">${stepHtml}</div>
     </div>
     <div style="display:grid;grid-template-columns:1.1fr 1fr;gap:18px;margin-bottom:18px;">
       <div class="cp-card">
@@ -28190,6 +28503,7 @@ function cpVerDevedor(id){
           <div style="display:flex;justify-content:space-between;margin-bottom:10px;"><span style="font-size:13px;color:var(--mute);">Capital (principal)</span><span class="cp-num" style="font-size:18px;color:var(--ink);">${fmtR(capital)}</span></div>
           <div style="display:flex;justify-content:space-between;margin-bottom:10px;"><span style="font-size:13px;color:var(--mute);">Já repassado a você</span><span class="cp-num" id="cpDevCapRec" style="font-size:18px;color:var(--st-quitado);">—</span></div>
           <div style="display:flex;justify-content:space-between;padding-top:10px;border-top:1px solid var(--pline);"><span style="font-size:13px;color:var(--ink);font-weight:600;">Saldo a receber</span><span class="cp-num" id="cpDevCapSaldo" style="font-size:18px;color:var(--gold-2);">—</span></div>
+          ${devolvida?`<div style="margin-top:12px;font-size:12.5px;color:var(--mute);line-height:1.5;">Cobrança devolvida a você: a COBRASQ encerrou a cobrança deste caso e não há saldo a receber por aqui.</div>`:''}
           <div style="margin-top:14px;background:color-mix(in srgb,var(--st-quitado) 12%,transparent);border-radius:11px;padding:11px 13px;"><span class="cp-lead" style="font-size:14px;color:var(--st-quitado);">O principal volta inteiro ao seu caixa. A COBRASQ fica apenas com os acessórios.</span></div>
         </div>
         <div class="cp-card">
@@ -28268,13 +28582,70 @@ async function cpEnviarDocumentoCaso(cobId){
   cpFillDocumentosCaso(cobId);
 }
 
+// Nota da equipe só aparece ao cliente quando marcada "mostrar ao cliente" ao ser criada.
+function cpNotaVisivelCliente(p){ return !!(p && (p.visivel_cliente===true || p.visivelCliente===true)); }
+// devedor_eventos → só o que o cliente deve ver, com rótulo e texto do PORTAL. Texto livre
+// escrito pela equipe (acao_completa de acordo cancelado/descumprido, notas) nunca passa,
+// salvo andamento judicial (curado) e nota marcada visível. Tipo fora da lista = oculto.
+function cpEventosCliente(eventos, reps){
+  const out=[];
+  const R=v=>fmtR(+v||0);
+  (eventos||[]).forEach(e=>{
+    if(!e) return;
+    const p=e.payload||{};
+    const ev=(tipo,texto,data)=>out.push({ tipo:'andamento_judicial', _rotulo:tipo, payload:{ acao_completa:texto, data:data||p.data||null }, criado_em:e.criado_em });
+    switch(e.tipo){
+      case 'andamento_judicial':
+        out.push({ tipo:'andamento_judicial', payload:p, criado_em:e.criado_em }); break;
+      case 'asaas_pagamento_recebido': {
+        const parc=(typeof p.installment==='number')?` (parcela ${p.installment})`:'';
+        ev('Pagamento', `Pagamento recebido — ${R(p.value)}${parc}`, p.payment_date); break; }
+      case 'asaas_pagamento_atrasado': {
+        const venc=p.due_date?` com vencimento em ${_detData(p.due_date)}`:'';
+        ev('Pagamento', `Parcela de ${R(p.value)}${venc} não foi paga no prazo`, null); break; }
+      case 'asaas_boletos_emitidos': {
+        const n=+p.parcelas||0;
+        ev('Acordo', n>1?`Boletos do acordo emitidos — ${n} parcelas, total ${R(p.total)}`:`Boleto do acordo emitido — ${R(p.total)}`); break; }
+      case 'zapsign_assinado':
+      case 'acordo_assinado_confirmado':
+        ev('Acordo', 'Acordo assinado pelo devedor'); break;
+      case 'acordo_concluido_auto':
+        ev('Acordo', 'Acordo formalizado e boletos enviados ao devedor'); break;
+      case 'acordo_cancelado':
+        ev('Acordo', 'Acordo cancelado'); break;
+      case 'acordo_descumprido':
+        ev('Acordo', 'Acordo não cumprido pelo devedor'); break;
+      case 'caso_criado':
+        ev('Caso', 'Caso registrado na COBRASQ'); break;
+      case 'repasse':
+        // Os PIX do caso já aparecem um a um (repasses_cliente); o evento-resumo só entra
+        // quando não há nenhum repasse registrado na tabela.
+        if(!(reps||[]).length) ev('Repasse', 'Capital repassado a você');
+        break;
+      case 'nota_manual': case 'nota': case 'anotacao': case 'historico_legacy': case 'mudanca_status':
+        if(cpNotaVisivelCliente(p)){
+          const t=p.texto||p.acao_completa||p.acao||p.descricao||p.titulo||'';
+          if(t) ev('Nota', t);
+        }
+        break;
+      default: break; // interno (script_*, telefone_*, edicao, reatribuicao, falhas...) — oculto
+    }
+  });
+  return out;
+}
+// metadata.historico (blob) no portal: só o comprovante enviado pelo próprio cliente e o
+// que a equipe marcou visível. Notas, "Script", ligações etc. ficam no painel.
+function cpHistLegadoCliente(hist){
+  return (hist||[]).filter(h=>h && (h.tipo==='Comprovante' || cpNotaVisivelCliente(h)));
+}
 // Monta o "Histórico do caso" do portal do cedente. Usa o MESMO builder do CRM
-// (buildCaseTimeline): eventos = devedor_eventos (andamentos judiciais curados,
-// notas, repasse-quitação — lidos via RLS eventos_cedente_read), repasses =
-// repasses_cliente, e a cauda legada de metadata.historico (não-datajud). Assim
-// o cedente e o gestor veem EXATAMENTE a mesma timeline.
+// (buildCaseTimeline), mas só com o que é PARA O CLIENTE: devedor_eventos passa por
+// cpEventosCliente (lista branca + texto próprio do portal) e a cauda legada de
+// metadata.historico por cpHistLegadoCliente. Antes ia tudo — nota interna da equipe,
+// mudança de status de migração em massa, payload cru do Asaas (payment_id, cus_...,
+// invoice_url) —, inclusive telefone de terceiro e fila interna de envio (28/09/2026).
 function cpRenderDevTimeline(eventos, reps, legacyHist){
-  const itens=buildCaseTimeline(eventos, reps, legacyHist);
+  const itens=buildCaseTimeline(cpEventosCliente(eventos, reps), reps, cpHistLegadoCliente(legacyHist));
   if(!itens.length){
     return `<div class="cp-tl-item"><span class="cp-tl-dot"></span><div style="font-size:13px;color:var(--ink);">Caso registrado na COBRASQ.<div style="font-size:11.5px;color:var(--mute);margin-top:2px;">Os andamentos detalhados aparecem aqui conforme o caso avança.</div></div></div>`;
   }
@@ -28289,8 +28660,19 @@ async function cpFillRepassesDevedor(cobId){
   let eventos=[];
   if(supa){
     try{ const { data }=await supa.from('repasses_cliente').select('*').eq('cobranca_id',cobId).order('data_pix',{ascending:false,nullsFirst:false}); reps=data||[]; }catch(_){}
-    // Eventos do caso via RLS de cedente (eventos_cedente_read filtra por devedor_id).
-    try{ const { data:ev }=await supa.from('devedor_eventos').select('tipo,payload,criado_em').eq('devedor_id',cobId).order('criado_em',{ascending:false}).limit(50); eventos=ev||[]; }catch(_){}
+    // Eventos do caso: pela cobrança (cobranca_id) ou, nos eventos antigos sem cobranca_id,
+    // pelo devedor PRINCIPAL de cobranca_partes. Antes buscava devedor_id = id da cobrança,
+    // que só acerta no legado 1:1 — 67 casos têm o principal com id diferente (28/09/2026).
+    // Evento sem cobranca_id de outro caso do mesmo devedor não entra (filtro por caso).
+    try{
+      const _cb=(typeof DB_cobrancas!=='undefined'?DB_cobrancas:[]||[]).find(c=>c.id===cobId);
+      const _pp=((_cb&&_cb.cobranca_partes)||[]).find(x=>x.principal);
+      const _devIds=[...new Set([cobId, _pp&&_pp.devedor_id].filter(Boolean))];
+      const { data:ev }=await supa.from('devedor_eventos').select('tipo,payload,criado_em')
+        .or(`cobranca_id.eq.${cobId},and(cobranca_id.is.null,devedor_id.in.(${_devIds.join(',')}))`)
+        .order('criado_em',{ascending:false}).limit(80);
+      eventos=ev||[];
+    }catch(_){}
   }
   // Re-renderiza o "Histórico do caso" unindo eventos (andamentos curados + notas)
   // + repasses + cauda legada de metadata.historico.
@@ -28302,7 +28684,13 @@ async function cpFillRepassesDevedor(cobId){
   const saldo=(cap!=null)?(cap-recebido):null;
   // Preenche o card "Seu capital neste caso" do detalhe
   const rec=document.getElementById('cpDevCapRec'); if(rec) rec.textContent=fmtR(recebido);
-  const sal=document.getElementById('cpDevCapSaldo'); if(sal) sal.textContent=(saldo!=null?fmtR(Math.max(saldo,0)):'—');
+  const _st=(cob&&cob.status)||((DB.devedores||[]).find(x=>x.id===cobId)||{}).status||'';
+  // Caso devolvido: não há saldo a receber pela COBRASQ (o título voltou ao cliente).
+  const sal=document.getElementById('cpDevCapSaldo'); if(sal) sal.textContent=cpEhDevolvida(_st)?'—':(saldo!=null?fmtR(Math.max(saldo,0)):'—');
+  // Jornada com o repassado real: quitado + capital 100% repassado completa "Repassada a você".
+  const stepsEl=document.getElementById('cpDevSteps');
+  const _capJ=(cap!=null)?cap:(cob?(+cob.valor_orig||0):0);
+  if(stepsEl) stepsEl.innerHTML=cpStepsHtml(_st, recebido, _capJ);
   if(!reps.length){
     el.innerHTML=`<div style="font-size:12.5px;color:var(--mute);padding:6px 0;">Nenhum repasse registrado neste caso ainda. Os valores recuperados aparecem aqui quando a COBRASQ repassa.</div>`;
     return;
@@ -28960,7 +29348,7 @@ function renderDocs(){
   });
   const pendentes = allMinutas.filter(m=>m.zapsignStatus==='PENDING').length;
 
-  const cats = ['Todos','Contrato','Nota promissória','Comprovante','Acordo assinado','Petição','Procuração','Cálculo','Outros'];
+  const cats = ['Todos','Contrato','Nota promissória','Cheque','Duplicata','Boleto','Comprovante','Acordo assinado','Petição','Procuração','Cálculo','Matrícula / certidão','Outros'];
 
   el.innerHTML = `
     <div class="cob-pg-head">
@@ -31521,8 +31909,13 @@ function _finCascataPeriodoBounds(){
   const dm = s => s.slice(8,10) + '/' + s.slice(5,7);
   const mesCurto = d => d.toLocaleDateString('pt-BR',{month:'short'}).replace('.','') + '/' + String(d.getFullYear()).slice(2);
   if(p.modo==='custom' && p.ini && p.fim){
-    const faixa = dm(p.ini) + ' – ' + dm(p.fim);
-    return { ini:p.ini, fim:p.fim, modo:'custom', label:faixa, datas:_finBR(p.ini)+' — '+_finBR(p.fim), nome:faixa, curto:'PERÍODO', ponte:dm(p.ini)+' — '+dm(p.fim) };
+    // Sem o ano, 01/09/2026 — 30/09/2030 aparecia como "01/09 – 30/09" e a meta
+    // proporcional (49 meses × meta) parecia erro de setembro (28/09/2026).
+    const anoAtual = h.slice(0,4);
+    const comAno = p.ini.slice(0,4) !== anoAtual || p.fim.slice(0,4) !== anoAtual;
+    const dma = s => dm(s) + (comAno ? '/' + s.slice(2,4) : '');
+    const faixa = dma(p.ini) + ' – ' + dma(p.fim);
+    return { ini:p.ini, fim:p.fim, modo:'custom', label:faixa, datas:_finBR(p.ini)+' — '+_finBR(p.fim), nome:faixa, curto:'PERÍODO', ponte:dma(p.ini)+' — '+dma(p.fim) };
   }
   const r = _finDeISO(p.ref);
   if(p.modo==='dia'){
@@ -34275,7 +34668,7 @@ function _finRepOverlay(){
   return ov;
 }
 function _finRepFechar(){ const ov = document.getElementById('finrep-overlay'); if(ov) ov.classList.remove('open'); _finRepState = null; }
-async function _finRepAbrir(lancId, fila){
+async function _finRepAbrir(lancId, fila, loteIds){
   const sb = getSupabase();
   const ov = _finRepOverlay();
   ov.innerHTML = `<div class="modal" style="max-width:560px;"><div class="modal-body" style="text-align:center;color:#8A94A6;padding:40px;"><div class="mv2-spinner" style="margin:0 auto 10px;width:24px;height:24px;border-width:3px;"></div>Preparando o repasse…</div></div>`;
@@ -34330,7 +34723,8 @@ async function _finRepAbrir(lancId, fila){
     }
     _finRepState = { l, valor: Math.abs(+l.valor||0), credor, credores, credorId: credor ? credor.id : null,
       pixKey: credor ? (credor.chave_pix || '') : '', pixEditada:false, devedor, parcela, total, saldo,
-      fila: Array.isArray(fila) ? fila.slice() : [], enviando:false, descricao:'', descricaoEditada:false };
+      fila: Array.isArray(fila) ? fila.slice() : [], enviando:false, descricao:'', descricaoEditada:false, lote:null };
+    if(Array.isArray(loteIds) && loteIds.length > 1) await _finRepMontarLote(loteIds);
     // A descrição sugerida ("<parcela> - <devedor>") pode ser corrigida antes do envio —
     // ex.: repasse feito por fora que a numeração do lançamento não conhece.
     _finRepState.descricao = _finRepDescricaoPix();
@@ -34342,8 +34736,10 @@ async function _finRepAbrir(lancId, fila){
 }
 function _finRepDescricaoPix(){
   const S = _finRepState; if(!S) return '';
-  // Espelho de descricaoPix (api/_repasse-msg.js): "<parcela> - <devedor>".
+  // Espelho de descricaoPix (api/_repasse-msg.js): "<parcela> - <devedor>"; no lote,
+  // "3, 8 e 9 - <devedor>".
   const nome = S.devedor || '';
+  if(S.lote){ const ns = (S.lote.parcelas||[]).map(Number).filter(n => n > 0); const ps = ns.length ? String(Math.min(...ns)) : ''; return nome ? (ps ? `${ps} - ${nome}` : nome) : (ps ? `Repasse Cobrasq - parcela ${ps}` : 'Repasse Cobrasq'); }  // lote: só a 1ª parcela no extrato (Gustavo, 30/09/2026)
   return nome ? (S.parcela ? `${S.parcela} - ${nome}` : nome) : (S.parcela ? `Repasse Cobrasq - parcela ${S.parcela}` : 'Repasse Cobrasq');
 }
 function _finRepSetCredor(id){
@@ -34358,7 +34754,7 @@ function _finRepSetDescricao(v){
   const S = _finRepState; if(!S) return;
   S.descricao = v; S.descricaoEditada = (v.trim() !== _finRepDescricaoPix());
   const n = document.getElementById('finrep-desc-nota');
-  if(n) n.innerHTML = S.descricaoEditada ? '<span style="color:#97793A;">descrição editada — o número inicial vira a parcela na mensagem do comprovante</span>' : 'sugerida pelo lançamento — pode editar';
+  if(n) n.innerHTML = S.descricaoEditada ? (S.lote ? '<span style="color:#97793A;">descrição editada — vai assim no extrato do credor</span>' : '<span style="color:#97793A;">descrição editada — o número inicial vira a parcela na mensagem do comprovante</span>') : 'sugerida pelo lançamento — pode editar';
 }
 function _finRepValido(){
   const S = _finRepState; if(!S || S.enviando) return false;
@@ -34412,7 +34808,7 @@ function _finRepRender(){
       <div class="modal-header" style="align-items:flex-start;">
         <div style="flex:1;min-width:0;">
           <div class="finrep-eye">Repasse ao credor · PIX via Asaas</div>
-          <div class="finrep-t">${escHtml(_finDescCrua(S.l.descricao) || 'Repasse')}</div>
+          <div class="finrep-t">${S.lote ? `${S.lote.ids.length} parcelas num PIX só · ${escHtml(S.devedor || '—')}` : escHtml(_finDescCrua(S.l.descricao) || 'Repasse')}</div>
         </div>
         <button class="modal-close" onclick="_finRepFechar()">&#10005;</button>
       </div>
@@ -34421,12 +34817,14 @@ function _finRepRender(){
           <div>
             <div class="finrep-lb">Valor do PIX</div>
             <div class="finrep-val">${fmtR(S.valor)}</div>
-            <div class="finrep-sub">${S.parcela ? `parcela ${S.parcela}${S.total ? ' de ' + S.total : ''} · ` : ''}devedor ${escHtml(S.devedor || '—')}</div>
+            <div class="finrep-sub">${S.lote
+              ? `${S.lote.parcelas.length ? `parcelas ${_finRepListarParcelas(S.lote.parcelas)}${S.total ? ' de ' + S.total : ''}` : S.lote.ids.length + ' parcelas'} · soma de ${S.lote.itens.map(x => fmtR(x.valor)).join(' + ')}`
+              : `${S.parcela ? `parcela ${S.parcela}${S.total ? ' de ' + S.total : ''} · ` : ''}devedor ${escHtml(S.devedor || '—')}`}</div>
           </div>
           <div>
             <div class="finrep-lb">Descrição no extrato do credor</div>
             <input class="finrep-inp" maxlength="500" value="${escHtml(S.descricao || '')}" placeholder="${escHtml(_finRepDescricaoPix())}" oninput="_finRepSetDescricao(this.value)" title="Pode editar — ex.: trocar o número da parcela">
-            <div class="finrep-sub" id="finrep-desc-nota">${S.descricaoEditada ? '<span style="color:#97793A;">descrição editada — o número inicial vira a parcela na mensagem do comprovante</span>' : 'sugerida pelo lançamento — pode editar'}</div>
+            <div class="finrep-sub" id="finrep-desc-nota">${S.descricaoEditada ? (S.lote ? '<span style="color:#97793A;">descrição editada — vai assim no extrato do credor</span>' : '<span style="color:#97793A;">descrição editada — o número inicial vira a parcela na mensagem do comprovante</span>') : 'sugerida pelo lançamento — pode editar'}</div>
           </div>
         </div>
         <div>
@@ -34447,7 +34845,7 @@ function _finRepRender(){
           <div class="finrep-bar"><i style="width:${pctJa.toFixed(1)}%;background:#4A7A52;"></i><i style="width:${pctEste.toFixed(1)}%;background:#C9A961;"></i></div>
           ${estoura ? `<div style="color:#9B4A3F;font-weight:600;font-size:12.5px;">Este repasse passa do teto em ${fmtR(S.valor - S.saldo.resta)} — o servidor recusaria (teto do capital do caso).</div>` : ''}
         </div>` : `<div style="font-size:12px;color:#8A94A6;">Sem cobrança vinculada ou sem capital definido no caso: não há teto conhecido para este repasse.</div>`}
-        <div style="font-size:12px;color:#5A5F66;line-height:1.5;">Ao confirmar: PIX sai pelo Asaas, esta saída é baixada como paga, o comprovante do banco vai ao credor por WhatsApp e fica anexado na ficha do caso.${S.fila.length ? ` Depois deste, ${S.fila.length === 1 ? 'vem mais 1 repasse' : 'vêm mais ' + S.fila.length + ' repasses'} da seleção.` : ''}</div>
+        <div style="font-size:12px;color:#5A5F66;line-height:1.5;">${S.lote ? `Ao confirmar: sai UM PIX de ${fmtR(S.valor)} pelo Asaas, as ${S.lote.ids.length} saídas são baixadas como pagas, UM comprovante vai ao credor por WhatsApp citando todas as parcelas e fica anexado na ficha do caso.` : `Ao confirmar: PIX sai pelo Asaas, esta saída é baixada como paga, o comprovante do banco vai ao credor por WhatsApp e fica anexado na ficha do caso.`}${S.fila.length ? ` Depois deste, ${S.fila.length === 1 ? 'vem mais 1 repasse' : 'vêm mais ' + S.fila.length + ' repasses'} da seleção.` : ''}</div>
       </div>
       <div class="modal-footer" style="display:flex;justify-content:flex-end;gap:10px;">
         <button class="finrep-ghost" onclick="_finRepFechar()">Cancelar</button>
@@ -34460,7 +34858,7 @@ async function _finRepConfirmar(){
   const S = _finRepState; if(!S || !_finRepValido()) return;
   S.enviando = true;
   const ok = document.getElementById('finrep-ok'); if(ok){ ok.disabled = true; ok.textContent = 'Enviando PIX…'; }
-  const body = { lancamento_id: S.l.id };
+  const body = S.lote ? { lancamento_ids: S.lote.ids.slice() } : { lancamento_id: S.l.id };
   if(!S.l.credor_id && S.credorId) body.credor_id = S.credorId;
   const pix = String(S.pixKey||'').trim();
   if(pix && (S.pixEditada || !(S.credor && S.credor.chave_pix === pix))) body.pix_key = pix;
@@ -34503,14 +34901,55 @@ function _finRepQuando(iso){
   const hora = d.toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit', timeZone:'America/Sao_Paulo' });
   return `às ${hora} de ${dia}`;
 }
-// Lote "Repassar N ao credor": abre o modal para o primeiro repasse em aberto da seleção;
-// ao confirmar, segue para o próximo.
+// Lote "Repassar N ao credor": as parcelas do MESMO devedor e credor saem num PIX só,
+// com a soma (pedido do Gustavo, 30/09/2026 — três parcelas da Fernanda não precisam de
+// três PIX). Seleção que mistura devedores ou credores cai no fluxo antigo: um modal por
+// parcela, em sequência — um PIX só não pode citar dois acordos no comprovante.
 function _finRepLote(){
   const ctx = window._finLancCascataCtx; if(!ctx) return;
   const sel = _finLancCascataState.sel;
   const ids = ctx.rows.filter(l => sel.has(l.id) && _finMovRepasseAberto(l, ctx)).map(l => l.id);
   if(!ids.length){ showToast('Nenhum repasse em aberto na seleção.', 'warning'); return; }
-  _finRepAbrir(ids[0], ids.slice(1));
+  if(ids.length === 1){ _finRepAbrir(ids[0], []); return; }
+  _finRepAbrir(ids[0], [], ids);
+}
+// "3, 8 e 9" — espelho de listarParcelas (api/_repasse-msg.js).
+function _finRepListarParcelas(ps){
+  const u = [...new Set((ps||[]).map(Number).filter(n => n > 0))].sort((a,b) => a-b);
+  return u.length <= 1 ? (u.length ? String(u[0]) : '') : u.slice(0,-1).join(', ') + ' e ' + u[u.length-1];
+}
+// Completa _finRepState com as outras parcelas do lote. Se alguma for de outro caso ou
+// de outro credor, desiste do PIX único e enfileira uma a uma (o fluxo de antes).
+async function _finRepMontarLote(ids){
+  const S = _finRepState; if(!S) return;
+  const sb = getSupabase();
+  const { data, error } = await sb.from('fin_lancamento')
+    .select('id,descricao,valor,tipo_movimento,status,cobranca_id,credor_id,numero_parcela,total_parcelas')
+    .in('id', ids);
+  if(error) throw new Error(error.message);
+  const porId = new Map((data||[]).map(x => [String(x.id), x]));
+  const lancs = ids.map(id => porId.get(String(id))).filter(Boolean);
+  const abertas = lancs.filter(x => x.tipo_movimento === 0 && +x.status === 0);
+  const norm = t => String(t||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
+  const caso = x => x.cobranca_id ? 'c:' + x.cobranca_id : 'n:' + norm(_finRepasseNomeDevedor(x.descricao));
+  const mesmoCaso = new Set(abertas.map(caso)).size === 1;
+  const credorDe = x => x.credor_id || (x.cobranca_id && x.cobranca_id === S.l.cobranca_id ? S.credorId : null) || S.credorId;
+  const mesmoCredor = new Set(abertas.map(x => String(credorDe(x) || ''))).size === 1;
+  if(abertas.length < 2 || abertas.length !== ids.length || !mesmoCaso || !mesmoCredor){
+    const resto = ids.filter(id => String(id) !== String(S.l.id));
+    S.fila = resto;
+    _finRepToast(!mesmoCaso ? 'A seleção tem parcelas de devedores diferentes — um PIX por parcela, em sequência.'
+      : !mesmoCredor ? 'A seleção tem credores diferentes — um PIX por parcela, em sequência.'
+      : 'Nem todas as parcelas estão em aberto — um PIX por parcela, em sequência.', true);
+    return;
+  }
+  const parcelaDe = x => { if(x.numero_parcela) return +x.numero_parcela; const m = String(x.descricao||'').match(/(\d+)\s*\/\s*(\d+)\s*$/); return m ? +m[1] : 0; };
+  const totalDe = x => { if(x.total_parcelas) return +x.total_parcelas; const m = String(x.descricao||'').match(/(\d+)\s*\/\s*(\d+)\s*$/); return m ? +m[2] : 0; };
+  const itens = abertas.map(x => ({ id: x.id, valor: Math.abs(+x.valor||0), parcela: parcelaDe(x) }))
+    .sort((a,b) => (a.parcela||0) - (b.parcela||0));
+  S.lote = { ids: itens.map(x => x.id), itens, parcelas: itens.map(x => x.parcela).filter(n => n > 0) };
+  S.valor = Math.round(itens.reduce((s2,x) => s2 + x.valor, 0) * 100) / 100;
+  S.total = Math.max(S.total || 0, ...abertas.map(totalDe)) || null;
 }
 
 // ── Lote "Alterar categoria" ──────────────────────────────────────────────────────
@@ -37323,6 +37762,34 @@ async function cobrasqComprovantePDF(operacaoId){
 //   • repasses A FAZER    → `fin_lancamento` tipo_movimento=0 status=0 (parcela prevista).
 // Somar as duas tabelas para a MESMA parcela duplicaria — por isso o pago vem só de
 // `repasses_cliente` e o previsto só dos lançamentos em aberto.
+// Junta a pessoa física com a empresa dela quando as duas são partes do mesmo caso
+// (MEI, ou CNPJ cujo nome contém o nome da PF). Sem isso o extrato dizia "Edenilson
+// dos Santos e Edenilson dos Santos 07238395908" (30/09/2026). A PJ vira rótulo:
+// "Nome (PF e MEI)" ou "Nome (PF e PJ)"; os dois documentos continuam na legenda.
+// Partes que são pessoas diferentes seguem separadas.
+function _extratoAgruparPartes(partes){
+  const dig = d => String(d||'').replace(/\D/g,'');
+  const norm = t => String(t||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase()
+    .replace(/\(?\bmei\b\)?/g,' ').replace(/[\d.\/\-]{2,}/g,' ')
+    .replace(/[^a-z ]+/g,' ').replace(/\s+/g,' ').trim();
+  const lista = (partes||[]).map(p=>({ nome:p.nome, doc:p.doc||'', docs:p.doc?[p.doc]:[], rotulo:'' }));
+  const ehPJ = p => dig(p.doc).length===14 || /\bmei\b/i.test(p.nome);
+  const usados = new Set();
+  lista.forEach((pf,i)=>{
+    if(usados.has(i) || ehPJ(pf)) return;
+    const n = norm(pf.nome);
+    if(n.split(' ').length < 2) return;
+    lista.forEach((pj,j)=>{
+      if(j===i || usados.has(j) || !ehPJ(pj) || pf.rotulo) return;
+      if(!(' '+norm(pj.nome)+' ').includes(' '+n+' ')) return;
+      pf.rotulo = /\bmei\b/i.test(pj.nome) ? 'PF e MEI' : 'PF e PJ';
+      if(pj.doc) pf.docs.push(pj.doc);
+      usados.add(j);
+    });
+  });
+  return lista.filter((_,i)=>!usados.has(i))
+    .map(p=>({ ...p, rotuloNome: p.rotulo ? `${p.nome} (${p.rotulo})` : p.nome }));
+}
 // Coleta os dados do extrato. Separado de quem gera o PDF/PNG porque o mesmo
 // documento serve para baixar e para enviar ao credor por WhatsApp.
 async function _extratoRepasseDados(cobId){
@@ -37359,7 +37826,8 @@ async function _extratoRepasseDados(cobId){
   const _partes = (partes||[]).slice().sort((x,y)=>(y.principal?1:0)-(x.principal?1:0))
     .map(x=>({ nome:(x.devedores&&x.devedores.nome)||'', doc:(x.devedores&&x.devedores.doc)||'' }))
     .filter(x=>x.nome);
-  const devedor = _partes.map(x=>x.nome).join(' e ') || '—';
+  const _grupos = _extratoAgruparPartes(_partes);
+  const devedor = _grupos.map(x=>x.rotuloNome).join(' e ') || '—';
   const devedorDoc = (_partes[0] && _partes[0].doc) || '';
   const capital = (cob.valor_capital!=null) ? +cob.valor_capital : null;
 
@@ -37387,7 +37855,7 @@ async function _extratoRepasseDados(cobId){
   // O grupo tem precedência: `clientes.telefone` nesses casos é um número
   // pessoal, e mandar extrato de repasse para lá é entregar no lugar errado.
   const grupo = (cli.metadata && cli.metadata.whatsapp_repasse) || '';
-  return { cobId, html, credor, credorTel: cli.telefone||'', credorGrupo: grupo, devedor, devedorDoc, devedorPartes: _partes, total, pago, aberto };
+  return { cobId, html, credor, credorTel: cli.telefone||'', credorGrupo: grupo, devedor, devedorDoc, devedorPartes: _grupos, total, pago, aberto };
 }
 
 async function extratoRepasseAcordoPDF(cobId){
@@ -37484,8 +37952,13 @@ async function enviarExtratoRepasseWA(cobId){
     // o avalista, que é justamente quem ele pode acionar.
     const _docRot = (doc)=>{ const n=String(doc||'').replace(/\D/g,'');
       return n.length===11 ? 'CPF' : (n.length===14 ? 'CNPJ' : 'CPF/CNPJ'); };
-    const _quemLista = (d.devedorPartes||[]).map(p =>
-      p.doc ? `*${p.nome}*, ${_docRot(p.doc)} ${_tajDocFmt(p.doc)}` : `*${p.nome}*`);
+    const _docsTxt = p => (p.docs&&p.docs.length ? p.docs : (p.doc?[p.doc]:[]))
+      .map(x=>`${_docRot(x)} ${_tajDocFmt(x)}`).join(' e ');
+    const _quemLista = (d.devedorPartes||[]).map(p => {
+      const nomeP = p.rotulo ? `*${p.nome}* (${p.rotulo})` : `*${p.nome}*`;
+      const docs = _docsTxt(p);
+      return docs ? `${nomeP}, ${docs}` : nomeP;
+    });
     const quemDev = _quemLista.length === 0 ? `*${d.devedor}*`
       : _quemLista.length === 1 ? _quemLista[0]
       : _quemLista.slice(0,-1).join(', ') + ' e ' + _quemLista[_quemLista.length-1];
@@ -45663,7 +46136,11 @@ async function confirmarAgendamentoWA(){
 // Upload da mídia agendada para o bucket 'documentos'.
 async function uploadMidiaWA(supa, userId, fileOrBlob, nome, mime){
   try{
-    const path = `wa_agendados/${userId}/${Date.now()}_${nome}`.replace(/\s+/g,'_');
+    // O Storage recusa chave com acento/ç ("Invalid key"): o caminho vai sem eles;
+    // o nome que o destinatário vê continua sendo `nome`, intacto.
+    const nomeChave = String(nome||'arquivo').normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+      .replace(/[^A-Za-z0-9._-]+/g,'_');
+    const path = `wa_agendados/${userId}/${Date.now()}_${nomeChave}`;
     const { error } = await supa.storage.from('documentos').upload(path, fileOrBlob, {
       contentType: mime || 'application/octet-stream', upsert:false
     });
@@ -48287,8 +48764,8 @@ function _tajDados(){
   const tipo=_tajTipoDoc(v('tajDoc')); const gEl=document.querySelector('input[name="tajGenero"]:checked'); const genero=gEl?gEl.value:'F';
   const endereco={ rua:v('tajRua'), numero:v('tajNumero'), complemento:'', bairro:v('tajBairro'), cidade:v('tajCidade'), uf:v('tajUf'), cep:v('tajCep') };
   const nomePrinc=dev.nome||'';
-  const principal={ nome:nomePrinc, tipo, genero, documento:v('tajDoc'), endereco, telefone:v('tajTel'), assNome:nomePrinc, assDoc:(tipo==='PJ'?'CNPJ ':'CPF ')+v('tajDoc') };
-  const extras=_tajLerExtras().map(x=>({ nome:x.nome, tipo:x.tipo, genero:x.genero, documento:x.documento, endereco:x.mesmoEndereco?endereco:{}, telefone:x.telefone, assNome:x.nome, assDoc:(x.tipo==='PJ'?'CNPJ ':'CPF ')+x.documento }));
+  const principal={ nome:nomePrinc, tipo, genero, documento:v('tajDoc'), endereco, telefone:v('tajTel'), assNome:nomePrinc, assDoc:(tipo==='PJ'?'CNPJ ':'CPF ')+_tajDocFmt(v('tajDoc')) };
+  const extras=_tajLerExtras().map(x=>({ nome:x.nome, tipo:x.tipo, genero:x.genero, documento:x.documento, endereco:x.mesmoEndereco?endereco:{}, telefone:x.telefone, assNome:x.nome, assDoc:(x.tipo==='PJ'?'CNPJ ':'CPF ')+_tajDocFmt(x.documento) }));
   const devedores=[principal].concat(extras);
   const credorNome=v('tajCredor');
   // Cedente do caso (cliente do cadastro), independente de quem figura como credor
@@ -52137,9 +52614,10 @@ async function _aavEnviarWhatsEdit(){
 // enxergam/enviam. Chave da pasta: CPF/CNPJ só dígitos, ou 'id-<uuid>' se sem doc.
 const DOC_CATEGORIAS = [
   ['contrato','Contrato'], ['nota-promissoria','Nota promissória'],
+  ['cheque','Cheque'], ['duplicata','Duplicata'], ['boleto','Boleto'],
   ['comprovante','Comprovante'], ['repasse','Repasse ao cliente'], ['acordo-assinado','Acordo assinado'],
   ['peticao','Petição'], ['procuracao','Procuração'],
-  ['calculo','Cálculo'], ['devolucao-documento','Devolução de documento'], ['outros','Outros']
+  ['calculo','Cálculo'], ['devolucao-documento','Devolução de documento'], ['matricula','Matrícula / certidão'], ['outros','Outros']
 ];
 function docChaveDevedor(dev){
   const dig = String(dev.doc||'').replace(/\D/g,'');
