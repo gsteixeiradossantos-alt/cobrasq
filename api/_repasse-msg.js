@@ -187,18 +187,15 @@ function listarParcelas(ps) {
 // da mesma devedora ao mesmo credor não precisam de três PIX). `parcelas` com 2+
 // números prevalece sobre `parcela`.
 function ehLote(d) { return !!(d && Array.isArray(d.parcelas) && listarParcelas(d.parcelas).includes(' e ')); }
-// O que o credor LÊ num lote (extrato do PIX e mensagem do comprovante): só a primeira
-// parcela — pedido do Gustavo em 30/09/2026 ("ao invés de 5 a 9, constasse apenas
-// parcela 5"). A lista inteira continua gravada em repasse_lote.parcelas.
-function primeiraParcela(ps) {
-  const ns = (ps || []).map(Number).filter(n => n > 0);
-  return ns.length ? String(Math.min(...ns)) : '';
-}
 
+// Num lote, extrato do PIX, nome do arquivo e mensagem citam TODAS as parcelas ("3, 4 e 5
+// - Elison …"). Decisão do Gustavo em 30/09/2026, depois de ver o comprovante do Elison
+// sair como "3 - Elison" e "parcela 3 de 5": "Todas em tudo". Substitui o pedido anterior
+// do mesmo dia de citar só a primeira.
 function descricaoPix(d) {
   if (ehLote(d)) {
-    const p = primeiraParcela(d.parcelas);
-    return ((d.devedor ? `${p} - ${d.devedor}` : `Repasse Cobrasq - parcela ${p}`)).slice(0, 500);
+    const p = listarParcelas(d.parcelas);
+    return ((d.devedor ? `${p} - ${d.devedor}` : `Repasse Cobrasq - parcelas ${p}`)).slice(0, 500);
   }
   const nome = (d && d.devedor) || '';
   // Sem devedor, "7 - " sozinho não diz nada a quem lê o extrato.
@@ -316,10 +313,10 @@ function msgComprovanteCredor({ parcela, parcelas, total, devedor, doc, partes }
   const qual = avista ? '' : (t ? `parcela ${p} de ${t}` : `parcela ${p}`);
   let ref;
   if (ehLote({ parcelas })) {
-    // Lote (3, 8 e 9 de 9): "referente à parcela 3 de 9 do acordo firmado por X" — só a
-    // primeira (ver primeiraParcela).
-    const quais = `parcela ${primeiraParcela(parcelas)}${t ? ` de ${t}` : ''}`;
-    ref = quem ? `referente à *${quais}* do acordo firmado por *${quem}.*` : `referente à *${quais}*.`;
+    // Lote (3, 8 e 9 de 9): "referente às parcelas 3, 8 e 9 de 9 do acordo firmado por X"
+    // — todas (ver descricaoPix).
+    const quais = `parcelas ${listarParcelas(parcelas)}${t ? ` de ${t}` : ''}`;
+    ref = quem ? `referente às *${quais}* do acordo firmado por *${quem}.*` : `referente às *${quais}*.`;
   } else if (avista) ref = quem ? `do pagamento à vista realizado por *${quem}.*` : `do pagamento à vista.`;
   else ref = quem ? `referente à *${qual}* do acordo firmado por *${quem}.*` : `referente à *${qual}*.`;
   return `*Setor financeiro | COBRASQ:*\n`
@@ -402,4 +399,4 @@ async function enviarComprovanteCredor({ telefone, parcela, parcelas, total, dev
   }
 }
 
-module.exports = { lerDescricaoRepasse, descricaoPix, listarParcelas, primeiraParcela, msgComprovanteCredor, listarPagadores, agruparPartes, pedeBaixaRestricoes, PARAGRAFO_RESTRICOES, paragrafoRestricoes, enviarComprovanteCredor, destinoWhatsapp, docPorExtenso, proximoHorarioComercial, JANELA_COMPROVANTE, ESPACO_MS };
+module.exports = { lerDescricaoRepasse, descricaoPix, listarParcelas, msgComprovanteCredor, listarPagadores, agruparPartes, pedeBaixaRestricoes, PARAGRAFO_RESTRICOES, paragrafoRestricoes, enviarComprovanteCredor, destinoWhatsapp, docPorExtenso, proximoHorarioComercial, JANELA_COMPROVANTE, ESPACO_MS };
