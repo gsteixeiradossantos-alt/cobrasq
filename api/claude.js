@@ -17,6 +17,45 @@
 // para que os call sites no front continuem funcionando sem mudança de parsing.
 
 const { requireUser, applyCors } = require('./_auth.js');
+const { sbFetch } = require('./_sb.js');
+
+// Só a equipe usa a IA (28/09/2026): proprietário ou colaborador ATIVO em app_users.
+// Cedente e devedor logados eram aceitos só por terem sessão válida.
+// Limite diário por usuário (dia de Brasília), contado no banco pela RPC
+// ia_uso_registrar (service role; ver migração 20260928_ia_uso_diario). O
+// proprietário não tem teto; o colaborador tem IA_LIMITE_DIARIO_COLABORADOR (padrão 100).
+const LIMITE_COLABORADOR = Number(process.env.IA_LIMITE_DIARIO_COLABORADOR) || 100;
+
+async function autorizarEquipe(user, res) {
+  let rows;
+  try {
+    rows = await sbFetch(`app_users?id=eq.${encodeURIComponent(user.id)}&select=papel,ativo`, { method: 'GET' });
+  } catch (e) {
+    console.error('[claude proxy] leitura de app_users falhou:', e.message);
+    res.status(503).json({ error: { message: 'Não foi possível conferir seu acesso à IA. Tente novamente.' } });
+    return null;
+  }
+  const u = Array.isArray(rows) ? rows[0] : null;
+  if (!u || u.ativo === false || !['proprietario', 'colaborador'].includes(u.papel)) {
+    res.status(403).json({ error: { message: 'A IA é de uso exclusivo da equipe COBRASQ.' } });
+    return null;
+  }
+  if (u.papel === 'proprietario') return u;
+  let r;
+  try {
+    r = await sbFetch('rpc/ia_uso_registrar', { method: 'POST', body: JSON.stringify({ p_user: user.id, p_limite: LIMITE_COLABORADOR }) });
+  } catch (e) {
+    // Sem a contagem, fecha (fail-closed): melhor negar do que liberar sem teto.
+    console.error('[claude proxy] ia_uso_registrar falhou:', e.message);
+    res.status(503).json({ error: { message: 'Não foi possível registrar o uso da IA. Tente novamente.' } });
+    return null;
+  }
+  if (!r || r.ok !== true) {
+    res.status(429).json({ error: { message: `Limite diário da IA atingido (${LIMITE_COLABORADOR} pedidos). Volta amanhã; se precisar antes, fale com o Gustavo.` } });
+    return null;
+  }
+  return u;
+}
 
 module.exports = async function handler(req, res) {
   applyCors(req, res, { methods: 'POST, OPTIONS' });
@@ -53,6 +92,8 @@ module.exports = async function handler(req, res) {
   if (!Number.isFinite(body.max_tokens) || body.max_tokens <= 0 || body.max_tokens > MAX_TOKENS_CEILING) {
     body.max_tokens = Math.min(Number(body.max_tokens) > 0 ? Number(body.max_tokens) : 4096, MAX_TOKENS_CEILING);
   }
+
+  if (!(await autorizarEquipe(user, res))) return;
 
   const version = req.headers['anthropic-version'] || '2023-06-01';
 
