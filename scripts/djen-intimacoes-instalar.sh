@@ -1,6 +1,8 @@
 #!/bin/zsh
 # Agenda as intimações do DJEN no Mac (launchd), todo dia às 08:05
 # (o cron antigo no Supabase era 11:00 UTC = 08:00 de Brasília).
+# Roda sob caffeinate -i: o Mac costuma estar dormindo na bateria às 08:05 e,
+# sem isso, voltava a dormir no meio da rodada (timeout em 04 e 05/10/2026).
 #
 # SÓ rodar depois de uma rodada manual ter dado certo:
 #   node scripts/djen-intimacoes-local.mjs
@@ -26,6 +28,7 @@ cat > "$PLIST" <<PL
 <plist version="1.0"><dict>
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key><array>
+    <string>/usr/bin/caffeinate</string><string>-i</string>
     <string>$NODE</string>
     <string>$DEST/scripts/djen-intimacoes-local.mjs</string>
   </array>
