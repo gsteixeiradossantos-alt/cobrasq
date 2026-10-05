@@ -217,6 +217,15 @@ async function gravarEventos(): Promise<number> {
   return n;
 }
 
+// Registro da rodada do Mac (rotinas_execucoes): o cron rotinas_mac_conferir avisa no zap
+// quando a rodada do dia não chegou ou falhou. Best-effort — nunca derruba a rodada.
+const registrarRotina = async (ok: boolean, resumo: Record<string, unknown>) => {
+  try {
+    const { error } = await sb.from('rotinas_execucoes').insert({ rotina: 'djen-intimacoes', ok, resumo });
+    if (error) console.error('[djen] rotinas_execucoes', error.message);
+  } catch (e) { console.error('[djen] rotinas_execucoes', e instanceof Error ? e.message : String(e)); }
+};
+
 // ── Handler ──────────────────────────────────────────────────────────────────
 Deno.serve(async (req) => {
   const auth = req.headers.get('authorization') || '';
@@ -272,10 +281,17 @@ Deno.serve(async (req) => {
     if (eCruz) console.error('[djen] cruzar', eCruz.message);
     res.cruzadas = cruzadas ?? null;
     res.eventos = await gravarEventos();
+    if (modo === 'resultados') {
+      // OAB com erro (no Mac ou fora da lista) = rodada falhou, mesmo tendo chegado aqui
+      const errosOab = Object.entries(res.oabs).filter(([, c]: [string, any]) => c?.erro).map(([o, c]: [string, any]) => `${o}: ${c.erro}`);
+      await registrarRotina(errosOab.length === 0, { novas, cruzadas: res.cruzadas, eventos: res.eventos, inicio, fim,
+        ...(errosOab.length ? { erros: errosOab } : {}) });
+    }
     return new Response(JSON.stringify({ ok: true, ...res }), { headers: { 'content-type': 'application/json' } });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error('[djen-intimacoes]', msg);
+    await registrarRotina(false, { erro: msg.slice(0, 300) });
     return new Response(JSON.stringify({ ok: false, error: msg }), { status: 500, headers: { 'content-type': 'application/json' } });
   }
 });
