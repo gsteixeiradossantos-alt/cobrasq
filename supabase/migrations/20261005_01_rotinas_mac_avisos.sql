@@ -28,6 +28,11 @@ drop policy if exists rotinas_execucoes_owner_select on public.rotinas_execucoes
 create policy rotinas_execucoes_owner_select on public.rotinas_execucoes
   for select using (public.current_user_papel() = 'proprietario');
 revoke insert, update, delete on public.rotinas_execucoes from anon, authenticated;
+-- Semente: a última rodada real da vigia (vigia_acoes_busca), para a conferência não
+-- acusar "sem rodada nesta semana" só porque a tabela nasceu depois dela.
+insert into public.rotinas_execucoes (rotina, em, ok, resumo)
+select 'vigia-acoes', max(buscado_ts), true, '{"origem":"semente da migração 20261005_01"}'::jsonb
+  from public.vigia_acoes_busca having max(buscado_ts) is not null;
 
 alter table public.vigia_acoes add column if not exists avisado_em timestamptz;
 comment on column public.vigia_acoes.avisado_em is
