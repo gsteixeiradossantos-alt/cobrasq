@@ -223,13 +223,23 @@
   async function limparJobAtivo() { try { await chrome.storage.local.remove(JOB_KEY); } catch (_) {} }
 
   // ── PDF ─────────────────────────────────────────────────────────────────────
+  // O eproc recusa o anexo se o nome tiver algo além de letras, números, espaço,
+  // "_" e "-" (ponto, parêntese, acento…). Saneia o nome antes de criar o File:
+  // "1. Petição Inicial (reajuizamento)..pdf" → "1 Peticao Inicial reajuizamento.pdf".
+  function nomeArquivoEproc(nome, padrao) {
+    const base = String(nome || '').replace(/\.pdf$/i, '')
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^A-Za-z0-9 _-]+/g, ' ')
+      .replace(/\s+/g, ' ').trim();
+    return (base || padrao) + '.pdf';
+  }
   async function baixarPdfComoFile(url, nome) {
     const resp = await chrome.runtime.sendMessage({ type: 'FETCH_PDF', url });
     if (!resp || !resp.ok) throw new Error('Falha ao baixar o PDF: ' + (resp && resp.error || '?'));
     const bin = atob(resp.base64);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return new File([bytes], nome || 'peticao.pdf', { type: 'application/pdf' });
+    return new File([bytes], nomeArquivoEproc(nome, 'peticao'), { type: 'application/pdf' });
   }
   function anexarArquivo(input, file) {
     const dt = new DataTransfer();
@@ -464,13 +474,13 @@
     const bin = atob(base64);
     const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const file = new File([bytes], nome || 'documento.pdf', { type: 'application/pdf' });
+    const file = new File([bytes], nomeArquivoEproc(nome, 'documento'), { type: 'application/pdf' });
     const input = qFirst(IDS.anexo) || qFirst(SEL.anexoPdf) || byAnyLabel(TXT.anexo);
     if (!input) { setBody(msg('Não achei o campo de anexo nesta tela — abra a etapa de Documentos.', '#ffe3e3')); return; }
     anexarArquivo(input, file);
     const tipoTxt = qFirst(IDS.tipoDoc); if (tipoTxt) destacar(tipoTxt, '#fab005');
     const conf = qFirst(IDS.confirmarDocs); if (conf) destacar(conf, '#fab005');
-    setBody(msg('📎 <b>' + nome + '</b> anexado da sua pasta.', '#d3f9d8') +
+    setBody(msg('📎 <b>' + file.name + '</b> anexado da sua pasta.', '#d3f9d8') +
       msg('Informe o <b>Tipo</b> do documento e clique <b>Confirmar seleção de documentos</b>.', '#e7f5ff'));
   }
 
@@ -961,7 +971,7 @@
     if (!r || !r.ok) throw new Error('PDF ' + (idx + 1) + ': ' + ((r && r.error) || 'a aba da Central está fechada?'));
     const bin = atob(r.base64); const bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return new File([bytes], r.nome, { type: 'application/pdf' });
+    return new File([bytes], nomeArquivoEproc(r.nome, 'documento'), { type: 'application/pdf' });
   }
   function uploadsProntos() {
     return Array.from(document.querySelectorAll('input[id^="fleArquivo_"]')).filter(i => i.value).length;
