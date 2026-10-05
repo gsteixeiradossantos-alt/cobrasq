@@ -1,4 +1,4 @@
-// _shared/datajud-tpu.ts — Curadoria dos movimentos processuais do DataJud/CNJ.
+// datajud-andamentos/tpu.ts — Curadoria dos movimentos processuais do DataJud/CNJ.
 //
 // Cópia em TypeScript de api/_datajud-tpu.js (mesma tabela, mesma lógica), para a
 // Edge Function datajud-andamentos. Há também o espelho TPU_MOV no index.html.

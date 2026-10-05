@@ -25,7 +25,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
-import { curarMovimento } from '../_shared/datajud-tpu.ts';
+import { curarMovimento } from './tpu.ts';
 
 const URL_TJPR = 'https://api-publica.datajud.cnj.jus.br/api_publica_tjpr/_search';
 const CHAVE_PUBLICA_CNJ = 'cDZHYzlZa0JadVREZDJCendQbXY6SkJlTzNjLV9TRENyQk1RdnFKZGRQdw==';
