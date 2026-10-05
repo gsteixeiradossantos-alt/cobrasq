@@ -21,6 +21,7 @@
 //   node scripts/vigia-acoes-local.mjs                 # rodada do dia (fila inteira)
 //   node scripts/vigia-acoes-local.mjs --limite 10     # só 10 alvos (teste)
 //   node scripts/vigia-acoes-local.mjs --forcar        # ignora "já buscado hoje"
+//   node scripts/vigia-acoes-local.mjs --dias 8        # janela de 8 dias (rodada semanal)
 //   node scripts/vigia-acoes-local.mjs --so-djen       # só testa o DJEN, não chama a função
 //   node scripts/vigia-acoes-local.mjs --nome "WESLEY CECHIN" --inicio 2025-01-01 --forcar
 //                                                       # só quem tem esse trecho no nome, janela longa
@@ -49,6 +50,7 @@ const SO_DJEN = args.includes('--so-djen');
 const NOME = opt('--nome');
 const INICIO = opt('--inicio');
 const FIM = opt('--fim');
+const DIAS = Number(opt('--dias')) || 0;
 
 try { mkdirSync(LOG_DIR, { recursive: true }); } catch { /* sem log em arquivo */ }
 const log = (...m) => {
@@ -146,7 +148,7 @@ async function main() {
 
   const f = await chamarFuncao(token, {
     modo: 'fila', limite: LIMITE, forcar: FORCAR,
-    ...(NOME ? { nome: NOME } : {}), ...(INICIO ? { inicio: INICIO } : {}), ...(FIM ? { fim: FIM } : {}),
+    ...(NOME ? { nome: NOME } : {}), ...(INICIO ? { inicio: INICIO } : {}), ...(FIM ? { fim: FIM } : {}), ...(DIAS ? { dias: DIAS } : {}),
   });
   const fila = f.fila || [];
   log(`fila: ${fila.length} alvos (universo ${f.universo}, pendentes hoje ${f.pendentes_hoje}), janela ${f.inicio} a ${f.fim}`);

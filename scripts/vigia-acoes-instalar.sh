@@ -1,5 +1,8 @@
 #!/bin/zsh
-# Agenda a vigia de ações no Mac (launchd), todo dia às 07:15.
+# Agenda a vigia de ações no Mac (launchd), toda segunda às 07:15, olhando 8 dias para trás
+# (semanal desde 05/10/2026: processo novo contra devedor não corre prazo nosso).
+# Roda sob caffeinate -i: às 07:15 o Mac costuma estar dormindo na bateria e,
+# sem isso, volta a dormir no meio da rodada.
 #
 # SÓ rodar depois de uma rodada manual completa ter dado certo:
 #   node scripts/vigia-acoes-local.mjs
@@ -26,10 +29,12 @@ cat > "$PLIST" <<EOF
 <plist version="1.0"><dict>
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key><array>
+    <string>/usr/bin/caffeinate</string><string>-i</string>
     <string>$NODE</string>
     <string>$DEST/scripts/vigia-acoes-local.mjs</string>
+    <string>--dias</string><string>8</string>
   </array>
-  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>15</integer></dict>
+  <key>StartCalendarInterval</key><dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>7</integer><key>Minute</key><integer>15</integer></dict>
   <key>StandardOutPath</key><string>$HOME/Library/Logs/cobrasq/vigia-acoes.launchd.log</string>
   <key>StandardErrorPath</key><string>$HOME/Library/Logs/cobrasq/vigia-acoes.launchd.log</string>
 </dict></plist>
@@ -37,4 +42,4 @@ EOF
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
-echo "agendado: $LABEL às 07:15 · log em ~/Library/Logs/cobrasq/vigia-acoes.log"
+echo "agendado: $LABEL segundas às 07:15 · log em ~/Library/Logs/cobrasq/vigia-acoes.log"
