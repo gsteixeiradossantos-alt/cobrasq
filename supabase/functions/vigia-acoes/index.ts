@@ -66,6 +66,15 @@ const menosDias = (iso: string, n: number) => _fmtBR.format(new Date(Date.parse(
 const dataISO = (v: unknown) => { const m = String(v ?? '').match(/^(\d{4})-(\d{2})-(\d{2})$/); return m ? m[0] : null; };
 const dormir = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+// Registro da rodada do Mac (rotinas_execucoes): o cron rotinas_mac_conferir avisa no zap
+// quando a rodada semanal não chegou. Best-effort — nunca derruba a rodada.
+const registrarRotina = async (ok: boolean, resumo: Record<string, unknown>) => {
+  try {
+    const { error } = await sb.from('rotinas_execucoes').insert({ rotina: 'vigia-acoes', ok, resumo });
+    if (error) console.error('[vigia] rotinas_execucoes', error.message);
+  } catch (e) { console.error('[vigia] rotinas_execucoes', e instanceof Error ? e.message : String(e)); }
+};
+
 // ── Ritmo ────────────────────────────────────────────────────────────────────
 let ultimaReq = 0;
 const stats = { requisicoes: 0, r429: 0 };
@@ -274,6 +283,11 @@ Deno.serve(async (req) => {
           return { itens, total: Number(r.total) || itens.length, truncado: !!r.truncado };
         });
       }
+      // rodada avulsa (--nome, um devedor só) não conta como a rodada semanal
+      if (!dryRun && body?.avulsa !== true) {
+        await registrarRotina(true, { processados: res.processados, novos: res.novos, atualizados: res.atualizados,
+          reabertos: res.reabertos, erros: res.erros, inicio, fim });
+      }
       return new Response(JSON.stringify({ ok: true, ...res, ms: Date.now() - t0 }), { headers: { 'content-type': 'application/json' } });
     }
 
@@ -285,6 +299,7 @@ Deno.serve(async (req) => {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error('[vigia-acoes]', msg);
+    await registrarRotina(false, { erro: msg.slice(0, 300) });
     return new Response(JSON.stringify({ ok: false, error: msg, ...stats }), { status: 500, headers: { 'content-type': 'application/json' } });
   }
 });

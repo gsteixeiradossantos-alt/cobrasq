@@ -157,7 +157,7 @@ async function main() {
   let lote = [];
   const enviar = async () => {
     if (!lote.length) return;
-    const r = await chamarFuncao(token, { modo: 'resultados', inicio: f.inicio, fim: f.fim, forcar: true, resultados: lote });
+    const r = await chamarFuncao(token, { modo: 'resultados', inicio: f.inicio, fim: f.fim, forcar: true, resultados: lote, ...(NOME ? { avulsa: true } : {}) });
     for (const k of ['processados', 'comunicacoes', 'novos', 'atualizados', 'reabertos', 'erros', 'truncados', 'pulados_nome']) soma[k] += Number(r[k]) || 0;
     lote = [];
   };
