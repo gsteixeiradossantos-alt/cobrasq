@@ -8,7 +8,7 @@
 -- Medido em 05/10/2026: o DataJud aceita consulta EM LOTE (query terms com vários
 -- numeroProcesso) — 20 processos numa chamada = 34s, ~1.500 movimentos; uma 2ª
 -- chamada logo em seguida devolveu 429. Por isso: UMA chamada por execução, com
--- poucos processos, a cada 10 minutos, sempre os consultados há mais tempo.
+-- poucos processos, a cada 4 minutos, sempre os consultados há mais tempo.
 --
 -- Esta migração cria:
 --   1) public.datajud_controle — quando cada cobrança foi consultada pela última vez;
@@ -16,7 +16,7 @@
 --   3) public.datajud_registrar_eventos(jsonb) — insert idempotente na timeline
 --      (devedor_eventos) usando o índice único parcial uq_dev_eventos_datajud_dedup,
 --      que o PostgREST não consegue usar como on_conflict;
---   4) o pg_cron 'datajud-andamentos' (*/10) chamando a Edge Function de mesmo nome.
+--   4) o pg_cron 'datajud-andamentos' (*/4, lote de 5) chamando a Edge Function de mesmo nome.
 --
 -- Rollback: 20261005_03_datajud_rodizio_rollback.sql
 
@@ -97,8 +97,10 @@ GRANT EXECUTE ON FUNCTION public.datajud_proximos(integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.datajud_registrar_eventos(jsonb) TO service_role;
 
 -- 4) Agendamento ----------------------------------------------------------------
--- 20 processos por execução × 1 execução a cada 10 min ≈ volta completa nos ~430
--- monitorados em menos de 4h. Mesmo padrão de segredo da djen-intimacoes (Vault).
+-- 5 processos por execução × 1 execução a cada 4 min ≈ volta completa nos 407
+-- monitorados em ~5h30. Ajustado no próprio dia 05/10/2026: lote de 20 levou 429
+-- (es_rejected_execution_exception) do CNJ; lote de 5 = 25s, ok. Mesmo padrão de
+-- segredo da djen-intimacoes (Vault).
 DO $$
 DECLARE
   v_url text := 'https://jokbxzhcctcwnbhkhgru.functions.supabase.co/datajud-andamentos';
@@ -118,12 +120,12 @@ BEGIN
 
   PERFORM cron.schedule(
     'datajud-andamentos',
-    '*/10 * * * *',
+    '*/4 * * * *',
     format($cmd$
       SELECT net.http_post(
         url := %L,
         headers := jsonb_build_object('Authorization', 'Bearer ' || %L, 'Content-Type', 'application/json'),
-        body := '{}'::jsonb,
+        body := '{"limite":5}'::jsonb,
         timeout_milliseconds := 120000
       );
     $cmd$, v_url, v_secret)

@@ -3,11 +3,12 @@
 // Substitui o disparo diário de api/cron-datajud.js (Vercel), desligado em
 // 25/08/2026 por estourar o timeout de 300s.
 //
-// Fluxo (pg_cron a cada 10 min, migração 20261005_03_datajud_rodizio.sql):
+// Fluxo (pg_cron a cada 4 min, lote de 5, migração 20261005_03_datajud_rodizio.sql):
 //   1) RPC datajud_proximos(LOTE): os processos consultados há mais tempo
 //      (nunca consultados primeiro), já com o devedor principal;
 //   2) UMA chamada ao DataJud com todos eles (query terms) — medido em 05/10/2026:
-//      20 processos = 34s; chamadas seguidas devolvem 429, por isso uma só;
+//      20 processos = 34s, mas sob carga o CNJ devolve 429 para lote de 20;
+//      5 processos = 25s, ok. Chamadas seguidas devolvem 429, por isso uma só;
 //   3) movimentos → proc_intimacoes (feed cru dos alertas, upsert por dedup_key) e
 //      o subconjunto curado → devedor_eventos (timeline, RPC idempotente);
 //   4) datajud_controle.consultado_em = agora para cada processo da vez.
@@ -29,7 +30,7 @@ import { curarMovimento } from './tpu.ts';
 
 const URL_TJPR = 'https://api-publica.datajud.cnj.jus.br/api_publica_tjpr/_search';
 const CHAVE_PUBLICA_CNJ = 'cDZHYzlZa0JadVREZDJCendQbXY6SkJlTzNjLV9TRENyQk1RdnFKZGRQdw==';
-const LOTE_PADRAO = 20;
+const LOTE_PADRAO = 5;
 const TIMEOUT_MS = 90000;
 
 const CRON_INVOKE_SECRET = Deno.env.get('CRON_INVOKE_SECRET') ?? '';
@@ -124,7 +125,7 @@ Deno.serve(async (req) => {
     const status = (e as any)?.status;
     const timeout = (e as Error)?.name === 'TimeoutError' || (e as Error)?.name === 'AbortError';
     console.error('[datajud-andamentos] consulta:', msg);
-    // 429 / timeout: limite do CNJ ou lentidão — não avança o rodízio, tenta de novo daqui a 10 min.
+    // 429 / timeout: limite do CNJ ou lentidão — não avança o rodízio, tenta de novo na próxima execução.
     if (status === 429 || timeout) return json({ ok: false, retentar: true, error: msg }, 200);
     // Outro erro (ex.: 400 por um número que o CNJ recusa): avança para não travar o rodízio.
     await marcar(validos.map((a) => a.cobranca_id), 'erro', { erro: msg.slice(0, 500) });

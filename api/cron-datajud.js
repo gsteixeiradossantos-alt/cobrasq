@@ -9,7 +9,7 @@
 // depois, se necessário.
 //
 // SUBSTITUÍDO em 05/10/2026 pela Edge Function supabase/functions/datajud-andamentos
-// (rodízio de 20 processos por chamada em lote, pg_cron a cada 10 min — migração
+// (rodízio de 5 processos por chamada em lote, pg_cron a cada 4 min — migração
 // 20261005_03_datajud_rodizio.sql). Não religar este endpoint em paralelo.
 //
 // Fonte gratuita e oficial do CNJ (latência ~24-48h). Complementa o Escavador
