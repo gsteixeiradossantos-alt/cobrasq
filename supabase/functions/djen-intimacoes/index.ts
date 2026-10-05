@@ -14,8 +14,9 @@
 //   3) casa o CNJ com cobrancas.numero_processo → status 'vinculada'/'a_vincular';
 //   4) RPC intimacoes_djen_cruzar(): marca as que também chegaram por e-mail
 //      (mesmo CNJ, data do ato −3 … publicação +3). O que sobra é "só no diário";
-//   5) o que é "só no diário" E de caso cadastrado entra em devedor_eventos
-//      (timeline, fonte='djen'), uma vez só (evento_gravado).
+//   5) publicação de caso cadastrado vai à timeline com o link da decisão, uma vez
+//      só (evento_gravado): "só no diário" vira item novo (fonte='djen'); a que
+//      também chegou por e-mail põe o link no item que o e-mail criou.
 //
 // Backfill manual: POST { inicio: 'YYYY-MM-DD', fim: 'YYYY-MM-DD' } ou { dias: N }.
 //
@@ -192,23 +193,48 @@ async function gravar(item: any, oab: string, cobrMap: Map<string, string>): Pro
   return 'erro';
 }
 
-// "Só no diário" de caso cadastrado → timeline do caso (uma vez). Só depois de
-// 1 dia da publicação: dá tempo de o e-mail do tribunal chegar e o cruzamento
-// casar — senão a timeline ganharia o mesmo ato duas vezes (djen + email).
+// Link público da decisão: a certidão do DJEN (PDF com o teor, sem login nem captcha).
+// O `link` que vem no item aponta para a validação do PROJUDI, que pede captcha.
+const linkDecisao = (hash: string | null) =>
+  hash ? `https://comunicaapi.pje.jus.br/api/v1/comunicacao/${hash}/certidao` : null;
+
+// Publicação de caso cadastrado → timeline do caso (uma vez), sempre com o link da
+// decisão. Só depois de 1 dia da publicação: dá tempo de o e-mail do tribunal chegar e
+// o cruzamento casar.
+//  - "só no diário" (sem e-mail): vira item novo na timeline (fonte='djen');
+//  - também chegou por e-mail: NÃO cria outro item (o ato apareceria duas vezes); o
+//    item que o e-mail criou ganha o link (decisão do Gustavo em 05/10/2026).
 async function gravarEventos(): Promise<number> {
   const ontem = isoDate(new Date(Date.now() - 86400000));
   const { data } = await sb.from('intimacoes_djen')
-    .select('id, cobranca_id, numero_processo, data_disponibilizacao, data_ato, tribunal, tipo_documento, orgao, texto_limpo, dedup')
-    .is('intimacao_email_id', null).eq('evento_gravado', false).not('cobranca_id', 'is', null)
+    .select('id, cobranca_id, numero_processo, data_disponibilizacao, data_ato, tribunal, tipo_documento, orgao, texto_limpo, dedup, hash_djen, intimacao_email_id')
+    .eq('evento_gravado', false).not('cobranca_id', 'is', null)
     .neq('status', 'ignorada').lte('data_disponibilizacao', ontem).limit(200);
   let n = 0;
   for (const r of (data || []) as any[]) {
+    const link = linkDecisao(r.hash_djen);
+    if (r.intimacao_email_id) {
+      if (link) {
+        const { data: em } = await sb.from('intimacoes_email').select('dedup').eq('id', r.intimacao_email_id).maybeSingle();
+        const { data: ev } = em?.dedup
+          ? await sb.from('devedor_eventos').select('id, payload').eq('payload->>dedup', `email:${em.dedup}`).limit(1)
+          : { data: [] as any[] };
+        const alvo = (ev || [])[0] as any;
+        if (alvo && !alvo.payload?.link_decisao) {
+          const { error } = await sb.from('devedor_eventos')
+            .update({ payload: { ...alvo.payload, link_decisao: link, djen_publicado_em: r.data_disponibilizacao } }).eq('id', alvo.id);
+          if (error) { console.error('[djen] link no evento do e-mail', error.message); continue; }
+        }
+      }
+      await sb.from('intimacoes_djen').update({ evento_gravado: true }).eq('id', r.id);
+      continue;
+    }
     const evDedup = `djen:${r.dedup}`;
     const rotulo = `${r.tipo_documento || 'Publicação no diário'} (DJEN)`;
     const { error } = await sb.from('devedor_eventos').insert({
       devedor_id: r.cobranca_id, cobranca_id: r.cobranca_id, tipo: 'andamento_judicial',
       payload: { acao_completa: rotulo, fonte: 'djen', data: r.data_ato || r.data_disponibilizacao, publicado_em: r.data_disponibilizacao, tribunal: r.tribunal, orgao: r.orgao,
-                 resumo: String(r.texto_limpo || '').slice(0, 600), dedup: evDedup },
+                 resumo: String(r.texto_limpo || '').slice(0, 600), dedup: evDedup, link_decisao: link },
     });
     if (error && !String(error.message || '').includes('duplicate')) { console.error('[djen] devedor_eventos', error.message); continue; }
     await sb.from('intimacoes_djen').update({ evento_gravado: true }).eq('id', r.id);
