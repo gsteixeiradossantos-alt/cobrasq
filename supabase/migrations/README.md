@@ -302,7 +302,7 @@ aplicada, um insert simultâneo do webhook e do cron volta 409 e vira
 
 ## 20261006_01 — `cobranca_processos_vinculados` (processos vinculados / desdobramentos)
 
-**PENDENTE — não aplicada em produção.** `20261006_01_cobranca_processos_vinculados.sql`
+**Aplicada em produção em 06/10/2026 (01 e 02; conferido: 2 linhas, gestor vê 2 como `authenticated`).** `20261006_01_cobranca_processos_vinculados.sql`
 (+ `_rollback`). Aditiva: tabela nova, um registro por desdobramento da cobrança
 (embargos de terceiro, apensos, acordos), com `rotulo` obrigatório, `numero_processo`
 opcional mas CNJ completo quando preenchido (CHECK), `monitorar_datajud` (padrão true)
