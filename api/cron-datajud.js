@@ -12,6 +12,11 @@
 // (intimações em tempo real via DJEN). Ver docs/setup/escavador.md e
 // docs/specs/eproc-tjpr-integracao-viabilidade.md.
 //
+// Processos vinculados (06/10/2026): além do principal, entram os desdobramentos
+// de public.cobranca_processos_vinculados com número e monitorar_datajud=true
+// (embargos de terceiro, apensos). Andamento do vinculado vai para a cobrança dona.
+// Número repetido (acordo no mesmo processo do principal) é consultado uma vez só.
+//
 // Modelo de dados: itera public.cobrancas (numero_processo IS NOT NULL). Pela
 // invariante 2026-06-15 (cobranca.id = id do devedor principal = caso.id), o
 // devedor_id da intimação é o próprio cobranca.id — sem lookup reverso.
@@ -87,6 +92,23 @@ async function consultarDataJud(apiKey, digitos) {
   return hit ? hit._source : null;
 }
 
+// Junta principal + vinculados num só rol de consultas: CNJ válido do TJPR, um por
+// número (dígitos). Principal vem antes, então número igual ao do principal fica
+// com a origem 'principal'; o mesmo número em duas cobranças fica com a primeira.
+function montarAlvos(cobrancas, vinculados) {
+  const alvos = [];
+  const vistos = new Set();
+  const add = (cobrancaId, num, origem, rotulo) => {
+    const d = digitosCNJ(num);
+    if (!d || !ehTJPR(d) || vistos.has(d)) return;
+    vistos.add(d);
+    alvos.push({ cobrancaId, digitos: d, formatado: formatarCNJ(d), origem, rotulo: rotulo || null });
+  };
+  for (const c of cobrancas || []) add(c.id, c.numero_processo, 'principal');
+  for (const v of vinculados || []) add(v.cobranca_id, v.numero_processo, 'vinculado', v.rotulo);
+  return alvos;
+}
+
 module.exports = async function handler(req, res) {
   // ── Auth (timing-safe), espelha cron-controlle / cron-regua ────────────────
   const expect = process.env.CRON_SECRET || '';
@@ -120,18 +142,28 @@ module.exports = async function handler(req, res) {
       `cobrancas?numero_processo=not.is.null&numero_processo=neq.&monitorar_datajud=is.true&select=id,numero_processo&limit=${limit}`
     );
 
-    // Filtra os que têm CNJ válido do TJPR.
-    const alvos = [];
-    for (const c of cobrancas) {
-      const d = digitosCNJ(c.numero_processo);
-      if (d && ehTJPR(d)) alvos.push({ cobrancaId: c.id, digitos: d, formatado: formatarCNJ(d) });
+    // Processos vinculados com número e monitoramento ligado. Tolerante: se a
+    // tabela ainda não existir (migração 20261006_01 pendente), segue só com o principal.
+    let vinculados = [];
+    try {
+      const v = await sbFetch(
+        `cobranca_processos_vinculados?numero_processo=not.is.null&monitorar_datajud=is.true&select=cobranca_id,numero_processo,rotulo&limit=${limit}`
+      );
+      vinculados = Array.isArray(v) ? v : [];
+    } catch (e) {
+      console.warn('[cron-datajud] processos vinculados indisponíveis:', String((e && e.message) || e));
     }
+
+    // Filtra os que têm CNJ válido do TJPR, sem repetir número.
+    const alvos = montarAlvos(cobrancas, vinculados);
 
     if (dry) {
       return res.status(200).json({
         ok: true, dry: true,
         cobrancas_com_processo: cobrancas.length,
+        vinculados_monitorados: vinculados.length,
         processos_tjpr_validos: alvos.length,
+        processos_vinculados_validos: alvos.filter((a) => a.origem === 'vinculado').length,
       });
     }
 
@@ -140,7 +172,7 @@ module.exports = async function handler(req, res) {
     // o insert em proc_intimacoes falharia todo dia com FK violation (23503). Filtra
     // esses casos ANTES de consultar o DataJud pra não gastar a chamada externa à toa,
     // e reporta como "sem_devedor" (dado a corrigir) em vez de "erro" (ruído recorrente).
-    const idsAlvo = alvos.map((a) => a.cobrancaId);
+    const idsAlvo = [...new Set(alvos.map((a) => a.cobrancaId))];
     const devedoresExistentes = idsAlvo.length
       ? await sbFetch(`devedores?id=in.(${idsAlvo.join(',')})&select=id`)
       : [];
@@ -248,3 +280,5 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ ok: false, error: msg });
   }
 };
+
+module.exports.montarAlvos = montarAlvos;

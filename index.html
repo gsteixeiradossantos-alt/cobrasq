@@ -12066,6 +12066,7 @@ function renderBuscaGlobal(q){
     if(txtNorm(c.tipo_documento).includes(q)) return true;
     if(txtNorm(c.numero_documento).includes(q)) return true;
     if(txtNorm(c.numero_processo).includes(q)) return true;
+    if(_procVincBate(c, q, qd)) return true;
     if(credoresAlvo.has(c.cliente_id)) return true;
     if(partes.some(p=>txtNorm(p.devedores?.nome).includes(q))) return true;
     return qd.length>=3 && partes.some(p=>String(p.devedores?.doc||'').replace(/\D/g,'').includes(qd));
@@ -19156,6 +19157,91 @@ async function toggleMonitorarDataJud(cobId, ativo){
   showToast(ativo?'Monitoramento de andamentos ativado.':'Monitoramento pausado para este processo.','success');
 }
 
+// ── Processos vinculados / desdobramentos (06/10/2026) ─────────────────────────
+// Tabela cobranca_processos_vinculados (migração 20261006_01): embargos de terceiro,
+// apensos, acordos em desdobramento. O principal continua em cobrancas.numero_processo.
+// Número opcional, mas CNJ completo quando preenchido; rótulo obrigatório. Os com
+// número e "monitorar" ligado entram no cron do DataJud e na busca. Só escritório (RLS).
+window._cobrProcVinc = window._cobrProcVinc || [];
+function _procVincTabelaFaltando(err){ const code=String(err&&err.code||''), m=String(err&&err.message||''); return code==='42P01'||code==='PGRST205'||/cobranca_processos_vinculados/i.test(m)&&/does not exist|Could not find/i.test(m); }
+async function procVincCarregar(cobId){
+  window._cobrProcVinc=[]; window._cobrProcVincFalta=false;
+  const supa=getSupabase(); if(!supa||!cobId) return;
+  try{
+    const { data, error } = await supa.from('cobranca_processos_vinculados')
+      .select('id,cobranca_id,numero_processo,rotulo,monitorar_datajud,observacao,created_at')
+      .eq('cobranca_id',cobId).order('created_at',{ascending:true});
+    if(error){ if(_procVincTabelaFaltando(error)) window._cobrProcVincFalta=true; else console.warn('[procVinc]', error.message); return; }
+    window._cobrProcVinc = data||[];
+    // Mantém a busca em dia sem recarregar a lista inteira.
+    try{ const c=(DB_cobrancas||[]).find(x=>x.id===cobId); if(c) c._procVinc=(data||[]).map(v=>({numero_processo:v.numero_processo, rotulo:v.rotulo})); }catch(_){}
+  }catch(e){ console.warn('[procVinc] ex:', e.message); }
+}
+function procVincHTML(cobId){
+  const lista=window._cobrProcVinc||[];
+  const tt=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+      <div style="flex:1;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--d-text-3);">Processos vinculados${lista.length?` (${lista.length})`:''}</div>
+      ${window._cobrProcVincFalta?'':`<button class="btn btn-ghost btn-sm" onclick="procVincAbrir('${cobId}')">+ Adicionar</button>`}
+    </div>`;
+  let corpo;
+  if(window._cobrProcVincFalta) corpo=`<div style="font-size:12px;color:var(--d-warn,#b7791f);">A tabela de processos vinculados ainda não existe no banco (migração 20261006_01 pendente).</div>`;
+  else if(!lista.length) corpo=`<div style="font-size:12px;color:var(--d-text-3);">Nenhum desdobramento cadastrado (embargos, apensos, acordos).</div>`;
+  else corpo=lista.map(v=>`<div style="display:flex;align-items:center;gap:8px;font-size:12.5px;padding:5px 0;flex-wrap:wrap;">
+      <span style="color:var(--d-ink);font-weight:600;">${escHtml(v.rotulo||'')}</span>
+      ${v.numero_processo?`<span style="font-family:var(--font-mono);color:var(--d-text-2);">${escHtml(v.numero_processo)}</span>`:'<span style="font-size:11px;color:var(--d-text-3);">sem número</span>'}
+      ${v.numero_processo?`<span style="font-size:10.5px;padding:1px 7px;border-radius:20px;background:var(--d-bg-2);color:${v.monitorar_datajud?'var(--d-success)':'var(--d-text-3)'};">${v.monitorar_datajud?'DataJud: monitorando':'DataJud: pausado'}</span>`:''}
+      <span style="flex:1;"></span>
+      <button class="btn btn-ghost btn-sm" title="Editar" onclick="procVincAbrir('${cobId}','${v.id}')">✎</button>
+      <button class="btn btn-ghost btn-sm" title="Excluir" onclick="procVincExcluir('${cobId}','${v.id}')">🗑</button>
+      ${v.observacao?`<div style="flex-basis:100%;font-size:11.5px;color:var(--d-text-3);white-space:pre-wrap;">${escHtml(v.observacao)}</div>`:''}
+    </div>`).join('');
+  return `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--d-border);">${tt}${corpo}</div>`;
+}
+function _procVincRedesenhar(cobId){ const box=document.getElementById('proc-vinc-box-'+cobId); if(box) box.innerHTML=procVincHTML(cobId); }
+function procVincAbrir(cobId, vincId){
+  const v=(vincId&&(window._cobrProcVinc||[]).find(x=>x.id===vincId))||{monitorar_datajud:true};
+  const corpo=`
+    <div style="font-size:12px;color:var(--text-2);margin-bottom:10px;">Desdobramento ligado a esta cobrança — o processo principal continua em "Nº do processo".</div>
+    <div style="${_bensLinha}">${_bensCampo('Rótulo (obrigatório)',_bensInp('pv-rotulo',v.rotulo,'placeholder="Embargos de Terceiro, Cumprimento de sentença, Acordo 2…"'),'280px')}${_bensCampo('Processo (CNJ completo, opcional)',_bensInp('pv-num',v.numero_processo,'placeholder="0000000-00.0000.0.00.0000"'),'240px')}</div>
+    <div style="${_bensLinha}"><label style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;cursor:pointer;"><input type="checkbox" id="pv-dj" ${v.monitorar_datajud!==false?'checked':''} style="width:15px;height:15px;margin:0;"> Monitorar andamentos no DataJud (só vale com número)</label></div>
+    <div style="${_bensLinha}">${_bensCampo('Observação',`<textarea id="pv-obs" rows="2" style="${_bensInpSt}margin-top:3px;">${escHtml(v.observacao||'')}</textarea>`,'100%')}</div>`;
+  _bensModal('modal-proc-vinc', vincId?'Editar processo vinculado':'Novo processo vinculado', corpo, ()=>procVincSalvar(cobId, vincId||null));
+}
+async function procVincSalvar(cobId, vincId){
+  const val=id=>{ const s=(document.getElementById(id)?.value||'').trim(); return s||null; };
+  const rotulo=val('pv-rotulo');
+  const num=val('pv-num')&&_bensCNJ(val('pv-num'));
+  if(!rotulo){ showToast('Informe o rótulo (ex.: Embargos de Terceiro).','warning'); return; }
+  if(num && !_CNJ_RE.test(num)){ showToast('Número do processo tem que ser o CNJ completo (0000000-00.0000.0.00.0000).','warning'); return; }
+  const row={ numero_processo:num, rotulo, monitorar_datajud:!!document.getElementById('pv-dj')?.checked, observacao:val('pv-obs') };
+  const supa=getSupabase(); if(!supa) return;
+  const btn=document.getElementById('modal-proc-vinc-salvar'); if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
+  const q=vincId ? supa.from('cobranca_processos_vinculados').update(row).eq('id',vincId).select('id')
+                 : supa.from('cobranca_processos_vinculados').insert({...row, cobranca_id:cobId, criado_por:await _bensUid(supa)}).select('id');
+  const {data:gravou,error}=await q;
+  if(error||!(gravou&&gravou.length)){
+    if(btn){ btn.disabled=false; btn.textContent='Salvar'; }
+    const dup=error&&(String(error.code)==='23505');
+    showToast(dup?'Esse processo/rótulo já está cadastrado nesta cobrança.':'Não foi possível salvar: '+_bensErro(error),'danger'); return;
+  }
+  document.getElementById('modal-proc-vinc')?.remove();
+  showToast(vincId?'Processo vinculado atualizado.':'Processo vinculado cadastrado.','success');
+  await procVincCarregar(cobId); _procVincRedesenhar(cobId);
+}
+async function procVincExcluir(cobId, vincId){
+  const v=(window._cobrProcVinc||[]).find(x=>x.id===vincId); if(!v) return;
+  if(!confirm(`Excluir o processo vinculado "${v.rotulo}"${v.numero_processo?' ('+v.numero_processo+')':''}? Os andamentos já gravados continuam no histórico.`)) return;
+  const {data:apagou,error}=await getSupabase().from('cobranca_processos_vinculados').delete().eq('id',vincId).select('id');
+  if(error||!(apagou&&apagou.length)){ showToast('Não foi possível excluir: '+_bensErro(error),'danger'); return; }
+  showToast('Processo vinculado excluído.','success');
+  await procVincCarregar(cobId); _procVincRedesenhar(cobId);
+}
+// Busca: o número (com ou sem máscara) ou o rótulo de um vinculado acha a cobrança.
+function _procVincBate(c, q, qd){
+  return (c._procVinc||[]).some(v=>txtNorm(v.numero_processo).includes(q) || txtNorm(v.rotulo).includes(q)
+    || (qd.length>=7 && String(v.numero_processo||'').replace(/\D/g,'').includes(qd)));
+}
+
 async function marcarTodasIntimacoesLidas(){
   const naoLidas = (_intimacoesCache||[]).filter(i=>!i.lida);
   if(!naoLidas.length) return;
@@ -20201,6 +20287,13 @@ async function loadCobrancasFromSupabase(){
     // Valor atualizado sempre corrente (compute-on-read) — painel, busca e a
     // tela Cobranças passam a ver a dívida corrigida de hoje, não o congelado.
     try{ for(const c of rows){ if(parseValorBR(c.valor_orig) > 0){ const f = dividaAtualHoje(c); if(f && isFinite(f)) c.valor_atual = f; } } }catch(_){}
+    // Processos vinculados (busca por número/rótulo). Consulta à parte e tolerante:
+    // sem a migração 20261006_01 a lista de cobranças carrega igual.
+    try{
+      const { data:pv, error:pvErr } = await supa.from('cobranca_processos_vinculados').select('cobranca_id,numero_processo,rotulo').limit(10000);
+      if(!pvErr && pv){ const m=new Map(); for(const v of pv){ if(!m.has(v.cobranca_id)) m.set(v.cobranca_id,[]); m.get(v.cobranca_id).push({numero_processo:v.numero_processo, rotulo:v.rotulo}); }
+        for(const c of rows) c._procVinc = m.get(c.id) || []; }
+    }catch(_){}
     return rows;
   }catch(e){ console.warn('[rel] loadCobrancas ex:', e.message); return null; }
 }
@@ -22262,6 +22355,7 @@ async function renderCobrancaDetalhe(){
         .select('id,nome,doc,qualidade,intimado').eq('cobranca_id',id);
       window._cobrTerceiros = tc || [];
     }catch(_){ window._cobrTerceiros = []; }
+    await procVincCarregar(id);
     const { data:ev } = await supa.from('devedor_eventos')
       .select('tipo,payload,criado_em').eq('cobranca_id',id).order('criado_em',{ascending:false}).limit(25);
     hist=ev||[];
@@ -22450,6 +22544,7 @@ async function renderCobrancaDetalhe(){
       ${_kvRow2('Origem', cob.origem)}
     </div>
     ${(isJud && cob.numero_processo)?`<div style="margin-top:12px;padding-top:12px;border-top:1px solid #F1EFE8;"><label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" ${cob.monitorar_datajud!==false?'checked':''} onchange="toggleMonitorarDataJud('${cob.id}', this.checked)" style="width:15px;height:15px;margin:0;cursor:pointer;"/><span style="font-size:11.5px;color:var(--d-text-3);">Andamentos (DataJud)</span> <span id="mon-dj-lbl-${cob.id}" style="font-size:12px;font-weight:600;color:${cob.monitorar_datajud!==false?'var(--d-success)':'var(--d-text-3)'};">${cob.monitorar_datajud!==false?'Monitorando':'Pausado'}</span></label></div>`:''}
+    <div id="proc-vinc-box-${cob.id}">${procVincHTML(cob.id)}</div>
     ${cob.observacoes?`<div style="margin-top:12px;font-size:12.5px;color:var(--d-text-2);white-space:pre-wrap;">${escHtml(cob.observacoes)}</div>`:''}
     ${_detEncerramentoHTML(cob.encerramento)}
     ${_detDevolucaoDocHTML(cob.metadata&&cob.metadata.devolucaoDocumento)}
