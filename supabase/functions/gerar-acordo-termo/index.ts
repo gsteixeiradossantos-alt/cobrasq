@@ -169,8 +169,10 @@ Deno.serve(async (req) => {
         lock_phone: !!onlyDigits(d.telefone),
         require_cpf: true,
         cpf: onlyDigits(d.documento),
+        // Só selfie, sem foto do documento: o vídeo "como assinar" mostra só a selfie e o
+        // documento é pedido depois pelo WhatsApp (Gustavo, 06/10/2026).
         require_selfie_photo: true,
-        require_document_photo: true,
+        require_document_photo: false,
         selfie_validation_type: "none",
         signature_placement: "<<assdev" + (i + 1) + ">>",
         // Visto (rubrica) em todas as páginas: o template imprime <<vistodevN>> na

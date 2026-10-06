@@ -48443,6 +48443,9 @@ function _tajCepInput(el){
 // assinou ainda. NÃO entra em _STATUS_FORA_REGUA — decisão do Gustavo em 27/08:
 // quem recebeu o termo e não assina continua na régua da Bia.
 const _TAJ_STATUS_ENVIADO = 'Acordo enviado';
+// Vídeo "como assinar pelo celular" (selfie, sem navegador), enviado depois do link de assinatura.
+// Endereço fixo do painel: a Z-API baixa o arquivo, então não serve localhost nem prévia.
+const _TAJ_VIDEO_ASSINAR = 'https://painel.cobrasq.com.br/assets/video/como-assinar-zapsign.mp4';
 // Quando NÃO mexer na situação do caso: só a trilha extrajudicial ainda "a cobrar"
 // (Cobrar, Reajuizar, Em contato, Em negociação, Fazer ação, Para protocolar…) recebe
 // "Acordo enviado". Caso com AÇÃO EM CURSO — ou termo do modo Judicial, que pressupõe
@@ -49188,7 +49191,7 @@ async function tajEnviarZapSign(){
       // Exceção (Gustavo, 26/09/2026): pessoas que realmente só têm um celular assinam
       // com selfie + foto do documento + código no PRÓPRIO e-mail + desenho. Sem e-mail
       // próprio de cada uma, não sai. Fica registrado no histórico do caso.
-      if(!confirm('Signatários com o mesmo telefone: '+_rep.join('; ')+'.\n\nCada um deveria assinar pelo próprio celular. Se essas pessoas realmente só têm UM celular, cada uma vai assinar com selfie + foto do documento + código enviado ao PRÓPRIO e-mail + desenho.\n\nConfirmar que o telefone é compartilhado?')) throw new Error('Envio cancelado: signatários com o mesmo telefone.');
+      if(!confirm('Signatários com o mesmo telefone: '+_rep.join('; ')+'.\n\nCada um deveria assinar pelo próprio celular. Se essas pessoas realmente só têm UM celular, cada uma vai assinar com selfie + código enviado ao PRÓPRIO e-mail + desenho.\n\nConfirmar que o telefone é compartilhado?')) throw new Error('Envio cancelado: signatários com o mesmo telefone.');
       const _tn=s=>String(s||'').replace(/\D/g,'').replace(/^55(?=\d{10,11}$)/,'');
       const _cont={}; [...(dados.devedores||[]),...(dados.advogados||[])].forEach(p=>{ const k=_tn(p.telefone); if(k) _cont[k]=(_cont[k]||0)+1; });
       const _envolvidos=[...(dados.devedores||[]),...(dados.advogados||[])].filter(p=>_cont[_tn(p.telefone)]>1);
@@ -49203,7 +49206,7 @@ async function tajEnviarZapSign(){
       dados.telCompartilhadoConfirmado=true;
       if(!dev.historico) dev.historico=[];
       dev.historico.push({ id:uid(), data:hoje(), tipo:'ZapSign',
-        texto:'Telefone compartilhado confirmado no envio do termo ('+_rep.join('; ')+'). Assinatura com selfie + foto do documento + código no e-mail de cada um: '+_envolvidos.map(p=>(p.nome||'?')+' <'+p.email+'>').join(', ')+'.', autor:(typeof currentUser!=='undefined'&&currentUser&&currentUser.nome)||'Sistema' });
+        texto:'Telefone compartilhado confirmado no envio do termo ('+_rep.join('; ')+'). Assinatura com selfie + código no e-mail de cada um: '+_envolvidos.map(p=>(p.nome||'?')+' <'+p.email+'>').join(', ')+'.', autor:(typeof currentUser!=='undefined'&&currentUser&&currentUser.nome)||'Sistema' });
       save();
     }
     const { data, error } = await supa.functions.invoke('gerar-acordo-termo', { body:{ casoId: _tajState.devId, html, dados } });
@@ -49217,9 +49220,17 @@ async function tajEnviarZapSign(){
       const tel=String(s.phone||s.telefone||'').replace(/\D/g,'');
       if(!s.link){ nota+=` · ${s.nome||'?'}: SEM link`; waFalhas.push({ nome:s.nome||'?', link:'', tel, motivo:'ZapSign não retornou link' }); continue; }
       if(!tel){ nota+=` · ${s.nome||'?'}: sem telefone`; waFalhas.push({ nome:s.nome||'?', link:s.link, tel:'', motivo:'devedor sem telefone' }); continue; }
-      const msg=`${s.link}\n\nSegue acima o link para assinatura do seu acordo digital. Para assinar é bem tranquilo. Siga os seguintes passos:\n\n1) Clique no link acima;\n2) Confira o documento e clique em assinar;\n3) Preencha os seus dados, clique em "fotografar selfie" e tire uma foto de seu rosto segurando seu documento pessoal com foto ao lado de seu rosto;\n4) Assine na tela com o seu dedo. Pode ser apenas a sua inicial;\n5) Confirme e seu acordo estará assinado.\n\nPara assinar sem erro: abra o link no Chrome (ou Safari, no iPhone) e feche os outros aplicativos antes de tirar as fotos.`;
+      const msg=`${s.link}\n\nSegue acima o link para assinatura do seu acordo. Antes de assinar, assista ao vídeo logo abaixo: ele mostra o passo a passo.`;
       let r=null; try{ r=(typeof _aavEnviarWhats==='function')?await _aavEnviarWhats(tel,msg):null; }catch(_){}
-      if(r&&r.ok){ nota+=` · ${s.nome||'?'}: link enviado`; }
+      if(r&&r.ok){
+        nota+=` · ${s.nome||'?'}: link enviado`;
+        // Vídeo de como assinar, logo depois do link. Vai para o número que a edge
+        // confirmou (phoneUsed). Falha aqui não derruba o envio: o link já foi.
+        try{
+          await ZApiAPI.sendVideo(r.phoneUsed||tel, _TAJ_VIDEO_ASSINAR, 'Veja no vídeo como assinar pelo celular.');
+          nota+=' + vídeo';
+        }catch(e){ nota+=` (vídeo não enviado: ${e&&e.message||'erro'})`; }
+      }
       else{ const motivo=r?.error||'falha Z-API'; nota+=` · ${s.nome||'?'}: falha (${motivo})`; waFalhas.push({ nome:s.nome||'?', link:s.link, tel, motivo }); }
     }
     if(typeof logAtividade==='function') logAtividade('Termo de acordo enviado ao ZapSign', `${dados.tipo} — ${dev.nome||''}${nota}`, dev.id);
@@ -53253,6 +53264,10 @@ const ZApiAPI = {
   },
   sendDocumentPdf(phone, document, fileName, caption){
     return this.req('POST','/send-document/pdf',{ phone:this._tel(phone), document, fileName, caption:caption||'' });
+  },
+  // POST /send-video: `video` aceita link público ou base64 (doc Z-API, conferida em 06/10/2026).
+  sendVideo(phone, video, caption){
+    return this.req('POST','/send-video',{ phone:this._tel(phone), video, caption:caption||'' });
   },
   status(){ return this.req('GET','/status'); },
   // Leitura ao vivo do histórico de uma conversa (últimas `amount` mensagens).
