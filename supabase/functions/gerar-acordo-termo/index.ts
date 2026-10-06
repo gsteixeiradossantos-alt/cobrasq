@@ -33,6 +33,15 @@ const valorBR = (v: unknown) => String(v ?? "").replace(".", ",");
 // por ele ("não fui eu"). Regra do Gustavo, 26/09/2026: nenhum caso, nem com mais de
 // um contratante. Compara só dígitos, sem o DDI 55.
 const telNorm = (s: unknown) => onlyDigits(s).replace(/^55(?=\d{10,11}$)/, "");
+// Celular brasileiro como o ZapSign precisa (phone_country "55" vai à parte): DDD + 9 +
+// 8 dígitos, sem 55 nem 0 na frente. Fora disso devolve "". O código de acesso do
+// "Documento Protegido" vai para este número; errado, o código nunca chega e o devedor
+// não abre o termo (Taina Vitoria dos Santos, 06/10/2026: lista de dois telefones colada
+// num número de 22 dígitos).
+const telCelular = (s: unknown) => {
+  const t = onlyDigits(s).replace(/^0+/, "").replace(/^55(?=\d{11}$)/, "");
+  return /^[1-9][1-9]9\d{8}$/.test(t) ? t : "";
+};
 const telsRepetidos = (pessoas: any[]) => {
   const vistos: Record<string, string> = {};
   const rep: string[] = [];
@@ -85,6 +94,13 @@ Deno.serve(async (req) => {
     {
       const _devs = (Array.isArray(dados.devedores) && dados.devedores.length) ? dados.devedores : [dados.devedor];
       const _advs = (Array.isArray(dados.advogados) ? dados.advogados : []).filter((a: any) => a && a.nome);
+      // Barra antes de gerar PDF e documento: devedor sem celular válido, ou advogado com
+      // telefone preenchido que não é celular. Nada de número inválido travado no ZapSign.
+      const telRuim = [
+        ..._devs.filter((d: any) => !telCelular(d?.telefone)),
+        ..._advs.filter((a: any) => onlyDigits(a?.telefone) && !telCelular(a?.telefone)),
+      ].map((p: any) => `${String(p?.nome || "?").trim()} (${String(p?.telefone || "vazio").trim() || "vazio"})`);
+      if (telRuim.length) return json({ error: `Telefone inválido para o ZapSign: ${telRuim.join("; ")}. Informe um celular só, com DDD (ex.: 46 98822-7918).` }, 400);
       const rep = telsRepetidos([..._devs, ..._advs, { nome: nomeSignatarioCredor(dados), telefone: CREDOR_TEL }]);
       if (rep.length) {
         const comp = telsCompartilhados([..._devs, ..._advs]);
@@ -163,10 +179,10 @@ Deno.serve(async (req) => {
         send_automatic_email: false,
         send_automatic_whatsapp: false,
         phone_country: "55",
-        phone_number: onlyDigits(d.telefone),
+        phone_number: telCelular(d.telefone),
         // Nome e telefone travados: quem abre o link não troca pelo de outra pessoa.
         lock_name: true,
-        lock_phone: !!onlyDigits(d.telefone),
+        lock_phone: !!telCelular(d.telefone),
         require_cpf: true,
         cpf: onlyDigits(d.documento),
         // Só selfie, sem foto do documento: o vídeo "como assinar" mostra só a selfie e o
@@ -188,7 +204,7 @@ Deno.serve(async (req) => {
         send_automatic_email: false,
         send_automatic_whatsapp: false,
         phone_country: "55",
-        phone_number: onlyDigits(a.telefone),
+        phone_number: telCelular(a.telefone),
         require_cpf: !!onlyDigits(a.documento),
         cpf: onlyDigits(a.documento),
         require_selfie_photo: false,
@@ -247,7 +263,7 @@ Deno.serve(async (req) => {
       const arr = (z && z.signers) || [];
       return allSigners.map((d: any, i: number) => ({
         nome: d.nome || "",
-        phone: onlyDigits(d.telefone),
+        phone: telCelular(d.telefone),
         link: linkDe(arr[i]),
       }));
     };
@@ -280,7 +296,7 @@ Deno.serve(async (req) => {
           p_doc_token: token,
           p_external_id: String(casoId ?? ""),
           p_cpf_dev: onlyDigits(dev.documento),
-          p_telefone: onlyDigits(dev.telefone),
+          p_telefone: telCelular(dev.telefone),
           p_valor_total: valorBR(ac.total),
           p_num_parcelas: parseInt(String(ac.parcelas ?? "1"), 10) || null,
           p_data_primeiro_venc: isoToBR(ac.vencimento),

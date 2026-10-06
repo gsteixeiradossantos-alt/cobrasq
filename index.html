@@ -6822,6 +6822,14 @@ function _promptConfirm(){
 // No ato de enviar um documento para assinar, permite confirmar/alterar o número
 // que receberá o link. Default = telefone do cadastro. Resolve com os DÍGITOS
 // escolhidos (com DDI 55 garantido pelo Z-API/proxy) ou null se cancelar.
+// Celular brasileiro como o ZapSign precisa (phone_country '55' vai à parte): DDD + 9 +
+// 8 dígitos, sem 55 nem 0 na frente; fora disso, ''. O código de acesso do ZapSign vai
+// para este número: errado, o código não chega e o devedor não abre o documento (Taina
+// Vitoria dos Santos, 06/10/2026). A edge gerar-acordo-termo confere de novo no servidor.
+function _telCelularBR(s){
+  const t=String(s||'').replace(/\D/g,'').replace(/^0+/,'').replace(/^55(?=\d{11}$)/,'');
+  return /^[1-9][1-9]9\d{8}$/.test(t)?t:'';
+}
 function promptTelefoneEnvio(defaultTel){
   return new Promise(resolve=>{
     const id='modal-tel-envio';
@@ -6845,13 +6853,13 @@ function promptTelefoneEnvio(defaultTel){
       </div>
     </div>`;
     openModal(id);
-    setTimeout(()=>{ const el=document.getElementById('tel-envio-input'); if(el){ el.value=String(defaultTel||''); mascaraTel(el); el.focus(); try{el.select();}catch(_){} } },80);
+    setTimeout(()=>{ const el=document.getElementById('tel-envio-input'); if(el){ el.value=_tajPrimeiroTel(defaultTel)||String(defaultTel||''); mascaraTel(el); el.focus(); try{el.select();}catch(_){} } },80);
   });
 }
 function _telEnvioConfirm(){
   const el=document.getElementById('tel-envio-input');
-  const v=(el?el.value:'').replace(/\D/g,'');
-  if(v.length<10){ showToast('Telefone inválido — informe DDD + número (mín. 10 dígitos).','warning'); return; }
+  const v=_telCelularBR(el?el.value:'');
+  if(!v){ showToast('Telefone inválido — informe um celular só, com DDD (ex.: 46 98822-7918).','warning'); return; }
   if(window._telEnvioResolve) window._telEnvioResolve(v);
 }
 
@@ -16042,13 +16050,17 @@ async function zsPlanoBSemFotos(docToken, devId, btn){
     let cpf=String(s.cpf||(_ehPrinc?dev.doc:'')||'').replace(/\D/g,'');
     if(cpf.length!==11) cpf=String(prompt('CPF de '+(s.name||'?')+':', cpf)||'').replace(/\D/g,'');
     if(cpf.length!==11){ showToast('Plano B cancelado: CPF ausente ou inválido (só pessoa física).','danger'); return; }
+    // O código SMS vai para o telefone do signatário: inválido (ex.: dois números colados), pede o certo.
+    let telPB=_telCelularBR(s.phone_number);
+    if(!telPB) telPB=_telCelularBR(prompt('O telefone de '+(s.name||'?')+' no ZapSign não é um celular válido ('+(s.phone_number||'vazio')+').\nCelular com DDD para o código SMS:','')||'');
+    if(!telPB){ showToast('Plano B cancelado: sem celular válido para o código SMS.','danger'); return; }
     if(!confirm('Plano B para '+(s.name||'?')+':\n\nNo MESMO documento, a assinatura passa a ser desenho + CPF + código por SMS, sem selfie e sem foto do documento.\n\nAlterar?')) return;
     if(btn) btn.textContent='Alterando…';
     await ZapSignAPI.req('POST',`/signers/${s.token}/`,{
-      name:s.name, phone_country:s.phone_country||'55', phone_number:s.phone_number||'',
+      name:s.name, phone_country:'55', phone_number:telPB,
       auth_mode:'assinaturaTela-tokenSms', require_selfie_photo:false, require_document_photo:false,
       selfie_validation_type:'none', require_cpf:true, cpf, validate_cpf:false,
-      lock_name:true, lock_phone:!!s.phone_number,
+      lock_name:true, lock_phone:true,
     });
     // Lê de volta do ZapSign o link vigente (a documentação não diz se ele muda).
     const doc2=await ZapSignAPI.getDoc(docToken);
@@ -16061,7 +16073,7 @@ async function zsPlanoBSemFotos(docToken, devId, btn){
     if(typeof logAtividade==='function') logAtividade('ZapSign: plano B sem fotos', s.name||'', devId);
     const s2ok=s2.auth_mode==='assinaturaTela-tokenSms' && !s2.require_selfie_photo && !s2.require_document_photo;
     if(!s2ok) console.warn('[plano B] ZapSign devolveu o signatário sem a alteração completa:', s2);
-    const tel=String(s2.phone_number||s.phone_number||'').replace(/\D/g,'');
+    const tel=_telCelularBR(s2.phone_number)||telPB;
     const msg=`${link}\n\nSegue acima o link para assinatura do seu acordo, agora SEM fotos:\n\n1) Clique no link acima;\n2) Confira o documento e clique em assinar;\n3) Informe seu CPF;\n4) Digite o código que chegar por SMS;\n5) Assine na tela com o seu dedo e confirme.`;
     if(!link){ showToast('Alterado, mas o ZapSign não devolveu o link. Abra o documento no ZapSign e copie o link.','warning'); return; }
     if(!tel){ prompt('Alterado. Signatário sem telefone — copie a mensagem e envie manualmente:', msg); return; }
@@ -49193,10 +49205,18 @@ async function tajEnviarZapSign(){
   const btn=document.getElementById('taj-enviar'); if(btn){ btn.disabled=true; btn.textContent='Enviando…'; }
   try{
     const dados=_tajDados(); const supa=getSupabase(); if(!supa) throw new Error('Faça login.');
-    // Um telefone só por signatário (ver _tajPrimeiroTel): barra antes de criar o doc no ZapSign.
+    // Um celular válido por signatário (ver _tajPrimeiroTel e _telCelularBR): barra antes de
+    // criar o doc no ZapSign. Devedor sem celular não passa; advogado, só se preencheu.
     for(const p of (dados.devedores||[])){
-      const d=String(p.telefone||'').replace(/\D/g,'').replace(/^55(?=\d{10,11}$)/,'');
-      if(d.length>11) throw new Error('Envio cancelado: o telefone de '+(p.nome||'?')+' tem mais de um número. Deixe só um número no campo.');
+      const t=_telCelularBR(p.telefone);
+      if(!t) throw new Error('Envio cancelado: o telefone de '+(p.nome||'?')+' ('+(p.telefone||'vazio')+') não é um celular válido. Informe um celular só, com DDD.');
+      p.telefone=t;
+    }
+    for(const a of (dados.advogados||[])){
+      if(!String(a.telefone||'').replace(/\D/g,'')) continue;
+      const t=_telCelularBR(a.telefone);
+      if(!t) throw new Error('Envio cancelado: o telefone de '+(a.nome||'?')+' ('+a.telefone+') não é um celular válido. Informe um celular só, com DDD.');
+      a.telefone=t;
     }
     // Mesma edge function do CRM: gera PDF, cria doc no ZapSign com signatários e âncoras <<assdevN>>.
     const _rep=_zapTelsRepetidos([...(dados.devedores||[]),...(dados.advogados||[])]);
@@ -51593,7 +51613,15 @@ const ZapSignAPI = {
     if(!r.ok) throw new Error(json?.detail || json?.message || `Erro ${r.status}`);
     return json;
   },
-  createDoc(payload)      { const rep=_zapTelsRepetidos(payload&&payload.signers); if(rep.length) return Promise.reject(new Error('Signatários com o mesmo telefone: '+rep.join('; ')+'. Cada um precisa assinar pelo próprio celular.')); return this.req('POST','/docs/',payload); },
+  createDoc(payload)      {
+    // Telefone de signatário preenchido tem de ser celular válido (ver _telCelularBR); vai normalizado.
+    for(const sg of ((payload&&payload.signers)||[])){
+      if(!String(sg.phone_number||'').replace(/\D/g,'')) continue;
+      const t=_telCelularBR(sg.phone_number);
+      if(!t) return Promise.reject(new Error('Telefone inválido para o ZapSign: '+(sg.name||'?')+' ('+sg.phone_number+'). Informe um celular só, com DDD.'));
+      sg.phone_number=t; sg.phone_country='55';
+    }
+    const rep=_zapTelsRepetidos(payload&&payload.signers); if(rep.length) return Promise.reject(new Error('Signatários com o mesmo telefone: '+rep.join('; ')+'. Cada um precisa assinar pelo próprio celular.')); return this.req('POST','/docs/',payload); },
   // Anexa um documento EXTRA ao mesmo envelope/link (até 14 extras): o signatário
   // assina todas as peças num único link, cada uma como documento separado.
   addExtraDoc(token,payload){ return this.req('POST',`/docs/${token}/upload-extra-doc/`,payload); },
