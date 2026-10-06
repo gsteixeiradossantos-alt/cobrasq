@@ -36,14 +36,28 @@ const crypto = require('crypto');
 const { sbFetch } = require('./_sb.js');
 const { curarMovimento } = require('./_datajud-tpu.js');
 
-// Endpoint público do TJPR no DataJud. A chave é a APIKey pública do CNJ
-// (documentada em https://datajud-wiki.cnj.jus.br/), exposta em DATAJUD_API_KEY.
-const DATAJUD_TJPR_URL = 'https://api-publica.datajud.cnj.jus.br/api_publica_tjpr/_search';
+// API pública do DataJud: um alias por tribunal (`api_publica_<sigla>`). A chave é a
+// APIKey pública do CNJ (documentada em https://datajud-wiki.cnj.jus.br/), exposta em
+// DATAJUD_API_KEY (a mesma chave vale para todos os aliases).
+const DATAJUD_BASE = 'https://api-publica.datajud.cnj.jus.br';
 
-// Só consultamos processos do TJPR (Justiça Estadual J=8, Tribunal TR=16). Outros
-// tribunais usariam outro alias do DataJud — fora do escopo deste cron.
-const TJPR_SEGMENTO = '8';
-const TJPR_TRIBUNAL = '16';
+// Mapa "J.TR" do número CNJ (J = segmento da Justiça, TR = tribunal) → alias do DataJud.
+// Hoje só a Justiça Estadual (J=8) do PR e de SC. Para incluir outro tribunal, basta uma
+// linha aqui (ex.: '8.26': 'tjsp'); número de tribunal fora do mapa é ignorado.
+const TRIBUNAIS_DATAJUD = {
+  '8.16': 'tjpr',
+  '8.24': 'tjsc',
+};
+
+// Alias do DataJud para o número (20 dígitos), ou null se o tribunal não é monitorado.
+function aliasTribunal(d) {
+  if (!d || d.length !== 20) return null;
+  return TRIBUNAIS_DATAJUD[`${d[13]}.${d.slice(14, 16)}`] || null;
+}
+
+function urlDataJud(alias) {
+  return `${DATAJUD_BASE}/api_publica_${alias}/_search`;
+}
 
 // Extrai os 20 dígitos do número CNJ (aceita formatado ou só dígitos).
 function digitosCNJ(num) {
@@ -56,10 +70,6 @@ function formatarCNJ(d) {
   return `${d.slice(0, 7)}-${d.slice(7, 9)}.${d.slice(9, 13)}.${d.slice(13, 14)}.${d.slice(14, 16)}.${d.slice(16, 20)}`;
 }
 
-function ehTJPR(d) {
-  return d && d[13] === TJPR_SEGMENTO && d.slice(14, 16) === TJPR_TRIBUNAL;
-}
-
 // Timeout por chamada ao DataJud — sem isto, uma resposta lenta/travada do órgão
 // público prende o fetch até o limite duro da function (visto em produção: "Task
 // timed out after 300 seconds" em vez de um erro tratável por processo).
@@ -67,11 +77,13 @@ const DATAJUD_TIMEOUT_MS = 20000;
 
 // Consulta o DataJud por número de processo (20 dígitos). Retorna o _source ou null.
 async function consultarDataJud(apiKey, digitos) {
+  const alias = aliasTribunal(digitos);
+  if (!alias) throw new Error(`Tribunal não monitorado no DataJud: ${digitos}`);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), DATAJUD_TIMEOUT_MS);
   let r;
   try {
-    r = await fetch(DATAJUD_TJPR_URL, {
+    r = await fetch(urlDataJud(alias), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `APIKey ${apiKey}` },
       body: JSON.stringify({ query: { match: { numeroProcesso: digitos } }, size: 1 }),
@@ -92,15 +104,15 @@ async function consultarDataJud(apiKey, digitos) {
   return hit ? hit._source : null;
 }
 
-// Junta principal + vinculados num só rol de consultas: CNJ válido do TJPR, um por
-// número (dígitos). Principal vem antes, então número igual ao do principal fica
+// Junta principal + vinculados num só rol de consultas: CNJ válido de tribunal mapeado
+// (TJPR/TJSC), um por número (dígitos). Principal vem antes, então número igual ao do principal fica
 // com a origem 'principal'; o mesmo número em duas cobranças fica com a primeira.
 function montarAlvos(cobrancas, vinculados) {
   const alvos = [];
   const vistos = new Set();
   const add = (cobrancaId, num, origem, rotulo) => {
     const d = digitosCNJ(num);
-    if (!d || !ehTJPR(d) || vistos.has(d)) return;
+    if (!d || !aliasTribunal(d) || vistos.has(d)) return;
     vistos.add(d);
     alvos.push({ cobrancaId, digitos: d, formatado: formatarCNJ(d), origem, rotulo: rotulo || null });
   };
@@ -154,7 +166,7 @@ module.exports = async function handler(req, res) {
       console.warn('[cron-datajud] processos vinculados indisponíveis:', String((e && e.message) || e));
     }
 
-    // Filtra os que têm CNJ válido do TJPR, sem repetir número.
+    // Filtra os que têm CNJ válido de tribunal mapeado, sem repetir número.
     const alvos = montarAlvos(cobrancas, vinculados);
 
     if (dry) {
@@ -162,7 +174,9 @@ module.exports = async function handler(req, res) {
         ok: true, dry: true,
         cobrancas_com_processo: cobrancas.length,
         vinculados_monitorados: vinculados.length,
-        processos_tjpr_validos: alvos.length,
+        processos_tjpr_validos: alvos.filter((a) => aliasTribunal(a.digitos) === 'tjpr').length,
+        processos_tjsc_validos: alvos.filter((a) => aliasTribunal(a.digitos) === 'tjsc').length,
+        processos_validos: alvos.length,
         processos_vinculados_validos: alvos.filter((a) => a.origem === 'vinculado').length,
       });
     }
@@ -282,3 +296,5 @@ module.exports = async function handler(req, res) {
 };
 
 module.exports.montarAlvos = montarAlvos;
+module.exports.aliasTribunal = aliasTribunal;
+module.exports.urlDataJud = urlDataJud;
