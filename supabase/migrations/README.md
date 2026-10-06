@@ -299,3 +299,30 @@ Em 30/09/2026 havia 0 linhas marcadas em produção. Enquanto não aplicada, o
 código funciona igual ao do PR 859 (conferência pelo marcador); depois de
 aplicada, um insert simultâneo do webhook e do cron volta 409 e vira
 "já lançada". Rollback: `20260930_02_..._rollback.sql`.
+
+## 20261006_01 — `cobranca_processos_vinculados` (processos vinculados / desdobramentos)
+
+**Aplicada em produção em 06/10/2026 (01 e 02; conferido: 2 linhas, gestor vê 2 como `authenticated`).** `20261006_01_cobranca_processos_vinculados.sql`
+(+ `_rollback`). Aditiva: tabela nova, um registro por desdobramento da cobrança
+(embargos de terceiro, apensos, acordos), com `rotulo` obrigatório, `numero_processo`
+opcional mas CNJ completo quando preenchido (CHECK), `monitorar_datajud` (padrão true)
+e `observacao`. Número igual ao do principal é permitido (acordos no mesmo processo).
+RLS só escritório (proprietário tudo; colaborador nas cobranças dele; cedente e
+devedor nada). Backfill: `metadata.processosRelacionados` (Astrea) → rótulo
+"Processo relacionado (Astrea)"; o metadata original fica intacto.
+
+`20261006_02_processo_vinculado_valery_dados.sql` (dados, depois da 01): Embargos de
+Terceiro 0000505-91.2022.8.16.0068 na cobrança do processo 0000961-75.2021.8.16.0068,
+localizada pelo número (para se não achar exatamente uma).
+
+Dry-run em prod (06/10/2026, 01+02 numa transação abortada por `RAISE EXCEPTION`, R-18
+como `authenticated` com jwt claims; colaborador simulado trocando o papel de um
+cedente e o dono da cobrança dentro da transação): `total=2 | linhas:
+0002882-34.2021.8.16.0209 -> 0003835-95.2021.8.16.0209 [Processo relacionado (Astrea)];
+0000961-75.2021.8.16.0068 -> 0000505-91.2022.8.16.0068 [Embargos de Terceiro] | gestor
+ve=2 gestor ins/upd=1 del=1 CNJ curto barrado | colab ve=1 colab ins/del propria=1 colab
+em alheia barrado | cedente ve=0 cedente insere barrado`. Depois conferido que nada
+persistiu (tabela inexistente, papel e dono originais).
+
+**Ordem:** aplicar 01 → 02 → merge. Merge antes: a ficha mostra "migração 20261006_01
+pendente" na seção Processos vinculados; lista, busca e cron seguem como antes.
