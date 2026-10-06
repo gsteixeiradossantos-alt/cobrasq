@@ -427,6 +427,13 @@ carregadas de propósito). E o aviso de corte tem que dizer sobre o que ele caiu
 **Corrigido:** `_finLancCascataCarregar` manda a busca ao servidor e recarrega a
 cada digitação; o aviso passa a sugerir refinar a busca quando há termo.
 
+**Ampliado em 06/10/2026:** a busca também acha o **credor**. Buscar "Oxipar" no
+período 01/09–30/09/2026 não trazia os alvarás da carteira dela (descrição com o
+nome do devedor). Agora `_finLancBuscaPorCredor` acha os clientes por nome/fantasia
+e traz, no servidor e dentro do período, os lançamentos ligados a eles por
+`credor_id`, `cedente_id`, `cobranca_id → cobrancas.cliente_id` e
+`fin_operacao.credor_id` — os mesmos caminhos de `_finLancCedente`. Teste: F-59.
+
 ## R-22 · Identificador `@lid` do WhatsApp no lugar do telefone (a conversa respondida continua "pendente")
 
 **O que acontece.** O WhatsApp identifica parte das conversas por

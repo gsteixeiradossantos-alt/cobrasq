@@ -34249,6 +34249,34 @@ function _finLancSit(l){
 // do corte e a tela não dizia que faltava nada além do aviso genérico. Com o
 // filtro no banco, a busca varre o período inteiro e o teto passa a valer sobre
 // o resultado dela.
+// Lançamentos do período cujo credor casa com o termo da busca (nome ou fantasia, sem
+// acento). Duas leituras em vez de .or(): a regex sem acento pode conter vírgula.
+async function _finLancBuscaPorCredor(sb, termo, consultaBase, ordenaLimita, temCedente, emBlocos, lerBlocos){
+  const re = _finBuscaRegexSemAcento(termo);
+  const lerCredores = async col => {
+    let r = await sb.from('clientes').select('id').filter(col, 'imatch', re).limit(50);
+    if(r.error) r = await sb.from('clientes').select('id').ilike(col, '%'+termo+'%').limit(50);
+    return r.data||[];
+  };
+  const [porNome, porFantasia] = await Promise.all([lerCredores('nome'), lerCredores('nome_fantasia')]);
+  const credIds = [...new Set([...porNome, ...porFantasia].map(c => c.id))];
+  if(!credIds.length) return [];
+  const [cobs, ops] = await Promise.all([
+    lerBlocos(emBlocos(credIds), b => sb.from('cobrancas').select('id').in('cliente_id', b)),
+    lerBlocos(emBlocos(credIds), b => sb.from('fin_operacao').select('lancamento_receita_id,lancamento_despesa_id').in('credor_id', b).limit(4000)),
+  ]);
+  const cobIds = [...new Set(cobs.map(c => c.id))];
+  const lancIds = [...new Set(ops.flatMap(o => [o.lancamento_receita_id, o.lancamento_despesa_id]).filter(Boolean))];
+  const leitura = c => ordenaLimita(c).then(r => r.data||[]).catch(() => []);
+  const partes = await Promise.all([
+    leitura(consultaBase().in('credor_id', credIds)),
+    temCedente ? leitura(consultaBase().in('cedente_id', credIds)) : Promise.resolve([]),
+    ...emBlocos(cobIds).map(b => leitura(consultaBase().in('cobranca_id', b))),
+    ...emBlocos(lancIds).map(b => leitura(consultaBase().in('id', b))),
+  ]);
+  return partes.flat();
+}
+
 async function _finLancCascataCarregar(){
   const sb = getSupabase();
   const { ini, fim } = _finCascataPeriodoBounds();
@@ -34274,6 +34302,11 @@ async function _finLancCascataCarregar(){
   const pOpsJanela = sb.from('fin_operacao').select(OPSEL)
     .gte('recebido_em', ini).lte('recebido_em', fim).limit(2000).then(r => r.data||[]).catch(()=>[]);
 
+  // Blocos de 300 ids, em paralelo: um `.in()` com as 800 linhas da página passaria de
+  // 25 KB de URL. Cada bloco cobre ids disjuntos, então a junção é só concatenar.
+  const emBlocos = arr => { const o = []; for(let i = 0; i < arr.length; i += 300) o.push(arr.slice(i, i+300)); return o; };
+  const lerBlocos = (blocos, consulta) => Promise.all(blocos.map(b => consulta(b).then(r=>r.data||[]).catch(()=>[]))).then(partes => partes.flat());
+
   // ── Etapa 1: as linhas ──────────────────────────────────────────────────────
   const baseSel = 'id,descricao,data_competencia,data_vencimento,data_pagamento,valor,valor_pago,tipo_movimento,status,conciliado,conta_id,cobranca_id,credor_id,contato_id,numero_parcela,total_parcelas,judicial_liberado_em,fin_conta(descricao,banco_nome),fin_contato(nome)';
   const extra = (await _finTemColunasCascata()) ? ',cedente_id,capital,meu_total,amortizado,repasse_status' : '';
@@ -34289,16 +34322,30 @@ async function _finLancCascataCarregar(){
     console.warn('busca sem acento recusada pelo servidor; usando ilike:', error.message || error);
     ({ data } = await ordenaLimita(consultaBase().ilike('descricao', '%'+termo+'%')));
   }
-  const rows = data||[];
+  let rows = data||[];
+  // A busca também acha o CREDOR: "Oxipar" traz os lançamentos da carteira dele no período
+  // inteiro, mesmo quando o nome não está na descrição (alvará com o nome do devedor,
+  // repasse). Os mesmos caminhos que _finLancCedente usa para mostrar o credor na linha:
+  // credor_id, cedente_id, cobranca_id → cobrancas.cliente_id e fin_operacao.credor_id.
+  // Tudo no servidor e antes do limite (R-21); se falhar, fica só a busca na descrição.
+  if(termo){
+    try{
+      const porCredor = await _finLancBuscaPorCredor(sb, termo, consultaBase, ordenaLimita, !!extra, emBlocos, lerBlocos);
+      if(porCredor.length){
+        const porId = new Map(rows.map(r => [r.id, r]));
+        for(const r of porCredor) if(!porId.has(r.id)) porId.set(r.id, r);
+        const asc = _finLancOrdServidorAsc();
+        rows = [...porId.values()]
+          .sort((a,b) => { const x = String(a.data_competencia||''), y = String(b.data_competencia||''); return x===y ? 0 : ((x<y) === asc ? -1 : 1); })
+          .slice(0, FIN_LANC_LIMITE);
+      }
+    }catch(e){ console.warn('busca por credor falhou; ficou só a descrição:', e?.message || e); }
+  }
 
   // ── Etapa 2: tudo que depende só das linhas, junto ───────────────────────────
   const cedIds=[...new Set(rows.map(r=>r.cedente_id).filter(Boolean))];
   const ids = rows.map(r=>r.id);
   const desp = rows.filter(r => r.tipo_movimento === 0).map(r => r.id);
-  // Blocos de 300 ids, em paralelo: um `.in()` com as 800 linhas da página passaria de
-  // 25 KB de URL. Cada bloco cobre ids disjuntos, então a junção é só concatenar.
-  const emBlocos = arr => { const o = []; for(let i = 0; i < arr.length; i += 300) o.push(arr.slice(i, i+300)); return o; };
-  const lerBlocos = (blocos, consulta) => Promise.all(blocos.map(b => consulta(b).then(r=>r.data||[]).catch(()=>[]))).then(partes => partes.flat());
   // Cobranças de todas as linhas com cobrança (superconjunto do que a carteira precisa —
   // assim a leitura não espera as operações para saber quais linhas ficaram sem elas).
   const cobIdsTodas = [...new Set(rows.map(r=>r.cobranca_id).filter(Boolean))];
@@ -34631,7 +34678,7 @@ function _finLancCascataRender(){
         <div class="finmv-right">
           <div class="finmv-busca">
             <span class="lupa">&#8981;</span>
-            <input class="finmv-inp" id="finmv-busca" type="search" value="${escHtml(s.busca)}" placeholder="Buscar nome, parcela, anotação…" oninput="_finLancCascataBusca(this.value)">
+            <input class="finmv-inp" id="finmv-busca" type="search" value="${escHtml(s.busca)}" placeholder="Buscar nome, credor, parcela, anotação…" oninput="_finLancCascataBusca(this.value)">
           </div>
           ${_finPeriodoNavHtml({ formato:'datas', align:'right' })}
           <div style="position:relative;">
