@@ -119,7 +119,7 @@ const SIS = { mode: 'sisbajud', valorBloqueado: 1234.56, levExequente: 1000, lev
     const c2 = texto(clausula(sem, 'Da forma de pagamento'));
     assert.ok(/^ O pagamento do valor total da dívida, ou seja, de R\$ 1\.500,00 \(mil e quinhentos reais\) , será realizado mediante o pagamento de 10 \(dez\) parcelas mensais e sucessivas no valor de R\$ 150,00 \(cento e cinquenta reais\) cada, sendo que a primeira parcela será considerada vencida em 10 de novembro de 2026 , prorrogando-se o vencimento para o primeiro dia útil seguinte caso recaia em dia não útil\. /.test(c2), c2);
     const r = texto(clausula(sem, 'Requerimentos')).trim();
-    assert.strictEqual(r, 'Diante do exposto, as partes requerem a homologação do presente acordo por sentença, para que produza seus efeitos legais, bem como, se houver audiência designada, o seu cancelamento, a retirada do nome da parte executada junto aos cadastros de inadimplentes incluídos por meio do Sistema SerasaJud e, ao final, comprovada a quitação integral, a extinção do processo e a liberação das constrições, se existentes, além das providências de baixa de restrições, na forma ajustada.');
+    assert.strictEqual(r, 'Diante do exposto, as partes requerem a homologação do presente acordo por sentença, para que produza seus efeitos legais, bem como, se houver audiência designada, o seu cancelamento, a retirada do nome da parte executada junto aos cadastros de inadimplentes incluídos por meio do sistema Serasajud e, ao final, comprovada a quitação integral, a extinção do processo e a liberação das constrições, se existentes, além das providências de baixa de restrições, na forma ajustada.');
     assert.ok(!/Sisbajud/.test(texto(sem)));
   });
 
@@ -133,6 +133,12 @@ const SIS = { mode: 'sisbajud', valorBloqueado: 1234.56, levExequente: 1000, lev
     const t = texto(await E.montarTermoJudicial(d));
     assert.ok(/em favor da parte autora, do valor bloqueado/.test(t) && /para a conta da parte autora indicada na cláusula 4/.test(t) && /em favor da parte requerida, para a conta/.test(t));
     assert.ok(!/exequente|executad/.test(t));
+  });
+
+  await checa('Serasajud em itálico e aspas curvas na cláusula 3 do termo judicial', () => {
+    assert.ok(/por meio do sistema <em>Serasajud<\/em>/.test(com));
+    assert.ok(!/Sistema SerasaJud/.test(com));
+    assert.ok(/alínea “a”\), incidirão/.test(com) && /na forma da alínea “c”:/.test(com));
   });
 
   await checa('texto novo: sem "nº", sem "respeitosamente", sem aspas retas', () => {
