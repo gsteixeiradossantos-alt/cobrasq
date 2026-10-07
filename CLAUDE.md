@@ -55,8 +55,11 @@ teve a `crm-cobrasq-auth` removida no merge). Não é preciso `sso_token` entre 
 ## Dual-write blob + relacional (armadilha nº 1)
 O app ainda **lê o blob** (`DB.*`) e escreve **blob + tabelas relacionais**. Consequências:
 - **Dono do caso vive em dois lugares**: `assigned_to` (relacional, UUID) e nome no
-  blob/metadata. Transferência tem que sincronizar **ambos** — usar
-  `scripts/transferir-responsavel.sql`.
+  blob/metadata. Transferência tem que sincronizar **ambos**. Caminho de tela: no caso,
+  "Reatribuir cobrança" (`reatribuirCobranca` no `index.html`, grava
+  `cobrancas.assigned_to`; só o proprietário pode, pela RLS da migração
+  `20260928_07`). Não existe `scripts/transferir-responsavel.sql` (nunca esteve no
+  histórico; citado aqui por engano até 01/10/2026).
 - `devedores` e `cobrancas` compartilham o **mesmo id** só nos casos legado (1:1). O
   caminho atual e correto pra achar o devedor de uma cobrança é `cobrancas.id →
   cobranca_partes.cobranca_id (principal=true) → devedores.id` — é o que a própria view
