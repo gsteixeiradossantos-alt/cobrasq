@@ -139,6 +139,17 @@ const SIS = { mode: 'sisbajud', valorBloqueado: 1234.56, levExequente: 1000, lev
     assert.ok(/por meio do sistema <em>Serasajud<\/em>/.test(com));
     assert.ok(!/Sistema SerasaJud/.test(com));
     assert.ok(/alínea “a”\), incidirão/.test(com) && /na forma da alínea “c”:/.test(com));
+    assert.ok(/Na hipótese da alínea “b”/.test(com));
+  });
+
+  await checa('templates: nenhum "Sistema SerasaJud" nem alínea com aspas retas (judicial, quitação, extrajudicial)', () => {
+    for (const f of ['acordo-judicial.html', 'acordo-quitacao-clausulas.html', 'acordo-extrajudicial.html']) {
+      const src = fs.readFileSync(path.join(__dirname, '..', 'templates', f), 'utf8');
+      assert.ok(!/Sistema SerasaJud/.test(src), f + ': Sistema SerasaJud');
+      assert.ok(!/alínea "/.test(src), f + ': alínea com aspas retas');
+    }
+    const q = fs.readFileSync(path.join(__dirname, '..', 'templates', 'acordo-quitacao-clausulas.html'), 'utf8');
+    assert.ok(/por meio do sistema <em>Serasajud<\/em>/.test(q));
   });
 
   await checa('texto novo: sem "nº", sem "respeitosamente", sem aspas retas', () => {
