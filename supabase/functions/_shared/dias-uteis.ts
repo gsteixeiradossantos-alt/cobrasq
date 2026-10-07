@@ -130,3 +130,10 @@ export function reagendarAntecipado(
   const quando = et.etapa === 'aguardar' ? noveHorasBRT(et.proximo) : agoraIso;
   return !s.prox || Date.parse(quando) < Date.parse(s.prox) ? quando : null;
 }
+
+// O Asaas ainda considera o boleto A VENCER? Então a Bia não cobra como atrasado,
+// mesmo que o nosso calendário (só feriado nacional) diga que venceu — feriado
+// municipal e outras prorrogações quem conhece é o Asaas. null = não consultou.
+export function aindaAVencerNoAsaas(statusAsaas: string | null | undefined): boolean {
+  return statusAsaas === 'PENDING';
+}

@@ -4,6 +4,7 @@
 // útil anterior e o dia útil posterior (que passa a ser o vencimento).
 // Caso real: Elisandra (vencimento mudado de 30/09 para 10/10 no Asaas) levou o
 // aviso "vence em 10 dias" na data antiga — agora só reagenda.
+const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
 
@@ -136,6 +137,17 @@ const FN = path.join(__dirname, '..', 'supabase', 'functions');
   // pausada/adiada/para_acao: não mexe; novo vencimento já passado: não mexe
   assert.strictEqual(U.reagendarAntecipado({ ...ag0, status: 'adiada' }, '2026-10-15', '2026-10-08', 3, AG), null);
   assert.strictEqual(U.reagendarAntecipado(ag0, '2026-10-01', '2026-10-08', 3, AG), null);
+
+  // quem diz se venceu é o Asaas: PENDING segura a cobrança de atraso
+  assert.strictEqual(U.aindaAVencerNoAsaas('PENDING'), true);
+  assert.strictEqual(U.aindaAVencerNoAsaas('OVERDUE'), false);
+  assert.strictEqual(U.aindaAVencerNoAsaas(null), false); // consulta falhou: segue o calendário
+
+  // o worker consulta essa trava ANTES de cobrar atraso (depois do bloco pré-vencimento)
+  const W = fs.readFileSync(path.join(__dirname, '../supabase/functions/bia-cobranca/index.ts'), 'utf8');
+  const iTrava = W.indexOf('if (aindaAVencerNoAsaas(statusAsaas))');
+  assert.ok(iTrava > W.indexOf("pre.etapa !== 'vencido'") && iTrava < W.indexOf('marcar para ação'), 'trava do Asaas fora do lugar');
+  assert.ok(/statusAsaas = st;/.test(W), 'statusAsaas não é lido do Asaas');
 
   console.log('F-57 ok');
 })().catch((e) => { console.error(e); process.exit(1); });

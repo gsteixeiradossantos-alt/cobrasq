@@ -10,7 +10,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { MODELO } from '../_shared/bia-system.ts';
 import { resolverJid } from '../_shared/telefone-jid.ts';
-import { ehDiaUtil, etapaPreVencimento, noveHorasBRT, somarDiasUteis, vencimentoEfetivo } from '../_shared/dias-uteis.ts';
+import { aindaAVencerNoAsaas, ehDiaUtil, etapaPreVencimento, noveHorasBRT, somarDiasUteis, vencimentoEfetivo } from '../_shared/dias-uteis.ts';
 import { decidirPrazoFinal, PREFIXO_PRAZO, prazoDoLog, textosAtraso, textosPreVencimento } from '../_shared/bia-avisos.ts';
 
 const SIG = '*Bia • COBRASQ*';
@@ -377,12 +377,14 @@ Deno.serve(async (req) => {
     }
 
     // confere no Asaas se já pagou / deletado / cancelado → para de cobrar
+    let statusAsaas: string | null = null;
     let pago = false, cancelado = false, venc = c.venc_atual, url = c.invoice_url, valorAsaas: number | null = null;
     try {
       const r = await fetch(`${aBase}/payments/${c.asaas_payment_id}`, { headers: aHead });
       if (r.ok) {
         const p = await r.json();
         const st = String(p.status || '');
+        statusAsaas = st;
         if (['RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH'].includes(st)) pago = true;
         if (['CANCELLED', 'REFUNDED', 'DELETED'].includes(st) || p.deleted === true) cancelado = true;
         venc = p.dueDate || venc; url = p.invoiceUrl || url;
@@ -450,6 +452,20 @@ Deno.serve(async (req) => {
       }).eq('asaas_payment_id', c.asaas_payment_id);
       await sb.from('bia_cobranca_log').insert({ asaas_payment_id: c.asaas_payment_id, telefone: tel, lembrete_num: 0, texto: `AVISO PRE-VENCIMENTO (${pre.etapa}): ` + blocosAviso.join('\n\n') });
       enviadas++; continue;
+    }
+
+    // Quem diz se o boleto venceu é o Asaas, não o nosso calendário. O nosso só
+    // conhece feriado NACIONAL; num feriado municipal (ou em qualquer outra regra
+    // de prorrogação do Asaas) a Bia cobrava como atrasado um boleto que o Asaas
+    // ainda mostrava "a vencer" — ela falava A e o Asaas, B (01/10/2026). Asaas
+    // ainda PENDING: não manda nada e confere de novo no próximo dia útil. Se a
+    // consulta ao Asaas falhou (statusAsaas null), segue pelo calendário.
+    if (aindaAVencerNoAsaas(statusAsaas)) {
+      await sb.from('bia_cobranca').update({
+        venc_atual: vencIso || c.venc_atual, proximo_lembrete_em: noveHorasBRT(somarDiasUteis(hoje, 1)),
+        observacao: `Asaas ainda mostra a vencer em ${hoje}; cobrança de atraso aguarda o Asaas`, updated_at: agoraIso,
+      }).eq('asaas_payment_id', c.asaas_payment_id);
+      puladas++; continue;
     }
 
     // marcar para ação: >= diaMax dias vencido sem NENHUMA resposta, ou 2+ promessas quebradas
