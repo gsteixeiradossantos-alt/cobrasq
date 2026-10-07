@@ -25,7 +25,12 @@ assert.ok(pj.includes('34.626.848/0001-42'), pj);
 assert.ok(E.qualifDevedor({ tipo: 'PF', genero: 'F', documento: '024.335.559-90' }).includes('024.335.559-90'));
 assert.ok(!/undefined|null/.test(E.qualifDevedor({ tipo: 'PF', genero: 'F' })));
 
+// CEP só em dígitos sai com hífen (30/09/2026)
+const comCep = E.qualifDevedor({ tipo: 'PF', genero: 'M', documento: '02433555990', endereco: { rua: 'Linha Colônia Nova', cep: '85660000' } });
+assert.ok(comCep.includes('CEP. 85660-000'), comCep);
+assert.ok(E.qualifDevedor({ tipo: 'PF', genero: 'M', endereco: { cep: '85660-000' } }).includes('CEP. 85660-000'));
+
 const cr = E.qualifCredor({ documento: '34626848000142' });
 assert.ok(cr.includes('34.626.848/0001-42'), cr);
 
-console.log('f55 ok — CPF/CNPJ formatado na qualificação dos termos');
+console.log('f55 ok — CPF/CNPJ e CEP formatados na qualificação dos termos');
