@@ -112,7 +112,7 @@ const dados = {
     assert.ok(/enviados pela parte exequente à parte executada/.test(tJ));
   });
   checa('judicial: cláusula 3 remete à cláusula 5 (penal) e a 4 continua o slot variável (Sisbajud)', () => {
-    assert.ok(/\(cláusula 5, alínea "a"\)/.test(tJ));
+    assert.ok(/\(cláusula 5, alínea “a”\)/.test(tJ));
     assert.ok(/Sisbajud/.test(tJ) && /levantada em favor da parte exequente/.test(tJ));
   });
 
