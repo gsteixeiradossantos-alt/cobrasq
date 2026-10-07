@@ -49,7 +49,7 @@ const dados = {
     { nome: 'João de Souza', tipo: 'PF', genero: 'M', documento: '111.111.111-11', endereco: { cidade: 'Dois Vizinhos', uf: 'PR' } },
   ],
   acordo: { total: 6000, parcelas: 12, valorParcela: 500, vencimento: '2026-10-10', multa: 10, penal: 50, faixas: [{ qtd: 12, valor: 500 }] },
-  judicial: { numeroProcesso: '0001220-30.2024.8.16.0209', comarca: 'Dois Vizinhos', vara: 'Juizado Especial Cível', clausula4: { mode: 'sisbajud', total: 1000, levExequente: 1000 } },
+  judicial: { numeroProcesso: '0001220-30.2024.8.16.0209', comarca: 'Dois Vizinhos', vara: 'Juizado Especial Cível', clausula4: { mode: 'sisbajud', total: 1000, levExequente: 1000, totalAcordo: 7000 } },
 };
 
 (async function () {
