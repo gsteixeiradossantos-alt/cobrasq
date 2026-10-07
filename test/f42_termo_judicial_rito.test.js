@@ -51,7 +51,7 @@ function dados(rito) {
     advogadoExec: { nome: 'Dra. Ana Advogada', oab: 'PR 12.345' },
     acordo: { total: 780, parcelas: 5, valorParcela: 156, vencimento: '2026-10-10', multa: 10, penal: 50, faixas: [{ qtd: 5, valor: 156 }] },
     judicial: Object.assign({ numeroProcesso: '0001220-30.2024.8.16.0209', comarca: 'Dois Vizinhos', foro: 'jec',
-      clausula4: { mode: 'sisbajud', valorBloqueado: 1000, levExequente: 700, levExecutado: 300, contaExecutado: { pix: '000.000.000-00', titular: 'Maria da Silva' } } }, rito ? { rito } : {}),
+      clausula4: { mode: 'sisbajud', valorBloqueado: 1000, levExequente: 700, levExecutado: 300, totalAcordo: 1480, contaExecutado: { pix: '000.000.000-00', titular: 'Maria da Silva' } } }, rito ? { rito } : {}),
   };
 }
 

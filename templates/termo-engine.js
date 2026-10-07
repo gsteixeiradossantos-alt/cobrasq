@@ -469,7 +469,8 @@
    * dados.judicial = { numeroProcesso, comarca, foro:'jec'|'vara',
  *   rito:'execucao'|'conhecimento' (default execucao — ver papeisRito),
    *   clausula4:{ mode:''|'desistencia'|'sisbajud',
-   *               procPrincipal, proc2, comarca2, valorBloqueado } }
+   *               procPrincipal, proc2, comarca2, valorBloqueado,
+   *               levExequente, levExecutado, totalAcordo, contaExequente, contaExecutado } }
    * ======================================================================== */
   function enderecamentoJudicial(j) {
     const comarca = (j && j.comarca ? String(j.comarca).trim() : "") || "____";
@@ -527,7 +528,7 @@
       const itens = [];
       if (vExeq) itens.push("a quantia de <strong>" + vExeq + "</strong> será levantada em favor da <strong>" + PC + "</strong>, a título de amortização do débito ora reconhecido, mediante expedição do competente alvará ou transferência para a conta adiante indicada");
       if (vExec) itens.push("a quantia de <strong>" + vExec + "</strong> será liberada em favor da <strong>" + PD + "</strong>" + (contaExec ? ", para a conta bancária adiante indicada" : ", mediante manifestação posterior nos autos, na qual indicará os dados bancários de sua titularidade"));
-      let corpo = "<p>A " + PD + " informou que houve o bloqueio do valor de <strong>" + total + "</strong>, por meio do Sistema Sisbajud nestes autos.</p>";
+      let corpo = "<p>A " + PD + " informou que houve o bloqueio do valor de <strong>" + total + "</strong>, por meio do sistema <em>Sisbajud</em>, nestes autos.</p>";
       if (itens.length) {
         const rot = ["i", "ii"];
         corpo += "<p>As partes convencionam a seguinte destinação do valor bloqueado: " +
@@ -538,8 +539,9 @@
       }
       corpo += "<p class=\"dados-conta\"><strong>Dados bancários para levantamento da " + PC + ":</strong> " + contaEx + ".</p>";
       if (contaExec) corpo += "<p class=\"dados-conta\"><strong>Dados bancários para levantamento da " + PD + ":</strong> " + contaExec + ".</p>";
-      corpo += "<p>Fica pactuado que, caso posteriormente seja constatado bloqueio de valores realizado em data anterior à assinatura deste acordo, em montante superior ao descrito nesta cláusula, as partes deverão protocolar contrato aditivo no prazo de 5 (cinco) dias, a fim de definir a destinação do valor remanescente.</p>";
-      return { titulo: "Do Sisbajud e destinação dos valores bloqueados", corpo: corpo };
+      // Bloqueio maior OU menor que o informado → aditivo (modelo do 0003337-57.2025.8.16.0209, 07/10/2026).
+      corpo += "<p>Fica pactuado que, caso o valor efetivamente bloqueado por meio do sistema <em>Sisbajud</em>, em data anterior à assinatura deste acordo, seja maior ou menor que o descrito nesta cláusula, as partes protocolarão termo aditivo no prazo de 5 (cinco) dias, ajustando os valores e a forma de pagamento.</p>";
+      return { titulo: "Do <em>Sisbajud</em> e destinação dos valores bloqueados", corpo: corpo };
     }
     if (mode === "desistencia") {
       const principal = escHtml(c4.procPrincipal || dados.judicial.numeroProcesso || "____");
@@ -554,6 +556,75 @@
       };
     }
     return null;
+  }
+
+  /* Sisbajud com valor levantado pela parte credora (07/10/2026, modelo do
+   * 0003337-57.2025.8.16.0209): a cláusula 2 passa a ter alíneas — a) o valor do
+   * Sisbajud, levantado para a conta da cláusula 4; b) o saldo, nas faixas do
+   * sistema — e os requerimentos finais pedem a transferência/alvará. As faixas
+   * (ac.faixas) são só o SALDO: é o que vira boleto em api/_emitir-acordo.js.
+   * O total do acordo vem digitado (clausula4.totalAcordo) e tem de fechar com
+   * a) + b); se não fechar, lança erro — o termo não sai com conta errada.
+   * Devolve null fora desse caso (cláusula 2 e requerimentos ficam como sempre). */
+  function sisbajudPagamento(dados) {
+    const j = dados.judicial || {};
+    const c4 = j.clausula4 || {};
+    const lev = Number(c4.levExequente) || 0;
+    // quitação já paga não tem cláusula 2 de parcelas nem slot da cláusula 4
+    if (dados.tipo === "quitacao" || c4.mode !== "sisbajud" || !(lev > 0)) return null;
+    const ac = dados.acordo || {};
+    const faixas = Array.isArray(ac.faixas) ? ac.faixas.filter(function (f) { return f && f.qtd > 0 && f.valor > 0; }) : [];
+    const saldo = Math.round(faixas.reduce(function (s, f) { return s + f.qtd * f.valor; }, 0) * 100) / 100;
+    const nParc = faixas.reduce(function (s, f) { return s + f.qtd; }, 0);
+    const total = Number(c4.totalAcordo) || 0;
+    const brl = function (v) { return "R$ " + Number(v).toFixed(2).replace(".", ",").replace(/\B(?=(\d{3})+(?!\d))/g, "."); };
+    if (!(total > 0)) throw new Error("Sisbajud: informe o valor total do acordo (Sisbajud + parcelas).");
+    if (!(nParc > 0)) throw new Error("Sisbajud: informe as parcelas do saldo.");
+    const dif = Math.round((lev + saldo - total) * 100) / 100;
+    if (Math.abs(dif) >= 0.01) {
+      throw new Error("Sisbajud: a conta não fecha — " + brl(lev) + " (Sisbajud) + " + brl(saldo) +
+        " (parcelas) = " + brl(lev + saldo) + ", mas o total do acordo é " + brl(total) +
+        " (diferença de " + brl(Math.abs(dif)) + "). Ajuste as parcelas ou o total.");
+    }
+    // último vencimento: mesma conta de _tajFecharAcordo (index.html) — mês a mês a partir do 1º
+    let vencUlt = "";
+    if (ac.vencimento) {
+      const p = String(ac.vencimento).split("-").map(Number);
+      const dt = new Date(p[0], p[1] - 1 + (nParc - 1), p[2]);
+      vencUlt = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+    }
+    return { lev: lev, saldo: saldo, total: total, nParc: nParc, vencUlt: vencUlt,
+      levExec: Number(c4.levExecutado) || 0, contaExec: !!((c4.contaExecutado || {}).conta || (c4.contaExecutado || {}).pix) };
+  }
+
+  // Parágrafo(s) da cláusula 2 do termo judicial. Sem Sisbajud: o texto de sempre.
+  function paragrafoPagamentoJudicial(dados, sp) {
+    const ac = dados.acordo || {};
+    const fim = ", prorrogando-se o vencimento para o primeiro dia útil seguinte caso recaia em dia não útil.";
+    if (!sp) {
+      return "<p>O pagamento do valor total da dívida, ou seja, de <strong>" + valorCompleto(ac.total) +
+        "</strong>, será realizado " + frasePagamento(ac) + fim + "</p>";
+    }
+    const pj = papeisRito(ritoJudicial(dados.judicial));
+    const ult = sp.nParc > 1 && sp.vencUlt ? ", e a última em <strong>" + dataExtenso(sp.vencUlt) + "</strong>" : "";
+    return "<p>O pagamento do valor total da dívida, ou seja, de <strong>" + valorCompleto(sp.total) +
+      "</strong>, será realizado da seguinte forma:</p>" +
+      "<p>a) <strong>" + valorCompleto(sp.lev) + "</strong>, mediante o levantamento, em favor da " + pj.parteCredor +
+      ", do valor bloqueado por meio do sistema <em>Sisbajud</em> nestes autos, para a conta indicada na cláusula 4; e</p>" +
+      "<p>b) o saldo de <strong>" + valorCompleto(sp.saldo) + "</strong>, " + frasePagamento(ac) + ult + fim + "</p>";
+  }
+
+  // Pedido de transferência/alvará nos requerimentos finais (vazio sem Sisbajud).
+  function requerimentoSisbajud(dados, sp) {
+    if (!sp) return "";
+    const pj = papeisRito(ritoJudicial(dados.judicial));
+    let out = "a transferência do valor de <strong>" + valorCompleto(sp.lev) + "</strong>, bloqueado por meio do sistema <em>Sisbajud</em>, " +
+      "para a conta da " + pj.parteCredor + " indicada na cláusula 4, ou a expedição do respectivo alvará em seu favor, ";
+    if (sp.levExec > 0) {
+      out += "a liberação do valor de <strong>" + valorCompleto(sp.levExec) + "</strong> em favor da " + pj.parteDevedor +
+        (sp.contaExec ? ", para a conta indicada na mesma cláusula, " : ", na conta que vier a indicar nos autos, ");
+    }
+    return out;
   }
 
   function contatoReJudicial(dados) {
@@ -578,9 +649,15 @@
   }
 
   function placeholdersJudicial(dados) {
+    const sp = sisbajudPagamento(dados);
+    // com Sisbajud, o "valor total da dívida" é o total digitado (Sisbajud + saldo),
+    // não a soma das faixas — vale para a cláusula 1 e a 2
+    if (sp) dados = Object.assign({}, dados, { acordo: Object.assign({}, dados.acordo, { total: sp.total }) });
     const base = placeholders(dados);
     const j = dados.judicial || {};
     const c4 = clausula4Judicial(dados);
+    base.paragrafoPagamento = paragrafoPagamentoJudicial(dados, sp);
+    base.requerimentoSisbajud = requerimentoSisbajud(dados, sp);
     base.enderecamento = enderecamentoJudicial(j);
     base.numeroProcesso = escAttr(j.numeroProcesso || "");
     base.clausula4Titulo = c4 ? c4.titulo : "";
@@ -625,7 +702,7 @@
       templateHtml = templateHtml.replace(/<!--c4-->[\s\S]*?<!--\/c4-->\s*/, "");
     }
     templateHtml = renumerarClausulas(templateHtml);
-    const rawHtml = { fraseReconhecimentoDivida: 1, clausula4Corpo: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1, frasePagamento: 1, fraseEntregaBoletos: 1, credorQualificacao: 1, vistosPageCss: 1 };
+    const rawHtml = { fraseReconhecimentoDivida: 1, clausula4Titulo: 1, clausula4Corpo: 1, paragrafoPagamento: 1, requerimentoSisbajud: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1, frasePagamento: 1, fraseEntregaBoletos: 1, credorQualificacao: 1, vistosPageCss: 1 };
     return templateHtml.replace(/\{\{(\w+)\}\}/g, function (m, k) {
       if (!Object.prototype.hasOwnProperty.call(map, k)) return m;
       return rawHtml[k] ? String(map[k] == null ? "" : map[k]) : escAttr(map[k]);
@@ -754,7 +831,7 @@
     preencher, carregarTemplate, montarTermoExtrajudicial,
     credorEhCobrasq, timbreDe, carregarTimbreTA, aplicarTimbreTA,
     ritoJudicial, papeisRito,
-    enderecamentoJudicial, clausula4Judicial, contatoReJudicial, contaFrase, assinaturaAdvExec,
+    enderecamentoJudicial, clausula4Judicial, sisbajudPagamento, paragrafoPagamentoJudicial, requerimentoSisbajud, contatoReJudicial, contaFrase, assinaturaAdvExec,
     placeholdersJudicial, preencherJudicial, carregarTemplateJudicial, montarTermoJudicial,
     fraseReconhecimento, frasePagamentoRealizado, placeholdersQuitacao, aplicarClausulasQuitacao,
     preencherQuitacao, carregarClausulasQuitacao, montarTermoQuitacao
