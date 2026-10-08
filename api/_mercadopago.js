@@ -56,9 +56,9 @@ module.exports = async function handler(req, res) {
       currency_id: 'BRL',
       unit_price: valor,
     }],
-    // Mantém cartão habilitado; limita o parcelamento a 12x.
+    // Mantém cartão habilitado; até 18x (parcelado cliente: juros da operadora).
     payment_methods: {
-      installments: 12,
+      installments: 18,
     },
   };
   if (externalRef) pref.external_reference = externalRef;
