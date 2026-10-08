@@ -34,7 +34,7 @@ const JANELA_HORAS = 48;
 // Assinatura fixa no INÍCIO de TODA mensagem que a Bia envia ao cliente,
 // em negrito (negrito do WhatsApp = *texto*).
 const ASSINATURA = '*Bia • COBRASQ*';
-const ASSINATURA_CARLOS = '*Dr. Gustavo • COBRASQ*';
+const ASSINATURA_CARLOS = '*Gustavo • COBRASQ*';
 const assinar = (msg: string) => `${ASSINATURA}\n${String(msg || '').trimStart()}`;
 
 // Envia em BLOCOS: quebra o texto na LINHA EM BRANCO (\n\n) e manda cada parte como uma
