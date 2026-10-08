@@ -854,7 +854,7 @@ Deno.serve(async (req) => {
           if (parsedC.resposta) await mandarCarlos(parsedC.resposta);
           await sb.from('cobrancas').update({
             acordo_final: { forma, parcelas, valor: valorParc, total, origem: 'carlos' },
-            passo_atual: 'Aguardando autorização Dr. Gustavo',
+            passo_atual: 'Aguardando autorização Gustavo',
             updated_at: nowIsoC,
           }).eq('id', casoId);
           await sb.from('whatsapp_bia_log').update({ resposta: parsedC.resposta || null, acao: 'proposta_aceita' }).eq('id', logId);
