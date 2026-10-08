@@ -15,7 +15,7 @@
  *
  * Este teste monta os dois termos (fetch simulado) e trava: a cláusula nova está lá,
  * a devolução não é mais na primeira parcela, os termos das partes seguem o modo e a
- * cláusula 10 do extrajudicial remete à devolução.
+ * cláusula 11 do extrajudicial remete à devolução.
  *
  * Como rodar:
  *   node test/f41_termo_custodia_titulos.test.js
@@ -100,8 +100,8 @@ const dados = {
     assert.ok(/\(cláusula 04\)/.test(c5));
     assert.ok(/parte devedora/.test(c5) && /credora/.test(c5) && !/exequente|executad/.test(c5));
   });
-  checa('extrajudicial cl. 10: quitação com devolução dos títulos na forma da cláusula 05', () => {
-    assert.ok(/com a devolução dos títulos na forma da cláusula 05/.test(clausula(extra, '10')));
+  checa('extrajudicial cl. 11: quitação com devolução dos títulos na forma da cláusula 05', () => {
+    assert.ok(/com a devolução dos títulos na forma da cláusula 05/.test(clausula(extra, '11')));
   });
 
   checa('judicial cl. 8: sem caput de novação (a cláusula 6 já a afasta); §§ 1º a 4º; remete ao vencimento antecipado da cláusula 5', () => {
