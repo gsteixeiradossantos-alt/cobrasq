@@ -15760,6 +15760,7 @@ function acordoHtml(ac, ai, devId){
               <input type="checkbox" ${p.pago?'checked':''} onchange="toggleParcela('${devId}','${ac.id}',${pi})" style="accent-color:var(--navy);">
               <span style="font-size:13px;color:var(--text-2);">Parcela ${pi+1} — ${p.vencimento||''}</span>
               ${p.meio==='pix'?`<span title="Faixa via PIX: não vai ao Asaas, baixa manual aqui" style="font-size:10px;font-weight:700;letter-spacing:.04em;padding:1px 6px;border-radius:4px;background:var(--active-bg);color:var(--navy);">PIX</span>`:''}
+              ${p.meio==='cartao'?`<span title="Faixa no cartão (link Mercado Pago): não vai ao Asaas, baixa manual aqui" style="font-size:10px;font-weight:700;letter-spacing:.04em;padding:1px 6px;border-radius:4px;background:var(--active-bg);color:var(--navy);">CARTÃO</span>`:''}
             </div>
             <span style="display:flex;align-items:center;gap:6px;">
               <span style="font-size:13px;font-weight:600;${p.pago?'text-decoration:line-through;color:var(--text-3);':'color:var(--navy);"'}>${fmtR(p.valor||0)}</span>
@@ -18658,20 +18659,23 @@ function salvarHistorico(){
 // (#macord-blocos) quanto no assistente do Termo de acordo (#taj-blocos), que
 // reaproveita as mesmas faixas em vez de ter seu próprio "nº parcelas + valor
 // único" desencontrado do que foi registrado.
-// meio: 'boleto' (Asaas, padrão) ou 'pix'. Faixa PIX não vai ao Asaas — é o
+// meio: 'boleto' (Asaas, padrão), 'pix' ou 'cartao'. Faixa PIX não vai ao Asaas — é o
 // caso típico da entrada/parcela única paga na hora — e o termo diz "via PIX,
-// para a chave X". A baixa dessas parcelas é manual, na gaveta do devedor.
+// para a chave X". Faixa 'cartao' também não vai ao Asaas: é o valor à vista pago
+// por link do Mercado Pago gerado à mão (o devedor parcela com a operadora, a
+// taxa é da COBRASQ — decisão do Gustavo, 08/10/2026). A baixa dessas parcelas é
+// manual, na gaveta do devedor.
 function addBlocoAcordo(qtd, valor, containerId, meio){
   const wrap = document.getElementById(containerId||'macord-blocos');
   if(!wrap) return;
   const row = document.createElement('div');
   row.className = 'fg-row macord-bloco-row';
   row.style.cssText = 'align-items:flex-end;gap:8px;';
-  const isPix = meio==='pix';
+  const isPix = meio==='pix', isCartao = meio==='cartao';
   row.innerHTML = `
     <div class="fg" style="flex:1;"><label>Nº parcelas</label><input type="number" min="1" class="macord-bloco-qtd" value="${qtd||1}"></div>
     <div class="fg" style="flex:1;"><label>Valor por parcela (R$)</label><input type="text" class="macord-bloco-valor" placeholder="0,00" value="${valor?fmt(valor):''}"></div>
-    <div class="fg" style="flex:0 0 150px;"><label>Meio</label><select class="macord-bloco-meio"><option value="boleto"${isPix?'':' selected'}>Boleto (Asaas)</option><option value="pix"${isPix?' selected':''}>PIX</option></select></div>
+    <div class="fg" style="flex:0 0 190px;"><label>Meio</label><select class="macord-bloco-meio"><option value="boleto"${(isPix||isCartao)?'':' selected'}>Boleto (Asaas)</option><option value="pix"${isPix?' selected':''}>PIX</option><option value="cartao"${isCartao?' selected':''}>Cartão (link Mercado Pago)</option></select></div>
     <button type="button" class="btn btn-ghost btn-sm macord-bloco-rm" title="Remover esta faixa" style="margin-bottom:2px;">&#10005;</button>
   `;
   const onInput = ()=>recalcAcordoBlocos(containerId);
@@ -18687,7 +18691,7 @@ function lerBlocosAcordo(containerId){
   return Array.from(document.querySelectorAll('#'+(containerId||'macord-blocos')+' .macord-bloco-row')).map(row=>({
     qtd: parseInt(row.querySelector('.macord-bloco-qtd').value)||0,
     valor: parseValorBR(row.querySelector('.macord-bloco-valor').value||'0'),
-    meio: (row.querySelector('.macord-bloco-meio')||{}).value==='pix' ? 'pix' : 'boleto'
+    meio: (v=>(v==='pix'||v==='cartao')?v:'boleto')((row.querySelector('.macord-bloco-meio')||{}).value)
   })).filter(b=>b.qtd>0 && b.valor>0);
 }
 
@@ -49094,12 +49098,14 @@ function _tajDados(){
 // valor_entrada faria api/_emitir-acordo.js subtraí-la do total DE NOVO antes
 // de montar as séries do Asaas (R-19), cobrando a menos.
 // forma (acordos.forma ∈ avista/boleto/cartao/outro) derivada das faixas: qualquer
-// faixa em boleto → 'boleto' (é o que _emitir-acordo.js manda ao Asaas); só PIX em
-// 1 parcela → 'avista'; PIX parcelado → 'outro'. Antes o painel gravava 'avista'
+// faixa em boleto → 'boleto' (é o que _emitir-acordo.js manda ao Asaas); só cartão
+// → 'cartao'; só PIX em 1 parcela → 'avista'; PIX parcelado ou PIX + cartão → 'outro'. Antes o painel gravava 'avista'
 // fixo no "Novo Acordo" e o Termo não regravava — acordo 15× boleto ficava 'avista'.
 function _formaAcordoDasFaixas(faixas){
-  const temBoleto = faixas.some(b=>(b.meio||'boleto')!=='pix');
+  const temBoleto = faixas.some(b=>(b.meio||'boleto')==='boleto');
   if(temBoleto) return 'boleto';
+  if(faixas.length && faixas.every(b=>b.meio==='cartao')) return 'cartao';
+  if(faixas.some(b=>b.meio==='cartao')) return 'outro';
   const numParc = faixas.reduce((s,b)=>s+b.qtd,0);
   return numParc>1 ? 'outro' : 'avista';
 }
