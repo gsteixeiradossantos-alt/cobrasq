@@ -50638,9 +50638,11 @@ async function gerarAnexoICliente(){
   let salvos=0;
   for(const t of lista){
     // PDF vetorial no servidor (rodapé DE PÁGINA em toda folha + multi-página correto).
-    try{ _baixarBase64Pdf(await _pdfBase64Servidor(t.html), t.nome+'.pdf'); }
-    catch(e){ showToast(`Não gerei o PDF "${t.nome}" no servidor — use Imprimir na janela aberta. `+(e.message||''),'warning'); }
-    if(await _anexarDocClienteGerado('outros', t.html, t.nome+'.html', cli.id)) salvos++;
+    let b64=null;
+    try{ b64=await _pdfBase64Servidor(t.html); }
+    catch(e){ showToast(`Não gerei o PDF "${t.nome}" no servidor — use Imprimir na janela aberta. `+(e.message||''),'warning'); continue; }
+    _baixarBase64Pdf(b64, t.nome+'.pdf');
+    if(await _anexarDocClienteGerado('outros', t.html, t.nome+'.pdf', cli.id, b64)) salvos++;
   }
   if(salvos && typeof _detCliId!=='undefined' && _detCliId===cli.id && typeof renderClienteDetalhe==='function') renderClienteDetalhe();
   if(typeof logAtividade==='function') logAtividade('Gerou termos de cessão', `Lote ${lista[0].numero} — ${v.sel.length} termo(s) — ${cli.nome||''}`, cli.id);
@@ -50680,7 +50682,7 @@ async function gerarDocCliente(tipo){
   const tipoCol = tipo==='procuracao' ? 'procuracao' : 'outros';
   const clienteId=_docClienteId();
   const dataBR=new Date().toLocaleDateString('pt-BR');
-  const anexou = await _anexarDocClienteGerado(tipoCol, html, `${titulos[tipo]||'Documento'} — ${d.nome} — ${dataBR}.html`, clienteId);
+  const anexou = await _anexarDocClienteGerado(tipoCol, html, `${titulos[tipo]||'Documento'} — ${d.nome} — ${dataBR}.pdf`, clienteId);
   if(anexou) _detDocSync(clienteId);
   showToast(anexou ? 'Documento gerado e salvo na ficha do cliente.'
     : 'Documento gerado. Salve o cliente para anexá-lo à ficha automaticamente.', anexou?'success':'info');
@@ -51285,19 +51287,22 @@ async function _registrarDocClienteZapSign({clienteId, tipo, nome, base64Pdf, do
     return false;
   }
 }
-async function _anexarDocClienteGerado(tipoCol, html, nomeArq, clienteIdOpt){
+// Salva na pasta do cliente o PDF do documento gerado. O bucket peticao-assets só aceita
+// PDF, imagem e Word (allowed_mime_types): HTML era recusado com "mime type text/html is
+// not supported". b64Opt reaproveita o PDF já gerado no servidor; sem ele, gera aqui.
+async function _anexarDocClienteGerado(tipoCol, html, nomeArq, clienteIdOpt, b64Opt){
   const clienteId=clienteIdOpt||document.getElementById('mcli-id')?.value;
-  if(!clienteId) return false;          // cliente ainda não salvo → só abre p/ impressão
+  if(!clienteId) return false;
   const supa=getSupabase(); if(!supa) return false;
   try{
+    const b64=b64Opt||await _pdfBase64Servidor(html);
+    const bin=atob(b64); const arr=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
     const u=(await supa.auth.getUser()).data?.user;
-    // RLS do bucket exige a 1ª pasta = uid do usuário (policy peticao_assets_insert).
-    const path=(u?.id?u.id+'/':'')+'clientes/'+clienteId+'/gerado_'+tipoCol+'_'+Date.now()+'.html';
-    const blob=new Blob([html],{type:'text/html'});
-    const { error:eUp }=await supa.storage.from('peticao-assets').upload(path, blob, { contentType:'text/html' });
+    const path=(u?.id?u.id+'/':'')+'clientes/'+clienteId+'/gerado_'+tipoCol+'_'+Date.now()+'_'+Math.random().toString(36).slice(2,8)+'.pdf';
+    const { error:eUp }=await supa.storage.from('peticao-assets').upload(path, new Blob([arr],{type:'application/pdf'}), { contentType:'application/pdf' });
     if(eUp) throw eUp;
     const { error:eIns }=await supa.from('cliente_documentos').insert({
-      cliente_id:clienteId, tipo:tipoCol, nome:nomeArq, storage_path:path, uploaded_by:u?.id, ativo:true });
+      cliente_id:clienteId, tipo:tipoCol, nome:nomeArq, storage_path:path, mime_type:'application/pdf', size_bytes:arr.length, uploaded_by:u?.id, ativo:true });
     if(eIns) throw eIns;
     mcliCarregarDocumentos(clienteId);
     return true;
