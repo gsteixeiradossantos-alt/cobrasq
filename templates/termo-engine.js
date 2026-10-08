@@ -473,8 +473,29 @@
     return out.replace(mh, function () { return timbre.masthead; });
   }
 
+  // Cláusula do FGTS (08/10/2026): empresa não tem conta vinculada. Sai só quando
+  // TODOS os devedores são PJ — havendo pessoa física junto (ex.: o sócio), fica.
+  function todosDevedoresPJ(dados) {
+    const devs = (dados.devedores && dados.devedores.length) ? dados.devedores : (dados.devedor ? [dados.devedor] : []);
+    return devs.length > 0 && devs.every(function (d) { return d && d.tipo === "PJ"; });
+  }
+  function semClausulaFgts(html, dados) {
+    if (!todosDevedoresPJ(dados)) return html.replace(/<!--\/?fgts-->/g, "");
+    return html.replace(/<!--fgts-->[\s\S]*?<!--\/fgts-->\s*/, "");
+  }
+
   async function montarTermoExtrajudicial(dados) {
-    const tpl = await carregarTemplate();
+    let tpl = await carregarTemplate();
+    if (todosDevedoresPJ(dados)) {
+      // o extrajudicial tem numeração fixa com dois dígitos (01, 02…): renumera mantendo o zero
+      let n = 0;
+      tpl = semClausulaFgts(tpl, dados).replace(/(<span class="clause-num">)\d+(<\/span>)/g, function (m, a, b) {
+        n += 1;
+        return a + String(n).padStart(2, "0") + b;
+      });
+    } else {
+      tpl = semClausulaFgts(tpl, dados);
+    }
     const html = preencher(tpl, dados);
     if (timbreDe(dados) === "cobrasq") return html;
     return aplicarTimbreTA(html, await carregarTimbreTA());
@@ -720,7 +741,7 @@
       // nenhum conteúdo para o slot variável: remove o bloco inteiro
       templateHtml = templateHtml.replace(/<!--c4-->[\s\S]*?<!--\/c4-->\s*/, "");
     }
-    templateHtml = renumerarClausulas(templateHtml);
+    templateHtml = renumerarClausulas(semClausulaFgts(templateHtml, dados));
     const rawHtml = { fraseReconhecimentoDivida: 1, clausula4Titulo: 1, clausula4Corpo: 1, paragrafoPagamento: 1, requerimentoSisbajud: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1, frasePagamento: 1, fraseEntregaBoletos: 1, credorQualificacao: 1, vistosPageCss: 1 };
     return templateHtml.replace(/\{\{(\w+)\}\}/g, function (m, k) {
       if (!Object.prototype.hasOwnProperty.call(map, k)) return m;

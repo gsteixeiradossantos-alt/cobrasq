@@ -74,6 +74,40 @@ const TEXTO = 'autoriza expressamente a utilização do saldo existente em sua c
     }
   });
 
+  checa('sem comentários-marcadores <!--fgts--> no termo pronto', () => {
+    for (const h of [extra, jud]) assert.ok(!/fgts-->/.test(h));
+  });
+
+  // só empresa: não há conta vinculada — a cláusula sai e a numeração fecha
+  const empresa = { nome: 'Mercado Exemplo Ltda', tipo: 'PJ', documento: '00.000.000/0001-00', endereco: dados.devedores[0].endereco, telefone: '(46) 3536-0000' };
+  const soPJ = Object.assign({}, dados, { devedores: [empresa] });
+  const extraPJ = await E.montarTermoExtrajudicial(soPJ);
+  const judPJ = await E.montarTermoJudicial(soPJ);
+  checa('só empresa: cláusula do FGTS sai dos dois termos', () => {
+    for (const h of [extraPJ, judPJ]) assert.ok(!/FGTS/.test(h) && !/fgts-->/.test(h));
+  });
+  checa('só empresa: extrajudicial renumera com dois dígitos (01…11), restrições vira 07', () => {
+    const ns = [...extraPJ.matchAll(/class="clause-num">(\d+)</g)].map(m => m[1]);
+    assert.deepStrictEqual(ns, ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11']);
+    assert.ok(/Das restrições/.test(clausula(extraPJ, '07')));
+    assert.ok(/com a devolução dos títulos na forma da cláusula 05/.test(clausula(extraPJ, '10')));
+  });
+  checa('só empresa: judicial em sequência, sócios logo após a penhora de salário', () => {
+    const t = [...judPJ.matchAll(/class="clause-num">(\d+)<\/span><h2 class="clause-title">([^<]*)/g)];
+    t.forEach((m, i) => assert.strictEqual(Number(m[1]), i + 1));
+    const i = t.findIndex(m => /penhora de salário/.test(m[2]));
+    assert.ok(/responsabilidade solidária/.test(t[i + 1][2]));
+  });
+
+  // empresa + pessoa física (ex.: o sócio assina junto): a PF tem FGTS — a cláusula fica
+  const mista = Object.assign({}, dados, { devedores: [empresa, dados.devedores[0]] });
+  const extraM = await E.montarTermoExtrajudicial(mista);
+  const judM = await E.montarTermoJudicial(mista);
+  checa('empresa + pessoa física: FGTS presente, extrajudicial na 07', () => {
+    assert.ok(/uso do saldo do FGTS/.test(clausula(extraM, '07')));
+    assert.ok(/uso do saldo do FGTS/.test(judM));
+  });
+
   console.log(falhas ? '\nF-64 FALHOU — ' + falhas + ' verificação(ões).' : '\nF-64 ok — cláusula do FGTS nos dois termos.');
   if (falhas) process.exit(1);
 })().catch(e => { console.error(e); process.exit(1); });
