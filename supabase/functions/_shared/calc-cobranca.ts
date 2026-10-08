@@ -20,7 +20,9 @@ export const COB = {
   boletoFixo: 6,
   parcelaMin: 256,
   parcelaMax: 12,
-  cartaoMult: 1 + (0.0499 * 12) + 0.05,
+  // Cartão: à vista no acordo (= PIX); o devedor parcela em até 18x com a
+  // operadora (Mercado Pago, parcelado cliente). Taxa do MP é da COBRASQ.
+  cartaoMaxParcelas: 18,
 };
 
 function mesesEntre(d1: Date, d2: Date): number {
@@ -42,8 +44,7 @@ export interface CalcCobranca {
   totalAvista: number;
   boletoOptions: BoletoOption[];
   boleto12: BoletoOption | null;
-  cartao12Total: number;
-  cartao12Parcela: number;
+  cartaoTotal: number;
   fixo?: boolean;
 }
 
@@ -84,8 +85,7 @@ export function valorFixo(totalAvista: number): CalcCobranca {
     totalAvista,
     boletoOptions,
     boleto12,
-    cartao12Total: totalAvista,
-    cartao12Parcela: totalAvista,
+    cartaoTotal: totalAvista,
     fixo: true,
   };
 }
@@ -108,10 +108,8 @@ export function calcularCobranca(valorOriginal: number, vencimentoISO: string, h
 
   const boletoOptions = gerarBoletoOptions(total);
   const boleto12 = boletoOptions.find((o) => o.n === 12) || boletoOptions[boletoOptions.length - 1] || null;
-  const cartao12Total = Math.ceil(total * COB.cartaoMult);
-  const cartao12Parcela = Math.ceil(cartao12Total / 12);
 
-  return { valorOriginal, totalAvista: total, boletoOptions, boleto12, cartao12Total, cartao12Parcela };
+  return { valorOriginal, totalAvista: total, boletoOptions, boleto12, cartaoTotal: total };
 }
 
 // Vários títulos com vencimentos próprios (cobrancas.divida.titulos, ≥2 válidos):
@@ -147,7 +145,5 @@ export function calcularCobrancaTitulos(titulos: TituloCobranca[], hojeISO: stri
   const total = Math.ceil(bruto);
   const boletoOptions = gerarBoletoOptions(total);
   const boleto12 = boletoOptions.find((o) => o.n === 12) || boletoOptions[boletoOptions.length - 1] || null;
-  const cartao12Total = Math.ceil(total * COB.cartaoMult);
-  const cartao12Parcela = Math.ceil(cartao12Total / 12);
-  return { valorOriginal, totalAvista: total, boletoOptions, boleto12, cartao12Total, cartao12Parcela };
+  return { valorOriginal, totalAvista: total, boletoOptions, boleto12, cartaoTotal: total };
 }

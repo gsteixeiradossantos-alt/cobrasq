@@ -11,7 +11,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { MODELO, CARLOS_SYSTEM, extrairJson } from '../_shared/carlos-system.ts';
-import { calcularCobranca, calcularCobrancaTitulos, titulosValidos, valorFixo } from '../_shared/calc-cobranca.ts';
+import { COB, calcularCobranca, calcularCobrancaTitulos, titulosValidos, valorFixo } from '../_shared/calc-cobranca.ts';
 import { parseValorBR } from '../_shared/valor-br.ts';
 
 const CORS = {
@@ -100,8 +100,7 @@ Deno.serve(async (req: Request) => {
       totalAvista: 1800,
       boletoOptions: [],
       boleto12: { n: 12, parcela: 220, total: 2640 },
-      cartao12Total: 2760,
-      cartao12Parcela: 230,
+      cartaoTotal: 1800,
     } as any;
     fonte = 'ficticio';
   }
@@ -120,8 +119,8 @@ Deno.serve(async (req: Request) => {
           `FORMAS DE PAGAMENTO JÁ CALCULADAS PELO SISTEMA (use exatamente estes números, nunca invente outro):`,
           `- À VISTA: R$ ${fmtBRL(calc.totalAvista)} (pagamento único)`,
           calc.boleto12 ? `- BOLETO PARCELADO: ${calc.boleto12.n}x de R$ ${fmtBRL(calc.boleto12.parcela)} (total R$ ${fmtBRL(calc.boleto12.total)})` : '- BOLETO PARCELADO: indisponível pra esse valor',
-          `- CARTÃO PARCELADO: 12x de R$ ${fmtBRL(calc.cartao12Parcela)} (total R$ ${fmtBRL(calc.cartao12Total)})`,
-          `Máximo de parcelas permitido: ${calc.boleto12?.n ?? 12}x. Qualquer pedido acima disso é "fora_padrao".`,
+          `- CARTÃO DE CRÉDITO: à vista R$ ${fmtBRL(calc.cartaoTotal)} (o mesmo valor do à vista), por link do Mercado Pago enviado depois do termo assinado. O devedor pode parcelar em até ${COB.cartaoMaxParcelas}x direto no cartão, com os juros da operadora — a COBRASQ não cobra juros sobre o cartão. Nunca diga "sem juros" e nunca informe valor de parcela do cartão (a tela do Mercado Pago mostra antes de ele confirmar).`,
+          `Máximo de parcelas no boleto: ${calc.boleto12?.n ?? 12}x. Qualquer pedido acima disso no boleto é "fora_padrao".`,
         ].join('\n'),
   ].filter(Boolean).join('\n');
 

@@ -14,7 +14,7 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
-import { calcularCobranca, calcularCobrancaTitulos, titulosValidos, valorFixo } from '../_shared/calc-cobranca.ts';
+import { COB, calcularCobranca, calcularCobrancaTitulos, titulosValidos, valorFixo } from '../_shared/calc-cobranca.ts';
 import { parseValorBR } from '../_shared/valor-br.ts';
 
 // CORS: esta function é chamada pelo BOTÃO do painel, ou seja, de um browser em
@@ -121,7 +121,7 @@ Deno.serve(async (req: Request) => {
     partes.push(`Você tem uma pendência de R$ ${fmtBRL(valorOriginal)} com ${credorNome}, e a gente ficou responsável por resolver isso.`);
     let opcoes = `Você pode pagar à vista por R$ ${fmtBRL(calc.totalAvista)}`;
     if (calc.boleto12) opcoes += `, ou parcelar em até ${calc.boleto12.n}x de R$ ${fmtBRL(calc.boleto12.parcela)} no boleto`;
-    opcoes += `, ou ${12}x de R$ ${fmtBRL(calc.cartao12Parcela)} no cartão.`;
+    opcoes += `, ou à vista no cartão de crédito por R$ ${fmtBRL(calc.cartaoTotal)}, parcelando em até ${COB.cartaoMaxParcelas}x direto no cartão (juros da operadora).`;
     partes.push(opcoes);
     partes.push('Como você prefere seguir?');
   }
