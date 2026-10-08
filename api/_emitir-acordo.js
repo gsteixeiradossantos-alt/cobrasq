@@ -186,19 +186,22 @@ module.exports = async function handler(req, res) {
     // FAIXA VIA PIX (meio:'pix', escolhido no Termo de acordo): paga fora do Asaas
     // — entrada/parcela única no ato, tipicamente. Não emite boleto para ela; a
     // baixa é manual na gaveta do devedor. Só as faixas 'boleto' viram série.
-    const blocosBoleto = blocosMeta.filter((b) => b.meio !== 'pix');
+    // FAIXA NO CARTÃO (meio:'cartao'): mesma regra — paga por link do Mercado
+    // Pago gerado à mão, fora do Asaas (08/10/2026).
+    const foraAsaas = (b) => b.meio === 'pix' || b.meio === 'cartao';
+    const blocosBoleto = blocosMeta.filter((b) => !foraAsaas(b));
     const temPix = blocosBoleto.length < blocosMeta.length;
     const usaBlocos = blocosMeta.length > 1 || temPix;
 
     if (temPix && !blocosBoleto.length) {
       // Acordo 100% PIX: nada a emitir. Marca como emitido (idempotência e o
       // botão "Emitir" do Painel param de insistir) e registra o porquê.
-      const metaPix = { ...meta, boletos_emitidos: true, emitido_em: new Date().toISOString(), emitido_via: manual ? 'manual' : 'auto', sem_boleto: 'todas as faixas via PIX', valor_boletos: 0, asaas_series: [] };
+      const metaPix = { ...meta, boletos_emitidos: true, emitido_em: new Date().toISOString(), emitido_via: manual ? 'manual' : 'auto', sem_boleto: 'todas as faixas via PIX/cartão', valor_boletos: 0, asaas_series: [] };
       delete metaPix.emitindo;
       await sbFetch(`acordos?id=eq.${acordo.id}`, { method: 'PATCH', body: JSON.stringify({ status: 'ativo', metadata: metaPix }) });
       claimedAcordo = false;
       await sbFetch('devedor_eventos', { method: 'POST', body: JSON.stringify({ devedor_id: dev.id, tipo: 'acordo_sem_boleto_pix', payload: { acordo_id: acordo.id, parcelas: nParc, total }, autor_nome: manual ? 'Faturamento' : 'Automação' }) }).catch(() => {});
-      return res.status(200).json({ ok: true, skipped: 'todas as faixas via PIX — nenhum boleto a emitir', acordo_id: acordo.id, series: 0, parcelas: nParc, total: 0 });
+      return res.status(200).json({ ok: true, skipped: 'todas as faixas via PIX/cartão — nenhum boleto a emitir', acordo_id: acordo.id, series: 0, parcelas: nParc, total: 0 });
     }
 
     let series; // [{ bloco, qtd, total, dueDate, charge }] — sempre >=1 entrada.
@@ -206,7 +209,7 @@ module.exports = async function handler(req, res) {
       series = [];
       for (let bi = 0; bi < blocosMeta.length; bi++) {
         const bloco = blocosMeta[bi];
-        if (bloco.meio === 'pix') continue;   // faixa PIX: sem série no Asaas
+        if (foraAsaas(bloco)) continue;   // faixa PIX/cartão: sem série no Asaas
         const parcelasDoBloco = parcelas.filter((p) => (p.bloco || 0) === bi + 1);
         const dueBloco = (parcelasDoBloco[0] && (parcelasDoBloco[0].vencimento || parcelasDoBloco[0].venc)) || firstDue;
         const totalBloco = round2(bloco.qtd * bloco.valor);

@@ -130,8 +130,10 @@
   // Descreve uma única faixa (nº de parcelas × valor uniforme dentro dela).
   // meio === "pix" acrescenta "via PIX" à faixa; a chave vem uma vez só, no fim
   // da frase (frasePagamento), para não repetir em cada faixa.
+  // meio === "cartao" acrescenta "à vista no cartão de crédito" (link do Mercado
+  // Pago; o parcelamento é do devedor com a operadora — 08/10/2026).
   function fraseFaixa(qtd, valor, meio) {
-    const via = meio === "pix" ? ", via PIX" : "";
+    const via = meio === "pix" ? ", via PIX" : (meio === "cartao" ? ", à vista no cartão de crédito" : "");
     if (qtd === 1) return "1 (uma) parcela mensal no valor de <strong>" + valorCompleto(valor) + "</strong>" + via;
     return qtd + " (" + extInt(qtd, true) + ") parcelas mensais e sucessivas no valor de <strong>" +
       valorCompleto(valor) + "</strong> cada" + via;
@@ -140,6 +142,15 @@
   function temPix(ac) {
     const faixas = Array.isArray(ac && ac.faixas) ? ac.faixas : [];
     return faixas.some(function (f) { return f && f.meio === "pix" && f.qtd > 0 && f.valor > 0; });
+  }
+  function temCartao(ac) {
+    const faixas = Array.isArray(ac && ac.faixas) ? ac.faixas : [];
+    return faixas.some(function (f) { return f && f.meio === "cartao" && f.qtd > 0 && f.valor > 0; });
+  }
+  function temBoleto(ac) {
+    const faixas = Array.isArray(ac && ac.faixas) ? ac.faixas.filter(function (f) { return f && f.qtd > 0 && f.valor > 0; }) : [];
+    if (!faixas.length) return true;   // sem faixas = parcelamento antigo, em boleto
+    return faixas.some(function (f) { return f.meio !== "pix" && f.meio !== "cartao"; });
   }
   function soPix(ac) {
     const faixas = Array.isArray(ac && ac.faixas) ? ac.faixas.filter(function (f) { return f && f.qtd > 0 && f.valor > 0; }) : [];
@@ -163,7 +174,8 @@
       devedorTermo: "executada", parteDevedor: "parte executada", devedorM: "executado", devedorF: "executada" };
   }
   // Complemento da cláusula 2: como os boletos chegam — ou, se tudo é PIX, a
-  // chave e o comprovante. Com faixas mistas, as duas frases.
+  // chave e o comprovante; faixa no cartão, o link. Com faixas mistas, cada
+  // frase do meio presente, na ordem boleto, PIX, cartão.
   function fraseEntregaBoletos(ac, generoCredor, jud) {
     const M = generoCredor === "M";
     const pj = jud ? papeisRito(jud) : null;
@@ -179,9 +191,16 @@
       "por meio do canal indicado no preâmbulo. A " + devedora + " compromete-se a encaminhar o comprovante de pagamento " + aoCred +
       " em até 1 dia útil após cada quitação, para fins de conferência e baixa, ficando ajustado que a ausência de envio do comprovante " +
       "não descaracteriza o pagamento quando identificado o crédito correspondente na conta recebedora.";
+    const fCartao = "O pagamento no cartão de crédito será feito à vista, por link de pagamento enviado à " + devedora +
+      " em até 1 dia útil após a assinatura deste instrumento, pelo canal indicado no preâmbulo. Eventual parcelamento no cartão " +
+      "é contratado pela " + devedora + " diretamente com a administradora do cartão, por sua conta, e não altera o valor nem o " +
+      "vencimento ajustados neste acordo.";
     if (soPix(ac)) return fPix;
-    if (temPix(ac)) return fBol + " " + fPix;
-    return fBol;
+    const partes = [];
+    if (temBoleto(ac)) partes.push(fBol);
+    if (temPix(ac)) partes.push(fPix);
+    if (temCartao(ac)) partes.push(fCartao);
+    return partes.join(" ");
   }
 
   function frasePagamento(ac) {
