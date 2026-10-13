@@ -18,7 +18,7 @@ const crypto = require('crypto');
 const { requireUser, applyCors } = require('./_auth.js');
 const { sbFetch } = require('./_sb.js');
 const { asaasReq, ensureAsaasCustomer } = require('./_asaas.js');
-const { zapiSendText } = require('./_zapi.js');
+const { zapiSendText, normalizarTelefone } = require('./_zapi.js');
 
 const { addDiasBR } = require('./_data.js');
 function timingSafeEq(a, b) {
@@ -51,6 +51,53 @@ function boletoMsgMultiplo(nome, links) {
     + `Informamos que os boletos referentes ao nosso acordo realizado recentemente foram emitidos e estão disponíveis para pagamento. Seguem os links:\n\n`
     + `${lista}\n\n`
     + `_Se precisar de alguma ajuda, é só nos chamar._`;
+}
+
+// Telefone do devedor para o envio. Vai o CAMPO DO CADASTRO para normalizarTelefone,
+// nunca os dígitos limpos antes: um cadastro com dois números ("46988227918,
+// 46988261857") virava 22 dígitos colados, que a Z-API trata como id de GRUPO —
+// aceitava, devolvia messageId e nada era entregue (Taina, 07/10/2026). A
+// normalização separa a lista e pega o primeiro número plausível.
+function telefoneDoDevedor(dev) {
+  return normalizarTelefone((dev && dev.telefone) || '');
+}
+
+// messageId da Z-API NÃO prova entrega: um número ou grupo inexistente também
+// recebe protocolo. A prova é o callback dela, que o zapi-webhook grava em
+// crm_mensagens_status com o MESMO message_id (482 de 483 envios da Bia em 30 dias),
+// em 1 a 6 s. Espera curta: o zapsign-webhook corta a chamada em 25 s.
+async function confirmarEntrega(messageId, { tentativas = 4, intervaloMs = 2000 } = {}) {
+  if (!messageId) return null;
+  for (let i = 0; i < tentativas; i++) {
+    await new Promise((r) => setTimeout(r, intervaloMs));
+    try {
+      const rows = await sbFetch(`crm_mensagens_status?message_id=eq.${encodeURIComponent(messageId)}&select=status,telefone_enviado&limit=1`);
+      if (rows && rows[0]) return rows[0];
+    } catch (_) { /* tenta de novo */ }
+  }
+  return null;
+}
+
+// Resultado do envio para gravar no acordo e no evento. whatsapp_ok só fica true
+// com o callback; sem ele o acordo cai no alerta "sem WhatsApp" do Painel, e o
+// reenvio é decisão do gestor (botão "Resolver agora", com confirmação).
+async function resultadoEnvio(zap, tel) {
+  const messageId = (zap && (zap.messageId || zap.zaapId)) || null;
+  const cb = messageId ? await confirmarEntrega(messageId) : null;
+  const entregue = !!(cb && cb.status !== 'not_delivered');
+  const situacao = !messageId ? 'falha' : (entregue ? 'confirmado' : (cb ? 'nao_entregue' : 'sem_confirmacao'));
+  return {
+    ok: entregue,
+    situacao,
+    meta: {
+      whatsapp_ok: entregue,
+      whatsapp_situacao: situacao,
+      whatsapp_message_id: messageId,
+      whatsapp_destino: tel || null,
+      whatsapp_em: new Date().toISOString(),
+    },
+    erro: zap && zap.error,
+  };
 }
 
 module.exports = async function handler(req, res) {
@@ -95,15 +142,15 @@ module.exports = async function handler(req, res) {
       const links = linksSeries.length > 1 ? linksSeries : (url ? [url] : []);
       const dvs = await sbFetch(`devedores?id=eq.${acordo.devedor_id}&select=nome,telefone&limit=1`);
       const dev = dvs[0];
-      const tel = String((dev && dev.telefone) || '').replace(/\D/g, '');
-      if (!tel || !links.length) return res.status(200).json({ ok: true, acordo_id: acordoId, reenviado: false, motivo: !tel ? 'devedor sem telefone' : 'acordo sem link' });
+      const tel = telefoneDoDevedor(dev);
+      if (!tel || !links.length) return res.status(200).json({ ok: true, acordo_id: acordoId, reenviado: false, motivo: !tel ? 'devedor sem telefone válido' : 'acordo sem link' });
       let zap = null;
       try { zap = await zapiSendText(tel, links.length > 1 ? boletoMsgMultiplo(dev.nome, links) : boletoMsg(dev.nome, links[0])); }
       catch (e) { zap = { error: e.message }; }
-      const enviado = !!(zap && zap.messageId);
-      await sbFetch(`acordos?id=eq.${acordo.id}`, { method: 'PATCH', body: JSON.stringify({ metadata: { ...meta, whatsapp_ok: enviado } }) }).catch(() => {});
-      await sbFetch('devedor_eventos', { method: 'POST', body: JSON.stringify({ devedor_id: acordo.devedor_id, tipo: 'asaas_boletos_emitidos', payload: { acordo_id: acordoId, invoice_url: links[0], invoice_urls: links, whatsapp: enviado ? 'enviado' : 'falha', via: 'reenvio' }, autor_nome: 'Faturamento (reenvio)' }) }).catch(() => {});
-      return res.status(200).json({ ok: true, acordo_id: acordoId, reenviado: enviado, erro: enviado ? undefined : (zap && zap.error) });
+      const env = await resultadoEnvio(zap, tel);
+      await sbFetch(`acordos?id=eq.${acordo.id}`, { method: 'PATCH', body: JSON.stringify({ metadata: { ...meta, ...env.meta } }) }).catch(() => {});
+      await sbFetch('devedor_eventos', { method: 'POST', body: JSON.stringify({ devedor_id: acordo.devedor_id, tipo: 'asaas_boletos_emitidos', payload: { acordo_id: acordoId, invoice_url: links[0], invoice_urls: links, whatsapp: env.situacao, message_id: env.meta.whatsapp_message_id, telefone: tel, via: 'reenvio' }, autor_nome: 'Faturamento (reenvio)' }) }).catch(() => {});
+      return res.status(200).json({ ok: true, acordo_id: acordoId, reenviado: env.ok, whatsapp: env.situacao, erro: env.ok ? undefined : (env.erro || env.situacao) });
     }
 
     if (meta.boletos_emitidos) {
@@ -349,7 +396,7 @@ module.exports = async function handler(req, res) {
     // WhatsApp com o(s) link(s) do boleto/PIX (best-effort, não derruba a emissão).
     // 1 série = mensagem simples (igual sempre foi); >1 série = lista uma por faixa.
     let zap = null;
-    const tel = String(dev.telefone || '').replace(/\D/g, '');
+    const tel = telefoneDoDevedor(dev);
     const linksValidos = series.map((s) => s.charge.invoiceUrl || s.charge.bankSlipUrl || '').filter(Boolean);
     if (tel && linksValidos.length === 1) {
       try { zap = await zapiSendText(tel, boletoMsg(dev.nome, linksValidos[0])); } catch (e) { zap = { error: e.message }; }
@@ -357,8 +404,10 @@ module.exports = async function handler(req, res) {
       try { zap = await zapiSendText(tel, boletoMsgMultiplo(dev.nome, linksValidos)); } catch (e) { zap = { error: e.message }; }
     }
 
-    // Marca no acordo se o WhatsApp do boleto saiu (alimenta o alerta/reenvio do Painel).
-    await sbFetch(`acordos?id=eq.${acordo.id}`, { method: 'PATCH', body: JSON.stringify({ metadata: { ...newMeta, whatsapp_ok: !!(zap && zap.messageId) } }) }).catch(() => {});
+    // Marca no acordo se o WhatsApp do boleto foi ENTREGUE — callback da Z-API, não só o
+    // messageId (alimenta o alerta/reenvio do Painel).
+    const env = tel ? await resultadoEnvio(zap, tel) : { ok: false, situacao: 'sem_telefone', meta: { whatsapp_ok: false, whatsapp_situacao: 'sem_telefone' } };
+    await sbFetch(`acordos?id=eq.${acordo.id}`, { method: 'PATCH', body: JSON.stringify({ metadata: { ...newMeta, ...env.meta } }) }).catch(() => {});
 
     await sbFetch('devedor_eventos', {
       method: 'POST',
@@ -373,7 +422,9 @@ module.exports = async function handler(req, res) {
           total,
           invoice_url: invoiceUrl,
           parcelas_previstas: previstas,
-          whatsapp: zap && zap.messageId ? 'enviado' : 'falha/sem-tel',
+          whatsapp: env.situacao,
+          message_id: env.meta.whatsapp_message_id || null,
+          telefone: tel || null,
           via: manual ? 'manual' : 'auto',
         },
         autor_nome: manual ? 'Faturamento (manual)' : 'ZapSign (auto)',
@@ -388,7 +439,8 @@ module.exports = async function handler(req, res) {
       parcelas: nParc,
       total,
       invoice_url: invoiceUrl,
-      whatsapp: !!(zap && zap.messageId),
+      whatsapp: env.ok,
+      whatsapp_situacao: env.situacao,
       customer_criado: created,
     });
   } catch (e) {
