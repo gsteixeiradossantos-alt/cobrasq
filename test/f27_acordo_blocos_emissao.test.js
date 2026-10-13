@@ -120,6 +120,7 @@ async function rodarEmissao(acordo, devNome) {
   });
   stub('_zapi.js', {
     zapiSendText: async (tel, msg) => { calls.zapi.push({ tel, msg }); return { messageId: 'zap-fake-' + (++seq) }; },
+    normalizarTelefone: (t) => String(t || '').replace(/\D/g, ''),
   });
   stub('_asaas.js', {
     ensureAsaasCustomer: async () => ({ customerId: 'cus-fake-1', created: false }),
@@ -163,6 +164,7 @@ async function rodarEmissao(acordo, devNome) {
       if (pathQuery.startsWith('cobrancas?')) return [];
       if (pathQuery.startsWith('fin_lancamento')) return [];
       if (pathQuery.startsWith('devedor_eventos')) return [];
+      if (pathQuery.startsWith('crm_mensagens_status')) return [{ status: 'sent' }]; // callback da Z-API (F-64)
       return [];
     },
   });
