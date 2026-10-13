@@ -45,9 +45,10 @@ async function safeEqual(a: string, b: string): Promise<boolean> {
 
 function mapStatus(raw: string): string {
   const s = String(raw || '').toUpperCase();
+  // Falha primeiro: "NOT_DELIVERED" contém "DELIVER" e virava 'delivered'.
+  if (s.includes('NOT_DELIVER') || s.includes('NOT-DELIVER') || s.includes('FAIL') || s.includes('ERROR')) return 'not_delivered';
   if (s.includes('READ')) return 'read';
   if (s.includes('DELIVER')) return 'delivered';
-  if (s.includes('NOT_DELIVER') || s.includes('NOT-DELIVER') || s.includes('FAIL') || s.includes('ERROR')) return 'not_delivered';
   if (s.includes('SENT') || s.includes('PLAY')) return 'sent';
   if (s.includes('QUEUE')) return 'queued';
   return 'sent';
