@@ -30,7 +30,9 @@ LOG('1) Tabelas oficiais BCB + TJPR media + TAXA-LEGAL oficial');
   near(T['IGP-DI']['2026-04'], 2.41, 'IGP-DI 2026-04');
   near(T.SELIC['2025-01'], 1.01, 'SELIC 2025-01');
   ['2025-06', '2026-04'].forEach(function (m) { near(T.TJPR[m], (T.INPC[m] + T['IGP-DI'][m]) / 2, 'TJPR ' + m + ' = media(INPC,IGP-DI)'); });
-  near(T['TAXA-LEGAL']['2025-02'], 0.67092, 'TAXA-LEGAL 2025-02 oficial', 1e-4);
+  near(T['TAXA-LEGAL']['2025-02'], 0.902209, 'TAXA-LEGAL 2025-02 oficial (SGS 29543)', 1e-6);
+  near(T['TAXA-LEGAL']['2025-04'], 0.321969, 'TAXA-LEGAL 2025-04 = Calculadora do Cidadao (fator SELIC e IPCA-15 do mesmo mes)', 1e-6);
+  near(T['TAXA-LEGAL']['2026-03'], 0.155714, 'TAXA-LEGAL 2026-03 = Calculadora do Cidadao', 1e-6);
   ok(!('2024-08' in T['TAXA-LEGAL']), 'TAXA-LEGAL comeca em 2024-09 (Lei 14.905)');
   ok(('2000-01' in T.INPC) && Object.keys(T.INPC).length >= 300, 'INPC cobre 2000+ (300+ meses)');
 })();
@@ -68,7 +70,7 @@ LOG('3) Item 14: Taxa Legal pos-cutoff usa a tabela oficial; pre-cutoff usa juro
   var pos = E.calcularPrincipal({ valorOriginal: 10000, dataCorrecao: D(2024, 8, 1), dataFim: D(2025, 8, 1), dataJuros: D(2024, 8, 1), indice: 'TAXA-LEGAL', taxaJurosMensal: 1, aplicarMulta: false, eventos: [] });
   var lins = pos.linhas.filter(function (l) { return l.tipo === 'mes'; });
   ok(lins.every(function (l) { return l.viaTaxaLegal; }), 'todos os meses pos-09/2024 via Taxa Legal');
-  near(lins[0].taxaMesAplicada, 0.565815, 'set/2024 taxa legal = 0.5658', 1e-4);
+  near(lins[0].taxaMesAplicada, 0.676227, 'set/2024 taxa legal = 0.676227 (SGS 29543)', 1e-6);
   // pre-cutoff: juros fixos (1% a.m.), NAO via taxa legal
   var pre = E.calcularPrincipal({ valorOriginal: 10000, dataCorrecao: D(2024, 0, 1), dataFim: D(2024, 7, 1), dataJuros: D(2024, 0, 1), indice: 'TAXA-LEGAL', taxaJurosMensal: 1, aplicarMulta: false, eventos: [] });
   ok(pre.linhas.filter(function (l) { return l.tipo === 'mes'; }).every(function (l) { return !l.viaTaxaLegal; }), 'meses pre-09/2024 NAO via Taxa Legal');
