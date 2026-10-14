@@ -96,7 +96,7 @@ for (const k of Object.keys(tabelas.INPC)) {
 // TAXA-LEGAL derivada (SGS 29541 = Fator Selic[m]; 29542 = Fator IPCA[m]; mesmo m)
 const tlS = await sgs(SGS_TL.selic), tlI = await sgs(SGS_TL.ipca15);
 for (const k of Object.keys(tlS)) {
-  if (k >= mesCorrente || k in tabelas['TAXA-LEGAL'] || k < '2024-09') continue;
+  if (k >= mesCorrente || k in tabelas['TAXA-LEGAL'] || k < '2024-08') continue;
   const ipca = tlI[k]; if (ipca == null) continue;
   const tl = Math.max(0, (tlS[k] / ipca - 1) * 100);
   tabelas['TAXA-LEGAL'][k] = Math.round(tl * 1e6) / 1e6;

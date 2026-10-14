@@ -33,7 +33,7 @@ LOG('1) Tabelas oficiais BCB + TJPR media + TAXA-LEGAL oficial');
   near(T['TAXA-LEGAL']['2025-02'], 0.902209, 'TAXA-LEGAL 2025-02 oficial (SGS 29543)', 1e-6);
   near(T['TAXA-LEGAL']['2025-04'], 0.321969, 'TAXA-LEGAL 2025-04 = Calculadora do Cidadao (fator SELIC e IPCA-15 do mesmo mes)', 1e-6);
   near(T['TAXA-LEGAL']['2026-03'], 0.155714, 'TAXA-LEGAL 2026-03 = Calculadora do Cidadao', 1e-6);
-  ok(!('2024-08' in T['TAXA-LEGAL']), 'TAXA-LEGAL comeca em 2024-09 (Lei 14.905)');
+  near(T['TAXA-LEGAL']['2024-08'], 0.605306, 'TAXA-LEGAL 2024-08 oficial (SGS 29543; so vale para 30 e 31/08)', 1e-6);
   ok(('2000-01' in T.INPC) && Object.keys(T.INPC).length >= 300, 'INPC cobre 2000+ (300+ meses)');
 })();
 
@@ -74,6 +74,16 @@ LOG('3) Item 14: Taxa Legal pos-cutoff usa a tabela oficial; pre-cutoff usa juro
   // pre-cutoff: juros fixos (1% a.m.), NAO via taxa legal
   var pre = E.calcularPrincipal({ valorOriginal: 10000, dataCorrecao: D(2024, 0, 1), dataFim: D(2024, 7, 1), dataJuros: D(2024, 0, 1), indice: 'TAXA-LEGAL', taxaJurosMensal: 1, aplicarMulta: false, eventos: [] });
   ok(pre.linhas.filter(function (l) { return l.tipo === 'mes'; }).every(function (l) { return !l.viaTaxaLegal; }), 'meses pre-09/2024 NAO via Taxa Legal');
+  // agosto/2024: 01 a 29/08 na taxa fixa (pro rata de 30); 30 e 31/08 na taxa legal de agosto (pro rata de 31) -- Res. CMN 5.171, art. 8o, p.u.
+  var ago = E.calcularPrincipal({ valorOriginal: 10000, dataCorrecao: D(2024, 7, 1), dataFim: D(2024, 8, 1), dataJuros: D(2024, 7, 1), indice: 'TAXA-LEGAL', taxaJurosMensal: 1, aplicarMulta: false, eventos: [] });
+  var la = ago.linhas.filter(function (l) { return l.tipo === 'mes' && l.ano === 2024 && l.mes === 8; })[0];
+  ok(!!la, 'linha de agosto/2024 existe');
+  near(la.jurosMes, la.saldoCorrigido * (0.01 * 29 / 30 + 0.00605306 * (la.diasJuros - 29) / 31), 'ago/2024: 29 dias a 1%/30 + resto a 0,605306%/31', 1e-9);
+  ok(la.diasJuros - 29 === 2, 'ago/2024: 2 dias na taxa legal (30 e 31/08), diasJuros=' + la.diasJuros);
+  // juros so a partir de 30/08: tudo na taxa legal de agosto
+  var ago2 = E.calcularPrincipal({ valorOriginal: 10000, dataCorrecao: D(2024, 7, 30), dataFim: D(2024, 8, 1), dataJuros: D(2024, 7, 30), indice: 'TAXA-LEGAL', taxaJurosMensal: 1, aplicarMulta: false, eventos: [] });
+  var lb = ago2.linhas.filter(function (l) { return l.tipo === 'mes' && l.ano === 2024 && l.mes === 8; })[0];
+  near(lb.jurosMes, lb.saldoCorrigido * 0.00605306 * lb.diasJuros / 31, 'juros desde 30/08/2024: so taxa legal de agosto', 1e-9);
 })();
 
 // 4) Item 15 — escalonamento por periodo
