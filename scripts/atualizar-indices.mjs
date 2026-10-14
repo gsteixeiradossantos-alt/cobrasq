@@ -13,8 +13,11 @@
  *  - Nunca sobrescreve um valor já gravado: revisão do BCB em mês antigo é
  *    apontada no relatório para conferência humana, não aplicada por script.
  *  - TJPR = média aritmética INPC/IGP-DI do mês (Tabela Prática TJPR).
- *  - TAXA-LEGAL[m] = (SGS 29541[m] / SGS 29542[m-1] − 1) × 100, piso 0,
- *    6 casas — mesma fórmula dos valores já gravados (Lei 14.905/24).
+ *  - TAXA-LEGAL[m] = (SGS 29541[m] / SGS 29542[m] − 1) × 100, piso 0, 6 casas
+ *    (Res. CMN 5.171/24, art. 2º). Os dois fatores são do MESMO mês de
+ *    referência: 29541[m] já é a SELIC de m−1 e 29542[m] já é o IPCA-15 de m−1.
+ *    Dividir por 29542[m−1] (como se fez até 10/2026) usava o IPCA-15 de m−2.
+ *    Resultado = SGS 29543 (taxa legal divulgada pelo BCB).
  *
  * Roda no GitHub Actions (.github/workflows/atualizar-indices.yml) nos dias 12
  * e 16 de cada mês e abre um PR; o merge continua sendo decisão humana.
@@ -34,7 +37,6 @@ const SGS_TL = { selic: 29541, ipca15: 29542 };
 const hoje = new Date();
 const mesCorrente = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`;
 const mesAnterior = (() => { const d = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; })();
-const mesAntes = (k) => { const [y, m] = k.split('-').map(Number); const d = new Date(y, m - 2, 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
 
 async function sgs(codigo, ultimos = 18) {   // o SGS aceita no máximo 20 em /ultimos
   const url = `https://api.bcb.gov.br/dados/serie/bcdata.sgs.${codigo}/dados/ultimos/${ultimos}?formato=json`;
@@ -91,12 +93,12 @@ for (const k of Object.keys(tabelas.INPC)) {
   tabelas.TJPR[k] = Math.round(((tabelas.INPC[k] + tabelas['IGP-DI'][k]) / 2) * 1000) / 1000;
   (novos.TJPR ||= []).push(k);
 }
-// TAXA-LEGAL derivada (SGS 29541 = fator SELIC do mês; 29542 = fator IPCA-15 do mês)
+// TAXA-LEGAL derivada (SGS 29541 = Fator Selic[m]; 29542 = Fator IPCA[m]; mesmo m)
 const tlS = await sgs(SGS_TL.selic), tlI = await sgs(SGS_TL.ipca15);
 for (const k of Object.keys(tlS)) {
   if (k >= mesCorrente || k in tabelas['TAXA-LEGAL'] || k < '2024-09') continue;
-  const ant = tlI[mesAntes(k)]; if (ant == null) continue;
-  const tl = Math.max(0, (tlS[k] / ant - 1) * 100);
+  const ipca = tlI[k]; if (ipca == null) continue;
+  const tl = Math.max(0, (tlS[k] / ipca - 1) * 100);
   tabelas['TAXA-LEGAL'][k] = Math.round(tl * 1e6) / 1e6;
   (novos['TAXA-LEGAL'] ||= []).push(k);
 }
