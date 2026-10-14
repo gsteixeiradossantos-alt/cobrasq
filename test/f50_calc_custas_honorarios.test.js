@@ -7,6 +7,8 @@
  * sem juros) e 3 × R$ 30,00 de expedição a recolher (nominal).
  *   saldo total 12.121,15 · custas 1.462,32 (pagas 1.337,57 + correção 34,75 + 90,00)
  *   honorários 1.212,12 · total 14.795,59
+ * O aceite foi conferido com o TJPR até ago/2026: as tabelas do teste ficam congeladas nesse ponto,
+ * para o índice de set/2026 (e os seguintes) não mexer no caso de aceite.
  *
  * Como rodar:
  *   node test/f50_calc_custas_honorarios.test.js
@@ -37,6 +39,9 @@ vm.createContext(ctx);
 vm.runInContext(trecho('function consolidarCustasHon(r){'), ctx);
 vm.runInContext(bloco('var M3_CSS=', '// ════════ EXPORT PDF'), ctx);
 
+// tabelas como estavam no aceite (TJPR até 2026-08)
+const TAB = Object.assign({}, E.TABELAS, { TJPR: Object.fromEntries(
+  Object.entries(E.TABELAS.TJPR).filter(([k]) => k <= '2026-08')) });
 const p = E.parseDataLocal;
 const pagas = [['2025-08-12', 56.28, 'mov. 12'], ['2025-08-12', 79.20, 'mov. 13'], ['2025-08-25', 637.10, 'preparo'],
   ['2025-08-28', 54.31, ''], ['2025-08-28', 193.09, ''], ['2025-09-01', 18.46, ''], ['2026-03-30', 30, ''],
@@ -46,7 +51,7 @@ const params = { valorOriginal: 8343, dataCorrecao: p('2024-01-06'), dataFim: p(
   indice: 'TJPR', taxaJurosMensal: 1, aplicarMulta: false, multaPct: 0, eventos: [], parcelasExtras: [],
   custas: pagas.map((c) => ({ descricao: c[2], data: c[0], valor: c[1] })),
   honC: { ativo: true, tipo: 'PCT', valor: 10, base: 'CORRIGIDO_JUROS_MULTA' } };
-const r = E.calcularJudicial(params, E.TABELAS);
+const r = E.calcularJudicial(params, TAB);
 r.params = params;
 r.custasRecolher = [1, 2, 3].map(() => ({ descricao: 'expedição', valor: 30 }));
 const cons = ctx.consolidarCustasHon(r);
@@ -73,7 +78,7 @@ assert.ok(m3.comp.includes('Custas processuais (13 recolhimentos, corrigidos pel
 console.log('  ✔ memória em 3 folhas (tabela com custas e fechamento)');
 
 // sem custas: a coluna some
-const r0 = E.calcularJudicial(Object.assign({}, params, { custas: [] }), E.TABELAS);
+const r0 = E.calcularJudicial(Object.assign({}, params, { custas: [] }), TAB);
 r0.params = params; r0.custasRecolher = [];
 const m30 = ctx.memoria3Folhas(r0, ctx.consolidarCustasHon(r0), {});
 assert.ok(!/Custas<br>processuais/.test(m30.thead), 'sem custas não há coluna de custas');
@@ -81,7 +86,7 @@ console.log('  ✔ sem custas, sem coluna');
 
 // multaInicial (cláusula penal já somada ao valor): 1ª linha e composição; o total não muda
 const pMi = Object.assign({}, params, { multaInicial: 2781, multaLabel: 'Cláusula penal (50%)' });
-const rMi = E.calcularJudicial(pMi, E.TABELAS);
+const rMi = E.calcularJudicial(pMi, TAB);
 rMi.params = pMi;
 rMi.custasRecolher = [1, 2, 3].map(() => ({ descricao: 'expedição', ref: 'mov. 99', valor: 30 }));
 const consMi = ctx.consolidarCustasHon(rMi);
