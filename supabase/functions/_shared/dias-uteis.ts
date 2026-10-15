@@ -105,6 +105,23 @@ export function etapaPreVencimento(venc: string, hoje: string, antecedencia = 3)
   return { etapa: 'aguardar', proximo: a.antecipado || a.vespera };
 }
 
+// Régua de ATRASO: cobranças nos dias 1, 3, 5, 7, 10 e 15 depois do vencimento
+// efetivo (Gustavo, 15/10/2026). Antes era +1 dia nas duas primeiras e +2 dias
+// depois, e o mesmo texto de "primeira cobrança" saía dia após dia até o 7º dia
+// (Cristiane e Fernanda receberam a mesma mensagem em 14 e 15/10/2026).
+// Dia que cai em fim de semana/feriado sai no dia útil seguinte (o worker só
+// envia em horário comercial).
+export const DIAS_REGUA_ATRASO = [1, 3, 5, 7, 10, 15];
+
+// Próxima data da régua de atraso depois de `hoje`. Passado o último dia, volta
+// a olhar amanhã (o worker decide se o caso vai para ação).
+export function proximoDiaAtraso(venc: string, hoje: string): string {
+  const ef = vencimentoEfetivo(venc);
+  const passados = Math.round((toUTC(hoje).getTime() - toUTC(ef).getTime()) / 864e5);
+  const d = DIAS_REGUA_ATRASO.find((x) => x > passados);
+  return d ? somarDias(ef, d) : somarDias(hoje.slice(0, 10), 1);
+}
+
 // 09h de Brasília do dia `iso` (a régua só sai em horário comercial).
 export function noveHorasBRT(iso: string): string {
   return new Date(Date.parse(iso.slice(0, 10) + 'T12:00:00Z')).toISOString();
