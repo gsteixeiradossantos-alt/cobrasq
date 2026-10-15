@@ -370,7 +370,7 @@
     const pfs = (devs || []).filter(function (d) { return d && d.tipo !== "PJ"; });
     const ident = pfs.map(function (d) {
       const doc = fmtDocumento(d.documento);
-      return "<strong>" + escAttr(String(d.nome || "").trim().toUpperCase()) + (doc ? ", CPF " + escAttr(doc) : "") + "</strong>";
+      return "<strong>" + escAttr(String(d.nome || "").trim()) + (doc ? ", CPF " + escAttr(doc) : "") + "</strong>";
     });
     const v = pfs.length > 1
       ? { quem: "Nós, " + ident.slice(0, -1).join(", ") + ", e " + ident[ident.length - 1] + ", declaramos que ",
