@@ -179,6 +179,9 @@ const STATUS_FORA_REGUA = [
   // "Quita Fácil" virou etiqueta oficial (30/07) -> tem cadência própria (reguaQuita),
   // não pode também levar a régua A de cobrança normal por cima (mensagem duplicada).
   'Quita Fácil',
+  // "Protestar - Quita Fácil" (15/10/2026, migração Astrea): crédito judicial indo a
+  // protesto -> sem WhatsApp automático (decisão do Gustavo).
+  'Protestar - Quita Fácil',
 ];
 
 // ── Idempotência: lookup/registro em regua_envios ───────────────
@@ -893,6 +896,7 @@ async function reguaQuita({ dry, DB }) {
     // na cobrança normal.
     if (!/fazer a[çc][ãa]o|infrut[íi]fero|encaminh\w*\s*(ao\s*)?judic|reajuizar|quita\s*f[aá]cil/i.test(c.status || '')) continue;
     if (/quitad|encerrad|recebid|baixad|devolvid|sem ?[êe]xito/i.test(c.status || '')) continue;  // terminal
+    if (/^protestar/i.test(c.status || '')) continue;  // "Protestar - Quita Fácil": fora da régua (15/10/2026)
     const cfg = cfgPorCredor[c.cliente_id] || {};
     const limite = (cfg.limite != null && cfg.limite !== '' && +cfg.limite > 0) ? +cfg.limite : 500;
     const capital = (c.valor_capital != null) ? +c.valor_capital
