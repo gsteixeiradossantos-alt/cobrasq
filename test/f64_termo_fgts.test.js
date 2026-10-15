@@ -33,7 +33,7 @@ function clausula(html, num) {
   const re = new RegExp('<span class="clause-num">' + num + '</span>[\\s\\S]*?</article>');
   const m = html.match(re);
   assert.ok(m, 'cláusula ' + num + ' não encontrada');
-  return texto(m[0]);
+  return texto(m[0]).replace(/ ([,:;.])/g, '$1');
 }
 
 const dados = {
@@ -45,7 +45,10 @@ const dados = {
   judicial: { numeroProcesso: '0001220-30.2024.8.16.0209', comarca: 'Dois Vizinhos', vara: 'Juizado Especial Cível', clausula4: { mode: 'sisbajud', total: 1000, levExequente: 1000, totalAcordo: 1780 } },
 };
 
-const TEXTO = 'autoriza expressamente a utilização do saldo existente em sua conta vinculada ao FGTS para pagamento do débito remanescente e concorda que o Juízo oficie à Caixa Econômica Federal para transferência do valor à conta judicial, até o limite do saldo devedor.';
+const TEXTO = 'Eu, Maria da Silva, CPF 000.000.000-00, declaro que li esta cláusula com atenção, que entendi o seu conteúdo e que concordo com ela por livre escolha: ' +
+  'a) sei que o saldo da minha conta vinculada ao FGTS é, em regra, impenhorável (art. 2º, § 2º, da Lei n. 8.036/1990); ' +
+  'b) mesmo assim, se eu descumprir este acordo, autorizo, de forma expressa, irrevogável e irretratável, que esse saldo seja usado para pagar o débito remanescente, até o limite do saldo devedor; ' +
+  'c) concordo que o Juízo oficie à Caixa Econômica Federal para transferir o valor à conta judicial, o que ajusto nos termos do art. 190 do Código de Processo Civil.';
 
 (async function () {
   console.log('\nF-64 · cláusula de uso do saldo do FGTS nos termos de acordo\n');
@@ -56,15 +59,15 @@ const TEXTO = 'autoriza expressamente a utilização do saldo existente em sua c
   checa('extrajudicial cl. 07: FGTS logo após a penhora (06), texto aprovado, parte devedora', () => {
     assert.ok(/Da autorização para penhora de valores/.test(clausula(extra, '06')));
     const c = clausula(extra, '07');
-    assert.ok(/Da autorização para uso do saldo do FGTS/.test(c));
-    assert.ok(c.includes('Em caso de descumprimento deste acordo, a parte devedora ' + TEXTO), c);
+    assert.ok(/Da declaração de ciência e autorização para uso do saldo do FGTS/.test(c));
+    assert.ok(c.includes(TEXTO), c);
   });
   checa('judicial: FGTS logo após a penhora de salário, texto aprovado, parte executada', () => {
     const nums = [...jud.matchAll(/class="clause-num">(\d+)<\/span><h2 class="clause-title">([^<]*)/g)];
     const iPen = nums.findIndex(m => /penhora de salário/.test(m[2]));
     assert.ok(iPen >= 0 && /uso do saldo do FGTS/.test(nums[iPen + 1][2]), 'FGTS não vem logo após a penhora');
     const c = clausula(jud, nums[iPen + 1][1]);
-    assert.ok(c.includes('Em caso de descumprimento deste acordo, a parte executada ' + TEXTO), c);
+    assert.ok(c.includes(TEXTO), c);
     assert.ok(!/devedora|\{\{/.test(c), 'vazou termo extrajudicial ou placeholder');
   });
   checa('numeração em sequência nos dois termos', () => {
@@ -106,6 +109,29 @@ const TEXTO = 'autoriza expressamente a utilização do saldo existente em sua c
   checa('empresa + pessoa física: FGTS presente, extrajudicial na 07', () => {
     assert.ok(/uso do saldo do FGTS/.test(clausula(extraM, '07')));
     assert.ok(/uso do saldo do FGTS/.test(judM));
+  });
+
+  checa('negrito no nome/CPF, na declaração de leitura e no "de forma expressa, irrevogável e irretratável"', () => {
+    const bruto = extra.match(/clause-num">07<[\s\S]*?<\/article>/)[0];
+    for (const t of ['<strong>Maria da Silva, CPF 000.000.000-00</strong>',
+      '<strong>li esta cláusula com atenção, que entendi o seu conteúdo e que concordo com ela por livre escolha</strong>',
+      '<strong>de forma expressa, irrevogável e irretratável</strong>']) assert.ok(bruto.includes(t), t);
+  });
+
+  // empresa + duas pessoas físicas: declaração no plural, só com as PF
+  const joao = Object.assign({}, dados.devedores[0], { nome: 'João de Souza', genero: 'M', documento: '11111111111' });
+  const plural = Object.assign({}, dados, { devedores: [empresa, dados.devedores[0], joao] });
+  const extraP = await E.montarTermoExtrajudicial(plural);
+  const judP = await E.montarTermoJudicial(plural);
+  checa('duas pessoas físicas: "Nós, …, e …, declaramos", sem a empresa', () => {
+    for (const h of [extraP, judP]) {
+      const c = texto(h.match(/uso do saldo do FGTS[\s\S]*?<\/article>/)[0]).replace(/ ([,:;.])/g, '$1');
+      assert.ok(c.includes('Nós, Maria da Silva, CPF 000.000.000-00, e João de Souza, CPF 111.111.111-11, declaramos que lemos esta cláusula com atenção, que entendemos o seu conteúdo e que concordamos com ela por livre escolha:'), c);
+      assert.ok(c.includes('a) sabemos que o saldo de nossas contas vinculadas ao FGTS'), c);
+      assert.ok(c.includes('b) mesmo assim, se descumprirmos este acordo, autorizamos, de forma expressa, irrevogável e irretratável, que esses saldos sejam usados'), c);
+      assert.ok(c.includes('c) concordamos que o Juízo oficie à Caixa Econômica Federal para transferir os valores à conta judicial, o que ajustamos'), c);
+      assert.ok(!/MERCADO/i.test(c), 'empresa entrou na declaração');
+    }
   });
 
   console.log(falhas ? '\nF-64 FALHOU — ' + falhas + ' verificação(ões).' : '\nF-64 ok — cláusula do FGTS nos dois termos.');

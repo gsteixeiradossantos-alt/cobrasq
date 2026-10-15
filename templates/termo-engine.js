@@ -364,6 +364,31 @@
       ondeDebito + ", no valor total de " + total + consolid;
   }
 
+  // Cláusula do FGTS em primeira pessoa, com nome e CPF de cada devedor pessoa física
+  // (PJ não tem FGTS e fica de fora). Singular para um, plural ("Nós, …") para dois ou mais.
+  function declaracaoFgts(devs) {
+    const pfs = (devs || []).filter(function (d) { return d && d.tipo !== "PJ"; });
+    const ident = pfs.map(function (d) {
+      const doc = fmtDocumento(d.documento);
+      return "<strong>" + escAttr(String(d.nome || "").trim()) + (doc ? ", CPF " + escAttr(doc) : "") + "</strong>";
+    });
+    const v = pfs.length > 1
+      ? { quem: "Nós, " + ident.slice(0, -1).join(", ") + ", e " + ident[ident.length - 1] + ", declaramos que ",
+          li: "lemos esta cláusula com atenção, que entendemos o seu conteúdo e que concordamos com ela por livre escolha",
+          a: "sabemos que o saldo de nossas contas vinculadas ao FGTS é, em regra, impenhorável",
+          b: "mesmo assim, se descumprirmos este acordo, autorizamos, <strong>de forma expressa, irrevogável e irretratável</strong>, que esses saldos sejam usados",
+          c: "concordamos que o Juízo oficie à Caixa Econômica Federal para transferir os valores à conta judicial, o que ajustamos" }
+      : { quem: "Eu, " + (ident[0] || "<strong>parte devedora</strong>") + ", declaro que ",
+          li: "li esta cláusula com atenção, que entendi o seu conteúdo e que concordo com ela por livre escolha",
+          a: "sei que o saldo da minha conta vinculada ao FGTS é, em regra, impenhorável",
+          b: "mesmo assim, se eu descumprir este acordo, autorizo, <strong>de forma expressa, irrevogável e irretratável</strong>, que esse saldo seja usado",
+          c: "concordo que o Juízo oficie à Caixa Econômica Federal para transferir o valor à conta judicial, o que ajusto" };
+    return "<p>" + v.quem + "<strong>" + v.li + "</strong>:</p>\n" +
+      "        <p>a) " + v.a + " (art. 2º, § 2º, da Lei n. 8.036/1990);</p>\n" +
+      "        <p>b) " + v.b + " para pagar o débito remanescente, até o limite do saldo devedor;</p>\n" +
+      "        <p>c) " + v.c + " nos termos do art. 190 do Código de Processo Civil.</p>";
+  }
+
   // Mapa placeholder → valor
   function placeholders(dados) {
     const cr = dados.credor || {}, ac = dados.acordo || {};
@@ -375,6 +400,7 @@
       credorQualificacao: qualifCredor(cr),
       devedoresPreambulo: preambuloDevedores(devs),
       assinaturasDevedores: assinaturasDevedores(devs),
+      declaracaoFgts: declaracaoFgts(devs),
       vistosPageCss: vistosPageCss(vistosAncoras(dados)),
       valorDivida: valorCompleto(ac.total),
       fraseReconhecimentoDivida: fraseReconhecimentoDivida(dados, "extrajudicial"),
@@ -742,7 +768,7 @@
       templateHtml = templateHtml.replace(/<!--c4-->[\s\S]*?<!--\/c4-->\s*/, "");
     }
     templateHtml = renumerarClausulas(semClausulaFgts(templateHtml, dados));
-    const rawHtml = { fraseReconhecimentoDivida: 1, clausula4Titulo: 1, clausula4Corpo: 1, paragrafoPagamento: 1, requerimentoSisbajud: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1, frasePagamento: 1, fraseEntregaBoletos: 1, credorQualificacao: 1, vistosPageCss: 1 };
+    const rawHtml = { fraseReconhecimentoDivida: 1, clausula4Titulo: 1, clausula4Corpo: 1, paragrafoPagamento: 1, requerimentoSisbajud: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1, frasePagamento: 1, fraseEntregaBoletos: 1, credorQualificacao: 1, vistosPageCss: 1, declaracaoFgts: 1 };
     return templateHtml.replace(/\{\{(\w+)\}\}/g, function (m, k) {
       if (!Object.prototype.hasOwnProperty.call(map, k)) return m;
       return rawHtml[k] ? String(map[k] == null ? "" : map[k]) : escAttr(map[k]);
