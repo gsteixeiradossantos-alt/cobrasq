@@ -59,9 +59,13 @@ module.exports = async function handler(req, res) {
     const devs = (await sbFetch(`devedores?select=id,nome,doc,doc_digits,asaas_customer_id`)) || [];
 
     // 3. Casa por doc; só atualiza onde há EXATAMENTE 1 cliente e ainda não está certo.
+    //    O CPF é único por credor (não no sistema todo): a mesma pessoa pode ter uma ficha
+    //    em cada credor, mas o customer Asaas só pode ficar em UMA delas
+    //    (idx_devedores_asaas_customer_id). Customer já usado por outra ficha → não mexe.
     const updates = [];
-    let already = 0, ambiguous = 0, unmatched = 0, semDoc = 0;
+    let already = 0, ambiguous = 0, unmatched = 0, semDoc = 0, emOutraFicha = 0;
     const ambiguousList = [];
+    const custUsado = new Map(devs.filter((d) => d.asaas_customer_id).map((d) => [d.asaas_customer_id, d.id]));
     for (const dv of devs) {
       const d = digits(dv.doc_digits || dv.doc);
       if (!d) { semDoc++; continue; }
@@ -70,6 +74,8 @@ module.exports = async function handler(req, res) {
       if (set.size > 1) { ambiguous++; if (ambiguousList.length < 15) ambiguousList.push({ nome: dv.nome, doc: d }); continue; }
       const cust = [...set][0];
       if (dv.asaas_customer_id === cust) { already++; continue; }
+      if (custUsado.has(cust) && custUsado.get(cust) !== dv.id) { emOutraFicha++; continue; }
+      custUsado.set(cust, dv.id);
       updates.push({ id: dv.id, cust });
     }
 
@@ -91,6 +97,7 @@ module.exports = async function handler(req, res) {
       ambiguos: ambiguous,
       sem_match: unmatched,
       sem_doc: semDoc,
+      customer_em_outra_ficha: emOutraFicha,
       ambiguos_amostra: ambiguousList,
     });
   } catch (e) {

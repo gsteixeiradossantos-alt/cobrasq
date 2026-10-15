@@ -6265,7 +6265,7 @@ async function flushRelational(){
         // PR-F: traduz erro de duplicação (idx_devedores_doc_digits_unique)
         // pra mensagem amigável. Code 23505 = unique_violation.
         const msg = (error.code === '23505' || /duplicate key|idx_devedores_doc_digits/i.test(error.message||''))
-          ? 'Já existe um cadastro com esse CPF/CNPJ. Pode estar com outro responsável (que não aparece na sua lista) — peça ao gestor para localizar/transferir, ou use "Dívidas adicionais" no cadastro existente.'
+          ? 'Já existe um cadastro com esse CPF/CNPJ neste credor. Pode estar com outro responsável (que não aparece na sua lista) — peça ao gestor para localizar/transferir, ou use "Dívidas adicionais" no cadastro existente.'
           : 'Não foi possível sincronizar Devedores: '+error.message;
         try { showToast(msg, 'danger'); } catch(_){}
       } else if(sentDev.length){
@@ -6929,14 +6929,18 @@ function mascaraDoc(el){const v=el.value.replace(/\D/g,'');el.value=v.length<=11
 // ── Item 1 (dedup CPF/CNPJ): busca por documento ─────────────────────────
 // Só considera documento completo (11 = CPF, 14 = CNPJ); ignora arquivados e
 // o próprio registro em edição. Rascunho é tratado à parte (avisa, não bloqueia).
+// O CPF/CNPJ é único POR CREDOR (idx_devedores_doc_digits_unique = cliente_id + doc):
+// a mesma pessoa pode ter uma ficha em cada credor. clienteId informado → só procura
+// naquele credor; sem clienteId, procura em todos (comportamento antigo).
 function docSoDigitos(v){ return (v||'').replace(/\D/g,''); }
-function findDevedorPorDoc(docDigits, ignorarId){
+function _mesmoCredor(d, clienteId){ return clienteId === undefined || (d.clienteId||'') === (clienteId||''); }
+function findDevedorPorDoc(docDigits, ignorarId, clienteId){
   if(docDigits.length !== 11 && docDigits.length !== 14) return null;
-  return (DB.devedores||[]).find(d => d.id !== (ignorarId||'') && !d.arquivado && !d.isDraft && docSoDigitos(d.doc) === docDigits) || null;
+  return (DB.devedores||[]).find(d => d.id !== (ignorarId||'') && !d.arquivado && !d.isDraft && docSoDigitos(d.doc) === docDigits && _mesmoCredor(d, clienteId)) || null;
 }
-function findDevedorRascunhoPorDoc(docDigits, ignorarId){
+function findDevedorRascunhoPorDoc(docDigits, ignorarId, clienteId){
   if(docDigits.length !== 11 && docDigits.length !== 14) return null;
-  return (DB.devedores||[]).find(d => d.id !== (ignorarId||'') && !d.arquivado && d.isDraft && docSoDigitos(d.doc) === docDigits) || null;
+  return (DB.devedores||[]).find(d => d.id !== (ignorarId||'') && !d.arquivado && d.isDraft && docSoDigitos(d.doc) === docDigits && _mesmoCredor(d, clienteId)) || null;
 }
 function findClientePorDoc(docDigits, ignorarId){
   if(docDigits.length !== 11 && docDigits.length !== 14) return null;
@@ -6956,14 +6960,22 @@ function _setDocDupUI(avisoId, btnId, msg, bloqueia){
 function checarDupDocDevedor(){
   const docDigits = docSoDigitos(document.getElementById('mdev-doc')?.value);
   const ignorarId = document.getElementById('mdev-id')?.value || '';
-  const dup = findDevedorPorDoc(docDigits, ignorarId);
+  const clienteId = document.getElementById('mdev-cliente')?.value || '';
+  const dup = findDevedorPorDoc(docDigits, ignorarId, clienteId);
   if(dup){
-    _setDocDupUI('mdev-doc-dup','btn-save-devedor', `Já existe cobrança para esse documento: ${dup.nome}. Para outra dívida do mesmo devedor, use "Dívidas adicionais" no cadastro existente.`, true);
+    _setDocDupUI('mdev-doc-dup','btn-save-devedor', `Já existe cobrança para esse documento neste credor: ${dup.nome}. Para outra dívida do mesmo devedor, use "Dívidas adicionais" no cadastro existente.`, true);
     return;
   }
-  const ras = findDevedorRascunhoPorDoc(docDigits, ignorarId);
+  const ras = findDevedorRascunhoPorDoc(docDigits, ignorarId, clienteId);
   if(ras){
     _setDocDupUI('mdev-doc-dup','btn-save-devedor', `Há um rascunho com esse documento (${ras.nome||'sem nome'}). Confira em Rascunhos antes de cadastrar de novo.`, false);
+    return;
+  }
+  // Mesmo CPF/CNPJ em OUTRO credor é permitido (uma ficha por credor) — só avisa.
+  const outro = findDevedorPorDoc(docDigits, ignorarId);
+  if(outro){
+    const cli = (DB.clientes||[]).find(c => c.id === outro.clienteId);
+    _setDocDupUI('mdev-doc-dup','btn-save-devedor', `Esse documento já é devedor em outro credor${cli ? ' ('+(cli.nomeFantasia||cli.nome||'')+')' : ''}: ${outro.nome}. Pode cadastrar — cada credor tem a sua ficha.`, false);
     return;
   }
   _setDocDupUI('mdev-doc-dup','btn-save-devedor', '', false);
@@ -18030,11 +18042,12 @@ async function salvarDevedor(){
   // mesmo devedor, usar "Dívidas adicionais" no cadastro existente.
   // Item 1: rascunho não bloqueia mais (o aviso aparece no campo, sem travar).
   const docDigits = docSoDigitos(doc);
-  const conflito = findDevedorPorDoc(docDigits, id || '');
+  // Único por credor: o mesmo CPF/CNPJ pode ter ficha em outro credor.
+  const conflito = findDevedorPorDoc(docDigits, id || '', document.getElementById('mdev-cliente')?.value || '');
   if(conflito){
     const tipoDoc = docDigits.length === 11 ? 'CPF' : 'CNPJ';
     alert(
-      `Já existe cobrança cadastrada para esse ${tipoDoc}:\n\n` +
+      `Já existe cobrança cadastrada para esse ${tipoDoc} neste credor:\n\n` +
       `• ${conflito.nome}\n` +
       `• Situação: ${conflito.status || '—'}\n\n` +
       `Para adicionar outra dívida ao mesmo devedor, abra o cadastro existente ` +
@@ -22001,7 +22014,9 @@ function _cobrFmtNum(n){ return (n==null||n==='') ? '' : Number(n).toFixed(2).re
 //  • garantirUmPrincipal: exatamente UM principal por dívida (espelha o índice
 //    único uq_cobranca_partes_principal). Sem marcação → 1º vira principal;
 //    múltiplos → o 1º marcado vence, os demais caem.
-//  • escolherDevedorExistente: dedup — reusa por CPF/CNPJ, depois por nome.
+//  • escolherDevedorExistente: dedup — reusa por CPF/CNPJ, depois por nome. Com
+//    clienteId, só reusa ficha do MESMO credor (CPF é único por credor; reusar a
+//    ficha de outro credor misturava as carteiras — o "1:N" das vistorias).
 function garantirUmPrincipal(resp){
   if(!Array.isArray(resp) || !resp.length) return resp;
   if(!resp.some(x=>x && x.principal)) resp[0].principal = true;
@@ -22009,8 +22024,8 @@ function garantirUmPrincipal(resp){
   for(const r of resp){ if(r && r.principal){ if(visto) r.principal = false; else visto = true; } }
   return resp;
 }
-function escolherDevedorExistente(devedores, nome, doc){
-  const lista = devedores || [];
+function escolherDevedorExistente(devedores, nome, doc, clienteId){
+  const lista = (devedores || []).filter(d => clienteId === undefined || (d && (d.clienteId||'') === (clienteId||'')));
   const rdig = docSoDigitos(doc);
   return (rdig && lista.find(d=> docSoDigitos(d.doc)===rdig))
       || lista.find(d=> (d.nome||'').toLowerCase() === (nome||'').toLowerCase())
@@ -25811,7 +25826,7 @@ async function salvarCobranca(){
 
     // 2) Resolve/cria os contatos (devedores) de cada responsável
     for(const r of resp){
-      let dev = escolherDevedorExistente(DB.devedores, r.nome, r.doc);
+      let dev = escolherDevedorExistente(DB.devedores, r.nome, r.doc, clienteId || undefined);
       if(dev){ r.devedorId = dev.id; r._novo = false; }
       else{
         const { data, error } = await supa.from('devedores')
@@ -53361,6 +53376,11 @@ async function asaasEnsureCustomer(dev){
   if(!dev.doc) throw new Error('O devedor não possui CPF/CNPJ cadastrado');
   const result = await AsaasAPI.findByCpfCnpj(dev.doc.replace(/\D/g,''));
   if(result.data && result.data.length > 0){
+    // Mesmo CPF com ficha em outro credor: o customer Asaas já está vinculado à outra
+    // ficha (idx_devedores_asaas_customer_id é único) e o asaas-webhook casa o pagamento
+    // por esse vínculo — emitir aqui jogaria o pagamento na cobrança do outro credor.
+    const usadoPor = (DB.devedores||[]).find(o => o.id !== dev.id && o.asaasCustomerId === result.data[0].id);
+    if(usadoPor) throw new Error(`Esse CPF/CNPJ já tem cliente no Asaas vinculado à ficha de ${usadoPor.nome||'outro devedor'} (outro credor). Emitir aqui misturaria os pagamentos dos dois credores — emita pela outra ficha ou fale com o gestor.`);
     dev.asaasCustomerId = result.data[0].id;
   } else {
     const created = await AsaasAPI.createCustomer({
@@ -53799,6 +53819,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
   // Doc mask
   const docInput = document.getElementById('mdev-doc');
   if(docInput) docInput.addEventListener('input', ()=>{ mascaraDoc(docInput); checarDupDocDevedor(); });
+  // CPF é único por credor: trocar o credor muda se o documento conflita.
+  const cliSelDup = document.getElementById('mdev-cliente');
+  if(cliSelDup) cliSelDup.addEventListener('change', ()=>{ try{ checarDupDocDevedor(); }catch(_){} });
   const cliDocInput = document.getElementById('mcli-doc');
   if(cliDocInput) cliDocInput.addEventListener('input', ()=>{ mascaraDoc(cliDocInput); checarDupDocCliente(); });
 
