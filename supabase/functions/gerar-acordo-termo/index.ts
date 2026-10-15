@@ -61,8 +61,8 @@ const telsCompartilhados = (pessoas: any[]) => {
   for (const p of pessoas) { const t = telNorm(p?.telefone); if (t) cont[t] = (cont[t] || 0) + 1; }
   return new Set(Object.keys(cont).filter((k) => cont[k] > 1));
 };
-// Credor como signatário (Gustavo, 26/09/2026): assina em <<assadv>> e rubrica todas
-// as páginas. Sendo a COBRASQ, assina a COBRASQ; sendo outro credor, quem assina é o
+// Credor como signatário (Gustavo, 26/09/2026): assina em <<assadv>> (sem visto desde
+// 15/10/2026). Sendo a COBRASQ, assina a COBRASQ; sendo outro credor, quem assina é o
 // Gustavo por procuração, mas o nome no ZapSign é o do credor. O telefone no ZapSign é
 // sempre o da COBRASQ; o link chega por WhatsApp no pessoal dele, pelo zapsign-webhook,
 // quando todos os devedores tiverem assinado — o ZapSign não manda nada sozinho.
@@ -138,7 +138,7 @@ Deno.serve(async (req) => {
       ? dados.devedores : (dados.devedor ? [dados.devedor] : []);
     const dev = devs[0] || {};
     // Advogado(s) da parte executada (acordo judicial): signatários opcionais que
-    // assinam nas âncoras <<assadv2>>, <<assadv3>>… e rubricam em <<vistoadv2>>…
+    // assinam nas âncoras <<assadv2>>, <<assadv3>>…
     // A <<assadv>> é do credor, que assina por último (ver CREDOR_TEL).
     const advs = (Array.isArray(dados.advogados) ? dados.advogados : []).filter((a: any) => a && a.nome);
     const tipoAcordoLabel = dados.tipo === "judicial" ? "Acordo Judicial" : "Acordo Extrajudicial";
@@ -191,11 +191,9 @@ Deno.serve(async (req) => {
         require_document_photo: false,
         selfie_validation_type: "none",
         signature_placement: "<<assdev" + (i + 1) + ">>",
-        // Visto (rubrica) em todas as páginas: o template imprime <<vistodevN>> na
-        // margem inferior de cada página (TermoEngine.vistosPageCss) e o ZapSign
-        // posiciona a rubrica em cada ocorrência. Mesmo mecanismo da assinatura —
-        // a devedora assina UMA vez; o visto é derivado. Pedido do Gustavo, 12/09/2026.
-        rubrica_placement: "<<vistodev" + (i + 1) + ">>",
+        // Sem rubrica_placement: o ZapSign pedia visto E assinatura; agora só a
+        // assinatura, uma vez (Gustavo, 15/10/2026 — revoga o visto de 12/09 e 26/09).
+        // As âncoras <<visto…>> continuam no template (3pt, quase brancas) e ficam sem uso.
       })).concat(advs.map((a: any, i: number) => ({
         name: a.nome || "",
         external_id: "adv" + (i + 2),
@@ -212,8 +210,6 @@ Deno.serve(async (req) => {
         selfie_validation_type: "none",
         ...(a.telCompartilhado ? { email: String(a.email).trim(), lock_email: true, auth_mode: "assinaturaTela-tokenEmail", require_selfie_photo: true, require_document_photo: true } : {}),
         signature_placement: "<<assadv" + (i + 2) + ">>",
-        // Rubrica em todas as páginas também para o advogado (Gustavo, 26/09/2026).
-        rubrica_placement: "<<vistoadv" + (i + 2) + ">>",
       }))).concat([{
         name: nomeSignatarioCredor(dados),
         external_id: "credor",
@@ -231,7 +227,6 @@ Deno.serve(async (req) => {
         require_document_photo: false,
         selfie_validation_type: "none",
         signature_placement: "<<assadv>>",
-        rubrica_placement: "<<vistocredor>>",
       }]),
       lang: "pt-br",
       disable_signer_emails: false,
