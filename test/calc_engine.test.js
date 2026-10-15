@@ -270,5 +270,19 @@ LOG('12) Capitalizacao anual: opt-in, aniversario da data de inicio dos juros, n
   ok(r.total < mesmo.total, 'titulos mais novos rendem menos que tudo no vencimento mais antigo');
 })();
 
+// troca de indice no meio do mes: o mes do corte vira dois segmentos, cada um pro-rata
+// (0014263-40.2025.8.16.0131: IPCA ate 22/05/2023, SELIC a partir de 23/05/2023)
+(function () {
+  var r = E.juridica(2700, D(2023, 2, 6), D(2023, 5, 30), 'SELIC', 0, 0, 0, { regimesIndice: [{ dataFim: '2023-05-22', indice: 'IPCA' }, { dataIni: '2023-05-23', indice: 'SELIC' }] });
+  var mai = r.linhas.filter(function (l) { return l.ano === 2023 && l.mes === 5; });
+  ok(mai.length === 2, 'maio/2023 em dois segmentos');
+  ok(mai[0].indiceTabela === 'IPCA' && mai[0].diasSeg === 22 && mai[0].diasMes === 31, 'maio: IPCA em 22/31 dias');
+  ok(mai[1].indiceTabela === 'SELIC' && mai[1].diasSeg === 9 && mai[1].diasMes === 31, 'maio: SELIC em 9/31 dias');
+  near(mai[0].saldoCorrigido, 2737.11, 'saldo em 22/05/2023 = memoria IPCA', 0.005);
+  near(r.total, 2775.39, 'saldo em 30/06/2023', 0.005);
+  var sem = E.juridica(2700, D(2023, 2, 6), D(2023, 5, 30), 'SELIC', 0, 0, 0, {});
+  ok(sem.linhas.filter(function (l) { return l.mes === 5 && l.ano === 2023; }).length === 1, 'sem regimes, um segmento por mes');
+})();
+
 LOG(FAIL === 0 ? '\nOK -- ' + RAN + ' assercoes passaram (motor canonico v3).' : '\nFALHOU -- ' + FAIL + '/' + RAN + ' assercao(oes).');
 if (FAIL > 0) { if (typeof process !== 'undefined' && process.exit) process.exit(1); else throw new Error('calc-engine: ' + FAIL + ' falhas'); }
