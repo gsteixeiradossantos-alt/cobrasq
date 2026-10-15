@@ -137,5 +137,17 @@ const FN = path.join(__dirname, '..', 'supabase', 'functions');
   assert.strictEqual(U.reagendarAntecipado({ ...ag0, status: 'adiada' }, '2026-10-15', '2026-10-08', 3, AG), null);
   assert.strictEqual(U.reagendarAntecipado(ag0, '2026-10-01', '2026-10-08', 3, AG), null);
 
+  // régua de atraso: dias 1, 3, 5, 7, 10 e 15 do vencimento efetivo (15/10/2026).
+  // Vence sábado 10/10/2026 -> efetivo terça 13/10 (12/10 feriado).
+  const px = (h) => U.proximoDiaAtraso('2026-10-10', h);
+  assert.strictEqual(px('2026-10-14'), '2026-10-16'); // enviou o dia 1 -> dia 3
+  assert.strictEqual(px('2026-10-15'), '2026-10-16'); // nunca repete no dia seguinte ao 2º
+  assert.strictEqual(px('2026-10-16'), '2026-10-18'); // dia 3 -> dia 5 (domingo: worker espera o dia útil)
+  assert.strictEqual(px('2026-10-19'), '2026-10-20'); // dia 6 -> dia 7
+  assert.strictEqual(px('2026-10-20'), '2026-10-23'); // dia 7 -> dia 10
+  assert.strictEqual(px('2026-10-23'), '2026-10-28'); // dia 10 -> dia 15
+  assert.strictEqual(px('2026-10-28'), '2026-10-29'); // passou do 15: olha amanhã
+  assert.deepStrictEqual(U.DIAS_REGUA_ATRASO, [1, 3, 5, 7, 10, 15]);
+
   console.log('F-57 ok');
 })().catch((e) => { console.error(e); process.exit(1); });

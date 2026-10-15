@@ -10,7 +10,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { MODELO } from '../_shared/bia-system.ts';
 import { resolverJid } from '../_shared/telefone-jid.ts';
-import { ehDiaUtil, etapaPreVencimento, noveHorasBRT, somarDiasUteis, vencimentoEfetivo } from '../_shared/dias-uteis.ts';
+import { ehDiaUtil, etapaPreVencimento, noveHorasBRT, proximoDiaAtraso, somarDiasUteis, vencimentoEfetivo } from '../_shared/dias-uteis.ts';
 import { decidirPrazoFinal, PREFIXO_PRAZO, prazoDoLog, textosAtraso, textosPreVencimento } from '../_shared/bia-avisos.ts';
 
 const SIG = '*Bia • COBRASQ*';
@@ -521,12 +521,12 @@ Deno.serve(async (req) => {
     const { ok } = await enviarBlocos(tel, blocos);
     if (!ok) { puladas++; continue; }
 
-    // avança a régua: cadência normal (n<=2 +1d; n>=3 +2d)
+    // avança a régua: dias 1, 3, 5, 7, 10 e 15 do atraso (proximoDiaAtraso)
     // depois do prazo final, só volta a olhar no dia útil seguinte ao prazo
-    const proxMs = Date.now() + (n <= 2 ? 1 : 2) * 864e5;
+    const proxRegua = vencIso ? noveHorasBRT(proximoDiaAtraso(vencIso, hoje)) : new Date(Date.now() + 2 * 864e5).toISOString();
     const upd: any = {
       lembretes_enviados: n, ultimo_lembrete_em: agoraIso,
-      proximo_lembrete_em: ehPrazoFinal ? noveHorasBRT(somarDiasUteis(prazo, 1)) : new Date(proxMs).toISOString(),
+      proximo_lembrete_em: ehPrazoFinal ? noveHorasBRT(somarDiasUteis(prazo, 1)) : proxRegua,
       primeiro_contato_em: c.primeiro_contato_em || agoraIso, venc_atual: venc, invoice_url: url, updated_at: agoraIso,
     };
     if (promessaQuebrada) {
