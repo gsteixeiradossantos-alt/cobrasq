@@ -64,18 +64,39 @@
   function parseDec(v) { let s = String(v || '').replace(/R\$\s?/g, '').replace(/%/g, '').trim(); if (s.indexOf(',') >= 0) s = s.replace(/\./g, '').replace(',', '.'); return parseFloat(s.replace(/[^\d.\-]/g, '')) || 0; }
 
   // ── segmentação mensal (pró-rata) ───────────────────────────────────────────
-  function segmentarPorMes(d1, d2) {
+  // `cortes` (opcional): datas em que começa um novo regime de índice/juros. O mês que
+  // contém um corte vira dois segmentos (antes e a partir do corte), cada um pró-rata
+  // sobre os dias do mês. Sem isso a troca só acontecia na virada do mês e o mês da
+  // troca ia inteiro pelo índice novo: IPCA até 22/05/2023 e SELIC depois, sobre
+  // R$ 2.700,00, dava R$ 4.152,83 em vez de R$ 4.126,91 (0014263-40.2025.8.16.0131).
+  function segmentarPorMes(d1, d2, cortes) {
+    const cs = (cortes || []).map(c => c.getTime()).sort((a, b) => a - b);
     const segs = []; let cur = new Date(d1.getFullYear(), d1.getMonth(), d1.getDate());
     while (cur <= d2) {
       const ano = cur.getFullYear(), mes = cur.getMonth() + 1;
       const ultimo = new Date(ano, mes, 0);
-      const fim = ultimo <= d2 ? ultimo : new Date(d2);
+      let fim = ultimo <= d2 ? ultimo : new Date(d2);
+      const corte = cs.find(t => t > cur.getTime() && t <= fim.getTime());
+      const proximo = corte != null ? new Date(corte) : new Date(ano, mes, 1);
+      if (corte != null) fim = new Date(ano, mes - 1, proximo.getDate() - 1);
       const dMes = diasNoMes(ano, mes), diasSeg = diffDias(cur, fim) + 1;
       const parcial = !(cur.getDate() === 1 && fim.getDate() === dMes);
       segs.push({ ano, mes, dataIniSeg: new Date(cur), dataFimSeg: new Date(fim), diasSeg, diasMes: dMes, parcial });
-      cur = new Date(ano, mes, 1);
+      cur = proximo;
     }
     return segs;
+  }
+
+  // Datas de início de cada janela de regime (dataIni, ou o dia seguinte ao dataFim).
+  function cortesDeRegimes(...listas) {
+    const out = [];
+    for (const lista of listas) for (const r of (lista || [])) {
+      const di = r.dataIni ? parseDataLocal(r.dataIni) : null;
+      const df = r.dataFim ? parseDataLocal(r.dataFim) : null;
+      if (di) out.push(di);
+      if (df) out.push(new Date(df.getFullYear(), df.getMonth(), df.getDate() + 1));
+    }
+    return out;
   }
 
   // Decide tabela de correção + regime de juros do segmento.
@@ -130,7 +151,7 @@
       dataFim:      _dt(params.dataFim),
       dataJuros:    _dt(params.dataJuros),
       multaData:    _dt(params.multaData) };
-    const segs = segmentarPorMes(params.dataCorrecao, params.dataFim);
+    const segs = segmentarPorMes(params.dataCorrecao, params.dataFim, cortesDeRegimes(params.regimesIndice, params.regimesJuros));
     const eventosOrd = [...(params.eventos || [])]
       .filter(e => e.data && e.valor && parseDataLocal(e.data) >= params.dataCorrecao && parseDataLocal(e.data) <= params.dataFim)
       // Sem `tipo` o evento caía fora dos dois ramos abaixo e era descartado calado,
