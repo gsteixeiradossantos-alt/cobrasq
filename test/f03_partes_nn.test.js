@@ -70,5 +70,15 @@ check('acha por nome quando sem doc', (escolherDevedorExistente(devs,'maria','')
 check('doc tem prioridade sobre nome', (escolherDevedorExistente(devs,'Maria','11122233344')||{}).id === 'd1');
 check('não acha → null (cadastra novo)', escolherDevedorExistente(devs,'Fulano','99999999999') === null);
 
+// ── CPF único POR CREDOR (20261015): a mesma pessoa pode ter uma ficha em cada credor ──
+var devsCred = [
+  {id:'o1', nome:'Douglas', doc:'063.172.639-06', clienteId:'oxipar'},
+  {id:'m1', nome:'Ana',     doc:'11122233344',    clienteId:'master'}
+];
+check('mesmo credor → reusa a ficha', (escolherDevedorExistente(devsCred,'Douglas','06317263906','oxipar')||{}).id === 'o1');
+check('outro credor → não reusa (cadastra nova)', escolherDevedorExistente(devsCred,'Douglas','06317263906','master') === null);
+check('nome igual em outro credor → não reusa', escolherDevedorExistente(devsCred,'Ana','','oxipar') === null);
+check('sem clienteId → procura em todos (como antes)', (escolherDevedorExistente(devsCred,'x','06317263906')||{}).id === 'o1');
+
 LOG(FAIL === 0 ? '\n✅ F-03 OK — ' + RAN + ' testes.' : '\n❌ F-03 FALHOU — ' + FAIL + '/' + RAN);
 if (FAIL > 0) { if (typeof process !== 'undefined' && process.exit) process.exit(1); throw new Error('F-03 failures: ' + FAIL); }

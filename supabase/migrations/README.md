@@ -326,3 +326,13 @@ persistiu (tabela inexistente, papel e dono originais).
 
 **Ordem:** aplicar 01 → 02 → merge. Merge antes: a ficha mostra "migração 20261006_01
 pendente" na seção Processos vinculados; lista, busca e cron seguem como antes.
+
+## 20261015 — CPF/CNPJ do devedor único por credor
+
+**Não aplicada.** Troca `idx_devedores_doc_digits_unique` de `(doc_digits)` para
+`(cliente_id, doc_digits) NULLS NOT DISTINCT`, mesmo filtro (sem arquivado/rascunho).
+A mesma pessoa pode ter uma ficha em cada credor; no mesmo credor continua bloqueado.
+Aplicar não falha (índice menos restritivo); o rollback falha se já houver o mesmo CPF em
+dois credores. Enquanto não aplicada, o front já deixa tentar e o banco devolve 23505.
+Limitação: o customer Asaas (`idx_devedores_asaas_customer_id`) segue único — só uma das
+fichas da mesma pessoa emite boleto; a tela avisa em vez de misturar os pagamentos.
