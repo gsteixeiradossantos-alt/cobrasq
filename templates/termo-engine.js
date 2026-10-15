@@ -760,6 +760,19 @@
     });
   }
 
+  /* Cláusula das custas (decisão do Gustavo, 15/10/2026, 0000943-85.2025.8.16.0174):
+   * acordo judicial na Vara Cível põe as custas a cargo exclusivo da parte devedora.
+   * Sem cláusula, o art. 90, § 2º, do CPC divide as despesas igualmente e a credora
+   * paga metade. No Juizado não entra: em 1º grau não há custas (art. 54 da
+   * Lei 9.099/1995). Só a Vara mantém o bloco <!--custas-->; qualquer outro foro
+   * (inclusive vazio, que o endereçamento trata como Juizado) remove. */
+  function clausulaCustasPorForo(html, dados) {
+    const vara = ((dados && dados.judicial) || {}).foro === "vara";
+    return vara
+      ? html.replace(/<!--\/?custas-->\s*/g, "")
+      : html.replace(/<!--custas-->[\s\S]*?<!--\/custas-->\s*/g, "");
+  }
+
   // preenche já permitindo HTML nos valores de cláusula 4 / contato (não escapa esses)
   function preencherJudicial(templateHtml, dados) {
     const map = placeholdersJudicial(dados);
@@ -767,7 +780,7 @@
       // nenhum conteúdo para o slot variável: remove o bloco inteiro
       templateHtml = templateHtml.replace(/<!--c4-->[\s\S]*?<!--\/c4-->\s*/, "");
     }
-    templateHtml = renumerarClausulas(semClausulaFgts(templateHtml, dados));
+    templateHtml = renumerarClausulas(semClausulaFgts(clausulaCustasPorForo(templateHtml, dados), dados));
     const rawHtml = { fraseReconhecimentoDivida: 1, clausula4Titulo: 1, clausula4Corpo: 1, paragrafoPagamento: 1, requerimentoSisbajud: 1, contatoRe: 1, devedoresPreambulo: 1, assinaturasDevedores: 1, assinaturaAdvExec: 1, frasePagamento: 1, fraseEntregaBoletos: 1, credorQualificacao: 1, vistosPageCss: 1, declaracaoFgts: 1 };
     return templateHtml.replace(/\{\{(\w+)\}\}/g, function (m, k) {
       if (!Object.prototype.hasOwnProperty.call(map, k)) return m;
@@ -885,7 +898,8 @@
   async function montarTermoQuitacao(dados) {
     const casca = await carregarTemplateJudicial();
     const clausulas = await carregarClausulasQuitacao();
-    return preencherQuitacao(aplicarClausulasQuitacao(casca, clausulas), dados);
+    // custas antes de aplicar: aplicarClausulasQuitacao apaga os comentários-marcadores
+    return preencherQuitacao(renumerarClausulas(aplicarClausulasQuitacao(casca, clausulaCustasPorForo(clausulas, dados))), dados);
   }
 
   global.TermoEngine = {
@@ -898,7 +912,7 @@
     credorEhCobrasq, timbreDe, carregarTimbreTA, aplicarTimbreTA,
     ritoJudicial, papeisRito,
     enderecamentoJudicial, clausula4Judicial, sisbajudPagamento, paragrafoPagamentoJudicial, requerimentoSisbajud, contatoReJudicial, contaFrase, assinaturaAdvExec,
-    placeholdersJudicial, preencherJudicial, carregarTemplateJudicial, montarTermoJudicial,
+    placeholdersJudicial, clausulaCustasPorForo, preencherJudicial, carregarTemplateJudicial, montarTermoJudicial,
     fraseReconhecimento, frasePagamentoRealizado, placeholdersQuitacao, aplicarClausulasQuitacao,
     preencherQuitacao, carregarClausulasQuitacao, montarTermoQuitacao
   };
