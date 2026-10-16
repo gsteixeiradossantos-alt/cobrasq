@@ -75,6 +75,9 @@ module.exports = async function handler(req, res) {
     const data = await r.json().catch(() => ({}));
     if (r.ok && data && data.id) {
       uid = data.id;
+    } else if (data && (data.error_code === 'weak_password' || data.weak_password)) {
+      // o GoTrue também responde 422 para senha fraca; não confundir com e-mail existente.
+      return res.status(400).json({ error: 'Senha recusada por ser fraca ou muito comum. Escolha outra senha, mais longa e sem palavras óbvias.' });
     } else if (r.status === 422 || /already.*regist|exists/i.test(JSON.stringify(data))) {
       // e-mail já existe no Auth: localiza o uid para reativar/religar (idempotente).
       const lr = await fetch(`${SB_URL}/auth/v1/admin/users?per_page=200`, {
