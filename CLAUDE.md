@@ -80,9 +80,17 @@ produção** — ele **não está** em `supabase/migrations/`. Armadilhas conhec
 
 ## RLS / perfis
 4 perfis reais: **proprietário/gestor, colaborador, cedente (empresa cliente), devedor**.
-- Cedente **não** lê a própria linha de `clientes` via RLS (a política usa `app_user_id`,
-  que nunca é populado); o vínculo real é `app_users.ref_id → clientes.id` e a leitura se
-  faz pelas **RPCs security-definer** `cedente_meu_cliente()` / `cedente_set_logo()`.
+- Cedente acha os próprios clientes por **três caminhos** (os mesmos da
+  `cedente_cliente_ids()`): `clientes.app_user_id = auth.uid()` (populado, ex.: Bidão e
+  Machadinho), grupo econômico (`grupo_economico_id`, ex.: Arte e Master, que têm
+  `app_user_id` vazio e `ref_id` vazio) e `cliente_grupo_id`. `app_users.ref_id → clientes.id`
+  existe só para parte deles. Leitura e gravação da própria ficha seguem pelas **RPCs
+  security-definer** `cedente_meu_cliente()` / `cedente_set_logo()`. (Conferido em 16/10/2026.)
+- Desde 16/10/2026 (migração `20261016_portal_dados_sensiveis`) o cedente **não lê**
+  `devedores`/`cobrancas` direto: o portal usa as RPCs `portal_devedores()` /
+  `portal_cobrancas()`, que devolvem só campos em lista branca. Campo novo que o cliente
+  precise ver entra na lista dessas funções; tirar algo da tela do cliente sem tirar da RPC
+  ou da policy não tira do acesso dele.
 - Ao validar qualquer mudança, **simular os 4 perfis** (protocolo completo na skill
   `/auditar-cobrasq`).
 
