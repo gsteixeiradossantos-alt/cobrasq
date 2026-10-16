@@ -275,6 +275,10 @@ module.exports = async function handler(req, res) {
     // recebeu (ex.: R$ 20 pagos por fora antes da série). Ela vai literal ao extrato do
     // PIX; o número inicial ("2 - Fulana") vira a parcela da mensagem e da operação.
     const descEditada = String(body.descricao || '').trim().slice(0, 500);
+    // "Sem mensagem ao credor" (16/10/2026): o PIX sai e a ficha registra, mas a mensagem
+    // automática não vai — caso fora do padrão (ex.: alvará que não quita o débito), em
+    // que o Gustavo manda um texto próprio. Gravado na operação para o webhook respeitar.
+    const semMensagem = body.sem_mensagem === true;
     const ref = lerDescricaoRepasse(descEditada || (op.metadata && op.metadata.lancamento_descricao) || '');
     if (op.devedor_id) {
       const dvs = await sbFetch(`devedores?id=eq.${op.devedor_id}&select=nome&limit=1`).catch(() => []);
@@ -340,6 +344,7 @@ module.exports = async function handler(req, res) {
         ...(op.metadata || {}), repasse_pix_key: pixKey, repasse_asaas_status: st,
         repasse_devedor_nome: ref.devedor || undefined,
         ...(descEditada ? { repasse_descricao_pix: descEditada } : {}),
+        sem_mensagem_credor: semMensagem || undefined, // reescrito sempre: nova tentativa não herda a anterior
         ...(arq ? { comprovante_storage_path: arq.storage_path, comprovante_bytes: arq.bytes } : {}),
       },
     };
@@ -367,7 +372,7 @@ module.exports = async function handler(req, res) {
     // Se já concluiu, manda o comprovante ao credor agora (senão, vai no webhook).
     // Um PIX = uma mensagem, com o PDF em anexo.
     let envio = null;
-    if (concluido) {
+    if (concluido && !semMensagem) {
       // Ordem de preferência: o comprovante do BANCO primeiro. Ele é prova de
       // terceiro, com o identificador oficial do PIX e as instituições das duas partes —
       // documento que a COBRASQ emite sobre si mesma não tem a mesma força. O nosso PDF
@@ -424,6 +429,7 @@ module.exports = async function handler(req, res) {
       comprovante_via: (envio && envio.via) || null,
       // Fora do horário comercial o comprovante fica na fila; o painel mostra quando sai.
       comprovante_agendado_para: (envio && envio.agendado && envio.agendada_para) || null,
+      ...(semMensagem ? { sem_mensagem_credor: true } : {}),
       ficha_caso: ficha ? { repasse_id: ficha.repasse_id, status_caso: ficha.status_caso || null } : null,
     });
   } catch (e) {
@@ -511,6 +517,7 @@ async function repassarLote(res, body) {
     const parcelas = [...new Set(ops.map((o, i) => Number(o.parcela || refs[i].parcela) || 0).filter(n => n > 0))].sort((a, b) => a - b);
     const totalParcelas = Math.max(0, ...ops.map((o, i) => Number(o.total_parcelas || refs[i].total) || 0)) || null;
     const descEditada = String(body.descricao || '').trim().slice(0, 500);
+    const semMensagem = body.sem_mensagem === true;
 
     // Trava: todas pendente→preparado, ou nenhuma. Quem não pegar o grupo inteiro
     // devolve o que pegou e sai sem PIX.
@@ -566,6 +573,7 @@ async function repassarLote(res, body) {
           ...(op.metadata || {}), repasse_pix_key: pixKey, repasse_asaas_status: st,
           repasse_devedor_nome: devedor || undefined, repasse_lote: lote,
           ...(descEditada ? { repasse_descricao_pix: descEditada } : {}),
+          sem_mensagem_credor: semMensagem || undefined, // reescrito sempre: nova tentativa não herda a anterior
           ...(arq ? { comprovante_storage_path: arq.storage_path, comprovante_bytes: arq.bytes } : {}),
         },
       }),
@@ -587,24 +595,26 @@ async function repassarLote(res, body) {
     // com a soma (a ficha é idempotente pelo transfer id).
     let envio = null; let ficha = null;
     if (concluido) {
-      let pdf = (arq && arq.base64) || '';
-      if (!pdf) pdf = await imprimirPaginaAsaasPdf(comprovanteUrl);
-      if (!pdf) {
-        pdf = await gerarComprovanteRepassePdf({
-          credorNome: credor.nome, devedor, parcela: listarParcelas(parcelas),
-          valor: total, dataISO: hojeBR(),
-          transferId: transfer.id, chavePix: pixKey, urlAsaas: comprovanteUrl,
+      if (!semMensagem) {
+        let pdf = (arq && arq.base64) || '';
+        if (!pdf) pdf = await imprimirPaginaAsaasPdf(comprovanteUrl);
+        if (!pdf) {
+          pdf = await gerarComprovanteRepassePdf({
+            credorNome: credor.nome, devedor, parcela: listarParcelas(parcelas),
+            valor: total, dataISO: hojeBR(),
+            transferId: transfer.id, chavePix: pixKey, urlAsaas: comprovanteUrl,
+          });
+        }
+        const [dp, partes] = await Promise.all([
+          devedorPrincipal(cobId).catch(() => null),
+          partesDaCobranca(cobId).catch(() => []),
+        ]);
+        envio = await enviarComprovanteCredor({
+          telefone: destinoWhatsapp(credor), parcelas, total: totalParcelas, devedor,
+          doc: dp && dp.doc, partes,
+          base64: pdf, ext: 'pdf', comprovanteUrl,
         });
       }
-      const [dp, partes] = await Promise.all([
-        devedorPrincipal(cobId).catch(() => null),
-        partesDaCobranca(cobId).catch(() => []),
-      ]);
-      envio = await enviarComprovanteCredor({
-        telefone: destinoWhatsapp(credor), parcelas, total: totalParcelas, devedor,
-        doc: dp && dp.doc, partes,
-        base64: pdf, ext: 'pdf', comprovanteUrl,
-      });
       ficha = await registrarRepasseNaFicha({
         cobrancaId: cobId, credor, valor: total, transferId: transfer.id,
         dataPix: hojeBR(), comprovante: arq,
@@ -624,6 +634,7 @@ async function repassarLote(res, body) {
       comprovante_enviado: !!(envio && envio.enviado),
       comprovante_via: (envio && envio.via) || null,
       comprovante_agendado_para: (envio && envio.agendado && envio.agendada_para) || null,
+      ...(semMensagem ? { sem_mensagem_credor: true } : {}),
       ficha_caso: ficha ? { repasse_id: ficha.repasse_id, status_caso: ficha.status_caso || null } : null,
     });
   } catch (e) {

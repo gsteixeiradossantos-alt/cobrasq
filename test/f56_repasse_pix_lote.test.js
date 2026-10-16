@@ -256,6 +256,53 @@ function inicio() { novoBanco(); transfers = []; mensagens = []; fichas = []; as
     assert.strictEqual(db.fin_operacao.length, 0);
   });
 
+  // "Sem mensagem ao credor" (Maicon/Leofer, 16/10/2026): alvará que não quitou o débito.
+  await caso('sem mensagem, Asaas conclui na hora: PIX sai, ficha registra, nada vai ao credor', async () => {
+    const r = await chamarRepassar({ lancamento_id: 11, sem_mensagem: true });
+    assert.strictEqual(r.code, 200, JSON.stringify(r.corpo));
+    assert.strictEqual(transfers.length, 1);
+    assert.strictEqual(r.corpo.repasse_status, 'efetuado');
+    assert.strictEqual(r.corpo.sem_mensagem_credor, true);
+    assert.strictEqual(mensagens.length, 0);
+    assert.strictEqual(fichas.length, 1);
+    assert.strictEqual(db.fin_operacao[0].metadata.sem_mensagem_credor, true);
+    assert.strictEqual(db.fin_lancamento.find(l => l.id === 11).status, 1);
+  });
+
+  await caso('sem mensagem, Asaas processando: o webhook conclui sem mandar mensagem', async () => {
+    asaasResposta = 'PENDING';
+    await chamarRepassar({ lancamento_id: 11, sem_mensagem: true });
+    const w = await chamarWebhook({ id: 'tr_1', status: 'DONE', externalReference: db.fin_operacao[0].id }, 'TRANSFER_DONE');
+    assert.strictEqual(w.code, 200, JSON.stringify(w.corpo));
+    assert.strictEqual(db.fin_operacao[0].repasse_status, 'efetuado');
+    assert.strictEqual(mensagens.length, 0);
+    assert.strictEqual(fichas.length, 1);
+  });
+
+  await caso('sem mensagem no lote: um PIX, uma ficha, nenhuma mensagem (também pelo webhook)', async () => {
+    const r = await chamarRepassar({ lancamento_ids: [11, 12, 13], sem_mensagem: true });
+    assert.strictEqual(r.code, 200, JSON.stringify(r.corpo));
+    assert.strictEqual(r.corpo.sem_mensagem_credor, true);
+    assert.strictEqual(mensagens.length, 0);
+    assert.strictEqual(fichas.length, 1);
+    inicio(); asaasResposta = 'PENDING';
+    await chamarRepassar({ lancamento_ids: [11, 12, 13], sem_mensagem: true });
+    await chamarWebhook({ id: 'tr_1', status: 'DONE', externalReference: db.fin_operacao[0].id }, 'TRANSFER_DONE');
+    assert.ok(db.fin_operacao.every(o => o.repasse_status === 'efetuado'));
+    assert.strictEqual(mensagens.length, 0);
+  });
+
+  await caso('nova tentativa após falha não herda o "sem mensagem" da anterior', async () => {
+    asaasResposta = 'PENDING';
+    await chamarRepassar({ lancamento_id: 11, sem_mensagem: true });
+    await chamarWebhook({ id: 'tr_1', status: 'FAILED', externalReference: db.fin_operacao[0].id }, 'TRANSFER_FAILED');
+    asaasResposta = 'DONE';
+    const r = await chamarRepassar({ lancamento_id: 11 });
+    assert.strictEqual(r.code, 200, JSON.stringify(r.corpo));
+    assert.ok(!db.fin_operacao[0].metadata.sem_mensagem_credor);
+    assert.strictEqual(mensagens.length, 1);
+  });
+
   console.log(`\nF-56: ${ok} casos OK`);
   await caso('lote: extrato, nome do arquivo e mensagem citam todas as parcelas (Elison, 30/09/2026)', async () => {
     const m = require(path.join(RAIZ, 'api', '_repasse-msg.js'));
