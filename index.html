@@ -56061,38 +56061,526 @@ function toggleDevSelection(id, e){
   updateBulkToolbar();
 }
 
-function gerarRelatorioCarteira(clienteId){
-  const devs = (DB.devedores||[]).filter(d=>d.clienteId===clienteId);
-  if(!devs.length){ showToast('Este credor não tem devedores cadastrados.','warning'); return; }
-  abrirModalRelatorio(devs.map(d=>d.id), clienteId);
+// ============================================================================
+// Relatório de Andamento ao credor (carteira e grupo econômico), no molde do
+// relatório da carteira Master 24 Horas aprovado em 15/10/2026 (skill
+// relatorio-andamento-cobrasq). Lê as cobranças do banco na hora (relacional,
+// não o blob), então sai sempre com a posição do dia, para qualquer credor
+// com acesso ao portal, sem ninguém montar nada à mão.
+//
+// O gerador antigo lia `DB.devedores` (blob), mostrava etiqueta crua do
+// sistema ("Período atual", "Fazer ação"), número de processo cortado e datas
+// de importação como se fossem datas de pagamento. Regras deste:
+//   - três blocos: Ativos, Quitados, Devolvidos & Encerrados (bloco vazio some);
+//   - situação em linguagem de leigo, por tipo de status, sem travessão;
+//   - data só quando é confiável: `etapa_atualizada_em` nunca; no repasse-pix a
+//     data sai dos IDs PIX (o `quando` é do lote de 30/09/2026); importação
+//     Astrea não tem data de pagamento;
+//   - o motivo interno do encerramento (`encerramento.motivo`) nunca sai.
+// ============================================================================
+function _ra2Norm(s){
+  return String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().trim();
+}
+function _ra2Enc(c){
+  let e = c && c.encerramento;
+  if(typeof e === 'string'){ try{ e = JSON.parse(e); }catch(_){ e = null; } }
+  return (e && typeof e === 'object') ? e : {};
+}
+function _ra2Brl(v){
+  return 'R$ ' + (Number(v)||0).toLocaleString('pt-BR',{minimumFractionDigits:2, maximumFractionDigits:2});
+}
+function _ra2DataBR(iso){
+  const m = String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : '';
+}
+// CPF 123.***.***-45 · CNPJ 12.***.***/0001-00 (padrão da skill).
+function _ra2DocMasc(d){
+  const n = String(d||'').replace(/\D/g,'');
+  if(n.length===11) return `CPF ${n.slice(0,3)}.***.***-${n.slice(9)}`;
+  if(n.length===14) return `CNPJ ${n.slice(0,2)}.***.***/${n.slice(8,12)}-${n.slice(12)}`;
+  return '';
+}
+const _RA2_EXT_M = ['zero','um','dois','três','quatro','cinco','seis','sete','oito','nove','dez','onze','doze','treze','catorze','quinze','dezesseis','dezessete','dezoito','dezenove','vinte'];
+function _ra2Ext(n, fem){
+  if(n > 20) return String(n);
+  if(fem && n===1) return 'uma';
+  if(fem && n===2) return 'duas';
+  return _RA2_EXT_M[n];
+}
+function _ra2Cap(s){ return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+function _ra2Lista(itens){
+  const l = itens.filter(Boolean);
+  if(l.length<=1) return l.join('');
+  return l.slice(0,-1).join(', ') + ' e ' + l[l.length-1];
 }
 
-// Relatório de GRUPO econômico — casos separados por empresa cedente, com subtotais + total do grupo.
-function gerarRelatorioGrupo(gid){
-  const nome = ((DB.gruposEconomicos||[]).find(g=>g.id===gid)||{}).nome || 'Grupo';
-  const credores = (DB.clientes||[]).filter(c=>c.grupoEconomicoId===gid && !c.arquivado && !c.isDraft);
-  const devs = (DB.devedores||[]).filter(d=>!d.isDraft && credores.some(c=>c.id===d.clienteId));
-  if(!devs.length){ showToast('Nenhum caso neste grupo.','warning'); return; }
-  _reportGrupoId = gid; _reportDevIds = devs.map(d=>d.id); _reportClienteId = null;
-  document.getElementById('modal-relatorio-body').innerHTML = `
-    <div style="margin-bottom:16px;padding:12px 14px;background:var(--bg);border-radius:var(--radius-sm);font-size:13px;">
-      <strong>Tipo:</strong> Relatório de Grupo Econômico<br>
-      <strong>Grupo:</strong> ${escHtml(nome)}<br>
-      <strong>Empresas:</strong> ${credores.length} · <strong>Casos:</strong> ${devs.length}
+// Data confiável do encerramento, ou ''.
+function _ra2DataEnc(c){
+  const e = _ra2Enc(c);
+  const origem = _ra2Norm(e.origem);
+  if(origem === 'repasse-pix'){
+    // ID PIX E + ISPB(8) + AAAAMMDD…: a data real de cada repasse.
+    let maior = '';
+    String(e.motivo||'').replace(/E\d{8}(\d{8})/g, (_, d)=>{ if(d > maior) maior = d; return _; });
+    return maior ? `${maior.slice(6,8)}/${maior.slice(4,6)}/${maior.slice(0,4)}` : '';
+  }
+  if(/astrea/.test(origem)) return '';
+  return _ra2DataBR(e.quando || e.data);
+}
+
+// Classe do caso: ativo · quitado · quitado_direto · devolvido · encerrado.
+function _ra2Classe(c){
+  const s = _ra2Norm(statusLabel(c.status));
+  const e = _ra2Enc(c);
+  if(/quitado direto/.test(s) || e.origem === 'pagamento-direto-credor') return 'quitado_direto';
+  if(/quitad|liquidad/.test(s)) return 'quitado';
+  if(/^devolvida/.test(s)) return 'devolvido';
+  if(/^devolver/.test(s)) return 'encerrado';
+  return 'ativo';
+}
+
+// Tipo do caso ativo → textos ao credor. `jud` diz se conta como fase judicial.
+const _RA2_TIPOS = {
+  cumprimento: { jud:true,  sit:'Em cumprimento de sentença, buscando bens e valores para penhora.', esp:'Seguiremos com a busca de bens e valores.' },
+  acordo_jud:  { jud:true,  sit:'Acordo firmado no processo e homologado pelo juízo.', esp:'Seguiremos acompanhando o cumprimento do acordo.' },
+  acao:        { jud:true,  sit:'', esp:'Seguiremos com a citação do devedor.' },
+  sentenca:    { jud:true,  sit:'Ação julgada, com sentença proferida pelo juízo.', esp:'Aguardamos o início da fase de cumprimento de sentença.' },
+  exec_acordo: { jud:false, sit:'O devedor deixou de cumprir o acordo firmado.', esp:'O caso passa à cobrança do acordo descumprido.' },
+  medida:      { jud:false, sit:'Documentação em análise para a medida judicial cabível.', esp:'Concluída a análise, seguiremos com a medida judicial cabível.' },
+  analise:     { jud:false, sit:'Caso em análise pela COBRASQ.', esp:'Concluída a análise, seguiremos com a medida cabível.' },
+  quita_facil: { jud:false, sit:'Crédito de menor valor, incluído no Quita Fácil: a cobrança é conduzida pela régua automatizada da COBRASQ, com contatos periódicos ao devedor por WhatsApp e opção de pagamento imediato, sem custo de processo para o credor.', esp:'A régua segue ativa até o pagamento. Se o devedor não responder ao ciclo completo, o caso sai do Quita Fácil e passa à análise para a medida judicial cabível.' },
+  acordo_ext:  { jud:false, sit:'Acordo firmado diretamente com o devedor, fora do processo judicial.', esp:'Seguiremos acompanhando o pagamento das parcelas.' },
+  acordo_env:  { jud:false, sit:'Proposta de acordo enviada ao devedor, aguardando a assinatura.', esp:'Assinado o acordo, seguiremos acompanhando o pagamento.' },
+  negociando:  { jud:false, sit:'Em negociação com o devedor, fora do processo judicial.', esp:'Seguiremos com a negociação. Sem acordo, o caso passa à análise da medida judicial cabível.' },
+  telefone:    { jud:false, sit:'Cobrança direta, fora do processo judicial. Os telefones informados não respondem, e buscamos novos contatos do devedor.', esp:'Localizado o devedor, seguiremos com os contatos.' },
+  judicial:    { jud:true,  sit:'Processo judicial em curso.', esp:'Seguiremos acompanhando o processo.' },
+  extrajud:    { jud:false, sit:'Cobrança direta, fora do processo judicial.', esp:'Seguiremos com os contatos. Sem pagamento, o caso passa à análise da medida judicial cabível.' },
+};
+function _ra2Tipo(c){
+  const s = _ra2Norm(statusLabel(c.status));
+  let t = 'extrajud', acao = '';
+  if(/cumprimento/.test(s)) t = 'cumprimento';
+  else if(/acordo judicial/.test(s)) t = 'acordo_jud';
+  else if(/sentenca/.test(s)) t = 'sentenca';
+  else if(/executar acordo/.test(s)) t = 'exec_acordo';
+  else if(/^(fazer acao|corrigir acao|reajuizar)/.test(s)) t = 'medida';
+  else if(/quita facil/.test(s)) t = 'quita_facil';
+  else if(/acordo extrajudicial/.test(s)) t = 'acordo_ext';
+  else if(/acordo enviado/.test(s)) t = 'acordo_env';
+  else if(/negociando/.test(s)) t = 'negociando';
+  else if(/telefone invalido/.test(s)) t = 'telefone';
+  else if(/^analise/.test(s)) t = 'analise';
+  else if(/^acao|execucao|monitoria|locupletamento/.test(s)){
+    t = 'acao';
+    acao = /execucao/.test(s) ? 'Ação de execução'
+         : /monitoria/.test(s) ? 'Ação monitória'
+         : /locupletamento/.test(s) ? 'Ação de locupletamento'
+         : /cobranca/.test(s) ? 'Ação de cobrança' : 'Ação judicial';
+  }
+  // Processo já no juízo com etiqueta de fase extrajudicial: não se descreve
+  // como "cobrança direta".
+  if(!_RA2_TIPOS[t].jud && c.fase === 'judicial' && ['extrajud','negociando','telefone','analise'].includes(t)) t = 'judicial';
+  return { t, acao };
+}
+
+function _ra2Caso(c){
+  const classe = _ra2Classe(c);
+  const caso = {
+    c, classe,
+    nome: _cobrPrincipalNome(c),
+    valor: parseValorBR(c.valor_orig) || 0,
+    proc: String(c.numero_processo||'').trim(),
+    data: '', tipo: null, jud: false, sit: '', esp: '',
+  };
+  if(classe === 'ativo'){
+    const { t, acao } = _ra2Tipo(c);
+    const def = _RA2_TIPOS[t];
+    caso.tipo = t;
+    caso.jud = def.jud || c.fase === 'judicial';
+    caso.sit = t === 'acao' ? `${acao} em curso.` : def.sit;
+    caso.esp = def.esp;
+    caso.acao = acao;
+  } else {
+    caso.data = _ra2DataEnc(c);
+    if(classe === 'quitado'){
+      const pix = _ra2Norm(_ra2Enc(c).origem) === 'repasse-pix';
+      caso.sit = 'Dívida quitada por meio da COBRASQ.';
+      caso.esp = caso.data ? (pix ? `Valor repassado ao credor em ${caso.data}.` : `Cobrança quitada em ${caso.data}.`) : 'Nenhuma providência pendente.';
+    } else if(classe === 'quitado_direto'){
+      caso.sit = 'Dívida paga diretamente ao credor.';
+      caso.esp = caso.data ? `Cobrança encerrada em ${caso.data}.` : 'Nenhuma providência pendente.';
+    } else if(classe === 'devolvido'){
+      caso.sit = 'Cobrança encerrada e devolvida ao credor.';
+      caso.esp = 'Nenhuma providência pendente.';
+    } else {
+      caso.sit = 'Cobrança encerrada. Documentação física disponível para retirada na sede da COBRASQ.';
+      caso.esp = 'Aguardamos a retirada da documentação.';
+    }
+  }
+  return caso;
+}
+
+// Coleta: { clienteId } ou { grupoId }. Rascunho fica de fora; quitado,
+// devolvido e arquivado entram (o credor precisa ver o histórico inteiro).
+async function _ra2Coletar(alvo){
+  const lista = await ensureCobrancas({ forcar:true });
+  if(!lista) throw new Error('Não foi possível ler as cobranças agora. Tente de novo em instantes.');
+  let clientes = [];
+  if(alvo.grupoId){
+    clientes = (DB.clientes||[]).filter(x=>x.grupoEconomicoId===alvo.grupoId && !x.arquivado && !x.isDraft);
+  } else {
+    const cli = (DB.clientes||[]).find(x=>x.id===alvo.clienteId);
+    if(cli) clientes = [cli];
+  }
+  const ids = new Set(alvo.grupoId ? clientes.map(x=>x.id) : [alvo.clienteId]);
+  let cobs = lista.filter(c=>!c.is_draft && !(c.metadata && c.metadata.isDraft));
+  // Cedente de grupo: a RLS já restringe às cobranças dele; se o blob não
+  // trouxe as empresas do grupo, vale o que a RLS liberou.
+  const cedente = typeof currentUser !== 'undefined' && currentUser && currentUser.role === 'cedente';
+  if(!(alvo.grupoId && cedente && !clientes.length)) cobs = cobs.filter(c=>ids.has(c.cliente_id));
+  if(!clientes.length){
+    const vistos = new Set(cobs.map(c=>c.cliente_id));
+    clientes = (DB.clientes||[]).filter(x=>vistos.has(x.id));
+  }
+  // Só as empresas com cobrança aparecem na capa.
+  const comCob = new Set(cobs.map(c=>c.cliente_id));
+  clientes = clientes.filter(x=>comCob.has(x.id))
+    .sort((a,b)=>(a.nome||'').localeCompare(b.nome||'','pt-BR',{sensitivity:'base'}));
+  let titulo;
+  if(alvo.grupoId){
+    titulo = ((DB.gruposEconomicos||[]).find(g=>g.id===alvo.grupoId)||{}).nome
+          || (cedente && currentUser.grupoNome) || 'Grupo econômico';
+  } else {
+    const cli = clientes[0] || (DB.clientes||[]).find(x=>x.id===alvo.clienteId) || {};
+    titulo = cli.nomeFantasia || cli.nome_fantasia || cli.nome || (cobs[0] && _cobrCredorNome(cobs[0])) || 'Credor';
+  }
+  return { titulo, clientes, casos: cobs.map(_ra2Caso), grupo: !!alvo.grupoId };
+}
+
+function _ra2Css(posicao){
+  return `
+:root{--ink:#0A1530;--paper:#EFEAD9;--paper-2:#E2DBC6;--accent:#C9A961;--mute:rgba(10,21,48,0.5);--line:rgba(10,21,48,0.12);
+  --serif:"Fraunces","Times New Roman",serif;--serif-edit:"Instrument Serif","Times New Roman",serif;
+  --sans:"Inter Tight",-apple-system,Arial,sans-serif;--mono:"JetBrains Mono","Courier New",monospace;}
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body{background:var(--paper);color:var(--ink);-webkit-font-smoothing:antialiased;}
+*{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important;}
+@page{size:A4 portrait;margin:24mm 18mm 20mm;background:#EFEAD9;
+  @top-left{content:"cobrasq.";font-family:"Fraunces",serif;font-weight:300;font-size:16px;color:#0A1530;
+    vertical-align:bottom;padding-bottom:9px;border-bottom:0.5px solid #C9A961;}
+  @top-right{content:"RELATÓRIO DE ANDAMENTO · POSIÇÃO EM ${posicao}";font-family:"JetBrains Mono",monospace;font-size:8px;
+    letter-spacing:0.16em;color:rgba(10,21,48,0.5);vertical-align:bottom;padding-bottom:11px;border-bottom:0.5px solid #C9A961;}
+  @bottom-left{content:"COBRASQ · DESDE 2019";font-family:"JetBrains Mono",monospace;font-size:7.5px;letter-spacing:0.14em;
+    color:rgba(10,21,48,0.5);vertical-align:top;padding-top:11px;border-top:0.5px solid rgba(10,21,48,0.12);}
+  @bottom-right{content:"PÁGINA " counter(page);font-family:"JetBrains Mono",monospace;font-size:7.5px;letter-spacing:0.14em;
+    color:rgba(10,21,48,0.5);vertical-align:top;padding-top:11px;border-top:0.5px solid rgba(10,21,48,0.12);}
+}
+@page capa{margin:0;@top-left{content:none;border:none}@top-right{content:none;border:none}
+  @bottom-left{content:none;border:none}@bottom-right{content:none;border:none}}
+@media screen{
+  html,body{background:#3a3a3a;}
+  .cover,.fluxo{width:210mm;margin:0 auto 26px;box-shadow:0 24px 60px rgba(0,0,0,0.45);}
+  .fluxo{background:var(--paper);padding:20mm 18mm;}
+}
+/* capa */
+.cover{page:capa;height:297mm;background:var(--ink);color:var(--paper);padding:24mm 22mm;
+  display:flex;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden;break-after:page;}
+.cover::before{content:"";position:absolute;inset:0;
+  background-image:linear-gradient(0deg,transparent calc(100% - 1px),rgba(201,169,97,0.07) 100%),
+                   linear-gradient(90deg,transparent calc(100% - 1px),rgba(201,169,97,0.07) 100%);
+  background-size:56px 56px;pointer-events:none;}
+.cover-goldtop{position:absolute;top:0;left:22mm;right:22mm;height:2px;background:var(--accent);opacity:0.85;}
+.cover>*{position:relative;z-index:2;}
+.cover-head{display:flex;justify-content:space-between;align-items:flex-start;}
+.lockup{display:flex;align-items:center;gap:12px;}
+.lockup-dot{width:30px;height:30px;border-radius:50%;background:var(--accent);flex-shrink:0;}
+.lockup-sep{width:0.5px;height:34px;background:rgba(239,234,217,0.30);}
+.lockup .wm{font-family:var(--serif);font-weight:300;font-size:26px;color:var(--paper);line-height:1;}
+.lockup .wm .p{color:var(--accent);}
+.lockup .tag{font-family:var(--mono);font-size:7.5px;letter-spacing:0.2em;text-transform:uppercase;color:rgba(239,234,217,0.42);margin-top:6px;}
+.cover-symbol{width:34px;height:34px;border-radius:50%;background:var(--accent);flex-shrink:0;}
+.cover-mid{display:flex;flex-direction:column;}
+.cover-eyebrow{font-family:var(--mono);font-size:9.5px;letter-spacing:0.26em;text-transform:uppercase;color:var(--accent);margin-bottom:26px;}
+.cover-title{font-family:var(--serif);font-weight:300;font-size:62px;line-height:1.03;color:var(--paper);letter-spacing:-0.02em;}
+.cover-tipo{font-family:var(--mono);font-size:11px;letter-spacing:0.2em;text-transform:uppercase;color:rgba(239,234,217,0.55);margin-top:20px;}
+.cover-rule{height:0.5px;background:rgba(239,234,217,0.18);margin:30px 0;}
+.cover-credor-label{font-family:var(--mono);font-size:8px;letter-spacing:0.22em;text-transform:uppercase;color:rgba(239,234,217,0.45);margin-bottom:11px;}
+.cover-credor-name{font-family:var(--serif);font-weight:300;font-size:30px;color:var(--paper);line-height:1.15;margin-bottom:5px;}
+.cover-credor-doc{font-family:var(--mono);font-size:9px;letter-spacing:0.14em;color:rgba(239,234,217,0.5);margin-top:4px;}
+.cover-meta{display:flex;border-top:0.5px solid rgba(239,234,217,0.16);padding-top:20px;}
+.meta-item{flex:1;}
+.meta-label{font-family:var(--mono);font-size:7.5px;letter-spacing:0.2em;text-transform:uppercase;color:rgba(239,234,217,0.4);margin-bottom:8px;}
+.meta-value{font-family:var(--mono);font-size:10px;letter-spacing:0.06em;color:var(--paper);}
+.cover-inst{display:flex;justify-content:space-between;margin-top:22px;font-family:var(--mono);font-size:8px;letter-spacing:0.14em;text-transform:uppercase;color:rgba(239,234,217,0.35);}
+/* corpo */
+.section{margin-bottom:26px;}
+.section:first-child,.secao-resumo,.fecho{padding-top:6mm;}
+.sec-num{font-family:var(--mono);font-size:9px;letter-spacing:0.22em;text-transform:uppercase;color:var(--accent);margin-bottom:9px;break-after:avoid;}
+.sec-title{font-family:var(--serif);font-weight:300;font-size:23px;line-height:1.12;color:var(--ink);margin-bottom:15px;break-after:avoid;}
+.sub-title{font-family:var(--mono);font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:var(--ink);margin:20px 0 10px;break-after:avoid;}
+.prose{font-family:var(--serif-edit);font-size:13px;line-height:1.66;color:var(--ink);}
+.prose p{margin-bottom:0.8em;orphans:2;widows:2;}
+.prose p:last-child{margin-bottom:0;}
+.prose .gloss{font-style:italic;color:var(--mute);}
+.kpis{display:flex;gap:9px;margin-bottom:16px;}
+.kpi{flex:1 1 0;min-width:0;background:var(--paper-2);border-top:2px solid var(--accent);padding:13px 14px 15px;}
+.kpi-label{font-family:var(--mono);font-size:7px;letter-spacing:0.14em;text-transform:uppercase;color:var(--mute);line-height:1.5;margin-bottom:10px;min-height:21px;}
+.kpi-value{font-family:var(--serif);font-weight:300;font-size:24px;color:var(--ink);line-height:1.05;}
+.kpi-value.compact{font-size:18px;letter-spacing:-0.01em;}
+.kpi-note{font-family:var(--sans);font-size:8.5px;color:var(--mute);margin-top:6px;}
+.secao-resumo{break-before:page;}
+.tabela{width:100%;border-collapse:collapse;margin-top:8px;}
+.tabela thead{display:table-header-group;}
+.tabela th{font-family:var(--mono);font-size:9px;letter-spacing:0.14em;text-transform:uppercase;color:var(--mute);text-align:left;padding:9px 10px;border-bottom:1px solid var(--accent);}
+.tabela td{font-family:var(--sans);font-size:11.5px;line-height:1.4;color:var(--ink);padding:6px 10px;border-bottom:0.5px solid var(--line);vertical-align:top;}
+.tabela tr{break-inside:avoid;}
+.tabela tr.grupo{break-after:avoid;}
+.tabela td.devedor{font-weight:600;font-size:12px;}
+.tabela td.devedor small{display:block;font-weight:400;font-size:10px;color:var(--mute);margin-top:1px;}
+.tabela td.devedor small.proc{font-family:var(--mono);font-size:8px;letter-spacing:0;}
+.tabela td.devedor small.proc span{white-space:nowrap;}
+.tabela th:nth-child(1){width:24%;}
+.tabela th:nth-child(2){width:38%;}
+.tabela th:nth-child(3){width:38%;}
+.tabela tr.grupo td{background:var(--paper-2);font-weight:700;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;padding:7px 10px;border-bottom:1px solid var(--accent);}
+.fecho{break-inside:avoid;}
+.assinatura{margin-top:30px;padding-top:8px;}
+.assina-rub{font-family:'Great Vibes',cursive;font-size:34px;color:#182252;line-height:1;margin-bottom:-8px;}
+.assina-line{width:230px;border-bottom:0.5px solid var(--ink);margin-bottom:9px;}
+.assina-name{font-family:var(--serif);font-weight:400;font-size:17px;color:var(--ink);}
+.assina-role{font-family:var(--mono);font-size:8.5px;letter-spacing:0.16em;text-transform:uppercase;color:var(--mute);margin-top:4px;}
+.assina-local{font-family:var(--mono);font-size:8.5px;letter-spacing:0.1em;color:var(--mute);margin-top:14px;}
+.rodape{margin-top:28px;border-top:1px solid var(--accent);padding-top:16px;}
+.rodape-cols{display:flex;gap:30px;}
+.rodape-cols>div{flex:1;}
+.rodape-label{font-family:var(--mono);font-size:7px;letter-spacing:0.2em;text-transform:uppercase;color:var(--accent);margin-bottom:8px;}
+.rodape-body{font-family:var(--mono);font-size:8px;letter-spacing:0.05em;color:var(--mute);line-height:1.95;}
+.rodape-confid{text-align:center;margin-top:16px;padding-top:12px;border-top:0.5px solid var(--line);font-family:var(--serif-edit);font-style:italic;font-size:10px;color:var(--mute);}
+`;
+}
+
+function _ra2Html(d){
+  const e = escHtml;
+  const hojeBR = new Date().toLocaleDateString('pt-BR');
+  const nomeCmp = (a,b)=>a.nome.localeCompare(b.nome,'pt-BR',{sensitivity:'base'}) || (b.valor - a.valor);
+  const soma = l => l.reduce((s,x)=>s+x.valor,0);
+  const ativos = d.casos.filter(x=>x.classe==='ativo').sort(nomeCmp);
+  const quitados = d.casos.filter(x=>x.classe==='quitado' || x.classe==='quitado_direto').sort(nomeCmp);
+  const devolvidos = d.casos.filter(x=>x.classe==='devolvido' || x.classe==='encerrado').sort(nomeCmp);
+  const jud = ativos.filter(x=>x.jud), ext = ativos.filter(x=>!x.jud);
+  const nv = x => `${e(x.nome)} (${_ra2Brl(x.valor)})`;
+
+  // ---- 01 Sumário
+  const total = d.casos.length;
+  const quem = d.grupo
+    ? (d.clientes.length > 1 ? `A carteira das ${_ra2Ext(d.clientes.length,true)} empresas do ${e(d.titulo)}` : `A carteira do ${e(d.titulo)}`)
+    : `A carteira de ${e(d.titulo)}`;
+  const frases = [`${quem} soma ${_ra2Ext(total,true)} ${total===1?'cobrança':'cobranças'}.`];
+  if(ativos.length){
+    let f = `${_ra2Cap(_ra2Ext(ativos.length,true))} ${ativos.length===1?'segue ativa':'seguem ativas'}, com valor nominal de ${_ra2Brl(soma(ativos))}`;
+    if(jud.length && ext.length) f += `: ${_ra2Ext(jud.length,true)} em juízo e ${_ra2Ext(ext.length,true)} na via extrajudicial.`;
+    else if(jud.length) f += ativos.length===1 ? ', em juízo.' : ', todas em juízo.';
+    else f += ativos.length===1 ? ', na via extrajudicial.' : ', todas na via extrajudicial.';
+    frases.push(f);
+  } else frases.push('Não há cobranças ativas nesta data.');
+  const fq = quitados.length ? `${_ra2Cap(_ra2Ext(quitados.length,true))} ${quitados.length===1?'foi quitada':'foram quitadas'}, com ${_ra2Brl(soma(quitados))} em valor nominal` : '';
+  const fd = devolvidos.length ? `${_ra2Ext(devolvidos.length,true)} ${devolvidos.length===1?'foi encerrada e devolvida':'foram encerradas e devolvidas'}, com ${_ra2Brl(soma(devolvidos))}` : '';
+  if(fq && fd) frases.push(`${fq}, e ${fd}.`);
+  else if(fq) frases.push(fq + '.');
+  else if(fd) frases.push(_ra2Cap(fd) + '.');
+  frases.push('A situação de cada devedor está no Resumo por Devedor, na seção 03.');
+
+  const kpis = `
+      <div class="kpis">
+        <div class="kpi"><div class="kpi-label">Casos ativos</div><div class="kpi-value">${ativos.length}</div><div class="kpi-note">Em juízo e extrajudicial</div></div>
+        <div class="kpi"><div class="kpi-label">Valor Nominal total</div><div class="kpi-value compact">${_ra2Brl(soma(ativos))}</div><div class="kpi-note">Somatório nominal dos ativos</div></div>
+        <div class="kpi"><div class="kpi-label">Em fase judicial</div><div class="kpi-value">${jud.length}</div><div class="kpi-note">${_ra2Brl(soma(jud))} em valor nominal</div></div>
+        <div class="kpi"><div class="kpi-label">Em fase extrajudicial</div><div class="kpi-value">${ext.length}</div><div class="kpi-note">${_ra2Brl(soma(ext))} em valor nominal</div></div>
+      </div>`;
+
+  // ---- 02 Andamento: um parágrafo por tipo, na ordem abaixo
+  const porTipo = t => ativos.filter(x=>x.tipo===t);
+  const pAt = [];
+  const bloco = (t, um, varios, sufixo) => {
+    const l = porTipo(t); if(!l.length) return;
+    pAt.push(`${l.length===1 ? um : varios.replace('{n}', _ra2Cap(_ra2Ext(l.length, false)))}${sufixo||''}: ${_ra2Lista(l.map(nv))}.`);
+  };
+  bloco('cumprimento', 'Um crédito está em cumprimento de sentença', '{n} créditos estão em cumprimento de sentença',
+        ', <em class="gloss">a fase em que se cobra o que a decisão judicial já reconheceu como devido</em>. Seguem as buscas de bens e valores dos devedores para penhora');
+  { const l = porTipo('acao'); if(l.length){
+      const nomes = [...new Set(l.map(x=>x.acao.replace(/^Ação /,'ação ')))];
+      pAt.push(`${l.length===1?'Uma ação está em curso':`${_ra2Cap(_ra2Ext(l.length,true))} ações estão em curso`} (${_ra2Lista(nomes)}), na fase de citação dos devedores: ${_ra2Lista(l.map(nv))}.`);
+  } }
+  bloco('sentenca', 'Um crédito já tem sentença proferida', '{n} créditos já têm sentença proferida');
+  bloco('acordo_jud', 'Um crédito está em acordo judicial', '{n} créditos estão em acordo judicial',
+        ', <em class="gloss">acordo firmado dentro do processo e aprovado pelo juízo</em>');
+  bloco('judicial', 'Um crédito tem processo judicial em curso', '{n} créditos têm processo judicial em curso');
+  bloco('exec_acordo', 'Em um crédito, o devedor deixou de cumprir o acordo firmado', 'Em {n} créditos, os devedores deixaram de cumprir o acordo firmado');
+  bloco('medida', 'Um crédito está com a documentação em análise para a medida judicial cabível', '{n} créditos estão com a documentação em análise para a medida judicial cabível');
+  bloco('analise', 'Um crédito está em análise pela COBRASQ', '{n} créditos estão em análise pela COBRASQ');
+  bloco('quita_facil', 'Um crédito está no Quita Fácil', '{n} créditos estão no Quita Fácil',
+        ', <em class="gloss">rito da COBRASQ para créditos de menor valor, em que a cobrança corre pela régua automatizada de contatos, com pagamento facilitado ao devedor</em>');
+  bloco('acordo_ext', 'Um crédito está em acordo extrajudicial', '{n} créditos estão em acordo extrajudicial',
+        ', <em class="gloss">acordo firmado diretamente com o devedor, fora do processo</em>');
+  bloco('acordo_env', 'Um crédito tem proposta de acordo enviada ao devedor', '{n} créditos têm proposta de acordo enviada aos devedores');
+  bloco('negociando', 'Um crédito está em negociação com o devedor', '{n} créditos estão em negociação com os devedores');
+  bloco('telefone', 'Em um crédito, buscamos novos contatos do devedor', 'Em {n} créditos, buscamos novos contatos dos devedores');
+  bloco('extrajud', 'Um crédito está em cobrança direta, fora do processo judicial', '{n} créditos estão em cobrança direta, fora do processo judicial');
+
+  const pQ = [];
+  if(quitados.length){
+    const pc = quitados.filter(x=>x.classe==='quitado'), pd = quitados.filter(x=>x.classe==='quitado_direto');
+    const um = quitados.length===1, nomes = l => _ra2Lista(l.map(x=>e(x.nome)));
+    let p = `${_ra2Cap(_ra2Ext(quitados.length,true))} ${um?'cobrança foi quitada':'cobranças foram quitadas'}`;
+    if(!pd.length) p += ` por meio da COBRASQ: ${nomes(pc)}.`;
+    else if(!pc.length) p += ` com pagamento feito diretamente ao credor: ${nomes(pd)}.`;
+    else p += `. ${_ra2Cap(_ra2Ext(pc.length,true))} por meio da COBRASQ: ${nomes(pc)}. ${pd.length===1?'Um devedor pagou':`${_ra2Cap(_ra2Ext(pd.length,false))} devedores pagaram`} diretamente ao credor: ${nomes(pd)}.`;
+    if(quitados.some(x=>x.data)) p += ' A data das quitações registradas está no Resumo por Devedor.';
+    pQ.push(p);
+  }
+  const pD = [];
+  { const dv = devolvidos.filter(x=>x.classe==='devolvido'), en = devolvidos.filter(x=>x.classe==='encerrado');
+    if(dv.length) pD.push(`${_ra2Cap(_ra2Ext(dv.length,true))} ${dv.length===1?'cobrança foi encerrada e devolvida':'cobranças foram encerradas e devolvidas'} ao credor: ${_ra2Lista(dv.map(x=>e(x.nome)))}.`);
+    if(en.length) pD.push(`${_ra2Cap(_ra2Ext(en.length,true))} ${en.length===1?'cobrança foi encerrada':'cobranças foram encerradas'}, com a documentação física disponível para retirada na sede da COBRASQ: ${_ra2Lista(en.map(x=>e(x.nome)))}.`);
+  }
+  const sub = (tit, ps) => ps.length ? `<div class="sub-title">${tit}</div><div class="prose">${ps.map(p=>`<p>${p}</p>`).join('')}</div>` : '';
+
+  // ---- 03 Resumo por Devedor
+  const linha = x => `<tr><td class="devedor">${e(x.nome)}<small>${_ra2Brl(x.valor)}</small>${x.proc?`<small class="proc">Processo<br><span>${e(x.proc)}</span></small>`:''}</td><td>${e(x.sit)}</td><td>${e(x.esp)}</td></tr>`;
+  const grupo = (tit, l) => l.length ? `<tr class="grupo"><td colspan="3">${tit} · ${l.length}</td></tr>${l.map(linha).join('')}` : '';
+
+  // ---- 04 Próximos Passos
+  const tem = t => ativos.some(x=>x.tipo===t);
+  const j = [], x2 = [];
+  if(tem('cumprimento')) j.push('Nos cumprimentos de sentença, seguiremos buscando bens e valores dos devedores para penhora.');
+  if(tem('acao')) j.push('Nas ações em curso, seguiremos com a citação dos devedores.');
+  if(tem('sentenca')) j.push('Nos casos com sentença proferida, aguardamos o início da fase de cumprimento.');
+  if(tem('acordo_jud')) j.push('Nos acordos judiciais, seguiremos acompanhando o cumprimento.');
+  if(tem('judicial')) j.push('Nos demais processos em curso, seguiremos acompanhando cada andamento.');
+  if(tem('medida') || tem('analise')) j.push('Nos casos em análise, concluiremos o exame da documentação e seguiremos com a medida cabível.');
+  if(tem('exec_acordo')) j.push('Nos acordos descumpridos, o caso passa à cobrança do saldo do acordo.');
+  if(tem('extrajud') || tem('negociando') || tem('telefone')) x2.push('Nas cobranças extrajudiciais, seguiremos com os contatos diretos e, sem pagamento, levaremos cada caso à análise da medida judicial cabível.');
+  if(tem('quita_facil')) x2.push('No Quita Fácil, a régua automatizada segue ativa até o pagamento.');
+  if(tem('acordo_ext') || tem('acordo_env')) x2.push('Nos acordos extrajudiciais, seguiremos acompanhando o pagamento das parcelas.');
+  if(devolvidos.some(x=>x.classe==='encerrado')) x2.push('A documentação física das cobranças encerradas segue disponível para retirada na sede da COBRASQ.');
+  x2.push('O próximo relatório consolidará esses desdobramentos.');
+  const proximos = (ativos.length ? [j.join(' '), x2.join(' ')] : ['Não há cobranças ativas nesta carteira. ' + x2.join(' ')]).filter(Boolean);
+
+  const docs = d.clientes.map(cli=>{
+    const doc = _ra2DocMasc(cli.doc || cli.cnpj || cli.cpf);
+    const nome = cli.nome||cli.nomeFantasia||'';
+    const rot = nome && nome !== d.titulo ? e(nome) : '';
+    return (rot||doc) ? `<div class="cover-credor-doc">${rot}${rot&&doc?' · ':''}${doc}</div>` : '';
+  }).join('');
+
+  return `<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relatório de Andamento · ${e(d.titulo)} · ${hojeBR}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500&family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@400;500;600;700&family=Great+Vibes&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>${_ra2Css(hojeBR)}</style>
+</head><body>
+<section class="cover">
+  <div class="cover-goldtop"></div>
+  <div class="cover-head">
+    <div class="lockup"><div class="lockup-dot"></div><div class="lockup-sep"></div>
+      <div><div class="wm">cobrasq<span class="p">.</span></div><div class="tag">Recuperação de Crédito</div></div></div>
+    <div class="cover-symbol"></div>
+  </div>
+  <div class="cover-mid">
+    <div class="cover-eyebrow">Recuperação de Crédito · Documento Confidencial</div>
+    <div class="cover-title">Relatório de<br>Andamento</div>
+    <div class="cover-tipo">Carteira de crédito</div>
+    <div class="cover-rule"></div>
+    <div class="cover-credor-label">Preparado para</div>
+    <div class="cover-credor-name">${e(d.titulo)}</div>
+    ${docs}
+  </div>
+  <div class="cover-foot">
+    <div class="cover-meta">
+      <div class="meta-item"><div class="meta-label">Data de emissão</div><div class="meta-value">${hojeBR}</div></div>
+      <div class="meta-item"><div class="meta-label">Período de referência</div><div class="meta-value">Posição em ${hojeBR}</div></div>
+      <div class="meta-item"><div class="meta-label">Responsável</div><div class="meta-value">Gustavo S. Teixeira dos Santos</div></div>
     </div>
-    <div style="margin-bottom:16px;">
-      <label style="display:block;margin-bottom:6px;font-size:13px;font-weight:500;">Período de Referência</label>
-      <input type="text" id="rel-periodo" placeholder="Ex: Janeiro a Abril de 2026"
-        style="width:100%;padding:8px 10px;border:1px solid var(--border-2);border-radius:var(--radius-sm);background:var(--surface);color:var(--text);">
+    <div class="cover-inst"><span>COBRASQ Recuperadora de Crédito e Cobrança Ltda · desde 2019</span><span>cobrasq.com.br</span></div>
+  </div>
+</section>
+<main class="fluxo">
+  <div class="section">
+    <div class="sec-num">01 · Sumário Executivo</div>
+    <div class="sec-title">Panorama da carteira</div>
+    ${kpis}
+    <div class="prose"><p>${frases.join(' ')}</p></div>
+  </div>
+  <div class="section">
+    <div class="sec-num">02 · Andamento Detalhado</div>
+    <div class="sec-title">Atuação por fase</div>
+    ${sub('Ativos', pAt)}
+    ${sub('Quitados', pQ)}
+    ${sub('Devolvidos &amp; Encerrados', pD)}
+  </div>
+  <div class="section secao-resumo">
+    <div class="sec-num">03 · Resumo por Devedor</div>
+    <div class="sec-title">Onde está cada crédito</div>
+    <table class="tabela resumo">
+      <thead><tr><th>Devedor</th><th>Situação</th><th>O que esperar</th></tr></thead>
+      <tbody>${grupo('Ativos', ativos)}${grupo('Quitados', quitados)}${grupo('Devolvidos &amp; Encerrados', devolvidos)}</tbody>
+    </table>
+  </div>
+  <div class="fecho">
+    <div class="section">
+      <div class="sec-num">04 · Próximos Passos</div>
+      <div class="sec-title">Diligências previstas</div>
+      <div class="prose">${proximos.map(p=>`<p>${p}</p>`).join('')}</div>
     </div>
-    <div>
-      <label style="display:block;margin-bottom:8px;font-size:13px;font-weight:500;">Formato</label>
-      <div style="display:flex;gap:20px;">
-        <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13px;"><input type="radio" name="rel-fmt" value="pdf" checked> PDF (janela de impressão)</label>
-        <label style="display:flex;align-items:center;gap:7px;cursor:pointer;font-size:13px;"><input type="radio" name="rel-fmt" value="word"> Word / Pages (.doc)</label>
+    <div class="assinatura">
+      <div class="assina-rub">GustavoT.</div>
+      <div class="assina-line"></div>
+      <div class="assina-name">Gustavo S. Teixeira dos Santos</div>
+      <div class="assina-role">Proprietário · CEO</div>
+      <div class="assina-local">Dois Vizinhos · PR · ${hojeBR}</div>
+    </div>
+    <div class="rodape">
+      <div class="rodape-cols">
+        <div><div class="rodape-label">Sede</div><div class="rodape-body">COBRASQ Recuperadora de Crédito e Cobrança Ltda.<br>Av. Rio Grande do Sul, 380, Sala 201<br>Dois Vizinhos · PR · CEP 85660-000<br>CNPJ 34.626.848/0001-42</div></div>
+        <div><div class="rodape-label">Atendimento</div><div class="rodape-body">WhatsApp 46 98822-6533<br>ccobrasq@gmail.com<br>cobrasq.com.br<br>Atuação nacional</div></div>
       </div>
-    </div>`;
-  openModal('modal-relatorio');
+      <div class="rodape-confid">Documento confidencial, destinado exclusivamente ao credor identificado. Vedada a reprodução ou o compartilhamento sem autorização da COBRASQ. As informações aqui apresentadas refletem a situação processual na data de emissão e podem sofrer alterações supervenientes.</div>
+    </div>
+  </div>
+</main>
+</body></html>`;
+}
+
+// Abre a janela já no clique (senão o bloqueador de pop-up barra), lê os dados
+// e escreve o relatório nela.
+async function _ra2Abrir(alvo){
+  const w = window.open('', '_blank');
+  if(!w){ showToast('O navegador bloqueou a janela do relatório. Libere pop-ups para este site.','warning'); return; }
+  try{ w.document.write('<p style="font:14px sans-serif;padding:24px">Gerando o relatório com a posição de hoje…</p>'); }catch(_){}
+  try{
+    const dados = await _ra2Coletar(alvo);
+    if(!dados.casos.length){ w.close(); showToast('Nenhuma cobrança nesta carteira.','warning'); return; }
+    w.document.open(); w.document.write(_ra2Html(dados)); w.document.close();
+    // Só imprime depois que a folha de estilo das fontes carregou (o fonts.ready
+    // de um documento recém-escrito resolve antes do <link> chegar).
+    let foi = false;
+    const imprimir = () => { if(!foi){ foi = true; _imprimirQuandoPronto(w); } };
+    try{ w.addEventListener('load', imprimir); }catch(_){}
+    setTimeout(imprimir, 3000);
+  }catch(err){
+    try{ w.close(); }catch(_){}
+    showToast((err && err.message) || 'Falha ao gerar o relatório.','error');
+  }
+}
+
+// Relatório da carteira de um credor, ou do grupo econômico inteiro (todas as
+// empresas do grupo). Sem modal: sai sempre com a posição do dia.
+function gerarRelatorioCarteira(clienteId){
+  return _ra2Abrir({ clienteId });
+}
+function gerarRelatorioGrupo(gid){
+  return _ra2Abrir({ grupoId: gid });
 }
 
 function buildReportHtmlGrupo(gid, periodo){
