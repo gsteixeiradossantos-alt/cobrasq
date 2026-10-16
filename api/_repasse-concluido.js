@@ -133,29 +133,34 @@ module.exports = async function handler(req, res) {
       if (!devNome && op.metadata && op.metadata.lancamento_descricao) {
         devNome = lerDescricaoRepasse(op.metadata.lancamento_descricao).devedor;
       }
-      // PDF original do Asaas primeiro; página impressa e o nosso só se ele não vier
-      // (ver _repassar.js).
-      let pdf = (arqCompr && arqCompr.base64) || '';
-      if (!pdf) pdf = await imprimirPaginaAsaasPdf(comprovanteUrl);
-      if (!pdf) {
-        pdf = await gerarComprovanteRepassePdf({
-          credorNome: credor.nome, devedor: devNome, parcela: parcelasLote ? listarParcelas(parcelasLote) : op.parcela,
-          valor: valorPix, dataISO: hojeBR(),
-          transferId: transferId || op.repasse_asaas_transfer_id,
-          chavePix: (op.metadata && op.metadata.repasse_pix_key) || '', urlAsaas: comprovanteUrl,
+      // Repasse marcado "sem mensagem ao credor" no painel: a ficha registra, a mensagem
+      // automática não vai (o Gustavo manda um texto próprio).
+      const semMensagem = !!(op.metadata && op.metadata.sem_mensagem_credor);
+      if (!semMensagem) {
+        // PDF original do Asaas primeiro; página impressa e o nosso só se ele não vier
+        // (ver _repassar.js).
+        let pdf = (arqCompr && arqCompr.base64) || '';
+        if (!pdf) pdf = await imprimirPaginaAsaasPdf(comprovanteUrl);
+        if (!pdf) {
+          pdf = await gerarComprovanteRepassePdf({
+            credorNome: credor.nome, devedor: devNome, parcela: parcelasLote ? listarParcelas(parcelasLote) : op.parcela,
+            valor: valorPix, dataISO: hojeBR(),
+            transferId: transferId || op.repasse_asaas_transfer_id,
+            chavePix: (op.metadata && op.metadata.repasse_pix_key) || '', urlAsaas: comprovanteUrl,
+          });
+        }
+        const cobId = await resolverCobrancaId(op).catch(() => null);
+        const [dp, partes] = await Promise.all([
+          devedorPrincipal(cobId).catch(() => null),
+          partesDaCobranca(cobId).catch(() => []),
+        ]);
+        envio = await enviarComprovanteCredor({
+          telefone: destinoWhatsapp(credor), parcela: op.parcela, total: (lote && lote.total_parcelas) || op.total_parcelas || null, devedor: devNome,
+          ...(parcelasLote ? { parcelas: parcelasLote } : {}),
+          doc: dp && dp.doc, partes,
+          base64: pdf, ext: 'pdf', comprovanteUrl,
         });
       }
-      const cobId = await resolverCobrancaId(op).catch(() => null);
-      const [dp, partes] = await Promise.all([
-        devedorPrincipal(cobId).catch(() => null),
-        partesDaCobranca(cobId).catch(() => []),
-      ]);
-      envio = await enviarComprovanteCredor({
-        telefone: destinoWhatsapp(credor), parcela: op.parcela, total: (lote && lote.total_parcelas) || op.total_parcelas || null, devedor: devNome,
-        ...(parcelasLote ? { parcelas: parcelasLote } : {}),
-        doc: dp && dp.doc, partes,
-        base64: pdf, ext: 'pdf', comprovanteUrl,
-      });
       // Ficha do caso — idempotente pelo transacao_id, então não duplica se /api/repassar
       // já tiver registrado ao concluir na hora.
       ficha = await registrarRepasseNaFicha({

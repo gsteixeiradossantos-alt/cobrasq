@@ -35018,7 +35018,7 @@ async function _finRepAbrir(lancId, fila, loteIds){
     }
     _finRepState = { l, valor: Math.abs(+l.valor||0), credor, credores, credorId: credor ? credor.id : null,
       pixKey: credor ? (credor.chave_pix || '') : '', pixEditada:false, devedor, parcela, total, saldo,
-      fila: Array.isArray(fila) ? fila.slice() : [], enviando:false, descricao:'', descricaoEditada:false, lote:null };
+      fila: Array.isArray(fila) ? fila.slice() : [], enviando:false, descricao:'', descricaoEditada:false, lote:null, semMensagem:false };
     if(Array.isArray(loteIds) && loteIds.length > 1) await _finRepMontarLote(loteIds);
     // A descrição sugerida ("<parcela> - <devedor>") pode ser corrigida antes do envio —
     // ex.: repasse feito por fora que a numeração do lançamento não conhece.
@@ -35051,6 +35051,9 @@ function _finRepSetDescricao(v){
   const n = document.getElementById('finrep-desc-nota');
   if(n) n.innerHTML = S.descricaoEditada ? (S.lote ? '<span style="color:#97793A;">descrição editada — vai assim no extrato do credor</span>' : '<span style="color:#97793A;">descrição editada — o número inicial vira a parcela na mensagem do comprovante</span>') : 'sugerida pelo lançamento — pode editar';
 }
+// "Sem mensagem ao credor" (16/10/2026): o PIX sai e a ficha registra, mas o WhatsApp
+// automático não vai — caso fora do padrão, em que o texto vai à parte.
+function _finRepSetSemMensagem(v){ const S = _finRepState; if(!S) return; S.semMensagem = !!v; _finRepRender(); }
 function _finRepValido(){
   const S = _finRepState; if(!S || S.enviando) return false;
   if(!S.credorId) return false;
@@ -35140,7 +35143,13 @@ function _finRepRender(){
           <div class="finrep-bar"><i style="width:${pctJa.toFixed(1)}%;background:#4A7A52;"></i><i style="width:${pctEste.toFixed(1)}%;background:#C9A961;"></i></div>
           ${estoura ? `<div style="color:#9B4A3F;font-weight:600;font-size:12.5px;">Este repasse passa do teto em ${fmtR(S.valor - S.saldo.resta)} — o servidor recusaria (teto do capital do caso).</div>` : ''}
         </div>` : `<div style="font-size:12px;color:#8A94A6;">Sem cobrança vinculada ou sem capital definido no caso: não há teto conhecido para este repasse.</div>`}
-        <div style="font-size:12px;color:#5A5F66;line-height:1.5;">${S.lote ? `Ao confirmar: sai UM PIX de ${fmtR(S.valor)} pelo Asaas, as ${S.lote.ids.length} saídas são baixadas como pagas, UM comprovante vai ao credor por WhatsApp citando todas as parcelas e fica anexado na ficha do caso.` : `Ao confirmar: PIX sai pelo Asaas, esta saída é baixada como paga, o comprovante do banco vai ao credor por WhatsApp e fica anexado na ficha do caso.`}${S.fila.length ? ` Depois deste, ${S.fila.length === 1 ? 'vem mais 1 repasse' : 'vêm mais ' + S.fila.length + ' repasses'} da seleção.` : ''}</div>
+        <label style="display:flex;align-items:flex-start;gap:10px;font-size:13px;color:#0A1530;cursor:pointer;">
+          <input type="checkbox" id="finrep-semmsg" ${S.semMensagem?'checked':''} onchange="_finRepSetSemMensagem(this.checked)" style="margin-top:2px;">
+          <span><b style="font-weight:600;">Não mandar a mensagem automática ao credor</b><br><span style="font-size:12px;color:#5A5F66;">Para caso fora do padrão (ex.: alvará que não quitou o débito). O PIX sai e a ficha registra; a mensagem vai à parte.</span></span>
+        </label>
+        <div style="font-size:12px;color:#5A5F66;line-height:1.5;">${S.semMensagem
+          ? (S.lote ? `Ao confirmar: sai UM PIX de ${fmtR(S.valor)} pelo Asaas, as ${S.lote.ids.length} saídas são baixadas como pagas e o comprovante fica anexado na ficha do caso. <b style="color:#97793A;">Nada vai ao credor por WhatsApp.</b>` : `Ao confirmar: PIX sai pelo Asaas, esta saída é baixada como paga e o comprovante fica anexado na ficha do caso. <b style="color:#97793A;">Nada vai ao credor por WhatsApp.</b>`)
+          : (S.lote ? `Ao confirmar: sai UM PIX de ${fmtR(S.valor)} pelo Asaas, as ${S.lote.ids.length} saídas são baixadas como pagas, UM comprovante vai ao credor por WhatsApp citando todas as parcelas e fica anexado na ficha do caso.` : `Ao confirmar: PIX sai pelo Asaas, esta saída é baixada como paga, o comprovante do banco vai ao credor por WhatsApp e fica anexado na ficha do caso.`)}${S.fila.length ? ` Depois deste, ${S.fila.length === 1 ? 'vem mais 1 repasse' : 'vêm mais ' + S.fila.length + ' repasses'} da seleção.` : ''}</div>
       </div>
       <div class="modal-footer" style="display:flex;justify-content:flex-end;gap:10px;">
         <button class="finrep-ghost" onclick="_finRepFechar()">Cancelar</button>
@@ -35159,6 +35168,7 @@ async function _finRepConfirmar(){
   if(pix && (S.pixEditada || !(S.credor && S.credor.chave_pix === pix))) body.pix_key = pix;
   const desc = String(S.descricao||'').trim();
   if(S.descricaoEditada && desc) body.descricao = desc;
+  if(S.semMensagem) body.sem_mensagem = true;
   const fila = S.fila.slice();
   try{
     const res = await fetch('/api/repassar', { method:'POST', headers:{ ...(await authHeaders()), 'Content-Type':'application/json' }, body: JSON.stringify(body) });
@@ -35168,9 +35178,10 @@ async function _finRepConfirmar(){
       throw new Error(j.error || ('HTTP ' + res.status));
     }
     if(j.skipped) _finRepToast(`Nada enviado: ${j.skipped}.`);
+    else if(j.repasse_status === 'efetuado' && j.sem_mensagem_credor) _finRepToast(`PIX de ${fmtR(S.valor)} enviado · sem mensagem ao credor; comprovante na ficha do caso.`);
     else if(j.repasse_status === 'efetuado' && j.comprovante_agendado_para) _finRepToast(`PIX de ${fmtR(S.valor)} enviado · fora do horário comercial: comprovante sai ao credor ${_finRepQuando(j.comprovante_agendado_para)}.`);
     else if(j.repasse_status === 'efetuado') _finRepToast(`PIX de ${fmtR(S.valor)} enviado · comprovante indo ao credor por WhatsApp.`);
-    else if(j.repasse_status === 'preparado') _finRepToast(`PIX de ${fmtR(S.valor)} enviado · Asaas ainda processando; a linha vira REPASSADO quando confirmar.`);
+    else if(j.repasse_status === 'preparado') _finRepToast(`PIX de ${fmtR(S.valor)} enviado · Asaas ainda processando; a linha vira REPASSADO quando confirmar.${j.sem_mensagem_credor ? ' Sem mensagem ao credor.' : ''}`);
     else if(j.liberado) _finRepToast(`A transferência anterior ${j.motivo ? '(' + j.motivo + ') ' : ''}foi liberada — clique em Repassar de novo.`);
     else _finRepToast('Repasse registrado.');
     _finRepFechar();
