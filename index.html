@@ -5824,10 +5824,41 @@ async function _carregarPaginado(montar){
   return { data:null, error:{ message:'paginação terminou sem resultado' } };
 }
 
+// Papel de quem está logado, direto do banco. No login do cedente os loaders rodam
+// antes de existir currentUser, então não dá para confiar nele aqui. Cache por uid.
+let _papelCache = { uid:null, papel:null };
+async function _papelDaSessao(supa){
+  try{
+    const { data:{ session } } = await supa.auth.getSession();
+    const uid = session && session.user && session.user.id;
+    if(!uid) return null;
+    if(_papelCache.uid === uid) return _papelCache.papel;
+    const { data, error } = await supa.rpc('current_user_papel');
+    if(error) return null;
+    _papelCache = { uid, papel: data || null };
+    return _papelCache.papel;
+  }catch(_){ return null; }
+}
+// O cliente (cedente) recebe devedores/cobranças por RPC com lista branca de campos:
+// sem observações internas, responsável, metadata da equipe nem o cadastro completo de
+// devedor-parte de outro credor. Devolve null quando a RPC não existe (migração
+// 20261016_portal_dados_sensiveis ainda não aplicada) — aí cai no select antigo.
+async function _portalRpc(supa, nome){
+  if(await _papelDaSessao(supa) !== 'cedente') return null;
+  const { data, error } = await supa.rpc(nome);
+  if(error){
+    if(error.code === 'PGRST202' || error.code === '42883') return null;
+    throw new Error(error.message);
+  }
+  return Array.isArray(data) ? data : [];
+}
+
 async function loadDevedoresFromSupabase(){
   const supa = getSupabase();
   if(!supa) return null;
   try{
+    const viaPortal = await _portalRpc(supa, 'portal_devedores');
+    if(viaPortal) return viaPortal.map(rowToDevedor);
     const { data, error } = await _carregarPaginado((depoisDe,tam,contar)=>{
       let q = supa.from('devedores').select('*', contar?{count:'exact'}:undefined);
       if(depoisDe) q = q.gt('id', depoisDe);
@@ -20299,7 +20330,8 @@ async function loadCobrancasFromSupabase(){
     // `id` é PK, então não empata nunca.
     // `limit` conta LINHAS DE COBRANÇA, não do embed: no PostgREST o recurso
     // embutido vem aninhado dentro do pai.
-    const { data, error } = await _carregarPaginado((depoisDe,tam,contar)=>{
+    const viaPortal = await _portalRpc(supa, 'portal_cobrancas');
+    const { data, error } = viaPortal ? { data:viaPortal, error:null } : await _carregarPaginado((depoisDe,tam,contar)=>{
       let q = supa.from('cobrancas')
         .select('*, cobranca_partes(id, devedor_id, papel, principal, devedores(nome, doc, telefone, tags))',
                 contar?{count:'exact'}:undefined);
@@ -28713,7 +28745,7 @@ function cpVerDevedor(id){
       <span style="width:58px;height:58px;border-radius:50%;background:linear-gradient(135deg,var(--pgold),var(--gold-2));color:var(--ink);display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;flex-shrink:0;">${ini}</span>
       <div style="flex:1;min-width:0;">
         <div class="cp-serif" style="font-family:'Fraunces',serif;font-size:28px;font-weight:400;">${escHtml(d.nome||'—')}</div>
-        <div class="cp-mono" style="font-size:11.5px;color:rgba(239,234,217,.6);margin-top:4px;letter-spacing:.04em;">${escHtml(d.doc||'—')} · ${d.fase==='judicial'?'JUDICIAL':'EXTRAJUDICIAL'} · ${escHtml((d.status||'').toUpperCase())}</div>
+        <div class="cp-mono" style="font-size:11.5px;color:rgba(239,234,217,.6);margin-top:4px;letter-spacing:.04em;">${escHtml(d.doc||'—')} · ${d.fase==='judicial'?'JUDICIAL':'EXTRAJUDICIAL'} · ${escHtml(rotuloCedente(stCaso).toUpperCase())}</div>
       </div>
       <div style="text-align:right;">
         <div class="cp-label" style="color:rgba(239,234,217,.55);">Valor da dívida</div>
@@ -56295,6 +56327,9 @@ function _maskDoc(doc){
 
 function _faseLabel(d){
   if(!d) return '—';
+  // Relatório gerado pelo próprio cliente (portal): rótulo do portal, nunca a etiqueta
+  // interna ("Executar acordo", "A Reajuizar"…). Decisão do Gustavo, 16/10/2026.
+  if(_relatorioDoCliente()) return rotuloCedente(d.status||d.etiqueta||'');
   const etq = d.etiqueta||'';
   const map = {
     'Automatizar Micro':'Micro Cobrança',
@@ -56324,6 +56359,11 @@ function _faseLabel(d){
   return d.etapa || '—';
 }
 
+// Quem gera o relatório é o cliente (sessão de cedente, ou o proprietário vendo como cedente).
+function _relatorioDoCliente(){
+  return typeof currentUser!=='undefined' && !!currentUser && currentUser.tipo==='cedente';
+}
+
 function _faseEncerrada(d){
   const s=(d.status||'').toLowerCase(), e=(d.etiqueta||'').toLowerCase();
   return s==='quitado'||s==='devolvida'||e.includes('baixado')||e.includes('quitado');
@@ -56348,7 +56388,10 @@ function buildReportHtml(devIds, periodo, clienteId){
     const docM=_maskDoc(d.doc);
     const tipoDoc=(d.doc||'').replace(/\D/g,'').length>11?'CNPJ':'CPF';
     const fase=_faseLabel(d);
-    const hist=(d.historico||[]).slice().sort((a,b)=>(a.data||'').localeCompare(b.data||'')).slice(-6);
+    // Cliente: sem a observação interna da equipe e só o histórico que o portal mostra.
+    const _cli=_relatorioDoCliente();
+    const obs=_cli?'':(d.obs||'');
+    const hist=(_cli?cpHistLegadoCliente(d.historico):(d.historico||[])).slice().sort((a,b)=>(a.data||'').localeCompare(b.data||'')).slice(-6);
     const tlHtml = hist.length>0
       ? hist.map((h,i)=>`<li${i===hist.length-1?' class="destacado"':''}>
           <span class="data">${h.data?new Date(h.data+'T12:00:00').toLocaleDateString('pt-BR'):'—'}</span>
@@ -56365,10 +56408,10 @@ function buildReportHtml(devIds, periodo, clienteId){
       <div class="item"><span class="rotulo">Fase Atual</span><span class="valor">${escHtml(fase)}</span></div>
     </div>`;
     const sumario=[
-      `O caso encontra-se em fase de <strong>${escHtml(fase)}</strong>${d.numero_processo?' autuado sob o nº '+escHtml(d.numero_processo):''}. ${d.obs?escHtml(d.obs):'As tratativas prosseguem conforme a estratégia operacional definida para o caso.'}`,
+      `O caso encontra-se em fase de <strong>${escHtml(fase)}</strong>${d.numero_processo?' autuado sob o nº '+escHtml(d.numero_processo):''}. ${obs?escHtml(obs):'As tratativas prosseguem conforme a estratégia operacional definida para o caso.'}`,
       `O valor nominal em cobrança é de <strong>${fmtR(valor)}</strong>. Novos andamentos serão reportados em ciclos subsequentes, conforme a evolução do caso.`
     ];
-    const detalheHtml=(d.obs?`<h3>Antecedentes</h3><p>${escHtml(d.obs)}</p>`:'')+
+    const detalheHtml=(obs?`<h3>Antecedentes</h3><p>${escHtml(obs)}</p>`:'')+
       `<h3>Linha do Tempo Processual</h3><ul class="linha-tempo">${tlHtml}</ul>`;
     const notasHtml=_reportNotasHtml(devs);
     const proxHtml=_reportProxHtml(devs);
