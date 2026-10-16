@@ -9326,6 +9326,7 @@ async function excluirAudiencia(id){
 // 10min antes. O front-end não duplica essa lógica.
 // ══════════════════════════════════════════════════════════════════════════
 let _lemCache = [];
+let _gcalCache = {};   // eventos da Google Agenda pintados no card do Painel, por id
 
 async function renderLembretes(){
   const el = document.getElementById('page-lembretes');
@@ -9493,6 +9494,8 @@ async function salvarLembrete(id){
   };
 
   const btn = document.getElementById('lem-btn-salvar'); if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
+  const antes = id ? _lemCache.find(x=>x.id===id) : null;
+  const mudouHora = !!(antes && new Date(antes.data_hora).getTime() !== new Date(payload.data_hora).getTime());
   try{
     if(id){
       const { error } = await supa.from('lembretes').update(payload).eq('id', id);
@@ -9505,6 +9508,7 @@ async function salvarLembrete(id){
     showToast('Lembrete salvo. Avisos agendados.','success');
     closeModal('modal-lem');
     _lemAposMudar();
+    if(mudouHora) _lemEspelho(id, 'reagendar', payload.data_hora);
   }catch(e){
     showToast('Falha ao salvar: '+(e.message||e),'danger');
     if(btn){ btn.disabled=false; btn.textContent=id?'Salvar':'Criar'; }
@@ -9528,6 +9532,7 @@ async function cancelarLembrete(id){
   if(error){ showToast('Falha ao cancelar: '+error.message,'danger'); return; }
   showToast('Lembrete cancelado.','success');
   _lemAposMudar();
+  _lemEspelho(id, 'excluir');
 }
 
 async function concluirLembrete(id){
@@ -9538,6 +9543,7 @@ async function concluirLembrete(id){
   if(error){ showToast('Falha ao atualizar: '+error.message,'danger'); return; }
   showToast('Lembrete marcado como concluído.','success');
   _lemAposMudar();
+  _lemEspelho(id, 'concluir');
 }
 
 async function excluirLembrete(id){
@@ -9549,6 +9555,103 @@ async function excluirLembrete(id){
   if(error){ showToast('Falha ao excluir: '+error.message,'danger'); return; }
   showToast('Lembrete excluído.','success');
   _lemAposMudar();
+  _lemEspelho(id, 'excluir');
+}
+
+// Evento-espelho do lembrete na Google Agenda (descrição `lembrete:<uuid>`). Roda
+// DEPOIS do banco: o lembrete já mudou; se a agenda falhar, só avisa.
+async function _lemEspelho(id, op, dataHora){
+  if(currentUser?.tipo!=='gestor') return;
+  try{
+    const { data, error } = await getSupabase().functions.invoke('google-calendar-sync', { body:{ action:'lembrete', lembreteId:id, op, dataHora } });
+    if(error) throw error;
+    if(data?.error) throw new Error(data.error);
+  }catch(e){
+    showToast('Lembrete salvo, mas a Google Agenda não foi atualizada: '+(e?.message||e),'warning');
+  }
+}
+
+// ── Eventos da Google Agenda no card "Próximos 7 dias" ───────────────────────
+async function _gcalChamar(body){
+  const { data, error } = await getSupabase().functions.invoke('google-calendar-sync', { body });
+  if(error) throw error;
+  if(data?.error) throw new Error(data.error);
+  return data;
+}
+
+async function gcalConcluir(eventId){
+  if(currentUser?.tipo!=='gestor') return;
+  try{
+    await _gcalChamar({ action:'concluir', eventId });
+    showToast('Evento concluído na Google Agenda.','success');
+    _lemAposMudar();
+  }catch(e){ showToast('Falha ao concluir na Google Agenda: '+(e?.message||e),'danger'); }
+}
+
+async function gcalExcluir(eventId){
+  if(currentUser?.tipo!=='gestor') return;
+  const ev = _gcalCache[eventId];
+  if(!confirm(`Excluir da Google Agenda o evento "${ev?.summary||'(sem título)'}"?`)) return;
+  try{
+    await _gcalChamar({ action:'delete', eventId });
+    delete _gcalCache[eventId];
+    showToast('Evento excluído da Google Agenda.','success');
+    _lemAposMudar();
+  }catch(e){ showToast('Falha ao excluir da Google Agenda: '+(e?.message||e),'danger'); }
+}
+
+function gcalEditarModal(eventId){
+  if(currentUser?.tipo!=='gestor') return;
+  const ev = _gcalCache[eventId]; if(!ev) return;
+  const inp='width:100%;padding:8px 10px;border:1px solid var(--border-2);border-radius:6px;font-size:13px;font-family:inherit;background:var(--bg);color:var(--text);';
+  const lbl='font-size:11px;font-weight:600;color:var(--text-2);display:block;margin-bottom:3px;';
+  const pad=n=>String(n).padStart(2,'0');
+  const diaInteiro = !ev.start?.dateTime;
+  const d = diaInteiro ? null : new Date(ev.start.dateTime);
+  const valor = diaInteiro ? (ev.start?.date||'') : `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  _injAudModal('modal-gcal', `
+    <div class="modal-header"><span class="modal-title">Editar evento da Google Agenda</span><button class="modal-close" onclick="closeModal('modal-gcal')">✕</button></div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:10px;">
+      <div><label style="${lbl}">Título *</label><input id="gcal-titulo" value="${escHtml(ev.summary||'')}" style="${inp}"></div>
+      <div><label style="${lbl}">${diaInteiro?'Data (dia todo)':'Data e hora'} *</label><input id="gcal-data" type="${diaInteiro?'date':'datetime-local'}" value="${valor}" style="${inp}"></div>
+      <div style="font-size:11.5px;color:var(--text-3);">A duração do evento é mantida. ${ev.htmlLink?`<a href="${escHtml(ev.htmlLink)}" target="_blank" rel="noopener">Abrir na Google Agenda</a>`:''}</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-gcal')">Cancelar</button>
+      <button class="btn btn-primary" id="gcal-btn-salvar" onclick="gcalSalvar('${escHtml(eventId)}')">Salvar</button>
+    </div>
+  `, 520);
+  setTimeout(()=>document.getElementById('gcal-titulo')?.focus(), 50);
+}
+
+async function gcalSalvar(eventId){
+  const ev = _gcalCache[eventId]; if(!ev) return;
+  const titulo = (document.getElementById('gcal-titulo')?.value||'').trim();
+  const dataVal = document.getElementById('gcal-data')?.value;
+  if(!titulo){ showToast('Informe o título.','warning'); return; }
+  if(!dataVal){ showToast('Informe a data.','warning'); return; }
+  const event = { summary: titulo };
+  if(!ev.start?.dateTime){
+    // Dia todo: o fim é exclusivo — mantém o mesmo número de dias.
+    const dias = Math.max(1, Math.round((new Date(ev.end?.date+'T12:00:00') - new Date(ev.start.date+'T12:00:00'))/864e5) || 1);
+    const fim = new Date(dataVal+'T12:00:00'); fim.setDate(fim.getDate()+dias);
+    event.start = { date: dataVal }; event.end = { date: isoLocal(fim) };
+  } else {
+    const ini = new Date(dataVal);
+    const durMs = Math.max(5*60e3, (new Date(ev.end?.dateTime) - new Date(ev.start.dateTime)) || 30*60e3);
+    event.start = { dateTime: ini.toISOString(), timeZone:'America/Sao_Paulo' };
+    event.end   = { dateTime: new Date(ini.getTime()+durMs).toISOString(), timeZone:'America/Sao_Paulo' };
+  }
+  const btn = document.getElementById('gcal-btn-salvar'); if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
+  try{
+    await _gcalChamar({ action:'update', eventId, event });
+    showToast('Evento atualizado na Google Agenda.','success');
+    closeModal('modal-gcal');
+    _lemAposMudar();
+  }catch(e){
+    showToast('Falha ao salvar na Google Agenda: '+(e?.message||e),'danger');
+    if(btn){ btn.disabled=false; btn.textContent='Salvar'; }
+  }
 }
 
 // ── IA (Claude) + Mermaid para o "Como fazer" ────────────────────────────────
@@ -11003,7 +11106,22 @@ async function _pnlCarregarAgenda(todayStr, in7str){
   ]);
   const erro = rAud.error || rBia.error || rAcd.error || rLem.error;
   if(erro) throw erro;
-  return { aud: rAud.data||[], bia: rBia.data||[], acd: rAcd.data||[], lem: rLem.data||[] };
+  const gcal = await _pnlCarregarGoogle(iniLem, fimLem);
+  return { aud: rAud.data||[], bia: rBia.data||[], acd: rAcd.data||[], lem: rLem.data||[], gcal };
+}
+// Google Agenda (ccobrasq@gmail.com) via edge function — só para o gestor, que é
+// quem a função aceita. Falha aqui vira aviso no card, não derruba a agenda toda.
+async function _pnlCarregarGoogle(timeMin, timeMax){
+  if(currentUser?.tipo !== 'gestor') return { itens:[], erro:null };
+  try{
+    const { data, error } = await getSupabase().functions.invoke('google-calendar-sync', { body:{ action:'list', timeMin, timeMax } });
+    if(error) throw error;
+    if(data?.error) throw new Error(data.error);
+    return { itens: data?.items||[], erro:null };
+  }catch(e){
+    console.warn('[painel] Google Agenda:', e?.message||e);
+    return { itens:[], erro: e?.message||String(e) };
+  }
 }
 // (removido) "Ações judiciais no mês" não faz parte do card: o handoff v3 §3
 // fecha em 4 métricas — ACORDADO NO MÊS · A RECEBER · META DO MÊS · FECHAR POR
@@ -11179,7 +11297,7 @@ async function renderPainel(){
       .forEach(c=>vencBase.push({ desc:d.nome, data:c.dueDate, valor:c.value||0, tipo:'asaas' }));
   });
   const nomePorDevedor = new Map(devs.map(d=>[d.id, d.nome]));
-  const _ordemTipo = { audiencia:0, lembrete:1, tarefa:1, parcela:2, boleto:3, asaas:3, devedor:4, lancamento:5 };
+  const _ordemTipo = { audiencia:0, lembrete:1, google:1, tarefa:1, parcela:2, boleto:3, asaas:3, devedor:4, lancamento:5 };
 
   // Greeting
   const hrNow = new Date().getHours();
@@ -11375,6 +11493,19 @@ async function renderPainel(){
           lemId: l.id, lemRow: l,
         });
       });
+      // Google Agenda: fica de fora o que já aparece pelo banco (espelho de lembrete
+      // ou audiência, achado pela linha `lembrete:<uuid>`/`audiencia:<uuid>` da
+      // descrição) e o que já foi concluído (título com ✅).
+      (agenda.valor.gcal?.itens||[]).forEach(ev=>{
+        if(/(^|\s)(lembrete|audiencia):[0-9a-f-]{36}/i.test(ev.description||'')) return;
+        if(/^\s*✅/.test(ev.summary||'')) return;
+        const diaInteiro = !ev.start?.dateTime;
+        const dt   = diaInteiro ? new Date((ev.start?.date||'')+'T12:00:00') : new Date(ev.start.dateTime);
+        if(isNaN(dt.getTime())) return;
+        const hora = diaInteiro ? 'Dia todo' : String(dt.getHours()).padStart(2,'0')+':'+String(dt.getMinutes()).padStart(2,'0');
+        _gcalCache[ev.id] = ev;
+        vencItems.push({ desc:`${hora} · ${ev.summary||'(sem título)'}`, data: isoLocal(dt), valor:0, tipo:'google', rotulo:'GOOGLE AGENDA', gcalId: ev.id });
+      });
       agenda.valor.bia.forEach(b=>{
         // Não repetir o que o cache do Asaas já trouxe (mesmo nome + mesma data).
         if(vencItems.some(v=>v.tipo==='asaas' && v.data===b.venc_atual && v.desc===b.nome)) return;
@@ -11405,9 +11536,12 @@ async function renderPainel(){
     const vencOcultos = Math.max(0, vencDoDia.length - VENC_MOSTRAR);
     // Enquanto a agenda remota não chegou (ou falhou), a lista diz isso em vez de
     // fingir que "nada nos próximos 7 dias".
-    const agendaNota = agenda.valor ? '' : (agenda.falhou
-      ? 'Audiências, lembretes, boletos e parcelas: <span style="color:var(--danger);">não foi possível ler</span>'
-      : 'Audiências, lembretes, boletos e parcelas: carregando…');
+    // A Google Agenda tem aviso próprio: falhar ela não esconde o resto.
+    const agendaNota = agenda.valor
+      ? (agenda.valor.gcal?.erro ? 'Google Agenda: <span style="color:var(--danger);">não foi possível ler</span>' : '')
+      : (agenda.falhou
+        ? 'Audiências, lembretes, boletos e parcelas: <span style="color:var(--danger);">não foi possível ler</span>'
+        : 'Audiências, lembretes, boletos e parcelas: carregando…');
 
     // ── Precisa de decisão hoje — mesma régua de pendência da tela Cobranças ──────
     // A montagem vive em _montarFilaDecisoesSync() (fonte única com a página #/fila).
@@ -11625,7 +11759,7 @@ async function renderPainel(){
             <div class="cob-panel-head"><span class="cob-panel-title">${diaSel? diaSel.slice(8,10)+'/'+diaSel.slice(5,7) : 'Próximos 7 dias'}</span>${diaSel?`<a class="cob-link" style="margin-left:8px;" onclick="painelToggleDia('${diaSel}')">↺ ver os 7 dias</a>`:''}<a class="cob-link" style="margin-left:auto;" onclick="showPage('tarefas')">Agenda completa →</a></div>
             <div class="cob-panel-body">
               <div class="pnl-dias7">${dias7.map(d=>`<div class="pnl-dia ${d.hoje?'hoje':''} ${d.sel?'sel':''} ${d.qtd?'':'vazio'}"${d.qtd?` onclick="painelToggleDia('${d.iso}')" title="${d.qtd} ${d.qtd===1?'compromisso':'compromissos'} em ${d.iso.slice(8,10)}/${d.iso.slice(5,7)}"`:' title="nada neste dia"'}><span class="dow">${d.dow}</span><span class="num">${d.num}</span><div class="dot ${d.temEvento?'on':''}"></div></div>`).join('')}</div>
-              ${vencimentos.length? vencimentos.map(v=>`<div class="pnl-comp"><div style="font-family:var(--font-mono);font-size:11.5px;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};width:56px;flex-shrink:0;">${(v.data||'').slice(8,10)}/${(v.data||'').slice(5,7)}</div><div style="min-width:0;flex:1;">${v.rotulo?`<div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};">${escHtml(v.rotulo)}</div>`:''}<div style="font-size:12.5px;font-weight:500;color:var(--text);">${escHtml(v.desc||'—')}</div>${v.valor?`<div style="font-size:11.5px;color:var(--text-3);">${fmtR(v.valor)}</div>`:''}</div>${v.lemId && podeLem ? `<div class="pnl-lem-acoes"><button title="Marcar como concluído" onclick="concluirLembrete('${v.lemId}')">✓</button><button title="Editar" onclick="abrirLembreteModal('${v.lemId}')">✎</button><button title="Excluir" class="del" onclick="excluirLembrete('${v.lemId}')">✕</button></div>` : ''}</div>`).join('')+(vencOcultos?`<div style="padding:9px 0 0;font-size:11.5px;color:var(--text-3);">+${vencOcultos} ${vencOcultos===1?'compromisso':'compromissos'} — ver agenda completa</div>`:'') : (agendaNota ? '' : `<div class="cob-empty"><span class="cob-empty-dot"></span> ${diaSel? 'Nada em '+diaSel.slice(8,10)+'/'+diaSel.slice(5,7)+'.' : 'Nada nos próximos 7 dias.'}</div>`)}${agendaNota?`<div style="padding:9px 0 0;font-size:11.5px;color:var(--text-3);">${agendaNota}</div>`:''}
+              ${vencimentos.length? vencimentos.map(v=>`<div class="pnl-comp"><div style="font-family:var(--font-mono);font-size:11.5px;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};width:56px;flex-shrink:0;">${(v.data||'').slice(8,10)}/${(v.data||'').slice(5,7)}</div><div style="min-width:0;flex:1;">${v.rotulo?`<div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};">${escHtml(v.rotulo)}</div>`:''}<div style="font-size:12.5px;font-weight:500;color:var(--text);">${escHtml(v.desc||'—')}</div>${v.valor?`<div style="font-size:11.5px;color:var(--text-3);">${fmtR(v.valor)}</div>`:''}</div>${v.lemId && podeLem ? `<div class="pnl-lem-acoes"><button title="Marcar como concluído" onclick="concluirLembrete('${v.lemId}')">✓</button><button title="Editar" onclick="abrirLembreteModal('${v.lemId}')">✎</button><button title="Excluir" class="del" onclick="excluirLembrete('${v.lemId}')">✕</button></div>` : (v.gcalId && podeLem ? `<div class="pnl-lem-acoes"><button title="Marcar como concluído na Google Agenda" onclick="gcalConcluir('${escHtml(v.gcalId)}')">✓</button><button title="Editar" onclick="gcalEditarModal('${escHtml(v.gcalId)}')">✎</button><button title="Excluir da Google Agenda" class="del" onclick="gcalExcluir('${escHtml(v.gcalId)}')">✕</button></div>` : '')}</div>`).join('')+(vencOcultos?`<div style="padding:9px 0 0;font-size:11.5px;color:var(--text-3);">+${vencOcultos} ${vencOcultos===1?'compromisso':'compromissos'} — ver agenda completa</div>`:'') : (agendaNota ? '' : `<div class="cob-empty"><span class="cob-empty-dot"></span> ${diaSel? 'Nada em '+diaSel.slice(8,10)+'/'+diaSel.slice(5,7)+'.' : 'Nada nos próximos 7 dias.'}</div>`)}${agendaNota?`<div style="padding:9px 0 0;font-size:11.5px;color:var(--text-3);">${agendaNota}</div>`:''}
             </div>
           </div>
 

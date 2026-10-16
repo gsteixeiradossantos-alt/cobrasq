@@ -2,6 +2,18 @@
 // Cria/atualiza/deleta eventos no Google Calendar de ccobrasq@gmail.com via Service Account.
 // Usado pelo app pra sincronizar acordos, vencimentos, lembretes (S10).
 //
+// Ações (body.action):
+//   list      { timeMin, timeMax }            → eventos da janela (card "Próximos 7 dias")
+//   create    { event }                       → cria
+//   update    { eventId, event }              → PATCH
+//   delete    { eventId }                     → apaga
+//   lembrete  { lembreteId, op, dataHora? }   → acha o evento-espelho pela linha
+//             `lembrete:<uuid>` da descrição e aplica op = concluir | excluir | reagendar
+//
+// Quem pode chamar: o gestor logado (app_users.papel = 'proprietario', ativo) ou o
+// servidor com a service_role (cron-regua, limpeza de eventos). O gateway confere a
+// assinatura do JWT (verify_jwt = true no config.toml); aqui se confere QUEM é.
+//
 // Setup:
 //   - Criar projeto no Google Cloud Console
 //   - Ativar Google Calendar API
@@ -12,6 +24,7 @@
 //   - supabase functions deploy google-calendar-sync
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 
 // Origens permitidas para chamar essa função. Configurável via env GCAL_ALLOWED_ORIGINS
 // (lista separada por vírgula). Padrão inclui o domínio canônico e o legado .vercel.app.
@@ -96,6 +109,43 @@ async function getAccessToken(): Promise<string> {
   return tokenData.access_token;
 }
 
+// Quem chama: service_role (servidor) ou o gestor logado. O gateway já validou a
+// assinatura (verify_jwt = true), então ler o `role` do payload é seguro aqui.
+async function chamadorAutorizado(req: Request): Promise<true | { erro: string; status: number }> {
+  const token = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();
+  if (!token) return { erro: 'unauthorized: sem token de sessão', status: 401 };
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+    if (payload?.role === 'service_role') return true;
+  } catch { /* não é JWT legível: segue para getUser, que recusa */ }
+  const SUPABASE_URL = Deno.env.get('SUPABASE_URL');
+  const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  if (!SUPABASE_URL || !SERVICE_ROLE_KEY) return { erro: 'configuração do servidor incompleta', status: 500 };
+  const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, { auth: { autoRefreshToken: false, persistSession: false } });
+  const { data: { user }, error } = await admin.auth.getUser(token);
+  if (error || !user) return { erro: 'unauthorized: sessão inválida ou expirada', status: 401 };
+  const { data: caller, error: e2 } = await admin.from('app_users').select('papel, ativo').eq('id', user.id).maybeSingle();
+  if (e2) return { erro: 'falha ao verificar permissão', status: 500 };
+  if (!caller || caller.ativo === false || caller.papel !== 'proprietario') {
+    return { erro: 'forbidden: só o gestor mexe na agenda', status: 403 };
+  }
+  return true;
+}
+
+// Regra fixa de "concluído" na agenda (skill lembretes-cobrasq): o evento vai para
+// 07:00–07:10 do dia em que foi cumprido, cor Sage (2), e o emoji do título vira ✅.
+function patchConcluir(summary: string) {
+  const hoje = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+  const tit = String(summary || '').trim();
+  const semEmoji = tit.replace(/^(?:\p{Extended_Pictographic}|\uFE0F|\u200D|\s)+/u, '');
+  return {
+    summary: tit.startsWith('✅') ? tit : '✅ ' + semEmoji,
+    colorId: '2',
+    start: { dateTime: `${hoje}T07:00:00`, timeZone: 'America/Sao_Paulo' },
+    end: { dateTime: `${hoje}T07:10:00`, timeZone: 'America/Sao_Paulo' }
+  };
+}
+
 Deno.serve(async (req) => {
   const corsHeaders = buildCorsHeaders(req);
 
@@ -113,13 +163,90 @@ Deno.serve(async (req) => {
     });
   }
 
+  const json = (obj: unknown, status = 200) => new Response(JSON.stringify(obj), {
+    status, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+  });
+
   try {
+    const autorizado = await chamadorAutorizado(req);
+    if (autorizado !== true) return json({ error: autorizado.erro }, autorizado.status);
+
     const body = await req.json();
-    // body: { action: 'create'|'update'|'delete', event: {summary, description, start, end, ...}, eventId? }
     const calendarId = Deno.env.get('GCAL_CALENDAR_ID') || 'ccobrasq@gmail.com';
     const token = await getAccessToken();
+    const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`;
+    const gfetch = (url: string, method = 'GET', payload?: unknown) => fetch(url, {
+      method,
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: payload ? JSON.stringify(payload) : undefined
+    });
 
-    let url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`;
+    if (body.action === 'list') {
+      if (!body.timeMin || !body.timeMax) return json({ error: 'timeMin e timeMax são obrigatórios' }, 400);
+      const qs = new URLSearchParams({
+        timeMin: body.timeMin, timeMax: body.timeMax,
+        singleEvents: 'true', orderBy: 'startTime', maxResults: '250'
+      });
+      const r = await gfetch(`${base}?${qs}`);
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) return json({ error: data.error?.message || `HTTP ${r.status}` }, 502);
+      const items = (data.items || []).filter((e: any) => e.status !== 'cancelled').map((e: any) => ({
+        id: e.id, summary: e.summary || '', description: e.description || '',
+        start: e.start, end: e.end, colorId: e.colorId || null, htmlLink: e.htmlLink || null
+      }));
+      return json({ ok: true, items });
+    }
+
+    if (body.action === 'lembrete') {
+      const id = String(body.lembreteId || '');
+      if (!/^[0-9a-f-]{36}$/i.test(id)) return json({ error: 'lembreteId inválido' }, 400);
+      // A busca livre do Google cobre a descrição; confere a linha exata depois.
+      const r = await gfetch(`${base}?${new URLSearchParams({ q: `lembrete:${id}`, singleEvents: 'true', maxResults: '10' })}`);
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) return json({ error: data.error?.message || `HTTP ${r.status}` }, 502);
+      const eventos = (data.items || []).filter((e: any) =>
+        e.status !== 'cancelled' && String(e.description || '').includes(`lembrete:${id}`));
+      if (!eventos.length) return json({ ok: true, achados: 0 });
+      for (const ev of eventos) {
+        const url = `${base}/${encodeURIComponent(ev.id)}`;
+        let rr: Response;
+        if (body.op === 'excluir') {
+          rr = await gfetch(url, 'DELETE');
+        } else if (body.op === 'concluir') {
+          rr = await gfetch(url, 'PATCH', patchConcluir(ev.summary));
+        } else if (body.op === 'reagendar' && body.dataHora) {
+          const ini = new Date(body.dataHora);
+          if (isNaN(ini.getTime())) return json({ error: 'dataHora inválida' }, 400);
+          const durMs = ev.start?.dateTime && ev.end?.dateTime
+            ? Math.max(5 * 60e3, new Date(ev.end.dateTime).getTime() - new Date(ev.start.dateTime).getTime())
+            : 15 * 60e3;
+          rr = await gfetch(url, 'PATCH', {
+            start: { dateTime: ini.toISOString(), timeZone: 'America/Sao_Paulo' },
+            end: { dateTime: new Date(ini.getTime() + durMs).toISOString(), timeZone: 'America/Sao_Paulo' }
+          });
+        } else {
+          return json({ error: 'op inválida (use concluir, excluir ou reagendar)' }, 400);
+        }
+        if (!rr.ok && rr.status !== 404 && rr.status !== 410) {
+          const d = await rr.json().catch(() => ({}));
+          return json({ error: d.error?.message || `HTTP ${rr.status}` }, 502);
+        }
+      }
+      return json({ ok: true, achados: eventos.length });
+    }
+
+    if (body.action === 'concluir' && body.eventId) {
+      const url = `${base}/${encodeURIComponent(body.eventId)}`;
+      const r0 = await gfetch(url);
+      const ev = await r0.json().catch(() => ({}));
+      if (!r0.ok) return json({ error: ev.error?.message || `HTTP ${r0.status}` }, 502);
+      const r = await gfetch(url, 'PATCH', patchConcluir(ev.summary));
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) return json({ error: data.error?.message || `HTTP ${r.status}` }, 502);
+      return json({ ok: true, event: data });
+    }
+
+    let url = base;
     let method = 'POST';
     let payload: any = body.event;
 
