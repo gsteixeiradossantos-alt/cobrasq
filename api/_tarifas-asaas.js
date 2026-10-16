@@ -34,7 +34,19 @@ const { asaasReq } = require('./_asaas.js');
 const { hojeBR, addDiasBR } = require('./_data.js');
 
 const CONTA_ASAAS = 13;
-const CATEGORIA_TARIFA = 8946;  // "Tarifas bancárias" — a das tarifas lançadas à mão
+// Tarifas Bancárias (8946) → Asaas (8947) → uma subcategoria por tipo (16/10/2026).
+const CATEGORIA_TARIFA_POR_ROTULO = {
+  'Pix': 8948,            // Pix recebido
+  'boleto': 8949,
+  'cartão': 8950,
+  'cartão de débito': 8950,
+  'Pix enviado': 8951,
+  'mensageria': 8952,
+};
+const CATEGORIA_TARIFA_OUTRAS = 8953;  // Asaas → Outras
+function categoriaDaTarifa(rotulo) {
+  return CATEGORIA_TARIFA_POR_ROTULO[rotulo] || CATEGORIA_TARIFA_OUTRAS;
+}
 const TARIFA_AUTO_DESDE = '2026-10-01';
 
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
@@ -151,7 +163,7 @@ async function _inserirTarifa({ chave, valor, data, rotulo, nome, cobrancaId, ob
   if (id) {
     try {
       await sbFetch('fin_lancamento_categoria', { method: 'POST', prefer: 'return=minimal',
-        body: JSON.stringify({ lancamento_id: id, categoria_id: CATEGORIA_TARIFA, valor }) });
+        body: JSON.stringify({ lancamento_id: id, categoria_id: categoriaDaTarifa(rotulo), valor }) });
     } catch (e) { console.warn('[tarifas-asaas] categoria:', e.message); }
   }
   return id;
@@ -258,7 +270,7 @@ async function handler(req, res) {
 
 module.exports = handler;
 Object.assign(module.exports, {
-  CONTA_ASAAS, CATEGORIA_TARIFA, TARIFA_AUTO_DESDE,
+  CONTA_ASAAS, CATEGORIA_TARIFA_POR_ROTULO, CATEGORIA_TARIFA_OUTRAS, categoriaDaTarifa, TARIFA_AUTO_DESDE,
   rotuloBilling, tarifaDoPagamento, planejarTarifas, descricaoTarifa,
   nomeDaDescricaoFatura, nomeDoFavorecido, marcadorPagamento, marcadorTransacao,
   garantirTarifaDoPagamento, sincronizarTarifasAsaas,
