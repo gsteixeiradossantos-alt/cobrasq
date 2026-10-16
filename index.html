@@ -9504,11 +9504,19 @@ async function salvarLembrete(id){
     // Os 3 avisos são agendados pelo trigger no banco (lembretes_agendar_avisos).
     showToast('Lembrete salvo. Avisos agendados.','success');
     closeModal('modal-lem');
-    renderLembretes();
+    _lemAposMudar();
   }catch(e){
     showToast('Falha ao salvar: '+(e.message||e),'danger');
     if(btn){ btn.disabled=false; btn.textContent=id?'Salvar':'Criar'; }
   }
+}
+
+// Depois de criar/editar/concluir/cancelar/excluir: repinta a tela de onde veio
+// o clique — a de Lembretes ou o card "Próximos 7 dias" do Painel.
+function _lemAposMudar(){
+  try{ invalidarPainel('agenda:'); }catch(_){}
+  if(document.getElementById('page-painel')?.classList.contains('active')) renderPainel();
+  if(document.getElementById('page-lembretes')?.classList.contains('active')) renderLembretes();
 }
 
 async function cancelarLembrete(id){
@@ -9519,7 +9527,7 @@ async function cancelarLembrete(id){
   const { error } = await supa.from('lembretes').update({ status:'cancelado' }).eq('id', id);
   if(error){ showToast('Falha ao cancelar: '+error.message,'danger'); return; }
   showToast('Lembrete cancelado.','success');
-  renderLembretes();
+  _lemAposMudar();
 }
 
 async function concluirLembrete(id){
@@ -9529,7 +9537,7 @@ async function concluirLembrete(id){
   const { error } = await supa.from('lembretes').update({ status:'concluido' }).eq('id', id);
   if(error){ showToast('Falha ao atualizar: '+error.message,'danger'); return; }
   showToast('Lembrete marcado como concluído.','success');
-  renderLembretes();
+  _lemAposMudar();
 }
 
 async function excluirLembrete(id){
@@ -9540,7 +9548,7 @@ async function excluirLembrete(id){
   const { error } = await supa.from('lembretes').delete().eq('id', id);
   if(error){ showToast('Falha ao excluir: '+error.message,'danger'); return; }
   showToast('Lembrete excluído.','success');
-  renderLembretes();
+  _lemAposMudar();
 }
 
 // ── IA (Claude) + Mermaid para o "Como fazer" ────────────────────────────────
@@ -10970,7 +10978,11 @@ function invalidarPainel(...prefixos){
 // fosse inteira; com valor velho, mostra o velho.
 async function _pnlCarregarAgenda(todayStr, in7str){
   const supa = getSupabase(); if(!supa) throw new Error('Supabase indisponível');
-  const [rAud, rBia, rAcd] = await Promise.all([
+  // Lembretes: data_hora é timestamptz — a janela vai em hora LOCAL convertida,
+  // senão "hoje 00:00" vira 21:00 de ontem (o banco lê o literal sem fuso como UTC).
+  const iniLem = new Date(todayStr+'T00:00:00').toISOString();
+  const fimLem = new Date(in7str+'T23:59:59').toISOString();
+  const [rAud, rBia, rAcd, rLem] = await Promise.all([
     supa.from('audiencias')
       .select('numero_processo,comarca,tipo_audiencia,data_hora,status,partes')
       .gte('data_hora', todayStr+'T00:00:00')
@@ -10983,10 +10995,15 @@ async function _pnlCarregarAgenda(todayStr, in7str){
     supa.from('acordos')
       .select('id,devedor_id,parcelas,status')
       .eq('status','ativo').not('parcelas','is',null),
+    supa.from('lembretes')
+      .select('*')
+      .eq('status','agendado')
+      .gte('data_hora', iniLem).lte('data_hora', fimLem)
+      .order('data_hora',{ascending:true}),
   ]);
-  const erro = rAud.error || rBia.error || rAcd.error;
+  const erro = rAud.error || rBia.error || rAcd.error || rLem.error;
   if(erro) throw erro;
-  return { aud: rAud.data||[], bia: rBia.data||[], acd: rAcd.data||[] };
+  return { aud: rAud.data||[], bia: rBia.data||[], acd: rAcd.data||[], lem: rLem.data||[] };
 }
 // (removido) "Ações judiciais no mês" não faz parte do card: o handoff v3 §3
 // fecha em 4 métricas — ACORDADO NO MÊS · A RECEBER · META DO MÊS · FECHAR POR
@@ -11161,7 +11178,7 @@ async function renderPainel(){
       .forEach(c=>vencBase.push({ desc:d.nome, data:c.dueDate, valor:c.value||0, tipo:'asaas' }));
   });
   const nomePorDevedor = new Map(devs.map(d=>[d.id, d.nome]));
-  const _ordemTipo = { audiencia:0, tarefa:1, parcela:2, boleto:3, asaas:3, devedor:4, lancamento:5 };
+  const _ordemTipo = { audiencia:0, lembrete:1, tarefa:1, parcela:2, boleto:3, asaas:3, devedor:4, lancamento:5 };
 
   // Greeting
   const hrNow = new Date().getHours();
@@ -11349,6 +11366,14 @@ async function renderPainel(){
           data: isoLocal(dt), valor:0, tipo:'audiencia', rotulo:'AUDIÊNCIA',
         });
       });
+      (agenda.valor.lem||[]).forEach(l=>{
+        const dt   = new Date(l.data_hora);
+        const hora = String(dt.getHours()).padStart(2,'0')+':'+String(dt.getMinutes()).padStart(2,'0');
+        vencItems.push({
+          desc: `${hora} · ${l.titulo||'—'}`, data: isoLocal(dt), valor:0, tipo:'lembrete', rotulo:'LEMBRETE',
+          lemId: l.id, lemRow: l,
+        });
+      });
       agenda.valor.bia.forEach(b=>{
         // Não repetir o que o cache do Asaas já trouxe (mesmo nome + mesma data).
         if(vencItems.some(v=>v.tipo==='asaas' && v.data===b.venc_atual && v.desc===b.nome)) return;
@@ -11380,8 +11405,8 @@ async function renderPainel(){
     // Enquanto a agenda remota não chegou (ou falhou), a lista diz isso em vez de
     // fingir que "nada nos próximos 7 dias".
     const agendaNota = agenda.valor ? '' : (agenda.falhou
-      ? 'Audiências, boletos e parcelas: <span style="color:var(--danger);">não foi possível ler</span>'
-      : 'Audiências, boletos e parcelas: carregando…');
+      ? 'Audiências, lembretes, boletos e parcelas: <span style="color:var(--danger);">não foi possível ler</span>'
+      : 'Audiências, lembretes, boletos e parcelas: carregando…');
 
     // ── Precisa de decisão hoje — mesma régua de pendência da tela Cobranças ──────
     // A montagem vive em _montarFilaDecisoesSync() (fonte única com a página #/fila).
@@ -11420,6 +11445,12 @@ async function renderPainel(){
       return { iso, dow:diasSemanaCurta[d.getDay()], num:String(d.getDate()).padStart(2,'0'),
                hoje:i===0, temEvento:eventDates7.has(iso), qtd, sel:iso===diaSel };
     });
+    // Lembretes do card: os botões reaproveitam concluir/editar/excluir da tela
+    // Lembretes, que leem _lemCache — põe as linhas lá (sem apagar as que já há).
+    const podeLem = currentUser?.tipo === 'gestor';
+    vencItems.forEach(v=>{ if(!v.lemRow) return;
+      const i = _lemCache.findIndex(x=>x.id===v.lemId);
+      if(i>=0) _lemCache[i] = v.lemRow; else _lemCache.push(v.lemRow); });
     // Select de filtro focado: a pintura o recria; devolve o foco ao equivalente
     // (sem rolar) para o teclado não voltar ao início do documento.
     const _ativo = document.activeElement;
@@ -11492,6 +11523,10 @@ async function renderPainel(){
         #page-painel .pnl-dia .dot.on{background:var(--accent);}
         #page-painel .pnl-comp{display:flex;gap:10px;padding:9px 0;border-top:1px solid var(--border-2);}
         #page-painel .pnl-comp:first-child{border-top:0;}
+        #page-painel .pnl-lem-acoes{display:flex;gap:4px;flex-shrink:0;align-self:center;}
+        #page-painel .pnl-lem-acoes button{width:26px;height:26px;border:1px solid var(--border-2);border-radius:6px;background:transparent;color:var(--text-2);font-size:12.5px;line-height:1;cursor:pointer;padding:0;}
+        #page-painel .pnl-lem-acoes button:hover{background:var(--surface-2,rgba(0,0,0,.04));color:var(--text);}
+        #page-painel .pnl-lem-acoes button.del:hover{color:var(--danger,#A65A4A);border-color:var(--danger,#A65A4A);}
         #page-painel .pnl-risco-row{display:flex;align-items:center;gap:10px;padding:9px 0;}
         #page-painel .pnl-risco-hr{height:1px;background:var(--border-2);}
         #page-painel .pnl-risco-v{font-family:var(--font-mono);font-size:17px;font-weight:600;width:80px;flex-shrink:0;}
@@ -11589,7 +11624,7 @@ async function renderPainel(){
             <div class="cob-panel-head"><span class="cob-panel-title">${diaSel? diaSel.slice(8,10)+'/'+diaSel.slice(5,7) : 'Próximos 7 dias'}</span>${diaSel?`<a class="cob-link" style="margin-left:8px;" onclick="painelToggleDia('${diaSel}')">↺ ver os 7 dias</a>`:''}<a class="cob-link" style="margin-left:auto;" onclick="showPage('tarefas')">Agenda completa →</a></div>
             <div class="cob-panel-body">
               <div class="pnl-dias7">${dias7.map(d=>`<div class="pnl-dia ${d.hoje?'hoje':''} ${d.sel?'sel':''} ${d.qtd?'':'vazio'}"${d.qtd?` onclick="painelToggleDia('${d.iso}')" title="${d.qtd} ${d.qtd===1?'compromisso':'compromissos'} em ${d.iso.slice(8,10)}/${d.iso.slice(5,7)}"`:' title="nada neste dia"'}><span class="dow">${d.dow}</span><span class="num">${d.num}</span><div class="dot ${d.temEvento?'on':''}"></div></div>`).join('')}</div>
-              ${vencimentos.length? vencimentos.map(v=>`<div class="pnl-comp"><div style="font-family:var(--font-mono);font-size:11.5px;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};width:56px;flex-shrink:0;">${(v.data||'').slice(8,10)}/${(v.data||'').slice(5,7)}</div><div style="min-width:0;">${v.rotulo?`<div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};">${escHtml(v.rotulo)}</div>`:''}<div style="font-size:12.5px;font-weight:500;color:var(--text);">${escHtml(v.desc||'—')}</div>${v.valor?`<div style="font-size:11.5px;color:var(--text-3);">${fmtR(v.valor)}</div>`:''}</div></div>`).join('')+(vencOcultos?`<div style="padding:9px 0 0;font-size:11.5px;color:var(--text-3);">+${vencOcultos} ${vencOcultos===1?'compromisso':'compromissos'} — ver agenda completa</div>`:'') : (agendaNota ? '' : `<div class="cob-empty"><span class="cob-empty-dot"></span> ${diaSel? 'Nada em '+diaSel.slice(8,10)+'/'+diaSel.slice(5,7)+'.' : 'Nada nos próximos 7 dias.'}</div>`)}${agendaNota?`<div style="padding:9px 0 0;font-size:11.5px;color:var(--text-3);">${agendaNota}</div>`:''}
+              ${vencimentos.length? vencimentos.map(v=>`<div class="pnl-comp"><div style="font-family:var(--font-mono);font-size:11.5px;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};width:56px;flex-shrink:0;">${(v.data||'').slice(8,10)}/${(v.data||'').slice(5,7)}</div><div style="min-width:0;flex:1;">${v.rotulo?`<div style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:.12em;color:${v.tipo==='audiencia'?'var(--danger,#A65A4A)':'var(--text-3)'};">${escHtml(v.rotulo)}</div>`:''}<div style="font-size:12.5px;font-weight:500;color:var(--text);">${escHtml(v.desc||'—')}</div>${v.valor?`<div style="font-size:11.5px;color:var(--text-3);">${fmtR(v.valor)}</div>`:''}</div>${v.lemId && podeLem ? `<div class="pnl-lem-acoes"><button title="Marcar como concluído" onclick="concluirLembrete('${v.lemId}')">✓</button><button title="Editar" onclick="abrirLembreteModal('${v.lemId}')">✎</button><button title="Excluir" class="del" onclick="excluirLembrete('${v.lemId}')">✕</button></div>` : ''}</div>`).join('')+(vencOcultos?`<div style="padding:9px 0 0;font-size:11.5px;color:var(--text-3);">+${vencOcultos} ${vencOcultos===1?'compromisso':'compromissos'} — ver agenda completa</div>`:'') : (agendaNota ? '' : `<div class="cob-empty"><span class="cob-empty-dot"></span> ${diaSel? 'Nada em '+diaSel.slice(8,10)+'/'+diaSel.slice(5,7)+'.' : 'Nada nos próximos 7 dias.'}</div>`)}${agendaNota?`<div style="padding:9px 0 0;font-size:11.5px;color:var(--text-3);">${agendaNota}</div>`:''}
             </div>
           </div>
 
