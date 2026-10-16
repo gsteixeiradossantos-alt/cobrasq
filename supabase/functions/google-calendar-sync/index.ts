@@ -111,13 +111,18 @@ async function getAccessToken(): Promise<string> {
 
 // Quem chama: service_role (servidor) ou o gestor logado. O gateway já validou a
 // assinatura (verify_jwt = true), então ler o `role` do payload é seguro aqui.
+function ehServiceRole(req: Request): boolean {
+  const token = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+    return payload?.role === 'service_role';
+  } catch { return false; /* não é JWT legível: segue para getUser, que recusa */ }
+}
+
 async function chamadorAutorizado(req: Request): Promise<true | { erro: string; status: number }> {
   const token = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();
   if (!token) return { erro: 'unauthorized: sem token de sessão', status: 401 };
-  try {
-    const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-    if (payload?.role === 'service_role') return true;
-  } catch { /* não é JWT legível: segue para getUser, que recusa */ }
+  if (ehServiceRole(req)) return true;
   const SUPABASE_URL = Deno.env.get('SUPABASE_URL');
   const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
   if (!SUPABASE_URL || !SERVICE_ROLE_KEY) return { erro: 'configuração do servidor incompleta', status: 500 };
@@ -149,8 +154,10 @@ function patchConcluir(summary: string) {
 Deno.serve(async (req) => {
   const corsHeaders = buildCorsHeaders(req);
 
-  // Bloqueia preflight/origin não-listada
-  if (!corsHeaders['Access-Control-Allow-Origin']) {
+  // Bloqueia preflight/origin não-listada. Chamada de servidor com a service_role
+  // (cron-regua manda Origin = URL do deploy da Vercel, que muda a cada deploy) não
+  // depende de CORS: a origem só protege o navegador.
+  if (!corsHeaders['Access-Control-Allow-Origin'] && !ehServiceRole(req)) {
     return new Response(JSON.stringify({ error: 'origin not allowed' }), {
       status: 403, headers: { 'Content-Type': 'application/json' }
     });
