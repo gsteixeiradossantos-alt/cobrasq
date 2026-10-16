@@ -271,6 +271,11 @@ Deno.serve(async (req) => {
       headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: payload ? JSON.stringify(payload) : undefined
     });
+    // Apagar evento que já não existe (404/410) = objetivo cumprido. Sem isso o
+    // cron-regua recebia 502 e tentava apagar o mesmo evento a cada rodada.
+    if (method === 'DELETE' && (r.status === 404 || r.status === 410)) {
+      return json({ ok: true, jaNaoExistia: true });
+    }
     const data = await r.json().catch(() => ({}));
     if (!r.ok) {
       return new Response(JSON.stringify({ error: data.error?.message || `HTTP ${r.status}`, detalhes: data }), {
