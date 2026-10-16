@@ -34,16 +34,16 @@ const { asaasReq } = require('./_asaas.js');
 const { hojeBR, addDiasBR } = require('./_data.js');
 
 const CONTA_ASAAS = 13;
-// Tarifas Bancárias (8946) → Asaas (8947) → uma subcategoria por tipo (16/10/2026).
+// Tarifas Bancárias (8946) → ramo → banco (árvore de 16/10/2026). Aqui só os ramos do Asaas.
 const CATEGORIA_TARIFA_POR_ROTULO = {
-  'Pix': 8948,            // Pix recebido
-  'boleto': 8949,
-  'cartão': 8950,
-  'cartão de débito': 8950,
-  'Pix enviado': 8951,
-  'mensageria': 8952,
+  'Pix': 8968,              // Despesas com cobrança (Boleto/PIX) → Asaas
+  'boleto': 8968,
+  'cartão': 8968,
+  'cartão de débito': 8968,
+  'Pix enviado': 8960,      // Envio de PIX → Asaas
+  'mensageria': 8972,       // Notificações → Asaas
 };
-const CATEGORIA_TARIFA_OUTRAS = 8953;  // Asaas → Outras
+const CATEGORIA_TARIFA_OUTRAS = 8968;
 function categoriaDaTarifa(rotulo) {
   return CATEGORIA_TARIFA_POR_ROTULO[rotulo] || CATEGORIA_TARIFA_OUTRAS;
 }

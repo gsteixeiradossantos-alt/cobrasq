@@ -105,12 +105,12 @@ const T = require('../api/_tarifas-asaas.js');
   assert.strictEqual(l.data_vencimento, '2026-10-02');
   assert.strictEqual(l.data_pagamento, '2026-10-02');
   assert.ok(/tarifa/i.test(l.descricao), 'as telas excluem tarifa por /tarifa/ — precisa manter a palavra');
-  assert.deepStrictEqual(db.fin_lancamento_categoria.map(c => [c.lancamento_id, c.categoria_id, c.valor]), [[l.id, 8948, 1.99]], 'Pix recebido');
-  assert.strictEqual(T.categoriaDaTarifa('boleto'), 8949);
-  assert.strictEqual(T.categoriaDaTarifa('cartão'), 8950);
-  assert.strictEqual(T.categoriaDaTarifa('Pix enviado'), 8951);
-  assert.strictEqual(T.categoriaDaTarifa('mensageria'), 8952);
-  assert.strictEqual(T.categoriaDaTarifa('recebimento'), 8953, 'tipo desconhecido cai em Outras');
+  assert.deepStrictEqual(db.fin_lancamento_categoria.map(c => [c.lancamento_id, c.categoria_id, c.valor]), [[l.id, 8968, 1.99]], 'cobrança → Asaas');
+  assert.strictEqual(T.categoriaDaTarifa('boleto'), 8968);
+  assert.strictEqual(T.categoriaDaTarifa('cartão'), 8968);
+  assert.strictEqual(T.categoriaDaTarifa('Pix enviado'), 8960);
+  assert.strictEqual(T.categoriaDaTarifa('mensageria'), 8972);
+  assert.strictEqual(T.categoriaDaTarifa('recebimento'), 8968, 'tipo desconhecido cai em cobrança');
 
   // Sem devedor: nome vem do cliente do Asaas.
   await T.garantirTarifaDoPagamento({ payment: { ...pix, id: 'pay_sem' }, paymentId: 'pay_sem', devedor: null });
