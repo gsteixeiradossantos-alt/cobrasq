@@ -357,3 +357,11 @@ Sem dry-run R-18 (não há Postgres local; dry-run em prod não foi autorizado n
 
 **Ordem:** indiferente para o front (o PR já lê capital → `valor_orig` como reserva e grava os
 dois). Recomendado: merge → decidir os divergentes → aplicar → recarregar o painel.
+
+## 20261016e — papel `assistido` em `cobranca_partes`
+
+**Não aplicada.** `20261016e_papel_assistido.sql` (+ `_rollback`). Derruba e recria
+`cobranca_partes_papel_check` acrescentando `'assistido'` (pessoa atendida que não é
+devedora, ex.: filho atendido pelo dentista). Aditiva e idempotente. Enquanto não for
+aplicada, escolher "Assistido(a)" no painel falha ao salvar (violação do CHECK). Aplicar
+só com autorização do gestor, antes do merge do PR.
