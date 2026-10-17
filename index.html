@@ -9382,7 +9382,7 @@ async function renderPortalPedidos(){
          r.mensagem&&('Observações: '+escHtml(r.mensagem))].filter(Boolean).join('<br>');
     const acoes=!aberto?'':(r.tipo==='duvida'
       ? `<button class="cob-btn-primary" onclick="ppResponder('${r.id}','respondida')">Responder</button>`
-      : `<button class="cob-btn-primary" onclick="ppResponder('${r.id}','aprovada')">Aprovar</button><button class="cob-btn-ghost" onclick="ppResponder('${r.id}','recusada')">Recusar</button>`)
+      : `<button class="cob-btn-primary" onclick="ppAprovarCadastrar('${r.id}')">Aprovar e cadastrar</button><button class="cob-btn-ghost" onclick="ppResponder('${r.id}','recusada')">Recusar</button>`)
       +(r.status==='aberta'?`<button class="cob-btn-ghost" onclick="ppResponder('${r.id}','em_analise')">Marcar em análise</button>`:'');
     return `<div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px;margin-bottom:12px;">
       <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center;">
@@ -9393,7 +9393,7 @@ async function renderPortalPedidos(){
       <div style="font-size:13px;color:var(--text-2);margin-top:6px;white-space:pre-wrap;">${corpo}</div>
       ${r.resposta?`<div style="margin-top:10px;padding:10px 12px;border-radius:9px;background:var(--bg-2,rgba(0,0,0,.04));font-size:13px;white-space:pre-wrap;"><strong>Resposta enviada${r.respondida_em?' · '+fmtD(r.respondida_em):''}:</strong><br>${escHtml(r.resposta)}</div>`:''}
       ${aberto?`<textarea id="pp-resp-${r.id}" rows="3" placeholder="${r.tipo==='duvida'?'Resposta ao cliente (aparece no portal)':'Mensagem ao cliente (opcional; aparece no portal)'}" style="width:100%;margin-top:10px;padding:10px 12px;border:1px solid var(--border);border-radius:9px;font:inherit;font-size:13px;resize:vertical;"></textarea>
-      ${r.tipo==='nova_cobranca'?'<div style="font-size:11.5px;color:var(--text-3);margin-top:4px;">Aprovar só registra a resposta: a cobrança continua sendo cadastrada em Cobranças.</div>':''}
+      ${r.tipo==='nova_cobranca'?'<div style="font-size:11.5px;color:var(--text-3);margin-top:4px;">Aprovar abre o cadastro da cobrança já preenchido com os dados do pedido. O pedido só fica aprovado quando você salvar a cobrança.</div>':''}
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">${acoes}</div>`:''}
     </div>`;
   };
@@ -9412,6 +9412,33 @@ async function ppResponder(id, status){
   if(error){ showToast('Não foi possível salvar: '+error.message,'error'); return; }
   showToast(status==='em_analise'?'Marcado em análise.':'Resposta registrada. O cliente vê no portal.','success');
   renderPortalPedidos(); atualizarBadgePortal();
+}
+// Aprovar pedido de nova cobrança: abre o cadastro já preenchido. O pedido só vira "aprovada"
+// quando salvarCobranca conclui (ver _ppAprovarPendente lá); cancelar o modal não aprova nada.
+function ppAprovarCadastrar(id){
+  const r=(_ppCache||[]).find(x=>String(x.id)===String(id)); if(!r) return;
+  const txt=(document.getElementById('pp-resp-'+id)?.value||'').trim();
+  const cli=(DB.clientes||[]).find(c=>String(c.id)===String(r.cliente_id));
+  if(!cli){ showToast('Credor deste pedido não está na lista de clientes. Recarregue o painel.','danger'); return; }
+  abrirCobrancaModal(null);
+  window._ppAprovarPendente={ id:r.id, resposta:txt };
+  const set=(sel,v)=>{ const el=document.querySelector(sel); if(el && v!=null && v!=='') el.value=v; };
+  set('#cobr-credor', cli.nome);
+  set('#cobr-desc', r.titulo);
+  set('#cobr-valor-capital', r.valor!=null?_cobrFmtNum(+r.valor):'');
+  set('#cobr-venc', r.vencimento);
+  const obs=[r.mensagem, r.devedor_email&&('E-mail do devedor: '+r.devedor_email),
+    'Pedido enviado pelo portal em '+new Date(r.criado_em).toLocaleDateString('pt-BR')+'.'].filter(Boolean).join('\n');
+  set('#cobr-obs', obs);
+  const row=document.querySelector('#cobr-resp-list .cobr-resp-row');
+  if(row){
+    const n=row.querySelector('.cobr-resp-nome'); if(n){ n.value=r.devedor_nome||''; try{ _cobrAutoDoc(n); }catch(_){} }
+    const d=row.querySelector('.cobr-resp-doc'); if(d && r.devedor_doc) d.value=r.devedor_doc;
+    const t=row.querySelector('.cobr-resp-tel'); if(t && r.devedor_tel) t.value=r.devedor_tel;
+  }
+  try{ cobrRecalcValorAtual(); }catch(_){}
+  try{ _aplicarMascarasNoModal(document.getElementById('cobr-modal-overlay')); }catch(_){}
+  showToast('Confira os dados e salve a cobrança. O pedido fica aprovado ao salvar.','info');
 }
 async function atualizarBadgePortal(){
   try{
@@ -25651,6 +25678,7 @@ async function mcliCarregarCobrancas(){
 
 function abrirCobrancaModal(cob){
   window._cobrEditId = cob?.id || null;
+  window._ppAprovarPendente = null; // só ppAprovarCadastrar liga, depois de abrir o modal
   // Valor capital: trava após o 1º cadastro (só dono + digitar CONFIRMAR). _cobrEditCapitalPrev = valor já salvo (null = ainda não definido).
   window._cobrEditCapitalPrev = (cob && cob.valor_capital!=null) ? +cob.valor_capital : null;
   const _ordNome = (a,b)=>(a.nome||'').localeCompare(b.nome||'','pt-BR',{sensitivity:'base'});
@@ -26223,6 +26251,16 @@ async function salvarCobranca(){
 
 
     showToast(editId ? 'Cobrança atualizada.' : ('Cobrança criada com '+resp.length+' responsável(is).'),'success');
+    // Veio de "Aprovar e cadastrar" em Pedidos do portal: agora sim marca o pedido como aprovado.
+    const _ppPend = !editId ? window._ppAprovarPendente : null;
+    window._ppAprovarPendente = null;
+    if(_ppPend){
+      const upd={ status:'aprovada', respondida_em:new Date().toISOString(), respondida_por:currentUser?.id||null };
+      if(_ppPend.resposta) upd.resposta=_ppPend.resposta;
+      const { error: epp } = await supa.from('portal_solicitacoes').update(upd).eq('id', _ppPend.id);
+      if(epp) showToast('Cobrança salva, mas o pedido do portal não foi marcado como aprovado: '+epp.message,'warning');
+      try{ atualizarBadgePortal(); if(document.getElementById('page-portalpedidos')?.offsetParent) renderPortalPedidos(); }catch(_){}
+    }
     document.getElementById('cobr-modal-overlay')?.remove();
     window._cobrEditId = null;
     if(typeof loadRelationalData === 'function') await loadRelationalData();
