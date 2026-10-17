@@ -8230,7 +8230,7 @@ let _impSel = new Set();
 const _impEsc = (s)=> String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const _impPrompt = (t,l,cb,o)=>{ if(typeof promptModal==='function') return promptModal(t,l,cb,o); const v=prompt(l); if(v!=null) cb(v); };
 const _impStatusOpts = ['Cobrar','Automatizar','Em contato','Em negociação','Acordo','Recebido','Fazer ação','Quitado','Quitado direto ao credor','Devolvida','Sem êxito'];
-const _IMP_PAPEIS = { emitente:'Emitente', endossante:'Endossante', avalista:'Avalista', fiador:'Fiador', devedor_solidario:'Devedor solidário' };
+const _IMP_PAPEIS = { emitente:'Emitente', endossante:'Endossante', avalista:'Avalista', fiador:'Fiador', devedor_solidario:'Devedor solidário', assistido:'Assistido(a)' };
 
 function _impDocOk(doc){ const d=String(doc||'').replace(/\D/g,''); return d.length===11||d.length===14; }
 function _impTelOk(tel){ return String(tel||'').replace(/\D/g,'').length>=10; }
@@ -11373,7 +11373,7 @@ async function renderPainel(){
 
   const totalCarteira = cobrAtivas.reduce((s,c)=>s+(+c.valor_atual||+c.valor_orig||0), 0);
   const totalCasos    = cobrAtivas.length;
-  const totalDevedores = new Set(cobrAtivas.flatMap(c=>(c.cobranca_partes||[]).map(p=>p.devedor_id))).size;
+  const totalDevedores = new Set(cobrAtivas.flatMap(c=>(c.cobranca_partes||[]).filter(p=>p.papel!=='assistido').map(p=>p.devedor_id))).size;
   const totalClientes  = new Set(cobrAtivas.map(c=>c.cliente_id).filter(Boolean)).size;
 
   // Recuperado no mês = dinheiro que de fato entrou (parcelas de acordo pagas).
@@ -13389,7 +13389,7 @@ function _capaQualHtml(ctx, modo){
     ? { capa:'Capa · 01 / 02', qual:'Ficha · 02 / 02' }
     : { capa:'Capa do Caso', qual:'Ficha de Qualificação' };
   // Lista TODOS os envolvidos (não só o principal) quando o caso tem mais de um.
-  const _papelLbl = { emitente:'Emitente', endossante:'Endossante', avalista:'Avalista', fiador:'Fiador', devedor_solidario:'Devedor solidário' };
+  const _papelLbl = { emitente:'Emitente', endossante:'Endossante', avalista:'Avalista', fiador:'Fiador', devedor_solidario:'Devedor solidário', sucessor:'Sucessor', assistido:'Assistido(a)' };
   const envs = Array.isArray(ctx.envolvidos) ? ctx.envolvidos : [];
   const envBlock = envs.length > 1 ? `
     <div class="envs">
@@ -20269,7 +20269,7 @@ function petCasoChange(){
   const valEl = document.getElementById('pet-valor');
   if(!caso){ if(prev) prev.textContent=''; return; }
   if(valEl && !valEl.value){ const v = caso.valor_atual||caso.valor_orig; if(v) valEl.value = fmtR(v); }
-  const reqdos = (caso.cobranca_partes||[]).map(p=>p.devedores&&p.devedores.nome).filter(Boolean);
+  const reqdos = (caso.cobranca_partes||[]).filter(p=>p.papel!=='assistido').map(p=>p.devedores&&p.devedores.nome).filter(Boolean);
   if(prev) prev.innerHTML = `<b>Requerente:</b> ${escHtml(_petCredorNome(caso))} · <b>Requerido(s):</b> ${escHtml(reqdos.join(', ')||'—')}`;
 }
 
@@ -20315,6 +20315,7 @@ async function submeterPeticionamento(){
       const v = (id)=>{ const x=(document.getElementById(id)?.value||'').trim(); return x||null; };
       const requerentes = caso && caso.clientes ? [{ nome: caso.clientes.nome_fantasia||caso.clientes.nome, doc: caso.clientes.doc||null }] : [];
       const requeridos = (caso?.cobranca_partes||[])
+        .filter(p=>p.papel!=='assistido')
         .map(p=>({ nome: p.devedores&&p.devedores.nome, doc: (p.devedores&&p.devedores.doc)||null, principal: !!p.principal }))
         .filter(x=>x.nome);
       dadosDist = {
@@ -20583,8 +20584,14 @@ function cliSortArrowHtml(key){
 // ════════════════════════════════════════════════════════════════════════════
 const PAPEL_LABELS = {
   emitente:'Emitente', endossante:'Endossante', avalista:'Avalista',
-  fiador:'Fiador', devedor_solidario:'Devedor solidário', sucessor:'Sucessor'
+  fiador:'Fiador', devedor_solidario:'Devedor solidário', sucessor:'Sucessor',
+  assistido:'Assistido(a)'
 };
+// Assistido(a) = pessoa atendida (ex.: filho atendido pelo dentista) que NÃO é devedora; o
+// responsável pelo pagamento é a outra parte. Fica fora de cálculo, cobrança, régua, totais de
+// devedores, petições e termos. Use _ehAssistido/_semAssistido ao percorrer cobranca_partes.
+const _ehAssistido = (p)=> !!p && p.papel === 'assistido';
+const _semAssistido = (partes)=> (partes||[]).filter(p=>!_ehAssistido(p));
 let DB_cobrancas = [];          // cache local (com cobranca_partes embutidas)
 // ONDA I · 2 — triagem de pendência: default = Todos (era 'agir').
 // Filtro da tela: UMA etapa do ciclo (single) + N recortes (multi, AND).
@@ -21474,7 +21481,7 @@ async function _carregarSinaisPendencia(cobrs){
   const sinais = { acordoPorDev:{}, waAguardando:new Set(), peticaoPreparada:new Set(), intimacaoNova:new Set(), ultimaAtividade:{} };
   const sb = (typeof getSupabase==='function') ? getSupabase() : null;
   if(!sb || !Array.isArray(cobrs) || !cobrs.length) return sinais;
-  const devIds = [...new Set(cobrs.flatMap(c=>(c.cobranca_partes||[]).map(p=>p.devedor_id)).filter(Boolean))];
+  const devIds = [...new Set(cobrs.flatMap(c=>(c.cobranca_partes||[]).filter(p=>p.papel!=='assistido').map(p=>p.devedor_id)).filter(Boolean))];
   const _chunks = (arr,n)=>{ const o=[]; for(let i=0;i<arr.length;i+=n) o.push(arr.slice(i,i+n)); return o; };
   // Os 5 grupos abaixo são independentes entre si, e os chunks de um mesmo grupo
   // cobrem devedores disjuntos. Rodavam em série: com 823 devedores isso dava 13
@@ -22335,7 +22342,10 @@ function _cobrFmtNum(n){ return (n==null||n==='') ? '' : Number(n).toFixed(2).re
 //    ficha de outro credor misturava as carteiras — o "1:N" das vistorias).
 function garantirUmPrincipal(resp){
   if(!Array.isArray(resp) || !resp.length) return resp;
-  if(!resp.some(x=>x && x.principal)) resp[0].principal = true;
+  // Assistido(a) não é devedor: nunca pode ser o principal (é o principal que a régua, o
+  // WhatsApp e os documentos tratam como devedor).
+  for(const r of resp){ if(r && r.papel === 'assistido') r.principal = false; }
+  if(!resp.some(x=>x && x.principal)){ const c = resp.find(x=>x && x.papel !== 'assistido'); if(c) c.principal = true; }
   let visto = false;
   for(const r of resp){ if(r && r.principal){ if(visto) r.principal = false; else visto = true; } }
   return resp;
@@ -24585,7 +24595,7 @@ async function invCarregarCobranca(cobId, hostId){
   ]);
   if(host.dataset.cob!==cobId) return; // trocou de cobrança enquanto carregava
   if(error){ host.innerHTML=_detEmpty('Não foi possível carregar as investigações: '+error.message); return; }
-  const ps=(partes||[]).filter(p=>p.devedor_id).sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
+  const ps=(partes||[]).filter(p=>p.devedor_id && p.papel!=='assistido').sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
   _invPartesCache[cobId]=ps;
   const lista=invs||[];
   const ultima=id=>lista.find(i=>i.devedor_id===id);
@@ -24762,7 +24772,7 @@ async function bensCarregarCobranca(cobId, hostId){
       : 'Não foi possível carregar os bens: '+(error.message||error));
     return;
   }
-  const ps=(partes||[]).filter(p=>p.devedor_id).sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
+  const ps=(partes||[]).filter(p=>p.devedor_id && p.papel!=='assistido').sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
   _bensCtx={cobId, hostId, bens:bens||[], partes:ps, docs:docs||[], numeroProcesso:_bensCNJ(cob&&cob.numero_processo)};
   bensRender();
 }
@@ -25464,7 +25474,7 @@ async function renderClienteDetalhe(){
   _detCliObj=cli; window._docSrcCli=cli;
   const nome=cli.nome||'—', fantasia=cli.nome_fantasia||cli.nomeFantasia||'';
   const carteira=cobr.reduce((s,c)=>s+(+c.valor_atual||+c.valor_orig||0),0);
-  const nDevedores=new Set(cobr.flatMap(c=>(c.cobranca_partes||[]).map(p=>p.devedor_id))).size;
+  const nDevedores=new Set(cobr.flatMap(c=>(c.cobranca_partes||[]).filter(p=>p.papel!=='assistido').map(p=>p.devedor_id))).size;
   const taxa=cli.metadata?.percentualHonorarios||cli.metadata?.taxaRecuperacao||cli.taxa_honorarios||'';
   const portalAtivo=!!(cli.metadata?.portalAtivo||cli.metadata?.login||cli.login);
   const endParts=[_gv(cli,'rua'),_gv(cli,'numero')&&('nº '+_gv(cli,'numero')),_gv(cli,'bairro'),_gv(cli,'cidade'),_gv(cli,'uf')].filter(Boolean).join(', ');
@@ -26100,6 +26110,7 @@ async function salvarCobranca(){
   })).filter(x=>x.nome);
 
   if(!resp.length){ showToast('Informe ao menos um devedor.','danger'); return; }
+  if(!resp.some(x=>x.papel!=='assistido')){ showToast('O(a) assistido(a) não é devedor: informe também quem responde pela dívida.','danger'); return; }
   if(!tipoCobr){ showToast('Selecione o tipo de cobrança (física ou digital).','danger'); return; }
   // R-11: na CRIAÇÃO exige credor vinculado e valor > 0 (evita cobrança vazia fora de capital/saldo).
   if(!editId){
@@ -28268,7 +28279,7 @@ function cpDevs(){
   const ids = cpClienteIds();
   return (DB.devedores||[]).filter(d=>ids.includes(d.clienteId) && !d.isDraft);
 }
-function cpPapelLbl(p){ return ({emitente:'Emitente',endossante:'Endossante',avalista:'Avalista',fiador:'Fiador',devedor_solidario:'Devedor solidário'}[p]||p||'Parte'); }
+function cpPapelLbl(p){ return ({emitente:'Emitente',endossante:'Endossante',avalista:'Avalista',fiador:'Fiador',devedor_solidario:'Devedor solidário',sucessor:'Sucessor',assistido:'Assistido(a)'}[p]||p||'Parte'); }
 // Casos do cedente = COBRANÇAS cujo credor é ele (cobrancas.cliente_id), não rascunho/arquivada.
 // Case-centric: cada item traz TODAS as partes (principal + coobrigados) e uma buscaKey.
 // Escopar pela cobrança (e não por devedor.clienteId) faz aparecer casos cujo devedor
@@ -49230,7 +49241,7 @@ function _tajPrefillCoobrigados(cobId){
   const src=(typeof DB_cobrancas!=='undefined' && DB_cobrancas) || [];
   const c=src.find(x=>x && x.id===cobId);
   const extras=((c&&c.cobranca_partes)||[])
-    .filter(p=>p && !p.principal && p.devedores && String(p.devedores.nome||'').trim());
+    .filter(p=>p && !p.principal && p.papel!=='assistido' && p.devedores && String(p.devedores.nome||'').trim());
   extras.forEach(p=>_tajAddDevedor({
     nome:p.devedores.nome, documento:p.devedores.doc,
     telefone:_tajPrimeiroTel(p.devedores.telefone||''), papel:p.papel||'' }));
