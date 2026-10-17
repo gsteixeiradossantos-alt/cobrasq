@@ -1,8 +1,8 @@
 -- ============================================================================
 -- 20261016d — CAPITAL É O ÚNICO VALOR DE DÍVIDA DIGITADO OU CONFERIDO POR PESSOAS
 --
--- NÃO APLICADA. Aplicar manualmente (SQL Editor ou MCP apply_migration) só com
--- autorização expressa do dono. Rollback pareado:
+-- APLICADA EM PRODUÇÃO em 16/10/2026 (MCP apply_migration
+-- `cobrancas_capital_valor_unico`), com autorização do dono. Rollback pareado:
 -- 20261016d_cobrancas_capital_valor_unico_rollback.sql
 --
 -- Por quê: `cobrancas` tem dois campos para o mesmo número — `valor_capital`

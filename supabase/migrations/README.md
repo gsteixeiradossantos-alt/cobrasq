@@ -339,7 +339,7 @@ fichas da mesma pessoa emite boleto; a tela avisa em vez de misturar os pagament
 
 ## 20261016d — capital é o único valor de dívida digitado
 
-**Não aplicada.** `20261016d_cobrancas_capital_valor_unico.sql` (+ `_rollback.sql`).
+**Aplicada em 16/10/2026** (MCP apply_migration `cobrancas_capital_valor_unico`; depois: capital faltando 0, trigger instalado 1; as 16 divergentes foram igualadas ao capital por decisão do dono, e a cb73b80d teve o capital corrigido de 0 para 5.400,00 antes). `20261016d_cobrancas_capital_valor_unico.sql` (+ `_rollback.sql`).
 (1) Backfill `valor_capital = coalesce(valor_capital, valor_orig, (divida->>'valorCapital')::numeric)`
 onde o capital é nulo (em 16/10/2026: 35 nulas, 14 preenchidas por `valor_orig`, 21 seguem
 nulas por não terem valor nenhum). (2) Trigger `trg_cobrancas_capital_unico` (BEFORE INSERT OR
