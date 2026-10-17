@@ -337,9 +337,9 @@ dois credores. Enquanto não aplicada, o front já deixa tentar e o banco devolv
 Limitação: o customer Asaas (`idx_devedores_asaas_customer_id`) segue único — só uma das
 fichas da mesma pessoa emite boleto; a tela avisa em vez de misturar os pagamentos.
 
-## 20261016c — papel `assistido` em `cobranca_partes`
+## 20261016e — papel `assistido` em `cobranca_partes`
 
-**Não aplicada.** `20261016c_papel_assistido.sql` (+ `_rollback`). Derruba e recria
+**Não aplicada.** `20261016e_papel_assistido.sql` (+ `_rollback`). Derruba e recria
 `cobranca_partes_papel_check` acrescentando `'assistido'` (pessoa atendida que não é
 devedora, ex.: filho atendido pelo dentista). Aditiva e idempotente. Enquanto não for
 aplicada, escolher "Assistido(a)" no painel falha ao salvar (violação do CHECK). Aplicar
