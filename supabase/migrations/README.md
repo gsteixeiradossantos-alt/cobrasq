@@ -337,9 +337,9 @@ dois credores. Enquanto não aplicada, o front já deixa tentar e o banco devolv
 Limitação: o customer Asaas (`idx_devedores_asaas_customer_id`) segue único — só uma das
 fichas da mesma pessoa emite boleto; a tela avisa em vez de misturar os pagamentos.
 
-## 20261016c — capital é o único valor de dívida digitado
+## 20261016d — capital é o único valor de dívida digitado
 
-**Não aplicada.** `20261016c_cobrancas_capital_valor_unico.sql` (+ `_rollback.sql`).
+**Não aplicada.** `20261016d_cobrancas_capital_valor_unico.sql` (+ `_rollback.sql`).
 (1) Backfill `valor_capital = coalesce(valor_capital, valor_orig, (divida->>'valorCapital')::numeric)`
 onde o capital é nulo (em 16/10/2026: 35 nulas, 14 preenchidas por `valor_orig`, 21 seguem
 nulas por não terem valor nenhum). (2) Trigger `trg_cobrancas_capital_unico` (BEFORE INSERT OR

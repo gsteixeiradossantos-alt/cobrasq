@@ -1,5 +1,5 @@
 -- ============================================================================
--- ROLLBACK de 20261016c_cobrancas_capital_valor_unico.sql
+-- ROLLBACK de 20261016d_cobrancas_capital_valor_unico.sql
 --
 -- Remove o trigger e a função que mantinham valor_orig = valor_capital e
 -- devolve o comentário original (nenhum) da coluna valor_orig.

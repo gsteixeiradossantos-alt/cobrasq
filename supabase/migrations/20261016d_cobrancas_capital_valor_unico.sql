@@ -1,9 +1,9 @@
 -- ============================================================================
--- 20261016c — CAPITAL É O ÚNICO VALOR DE DÍVIDA DIGITADO OU CONFERIDO POR PESSOAS
+-- 20261016d — CAPITAL É O ÚNICO VALOR DE DÍVIDA DIGITADO OU CONFERIDO POR PESSOAS
 --
 -- NÃO APLICADA. Aplicar manualmente (SQL Editor ou MCP apply_migration) só com
 -- autorização expressa do dono. Rollback pareado:
--- 20261016c_cobrancas_capital_valor_unico_rollback.sql
+-- 20261016d_cobrancas_capital_valor_unico_rollback.sql
 --
 -- Por quê: `cobrancas` tem dois campos para o mesmo número — `valor_capital`
 -- (base do repasse ao cliente, travado pelo trg_enforce_valor_capital_lock) e
@@ -112,7 +112,7 @@ end;
 $$;
 
 comment on function public.cobrancas_capital_unico() is
-  'Mantém cobrancas.valor_orig = valor_capital (capital é o único valor digitado). Ver migração 20261016c.';
+  'Mantém cobrancas.valor_orig = valor_capital (capital é o único valor digitado). Ver migração 20261016d.';
 
 drop trigger if exists trg_cobrancas_capital_unico on public.cobrancas;
 create trigger trg_cobrancas_capital_unico
@@ -120,6 +120,6 @@ create trigger trg_cobrancas_capital_unico
   for each row execute function public.cobrancas_capital_unico();
 
 comment on column public.cobrancas.valor_orig is
-  'Espelho de valor_capital, mantido pelo trigger trg_cobrancas_capital_unico (20261016c). Não digitar: grave valor_capital.';
+  'Espelho de valor_capital, mantido pelo trigger trg_cobrancas_capital_unico (20261016d). Não digitar: grave valor_capital.';
 
 commit;
