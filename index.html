@@ -28385,8 +28385,18 @@ function cpBeatrizSend(){ const i=document.getElementById('cpBeatrizInput'); con
 // Monta o extrato de repasses do cedente: capital · recebido · saldo, por caso.
 let _cpExtrato = null;
 let _cpExtUI = { q:'', filter:'todos', sort:'orig', sel:{}, open:{}, bodyEl:null, focusSearch:false };
+// Nome que encabeça o extrato: o do grupo econômico no login de grupo (que não tem
+// empresa única: currentUser.clienteId vem vazio), senão o do credor do login.
+function cpNomeCarteira(){
+  if(cpEhGrupo()){ const g=(DB.gruposEconomicos||[]).find(x=>x.id===currentUser.grupoEconomicoId); if(g&&g.nome) return g.nome; }
+  const cli=(DB.clientes||[]).find(c=>c.id===currentUser.clienteId)||{};
+  return cli.nomeFantasia||cli.nome_fantasia||cli.nome||currentUser.nome||'Cliente';
+}
 async function cpComputeExtrato(){
-  const cid = currentUser.clienteId;
+  // Mesmo escopo da carteira (cpClienteIds): no login de grupo são todas as empresas do
+  // grupo. Filtrar só por currentUser.clienteId zerava o extrato do grupo (16/10/2026,
+  // Grupo Master 24 Horas: 36 cobranças e 29 repasses no banco, R$ 0,00 na tela).
+  const cids = cpClienteIds();
   const supa = getSupabase();
   let repasses=[];
   if(supa){
@@ -28394,7 +28404,7 @@ async function cpComputeExtrato(){
   }
   const repByCob={};
   repasses.forEach(r=>{ (repByCob[r.cobranca_id]=repByCob[r.cobranca_id]||[]).push(r); });
-  const cobr=(typeof DB_cobrancas!=='undefined'?DB_cobrancas:[]||[]).filter(c=>c.cliente_id===cid);
+  const cobr=(typeof DB_cobrancas!=='undefined'?DB_cobrancas:[]||[]).filter(c=>cids.includes(c.cliente_id));
   const linhas=cobr.map(c=>{
     const cap=(c.valor_capital!=null)?+c.valor_capital:((c.divida&&c.divida.valorCapital!=null)?+c.divida.valorCapital:null);
     const reps=(repByCob[c.id]||[]).slice().sort((a,b)=>String(b.data_pix||'').localeCompare(String(a.data_pix||'')));
@@ -28475,8 +28485,7 @@ function cpExtPaint(){
   const body=_cpExtUI.bodyEl, ex=_cpExtrato; if(!body||!ex) return;
   const u=_cpExtUI, view=_cpExtView(), cnt=_cpExtCounts();
   const active = !!u.q.trim() || u.filter!=='todos' || u.sort!=='orig';
-  const cli=(DB.clientes||[]).find(c=>c.id===currentUser.clienteId)||{};
-  const nomeCli=cli.nomeFantasia||cli.nome_fantasia||cli.nome||currentUser.nome||'Cliente';
+  const nomeCli=cpNomeCarteira();
   const grid='grid-template-columns:22px minmax(0,1fr) 88px 88px 88px 96px;gap:8px;';
   const filterLbl={todos:'Todos',Quitado:'Quitados',andamento:'Em andamento',sem:'Sem entrada'}[u.filter]||'Todos';
   const sortLbl={orig:'ordem do extrato',saldo:'maior saldo',recebido:'mais recuperado',capital:'maior capital',nome:'nome',recente:'último repasse'}[u.sort]||'ordem do extrato';
@@ -28523,7 +28532,7 @@ function cpExtPaint(){
       <button class="cp-btn cp-btn-outline" onclick="cpExtToggleAll()">${allOpen?'Recolher tudo':'Expandir tudo'}</button>
       <button class="cp-btn cp-btn-outline" onclick="cpExtratoPDF()"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg> Baixar PDF</button>
       <button class="cp-btn cp-btn-outline" onclick="cpExtReport()">${btnLabel}</button>
-      <button class="cp-btn cp-btn-primary" onclick="gerarRelatorioCarteira(currentUser.clienteId)"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> Relatório de andamento</button>
+      <button class="cp-btn cp-btn-primary" onclick="${cpEhGrupo()?`gerarRelatorioGrupo('${currentUser.grupoEconomicoId}')`:'gerarRelatorioCarteira(currentUser.clienteId)'}"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> Relatório de andamento</button>
     </div>
     <div style="background:var(--card-warm);border:1px solid var(--pline);border-radius:18px;box-shadow:0 24px 60px -36px rgba(10,21,48,.4);overflow:hidden;">
       <div style="position:relative;padding:34px 40px 28px;border-bottom:.5px solid var(--pline);overflow:hidden;">
@@ -28599,8 +28608,7 @@ function cpExtReport(){
   const n=scope.length, nq=scope.filter(l=>l.quitado).length, nand=n-nq, nsem=scope.filter(l=>l.recebido<=0.005).length;
   const cap=scope.reduce((s,l)=>s+(l.cap||0),0), rec=scope.reduce((s,l)=>s+l.recebido,0);
   const saldo=Math.max(cap-rec,0), pct=cap>0?(rec/cap*100):0;
-  const cli=(DB.clientes||[]).find(c=>c.id===currentUser.clienteId)||{};
-  const nomeCli=cli.nomeFantasia||cli.nome_fantasia||cli.nome||currentUser.nome||'Cliente';
+  const nomeCli=cpNomeCarteira();
   const metric=(lbl,valHtml,color)=>`<div style="padding:18px 16px;min-width:0;background:var(--card-warm);"><div class="cp-label" style="font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${lbl}</div><div class="cp-num" style="font-size:clamp(15px,2vw,24px);color:${color};margin-top:6px;white-space:nowrap;">${valHtml}</div></div>`;
   const dot=(c,t)=>`<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink);"><span style="width:8px;height:8px;border-radius:50%;background:${c};"></span>${t}</span>`;
   const caseItem=(l)=>{ const p=l.cap?Math.min(100,l.recebido/l.cap*100):0; const sclass=l.quitado?'cp-st-quitado':'cp-st-acordo';
@@ -28643,8 +28651,7 @@ function cpExtReport(){
 }
 function cpExtratoPDF(){
   const ex=_cpExtrato; if(!ex){ showToast('Carregue os repasses primeiro.','warning'); return; }
-  const cli=(DB.clientes||[]).find(c=>c.id===currentUser.clienteId)||{};
-  const nomeCli=cli.nomeFantasia||cli.nome_fantasia||cli.nome||currentUser.nome||'Cliente';
+  const nomeCli=cpNomeCarteira();
   // Separa "R$ 1.480" e os centavos ",00" para os números grandes do extrato.
   const money=(v)=>{ const s=fmtR(+v||0); const i=s.lastIndexOf(','); return i<0?{int:escHtml(s),cent:''}:{int:escHtml(s.slice(0,i)),cent:escHtml(s.slice(i))}; };
   // Derivados (nunca fixos): % recuperado e nº de casos quitados.
