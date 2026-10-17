@@ -336,3 +336,24 @@ Aplicar não falha (índice menos restritivo); o rollback falha se já houver o 
 dois credores. Enquanto não aplicada, o front já deixa tentar e o banco devolve 23505.
 Limitação: o customer Asaas (`idx_devedores_asaas_customer_id`) segue único — só uma das
 fichas da mesma pessoa emite boleto; a tela avisa em vez de misturar os pagamentos.
+
+## 20261016d — capital é o único valor de dívida digitado
+
+**Não aplicada.** `20261016d_cobrancas_capital_valor_unico.sql` (+ `_rollback.sql`).
+(1) Backfill `valor_capital = coalesce(valor_capital, valor_orig, (divida->>'valorCapital')::numeric)`
+onde o capital é nulo (em 16/10/2026: 35 nulas, 14 preenchidas por `valor_orig`, 21 seguem
+nulas por não terem valor nenhum). (2) Trigger `trg_cobrancas_capital_unico` (BEFORE INSERT OR
+UPDATE): capital preenchido → `valor_orig := valor_capital`; capital nulo e `valor_orig`
+preenchido → `valor_capital := valor_orig`. Dispara antes de `trg_enforce_valor_capital_lock`
+(ordem alfabética), então a trava do capital avalia o valor final. Sem DROP de coluna;
+`valor_atual` intocado. Conferências (A) antes, (B) divergentes e (C) depois no topo do arquivo.
+
+**Risco:** as linhas com capital ≠ `valor_orig` (17 em 16/10/2026, uma com capital 0,00 e
+`valor_orig` 5.400,00) têm o `valor_orig` igualado ao capital no próximo UPDATE. Corrigir o
+capital dessas linhas (ou aceitar o capital como certo) ANTES de aplicar, e guardar o
+resultado da consulta (B).
+
+Sem dry-run R-18 (não há Postgres local; dry-run em prod não foi autorizado nesta etapa).
+
+**Ordem:** indiferente para o front (o PR já lê capital → `valor_orig` como reserva e grava os
+dois). Recomendado: merge → decidir os divergentes → aplicar → recarregar o painel.
