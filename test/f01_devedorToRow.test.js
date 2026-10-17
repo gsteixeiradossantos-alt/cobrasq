@@ -119,7 +119,8 @@ check('encaminhamento_judicial OMITIDO quando vazio', !has(r4,'encaminhamento_ju
 // em `cobrancas`). devedorToRow NÃO deve emiti-los, mesmo presentes no objeto.
 var r5 = devedorToRow({ id:'d5', nome:'X', passoAtual:'negociacao', encerramento:'2026-06-10',
                         acordoFinal:{x:1}, encaminhamentoJudicial:'sim',
-                        status:'Acordo', fase:'judicial', valorOrig:'1.000,00', tipoCobranca:'fisica' });
+                        status:'Acordo', fase:'judicial', valorOrig:'1.000,00', valorCapital:'1000',
+                        tipoCobranca:'fisica' });
 check('passo_atual NÃO emitido (tempo-2)', !has(r5,'passo_atual'));
 check('encerramento NÃO emitido (tempo-2)', !has(r5,'encerramento'));
 check('acordo_final NÃO emitido (tempo-2)', !has(r5,'acordo_final'));
@@ -127,6 +128,8 @@ check('encaminhamento_judicial NÃO emitido (tempo-2)', !has(r5,'encaminhamento_
 check('status NÃO emitido (tempo-2)', !has(r5,'status'));
 check('fase NÃO emitida (tempo-2)', !has(r5,'fase'));
 check('valor_orig NÃO emitido (tempo-2)', !has(r5,'valor_orig'));
+// Capital (20261016c) vive só em `cobrancas` (syncDevedorCobranca / salvarCobranca).
+check('valor_capital NÃO emitido (capital vive em cobrancas)', !has(r5,'valor_capital'));
 check('tipo_cobranca NÃO emitido (tempo-2)', !has(r5,'tipo_cobranca'));
 
 // 4) Campos sempre presentes (não-CRM) continuam saindo no row, inclusive vazios.
