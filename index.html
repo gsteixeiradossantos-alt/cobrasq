@@ -1068,6 +1068,13 @@ html:not(.dark) #page-config .cfg-nav-item.active{background:#F3ECD9 !important;
 .cp-st-acordo .dot{background:var(--gold-2);}
 .cp-st-cobrar{color:var(--st-cobrar);background:color-mix(in srgb,var(--st-cobrar) 14%,transparent);}
 .cp-st-cobrar .dot{background:var(--st-cobrar);}
+.cp-comp-btn{border:1px solid var(--pline);background:var(--paper-2,#E2DBC6);color:var(--ink);border-radius:100px;padding:3px 9px;font:inherit;font-size:10.5px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;gap:5px;white-space:nowrap;}
+.cp-comp-btn:hover{border-color:var(--gold-2);color:var(--gold-2);}
+#cpCompPop{position:fixed;z-index:9999;width:380px;max-width:calc(100vw - 24px);height:480px;max-height:calc(100vh - 24px);background:var(--card-warm,#FBF8EF);border:1px solid var(--pline);border-radius:14px;box-shadow:0 24px 60px -20px rgba(10,21,48,.5);display:flex;flex-direction:column;overflow:hidden;}
+#cpCompPop .cp-comp-hd{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 12px;border-bottom:.5px solid var(--pline);font-size:11px;color:var(--mute);}
+#cpCompPop .cp-comp-bd{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;background:#fff;}
+#cpCompPop .cp-comp-bd img{max-width:100%;max-height:100%;object-fit:contain;}
+#cpCompPop .cp-comp-bd iframe{width:100%;height:100%;border:0;}
 .cp-st-semexito{color:var(--st-semexito);background:color-mix(in srgb,var(--st-semexito) 14%,transparent);}
 .cp-st-semexito .dot{background:var(--st-semexito);}
 /* progress / chips / stepper / timeline / toggle */
@@ -28397,6 +28404,14 @@ function cpNomeCarteira(){
   const cli=(DB.clientes||[]).find(c=>c.id===currentUser.clienteId)||{};
   return cli.nomeFantasia||cli.nome_fantasia||cli.nome||currentUser.nome||'Cliente';
 }
+// Caso encerrado pela COBRASQ (fora dos totais do extrato). 'Baixados' é sinônimo antigo de
+// Devolvida e 'Encerrada' de Sem êxito (mapa de status legado).
+function _cpEncTxt(status){
+  const st=status||'';
+  if(/devolvid|baixad/i.test(st)) return 'Devolvida';
+  if(/sem\s*[êe]xito|encerrad/i.test(st)) return 'Sem êxito';
+  return null;
+}
 async function cpComputeExtrato(){
   // Mesmo escopo da carteira (cpClienteIds): no login de grupo são todas as empresas do
   // grupo. Filtrar só por currentUser.clienteId zerava o extrato do grupo (16/10/2026,
@@ -28417,14 +28432,20 @@ async function cpComputeExtrato(){
     const saldo=(cap!=null)?(cap-recebido):null;
     const principal=(c.cobranca_partes||[]).find(p=>p.principal)||(c.cobranca_partes||[])[0];
     const devNome=(principal&&principal.devedores&&principal.devedores.nome)||(c.divida&&c.divida.descricao)||'Caso';
-    return { id:c.id, cap, reps, recebido, saldo, devNome, status:c.status, quitado:(saldo!=null&&cap>0&&saldo<=0.005), ultimo:(reps[0]&&reps[0].data_pix)||null };
+    // Devolvida/Baixados e Sem êxito/Encerrada: a COBRASQ encerrou o caso. Ficam na lista
+    // com o próprio selo, mas fora dos totais (16/10/2026: no Grupo Master as 8 devolvidas
+    // somavam R$ 12.459,48 ao "Capital em cobrança" e apareciam como "Em andamento").
+    const encTxt=_cpEncTxt(c.status), enc=!!encTxt;
+    return { id:c.id, cap, reps, recebido, saldo:enc?null:saldo, devNome, status:c.status, encerrada:enc, encTxt, quitado:!enc&&(saldo!=null&&cap>0&&saldo<=0.005), ultimo:(reps[0]&&reps[0].data_pix)||null };
   }).filter(l=>l.cap!=null || l.reps.length);
   linhas.sort((a,b)=>b.recebido-a.recebido);
   linhas.forEach((l,i)=>{ l.origIdx=i; }); // índice de origem estável (seleção/expansão sobrevivem a filtro/ordenação)
-  const totCap=linhas.reduce((s,l)=>s+(l.cap||0),0);
-  const totRec=linhas.reduce((s,l)=>s+l.recebido,0);
-  const nQuit=linhas.filter(l=>l.quitado).length;
-  _cpExtrato={ linhas, totCap, totRec, totSaldo:Math.max(totCap-totRec,0), nRep:repasses.length, nQuit, pct: totCap>0?(totRec/totCap*100):0 };
+  const ativas=linhas.filter(l=>!l.encerrada), encs=linhas.filter(l=>l.encerrada);
+  const totCap=ativas.reduce((s,l)=>s+(l.cap||0),0);
+  const totRec=ativas.reduce((s,l)=>s+l.recebido,0);
+  const nQuit=ativas.filter(l=>l.quitado).length;
+  _cpExtrato={ linhas, totCap, totRec, totSaldo:Math.max(totCap-totRec,0), nRep:repasses.length, nQuit, pct: totCap>0?(totRec/totCap*100):0,
+    nEnc:encs.length, capEnc:encs.reduce((s,l)=>s+(l.cap||0),0), recEnc:encs.reduce((s,l)=>s+l.recebido,0) };
   return _cpExtrato;
 }
 // ── Extrato: view (filtra+ordena mantendo origIdx), contagens, helpers ──
@@ -28435,8 +28456,9 @@ function _cpExtView(){
   const q=_cpExtNorm(u.q.trim());
   if(q) v=v.filter(l=>_cpExtNorm(l.devNome).includes(q));
   if(u.filter==='Quitado') v=v.filter(l=>l.quitado);
-  else if(u.filter==='andamento') v=v.filter(l=>!l.quitado);
-  else if(u.filter==='sem') v=v.filter(l=>l.recebido<=0.005);
+  else if(u.filter==='andamento') v=v.filter(l=>!l.quitado&&!l.encerrada);
+  else if(u.filter==='sem') v=v.filter(l=>!l.encerrada&&l.recebido<=0.005);
+  else if(u.filter==='encerrada') v=v.filter(l=>l.encerrada);
   const sk=u.sort;
   if(sk==='saldo') v.sort((a,b)=>Math.max(b.saldo||0,0)-Math.max(a.saldo||0,0));
   else if(sk==='recebido') v.sort((a,b)=>b.recebido-a.recebido);
@@ -28445,32 +28467,86 @@ function _cpExtView(){
   else if(sk==='recente') v.sort((a,b)=>String(b.ultimo||'').localeCompare(String(a.ultimo||'')));
   return v; // 'orig' = ordem do extrato (sem reordenar)
 }
-function _cpExtCounts(){ const ls=(_cpExtrato&&_cpExtrato.linhas)||[]; return { todos:ls.length, Quitado:ls.filter(l=>l.quitado).length, andamento:ls.filter(l=>!l.quitado).length, sem:ls.filter(l=>l.recebido<=0.005).length }; }
+function _cpExtCounts(){ const ls=(_cpExtrato&&_cpExtrato.linhas)||[]; return { todos:ls.length, Quitado:ls.filter(l=>l.quitado).length, andamento:ls.filter(l=>!l.quitado&&!l.encerrada).length, sem:ls.filter(l=>!l.encerrada&&l.recebido<=0.005).length, encerrada:ls.filter(l=>l.encerrada).length }; }
 function _cpMoneyBig(v){ const s=fmtR(v||0); const i=s.lastIndexOf(','); return i<0?escHtml(s):(escHtml(s.slice(0,i))+'<span style="font-size:.6em;">'+escHtml(s.slice(i))+'</span>'); }
 function _cpCheck(on,partial){
   if(partial) return '<span style="width:18px;height:18px;border-radius:5px;border:1px solid var(--gold-2);background:var(--pgold);display:flex;align-items:center;justify-content:center;flex-shrink:0;"><span style="width:9px;height:2px;background:var(--ink);border-radius:1px;"></span></span>';
   if(on) return '<span style="width:18px;height:18px;border-radius:5px;border:1px solid var(--pgold);background:var(--pgold);display:flex;align-items:center;justify-content:center;flex-shrink:0;"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="#0A1530" stroke-width="3"><path d="m5 12 5 5 9-10"/></svg></span>';
   return '<span style="width:18px;height:18px;border-radius:5px;border:1px solid var(--mute);background:transparent;flex-shrink:0;display:block;"></span>';
 }
-function _cpBia(scope){
+function _cpBia(scopeAll){
+  const scope=scopeAll.filter(l=>!l.encerrada), nEnc=scopeAll.length-scope.length;
   const n=scope.length, nq=scope.filter(l=>l.quitado).length, nand=n-nq;
   const cap=scope.reduce((s,l)=>s+(l.cap||0),0), rec=scope.reduce((s,l)=>s+l.recebido,0);
   const saldo=Math.max(cap-rec,0), pct=cap>0?(rec/cap*100):0, nsem=scope.filter(l=>l.recebido<=0.005).length;
   let maior=null; scope.filter(l=>!l.quitado&&(l.saldo||0)>0).forEach(l=>{ if(!maior||(l.saldo||0)>(maior.saldo||0)) maior=l; });
-  let t=`Dos ${n} caso(s) da sua carteira, ${nq} ${nq===1?'já está quitado':'já estão quitados'} e ${nand} ${nand===1?'segue':'seguem'} em andamento. `;
+  let t=`Dos ${n} caso(s) ${nEnc?'ativos ':''}da sua carteira, ${nq} ${nq===1?'já está quitado':'já estão quitados'} e ${nand} ${nand===1?'segue':'seguem'} em andamento. `;
   t+=`Já ${rec>0?'foram recuperados':'foi recuperado'} ${fmtR(rec)} de ${fmtR(cap)} (${pct.toFixed(1).replace('.',',')}%), restando ${fmtR(saldo)} a recuperar.`;
   if(maior) t+=` O maior valor em aberto é de ${maior.devNome} (${fmtR(Math.max(maior.saldo||0,0))}).`;
   if(nsem>0) t+=` ${nsem} caso(s) ainda não tiveram entrada e seguem em fase de cobrança.`;
+  if(nEnc>0) t+=` ${nEnc} caso(s) devolvido(s) ou encerrado(s) sem êxito não entram nessa conta.`;
   return t;
 }
 function _cpNarr(l){
+  if(l.encerrada){ const ant=l.recebido>0.005?` Antes do encerramento foram repassados ${fmtR(l.recebido)}.`:''; return (l.encTxt==='Devolvida'?'Cobrança devolvida — encerrada pela COBRASQ.':'Cobrança encerrada sem êxito.')+ant+' Fora dos totais da carteira.'; }
   if(l.quitado) return `Cobrança quitada — recuperação integral do capital.${l.ultimo?` Último repasse em ${_detData(l.ultimo)}.`:''} Nenhuma ação pendente.`;
   if(l.recebido>0.005){ const pct=l.cap?(l.recebido/l.cap*100):0; return `Recuperação parcial: ${fmtR(l.recebido)} de ${fmtR(l.cap||0)} (${pct.toFixed(1).replace('.',',')}%). Saldo de ${fmtR(Math.max(l.saldo||0,0))} ainda em recuperação.`; }
   return 'Sem repasses até o momento — caso em fase de cobrança.';
 }
+// ── Comprovante do repasse: prévia ao passar o mouse + abrir em nova aba ──
+// URL assinada do bucket 'documentos' (o acesso do cliente ao arquivo já vem da RLS de
+// documentos/storage). Cache curto por documento para o hover não gerar link a cada passada.
+const _cpCompCache={};
+async function _cpCompUrl(docId){
+  const c=_cpCompCache[docId]; if(c&&Date.now()-c.t<240000) return c;
+  const supa=getSupabase(); if(!supa) throw new Error('sem conexão');
+  const { data, error } = await supa.from('documentos').select('storage_path').eq('id',docId).single();
+  if(error||!data||!data.storage_path) throw new Error('Arquivo não encontrado.');
+  const path=String(data.storage_path);
+  if(path.startsWith('zapsign://')){ const r={t:Date.now(),path,url:null}; _cpCompCache[docId]=r; return r; }
+  const { data: signed, error: sErr } = await supa.storage.from('documentos').createSignedUrl(path,300);
+  if(sErr||!signed||!signed.signedUrl) throw new Error('Não foi possível gerar o link.');
+  const r={t:Date.now(),path,url:signed.signedUrl}; _cpCompCache[docId]=r; return r;
+}
+let _cpCompTimer=null, _cpCompAtual=null;
+function cpCompPrevSair(){ clearTimeout(_cpCompTimer); _cpCompTimer=setTimeout(cpCompPrevFechar,250); }
+function cpCompPrevFechar(){ clearTimeout(_cpCompTimer); _cpCompAtual=null; const o=document.getElementById('cpCompPop'); if(o) o.remove(); }
+async function cpCompPrev(btn,docId,fixar){
+  clearTimeout(_cpCompTimer);
+  if(fixar&&_cpCompAtual===docId&&document.getElementById('cpCompPop')){ cpCompPrevFechar(); return; }
+  _cpCompAtual=docId;
+  let pop=document.getElementById('cpCompPop');
+  if(!pop){
+    pop=document.createElement('div'); pop.id='cpCompPop';
+    pop.onmouseenter=()=>clearTimeout(_cpCompTimer); pop.onmouseleave=cpCompPrevSair;
+    document.body.appendChild(pop);
+  }
+  pop.innerHTML=`<div class="cp-comp-hd"><span>Comprovante do repasse</span><span style="display:flex;gap:6px;"><button class="cp-comp-btn" onclick="cpCompAbrir('${escHtml(docId)}')">Abrir</button><button class="cp-comp-btn" onclick="cpCompPrevFechar()" title="Fechar">✕</button></span></div><div class="cp-comp-bd"><span style="font-size:12px;color:var(--mute);">Carregando…</span></div>`;
+  // posição: à esquerda do botão (a lista ocupa o centro), sem sair da tela
+  const r=btn.getBoundingClientRect(), W=pop.offsetWidth, H=pop.offsetHeight;
+  let x=r.left-W-12; if(x<12) x=Math.min(r.right+12, window.innerWidth-W-12);
+  let y=r.top+r.height/2-H/2; y=Math.max(12,Math.min(y,window.innerHeight-H-12));
+  pop.style.left=Math.max(12,x)+'px'; pop.style.top=y+'px';
+  let info; try{ info=await _cpCompUrl(docId); }catch(e){ if(_cpCompAtual===docId){ const bd=pop.querySelector('.cp-comp-bd'); if(bd) bd.innerHTML=`<span style="font-size:12px;color:var(--mute);padding:20px;text-align:center;">${escHtml(e.message||'Não foi possível carregar.')}</span>`; } return; }
+  if(_cpCompAtual!==docId) return; // o mouse já foi para outro comprovante
+  const bd=pop.querySelector('.cp-comp-bd'); if(!bd) return;
+  const ext=(info.path.split('?')[0].split('.').pop()||'').toLowerCase();
+  if(info.url&&/^(png|jpe?g|gif|webp|bmp)$/.test(ext)) bd.innerHTML=`<img src="${escHtml(info.url)}" alt="Comprovante">`;
+  else if(info.url&&ext==='pdf') bd.innerHTML=`<iframe src="${escHtml(info.url)}#toolbar=0&navpanes=0&view=FitH" title="Comprovante"></iframe>`;
+  else bd.innerHTML=`<span style="font-size:12px;color:var(--mute);padding:20px;text-align:center;">Prévia indisponível para este arquivo. Use <b>Abrir</b>.</span>`;
+}
+async function cpCompAbrir(docId){
+  // A aba abre já no clique (antes do await), senão o navegador bloqueia como pop-up.
+  const w=window.open('about:blank','_blank');
+  try{
+    const info=await _cpCompUrl(docId);
+    if(!info.url){ if(w) w.close(); return baixarDocumentoDevedor(docId); } // zapsign: fluxo existente
+    if(w) w.location.href=info.url; else window.open(info.url,'_blank');
+  }catch(e){ if(w) w.close(); showToast(e.message||'Não foi possível abrir o comprovante.','danger'); }
+}
 async function cpRenderRepasses(body){
   if(!body) return;
-  _cpExtUI.bodyEl=body;
+  _cpExtUI.bodyEl=body; cpCompPrevFechar();
   body.innerHTML=`<div style="padding:60px;text-align:center;color:var(--mute);">Carregando extrato…</div>`;
   await cpComputeExtrato();
   // estado de UI zera a cada entrada na tela
@@ -28492,7 +28568,7 @@ function cpExtPaint(){
   const active = !!u.q.trim() || u.filter!=='todos' || u.sort!=='orig';
   const nomeCli=cpNomeCarteira();
   const grid='grid-template-columns:22px minmax(0,1fr) 88px 88px 88px 96px;gap:8px;';
-  const filterLbl={todos:'Todos',Quitado:'Quitados',andamento:'Em andamento',sem:'Sem entrada'}[u.filter]||'Todos';
+  const filterLbl={todos:'Todos',Quitado:'Quitados',andamento:'Em andamento',sem:'Sem entrada',encerrada:'Devolvidas / sem êxito'}[u.filter]||'Todos';
   const sortLbl={orig:'ordem do extrato',saldo:'maior saldo',recebido:'mais recuperado',capital:'maior capital',nome:'nome',recente:'último repasse'}[u.sort]||'ordem do extrato';
   // seleção / expansão (estado do cabeçalho)
   const selN=view.filter(l=>u.sel[l.origIdx]).length;
@@ -28509,11 +28585,14 @@ function cpExtPaint(){
   const sortOpt=(v,l)=>`<option value="${v}" ${u.sort===v?'selected':''}>${l}</option>`;
   const pixRow=(r)=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 0;border-bottom:.5px solid rgba(10,21,48,.07);">
       <div style="display:flex;align-items:center;gap:9px;min-width:0;"><span style="color:var(--gold-2);flex-shrink:0;">↳</span><span class="cp-mono" style="font-size:12px;color:var(--ink);flex-shrink:0;">${escHtml(r.data_pix?_detData(r.data_pix):'—')}</span><span class="cp-mono" style="font-size:10.5px;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escHtml(r.transacao_id||'')}</span></div>
-      <span class="cp-mono" style="font-size:12.5px;color:var(--st-quitado);white-space:nowrap;flex-shrink:0;">${fmtR(+r.valor||0)}</span>
+      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+        ${r.documento_id?`<button class="cp-comp-btn" onmouseenter="cpCompPrev(this,'${escHtml(String(r.documento_id))}')" onmouseleave="cpCompPrevSair()" onclick="event.stopPropagation();cpCompPrev(this,'${escHtml(String(r.documento_id))}',true)" title="Ver comprovante"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>Comprovante</button><button class="cp-comp-btn" onclick="event.stopPropagation();cpCompAbrir('${escHtml(String(r.documento_id))}')" title="Abrir o comprovante em nova aba"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>Abrir</button>`:`<span class="cp-mono" style="font-size:10px;color:var(--mute);">sem comprovante</span>`}
+        <span class="cp-mono" style="font-size:12.5px;color:var(--st-quitado);white-space:nowrap;min-width:84px;text-align:right;">${fmtR(+r.valor||0)}</span>
+      </div>
     </div>`;
   const row=(l)=>{
     const has=l.reps.length>0, open=!!u.open[l.origIdx], seld=!!u.sel[l.origIdx];
-    const sit=l.quitado?'Quitado':'Em andamento', sclass=l.quitado?'cp-st-quitado':'cp-st-acordo';
+    const sit=l.encerrada?l.encTxt:(l.quitado?'Quitado':'Em andamento'), sclass=l.encerrada?'cp-st-semexito':(l.quitado?'cp-st-quitado':'cp-st-acordo');
     return `<div>
       <div style="display:grid;${grid}padding:12px 22px;align-items:center;border-bottom:.5px solid rgba(10,21,48,.07);${seld?'background:color-mix(in srgb,var(--pgold) 9%,transparent);':(open?'background:var(--paper-2);':'')}${has?'cursor:pointer;':''}" ${has?`onclick="cpExtToggle(${l.origIdx})"`:''}>
         <button onclick="event.stopPropagation();cpExtSel(${l.origIdx})" style="border:0;background:none;cursor:pointer;padding:0;display:flex;">${_cpCheck(seld,false)}</button>
@@ -28531,7 +28610,9 @@ function cpExtPaint(){
     </div>`;
   };
   // total da faixa = recorte visível
-  const vCap=view.reduce((s,l)=>s+(l.cap||0),0), vRec=view.reduce((s,l)=>s+l.recebido,0), vSaldo=Math.max(vCap-vRec,0);
+  // Devolvidas/sem êxito aparecem na lista mas não somam (mesma regra dos cards do topo).
+  const vAtivas=view.filter(l=>!l.encerrada), vEnc=view.length-vAtivas.length;
+  const vCap=vAtivas.reduce((s,l)=>s+(l.cap||0),0), vRec=vAtivas.reduce((s,l)=>s+l.recebido,0), vSaldo=Math.max(vCap-vRec,0);
   body.innerHTML=`<div style="max-width:1080px;margin:0 auto;">
     <div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
       <button class="cp-btn cp-btn-outline" onclick="cpExtToggleAll()">${allOpen?'Recolher tudo':'Expandir tudo'}</button>
@@ -28568,7 +28649,7 @@ function cpExtPaint(){
           ${u.q?`<button onclick="cpExtSearch('')" style="border:0;background:none;cursor:pointer;color:var(--mute);font-size:13px;">✕</button>`:''}
         </div>
         <div style="display:inline-flex;align-items:center;gap:2px;background:var(--paper);border:1px solid var(--pline);border-radius:100px;padding:3px;">
-          ${chip('todos','Todos',cnt.todos)}${chip('Quitado','Quitados',cnt.Quitado)}${chip('andamento','Em andamento',cnt.andamento)}${chip('sem','Sem entrada',cnt.sem)}
+          ${chip('todos','Todos',cnt.todos)}${chip('Quitado','Quitados',cnt.Quitado)}${chip('andamento','Em andamento',cnt.andamento)}${chip('sem','Sem entrada',cnt.sem)}${cnt.encerrada?chip('encerrada','Devolvidas / sem êxito',cnt.encerrada):''}
         </div>
         <div style="margin-left:auto;display:flex;align-items:center;gap:8px;">
           <span class="cp-label">Ordenar</span>
@@ -28591,7 +28672,7 @@ function cpExtPaint(){
       ${view.length?view.map(row).join(''):'<div style="padding:56px;text-align:center;color:var(--mute);font-size:13px;">Nenhum caso encontrado.</div>'}
       <div style="display:grid;${grid}padding:20px 22px;align-items:center;background:var(--ink);color:var(--cream);">
         <span></span>
-        <span class="cp-mono" style="font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:var(--pgold);">${active?`Total (${view.length})`:'Total'}</span>
+        <span class="cp-mono" style="font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:var(--pgold);">${active?`Total (${vAtivas.length})`:'Total'}${vEnc?`<span style="display:block;font-size:9.5px;letter-spacing:.04em;text-transform:none;color:rgba(239,234,217,.6);margin-top:3px;">sem ${vEnc} devolvida${vEnc!==1?'s':''} / sem êxito</span>`:''}</span>
         <div class="cp-mono" style="font-size:12px;text-align:right;white-space:nowrap;color:var(--cream);">${fmtR(vCap)}</div>
         <div class="cp-mono" style="font-size:12px;text-align:right;white-space:nowrap;color:#9CC18F;">${fmtR(vRec)}</div>
         <div class="cp-mono" style="font-size:12px;text-align:right;white-space:nowrap;color:var(--pgold);">${fmtR(vSaldo)}</div>
@@ -28599,7 +28680,7 @@ function cpExtPaint(){
       </div>
       <div style="display:flex;align-items:flex-start;gap:10px;padding:18px 22px;">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--gold-2)" stroke-width="1.8" style="flex-shrink:0;margin-top:1px;"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
-        <span style="font-size:12.5px;color:var(--mute);line-height:1.5;">Cada repasse listado é um PIX da COBRASQ ao seu favor, com data e identificador da transação. Documento informativo gerado automaticamente a partir dos seus dados.</span>
+        <span style="font-size:12.5px;color:var(--mute);line-height:1.5;">Cada repasse listado é um PIX da COBRASQ ao seu favor, com data e identificador da transação.${ex.nEnc?` Cobranças devolvidas ou encerradas sem êxito (${ex.nEnc}, capital de ${fmtR(ex.capEnc)}${ex.recEnc>0.005?`, ${fmtR(ex.recEnc)} já repassados`:''}) seguem listadas, mas não entram no capital em cobrança, no saldo nem no percentual recuperado.`:''} Documento informativo gerado automaticamente a partir dos seus dados.</span>
       </div>
     </div></div>`;
   if(u.focusSearch){ const si=document.getElementById('cpExtSearchInput'); if(si){ si.focus(); const val=si.value; si.value=''; si.value=val; } u.focusSearch=false; }
@@ -28610,16 +28691,17 @@ function cpExtReport(){
   const ex=_cpExtrato; if(!ex) return;
   const selIdxs=Object.keys(_cpExtUI.sel).filter(k=>_cpExtUI.sel[k]).map(Number);
   const scope=selIdxs.length?ex.linhas.filter(l=>selIdxs.includes(l.origIdx)):ex.linhas.slice();
-  const n=scope.length, nq=scope.filter(l=>l.quitado).length, nand=n-nq, nsem=scope.filter(l=>l.recebido<=0.005).length;
-  const cap=scope.reduce((s,l)=>s+(l.cap||0),0), rec=scope.reduce((s,l)=>s+l.recebido,0);
+  const atv=scope.filter(l=>!l.encerrada);
+  const n=scope.length, nq=atv.filter(l=>l.quitado).length, nand=atv.length-nq, nsem=atv.filter(l=>l.recebido<=0.005).length;
+  const cap=atv.reduce((s,l)=>s+(l.cap||0),0), rec=atv.reduce((s,l)=>s+l.recebido,0);
   const saldo=Math.max(cap-rec,0), pct=cap>0?(rec/cap*100):0;
   const nomeCli=cpNomeCarteira();
   const metric=(lbl,valHtml,color)=>`<div style="padding:18px 16px;min-width:0;background:var(--card-warm);"><div class="cp-label" style="font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${lbl}</div><div class="cp-num" style="font-size:clamp(15px,2vw,24px);color:${color};margin-top:6px;white-space:nowrap;">${valHtml}</div></div>`;
   const dot=(c,t)=>`<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink);"><span style="width:8px;height:8px;border-radius:50%;background:${c};"></span>${t}</span>`;
-  const caseItem=(l)=>{ const p=l.cap?Math.min(100,l.recebido/l.cap*100):0; const sclass=l.quitado?'cp-st-quitado':'cp-st-acordo';
+  const caseItem=(l)=>{ const p=l.cap?Math.min(100,l.recebido/l.cap*100):0; const sclass=l.encerrada?'cp-st-semexito':(l.quitado?'cp-st-quitado':'cp-st-acordo');
     return `<div style="padding:14px 24px;border-bottom:.5px solid var(--pline);">
       <div style="display:flex;align-items:center;gap:10px;justify-content:space-between;flex-wrap:wrap;">
-        <div style="display:flex;align-items:center;gap:10px;min-width:0;"><span class="cp-pill ${sclass}" style="font-size:9px;text-transform:uppercase;padding:3px 9px;">${l.quitado?'Quitado':'Em andamento'}</span><span style="font-size:14px;font-weight:600;color:var(--ink);">${escHtml(l.devNome)}</span></div>
+        <div style="display:flex;align-items:center;gap:10px;min-width:0;"><span class="cp-pill ${sclass}" style="font-size:9px;text-transform:uppercase;padding:3px 9px;">${l.encerrada?l.encTxt:(l.quitado?'Quitado':'Em andamento')}</span><span style="font-size:14px;font-weight:600;color:var(--ink);">${escHtml(l.devNome)}</span></div>
         <span class="cp-mono" style="font-size:12px;color:var(--mute);">${fmtR(l.recebido)} / ${fmtR(l.cap||0)}</span>
       </div>
       <div class="cp-prog" style="margin:10px 0 8px;"><span style="width:${p.toFixed(0)}%;background:var(--st-quitado);"></span></div>
@@ -28637,7 +28719,7 @@ function cpExtReport(){
         ${metric('Capital',_cpMoneyBig(cap),'var(--ink)')}${metric('Recuperado',_cpMoneyBig(rec),'var(--st-quitado)')}${metric('Saldo',_cpMoneyBig(saldo),'var(--gold-2)')}${metric('Recuperado %',pct.toFixed(1).replace('.',',')+'%','var(--ink)')}
       </div>
       <div style="display:flex;gap:18px;align-items:center;padding:12px 26px;background:var(--paper-2);flex-wrap:wrap;">
-        ${dot('var(--st-quitado)',`<strong>${nq}</strong>&nbsp;quitado(s)`)}${dot('var(--gold-2)',`<strong>${nand}</strong>&nbsp;em andamento`)}${dot('var(--mute)',`<strong>${nsem}</strong>&nbsp;sem entrada`)}
+        ${dot('var(--st-quitado)',`<strong>${nq}</strong>&nbsp;quitado(s)`)}${dot('var(--gold-2)',`<strong>${nand}</strong>&nbsp;em andamento`)}${dot('var(--mute)',`<strong>${nsem}</strong>&nbsp;sem entrada`)}${n-atv.length?dot('var(--st-semexito)',`<strong>${n-atv.length}</strong>&nbsp;devolvida(s) / sem êxito — fora dos totais`):''}
         <span class="cp-mono" style="margin-left:auto;font-size:10px;color:var(--mute);">${n} caso(s) no relatório</span>
       </div>
       <div style="display:flex;gap:12px;padding:16px 26px;background:linear-gradient(120deg,rgba(201,169,97,.12),rgba(201,169,97,.02));border-bottom:.5px solid var(--pline);">
@@ -28660,7 +28742,7 @@ function cpExtratoPDF(){
   // Separa "R$ 1.480" e os centavos ",00" para os números grandes do extrato.
   const money=(v)=>{ const s=fmtR(+v||0); const i=s.lastIndexOf(','); return i<0?{int:escHtml(s),cent:''}:{int:escHtml(s.slice(0,i)),cent:escHtml(s.slice(i))}; };
   // Derivados (nunca fixos): % recuperado e nº de casos quitados.
-  const nQuit=ex.linhas.filter(l=>l.quitado).length;
+  const nQuit=ex.nQuit;
   const pctRec=ex.totCap>0?Math.min(100,(ex.totRec/ex.totCap)*100):0;
   const mCap=money(ex.totCap), mRec=money(ex.totRec), mSal=money(ex.totSaldo);
 
@@ -28685,7 +28767,7 @@ function cpExtratoPDF(){
         <div class="ex-num">${l.cap!=null?escHtml(fmtR(l.cap)):'—'}</div>
         <div class="ex-num ${l.recebido>0?'ex-green':'ex-mute'}">${fmtR(l.recebido)}</div>
         <div class="ex-num ${(l.saldo!=null&&Math.max(l.saldo,0)>0)?'':'ex-mute'}">${l.saldo!=null?escHtml(fmtR(Math.max(l.saldo,0))):'—'}</div>
-        <div class="ex-sit"><span class="ex-badge ${l.quitado?'ex-bq':'ex-ba'}">${l.quitado?'Quitado':'Em andamento'}</span></div>
+        <div class="ex-sit"><span class="ex-badge ${l.encerrada?'ex-be':(l.quitado?'ex-bq':'ex-ba')}">${l.encerrada?l.encTxt:(l.quitado?'Quitado':'Em andamento')}</span></div>
       </div>
       ${repHtml}
     </div>`;
@@ -28743,6 +28825,7 @@ function cpExtratoPDF(){
     .ex-badge{font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;padding:4px 10px;border-radius:100px;white-space:nowrap;}
     .ex-bq{color:var(--st-quitado);background:rgba(94,124,88,.13);border:.5px solid rgba(94,124,88,.3);}
     .ex-ba{color:var(--st-andamento);background:rgba(156,127,64,.13);border:.5px solid rgba(156,127,64,.3);}
+    .ex-be{color:#6B7591;background:rgba(138,150,184,.16);border:.5px solid rgba(138,150,184,.35);}
     /* pix sub-rows */
     .ex-pix{background:var(--paper);border-top:.5px solid var(--line-2);padding:6px 40px 12px 64px;}
     .ex-pix-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:.5px solid var(--line-2);}
@@ -28800,7 +28883,7 @@ function cpExtratoPDF(){
       </div>
       <div class="ex-foot">
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="var(--gold-2)" stroke-width="1.6" style="flex-shrink:0"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>
-        <span>Os comprovantes PIX de cada repasse estão disponíveis no portal, em <b>Comprovantes</b>. Documento informativo gerado automaticamente.</span>
+        <span>Os comprovantes PIX de cada repasse estão disponíveis no portal, em <b>Comprovantes</b>.${ex.nEnc?` Cobranças devolvidas ou encerradas sem êxito (${ex.nEnc}, capital de ${escHtml(fmtR(ex.capEnc))}${ex.recEnc>0.005?`, ${escHtml(fmtR(ex.recEnc))} já repassados`:''}) seguem listadas, mas não entram nos totais.`:''} Documento informativo gerado automaticamente.</span>
       </div>
     </div>
     <script>window.onload=function(){setTimeout(function(){window.print();},450);}<\/script>
