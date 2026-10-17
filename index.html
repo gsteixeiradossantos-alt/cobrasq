@@ -3288,7 +3288,7 @@ body.viewas-readonly select {
         <div style="font-size:11.5px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.06em;margin-top:8px;margin-bottom:6px;">Dívida principal</div>
         <div class="fg-row">
           <div class="fg">
-            <label>Valor original (R$) *</label>
+            <label>Capital (R$) *</label>
             <input type="text" id="mdev-valor-orig" placeholder="0,00" oninput="mdevRecalcularValorAtualizado()" onblur="mdevRecalcularValorAtualizado()">
           </div>
           <div class="fg">
@@ -6067,6 +6067,8 @@ function _mergeDividaFromCobrancas(){
     const c = byId.get(d.id);
     if(!c) continue;
     if(c.valor_orig  != null) d.valorOrig  = String(c.valor_orig);
+    // Capital = base da dívida (20261016c); dividaAtualHoje lê d.valorCapital antes de d.valorOrig.
+    if(c.valor_capital != null) d.valorCapital = String(c.valor_capital);
     if(c.valor_atual != null) d.valorAtual = String(c.valor_atual);
     if(c.status      != null) d.status     = c.status;
     if(c.fase        != null) d.fase       = c.fase;
@@ -8403,7 +8405,7 @@ function _impCard(r){
           : `<div style="font-size:11px;color:#92400e;margin-top:4px;">⚠ Localize o cliente pelo CNPJ. Não está na lista? <a href="#" onclick="showPage('clientes');return false;" style="color:var(--navy);font-weight:700;">Cadastre em Clientes</a> e volte — o import não cria credor.</div>`}
       </label>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">
-        <label style="font-size:11px;color:var(--text-3);font-weight:600;">Valor original
+        <label style="font-size:11px;color:var(--text-3);font-weight:600;">Capital
           <input value="${_impEsc(p.valorOrig||'')}" oninput="_impEdit('${r.id}','valorOrig',this.value)" onblur="_impPersist('${r.id}')" style="${inp}border:1px solid var(--border);margin-top:3px;">
         </label>
         <label style="font-size:11px;color:var(--text-3);font-weight:600;">Situação (etiqueta)
@@ -8519,12 +8521,13 @@ async function _impSalvar(id, silent){
     // 3) cobrança
     const valorOrig=parseValorBR(p.valorOrig)||0, valorAtual=parseValorBR(p.valorAtual||p.valorOrig)||valorOrig;
     const venc=p.vencimento||null, entrada=p.entrada||null;
-    const divida={ valorOriginal:valorOrig, totalAvista:valorAtual, vencimento:venc, descricao:(p.descDivida||p.titulo||'') };
+    // Capital = único valor de dívida digitado (20261016c); valor_orig segue gravado como espelho.
+    const divida={ valorOriginal:valorOrig, valorCapital:(valorOrig||null), totalAvista:valorAtual, vencimento:venc, descricao:(p.descDivida||p.titulo||'') };
     const metadata={ origem:'Astrea', lote:r.lote||'', credorOriginal:credorNome, processoNum:p.processoNum||'', vara:p.vara||'', obs:p.obs||'', tags:Array.isArray(p.tags)?p.tags:[], processoHistorico:Array.isArray(p.processoHistorico)?p.processoHistorico:[] };
     const principal=envs.find(e=>e.principal)||envs[0];
     let cobrancaId=principal._devedorId;
     if(!principal._novo){ const { data:ja }=await supa.from('cobrancas').select('id').eq('id',cobrancaId).maybeSingle(); if(ja) cobrancaId=null; }
-    const nova={ cliente_id:clienteId, status:p.status||_etiquetas()[0], fase:faseDaEtiqueta(p.status), valor_orig:valorOrig, valor_atual:valorAtual, data_entrada:entrada, tipo_cobranca:p.tipoCobranca||'fisica', divida, metadata, assigned_to:uidUser };
+    const nova={ cliente_id:clienteId, status:p.status||_etiquetas()[0], fase:faseDaEtiqueta(p.status), valor_orig:valorOrig, valor_capital:(valorOrig||null), valor_atual:valorAtual, data_entrada:entrada, tipo_cobranca:p.tipoCobranca||'fisica', divida, metadata, assigned_to:uidUser };
     if(cobrancaId) nova.id=cobrancaId;
     const { data:cob, error:ecob }=await supa.from('cobrancas').insert(nova).select('id').single(); if(ecob) throw new Error('cobrança: '+ecob.message);
     const cobId=cob.id;
@@ -12699,7 +12702,7 @@ function calcDividaCobrancaTitulos(titulos){
 
 // ── Valor atualizado HOJE (compute-on-read) ──────────────────────────────────
 // Fonte única de verdade para exibir/somar a dívida nas listas, cards e totais.
-// Deriva de valorOrig + vencimento pela MESMA régua do modal/cobrança
+// Deriva do CAPITAL (valor_orig só como reserva) + vencimento pela MESMA régua do modal/cobrança
 // (calcDividaCobranca), então o número nunca fica "congelado" no banco.
 // Memoizado por (orig|venc|dia) — calcDividaCobranca faz loop mês-a-mês e há
 // dezenas de chamadas por render. GUARDA: casos com acordo aceito ou já
@@ -12709,9 +12712,22 @@ function calcDividaCobrancaTitulos(titulos){
 // (d.valorOrig / d.valorAtual / d.vencimento / d.acordoFinal / d.fase) e a linha
 // de cobrança snake_case (c.valor_orig / c.valor_atual / c.acordo_final).
 const _dividaCache = new Map();
+// Base do cálculo = CAPITAL (único valor de dívida digitado/conferido por pessoas,
+// migração 20261016c). Ordem: valor_capital/valorCapital → divida.valorCapital →
+// valor_orig/valorOrig (reserva para linhas antigas sem capital). Mesma
+// precedência de cobCapital(), mas aceita as duas formas de objeto e devolve o
+// valor cru (string BR ou número) para passar por parseValorBR.
+function _baseCapitalDivida(d){
+  if(!d) return null;
+  const cap = d.valor_capital != null && d.valor_capital !== '' ? d.valor_capital
+            : (d.valorCapital != null && d.valorCapital !== '' ? d.valorCapital
+            : (d.divida && d.divida.valorCapital != null && d.divida.valorCapital !== '' ? d.divida.valorCapital : null));
+  if(cap != null) return cap;
+  return d.valorOrig != null ? d.valorOrig : d.valor_orig;
+}
 function dividaAtualHoje(d){
   if(!d) return 0;
-  const rawOrig  = d.valorOrig  != null ? d.valorOrig  : d.valor_orig;
+  const rawOrig  = _baseCapitalDivida(d);
   const rawAtual = d.valorAtual != null ? d.valorAtual : d.valor_atual;
   const acordo   = d.acordoFinal != null ? d.acordoFinal : d.acordo_final;
   const orig = parseValorBR(rawOrig) || parseValorBR(rawAtual) || 0;
@@ -12744,14 +12760,14 @@ function dividaAtualHoje(d){
 // Casos com acordo aceito / judiciais / sem vencimento ficam intactos (guarda em
 // dividaAtualHoje). O valor gravado no banco vira espelho no próximo flush.
 function _refrescarValorAtualHoje(){
-  const aplicar = (obj, atualKey, origKey) => {
-    const rawOrig = obj[origKey];
-    if(!(parseValorBR(rawOrig) > 0)) return;   // sem original: não mexe
+  const aplicar = (obj, atualKey) => {
+    const rawOrig = _baseCapitalDivida(obj);
+    if(!(parseValorBR(rawOrig) > 0)) return;   // sem capital (nem original): não mexe
     const fresh = dividaAtualHoje(obj);
     if(fresh && isFinite(fresh)) obj[atualKey] = fresh;
   };
-  for(const c of (DB_cobrancas||[])) aplicar(c, 'valor_atual', 'valor_orig');
-  for(const d of (DB.devedores||[])) aplicar(d, 'valorAtual', 'valorOrig');
+  for(const c of (DB_cobrancas||[])) aplicar(c, 'valor_atual');
+  for(const d of (DB.devedores||[])) aplicar(d, 'valorAtual');
 }
 
 function _fmtR(n){ return 'R$ ' + (Number(n)||0).toLocaleString('pt-BR', { minimumFractionDigits:2, maximumFractionDigits:2 }); }
@@ -12771,8 +12787,8 @@ function abrirVerificarCalculo(){
   const vencStr      = (document.getElementById('mdev-vencimento')?.value||'').trim();
   const valorOrig = parseValorBR(valorOrigStr);
   if(!valorOrig || valorOrig <= 0){
-    if(typeof toast === 'function') toast('Informe o valor original da dívida primeiro.', 'error');
-    else alert('Informe o valor original da dívida primeiro.');
+    if(typeof toast === 'function') toast('Informe o capital da dívida primeiro.', 'error');
+    else alert('Informe o capital da dívida primeiro.');
     return;
   }
 
@@ -12794,7 +12810,7 @@ function abrirVerificarCalculo(){
 
   const body = `
     <table style="width:100%;border-collapse:collapse;font-size:12.5px;">
-      <tr><td style="padding:6px 0;color:var(--text-2);">Valor original</td>
+      <tr><td style="padding:6px 0;color:var(--text-2);">Capital</td>
           <td style="padding:6px 0;text-align:right;font-family:var(--font-mono);font-weight:600;">${_fmtR(valorOrig)}</td></tr>
       <tr><td style="padding:6px 0;color:var(--text-2);">Vencimento</td>
           <td style="padding:6px 0;text-align:right;font-family:var(--font-mono);">${dataVencFmt}</td></tr>
@@ -16909,7 +16925,7 @@ function mdevRenderDividas(){
     return '<div style="border:1px solid var(--border-2);border-radius:6px;padding:10px 12px;background:var(--surface);">'
       + '<div style="display:flex;gap:8px;flex-wrap:wrap;">'
         + '<div style="flex:1;min-width:140px;">'
-          + '<label style="font-size:11px;font-weight:600;color:var(--text-3);">Valor original (R$)</label>'
+          + '<label style="font-size:11px;font-weight:600;color:var(--text-3);">Capital (R$)</label>'
           + '<input type="text" placeholder="0,00" value="'+escHtml(String(d.valor_original||''))+'" oninput="mdevUpdateDivida(\''+k+'\',\'valor_original\',this.value)" style="width:100%;padding:6px 8px;border:1px solid var(--border-2);border-radius:4px;font-size:12.5px;">'
         + '</div>'
         + '<div style="flex:1;min-width:140px;">'
@@ -17591,7 +17607,7 @@ function mdevRenderDocImport(){
     <!-- S3: pedir valor original ANTES da análise pra IA validar/corrigir -->
     <div style="margin-bottom:14px;padding:11px 14px;background:var(--surface-2);border-radius:8px;border-left:3px solid var(--gold);">
       <label for="mdev-di-valor-prev" style="font-size:12.5px;font-weight:600;color:var(--text);display:block;margin-bottom:4px;">
-        Valor original da dívida (capital, sem juros/multa)
+        Capital (sem juros/multa/correção)
       </label>
       <input type="text" id="mdev-di-valor-prev" placeholder="R$ 0,00"
         oninput="maskMoneyBR(this)"
@@ -17919,7 +17935,7 @@ function mdevDiRenderCampos(extracted){
     { id:'doc',         label:'CPF / CNPJ',                  value:merged.doc||merged.cpf||merged.cnpj||'' },
     { id:'tel',         label:'Telefone',                    value:merged.tel||merged.telefone||'' },
     { id:'email',       label:'E-mail',                      value:merged.email||'' },
-    { id:'valorOrig',   label:'Valor original (R$)',         value:merged.valorOrig||merged.valor||'' },
+    { id:'valorOrig',   label:'Capital (R$)',                value:merged.valorOrig||merged.valor||'' },
     { id:'vencimento',  label:'Vencimento (AAAA-MM-DD)',     value:merged.vencimento||'' },
     { id:'credorNome',  label:'Credor (nome)',               value:merged.credorNome||'' },
     { id:'processoNum', label:'Nº do processo (se judicial)', value:merged.processoNum||'' },
@@ -18274,6 +18290,11 @@ async function syncDevedorCobranca(d){
       updated_at: new Date().toISOString()
     };
     if(d.assignedTo) row.assigned_to = d.assignedTo;
+    // Capital (20261016c): o campo digitado no modal é d.valorOrig (rótulo "Capital").
+    // Só entra quando há valor — um upsert com null apagaria o capital já gravado.
+    // Alterar capital já definido continua barrado para colaborador pelo
+    // trg_enforce_valor_capital_lock (o upsert falha e só é logado, como antes).
+    { const cap = _devNumOrNull(d.valorOrig); if(cap != null) row.valor_capital = cap; }
     // cliente_id (credor): só grava quando há valor — nunca deixa uma aba velha
     // com clienteId vazio zerar o vínculo do caso. Ver devedorToRow e R-13.
     if(d.clienteId) row.cliente_id = d.clienteId;
@@ -18337,7 +18358,7 @@ async function salvarDevedor(){
   if(!pure){
     if(!titulo) faltantes.push('Título / Descrição da dívida');
     if(!status) faltantes.push('Status');
-    if(!valorOrig) faltantes.push('Valor original');
+    if(!valorOrig) faltantes.push('Capital');
     if(!vencimento) faltantes.push('Vencimento');
     if(!entrada) faltantes.push('Entrada na carteira');
     if(!cliente) faltantes.push('Cliente vinculado');
@@ -18733,7 +18754,7 @@ function diStep3(d){
     { key:'tel',         label:'Telefone',            val: d.tel,        required:false },
     { key:'email',       label:'E-mail',              val: d.email,      required:false },
     { key:'endereco',    label:'Endereço',            val: d.endereco,   required:false },
-    { key:'valorOrig',   label:'Valor original',      val: d.valorOrig,  required:true  },
+    { key:'valorOrig',   label:'Capital',             val: d.valorOrig,  required:true  },
     { key:'vencimento',  label:'Vencimento',          val: d.vencimento, required:false },
     { key:'credorNome',  label:'Credor',              val: d.credorNome, required:false },
     { key:'fase',        label:'Fase',                val: d.fase,       required:false },
@@ -18829,7 +18850,7 @@ function diStep3(d){
       </div>
       <div class="fg-row">
         <div class="fg">
-          <label>Valor original (R$) *</label>
+          <label>Capital (R$) *</label>
           <input type="text" id="di-valor" value="${escHtml(d.valorOrig||'')}" placeholder="0,00" style="${miss(d.valorOrig)}">
         </div>
         <div class="fg">
@@ -18891,7 +18912,7 @@ function diConfirmar(){
   const nome  = (document.getElementById('di-nome')?.value||'').trim();
   const valor = (document.getElementById('di-valor')?.value||'').trim();
   if(!nome)  { showToast('Nome do devedor é obrigatório.','warning'); return; }
-  if(!valor) { showToast('Valor original é obrigatório.','warning'); return; }
+  if(!valor) { showToast('Capital é obrigatório.','warning'); return; }
 
   const situacao = document.getElementById('di-situacao')?.value || 'Cobrar';
   const fase  = faseDaEtiqueta(situacao);
@@ -20641,7 +20662,7 @@ async function loadCobrancasFromSupabase(){
     });
     // Valor atualizado sempre corrente (compute-on-read) — painel, busca e a
     // tela Cobranças passam a ver a dívida corrigida de hoje, não o congelado.
-    try{ for(const c of rows){ if(parseValorBR(c.valor_orig) > 0){ const f = dividaAtualHoje(c); if(f && isFinite(f)) c.valor_atual = f; } } }catch(_){}
+    try{ for(const c of rows){ if(parseValorBR(_baseCapitalDivida(c)) > 0){ const f = dividaAtualHoje(c); if(f && isFinite(f)) c.valor_atual = f; } } }catch(_){}
     // Processos vinculados (busca por número/rótulo). Consulta à parte e tolerante:
     // sem a migração 20261006_01 a lista de cobranças carrega igual.
     try{
@@ -22735,10 +22756,13 @@ async function renderCobrancaDetalhe(){
   const partes=(cob.cobranca_partes||[]).slice().sort((a,b)=>(b.principal?1:0)-(a.principal?1:0));
   const credor=_cobrCredorNome(cob);
   const d=cob.divida||{};
-  const vAtual=+cob.valor_atual||+cob.valor_orig||0, vOrig=+cob.valor_orig||+d.valorOriginal||0;
+  // Capital é o único valor de dívida digitado (20261016c); valor_orig/valorOriginal só como reserva.
+  const vAtual=+cob.valor_atual||cobCapital(cob)||0;
   const juros=+d.juros||0, multa=+d.multa||0, correcao=+(d.correcao||d.valorCorrigido)||0;
   // Capital e repasses ao cliente
-  const vCapital = (cob.valor_capital!=null) ? +cob.valor_capital : (d.valorCapital!=null ? +d.valorCapital : null);
+  const vCapital = (cob.valor_capital!=null) ? +cob.valor_capital
+                 : (d.valorCapital!=null ? +d.valorCapital
+                 : ((+cob.valor_orig||+d.valorOriginal) ? (+cob.valor_orig||+d.valorOriginal) : null));
   const enviado = (repasses||[]).reduce((s,r)=>s+(+r.valor||0),0);
   const saldoCap = (vCapital!=null) ? (vCapital - enviado) : null;
   // "Quitado direto ao credor": o devedor pagou (ou compôs) direto com o credor, sem
@@ -22851,8 +22875,8 @@ async function renderCobrancaDetalhe(){
     </div>`:''}
     <div class="det2-statgrid">
       <div class="det2-stat">
-        <div class="det2-stat-k">Valor capital</div>
-        <div class="det2-stat-v">${_temCapital?fmtR(vCapital):fmtR(vAtual)}</div>
+        <div class="det2-stat-k">Capital</div>
+        <div class="det2-stat-v">${_temCapital?fmtR(vCapital):'—'}</div>
         <div class="det2-stat-sub">${_temCapital?'origem':'capital não definido'}</div>
       </div>
       <div class="det2-stat">
@@ -22868,7 +22892,7 @@ async function renderCobrancaDetalhe(){
       <div class="det2-stat">
         <div class="det2-stat-k">Valor atualizado</div>
         <div class="det2-stat-v">${fmtR(vAtual)}</div>
-        <div class="det2-stat-sub">com encargos</div>
+        <div class="det2-stat-sub">${cob.acordo_final?'fixado no acordo':'calculado: capital + encargos'}</div>
       </div>
     </div>
     <div class="det-vbreak" style="margin-top:16px;border-top:1px dashed var(--d-border-2);border-left:none;border-right:none;border-bottom:none;background:none;padding-top:14px;">
@@ -22877,7 +22901,7 @@ async function renderCobrancaDetalhe(){
       <div><div class="k">Correção</div><div class="v">${fmtR(correcao)}</div></div>
       <div><div class="k">Honorários</div><div class="v">${fmtR(honor)}</div></div>
     </div>
-    ${_temCapital?'':`<div style="font-size:11.5px;color:var(--d-text-3);margin-top:10px;">Defina o <strong>valor capital</strong> no botão <strong>Editar</strong> para acompanhar o saldo de repasses. Registre os comprovantes na aba <strong>Repasses ao cliente</strong>.</div>`}
+    ${_temCapital?'':`<div style="font-size:11.5px;color:var(--d-text-3);margin-top:10px;">Defina o <strong>capital</strong> no botão <strong>Editar</strong> para acompanhar o saldo de repasses. Registre os comprovantes na aba <strong>Repasses ao cliente</strong>.</div>`}
   </div>`;
 
   // Painel Documento do caso: linhas vazias ("—") não aparecem — só o que está preenchido.
@@ -22973,7 +22997,7 @@ async function renderCobrancaDetalhe(){
     credor: credor,
     recebida: _detData(cob.data_entrada || cob.created_at),
     responsavel: _detUserNome(cob.assigned_to),
-    valorCapital: vOrig || vAtual || 0,
+    valorCapital: vCapital || 0,
     valorAtual: vAtual || 0,
     tipoDoc: (tipoDoc && tipoDoc !== '—') ? tipoDoc : '',
     numeroProcesso: cob.numero_processo || '',
@@ -25681,6 +25705,9 @@ function abrirCobrancaModal(cob){
   window._ppAprovarPendente = null; // só ppAprovarCadastrar liga, depois de abrir o modal
   // Valor capital: trava após o 1º cadastro (só dono + digitar CONFIRMAR). _cobrEditCapitalPrev = valor já salvo (null = ainda não definido).
   window._cobrEditCapitalPrev = (cob && cob.valor_capital!=null) ? +cob.valor_capital : null;
+  // Acordo aceito congela o valor atualizado (montante renegociado, lido pelo QuitaFácil,
+  // portal, régua e Bia): o formulário NÃO recalcula por cima dele.
+  window._cobrEditTemAcordo = !!(cob && cob.acordo_final);
   const _ordNome = (a,b)=>(a.nome||'').localeCompare(b.nome||'','pt-BR',{sensitivity:'base'});
   const credoresOpts = (DB.clientes||[]).filter(c=>!c.arquivado && !c.isDraft).slice().sort(_ordNome)
     .map(c=>`<option value="${escHtml(c.nome)}"></option>`).join('');
@@ -25800,13 +25827,13 @@ function abrirCobrancaModal(cob){
         <!-- Valores e vencimento -->
         <div style="font-size:11.5px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:.06em;margin:18px 0 8px;">Valores e vencimento</div>
         <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;background:var(--surface-2);">
-          <label style="font-size:12px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:6px;">Valor capital da dívida ${capJaSet?'<span title="Campo crítico — travado após o cadastro">🔒</span>':''}<span style="font-weight:400;color:var(--text-3);">(sem juros/multa/correção)</span></label>
+          <label style="font-size:12px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:6px;">Capital ${capJaSet?'<span title="Campo crítico — travado após o cadastro">🔒</span>':''}<span style="font-weight:400;color:var(--text-3);">(sem juros/multa/correção)</span></label>
           <input id="cobr-valor-capital" value="${vCapital}" placeholder="0,00" ${capDisabled?'disabled':''} oninput="cobrRecalcValorAtual()" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;margin-top:4px;${capDisabled?'background:var(--surface);color:var(--text-3);cursor:not-allowed;':''}"/>
           <div style="font-size:11px;color:var(--text-3);margin-top:5px;">${capDisabled?'Só o proprietário pode alterar este valor após o cadastro.':(capJaSet?'Alterar este valor exige digitar <strong>CONFIRMAR</strong> (campo crítico).':'Base para o saldo de repasses ao cliente. Após salvo, só o proprietário edita (com confirmação).')}</div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-          <div><label style="font-size:12px;font-weight:600;color:var(--text-2);">Valor atual <span style="font-weight:400;color:var(--text-3);">(recalculado ao alterar capital/vencimento)</span></label>
-            <input id="cobr-valor-atual" value="${vAtual}" placeholder="0,00" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;margin-top:4px;"/></div>
+          <div><label style="font-size:12px;font-weight:600;color:var(--text-2);">Valor atualizado <span style="font-weight:400;color:var(--text-3);">${(cob && cob.acordo_final)?'(fixado no acordo)':'(calculado: capital + encargos)'}</span></label>
+            <input id="cobr-valor-atual" value="${vAtual}" placeholder="0,00" readonly tabindex="-1" title="Calculado a partir do capital e do vencimento — não é digitado" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;margin-top:4px;background:var(--surface-2);cursor:not-allowed;"/></div>
           <div><label style="font-size:12px;font-weight:600;color:var(--text-2);">Vencimento</label>
             <input id="cobr-venc" type="date" value="${venc}" onchange="cobrRecalcValorAtual()" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;margin-top:4px;"/></div>
         </div>
@@ -25935,9 +25962,9 @@ Retorne SOMENTE o JSON, sem markdown.`});
     set('cobr-num-doc', ex.numero_documento||'');
     set('cobr-banco', ex.banco ? titleCasePtBR(ex.banco) : '');
     set('cobr-valor-capital', ex.valor_original ? String(ex.valor_original).replace(/^R\$\s*/,'') : '');
-    set('cobr-valor-atual', ex.valor_atualizado ? String(ex.valor_atualizado).replace(/^R\$\s*/,'') : '');
+    // Valor atualizado não é digitado nem extraído: sai do capital + vencimento.
     set('cobr-venc', ex.vencimento||'');
-    if(!ex.valor_atualizado) cobrRecalcValorAtual();
+    cobrRecalcValorAtual();
     if(ex.credor){ const c=document.getElementById('cobr-credor'); if(c && !c.value.trim()) c.value=titleCasePtBR(ex.credor); }
     showToast('Dados extraídos. Revise antes de salvar.','success');
   }catch(e){
@@ -25990,15 +26017,17 @@ function cobrRecalcValorAtual(){
   const capEl = document.getElementById('cobr-valor-capital');
   const outEl = document.getElementById('cobr-valor-atual');
   if(!capEl || !outEl) return;
+  const acordo = !!window._cobrEditTemAcordo;   // acordo aceito: valor atualizado fica o do acordo
   const tits = _titulosValidos({ titulos: _cobrLerTitulos() });
   if(tits.length){
     const r = calcDividaCobrancaTitulos(tits);
     if(!capEl.disabled) capEl.value = _cobrFmtNum(r.valorOrig);
     const vEl = document.getElementById('cobr-venc');
     if(vEl) vEl.value = tits.map(t=>t.vencimento).sort()[0];
-    outEl.value = _cobrFmtNum(r.total);
+    if(!acordo) outEl.value = _cobrFmtNum(r.total);
     return;
   }
+  if(acordo) return;
   const cap = parseValorBR(capEl.value) || 0;
   if(!(cap>0)){ return; }
   const venc = document.getElementById('cobr-venc')?.value || '';
