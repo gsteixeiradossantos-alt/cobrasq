@@ -9318,15 +9318,19 @@ async function renderPortalPedidos(){
   el.innerHTML=`<div class="cob-pg-head"><div><h1 class="cob-h1">Pedidos do portal</h1><div class="cob-h1-sub">Carregando…</div></div></div>`;
   const supa=getSupabase();
   if(!supa){ el.innerHTML=`<div class="cob-empty-big"><div class="cob-empty-tt">Supabase indisponível</div></div>`; return; }
-  const [rs, rc]=await Promise.all([
+  const [rs, rc, rl]=await Promise.all([
     supa.from('portal_solicitacoes').select('*').order('criado_em',{ascending:false}).limit(500),
     // Conferência de títulos (migração 20261019): sem a tabela, o erro só esconde a aba.
-    supa.from('conferencia_perguntas').select('id,cliente_id,item_id,ordem,pergunta,resposta,respondida_em,historico,conferencia_itens(devedor,titulo,ordem,arquivo)').limit(2000)
+    // select * para não quebrar antes da 20261020 (coluna respondida_link).
+    supa.from('conferencia_perguntas').select('*,conferencia_itens(devedor,titulo,ordem,arquivo)').limit(2000),
+    // Links sem login (migração 20261020): sem a tabela, só some o bloco do link.
+    supa.from('conferencia_links').select('id,cliente_id,token,criado_em,ultimo_acesso_em,acessos').is('revogado_em',null)
   ]);
   const { data, error }=rs;
   if(error){ el.innerHTML=`<div class="cob-empty-big"><div class="cob-empty-tt">Erro ao carregar os pedidos</div><div class="cob-empty-ds">${escHtml(error.message)}</div></div>`; return; }
   _ppCache=data||[];
   const conf=rc.error?null:(rc.data||[]);
+  _ppConfLinks=rl.error?null:(rl.data||[]);
   const abertos=_ppCache.filter(r=>r.status==='aberta'||r.status==='em_analise');
   const lista=filtro==='abertos'?abertos:_ppCache;
   const nomeCli=id=>((DB.clientes||[]).find(c=>String(c.id)===String(id))||{}).nome||'Cliente';
@@ -9372,6 +9376,50 @@ async function renderPortalPedidos(){
 }
 // Respostas da conferência de títulos, por cliente e por devedor (só leitura; o cliente
 // responde no portal). Mesma informação de supabase/verification/bancada_conferencia_respostas.sql.
+let _ppConfLinks=null;   // conferencia_links ativos; null = migração 20261020 ainda não aplicada
+function ppConfLinkUrl(token){ return location.origin+'/conferencia#'+token; }
+// Link sem login do cliente: mostrar, copiar, gerar e revogar (gerar e revogar só o proprietário,
+// a RLS barra os demais). O link só abre os títulos daquele cliente (RPC conferencia_por_link).
+function ppConfLinkHtml(cid, fmtD){
+  if(_ppConfLinks===null) return '';
+  const dono=currentUser?.papel==='proprietario';
+  const l=_ppConfLinks.find(x=>String(x.cliente_id)===String(cid));
+  if(!l) return `<div style="margin-top:10px;padding:10px 12px;border-radius:9px;background:var(--bg-2,rgba(0,0,0,.04));font-size:12.5px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center;">
+      <span style="color:var(--text-3);">Sem link de conferência para este cliente.</span>
+      ${dono?`<button class="cob-btn-ghost" onclick="ppConfLinkGerar('${escHtml(String(cid))}')">Gerar link</button>`:''}</div>`;
+  const url=ppConfLinkUrl(l.token);
+  return `<div style="margin-top:10px;padding:10px 12px;border-radius:9px;background:var(--bg-2,rgba(0,0,0,.04));font-size:12.5px;">
+      <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center;">
+        <span><strong>Link sem login</strong> · criado ${fmtD(l.criado_em)} · ${l.acessos?'aberto '+l.acessos+'x, último em '+fmtD(l.ultimo_acesso_em):'ainda não aberto'}</span>
+        <span style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button class="cob-btn-ghost" onclick="ppConfLinkCopiar('${escHtml(l.token)}')">Copiar link</button>
+          ${dono?`<button class="cob-btn-ghost" onclick="ppConfLinkGerar('${escHtml(String(cid))}','${escHtml(l.id)}')">Gerar outro</button><button class="cob-btn-ghost" onclick="ppConfLinkRevogar('${escHtml(l.id)}')">Desativar</button>`:''}
+        </span></div>
+      <div style="font-family:monospace;font-size:11px;color:var(--text-3);margin-top:6px;word-break:break-all;">${escHtml(url)}</div></div>`;
+}
+async function ppConfLinkCopiar(token){
+  try{ await navigator.clipboard.writeText(ppConfLinkUrl(token)); showToast('Link copiado.','success'); }
+  catch(_){ showToast('Não foi possível copiar. Selecione o link e copie à mão.','error'); }
+}
+async function ppConfLinkGerar(cid, antigoId){
+  if(antigoId && !confirm('O link atual deixa de abrir na hora e um novo é criado. Continuar?')) return;
+  const supa=getSupabase(); if(!supa) return;
+  if(antigoId){
+    const r=await supa.from('conferencia_links').update({ revogado_em:new Date().toISOString() }).eq('id',antigoId);
+    if(r.error){ showToast('Não foi possível desativar o link atual: '+r.error.message,'error'); return; }
+  }
+  const { error }=await supa.from('conferencia_links').insert({ cliente_id:cid });
+  if(error){ showToast('Não foi possível gerar o link: '+error.message,'error'); renderPortalPedidos(); return; }
+  showToast('Link gerado. Ele só sai para o cliente quando você enviar.','success');
+  renderPortalPedidos();
+}
+async function ppConfLinkRevogar(id){
+  if(!confirm('Desativar o link? Quem abrir depois verá "link desativado". As respostas já dadas ficam.')) return;
+  const supa=getSupabase(); if(!supa) return;
+  const { error }=await supa.from('conferencia_links').update({ revogado_em:new Date().toISOString() }).eq('id',id);
+  if(error){ showToast('Não foi possível desativar: '+error.message,'error'); return; }
+  showToast('Link desativado.','success'); renderPortalPedidos();
+}
 function ppConferenciaHtml(rows, nomeCli, fmtD){
   if(!rows.length) return `<div class="cob-empty-big"><div class="cob-empty-tt">Nenhuma pergunta de conferência carregada</div></div>`;
   const porCli={};
@@ -9389,7 +9437,7 @@ function ppConferenciaHtml(rows, nomeCli, fmtD){
       const linhas=grupos[k].sort((a,b)=>a.ordem-b.ordem).map(r=>`<div style="padding:8px 0;border-top:1px solid var(--border);">
           <div style="font-size:12.5px;color:var(--text-3);">${r.ordem}. ${escHtml(r.pergunta)}</div>
           <div style="font-size:13.5px;margin-top:3px;white-space:pre-wrap;${r.resposta?'':'color:var(--text-3);font-style:italic;'}">${r.resposta?escHtml(r.resposta):'sem resposta'}</div>
-          ${r.resposta?`<div style="font-size:11px;color:var(--text-3);margin-top:2px;">${fmtD(r.respondida_em)}${(r.historico||[]).length?' · trocada '+(r.historico||[]).length+'x':''}</div>`:''}
+          ${r.resposta?`<div style="font-size:11px;color:var(--text-3);margin-top:2px;">${fmtD(r.respondida_em)}${r.respondida_link?' · pelo link':(r.respondida_por?' · pelo portal':'')}${(r.historico||[]).length?' · trocada '+(r.historico||[]).length+'x':''}</div>`:''}
         </div>`).join('');
       return `<div style="margin-top:12px;">
         <div style="font-size:14px;font-weight:600;">${it?escHtml(it.devedor||''):'Pergunta geral'}${it&&it.arquivo?` <span style="font-size:11px;font-weight:400;color:var(--text-3);">PDF ${escHtml(it.arquivo)}</span>`:''}</div>
@@ -9400,7 +9448,7 @@ function ppConferenciaHtml(rows, nomeCli, fmtD){
       <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline;">
         <div style="font-size:15px;font-weight:700;">${escHtml(nomeCli(cid))}</div>
         <div style="font-size:12px;color:var(--text-3);">${feitas} de ${ps.length} respondidas</div>
-      </div>${blocos}</div>`;
+      </div>${ppConfLinkHtml(cid,fmtD)}${blocos}</div>`;
   }).join('');
 }
 async function ppResponder(id, status){
