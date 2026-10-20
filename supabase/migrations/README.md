@@ -369,7 +369,8 @@ só com autorização do gestor, antes do merge do PR.
 ## 20261019 — bancada de conferência do cliente (cedente)
 
 **Aplicada em 19/10/2026**, com o seed (5 clientes, 21 itens, 45 perguntas). O `revoke ... from anon`
-da RPC foi rodado à parte no mesmo dia: o Supabase dá execute a anon em função nova. `20261019_bancada_conferencia.sql` (+ `_rollback.sql`). Tabelas
+da RPC e o `revoke truncate ... from authenticated` das duas tabelas foram rodados à parte no
+mesmo dia (padrões do Supabase: execute a anon em função nova; TRUNCATE ignora a RLS). `20261019_bancada_conferencia.sql` (+ `_rollback.sql`). Tabelas
 `conferencia_itens` (título digitalizado: devedor, descrição, `dados` com o lido no título e o
 que consta no cadastro) e `conferencia_perguntas` (pergunta por item ou geral, resposta,
 histórico de respostas trocadas). RLS: o cedente lê só os itens ativos dos clientes de

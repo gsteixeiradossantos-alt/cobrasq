@@ -49,6 +49,8 @@ alter table public.conferencia_itens     enable row level security;
 alter table public.conferencia_perguntas enable row level security;
 revoke all on public.conferencia_itens, public.conferencia_perguntas from anon;
 grant select, insert, update, delete on public.conferencia_itens, public.conferencia_perguntas to authenticated;  -- a RLS filtra
+-- TRUNCATE vem por padrão do Supabase e passa por cima da RLS
+revoke truncate on public.conferencia_itens, public.conferencia_perguntas from authenticated;
 
 -- ── itens ────────────────────────────────────────────────────────────────────
 drop policy if exists conf_itens_cedente_sel on public.conferencia_itens;
