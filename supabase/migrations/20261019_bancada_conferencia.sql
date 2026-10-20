@@ -115,4 +115,6 @@ begin
                             'respondida_em', case when v_txt is null then null else now() end);
 end; $$;
 revoke all on function public.cedente_responder_conferencia(uuid,text) from public;
+-- o Supabase dá execute a anon em toda função nova (default privileges); "from public" não tira
+revoke all on function public.cedente_responder_conferencia(uuid,text) from anon;
 grant execute on function public.cedente_responder_conferencia(uuid,text) to authenticated;
