@@ -391,7 +391,7 @@ do painel. **Ordem:** aplicar → rodar o seed → merge.
 
 ## 20261020 — bancada de conferência por link (sem login)
 
-**Não aplicada.** `20261020_conferencia_link.sql` (+ `_rollback.sql`); depende de 20261019.
+**Aplicada em produção em 20/10/2026** (apply_migration `20261020_conferencia_link`; conferido em transação desfeita: anon sem acesso às tabelas, abre o link com 17 itens e 31 perguntas, grava resposta com `respondida_link`, recusa token falso, token revogado e pergunta de outro cliente; proprietário cria e revoga; colaborador vê e não altera; cedente não vê). `20261020_conferencia_link.sql` (+ `_rollback.sql`); depende de 20261019.
 Para o credor que não tem login no portal: link secreto `painel.cobrasq.com.br/conferencia#<token>`
 (página `conferencia.html`). Tabela `conferencia_links` (token de 48 hex, um ativo por cliente,
 `revogado_em`, `expira_em` opcional, último acesso e contagem). RLS: proprietário cria e revoga,
