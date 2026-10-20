@@ -388,3 +388,18 @@ anon, colaborador, proprietário, FK de cliente, unique, rollback e reaplicaçã
 (21 itens e 45 perguntas em 19/10/2026). Sem dry-run em prod. Leitura das respostas:
 `supabase/verification/bancada_conferencia_respostas.sql` ou a tela "Conferência de títulos"
 do painel. **Ordem:** aplicar → rodar o seed → merge.
+
+## 20261020 — bancada de conferência por link (sem login)
+
+**Aplicada em produção em 20/10/2026** (apply_migration `20261020_conferencia_link`; conferido em transação desfeita: anon sem acesso às tabelas, abre o link com 17 itens e 31 perguntas, grava resposta com `respondida_link`, recusa token falso, token revogado e pergunta de outro cliente; proprietário cria e revoga; colaborador vê e não altera; cedente não vê). `20261020_conferencia_link.sql` (+ `_rollback.sql`); depende de 20261019.
+Para o credor que não tem login no portal: link secreto `painel.cobrasq.com.br/conferencia#<token>`
+(página `conferencia.html`). Tabela `conferencia_links` (token de 48 hex, um ativo por cliente,
+`revogado_em`, `expira_em` opcional, último acesso e contagem). RLS: proprietário cria e revoga,
+colaborador só lê, cedente/devedor/anon nada. O anon entra só por duas RPCs security definer:
+`conferencia_por_link(token)` (nome do cliente, itens ativos e perguntas daquele cliente) e
+`conferencia_responder_link(token, pergunta, resposta)` (recusa pergunta de outro cliente ou de
+item desativado; token revogado ou vencido dá erro). Nova coluna `conferencia_perguntas.respondida_link`
+marca a resposta feita pelo link; `cedente_responder_conferencia` é recriada para limpá-la e para
+guardar o link no histórico. Os links se geram, copiam e revogam na aba "Conferência de títulos"
+dos Pedidos do portal. **Ordem:** aplicar → merge (a tela só lê `respondida_link` via `select *`,
+então não quebra antes, mas a página do link só funciona depois da migração).
