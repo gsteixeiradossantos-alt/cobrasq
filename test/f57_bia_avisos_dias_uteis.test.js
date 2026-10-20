@@ -137,17 +137,32 @@ const FN = path.join(__dirname, '..', 'supabase', 'functions');
   assert.strictEqual(U.reagendarAntecipado({ ...ag0, status: 'adiada' }, '2026-10-15', '2026-10-08', 3, AG), null);
   assert.strictEqual(U.reagendarAntecipado(ag0, '2026-10-01', '2026-10-08', 3, AG), null);
 
-  // régua de atraso: dias 1, 3, 5, 7, 10 e 15 do vencimento efetivo (15/10/2026).
+  // régua de atraso: dias ÚTEIS 1, 3, 5, 7, 10 e 15 do vencimento efetivo (20/10/2026).
   // Vence sábado 10/10/2026 -> efetivo terça 13/10 (12/10 feriado).
+  // Marcos: 14/10 (1), 16/10 (3), 20/10 (5), 22/10 (7), 27/10 (10), 04/11 (15; 02/11 feriado).
   const px = (h) => U.proximoDiaAtraso('2026-10-10', h);
   assert.strictEqual(px('2026-10-14'), '2026-10-16'); // enviou o dia 1 -> dia 3
   assert.strictEqual(px('2026-10-15'), '2026-10-16'); // nunca repete no dia seguinte ao 2º
-  assert.strictEqual(px('2026-10-16'), '2026-10-18'); // dia 3 -> dia 5 (domingo: worker espera o dia útil)
-  assert.strictEqual(px('2026-10-19'), '2026-10-20'); // dia 6 -> dia 7
-  assert.strictEqual(px('2026-10-20'), '2026-10-23'); // dia 7 -> dia 10
-  assert.strictEqual(px('2026-10-23'), '2026-10-28'); // dia 10 -> dia 15
-  assert.strictEqual(px('2026-10-28'), '2026-10-29'); // passou do 15: olha amanhã
+  assert.strictEqual(px('2026-10-16'), '2026-10-20'); // dia 3 -> dia 5 (sábado/domingo não contam)
+  assert.strictEqual(px('2026-10-19'), '2026-10-20'); // dia 4 -> dia 5
+  assert.strictEqual(px('2026-10-20'), '2026-10-22'); // dia 5 -> dia 7
+  assert.strictEqual(px('2026-10-22'), '2026-10-27'); // dia 7 -> dia 10
+  assert.strictEqual(px('2026-10-27'), '2026-11-04'); // dia 10 -> dia 15 (02/11 feriado)
+  assert.strictEqual(px('2026-11-04'), '2026-11-05'); // passou do 15: olha amanhã
   assert.deepStrictEqual(U.DIAS_REGUA_ATRASO, [1, 3, 5, 7, 10, 15]);
+  // todo marco cai em dia útil
+  for (const v of ['2026-10-10', '2026-10-16', '2026-10-23', '2026-12-18', '2026-11-20']) {
+    const ef = U.vencimentoEfetivo(v);
+    for (const d of U.DIAS_REGUA_ATRASO) assert.ok(U.ehDiaUtil(U.somarDiasUteis(ef, d)), `${v} dia ${d}`);
+  }
+  // vence sexta 16/10: o dia 1 não vira sábado -> segunda engolindo o dia 3
+  assert.strictEqual(U.proximoDiaAtraso('2026-10-16', '2026-10-19'), '2026-10-21'); // dia 1 (seg) -> dia 3 (qua)
+  assert.strictEqual(U.proximoDiaAtraso('2026-10-16', '2026-10-21'), '2026-10-23'); // dia 3 -> dia 5 (sex)
+  // dias úteis decorridos: o dia de partida não conta, o de chegada conta
+  assert.strictEqual(U.diasUteisDecorridos('2026-10-13', '2026-10-13'), 0);
+  assert.strictEqual(U.diasUteisDecorridos('2026-10-13', '2026-10-14'), 1);
+  assert.strictEqual(U.diasUteisDecorridos('2026-10-13', '2026-10-20'), 5);
+  assert.strictEqual(U.diasUteisDecorridos('2026-10-13', '2026-11-04'), 15);
 
   console.log('F-57 ok');
 })().catch((e) => { console.error(e); process.exit(1); });
