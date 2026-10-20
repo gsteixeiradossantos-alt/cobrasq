@@ -10,7 +10,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { MODELO } from '../_shared/bia-system.ts';
 import { resolverJid } from '../_shared/telefone-jid.ts';
-import { ehDiaUtil, etapaPreVencimento, noveHorasBRT, proximoDiaAtraso, somarDiasUteis, vencimentoEfetivo } from '../_shared/dias-uteis.ts';
+import { diasUteisDecorridos, ehDiaUtil, etapaPreVencimento, noveHorasBRT, proximoDiaAtraso, somarDiasUteis, vencimentoEfetivo } from '../_shared/dias-uteis.ts';
 import { decidirPrazoFinal, PREFIXO_PRAZO, prazoDoLog, textosAtraso, textosPreVencimento } from '../_shared/bia-avisos.ts';
 
 const SIG = '*Bia • COBRASQ*';
@@ -452,13 +452,17 @@ Deno.serve(async (req) => {
       enviadas++; continue;
     }
 
-    // marcar para ação: >= diaMax dias vencido sem NENHUMA resposta, ou 2+ promessas quebradas
-    const diasVencido = Math.floor((Date.now() - new Date(c.venc_original).getTime()) / 864e5);
+    // marcar para ação: >= diaMax dias ÚTEIS vencido sem NENHUMA resposta, ou 2+ promessas quebradas
+    // (dias úteis desde 20/10/2026, junto com a régua de atraso)
+    const vencOrig = String(c.venc_original || '').slice(0, 10);
+    const diasVencido = vencOrig
+      ? diasUteisDecorridos(vencimentoEfetivo(vencOrig), hoje)
+      : Math.floor((Date.now() - new Date(c.venc_original).getTime()) / 864e5);
     const respondeuAlguemDia = ultimaRecv > 0;
     if ((diasVencido >= diaMax && !respondeuAlguemDia) || (c.promessas_quebradas ?? 0) >= 2) {
       await sb.from('bia_cobranca').update({ status: 'para_acao', marcada_acao_em: agoraIso, updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
       paraAcao++;
-      await notificar(`COBRANÇA -> PARA AÇÃO\n${c.nome || ('+' + tel)} | R$ ${brMoney(c.valor)} | venceu ${brDate(c.venc_original)}\nSem resposta há ${diasVencido} dias. Encaminhar ao Teixeira & Azzolin.`);
+      await notificar(`COBRANÇA -> PARA AÇÃO\n${c.nome || ('+' + tel)} | R$ ${brMoney(c.valor)} | venceu ${brDate(c.venc_original)}\nSem resposta há ${diasVencido} dias úteis. Encaminhar ao Teixeira & Azzolin.`);
       continue;
     }
 
@@ -470,8 +474,8 @@ Deno.serve(async (req) => {
 
     // monta a mensagem: escalada por dias de atraso (contra a data ATUAL) + firmeza real.
     const n = (c.lembretes_enviados ?? 0) + 1;
-    // atraso contado do vencimento de FATO (boleto de sábado vence na segunda)
-    const diasVencAtual = vencIso ? Math.round((Date.parse(hoje) - Date.parse(vencimentoEfetivo(vencIso))) / 864e5) : diasVencido;
+    // atraso em DIAS ÚTEIS contado do vencimento de FATO (boleto de sábado vence na segunda)
+    const diasVencAtual = vencIso ? diasUteisDecorridos(vencimentoEfetivo(vencIso), hoje) : diasVencido;
     // só ameaça (judicial/negativação/protesto) se JÁ houve lembrete anterior do MESMO boleto
     // sem resultado e o atraso passou de 7 dias — no 1º contato, nunca ameaça.
     const jaCobrado = (c.lembretes_enviados ?? 0) >= 1;
@@ -521,7 +525,7 @@ Deno.serve(async (req) => {
     const { ok } = await enviarBlocos(tel, blocos);
     if (!ok) { puladas++; continue; }
 
-    // avança a régua: dias 1, 3, 5, 7, 10 e 15 do atraso (proximoDiaAtraso)
+    // avança a régua: dias úteis 1, 3, 5, 7, 10 e 15 do atraso (proximoDiaAtraso)
     // depois do prazo final, só volta a olhar no dia útil seguinte ao prazo
     const proxRegua = vencIso ? noveHorasBRT(proximoDiaAtraso(vencIso, hoje)) : new Date(Date.now() + 2 * 864e5).toISOString();
     const upd: any = {
