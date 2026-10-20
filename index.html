@@ -39724,7 +39724,7 @@ async function _finCaixaV2AggLer(b, force){
     return `${sg}${String(Math.floor(a/60)).padStart(2,'0')}:${String(a%60).padStart(2,'0')}`; })();
   const fimMais1 = (() => { const d = _finDeISO(b.fim); d.setDate(d.getDate()+1); return isoLocal(d); })();
 
-  const [dim, saldos, perRows, abertos, rep, acordosPer, ativosN] = await Promise.all([
+  const [dim, saldos, perRows, abertos, rep, acordosPer, ativosN, aCreditarRows] = await Promise.all([
     finApi.loadDimensoes(),
     sb.rpc('fin_saldos_realizados').then(r => r.data || []).catch(() => []),
     paginadoV2(q => q.gte('data_competencia', b.ini).lte('data_competencia', b.fim)),
@@ -39741,7 +39741,18 @@ async function _finCaixaV2AggLer(b, force){
       const { count } = await sb.from('acordos').select('id', { count:'exact', head:true }).eq('status','ativo');
       return +count || 0;
     }catch(_){ return 0; } })(),
+    // Boleto Asaas pago hoje: já está no saldo do livro, mas o Asaas só libera na conta depois.
+    (async () => { try{
+      const { data } = await sb.from('fin_lancamento').select('conta_id,valor,valor_pago')
+        .eq('tipo_movimento', 1).in('status', [1,2]).not('asaas_payment_id','is',null).eq('data_pagamento', hoje).limit(500);
+      return data || [];
+    }catch(_){ return []; } })(),
   ]);
+  const aCreditarPorConta = {};
+  for(const r of aCreditarRows){
+    const x = aCreditarPorConta[r.conta_id] || (aCreditarPorConta[r.conta_id] = { valor:0, n:0 });
+    x.valor = +(x.valor + Math.abs(+(r.valor_pago != null ? r.valor_pago : r.valor) || 0)).toFixed(2); x.n++;
+  }
 
   // Categoria de cada linha (rateio inteiro) — classifica repasse e judicial de uma vez.
   const ids = [...new Set([...perRows.map(r => r.id), ...abertos.map(r => r.id)])];
@@ -39819,7 +39830,7 @@ async function _finCaixaV2AggLer(b, force){
   const repVencidosN = rep.itens.filter(l => String(l.data_vencimento||'').slice(0,10) < hoje).length;
 
   const v = {
-    b, hoje, contas, saldoTotal, custodia, caixaLivre, repassesN: rep.n, repVencidosN,
+    b, hoje, contas, aCreditarPorConta, saldoTotal, custodia, caixaLivre, repassesN: rep.n, repVencidosN,
     entradas, entPagas, entPrev, aquisicao, aqPagas, aqPrev, lucro,
     metaMensal, meta, falta, excedente,
     acordos, descumpridos,
@@ -40062,6 +40073,7 @@ async function renderFinVisao(el){
       .cx2-conta .av{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;color:#fff;font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:700;flex-shrink:0;}
       .cx2-conta .nm{font-size:12px;font-weight:600;color:#0A1530;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
       .cx2-conta .sd{font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:600;color:#0A1530;white-space:nowrap;}
+      .cx2-conta .acr{font-family:'JetBrains Mono',monospace;font-size:10.5px;font-weight:500;color:#9C7F40;}
       .cx2-conta .tp{font-size:11px;color:#5A5F66;}
       .cx2-conta.total{background:#0A1530;border-color:#0A1530;color:#EFEAD9;}
       .cx2-conta.total .lb{font-family:'JetBrains Mono',monospace;font-size:8.5px;letter-spacing:.16em;text-transform:uppercase;color:#C9A961;}
@@ -40142,6 +40154,7 @@ async function renderFinVisao(el){
           ${A.contas.map(({ conta:c, saldo }) => `<div class="cx2-conta"${Math.abs(+saldo||0) < 0.005 ? ' data-zero="1"' : ''}>
             <div class="l1"><span class="av" style="background:${_finCxContaCor(c)};">${escHtml(_finCxContaSigla(c))}</span><span class="nm" title="${escHtml(c.descricao||'')}">${escHtml(c.descricao||'—')}</span></div>
             <div class="sd" style="color:${saldo < 0 ? '#9B4A3F' : '#0A1530'};">${fmtR(saldo)}</div>
+            ${(A.aCreditarPorConta||{})[c.id] ? `<div class="acr" title="Já está no saldo do sistema; o Asaas ainda não liberou na conta">inclui ${fmtR(A.aCreditarPorConta[c.id].valor)} a creditar (${A.aCreditarPorConta[c.id].n} ${plural(A.aCreditarPorConta[c.id].n,'boleto')} de hoje)</div>` : ''}
             <div class="tp">${escHtml(_finCxContaTipo(c))}</div>
           </div>`).join('')}
         </div>
