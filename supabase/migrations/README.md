@@ -365,3 +365,24 @@ dois). Recomendado: merge → decidir os divergentes → aplicar → recarregar 
 devedora, ex.: filho atendido pelo dentista). Aditiva e idempotente. Enquanto não for
 aplicada, escolher "Assistido(a)" no painel falha ao salvar (violação do CHECK). Aplicar
 só com autorização do gestor, antes do merge do PR.
+
+## 20261019 — bancada de conferência do cliente (cedente)
+
+**Não aplicada.** `20261019_bancada_conferencia.sql` (+ `_rollback.sql`). Tabelas
+`conferencia_itens` (título digitalizado: devedor, descrição, `dados` com o lido no título e o
+que consta no cadastro) e `conferencia_perguntas` (pergunta por item ou geral, resposta,
+histórico de respostas trocadas). RLS: o cedente lê só os itens ativos dos clientes de
+`portal_meus_clientes()` (20261016b — aplicar esta antes); não tem INSERT/UPDATE/DELETE e
+responde só pela RPC `cedente_responder_conferencia(uuid, text)`, que recusa pergunta de outro
+cliente ou de item desativado. Proprietário: tudo; colaborador: só leitura; devedor e anon: nada.
+Aditiva e idempotente; o rollback apaga as respostas.
+
+Os itens NÃO estão no git (nomes, CPF, valores): `scripts/bancada_seed.py <_bancada-dados.json>`
+gera `_bancada-seed.sql` e `_bancada-previa.txt` ao lado do JSON. O seed acha o cliente pelo nome
+exato (para se achar 0 ou 2+), é reaplicável e não troca o texto de pergunta já respondida.
+
+Testada em PGlite (Postgres 16, sem Supabase): migração 28/28 (cedente A/B/inativo, devedor,
+anon, colaborador, proprietário, FK de cliente, unique, rollback e reaplicação) e seed 10/10
+(21 itens e 45 perguntas em 19/10/2026). Sem dry-run em prod. Leitura das respostas:
+`supabase/verification/bancada_conferencia_respostas.sql` ou a tela "Conferência de títulos"
+do painel. **Ordem:** aplicar → rodar o seed → merge.
