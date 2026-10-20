@@ -462,7 +462,7 @@ Deno.serve(async (req) => {
     if ((diasVencido >= diaMax && !respondeuAlguemDia) || (c.promessas_quebradas ?? 0) >= 2) {
       await sb.from('bia_cobranca').update({ status: 'para_acao', marcada_acao_em: agoraIso, updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
       paraAcao++;
-      await notificar(`COBRANÇA -> PARA AÇÃO\n${c.nome || ('+' + tel)} | R$ ${brMoney(c.valor)} | venceu ${brDate(c.venc_original)}\nSem resposta há ${diasVencido} dias úteis. Encaminhar ao Teixeira & Azzolin.`);
+      await notificar(`COBRANÇA -> PARA AÇÃO\n${c.nome || ('+' + tel)} | R$ ${brMoney(c.valor)} | venceu ${brDate(c.venc_original)}\nSem resposta há ${diasVencido} dias úteis. Encaminhar ao Gustavo Teixeira.`);
       continue;
     }
 
@@ -506,7 +506,7 @@ Deno.serve(async (req) => {
       if (dec === 'para_acao') {
         await sb.from('bia_cobranca').update({ status: 'para_acao', marcada_acao_em: agoraIso, updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
         paraAcao++;
-        await notificar(`COBRANÇA -> PARA AÇÃO\n${c.nome || ('+' + tel)} | R$ ${brMoney(c.valor)} | venceu ${brDate(c.venc_original)}\nPrazo final de ${brDate(prazoAnt)} passou sem pagamento. Encaminhar ao Teixeira & Azzolin.`);
+        await notificar(`COBRANÇA -> PARA AÇÃO\n${c.nome || ('+' + tel)} | R$ ${brMoney(c.valor)} | venceu ${brDate(c.venc_original)}\nPrazo final de ${brDate(prazoAnt)} passou sem pagamento. Encaminhar ao Gustavo Teixeira.`);
         continue;
       }
     }

@@ -318,7 +318,7 @@ R$506,00; sem o desconto da entrada, o Asaas gerou 9 boletos de ~R$561/554
 código.
 
 **Teste:** criar/editar um acordo com "Tem entrada?" marcado pela
-`peticao-teixeira-azzolin` (modo acordo), assinar no ZapSign (ou simular a
+`peticao-gustavo-teixeira` (modo acordo), assinar no ZapSign (ou simular a
 chamada a `gerar-acordo-termo`) e conferir `acordos.valor_entrada` preenchido
 e o `totalValue` enviado ao Asaas (`api/_emitir-acordo.js` → `pay.totalValue`)
 já descontando a entrada.
@@ -331,7 +331,7 @@ pendentes de aplicação manual em produção** — ver PR.
 
 **Achado junto (mesmo PR):** `api/_emitir-acordo.js` também tinha `fine: { value: 2 }`
 hardcoded — 2% de multa no boleto Asaas, enquanto o termo assinado
-(`peticao-teixeira-azzolin`, campo "Multa boleto (%)") usa 10% como padrão.
+(`peticao-gustavo-teixeira`, campo "Multa boleto (%)") usa 10% como padrão.
 Corrigido para 10%. **Retroativo:** os 20 acordos já emitidos por este fluxo
 (`metadata.boletos_emitidos=true`) saíram com multa 2% — correção nos boletos
 já existentes no Asaas é manual, fora desta migração (ver conversa/PR #483).
@@ -344,7 +344,7 @@ já existentes no Asaas é manual, fora desta migração (ver conversa/PR #483).
 - **F-22** (em desenvolvimento) colaborador cadastra credor via **aprovação do gestor** (branches
   `feat/aviso-aprovacao-whatsapp`, `feat/editar-credor-aprovacao`).
 - Higiene git: **fetch+rebase antes de afirmar/pushar**; editar em worktree isolado (sessões concorrentes).
-- Posicionamento público COBRASQ = **extrajudicial** (o judicial é do escritório Teixeira & Azzolin).
+- Posicionamento público COBRASQ = **extrajudicial** (o judicial é do escritório Gustavo Teixeira).
 
 ## R-20 · Pagamento do Asaas que não vira baixa no financeiro
 

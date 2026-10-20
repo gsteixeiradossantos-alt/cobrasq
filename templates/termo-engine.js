@@ -438,7 +438,7 @@
   }
 
   /* ------------------------------------------------------------------------
-   * TIMBRE: COBRASQ x Teixeira & Azzolin
+   * TIMBRE: COBRASQ x Gustavo Teixeira
    * O template do extrajudicial nasce com o timbre da COBRASQ. Ele só pode sair
    * assim quando a COBRASQ É A CREDORA (crédito cedido). Quando a credora é um
    * cliente, a COBRASQ não é parte do instrumento e estampar a marca dela no
@@ -490,7 +490,7 @@
   function aplicarTimbreTA(html, timbre) {
     let out = html.replace(/<style id="brand-fonts">[\s\S]*?<\/style>/, "");
     out = out.replace(/<title>[\s\S]*?<\/title>/,
-      "<title>Instrumento Particular de Confissão de Dívida — Teixeira &amp; Azzolin</title>");
+      "<title>Instrumento Particular de Confissão de Dívida — Gustavo Teixeira</title>");
     if (out.indexOf("</head>") === -1) throw new Error("Template do termo sem </head> — timbre não aplicado.");
     // Replacers como função: o conteúdo injetado é literal, sem interpretação de "$&".
     out = out.replace("</head>", function () { return timbre.style + "\n</head>"; });

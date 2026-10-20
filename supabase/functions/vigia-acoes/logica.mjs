@@ -14,7 +14,7 @@
 // Advogados do escritório (Gustavo, Ana Clara) — processo com um deles é NOSSO.
 export const OABS_NOSSAS = ['112743/PR', '119424/PR'];
 // Parte com um destes nomes = processo da casa (COBRASQ autora / cessionária).
-const RE_NOSSA_PARTE = /\bCOBRASQ\b|TEIXEIRA\s*(E|&)?\s*AZZOLIN/;
+const RE_NOSSA_PARTE = /\bCOBRASQ\b|GUSTAVO\s*TEIXEIRA|TEIXEIRA\s*(E|&)?\s*AZZOLIN/;
 
 // Sufixos societários ignorados na comparação ("… LTDA" x "… LTDA - ME").
 const SUFIXOS = new Set(['LTDA', 'ME', 'EPP', 'EIRELI', 'MEI', 'SA', 'S', 'A', 'SS', 'SLU']);
