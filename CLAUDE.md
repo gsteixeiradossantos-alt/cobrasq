@@ -121,6 +121,6 @@ sincronizar/migrar antes de qualquer cutover de origem.
   ao comentar blocos grandes.
 - Em material **público** da COBRASQ, posicionar sempre como cobrança
   **extrajudicial**/recuperação de crédito — nunca anunciar atuação judicial (privativa
-  de advocacia; fica no Teixeira & Azzolin).
+  de advocacia; fica no Gustavo Teixeira).
 - Catálogo de regressões com prova: `docs/audit/REGRESSOES.md`. Queries de verificação:
   `supabase/verification/`. Auditoria ponta a ponta: skill `/auditar-cobrasq`.
