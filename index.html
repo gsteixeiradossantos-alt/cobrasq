@@ -23932,21 +23932,26 @@ function registrarNegativacao(cobId, devId){
   }, { hint:'Sem API por enquanto — registro manual. O gancho p/ Serasa/SPC entra aqui depois.' });
 }
 
+// Apaga a cobrança e o que depende dela. Lança Error com a tabela que falhou.
+async function _apagarCobrancaEDependentes(supa, id){
+  const { error: e1 } = await supa.from('cobranca_partes').delete().eq('cobranca_id', id);
+  if(e1) throw new Error('partes: ' + e1.message);
+  const { error: e2 } = await supa.from('devedor_eventos').delete().eq('cobranca_id', id);
+  if(e2) throw new Error('histórico: ' + e2.message);
+  const { error: e3 } = await supa.from('documentos').delete().eq('cobranca_id', id);
+  if(e3) throw new Error('documentos: ' + e3.message);
+  const { error: e4 } = await supa.from('cobrancas').delete().eq('id', id);
+  if(e4) throw new Error('cobrança: ' + e4.message);
+  DB_cobrancas = (DB_cobrancas||[]).filter(c => c.id !== id);
+}
+
 async function excluirCobranca(id){
   if(ehColaborador()){ showToast('Só o administrador exclui casos. Peça ao Gustavo.','warning'); return; }
   if(!confirm('Excluir esta cobrança permanentemente?\n\nTodos os históricos, partes e documentos vinculados também serão excluídos.\nEsta ação não pode ser desfeita.')) return;
   const supa = getSupabase();
   if(!supa){ showToast('Supabase não configurado.','danger'); return; }
   try{
-    const { error: e1 } = await supa.from('cobranca_partes').delete().eq('cobranca_id', id);
-    if(e1) throw new Error('partes: ' + e1.message);
-    const { error: e2 } = await supa.from('devedor_eventos').delete().eq('cobranca_id', id);
-    if(e2) throw new Error('histórico: ' + e2.message);
-    const { error: e3 } = await supa.from('documentos').delete().eq('cobranca_id', id);
-    if(e3) throw new Error('documentos: ' + e3.message);
-    const { error: e4 } = await supa.from('cobrancas').delete().eq('id', id);
-    if(e4) throw new Error('cobrança: ' + e4.message);
-    DB_cobrancas = (DB_cobrancas||[]).filter(c => c.id !== id);
+    await _apagarCobrancaEDependentes(supa, id);
     showToast('Cobrança excluída.', 'success');
     showPage('cobr');
     renderCobrancas();
@@ -23954,6 +23959,47 @@ async function excluirCobranca(id){
     console.warn('[cobr] excluir:', e);
     showToast('Não foi possível excluir: ' + e.message, 'danger');
   }
+}
+
+// Exclusão definitiva do devedor pela ficha (só gestor). Recusa se o devedor
+// tem dívida de verdade vinculada: aí o caminho é excluir a cobrança primeiro.
+// A cobrança de mesmo id (cadastro antigo 1:1) vai junto, senão fica órfã.
+async function excluirDevedorDetalhe(id){
+  if(ehColaborador()){ showToast('Só o administrador exclui devedores. Peça ao Gustavo.','warning'); return; }
+  const supa = getSupabase();
+  if(!supa){ showToast('Supabase não configurado.','danger'); return; }
+  const { data:dev } = await supa.from('devedores').select('id,nome,doc').eq('id',id).maybeSingle();
+  if(!dev){ showToast('Devedor não encontrado.','warning'); return; }
+  const { data:vv, error:ev } = await supa.from('cobranca_partes').select('cobranca_id').eq('devedor_id',id);
+  if(ev){ showToast('Não foi possível conferir as dívidas: '+ev.message,'danger'); return; }
+  const outras = (vv||[]).filter(v=>v.cobranca_id!==id);
+  if(outras.length){
+    showToast(`"${dev.nome}" tem ${outras.length} dívida${outras.length>1?'s':''} vinculada${outras.length>1?'s':''}. Exclua ou desvincule a cobrança antes de excluir o devedor.`,'warning');
+    return;
+  }
+  promptModal(
+    `Excluir "${dev.nome||'devedor'}" definitivamente`,
+    `Digite "excluir" para confirmar. O cadastro e a cobrança antiga de mesmo código, com histórico e documentos, serão apagados e não voltam.`,
+    async (val)=>{
+      if(!val || val.toLowerCase() !== 'excluir'){
+        showToast('Texto incorreto — operação cancelada.','warning'); return;
+      }
+      try{
+        await _apagarCobrancaEDependentes(supa, id);
+        DB.devedores = (DB.devedores||[]).filter(d=>d.id!==id);
+        await excluirComTombstone('devedor', id, 'excluído pela ficha do devedor');
+        logAtividade('Excluiu devedor', `"${dev.nome}" — ${dev.doc||''}`, id);
+        save();
+        showToast(`"${dev.nome}" excluído.`,'success');
+        showPage('devedores');
+        renderDevedores();
+      }catch(e){
+        console.warn('[devedor] excluir:', e);
+        showToast('Não foi possível excluir: '+e.message,'danger');
+      }
+    },
+    { hint:'Digite exatamente: excluir' }
+  );
 }
 
 // Investigações do devedor + as avulsas (feitas antes do cadastro) do mesmo CPF/CNPJ.
@@ -24074,7 +24120,7 @@ async function renderDevedorDetalhe(){
     <div class="det-head">
       <span class="det-head-av">${escHtml(_detIniciais(dev.nome))}</span>
       <div><div class="det-head-tt">${escHtml(dev.nome||'—')}</div><div class="det-head-sub">${escHtml(dev.doc||'sem documento')}${dev.apelido?' · '+escHtml(dev.apelido):''}</div></div>
-      <div class="det-head-actions">${tel?_detWa(tel):''}<button class="cob-btn-ghost" onclick="openDrawer('${dev.id}')" title="Asaas, acordos, registrar pagamento, documentos">${ico('eye',14)} Painel operacional</button><button class="cob-btn-primary" onclick="editDevedor('${dev.id}')">${ico('edit',14)} Editar cadastro</button></div>
+      <div class="det-head-actions">${tel?_detWa(tel):''}<button class="cob-btn-ghost" onclick="openDrawer('${dev.id}')" title="Asaas, acordos, registrar pagamento, documentos">${ico('eye',14)} Painel operacional</button><button class="cob-btn-primary" onclick="editDevedor('${dev.id}')">${ico('edit',14)} Editar cadastro</button>${!ehColaborador()?`<button class="cob-btn-ghost" style="color:var(--danger);" onclick="excluirDevedorDetalhe('${dev.id}')" title="Exclui o devedor definitivamente">${ico('trash',14)||''} Excluir</button>`:''}</div>
     </div>
     ${meta}
     <div class="det-body"><div class="det-col">${panelDividas}${panelInvestigacao}<div id="dev-vigia"></div>${panelHist}</div><div class="det-col">${panelDados}${panelDocs}</div></div>
