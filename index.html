@@ -22606,7 +22606,7 @@ function buildCaseTimeline(eventos, repasses, legacyHist){
     const iso = String(p.data || e.criado_em || '').slice(0,10);
     // link público da decisão (certidão do DJEN, PDF sem login) — só esse domínio vira link.
     const link = /^https:\/\/comunicaapi\.pje\.jus\.br\//.test(p.link_decisao||'') ? p.link_decisao : null;
-    out.push({ iso, dataTxt:_detData(p.data||e.criado_em), tipo:tipoLabel, texto, cor, link });
+    out.push({ iso, dataTxt:_detData(p.data||e.criado_em), tipo:tipoLabel, texto, cor, link, notaId:(e.tipo==='nota_manual' && e.id) ? e.id : null });
   });
   (repasses||[]).forEach(r=>{
     const iso=String(r.data_pix||'').slice(0,10);
@@ -22802,7 +22802,7 @@ async function renderCobrancaDetalhe(){
     }catch(_){ window._cobrTerceiros = []; }
     await procVincCarregar(id);
     const { data:ev } = await supa.from('devedor_eventos')
-      .select('tipo,payload,criado_em').eq('cobranca_id',id).order('criado_em',{ascending:false}).limit(25);
+      .select('id,tipo,payload,criado_em').eq('cobranca_id',id).order('criado_em',{ascending:false}).limit(25);
     hist=ev||[];
     // Colunas do portal do cliente (migração 20260928_01). Sem elas no banco a consulta
     // erra; aí cai na consulta antiga e a aba Portal do cliente avisa que falta a migração.
@@ -23050,7 +23050,7 @@ async function renderCobrancaDetalhe(){
       return `<div class="det2-tl-item"><span class="det2-tl-dot" style="background:${cor};"></span>
         <span class="det2-tl-tag" style="color:${cor};">${escHtml((it.tipo||'').toUpperCase())}</span>
         <div class="det2-tl-desc">${escHtml(it.texto||'')}</div>${_tlLinkDecisao(it)}
-        <div class="det2-tl-meta">${escHtml(it.dataTxt||'')}</div>
+        <div class="det2-tl-meta">${escHtml(it.dataTxt||'')}${(it.notaId && currentUser?.papel==='proprietario') ? ` · <a href="#" style="color:var(--d-danger,#b3261e);" onclick="event.preventDefault();excluirNotaHistorico('${it.notaId}','${cob.id}')">excluir nota</a>` : ''}</div>
       </div>`; }).join('')}</div>`
       : `<div class="det2-empty"><span class="ic">${ico('clock',20)}</span><div class="tt">Sem histórico registrado.</div></div>`; })()}
   </div>`;
@@ -23911,6 +23911,28 @@ function adicionarNotaHistorico(cobId){
       renderCobrancaDetalhe();
     }catch(e){ showToast('Falha ao registrar: '+(e.message||e),'danger'); }
   }, { textarea: true, hint: 'A nota fica no histórico do caso para a equipe. Só aparece ao cliente, no portal, se a caixa abaixo estiver marcada.', checkbox: { label: 'Mostrar esta nota ao cliente no portal', checked: false } });
+}
+
+// Exclui UMA nota manual do histórico (só proprietário; a RLS de devedor_eventos já
+// restringe DELETE a ele). Só tipo 'nota_manual': andamentos, repasses e mudanças de
+// status são registro e não saem por aqui.
+async function excluirNotaHistorico(eventoId, cobId){
+  if(currentUser?.papel !== 'proprietario'){ showToast('Só o administrador exclui notas do histórico.','warning'); return; }
+  const supa=getSupabase(); if(!supa){ showToast('Supabase não configurado.','danger'); return; }
+  const { data:ev } = await supa.from('devedor_eventos').select('id,tipo,payload').eq('id',eventoId).maybeSingle();
+  if(!ev || ev.tipo!=='nota_manual'){ showToast('Nota não encontrada.','warning'); return; }
+  const txt = String((ev.payload||{}).acao_completa||(ev.payload||{}).texto||'').slice(0,160);
+  promptModal('Excluir nota do histórico', `Digite "excluir" para apagar esta nota definitivamente:\n\n${txt}`, async (val)=>{
+    if(!val || val.toLowerCase()!=='excluir'){ showToast('Texto incorreto — operação cancelada.','warning'); return; }
+    try{
+      const { data:del, error } = await supa.from('devedor_eventos').delete().eq('id',eventoId).eq('tipo','nota_manual').select('id');
+      if(error) throw error;
+      if(!del || !del.length) throw new Error('nada foi apagado (sem permissão?)');
+      logAtividade('Excluiu nota do histórico', txt, cobId);
+      showToast('Nota excluída.','success');
+      renderCobrancaDetalhe();
+    }catch(e){ showToast('Não foi possível excluir: '+(e.message||e),'danger'); }
+  }, { hint:'A nota some do histórico e não volta.' });
 }
 
 // Negativação manual (handoff §4.9): registra no histórico do caso. Sem API por ora;
