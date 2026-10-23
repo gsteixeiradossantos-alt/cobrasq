@@ -84,13 +84,14 @@ module.exports = async function handler(req, res) {
   //    foi decidida em 12/09/2026; nesse intervalo a RPC devolvia [] e o botão dizia
   //    "Nenhuma empresa encontrada" — falso negativo silencioso. Agora a API confere
   //    rf_base_status() antes: base vazia → cai no fallback (CNPJá pago ou aviso manual).
-  let baseOk = false, baseStatus = null;
+  let baseOk = false, baseStatus = null, erroBase = '';
   try {
     const st = await sbFetch('rpc/rf_base_status', { method: 'POST', body: '{}' });
     baseStatus = Array.isArray(st) ? st[0] : st;
     baseOk = !!(baseStatus && Number(baseStatus.socios) > 0);
   } catch (e) {
-    console.warn('[cnpja] rf_base_status indisponível (migração 20260912 não aplicada?):', e && e.message);
+    erroBase = (e && e.message) || String(e);
+    console.warn('[cnpja] rf_base_status indisponível (migração 20260912 não aplicada?):', erroBase);
   }
   if (baseOk) try {
     const rows = await sbFetch('rpc/buscar_empresas_por_socio', {
@@ -133,7 +134,8 @@ module.exports = async function handler(req, res) {
     }
   } catch (e) {
     // RPC/tabela ausente ou Supabase indisponível — segue para o CNPJá pago (fallback).
-    console.warn('[cnpja] RPC Supabase indisponível, tentando CNPJá:', e && e.message);
+    erroBase = (e && e.message) || String(e);
+    console.warn('[cnpja] RPC Supabase indisponível, tentando CNPJá:', erroBase);
   }
 
   // 2) FALLBACK PAGO: API Comercial do CNPJá (busca por sócio), gated por CNPJA_TOKEN.
@@ -142,8 +144,12 @@ module.exports = async function handler(req, res) {
     // Sem base local nem token pago: orienta o operador a usar a busca manual gratuita.
     return res.status(200).json({
       pendente: true,
+      // Distingue "base vazia" de "o servidor não conseguiu consultar o Supabase": antes os dois
+      // viravam "rf_socios vazia", e uma chave inválida na Vercel ficava invisível.
       motivo: baseOk ? 'CNPJA_TOKEN não configurada no servidor.'
-        : 'base da Receita ainda não carregada no Supabase (rf_socios vazia) e CNPJA_TOKEN não configurada.',
+        : erroBase
+          ? 'o servidor não conseguiu consultar a base da Receita no Supabase (' + erroBase.slice(0, 300) + ') e CNPJA_TOKEN não configurada.'
+          : 'base da Receita ainda não carregada no Supabase (rf_socios vazia) e CNPJA_TOKEN não configurada.',
       hint: 'Defina CNPJA_TOKEN (API Comercial do CNPJá) no painel da Vercel para ligar a busca automática por sócio.',
       fallbackUrl: 'https://casadosdados.com.br/solucao/cnpj/busca-avancada?socio=' + encodeURIComponent(nome),
     });
