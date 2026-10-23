@@ -5112,6 +5112,9 @@ let _syncPendingForce = false;
 // F-20 (incidente 2026-06-11): nº de devedores da última versão confiável.
 // Usado pela trava anti-encolhimento do syncToSupabase.
 let _lastKnownDevCount = null;
+// true depois que loadRelationalData terminou (com sucesso ou não) no boot. Antes disso o
+// _lastKnownDevCount vem do blob (74) e a lista em memória não é a do servidor (2200+).
+let _relBootDone = false;
 
 // ── GRAVAÇÃO POR REGISTRO (aprovada pelo gestor, 2026-06-12) ─────────────
 // Snapshot da última versão sincronizada. No save, comparamos registro a
@@ -5281,6 +5284,12 @@ async function syncToSupabase(force){
         // que a aba está com cópia velha. BLOQUEIO TOTAL, sem confirmação
         // (decisão do gestor: ninguém pode "confirmar sem querer") — recarrega
         // os dados do servidor e avisa.
+        // No boot, até a carga relacional terminar, a contagem local é a do blob e não diz nada
+        // sobre o servidor: comparar agora gerava "faltam 2153 devedores" no login. Adia o save.
+        if(!_relBootDone && _lastKnownDevCount != null && localDevs < _lastKnownDevCount - 2){
+          console.warn('F-20: carga relacional ainda não terminou — save adiado.');
+          return;
+        }
         if(_lastKnownDevCount != null && localDevs < _lastKnownDevCount - 2){
           // CONFERE CONTRA O SERVIDOR ANTES DE BLOQUEAR. `_lastKnownDevCount` é uma
           // referência de SESSÃO e derrapa por caminhos que não têm nada a ver com aba
@@ -5304,7 +5313,9 @@ async function syncToSupabase(force){
             const perda = (serverDevs == null ? _lastKnownDevCount : serverDevs) - localDevs;
             console.warn('F-20: save bloqueado — removeria ' + perda + ' devedores do servidor.');
             if(typeof showToast === 'function') showToast('🛡️ Salvamento BLOQUEADO: esta aba está desatualizada (faltam ' + perda + ' devedores). Dados do servidor recarregados — reaplique sua alteração.','danger');
-            try{ await loadFromSupabase(); }catch(e){ console.warn('F-20: reload pós-bloqueio falhou:', e?.message||e); }
+            // loadFromSupabase traz só o blob (74 devedores); sem recarregar o relacional a aba
+            // ficava com 74 e o próximo save era bloqueado de novo, em loop.
+            try{ await loadFromSupabase(); await loadRelationalData(); }catch(e){ console.warn('F-20: reload pós-bloqueio falhou:', e?.message||e); }
             return;
           }
           // O servidor confirma que esta aba NÃO está encolhendo nada: quem estava
@@ -5328,7 +5339,7 @@ async function syncToSupabase(force){
           }
           if(merr && /F-20/.test(merr.message||'')){
             if(typeof showToast === 'function') showToast('🛡️ ' + merr.message, 'danger');
-            try{ await loadFromSupabase(); }catch(e){ console.warn('reload pós-F20:', e?.message||e); }
+            try{ await loadFromSupabase(); await loadRelationalData(); }catch(e){ console.warn('reload pós-F20:', e?.message||e); }
             return;
           }
           console.warn('cobrasq_merge indisponível — fallback para blob inteiro:', merr?.message || JSON.stringify(mres||{}));
@@ -6114,6 +6125,9 @@ async function loadTombstones(){
 }
 
 async function loadRelationalData(){
+  try{ return await _loadRelationalDataImpl(); } finally { _relBootDone = true; }
+}
+async function _loadRelationalDataImpl(){
   // Sobrescreve DB.devedores e DB.clientes com dados das tabelas relacionais
   // (fonte da verdade pós-Fase 2.5). Roda só após login — antes disso, RLS
   // retorna [] e perderíamos os dados do JSON blob.
