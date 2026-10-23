@@ -11,7 +11,7 @@ import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { MODELO } from '../_shared/bia-system.ts';
 import { resolverJid } from '../_shared/telefone-jid.ts';
 import { diasUteisDecorridos, ehDiaUtil, etapaPreVencimento, noveHorasBRT, proximoDiaAtraso, somarDiasUteis, vencimentoEfetivo } from '../_shared/dias-uteis.ts';
-import { decidirPrazoFinal, PREFIXO_PRAZO, prazoDoLog, textosAtraso, textosPreVencimento } from '../_shared/bia-avisos.ts';
+import { decidirPrazoFinal, PREFIXO_PRAZO, prazoDoLog, retomadaAposManual, textosAtraso, textosPreVencimento } from '../_shared/bia-avisos.ts';
 
 const SIG = '*Bia • COBRASQ*';
 // 1º aviso antes do vencimento: N dias antes (mesma variável do bia-cobranca-sync)
@@ -357,9 +357,20 @@ Deno.serve(async (req) => {
     }
 
     // cede a vez ao humano / negociação viva
-    const { data: at } = await sb.from('whatsapp_atendimentos').select('estado, humano_ate').eq('telefone', tel).maybeSingle();
+    // casa pelos 8 últimos dígitos: o atendimento grava o número sem o 9 (554699046592)
+    // e a bia_cobranca com ele (5546999046592) — no .eq exato a pausa nunca achava
+    const { data: ats } = await sb.from('whatsapp_atendimentos').select('estado, humano_ate').like('telefone', '%' + tel.slice(-8)).order('updated_at', { ascending: false }).limit(1);
+    const at = ats?.[0];
     if (at?.estado === 'aguardando_humano') { puladas++; continue; }
     if (at?.humano_ate && Date.now() < new Date(at.humano_ate).getTime()) { puladas++; continue; }
+
+    // mensagem manual pela fila também é humano: pausa e respeita o prazo dado nela
+    const { data: manuais } = await sb.from('crm_mensagens_agendadas').select('origem, mensagem, enviada_em').eq('status', 'enviada').like('telefone', '%' + tel.slice(-8)).gte('enviada_em', new Date(Date.now() - 90 * 864e5).toISOString());
+    const retomar = retomadaAposManual(manuais || [], Date.now(), cfg.humano_pausa_min ?? 1440);
+    if (retomar) {
+      await sb.from('bia_cobranca').update({ proximo_lembrete_em: retomar, observacao: 'mensagem manual enviada; régua aguarda a pausa/prazo dado', updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
+      puladas++; continue;
+    }
 
     // se o cliente escreveu DEPOIS do último lembrete, está conversando -> pausa a régua
     const { data: msgs } = await sb.from('crm_mensagens_recebidas').select('recebida_em').eq('telefone', tel).order('recebida_em', { ascending: false }).limit(1);

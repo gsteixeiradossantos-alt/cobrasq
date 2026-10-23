@@ -165,3 +165,56 @@ export function decidirPrazoFinal(prazoAnterior: string | null, hoje: string): '
   if (!prazoAnterior) return 'enviar';
   return hoje.slice(0, 10) <= prazoAnterior ? 'aguardar' : 'para_acao';
 }
+
+// ===== Mensagem manual pela fila também é atendimento humano =====
+// A pausa de humano_pausa_min só ligava quando alguém escrevia no celular
+// (zapi-recebidas). Mensagem manual pela fila (origem manual_* / negociacao)
+// passava batida, e o prazo dado nela era atropelado. Caso real: Cristiane,
+// 19/10/2026, "Preciso do pagamento até sexta-feira, 23/10" saiu pela fila; a
+// Bia cobrou no dia seguinte e no próprio dia 23 ("Sem retorno, o caso segue...").
+//  - toda mensagem manual  -> Bia espera humano_pausa_min a partir do envio
+//  - "até dd/mm" no texto  -> Bia fica quieta até o prazo; volta no dia seguinte, 9h
+export type MsgManual = { origem: string | null; mensagem: string | null; enviada_em: string | null };
+
+export function ehOrigemManual(origem: string | null | undefined): boolean {
+  return /^(manual|negociacao)/i.test(String(origem || ''));
+}
+
+function somar1Dia(d: string): string {
+  const t = new Date(d + 'T12:00:00Z'); t.setUTCDate(t.getUTCDate() + 1);
+  return t.toISOString().slice(0, 10);
+}
+
+// prazo "até [sexta-feira,] dd/mm[/aaaa]" -> 'YYYY-MM-DD' (o mais distante), ou null.
+// Só vale data entre o dia do envio e 90 dias depois (dd/mm de vencimento antigo não conta).
+export function prazoDaMensagem(texto: string | null | undefined, enviadaEm: string): string | null {
+  const base = enviadaEm.slice(0, 10);
+  const lim = new Date(Date.parse(base + 'T12:00:00Z') + 90 * 864e5).toISOString().slice(0, 10);
+  let melhor: string | null = null;
+  const re = /(?<!\p{L})at[ée](?!\p{L})[^\d\n]{0,30}?(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/giu;
+  for (const m of String(texto || '').matchAll(re)) {
+    const dd = Number(m[1]), mm = Number(m[2]);
+    if (dd < 1 || dd > 31 || mm < 1 || mm > 12) continue;
+    let ano = m[3] ? Number(m[3].length === 2 ? '20' + m[3] : m[3]) : Number(base.slice(0, 4));
+    let d = `${ano}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+    if (!m[3] && d < base) { ano++; d = `${ano}-${d.slice(5)}`; }
+    if (d < base || d > lim) continue;
+    if (!melhor || d > melhor) melhor = d;
+  }
+  return melhor;
+}
+
+// quando a Bia pode voltar a cobrar depois das mensagens manuais (ISO), ou null se já pode.
+export function retomadaAposManual(msgs: MsgManual[], agoraMs: number, pausaMin: number): string | null {
+  let ate = 0;
+  for (const m of msgs) {
+    if (!ehOrigemManual(m.origem) || !m.enviada_em) continue;
+    const env = Date.parse(m.enviada_em);
+    if (!Number.isFinite(env)) continue;
+    ate = Math.max(ate, env + pausaMin * 60e3);
+    const envSP = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date(env));
+    const prazo = prazoDaMensagem(m.mensagem, envSP);
+    if (prazo) ate = Math.max(ate, Date.parse(somar1Dia(prazo) + 'T09:00:00-03:00'));
+  }
+  return ate > agoraMs ? new Date(ate).toISOString() : null;
+}
