@@ -19076,7 +19076,7 @@ function salvarHistorico(){
 // por link do Mercado Pago gerado à mão (o devedor parcela com a operadora, a
 // taxa é da COBRASQ — decisão do Gustavo, 08/10/2026). A baixa dessas parcelas é
 // manual, na gaveta do devedor.
-function addBlocoAcordo(qtd, valor, containerId, meio){
+function addBlocoAcordo(qtd, valor, containerId, meio, venc){
   const wrap = document.getElementById(containerId||'macord-blocos');
   if(!wrap) return;
   const row = document.createElement('div');
@@ -19087,23 +19087,33 @@ function addBlocoAcordo(qtd, valor, containerId, meio){
     <div class="fg" style="flex:1;"><label>Nº parcelas</label><input type="number" min="1" class="macord-bloco-qtd" value="${qtd||1}"></div>
     <div class="fg" style="flex:1;"><label>Valor por parcela (R$)</label><input type="text" class="macord-bloco-valor" placeholder="0,00" value="${valor?fmt(valor):''}"></div>
     <div class="fg" style="flex:0 0 190px;"><label>Meio</label><select class="macord-bloco-meio"><option value="boleto"${(isPix||isCartao)?'':' selected'}>Boleto (Asaas)</option><option value="pix"${isPix?' selected':''}>PIX</option><option value="cartao"${isCartao?' selected':''}>Cartão (link Mercado Pago)</option></select></div>
+    ${containerId==='taj-blocos' ? `<div class="fg macord-bloco-venc-wrap" style="flex:0 0 150px;" title="Deixe em branco para seguir mês a mês depois da faixa anterior"><label>1º venc. da faixa</label><input type="date" class="macord-bloco-venc" value="${/^\d{4}-\d{2}-\d{2}$/.test(venc||'')?venc:''}"></div>` : ''}
     <button type="button" class="btn btn-ghost btn-sm macord-bloco-rm" title="Remover esta faixa" style="margin-bottom:2px;">&#10005;</button>
   `;
   const onInput = ()=>recalcAcordoBlocos(containerId);
   row.querySelector('.macord-bloco-qtd').addEventListener('input', onInput);
   row.querySelector('.macord-bloco-valor').addEventListener('input', onInput);
   row.querySelector('.macord-bloco-meio').addEventListener('change', onInput);
+  const vencEl = row.querySelector('.macord-bloco-venc'); if(vencEl) vencEl.addEventListener('input', onInput);
   row.querySelector('.macord-bloco-rm').onclick = ()=>{ row.remove(); recalcAcordoBlocos(containerId); };
   wrap.appendChild(row);
   recalcAcordoBlocos(containerId);
 }
 
 function lerBlocosAcordo(containerId){
-  return Array.from(document.querySelectorAll('#'+(containerId||'macord-blocos')+' .macord-bloco-row')).map(row=>({
-    qtd: parseInt(row.querySelector('.macord-bloco-qtd').value)||0,
-    valor: parseValorBR(row.querySelector('.macord-bloco-valor').value||'0'),
-    meio: (v=>(v==='pix'||v==='cartao')?v:'boleto')((row.querySelector('.macord-bloco-meio')||{}).value)
-  })).filter(b=>b.qtd>0 && b.valor>0);
+  // venc: data do 1º vencimento da faixa (só no Termo, #taj-blocos). A 1ª linha não
+  // tem — o 1º vencimento do acordo é o campo tajVenc. Vazio = segue mês a mês
+  // depois da faixa anterior (comportamento de sempre).
+  return Array.from(document.querySelectorAll('#'+(containerId||'macord-blocos')+' .macord-bloco-row')).map((row,i)=>{
+    const vEl = row.querySelector('.macord-bloco-venc');
+    const b = {
+      qtd: parseInt(row.querySelector('.macord-bloco-qtd').value)||0,
+      valor: parseValorBR(row.querySelector('.macord-bloco-valor').value||'0'),
+      meio: (v=>(v==='pix'||v==='cartao')?v:'boleto')((row.querySelector('.macord-bloco-meio')||{}).value)
+    };
+    if(vEl && i>0 && /^\d{4}-\d{2}-\d{2}$/.test(vEl.value)) b.venc = vEl.value;
+    return b;
+  }).filter(b=>b.qtd>0 && b.valor>0);
 }
 
 // entradaId/resumoId param — o Termo de acordo (#taj-blocos) não tem campo de
@@ -19125,6 +19135,9 @@ function recalcAcordoBlocos(containerId, entradaId, resumoId){
     if(el) el.textContent = `Total: ${fmtR(total)} em ${nParc + (entrada>0?1:0)} parcela(s)${entrada>0?' (incl. entrada)':''}`;
   }
   if(cId==='taj-blocos'){
+    document.querySelectorAll('#taj-blocos .macord-bloco-row').forEach((row,i)=>{
+      const w=row.querySelector('.macord-bloco-venc-wrap'); if(w) w.style.display = i===0 ? 'none' : '';
+    });
     const elT=document.getElementById('tajTotal'); if(elT) elT.value = valorBRParaInput(total);
     // Chave PIX só aparece quando alguma faixa é PIX — é o que o termo vai citar.
     const w=document.getElementById('tajPixWrap'); if(w) w.style.display = blocos.some(b=>b.meio==='pix') ? '' : 'none';
@@ -49495,7 +49508,7 @@ function abrirTermoAcordoJ(devId){
   window._tajFaixasIniciais = null;
   if(temEntradaAc) _tajBlocosSeed.unshift({ qtd:1, valor:ac.entrada });
   if(!_tajBlocosSeed.length) _tajBlocosSeed.push({ qtd:1, valor:null });
-  _tajBlocosSeed.forEach(b=>addBlocoAcordo(b.qtd, b.valor, 'taj-blocos', b.meio));
+  _tajBlocosSeed.forEach(b=>addBlocoAcordo(b.qtd, b.valor, 'taj-blocos', b.meio, b.venc));
   const _tajVencEl = document.getElementById('tajVenc'); if(_tajVencEl) _tajVencEl.value = temEntradaAc ? entradaVenc : venc1;
   _tajAoTrocarCredor();
   const rExt=document.querySelector('input[name="tajTipo"][value="extrajudicial"]'); if(rExt) rExt.checked=true;
@@ -49975,13 +49988,17 @@ async function _tajFecharAcordo(faixas, venc1, rito){
   const forma = _formaAcordoDasFaixas(faixas);
   const [y,m,d] = venc1.split('-').map(Number);
   const parcelas = [];
-  let mesOffset=0, seq=0;
+  // Cada faixa pode ter o seu 1º vencimento (b.venc); sem ele, começa um mês depois
+  // do fim da faixa anterior. A 1ª faixa sempre parte de venc1.
+  let seq=0, inicio=[y, m-1, d];
   faixas.forEach((b,bi)=>{
+    if(bi>0 && /^\d{4}-\d{2}-\d{2}$/.test(b.venc||'')){ const q=b.venc.split('-').map(Number); inicio=[q[0], q[1]-1, q[2]]; }
     for(let i=0;i<b.qtd;i++){
-      const vDate = new Date(y, m-1+mesOffset, d);
+      const vDate = new Date(inicio[0], inicio[1]+i, inicio[2]);
       parcelas.push({ id:uid(), numero:seq, valor:b.valor, vencimento:isoLocal(vDate), pago:false, bloco:bi+1, meio:b.meio||'boleto' });
-      seq++; mesOffset++;
+      seq++;
     }
+    inicio=[inicio[0], inicio[1]+b.qtd, inicio[2]];
   });
 
   let acordoId = _tajState.acordoId;

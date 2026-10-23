@@ -220,7 +220,18 @@
       return "mediante o pagamento de uma entrada de " + ent + entVenc +
         " e o remanescente em " + corpo + ", sendo que a primeira parcela será considerada vencida em " + venc;
     }
-    return "mediante o pagamento de " + corpo + ", sendo que a primeira parcela será considerada vencida em " + venc;
+    return "mediante o pagamento de " + corpo + ", sendo que a primeira parcela será considerada vencida em " + venc + vencFaixas(faixas);
+  }
+
+  // Faixa com data própria (f.venc, YYYY-MM-DD): o termo diz quando ela começa a vencer.
+  // A 1ª faixa parte de ac.vencimento e nunca entra aqui; faixa sem data segue mês a mês.
+  function vencFaixas(faixas) {
+    const com = [];
+    faixas.forEach(function (f, i) { if (i > 0 && f.venc) com.push({ i: i + 1, f: f }); });
+    if (!com.length) return "";
+    return com.map(function (x) {
+      return ", e a primeira parcela da " + x.i + "ª faixa (" + x.f.qtd + "x de " + valorCompleto(x.f.valor) + ") será considerada vencida em <strong>" + dataExtenso(x.f.venc) + "</strong>";
+    }).join("");
   }
 
   function escAttr(s) { return String(s == null ? "" : s); }
@@ -655,8 +666,12 @@
     // último vencimento: mesma conta de _tajFecharAcordo (index.html) — mês a mês a partir do 1º
     let vencUlt = "";
     if (ac.vencimento) {
-      const p = String(ac.vencimento).split("-").map(Number);
-      const dt = new Date(p[0], p[1] - 1 + (nParc - 1), p[2]);
+      let p = String(ac.vencimento).split("-").map(Number), off = 0, last = 0;
+      faixas.forEach(function (f, i) {
+        if (i > 0 && f.venc) { p = String(f.venc).split("-").map(Number); off = 0; }
+        last = off + f.qtd - 1; off += f.qtd;
+      });
+      const dt = new Date(p[0], p[1] - 1 + last, p[2]);
       vencUlt = dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
     }
     return { lev: lev, saldo: saldo, total: total, nParc: nParc, vencUlt: vencUlt,
