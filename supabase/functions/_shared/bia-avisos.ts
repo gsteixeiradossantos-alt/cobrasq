@@ -180,16 +180,19 @@ export function ehOrigemManual(origem: string | null | undefined): boolean {
   return /^(manual|negociacao)/i.test(String(origem || ''));
 }
 
+function ymdUTC(t: Date): string {
+  return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')}`;
+}
 function somar1Dia(d: string): string {
   const t = new Date(d + 'T12:00:00Z'); t.setUTCDate(t.getUTCDate() + 1);
-  return t.toISOString().slice(0, 10);
+  return ymdUTC(t);
 }
 
 // prazo "até [sexta-feira,] dd/mm[/aaaa]" -> 'YYYY-MM-DD' (o mais distante), ou null.
 // Só vale data entre o dia do envio e 90 dias depois (dd/mm de vencimento antigo não conta).
 export function prazoDaMensagem(texto: string | null | undefined, enviadaEm: string): string | null {
   const base = enviadaEm.slice(0, 10);
-  const lim = new Date(Date.parse(base + 'T12:00:00Z') + 90 * 864e5).toISOString().slice(0, 10);
+  const lim = ymdUTC(new Date(Date.parse(base + 'T12:00:00Z') + 90 * 864e5));
   let melhor: string | null = null;
   const re = /(?<!\p{L})at[ée](?!\p{L})[^\d\n]{0,30}?(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/giu;
   for (const m of String(texto || '').matchAll(re)) {
