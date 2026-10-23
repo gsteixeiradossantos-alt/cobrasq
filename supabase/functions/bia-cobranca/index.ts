@@ -336,7 +336,30 @@ Deno.serve(async (req) => {
     (apsPend || []).forEach((a: any) => { const k = String(a.telefone || '').replace(/\D/g, '').slice(-8); if (k) telsComAprovPendente.add(k); });
   } catch { /* best-effort */ }
 
+  // Caso em "Executar acordo" = acordo descumprido indo para execução: quem fala é o
+  // advogado, não a régua (mesma regra do STATUS_FORA_REGUA em api/cron-regua.js).
+  // Até 23/10/2026 a Bia seguia lembrando os boletos desses casos. O vínculo é pelo
+  // BOLETO (fin_lancamento.cobranca_id), não pelo cliente do Asaas: o mesmo devedor
+  // pode ter outro acordo em dia (Douglas Flores Rodrigues) que deve continuar.
+  const paysExecutarAcordo = new Set<string>();
+  try {
+    const ids = (rows || []).map((r: any) => r.asaas_payment_id).filter(Boolean);
+    if (ids.length) {
+      const { data: lancs } = await sb.from('fin_lancamento').select('asaas_payment_id, cobranca_id').in('asaas_payment_id', ids).not('cobranca_id', 'is', null);
+      const cobIds = [...new Set((lancs || []).map((l: any) => l.cobranca_id))];
+      if (cobIds.length) {
+        const { data: cobs } = await sb.from('cobrancas').select('id').in('id', cobIds).eq('status', 'Executar acordo');
+        const exec = new Set((cobs || []).map((x: any) => x.id));
+        (lancs || []).forEach((l: any) => { if (exec.has(l.cobranca_id)) paysExecutarAcordo.add(l.asaas_payment_id); });
+      }
+    }
+  } catch { /* best-effort */ }
+
   for (const c of (rows || [])) {
+    if (paysExecutarAcordo.has(c.asaas_payment_id)) {
+      await sb.from('bia_cobranca').update({ status: 'pausada', observacao: 'caso em Executar acordo — régua não cobra', updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
+      puladas++; continue;
+    }
     const tel = String(c.telefone || '').replace(/\D/g, '');
     if (!tel) { puladas++; continue; }
     if (testeTel && tel.slice(-8) !== testeTel.slice(-8)) { puladas++; continue; }
