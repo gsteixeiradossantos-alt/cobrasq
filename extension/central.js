@@ -585,6 +585,8 @@ function partesHtml(caso, chave, rotulo) {
   const lista = caso.dados[chave] || [];
   // Endereço/e-mail/telefone: o eproc EXIGE endereço+contato da parte (cadastro novo
   // ou complemento). Vêm da qualificação da inicial via IA; usados nas pausas guiadas.
+  // A IA separa "telefone" (fixo) de "celular"; o campo telefone mostra o celular
+  // quando não há fixo (senão o número da peça nunca aparecia na revisão).
   const linhas = lista.map((p, i) => `<div style="margin:3px 0 8px;" class="partes">
       <div style="display:flex;gap:6px;">
         <input style="flex:2;" data-caso="${caso.id}" data-parte="${chave}.${i}.nome" value="${esc(p.nome || '')}" placeholder="nome">
@@ -593,7 +595,7 @@ function partesHtml(caso, chave, rotulo) {
       <div style="display:flex;gap:6px;margin-top:3px;">
         <input style="flex:3;" data-caso="${caso.id}" data-parte="${chave}.${i}.endereco" value="${esc(p.endereco || '')}" placeholder="endereço (rua, nº, cidade/UF, CEP) — p/ cadastro no eproc">
         <input style="flex:1.4;" data-caso="${caso.id}" data-parte="${chave}.${i}.email" value="${esc(p.email || '')}" placeholder="e-mail">
-        <input style="flex:1;" data-caso="${caso.id}" data-parte="${chave}.${i}.telefone" value="${esc(p.telefone || '')}" placeholder="telefone">
+        <input style="flex:1;" data-caso="${caso.id}" data-parte="${chave}.${i}.telefone" value="${esc(p.telefone || p.celular || '')}" placeholder="telefone">
       </div>
     </div>`).join('');
   const alerta = lista.some(p => p && digitos(p.doc).length >= 11) ? ''
@@ -650,6 +652,8 @@ function renderFase3() {
     const caso = state.casos.find(c => c.id === inp.dataset.caso);
     const [chave, i, campo] = inp.dataset.parte.split('.');
     caso.dados[chave][+i][campo] = inp.value.trim() || null;
+    // Telefone editado na revisão vale sobre o celular da IA (o eproc usa celular || telefone).
+    if (campo === 'telefone') caso.dados[chave][+i].celular = null;
   });
   app.querySelectorAll('input[data-proj]').forEach(inp => inp.onchange = () => {
     const caso = state.casos.find(c => c.id === inp.dataset.caso);
