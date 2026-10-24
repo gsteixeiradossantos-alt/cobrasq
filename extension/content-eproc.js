@@ -203,13 +203,62 @@
     p.innerHTML =
       '<div style="background:#0c2340;color:#fff;padding:10px 12px;font-weight:600;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;">' +
       '<span>Cobrasq · Peticionador eproc <small style="opacity:.7;">v' + chrome.runtime.getManifest().version + '</small></span>' +
-      '<span id="cb-close" style="cursor:pointer;opacity:.8;">✕</span></div>' +
+      '<span style="display:flex;gap:12px;align-items:center;">' +
+      '<span id="cb-novo" title="aviso novo" style="display:none;width:8px;height:8px;border-radius:50%;background:#C9A961;"></span>' +
+      '<span id="cb-min" title="minimizar" style="cursor:pointer;opacity:.8;">—</span>' +
+      '<span id="cb-close" style="cursor:pointer;opacity:.8;">✕</span></span></div>' +
       '<div id="cb-body" style="padding:12px;"></div>';
     document.body.appendChild(p);
     p.querySelector('#cb-close').onclick = () => p.remove();
+    janelaMovel(p);
     return p;
   }
-  function setBody(html) { painel().querySelector('#cb-body').innerHTML = html; }
+  // Minimizar (— no cabeçalho) e arrastar pelo cabeçalho. Posição e estado ficam no
+  // storage: cada etapa do eproc recarrega a página e recria o painel.
+  const UI_KEY = 'cobrasq_eproc_painel_ui';
+  function janelaMovel(p) {
+    const head = p.firstElementChild, body = p.querySelector('#cb-body');
+    const btnMin = p.querySelector('#cb-min'), novo = p.querySelector('#cb-novo');
+    let ui = {};
+    const salvar = () => { try { chrome.storage.local.set({ [UI_KEY]: ui }); } catch (_) {} };
+    const posicionar = (x, y) => {
+      x = Math.max(0, Math.min(x, window.innerWidth - p.offsetWidth));
+      y = Math.max(0, Math.min(y, window.innerHeight - head.offsetHeight));
+      Object.assign(p.style, { left: x + 'px', top: y + 'px', right: 'auto', bottom: 'auto' });
+      ui.x = x; ui.y = y;
+    };
+    const minimizar = (sim) => {
+      ui.min = !!sim;
+      body.style.display = sim ? 'none' : '';
+      btnMin.textContent = sim ? '▢' : '—';
+      btnMin.title = sim ? 'restaurar' : 'minimizar';
+      if (!sim) novo.style.display = 'none';
+    };
+    btnMin.onclick = () => { minimizar(!ui.min); salvar(); };
+    head.style.cursor = 'move';
+    head.addEventListener('mousedown', (e) => {
+      if (e.button !== 0 || e.target === btnMin || e.target.id === 'cb-close') return;
+      e.preventDefault();
+      const r = p.getBoundingClientRect(), dx = e.clientX - r.left, dy = e.clientY - r.top;
+      const mover = (ev) => posicionar(ev.clientX - dx, ev.clientY - dy);
+      const soltar = () => { document.removeEventListener('mousemove', mover); document.removeEventListener('mouseup', soltar); salvar(); };
+      document.addEventListener('mousemove', mover);
+      document.addEventListener('mouseup', soltar);
+    });
+    try {
+      chrome.storage.local.get([UI_KEY], (o) => {
+        ui = (o && o[UI_KEY]) || {};
+        if (typeof ui.x === 'number') posicionar(ui.x, ui.y);
+        minimizar(ui.min);
+      });
+    } catch (_) {}
+  }
+  function setBody(html) {
+    const p = painel();
+    p.querySelector('#cb-body').innerHTML = html;
+    // Minimizado: acende a bolinha dourada para o aviso novo não passar batido.
+    if (p.querySelector('#cb-body').style.display === 'none') p.querySelector('#cb-novo').style.display = '';
+  }
   function msg(t, cor) { return '<div style="padding:6px 8px;border-radius:6px;background:' + (cor || '#f1f3f5') + ';margin-bottom:8px;">' + t + '</div>'; }
   function listaErros(erros) {
     return erros.length
