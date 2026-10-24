@@ -116,7 +116,8 @@ async function lerPdfsDaPasta(dirHandle) {
 }
 async function escolherPasta() {
   let root;
-  try { root = await window.showDirectoryPicker({ mode: 'read' }); }
+  // eproc pede 'readwrite': o extrato da distribuição é gravado de volta na pasta do caso.
+  try { root = await window.showDirectoryPicker({ mode: state.sistema === 'eproc' ? 'readwrite' : 'read' }); }
   catch (e) { if (e && e.name === 'AbortError') return; throw e; }
   state.pastaNome = root.name;
   state.casos = [];
@@ -151,14 +152,14 @@ async function escolherPasta() {
   // própria pasta eram ignorados — daí "puxava das subpastas" sem querer.
   const raizDocs = await lerPdfsDaPasta(root);
   if (raizDocs.length) {
-    state.casos.push(novoCaso(root.name, raizDocs));
+    state.casos.push(novoCaso(root.name, raizDocs, root));
   } else {
     const subs = [];
     for await (const [nome, h] of root.entries()) if (h.kind === 'directory') subs.push([nome, h]);
     subs.sort((a, b) => a[0].localeCompare(b[0], 'pt-BR', { numeric: true, sensitivity: 'base' }));
     for (const [nome, h] of subs) {
       const docs = await lerPdfsDaPasta(h);
-      if (docs.length) state.casos.push(novoCaso(nome, docs));
+      if (docs.length) state.casos.push(novoCaso(nome, docs, h));
     }
   }
   if (!state.casos.length) { renderFase1('Nenhum PDF encontrado (nem na pasta, nem em subpastas).'); return; }
@@ -351,13 +352,14 @@ function novoCasoProjudi(nome, docs) {
     extracao: 'ok', status: 'aguardando', numero: null, statusTexto: '',
   };
 }
-function novoCaso(nome, docs) {
+function novoCaso(nome, docs, dir) {
   // Peça principal: nome contém "inicial"; senão o 1º PDF.
   let pi = docs.findIndex(d => /inicial/i.test(d.nome));
   if (pi < 0) pi = 0;
   docs.forEach((d, i) => d.principal = (i === pi));
   return {
     id: 'caso-' + Math.random().toString(36).slice(2, 9), nome, docs,
+    dir: dir || null, // pasta do caso (handle) — onde vai o "Protocolo de ação.pdf"
     dados: JSON.parse(JSON.stringify(DEFAULTS)),
     extracao: 'pendente', status: 'aguardando', numero: null, statusTexto: '',
   };
@@ -793,6 +795,7 @@ function mostraErroGeral(e) {
 function renderFase4() {
   setPasso(4);
   const pausado = state.casos.find(c => c.status === 'pausado');
+  const proxEspera = state.esperandoOk ? state.casos.find((c, i) => i > state.atual && c.status === 'aguardando') : null;
   const concluidos = state.casos.filter(c => c.status === 'protocolado').length;
   app.innerHTML = `<div class="card">
     <h2 style="margin-top:0;font-size:16px;">Protocolando ${state.casos.length > 1 ? 'lote' : 'caso'} — ${concluidos}/${state.casos.length} ✓</h2>
@@ -803,6 +806,11 @@ function renderFase4() {
         <button class="btn" id="continuar">▶ Continuar</button>
         <button class="btn ghost" id="pular">Pular este caso</button>
         <button class="btn warn" id="cancelar">Cancelar o lote</button>
+      </div></div>` : ''}
+    ${proxEspera ? `<div class="aviso">✅ Caso protocolado. Próximo da fila: <b>${esc(proxEspera.nome)}</b>.
+      <div style="margin-top:8px;display:flex;gap:8px;">
+        <button class="btn" id="proxima">▶ Iniciar a próxima ação</button>
+        <button class="btn warn" id="parar">Encerrar o lote aqui</button>
       </div></div>` : ''}
   </div>` + state.casos.map(c => `
     <div class="caso"><h3>📂 ${esc(c.nome)} ${pill(c)}</h3>
@@ -842,8 +850,50 @@ function renderFase4() {
     mandarParaAba('CANCELAR_CENTRAL', {}).catch(() => {}).then(() => { try { renderFase4(); } catch (_) {} });
     renderFase4();
   };
+  const btnProx = document.getElementById('proxima');
+  if (btnProx) btnProx.onclick = () => { state.esperandoOk = false; proximoCaso(); };
+  const btnParar = document.getElementById('parar');
+  if (btnParar) btnParar.onclick = () => {
+    state.esperandoOk = false;
+    state.casos.forEach(c => { if (c.status === 'aguardando') c.status = 'pulado'; });
+    state.rodando = false; state.atual = -1; renderFase4();
+  };
   const btnN = document.getElementById('denovo');
   if (btnN) btnN.onclick = () => { state.primeiroValidado = false; renderFase1(); };
+}
+
+// Extrato da distribuição → "Protocolo de ação.pdf" na pasta do caso. Nunca
+// sobrescreve: se já existir, vira "Protocolo de ação (2).pdf". Sem pasta gravável
+// (caso montado por "Arquivos", ou permissão negada) vai para Downloads.
+const NOME_EXTRATO = 'Protocolo de ação';
+async function nomeLivre(dir, base, ext) {
+  for (let i = 1; i < 100; i++) {
+    const nome = base + (i > 1 ? ' (' + i + ')' : '') + ext;
+    try { await dir.getFileHandle(nome); } catch (_) { return nome; }
+  }
+  return base + ' ' + Date.now() + ext;
+}
+async function gravarExtrato(caso, base64) {
+  const bin = atob(base64), bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const dir = caso.dir;
+  if (dir) {
+    let perm = await dir.queryPermission({ mode: 'readwrite' }).catch(() => 'denied');
+    if (perm !== 'granted') perm = await dir.requestPermission({ mode: 'readwrite' }).catch(() => 'denied');
+    if (perm === 'granted') {
+      const nome = await nomeLivre(dir, NOME_EXTRATO, '.pdf');
+      const fh = await dir.getFileHandle(nome, { create: true });
+      const w = await fh.createWritable();
+      await w.write(bytes); await w.close();
+      return { ok: true, arquivo: nome, pasta: dir.name };
+    }
+  }
+  const nome = NOME_EXTRATO + ' - ' + (caso.nome || 'caso') + '.pdf';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+  a.download = nome; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  return { ok: true, arquivo: nome, pasta: 'Downloads (o caso não tem pasta gravável)' };
 }
 
 // ── mensagens vindas do content script (aba do eproc) ─────────────────────────
@@ -868,6 +918,12 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
         sendResponse({ ok: true, nome: d.nome, base64: b64DeBuffer(await f.arrayBuffer()) });
       } catch (e) { sendResponse({ error: String((e && e.message) || e) }); }
     })();
+    return true;
+  }
+  if (m.type === 'SALVAR_EXTRATO') {
+    const c = state.casos.find(x => x.id === m.casoId);
+    if (!c) return false; // mesma regra do PEDIR_DOC: só a aba que conhece o caso responde
+    gravarExtrato(c, m.base64).then(sendResponse, e => sendResponse({ error: String((e && e.message) || e) }));
     return true;
   }
   // Status TERMINAL não regride (auditoria): um PAUSA/PROGRESS atrasado ou duplicado
@@ -897,10 +953,17 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
         caso: { dados: caso.dados, tipo: caso.sistema === 'projudi' ? 'intercorrente' : 'inicial', numero_processo: caso.numero_processo || null },
       }).catch(() => null);
       caso.statusTexto = r && r.ok ? ('registrado no Cobrasq' + (r.cobrancaVinculada ? ' + cobrança vinculada' : ' (sem cobrança correspondente)')) : 'protocolado (registro no Cobrasq falhou: ' + ((r && r.error) || '?') + ')';
-      renderFase4();
+      const ext = m.extrato;
+      if (ext) caso.statusTexto += ext.ok ? ' · extrato salvo: ' + ext.arquivo + ' (' + ext.pasta + ')' : ' · ⚠ extrato NÃO salvo: ' + ext.erro;
       // Só o caso ATUAL avança a fila — um OK de caso antigo não pode disparar o
-      // próximo enquanto outro já roda.
-      if (eraAtual) proximoCaso();
+      // próximo enquanto outro já roda. E não avança sozinho: a próxima ação só
+      // começa quando o usuário clicar "Iniciar a próxima ação".
+      if (eraAtual) {
+        const prox = state.casos.findIndex((c, i) => i > state.atual && c.status === 'aguardando');
+        if (prox < 0) { state.rodando = false; state.atual = -1; }
+        else state.esperandoOk = true;
+      }
+      renderFase4();
     })();
     return false;
   }

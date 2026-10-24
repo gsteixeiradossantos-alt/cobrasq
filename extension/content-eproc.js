@@ -24,6 +24,10 @@
   // ou eproc.trf<N>.jus.br). Se a aba foi navegada p/ outro site e a Central reinjeta
   // aqui, não roda (evita "pausas" absurdas em página alheia). Ver CM3.
   if (!/^eproc[\dg]*\.[\w.-]+\.jus\.br$/i.test(location.hostname)) return;
+  // Página do extrato da distribuição (aberta pelo background para virar PDF): nada
+  // de painel, botão ou motor aqui — sairiam no PDF e o motor, vendo o caso ainda
+  // guardado, navegaria a aba para "Petição Inicial".
+  if (/acao=processo_extrato_distribuicao/i.test(location.search)) return;
 
   // ── Botão de SUPORTE: copia o HTML desta página (+ iframes de mesma origem)
   // pro clipboard, pro usuário colar no chat. Sempre visível, independe da fila.
@@ -557,6 +561,42 @@
   function temLogin() { const p = document.querySelector('input[type="password"]'); return !!(p && visivel(p)); }
   function clicar(el) { try { el.scrollIntoView({ block: 'center' }); } catch (_) {} el.click(); }
 
+  // Link do "Imprimir Extrato": a página só o tem dentro do script inline de
+  // imprimirExtratoProcessoDistribuicao() (window.open com o hash da sessão).
+  function urlExtrato() {
+    for (const sc of document.scripts) {
+      const m = (sc.textContent || '').match(/controlador\.php\?acao=processo_extrato_distribuicao&(?:amp;)?hash=[0-9a-f]+/i);
+      if (m) return new URL(m[0].replace('&amp;', '&'), location.href).href;
+    }
+    return null;
+  }
+  function b64DeBuf(buf) {
+    const bytes = new Uint8Array(buf); let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(bin);
+  }
+  async function salvarExtrato(c) {
+    try {
+      const url = urlExtrato();
+      if (!url) return { ok: false, erro: 'não achei o link do extrato na página' };
+      let base64 = null;
+      // Se o tribunal já devolve PDF, usa direto; se é página HTML, o background a
+      // imprime em PDF (aba em segundo plano + Page.printToPDF).
+      try {
+        const r = await fetch(url, { credentials: 'include' });
+        if (r.ok && /pdf/i.test(r.headers.get('content-type') || '')) base64 = b64DeBuf(await r.arrayBuffer());
+      } catch (_) {}
+      if (!base64) {
+        const r = await chrome.runtime.sendMessage({ type: 'EXTRATO_PDF', url });
+        if (!r || !r.ok) return { ok: false, erro: (r && r.error) || 'falha ao gerar o PDF do extrato' };
+        base64 = r.base64;
+      }
+      const s = await chrome.runtime.sendMessage({ type: 'SALVAR_EXTRATO', casoId: c.id, base64 });
+      if (!s || !s.ok) return { ok: false, erro: (s && s.error) || 'a aba da Central não respondeu (foi fechada?)' };
+      return { ok: true, arquivo: s.arquivo, pasta: s.pasta };
+    } catch (e) { return { ok: false, erro: String((e && e.message) || e) }; }
+  }
+
   // Mutex: runCentral é chamado por autoRetomar (no load), RUN_CENTRAL e
   // CONTINUAR_CENTRAL; sendo async e cheia de await, 2 disparos quase simultâneos
   // entrelaçam e duplicam cliques. A trava serializa. Ver auditoria C3.
@@ -590,11 +630,21 @@
         }
         const elNum = qFirst(IDS.numeroSucesso) || qFirst(SEL.resultadoProtocolo);
         const numero = elNum ? (elNum.textContent || '').trim() : '';
+        // Extrato da distribuição → "Protocolo de ação.pdf" na pasta do caso (a Central
+        // grava pelo handle da pasta). Só depois reporta o OK.
+        progresso(c, 'distribuído — salvando o extrato na pasta do caso…');
+        const ext = await salvarExtrato(c);
         await casoLimpar();
-        reportar('CENTRAL_CASO_OK', { casoId: c.id, numero });
-        setBody(msg('🎉 <b>Distribuído!</b> Nº ' + numero, '#d3f9d8'));
-        const nova = document.querySelector('#btnNovaPeticao');
-        if (nova) clicar(nova); // deixa a tela pronta pro próximo caso da fila
+        reportar('CENTRAL_CASO_OK', { casoId: c.id, numero, extrato: ext });
+        // NÃO emenda sozinho numa nova petição: a nova ação só começa com o clique do
+        // usuário (aqui, ou no "Iniciar a próxima ação" da Central, no lote).
+        setBody(msg('🎉 <b>Distribuído!</b> Nº ' + numero, '#d3f9d8') +
+          (ext.ok
+            ? msg('📄 Extrato salvo como <b>' + ext.arquivo + '</b> em <b>' + ext.pasta + '</b>.', '#d3f9d8')
+            : msg('⚠ Não salvei o extrato: ' + ext.erro + ' — use o botão <b>Imprimir Extrato</b> da página.', '#fff3bf')) +
+          '<button id="cb-nova-acao" style="padding:6px 10px;cursor:pointer;">➕ Iniciar nova ação</button>');
+        const bNova = document.getElementById('cb-nova-acao');
+        if (bNova) bNova.onclick = () => { const nova = document.querySelector('#btnNovaPeticao'); if (nova) clicar(nova); };
         return;
       }
       if (c.status === 'pausado') {
