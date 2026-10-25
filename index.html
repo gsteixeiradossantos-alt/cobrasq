@@ -25501,6 +25501,17 @@ async function renderInvestigacaoPatrimonial(){
       <input id="inv-busca" type="search" autocomplete="off" placeholder="Buscar por devedor, credor, CPF/CNPJ ou nº do processo" oninput="invFiltrarCasos()" style="margin-top:12px;width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;background:var(--surface);color:var(--text);">
       <div id="inv-casos" style="margin-top:8px;max-height:300px;overflow:auto;"><div style="padding:12px;color:var(--text-3);font-size:12.5px;">Carregando cobranças…</div></div>
     </div>
+    <div id="inv-rf-bloco" class="cob-panel" style="padding:18px;margin-top:14px;">
+      <div class="det-panel-tt" style="margin:0;">Empresas e sócios na Receita</div>
+      <div style="font-size:11.5px;color:var(--text-3);margin-top:3px;">Consulta rápida, sem abrir cobrança nem acordo. CPF → empresas no nome da pessoa (precisa do nome completo). CNPJ → quadro de sócios. O telefone é opcional e mostra quais CNPJs o usam.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
+        <input id="inv-rf-nome" type="text" autocomplete="off" placeholder="Nome completo (para CPF)" style="flex:2 1 220px;min-width:0;padding:9px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;background:var(--surface);color:var(--text);">
+        <input id="inv-rf-doc" type="text" autocomplete="off" inputmode="numeric" placeholder="CPF ou CNPJ" onkeydown="if(event.key==='Enter')invBuscarRF()" style="flex:1 1 150px;min-width:0;padding:9px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;background:var(--surface);color:var(--text);">
+        <input id="inv-rf-tel" type="text" autocomplete="off" inputmode="tel" placeholder="Telefone (opcional)" onkeydown="if(event.key==='Enter')invBuscarRF()" style="flex:1 1 140px;min-width:0;padding:9px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;background:var(--surface);color:var(--text);">
+        <button class="cob-btn-primary" id="inv-rf-btn" onclick="invBuscarRF()">Buscar</button>
+      </div>
+      <div id="inv-rf-res" style="margin-top:10px;display:none;"></div>
+    </div>
     <div id="inv-av-bloco" class="cob-panel" style="padding:18px;margin-top:14px;">
       <div class="det-panel-tt" style="margin:0;">Investigar sem cobrança</div>
       <div style="font-size:11.5px;color:var(--text-3);margin-top:3px;">Para quem ainda não está cadastrado. Use o nome completo como consta na Receita. Cadastrar como devedor é opcional e pode ser feito depois.</div>
@@ -25559,6 +25570,32 @@ function invUsarBusca(){
 }
 // ── Investigação avulsa (sem cobrança nem devedor cadastrado) ──
 let _invAvCache=[];
+// Consulta avulsa à base da Receita (a mesma do termo de acordo), direto da página de
+// Investigação: CPF → empresas no nome (+ cruzamento por telefone); CNPJ → sócios.
+async function invBuscarRF(){
+  const v=id=>String((document.getElementById(id)||{}).value||'').trim();
+  const nome=v('inv-rf-nome'), d=v('inv-rf-doc').replace(/\D/g,''), tel=v('inv-rf-tel');
+  const box=document.getElementById('inv-rf-res'), btn=document.getElementById('inv-rf-btn'); if(!box) return;
+  const msg=(html)=>{ box.style.display='block'; box.innerHTML=html; };
+  const erro=(t)=>msg('<div style="color:var(--danger);font-size:12px;">'+escHtml(t)+'</div>');
+  if(d.length!==11 && d.length!==14){ erro('Informe um CPF (11 dígitos) ou CNPJ (14 dígitos) válido.'); return; }
+  if(d.length===11 && !nome){ erro('Para buscar empresas pelo CPF, informe o nome completo da pessoa.'); return; }
+  if(btn){ btn.disabled=true; btn.textContent='Consultando…'; }
+  msg('<div style="font-size:12px;color:var(--text-3);">Consultando…</div>');
+  try{
+    if(d.length===14){
+      const r=await cnpjSociosLookup(d);
+      if(!r.ok){ erro(cnpjLookupErroMsg(r)); return; }
+      msg(''); _tajRenderSocios(r,{ boxId:'inv-rf-res', semAvalista:true });
+    } else {
+      const resp=await fetch('/api/automacao?action=cnpja',{ method:'POST', headers:{ 'Content-Type':'application/json', ...(await authHeaders()) }, body:JSON.stringify({ nome, cpf:d, telefone:tel }) });
+      const j=await resp.json().catch(()=>({}));
+      if(!resp.ok){ erro(j.error||('Falha HTTP '+resp.status)); return; }
+      msg(''); _tajRenderEmpresasPF(j, nome, d, { boxId:'inv-rf-res', semAvalista:true });
+    }
+  }catch(e){ erro('Erro: '+((e&&e.message)||String(e))); }
+  finally{ if(btn){ btn.disabled=false; btn.textContent='Buscar'; } }
+}
 async function invIniciarAvulsa(btn){
   const nome=String(document.getElementById('inv-av-nome')?.value||'').trim();
   const doc=String(document.getElementById('inv-av-doc')?.value||'').replace(/\D/g,'');
@@ -49844,8 +49881,8 @@ async function _tajVerificarDoc(){
   }catch(e){ msg('<div style="color:var(--danger);font-size:12px;">Erro: '+escHtml((e&&e.message)||String(e))+'</div>'); }
   finally{ if(btn){ btn.disabled=false; btn.textContent='🔎 Verificar sócios / empresas'; } }
 }
-function _tajRenderSocios(r){
-  const box=document.getElementById('tajVerifBox'); if(!box) return;
+function _tajRenderSocios(r, opts){
+  opts=opts||{}; const box=document.getElementById(opts.boxId||'tajVerifBox'); if(!box) return;
   const socios=(r&&r.socios)||[]; _tajState._socios=socios;
   if(!socios.length){ box.innerHTML='<div style="font-size:12px;color:var(--text-3);">Nenhum sócio no quadro societário (fonte: '+escHtml((r&&r.fonte)||'?')+').</div>'; return; }
   const linhas=socios.map((s,i)=>`
@@ -49854,13 +49891,13 @@ function _tajRenderSocios(r){
         <div style="font-size:12.5px;font-weight:600;">${escHtml(s.nome)}</div>
         <div style="font-size:11px;color:var(--text-3);">${escHtml([s.doc,s.papel].filter(Boolean).join(' · '))||'—'}</div>
       </div>
-      <button type="button" class="btn btn-ghost btn-sm" onclick="_tajAddAvalistaFromSocio(${i})">+ avalista</button>
+      ${opts.semAvalista?'':`<button type="button" class="btn btn-ghost btn-sm" onclick="_tajAddAvalistaFromSocio(${i})">+ avalista</button>`}
     </div>`).join('');
   box.innerHTML=`<div style="font-size:11px;font-weight:700;color:var(--text-3);margin-bottom:4px;">SÓCIOS · fonte: ${escHtml(r.fonte)}</div>${linhas}
-    <div style="font-size:10.5px;color:var(--text-3);margin-top:6px;">O CPF do sócio vem <strong>mascarado</strong> na base pública — preencha o documento completo na linha do avalista antes de enviar ao ZapSign.</div>`;
+    <div style="font-size:10.5px;color:var(--text-3);margin-top:6px;">O CPF do sócio vem <strong>mascarado</strong> na base pública${opts.semAvalista?'.':' — preencha o documento completo na linha do avalista antes de enviar ao ZapSign.'}</div>`;
 }
-function _tajRenderEmpresasPF(j, nome, cpf){
-  const box=document.getElementById('tajVerifBox'); if(!box) return;
+function _tajRenderEmpresasPF(j, nome, cpf, opts){
+  opts=opts||{}; const box=document.getElementById(opts.boxId||'tajVerifBox'); if(!box) return;
   if(j && j.pendente){
     const link=j.fallbackUrl||('https://casadosdados.com.br/solucao/cnpj/busca-avancada?socio='+encodeURIComponent(nome||''));
     box.innerHTML=`<div style="font-size:12px;color:var(--text-2);">
@@ -49902,7 +49939,7 @@ function _tajRenderEmpresasPF(j, nome, cpf){
         <div style="font-size:12.5px;font-weight:600;">${escHtml(e.nome||'')} ${tag}</div>
         <div style="font-size:11px;color:var(--text-3);">${escHtml([e.cnpj,e.papel,sit(e.situacao)].filter(Boolean).join(' · '))}</div>
       </div>
-      <button type="button" class="btn btn-ghost btn-sm" onclick="_tajAddAvalistaFromEmpresa(${i})">+ avalista</button>
+      ${opts.semAvalista?'':`<button type="button" class="btn btn-ghost btn-sm" onclick="_tajAddAvalistaFromEmpresa(${i})">+ avalista</button>`}
     </div>`;
   }).join('');
   const fonte=(j&&j.fonte)?' · fonte: '+escHtml(j.fonte):'';
