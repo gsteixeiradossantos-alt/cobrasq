@@ -146,7 +146,10 @@ module.exports = async function handler(req, res) {
       pendente: true,
       // Distingue "base vazia" de "o servidor não conseguiu consultar o Supabase": antes os dois
       // viravam "rf_socios vazia", e uma chave inválida na Vercel ficava invisível.
-      motivo: baseOk ? 'CNPJA_TOKEN não configurada no servidor.'
+      motivo: baseOk
+        ? (erroBase
+          ? 'a consulta à base da Receita falhou (' + erroBase.slice(0, 300) + ') e CNPJA_TOKEN não configurada.'
+          : 'CNPJA_TOKEN não configurada no servidor.')
         : erroBase
           ? 'o servidor não conseguiu consultar a base da Receita no Supabase (' + erroBase.slice(0, 300) + ') e CNPJA_TOKEN não configurada.'
           : 'base da Receita ainda não carregada no Supabase (rf_socios vazia) e CNPJA_TOKEN não configurada.',
