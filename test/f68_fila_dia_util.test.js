@@ -29,10 +29,26 @@ const FN = path.join(__dirname, '..', 'supabase', 'functions');
   // sem created_at -> segura (não dá para saber se foi agendada no dia)
   assert.ok(F.adiarParaDiaUtil('2026-10-25T12:00:00Z', null));
 
+  // horário: fora das 08h-20h, agendada antes -> 09h do próximo dia útil
+  // terça 27/10 22:00 BRT, agendada na segunda -> quarta 28/10 09:00
+  assert.strictEqual(F.adiarParaHorario('2026-10-28T01:00:00Z', '2026-10-26T15:00:00Z'), '2026-10-28T12:00:00.000Z');
+  // terça 27/10 06:00 BRT, agendada na véspera -> mesma terça 09:00
+  assert.strictEqual(F.adiarParaHorario('2026-10-27T09:00:00Z', '2026-10-26T20:00:00Z'), '2026-10-27T12:00:00.000Z');
+  // sexta 30/10 21:00 BRT -> segunda 02/11 é feriado (Finados) -> terça 03/11 09:00
+  assert.strictEqual(F.adiarParaHorario('2026-10-31T00:00:00Z', '2026-10-30T10:00:00Z'), '2026-11-03T12:00:00.000Z');
+  // posta na fila agora às 22h (há 1 min) -> sai
+  assert.strictEqual(F.adiarParaHorario('2026-10-28T01:01:00Z', '2026-10-28T01:00:00Z'), null);
+  // dentro da janela -> sai; limites 08:00 sai e 20:00 segura
+  assert.strictEqual(F.adiarParaHorario('2026-10-27T15:00:00Z', '2026-10-20T15:00:00Z'), null);
+  assert.strictEqual(F.adiarParaHorario('2026-10-27T11:00:00Z', '2026-10-20T15:00:00Z'), null);
+  assert.ok(F.adiarParaHorario('2026-10-27T23:00:00Z', '2026-10-20T15:00:00Z'));
+  // sem created_at -> segura
+  assert.ok(F.adiarParaHorario('2026-10-28T01:00:00Z', null));
+
   // o worker usa a trava e lê created_at; aviso interno e grupo ficam de fora
   const src = fs.readFileSync(path.join(FN, 'cron-mensagens-agendadas', 'index.ts'), 'utf8');
   assert.ok(/origem, created_at'\)/.test(src), 'select traz created_at');
-  assert.ok(/\(!souGrupo && !avisoInterno\) \? adiarParaDiaUtil\(new Date\(\), m\.created_at\)/.test(src), 'trava aplicada fora de grupo e aviso interno');
+  assert.ok(/\(!souGrupo && !avisoInterno\)\s*\? \(adiarParaDiaUtil\(new Date\(\), m\.created_at\) \|\| adiarParaHorario\(new Date\(\), m\.created_at\)\)/.test(src), 'travas aplicadas fora de grupo e aviso interno');
 
   console.log('f68 ok');
 })().catch((e) => { console.error(e); process.exit(1); });
