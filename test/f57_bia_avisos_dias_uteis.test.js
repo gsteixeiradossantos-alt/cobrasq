@@ -89,23 +89,33 @@ const FN = path.join(__dirname, '..', 'supabase', 'functions');
     'O boleto atualizado está aqui: U', 'Conto com você nessa data. Qualquer dúvida, fico à disposição!']);
 
   const at = (o) => T.textosAtraso({ sig: S, nome: 'Maria Souza', valor: 350, venc: '2026-10-22', url: 'U', nAberto: 1, ...o });
-  assert.deepStrictEqual(at({ tipo: 'primeira', nAberto: 3 }), [
-    `${S}\nOi Maria, tudo bem? Sua parcela de R$ 350,00 venceu em 22/10 e ainda não consta o pagamento.`,
-    'Pedimos que regularize o quanto antes pra evitar o aumento de encargos e o prosseguimento da cobrança:\nU',
-    'Estou à disposição para conversar, caso precise.']);
-  assert.deepStrictEqual(at({ tipo: 'sete_dias', nAberto: 2 }), [
-    `${S}\nOi Maria, tudo bem? Sua parcela de R$ 350,00 está vencida desde 22/10 e segue em aberto. Constam 2 boletos em aberto em seu nome.`,
-    'Preciso que você regularize com urgência, pelo link:\nU',
-    'Se precisar combinar uma data, me responde aqui. Sem retorno, o caso segue para as próximas medidas de cobrança.']);
-  assert.deepStrictEqual(at({ tipo: 'prazo_final', prazo: '2026-11-04' }), [
-    `${S}\nOi Maria. Sua parcela de R$ 350,00 está vencida desde 22/10 e já tentei contato algumas vezes sem retorno.`,
-    'Te dou até quarta-feira, 04/11, pra pagar ou me chamar pra combinar: U',
-    'Depois dessa data, o caso sai do atendimento por aqui e seguirá para o jurídico para as medidas de cobranças cabíveis.']);
+  // textos do Gustavo, 27/10/2026; saudação pela hora de Brasília
+  const MANHA = '2026-10-23T13:00:00.000Z'; // 10h BRT
+  assert.strictEqual(T.saudacaoHora(MANHA), 'Bom dia');
+  assert.strictEqual(T.saudacaoHora('2026-10-23T14:59:00.000Z'), 'Bom dia');   // 11h59
+  assert.strictEqual(T.saudacaoHora('2026-10-23T15:00:00.000Z'), 'Boa tarde'); // 12h
+  assert.strictEqual(T.saudacaoHora('2026-10-23T21:00:00.000Z'), 'Boa noite'); // 18h
+  assert.deepStrictEqual(at({ tipo: 'dia1', nAberto: 3, agora: MANHA, valor: 355.2 }), [
+    `${S}\nBom dia, Maria! Tudo bem? Vi aqui que a parcela de R$ 355,20 do seu acordo, que venceu dia 22/10, ainda não foi paga.`,
+    'O que que aconteceu? Consegue pagar até amanhã? Assim fica tudo como a gente combinou.',
+    'Fico no aguardo do seu retorno. Ok?']);
+  assert.deepStrictEqual(at({ tipo: 'dia3', agora: '2026-10-23T18:00:00.000Z' }), [
+    `${S}\nBoa tarde, Maria! Tudo bem? Esses dias te chamei perguntando sobre a parcela do acordo que você ainda não tinha pago,  certo?`,
+    'Verifiquei novamente no meu sistema e ainda consta em aberto. Preciso saber que dia, de certeza, conseguirá estar realizando o pagamento.']);
+  assert.deepStrictEqual(at({ tipo: 'dia7', agora: MANHA }), [
+    `${S}\nBom dia, Maria! Infelizmente como não houve retorno da sua parte, vamos iniciar as tratativas mais graves como negativação, protesto e outros.`,
+    'Peço que verifique para estar fazendo o pagamento o quanto antes, pois se a dívida chegar a ser protestada, para baixar o protesto terá novas custas.',
+    'Além disso, se o jurídico entender que o acordo se tornou insustentável pelo atraso e resolver executar o acordo na justiça, o valor pendente vence tudo de uma vez e ainda adiciona com multa. Consegue me dar um retorno, hoje, sem falta?']);
+  assert.deepStrictEqual(at({ tipo: 'dia10', agora: MANHA }), [
+    `${S}\n*Maria, notificamos que, diante do não pagamento do acordo firmado, a execução judicial será imediatamente iniciada, com aplicação da multa sobre o valor devido e outras despesas.*`,
+    '*O processo poderá resultar em bloqueio de contas, penhora de bens e salários, inclusão no protesto e SERASA.*']);
+  // nenhum dos textos novos leva link
+  for (const tipo of ['dia1', 'dia3', 'dia7', 'dia10']) assert.ok(!at({ tipo, agora: MANHA }).join(' ').includes('U'), tipo);
   assert.deepStrictEqual(at({ tipo: 'promessa_quebrada', dataPrometida: '2026-10-20', nAberto: 2 }), [
     `${S}\nOi Maria, tudo bem? Você tinha combinado de pagar a parcela de R$ 350,00 até 20/10, e o pagamento não entrou.`,
     'Aconteceu alguma coisa?']);
-  for (const tipo of ['primeira', 'sete_dias', 'prazo_final', 'promessa_quebrada']) {
-    const t = at({ tipo, prazo: '2026-11-04', dataPrometida: '2026-10-20' }).join(' ');
+  for (const tipo of ['dia1', 'dia3', 'promessa_quebrada']) {
+    const t = at({ tipo, dataPrometida: '2026-10-20' }).join(' ');
     assert.ok(!/negativa|protesto|SPC|Serasa|cart[óo]rio/i.test(t), t);
   }
   // prazo final = 2 dias úteis à frente: sexta 30/10 -> (02/11 é Finados) terça 03 -> quarta 04/11
@@ -113,8 +123,10 @@ const FN = path.join(__dirname, '..', 'supabase', 'functions');
   assert.strictEqual(U.somarDiasUteis('2026-10-19', 2), '2026-10-21');
   assert.strictEqual(U.somarDiasUteis('2026-10-22', 2), '2026-10-26');
 
-  // prazo final sai uma vez só (01/10/2026)
-  assert.strictEqual(T.prazoDoLog('PRAZO FINAL até 2026-11-04: *Bia • COBRASQ*\nOi Maria.'), '2026-11-04');
+  // último aviso (dia 10) sai uma vez só; no dia útil seguinte, ação (27/10/2026)
+  assert.strictEqual(T.PREFIXO_PRAZO, 'ULTIMO AVISO em ');
+  assert.strictEqual(T.prazoDoLog('ULTIMO AVISO em 2026-10-27: *Bia • COBRASQ*\n*Maria, notificamos'), '2026-10-27');
+  assert.strictEqual(T.prazoDoLog('PRAZO FINAL até 2026-11-04: *Bia • COBRASQ*\nOi Maria.'), '2026-11-04'); // log antigo
   assert.strictEqual(T.prazoDoLog('*Bia • COBRASQ*\nOi Maria, tudo bem?'), null);
   assert.strictEqual(T.decidirPrazoFinal(null, '2026-11-02'), 'enviar');
   assert.strictEqual(T.decidirPrazoFinal('2026-11-04', '2026-11-03'), 'aguardar');
@@ -137,19 +149,17 @@ const FN = path.join(__dirname, '..', 'supabase', 'functions');
   assert.strictEqual(U.reagendarAntecipado({ ...ag0, status: 'adiada' }, '2026-10-15', '2026-10-08', 3, AG), null);
   assert.strictEqual(U.reagendarAntecipado(ag0, '2026-10-01', '2026-10-08', 3, AG), null);
 
-  // régua de atraso: dias ÚTEIS 1, 3, 5, 7, 10 e 15 do vencimento efetivo (20/10/2026).
+  // régua de atraso: dias ÚTEIS 1, 3, 7 e 10 do vencimento efetivo (27/10/2026: saíram o dia 5 e o 15).
   // Vence sábado 10/10/2026 -> efetivo terça 13/10 (12/10 feriado).
-  // Marcos: 14/10 (1), 16/10 (3), 20/10 (5), 22/10 (7), 27/10 (10), 04/11 (15; 02/11 feriado).
+  // Marcos: 14/10 (1), 16/10 (3), 22/10 (7), 27/10 (10).
   const px = (h) => U.proximoDiaAtraso('2026-10-10', h);
   assert.strictEqual(px('2026-10-14'), '2026-10-16'); // enviou o dia 1 -> dia 3
   assert.strictEqual(px('2026-10-15'), '2026-10-16'); // nunca repete no dia seguinte ao 2º
-  assert.strictEqual(px('2026-10-16'), '2026-10-20'); // dia 3 -> dia 5 (sábado/domingo não contam)
-  assert.strictEqual(px('2026-10-19'), '2026-10-20'); // dia 4 -> dia 5
-  assert.strictEqual(px('2026-10-20'), '2026-10-22'); // dia 5 -> dia 7
+  assert.strictEqual(px('2026-10-16'), '2026-10-22'); // dia 3 -> dia 7 (sábado/domingo não contam)
+  assert.strictEqual(px('2026-10-20'), '2026-10-22'); // dia 5 não é mais marco
   assert.strictEqual(px('2026-10-22'), '2026-10-27'); // dia 7 -> dia 10
-  assert.strictEqual(px('2026-10-27'), '2026-11-04'); // dia 10 -> dia 15 (02/11 feriado)
-  assert.strictEqual(px('2026-11-04'), '2026-11-05'); // passou do 15: olha amanhã
-  assert.deepStrictEqual(U.DIAS_REGUA_ATRASO, [1, 3, 5, 7, 10, 15]);
+  assert.strictEqual(px('2026-10-27'), '2026-10-28'); // passou do 10: olha amanhã (o worker manda para ação)
+  assert.deepStrictEqual(U.DIAS_REGUA_ATRASO, [1, 3, 7, 10]);
   // todo marco cai em dia útil
   for (const v of ['2026-10-10', '2026-10-16', '2026-10-23', '2026-12-18', '2026-11-20']) {
     const ef = U.vencimentoEfetivo(v);
@@ -157,7 +167,7 @@ const FN = path.join(__dirname, '..', 'supabase', 'functions');
   }
   // vence sexta 16/10: o dia 1 não vira sábado -> segunda engolindo o dia 3
   assert.strictEqual(U.proximoDiaAtraso('2026-10-16', '2026-10-19'), '2026-10-21'); // dia 1 (seg) -> dia 3 (qua)
-  assert.strictEqual(U.proximoDiaAtraso('2026-10-16', '2026-10-21'), '2026-10-23'); // dia 3 -> dia 5 (sex)
+  assert.strictEqual(U.proximoDiaAtraso('2026-10-16', '2026-10-21'), '2026-10-27'); // dia 3 -> dia 7 (ter)
   // dias úteis decorridos: o dia de partida não conta, o de chegada conta
   assert.strictEqual(U.diasUteisDecorridos('2026-10-13', '2026-10-13'), 0);
   assert.strictEqual(U.diasUteisDecorridos('2026-10-13', '2026-10-14'), 1);

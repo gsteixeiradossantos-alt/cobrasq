@@ -98,19 +98,28 @@ function saudacao(nome: string): string {
 }
 
 // ===== Cobrança de boleto JÁ VENCIDO (p07, p09, p10, p11) =====
-// Nenhum texto cita negativação nem protesto (decisão de 30/09/2026). A linha de
-// "N boletos em aberto" só entra na de 7 dias e na de prazo final.
+// Textos dos dias 1, 3, 7 e 10 escritos pelo Gustavo em 27/10/2026 (página "Régua
+// da Bia"); o dia 5 saiu da régua e o texto dele passou para o dia 7, e o prazo
+// final do dia 15 foi excluído (o dia 10 é o último aviso). Promessa quebrada segue
+// a de 30/09/2026.
 export type CobrancaAtraso = {
-  tipo: 'primeira' | 'sete_dias' | 'prazo_final' | 'promessa_quebrada';
+  tipo: 'dia1' | 'dia3' | 'dia7' | 'dia10' | 'promessa_quebrada';
   sig: string;
   nome: string;
   valor: unknown;
   venc: string;          // vencimento do boleto
   url: string;
   nAberto: number;       // boletos em aberto do mesmo cliente
-  prazo?: string;        // prazo_final: data limite (dia útil)
   dataPrometida?: string; // promessa_quebrada
+  agora?: string;        // instante do envio (saudação); padrão: agora
 };
+
+// "Bom dia" até 12h, "Boa tarde" até 18h, "Boa noite" depois (horário de Brasília).
+export function saudacaoHora(agora?: string): string {
+  const h = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Sao_Paulo', hour: 'numeric', hourCycle: 'h23' })
+    .format(agora ? new Date(agora) : new Date()));
+  return h < 12 ? 'Bom dia' : h < 18 ? 'Boa tarde' : 'Boa noite';
+}
 
 export function textosAtraso(c: CobrancaAtraso): string[] {
   const ola = saudacao(c.nome);
@@ -123,45 +132,107 @@ export function textosAtraso(c: CobrancaAtraso): string[] {
       `${ola} Você tinha combinado de pagar a parcela de R$ ${val} até ${ddmm(String(c.dataPrometida || ''))}, e o pagamento não entrou.`,
       `Aconteceu alguma coisa?`,
     ];
-  } else if (c.tipo === 'prazo_final') {
-    const primeiro = String(c.nome || '').trim().split(/\s+/)[0] || '';
-    const prazo = String(c.prazo || '');
-    b = [
-      `${primeiro ? `Oi ${primeiro}.` : 'Oi.'} Sua parcela de R$ ${val} está vencida desde ${ddmm(c.venc)} e já tentei contato algumas vezes sem retorno.${multi}`,
-      `Te dou até ${diaSemana(prazo)}, ${ddmm(prazo)}, pra pagar ou me chamar pra combinar: ${url}`,
-      `Depois dessa data, o caso sai do atendimento por aqui e seguirá para o jurídico para as medidas de cobranças cabíveis.`,
-    ];
-  } else if (c.tipo === 'sete_dias') {
-    b = [
-      `${ola} Sua parcela de R$ ${val} está vencida desde ${ddmm(c.venc)} e segue em aberto.${multi}`,
-      `Preciso que você regularize com urgência, pelo link:\n${url}`,
-      `Se precisar combinar uma data, me responde aqui. Sem retorno, o caso segue para as próximas medidas de cobrança.`,
-    ];
   } else {
-    b = [
-      `${ola} Sua parcela de R$ ${val} venceu em ${ddmm(c.venc)} e ainda não consta o pagamento.`,
-      `Pedimos que regularize o quanto antes pra evitar o aumento de encargos e o prosseguimento da cobrança:\n${url}`,
-      `Estou à disposição para conversar, caso precise.`,
-    ];
+    const nome = String(c.nome || '').trim().split(/\s+/)[0] || '';
+    const oi = `${saudacaoHora(c.agora)}${nome ? `, ${nome}` : ''}!`;
+    if (c.tipo === 'dia10') {
+      b = [
+        `*${nome ? `${nome}, n` : 'N'}otificamos que, diante do não pagamento do acordo firmado, a execução judicial será imediatamente iniciada, com aplicação da multa sobre o valor devido e outras despesas.*`,
+        `*O processo poderá resultar em bloqueio de contas, penhora de bens e salários, inclusão no protesto e SERASA.*`,
+      ];
+    } else if (c.tipo === 'dia7') {
+      b = [
+        `${oi} Infelizmente como não houve retorno da sua parte, vamos iniciar as tratativas mais graves como negativação, protesto e outros.`,
+        `Peço que verifique para estar fazendo o pagamento o quanto antes, pois se a dívida chegar a ser protestada, para baixar o protesto terá novas custas.`,
+        `Além disso, se o jurídico entender que o acordo se tornou insustentável pelo atraso e resolver executar o acordo na justiça, o valor pendente vence tudo de uma vez e ainda adiciona com multa. Consegue me dar um retorno, hoje, sem falta?`,
+      ];
+    } else if (c.tipo === 'dia3') {
+      b = [
+        `${oi} Tudo bem? Esses dias te chamei perguntando sobre a parcela do acordo que você ainda não tinha pago,  certo?`,
+        `Verifiquei novamente no meu sistema e ainda consta em aberto. Preciso saber que dia, de certeza, conseguirá estar realizando o pagamento.`,
+      ];
+    } else {
+      b = [
+        `${oi} Tudo bem? Vi aqui que a parcela de R$ ${val} do seu acordo, que venceu dia ${ddmm(c.venc)}, ainda não foi paga.`,
+        `O que que aconteceu? Consegue pagar até amanhã? Assim fica tudo como a gente combinou.`,
+        `Fico no aguardo do seu retorno. Ok?`,
+      ];
+    }
   }
   b[0] = `${c.sig}\n${b[0]}`;
   return b;
 }
 
 // ===== Prazo final sai UMA vez =====
-// Antes, o "prazo final" se repetia a cada 2 dias com uma data nova enquanto o
-// caso não ia para ação — a data dada ao devedor deixava de valer. O prazo
-// enviado fica no log ("PRAZO FINAL até AAAA-MM-DD: ..."); depois dele:
-//  - dentro do prazo  -> não manda nada, volta a olhar no dia útil seguinte ao prazo
-//  - prazo vencido    -> o caso vai para ação (é o que a mensagem anunciou)
-export const PREFIXO_PRAZO = 'PRAZO FINAL até ';
+// O dia 10 é o último aviso (27/10/2026; antes era o prazo final do dia 15, que
+// ficava no log como "PRAZO FINAL até AAAA-MM-DD: ..."). A data do aviso fica no
+// log ("ULTIMO AVISO em AAAA-MM-DD: ..."); depois dele:
+//  - no mesmo dia          -> não manda nada, volta a olhar no dia útil seguinte
+//  - a partir do dia seguinte -> o caso vai para ação (é o que a mensagem anunciou)
+export const PREFIXO_PRAZO = 'ULTIMO AVISO em ';
 
 export function prazoDoLog(texto: string | null | undefined): string | null {
-  const m = String(texto || '').match(/^PRAZO FINAL até (\d{4}-\d{2}-\d{2})/);
+  const m = String(texto || '').match(/^(?:ULTIMO AVISO em|PRAZO FINAL até) (\d{4}-\d{2}-\d{2})/);
   return m ? m[1] : null;
 }
 
 export function decidirPrazoFinal(prazoAnterior: string | null, hoje: string): 'enviar' | 'aguardar' | 'para_acao' {
   if (!prazoAnterior) return 'enviar';
   return hoje.slice(0, 10) <= prazoAnterior ? 'aguardar' : 'para_acao';
+}
+
+// ===== Mensagem manual pela fila também é atendimento humano =====
+// A pausa de humano_pausa_min só ligava quando alguém escrevia no celular
+// (zapi-recebidas). Mensagem manual pela fila (origem manual_* / negociacao)
+// passava batida, e o prazo dado nela era atropelado. Caso real: Cristiane,
+// 19/10/2026, "Preciso do pagamento até sexta-feira, 23/10" saiu pela fila; a
+// Bia cobrou no dia seguinte e no próprio dia 23 ("Sem retorno, o caso segue...").
+//  - toda mensagem manual  -> Bia espera humano_pausa_min a partir do envio
+//  - "até dd/mm" no texto  -> Bia fica quieta até o prazo; volta no dia seguinte, 9h
+export type MsgManual = { origem: string | null; mensagem: string | null; enviada_em: string | null };
+
+export function ehOrigemManual(origem: string | null | undefined): boolean {
+  return /^(manual|negociacao)/i.test(String(origem || ''));
+}
+
+function ymdUTC(t: Date): string {
+  return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')}`;
+}
+function somar1Dia(d: string): string {
+  const t = new Date(d + 'T12:00:00Z'); t.setUTCDate(t.getUTCDate() + 1);
+  return ymdUTC(t);
+}
+
+// prazo "até [sexta-feira,] dd/mm[/aaaa]" -> 'YYYY-MM-DD' (o mais distante), ou null.
+// Só vale data entre o dia do envio e 90 dias depois (dd/mm de vencimento antigo não conta).
+export function prazoDaMensagem(texto: string | null | undefined, enviadaEm: string): string | null {
+  const base = enviadaEm.slice(0, 10);
+  const lim = ymdUTC(new Date(Date.parse(base + 'T12:00:00Z') + 90 * 864e5));
+  let melhor: string | null = null;
+  const re = /(?<!\p{L})at[ée](?!\p{L})[^\d\n]{0,30}?(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/giu;
+  for (const m of String(texto || '').matchAll(re)) {
+    const dd = Number(m[1]), mm = Number(m[2]);
+    if (dd < 1 || dd > 31 || mm < 1 || mm > 12) continue;
+    let ano = m[3] ? Number(m[3].length === 2 ? '20' + m[3] : m[3]) : Number(base.slice(0, 4));
+    let d = `${ano}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+    if (!m[3] && d < base) { ano++; d = `${ano}-${d.slice(5)}`; }
+    if (d < base || d > lim) continue;
+    if (!melhor || d > melhor) melhor = d;
+  }
+  return melhor;
+}
+
+// quando a Bia pode voltar a cobrar depois das mensagens manuais (ISO), ou null se já pode.
+export function retomadaAposManual(msgs: MsgManual[], agoraMs: number, pausaMin: number): string | null {
+  let ate = 0;
+  for (const m of msgs) {
+    if (!ehOrigemManual(m.origem) || !m.enviada_em) continue;
+    const env = Date.parse(m.enviada_em);
+    if (!Number.isFinite(env)) continue;
+    ate = Math.max(ate, env + pausaMin * 60e3);
+    const envSP = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date(env));
+    const prazo = prazoDaMensagem(m.mensagem, envSP);
+    if (prazo) ate = Math.max(ate, Date.parse(somar1Dia(prazo) + 'T09:00:00-03:00'));
+  }
+  return ate > agoraMs ? new Date(ate).toISOString() : null;
 }
