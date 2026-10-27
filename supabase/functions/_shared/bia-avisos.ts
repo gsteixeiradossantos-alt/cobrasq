@@ -99,17 +99,17 @@ function saudacao(nome: string): string {
 
 // ===== Cobrança de boleto JÁ VENCIDO (p07, p09, p10, p11) =====
 // Textos dos dias 1, 3, 7 e 10 escritos pelo Gustavo em 27/10/2026 (página "Régua
-// da Bia"); o dia 5 saiu da régua e o texto dele passou para o dia 7. Prazo final e
-// promessa quebrada seguem os de 30/09/2026.
+// da Bia"); o dia 5 saiu da régua e o texto dele passou para o dia 7, e o prazo
+// final do dia 15 foi excluído (o dia 10 é o último aviso). Promessa quebrada segue
+// a de 30/09/2026.
 export type CobrancaAtraso = {
-  tipo: 'dia1' | 'dia3' | 'dia7' | 'dia10' | 'prazo_final' | 'promessa_quebrada';
+  tipo: 'dia1' | 'dia3' | 'dia7' | 'dia10' | 'promessa_quebrada';
   sig: string;
   nome: string;
   valor: unknown;
   venc: string;          // vencimento do boleto
   url: string;
   nAberto: number;       // boletos em aberto do mesmo cliente
-  prazo?: string;        // prazo_final: data limite (dia útil)
   dataPrometida?: string; // promessa_quebrada
   agora?: string;        // instante do envio (saudação); padrão: agora
 };
@@ -132,20 +132,12 @@ export function textosAtraso(c: CobrancaAtraso): string[] {
       `${ola} Você tinha combinado de pagar a parcela de R$ ${val} até ${ddmm(String(c.dataPrometida || ''))}, e o pagamento não entrou.`,
       `Aconteceu alguma coisa?`,
     ];
-  } else if (c.tipo === 'prazo_final') {
-    const primeiro = String(c.nome || '').trim().split(/\s+/)[0] || '';
-    const prazo = String(c.prazo || '');
-    b = [
-      `${primeiro ? `Oi ${primeiro}.` : 'Oi.'} Sua parcela de R$ ${val} está vencida desde ${ddmm(c.venc)} e já tentei contato algumas vezes sem retorno.${multi}`,
-      `Te dou até ${diaSemana(prazo)}, ${ddmm(prazo)}, pra pagar ou me chamar pra combinar: ${url}`,
-      `Depois dessa data, o caso sai do atendimento por aqui e seguirá para o jurídico para as medidas de cobranças cabíveis.`,
-    ];
   } else {
     const nome = String(c.nome || '').trim().split(/\s+/)[0] || '';
     const oi = `${saudacaoHora(c.agora)}${nome ? `, ${nome}` : ''}!`;
     if (c.tipo === 'dia10') {
       b = [
-        `*${nome ? `${nome}, n` : 'N'}otificamos que, diante do não pagamento do acordo firmado, a execução judicial será imediatamente iniciada, com aplicação da multa de 50% sobre o valor devido e outras despesas.*`,
+        `*${nome ? `${nome}, n` : 'N'}otificamos que, diante do não pagamento do acordo firmado, a execução judicial será imediatamente iniciada, com aplicação da multa sobre o valor devido e outras despesas.*`,
         `*O processo poderá resultar em bloqueio de contas, penhora de bens e salários, inclusão no protesto e SERASA.*`,
       ];
     } else if (c.tipo === 'dia7') {
@@ -172,15 +164,15 @@ export function textosAtraso(c: CobrancaAtraso): string[] {
 }
 
 // ===== Prazo final sai UMA vez =====
-// Antes, o "prazo final" se repetia a cada 2 dias com uma data nova enquanto o
-// caso não ia para ação — a data dada ao devedor deixava de valer. O prazo
-// enviado fica no log ("PRAZO FINAL até AAAA-MM-DD: ..."); depois dele:
-//  - dentro do prazo  -> não manda nada, volta a olhar no dia útil seguinte ao prazo
-//  - prazo vencido    -> o caso vai para ação (é o que a mensagem anunciou)
-export const PREFIXO_PRAZO = 'PRAZO FINAL até ';
+// O dia 10 é o último aviso (27/10/2026; antes era o prazo final do dia 15, que
+// ficava no log como "PRAZO FINAL até AAAA-MM-DD: ..."). A data do aviso fica no
+// log ("ULTIMO AVISO em AAAA-MM-DD: ..."); depois dele:
+//  - no mesmo dia          -> não manda nada, volta a olhar no dia útil seguinte
+//  - a partir do dia seguinte -> o caso vai para ação (é o que a mensagem anunciou)
+export const PREFIXO_PRAZO = 'ULTIMO AVISO em ';
 
 export function prazoDoLog(texto: string | null | undefined): string | null {
-  const m = String(texto || '').match(/^PRAZO FINAL até (\d{4}-\d{2}-\d{2})/);
+  const m = String(texto || '').match(/^(?:ULTIMO AVISO em|PRAZO FINAL até) (\d{4}-\d{2}-\d{2})/);
   return m ? m[1] : null;
 }
 

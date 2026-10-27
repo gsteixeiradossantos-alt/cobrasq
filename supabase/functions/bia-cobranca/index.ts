@@ -490,7 +490,8 @@ Deno.serve(async (req) => {
     // só ameaça (judicial/negativação/protesto) se JÁ houve lembrete anterior do MESMO boleto
     // sem resultado e o atraso passou de 7 dias — no 1º contato, nunca ameaça.
     const jaCobrado = (c.lembretes_enviados ?? 0) >= 1;
-    const pertoAcao = jaCobrado && diasVencAtual >= (diaMax - 2);
+    // dia 10 em diante: último aviso (o prazo final do dia 15 saiu em 27/10/2026)
+    const pertoAcao = jaCobrado && diasVencAtual >= 10;
     const promessaQuebrada = c.status === 'adiada' && !!c.data_prometida &&
       Date.parse(hoje) > Date.parse(String(c.data_prometida).slice(0, 10));
 
@@ -503,7 +504,7 @@ Deno.serve(async (req) => {
         if (count && count > 0) nAberto = count;
       }
     } catch { /* ignora */ }
-    // prazo final: uma vez só (ver decidirPrazoFinal em bia-avisos.ts)
+    // último aviso: uma vez só; no dia útil seguinte, ação (ver decidirPrazoFinal em bia-avisos.ts)
     if (pertoAcao && !promessaQuebrada) {
       const { data: ultPrazo } = await sb.from('bia_cobranca_log').select('texto')
         .eq('asaas_payment_id', c.asaas_payment_id).like('texto', `${PREFIXO_PRAZO}%`)
@@ -517,33 +518,32 @@ Deno.serve(async (req) => {
       if (dec === 'para_acao') {
         await sb.from('bia_cobranca').update({ status: 'para_acao', marcada_acao_em: agoraIso, updated_at: agoraIso }).eq('asaas_payment_id', c.asaas_payment_id);
         paraAcao++;
-        await notificar(`COBRANÇA -> PARA AÇÃO\n${c.nome || ('+' + tel)} | R$ ${brMoney(c.valor)} | venceu ${brDate(c.venc_original)}\nPrazo final de ${brDate(prazoAnt)} passou sem pagamento. Encaminhar ao Gustavo Teixeira.`);
+        await notificar(`COBRANÇA -> PARA AÇÃO\n${c.nome || ('+' + tel)} | R$ ${brMoney(c.valor)} | venceu ${brDate(c.venc_original)}\nÚltimo aviso (dia 10) enviado em ${brDate(prazoAnt)}, sem pagamento. Encaminhar ao Gustavo Teixeira.`);
         continue;
       }
     }
     // textos dos dias 1, 3, 7 e 10: Gustavo, 27/10/2026 (bia-avisos.ts). O 1º contato
     // de atraso é sempre o do dia 1, mesmo que o caso chegue atrasado (o do dia 3 diz
-    // "esses dias te chamei"). Prazo final: data fixa, 2 dias úteis à frente.
-    const prazo = somarDiasUteis(hoje, 2);
+    // "esses dias te chamei").
     const blocos = textosAtraso({
-      tipo: promessaQuebrada ? 'promessa_quebrada' : pertoAcao ? 'prazo_final' : !jaCobrado ? 'dia1'
+      tipo: promessaQuebrada ? 'promessa_quebrada' : !jaCobrado ? 'dia1'
         : diasVencAtual >= 10 ? 'dia10' : diasVencAtual >= 7 ? 'dia7' : diasVencAtual >= 3 ? 'dia3' : 'dia1',
       sig: SIG, nome: String(c.nome || ''), valor: c.valor, venc: String(venc || c.venc_atual || ''), url: String(url || ''),
-      nAberto, prazo, dataPrometida: c.data_prometida ? String(c.data_prometida) : undefined,
+      nAberto, dataPrometida: c.data_prometida ? String(c.data_prometida) : undefined,
     });
     const ehPrazoFinal = pertoAcao && !promessaQuebrada;
-    const msgLog = (ehPrazoFinal ? `${PREFIXO_PRAZO}${prazo}: ` : '') + blocos.join('\n\n');
+    const msgLog = (ehPrazoFinal ? `${PREFIXO_PRAZO}${hoje}: ` : '') + blocos.join('\n\n');
 
     // envia bloco a bloco (mensagens separadas), com um pequeno intervalo
     const { ok } = await enviarBlocos(tel, blocos);
     if (!ok) { puladas++; continue; }
 
-    // avança a régua: dias úteis 1, 3, 7, 10 e 15 do atraso (proximoDiaAtraso)
-    // depois do prazo final, só volta a olhar no dia útil seguinte ao prazo
+    // avança a régua: dias úteis 1, 3, 7 e 10 do atraso (proximoDiaAtraso)
+    // depois do último aviso, volta a olhar no dia útil seguinte (e aí vai para ação)
     const proxRegua = vencIso ? noveHorasBRT(proximoDiaAtraso(vencIso, hoje)) : new Date(Date.now() + 2 * 864e5).toISOString();
     const upd: any = {
       lembretes_enviados: n, ultimo_lembrete_em: agoraIso,
-      proximo_lembrete_em: ehPrazoFinal ? noveHorasBRT(somarDiasUteis(prazo, 1)) : proxRegua,
+      proximo_lembrete_em: ehPrazoFinal ? noveHorasBRT(somarDiasUteis(hoje, 1)) : proxRegua,
       primeiro_contato_em: c.primeiro_contato_em || agoraIso, venc_atual: venc, invoice_url: url, updated_at: agoraIso,
     };
     if (promessaQuebrada) {
