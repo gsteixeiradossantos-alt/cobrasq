@@ -14,7 +14,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { resolverJid } from '../_shared/telefone-jid.ts';
-import { adiarParaDiaUtil } from '../_shared/fila-dia-util.ts';
+import { adiarParaDiaUtil, adiarParaHorario } from '../_shared/fila-dia-util.ts';
 
 const MAX_LOTE = 50;
 const MAX_TENTATIVAS = 5;
@@ -259,8 +259,11 @@ Deno.serve(async (req) => {
       .test(String(m.origem || ''));
 
     // Sábado, domingo ou feriado: o que foi agendado antes vai para o próximo dia
-    // útil às 09:00; o que entrou na fila hoje sai. Ver _shared/fila-dia-util.ts.
-    const proximoUtil = (!souGrupo && !avisoInterno) ? adiarParaDiaUtil(new Date(), m.created_at) : null;
+    // útil às 09:00; o que entrou na fila hoje sai. Fora das 08h às 20h, o mesmo:
+    // agendada antes espera as 09h; posta agora sai. Ver _shared/fila-dia-util.ts.
+    const proximoUtil = (!souGrupo && !avisoInterno)
+      ? (adiarParaDiaUtil(new Date(), m.created_at) || adiarParaHorario(new Date(), m.created_at))
+      : null;
     if (proximoUtil) {
       await sb.from('crm_mensagens_agendadas')
         .update({ status: 'pendente', agendada_para: proximoUtil, processando_desde: null })
