@@ -14,6 +14,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 import { resolverJid } from '../_shared/telefone-jid.ts';
+import { adiarParaDiaUtil } from '../_shared/fila-dia-util.ts';
 
 const MAX_LOTE = 50;
 const MAX_TENTATIVAS = 5;
@@ -176,7 +177,7 @@ Deno.serve(async (req) => {
   const agora = new Date().toISOString();
   const { data: lote, error: errSel } = await sb
     .from('crm_mensagens_agendadas')
-    .select('id, telefone, mensagem, tentativas, caso_id, operador_id, tipo, media_path, media_nome, media_mime, legenda, origem')
+    .select('id, telefone, mensagem, tentativas, caso_id, operador_id, tipo, media_path, media_nome, media_mime, legenda, origem, created_at')
     .eq('status', 'pendente')
     .lte('agendada_para', agora)
     .order('agendada_para', { ascending: true })
@@ -256,6 +257,17 @@ Deno.serve(async (req) => {
     // adiadas:9 por 4 minutos. Aviso com hora marcada não espera conversa nenhuma.
     const avisoInterno = /^(lembrete_aviso_|audiencia_lembrete_|resumo_diario$|vigia_seguranca$)/
       .test(String(m.origem || ''));
+
+    // Sábado, domingo ou feriado: o que foi agendado antes vai para o próximo dia
+    // útil às 09:00; o que entrou na fila hoje sai. Ver _shared/fila-dia-util.ts.
+    const proximoUtil = (!souGrupo && !avisoInterno) ? adiarParaDiaUtil(new Date(), m.created_at) : null;
+    if (proximoUtil) {
+      await sb.from('crm_mensagens_agendadas')
+        .update({ status: 'pendente', agendada_para: proximoUtil, processando_desde: null })
+        .eq('id', m.id);
+      adiadas++;
+      continue;
+    }
     if (!souGrupo && pendentes.has(dk(m.telefone)) && !escritaPorHumano && !avisoInterno) {
       await sb.from('crm_mensagens_agendadas')
         .update({ status: 'pendente', processando_desde: null })

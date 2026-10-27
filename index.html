@@ -5112,6 +5112,9 @@ let _syncPendingForce = false;
 // F-20 (incidente 2026-06-11): nº de devedores da última versão confiável.
 // Usado pela trava anti-encolhimento do syncToSupabase.
 let _lastKnownDevCount = null;
+// true depois que loadRelationalData terminou (com sucesso ou não) no boot. Antes disso o
+// _lastKnownDevCount vem do blob (74) e a lista em memória não é a do servidor (2200+).
+let _relBootDone = false;
 
 // ── GRAVAÇÃO POR REGISTRO (aprovada pelo gestor, 2026-06-12) ─────────────
 // Snapshot da última versão sincronizada. No save, comparamos registro a
@@ -5281,6 +5284,12 @@ async function syncToSupabase(force){
         // que a aba está com cópia velha. BLOQUEIO TOTAL, sem confirmação
         // (decisão do gestor: ninguém pode "confirmar sem querer") — recarrega
         // os dados do servidor e avisa.
+        // No boot, até a carga relacional terminar, a contagem local é a do blob e não diz nada
+        // sobre o servidor: comparar agora gerava "faltam 2153 devedores" no login. Adia o save.
+        if(!_relBootDone && _lastKnownDevCount != null && localDevs < _lastKnownDevCount - 2){
+          console.warn('F-20: carga relacional ainda não terminou — save adiado.');
+          return;
+        }
         if(_lastKnownDevCount != null && localDevs < _lastKnownDevCount - 2){
           // CONFERE CONTRA O SERVIDOR ANTES DE BLOQUEAR. `_lastKnownDevCount` é uma
           // referência de SESSÃO e derrapa por caminhos que não têm nada a ver com aba
@@ -5304,7 +5313,9 @@ async function syncToSupabase(force){
             const perda = (serverDevs == null ? _lastKnownDevCount : serverDevs) - localDevs;
             console.warn('F-20: save bloqueado — removeria ' + perda + ' devedores do servidor.');
             if(typeof showToast === 'function') showToast('🛡️ Salvamento BLOQUEADO: esta aba está desatualizada (faltam ' + perda + ' devedores). Dados do servidor recarregados — reaplique sua alteração.','danger');
-            try{ await loadFromSupabase(); }catch(e){ console.warn('F-20: reload pós-bloqueio falhou:', e?.message||e); }
+            // loadFromSupabase traz só o blob (74 devedores); sem recarregar o relacional a aba
+            // ficava com 74 e o próximo save era bloqueado de novo, em loop.
+            try{ await loadFromSupabase(); await loadRelationalData(); }catch(e){ console.warn('F-20: reload pós-bloqueio falhou:', e?.message||e); }
             return;
           }
           // O servidor confirma que esta aba NÃO está encolhendo nada: quem estava
@@ -5328,7 +5339,7 @@ async function syncToSupabase(force){
           }
           if(merr && /F-20/.test(merr.message||'')){
             if(typeof showToast === 'function') showToast('🛡️ ' + merr.message, 'danger');
-            try{ await loadFromSupabase(); }catch(e){ console.warn('reload pós-F20:', e?.message||e); }
+            try{ await loadFromSupabase(); await loadRelationalData(); }catch(e){ console.warn('reload pós-F20:', e?.message||e); }
             return;
           }
           console.warn('cobrasq_merge indisponível — fallback para blob inteiro:', merr?.message || JSON.stringify(mres||{}));
@@ -6114,6 +6125,9 @@ async function loadTombstones(){
 }
 
 async function loadRelationalData(){
+  try{ return await _loadRelationalDataImpl(); } finally { _relBootDone = true; }
+}
+async function _loadRelationalDataImpl(){
   // Sobrescreve DB.devedores e DB.clientes com dados das tabelas relacionais
   // (fonte da verdade pós-Fase 2.5). Roda só após login — antes disso, RLS
   // retorna [] e perderíamos os dados do JSON blob.
@@ -20049,6 +20063,7 @@ async function vigiaMarcar(id, status, doCaso){
   showToast(status==='visto'?'Marcado como visto.':status==='descartado'?'Descartado.':'Voltou para novos.','success');
   await refreshVigiaAcoesBadge();
   if(doCaso==='dev') devVigiaBloco(_detDevId);
+  else if(doCaso==='rf') invRfVigia();
   else if(doCaso && _invHost) invVigiaBloco(_invHost.cobId, _invHost.hostId); else renderVigiaAcoes();
 }
 
@@ -25487,6 +25502,17 @@ async function renderInvestigacaoPatrimonial(){
       <input id="inv-busca" type="search" autocomplete="off" placeholder="Buscar por devedor, credor, CPF/CNPJ ou nº do processo" oninput="invFiltrarCasos()" style="margin-top:12px;width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;background:var(--surface);color:var(--text);">
       <div id="inv-casos" style="margin-top:8px;max-height:300px;overflow:auto;"><div style="padding:12px;color:var(--text-3);font-size:12.5px;">Carregando cobranças…</div></div>
     </div>
+    <div id="inv-rf-bloco" class="cob-panel" style="padding:18px;margin-top:14px;">
+      <div class="det-panel-tt" style="margin:0;">Empresas e sócios na Receita</div>
+      <div style="font-size:11.5px;color:var(--text-3);margin-top:3px;">Consulta rápida, sem abrir cobrança nem acordo. CPF → empresas no nome da pessoa (precisa do nome completo). CNPJ → quadro de sócios. O telefone é opcional e mostra quais CNPJs o usam.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
+        <input id="inv-rf-nome" type="text" autocomplete="off" placeholder="Nome completo (para CPF)" style="flex:2 1 220px;min-width:0;padding:9px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;background:var(--surface);color:var(--text);">
+        <input id="inv-rf-doc" type="text" autocomplete="off" inputmode="numeric" placeholder="CPF ou CNPJ" onkeydown="if(event.key==='Enter')invBuscarRF()" style="flex:1 1 150px;min-width:0;padding:9px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;background:var(--surface);color:var(--text);">
+        <input id="inv-rf-tel" type="text" autocomplete="off" inputmode="tel" placeholder="Telefone (opcional)" onkeydown="if(event.key==='Enter')invBuscarRF()" style="flex:1 1 140px;min-width:0;padding:9px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-family:inherit;background:var(--surface);color:var(--text);">
+        <button class="cob-btn-primary" id="inv-rf-btn" onclick="invBuscarRF()">Buscar</button>
+      </div>
+      <div id="inv-rf-res" style="margin-top:10px;display:none;"></div>
+    </div>
     <div id="inv-av-bloco" class="cob-panel" style="padding:18px;margin-top:14px;">
       <div class="det-panel-tt" style="margin:0;">Investigar sem cobrança</div>
       <div style="font-size:11.5px;color:var(--text-3);margin-top:3px;">Para quem ainda não está cadastrado. Use o nome completo como consta na Receita. Cadastrar como devedor é opcional e pode ser feito depois.</div>
@@ -25545,6 +25571,108 @@ function invUsarBusca(){
 }
 // ── Investigação avulsa (sem cobrança nem devedor cadastrado) ──
 let _invAvCache=[];
+// Consulta avulsa à base da Receita (a mesma do termo de acordo), direto da página de
+// Investigação: CPF → empresas no nome (+ cruzamento por telefone); CNPJ → sócios.
+// Detalhe da empresa (clique no nome): dados da Receita via BrasilAPI (fallback CNPJ.ws),
+// quadro de sócios, link do Cartão CNPJ oficial e ficha para imprimir/salvar em PDF.
+// O comprovante oficial da Receita exige captcha — não dá para baixá-lo automaticamente.
+const _invEmpCache={};
+function _invMoeda(v){ const n=Number(v); return isFinite(n)?n.toLocaleString('pt-BR',{style:'currency',currency:'BRL'}):''; }
+function _invEmpFicha(cnpj,d){
+  const fmt=c=>String(c).replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/,'$1.$2.$3/$4-$5');
+  const end=[d.descricao_tipo_de_logradouro,d.logradouro,d.numero,d.complemento,d.bairro,d.municipio&&(d.municipio+'/'+d.uf),d.cep&&('CEP '+d.cep)].filter(Boolean).join(', ');
+  const tel=[d.ddd_telefone_1,d.ddd_telefone_2].filter(Boolean).join(' · ');
+  const qsa=(d.qsa||[]).map(q=>[q.nome_socio,q.qualificacao_socio,q.cnpj_cpf_do_socio].filter(Boolean).join(' — '));
+  return { titulo:d.razao_social||'', linhas:[
+    ['CNPJ',fmt(cnpj)],['Nome empresarial',d.razao_social],['Nome fantasia',d.nome_fantasia],
+    ['Situação cadastral',[d.descricao_situacao_cadastral,d.data_situacao_cadastral&&('desde '+String(d.data_situacao_cadastral).split('-').reverse().join('/'))].filter(Boolean).join(' ')],
+    ['Abertura',d.data_inicio_atividade&&String(d.data_inicio_atividade).split('-').reverse().join('/')],
+    ['Natureza jurídica',d.natureza_juridica],['Porte',d.porte],['Capital social',d.capital_social!=null?_invMoeda(d.capital_social):''],
+    ['Atividade principal',[d.cnae_fiscal,d.cnae_fiscal_descricao].filter(Boolean).join(' — ')],
+    ['Endereço',end],['Telefone',tel],['E-mail',d.email]], qsa };
+}
+async function invEmpresaToggle(a,cnpj){
+  const row=a.closest('[data-emp]'); const box=row&&row.querySelector('.emp-det'); if(!box) return;
+  if(box.style.display==='block'){ box.style.display='none'; return; }
+  box.style.display='block';
+  box.style.cssText='display:block;margin:6px 0 4px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2,rgba(10,21,48,.03));font-size:12px;';
+  box.innerHTML='<span style="color:var(--text-3);">Consultando a Receita…</span>';
+  cnpj=String(cnpj||'').replace(/\D/g,'');
+  try{
+    let d=_invEmpCache[cnpj];
+    if(!d){
+      let r=null; try{ const resp=await _cnpjFetch('https://brasilapi.com.br/api/cnpj/v1/'+cnpj); if(resp.ok) r=await resp.json(); }catch(_){}
+      if(!r){ const f=await cnpjLookupReceita(cnpj); if(!f.ok){ box.innerHTML='<span style="color:var(--danger);">'+escHtml(cnpjLookupErroMsg(f))+'</span>'; return; } r=f.data; }
+      d=_invEmpCache[cnpj]=r;
+    }
+    const f=_invEmpFicha(cnpj,d);
+    const linhas=f.linhas.filter(l=>l[1]).map(l=>`<div style="display:flex;gap:8px;padding:2px 0;"><span style="flex:0 0 130px;color:var(--text-3);">${escHtml(l[0])}</span><span style="flex:1;min-width:0;word-break:break-word;">${escHtml(String(l[1]))}</span></div>`).join('');
+    const qsa=f.qsa.length?`<div style="font-size:11px;font-weight:700;color:var(--text-3);margin:8px 0 2px;">QUADRO DE SÓCIOS (${f.qsa.length})</div>`+f.qsa.map(q=>`<div style="padding:1px 0;">${escHtml(q)}</div>`).join(''):'';
+    const rec='https://solucoes.receita.fazenda.gov.br/servicos/cnpjreva/Cnpjreva_Solicitacao.asp?cnpj='+cnpj;
+    box.innerHTML=linhas+qsa+`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;">
+      <a class="btn btn-ghost btn-sm" href="${rec}" target="_blank" rel="noopener">Cartão CNPJ oficial (Receita) ↗</a>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="invEmpresaImprimir('${cnpj}')">Imprimir / salvar PDF</button></div>
+      <div style="font-size:10.5px;color:var(--text-3);margin-top:6px;">O cartão oficial da Receita pede captcha (digite na página que abrir). A ficha acima vem da BrasilAPI e não substitui o comprovante.</div>`;
+  }catch(e){ box.innerHTML='<span style="color:var(--danger);">Erro: '+escHtml((e&&e.message)||String(e))+'</span>'; }
+}
+function invEmpresaImprimir(cnpj){
+  const d=_invEmpCache[cnpj]; if(!d){ showToast('Abra os dados da empresa primeiro.','warning'); return; }
+  const f=_invEmpFicha(cnpj,d); const w=window.open('','_blank'); if(!w){ showToast('Libere pop-ups para imprimir.','warning'); return; }
+  const linhas=f.linhas.filter(l=>l[1]).map(l=>`<tr><th>${escHtml(l[0])}</th><td>${escHtml(String(l[1]))}</td></tr>`).join('');
+  const qsa=f.qsa.length?`<h3>Quadro de sócios</h3><ul>${f.qsa.map(q=>`<li>${escHtml(q)}</li>`).join('')}</ul>`:'';
+  w.document.write(`<!doctype html><meta charset="utf-8"><title>Ficha CNPJ ${escHtml(cnpj)}</title><style>body{font-family:Arial,sans-serif;margin:32px;color:#111}h2{margin:0 0 12px}table{border-collapse:collapse;width:100%}th{text-align:left;width:190px;vertical-align:top;padding:5px 8px;border-bottom:1px solid #ddd;color:#555;font-weight:600}td{padding:5px 8px;border-bottom:1px solid #ddd}small{color:#777}</style><h2>${escHtml(f.titulo)}</h2><table>${linhas}</table>${qsa}<p><small>Ficha gerada pelo painel COBRASQ em ${new Date().toLocaleString('pt-BR')} a partir da BrasilAPI. Não substitui o Comprovante de Inscrição e de Situação Cadastral da Receita Federal.</small></p><script>onload=()=>print()<\/script>`);
+  w.document.close();
+}
+async function invBuscarRF(){
+  const v=id=>String((document.getElementById(id)||{}).value||'').trim();
+  const nome=v('inv-rf-nome'), d=v('inv-rf-doc').replace(/\D/g,''), tel=v('inv-rf-tel');
+  const box=document.getElementById('inv-rf-res'), btn=document.getElementById('inv-rf-btn'); if(!box) return;
+  const msg=(html)=>{ box.style.display='block'; box.innerHTML=html; };
+  const erro=(t)=>msg('<div style="color:var(--danger);font-size:12px;">'+escHtml(t)+'</div>');
+  if(d.length!==11 && d.length!==14){ erro('Informe um CPF (11 dígitos) ou CNPJ (14 dígitos) válido.'); return; }
+  if(d.length===11 && !nome){ erro('Para buscar empresas pelo CPF, informe o nome completo da pessoa.'); return; }
+  if(btn){ btn.disabled=true; btn.textContent='Consultando…'; }
+  msg('<div style="font-size:12px;color:var(--text-3);">Consultando…</div>');
+  try{
+    if(d.length===14){
+      const r=await cnpjSociosLookup(d);
+      if(!r.ok){ erro(cnpjLookupErroMsg(r)); return; }
+      msg(''); _tajRenderSocios(r,{ boxId:'inv-rf-res', semAvalista:true });
+    } else {
+      const resp=await fetch('/api/automacao?action=cnpja',{ method:'POST', headers:{ 'Content-Type':'application/json', ...(await authHeaders()) }, body:JSON.stringify({ nome, cpf:d, telefone:tel }) });
+      const j=await resp.json().catch(()=>({}));
+      if(!resp.ok){ erro(j.error||('Falha HTTP '+resp.status)); return; }
+      msg(''); _tajRenderEmpresasPF(j, nome, d, { boxId:'inv-rf-res', semAvalista:true, clicavel:true });
+    }
+    _invRfQ={ nome, doc:d }; invRfVigia();
+  }catch(e){ erro('Erro: '+((e&&e.message)||String(e))); }
+  finally{ if(btn){ btn.disabled=false; btn.textContent='Buscar'; } }
+}
+// Vigia de ações na busca da Receita: processos achados pela vigia para o CPF/CNPJ ou nome digitado.
+// Casa por devedor cadastrado (devedores.doc) e, nas linhas sem devedor, pelo nome que a vigia gravou.
+let _invRfQ=null;
+async function invRfVigia(){
+  const res=document.getElementById('inv-rf-res'); if(!res||!_invRfQ) return;
+  let box=document.getElementById('inv-rf-vigia');
+  if(!box){ box=document.createElement('div'); box.id='inv-rf-vigia'; res.insertAdjacentElement('afterend',box); }
+  const supa=getSupabase(); if(!supa){ box.innerHTML=''; return; }
+  const { nome, doc }=_invRfQ;
+  const cols='id,origem,nome_devedor,nome_encontrado,numero_processo,polo,tribunal,classe,orgao,link,primeira_data,ultima_data,qtd_comunicacoes,cpf_confere,processos,status,nota,visto_por,visto_em';
+  const devIds=(DB.devedores||[]).filter(x=>String(x.doc||'').replace(/\D/g,'')===doc).map(x=>x.id);
+  const qs=[];
+  if(devIds.length) qs.push(supa.from('vigia_acoes').select(cols).in('devedor_id',devIds));
+  const nm=String(nome||'').trim().replace(/[%,()]/g,' ');
+  if(nm.length>=5) qs.push(supa.from('vigia_acoes').select(cols).or(`nome_devedor.ilike.%${nm}%,nome_encontrado.ilike.%${nm}%`));
+  if(!qs.length){ box.innerHTML=''; return; }
+  const rs=await Promise.all(qs);
+  if(_invRfQ.doc!==doc) return;
+  const erro=rs.find(r=>r.error)?.error;
+  if(erro){ box.innerHTML=`<div class="cob-panel" style="padding:14px 18px;margin-top:14px;font-size:12px;color:var(--text-3);">Vigia de ações indisponível: ${escHtml(erro.message||'')}</div>`; return; }
+  const porId={}; rs.forEach(r=>(r.data||[]).forEach(v=>{ porId[v.id]=v; }));
+  _vigiaBlocoRender(box, Object.values(porId), { marcar:"'rf'", estilo:'margin-top:14px;',
+    sub:'Processos em que esta pessoa aparece no Diário de Justiça (DJEN), achados pela vigia semanal (por devedor cadastrado ou pelo nome). O diário quase nunca traz CPF: confira no tribunal se é a mesma pessoa.',
+    vazio:'A vigia não achou processo para este CPF/nome.' });
+}
 async function invIniciarAvulsa(btn){
   const nome=String(document.getElementById('inv-av-nome')?.value||'').trim();
   const doc=String(document.getElementById('inv-av-doc')?.value||'').replace(/\D/g,'');
@@ -49830,8 +49958,8 @@ async function _tajVerificarDoc(){
   }catch(e){ msg('<div style="color:var(--danger);font-size:12px;">Erro: '+escHtml((e&&e.message)||String(e))+'</div>'); }
   finally{ if(btn){ btn.disabled=false; btn.textContent='🔎 Verificar sócios / empresas'; } }
 }
-function _tajRenderSocios(r){
-  const box=document.getElementById('tajVerifBox'); if(!box) return;
+function _tajRenderSocios(r, opts){
+  opts=opts||{}; const box=document.getElementById(opts.boxId||'tajVerifBox'); if(!box) return;
   const socios=(r&&r.socios)||[]; _tajState._socios=socios;
   if(!socios.length){ box.innerHTML='<div style="font-size:12px;color:var(--text-3);">Nenhum sócio no quadro societário (fonte: '+escHtml((r&&r.fonte)||'?')+').</div>'; return; }
   const linhas=socios.map((s,i)=>`
@@ -49840,13 +49968,13 @@ function _tajRenderSocios(r){
         <div style="font-size:12.5px;font-weight:600;">${escHtml(s.nome)}</div>
         <div style="font-size:11px;color:var(--text-3);">${escHtml([s.doc,s.papel].filter(Boolean).join(' · '))||'—'}</div>
       </div>
-      <button type="button" class="btn btn-ghost btn-sm" onclick="_tajAddAvalistaFromSocio(${i})">+ avalista</button>
+      ${opts.semAvalista?'':`<button type="button" class="btn btn-ghost btn-sm" onclick="_tajAddAvalistaFromSocio(${i})">+ avalista</button>`}
     </div>`).join('');
   box.innerHTML=`<div style="font-size:11px;font-weight:700;color:var(--text-3);margin-bottom:4px;">SÓCIOS · fonte: ${escHtml(r.fonte)}</div>${linhas}
-    <div style="font-size:10.5px;color:var(--text-3);margin-top:6px;">O CPF do sócio vem <strong>mascarado</strong> na base pública — preencha o documento completo na linha do avalista antes de enviar ao ZapSign.</div>`;
+    <div style="font-size:10.5px;color:var(--text-3);margin-top:6px;">O CPF do sócio vem <strong>mascarado</strong> na base pública${opts.semAvalista?'.':' — preencha o documento completo na linha do avalista antes de enviar ao ZapSign.'}</div>`;
 }
-function _tajRenderEmpresasPF(j, nome, cpf){
-  const box=document.getElementById('tajVerifBox'); if(!box) return;
+function _tajRenderEmpresasPF(j, nome, cpf, opts){
+  opts=opts||{}; const box=document.getElementById(opts.boxId||'tajVerifBox'); if(!box) return;
   if(j && j.pendente){
     const link=j.fallbackUrl||('https://casadosdados.com.br/solucao/cnpj/busca-avancada?socio='+encodeURIComponent(nome||''));
     box.innerHTML=`<div style="font-size:12px;color:var(--text-2);">
@@ -49861,7 +49989,8 @@ function _tajRenderEmpresasPF(j, nome, cpf){
   // Cruzamentos por telefone / endereço / e-mail (base local). Pista, não prova:
   // telefone usado por >3 CNPJs é de contador/escritório e vira aviso.
   const sit=c=>({'02':'ativa','03':'suspensa','04':'inapta','08':'baixada','01':'nula'})[c]||c||'';
-  const linhaX=(e,extra)=>`<div style="padding:4px 0;border-bottom:1px solid var(--border);font-size:11.5px;"><strong>${escHtml(e.nome||e.fantasia||'')}</strong>${e.fantasia&&e.nome?' · '+escHtml(e.fantasia):''} <span style="color:var(--text-3);">· ${escHtml(e.cnpj)} · ${escHtml(sit(e.situacao))}${e.uf?' · '+escHtml(e.uf):''}${extra?' · '+escHtml(extra):''}</span></div>`;
+  const nomeEmp=(txt,cnpj)=> opts.clicavel ? `<a href="javascript:void(0)" onclick="invEmpresaToggle(this,'${escHtml(cnpj)}')" style="color:var(--primary,#1a56db);text-decoration:underline;cursor:pointer;" title="Ver dados da empresa">${escHtml(txt)}</a>` : escHtml(txt);
+  const linhaX=(e,extra)=>`<div data-emp style="padding:4px 0;border-bottom:1px solid var(--border);font-size:11.5px;"><strong>${nomeEmp(e.nome||e.fantasia||'',e.cnpj)}</strong>${e.fantasia&&e.nome?' · '+escHtml(e.fantasia):''} <span style="color:var(--text-3);">· ${escHtml(e.cnpj)} · ${escHtml(sit(e.situacao))}${e.uf?' · '+escHtml(e.uf):''}${extra?' · '+escHtml(extra):''}</span><div class="emp-det" style="display:none;"></div></div>`;
   let cruz='';
   const tel=Array.isArray(j.por_telefone)?j.por_telefone:null;
   if(tel){
@@ -49883,13 +50012,13 @@ function _tajRenderEmpresasPF(j, nome, cpf){
   const linhas=empresas.map((e,i)=>{
     const tag = e.confere===true ? '<span style="font-size:10px;color:var(--success);font-weight:700;">✓ confere CPF</span>'
               : e.confere===false ? '<span style="font-size:10px;color:var(--danger);font-weight:700;">✗ CPF não bate</span>' : '';
-    return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);">
+    return `<div data-emp style="padding:6px 0;border-bottom:1px solid var(--border);"><div style="display:flex;align-items:center;gap:8px;">
       <div style="flex:1;min-width:0;">
-        <div style="font-size:12.5px;font-weight:600;">${escHtml(e.nome||'')} ${tag}</div>
+        <div style="font-size:12.5px;font-weight:600;">${nomeEmp(e.nome||'',e.cnpj)} ${tag}</div>
         <div style="font-size:11px;color:var(--text-3);">${escHtml([e.cnpj,e.papel,sit(e.situacao)].filter(Boolean).join(' · '))}</div>
       </div>
-      <button type="button" class="btn btn-ghost btn-sm" onclick="_tajAddAvalistaFromEmpresa(${i})">+ avalista</button>
-    </div>`;
+      ${opts.semAvalista?'':`<button type="button" class="btn btn-ghost btn-sm" onclick="_tajAddAvalistaFromEmpresa(${i})">+ avalista</button>`}
+    </div><div class="emp-det" style="display:none;"></div></div>`;
   }).join('');
   const fonte=(j&&j.fonte)?' · fonte: '+escHtml(j.fonte):'';
   box.innerHTML=`<div style="font-size:11px;font-weight:700;color:var(--text-3);margin-bottom:4px;">EMPRESAS NO NOME · miolo do CPF ${escHtml(miolo)}${fonte}</div>${linhas}${cruz}${baseInfo}`;

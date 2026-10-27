@@ -12,7 +12,7 @@ const API_BASE = 'https://painel.cobrasq.com.br';
 
 // Mensagens que pertencem à página da Central (central.js responde/ouve) — o
 // background NÃO pode respondê-las, senão vence a corrida do sendResponse.
-const TIPOS_DA_CENTRAL = new Set(['PEDIR_DOC', 'CENTRAL_PROGRESS', 'CENTRAL_CASO_OK', 'CENTRAL_PAUSA']);
+const TIPOS_DA_CENTRAL = new Set(['PEDIR_DOC', 'SALVAR_EXTRATO', 'CENTRAL_PROGRESS', 'CENTRAL_CASO_OK', 'CENTRAL_PAUSA']);
 
 async function getToken() {
   const { token } = await chrome.storage.session.get('token');
@@ -280,6 +280,31 @@ async function overrideDialogos(tabId, allFrames) {
   });
 }
 
+// Extrato da distribuição (página HTML do eproc) → PDF: abre a URL numa aba em
+// segundo plano (mesma sessão/cookies), imprime via DevTools Protocol e fecha.
+async function extratoParaPdf(url) {
+  const tab = await chrome.tabs.create({ url, active: false });
+  try {
+    const fim = Date.now() + 30000;
+    for (;;) {
+      const t = await chrome.tabs.get(tab.id);
+      if (t.status === 'complete') break;
+      if (Date.now() > fim) throw new Error('a página do extrato não carregou em 30s');
+      await new Promise(r => setTimeout(r, 300));
+    }
+    await new Promise(r => setTimeout(r, 800)); // fontes/estilos assentarem
+    const alvo = { tabId: tab.id };
+    await chrome.debugger.attach(alvo, '1.3');
+    try {
+      const r = await chrome.debugger.sendCommand(alvo, 'Page.printToPDF', {
+        printBackground: true, paperWidth: 8.27, paperHeight: 11.69, // A4
+        marginTop: 0.4, marginBottom: 0.4, marginLeft: 0.4, marginRight: 0.4,
+      });
+      return { ok: true, base64: r.data };
+    } finally { await chrome.debugger.detach(alvo).catch(() => {}); }
+  } finally { chrome.tabs.remove(tab.id).catch(() => {}); }
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || TIPOS_DA_CENTRAL.has(msg.type)) return false; // deixa a Central responder/ouvir
   (async () => {
@@ -341,6 +366,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           });
           sendResponse({ ok: true, resultado: res && res.result });
         } catch (e) { sendResponse({ error: String((e && e.message) || e) }); }
+      } else if (msg.type === 'EXTRATO_PDF') {
+        sendResponse(await extratoParaPdf(msg.url));
       } else if (msg.type === 'FETCH_PDF') {
         // Baixa o PDF da signed URL (Supabase) aqui no worker — host_permissions
         // evita problema de CORS no content script do eproc.
