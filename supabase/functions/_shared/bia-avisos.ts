@@ -98,10 +98,11 @@ function saudacao(nome: string): string {
 }
 
 // ===== Cobrança de boleto JÁ VENCIDO (p07, p09, p10, p11) =====
-// Nenhum texto cita negativação nem protesto (decisão de 30/09/2026). A linha de
-// "N boletos em aberto" só entra na de 7 dias e na de prazo final.
+// Textos dos dias 1, 3, 7 e 10 escritos pelo Gustavo em 27/10/2026 (página "Régua
+// da Bia"); o dia 5 saiu da régua e o texto dele passou para o dia 7. Prazo final e
+// promessa quebrada seguem os de 30/09/2026.
 export type CobrancaAtraso = {
-  tipo: 'primeira' | 'sete_dias' | 'prazo_final' | 'promessa_quebrada';
+  tipo: 'dia1' | 'dia3' | 'dia7' | 'dia10' | 'prazo_final' | 'promessa_quebrada';
   sig: string;
   nome: string;
   valor: unknown;
@@ -110,7 +111,15 @@ export type CobrancaAtraso = {
   nAberto: number;       // boletos em aberto do mesmo cliente
   prazo?: string;        // prazo_final: data limite (dia útil)
   dataPrometida?: string; // promessa_quebrada
+  agora?: string;        // instante do envio (saudação); padrão: agora
 };
+
+// "Bom dia" até 12h, "Boa tarde" até 18h, "Boa noite" depois (horário de Brasília).
+export function saudacaoHora(agora?: string): string {
+  const h = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Sao_Paulo', hour: 'numeric', hourCycle: 'h23' })
+    .format(agora ? new Date(agora) : new Date()));
+  return h < 12 ? 'Bom dia' : h < 18 ? 'Boa tarde' : 'Boa noite';
+}
 
 export function textosAtraso(c: CobrancaAtraso): string[] {
   const ola = saudacao(c.nome);
@@ -131,18 +140,32 @@ export function textosAtraso(c: CobrancaAtraso): string[] {
       `Te dou até ${diaSemana(prazo)}, ${ddmm(prazo)}, pra pagar ou me chamar pra combinar: ${url}`,
       `Depois dessa data, o caso sai do atendimento por aqui e seguirá para o jurídico para as medidas de cobranças cabíveis.`,
     ];
-  } else if (c.tipo === 'sete_dias') {
-    b = [
-      `${ola} Sua parcela de R$ ${val} está vencida desde ${ddmm(c.venc)} e segue em aberto.${multi}`,
-      `Preciso que você regularize com urgência, pelo link:\n${url}`,
-      `Se precisar combinar uma data, me responde aqui. Sem retorno, o caso segue para as próximas medidas de cobrança.`,
-    ];
   } else {
-    b = [
-      `${ola} Sua parcela de R$ ${val} venceu em ${ddmm(c.venc)} e ainda não consta o pagamento.`,
-      `Pedimos que regularize o quanto antes pra evitar o aumento de encargos e o prosseguimento da cobrança:\n${url}`,
-      `Estou à disposição para conversar, caso precise.`,
-    ];
+    const nome = String(c.nome || '').trim().split(/\s+/)[0] || '';
+    const oi = `${saudacaoHora(c.agora)}${nome ? `, ${nome}` : ''}!`;
+    if (c.tipo === 'dia10') {
+      b = [
+        `*${nome ? `${nome}, n` : 'N'}otificamos que, diante do não pagamento do acordo firmado, a execução judicial será imediatamente iniciada, com aplicação da multa de 50% sobre o valor devido e outras despesas.*`,
+        `*O processo poderá resultar em bloqueio de contas, penhora de bens e salários, inclusão no protesto e SERASA.*`,
+      ];
+    } else if (c.tipo === 'dia7') {
+      b = [
+        `${oi} Infelizmente como não houve retorno da sua parte, vamos iniciar as tratativas mais graves como negativação, protesto e outros.`,
+        `Peço que verifique para estar fazendo o pagamento o quanto antes, pois se a dívida chegar a ser protestada, para baixar o protesto terá novas custas.`,
+        `Além disso, se o jurídico entender que o acordo se tornou insustentável pelo atraso e resolver executar o acordo na justiça, o valor pendente vence tudo de uma vez e ainda adiciona com multa. Consegue me dar um retorno, hoje, sem falta?`,
+      ];
+    } else if (c.tipo === 'dia3') {
+      b = [
+        `${oi} Tudo bem? Esses dias te chamei perguntando sobre a parcela do acordo que você ainda não tinha pago,  certo?`,
+        `Verifiquei novamente no meu sistema e ainda consta em aberto. Preciso saber que dia, de certeza, conseguirá estar realizando o pagamento.`,
+      ];
+    } else {
+      b = [
+        `${oi} Tudo bem? Vi aqui que a parcela de R$ ${val} do seu acordo, que venceu dia ${ddmm(c.venc)}, ainda não foi paga.`,
+        `O que que aconteceu? Consegue pagar até amanhã? Assim fica tudo como a gente combinou.`,
+        `Fico no aguardo do seu retorno. Ok?`,
+      ];
+    }
   }
   b[0] = `${c.sig}\n${b[0]}`;
   return b;

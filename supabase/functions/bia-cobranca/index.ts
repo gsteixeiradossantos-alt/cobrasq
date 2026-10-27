@@ -521,11 +521,13 @@ Deno.serve(async (req) => {
         continue;
       }
     }
-    // textos aprovados em 30/09/2026 (bia-avisos.ts); nenhum cita negativação/protesto.
-    // Prazo final: data fixa, 2 dias úteis à frente (antes: "48 horas").
+    // textos dos dias 1, 3, 7 e 10: Gustavo, 27/10/2026 (bia-avisos.ts). O 1º contato
+    // de atraso é sempre o do dia 1, mesmo que o caso chegue atrasado (o do dia 3 diz
+    // "esses dias te chamei"). Prazo final: data fixa, 2 dias úteis à frente.
     const prazo = somarDiasUteis(hoje, 2);
     const blocos = textosAtraso({
-      tipo: promessaQuebrada ? 'promessa_quebrada' : pertoAcao ? 'prazo_final' : (jaCobrado && diasVencAtual >= 7) ? 'sete_dias' : 'primeira',
+      tipo: promessaQuebrada ? 'promessa_quebrada' : pertoAcao ? 'prazo_final' : !jaCobrado ? 'dia1'
+        : diasVencAtual >= 10 ? 'dia10' : diasVencAtual >= 7 ? 'dia7' : diasVencAtual >= 3 ? 'dia3' : 'dia1',
       sig: SIG, nome: String(c.nome || ''), valor: c.valor, venc: String(venc || c.venc_atual || ''), url: String(url || ''),
       nAberto, prazo, dataPrometida: c.data_prometida ? String(c.data_prometida) : undefined,
     });
@@ -536,7 +538,7 @@ Deno.serve(async (req) => {
     const { ok } = await enviarBlocos(tel, blocos);
     if (!ok) { puladas++; continue; }
 
-    // avança a régua: dias úteis 1, 3, 5, 7, 10 e 15 do atraso (proximoDiaAtraso)
+    // avança a régua: dias úteis 1, 3, 7, 10 e 15 do atraso (proximoDiaAtraso)
     // depois do prazo final, só volta a olhar no dia útil seguinte ao prazo
     const proxRegua = vencIso ? noveHorasBRT(proximoDiaAtraso(vencIso, hoje)) : new Date(Date.now() + 2 * 864e5).toISOString();
     const upd: any = {
