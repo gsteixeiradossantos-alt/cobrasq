@@ -25,6 +25,7 @@ import { MODELO, BIA_SYSTEM, extrairJson } from '../_shared/bia-system.ts';
 import { CARLOS_SYSTEM, extrairJson as extrairJsonCarlos } from '../_shared/carlos-system.ts';
 import { COB, calcularCobranca, calcularCobrancaTitulos, titulosValidos, valorFixo } from '../_shared/calc-cobranca.ts';
 import { parseValorBR } from '../_shared/valor-br.ts';
+import { modoSoBoleto, biaDesligadaSoCarlos, pularAcaoBia, pularMidiaBia } from '../_shared/bia-modo.ts';
 
 const MAX_CONVERSAS_POR_RUN = 15;
 // Só atende mensagens RECENTES. Protege contra "backlog": mensagens antigas
@@ -483,9 +484,8 @@ Deno.serve(async (req) => {
   // é mais nova que debounce_seg, a pessoa provavelmente ainda está mandando
   // mensagens -> não responde ainda (responde no próximo run, à rajada inteira).
   const debounceMs = (cfg.debounce_seg ?? 120) * 1000;
-  // MODO SÓ BOLETO: quando ligado, a Bia SÓ responde pedido de boleto/2ª via.
-  // Qualquer outro assunto ela deixa pro humano (não fala nada; segue em Pendentes).
-  const boletoOnly = cfg.modo_boleto_only === true;
+  // MODO SÓ BOLETO (cfg.modo_boleto_only, e junto com somente_carlos): regras em
+  // _shared/bia-modo.ts. Fora do boleto a Bia não fala nada; a conversa segue em Pendentes.
 
   const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY');
   const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY'); // p/ transcrever áudio (Whisper); se ausente, áudio vai pro humano
@@ -748,6 +748,10 @@ Deno.serve(async (req) => {
         const tr = await transcreverAudio(String(c.midia_url), OPENAI_API_KEY);
         if (tr) {
           textoCliente = tr; // segue o fluxo normal com o texto transcrito
+        } else if (modoSoBoleto(cfg)) {
+          // Só boleto: áudio que não deu para ouvir fica para a equipe, sem resposta.
+          await sb.from('whatsapp_bia_log').update({ resposta: null, acao: 'skip_nao_boleto' }).eq('id', logId);
+          puladas++; continue;
         } else {
           const t = 'Recebi seu áudio! Vou ouvir com atenção e já te retorno, tá?';
           await enviarBlocos(telefone, casoId, t, sb, sendTextUrl, zapiHeaders, 'bia-atendimento:audio');
@@ -759,7 +763,7 @@ Deno.serve(async (req) => {
 
       // COMPROVANTE: se a própria mensagem é documento/imagem, a Bia LÊ e responde direto.
       if ((c.tipo === 'documento' || c.tipo === 'imagem') && c.midia_url) {
-        if (!cobAtiva && boletoOnly) {
+        if (pularMidiaBia(cfg, !!cobAtiva)) {
           await sb.from('whatsapp_bia_log').update({ resposta: null, acao: 'skip_nao_boleto' }).eq('id', logId);
           puladas++; continue;
         }
@@ -886,7 +890,9 @@ Deno.serve(async (req) => {
       // o `auto_ativo`, e ele liga os dois de uma vez: sem isto, ligar o Carlos
       // devolveria a Bia ao ar junto. A conversa fica sem resposta automática,
       // igual ao que acontecia com tudo desligado.
-      if (cfg.somente_carlos === true) {
+      // Com "só boleto" também ligado, a Bia segue só para pedido de boleto
+      // (trava logo depois da IA, em pularAcaoBia).
+      if (biaDesligadaSoCarlos(cfg)) {
         await sb.from('whatsapp_bia_log').update({ resposta: null, acao: 'skip_somente_carlos' }).eq('id', logId);
         puladas++; continue;
       }
@@ -939,7 +945,8 @@ Deno.serve(async (req) => {
       // EXCEÇÃO: contatos com COBRANÇA ATIVA liberam o playbook completo (negociar prazo etc.).
       // EXCEÇÃO 2: credor_info e lead_comercial sempre liberam — não são devedor, e os
       // blocos abaixo são conservadores (texto fixo/verificado, não a IA improvisando).
-      if (boletoOnly && !cobAtiva && !['enviar_boleto', 'ja_paguei', 'quer_comprovante', 'credor_info', 'lead_comercial'].includes(acao)) {
+      // Com "só Carlos" também ligado, nenhuma exceção: SOMENTE enviar_boleto (bia-modo.ts).
+      if (pularAcaoBia(cfg, !!cobAtiva, acao)) {
         await sb.from('whatsapp_bia_log').update({ resposta: null, acao: 'skip_nao_boleto' }).eq('id', logId);
         puladas++; continue;
       }
