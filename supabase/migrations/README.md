@@ -406,7 +406,7 @@ então não quebra antes, mas a página do link só funciona depois da migraçã
 
 ## 20261027 — repasse que cobre o capital vira "Quitado" no banco
 
-**Não aplicada.** Função `repasses_cliente_quitar_cobranca()` (SECURITY DEFINER,
+**Aplicada em 27/10/2026** (MCP `apply_migration`, nome `repasse_quita_cobranca`). Função `repasses_cliente_quitar_cobranca()` (SECURITY DEFINER,
 sem EXECUTE para anon/authenticated) + trigger `AFTER INSERT OR UPDATE OF valor,
 cobranca_id` em `repasses_cliente`. Mesma regra de `recomputarSaldoCapital` do
 painel: capital (`valor_capital` → `divida.valorCapital` → `valor_orig`) menos a
