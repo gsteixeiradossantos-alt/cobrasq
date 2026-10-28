@@ -403,3 +403,19 @@ marca a resposta feita pelo link; `cedente_responder_conferencia` é recriada pa
 guardar o link no histórico. Os links se geram, copiam e revogam na aba "Conferência de títulos"
 dos Pedidos do portal. **Ordem:** aplicar → merge (a tela só lê `respondida_link` via `select *`,
 então não quebra antes, mas a página do link só funciona depois da migração).
+
+## 20261027 — repasse que cobre o capital vira "Quitado" no banco
+
+**Não aplicada.** Função `repasses_cliente_quitar_cobranca()` (SECURITY DEFINER,
+sem EXECUTE para anon/authenticated) + trigger `AFTER INSERT OR UPDATE OF valor,
+cobranca_id` em `repasses_cliente`. Mesma regra de `recomputarSaldoCapital` do
+painel: capital (`valor_capital` → `divida.valorCapital` → `valor_orig`) menos a
+soma dos repasses ≤ 0,005 e status fora de `Quitado`/`Quitado ao cliente` →
+`status = 'Quitado'`, `divida.valorCapital`, `updated_at` e o mesmo evento em
+`devedor_eventos` (pulado quando não há linha em `devedores` com o id da
+cobrança). `etapa` vem do `trg_cobrancas_sync_etapa`. Motivo: 375 repasses
+lançados por SQL em 27/10/2026 deixaram 9 cobranças quitadas sem mudar de status.
+Dry-run em prod dentro de `DO ... RAISE EXCEPTION` (parcial, total, repasse
+extra sem evento duplicado, cobrança sem devedor, INSERT de 2 linhas como
+proprietário logado). Não corrige casos antigos (só reage a repasse novo).
+Rollback pareado.
