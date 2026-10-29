@@ -26,7 +26,7 @@ import { CARLOS_SYSTEM, extrairJson as extrairJsonCarlos } from '../_shared/carl
 import { COB, calcularCobranca, calcularCobrancaTitulos, titulosValidos, valorFixo } from '../_shared/calc-cobranca.ts';
 import { parseValorBR } from '../_shared/valor-br.ts';
 import { modoSoBoleto, biaDesligadaSoCarlos, pularAcaoBia, pularMidiaBia } from '../_shared/bia-modo.ts';
-import { type ClienteAsaas, ESPERA_DIGITOS, ESPERA_DOC, soDigitos, msgConfirmarCadastro, MSG_PEDIR_DIGITOS, MSG_PEDIR_DOC, MSG_PEDIR_DOC_NAO_ACHOU, MSG_DOC_INVALIDO, agruparPorDoc, lerRespostaConfirmacao, digitosConferem, lerDocENome, homonimosComDoc, confirmacaoValida } from '../_shared/bia-boleto-identidade.ts';
+import { type ClienteAsaas, ESPERA_DIGITOS, ESPERA_DOC, soDigitos, msgConfirmarCadastro, nomeParaConfirmar, MSG_PEDIR_DIGITOS, MSG_PEDIR_DOC, MSG_PEDIR_DOC_NAO_ACHOU, MSG_DOC_INVALIDO, agruparPorDoc, lerRespostaConfirmacao, digitosConferem, lerDocENome, homonimosComDoc, confirmacaoValida } from '../_shared/bia-boleto-identidade.ts';
 
 const MAX_CONVERSAS_POR_RUN = 15;
 // Só atende mensagens RECENTES. Protege contra "backlog": mensagens antigas
@@ -1429,7 +1429,7 @@ Deno.serve(async (req) => {
         if (grupos.length === 1) {
           dadosMergeB.boleto_pendente = { ids: grupos[0].ids, nome: grupos[0].nome };
           delete dadosMergeB.boleto_reperguntou;
-          contar((await perguntarBoleto(msgConfirmarCadastro(grupos[0].nome), ESPERA_DIGITOS, dadosMergeB, novosTurnos)) ? 'respondida' : 'pulada');
+          contar((await perguntarBoleto(msgConfirmarCadastro(nomeParaConfirmar(grupos[0].nome, grupos[0].doc)), ESPERA_DIGITOS, dadosMergeB, novosTurnos)) ? 'respondida' : 'pulada');
           continue;
         }
         delete dadosMergeB.boleto_pendente; delete dadosMergeB.boleto_tent_doc;

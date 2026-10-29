@@ -21,6 +21,13 @@ export const soDigitos = (s: unknown): string => String(s ?? '').replace(/\D/g, 
 export function msgConfirmarCadastro(nome: string): string {
   return `Vi que seu número está vinculado ao cadastro de ${nome}. Confere? Se sim, me envia os 3 primeiros dígitos do seu CPF ou CNPJ.`;
 }
+// Pessoa física: só o primeiro nome (revela menos se o número mudou de dono; decisão
+// do Gustavo em 29/10/2026). Empresa (CNPJ): a razão social inteira, porque o primeiro
+// termo ("Mercado", "Comercial") não identifica ninguém.
+export function nomeParaConfirmar(nome: string, doc: string): string {
+  const n = String(nome || '').trim();
+  return soDigitos(doc).length === 14 ? n : n.split(/\s+/)[0] || n;
+}
 export const MSG_PEDIR_DIGITOS = 'Pra eu confirmar, me envia os 3 primeiros dígitos do seu CPF ou CNPJ.';
 export const MSG_PEDIR_DOC = 'Sem problemas! Me envia seu CPF ou CNPJ e seu nome completo, pra eu localizar seu cadastro.';
 export const MSG_PEDIR_DOC_NAO_ACHOU = 'Não localizei pelo seu número aqui. Me envia seu CPF ou CNPJ e seu nome completo, pra eu localizar seu cadastro.';

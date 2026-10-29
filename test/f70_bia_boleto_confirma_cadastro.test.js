@@ -13,6 +13,10 @@ const FN = path.join(__dirname, '..', 'supabase', 'functions');
   assert.strictEqual(M.msgConfirmarCadastro('Maria Souza'),
     'Vi que seu número está vinculado ao cadastro de Maria Souza. Confere? Se sim, me envia os 3 primeiros dígitos do seu CPF ou CNPJ.');
 
+  // pessoa física: primeiro nome; empresa: razão social inteira
+  assert.strictEqual(M.nomeParaConfirmar('Maria da Silva Souza', '12345678901'), 'Maria');
+  assert.strictEqual(M.nomeParaConfirmar('Mercado Bom Preço Ltda', '12345678000190'), 'Mercado Bom Preço Ltda');
+
   // cadastros duplicados do mesmo CPF = uma pessoa; CPF diferente = outra pessoa
   const g1 = M.agruparPorDoc([
     { id: 'a', name: 'Maria Souza', cpfCnpj: '123.456.789-01' },
