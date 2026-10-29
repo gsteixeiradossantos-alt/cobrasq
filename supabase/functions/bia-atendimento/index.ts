@@ -27,6 +27,7 @@ import { COB, calcularCobranca, calcularCobrancaTitulos, titulosValidos, valorFi
 import { parseValorBR } from '../_shared/valor-br.ts';
 import { modoSoBoleto, biaDesligadaSoCarlos, pularAcaoBia, pularMidiaBia } from '../_shared/bia-modo.ts';
 import { type ClienteAsaas, ESPERA_DIGITOS, ESPERA_DOC, soDigitos, msgConfirmarCadastro, nomeParaConfirmar, MSG_PEDIR_DIGITOS, MSG_PEDIR_DOC, MSG_PEDIR_DOC_NAO_ACHOU, MSG_DOC_INVALIDO, agruparPorDoc, lerRespostaConfirmacao, digitosConferem, lerDocENome, homonimosComDoc, confirmacaoValida } from '../_shared/bia-boleto-identidade.ts';
+import { ehNumeroTeste } from '../_shared/bia-numero-teste.ts';
 
 const MAX_CONVERSAS_POR_RUN = 15;
 // Só atende mensagens RECENTES. Protege contra "backlog": mensagens antigas
@@ -733,10 +734,12 @@ Deno.serve(async (req) => {
     // 'resolvido' que reaparece na fila significa que o cliente escreveu DE NOVO
     // (msg mais nova que a última resposta) -> reabre e a Bia volta a atender.
     const { data: at } = await sb.from('whatsapp_atendimentos').select('*').eq('telefone', telefone).maybeSingle();
-    if (at && at.estado === 'aguardando_humano') { puladas++; continue; }
+    const semTrava = ehNumeroTeste(telefone, testeTelDig);
+    if (!semTrava && at && at.estado === 'aguardando_humano') { puladas++; continue; }
     // Trava "humano atendendo": um humano respondeu (pelo painel ou pelo celular)
     // há pouco -> a Bia não fala por cima. Expira sozinha (humano_ate no futuro).
-    if (at?.humano_ate && Date.now() < new Date(at.humano_ate).getTime()) { puladas++; continue; }
+    // O número de teste nunca trava (ver _shared/bia-numero-teste.ts).
+    if (!semTrava && at?.humano_ate && Date.now() < new Date(at.humano_ate).getTime()) { puladas++; continue; }
     if (at?.ultima_resposta_em && (Date.now() - new Date(at.ultima_resposta_em).getTime()) < cooldownMs) { puladas++; continue; }
 
     // CLAIM idempotente: tenta inserir o log p/ este message_id. Se já existe
