@@ -26,6 +26,7 @@ import { CARLOS_SYSTEM, extrairJson as extrairJsonCarlos } from '../_shared/carl
 import { COB, calcularCobranca, calcularCobrancaTitulos, titulosValidos, valorFixo } from '../_shared/calc-cobranca.ts';
 import { parseValorBR } from '../_shared/valor-br.ts';
 import { modoSoBoleto, biaDesligadaSoCarlos, pularAcaoBia, pularMidiaBia } from '../_shared/bia-modo.ts';
+import { type ClienteAsaas, ESPERA_DIGITOS, ESPERA_DOC, soDigitos, msgConfirmarCadastro, nomeParaConfirmar, MSG_PEDIR_DIGITOS, MSG_PEDIR_DOC, MSG_PEDIR_DOC_NAO_ACHOU, MSG_DOC_INVALIDO, agruparPorDoc, lerRespostaConfirmacao, digitosConferem, lerDocENome, homonimosComDoc, confirmacaoValida } from '../_shared/bia-boleto-identidade.ts';
 
 const MAX_CONVERSAS_POR_RUN = 15;
 // Só atende mensagens RECENTES. Protege contra "backlog": mensagens antigas
@@ -389,6 +390,58 @@ async function buscarBoletosAbertos(telefoneDigits: string, docDigits: string): 
     abertos.sort((a, b) => a.vencISO.localeCompare(b.vencISO)); // mais antigo/vencido primeiro
     return { ok: true, achouCliente: true, nome, boletos: abertos };
   } catch (e) { return { ok: false, achouCliente: false, nome: '', boletos: [], erro: e instanceof Error ? e.message : String(e) }; }
+}
+
+// Confirmação de cadastro antes do boleto (29/10/2026): as buscas abaixo devolvem
+// TODOS os cadastros achados (o Asaas aceita cadastro duplicado do mesmo CPF), e
+// quem decide se é seguro mandar é o fluxo do enviar_boleto + bia-boleto-identidade.
+function asaasConfig(): { BASE: string; H: Record<string, string> } | null {
+  const KEY = Deno.env.get('ASAAS_API_KEY');
+  if (!KEY) return null;
+  const ENV = (Deno.env.get('ASAAS_ENV') || 'production').toLowerCase();
+  return { BASE: ENV === 'sandbox' ? 'https://sandbox.asaas.com/api/v3' : 'https://www.asaas.com/api/v3', H: { access_token: KEY } };
+}
+async function asaasClientes(query: string): Promise<ClienteAsaas[]> {
+  const cfgA = asaasConfig();
+  if (!cfgA) throw new Error('ASAAS_API_KEY ausente');
+  const r = await fetch(`${cfgA.BASE}/customers?${query}&limit=100`, { headers: cfgA.H, signal: AbortSignal.timeout(9000) });
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(`Asaas customers ${r.status}`);
+  return (j?.data || []).filter((c: any) => !c.deleted).map((c: any) => ({ id: String(c.id), name: String(c.name || ''), cpfCnpj: String(c.cpfCnpj || '') }));
+}
+async function clientesPorTelefone(telefoneDigits: string): Promise<ClienteAsaas[]> {
+  const tel = soDigitos(telefoneDigits).replace(/^55/, '');
+  const cands = new Set<string>();
+  if (tel.length >= 10) { const ddd = tel.slice(0, 2), resto = tel.slice(2).replace(/^9/, ''); cands.add(ddd + resto); cands.add(ddd + '9' + resto); cands.add(tel); }
+  const achados = new Map<string, ClienteAsaas>();
+  for (const c of cands) for (const campo of ['mobilePhone', 'phone']) {
+    for (const cli of await asaasClientes(`${campo}=${encodeURIComponent(c)}`)) achados.set(cli.id, cli);
+  }
+  return [...achados.values()];
+}
+async function clientePorId(id: string): Promise<ClienteAsaas | null> {
+  const cfgA = asaasConfig();
+  if (!cfgA) throw new Error('ASAAS_API_KEY ausente');
+  const r = await fetch(`${cfgA.BASE}/customers/${encodeURIComponent(id)}`, { headers: cfgA.H, signal: AbortSignal.timeout(9000) });
+  if (!r.ok) throw new Error(`Asaas customer ${r.status}`);
+  const c = await r.json().catch(() => null);
+  return c?.id ? { id: String(c.id), name: String(c.name || ''), cpfCnpj: String(c.cpfCnpj || '') } : null;
+}
+const clientesPorDoc = (doc: string) => asaasClientes(`cpfCnpj=${soDigitos(doc)}`);
+const clientesPorNome = (nome: string) => asaasClientes(`name=${encodeURIComponent(nome)}`);
+// Boletos em aberto (vencidos + a vencer) de todos os cadastros da mesma pessoa.
+async function boletosDosClientes(ids: string[]): Promise<BoletoAberto[]> {
+  const cfgA = asaasConfig();
+  if (!cfgA) throw new Error('ASAAS_API_KEY ausente');
+  const abertos: BoletoAberto[] = [];
+  for (const cid of ids) for (const st of ['OVERDUE', 'PENDING']) {
+    const pr = await fetch(`${cfgA.BASE}/payments?customer=${cid}&status=${st}&limit=100`, { headers: cfgA.H, signal: AbortSignal.timeout(9000) });
+    if (!pr.ok) throw new Error(`Asaas payments ${pr.status}`);
+    const pj = await pr.json().catch(() => null);
+    (pj?.data || []).forEach((p: any) => { const url = p.invoiceUrl || p.bankSlipUrl || ''; if (url) abertos.push({ valor: fmtBRL(p.value), venc: fmtData(p.dueDate), vencISO: String(p.dueDate || ''), status: p.status, url }); });
+  }
+  abertos.sort((a, b) => a.vencISO.localeCompare(b.vencISO));
+  return abertos;
 }
 
 type ComprovantePago = { valor: string; valorNum: number; data: string; dataISO: string; url: string; paymentId: string; forma: string };
@@ -897,6 +950,127 @@ Deno.serve(async (req) => {
         puladas++; continue;
       }
 
+      // BOLETO: manda os boletos em aberto de um cadastro já confirmado (ids = todos os
+      // cadastros do mesmo CPF/CNPJ no Asaas). Usado depois da confirmação e no enviar_boleto.
+      const mandarBoleto = async (msg: string): Promise<boolean> => (await enviarBlocos(telefone, casoId, msg, sb, sendTextUrl, zapiHeaders, 'bia-atendimento:boleto')).ok;
+      const salvarAtendimento = (campos: Record<string, unknown>) =>
+        sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, ...campos, updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
+      const passarEquipeBoleto = async (msgCliente: string, dadosB: any, turnosB: number, resumo: string, motivo: string, aviso: string) => {
+        if (msgCliente) await mandarBoleto(msgCliente);
+        await sb.from('whatsapp_bia_log').update({ resposta: null, acao: 'boleto_handoff' }).eq('id', logId);
+        await salvarAtendimento({ estado: 'aguardando_humano', intencao: 'boleto', dados_coletados: dadosB, turnos: turnosB, resumo, motivo_handoff: motivo });
+        await notificar(aviso);
+      };
+      const perguntarBoleto = async (msg: string, intencao: string, dadosB: any, turnosB: number): Promise<boolean> => {
+        if (!(await mandarBoleto(msg))) { await sb.from('whatsapp_bia_log').delete().eq('id', logId); return false; }
+        await sb.from('whatsapp_bia_log').update({ resposta: msg, acao: 'continuar' }).eq('id', logId);
+        await salvarAtendimento({ estado: 'bot', intencao, dados_coletados: dadosB, turnos: turnosB, ultima_resposta_em: new Date().toISOString() });
+        return true;
+      };
+      const entregarBoletos = async (conf: { ids: string[]; nome: string }, dadosB: any, turnosB: number, escolha: string): Promise<'respondida' | 'handoff' | 'pulada'> => {
+        const contato = String(conf.nome || caso?.devedor || ('+' + telefone));
+        let abertos: BoletoAberto[];
+        try { abertos = await boletosDosClientes(conf.ids); } catch (e) {
+          await passarEquipeBoleto('Tive um problema pra consultar seu boleto agora. Já vou passar pra equipe pra te ajudar.', dadosB, turnosB, 'Pediu boleto; falha ao consultar o Asaas', 'boleto_erro_asaas', `Bia: pedido de boleto, falha ao consultar o Asaas (${e instanceof Error ? e.message : e}).\nContato: ${contato}\nVeja em WhatsApp > Pendentes.`);
+          return 'handoff';
+        }
+        if (abertos.length === 0) {
+          await passarEquipeBoleto('Não encontrei boleto em aberto no seu cadastro. Vou verificar com a equipe e te retorno.', dadosB, turnosB, 'Pediu boleto; sem boleto em aberto no Asaas', 'boleto_nao_encontrado', `Bia: pedido de boleto sem boleto em aberto no Asaas.\nContato: ${contato}\nVeja em WhatsApp > Pendentes.`);
+          return 'handoff';
+        }
+        let enviarLista: BoletoAberto[] = [];
+        if (abertos.length === 1 || escolha === 'todos') enviarLista = abertos;
+        else if (escolha === 'um' || escolha === 'proximo' || escolha === 'vencido') enviarLista = [abertos[0]];
+        else {
+          const ok = await perguntarBoleto(`Achei ${abertos.length} boletos em aberto aqui. O mais próximo vence ${abertos[0].venc}. Quer só esse ou te mando todos?`, 'boleto_escolha', dadosB, turnosB);
+          return ok ? 'respondida' : 'pulada';
+        }
+        const nomePrefix = String(conf.nome || caso?.devedor || '').split(' ')[0];
+        const saud = nomePrefix ? `Claro, ${nomePrefix}! ` : 'Claro! ';
+        const intro = enviarLista.length === 1 ? `${saud}Segue seu boleto:` : `${saud}Seguem seus ${enviarLista.length} boletos em aberto:`;
+        const corpo = enviarLista.slice(0, 8).map((b) => `Valor R$ ${b.valor}, vence ${b.venc}.\n${b.url}`).join('\n\n');
+        const msgBoleto = `${intro}\n\n${corpo}\n\nQualquer dúvida ou se precisar de mais alguma coisa, é só me chamar por aqui, tá? Fico à disposição.`;
+        if (!(await mandarBoleto(msgBoleto))) { await sb.from('whatsapp_bia_log').delete().eq('id', logId); return 'pulada'; }
+        await sb.from('whatsapp_bia_log').update({ resposta: msgBoleto, acao: 'enviar_boleto' }).eq('id', logId);
+        await salvarAtendimento({ estado: 'bot', intencao: 'boleto_enviado', dados_coletados: dadosB, turnos: turnosB, ultima_resposta_em: new Date().toISOString() });
+        return 'respondida';
+      };
+      const contar = (r: 'respondida' | 'handoff' | 'pulada') => { if (r === 'respondida') respondidas++; else if (r === 'handoff') handoffs++; else puladas++; };
+
+      // BOLETO, RESPOSTA À CONFIRMAÇÃO: a Bia perguntou "Confere?" (3 primeiros dígitos) ou
+      // pediu CPF/CNPJ + nome completo. Tratado aqui, sem IA, para a decisão de mandar o
+      // boleto não depender de interpretação do modelo.
+      const intencaoAt = String(at?.intencao || '');
+      if (at?.estado === 'bot' && (intencaoAt === ESPERA_DIGITOS || intencaoAt === ESPERA_DOC)) {
+        const turnosI = (at?.turnos ?? 0) + 1;
+        const dadosI: any = { ...dados };
+        const pend = dadosI.boleto_pendente;
+        let seguirParaIA = false;
+        try {
+          if (intencaoAt === ESPERA_DIGITOS && Array.isArray(pend?.ids) && pend.ids.length) {
+            const r = lerRespostaConfirmacao(String(textoCliente || ''));
+            const cad = r.tipo === 'digitos' ? await clientePorId(pend.ids[0]) : null;
+            if (r.tipo === 'digitos' && cad && digitosConferem(r.digitos, cad.cpfCnpj)) {
+              delete dadosI.boleto_pendente; delete dadosI.boleto_reperguntou;
+              dadosI.boleto_ok = { ids: pend.ids, nome: pend.nome, em: new Date().toISOString() };
+              contar(await entregarBoletos(dadosI.boleto_ok, dadosI, turnosI, ''));
+              continue;
+            }
+            if (r.tipo === 'digitos' || r.tipo === 'nega') {
+              // não confere (disse que não ou errou os dígitos): pede documento completo + nome
+              delete dadosI.boleto_pendente; delete dadosI.boleto_reperguntou;
+              contar((await perguntarBoleto(MSG_PEDIR_DOC, ESPERA_DOC, dadosI, turnosI)) ? 'respondida' : 'pulada');
+              continue;
+            }
+            if (!dadosI.boleto_reperguntou) {
+              dadosI.boleto_reperguntou = true;
+              contar((await perguntarBoleto(MSG_PEDIR_DIGITOS, ESPERA_DIGITOS, dadosI, turnosI)) ? 'respondida' : 'pulada');
+              continue;
+            }
+            seguirParaIA = true; // segunda resposta sem dígitos: deixa a IA classificar normalmente
+          } else if (intencaoAt === ESPERA_DOC) {
+            const { doc, nome } = lerDocENome(String(textoCliente || ''));
+            if (!doc) {
+              const tent = Number(dadosI.boleto_tent_doc || 0) + 1;
+              dadosI.boleto_tent_doc = tent;
+              if (tent >= 2) {
+                await passarEquipeBoleto('Não consegui localizar seu cadastro por aqui. Já vou passar pra equipe pra te ajudar com o boleto.', dadosI, turnosI, 'Pediu boleto; não informou CPF/CNPJ legível', 'boleto_doc_invalido', `Bia: pedido de boleto, a pessoa não mandou CPF/CNPJ legível em 2 tentativas.\nContato: +${telefone}\nVeja em WhatsApp > Pendentes.`);
+                handoffs++; continue;
+              }
+              contar((await perguntarBoleto(MSG_DOC_INVALIDO, ESPERA_DOC, dadosI, turnosI)) ? 'respondida' : 'pulada');
+              continue;
+            }
+            // 1) pelo documento; 2) se não achar, pelo nome, ficando só o homônimo com o mesmo documento
+            let achados = await clientesPorDoc(doc);
+            let homonimos = 0;
+            if (!achados.length && nome.split(' ').length >= 2) {
+              const porNome = await clientesPorNome(nome);
+              homonimos = porNome.length;
+              achados = homonimosComDoc(porNome, doc);
+            }
+            const grupo = agruparPorDoc(achados)[0];
+            if (!grupo) {
+              await passarEquipeBoleto('Não localizei seu cadastro com esses dados. Já vou passar pra equipe pra te ajudar com o boleto.', dadosI, turnosI, `Pediu boleto; CPF/CNPJ ${doc} e nome "${nome}" não localizados no Asaas`, 'boleto_cliente_nao_encontrado', `Bia: pedido de boleto, cadastro NÃO localizado no Asaas.\nInformou: ${nome || '(sem nome)'} · ${doc}\nBusca pelo nome: ${homonimos} cadastro(s), nenhum com esse documento.\nContato: +${telefone}\nVeja em WhatsApp > Pendentes.`);
+              handoffs++; continue;
+            }
+            delete dadosI.boleto_tent_doc;
+            dadosI.boleto_ok = { ids: grupo.ids, nome: grupo.nome, em: new Date().toISOString() };
+            contar(await entregarBoletos(dadosI.boleto_ok, dadosI, turnosI, ''));
+            continue;
+          } else {
+            seguirParaIA = true;
+          }
+        } catch (e) {
+          await passarEquipeBoleto('Tive um problema pra localizar seu cadastro agora. Já vou passar pra equipe pra te ajudar.', dadosI, turnosI, 'Pediu boleto; falha ao consultar o Asaas', 'boleto_erro_asaas', `Bia: pedido de boleto, falha ao consultar o Asaas (${e instanceof Error ? e.message : e}).\nContato: +${telefone}\nVeja em WhatsApp > Pendentes.`);
+          handoffs++; continue;
+        }
+        if (seguirParaIA) {
+          delete dadosI.boleto_pendente; delete dadosI.boleto_reperguntou;
+          await salvarAtendimento({ intencao: 'boleto', dados_coletados: dadosI });
+          if (at) { at.intencao = 'boleto'; at.dados_coletados = dadosI; }
+        }
+      }
+
       const hoje = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
       const ctx = [
         `Hoje é ${hoje}.`,
@@ -1231,80 +1405,35 @@ Deno.serve(async (req) => {
         respondidas++; continue;
       }
 
-      // ENVIAR BOLETO: acha pelo telefone (ou CPF), decide entre 1 / vários / nenhum.
+      // ENVIAR BOLETO: só manda depois de confirmar de quem é o cadastro (29/10/2026).
       if (acao === 'enviar_boleto') {
-        const dadosMergeB = { ...dados, ...(parsed.dados_coletados || {}) };
-        const doc = String(dadosMergeB?.cpf || '').replace(/\D/g, '');
+        const dadosMergeB: any = { ...dados, ...(parsed.dados_coletados || {}) };
         const escolha = String(parsed.escolha_boleto || '').toLowerCase(); // um | todos | ''
         const primeiroNome = String(caso?.devedor || dadosMergeB?.nome || '').split(' ')[0];
 
-        // envia texto + registra saída; true se confirmou
-        const mandar = async (msg: string): Promise<boolean> => (await enviarBlocos(telefone, casoId, msg, sb, sendTextUrl, zapiHeaders, 'bia-atendimento:boleto')).ok;
-        const linhaBoleto = (b: BoletoAberto) => `Valor R$ ${b.valor}, vence ${b.venc}.\n${b.url}`;
-
-        const info = await buscarBoletosAbertos(telefone, doc);
-        const abertos = info.boletos;
-
-        // não achou cliente e ainda não temos CPF -> pede CPF (não é handoff ainda)
-        if (!info.achouCliente && info.ok && doc.length < 11) {
-          await mandar('Não localizei pelo seu número aqui. Me confirma seu CPF pra eu achar seu boleto?');
-          await sb.from('whatsapp_bia_log').update({ resposta: 'pediu CPF (não achou por telefone)', acao: 'continuar' }).eq('id', logId);
-          await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, estado: 'bot', intencao: 'boleto', dados_coletados: dadosMergeB, turnos: novosTurnos, ultima_resposta_em: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
-          respondidas++; continue;
-        }
-
-        // não localizou o cadastro nem pelo telefone nem pelo CPF -> transfere pro humano
-        if (!info.achouCliente) {
-          await mandar('Não consegui localizar seu cadastro por aqui. Já vou passar pra equipe pra te ajudar com o boleto.');
-          await sb.from('whatsapp_bia_log').update({ resposta: null, acao: 'boleto_handoff' }).eq('id', logId);
-          await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, estado: 'aguardando_humano', intencao: 'boleto', dados_coletados: dadosMergeB, turnos: novosTurnos, resumo: 'Pediu boleto; cadastro NÃO localizado no Asaas (telefone e CPF)', motivo_handoff: 'boleto_cliente_nao_encontrado', updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
-          handoffs++;
-          await notificar(`Bia: pedido de boleto, cadastro NÃO localizado no Asaas (nem telefone nem CPF).\nContato: ${primeiroNome || ('+' + telefone)}\nVeja em WhatsApp > Pendentes.`);
+        // Já confirmou nas últimas 24h (ex.: respondendo "só esse ou todos"): manda direto.
+        if (confirmacaoValida(dadosMergeB.boleto_ok)) {
+          contar(await entregarBoletos(dadosMergeB.boleto_ok, dadosMergeB, novosTurnos, escolha));
           continue;
         }
+        delete dadosMergeB.boleto_ok;
 
-        if (abertos.length === 0) {
-          await mandar('Não encontrei boleto em aberto no seu cadastro. Vou verificar com a equipe e te retorno.');
-          await sb.from('whatsapp_bia_log').update({ resposta: null, acao: 'boleto_handoff' }).eq('id', logId);
-          await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, estado: 'aguardando_humano', intencao: 'boleto', dados_coletados: dadosMergeB, turnos: novosTurnos, resumo: 'Pediu boleto; sem boleto em aberto no Asaas', motivo_handoff: 'boleto_nao_encontrado', updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
-          handoffs++;
-          await notificar(`Bia: pedido de boleto sem boleto em aberto no Asaas.\nContato: ${info.nome || primeiroNome || ('+' + telefone)}\nVeja em WhatsApp > Pendentes.`);
+        // Identificação: telefone ligado a UMA pessoa (um CPF/CNPJ, mesmo com cadastro
+        // duplicado) -> diz de quem é o cadastro e pede os 3 primeiros dígitos. Telefone
+        // sem cadastro ou ligado a mais de uma pessoa -> pede CPF/CNPJ + nome completo.
+        let grupos: { doc: string; nome: string; ids: string[] }[] = [];
+        try { grupos = agruparPorDoc(await clientesPorTelefone(telefone)); } catch (e) {
+          await passarEquipeBoleto('Tive um problema pra localizar seu cadastro agora. Já vou passar pra equipe pra te ajudar.', dadosMergeB, novosTurnos, 'Pediu boleto; falha ao consultar o Asaas', 'boleto_erro_asaas', `Bia: pedido de boleto, falha ao consultar o Asaas (${e instanceof Error ? e.message : e}).\nContato: ${primeiroNome || ('+' + telefone)}\nVeja em WhatsApp > Pendentes.`);
+          handoffs++; continue;
+        }
+        if (grupos.length === 1) {
+          dadosMergeB.boleto_pendente = { ids: grupos[0].ids, nome: grupos[0].nome };
+          delete dadosMergeB.boleto_reperguntou;
+          contar((await perguntarBoleto(msgConfirmarCadastro(nomeParaConfirmar(grupos[0].nome, grupos[0].doc)), ESPERA_DIGITOS, dadosMergeB, novosTurnos)) ? 'respondida' : 'pulada');
           continue;
         }
-
-        // quais mandar
-        let enviarLista: BoletoAberto[] = [];
-        let precisaPerguntar = false;
-        if (abertos.length === 1) enviarLista = abertos;
-        else if (escolha === 'todos') enviarLista = abertos;
-        else if (escolha === 'um' || escolha === 'proximo' || escolha === 'vencido') enviarLista = [abertos[0]];
-        else precisaPerguntar = true;
-
-        if (precisaPerguntar) {
-          const prox = abertos[0];
-          await mandar(`Achei ${abertos.length} boletos em aberto aqui. O mais próximo vence ${prox.venc}. Quer só esse ou te mando todos?`);
-          await sb.from('whatsapp_bia_log').update({ resposta: 'perguntou quais boletos', acao: 'continuar' }).eq('id', logId);
-          await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, estado: 'bot', intencao: 'boleto_escolha', dados_coletados: dadosMergeB, turnos: novosTurnos, ultima_resposta_em: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
-          respondidas++; continue;
-        }
-
-        const nomePrefix = primeiroNome || String(info.nome || '').split(' ')[0] || '';
-        const corpo = enviarLista.slice(0, 8).map(linhaBoleto).join('\n\n');
-        const saud = nomePrefix ? `Claro, ${nomePrefix}! ` : 'Claro! ';
-        const intro = enviarLista.length === 1
-          ? `${saud}Segue seu boleto:`
-          : `${saud}Seguem seus ${enviarLista.length} boletos em aberto:`;
-        const fecho = 'Qualquer dúvida ou se precisar de mais alguma coisa, é só me chamar por aqui, tá? Fico à disposição.';
-        const msgBoleto = `${intro}\n\n${corpo}\n\n${fecho}`;
-        const okEnv = await mandar(msgBoleto);
-        if (okEnv) {
-          await sb.from('whatsapp_bia_log').update({ resposta: msgBoleto, acao: 'enviar_boleto' }).eq('id', logId);
-          await sb.from('whatsapp_atendimentos').upsert({ telefone, caso_id: casoId, estado: 'bot', intencao: 'boleto_enviado', dados_coletados: dadosMergeB, turnos: novosTurnos, ultima_resposta_em: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'telefone' });
-          respondidas++;
-        } else {
-          await sb.from('whatsapp_bia_log').delete().eq('id', logId);
-          puladas++;
-        }
+        delete dadosMergeB.boleto_pendente; delete dadosMergeB.boleto_tent_doc;
+        contar((await perguntarBoleto(MSG_PEDIR_DOC_NAO_ACHOU, ESPERA_DOC, dadosMergeB, novosTurnos)) ? 'respondida' : 'pulada');
         continue;
       }
 
