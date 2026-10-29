@@ -271,7 +271,10 @@
   // direita (medido no acordo da Jéssica: 32×19mm a assinatura). Ordem das caixas:
   // inferior-esquerda, inferior-direita, superior-esquerda, superior-direita — até 8
   // devedores; do 9º em diante fica sem visto (assinatura completa continua). A margem
-  // inferior dos templates é de 34mm justamente para o visto (≤28mm) não invadir o texto.
+  // inferior dos templates é de 34mm: o rodapé fica no pé da folha (texto a ~6–9mm da
+  // borda) e a âncora de baixo sobe para 11mm, então o carimbo ocupa ~11–30mm — entre o
+  // rodapé e o texto, sem cobrir nenhum dos dois (medido com PyMuPDF em 29/10/2026). As
+  // caixas de cima mantêm 2mm: lá o carimbo cresce para a margem superior.
   // Mesma regra da âncora de assinatura: Arial (TrueType → trecho único no PDF), 3pt,
   // cinza-claro, letter-spacing 0. Não trocar por fonte via data:.
   // Aceita o nº de devedores (só <<vistodevN>>, uso antigo) ou a lista pronta de
@@ -287,10 +290,12 @@
     ancs = ancs.slice(0, 8);
     if (!ancs.length) return "";
     const caixas = ["bottom-left", "bottom-right", "top-left", "top-right"];
-    const est = "font-family:Arial,Helvetica,sans-serif; font-size:3pt; color:#e6e6e3; letter-spacing:0; word-spacing:30mm; white-space:nowrap; text-align:left; vertical-align:bottom; padding-bottom:2mm;";
+    const est = "font-family:Arial,Helvetica,sans-serif; font-size:3pt; color:#e6e6e3; letter-spacing:0; word-spacing:30mm; white-space:nowrap; text-align:left; vertical-align:bottom;";
     let css = "";
     for (let i = 0; i < ancs.length; i += 2) {
-      css += "@" + caixas[i / 2] + "{ content:\"" + ancs.slice(i, i + 2).join(" ") + "\"; " + est + " }\n";
+      const cx = caixas[i / 2];
+      const pad = cx.indexOf("bottom") === 0 ? "11mm" : "2mm";
+      css += "@" + cx + "{ content:\"" + ancs.slice(i, i + 2).join(" ") + "\"; " + est + " padding-bottom:" + pad + "; }\n";
     }
     return "@page{\n" + css + "}";
   }

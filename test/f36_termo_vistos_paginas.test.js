@@ -64,6 +64,12 @@ const c9 = vistosPageCss(9);
 assert.strictEqual(conta(c9, /<<vistodev\d+>>/g), 8);
 assert.strictEqual(conta(c9, /<<vistodev9>>/g), 0);
 assert.ok(/@top-right\{ content:"<<vistodev7>> <<vistodev8>>"/.test(c9));
+// rodapé no pé da folha (29/10/2026): âncora de baixo a 11mm (carimbo entre rodapé e
+// texto); a de cima continua a 2mm
+assert.ok(/@bottom-left\{[^}]*padding-bottom:11mm;/.test(c9));
+assert.ok(/@bottom-right\{[^}]*padding-bottom:11mm;/.test(c9));
+assert.ok(/@top-left\{[^}]*padding-bottom:2mm;/.test(c9));
+assert.ok(/@top-right\{[^}]*padding-bottom:2mm;/.test(c9));
 console.log('  ok   5º devedor → @top-left; 9º fica sem visto (teto 8, 4 caixas × 2)');
 
 // placeholders(): devedores, depois o credor, depois os advogados (26/09/2026 —
