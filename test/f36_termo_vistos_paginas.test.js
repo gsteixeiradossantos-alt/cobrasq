@@ -11,7 +11,9 @@
  * O que se garante aqui:
  *  - 0 devedor → nada (não polui o @page);
  *  - 1 âncora por devedor, numerada 1..N, cada uma UMA vez;
- *  - duas por caixa, na ordem bottom-left, bottom-right, top-left, top-right;
+ *  - até 4 por faixa (de baixo, depois de cima), espalhadas: a última da faixa
+ *    sozinha em -right (alinhada à direita), as outras em -left (29/10/2026: 3
+ *    vistos = esquerda, centro e direita);
  *  - Arial e sem letter-spacing (fonte via data: vira Type 3 e quebra a âncora em
  *    trechos — o ZapSign carimba uma vez por trecho; ver #719), nowrap (a caixa
  *    lateral encolhe quando o centro tem texto longo e a 2ª âncora ia para a
@@ -45,7 +47,13 @@ assert.ok(/@bottom-left\{ content:"<<vistodev1>> <<vistodev2>>"/.test(c3));
 assert.ok(/@bottom-right\{ content:"<<vistodev3>>"/.test(c3));
 for (let i = 1; i <= 3; i++) assert.strictEqual(conta(c3, new RegExp('<<vistodev' + i + '>>', 'g')), 1, 'vistodev' + i);
 assert.strictEqual(conta(c3, /<<vistodev4>>/g), 0);
-console.log('  ok   3 devedores → 2 em @bottom-left + 1 em @bottom-right, sem repetir');
+// 3 na faixa = esquerda, centro e direita (29/10/2026): 60mm entre as da esquerda; a
+// da direita alinhada à direita com 24mm de recuo, sem word-spacing (sozinha)
+assert.ok(/@bottom-left\{[^}]*text-align:left; word-spacing:60mm;/.test(c3));
+assert.ok(/@bottom-right\{[^}]*text-align:right; padding-right:24mm;/.test(c3));
+assert.ok(!/@bottom-right\{[^}]*word-spacing/.test(c3));
+assert.ok(/word-spacing:37mm;/.test(vistosPageCss(4)), '4 na faixa = em quartos');
+console.log('  ok   3 devedores → esquerda e centro em @bottom-left + direita em @bottom-right, sem repetir');
 
 // estilo: Arial, letter-spacing 0, nowrap, embaixo da caixa
 assert.ok(/font-family:Arial,Helvetica,sans-serif/.test(c3));
@@ -63,14 +71,17 @@ assert.strictEqual(conta(c5, /@top-right\{/g), 0);
 const c9 = vistosPageCss(9);
 assert.strictEqual(conta(c9, /<<vistodev\d+>>/g), 8);
 assert.strictEqual(conta(c9, /<<vistodev9>>/g), 0);
-assert.ok(/@top-right\{ content:"<<vistodev7>> <<vistodev8>>"/.test(c9));
+assert.ok(/@bottom-left\{ content:"<<vistodev1>> <<vistodev2>> <<vistodev3>>"/.test(c9));
+assert.ok(/@bottom-right\{ content:"<<vistodev4>>"/.test(c9));
+assert.ok(/@top-left\{ content:"<<vistodev5>> <<vistodev6>> <<vistodev7>>"/.test(c9));
+assert.ok(/@top-right\{ content:"<<vistodev8>>"/.test(c9));
 // rodapé no pé da folha (29/10/2026): âncora de baixo a 11mm (carimbo entre rodapé e
 // texto); a de cima continua a 2mm
 assert.ok(/@bottom-left\{[^}]*padding-bottom:11mm;/.test(c9));
 assert.ok(/@bottom-right\{[^}]*padding-bottom:11mm;/.test(c9));
 assert.ok(/@top-left\{[^}]*padding-bottom:2mm;/.test(c9));
 assert.ok(/@top-right\{[^}]*padding-bottom:2mm;/.test(c9));
-console.log('  ok   5º devedor → @top-left; 9º fica sem visto (teto 8, 4 caixas × 2)');
+console.log('  ok   5º devedor → @top-left; 9º fica sem visto (teto 8, 2 faixas × 4)');
 
 // placeholders(): devedores, depois o credor, depois os advogados (26/09/2026 —
 // todos os signatários rubricam; mesma ordem de gerar-acordo-termo/index.ts)
@@ -83,7 +94,8 @@ console.log('  ok   placeholders(): 2 devedores + credor');
 
 const mapJ = placeholders({ credor: { nome: 'COBRASQ' }, devedores: devs.concat([{ nome: 'Dev 3' }]),
   advogados: [{ nome: 'Adv' }, null, { nome: '' }], acordo: { total: '100,00', parcelas: '1' } });
-assert.ok(/@bottom-right\{ content:"<<vistodev3>> <<vistocredor>>"/.test(mapJ.vistosPageCss));
+assert.ok(/@bottom-left\{ content:"<<vistodev1>> <<vistodev2>> <<vistodev3>>"/.test(mapJ.vistosPageCss));
+assert.ok(/@bottom-right\{ content:"<<vistocredor>>"/.test(mapJ.vistosPageCss));
 assert.ok(/@top-left\{ content:"<<vistoadv2>>"/.test(mapJ.vistosPageCss));
 assert.strictEqual(conta(mapJ.vistosPageCss, /<<vistoadv3>>/g), 0, 'advogado sem nome não assina nem rubrica');
 console.log('  ok   3 devedores + credor + advogado → advogado em @top-left, <<vistoadv2>>');
@@ -95,4 +107,4 @@ assert.strictEqual(conta(c8, /<<visto\w+>>/g), 8);
 assert.strictEqual(conta(c8, /<<vistocredor>>|<<vistoadv2>>/g), 0);
 console.log('  ok   8 devedores → credor e advogado ficam sem visto (teto 8)');
 
-console.log('\nF-36 ok — visto por página: devedores, credor e advogados, 2 por caixa, Arial, teto 8.');
+console.log('\nF-36 ok — visto por página: devedores, credor e advogados, até 4 por faixa, Arial, teto 8.');
