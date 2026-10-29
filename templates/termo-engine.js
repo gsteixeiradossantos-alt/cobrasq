@@ -266,12 +266,15 @@
   // texto existir em cada página sem depender de JS de paginação, ele vai nas caixas
   // de margem do @page (Chromium 131+ imprime `content` de margin box como texto real
   // — testado com PyMuPDF em 12/09/2026; position:fixed NÃO serve: some da página 1).
-  // Duas âncoras por caixa, separadas por word-spacing de 30mm, porque o carimbo do
+  // Âncoras na mesma caixa vão separadas por word-spacing, porque o carimbo do
   // ZapSign nasce no canto inferior-esquerdo da âncora e cresce para cima e para a
-  // direita (medido no acordo da Jéssica: 32×19mm a assinatura). Ordem das caixas:
-  // inferior-esquerda, inferior-direita, superior-esquerda, superior-direita — até 8
+  // direita (medido no acordo da Jéssica: 32×19mm a assinatura). Faixa de baixo
+  // primeiro, depois a de cima (distribuição no laço abaixo) — até 8
   // devedores; do 9º em diante fica sem visto (assinatura completa continua). A margem
-  // inferior dos templates é de 34mm justamente para o visto (≤28mm) não invadir o texto.
+  // inferior dos templates é de 34mm: o rodapé fica no pé da folha (texto a ~6–9mm da
+  // borda) e a âncora de baixo sobe para 11mm, então o carimbo ocupa ~11–30mm — entre o
+  // rodapé e o texto, sem cobrir nenhum dos dois (medido com PyMuPDF em 29/10/2026). As
+  // caixas de cima mantêm 2mm: lá o carimbo cresce para a margem superior.
   // Mesma regra da âncora de assinatura: Arial (TrueType → trecho único no PDF), 3pt,
   // cinza-claro, letter-spacing 0. Não trocar por fonte via data:.
   // Aceita o nº de devedores (só <<vistodevN>>, uso antigo) ou a lista pronta de
@@ -286,11 +289,26 @@
     }
     ancs = ancs.slice(0, 8);
     if (!ancs.length) return "";
-    const caixas = ["bottom-left", "bottom-right", "top-left", "top-right"];
-    const est = "font-family:Arial,Helvetica,sans-serif; font-size:3pt; color:#e6e6e3; letter-spacing:0; word-spacing:30mm; white-space:nowrap; text-align:left; vertical-align:bottom; padding-bottom:2mm;";
+    const est = "font-family:Arial,Helvetica,sans-serif; font-size:3pt; color:#e6e6e3; letter-spacing:0; white-space:nowrap; vertical-align:bottom;";
     let css = "";
-    for (let i = 0; i < ancs.length; i += 2) {
-      css += "@" + caixas[i / 2] + "{ content:\"" + ancs.slice(i, i + 2).join(" ") + "\"; " + est + " }\n";
+    // Até 4 âncoras por faixa (de baixo, depois de cima), espalhadas na largura do
+    // texto: 1 → esquerda; 2 → esquerda e direita; 3 → esquerda, centro e direita;
+    // 4 → em quartos. A última da faixa vai sozinha na caixa da direita, alinhada à
+    // direita com 24mm de recuo (o carimbo cresce para a direita e termina na margem
+    // do texto); as outras vão na caixa da esquerda, separadas por word-spacing. Só a
+    // da esquerda pode transbordar: texto que não cabe na caixa transborda para a
+    // direita mesmo com text-align:right, e jogava o carimbo para fora da folha.
+    // Pedido do Gustavo em 29/10/2026: com 2 devedores + credor os dois primeiros
+    // saíam colados e o terceiro longe.
+    for (let r = 0; r < 2; r++) {
+      const fx = ancs.slice(r * 4, r * 4 + 4);
+      if (!fx.length) break;
+      const lado = r === 0 ? "bottom" : "top";
+      const pad = r === 0 ? "11mm" : "2mm";
+      const nEsq = Math.max(fx.length - 1, 1);
+      const ws = fx.length === 3 ? "60mm" : "37mm";
+      css += "@" + lado + "-left{ content:\"" + fx.slice(0, nEsq).join(" ") + "\"; " + est + " text-align:left; word-spacing:" + ws + "; padding-bottom:" + pad + "; }\n";
+      if (fx.length > nEsq) css += "@" + lado + "-right{ content:\"" + fx.slice(nEsq).join(" ") + "\"; " + est + " text-align:right; padding-right:24mm; padding-bottom:" + pad + "; }\n";
     }
     return "@page{\n" + css + "}";
   }
