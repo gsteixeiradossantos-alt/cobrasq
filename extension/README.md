@@ -38,6 +38,10 @@ Partes (Consultar→Salvar→Incluir) são destacados para conferência/entrada 
 
 5. O resultado volta para o app (`status='protocolado'`, `protocolo_num`).
 
+**Lote — entre um caso e outro:** inicial (eproc) para depois de cada protocolo até você
+clicar **▶ Iniciar a próxima ação** (o extrato é salvo antes). Intercorrente (Projudi)
+segue direto para o próximo caso, sem esperar clique (v0.10.37).
+
 ## Instalar (modo desenvolvedor)
 
 1. `chrome://extensions` → ativar **Modo do desenvolvedor**.

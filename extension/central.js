@@ -956,11 +956,13 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
       const ext = m.extrato;
       if (ext) caso.statusTexto += ext.ok ? ' · extrato salvo: ' + ext.arquivo + ' (' + ext.pasta + ')' : ' · ⚠ extrato NÃO salvo: ' + ext.erro;
       // Só o caso ATUAL avança a fila — um OK de caso antigo não pode disparar o
-      // próximo enquanto outro já roda. E não avança sozinho: a próxima ação só
-      // começa quando o usuário clicar "Iniciar a próxima ação".
+      // próximo enquanto outro já roda. Inicial (eproc) não avança sozinha: a próxima
+      // ação só começa quando o usuário clicar "Iniciar a próxima ação". Intercorrente
+      // (Projudi) segue direto para o próximo caso, como antes da v0.10.36.
       if (eraAtual) {
         const prox = state.casos.findIndex((c, i) => i > state.atual && c.status === 'aguardando');
         if (prox < 0) { state.rodando = false; state.atual = -1; }
+        else if (caso.sistema === 'projudi') { renderFase4(); proximoCaso(); return; }
         else state.esperandoOk = true;
       }
       renderFase4();
